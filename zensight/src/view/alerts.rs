@@ -30,6 +30,8 @@ pub struct AlertRule {
     pub operator: ComparisonOp,
     /// Threshold value.
     pub threshold: f64,
+    /// Severity level for triggered alerts.
+    pub severity: Severity,
     /// Whether this rule is enabled.
     pub enabled: bool,
 }
@@ -45,8 +47,15 @@ impl AlertRule {
             metric_pattern: metric_pattern.into(),
             operator: ComparisonOp::GreaterThan,
             threshold: 0.0,
+            severity: Severity::Warning,
             enabled: true,
         }
+    }
+
+    /// Set the severity for this rule (builder pattern).
+    pub fn with_severity(mut self, severity: Severity) -> Self {
+        self.severity = severity;
+        self
     }
 
     /// Check if a metric matches this rule.
@@ -83,6 +92,47 @@ impl AlertRule {
             ComparisonOp::Equal => (value - self.threshold).abs() < f64::EPSILON,
             ComparisonOp::NotEqual => (value - self.threshold).abs() >= f64::EPSILON,
         }
+    }
+}
+
+/// Alert severity levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Severity {
+    /// Informational alert.
+    Info,
+    /// Warning that may need attention.
+    #[default]
+    Warning,
+    /// Critical issue requiring immediate attention.
+    Critical,
+}
+
+impl Severity {
+    /// All severity levels.
+    pub const ALL: &'static [Severity] = &[Severity::Info, Severity::Warning, Severity::Critical];
+
+    /// Get the display name for this severity.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Severity::Info => "Info",
+            Severity::Warning => "Warning",
+            Severity::Critical => "Critical",
+        }
+    }
+
+    /// Get the color for this severity (RGB).
+    pub fn color(&self) -> iced::Color {
+        match self {
+            Severity::Info => iced::Color::from_rgb(0.3, 0.6, 1.0), // Blue
+            Severity::Warning => iced::Color::from_rgb(1.0, 0.7, 0.0), // Orange
+            Severity::Critical => iced::Color::from_rgb(1.0, 0.2, 0.2), // Red
+        }
+    }
+}
+
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name())
     }
 }
 
@@ -147,6 +197,8 @@ pub struct Alert {
     pub threshold: f64,
     /// Operator.
     pub operator: ComparisonOp,
+    /// Severity level.
+    pub severity: Severity,
     /// When the alert was triggered (Unix epoch ms).
     pub timestamp: i64,
     /// Whether this alert has been acknowledged.
@@ -172,6 +224,7 @@ impl Alert {
             value,
             threshold: rule.threshold,
             operator: rule.operator,
+            severity: rule.severity,
             timestamp,
             acknowledged: false,
         }
@@ -216,6 +269,8 @@ pub struct AlertsState {
     pub new_rule_threshold: String,
     /// Form state for operator.
     pub new_rule_operator: ComparisonOp,
+    /// Form state for severity.
+    pub new_rule_severity: Severity,
     /// Number of unacknowledged alerts.
     pub unacknowledged_count: usize,
 }
@@ -240,6 +295,7 @@ impl AlertsState {
             new_rule_metric: String::new(),
             new_rule_threshold: String::new(),
             new_rule_operator: ComparisonOp::GreaterThan,
+            new_rule_severity: Severity::Warning,
             unacknowledged_count: 0,
         }
     }
@@ -280,6 +336,7 @@ impl AlertsState {
             metric_pattern: self.new_rule_metric.trim().to_string(),
             operator: self.new_rule_operator,
             threshold,
+            severity: self.new_rule_severity,
             enabled: true,
         };
 
@@ -291,6 +348,7 @@ impl AlertsState {
         self.new_rule_metric.clear();
         self.new_rule_threshold.clear();
         self.new_rule_operator = ComparisonOp::GreaterThan;
+        self.new_rule_severity = Severity::Warning;
 
         Ok(())
     }
@@ -398,6 +456,10 @@ impl AlertsState {
     pub fn set_new_rule_operator(&mut self, operator: ComparisonOp) {
         self.new_rule_operator = operator;
     }
+
+    pub fn set_new_rule_severity(&mut self, severity: Severity) {
+        self.new_rule_severity = severity;
+    }
 }
 
 /// Render the alerts view.
@@ -471,12 +533,12 @@ fn render_new_rule_form(state: &AlertsState) -> Element<'_, Message> {
     let name_input = text_input("Rule name", &state.new_rule_name)
         .on_input(Message::SetAlertRuleName)
         .padding(8)
-        .width(Length::Fixed(200.0));
+        .width(Length::Fixed(180.0));
 
     let metric_input = text_input("Metric pattern (e.g., ifInErrors)", &state.new_rule_metric)
         .on_input(Message::SetAlertRuleMetric)
         .padding(8)
-        .width(Length::Fixed(250.0));
+        .width(Length::Fixed(220.0));
 
     let operator_picker = pick_list(
         ComparisonOp::ALL,
@@ -487,7 +549,13 @@ fn render_new_rule_form(state: &AlertsState) -> Element<'_, Message> {
     let threshold_input = text_input("Threshold", &state.new_rule_threshold)
         .on_input(Message::SetAlertRuleThreshold)
         .padding(8)
-        .width(Length::Fixed(100.0));
+        .width(Length::Fixed(90.0));
+
+    let severity_picker = pick_list(
+        Severity::ALL,
+        Some(state.new_rule_severity),
+        Message::SetAlertRuleSeverity,
+    );
 
     let add_button = button(text("Add Rule").size(14))
         .on_press(Message::AddAlertRule)
@@ -498,6 +566,7 @@ fn render_new_rule_form(state: &AlertsState) -> Element<'_, Message> {
         metric_input,
         operator_picker,
         threshold_input,
+        severity_picker,
         add_button
     ]
     .spacing(10)
@@ -534,6 +603,15 @@ fn render_rule_row(rule: &AlertRule) -> Element<'_, Message> {
     };
 
     let name = text(rule.name.clone()).size(14);
+
+    // Severity badge with color
+    let severity_color = rule.severity.color();
+    let severity_badge = text(rule.severity.name())
+        .size(11)
+        .style(move |_theme: &Theme| text::Style {
+            color: Some(severity_color),
+        });
+
     let condition = text(format!(
         "{} {} {}",
         rule.metric_pattern,
@@ -558,10 +636,17 @@ fn render_rule_row(rule: &AlertRule) -> Element<'_, Message> {
     .on_press(Message::RemoveAlertRule(rule.id))
     .style(iced::widget::button::danger);
 
-    row![status, name, condition, toggle_button, remove_button]
-        .spacing(10)
-        .align_y(Alignment::Center)
-        .into()
+    row![
+        status,
+        name,
+        severity_badge,
+        condition,
+        toggle_button,
+        remove_button
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 /// Render the alerts section.
@@ -602,8 +687,21 @@ fn render_alert_row(alert: &Alert) -> Element<'_, Message> {
     let status: Element<'_, Message> = if alert.acknowledged {
         icons::check(IconSize::Small)
     } else {
-        icons::status_error(IconSize::Small)
+        // Use severity-appropriate icon for unacknowledged alerts
+        match alert.severity {
+            Severity::Critical => icons::status_error(IconSize::Small),
+            Severity::Warning => icons::status_warning(IconSize::Small),
+            Severity::Info => icons::info(IconSize::Small),
+        }
     };
+
+    // Severity badge with color
+    let severity_color = alert.severity.color();
+    let severity_badge = text(alert.severity.name())
+        .size(10)
+        .style(move |_theme: &Theme| text::Style {
+            color: Some(severity_color),
+        });
 
     let message = text(alert.message()).size(13);
 
@@ -613,8 +711,12 @@ fn render_alert_row(alert: &Alert) -> Element<'_, Message> {
             color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
         });
 
-    let mut row_content: Row<'_, Message> =
-        Row::new().push(status).push(message).push(time).spacing(10);
+    let mut row_content: Row<'_, Message> = Row::new()
+        .push(status)
+        .push(severity_badge)
+        .push(message)
+        .push(time)
+        .spacing(10);
 
     if !alert.acknowledged {
         let ack_button = button(

@@ -330,6 +330,10 @@ impl ZenSight {
                 self.alerts.set_new_rule_operator(op);
             }
 
+            Message::SetAlertRuleSeverity(severity) => {
+                self.alerts.set_new_rule_severity(severity);
+            }
+
             Message::AddAlertRule => {
                 if let Err(e) = self.alerts.add_rule() {
                     tracing::warn!(error = %e, "Failed to add alert rule");

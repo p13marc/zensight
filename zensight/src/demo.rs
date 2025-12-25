@@ -898,54 +898,60 @@ impl Default for DemoSimulator {
 ///
 /// These rules are designed to trigger alerts during the demo simulation.
 pub fn demo_alert_rules() -> Vec<crate::view::alerts::AlertRule> {
-    use crate::view::alerts::{AlertRule, ComparisonOp};
+    use crate::view::alerts::{AlertRule, ComparisonOp, Severity};
 
     vec![
-        // CPU alerts
+        // CPU alerts (Warning severity)
         {
             let mut rule = AlertRule::new(1, "High CPU Usage", "cpu/usage");
             rule.operator = ComparisonOp::GreaterThan;
             rule.threshold = 80.0;
+            rule.severity = Severity::Warning;
             rule.protocol = Some(Protocol::Sysinfo);
             rule
         },
-        // Memory alerts
+        // Memory alerts (Warning severity)
         {
             let mut rule = AlertRule::new(2, "High Memory Usage", "memory/usage_percent");
             rule.operator = ComparisonOp::GreaterThan;
             rule.threshold = 85.0;
+            rule.severity = Severity::Warning;
             rule.protocol = Some(Protocol::Sysinfo);
             rule
         },
-        // Disk alerts
+        // Disk alerts (Critical severity)
         {
             let mut rule = AlertRule::new(3, "Disk Space Critical", "disk/root/usage_percent");
             rule.operator = ComparisonOp::GreaterThan;
             rule.threshold = 90.0;
+            rule.severity = Severity::Critical;
             rule.protocol = Some(Protocol::Sysinfo);
             rule
         },
-        // Network interface down
+        // Network interface down (Critical severity)
         {
             let mut rule = AlertRule::new(4, "Interface Down", "ifOperStatus");
             rule.operator = ComparisonOp::GreaterThan;
             rule.threshold = 1.5; // 2 = down
+            rule.severity = Severity::Critical;
             rule.protocol = Some(Protocol::Snmp);
             rule
         },
-        // Temperature alerts
+        // Temperature alerts (Warning severity)
         {
             let mut rule = AlertRule::new(5, "High Temperature", "holding/0");
             rule.operator = ComparisonOp::GreaterThan;
             rule.threshold = 60.0;
+            rule.severity = Severity::Warning;
             rule.protocol = Some(Protocol::Modbus);
             rule
         },
-        // Interface errors
+        // Interface errors (Info severity)
         {
             let mut rule = AlertRule::new(6, "Interface Errors", "ifInErrors");
             rule.operator = ComparisonOp::GreaterThan;
             rule.threshold = 0.0;
+            rule.severity = Severity::Info;
             rule.protocol = Some(Protocol::Snmp);
             rule
         },

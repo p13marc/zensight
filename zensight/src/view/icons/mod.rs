@@ -101,6 +101,11 @@ pub fn alert<Message: 'static>(size: IconSize) -> Element<'static, Message> {
     svg_icon(include_bytes!("alert.svg"), size)
 }
 
+/// Info icon (circle with "i").
+pub fn info<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("info.svg"), size)
+}
+
 /// Chart/graph icon.
 pub fn chart<Message: 'static>(size: IconSize) -> Element<'static, Message> {
     svg_icon(include_bytes!("chart.svg"), size)

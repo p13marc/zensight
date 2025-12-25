@@ -1,6 +1,6 @@
 use zensight_common::{Protocol, TelemetryPoint};
 
-use crate::view::alerts::ComparisonOp;
+use crate::view::alerts::{ComparisonOp, Severity};
 use crate::view::chart::TimeWindow;
 use crate::view::settings::ZenohMode;
 
@@ -110,6 +110,9 @@ pub enum Message {
 
     /// Set new rule operator.
     SetAlertRuleOperator(ComparisonOp),
+
+    /// Set new rule severity.
+    SetAlertRuleSeverity(Severity),
 
     /// Add a new alert rule.
     AddAlertRule,
