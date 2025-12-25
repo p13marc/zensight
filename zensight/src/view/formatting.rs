@@ -42,7 +42,7 @@ pub fn format_timestamp(timestamp_ms: i64) -> String {
 
 /// Format a time offset for chart axis labels.
 ///
-/// Returns strings like "now", "-30s", "-5m", "-1h".
+/// Returns strings like "now", "-30s", "-5m", "-1h", "-2d".
 pub fn format_time_offset(offset_ms: i64) -> String {
     if offset_ms == 0 {
         "now".to_string()
@@ -50,8 +50,10 @@ pub fn format_time_offset(offset_ms: i64) -> String {
         format!("-{}s", offset_ms / 1000)
     } else if offset_ms < 3_600_000 {
         format!("-{}m", offset_ms / 60_000)
-    } else {
+    } else if offset_ms < 86_400_000 {
         format!("-{}h", offset_ms / 3_600_000)
+    } else {
+        format!("-{}d", offset_ms / 86_400_000)
     }
 }
 
@@ -75,5 +77,7 @@ mod tests {
         assert_eq!(format_time_offset(30_000), "-30s");
         assert_eq!(format_time_offset(300_000), "-5m");
         assert_eq!(format_time_offset(3_600_000), "-1h");
+        assert_eq!(format_time_offset(86_400_000), "-1d");
+        assert_eq!(format_time_offset(172_800_000), "-2d");
     }
 }

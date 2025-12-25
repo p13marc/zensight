@@ -56,6 +56,12 @@ pub enum TimeWindow {
     FifteenMinutes,
     /// 1 hour window.
     OneHour,
+    /// 6 hour window.
+    SixHours,
+    /// 24 hour window.
+    TwentyFourHours,
+    /// 7 day window.
+    SevenDays,
 }
 
 impl TimeWindow {
@@ -66,6 +72,9 @@ impl TimeWindow {
             TimeWindow::FiveMinutes => 5 * 60_000,
             TimeWindow::FifteenMinutes => 15 * 60_000,
             TimeWindow::OneHour => 60 * 60_000,
+            TimeWindow::SixHours => 6 * 60 * 60_000,
+            TimeWindow::TwentyFourHours => 24 * 60 * 60_000,
+            TimeWindow::SevenDays => 7 * 24 * 60 * 60_000,
         }
     }
 
@@ -76,6 +85,9 @@ impl TimeWindow {
             TimeWindow::FiveMinutes => "5m",
             TimeWindow::FifteenMinutes => "15m",
             TimeWindow::OneHour => "1h",
+            TimeWindow::SixHours => "6h",
+            TimeWindow::TwentyFourHours => "24h",
+            TimeWindow::SevenDays => "7d",
         }
     }
 
@@ -86,6 +98,9 @@ impl TimeWindow {
             TimeWindow::FiveMinutes,
             TimeWindow::FifteenMinutes,
             TimeWindow::OneHour,
+            TimeWindow::SixHours,
+            TimeWindow::TwentyFourHours,
+            TimeWindow::SevenDays,
         ]
     }
 }
