@@ -1,0 +1,47 @@
+{
+  // Zenoh connection settings
+  zenoh: {
+    mode: "peer",                    // "client", "peer", or "router"
+    // connect: ["tcp/localhost:7447"], // Router endpoints (if client mode)
+    // listen: ["tcp/0.0.0.0:7448"],    // Listen endpoints (if peer/router)
+    // serialization: "json",           // "json" or "cbor"
+  },
+
+  // Syslog bridge settings
+  syslog: {
+    // Key expression prefix for publishing
+    key_prefix: "zensight/syslog",
+
+    // Listener configurations
+    listeners: [
+      {
+        protocol: "udp",
+        bind: "0.0.0.0:1514",        // Use 1514 to avoid requiring root for port 514
+        max_message_size: 65535,
+      },
+      {
+        protocol: "tcp",
+        bind: "0.0.0.0:1514",
+        max_connections: 1000,
+        connection_timeout_secs: 300,
+      },
+    ],
+
+    // Hostname aliases: map IP addresses to friendly names
+    // Useful when syslog messages don't include a hostname
+    hostname_aliases: {
+      // "192.168.1.1": "router01",
+      // "192.168.1.2": "switch01",
+      // "10.0.0.1": "firewall",
+    },
+
+    // Include the raw syslog message in telemetry labels
+    // Useful for debugging but increases message size
+    include_raw_message: false,
+  },
+
+  // Logging configuration
+  logging: {
+    level: "info",                   // "trace", "debug", "info", "warn", "error"
+  },
+}
