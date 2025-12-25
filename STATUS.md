@@ -29,15 +29,17 @@
 
 **Total: 6 tests passing**
 
-### Phase 3: Iced Frontend (zensight) - NOT STARTED
+### Phase 3: Iced Frontend (zensight) - COMPLETE
 
-| Component | Status |
-|-----------|--------|
-| `zensight/src/main.rs` | Stub only |
-| `zensight/src/app.rs` | Not started |
-| `zensight/src/message.rs` | Not started |
-| `zensight/src/subscription.rs` | Not started |
-| `zensight/src/view/*` | Not started |
+| Component | Status | Description |
+|-----------|--------|-------------|
+| `zensight/src/main.rs` | Done | Entry point with tracing setup |
+| `zensight/src/app.rs` | Done | Iced Application implementation |
+| `zensight/src/message.rs` | Done | Message types and DeviceId |
+| `zensight/src/subscription.rs` | Done | Zenoh to Iced subscription bridge |
+| `zensight/src/view/mod.rs` | Done | View module exports |
+| `zensight/src/view/dashboard.rs` | Done | Dashboard with device grid |
+| `zensight/src/view/device.rs` | Done | Device detail with metrics |
 
 ### Phase 4: Testing & Validation - NOT STARTED
 
@@ -107,6 +109,36 @@
 - Optional trap receiver
 - Graceful shutdown on Ctrl+C
 
+### zensight (Iced Frontend)
+
+**Application** (`app.rs`):
+- `Zensight` struct implementing Iced Application pattern
+- Dashboard and device detail state management
+- Telemetry processing and device health tracking
+- Dark theme
+
+**Messages** (`message.rs`):
+- `Message` enum for all UI and Zenoh events
+- `DeviceId` type (protocol + source identifier)
+
+**Subscription** (`subscription.rs`):
+- Bridges Zenoh subscriber to Iced subscription system
+- Subscribes to `zensight/**` for all telemetry
+- Auto-reconnect on disconnection
+- Auto-decode JSON/CBOR payloads
+
+**Dashboard View** (`view/dashboard.rs`):
+- Device grid with health status indicators
+- Protocol filter buttons
+- Connection status display
+- Metric preview per device
+
+**Device View** (`view/device.rs`):
+- Full metrics list with values and types
+- Relative timestamps ("5s ago")
+- Trend arrows for numeric values
+- Labels display
+
 ---
 
 ## Build & Test
@@ -133,6 +165,6 @@ cargo build --release --workspace
 
 ## Next Steps
 
-1. Implement `zensight` Iced frontend
-2. Integration testing with real SNMP devices
-3. Full SNMP trap PDU parsing
+1. Integration testing with real SNMP devices
+2. Full SNMP trap PDU parsing
+3. Add more protocol bridges (Syslog, gNMI, etc.)
