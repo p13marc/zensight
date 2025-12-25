@@ -130,11 +130,15 @@ fn render_header(state: &DashboardState) -> Element<'_, Message> {
 
     let device_count = text(format!("{} devices", state.devices.len())).size(14);
 
+    let alerts_button = button(text("Alerts").size(14))
+        .on_press(Message::OpenAlerts)
+        .style(iced::widget::button::secondary);
+
     let settings_button = button(text("Settings").size(14))
         .on_press(Message::OpenSettings)
         .style(iced::widget::button::secondary);
 
-    let header_row = row![title, device_count, status, settings_button]
+    let header_row = row![title, device_count, status, alerts_button, settings_button]
         .spacing(20)
         .align_y(Alignment::Center);
 

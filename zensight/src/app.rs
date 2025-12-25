@@ -2,10 +2,11 @@
 
 use iced::{Element, Subscription, Task, Theme};
 
-use zensight_common::{TelemetryPoint, ZenohConfig};
+use zensight_common::{TelemetryPoint, TelemetryValue, ZenohConfig};
 
 use crate::message::{DeviceId, Message};
 use crate::subscription::{tick_subscription, zenoh_subscription};
+use crate::view::alerts::{AlertsState, alerts_view};
 use crate::view::dashboard::{DashboardState, DeviceState, dashboard_view};
 use crate::view::device::{DeviceDetailState, device_view};
 use crate::view::settings::{SettingsState, settings_view};
@@ -17,6 +18,7 @@ pub enum CurrentView {
     Dashboard,
     Device,
     Settings,
+    Alerts,
 }
 
 /// The main Zensight application.
@@ -29,6 +31,8 @@ pub struct Zensight {
     selected_device: Option<DeviceDetailState>,
     /// Settings state.
     settings: SettingsState,
+    /// Alerts state.
+    alerts: AlertsState,
     /// Current view.
     current_view: CurrentView,
     /// Stale threshold in milliseconds (devices not updated within this time are marked unhealthy).
@@ -59,6 +63,7 @@ impl Zensight {
             dashboard: DashboardState::default(),
             selected_device: None,
             settings,
+            alerts: AlertsState::new(),
             current_view: CurrentView::default(),
             stale_threshold_ms,
         };
@@ -166,6 +171,61 @@ impl Zensight {
             Message::ResetSettings => {
                 self.reset_settings();
             }
+
+            // Alert messages
+            Message::OpenAlerts => {
+                self.current_view = CurrentView::Alerts;
+            }
+
+            Message::CloseAlerts => {
+                self.current_view = if self.selected_device.is_some() {
+                    CurrentView::Device
+                } else {
+                    CurrentView::Dashboard
+                };
+            }
+
+            Message::SetAlertRuleName(name) => {
+                self.alerts.set_new_rule_name(name);
+            }
+
+            Message::SetAlertRuleMetric(metric) => {
+                self.alerts.set_new_rule_metric(metric);
+            }
+
+            Message::SetAlertRuleThreshold(threshold) => {
+                self.alerts.set_new_rule_threshold(threshold);
+            }
+
+            Message::SetAlertRuleOperator(op) => {
+                self.alerts.set_new_rule_operator(op);
+            }
+
+            Message::AddAlertRule => {
+                if let Err(e) = self.alerts.add_rule() {
+                    tracing::warn!(error = %e, "Failed to add alert rule");
+                }
+            }
+
+            Message::RemoveAlertRule(rule_id) => {
+                self.alerts.remove_rule(rule_id);
+            }
+
+            Message::ToggleAlertRule(rule_id) => {
+                self.alerts.toggle_rule(rule_id);
+            }
+
+            Message::AcknowledgeAlert(alert_id) => {
+                self.alerts.acknowledge(alert_id);
+            }
+
+            Message::AcknowledgeAllAlerts => {
+                self.alerts.acknowledge_all();
+            }
+
+            Message::ClearAlerts => {
+                self.alerts.clear_alerts();
+            }
         }
 
         Task::none()
@@ -183,6 +243,7 @@ impl Zensight {
     pub fn view(&self) -> Element<'_, Message> {
         match self.current_view {
             CurrentView::Settings => settings_view(&self.settings),
+            CurrentView::Alerts => alerts_view(&self.alerts),
             CurrentView::Device => {
                 if let Some(ref device_state) = self.selected_device {
                     device_view(device_state)
@@ -216,6 +277,23 @@ impl Zensight {
             .metrics
             .insert(point.metric.clone(), format_telemetry_value(&point.value));
         device_state.is_healthy = true;
+
+        // Check alert rules for numeric values
+        if let Some(numeric_value) = telemetry_to_f64(&point.value) {
+            if let Some(alert) =
+                self.alerts
+                    .check_metric(&device_id, &point.metric, numeric_value, point.timestamp)
+            {
+                tracing::warn!(
+                    rule = %alert.rule_name,
+                    device = %alert.device_id,
+                    metric = %alert.metric,
+                    value = %alert.value,
+                    threshold = %alert.threshold,
+                    "Alert triggered"
+                );
+            }
+        }
 
         // Update selected device if this telemetry is for it
         if let Some(ref mut selected) = self.selected_device {
@@ -280,9 +358,7 @@ impl Zensight {
 }
 
 /// Format a telemetry value as a string for the dashboard preview.
-fn format_telemetry_value(value: &zensight_common::TelemetryValue) -> String {
-    use zensight_common::TelemetryValue;
-
+fn format_telemetry_value(value: &TelemetryValue) -> String {
     match value {
         TelemetryValue::Counter(v) => format!("{}", v),
         TelemetryValue::Gauge(v) => format!("{:.2}", v),
@@ -295,5 +371,14 @@ fn format_telemetry_value(value: &zensight_common::TelemetryValue) -> String {
         }
         TelemetryValue::Boolean(b) => if *b { "true" } else { "false" }.to_string(),
         TelemetryValue::Binary(data) => format!("<{} bytes>", data.len()),
+    }
+}
+
+/// Convert a telemetry value to f64 for alert checking.
+fn telemetry_to_f64(value: &TelemetryValue) -> Option<f64> {
+    match value {
+        TelemetryValue::Counter(v) => Some(*v as f64),
+        TelemetryValue::Gauge(v) => Some(*v),
+        _ => None,
     }
 }

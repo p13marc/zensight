@@ -1,5 +1,6 @@
 use zensight_common::{Protocol, TelemetryPoint};
 
+use crate::view::alerts::ComparisonOp;
 use crate::view::chart::TimeWindow;
 use crate::view::settings::ZenohMode;
 
@@ -60,6 +61,43 @@ pub enum Message {
 
     /// Reset settings to defaults.
     ResetSettings,
+
+    // Alert messages
+    /// Open the alerts view.
+    OpenAlerts,
+
+    /// Close the alerts view.
+    CloseAlerts,
+
+    /// Set new rule name.
+    SetAlertRuleName(String),
+
+    /// Set new rule metric pattern.
+    SetAlertRuleMetric(String),
+
+    /// Set new rule threshold.
+    SetAlertRuleThreshold(String),
+
+    /// Set new rule operator.
+    SetAlertRuleOperator(ComparisonOp),
+
+    /// Add a new alert rule.
+    AddAlertRule,
+
+    /// Remove an alert rule.
+    RemoveAlertRule(u32),
+
+    /// Toggle an alert rule's enabled state.
+    ToggleAlertRule(u32),
+
+    /// Acknowledge an alert.
+    AcknowledgeAlert(u64),
+
+    /// Acknowledge all alerts.
+    AcknowledgeAllAlerts,
+
+    /// Clear all alerts.
+    ClearAlerts,
 }
 
 /// Unique identifier for a device (protocol + source name).
