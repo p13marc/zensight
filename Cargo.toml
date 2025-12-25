@@ -43,5 +43,8 @@ anyhow = "1"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
+# Platform utilities
+dirs = "5"
+
 # Internal crates
 zensight-common = { path = "zensight-common" }

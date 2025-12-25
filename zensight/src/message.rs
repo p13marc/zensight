@@ -34,6 +34,9 @@ pub enum Message {
     /// User changed the chart time window.
     SetChartTimeWindow(TimeWindow),
 
+    /// User changed the metric search filter.
+    SetMetricFilter(String),
+
     /// Tick for periodic UI updates (e.g., relative timestamps).
     Tick,
 

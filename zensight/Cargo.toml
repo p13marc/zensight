@@ -16,10 +16,15 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+json5.workspace = true
 
 # GUI
 iced = { version = "0.14", features = ["tokio", "canvas"] }
 
 # Async utilities
 async-stream = "0.3"
+
+# Platform utilities
+dirs.workspace = true

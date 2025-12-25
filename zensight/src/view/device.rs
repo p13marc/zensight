@@ -2,13 +2,16 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{Column, Row, button, column, container, row, rule, scrollable, text};
+use iced::widget::{
+    Column, Row, button, column, container, row, rule, scrollable, text, text_input,
+};
 use iced::{Alignment, Element, Length, Theme};
 
 use zensight_common::{TelemetryPoint, TelemetryValue};
 
 use crate::message::{DeviceId, Message};
 use crate::view::chart::{ChartState, DataPoint, TimeWindow, chart_view};
+use crate::view::formatting::{format_timestamp, format_value};
 
 /// State for the device detail view.
 #[derive(Debug)]
@@ -25,6 +28,8 @@ pub struct DeviceDetailState {
     pub selected_metric: Option<String>,
     /// Chart state for the selected metric.
     pub chart: ChartState,
+    /// Search filter for metrics.
+    pub metric_filter: String,
 }
 
 impl DeviceDetailState {
@@ -37,6 +42,7 @@ impl DeviceDetailState {
             max_history: 500,
             selected_metric: None,
             chart: ChartState::new(format!("{}", device_id)),
+            metric_filter: String::new(),
         }
     }
 
@@ -94,11 +100,32 @@ impl DeviceDetailState {
         self.chart.update_time();
     }
 
-    /// Get metrics sorted by name.
+    /// Set the metric search filter.
+    pub fn set_metric_filter(&mut self, filter: String) {
+        self.metric_filter = filter;
+    }
+
+    /// Get metrics sorted by name, optionally filtered by the search string.
     pub fn sorted_metrics(&self) -> Vec<(&String, &TelemetryPoint)> {
-        let mut metrics: Vec<_> = self.metrics.iter().collect();
+        let filter_lower = self.metric_filter.to_lowercase();
+        let mut metrics: Vec<_> = self
+            .metrics
+            .iter()
+            .filter(|(name, _)| {
+                if self.metric_filter.is_empty() {
+                    true
+                } else {
+                    name.to_lowercase().contains(&filter_lower)
+                }
+            })
+            .collect();
         metrics.sort_by(|a, b| a.0.cmp(b.0));
         metrics
+    }
+
+    /// Get the total metric count (unfiltered).
+    pub fn total_metric_count(&self) -> usize {
+        self.metrics.len()
     }
 
     /// Check if a metric is numeric (can be charted).
@@ -183,8 +210,8 @@ pub fn device_view(state: &DeviceDetailState) -> Element<'_, Message> {
     let header = render_header(state);
 
     // If a metric is selected for charting, show the chart
-    let chart_section = if state.selected_metric.is_some() {
-        render_chart_section(state)
+    let chart_section = if let Some(ref metric_name) = state.selected_metric {
+        render_chart_section(state, metric_name)
     } else {
         column![].into()
     };
@@ -233,9 +260,10 @@ fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
 }
 
 /// Render the chart section.
-fn render_chart_section(state: &DeviceDetailState) -> Element<'_, Message> {
-    let metric_name = state.selected_metric.as_ref().unwrap();
-
+fn render_chart_section<'a>(
+    state: &'a DeviceDetailState,
+    metric_name: &'a str,
+) -> Element<'a, Message> {
     // Chart header with close button and time window buttons
     let close_button = button(text("X").size(12))
         .on_press(Message::ClearChartSelection)
@@ -306,15 +334,52 @@ fn render_chart_section(state: &DeviceDetailState) -> Element<'_, Message> {
 
 /// Render the list of all metrics.
 fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
+    let total_count = state.total_metric_count();
     let metrics = state.sorted_metrics();
+    let filtered_count = metrics.len();
+
+    // Search filter input
+    let search_input = text_input("Search metrics...", &state.metric_filter)
+        .on_input(Message::SetMetricFilter)
+        .size(14)
+        .padding(8)
+        .width(Length::Fixed(300.0));
+
+    // Count indicator
+    let count_text = if state.metric_filter.is_empty() {
+        text(format!("{} metrics", total_count)).size(12)
+    } else {
+        text(format!("{} of {} metrics", filtered_count, total_count)).size(12)
+    };
+
+    let search_row = row![search_input, count_text]
+        .spacing(15)
+        .align_y(Alignment::Center);
+
+    if total_count == 0 {
+        return column![
+            search_row,
+            container(text("No metrics received yet...").size(16))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+        ]
+        .spacing(10)
+        .into();
+    }
 
     if metrics.is_empty() {
-        return container(text("No metrics received yet...").size(16))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .into();
+        return column![
+            search_row,
+            container(text("No metrics match the filter").size(16))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+        ]
+        .spacing(10)
+        .into();
     }
 
     let mut metric_list = Column::new().spacing(8);
@@ -323,10 +388,14 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
         metric_list = metric_list.push(render_metric_row(name, point, state));
     }
 
-    scrollable(metric_list)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    column![
+        search_row,
+        scrollable(metric_list)
+            .width(Length::Fill)
+            .height(Length::Fill)
+    ]
+    .spacing(10)
+    .into()
 }
 
 /// Render a single metric row.
@@ -449,19 +518,6 @@ fn format_value_display(value: &TelemetryValue) -> String {
     }
 }
 
-/// Format a numeric value for stats display.
-fn format_value(value: f64) -> String {
-    if value.abs() >= 1_000_000.0 {
-        format!("{:.1}M", value / 1_000_000.0)
-    } else if value.abs() >= 1_000.0 {
-        format!("{:.1}K", value / 1_000.0)
-    } else if value.fract() == 0.0 {
-        format!("{:.0}", value)
-    } else {
-        format!("{:.2}", value)
-    }
-}
-
 /// Get the type name for a telemetry value.
 fn value_type_name(value: &TelemetryValue) -> &'static str {
     match value {
@@ -470,26 +526,6 @@ fn value_type_name(value: &TelemetryValue) -> &'static str {
         TelemetryValue::Text(_) => "text",
         TelemetryValue::Boolean(_) => "bool",
         TelemetryValue::Binary(_) => "binary",
-    }
-}
-
-/// Format a timestamp for display.
-fn format_timestamp(timestamp_ms: i64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-
-    let diff_ms = now - timestamp_ms;
-
-    if diff_ms < 1000 {
-        "just now".to_string()
-    } else if diff_ms < 60_000 {
-        format!("{}s ago", diff_ms / 1000)
-    } else if diff_ms < 3_600_000 {
-        format!("{}m ago", diff_ms / 60_000)
-    } else {
-        format!("{}h ago", diff_ms / 3_600_000)
     }
 }
 
@@ -514,5 +550,84 @@ fn calculate_trend(history: &[TelemetryPoint]) -> String {
         "\u{2193}".to_string() // Down arrow
     } else {
         "\u{2192}".to_string() // Right arrow (stable)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zensight_common::Protocol;
+
+    fn make_test_point(metric: &str) -> TelemetryPoint {
+        TelemetryPoint {
+            timestamp: 1000,
+            source: "test".to_string(),
+            protocol: Protocol::Snmp,
+            metric: metric.to_string(),
+            value: TelemetryValue::Gauge(42.0),
+            labels: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_metric_filter_empty_returns_all() {
+        let device_id = DeviceId {
+            protocol: Protocol::Snmp,
+            source: "test".to_string(),
+        };
+        let mut state = DeviceDetailState::new(device_id);
+
+        state.update(make_test_point("cpu/usage"));
+        state.update(make_test_point("memory/used"));
+        state.update(make_test_point("disk/io"));
+
+        // Empty filter returns all metrics
+        assert_eq!(state.sorted_metrics().len(), 3);
+        assert_eq!(state.total_metric_count(), 3);
+    }
+
+    #[test]
+    fn test_metric_filter_substring_match() {
+        let device_id = DeviceId {
+            protocol: Protocol::Snmp,
+            source: "test".to_string(),
+        };
+        let mut state = DeviceDetailState::new(device_id);
+
+        state.update(make_test_point("cpu/usage"));
+        state.update(make_test_point("cpu/temperature"));
+        state.update(make_test_point("memory/used"));
+        state.update(make_test_point("disk/io"));
+
+        // Filter for "cpu" should return 2 metrics
+        state.set_metric_filter("cpu".to_string());
+        let filtered = state.sorted_metrics();
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().all(|(name, _)| name.contains("cpu")));
+
+        // Total count should still be 4
+        assert_eq!(state.total_metric_count(), 4);
+    }
+
+    #[test]
+    fn test_metric_filter_case_insensitive() {
+        let device_id = DeviceId {
+            protocol: Protocol::Snmp,
+            source: "test".to_string(),
+        };
+        let mut state = DeviceDetailState::new(device_id);
+
+        state.update(make_test_point("CPU/Usage"));
+        state.update(make_test_point("memory/used"));
+
+        // Filter should be case-insensitive
+        state.set_metric_filter("cpu".to_string());
+        assert_eq!(state.sorted_metrics().len(), 1);
+
+        state.set_metric_filter("CPU".to_string());
+        assert_eq!(state.sorted_metrics().len(), 1);
+
+        state.set_metric_filter("CpU".to_string());
+        assert_eq!(state.sorted_metrics().len(), 1);
     }
 }

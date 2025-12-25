@@ -10,6 +10,7 @@ use iced::{Alignment, Element, Length, Theme};
 use zensight_common::Protocol;
 
 use crate::message::{DeviceId, Message};
+use crate::view::formatting::{format_timestamp, format_value};
 
 /// Alert rule definition.
 #[derive(Debug, Clone)]
@@ -593,39 +594,6 @@ fn render_alert_row(alert: &Alert) -> Element<'_, Message> {
     }
 
     row_content.align_y(Alignment::Center).into()
-}
-
-/// Format a numeric value for display.
-fn format_value(value: f64) -> String {
-    if value.abs() >= 1_000_000.0 {
-        format!("{:.1}M", value / 1_000_000.0)
-    } else if value.abs() >= 1_000.0 {
-        format!("{:.1}K", value / 1_000.0)
-    } else if value.fract() == 0.0 {
-        format!("{:.0}", value)
-    } else {
-        format!("{:.2}", value)
-    }
-}
-
-/// Format a timestamp for display.
-fn format_timestamp(timestamp_ms: i64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-
-    let diff_ms = now - timestamp_ms;
-
-    if diff_ms < 1000 {
-        "just now".to_string()
-    } else if diff_ms < 60_000 {
-        format!("{}s ago", diff_ms / 1000)
-    } else if diff_ms < 3_600_000 {
-        format!("{}m ago", diff_ms / 60_000)
-    } else {
-        format!("{}h ago", diff_ms / 3_600_000)
-    }
 }
 
 #[cfg(test)]

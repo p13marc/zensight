@@ -1,11 +1,119 @@
 //! Settings view for application configuration.
 
+use std::path::PathBuf;
+
 use iced::widget::{
     Column, button, column, container, pick_list, row, rule, scrollable, text, text_input,
 };
 use iced::{Alignment, Element, Length, Theme};
+use serde::{Deserialize, Serialize};
 
 use crate::message::Message;
+
+/// Persistent settings that are saved to disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistentSettings {
+    /// Zenoh connection mode.
+    pub zenoh_mode: String,
+    /// Zenoh router/peer endpoints to connect to.
+    pub zenoh_connect: Vec<String>,
+    /// Zenoh endpoints to listen on.
+    pub zenoh_listen: Vec<String>,
+    /// Stale threshold in seconds.
+    pub stale_threshold_secs: u64,
+}
+
+impl Default for PersistentSettings {
+    fn default() -> Self {
+        Self {
+            zenoh_mode: "peer".to_string(),
+            zenoh_connect: vec![],
+            zenoh_listen: vec![],
+            stale_threshold_secs: 120,
+        }
+    }
+}
+
+impl PersistentSettings {
+    /// Get the settings file path.
+    pub fn config_path() -> Option<PathBuf> {
+        dirs::config_dir().map(|p| p.join("zensight").join("settings.json5"))
+    }
+
+    /// Load settings from disk, or return defaults if not found.
+    pub fn load() -> Self {
+        let Some(path) = Self::config_path() else {
+            tracing::warn!("Could not determine config directory");
+            return Self::default();
+        };
+
+        if !path.exists() {
+            tracing::info!("No settings file found at {:?}, using defaults", path);
+            return Self::default();
+        }
+
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => match json5::from_str(&contents) {
+                Ok(settings) => {
+                    tracing::info!("Loaded settings from {:?}", path);
+                    settings
+                }
+                Err(e) => {
+                    tracing::error!("Failed to parse settings file: {}", e);
+                    Self::default()
+                }
+            },
+            Err(e) => {
+                tracing::error!("Failed to read settings file: {}", e);
+                Self::default()
+            }
+        }
+    }
+
+    /// Save settings to disk.
+    pub fn save(&self) -> Result<(), String> {
+        let Some(path) = Self::config_path() else {
+            return Err("Could not determine config directory".to_string());
+        };
+
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return Err(format!("Failed to create config directory: {}", e));
+            }
+        }
+
+        // Serialize to JSON5 (pretty-printed JSON is valid JSON5)
+        let contents = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("Failed to serialize settings: {}", e))?;
+
+        std::fs::write(&path, contents)
+            .map_err(|e| format!("Failed to write settings file: {}", e))?;
+
+        tracing::info!("Saved settings to {:?}", path);
+        Ok(())
+    }
+
+    /// Convert to SettingsState for UI.
+    pub fn to_state(&self) -> SettingsState {
+        SettingsState::from_config(
+            &self.zenoh_mode,
+            &self.zenoh_connect,
+            &self.zenoh_listen,
+            (self.stale_threshold_secs * 1000) as i64,
+        )
+    }
+
+    /// Create from SettingsState.
+    pub fn from_state(state: &SettingsState) -> Self {
+        Self {
+            zenoh_mode: state.zenoh_mode.as_str().to_string(),
+            zenoh_connect: state.connect_endpoints(),
+            zenoh_listen: state.listen_endpoints(),
+            stale_threshold_secs: state.stale_threshold_secs.parse().unwrap_or(120),
+        }
+    }
+}
 
 /// Application settings state.
 #[derive(Debug, Clone)]
@@ -441,5 +549,50 @@ mod tests {
         assert_eq!(ZenohMode::from_str("peer"), ZenohMode::Peer);
         assert_eq!(ZenohMode::from_str("router"), ZenohMode::Router);
         assert_eq!(ZenohMode::from_str("unknown"), ZenohMode::Peer);
+    }
+
+    #[test]
+    fn test_persistent_settings_serialization_roundtrip() {
+        let settings = PersistentSettings {
+            zenoh_mode: "router".to_string(),
+            zenoh_connect: vec!["tcp/localhost:7447".to_string()],
+            zenoh_listen: vec!["tcp/0.0.0.0:7448".to_string()],
+            stale_threshold_secs: 60,
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&settings).expect("serialize");
+
+        // Deserialize back
+        let restored: PersistentSettings = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(restored.zenoh_mode, "router");
+        assert_eq!(restored.zenoh_connect, vec!["tcp/localhost:7447"]);
+        assert_eq!(restored.zenoh_listen, vec!["tcp/0.0.0.0:7448"]);
+        assert_eq!(restored.stale_threshold_secs, 60);
+    }
+
+    #[test]
+    fn test_persistent_settings_state_conversion() {
+        let persistent = PersistentSettings {
+            zenoh_mode: "client".to_string(),
+            zenoh_connect: vec!["tcp/router:7447".to_string()],
+            zenoh_listen: vec![],
+            stale_threshold_secs: 90,
+        };
+
+        // Convert to UI state
+        let state = persistent.to_state();
+        assert_eq!(state.zenoh_mode, ZenohMode::Client);
+        assert_eq!(state.zenoh_connect, "tcp/router:7447");
+        assert!(state.zenoh_listen.is_empty());
+        assert_eq!(state.stale_threshold_secs, "90");
+
+        // Convert back to persistent
+        let restored = PersistentSettings::from_state(&state);
+        assert_eq!(restored.zenoh_mode, "client");
+        assert_eq!(restored.zenoh_connect, vec!["tcp/router:7447"]);
+        assert!(restored.zenoh_listen.is_empty());
+        assert_eq!(restored.stale_threshold_secs, 90);
     }
 }

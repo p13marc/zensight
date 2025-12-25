@@ -6,6 +6,8 @@ use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use zensight_common::TelemetryValue;
 
+use super::formatting::{format_time_offset, format_value};
+
 /// A data point for the chart.
 #[derive(Debug, Clone)]
 pub struct DataPoint {
@@ -505,32 +507,6 @@ fn current_timestamp() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
-}
-
-/// Format a value for display.
-fn format_value(value: f64) -> String {
-    if value.abs() >= 1_000_000.0 {
-        format!("{:.1}M", value / 1_000_000.0)
-    } else if value.abs() >= 1_000.0 {
-        format!("{:.1}K", value / 1_000.0)
-    } else if value.fract() == 0.0 {
-        format!("{:.0}", value)
-    } else {
-        format!("{:.2}", value)
-    }
-}
-
-/// Format a time offset for display.
-fn format_time_offset(offset_ms: i64) -> String {
-    if offset_ms == 0 {
-        "now".to_string()
-    } else if offset_ms < 60_000 {
-        format!("-{}s", offset_ms / 1000)
-    } else if offset_ms < 3_600_000 {
-        format!("-{}m", offset_ms / 60_000)
-    } else {
-        format!("-{}h", offset_ms / 3_600_000)
-    }
 }
 
 #[cfg(test)]

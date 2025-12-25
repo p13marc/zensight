@@ -9,7 +9,7 @@ use crate::subscription::{tick_subscription, zenoh_subscription};
 use crate::view::alerts::{AlertsState, alerts_view};
 use crate::view::dashboard::{DashboardState, DeviceState, dashboard_view};
 use crate::view::device::{DeviceDetailState, device_view};
-use crate::view::settings::{SettingsState, settings_view};
+use crate::view::settings::{PersistentSettings, SettingsState, settings_view};
 
 /// Current view in the application.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -42,21 +42,19 @@ pub struct Zensight {
 impl Zensight {
     /// Boot the Zensight application (called by iced::application).
     pub fn boot() -> (Self, Task<Message>) {
-        // Default Zenoh configuration (peer mode, connect to default router)
+        // Load persistent settings from disk
+        let persistent = PersistentSettings::load();
+
+        // Build Zenoh configuration from loaded settings
         let zenoh_config = ZenohConfig {
-            mode: "peer".to_string(),
-            connect: vec![], // Will use default discovery
-            listen: vec![],
+            mode: persistent.zenoh_mode.clone(),
+            connect: persistent.zenoh_connect.clone(),
+            listen: persistent.zenoh_listen.clone(),
         };
 
-        let stale_threshold_ms = 120_000; // 2 minutes
+        let stale_threshold_ms = (persistent.stale_threshold_secs * 1000) as i64;
 
-        let settings = SettingsState::from_config(
-            &zenoh_config.mode,
-            &zenoh_config.connect,
-            &zenoh_config.listen,
-            stale_threshold_ms,
-        );
+        let settings = persistent.to_state();
 
         let app = Self {
             zenoh_config,
@@ -128,6 +126,12 @@ impl Zensight {
             Message::SetChartTimeWindow(window) => {
                 if let Some(ref mut device) = self.selected_device {
                     device.set_time_window(window);
+                }
+            }
+
+            Message::SetMetricFilter(filter) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.set_metric_filter(filter);
                 }
             }
 
@@ -337,6 +341,13 @@ impl Zensight {
         self.zenoh_config.mode = self.settings.zenoh_mode.as_str().to_string();
         self.zenoh_config.connect = self.settings.connect_endpoints();
         self.zenoh_config.listen = self.settings.listen_endpoints();
+
+        // Persist settings to disk
+        let persistent = PersistentSettings::from_state(&self.settings);
+        if let Err(error) = persistent.save() {
+            self.settings.set_error(error);
+            return;
+        }
 
         self.settings.mark_saved();
         tracing::info!("Settings saved");
