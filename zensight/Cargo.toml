@@ -30,6 +30,9 @@ iced = { version = "0.14", features = ["tokio", "canvas", "svg"] }
 # Async utilities
 async-stream = "0.3"
 
+# Random number generation (for demo mode)
+rand = "0.9"
+
 # Platform utilities
 dirs.workspace = true
 

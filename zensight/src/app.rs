@@ -5,7 +5,8 @@ use iced::{Element, Subscription, Task, Theme};
 use zensight_common::{TelemetryPoint, TelemetryValue, ZenohConfig};
 
 use crate::message::{DeviceId, Message};
-use crate::subscription::{tick_subscription, zenoh_subscription};
+use crate::mock;
+use crate::subscription::{demo_subscription, tick_subscription, zenoh_subscription};
 use crate::view::alerts::{AlertsState, alerts_view};
 use crate::view::dashboard::{DashboardState, DeviceState, dashboard_view};
 use crate::view::device::{DeviceDetailState, device_view};
@@ -37,11 +38,13 @@ pub struct ZenSight {
     current_view: CurrentView,
     /// Stale threshold in milliseconds (devices not updated within this time are marked unhealthy).
     stale_threshold_ms: i64,
+    /// Demo mode (use mock data instead of Zenoh).
+    demo_mode: bool,
 }
 
 impl ZenSight {
     /// Boot the ZenSight application (called by iced::application).
-    pub fn boot() -> (Self, Task<Message>) {
+    pub fn boot(demo_mode: bool) -> (Self, Task<Message>) {
         // Load persistent settings from disk
         let persistent = PersistentSettings::load();
 
@@ -56,14 +59,36 @@ impl ZenSight {
 
         let settings = persistent.to_state();
 
+        let mut dashboard = DashboardState::default();
+
+        // In demo mode, pre-populate with mock data and mark as connected
+        if demo_mode {
+            dashboard.connected = true;
+            for point in mock::mock_environment() {
+                let device_id = DeviceId::from_telemetry(&point);
+                let device_state = dashboard
+                    .devices
+                    .entry(device_id.clone())
+                    .or_insert_with(|| DeviceState::new(device_id.clone()));
+
+                device_state.last_update = point.timestamp;
+                device_state.metric_count = device_state.metrics.len() + 1;
+                device_state
+                    .metrics
+                    .insert(point.metric.clone(), format_telemetry_value(&point.value));
+                device_state.is_healthy = true;
+            }
+        }
+
         let app = Self {
             zenoh_config,
-            dashboard: DashboardState::default(),
+            dashboard,
             selected_device: None,
             settings,
             alerts: AlertsState::new(),
             current_view: CurrentView::default(),
             stale_threshold_ms,
+            demo_mode,
         };
 
         (app, Task::none())
@@ -246,10 +271,15 @@ impl ZenSight {
 
     /// Create subscriptions for Zenoh telemetry and periodic updates.
     pub fn subscription(&self) -> Subscription<Message> {
-        Subscription::batch([
-            zenoh_subscription(self.zenoh_config.clone()),
-            tick_subscription(),
-        ])
+        if self.demo_mode {
+            // In demo mode, use mock data generator instead of Zenoh
+            Subscription::batch([demo_subscription(), tick_subscription()])
+        } else {
+            Subscription::batch([
+                zenoh_subscription(self.zenoh_config.clone()),
+                tick_subscription(),
+            ])
+        }
     }
 
     /// Render the view.

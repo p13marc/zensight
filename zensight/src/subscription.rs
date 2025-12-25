@@ -110,3 +110,63 @@ async fn connect_zenoh(config: &ZenohConfig) -> anyhow::Result<zenoh::Session> {
 pub fn tick_subscription() -> Subscription<Message> {
     iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::Tick)
 }
+
+/// Create a demo subscription that generates mock telemetry data.
+///
+/// This subscription simulates live data by periodically generating
+/// new telemetry points with updated timestamps and varying values.
+pub fn demo_subscription() -> Subscription<Message> {
+    Subscription::run(|| {
+        async_stream::stream! {
+            use crate::mock;
+            use rand::{Rng, SeedableRng};
+
+            // Signal connected state
+            yield Message::Connected;
+
+            // Use a Send-compatible RNG (seeded from system entropy)
+            let mut rng = rand::rngs::SmallRng::from_os_rng();
+            let mut counter: u64 = 0;
+
+            loop {
+                // Wait between updates (simulates real-time data)
+                let delay = 500 + rng.random_range(0u64..1000u64);
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+
+                counter += 1;
+
+                // Generate varying mock data based on counter
+                let points = match counter % 5 {
+                    0 => mock::snmp::router("router01"),
+                    1 => mock::sysinfo::host("server01"),
+                    2 => mock::syslog::server("webserver"),
+                    3 => mock::modbus::plc("plc01"),
+                    _ => mock::snmp::switch("switch01", 4),
+                };
+
+                // Update timestamps and add some variation to values
+                for mut point in points {
+                    point.timestamp = now;
+
+                    // Add some random variation to numeric values
+                    match &mut point.value {
+                        zensight_common::TelemetryValue::Gauge(v) => {
+                            *v += rng.random_range(-5.0..5.0);
+                        }
+                        zensight_common::TelemetryValue::Counter(v) => {
+                            *v = v.saturating_add(rng.random_range(0u64..100u64));
+                        }
+                        _ => {}
+                    }
+
+                    yield Message::TelemetryReceived(point);
+                }
+            }
+        }
+    })
+}
