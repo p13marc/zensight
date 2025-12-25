@@ -21,3 +21,8 @@ anyhow.workspace = true
 
 # SNMP client (async with tokio)
 snmp2 = { version = "0.3", features = ["tokio"] }
+
+# SNMP PDU decoding (for trap parsing)
+rasn = "0.22"
+rasn-smi = "0.22"
+rasn-snmp = "0.22"
