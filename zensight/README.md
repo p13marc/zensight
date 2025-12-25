@@ -31,6 +31,27 @@ zensight
 # The frontend auto-discovers bridges via Zenoh subscription
 ```
 
+### Demo Mode (No Bridges Required)
+
+```bash
+# Run with mock data - no Zenoh connection needed
+zensight --demo
+
+# Or use short flag
+zensight -d
+```
+
+Demo mode is perfect for:
+- Testing the UI without hardware or bridges
+- Demonstrating features to users
+- Development and debugging
+- Learning how ZenSight works
+
+In demo mode:
+- Mock telemetry is generated for SNMP routers/switches, sysinfo hosts, syslog, and Modbus PLCs
+- Data updates every 0.5-1.5 seconds with realistic variations
+- All UI features work normally (alerts, charts, settings, export)
+
 ### With Tester Feature
 
 ```bash
