@@ -1,12 +1,22 @@
 //! Time-series chart component using Iced canvas.
 
+use iced::keyboard;
 use iced::mouse;
-use iced::widget::canvas::{self, Cache, Canvas, Frame, Geometry, Path, Stroke, Text};
+use iced::widget::canvas::{
+    self, Action, Cache, Canvas, Event, Frame, Geometry, Path, Stroke, Text,
+};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use zensight_common::TelemetryValue;
 
 use super::formatting::{format_time_offset, format_value};
+
+/// Minimum zoom level (100% = no zoom).
+pub const MIN_ZOOM: f32 = 1.0;
+/// Maximum zoom level (10x zoom).
+pub const MAX_ZOOM: f32 = 10.0;
+/// Zoom step for keyboard (+/-) and scroll.
+pub const ZOOM_STEP: f32 = 0.25;
 
 /// A data point for the chart.
 #[derive(Debug, Clone)]
@@ -97,6 +107,14 @@ pub struct ChartState {
     max_value: f64,
     /// Current timestamp (for calculating visible range).
     current_time: i64,
+    /// Current zoom level (1.0 = 100%, 2.0 = 200%, etc.).
+    zoom_level: f32,
+    /// Pan offset as fraction of visible range (0.0 = centered on now).
+    pan_offset: f64,
+    /// Whether zoom feedback should be shown.
+    show_zoom_feedback: bool,
+    /// Timestamp when zoom feedback was triggered.
+    zoom_feedback_time: i64,
 }
 
 impl ChartState {
@@ -110,7 +128,60 @@ impl ChartState {
             min_value: 0.0,
             max_value: 1.0,
             current_time: current_timestamp(),
+            zoom_level: 1.0,
+            pan_offset: 0.0,
+            show_zoom_feedback: false,
+            zoom_feedback_time: 0,
         }
+    }
+
+    /// Get the current zoom level.
+    pub fn zoom_level(&self) -> f32 {
+        self.zoom_level
+    }
+
+    /// Zoom in by one step.
+    pub fn zoom_in(&mut self) {
+        self.set_zoom(self.zoom_level + ZOOM_STEP);
+    }
+
+    /// Zoom out by one step.
+    pub fn zoom_out(&mut self) {
+        self.set_zoom(self.zoom_level - ZOOM_STEP);
+    }
+
+    /// Set the zoom level (clamped to valid range).
+    pub fn set_zoom(&mut self, level: f32) {
+        let new_level = level.clamp(MIN_ZOOM, MAX_ZOOM);
+        if (new_level - self.zoom_level).abs() > 0.001 {
+            self.zoom_level = new_level;
+            self.show_zoom_feedback = true;
+            self.zoom_feedback_time = current_timestamp();
+            self.cache.clear();
+        }
+    }
+
+    /// Reset zoom to 100%.
+    pub fn reset_zoom(&mut self) {
+        self.set_zoom(1.0);
+        self.pan_offset = 0.0;
+    }
+
+    /// Check if zoom feedback should be hidden (after timeout).
+    pub fn update_zoom_feedback(&mut self) {
+        if self.show_zoom_feedback {
+            let elapsed = current_timestamp() - self.zoom_feedback_time;
+            if elapsed > 1500 {
+                // Hide after 1.5 seconds
+                self.show_zoom_feedback = false;
+                self.cache.clear();
+            }
+        }
+    }
+
+    /// Whether zoom feedback overlay should be shown.
+    pub fn should_show_zoom_feedback(&self) -> bool {
+        self.show_zoom_feedback
     }
 
     /// Set the time window.
@@ -149,16 +220,35 @@ impl ChartState {
         }
     }
 
-    /// Get visible data points within the current time window.
+    /// Get the effective time window duration accounting for zoom.
+    fn effective_duration_ms(&self) -> i64 {
+        (self.time_window.duration_ms() as f64 / self.zoom_level as f64) as i64
+    }
+
+    /// Get the visible time range (start, end) accounting for zoom and pan.
+    fn visible_time_range(&self) -> (i64, i64) {
+        let duration = self.effective_duration_ms();
+        let end = self.current_time - (self.pan_offset * duration as f64) as i64;
+        let start = end - duration;
+        (start, end)
+    }
+
+    /// Get visible data points within the current time window (with zoom).
     fn visible_data(&self) -> impl Iterator<Item = &DataPoint> {
-        let cutoff = self.current_time - self.time_window.duration_ms();
-        self.data.iter().filter(move |p| p.timestamp >= cutoff)
+        let (start, end) = self.visible_time_range();
+        self.data
+            .iter()
+            .filter(move |p| p.timestamp >= start && p.timestamp <= end)
     }
 
     /// Recalculate min/max bounds.
     fn recalculate_bounds(&mut self) {
-        let cutoff = self.current_time - self.time_window.duration_ms();
-        let visible: Vec<_> = self.data.iter().filter(|p| p.timestamp >= cutoff).collect();
+        let (start, end) = self.visible_time_range();
+        let visible: Vec<_> = self
+            .data
+            .iter()
+            .filter(|p| p.timestamp >= start && p.timestamp <= end)
+            .collect();
 
         if visible.is_empty() {
             self.min_value = 0.0;
@@ -251,8 +341,68 @@ impl<'a> Chart<'a> {
     }
 }
 
+/// Internal state for chart interaction.
+#[derive(Debug, Clone, Default)]
+pub struct ChartInteraction {
+    /// Whether Ctrl key is pressed.
+    ctrl_pressed: bool,
+}
+
 impl<'a> canvas::Program<crate::message::Message> for Chart<'a> {
-    type State = ();
+    type State = ChartInteraction;
+
+    fn update(
+        &self,
+        state: &mut Self::State,
+        event: &Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Option<Action<crate::message::Message>> {
+        match event {
+            // Track Ctrl key state
+            Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                state.ctrl_pressed = modifiers.control();
+                None
+            }
+
+            // Handle keyboard zoom (+/- and 0 for reset)
+            Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) => {
+                match key {
+                    keyboard::Key::Character(c) => {
+                        let c_str = c.as_str();
+                        if c_str == "+" || c_str == "=" {
+                            return Some(Action::publish(crate::message::Message::ChartZoomIn));
+                        } else if c_str == "-" || c_str == "_" {
+                            return Some(Action::publish(crate::message::Message::ChartZoomOut));
+                        } else if c_str == "0" {
+                            return Some(Action::publish(crate::message::Message::ChartZoomReset));
+                        }
+                    }
+                    _ => {}
+                }
+                None
+            }
+
+            // Handle Ctrl+scroll for zoom
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                if state.ctrl_pressed && cursor.is_over(bounds) {
+                    let zoom_delta = match delta {
+                        mouse::ScrollDelta::Lines { y, .. } => *y,
+                        mouse::ScrollDelta::Pixels { y, .. } => *y / 50.0,
+                    };
+
+                    if zoom_delta > 0.0 {
+                        return Some(Action::publish(crate::message::Message::ChartZoomIn));
+                    } else if zoom_delta < 0.0 {
+                        return Some(Action::publish(crate::message::Message::ChartZoomOut));
+                    }
+                }
+                None
+            }
+
+            _ => None,
+        }
+    }
 
     fn draw(
         &self,
@@ -302,15 +452,25 @@ impl<'a> Chart<'a> {
         };
         frame.fill_text(title);
 
-        // Draw time window label
+        // Draw time window and zoom label
+        let zoom_pct = (self.state.zoom_level * 100.0) as i32;
         let window_label = Text {
-            content: format!("Window: {}", self.state.time_window.label()),
-            position: Point::new(size.width - padding - 80.0, 10.0),
+            content: format!(
+                "Window: {} | Zoom: {}%",
+                self.state.time_window.label(),
+                zoom_pct
+            ),
+            position: Point::new(size.width - padding - 140.0, 10.0),
             color: Color::from_rgb(0.6, 0.6, 0.6),
             size: 12.0.into(),
             ..Text::default()
         };
         frame.fill_text(window_label);
+
+        // Draw zoom feedback overlay if recently changed
+        if self.state.show_zoom_feedback {
+            self.draw_zoom_feedback(frame, size, zoom_pct);
+        }
 
         // Collect visible data
         let visible_data: Vec<_> = self.state.visible_data().collect();
@@ -328,9 +488,8 @@ impl<'a> Chart<'a> {
             return;
         }
 
-        // Calculate time range
-        let time_end = self.state.current_time;
-        let time_start = time_end - self.state.time_window.duration_ms();
+        // Calculate time range (with zoom)
+        let (time_start, time_end) = self.state.visible_time_range();
         let time_range = (time_end - time_start) as f64;
 
         // Calculate value range
@@ -447,9 +606,9 @@ impl<'a> Chart<'a> {
                 Stroke::default().with_color(grid_color).with_width(1.0),
             );
 
-            // Time label
+            // Time label (use effective duration for zoom)
             let time_offset =
-                self.state.time_window.duration_ms() as f64 * (1.0 - i as f64 / num_v_lines as f64);
+                self.state.effective_duration_ms() as f64 * (1.0 - i as f64 / num_v_lines as f64);
             let label_text = format_time_offset(time_offset as i64);
 
             let label = Text {
@@ -461,6 +620,53 @@ impl<'a> Chart<'a> {
             };
             frame.fill_text(label);
         }
+    }
+
+    /// Draw zoom feedback overlay.
+    fn draw_zoom_feedback(&self, frame: &mut Frame, size: Size, zoom_pct: i32) {
+        // Semi-transparent background box
+        let box_width = 120.0;
+        let box_height = 50.0;
+        let box_x = (size.width - box_width) / 2.0;
+        let box_y = (size.height - box_height) / 2.0;
+
+        let bg = Path::rectangle(Point::new(box_x, box_y), Size::new(box_width, box_height));
+        frame.fill(&bg, Color::from_rgba(0.0, 0.0, 0.0, 0.7));
+
+        // Border
+        frame.stroke(
+            &bg,
+            Stroke::default()
+                .with_color(Color::from_rgb(0.3, 0.8, 1.0))
+                .with_width(2.0),
+        );
+
+        // Zoom icon (magnifying glass approximation)
+        let icon_text = if zoom_pct > 100 {
+            "+"
+        } else if zoom_pct < 100 {
+            "-"
+        } else {
+            ""
+        };
+        let zoom_text = Text {
+            content: format!("{}{}%", icon_text, zoom_pct),
+            position: Point::new(box_x + box_width / 2.0 - 25.0, box_y + 15.0),
+            color: Color::WHITE,
+            size: 20.0.into(),
+            ..Text::default()
+        };
+        frame.fill_text(zoom_text);
+
+        // Hint text
+        let hint = Text {
+            content: "Ctrl+Scroll or +/-".to_string(),
+            position: Point::new(box_x + 10.0, box_y + box_height - 15.0),
+            color: Color::from_rgb(0.6, 0.6, 0.6),
+            size: 9.0.into(),
+            ..Text::default()
+        };
+        frame.fill_text(hint);
     }
 
     /// Draw statistics overlay.
@@ -568,5 +774,53 @@ mod tests {
         assert_eq!(format_value(3.14159), "3.14");
         assert_eq!(format_value(1500.0), "1.5K");
         assert_eq!(format_value(2500000.0), "2.5M");
+    }
+
+    #[test]
+    fn test_zoom_in_out() {
+        let mut chart = ChartState::new("test");
+        assert_eq!(chart.zoom_level(), 1.0);
+
+        chart.zoom_in();
+        assert_eq!(chart.zoom_level(), 1.25);
+
+        chart.zoom_in();
+        assert_eq!(chart.zoom_level(), 1.5);
+
+        chart.zoom_out();
+        assert_eq!(chart.zoom_level(), 1.25);
+
+        chart.reset_zoom();
+        assert_eq!(chart.zoom_level(), 1.0);
+    }
+
+    #[test]
+    fn test_zoom_limits() {
+        let mut chart = ChartState::new("test");
+
+        // Can't zoom below MIN_ZOOM
+        chart.set_zoom(0.5);
+        assert_eq!(chart.zoom_level(), MIN_ZOOM);
+
+        // Can't zoom above MAX_ZOOM
+        chart.set_zoom(15.0);
+        assert_eq!(chart.zoom_level(), MAX_ZOOM);
+    }
+
+    #[test]
+    fn test_effective_duration_with_zoom() {
+        let mut chart = ChartState::new("test");
+        chart.set_time_window(TimeWindow::FiveMinutes);
+
+        // At 1x zoom, effective duration = 5 minutes
+        assert_eq!(chart.effective_duration_ms(), 300_000);
+
+        // At 2x zoom, effective duration = 2.5 minutes
+        chart.set_zoom(2.0);
+        assert_eq!(chart.effective_duration_ms(), 150_000);
+
+        // At 4x zoom, effective duration = 1.25 minutes
+        chart.set_zoom(4.0);
+        assert_eq!(chart.effective_duration_ms(), 75_000);
     }
 }

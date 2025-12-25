@@ -217,6 +217,24 @@ impl ZenSight {
                 }
             }
 
+            Message::ChartZoomIn => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.zoom_in();
+                }
+            }
+
+            Message::ChartZoomOut => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.zoom_out();
+                }
+            }
+
+            Message::ChartZoomReset => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.reset_zoom();
+                }
+            }
+
             Message::SetMetricFilter(filter) => {
                 if let Some(ref mut device) = self.selected_device {
                     device.set_metric_filter(filter);

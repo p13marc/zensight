@@ -46,6 +46,15 @@ pub enum Message {
     /// User changed the chart time window.
     SetChartTimeWindow(TimeWindow),
 
+    /// Zoom in on the chart.
+    ChartZoomIn,
+
+    /// Zoom out on the chart.
+    ChartZoomOut,
+
+    /// Reset chart zoom to 100%.
+    ChartZoomReset,
+
     /// User changed the metric search filter.
     SetMetricFilter(String),
 

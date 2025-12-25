@@ -112,9 +112,25 @@ impl DeviceDetailState {
         self.chart.set_time_window(window);
     }
 
+    /// Zoom in on the chart.
+    pub fn zoom_in(&mut self) {
+        self.chart.zoom_in();
+    }
+
+    /// Zoom out on the chart.
+    pub fn zoom_out(&mut self) {
+        self.chart.zoom_out();
+    }
+
+    /// Reset chart zoom to 100%.
+    pub fn reset_zoom(&mut self) {
+        self.chart.reset_zoom();
+    }
+
     /// Update the chart time (call on tick).
     pub fn update_chart_time(&mut self) {
         self.chart.update_time();
+        self.chart.update_zoom_feedback();
     }
 
     /// Set the metric search filter.
