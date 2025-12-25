@@ -1,6 +1,7 @@
 use zensight_common::{Protocol, TelemetryPoint};
 
 use crate::view::chart::TimeWindow;
+use crate::view::settings::ZenohMode;
 
 /// Messages for the Zensight application.
 #[derive(Debug, Clone)]
@@ -34,6 +35,31 @@ pub enum Message {
 
     /// Tick for periodic UI updates (e.g., relative timestamps).
     Tick,
+
+    // Settings messages
+    /// Open the settings view.
+    OpenSettings,
+
+    /// Close the settings view.
+    CloseSettings,
+
+    /// Set Zenoh connection mode.
+    SetZenohMode(ZenohMode),
+
+    /// Set Zenoh connect endpoints.
+    SetZenohConnect(String),
+
+    /// Set Zenoh listen endpoints.
+    SetZenohListen(String),
+
+    /// Set stale threshold.
+    SetStaleThreshold(String),
+
+    /// Save settings.
+    SaveSettings,
+
+    /// Reset settings to defaults.
+    ResetSettings,
 }
 
 /// Unique identifier for a device (protocol + source name).

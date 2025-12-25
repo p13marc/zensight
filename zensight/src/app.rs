@@ -8,6 +8,16 @@ use crate::message::{DeviceId, Message};
 use crate::subscription::{tick_subscription, zenoh_subscription};
 use crate::view::dashboard::{DashboardState, DeviceState, dashboard_view};
 use crate::view::device::{DeviceDetailState, device_view};
+use crate::view::settings::{SettingsState, settings_view};
+
+/// Current view in the application.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum CurrentView {
+    #[default]
+    Dashboard,
+    Device,
+    Settings,
+}
 
 /// The main Zensight application.
 pub struct Zensight {
@@ -17,6 +27,10 @@ pub struct Zensight {
     dashboard: DashboardState,
     /// Currently selected device (if any).
     selected_device: Option<DeviceDetailState>,
+    /// Settings state.
+    settings: SettingsState,
+    /// Current view.
+    current_view: CurrentView,
     /// Stale threshold in milliseconds (devices not updated within this time are marked unhealthy).
     stale_threshold_ms: i64,
 }
@@ -31,11 +45,22 @@ impl Zensight {
             listen: vec![],
         };
 
+        let stale_threshold_ms = 120_000; // 2 minutes
+
+        let settings = SettingsState::from_config(
+            &zenoh_config.mode,
+            &zenoh_config.connect,
+            &zenoh_config.listen,
+            stale_threshold_ms,
+        );
+
         let app = Self {
             zenoh_config,
             dashboard: DashboardState::default(),
             selected_device: None,
-            stale_threshold_ms: 120_000, // 2 minutes
+            settings,
+            current_view: CurrentView::default(),
+            stale_threshold_ms,
         };
 
         (app, Task::none())
@@ -76,6 +101,7 @@ impl Zensight {
 
             Message::ClearSelection => {
                 self.selected_device = None;
+                self.current_view = CurrentView::Dashboard;
             }
 
             Message::ToggleProtocolFilter(protocol) => {
@@ -103,6 +129,43 @@ impl Zensight {
             Message::Tick => {
                 self.handle_tick();
             }
+
+            // Settings messages
+            Message::OpenSettings => {
+                self.current_view = CurrentView::Settings;
+            }
+
+            Message::CloseSettings => {
+                self.current_view = if self.selected_device.is_some() {
+                    CurrentView::Device
+                } else {
+                    CurrentView::Dashboard
+                };
+            }
+
+            Message::SetZenohMode(mode) => {
+                self.settings.set_mode(mode);
+            }
+
+            Message::SetZenohConnect(endpoints) => {
+                self.settings.set_connect(endpoints);
+            }
+
+            Message::SetZenohListen(endpoints) => {
+                self.settings.set_listen(endpoints);
+            }
+
+            Message::SetStaleThreshold(threshold) => {
+                self.settings.set_stale_threshold(threshold);
+            }
+
+            Message::SaveSettings => {
+                self.save_settings();
+            }
+
+            Message::ResetSettings => {
+                self.reset_settings();
+            }
         }
 
         Task::none()
@@ -118,9 +181,16 @@ impl Zensight {
 
     /// Render the view.
     pub fn view(&self) -> Element<'_, Message> {
-        match &self.selected_device {
-            Some(device_state) => device_view(device_state),
-            None => dashboard_view(&self.dashboard),
+        match self.current_view {
+            CurrentView::Settings => settings_view(&self.settings),
+            CurrentView::Device => {
+                if let Some(ref device_state) = self.selected_device {
+                    device_view(device_state)
+                } else {
+                    dashboard_view(&self.dashboard)
+                }
+            }
+            CurrentView::Dashboard => dashboard_view(&self.dashboard),
         }
     }
 
@@ -162,6 +232,33 @@ impl Zensight {
         // so the detail view will populate as new data arrives
         let detail_state = DeviceDetailState::new(device_id);
         self.selected_device = Some(detail_state);
+        self.current_view = CurrentView::Device;
+    }
+
+    /// Save settings.
+    fn save_settings(&mut self) {
+        // Validate settings first
+        if let Err(error) = self.settings.validate() {
+            self.settings.set_error(error);
+            return;
+        }
+
+        // Apply stale threshold immediately
+        self.stale_threshold_ms = self.settings.stale_threshold_ms();
+
+        // Update Zenoh config (will require restart to take effect)
+        self.zenoh_config.mode = self.settings.zenoh_mode.as_str().to_string();
+        self.zenoh_config.connect = self.settings.connect_endpoints();
+        self.zenoh_config.listen = self.settings.listen_endpoints();
+
+        self.settings.mark_saved();
+        tracing::info!("Settings saved");
+    }
+
+    /// Reset settings to defaults.
+    fn reset_settings(&mut self) {
+        self.settings = SettingsState::default();
+        self.settings.modified = true;
     }
 
     /// Handle periodic tick (update health status, etc.).
