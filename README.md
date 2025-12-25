@@ -224,7 +224,7 @@ pub struct TelemetryPoint {
 ## Development
 
 ```bash
-# Run all tests (154 tests)
+# Run all tests
 cargo test --workspace
 
 # Run specific bridge tests
@@ -234,6 +234,9 @@ cargo test -p zenoh-bridge-netflow   # 8 tests
 cargo test -p zenoh-bridge-modbus    # 11 tests
 cargo test -p zenoh-bridge-sysinfo   # 10 tests
 cargo test -p zenoh-bridge-gnmi      # 8 tests
+
+# Run frontend tests (includes UI tests with Simulator)
+cargo test -p zensight               # 32 tests
 
 # Check all crates
 cargo check --workspace
@@ -245,12 +248,65 @@ cargo fmt --all
 cargo clippy --workspace
 ```
 
+## Testing
+
+ZenSight uses Iced 0.14's testing framework for UI tests.
+
+### Unit Tests with Simulator
+
+The `iced_test` crate provides a `Simulator` for testing UI components without a window:
+
+```rust
+use iced_test::simulator;
+
+let state = DashboardState::default();
+let mut ui = simulator(dashboard_view(&state));
+
+// Find elements by text
+assert!(ui.find("Settings").is_ok());
+
+// Click buttons and check messages
+let _ = ui.click("Settings");
+let messages: Vec<Message> = ui.into_messages().collect();
+assert!(messages.iter().any(|m| matches!(m, Message::OpenSettings)));
+```
+
+### E2E Recording with Tester (F12)
+
+Build with the `tester` feature to enable the developer tool:
+
+```bash
+cargo run -p zensight --features tester
+```
+
+Press **F12** to open the tester panel, which allows you to:
+- Record UI interactions as `.ice` test files
+- Replay recorded tests for regression testing
+- Take snapshots for visual comparison
+
+### Mock Data
+
+The `zensight::mock` module provides test data generators:
+
+```rust
+use zensight::mock;
+
+// Generate SNMP router metrics
+let points = mock::snmp::router("router01");
+
+// Generate system metrics
+let points = mock::sysinfo::host("server01");
+
+// Generate a full mock environment
+let points = mock::mock_environment();
+```
+
 ## Test Coverage
 
 | Crate | Tests | Description |
 |-------|-------|-------------|
 | zensight-common | 14 + 10 + 4 + 5 | Unit, integration, E2E, doctests |
-| zensight (frontend) | 13 | Views, alerts, charts, settings |
+| zensight (frontend) | 32 | Views, alerts, charts, settings, UI tests |
 | zenoh-bridge-snmp | 19 + 6 | Unit + integration |
 | zenoh-bridge-syslog | 26 | Parser, receiver, config |
 | zenoh-bridge-netflow | 8 | Config, receiver, flow parsing |
