@@ -305,14 +305,15 @@ let points = mock::mock_environment();
 
 | Crate | Tests | Description |
 |-------|-------|-------------|
-| zensight-common | 14 + 10 + 4 + 5 | Unit, integration, E2E, doctests |
-| zensight (frontend) | 32 | Views, alerts, charts, settings, UI tests |
-| zenoh-bridge-snmp | 19 + 6 | Unit + integration |
-| zenoh-bridge-syslog | 26 | Parser, receiver, config |
-| zenoh-bridge-netflow | 8 | Config, receiver, flow parsing |
+| zensight-common | 33 | 14 unit + 10 integration + 4 E2E + 5 doctests |
+| zensight (frontend) | 32 | 23 unit + 9 UI tests (Simulator) |
+| zenoh-bridge-snmp | 25 | 19 unit + 6 integration |
+| zenoh-bridge-syslog | 52 | 26 unit + 26 integration |
+| zenoh-bridge-netflow | 16 | 8 unit + 8 integration |
 | zenoh-bridge-modbus | 11 | Config, register decoding |
 | zenoh-bridge-sysinfo | 10 | Config, filters, collection |
 | zenoh-bridge-gnmi | 8 | Config, path parsing, subscriber |
+| **Total** | **187** | All tests passing |
 
 ## License
 
