@@ -1,0 +1,28 @@
+[package]
+name = "zenoh-bridge-netflow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Zenoh bridge for NetFlow/IPFIX telemetry"
+
+[[bin]]
+name = "zenoh-bridge-netflow"
+path = "src/main.rs"
+
+[dependencies]
+zensight-common.workspace = true
+zenoh.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+json5.workspace = true
+
+# NetFlow/IPFIX parser (v5, v7, v9, IPFIX)
+netflow_parser = "0.6"
+
+[dev-dependencies]
+tokio-test = "0.4"

@@ -5,6 +5,7 @@ members = [
     "zensight-common",
     "zenoh-bridge-snmp",
     "zenoh-bridge-syslog",
+    "zenoh-bridge-netflow",
 ]
 
 [workspace.package]

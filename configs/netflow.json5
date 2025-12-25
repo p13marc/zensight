@@ -1,0 +1,49 @@
+{
+  // Zenoh connection settings
+  zenoh: {
+    mode: "peer",                    // "client", "peer", or "router"
+    // connect: ["tcp/localhost:7447"], // Router endpoints (if client mode)
+    // listen: ["tcp/0.0.0.0:7448"],    // Listen endpoints (if peer/router)
+  },
+
+  // NetFlow/IPFIX bridge settings
+  netflow: {
+    // Key expression prefix for publishing
+    key_prefix: "zensight/netflow",
+
+    // UDP listener configurations
+    // Standard ports: 2055 (NetFlow), 4739 (IPFIX), 9995 (common alternative)
+    listeners: [
+      {
+        bind: "0.0.0.0:2055",        // NetFlow standard port
+        max_packet_size: 65535,
+      },
+      {
+        bind: "0.0.0.0:4739",        // IPFIX standard port
+      },
+    ],
+
+    // Map exporter IP addresses to friendly names
+    // Useful for identifying routers/switches in the telemetry
+    exporter_names: {
+      // "192.168.1.1": "core-router",
+      // "192.168.1.2": "edge-switch",
+      // "10.0.0.1": "dc-router",
+    },
+
+    // Publish individual flow records
+    publish_flows: true,
+
+    // Publish aggregated statistics (flows per exporter, etc.)
+    publish_stats: true,
+
+    // Aggregation interval in seconds (0 = no aggregation)
+    // When > 0, flows are aggregated before publishing
+    aggregation_interval_secs: 0,
+  },
+
+  // Logging configuration
+  logging: {
+    level: "info",                   // "trace", "debug", "info", "warn", "error"
+  },
+}
