@@ -17,6 +17,7 @@ Zensight provides a suite of protocol bridges that collect telemetry from variou
 | `zenoh-bridge-netflow` | NetFlow/IPFIX receiver (v5, v7, v9, IPFIX) | Complete |
 | `zenoh-bridge-modbus` | Modbus bridge (TCP/RTU, all register types) | Complete |
 | `zenoh-bridge-sysinfo` | System monitoring (CPU, memory, disk, network) | Complete |
+| `zenoh-bridge-gnmi` | gNMI streaming telemetry (gRPC) | Complete |
 
 ## Supported Protocols
 
@@ -27,9 +28,9 @@ Zensight provides a suite of protocol bridges that collect telemetry from variou
 | **NetFlow/IPFIX** | Network flow telemetry | `zensight/netflow/<exporter>/<src>/<dst>` |
 | **Modbus** | Industrial device monitoring | `zensight/modbus/<device>/<register_type>/<addr>` |
 | **Sysinfo** | Host system metrics | `zensight/sysinfo/<hostname>/<metric>` |
+| **gNMI** | Streaming telemetry (gRPC) | `zensight/gnmi/<device>/<path>` |
 
 ### Planned Protocols
-- gNMI - Streaming telemetry
 - OPC UA - Industrial automation
 
 ## Key Expression Hierarchy
@@ -49,6 +50,7 @@ zensight/netflow/exporter01/10.0.0.1/10.0.0.2
 zensight/modbus/plc01/holding/temperature
 zensight/sysinfo/server01/cpu/usage
 zensight/sysinfo/server01/memory/used
+zensight/gnmi/router01/interfaces/interface[name=eth0]/state/counters
 ```
 
 ## Quick Start
@@ -76,6 +78,9 @@ cargo build --release --workspace
 
 # Sysinfo bridge - monitor local system
 ./target/release/zenoh-bridge-sysinfo --config configs/sysinfo.json5
+
+# gNMI bridge - streaming telemetry from network devices
+./target/release/zenoh-bridge-gnmi --config configs/gnmi.json5
 ```
 
 ### Run Frontend
@@ -179,6 +184,28 @@ All bridges use JSON5 configuration files. See the `configs/` directory for exam
 }
 ```
 
+### gNMI Bridge
+
+```json5
+{
+  zenoh: { mode: "peer" },
+  gnmi: {
+    targets: [
+      {
+        name: "router01",
+        address: "192.168.1.1:9339",
+        credentials: { username: "admin", password: "admin" },
+        encoding: "JSON_IETF",
+        subscriptions: [
+          { path: "/interfaces/interface/state/counters", mode: "SAMPLE", sample_interval_ms: 10000 },
+          { path: "/interfaces/interface/state/oper-status", mode: "ON_CHANGE" },
+        ],
+      },
+    ],
+  },
+}
+```
+
 ## Data Model
 
 All bridges emit a common `TelemetryPoint` structure:
@@ -197,7 +224,7 @@ pub struct TelemetryPoint {
 ## Development
 
 ```bash
-# Run all tests (146 tests)
+# Run all tests (154 tests)
 cargo test --workspace
 
 # Run specific bridge tests
@@ -206,6 +233,7 @@ cargo test -p zenoh-bridge-syslog    # 26 tests
 cargo test -p zenoh-bridge-netflow   # 8 tests
 cargo test -p zenoh-bridge-modbus    # 11 tests
 cargo test -p zenoh-bridge-sysinfo   # 10 tests
+cargo test -p zenoh-bridge-gnmi      # 8 tests
 
 # Check all crates
 cargo check --workspace
@@ -228,6 +256,7 @@ cargo clippy --workspace
 | zenoh-bridge-netflow | 8 | Config, receiver, flow parsing |
 | zenoh-bridge-modbus | 11 | Config, register decoding |
 | zenoh-bridge-sysinfo | 10 | Config, filters, collection |
+| zenoh-bridge-gnmi | 8 | Config, path parsing, subscriber |
 
 ## License
 

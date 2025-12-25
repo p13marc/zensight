@@ -8,6 +8,7 @@ members = [
     "zenoh-bridge-netflow",
     "zenoh-bridge-modbus",
     "zenoh-bridge-sysinfo",
+    "zenoh-bridge-gnmi",
 ]
 
 [workspace.package]
