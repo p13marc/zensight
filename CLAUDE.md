@@ -34,7 +34,7 @@ Zensight is a unified observability platform that bridges legacy monitoring prot
 | Crate | Type | Purpose |
 |-------|------|---------|
 | `zensight-common` | Library | Shared types: telemetry model, Zenoh session helpers, JSON5 config, serialization (JSON/CBOR) |
-| `zensight` | Binary | Iced 0.13 desktop frontend subscribing to `zensight/**` |
+| `zensight` | Binary | Iced 0.14 desktop frontend subscribing to `zensight/**` |
 | `zenoh-bridge-snmp` | Binary | SNMP bridge with polling and trap receiver |
 
 ### Data Flow

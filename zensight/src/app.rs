@@ -6,8 +6,8 @@ use zensight_common::{TelemetryPoint, ZenohConfig};
 
 use crate::message::{DeviceId, Message};
 use crate::subscription::{tick_subscription, zenoh_subscription};
-use crate::view::dashboard::{dashboard_view, DashboardState, DeviceState};
-use crate::view::device::{device_view, DeviceDetailState};
+use crate::view::dashboard::{DashboardState, DeviceState, dashboard_view};
+use crate::view::device::{DeviceDetailState, device_view};
 
 /// The main Zensight application.
 pub struct Zensight {
@@ -22,8 +22,15 @@ pub struct Zensight {
 }
 
 impl Zensight {
-    /// Create a new Zensight application with the given configuration.
-    pub fn new(zenoh_config: ZenohConfig) -> (Self, Task<Message>) {
+    /// Boot the Zensight application (called by iced::application).
+    pub fn boot() -> (Self, Task<Message>) {
+        // Default Zenoh configuration (peer mode, connect to default router)
+        let zenoh_config = ZenohConfig {
+            mode: "peer".to_string(),
+            connect: vec![], // Will use default discovery
+            listen: vec![],
+        };
+
         let app = Self {
             zenoh_config,
             dashboard: DashboardState::default(),

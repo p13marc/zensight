@@ -6,7 +6,7 @@ A unified observability platform that bridges legacy monitoring protocols into [
 
 | Crate | Description |
 |-------|-------------|
-| `zensight` | Iced 0.13 desktop frontend for visualizing telemetry |
+| `zensight` | Iced 0.14 desktop frontend for visualizing telemetry |
 | `zensight-common` | Shared library (telemetry model, Zenoh helpers, config) |
 | `zenoh-bridge-snmp` | SNMP bridge (polling + trap receiver) |
 

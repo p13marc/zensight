@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{button, column, container, horizontal_rule, row, scrollable, text, Column};
+use iced::widget::{Column, button, column, container, row, rule, scrollable, text};
 use iced::{Alignment, Element, Length, Theme};
 
 use zensight_common::Protocol;
@@ -104,7 +104,7 @@ pub fn dashboard_view(state: &DashboardState) -> Element<'_, Message> {
     let filters = render_protocol_filters(state);
     let devices = render_device_grid(state);
 
-    let content = column![header, filters, horizontal_rule(1), devices]
+    let content = column![header, filters, rule::horizontal(1), devices]
         .spacing(10)
         .padding(20);
 

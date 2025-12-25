@@ -5,7 +5,7 @@ use crate::error::{Error, Result};
 use crate::serialization::Format;
 
 /// Common Zenoh connection configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ZenohConfig {
     /// Zenoh mode: "client", "peer", or "router".
     #[serde(default = "default_mode")]

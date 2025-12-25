@@ -1,83 +1,67 @@
 use iced::Subscription;
 
-use zensight_common::{all_telemetry_wildcard, decode_auto, TelemetryPoint, ZenohConfig};
+use zensight_common::{TelemetryPoint, ZenohConfig, all_telemetry_wildcard, decode_auto};
 
 use crate::message::Message;
 
-/// State for the Zenoh subscription.
-enum State {
-    /// Not connected, will attempt connection.
-    Disconnected,
-    /// Connected and receiving telemetry.
-    Connected(zenoh::Session),
-}
-
 /// Create a subscription that connects to Zenoh and receives telemetry.
 pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
-    Subscription::run_with_id(
-        "zenoh-telemetry",
-        iced::futures::stream::unfold(State::Disconnected, move |state| {
-            let config = config.clone();
-            async move {
-                match state {
-                    State::Disconnected => {
-                        // Connect to Zenoh
-                        match connect_zenoh(&config).await {
-                            Ok(session) => Some((Message::Connected, State::Connected(session))),
+    Subscription::run_with(config, move |config| {
+        let config = config.clone();
+        async_stream::stream! {
+            // Connect to Zenoh
+            let session = match connect_zenoh(&config).await {
+                Ok(session) => {
+                    yield Message::Connected;
+                    session
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to connect to Zenoh");
+                    yield Message::Disconnected(e.to_string());
+                    // Wait before the stream ends (subscription will restart)
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    return;
+                }
+            };
+
+            // Subscribe to all zensight telemetry
+            let key_expr = all_telemetry_wildcard();
+            let subscriber = match session.declare_subscriber(&key_expr).await {
+                Ok(sub) => sub,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to create subscriber");
+                    yield Message::Disconnected(e.to_string());
+                    return;
+                }
+            };
+
+            // Process incoming samples
+            loop {
+                match subscriber.recv_async().await {
+                    Ok(sample) => {
+                        let payload = sample.payload().to_bytes();
+                        match decode_auto::<TelemetryPoint>(&payload) {
+                            Ok(point) => {
+                                yield Message::TelemetryReceived(point);
+                            }
                             Err(e) => {
-                                tracing::error!(error = %e, "Failed to connect to Zenoh");
-                                // Wait before retrying
-                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                                Some((Message::Disconnected(e.to_string()), State::Disconnected))
+                                tracing::warn!(
+                                    error = %e,
+                                    key = %sample.key_expr(),
+                                    "Failed to decode telemetry"
+                                );
                             }
                         }
                     }
-                    State::Connected(session) => {
-                        // Subscribe to all zensight telemetry
-                        let key_expr = all_telemetry_wildcard();
-                        match session.declare_subscriber(&key_expr).await {
-                            Ok(subscriber) => {
-                                // Process incoming samples
-                                loop {
-                                    match subscriber.recv_async().await {
-                                        Ok(sample) => {
-                                            let payload = sample.payload().to_bytes();
-                                            match decode_auto::<TelemetryPoint>(&payload) {
-                                                Ok(point) => {
-                                                    return Some((
-                                                        Message::TelemetryReceived(point),
-                                                        State::Connected(session),
-                                                    ));
-                                                }
-                                                Err(e) => {
-                                                    tracing::warn!(
-                                                        error = %e,
-                                                        key = %sample.key_expr(),
-                                                        "Failed to decode telemetry"
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::error!(error = %e, "Subscriber error");
-                                            return Some((
-                                                Message::Disconnected(e.to_string()),
-                                                State::Disconnected,
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!(error = %e, "Failed to create subscriber");
-                                Some((Message::Disconnected(e.to_string()), State::Disconnected))
-                            }
-                        }
+                    Err(e) => {
+                        tracing::error!(error = %e, "Subscriber error");
+                        yield Message::Disconnected(e.to_string());
+                        return;
                     }
                 }
             }
-        }),
-    )
+        }
+    })
 }
 
 /// Connect to Zenoh using the provided configuration.

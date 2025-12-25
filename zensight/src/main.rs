@@ -4,9 +4,7 @@
 //! from all connected bridges (SNMP, Syslog, gNMI, etc.).
 
 use iced::application;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-
-use zensight_common::ZenohConfig;
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod app;
 mod message;
@@ -24,18 +22,12 @@ fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting Zensight");
 
-    // Default Zenoh configuration (peer mode, connect to default router)
-    let zenoh_config = ZenohConfig {
-        mode: "peer".to_string(),
-        connect: vec![], // Will use default discovery
-        listen: vec![],
-    };
-
     // Run the Iced application
-    application("Zensight", Zensight::update, Zensight::view)
+    application(Zensight::boot, Zensight::update, Zensight::view)
+        .title("Zensight")
         .subscription(Zensight::subscription)
         .theme(Zensight::theme)
-        .run_with(move || Zensight::new(zenoh_config))
+        .run()
         .map_err(|e| anyhow::anyhow!("Application error: {}", e))?;
 
     Ok(())

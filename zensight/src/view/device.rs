@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{button, column, container, horizontal_rule, row, scrollable, text, Column};
+use iced::widget::{Column, button, column, container, row, rule, scrollable, text};
 use iced::{Alignment, Element, Length, Theme};
 
 use zensight_common::{TelemetryPoint, TelemetryValue};
@@ -63,7 +63,7 @@ pub fn device_view(state: &DeviceDetailState) -> Element<'_, Message> {
     let header = render_header(state);
     let metrics = render_metrics_list(state);
 
-    let content = column![header, horizontal_rule(1), metrics]
+    let content = column![header, rule::horizontal(1), metrics]
         .spacing(10)
         .padding(20);
 
