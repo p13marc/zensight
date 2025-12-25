@@ -170,8 +170,10 @@ fn test_device_metric_filter() {
         state.update(point);
     }
 
-    // Set filter
+    // Set filter (goes to pending with debouncing)
     state.set_metric_filter("cpu".to_string());
+    // Apply immediately by setting the applied filter directly
+    state.metric_filter = state.pending_filter.clone();
 
     // Verify filtering works
     let filtered = state.sorted_metrics();

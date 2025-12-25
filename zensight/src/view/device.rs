@@ -14,6 +14,17 @@ use crate::view::chart::{ChartState, DataPoint, TimeWindow, chart_view};
 use crate::view::formatting::{format_timestamp, format_value};
 use crate::view::icons::{self, IconSize};
 
+/// Debounce delay for metric search input in milliseconds.
+const SEARCH_DEBOUNCE_MS: i64 = 300;
+
+/// Get the current timestamp in milliseconds.
+fn current_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// State for the device detail view.
 #[derive(Debug)]
 pub struct DeviceDetailState {
@@ -29,8 +40,12 @@ pub struct DeviceDetailState {
     pub selected_metric: Option<String>,
     /// Chart state for the selected metric.
     pub chart: ChartState,
-    /// Search filter for metrics.
+    /// Search filter for metrics (applied after debounce).
     pub metric_filter: String,
+    /// Pending search filter (user input).
+    pub pending_filter: String,
+    /// Timestamp when pending filter was last updated.
+    pub pending_filter_time: i64,
 }
 
 impl DeviceDetailState {
@@ -49,6 +64,8 @@ impl DeviceDetailState {
             selected_metric: None,
             chart: ChartState::new(format!("{}", device_id)),
             metric_filter: String::new(),
+            pending_filter: String::new(),
+            pending_filter_time: 0,
         }
     }
 
@@ -127,15 +144,39 @@ impl DeviceDetailState {
         self.chart.reset_zoom();
     }
 
-    /// Update the chart time (call on tick).
+    /// Update the chart time and apply pending filter (call on tick).
     pub fn update_chart_time(&mut self) {
         self.chart.update_time();
         self.chart.update_zoom_feedback();
+        self.apply_pending_filter();
     }
 
-    /// Set the metric search filter.
+    /// Set the metric search filter (debounced).
+    ///
+    /// Updates the pending filter and timestamp. The actual filter
+    /// is applied after the debounce delay via `apply_pending_filter`.
     pub fn set_metric_filter(&mut self, filter: String) {
-        self.metric_filter = filter;
+        self.pending_filter = filter;
+        self.pending_filter_time = current_timestamp();
+    }
+
+    /// Apply the pending filter if the debounce delay has elapsed.
+    ///
+    /// Returns `true` if the filter was applied (changed).
+    pub fn apply_pending_filter(&mut self) -> bool {
+        if self.pending_filter != self.metric_filter {
+            let elapsed = current_timestamp() - self.pending_filter_time;
+            if elapsed >= SEARCH_DEBOUNCE_MS {
+                self.metric_filter = self.pending_filter.clone();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get the current filter input (for display in the text input).
+    pub fn filter_input(&self) -> &str {
+        &self.pending_filter
     }
 
     /// Get metrics sorted by name, optionally filtered by the search string.
@@ -388,8 +429,8 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
     let metrics = state.sorted_metrics();
     let filtered_count = metrics.len();
 
-    // Search filter input
-    let search_input = text_input("Search metrics...", &state.metric_filter)
+    // Search filter input (uses pending filter for immediate feedback)
+    let search_input = text_input("Search metrics...", state.filter_input())
         .on_input(Message::SetMetricFilter)
         .size(14)
         .padding(8)
@@ -649,8 +690,11 @@ mod tests {
         state.update(make_test_point("memory/used"));
         state.update(make_test_point("disk/io"));
 
-        // Filter for "cpu" should return 2 metrics
+        // Filter for "cpu" should return 2 metrics (after applying)
         state.set_metric_filter("cpu".to_string());
+        // Directly set the applied filter for testing
+        state.metric_filter = state.pending_filter.clone();
+
         let filtered = state.sorted_metrics();
         assert_eq!(filtered.len(), 2);
         assert!(filtered.iter().all(|(name, _)| name.contains("cpu")));
@@ -670,14 +714,42 @@ mod tests {
         state.update(make_test_point("CPU/Usage"));
         state.update(make_test_point("memory/used"));
 
-        // Filter should be case-insensitive
+        // Filter should be case-insensitive (apply immediately for testing)
         state.set_metric_filter("cpu".to_string());
+        state.metric_filter = state.pending_filter.clone();
         assert_eq!(state.sorted_metrics().len(), 1);
 
         state.set_metric_filter("CPU".to_string());
+        state.metric_filter = state.pending_filter.clone();
         assert_eq!(state.sorted_metrics().len(), 1);
 
         state.set_metric_filter("CpU".to_string());
+        state.metric_filter = state.pending_filter.clone();
+        assert_eq!(state.sorted_metrics().len(), 1);
+    }
+
+    #[test]
+    fn test_metric_filter_debounce() {
+        let device_id = DeviceId {
+            protocol: Protocol::Snmp,
+            source: "test".to_string(),
+        };
+        let mut state = DeviceDetailState::new(device_id);
+
+        state.update(make_test_point("cpu/usage"));
+        state.update(make_test_point("memory/used"));
+
+        // Set filter - should not apply immediately
+        state.set_metric_filter("cpu".to_string());
+        assert_eq!(state.filter_input(), "cpu");
+        assert_eq!(state.metric_filter, ""); // Not applied yet
+
+        // Simulate time passing by setting an old timestamp
+        state.pending_filter_time = current_timestamp() - SEARCH_DEBOUNCE_MS - 1;
+
+        // Now apply should work
+        assert!(state.apply_pending_filter());
+        assert_eq!(state.metric_filter, "cpu");
         assert_eq!(state.sorted_metrics().len(), 1);
     }
 }

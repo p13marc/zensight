@@ -7,6 +7,14 @@ use iced::{Alignment, Element, Length, Theme};
 
 use zensight_common::Protocol;
 
+/// Get the current timestamp in milliseconds.
+fn current_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 use crate::app::AppTheme;
 use crate::message::{DeviceId, Message};
 use crate::view::icons::{self, IconSize};
@@ -47,6 +55,9 @@ impl DeviceState {
 /// Default number of devices per page.
 pub const DEFAULT_DEVICES_PER_PAGE: usize = 20;
 
+/// Debounce delay for search input in milliseconds.
+pub const SEARCH_DEBOUNCE_MS: i64 = 300;
+
 /// Dashboard view state.
 #[derive(Debug)]
 pub struct DashboardState {
@@ -54,8 +65,12 @@ pub struct DashboardState {
     pub devices: HashMap<DeviceId, DeviceState>,
     /// Active protocol filters (empty = show all).
     pub protocol_filters: std::collections::HashSet<Protocol>,
-    /// Search filter for device names.
+    /// Search filter for device names (applied after debounce).
     pub search_filter: String,
+    /// Pending search filter (user input, not yet applied).
+    pub pending_search: String,
+    /// Timestamp when pending search was last updated.
+    pub pending_search_time: i64,
     /// Whether we are connected to Zenoh.
     pub connected: bool,
     /// Last error message, if any.
@@ -72,6 +87,8 @@ impl Default for DashboardState {
             devices: HashMap::new(),
             protocol_filters: std::collections::HashSet::new(),
             search_filter: String::new(),
+            pending_search: String::new(),
+            pending_search_time: 0,
             connected: false,
             last_error: None,
             current_page: 0,
@@ -119,11 +136,30 @@ impl DashboardState {
         }
     }
 
-    /// Set the search filter.
+    /// Set the pending search filter (debounced).
+    /// The actual filter is applied after SEARCH_DEBOUNCE_MS via `apply_pending_search`.
     pub fn set_search_filter(&mut self, filter: String) {
-        self.search_filter = filter;
-        // Reset to first page when search changes
-        self.current_page = 0;
+        self.pending_search = filter;
+        self.pending_search_time = current_timestamp();
+    }
+
+    /// Apply the pending search filter if debounce delay has passed.
+    /// Returns true if the filter was applied.
+    pub fn apply_pending_search(&mut self) -> bool {
+        if self.pending_search != self.search_filter {
+            let elapsed = current_timestamp() - self.pending_search_time;
+            if elapsed >= SEARCH_DEBOUNCE_MS {
+                self.search_filter = self.pending_search.clone();
+                self.current_page = 0;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get the current search input (pending, for display in text field).
+    pub fn search_input(&self) -> &str {
+        &self.pending_search
     }
 
     /// Get the total number of pages.
@@ -339,7 +375,7 @@ fn render_protocol_filters(state: &DashboardState) -> Element<'_, Message> {
     }
 
     // Device search input
-    let search_input = text_input("Search devices...", &state.search_filter)
+    let search_input = text_input("Search devices...", state.search_input())
         .on_input(Message::SetDeviceSearchFilter)
         .padding(6)
         .width(Length::Fixed(200.0));
@@ -625,7 +661,14 @@ mod tests {
         state.devices_per_page = 20;
         state.current_page = 2;
 
+        // Set the search filter (goes to pending)
         state.set_search_filter("device".to_string());
+        // Page doesn't reset until filter is applied
+        assert_eq!(state.current_page, 2);
+
+        // Simulate time passing and apply the filter
+        state.pending_search_time = current_timestamp() - SEARCH_DEBOUNCE_MS - 1;
+        state.apply_pending_search();
         assert_eq!(state.current_page, 0);
     }
 

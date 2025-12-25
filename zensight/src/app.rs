@@ -541,6 +541,9 @@ impl ZenSight {
             device.update_health(now, self.stale_threshold_ms);
         }
 
+        // Apply debounced search filter
+        self.dashboard.apply_pending_search();
+
         // Update chart time for selected device
         if let Some(ref mut device) = self.selected_device {
             device.update_chart_time();
