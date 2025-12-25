@@ -135,6 +135,9 @@ pub enum Message {
     /// Add a new alert rule.
     AddAlertRule,
 
+    /// Test the current rule form against existing metrics.
+    TestAlertRule,
+
     /// Remove an alert rule.
     RemoveAlertRule(u32),
 

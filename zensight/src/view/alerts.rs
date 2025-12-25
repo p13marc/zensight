@@ -171,6 +171,18 @@ impl ComparisonOp {
             ComparisonOp::NotEqual => "!=",
         }
     }
+
+    /// Evaluate the comparison.
+    pub fn evaluate(&self, value: f64, threshold: f64) -> bool {
+        match self {
+            ComparisonOp::GreaterThan => value > threshold,
+            ComparisonOp::GreaterOrEqual => value >= threshold,
+            ComparisonOp::LessThan => value < threshold,
+            ComparisonOp::LessOrEqual => value <= threshold,
+            ComparisonOp::Equal => (value - threshold).abs() < f64::EPSILON,
+            ComparisonOp::NotEqual => (value - threshold).abs() >= f64::EPSILON,
+        }
+    }
 }
 
 impl std::fmt::Display for ComparisonOp {
@@ -274,6 +286,8 @@ pub struct AlertsState {
     pub new_rule_severity: Severity,
     /// Number of unacknowledged alerts.
     pub unacknowledged_count: usize,
+    /// Test result message (None if not tested, Some(result) if tested).
+    pub test_result: Option<String>,
 }
 
 impl AlertsState {
@@ -298,6 +312,7 @@ impl AlertsState {
             new_rule_operator: ComparisonOp::GreaterThan,
             new_rule_severity: Severity::Warning,
             unacknowledged_count: 0,
+            test_result: None,
         }
     }
 
@@ -352,6 +367,72 @@ impl AlertsState {
         self.new_rule_severity = Severity::Warning;
 
         Ok(())
+    }
+
+    /// Test the current form rule against provided metrics.
+    /// Returns the number of metrics that would match.
+    pub fn test_rule(&mut self, metrics: &[(String, String, f64)]) -> Result<(), String> {
+        // Validate inputs first
+        if self.new_rule_metric.trim().is_empty() {
+            self.test_result = Some("Error: Metric pattern is required".to_string());
+            return Err("Metric pattern is required".to_string());
+        }
+
+        let threshold: f64 = self.new_rule_threshold.parse().map_err(|e| {
+            self.test_result = Some(format!("Error: Invalid threshold - {}", e));
+            format!("Threshold must be a number: {}", e)
+        })?;
+
+        let pattern = self.new_rule_metric.trim().to_lowercase();
+        let operator = self.new_rule_operator;
+
+        // Count matches
+        let mut matches = Vec::new();
+        for (device, metric, value) in metrics {
+            let metric_lower = metric.to_lowercase();
+            if metric_lower.contains(&pattern) {
+                let would_trigger = operator.evaluate(*value, threshold);
+                if would_trigger {
+                    matches.push(format!(
+                        "{}/{}: {} {} {}",
+                        device,
+                        metric,
+                        value,
+                        operator.symbol(),
+                        threshold
+                    ));
+                }
+            }
+        }
+
+        if matches.is_empty() {
+            self.test_result = Some(format!(
+                "No matches. Pattern '{}' with {} {} would not trigger on any current metrics.",
+                pattern,
+                operator.symbol(),
+                threshold
+            ));
+        } else {
+            let preview: Vec<_> = matches.iter().take(5).cloned().collect();
+            let more = if matches.len() > 5 {
+                format!(" ... and {} more", matches.len() - 5)
+            } else {
+                String::new()
+            };
+            self.test_result = Some(format!(
+                "Would match {} metric(s):\n{}{}",
+                matches.len(),
+                preview.join("\n"),
+                more
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Clear the test result.
+    pub fn clear_test_result(&mut self) {
+        self.test_result = None;
     }
 
     /// Remove a rule by ID.
@@ -558,6 +639,10 @@ fn render_new_rule_form(state: &AlertsState) -> Element<'_, Message> {
         Message::SetAlertRuleSeverity,
     );
 
+    let test_button = button(text("Test").size(14))
+        .on_press(Message::TestAlertRule)
+        .style(iced::widget::button::secondary);
+
     let add_button = button(text("Add Rule").size(14))
         .on_press(Message::AddAlertRule)
         .style(iced::widget::button::primary);
@@ -568,12 +653,50 @@ fn render_new_rule_form(state: &AlertsState) -> Element<'_, Message> {
         operator_picker,
         threshold_input,
         severity_picker,
+        test_button,
         add_button
     ]
     .spacing(10)
     .align_y(Alignment::Center);
 
-    column![section_title, form_row].spacing(10).into()
+    // Show test result if available
+    let mut form_content = Column::new().spacing(10).push(section_title).push(form_row);
+
+    if let Some(ref result) = state.test_result {
+        let is_error = result.starts_with("Error:");
+        let result_color = if is_error {
+            iced::Color::from_rgb(1.0, 0.3, 0.3)
+        } else if result.starts_with("No matches") {
+            iced::Color::from_rgb(0.7, 0.7, 0.7)
+        } else {
+            iced::Color::from_rgb(0.3, 0.8, 0.3)
+        };
+
+        let result_text = text(result.clone())
+            .size(12)
+            .style(move |_theme: &Theme| text::Style {
+                color: Some(result_color),
+            });
+
+        let result_container =
+            container(result_text)
+                .padding(8)
+                .style(|_theme: &Theme| container::Style {
+                    background: Some(iced::Background::Color(iced::Color::from_rgb(
+                        0.12, 0.12, 0.14,
+                    ))),
+                    border: iced::Border {
+                        color: iced::Color::from_rgb(0.25, 0.25, 0.3),
+                        width: 1.0,
+                        radius: 4.0.into(),
+                    },
+                    ..Default::default()
+                });
+
+        form_content = form_content.push(result_container);
+    }
+
+    form_content.into()
 }
 
 /// Render the rules section.

@@ -376,6 +376,30 @@ impl ZenSight {
                 }
             }
 
+            Message::TestAlertRule => {
+                // Collect all current metrics from dashboard devices
+                let metrics: Vec<(String, String, f64)> = self
+                    .dashboard
+                    .devices
+                    .values()
+                    .flat_map(|device| {
+                        // We need numeric values for testing
+                        // For now, just use a placeholder since we don't store raw values
+                        // In a real implementation, we'd need to track numeric values
+                        device.metrics.iter().filter_map(|(name, value_str)| {
+                            // Try to parse the displayed value back to a number
+                            let value: f64 = value_str
+                                .trim_end_matches(|c: char| !c.is_numeric() && c != '.' && c != '-')
+                                .parse()
+                                .ok()?;
+                            Some((device.id.source.clone(), name.clone(), value))
+                        })
+                    })
+                    .collect();
+
+                let _ = self.alerts.test_rule(&metrics);
+            }
+
             Message::RemoveAlertRule(rule_id) => {
                 self.alerts.remove_rule(rule_id);
             }
