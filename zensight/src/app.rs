@@ -82,6 +82,24 @@ impl Zensight {
                 self.dashboard.toggle_filter(protocol);
             }
 
+            Message::SelectMetricForChart(metric_name) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.select_metric(metric_name);
+                }
+            }
+
+            Message::ClearChartSelection => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.clear_chart_selection();
+                }
+            }
+
+            Message::SetChartTimeWindow(window) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.set_time_window(window);
+                }
+            }
+
             Message::Tick => {
                 self.handle_tick();
             }
@@ -155,6 +173,11 @@ impl Zensight {
 
         for device in self.dashboard.devices.values_mut() {
             device.update_health(now, self.stale_threshold_ms);
+        }
+
+        // Update chart time for selected device
+        if let Some(ref mut device) = self.selected_device {
+            device.update_chart_time();
         }
     }
 }

@@ -1,5 +1,7 @@
 use zensight_common::{Protocol, TelemetryPoint};
 
+use crate::view::chart::TimeWindow;
+
 /// Messages for the Zensight application.
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -20,6 +22,15 @@ pub enum Message {
 
     /// User toggled protocol filter.
     ToggleProtocolFilter(Protocol),
+
+    /// User selected a metric to graph.
+    SelectMetricForChart(String),
+
+    /// User cleared the chart selection.
+    ClearChartSelection,
+
+    /// User changed the chart time window.
+    SetChartTimeWindow(TimeWindow),
 
     /// Tick for periodic UI updates (e.g., relative timestamps).
     Tick,
