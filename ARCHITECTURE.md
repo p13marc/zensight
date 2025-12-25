@@ -1,8 +1,8 @@
-# Zensight Architecture Plan
+# ZenSight Architecture Plan
 
 ## Overview
 
-**Zensight** is a unified observability platform consisting of:
+**ZenSight** is a unified observability platform consisting of:
 1. **zensight** - Iced 0.14 desktop frontend for visualizing telemetry
 2. **zensight-common** - Shared library (telemetry model, Zenoh helpers, config)
 3. **zenoh-bridge-*** - Protocol bridges publishing telemetry to Zenoh

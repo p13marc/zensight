@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-/// Common error type for Zensight components.
+/// Common error type for ZenSight components.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Configuration error: {0}")]
@@ -34,5 +34,5 @@ impl From<ciborium::de::Error<std::io::Error>> for Error {
     }
 }
 
-/// Result type alias using Zensight's Error.
+/// Result type alias using ZenSight's Error.
 pub type Result<T> = std::result::Result<T, Error>;

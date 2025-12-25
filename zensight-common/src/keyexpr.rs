@@ -1,9 +1,9 @@
 use crate::telemetry::Protocol;
 
-/// Default key expression prefix for all Zensight telemetry.
+/// Default key expression prefix for all ZenSight telemetry.
 pub const KEY_PREFIX: &str = "zensight";
 
-/// Builder for constructing Zensight key expressions.
+/// Builder for constructing ZenSight key expressions.
 ///
 /// Key expressions follow the pattern:
 /// `zensight/<protocol>/<source>/<metric_path>`
@@ -97,7 +97,7 @@ impl KeyExprBuilder {
     }
 }
 
-/// Build a wildcard key expression for all Zensight telemetry.
+/// Build a wildcard key expression for all ZenSight telemetry.
 ///
 /// # Example
 /// ```
@@ -139,7 +139,7 @@ pub fn parse_key_expr(key: &str) -> Option<ParsedKeyExpr<'_>> {
     })
 }
 
-/// Parsed components of a Zensight key expression.
+/// Parsed components of a ZenSight key expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedKeyExpr<'a> {
     pub protocol: Protocol,

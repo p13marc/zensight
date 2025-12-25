@@ -1,4 +1,4 @@
-//! Zensight Iced application.
+//! ZenSight Iced application.
 
 use iced::{Element, Subscription, Task, Theme};
 
@@ -21,8 +21,8 @@ pub enum CurrentView {
     Alerts,
 }
 
-/// The main Zensight application.
-pub struct Zensight {
+/// The main ZenSight application.
+pub struct ZenSight {
     /// Zenoh configuration.
     zenoh_config: ZenohConfig,
     /// Dashboard state.
@@ -39,8 +39,8 @@ pub struct Zensight {
     stale_threshold_ms: i64,
 }
 
-impl Zensight {
-    /// Boot the Zensight application (called by iced::application).
+impl ZenSight {
+    /// Boot the ZenSight application (called by iced::application).
     pub fn boot() -> (Self, Task<Message>) {
         // Load persistent settings from disk
         let persistent = PersistentSettings::load();
@@ -73,9 +73,9 @@ impl Zensight {
     pub fn title(&self) -> String {
         let device_count = self.dashboard.devices.len();
         if device_count > 0 {
-            format!("Zensight - {} devices", device_count)
+            format!("ZenSight - {} devices", device_count)
         } else {
-            "Zensight".to_string()
+            "ZenSight".to_string()
         }
     }
 

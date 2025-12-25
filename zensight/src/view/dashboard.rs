@@ -116,7 +116,7 @@ pub fn dashboard_view(state: &DashboardState) -> Element<'_, Message> {
 
 /// Render the header with connection status.
 fn render_header(state: &DashboardState) -> Element<'_, Message> {
-    let title = text("Zensight Dashboard").size(24);
+    let title = text("ZenSight Dashboard").size(24);
 
     let status = if state.connected {
         text("Connected").style(|_theme: &Theme| text::Style {

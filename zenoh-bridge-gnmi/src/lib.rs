@@ -1,4 +1,4 @@
-//! gNMI (gRPC Network Management Interface) bridge for Zensight
+//! gNMI (gRPC Network Management Interface) bridge for ZenSight
 //!
 //! This bridge connects to gNMI-enabled network devices and publishes
 //! streaming telemetry to Zenoh.

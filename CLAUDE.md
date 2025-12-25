@@ -27,7 +27,7 @@ cargo clippy --workspace
 
 ## Architecture
 
-Zensight is a unified observability platform that bridges legacy monitoring protocols (SNMP, Syslog, gNMI, NetFlow, OPC UA, Modbus) into Zenoh's pub/sub infrastructure.
+ZenSight is a unified observability platform that bridges legacy monitoring protocols (SNMP, Syslog, gNMI, NetFlow, OPC UA, Modbus) into Zenoh's pub/sub infrastructure.
 
 ### Crate Structure
 

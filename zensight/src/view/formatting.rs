@@ -1,4 +1,4 @@
-//! Shared formatting utilities for the Zensight views.
+//! Shared formatting utilities for the ZenSight views.
 
 /// Format a numeric value for display with appropriate scale suffix.
 ///

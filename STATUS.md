@@ -1,4 +1,4 @@
-# Zensight Development Status
+# ZenSight Development Status
 
 ## Current Progress
 
@@ -123,7 +123,7 @@
 ### zensight (Iced Frontend)
 
 **Application** (`app.rs`):
-- `Zensight` struct implementing Iced Application pattern
+- `ZenSight` struct implementing Iced Application pattern
 - Dashboard and device detail state management
 - Telemetry processing and device health tracking
 - Dark theme

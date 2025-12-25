@@ -3,7 +3,7 @@ name = "zensight"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Zensight - Observability frontend for Zenoh telemetry"
+description = "ZenSight - Observability frontend for Zenoh telemetry"
 
 [[bin]]
 name = "zensight"

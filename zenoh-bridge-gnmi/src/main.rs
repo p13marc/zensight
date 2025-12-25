@@ -1,4 +1,4 @@
-//! gNMI bridge for Zensight
+//! gNMI bridge for ZenSight
 //!
 //! Connects to gNMI-enabled network devices and publishes streaming telemetry to Zenoh.
 

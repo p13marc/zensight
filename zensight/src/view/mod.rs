@@ -1,4 +1,4 @@
-//! View components for the Zensight application.
+//! View components for the ZenSight application.
 
 pub mod alerts;
 pub mod chart;

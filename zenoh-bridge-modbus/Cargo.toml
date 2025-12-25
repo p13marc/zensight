@@ -2,7 +2,7 @@
 name = "zenoh-bridge-modbus"
 version = "0.1.0"
 edition = "2024"
-authors = ["Zensight Contributors"]
+authors = ["ZenSight Contributors"]
 description = "Zenoh bridge for Modbus protocol (TCP/RTU)"
 license = "Apache-2.0"
 

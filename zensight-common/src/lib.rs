@@ -1,6 +1,6 @@
-//! Zensight Common Library
+//! ZenSight Common Library
 //!
-//! This crate provides shared types and utilities for Zensight observability bridges:
+//! This crate provides shared types and utilities for ZenSight observability bridges:
 //!
 //! - [`telemetry`] - Common telemetry data model (`TelemetryPoint`, `TelemetryValue`, `Protocol`)
 //! - [`serialization`] - JSON/CBOR encoding and decoding

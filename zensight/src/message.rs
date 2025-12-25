@@ -4,7 +4,7 @@ use crate::view::alerts::ComparisonOp;
 use crate::view::chart::TimeWindow;
 use crate::view::settings::ZenohMode;
 
-/// Messages for the Zensight application.
+/// Messages for the ZenSight application.
 #[derive(Debug, Clone)]
 pub enum Message {
     /// Telemetry received from Zenoh subscription.

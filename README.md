@@ -1,10 +1,10 @@
-# Zensight
+# ZenSight
 
 A unified observability platform that bridges legacy monitoring protocols into [Zenoh](https://zenoh.io/)'s pub/sub infrastructure.
 
 ## Overview
 
-Zensight provides a suite of protocol bridges that collect telemetry from various sources and publish it to Zenoh using a unified data model. A desktop frontend allows real-time visualization of all collected metrics.
+ZenSight provides a suite of protocol bridges that collect telemetry from various sources and publish it to Zenoh using a unified data model. A desktop frontend allows real-time visualization of all collected metrics.
 
 ## Components
 
