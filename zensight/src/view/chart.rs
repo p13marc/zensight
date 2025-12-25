@@ -108,6 +108,51 @@ impl TimeWindow {
 /// Pan step as fraction of visible range.
 pub const PAN_STEP: f64 = 0.25;
 
+/// A horizontal threshold line on the chart.
+#[derive(Debug, Clone)]
+pub struct ThresholdLine {
+    /// The value at which to draw the line.
+    pub value: f64,
+    /// Label for the threshold.
+    pub label: String,
+    /// Color of the line (RGB).
+    pub color: (f32, f32, f32),
+    /// Whether this is a warning (dashed) or critical (solid) threshold.
+    pub is_warning: bool,
+}
+
+impl ThresholdLine {
+    /// Create a critical threshold (solid red line).
+    pub fn critical(value: f64, label: impl Into<String>) -> Self {
+        Self {
+            value,
+            label: label.into(),
+            color: (1.0, 0.3, 0.3),
+            is_warning: false,
+        }
+    }
+
+    /// Create a warning threshold (dashed orange line).
+    pub fn warning(value: f64, label: impl Into<String>) -> Self {
+        Self {
+            value,
+            label: label.into(),
+            color: (1.0, 0.7, 0.2),
+            is_warning: true,
+        }
+    }
+
+    /// Create a baseline/target threshold (dashed green line).
+    pub fn baseline(value: f64, label: impl Into<String>) -> Self {
+        Self {
+            value,
+            label: label.into(),
+            color: (0.3, 0.8, 0.3),
+            is_warning: true,
+        }
+    }
+}
+
 /// State for the time-series chart.
 #[derive(Debug)]
 pub struct ChartState {
@@ -141,6 +186,8 @@ pub struct ChartState {
     drag_start: Option<f32>,
     /// Pan offset when drag started.
     drag_start_offset: f64,
+    /// Threshold/baseline lines to display on the chart.
+    thresholds: Vec<ThresholdLine>,
 }
 
 impl ChartState {
@@ -162,7 +209,31 @@ impl ChartState {
             pan_feedback_time: 0,
             drag_start: None,
             drag_start_offset: 0.0,
+            thresholds: Vec::new(),
         }
+    }
+
+    /// Add a threshold line to the chart.
+    pub fn add_threshold(&mut self, threshold: ThresholdLine) {
+        self.thresholds.push(threshold);
+        self.cache.clear();
+    }
+
+    /// Clear all threshold lines.
+    pub fn clear_thresholds(&mut self) {
+        self.thresholds.clear();
+        self.cache.clear();
+    }
+
+    /// Set threshold lines from alert rules.
+    pub fn set_thresholds(&mut self, thresholds: Vec<ThresholdLine>) {
+        self.thresholds = thresholds;
+        self.cache.clear();
+    }
+
+    /// Get current thresholds.
+    pub fn thresholds(&self) -> &[ThresholdLine] {
+        &self.thresholds
     }
 
     /// Get the current zoom level.
@@ -712,6 +783,16 @@ impl<'a> Chart<'a> {
             value_max,
         );
 
+        // Draw threshold lines
+        self.draw_thresholds(
+            frame,
+            padding,
+            chart_width,
+            chart_height,
+            value_min,
+            value_max,
+        );
+
         // Draw the data line
         if visible_data.len() >= 2 {
             let mut path_builder = canvas::path::Builder::new();
@@ -951,6 +1032,57 @@ impl<'a> Chart<'a> {
         frame.fill_text(hint);
     }
 
+    /// Draw threshold/baseline lines.
+    fn draw_thresholds(
+        &self,
+        frame: &mut Frame,
+        padding: f32,
+        chart_width: f32,
+        chart_height: f32,
+        value_min: f64,
+        value_max: f64,
+    ) {
+        let value_range = value_max - value_min;
+        if value_range <= 0.0 {
+            return;
+        }
+
+        for threshold in &self.state.thresholds {
+            // Skip if threshold is outside visible range
+            if threshold.value < value_min || threshold.value > value_max {
+                continue;
+            }
+
+            // Calculate Y position
+            let y = padding + chart_height
+                - ((threshold.value - value_min) / value_range) as f32 * chart_height;
+
+            let color = Color::from_rgb(threshold.color.0, threshold.color.1, threshold.color.2);
+
+            // Draw the line
+            let line = Path::line(Point::new(padding, y), Point::new(padding + chart_width, y));
+
+            // Use different widths: thinner for warning/baseline, thicker for critical
+            let stroke = if threshold.is_warning {
+                Stroke::default().with_color(color).with_width(1.5)
+            } else {
+                Stroke::default().with_color(color).with_width(2.5)
+            };
+
+            frame.stroke(&line, stroke);
+
+            // Draw label
+            let label = Text {
+                content: format!("{} ({})", threshold.label, format_value(threshold.value)),
+                position: Point::new(padding + 5.0, y - 12.0),
+                color,
+                size: 10.0.into(),
+                ..Text::default()
+            };
+            frame.fill_text(label);
+        }
+    }
+
     /// Draw statistics overlay.
     fn draw_stats(&self, frame: &mut Frame, size: Size, padding: f32, stats: &ChartStats) {
         let stats_x = size.width - padding - 100.0;
@@ -1187,5 +1319,47 @@ mod tests {
         // End drag
         chart.end_drag();
         assert!(!chart.is_dragging());
+    }
+
+    #[test]
+    fn test_threshold_lines() {
+        let mut chart = ChartState::new("test");
+
+        // Initially no thresholds
+        assert!(chart.thresholds().is_empty());
+
+        // Add thresholds
+        chart.add_threshold(ThresholdLine::critical(100.0, "Critical"));
+        chart.add_threshold(ThresholdLine::warning(80.0, "Warning"));
+        chart.add_threshold(ThresholdLine::baseline(50.0, "Target"));
+
+        assert_eq!(chart.thresholds().len(), 3);
+
+        // Check threshold properties
+        let critical = &chart.thresholds()[0];
+        assert_eq!(critical.value, 100.0);
+        assert_eq!(critical.label, "Critical");
+        assert!(!critical.is_warning);
+
+        let warning = &chart.thresholds()[1];
+        assert_eq!(warning.value, 80.0);
+        assert!(warning.is_warning);
+
+        // Clear thresholds
+        chart.clear_thresholds();
+        assert!(chart.thresholds().is_empty());
+    }
+
+    #[test]
+    fn test_set_thresholds() {
+        let mut chart = ChartState::new("test");
+
+        let thresholds = vec![
+            ThresholdLine::critical(100.0, "Max"),
+            ThresholdLine::baseline(0.0, "Min"),
+        ];
+
+        chart.set_thresholds(thresholds);
+        assert_eq!(chart.thresholds().len(), 2);
     }
 }
