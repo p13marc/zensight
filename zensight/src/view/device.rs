@@ -9,6 +9,7 @@ use iced::{Alignment, Element, Length, Theme};
 
 use zensight_common::{TelemetryPoint, TelemetryValue};
 
+use crate::app::DEVICE_SEARCH_ID;
 use crate::message::{DeviceId, Message};
 use crate::view::chart::{ChartState, DataPoint, TimeWindow, chart_view};
 use crate::view::formatting::{format_timestamp, format_value};
@@ -429,8 +430,9 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
     let metrics = state.sorted_metrics();
     let filtered_count = metrics.len();
 
-    // Search filter input (uses pending filter for immediate feedback)
-    let search_input = text_input("Search metrics...", state.filter_input())
+    // Search filter input (with ID for keyboard focus)
+    let search_input = text_input("Search metrics... (Ctrl+F)", state.filter_input())
+        .id(DEVICE_SEARCH_ID.clone())
         .on_input(Message::SetMetricFilter)
         .size(14)
         .padding(8)

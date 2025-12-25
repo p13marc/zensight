@@ -1,4 +1,5 @@
 use iced::Subscription;
+use iced::keyboard::{self, Key, key};
 
 use zensight_common::{TelemetryPoint, ZenohConfig, all_telemetry_wildcard, decode_auto};
 
@@ -109,6 +110,31 @@ async fn connect_zenoh(config: &ZenohConfig) -> anyhow::Result<zenoh::Session> {
 /// Create a tick subscription for periodic UI updates.
 pub fn tick_subscription() -> Subscription<Message> {
     iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::Tick)
+}
+
+/// Create a keyboard subscription for global shortcuts.
+///
+/// Handles:
+/// - Ctrl+F: Focus search input
+/// - Escape: Close dialogs, clear selections
+pub fn keyboard_subscription() -> Subscription<Message> {
+    keyboard::listen()
+        .map(|event| {
+            if let keyboard::Event::KeyPressed { key, modifiers, .. } = event {
+                match key.as_ref() {
+                    // Ctrl+F: Focus search
+                    Key::Character("f") if modifiers.control() => Some(Message::FocusSearch),
+
+                    // Escape: Close/back
+                    Key::Named(key::Named::Escape) => Some(Message::EscapePressed),
+
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        })
+        .filter_map(|msg| msg)
 }
 
 /// Create a demo subscription that generates mock telemetry data.

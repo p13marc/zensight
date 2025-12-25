@@ -15,7 +15,7 @@ fn current_timestamp() -> i64 {
         .unwrap_or(0)
 }
 
-use crate::app::AppTheme;
+use crate::app::{AppTheme, DASHBOARD_SEARCH_ID};
 use crate::message::{DeviceId, Message};
 use crate::view::icons::{self, IconSize};
 
@@ -374,8 +374,9 @@ fn render_protocol_filters(state: &DashboardState) -> Element<'_, Message> {
         filter_row = filter_row.push(btn);
     }
 
-    // Device search input
-    let search_input = text_input("Search devices...", state.search_input())
+    // Device search input (with ID for keyboard focus)
+    let search_input = text_input("Search devices... (Ctrl+F)", state.search_input())
+        .id(DASHBOARD_SEARCH_ID.clone())
         .on_input(Message::SetDeviceSearchFilter)
         .padding(6)
         .width(Length::Fixed(200.0));

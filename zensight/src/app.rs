@@ -1,12 +1,23 @@
 //! ZenSight Iced application.
 
+use iced::widget::Id;
+use iced::widget::operation::focus;
 use iced::{Element, Subscription, Task, Theme};
+use std::sync::LazyLock;
 
 use zensight_common::{TelemetryPoint, TelemetryValue, ZenohConfig};
 
+/// Text input ID for dashboard search.
+pub static DASHBOARD_SEARCH_ID: LazyLock<Id> = LazyLock::new(|| Id::new("dashboard-search"));
+
+/// Text input ID for device metric search.
+pub static DEVICE_SEARCH_ID: LazyLock<Id> = LazyLock::new(|| Id::new("device-search"));
+
 use crate::message::{DeviceId, Message};
 use crate::mock;
-use crate::subscription::{demo_subscription, tick_subscription, zenoh_subscription};
+use crate::subscription::{
+    demo_subscription, keyboard_subscription, tick_subscription, zenoh_subscription,
+};
 use crate::view::alerts::{AlertsState, alerts_view};
 use crate::view::dashboard::{DashboardState, DeviceState, dashboard_view};
 use crate::view::device::{DeviceDetailState, device_view};
@@ -360,20 +371,81 @@ impl ZenSight {
                 self.settings.dark_theme = matches!(self.theme, AppTheme::Dark);
                 self.settings.modified = true;
             }
+
+            // Keyboard shortcuts
+            Message::FocusSearch => {
+                return self.focus_search();
+            }
+
+            Message::EscapePressed => {
+                self.handle_escape();
+            }
         }
 
         Task::none()
+    }
+
+    /// Focus the appropriate search input based on current view.
+    fn focus_search(&self) -> Task<Message> {
+        match self.current_view {
+            CurrentView::Dashboard => focus(DASHBOARD_SEARCH_ID.clone()),
+            CurrentView::Device => focus(DEVICE_SEARCH_ID.clone()),
+            _ => Task::none(),
+        }
+    }
+
+    /// Handle Escape key - close dialogs or go back.
+    fn handle_escape(&mut self) {
+        match self.current_view {
+            CurrentView::Settings => {
+                self.current_view = if self.selected_device.is_some() {
+                    CurrentView::Device
+                } else {
+                    CurrentView::Dashboard
+                };
+            }
+            CurrentView::Alerts => {
+                self.current_view = if self.selected_device.is_some() {
+                    CurrentView::Device
+                } else {
+                    CurrentView::Dashboard
+                };
+            }
+            CurrentView::Device => {
+                // If charting, close chart; otherwise go back to dashboard
+                if let Some(ref mut device) = self.selected_device {
+                    if device.selected_metric.is_some() {
+                        device.clear_chart_selection();
+                    } else {
+                        self.selected_device = None;
+                        self.current_view = CurrentView::Dashboard;
+                    }
+                }
+            }
+            CurrentView::Dashboard => {
+                // Clear search filter if set
+                if !self.dashboard.search_filter.is_empty() {
+                    self.dashboard.search_filter.clear();
+                    self.dashboard.pending_search.clear();
+                }
+            }
+        }
     }
 
     /// Create subscriptions for Zenoh telemetry and periodic updates.
     pub fn subscription(&self) -> Subscription<Message> {
         if self.demo_mode {
             // In demo mode, use mock data generator instead of Zenoh
-            Subscription::batch([demo_subscription(), tick_subscription()])
+            Subscription::batch([
+                demo_subscription(),
+                tick_subscription(),
+                keyboard_subscription(),
+            ])
         } else {
             Subscription::batch([
                 zenoh_subscription(self.zenoh_config.clone()),
                 tick_subscription(),
+                keyboard_subscription(),
             ])
         }
     }

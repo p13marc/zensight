@@ -139,6 +139,13 @@ pub enum Message {
     // Theme messages
     /// Toggle between light and dark theme.
     ToggleTheme,
+
+    // Keyboard shortcut messages
+    /// Focus the search input (Ctrl+F).
+    FocusSearch,
+
+    /// Escape key pressed - close dialogs, clear selection, etc.
+    EscapePressed,
 }
 
 /// Unique identifier for a device (protocol + source name).
