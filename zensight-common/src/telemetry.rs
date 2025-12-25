@@ -128,6 +128,7 @@ pub enum Protocol {
     Netflow,
     Opcua,
     Modbus,
+    Sysinfo,
 }
 
 impl Protocol {
@@ -140,6 +141,7 @@ impl Protocol {
             Protocol::Netflow => "netflow",
             Protocol::Opcua => "opcua",
             Protocol::Modbus => "modbus",
+            Protocol::Sysinfo => "sysinfo",
         }
     }
 }

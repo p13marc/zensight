@@ -1,0 +1,76 @@
+{
+  // Zenoh connection settings
+  zenoh: {
+    mode: "peer",                    // "client", "peer", or "router"
+    // connect: ["tcp/localhost:7447"], // Router endpoints (if client mode)
+  },
+
+  // System information collection settings
+  sysinfo: {
+    // Key expression prefix
+    key_prefix: "zensight/sysinfo",
+
+    // Hostname for key expressions
+    // Use "auto" to detect automatically, or specify a custom name
+    hostname: "auto",
+
+    // Poll interval in seconds
+    poll_interval_secs: 5,
+
+    // Which metrics to collect
+    collect: {
+      // CPU usage (global and per-core)
+      cpu: true,
+
+      // Memory usage (RAM and swap)
+      memory: true,
+
+      // Disk usage (per mount point)
+      disk: true,
+
+      // Network statistics (per interface)
+      network: true,
+
+      // System info (uptime, load averages)
+      system: true,
+
+      // Top processes by CPU/memory (can be resource-intensive)
+      processes: false,
+
+      // Number of top processes to report (if processes: true)
+      top_processes: 10,
+    },
+
+    // Network interface filtering
+    network: {
+      // Only include these interfaces (empty = include all)
+      include: [],
+
+      // Exclude these interfaces
+      exclude: [],
+
+      // Exclude loopback interface (lo)
+      exclude_loopback: true,
+
+      // Exclude virtual interfaces (docker*, veth*, br-*, virbr*, vnet*)
+      exclude_virtual: false,
+    },
+
+    // Disk mount point filtering
+    disk: {
+      // Only include these mount points (empty = include all)
+      include: [],
+
+      // Exclude these mount points
+      exclude: [],
+
+      // Exclude pseudo filesystems (tmpfs, sysfs, proc, etc.)
+      exclude_pseudo: true,
+    },
+  },
+
+  // Logging
+  logging: {
+    level: "info",                   // "trace", "debug", "info", "warn", "error"
+  },
+}
