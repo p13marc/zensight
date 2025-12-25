@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{Column, button, column, container, row, rule, scrollable, text, text_input};
+use iced::widget::{
+    Column, button, column, container, row, rule, scrollable, text, text_input, tooltip,
+};
 use iced::{Alignment, Element, Length, Theme};
 
 use zensight_common::Protocol;
@@ -532,6 +534,9 @@ fn calculate_visible_pages(current: usize, total: usize) -> Vec<usize> {
     }
 }
 
+/// Maximum length for displayed metric values before truncation.
+const MAX_VALUE_DISPLAY_LEN: usize = 30;
+
 /// Render a single device card.
 fn render_device_card(device: &DeviceState) -> Element<'_, Message> {
     let status_indicator = if device.is_healthy {
@@ -541,18 +546,47 @@ fn render_device_card(device: &DeviceState) -> Element<'_, Message> {
     };
 
     let protocol_icon = icons::protocol_icon(device.id.protocol, IconSize::Medium);
-    let device_name = text(&device.id.source).size(16);
+
+    // Device name with tooltip showing full ID
+    let device_name_text = text(&device.id.source).size(16);
+    let device_name = tooltip(
+        device_name_text,
+        container(text(format!("{}/{}", device.id.protocol, device.id.source)).size(12))
+            .padding(6)
+            .style(container::rounded_box),
+        tooltip::Position::Top,
+    );
+
     let metric_count = text(format!("{} metrics", device.metric_count)).size(12);
 
     let header = row![status_indicator, protocol_icon, device_name, metric_count]
         .spacing(10)
         .align_y(Alignment::Center);
 
-    // Show a few recent metrics as preview
+    // Show a few recent metrics as preview with tooltips for full values
     let mut preview = Column::new().spacing(2);
     for (name, value) in device.metrics.iter().take(3) {
-        let metric_line = text(format!("  {} = {}", name, value)).size(11);
-        preview = preview.push(metric_line);
+        let display_value = if value.len() > MAX_VALUE_DISPLAY_LEN {
+            format!("{}...", &value[..MAX_VALUE_DISPLAY_LEN])
+        } else {
+            value.clone()
+        };
+
+        let metric_line = text(format!("  {} = {}", name, display_value)).size(11);
+
+        // Add tooltip only if value was truncated
+        if value.len() > MAX_VALUE_DISPLAY_LEN {
+            let metric_with_tooltip = tooltip(
+                metric_line,
+                container(column![text(name).size(11), text(value).size(11)].spacing(2))
+                    .padding(6)
+                    .style(container::rounded_box),
+                tooltip::Position::Right,
+            );
+            preview = preview.push(metric_with_tooltip);
+        } else {
+            preview = preview.push(metric_line);
+        }
     }
 
     if device.metrics.len() > 3 {

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use iced::widget::{
     Column, Row, button, column, container, pick_list, row, rule, scrollable, text, text_input,
+    tooltip,
 };
 use iced::{Alignment, Element, Length, Theme};
 
@@ -682,6 +683,9 @@ fn render_alerts_section(state: &AlertsState) -> Element<'_, Message> {
     column![header, alerts_list].spacing(10).into()
 }
 
+/// Maximum length for alert message before truncation.
+const MAX_ALERT_MESSAGE_LEN: usize = 60;
+
 /// Render a single alert row.
 fn render_alert_row(alert: &Alert) -> Element<'_, Message> {
     let status: Element<'_, Message> = if alert.acknowledged {
@@ -703,7 +707,21 @@ fn render_alert_row(alert: &Alert) -> Element<'_, Message> {
             color: Some(severity_color),
         });
 
-    let message = text(alert.message()).size(13);
+    let full_message = alert.message();
+    let message: Element<'_, Message> = if full_message.len() > MAX_ALERT_MESSAGE_LEN {
+        let truncated = format!("{}...", &full_message[..MAX_ALERT_MESSAGE_LEN]);
+        tooltip(
+            text(truncated).size(13),
+            container(text(full_message.clone()).size(12))
+                .padding(8)
+                .max_width(400.0)
+                .style(container::rounded_box),
+            tooltip::Position::Bottom,
+        )
+        .into()
+    } else {
+        text(full_message).size(13).into()
+    };
 
     let time = text(format_timestamp(alert.timestamp))
         .size(11)

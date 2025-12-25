@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use iced::widget::{
-    Column, Row, button, column, container, row, rule, scrollable, text, text_input,
+    Column, Row, button, column, container, row, rule, scrollable, text, text_input, tooltip,
 };
 use iced::{Alignment, Element, Length, Theme};
 
@@ -529,8 +529,23 @@ fn render_metric_row(
     state: &DeviceDetailState,
 ) -> Element<'static, Message> {
     let metric_name = text(name.to_string()).size(14);
-    let value_text = format_value_display(&point.value);
-    let value = text(value_text.clone()).size(14);
+    let (value_text, full_value) = format_value_display_with_full(&point.value);
+    let value_widget = text(value_text.clone()).size(14);
+
+    // Wrap in tooltip if value was truncated
+    let value: Element<'static, Message> = if let Some(ref full) = full_value {
+        tooltip(
+            value_widget,
+            container(text(full.clone()).size(12))
+                .padding(8)
+                .max_width(400.0)
+                .style(container::rounded_box),
+            tooltip::Position::Bottom,
+        )
+        .into()
+    } else {
+        value_widget.into()
+    };
 
     // Type indicator
     let type_indicator = text(format!("({})", value_type_name(&point.value)))
@@ -620,25 +635,27 @@ fn render_metric_row(
 }
 
 /// Format a telemetry value for display.
-fn format_value_display(value: &TelemetryValue) -> String {
+/// Returns (display_text, Option<full_text>) - full_text is Some if truncated.
+fn format_value_display_with_full(value: &TelemetryValue) -> (String, Option<String>) {
     match value {
-        TelemetryValue::Counter(v) => format!("{}", v),
+        TelemetryValue::Counter(v) => (format!("{}", v), None),
         TelemetryValue::Gauge(v) => {
-            if v.fract() == 0.0 {
+            let display = if v.fract() == 0.0 {
                 format!("{:.0}", v)
             } else {
                 format!("{:.2}", v)
-            }
+            };
+            (display, None)
         }
         TelemetryValue::Text(s) => {
             if s.len() > 50 {
-                format!("{}...", &s[..47])
+                (format!("{}...", &s[..47]), Some(s.clone()))
             } else {
-                s.clone()
+                (s.clone(), None)
             }
         }
-        TelemetryValue::Boolean(b) => if *b { "true" } else { "false" }.to_string(),
-        TelemetryValue::Binary(data) => format!("<{} bytes>", data.len()),
+        TelemetryValue::Boolean(b) => (if *b { "true" } else { "false" }.to_string(), None),
+        TelemetryValue::Binary(data) => (format!("<{} bytes>", data.len()), None),
     }
 }
 
