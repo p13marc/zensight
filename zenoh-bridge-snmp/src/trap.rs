@@ -13,7 +13,7 @@ use zenoh::Session as ZenohSession;
 
 use zensight_common::{Format, KeyExprBuilder, Protocol, TelemetryPoint, TelemetryValue, encode};
 
-use crate::oid::OidNameMapper;
+use crate::mib::MibResolver;
 
 /// Generic trap types as defined in RFC 1157.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,7 +93,7 @@ pub struct TrapReceiver {
     bind_addr: String,
     zenoh: Arc<ZenohSession>,
     key_builder: KeyExprBuilder,
-    oid_mapper: OidNameMapper,
+    mib_resolver: Arc<MibResolver>,
     format: Format,
 }
 
@@ -103,14 +103,14 @@ impl TrapReceiver {
         bind_addr: &str,
         zenoh: Arc<ZenohSession>,
         key_prefix: &str,
-        oid_names: &HashMap<String, String>,
+        mib_resolver: Arc<MibResolver>,
         format: Format,
     ) -> Self {
         Self {
             bind_addr: bind_addr.to_string(),
             zenoh,
             key_builder: KeyExprBuilder::with_prefix(key_prefix, Protocol::Snmp),
-            oid_mapper: OidNameMapper::new(oid_names),
+            mib_resolver,
             format,
         }
     }
@@ -178,7 +178,7 @@ impl TrapReceiver {
         // Determine trap identifier for the key expression
         let trap_id = if let Some(ref trap_oid) = trap.trap_oid {
             // v2: use the trap OID
-            self.oid_mapper.get_name(trap_oid)
+            self.mib_resolver.resolve(trap_oid)
         } else if let Some(generic) = trap.generic_trap {
             // v1: use generic trap name
             if generic == GenericTrap::EnterpriseSpecific {
@@ -241,7 +241,7 @@ impl TrapReceiver {
 
         // Publish each varbind as a separate telemetry point
         for varbind in &trap.varbinds {
-            let varbind_name = self.oid_mapper.get_name(&varbind.oid);
+            let varbind_name = self.mib_resolver.resolve(&varbind.oid);
             let varbind_metric = format!("trap/{}/{}", trap_id, varbind_name);
             let varbind_key = self.key_builder.build(&trap.source_ip, &varbind_metric);
 

@@ -1,4 +1,5 @@
 mod config;
+mod mib;
 mod oid;
 mod poller;
 mod trap;
@@ -13,6 +14,7 @@ use tokio::signal;
 use zensight_common::{connect, init_tracing};
 
 use crate::config::SnmpBridgeConfig;
+use crate::mib::MibResolver;
 use crate::poller::SnmpPoller;
 use crate::trap::TrapReceiver;
 
@@ -50,6 +52,40 @@ async fn main() -> Result<()> {
             .context("Failed to connect to Zenoh")?,
     );
 
+    // Initialize MIB resolver
+    let mut mib_resolver = MibResolver::new();
+
+    if config.snmp.mib.load_builtin {
+        mib_resolver
+            .load_builtin_mibs()
+            .context("Failed to load built-in MIBs")?;
+        tracing::info!(
+            modules = ?mib_resolver.loaded_modules(),
+            count = mib_resolver.mapping_count(),
+            "Loaded built-in MIB definitions"
+        );
+    }
+
+    // Load additional MIB files
+    for mib_file in &config.snmp.mib.files {
+        if let Err(e) = mib_resolver.load_file(mib_file) {
+            tracing::warn!(file = %mib_file, error = %e, "Failed to load MIB file");
+        } else {
+            tracing::info!(file = %mib_file, "Loaded MIB file");
+        }
+    }
+
+    // Add custom OID mappings from config
+    if !config.snmp.oid_names.is_empty() {
+        mib_resolver.add_custom_mappings(&config.snmp.oid_names);
+        tracing::info!(
+            count = config.snmp.oid_names.len(),
+            "Added custom OID mappings"
+        );
+    }
+
+    let mib_resolver = Arc::new(mib_resolver);
+
     // Spawn device pollers
     let mut tasks = Vec::new();
 
@@ -58,7 +94,7 @@ async fn main() -> Result<()> {
             device.clone(),
             session.clone(),
             &config.snmp.key_prefix,
-            &config.snmp.oid_names,
+            mib_resolver.clone(),
             &config.snmp.oid_groups,
             config.serialization,
         );
@@ -84,7 +120,7 @@ async fn main() -> Result<()> {
             &config.snmp.trap_listener.bind,
             session.clone(),
             &config.snmp.key_prefix,
-            &config.snmp.oid_names,
+            mib_resolver.clone(),
             config.serialization,
         );
 

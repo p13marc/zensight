@@ -45,6 +45,35 @@ pub struct SnmpConfig {
     /// OID to human-readable name mapping.
     #[serde(default)]
     pub oid_names: HashMap<String, String>,
+
+    /// MIB configuration.
+    #[serde(default)]
+    pub mib: MibConfig,
+}
+
+/// MIB loading configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MibConfig {
+    /// Load built-in MIB definitions (SNMPv2-MIB, IF-MIB, etc.).
+    #[serde(default = "default_true")]
+    pub load_builtin: bool,
+
+    /// Additional MIB files to load (JSON format).
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for MibConfig {
+    fn default() -> Self {
+        Self {
+            load_builtin: true,
+            files: Vec::new(),
+        }
+    }
 }
 
 fn default_key_prefix() -> String {

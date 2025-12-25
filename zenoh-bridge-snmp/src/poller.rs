@@ -13,14 +13,15 @@ use zensight_common::{Format, KeyExprBuilder, Protocol, TelemetryPoint, Telemetr
 use crate::config::{
     AuthProtocol, DeviceConfig, OidGroup, PrivProtocol, SnmpV3Security, SnmpVersion,
 };
-use crate::oid::{OidNameMapper, oid_starts_with, oid_to_string, parse_oid};
+use crate::mib::MibResolver;
+use crate::oid::{oid_starts_with, oid_to_string, parse_oid};
 
 /// SNMP poller for a single device.
 pub struct SnmpPoller {
     device: DeviceConfig,
     zenoh: Arc<ZenohSession>,
     key_builder: KeyExprBuilder,
-    oid_mapper: OidNameMapper,
+    mib_resolver: Arc<MibResolver>,
     format: Format,
     oids: Vec<String>,
     walks: Vec<String>,
@@ -35,12 +36,11 @@ impl SnmpPoller {
         device: DeviceConfig,
         zenoh: Arc<ZenohSession>,
         key_prefix: &str,
-        oid_names: &HashMap<String, String>,
+        mib_resolver: Arc<MibResolver>,
         oid_groups: &HashMap<String, OidGroup>,
         format: Format,
     ) -> Self {
         let key_builder = KeyExprBuilder::with_prefix(key_prefix, Protocol::Snmp);
-        let oid_mapper = OidNameMapper::new(oid_names);
 
         let oids = device.all_oids(oid_groups);
         let walks = device.all_walks(oid_groups);
@@ -49,7 +49,7 @@ impl SnmpPoller {
             device,
             zenoh,
             key_builder,
-            oid_mapper,
+            mib_resolver,
             format,
             oids,
             walks,
@@ -288,7 +288,7 @@ impl SnmpPoller {
 
     /// Publish a telemetry point to Zenoh.
     async fn publish(&self, oid_str: &str, value: TelemetryValue) {
-        let metric_name = self.oid_mapper.get_name(oid_str);
+        let metric_name = self.mib_resolver.resolve(oid_str);
 
         let point = TelemetryPoint::new(&self.device.name, Protocol::Snmp, &metric_name, value)
             .with_label("oid", oid_str);
