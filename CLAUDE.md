@@ -34,7 +34,7 @@ Zensight is a unified observability platform that bridges legacy monitoring prot
 | Crate | Type | Purpose |
 |-------|------|---------|
 | `zensight-common` | Library | Shared types: telemetry model, Zenoh session helpers, JSON5 config, serialization (JSON/CBOR) |
-| `zensight` | Binary | Iced 0.14 desktop frontend subscribing to `zensight/**` |
+| `zensight` | Binary | Iced 0.13 desktop frontend subscribing to `zensight/**` |
 | `zenoh-bridge-snmp` | Binary | SNMP bridge with polling and trap receiver |
 
 ### Data Flow
@@ -80,3 +80,26 @@ config.insert_json5("connect/endpoints", "[\"tcp/localhost:7447\"]")?;
 ### Frontend Pattern
 
 The Iced frontend bridges Zenoh subscriptions into Iced's subscription system. It subscribes to `zensight/**` and auto-discovers all bridges/devices without configuration.
+
+### Testing
+
+```bash
+# Run all 45 tests
+cargo test --workspace
+
+# Zenoh E2E tests require multi-thread tokio runtime
+# They use unique key prefixes to avoid interference
+```
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `zensight-common/src/telemetry.rs` | TelemetryPoint, TelemetryValue, Protocol |
+| `zensight-common/src/serialization.rs` | JSON/CBOR encode/decode with auto-detection |
+| `zensight-common/src/keyexpr.rs` | KeyExprBuilder and parse_key_expr |
+| `zensight-common/src/session.rs` | Zenoh session connection helper |
+| `zenoh-bridge-snmp/src/poller.rs` | SNMP GET/WALK polling loop |
+| `zenoh-bridge-snmp/src/oid.rs` | OID parsing and name mapping |
+| `zensight/src/subscription.rs` | Zenoh to Iced subscription bridge |
+| `zensight/src/view/dashboard.rs` | Device grid with protocol filters |

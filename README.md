@@ -6,7 +6,7 @@ A unified observability platform that bridges legacy monitoring protocols into [
 
 | Crate | Description |
 |-------|-------------|
-| `zensight` | Iced 0.14 desktop frontend for visualizing telemetry |
+| `zensight` | Iced 0.13 desktop frontend for visualizing telemetry |
 | `zensight-common` | Shared library (telemetry model, Zenoh helpers, config) |
 | `zenoh-bridge-snmp` | SNMP bridge (polling + trap receiver) |
 
@@ -84,8 +84,14 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for full configuration reference.
 ## Development
 
 ```bash
-# Run tests
+# Run all tests (45 tests)
 cargo test --workspace
+
+# Run specific test suites
+cargo test -p zensight-common                    # Unit tests
+cargo test -p zensight-common --test integration # Integration tests
+cargo test -p zensight-common --test zenoh_e2e   # Zenoh E2E tests
+cargo test -p zenoh-bridge-snmp                  # SNMP bridge tests
 
 # Check all crates
 cargo check --workspace
@@ -96,6 +102,17 @@ cargo fmt --all
 # Lint
 cargo clippy --workspace
 ```
+
+## Test Coverage
+
+| Test Suite | Tests | Description |
+|------------|-------|-------------|
+| zensight-common unit | 14 | Telemetry, serialization, config, keyexpr |
+| zensight-common integration | 10 | Full workflow, value types, key expressions |
+| zensight-common Zenoh E2E | 4 | Pub/sub, CBOR, wildcards, multi-publisher |
+| zenoh-bridge-snmp unit | 6 | Config parsing, OID utilities |
+| zenoh-bridge-snmp integration | 6 | Telemetry encoding, key expressions |
+| Doc tests | 5 | API usage examples |
 
 ## Architecture
 
