@@ -1,0 +1,17 @@
+[package]
+name = "zensight-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Common types and utilities for Zensight observability bridges"
+
+[dependencies]
+zenoh.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ciborium.workspace = true
+json5.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true

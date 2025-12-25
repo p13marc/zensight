@@ -1,0 +1,19 @@
+[package]
+name = "zensight"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Zensight - Observability frontend for Zenoh telemetry"
+
+[[bin]]
+name = "zensight"
+path = "src/main.rs"
+
+[dependencies]
+zensight-common.workspace = true
+zenoh.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+# Iced 0.14 (to be added when implementing frontend)
+# iced = { version = "0.14", features = ["tokio"] }

@@ -1,0 +1,19 @@
+[package]
+name = "zenoh-bridge-snmp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Zenoh bridge for SNMP telemetry"
+
+[[bin]]
+name = "zenoh-bridge-snmp"
+path = "src/main.rs"
+
+[dependencies]
+zensight-common.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+clap.workspace = true
+
+# SNMP (to be added when implementing bridge)
+# rasn-snmp = "0.15"

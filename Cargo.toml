@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "zensight",
+    "zensight-common",
+    "zenoh-bridge-snmp",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mpardo/zensight"
+
+[workspace.dependencies]
+# Zenoh
+zenoh = "1.0"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ciborium = "0.2"
+
+# Configuration
+json5 = "0.4"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Internal crates
+zensight-common = { path = "zensight-common" }
