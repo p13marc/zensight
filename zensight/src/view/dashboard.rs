@@ -101,8 +101,12 @@ impl DashboardState {
 }
 
 /// Render the dashboard view.
-pub fn dashboard_view(state: &DashboardState, theme: AppTheme) -> Element<'_, Message> {
-    let header = render_header(state, theme);
+pub fn dashboard_view(
+    state: &DashboardState,
+    theme: AppTheme,
+    unacknowledged_alerts: usize,
+) -> Element<'_, Message> {
+    let header = render_header(state, theme, unacknowledged_alerts);
     let filters = render_protocol_filters(state);
     let devices = render_device_grid(state);
 
@@ -117,7 +121,11 @@ pub fn dashboard_view(state: &DashboardState, theme: AppTheme) -> Element<'_, Me
 }
 
 /// Render the header with connection status.
-fn render_header(state: &DashboardState, theme: AppTheme) -> Element<'_, Message> {
+fn render_header(
+    state: &DashboardState,
+    theme: AppTheme,
+    unacknowledged_alerts: usize,
+) -> Element<'_, Message> {
     let title = text("ZenSight Dashboard").size(24);
 
     let status_icon = if state.connected {
@@ -155,13 +163,27 @@ fn render_header(state: &DashboardState, theme: AppTheme) -> Element<'_, Message
         .on_press(Message::ToggleTheme)
         .style(iced::widget::button::secondary);
 
+    let alerts_label = if unacknowledged_alerts > 0 {
+        text(format!("Alerts ({})", unacknowledged_alerts))
+            .size(14)
+            .style(|_theme: &Theme| text::Style {
+                color: Some(iced::Color::from_rgb(1.0, 0.3, 0.3)),
+            })
+    } else {
+        text("Alerts").size(14)
+    };
+
     let alerts_button = button(
-        row![icons::alert(IconSize::Medium), text("Alerts").size(14)]
+        row![icons::alert(IconSize::Medium), alerts_label]
             .spacing(6)
             .align_y(Alignment::Center),
     )
     .on_press(Message::OpenAlerts)
-    .style(iced::widget::button::secondary);
+    .style(if unacknowledged_alerts > 0 {
+        iced::widget::button::danger
+    } else {
+        iced::widget::button::secondary
+    });
 
     let settings_button = button(
         row![icons::settings(IconSize::Medium), text("Settings").size(14)]

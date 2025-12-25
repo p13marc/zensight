@@ -19,7 +19,7 @@ use zensight_common::Protocol;
 #[test]
 fn test_dashboard_empty() {
     let state = DashboardState::default();
-    let mut ui = simulator(dashboard_view(&state, AppTheme::Dark));
+    let mut ui = simulator(dashboard_view(&state, AppTheme::Dark, 0));
 
     // Should show "Waiting for telemetry data..." message
     assert!(ui.find("Waiting for telemetry data...").is_ok());
@@ -41,7 +41,7 @@ fn test_dashboard_with_devices() {
     device.is_healthy = true;
     state.devices.insert(device_id, device);
 
-    let mut ui = simulator(dashboard_view(&state, AppTheme::Dark));
+    let mut ui = simulator(dashboard_view(&state, AppTheme::Dark, 0));
 
     // Should show the device name
     assert!(ui.find("router01").is_ok());
@@ -55,7 +55,7 @@ fn test_dashboard_with_devices() {
 #[test]
 fn test_dashboard_settings_button() {
     let state = DashboardState::default();
-    let mut ui = simulator(dashboard_view(&state, AppTheme::Dark));
+    let mut ui = simulator(dashboard_view(&state, AppTheme::Dark, 0));
 
     // Click Settings button
     let _ = ui.click("Settings");
@@ -69,7 +69,7 @@ fn test_dashboard_settings_button() {
 #[test]
 fn test_dashboard_alerts_button() {
     let state = DashboardState::default();
-    let mut ui = simulator(dashboard_view(&state, AppTheme::Dark));
+    let mut ui = simulator(dashboard_view(&state, AppTheme::Dark, 0));
 
     // Click Alerts button
     let _ = ui.click("Alerts");

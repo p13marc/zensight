@@ -338,6 +338,7 @@ impl ZenSight {
 
     /// Render the view.
     pub fn view(&self) -> Element<'_, Message> {
+        let unack = self.alerts.unacknowledged_count;
         match self.current_view {
             CurrentView::Settings => settings_view(&self.settings),
             CurrentView::Alerts => alerts_view(&self.alerts),
@@ -345,10 +346,10 @@ impl ZenSight {
                 if let Some(ref device_state) = self.selected_device {
                     device_view(device_state)
                 } else {
-                    dashboard_view(&self.dashboard, self.theme)
+                    dashboard_view(&self.dashboard, self.theme, unack)
                 }
             }
-            CurrentView::Dashboard => dashboard_view(&self.dashboard, self.theme),
+            CurrentView::Dashboard => dashboard_view(&self.dashboard, self.theme, unack),
         }
     }
 
