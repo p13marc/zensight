@@ -90,6 +90,9 @@ impl TimeWindow {
     }
 }
 
+/// Pan step as fraction of visible range.
+pub const PAN_STEP: f64 = 0.25;
+
 /// State for the time-series chart.
 #[derive(Debug)]
 pub struct ChartState {
@@ -109,12 +112,20 @@ pub struct ChartState {
     current_time: i64,
     /// Current zoom level (1.0 = 100%, 2.0 = 200%, etc.).
     zoom_level: f32,
-    /// Pan offset as fraction of visible range (0.0 = centered on now).
+    /// Pan offset as fraction of visible range (0.0 = centered on now, positive = looking at past).
     pan_offset: f64,
     /// Whether zoom feedback should be shown.
     show_zoom_feedback: bool,
     /// Timestamp when zoom feedback was triggered.
     zoom_feedback_time: i64,
+    /// Whether pan feedback should be shown.
+    show_pan_feedback: bool,
+    /// Timestamp when pan feedback was triggered.
+    pan_feedback_time: i64,
+    /// Drag start position for mouse panning.
+    drag_start: Option<f32>,
+    /// Pan offset when drag started.
+    drag_start_offset: f64,
 }
 
 impl ChartState {
@@ -132,6 +143,10 @@ impl ChartState {
             pan_offset: 0.0,
             show_zoom_feedback: false,
             zoom_feedback_time: 0,
+            show_pan_feedback: false,
+            pan_feedback_time: 0,
+            drag_start: None,
+            drag_start_offset: 0.0,
         }
     }
 
@@ -167,6 +182,97 @@ impl ChartState {
         self.pan_offset = 0.0;
     }
 
+    /// Get the current pan offset.
+    pub fn pan_offset(&self) -> f64 {
+        self.pan_offset
+    }
+
+    /// Pan left (back in time) by one step.
+    pub fn pan_left(&mut self) {
+        self.set_pan(self.pan_offset + PAN_STEP);
+    }
+
+    /// Pan right (forward in time) by one step.
+    pub fn pan_right(&mut self) {
+        self.set_pan(self.pan_offset - PAN_STEP);
+    }
+
+    /// Set the pan offset (clamped to valid range).
+    /// Offset 0.0 = viewing "now", positive = viewing past.
+    pub fn set_pan(&mut self, offset: f64) {
+        // Can't pan into the future (offset < 0)
+        // Limit how far back we can pan based on available data
+        let max_offset = self.max_pan_offset();
+        let new_offset = offset.clamp(0.0, max_offset);
+
+        if (new_offset - self.pan_offset).abs() > 0.001 {
+            self.pan_offset = new_offset;
+            self.show_pan_feedback = true;
+            self.pan_feedback_time = current_timestamp();
+            self.cache.clear();
+        }
+    }
+
+    /// Calculate maximum pan offset based on data range.
+    fn max_pan_offset(&self) -> f64 {
+        if self.data.is_empty() {
+            return 0.0;
+        }
+
+        // Find oldest data point
+        let oldest = self.data.iter().map(|p| p.timestamp).min().unwrap_or(0);
+        let duration = self.effective_duration_ms();
+
+        if duration == 0 {
+            return 0.0;
+        }
+
+        // How many "screens" worth of data do we have?
+        let data_span = self.current_time - oldest;
+        let screens = data_span as f64 / duration as f64;
+
+        // Allow panning back to see oldest data (minus one screen width)
+        (screens - 1.0).max(0.0)
+    }
+
+    /// Reset pan to view current time.
+    pub fn reset_pan(&mut self) {
+        self.set_pan(0.0);
+    }
+
+    /// Whether the chart is panned away from "now".
+    pub fn is_panned(&self) -> bool {
+        self.pan_offset > 0.001
+    }
+
+    /// Start dragging for pan.
+    pub fn start_drag(&mut self, x: f32) {
+        self.drag_start = Some(x);
+        self.drag_start_offset = self.pan_offset;
+    }
+
+    /// Update pan during drag.
+    pub fn update_drag(&mut self, x: f32, chart_width: f32) {
+        if let Some(start_x) = self.drag_start {
+            // Calculate how much we've dragged as fraction of chart width
+            let delta_x = start_x - x; // Positive = dragged left = pan into past
+            let delta_fraction = delta_x as f64 / chart_width as f64;
+
+            // Apply to pan offset
+            self.set_pan(self.drag_start_offset + delta_fraction);
+        }
+    }
+
+    /// End dragging.
+    pub fn end_drag(&mut self) {
+        self.drag_start = None;
+    }
+
+    /// Whether currently dragging.
+    pub fn is_dragging(&self) -> bool {
+        self.drag_start.is_some()
+    }
+
     /// Check if zoom feedback should be hidden (after timeout).
     pub fn update_zoom_feedback(&mut self) {
         if self.show_zoom_feedback {
@@ -179,9 +285,25 @@ impl ChartState {
         }
     }
 
+    /// Check if pan feedback should be hidden (after timeout).
+    pub fn update_pan_feedback(&mut self) {
+        if self.show_pan_feedback {
+            let elapsed = current_timestamp() - self.pan_feedback_time;
+            if elapsed > 1500 {
+                self.show_pan_feedback = false;
+                self.cache.clear();
+            }
+        }
+    }
+
     /// Whether zoom feedback overlay should be shown.
     pub fn should_show_zoom_feedback(&self) -> bool {
         self.show_zoom_feedback
+    }
+
+    /// Whether pan feedback overlay should be shown.
+    pub fn should_show_pan_feedback(&self) -> bool {
+        self.show_pan_feedback
     }
 
     /// Set the time window.
@@ -346,6 +468,8 @@ impl<'a> Chart<'a> {
 pub struct ChartInteraction {
     /// Whether Ctrl key is pressed.
     ctrl_pressed: bool,
+    /// Whether mouse is being dragged.
+    dragging: bool,
 }
 
 impl<'a> canvas::Program<crate::message::Message> for Chart<'a> {
@@ -365,7 +489,7 @@ impl<'a> canvas::Program<crate::message::Message> for Chart<'a> {
                 None
             }
 
-            // Handle keyboard zoom (+/- and 0 for reset)
+            // Handle keyboard zoom (+/- and 0 for reset) and pan (arrow keys)
             Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) => {
                 match key {
                     keyboard::Key::Character(c) => {
@@ -377,6 +501,15 @@ impl<'a> canvas::Program<crate::message::Message> for Chart<'a> {
                         } else if c_str == "0" {
                             return Some(Action::publish(crate::message::Message::ChartZoomReset));
                         }
+                    }
+                    keyboard::Key::Named(keyboard::key::Named::ArrowLeft) => {
+                        return Some(Action::publish(crate::message::Message::ChartPanLeft));
+                    }
+                    keyboard::Key::Named(keyboard::key::Named::ArrowRight) => {
+                        return Some(Action::publish(crate::message::Message::ChartPanRight));
+                    }
+                    keyboard::Key::Named(keyboard::key::Named::Home) => {
+                        return Some(Action::publish(crate::message::Message::ChartPanReset));
                     }
                     _ => {}
                 }
@@ -400,7 +533,54 @@ impl<'a> canvas::Program<crate::message::Message> for Chart<'a> {
                 None
             }
 
+            // Handle mouse drag for panning
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                if cursor.is_over(bounds) {
+                    if let Some(pos) = cursor.position() {
+                        state.dragging = true;
+                        return Some(Action::publish(crate::message::Message::ChartDragStart(
+                            pos.x,
+                        )));
+                    }
+                }
+                None
+            }
+
+            Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                if state.dragging {
+                    let chart_width = bounds.width - 100.0;
+                    return Some(Action::publish(crate::message::Message::ChartDragUpdate(
+                        position.x,
+                        chart_width,
+                    )));
+                }
+                None
+            }
+
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                if state.dragging {
+                    state.dragging = false;
+                    return Some(Action::publish(crate::message::Message::ChartDragEnd));
+                }
+                None
+            }
+
             _ => None,
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        state: &Self::State,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> mouse::Interaction {
+        if state.dragging {
+            mouse::Interaction::Grabbing
+        } else if cursor.is_over(bounds) {
+            mouse::Interaction::Grab
+        } else {
+            mouse::Interaction::default()
         }
     }
 
@@ -470,6 +650,16 @@ impl<'a> Chart<'a> {
         // Draw zoom feedback overlay if recently changed
         if self.state.show_zoom_feedback {
             self.draw_zoom_feedback(frame, size, zoom_pct);
+        }
+
+        // Draw pan feedback overlay if recently changed
+        if self.state.show_pan_feedback {
+            self.draw_pan_feedback(frame, size);
+        }
+
+        // Draw "panned" indicator if not viewing current time
+        if self.state.is_panned() {
+            self.draw_pan_indicator(frame, size, padding);
         }
 
         // Collect visible data
@@ -669,6 +859,83 @@ impl<'a> Chart<'a> {
         frame.fill_text(hint);
     }
 
+    /// Draw pan feedback overlay.
+    fn draw_pan_feedback(&self, frame: &mut Frame, size: Size) {
+        let box_width = 140.0;
+        let box_height = 50.0;
+        let box_x = (size.width - box_width) / 2.0;
+        let box_y = (size.height - box_height) / 2.0;
+
+        let bg = Path::rectangle(Point::new(box_x, box_y), Size::new(box_width, box_height));
+        frame.fill(&bg, Color::from_rgba(0.0, 0.0, 0.0, 0.7));
+
+        frame.stroke(
+            &bg,
+            Stroke::default()
+                .with_color(Color::from_rgb(0.3, 0.8, 1.0))
+                .with_width(2.0),
+        );
+
+        // Pan direction indicator
+        let (icon, label) = if self.state.pan_offset > 0.001 {
+            ("<< Past", format!("{:.0}%", self.state.pan_offset * 100.0))
+        } else {
+            (">> Now", "Live".to_string())
+        };
+
+        let pan_text = Text {
+            content: format!("{} {}", icon, label),
+            position: Point::new(box_x + 15.0, box_y + 15.0),
+            color: Color::WHITE,
+            size: 16.0.into(),
+            ..Text::default()
+        };
+        frame.fill_text(pan_text);
+
+        let hint = Text {
+            content: "Drag or Arrow keys".to_string(),
+            position: Point::new(box_x + 15.0, box_y + box_height - 15.0),
+            color: Color::from_rgb(0.6, 0.6, 0.6),
+            size: 9.0.into(),
+            ..Text::default()
+        };
+        frame.fill_text(hint);
+    }
+
+    /// Draw pan indicator when viewing historical data.
+    fn draw_pan_indicator(&self, frame: &mut Frame, _size: Size, padding: f32) {
+        // Draw a "PAUSED - Viewing History" badge at top left
+        let badge_width = 150.0;
+        let badge_height = 22.0;
+        let badge_x = padding;
+        let badge_y = padding - 25.0;
+
+        let bg = Path::rectangle(
+            Point::new(badge_x, badge_y),
+            Size::new(badge_width, badge_height),
+        );
+        frame.fill(&bg, Color::from_rgba(1.0, 0.6, 0.0, 0.8));
+
+        let text = Text {
+            content: "PAUSED - Viewing Past".to_string(),
+            position: Point::new(badge_x + 8.0, badge_y + 4.0),
+            color: Color::BLACK,
+            size: 11.0.into(),
+            ..Text::default()
+        };
+        frame.fill_text(text);
+
+        // Draw "Return to Now" button hint
+        let hint = Text {
+            content: "(Home to reset)".to_string(),
+            position: Point::new(badge_x + badge_width + 10.0, badge_y + 4.0),
+            color: Color::from_rgb(0.6, 0.6, 0.6),
+            size: 10.0.into(),
+            ..Text::default()
+        };
+        frame.fill_text(hint);
+    }
+
     /// Draw statistics overlay.
     fn draw_stats(&self, frame: &mut Frame, size: Size, padding: f32, stats: &ChartStats) {
         let stats_x = size.width - padding - 100.0;
@@ -822,5 +1089,88 @@ mod tests {
         // At 4x zoom, effective duration = 1.25 minutes
         chart.set_zoom(4.0);
         assert_eq!(chart.effective_duration_ms(), 75_000);
+    }
+
+    #[test]
+    fn test_pan_left_right() {
+        let mut chart = ChartState::new("test");
+        chart.current_time = 1_000_000;
+
+        // Add some historical data so we can pan back
+        for i in 0..100 {
+            chart.push(DataPoint::new(chart.current_time - i * 10_000, i as f64));
+        }
+
+        // Initially at "now" (offset 0)
+        assert_eq!(chart.pan_offset(), 0.0);
+        assert!(!chart.is_panned());
+
+        // Pan left (back in time)
+        chart.pan_left();
+        assert!((chart.pan_offset() - PAN_STEP).abs() < 0.001);
+        assert!(chart.is_panned());
+
+        // Pan right (forward in time)
+        chart.pan_right();
+        assert_eq!(chart.pan_offset(), 0.0);
+        assert!(!chart.is_panned());
+    }
+
+    #[test]
+    fn test_pan_limits() {
+        let mut chart = ChartState::new("test");
+        chart.current_time = 100_000;
+
+        // With no data, can't pan back
+        chart.pan_left();
+        assert_eq!(chart.pan_offset(), 0.0);
+
+        // Can't pan into the future
+        chart.set_pan(-1.0);
+        assert_eq!(chart.pan_offset(), 0.0);
+    }
+
+    #[test]
+    fn test_pan_reset() {
+        let mut chart = ChartState::new("test");
+        chart.current_time = 1_000_000;
+
+        // Add historical data
+        for i in 0..100 {
+            chart.push(DataPoint::new(chart.current_time - i * 10_000, i as f64));
+        }
+
+        // Pan back
+        chart.pan_left();
+        chart.pan_left();
+        assert!(chart.is_panned());
+
+        // Reset
+        chart.reset_pan();
+        assert!(!chart.is_panned());
+        assert_eq!(chart.pan_offset(), 0.0);
+    }
+
+    #[test]
+    fn test_drag_panning() {
+        let mut chart = ChartState::new("test");
+        chart.current_time = 1_000_000;
+
+        // Add historical data
+        for i in 0..100 {
+            chart.push(DataPoint::new(chart.current_time - i * 10_000, i as f64));
+        }
+
+        // Start drag at x=500
+        chart.start_drag(500.0);
+        assert!(chart.is_dragging());
+
+        // Drag left (to x=400) should pan into the past
+        chart.update_drag(400.0, 500.0);
+        assert!(chart.pan_offset() > 0.0);
+
+        // End drag
+        chart.end_drag();
+        assert!(!chart.is_dragging());
     }
 }

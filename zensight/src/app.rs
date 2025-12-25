@@ -246,6 +246,42 @@ impl ZenSight {
                 }
             }
 
+            Message::ChartPanLeft => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.pan_left();
+                }
+            }
+
+            Message::ChartPanRight => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.pan_right();
+                }
+            }
+
+            Message::ChartPanReset => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.reset_pan();
+                }
+            }
+
+            Message::ChartDragStart(x) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.start_drag(x);
+                }
+            }
+
+            Message::ChartDragUpdate(x, width) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.update_drag(x, width);
+                }
+            }
+
+            Message::ChartDragEnd => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.end_drag();
+                }
+            }
+
             Message::SetMetricFilter(filter) => {
                 if let Some(ref mut device) = self.selected_device {
                     device.set_metric_filter(filter);

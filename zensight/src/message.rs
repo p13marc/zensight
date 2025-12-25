@@ -55,6 +55,24 @@ pub enum Message {
     /// Reset chart zoom to 100%.
     ChartZoomReset,
 
+    /// Pan chart left (back in time).
+    ChartPanLeft,
+
+    /// Pan chart right (forward in time).
+    ChartPanRight,
+
+    /// Reset chart pan to view current time.
+    ChartPanReset,
+
+    /// Start chart drag at position.
+    ChartDragStart(f32),
+
+    /// Update chart drag to position.
+    ChartDragUpdate(f32, f32),
+
+    /// End chart drag.
+    ChartDragEnd,
+
     /// User changed the metric search filter.
     SetMetricFilter(String),
 

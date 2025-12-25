@@ -145,10 +145,41 @@ impl DeviceDetailState {
         self.chart.reset_zoom();
     }
 
+    /// Pan the chart left (back in time).
+    pub fn pan_left(&mut self) {
+        self.chart.pan_left();
+    }
+
+    /// Pan the chart right (forward in time).
+    pub fn pan_right(&mut self) {
+        self.chart.pan_right();
+    }
+
+    /// Reset chart pan to view current time.
+    pub fn reset_pan(&mut self) {
+        self.chart.reset_pan();
+    }
+
+    /// Start chart drag.
+    pub fn start_drag(&mut self, x: f32) {
+        self.chart.start_drag(x);
+    }
+
+    /// Update chart drag.
+    pub fn update_drag(&mut self, x: f32, width: f32) {
+        self.chart.update_drag(x, width);
+    }
+
+    /// End chart drag.
+    pub fn end_drag(&mut self) {
+        self.chart.end_drag();
+    }
+
     /// Update the chart time and apply pending filter (call on tick).
     pub fn update_chart_time(&mut self) {
         self.chart.update_time();
         self.chart.update_zoom_feedback();
+        self.chart.update_pan_feedback();
         self.apply_pending_filter();
     }
 
