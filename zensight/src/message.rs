@@ -98,6 +98,13 @@ pub enum Message {
 
     /// Clear all alerts.
     ClearAlerts,
+
+    // Export messages
+    /// Export device metrics to CSV.
+    ExportToCsv,
+
+    /// Export device metrics to JSON.
+    ExportToJson,
 }
 
 /// Unique identifier for a device (protocol + source name).

@@ -112,6 +112,70 @@ impl DeviceDetailState {
             false
         }
     }
+
+    /// Export metrics to CSV format.
+    pub fn export_to_csv(&self) -> String {
+        let mut csv = String::new();
+
+        // Header
+        csv.push_str("timestamp,protocol,source,metric,value,type,labels\n");
+
+        // Sort by metric name
+        let mut metrics: Vec<_> = self.metrics.values().collect();
+        metrics.sort_by(|a, b| a.metric.cmp(&b.metric));
+
+        for point in metrics {
+            let value_str = format_value_for_export(&point.value);
+            let type_str = value_type_name(&point.value);
+            let labels_str = point
+                .labels
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join(";");
+
+            csv.push_str(&format!(
+                "{},{},{},{},{},{},{}\n",
+                point.timestamp,
+                point.protocol,
+                escape_csv(&point.source),
+                escape_csv(&point.metric),
+                escape_csv(&value_str),
+                type_str,
+                escape_csv(&labels_str)
+            ));
+        }
+
+        csv
+    }
+
+    /// Export metrics to JSON format.
+    pub fn export_to_json(&self) -> String {
+        let mut metrics: Vec<_> = self.metrics.values().collect();
+        metrics.sort_by(|a, b| a.metric.cmp(&b.metric));
+
+        serde_json::to_string_pretty(&metrics).unwrap_or_else(|_| "[]".to_string())
+    }
+}
+
+/// Escape a string for CSV (handle commas and quotes).
+fn escape_csv(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// Format a value for export.
+fn format_value_for_export(value: &TelemetryValue) -> String {
+    match value {
+        TelemetryValue::Counter(v) => v.to_string(),
+        TelemetryValue::Gauge(v) => v.to_string(),
+        TelemetryValue::Text(s) => s.clone(),
+        TelemetryValue::Boolean(b) => b.to_string(),
+        TelemetryValue::Binary(data) => format!("<{} bytes>", data.len()),
+    }
 }
 
 /// Render the device detail view.
@@ -147,10 +211,25 @@ fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
     let device_name = text(&state.device_id.source).size(24);
     let metric_count = text(format!("{} metrics", state.metrics.len())).size(14);
 
-    row![back_button, protocol_badge, device_name, metric_count]
-        .spacing(15)
-        .align_y(Alignment::Center)
-        .into()
+    let csv_button = button(text("Export CSV").size(12))
+        .on_press(Message::ExportToCsv)
+        .style(iced::widget::button::secondary);
+
+    let json_button = button(text("Export JSON").size(12))
+        .on_press(Message::ExportToJson)
+        .style(iced::widget::button::secondary);
+
+    row![
+        back_button,
+        protocol_badge,
+        device_name,
+        metric_count,
+        csv_button,
+        json_button
+    ]
+    .spacing(15)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 /// Render the chart section.

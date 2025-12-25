@@ -226,6 +226,15 @@ impl Zensight {
             Message::ClearAlerts => {
                 self.alerts.clear_alerts();
             }
+
+            // Export messages
+            Message::ExportToCsv => {
+                self.export_to_csv();
+            }
+
+            Message::ExportToJson => {
+                self.export_to_json();
+            }
         }
 
         Task::none()
@@ -339,6 +348,42 @@ impl Zensight {
         self.settings.modified = true;
     }
 
+    /// Export current device metrics to CSV file.
+    fn export_to_csv(&self) {
+        if let Some(ref device) = self.selected_device {
+            let csv = device.export_to_csv();
+            let filename = format!(
+                "zensight_{}_{}.csv",
+                device.device_id.source,
+                chrono_timestamp()
+            );
+
+            if let Err(e) = std::fs::write(&filename, csv) {
+                tracing::error!(error = %e, filename = %filename, "Failed to export CSV");
+            } else {
+                tracing::info!(filename = %filename, "Exported metrics to CSV");
+            }
+        }
+    }
+
+    /// Export current device metrics to JSON file.
+    fn export_to_json(&self) {
+        if let Some(ref device) = self.selected_device {
+            let json = device.export_to_json();
+            let filename = format!(
+                "zensight_{}_{}.json",
+                device.device_id.source,
+                chrono_timestamp()
+            );
+
+            if let Err(e) = std::fs::write(&filename, json) {
+                tracing::error!(error = %e, filename = %filename, "Failed to export JSON");
+            } else {
+                tracing::info!(filename = %filename, "Exported metrics to JSON");
+            }
+        }
+    }
+
     /// Handle periodic tick (update health status, etc.).
     fn handle_tick(&mut self) {
         let now = std::time::SystemTime::now()
@@ -381,4 +426,13 @@ fn telemetry_to_f64(value: &TelemetryValue) -> Option<f64> {
         TelemetryValue::Gauge(v) => Some(*v),
         _ => None,
     }
+}
+
+/// Generate a timestamp string for filenames.
+fn chrono_timestamp() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{}", now)
 }
