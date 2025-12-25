@@ -19,6 +19,7 @@ fn current_timestamp() -> i64 {
 
 use crate::app::{AppTheme, DASHBOARD_SEARCH_ID};
 use crate::message::{DeviceId, Message};
+use crate::view::groups::{GroupTag, GroupsState, device_group_tags, group_filter_bar};
 use crate::view::icons::{self, IconSize};
 
 /// State for a single device on the dashboard.
@@ -230,16 +231,18 @@ impl DashboardState {
 }
 
 /// Render the dashboard view.
-pub fn dashboard_view(
-    state: &DashboardState,
+pub fn dashboard_view<'a>(
+    state: &'a DashboardState,
     theme: AppTheme,
     unacknowledged_alerts: usize,
-) -> Element<'_, Message> {
+    groups: &'a GroupsState,
+) -> Element<'a, Message> {
     let header = render_header(state, theme, unacknowledged_alerts);
     let filters = render_protocol_filters(state);
-    let devices = render_device_grid(state);
+    let group_filters = group_filter_bar(groups);
+    let devices = render_device_grid(state, groups);
 
-    let content = column![header, filters, rule::horizontal(1), devices]
+    let content = column![header, filters, group_filters, rule::horizontal(1), devices]
         .spacing(10)
         .padding(20);
 
@@ -403,8 +406,16 @@ fn render_protocol_filters(state: &DashboardState) -> Element<'_, Message> {
 }
 
 /// Render the device grid with pagination.
-fn render_device_grid(state: &DashboardState) -> Element<'_, Message> {
-    let all_devices = state.filtered_devices();
+fn render_device_grid<'a>(
+    state: &'a DashboardState,
+    groups: &'a GroupsState,
+) -> Element<'a, Message> {
+    // Filter devices by both protocol/search and group filters
+    let all_devices: Vec<_> = state
+        .filtered_devices()
+        .into_iter()
+        .filter(|d| groups.device_passes_filter(&d.id))
+        .collect();
 
     if all_devices.is_empty() {
         let message = if state.devices.is_empty() {
@@ -420,17 +431,35 @@ fn render_device_grid(state: &DashboardState) -> Element<'_, Message> {
             .into();
     }
 
-    let devices = state.paginated_devices();
+    // Paginate the filtered devices
+    let start = state.current_page * state.devices_per_page;
+    let end = (start + state.devices_per_page).min(all_devices.len());
+    let devices = if start < all_devices.len() {
+        &all_devices[start..end]
+    } else {
+        &[]
+    };
+
     let mut device_list = Column::new().spacing(10);
 
     for device in devices {
-        device_list = device_list.push(render_device_card(device));
+        device_list = device_list.push(render_device_card(device, groups));
     }
 
     // Add pagination controls if there are multiple pages
-    let total_pages = state.total_pages();
+    let total_pages = if all_devices.is_empty() {
+        1
+    } else {
+        (all_devices.len() + state.devices_per_page - 1) / state.devices_per_page
+    };
+
     if total_pages > 1 {
-        let pagination = render_pagination_controls(state, total_pages);
+        let pagination = render_pagination_controls_with_count(
+            state.current_page,
+            total_pages,
+            all_devices.len(),
+            state.devices_per_page,
+        );
         device_list = device_list.push(pagination);
     }
 
@@ -440,10 +469,13 @@ fn render_device_grid(state: &DashboardState) -> Element<'_, Message> {
         .into()
 }
 
-/// Render pagination controls.
-fn render_pagination_controls(state: &DashboardState, total_pages: usize) -> Element<'_, Message> {
-    let current_page = state.current_page;
-
+/// Render pagination controls with explicit count (for group-filtered lists).
+fn render_pagination_controls_with_count(
+    current_page: usize,
+    total_pages: usize,
+    filtered_count: usize,
+    devices_per_page: usize,
+) -> Element<'static, Message> {
     // Previous button
     let prev_btn = if current_page > 0 {
         button(text("<").size(14))
@@ -462,14 +494,13 @@ fn render_pagination_controls(state: &DashboardState, total_pages: usize) -> Ele
         button(text(">").size(14)).style(iced::widget::button::secondary)
     };
 
-    // Page numbers - show up to 7 page buttons with ellipsis
+    // Page numbers
     let mut page_row = row![prev_btn].spacing(5).align_y(Alignment::Center);
 
     let pages_to_show = calculate_visible_pages(current_page, total_pages);
     let mut last_shown: Option<usize> = None;
 
     for page in pages_to_show {
-        // Add ellipsis if there's a gap
         if let Some(last) = last_shown {
             if page > last + 1 {
                 page_row = page_row.push(text("...").size(14));
@@ -490,9 +521,8 @@ fn render_pagination_controls(state: &DashboardState, total_pages: usize) -> Ele
     page_row = page_row.push(next_btn);
 
     // Page info
-    let filtered_count = state.filtered_devices().len();
-    let start = state.current_page * state.devices_per_page + 1;
-    let end = ((state.current_page + 1) * state.devices_per_page).min(filtered_count);
+    let start = current_page * devices_per_page + 1;
+    let end = ((current_page + 1) * devices_per_page).min(filtered_count);
     let info = text(format!("Showing {}-{} of {}", start, end, filtered_count)).size(12);
 
     row![page_row, info]
@@ -538,7 +568,10 @@ fn calculate_visible_pages(current: usize, total: usize) -> Vec<usize> {
 const MAX_VALUE_DISPLAY_LEN: usize = 30;
 
 /// Render a single device card.
-fn render_device_card(device: &DeviceState) -> Element<'_, Message> {
+fn render_device_card<'a>(
+    device: &'a DeviceState,
+    groups: &'a GroupsState,
+) -> Element<'a, Message> {
     let status_indicator = if device.is_healthy {
         icons::status_healthy(IconSize::Small)
     } else {
@@ -559,9 +592,23 @@ fn render_device_card(device: &DeviceState) -> Element<'_, Message> {
 
     let metric_count = text(format!("{} metrics", device.metric_count)).size(12);
 
-    let header = row![status_indicator, protocol_icon, device_name, metric_count]
-        .spacing(10)
-        .align_y(Alignment::Center);
+    // Get device's group tags (convert to owned GroupTag to avoid lifetime issues)
+    let device_groups: Vec<GroupTag> = groups
+        .device_groups(&device.id)
+        .iter()
+        .map(|g| GroupTag::from_group(g))
+        .collect();
+    let group_tags = device_group_tags(device_groups);
+
+    let header = row![
+        status_indicator,
+        protocol_icon,
+        device_name,
+        metric_count,
+        group_tags
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
 
     // Show a few recent metrics as preview with tooltips for full values
     let mut preview = Column::new().spacing(2);

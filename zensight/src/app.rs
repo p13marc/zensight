@@ -21,6 +21,7 @@ use crate::subscription::{
 use crate::view::alerts::{AlertsState, alerts_view};
 use crate::view::dashboard::{DashboardState, DeviceState, dashboard_view};
 use crate::view::device::{DeviceDetailState, device_view};
+use crate::view::groups::{GroupsState, groups_panel};
 use crate::view::settings::{PersistentSettings, SettingsState, settings_view};
 
 /// Current view in the application.
@@ -71,6 +72,8 @@ pub struct ZenSight {
     settings: SettingsState,
     /// Alerts state.
     alerts: AlertsState,
+    /// Groups state.
+    groups: GroupsState,
     /// Current view.
     current_view: CurrentView,
     /// Stale threshold in milliseconds (devices not updated within this time are marked unhealthy).
@@ -137,12 +140,16 @@ impl ZenSight {
             alerts.alert_cooldown_ms = 10_000;
         }
 
+        // Load groups from persistent settings
+        let groups = persistent.groups.clone();
+
         let app = Self {
             zenoh_config,
             dashboard,
             selected_device: None,
             settings,
             alerts,
+            groups,
             current_view: CurrentView::default(),
             stale_threshold_ms,
             demo_mode,
@@ -462,9 +469,75 @@ impl ZenSight {
             Message::EscapePressed => {
                 self.handle_escape();
             }
+
+            // Group management messages
+            Message::OpenGroupsPanel => {
+                self.groups.open_panel();
+            }
+
+            Message::CloseGroupsPanel => {
+                self.groups.close_panel();
+            }
+
+            Message::SetGroupFilter(group_id) => {
+                self.groups.set_filter(group_id);
+            }
+
+            Message::SetNewGroupName(name) => {
+                self.groups.new_group_name = name;
+            }
+
+            Message::SetNewGroupColor(index) => {
+                self.groups.new_group_color = index;
+            }
+
+            Message::AddGroup => {
+                self.groups.add_group_from_form();
+                self.save_groups();
+            }
+
+            Message::EditGroup(group_id) => {
+                self.groups.start_editing(group_id);
+            }
+
+            Message::SetEditGroupName(name) => {
+                self.groups.edit_name = name;
+            }
+
+            Message::SetEditGroupColor(index) => {
+                self.groups.edit_color = index;
+            }
+
+            Message::SaveGroupEdit => {
+                self.groups.save_edit();
+                self.save_groups();
+            }
+
+            Message::CancelGroupEdit => {
+                self.groups.cancel_edit();
+            }
+
+            Message::DeleteGroup(group_id) => {
+                self.groups.delete_group(group_id);
+                self.save_groups();
+            }
+
+            Message::ToggleDeviceGroup(device_id, group_id) => {
+                self.groups.toggle_assignment(&device_id, group_id);
+                self.save_groups();
+            }
         }
 
         Task::none()
+    }
+
+    /// Save groups to persistent settings.
+    fn save_groups(&self) {
+        let mut persistent = PersistentSettings::load();
+        persistent.groups = self.groups.clone();
+        if let Err(e) = persistent.save() {
+            tracing::error!("Failed to save groups: {}", e);
+        }
     }
 
     /// Focus the appropriate search input based on current view.
@@ -534,18 +607,30 @@ impl ZenSight {
 
     /// Render the view.
     pub fn view(&self) -> Element<'_, Message> {
+        use iced::widget::row;
+
         let unack = self.alerts.unacknowledged_count;
-        match self.current_view {
+
+        let main_view: Element<'_, Message> = match self.current_view {
             CurrentView::Settings => settings_view(&self.settings),
             CurrentView::Alerts => alerts_view(&self.alerts),
             CurrentView::Device => {
                 if let Some(ref device_state) = self.selected_device {
                     device_view(device_state)
                 } else {
-                    dashboard_view(&self.dashboard, self.theme, unack)
+                    dashboard_view(&self.dashboard, self.theme, unack, &self.groups)
                 }
             }
-            CurrentView::Dashboard => dashboard_view(&self.dashboard, self.theme, unack),
+            CurrentView::Dashboard => {
+                dashboard_view(&self.dashboard, self.theme, unack, &self.groups)
+            }
+        };
+
+        // Show groups panel as a sidebar if open
+        if self.groups.panel_open {
+            row![main_view, groups_panel(&self.groups)].into()
+        } else {
+            main_view
         }
     }
 

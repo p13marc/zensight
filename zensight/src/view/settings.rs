@@ -9,6 +9,7 @@ use iced::{Alignment, Element, Length, Theme};
 use serde::{Deserialize, Serialize};
 
 use crate::message::Message;
+use crate::view::groups::GroupsState;
 use crate::view::icons::{self, IconSize};
 
 /// Persistent settings that are saved to disk.
@@ -31,6 +32,9 @@ pub struct PersistentSettings {
     /// Maximum number of alerts to keep.
     #[serde(default = "default_max_alerts")]
     pub max_alerts: usize,
+    /// Device groups configuration.
+    #[serde(default)]
+    pub groups: GroupsState,
 }
 
 fn default_dark_theme() -> bool {
@@ -55,6 +59,7 @@ impl Default for PersistentSettings {
             dark_theme: true,
             max_history: default_max_history(),
             max_alerts: default_max_alerts(),
+            groups: GroupsState::default(),
         }
     }
 }
@@ -142,6 +147,21 @@ impl PersistentSettings {
             dark_theme: state.dark_theme,
             max_history: state.max_history.parse().unwrap_or(default_max_history()),
             max_alerts: state.max_alerts.parse().unwrap_or(default_max_alerts()),
+            groups: GroupsState::default(),
+        }
+    }
+
+    /// Create from SettingsState with groups.
+    pub fn from_state_with_groups(state: &SettingsState, groups: GroupsState) -> Self {
+        Self {
+            zenoh_mode: state.zenoh_mode.as_str().to_string(),
+            zenoh_connect: state.connect_endpoints(),
+            zenoh_listen: state.listen_endpoints(),
+            stale_threshold_secs: state.stale_threshold_secs.parse().unwrap_or(120),
+            dark_theme: state.dark_theme,
+            max_history: state.max_history.parse().unwrap_or(default_max_history()),
+            max_alerts: state.max_alerts.parse().unwrap_or(default_max_alerts()),
+            groups,
         }
     }
 }
@@ -713,6 +733,7 @@ mod tests {
             dark_theme: true,
             max_history: 1000,
             max_alerts: 200,
+            groups: GroupsState::default(),
         };
 
         // Serialize to JSON
@@ -739,6 +760,7 @@ mod tests {
             dark_theme: false,
             max_history: 750,
             max_alerts: 150,
+            groups: GroupsState::default(),
         };
 
         // Convert to UI state

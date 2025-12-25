@@ -116,6 +116,11 @@ pub fn export<Message: 'static>(size: IconSize) -> Element<'static, Message> {
     svg_icon(include_bytes!("export.svg"), size)
 }
 
+/// Edit/pencil icon.
+pub fn edit<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("edit.svg"), size)
+}
+
 /// Checkmark icon (green).
 pub fn check<Message: 'static>(size: IconSize) -> Element<'static, Message> {
     svg_icon(include_bytes!("check.svg"), size)

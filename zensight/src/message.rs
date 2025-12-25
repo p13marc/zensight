@@ -179,6 +179,46 @@ pub enum Message {
 
     /// Escape key pressed - close dialogs, clear selection, etc.
     EscapePressed,
+
+    // Group management messages
+    /// Open the groups management panel.
+    OpenGroupsPanel,
+
+    /// Close the groups management panel.
+    CloseGroupsPanel,
+
+    /// Set the group filter (None = show all).
+    SetGroupFilter(Option<u32>),
+
+    /// Set new group name in form.
+    SetNewGroupName(String),
+
+    /// Set new group color in form.
+    SetNewGroupColor(usize),
+
+    /// Add a new group from the form.
+    AddGroup,
+
+    /// Start editing a group.
+    EditGroup(u32),
+
+    /// Set edit group name.
+    SetEditGroupName(String),
+
+    /// Set edit group color.
+    SetEditGroupColor(usize),
+
+    /// Save group edit.
+    SaveGroupEdit,
+
+    /// Cancel group edit.
+    CancelGroupEdit,
+
+    /// Delete a group.
+    DeleteGroup(u32),
+
+    /// Toggle device assignment to a group.
+    ToggleDeviceGroup(DeviceId, u32),
 }
 
 /// Unique identifier for a device (protocol + source name).

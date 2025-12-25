@@ -11,6 +11,7 @@ use zensight::message::{DeviceId, Message};
 use zensight::mock;
 use zensight::view::dashboard::{DashboardState, DeviceState, dashboard_view};
 use zensight::view::device::{DeviceDetailState, device_view};
+use zensight::view::groups::GroupsState;
 use zensight::view::settings::{SettingsState, settings_view};
 
 use zensight_common::Protocol;
@@ -19,7 +20,8 @@ use zensight_common::Protocol;
 #[test]
 fn test_dashboard_empty() {
     let state = DashboardState::default();
-    let mut ui = simulator(dashboard_view(&state, AppTheme::Dark, 0));
+    let groups = GroupsState::default();
+    let mut ui = simulator(dashboard_view(&state, AppTheme::Dark, 0, &groups));
 
     // Should show "Waiting for telemetry data..." message
     assert!(ui.find("Waiting for telemetry data...").is_ok());
@@ -41,7 +43,8 @@ fn test_dashboard_with_devices() {
     device.is_healthy = true;
     state.devices.insert(device_id, device);
 
-    let mut ui = simulator(dashboard_view(&state, AppTheme::Dark, 0));
+    let groups = GroupsState::default();
+    let mut ui = simulator(dashboard_view(&state, AppTheme::Dark, 0, &groups));
 
     // Should show the device name
     assert!(ui.find("router01").is_ok());
@@ -55,7 +58,8 @@ fn test_dashboard_with_devices() {
 #[test]
 fn test_dashboard_settings_button() {
     let state = DashboardState::default();
-    let mut ui = simulator(dashboard_view(&state, AppTheme::Dark, 0));
+    let groups = GroupsState::default();
+    let mut ui = simulator(dashboard_view(&state, AppTheme::Dark, 0, &groups));
 
     // Click Settings button
     let _ = ui.click("Settings");
@@ -69,7 +73,8 @@ fn test_dashboard_settings_button() {
 #[test]
 fn test_dashboard_alerts_button() {
     let state = DashboardState::default();
-    let mut ui = simulator(dashboard_view(&state, AppTheme::Dark, 0));
+    let groups = GroupsState::default();
+    let mut ui = simulator(dashboard_view(&state, AppTheme::Dark, 0, &groups));
 
     // Click Alerts button
     let _ = ui.click("Alerts");
