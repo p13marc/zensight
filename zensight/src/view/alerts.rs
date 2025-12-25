@@ -11,6 +11,7 @@ use zensight_common::Protocol;
 
 use crate::message::{DeviceId, Message};
 use crate::view::formatting::{format_timestamp, format_value};
+use crate::view::icons::{self, IconSize};
 
 /// Alert rule definition.
 #[derive(Debug, Clone)]
@@ -408,20 +409,35 @@ pub fn alerts_view(state: &AlertsState) -> Element<'_, Message> {
 
 /// Render header with back button.
 fn render_header(state: &AlertsState) -> Element<'_, Message> {
-    let back_button = button(text("<- Back").size(14))
-        .on_press(Message::CloseAlerts)
-        .style(iced::widget::button::secondary);
+    let back_button = button(
+        row![icons::arrow_left(IconSize::Medium), text("Back").size(14)]
+            .spacing(6)
+            .align_y(Alignment::Center),
+    )
+    .on_press(Message::CloseAlerts)
+    .style(iced::widget::button::secondary);
 
-    let title = text("Alerts & Notifications").size(24);
+    let title = row![
+        icons::alert(IconSize::XLarge),
+        text("Alerts & Notifications").size(24)
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
 
-    let unack_badge = if state.unacknowledged_count > 0 {
-        text(format!("{} unacknowledged", state.unacknowledged_count))
-            .size(14)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(1.0, 0.5, 0.0)),
-            })
+    let unack_badge: Element<'_, Message> = if state.unacknowledged_count > 0 {
+        row![
+            icons::status_warning(IconSize::Small),
+            text(format!("{} unacknowledged", state.unacknowledged_count))
+                .size(14)
+                .style(|_theme: &Theme| text::Style {
+                    color: Some(iced::Color::from_rgb(1.0, 0.5, 0.0)),
+                })
+        ]
+        .spacing(5)
+        .align_y(Alignment::Center)
+        .into()
     } else {
-        text("").size(14)
+        row![].into()
     };
 
     row![back_button, title, unack_badge]
@@ -493,14 +509,10 @@ fn render_rules_section(state: &AlertsState) -> Element<'_, Message> {
 
 /// Render a single rule row.
 fn render_rule_row(rule: &AlertRule) -> Element<'_, Message> {
-    let status = if rule.enabled {
-        text("\u{25CF}").style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.2, 0.8, 0.2)),
-        })
+    let status: Element<'_, Message> = if rule.enabled {
+        icons::status_healthy(IconSize::Small)
     } else {
-        text("\u{25CF}").style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
-        })
+        icons::status_warning(IconSize::Small)
     };
 
     let name = text(rule.name.clone()).size(14);
@@ -520,9 +532,13 @@ fn render_rule_row(rule: &AlertRule) -> Element<'_, Message> {
         .on_press(Message::ToggleAlertRule(rule.id))
         .style(iced::widget::button::secondary);
 
-    let remove_button = button(text("Remove").size(11))
-        .on_press(Message::RemoveAlertRule(rule.id))
-        .style(iced::widget::button::danger);
+    let remove_button = button(
+        row![icons::trash(IconSize::Small), text("Remove").size(11)]
+            .spacing(4)
+            .align_y(Alignment::Center),
+    )
+    .on_press(Message::RemoveAlertRule(rule.id))
+    .style(iced::widget::button::danger);
 
     row![status, name, condition, toggle_button, remove_button]
         .spacing(10)
@@ -565,14 +581,10 @@ fn render_alerts_section(state: &AlertsState) -> Element<'_, Message> {
 
 /// Render a single alert row.
 fn render_alert_row(alert: &Alert) -> Element<'_, Message> {
-    let status = if alert.acknowledged {
-        text("\u{2713}").style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
-        })
+    let status: Element<'_, Message> = if alert.acknowledged {
+        icons::check(IconSize::Small)
     } else {
-        text("\u{26A0}").style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(1.0, 0.5, 0.0)),
-        })
+        icons::status_error(IconSize::Small)
     };
 
     let message = text(alert.message()).size(13);
@@ -587,9 +599,13 @@ fn render_alert_row(alert: &Alert) -> Element<'_, Message> {
         Row::new().push(status).push(message).push(time).spacing(10);
 
     if !alert.acknowledged {
-        let ack_button = button(text("Ack").size(10))
-            .on_press(Message::AcknowledgeAlert(alert.id))
-            .style(iced::widget::button::secondary);
+        let ack_button = button(
+            row![icons::check(IconSize::Small), text("Ack").size(10)]
+                .spacing(3)
+                .align_y(Alignment::Center),
+        )
+        .on_press(Message::AcknowledgeAlert(alert.id))
+        .style(iced::widget::button::secondary);
         row_content = row_content.push(ack_button);
     }
 

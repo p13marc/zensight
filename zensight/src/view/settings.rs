@@ -9,6 +9,7 @@ use iced::{Alignment, Element, Length, Theme};
 use serde::{Deserialize, Serialize};
 
 use crate::message::Message;
+use crate::view::icons::{self, IconSize};
 
 /// Persistent settings that are saved to disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -339,20 +340,32 @@ pub fn settings_view(state: &SettingsState) -> Element<'_, Message> {
 
 /// Render header with back button.
 fn render_header(state: &SettingsState) -> Element<'_, Message> {
-    let back_button = button(text("<- Back").size(14))
-        .on_press(Message::CloseSettings)
-        .style(iced::widget::button::secondary);
+    let back_button = button(
+        row![icons::arrow_left(IconSize::Medium), text("Back").size(14)]
+            .spacing(6)
+            .align_y(Alignment::Center),
+    )
+    .on_press(Message::CloseSettings)
+    .style(iced::widget::button::secondary);
 
-    let title = text("Settings").size(24);
+    let title = row![icons::settings(IconSize::XLarge), text("Settings").size(24)]
+        .spacing(10)
+        .align_y(Alignment::Center);
 
-    let modified_indicator = if state.modified {
-        text("(unsaved changes)")
-            .size(12)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(1.0, 0.7, 0.0)),
-            })
+    let modified_indicator: Element<'_, Message> = if state.modified {
+        row![
+            icons::status_warning(IconSize::Small),
+            text("(unsaved changes)")
+                .size(12)
+                .style(|_theme: &Theme| text::Style {
+                    color: Some(iced::Color::from_rgb(1.0, 0.7, 0.0)),
+                })
+        ]
+        .spacing(5)
+        .align_y(Alignment::Center)
+        .into()
     } else {
-        text("")
+        row![].into()
     };
 
     row![back_button, title, modified_indicator]

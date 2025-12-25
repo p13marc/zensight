@@ -21,7 +21,7 @@ serde_json.workspace = true
 json5.workspace = true
 
 # GUI
-iced = { version = "0.14", features = ["tokio", "canvas"] }
+iced = { version = "0.14", features = ["tokio", "canvas", "svg"] }
 
 # Async utilities
 async-stream = "0.3"

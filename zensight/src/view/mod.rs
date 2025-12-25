@@ -5,4 +5,5 @@ pub mod chart;
 pub mod dashboard;
 pub mod device;
 pub mod formatting;
+pub mod icons;
 pub mod settings;

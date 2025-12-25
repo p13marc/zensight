@@ -12,6 +12,7 @@ use zensight_common::{TelemetryPoint, TelemetryValue};
 use crate::message::{DeviceId, Message};
 use crate::view::chart::{ChartState, DataPoint, TimeWindow, chart_view};
 use crate::view::formatting::{format_timestamp, format_value};
+use crate::view::icons::{self, IconSize};
 
 /// State for the device detail view.
 #[derive(Debug)]
@@ -230,25 +231,37 @@ pub fn device_view(state: &DeviceDetailState) -> Element<'_, Message> {
 
 /// Render the header with back button and device info.
 fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
-    let back_button = button(text("<- Back").size(14))
-        .on_press(Message::ClearSelection)
-        .style(iced::widget::button::secondary);
+    let back_button = button(
+        row![icons::arrow_left(IconSize::Medium), text("Back").size(14)]
+            .spacing(6)
+            .align_y(Alignment::Center),
+    )
+    .on_press(Message::ClearSelection)
+    .style(iced::widget::button::secondary);
 
-    let protocol_badge = text(format!("[{}]", state.device_id.protocol)).size(14);
+    let protocol_icon = icons::protocol_icon(state.device_id.protocol, IconSize::Large);
     let device_name = text(&state.device_id.source).size(24);
     let metric_count = text(format!("{} metrics", state.metrics.len())).size(14);
 
-    let csv_button = button(text("Export CSV").size(12))
-        .on_press(Message::ExportToCsv)
-        .style(iced::widget::button::secondary);
+    let csv_button = button(
+        row![icons::export(IconSize::Small), text("CSV").size(12)]
+            .spacing(4)
+            .align_y(Alignment::Center),
+    )
+    .on_press(Message::ExportToCsv)
+    .style(iced::widget::button::secondary);
 
-    let json_button = button(text("Export JSON").size(12))
-        .on_press(Message::ExportToJson)
-        .style(iced::widget::button::secondary);
+    let json_button = button(
+        row![icons::export(IconSize::Small), text("JSON").size(12)]
+            .spacing(4)
+            .align_y(Alignment::Center),
+    )
+    .on_press(Message::ExportToJson)
+    .style(iced::widget::button::secondary);
 
     row![
         back_button,
-        protocol_badge,
+        protocol_icon,
         device_name,
         metric_count,
         csv_button,
@@ -265,11 +278,16 @@ fn render_chart_section<'a>(
     metric_name: &'a str,
 ) -> Element<'a, Message> {
     // Chart header with close button and time window buttons
-    let close_button = button(text("X").size(12))
+    let close_button = button(icons::close(IconSize::Small))
         .on_press(Message::ClearChartSelection)
         .style(iced::widget::button::secondary);
 
-    let chart_title = text(format!("Chart: {}", metric_name)).size(14);
+    let chart_title = row![
+        icons::chart(IconSize::Medium),
+        text(format!("{}", metric_name)).size(14)
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
 
     // Time window buttons
     let time_buttons: Element<'_, Message> = Row::with_children(
@@ -424,16 +442,16 @@ fn render_metric_row(
         });
 
     // History indicator (if we have history)
-    let history_indicator = if let Some(history) = state.history.get(name) {
-        if history.len() > 1 {
-            let trend = calculate_trend(history);
-            text(trend).size(14)
+    let history_indicator: Element<'static, Message> =
+        if let Some(history) = state.history.get(name) {
+            if history.len() > 1 {
+                trend_icon(history)
+            } else {
+                text("").into()
+            }
         } else {
-            text("").size(14)
-        }
-    } else {
-        text("").size(14)
-    };
+            text("").into()
+        };
 
     // Chart button (only for numeric types)
     let chart_button: Element<'static, Message> = if state.is_metric_chartable(name) {
@@ -529,10 +547,10 @@ fn value_type_name(value: &TelemetryValue) -> &'static str {
     }
 }
 
-/// Calculate a simple trend indicator for numeric values.
-fn calculate_trend(history: &[TelemetryPoint]) -> String {
+/// Create a trend indicator icon for numeric values.
+fn trend_icon(history: &[TelemetryPoint]) -> Element<'static, Message> {
     if history.len() < 2 {
-        return String::new();
+        return text("").into();
     }
 
     let last = &history[history.len() - 1];
@@ -541,15 +559,15 @@ fn calculate_trend(history: &[TelemetryPoint]) -> String {
     let (last_val, prev_val) = match (&last.value, &prev.value) {
         (TelemetryValue::Counter(a), TelemetryValue::Counter(b)) => (*a as f64, *b as f64),
         (TelemetryValue::Gauge(a), TelemetryValue::Gauge(b)) => (*a, *b),
-        _ => return String::new(),
+        _ => return text("").into(),
     };
 
     if last_val > prev_val {
-        "\u{2191}".to_string() // Up arrow
+        icons::arrow_up(IconSize::Small)
     } else if last_val < prev_val {
-        "\u{2193}".to_string() // Down arrow
+        icons::arrow_down(IconSize::Small)
     } else {
-        "\u{2192}".to_string() // Right arrow (stable)
+        icons::arrow_stable(IconSize::Small)
     }
 }
 

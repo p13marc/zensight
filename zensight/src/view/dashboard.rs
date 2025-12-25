@@ -8,6 +8,7 @@ use iced::{Alignment, Element, Length, Theme};
 use zensight_common::Protocol;
 
 use crate::message::{DeviceId, Message};
+use crate::view::icons::{self, IconSize};
 
 /// State for a single device on the dashboard.
 #[derive(Debug, Clone)]
@@ -118,25 +119,47 @@ pub fn dashboard_view(state: &DashboardState) -> Element<'_, Message> {
 fn render_header(state: &DashboardState) -> Element<'_, Message> {
     let title = text("ZenSight Dashboard").size(24);
 
-    let status = if state.connected {
-        text("Connected").style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.2, 0.8, 0.2)),
-        })
+    let status_icon = if state.connected {
+        icons::connected(IconSize::Medium)
     } else {
-        text("Disconnected").style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.8, 0.2, 0.2)),
-        })
+        icons::disconnected(IconSize::Medium)
     };
+
+    let status_text = if state.connected {
+        text("Connected")
+            .size(14)
+            .style(|_theme: &Theme| text::Style {
+                color: Some(iced::Color::from_rgb(0.2, 0.8, 0.2)),
+            })
+    } else {
+        text("Disconnected")
+            .size(14)
+            .style(|_theme: &Theme| text::Style {
+                color: Some(iced::Color::from_rgb(0.8, 0.2, 0.2)),
+            })
+    };
+
+    let status = row![status_icon, status_text]
+        .spacing(5)
+        .align_y(Alignment::Center);
 
     let device_count = text(format!("{} devices", state.devices.len())).size(14);
 
-    let alerts_button = button(text("Alerts").size(14))
-        .on_press(Message::OpenAlerts)
-        .style(iced::widget::button::secondary);
+    let alerts_button = button(
+        row![icons::alert(IconSize::Medium), text("Alerts").size(14)]
+            .spacing(6)
+            .align_y(Alignment::Center),
+    )
+    .on_press(Message::OpenAlerts)
+    .style(iced::widget::button::secondary);
 
-    let settings_button = button(text("Settings").size(14))
-        .on_press(Message::OpenSettings)
-        .style(iced::widget::button::secondary);
+    let settings_button = button(
+        row![icons::settings(IconSize::Medium), text("Settings").size(14)]
+            .spacing(6)
+            .align_y(Alignment::Center),
+    )
+    .on_press(Message::OpenSettings)
+    .style(iced::widget::button::secondary);
 
     let header_row = row![title, device_count, status, alerts_button, settings_button]
         .spacing(20)
@@ -220,20 +243,16 @@ fn render_device_grid(state: &DashboardState) -> Element<'_, Message> {
 /// Render a single device card.
 fn render_device_card(device: &DeviceState) -> Element<'_, Message> {
     let status_indicator = if device.is_healthy {
-        text("\u{25CF}").style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.2, 0.8, 0.2)),
-        })
+        icons::status_healthy(IconSize::Small)
     } else {
-        text("\u{25CF}").style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.8, 0.6, 0.2)),
-        })
+        icons::status_warning(IconSize::Small)
     };
 
-    let protocol_badge = text(format!("[{}]", device.id.protocol)).size(12);
+    let protocol_icon = icons::protocol_icon(device.id.protocol, IconSize::Medium);
     let device_name = text(&device.id.source).size(16);
     let metric_count = text(format!("{} metrics", device.metric_count)).size(12);
 
-    let header = row![status_indicator, protocol_badge, device_name, metric_count]
+    let header = row![status_indicator, protocol_icon, device_name, metric_count]
         .spacing(10)
         .align_y(Alignment::Center);
 
