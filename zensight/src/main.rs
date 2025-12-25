@@ -6,12 +6,7 @@
 use iced::application;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-mod app;
-mod message;
-mod subscription;
-mod view;
-
-use app::ZenSight;
+use zensight::app::ZenSight;
 
 fn main() -> anyhow::Result<()> {
     // Initialize tracing

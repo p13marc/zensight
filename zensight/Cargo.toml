@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "ZenSight - Observability frontend for Zenoh telemetry"
 
+[lib]
+name = "zensight"
+path = "src/lib.rs"
+
 [[bin]]
 name = "zensight"
 path = "src/main.rs"
@@ -28,3 +32,11 @@ async-stream = "0.3"
 
 # Platform utilities
 dirs.workspace = true
+
+[features]
+default = []
+# Enable the tester developer tool (F12 to record/play tests)
+tester = ["iced/tester"]
+
+[dev-dependencies]
+iced_test = "0.14"
