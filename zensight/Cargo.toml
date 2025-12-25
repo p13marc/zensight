@@ -14,6 +14,9 @@ zensight-common.workspace = true
 zenoh.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
 
-# Iced 0.14 (to be added when implementing frontend)
-# iced = { version = "0.14", features = ["tokio"] }
+# GUI
+iced = { version = "0.13", features = ["tokio"] }

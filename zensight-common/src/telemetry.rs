@@ -119,7 +119,7 @@ impl From<Vec<u8>> for TelemetryValue {
 }
 
 /// Protocol identifier for telemetry sources.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     Snmp,
