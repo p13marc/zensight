@@ -108,6 +108,10 @@ pub enum Message {
 
     /// Export device metrics to JSON.
     ExportToJson,
+
+    // Theme messages
+    /// Toggle between light and dark theme.
+    ToggleTheme,
 }
 
 /// Unique identifier for a device (protocol + source name).

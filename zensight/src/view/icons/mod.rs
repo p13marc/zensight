@@ -194,3 +194,17 @@ pub fn protocol_icon<Message: 'static>(
         zensight_common::Protocol::Opcua => protocol_opcua(size),
     }
 }
+
+// ============================================================================
+// Theme Icons
+// ============================================================================
+
+/// Sun icon (light theme indicator).
+pub fn sun<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("sun.svg"), size)
+}
+
+/// Moon icon (dark theme indicator).
+pub fn moon<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("moon.svg"), size)
+}

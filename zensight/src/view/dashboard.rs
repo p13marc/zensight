@@ -7,6 +7,7 @@ use iced::{Alignment, Element, Length, Theme};
 
 use zensight_common::Protocol;
 
+use crate::app::AppTheme;
 use crate::message::{DeviceId, Message};
 use crate::view::icons::{self, IconSize};
 
@@ -100,8 +101,8 @@ impl DashboardState {
 }
 
 /// Render the dashboard view.
-pub fn dashboard_view(state: &DashboardState) -> Element<'_, Message> {
-    let header = render_header(state);
+pub fn dashboard_view(state: &DashboardState, theme: AppTheme) -> Element<'_, Message> {
+    let header = render_header(state, theme);
     let filters = render_protocol_filters(state);
     let devices = render_device_grid(state);
 
@@ -116,7 +117,7 @@ pub fn dashboard_view(state: &DashboardState) -> Element<'_, Message> {
 }
 
 /// Render the header with connection status.
-fn render_header(state: &DashboardState) -> Element<'_, Message> {
+fn render_header(state: &DashboardState, theme: AppTheme) -> Element<'_, Message> {
     let title = text("ZenSight Dashboard").size(24);
 
     let status_icon = if state.connected {
@@ -145,6 +146,15 @@ fn render_header(state: &DashboardState) -> Element<'_, Message> {
 
     let device_count = text(format!("{} devices", state.devices.len())).size(14);
 
+    // Theme toggle button - show moon when dark (click to go light), sun when light (click to go dark)
+    let theme_icon = match theme {
+        AppTheme::Dark => icons::moon(IconSize::Medium),
+        AppTheme::Light => icons::sun(IconSize::Medium),
+    };
+    let theme_button = button(theme_icon)
+        .on_press(Message::ToggleTheme)
+        .style(iced::widget::button::secondary);
+
     let alerts_button = button(
         row![icons::alert(IconSize::Medium), text("Alerts").size(14)]
             .spacing(6)
@@ -161,9 +171,16 @@ fn render_header(state: &DashboardState) -> Element<'_, Message> {
     .on_press(Message::OpenSettings)
     .style(iced::widget::button::secondary);
 
-    let header_row = row![title, device_count, status, alerts_button, settings_button]
-        .spacing(20)
-        .align_y(Alignment::Center);
+    let header_row = row![
+        title,
+        device_count,
+        status,
+        theme_button,
+        alerts_button,
+        settings_button
+    ]
+    .spacing(20)
+    .align_y(Alignment::Center);
 
     let mut header_col = Column::new().push(header_row);
 

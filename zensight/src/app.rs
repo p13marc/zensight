@@ -22,6 +22,32 @@ pub enum CurrentView {
     Alerts,
 }
 
+/// Application theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AppTheme {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl AppTheme {
+    /// Toggle between light and dark theme.
+    pub fn toggle(self) -> Self {
+        match self {
+            AppTheme::Dark => AppTheme::Light,
+            AppTheme::Light => AppTheme::Dark,
+        }
+    }
+
+    /// Convert to Iced theme.
+    pub fn to_iced_theme(self) -> Theme {
+        match self {
+            AppTheme::Dark => Theme::Dark,
+            AppTheme::Light => Theme::Light,
+        }
+    }
+}
+
 /// The main ZenSight application.
 pub struct ZenSight {
     /// Zenoh configuration.
@@ -40,6 +66,8 @@ pub struct ZenSight {
     stale_threshold_ms: i64,
     /// Demo mode (use mock data instead of Zenoh).
     demo_mode: bool,
+    /// Current theme.
+    theme: AppTheme,
 }
 
 impl ZenSight {
@@ -80,6 +108,13 @@ impl ZenSight {
             }
         }
 
+        // Load theme preference
+        let theme = if persistent.dark_theme {
+            AppTheme::Dark
+        } else {
+            AppTheme::Light
+        };
+
         let app = Self {
             zenoh_config,
             dashboard,
@@ -89,6 +124,7 @@ impl ZenSight {
             current_view: CurrentView::default(),
             stale_threshold_ms,
             demo_mode,
+            theme,
         };
 
         (app, Task::none())
@@ -264,6 +300,13 @@ impl ZenSight {
             Message::ExportToJson => {
                 self.export_to_json();
             }
+
+            Message::ToggleTheme => {
+                self.theme = self.theme.toggle();
+                // Persist the theme preference
+                self.settings.dark_theme = matches!(self.theme, AppTheme::Dark);
+                self.settings.modified = true;
+            }
         }
 
         Task::none()
@@ -291,16 +334,16 @@ impl ZenSight {
                 if let Some(ref device_state) = self.selected_device {
                     device_view(device_state)
                 } else {
-                    dashboard_view(&self.dashboard)
+                    dashboard_view(&self.dashboard, self.theme)
                 }
             }
-            CurrentView::Dashboard => dashboard_view(&self.dashboard),
+            CurrentView::Dashboard => dashboard_view(&self.dashboard, self.theme),
         }
     }
 
     /// Get the application theme.
     pub fn theme(&self) -> Theme {
-        Theme::Dark
+        self.theme.to_iced_theme()
     }
 
     /// Handle incoming telemetry.

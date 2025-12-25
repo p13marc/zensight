@@ -22,6 +22,13 @@ pub struct PersistentSettings {
     pub zenoh_listen: Vec<String>,
     /// Stale threshold in seconds.
     pub stale_threshold_secs: u64,
+    /// Use dark theme (true) or light theme (false).
+    #[serde(default = "default_dark_theme")]
+    pub dark_theme: bool,
+}
+
+fn default_dark_theme() -> bool {
+    true
 }
 
 impl Default for PersistentSettings {
@@ -31,6 +38,7 @@ impl Default for PersistentSettings {
             zenoh_connect: vec![],
             zenoh_listen: vec![],
             stale_threshold_secs: 120,
+            dark_theme: true,
         }
     }
 }
@@ -102,6 +110,7 @@ impl PersistentSettings {
             &self.zenoh_connect,
             &self.zenoh_listen,
             (self.stale_threshold_secs * 1000) as i64,
+            self.dark_theme,
         )
     }
 
@@ -112,6 +121,7 @@ impl PersistentSettings {
             zenoh_connect: state.connect_endpoints(),
             zenoh_listen: state.listen_endpoints(),
             stale_threshold_secs: state.stale_threshold_secs.parse().unwrap_or(120),
+            dark_theme: state.dark_theme,
         }
     }
 }
@@ -127,6 +137,8 @@ pub struct SettingsState {
     pub zenoh_listen: String,
     /// Stale threshold in seconds (devices not updated are marked unhealthy).
     pub stale_threshold_secs: String,
+    /// Use dark theme.
+    pub dark_theme: bool,
     /// Whether settings have been modified.
     pub modified: bool,
     /// Last error message (if any).
@@ -142,6 +154,7 @@ impl Default for SettingsState {
             zenoh_connect: String::new(),
             zenoh_listen: String::new(),
             stale_threshold_secs: "120".to_string(),
+            dark_theme: true,
             modified: false,
             error: None,
             success: None,
@@ -156,12 +169,14 @@ impl SettingsState {
         connect: &[String],
         listen: &[String],
         stale_threshold_ms: i64,
+        dark_theme: bool,
     ) -> Self {
         Self {
             zenoh_mode: ZenohMode::from_str(mode),
             zenoh_connect: connect.join(", "),
             zenoh_listen: listen.join(", "),
             stale_threshold_secs: (stale_threshold_ms / 1000).to_string(),
+            dark_theme,
             modified: false,
             error: None,
             success: None,
@@ -571,6 +586,7 @@ mod tests {
             zenoh_connect: vec!["tcp/localhost:7447".to_string()],
             zenoh_listen: vec!["tcp/0.0.0.0:7448".to_string()],
             stale_threshold_secs: 60,
+            dark_theme: true,
         };
 
         // Serialize to JSON
@@ -592,6 +608,7 @@ mod tests {
             zenoh_connect: vec!["tcp/router:7447".to_string()],
             zenoh_listen: vec![],
             stale_threshold_secs: 90,
+            dark_theme: false,
         };
 
         // Convert to UI state
