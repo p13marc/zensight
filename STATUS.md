@@ -41,7 +41,18 @@
 | `zensight/src/view/dashboard.rs` | Done | Dashboard with device grid |
 | `zensight/src/view/device.rs` | Done | Device detail with metrics |
 
-### Phase 4: Testing & Validation - NOT STARTED
+### Phase 4: Testing & Validation - COMPLETE
+
+| Test Suite | Tests | Description |
+|------------|-------|-------------|
+| zensight-common unit tests | 14 | Telemetry, serialization, config, keyexpr |
+| zensight-common integration | 10 | Full workflow, value types, key expressions |
+| zensight-common Zenoh E2E | 4 | Pub/sub, CBOR, wildcards, multi-publisher |
+| zenoh-bridge-snmp unit tests | 6 | Config parsing, OID utilities |
+| zenoh-bridge-snmp integration | 6 | Telemetry encoding, key expressions |
+| Doc tests | 5 | API usage examples |
+
+**Total: 45 tests passing**
 
 ---
 
