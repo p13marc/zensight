@@ -297,7 +297,7 @@ impl DiskConfig {
                 "overlay",
                 "squashfs",
             ];
-            if pseudo_types.iter().any(|t| *t == fs_type) {
+            if pseudo_types.contains(&fs_type) {
                 return false;
             }
         }

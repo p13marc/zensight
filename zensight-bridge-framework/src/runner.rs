@@ -87,6 +87,8 @@ impl<C: BridgeConfig> BridgeRunner<C> {
             if let Some(ref level) = args.log_level {
                 LoggingConfig {
                     level: level.clone(),
+                    // Preserve format from config, only override level from CLI
+                    format: config.logging().format,
                 }
             } else {
                 config.logging().clone()
@@ -224,10 +226,10 @@ impl<C: BridgeConfig> BridgeRunner<C> {
     /// Run the bridge with custom status metadata.
     pub async fn run_with_metadata(self, metadata: Option<serde_json::Value>) -> Result<()> {
         // Publish running status
-        if let Some(ref status_pub) = self.status_publisher {
-            if let Err(e) = status_pub.publish_running(metadata).await {
-                tracing::warn!(error = %e, "Failed to publish running status");
-            }
+        if let Some(ref status_pub) = self.status_publisher
+            && let Err(e) = status_pub.publish_running(metadata).await
+        {
+            tracing::warn!(error = %e, "Failed to publish running status");
         }
 
         tracing::info!(
@@ -252,10 +254,10 @@ impl<C: BridgeConfig> BridgeRunner<C> {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         // Publish offline status
-        if let Some(ref status_pub) = self.status_publisher {
-            if let Err(e) = status_pub.publish_offline().await {
-                tracing::warn!(error = %e, "Failed to publish offline status");
-            }
+        if let Some(ref status_pub) = self.status_publisher
+            && let Err(e) = status_pub.publish_offline().await
+        {
+            tracing::warn!(error = %e, "Failed to publish offline status");
         }
 
         // Close Zenoh session
@@ -267,43 +269,6 @@ impl<C: BridgeConfig> BridgeRunner<C> {
 
         Ok(())
     }
-}
-
-/// Convenience function to run a bridge with minimal boilerplate.
-///
-/// # Example
-///
-/// ```ignore
-/// use zensight_bridge_framework::{run_bridge, BridgeConfig};
-///
-/// #[tokio::main]
-/// async fn main() -> anyhow::Result<()> {
-///     run_bridge::<MyBridgeConfig>("mybridge", "mybridge.json5", |runner| {
-///         // Configure and spawn workers
-///         let publisher = runner.publisher();
-///         runner.spawn(my_worker(publisher));
-///     }).await
-/// }
-/// ```
-pub async fn run_bridge<C, F>(
-    name: &str,
-    default_config: &'static str,
-    setup: F,
-) -> anyhow::Result<()>
-where
-    C: BridgeConfig,
-    F: FnOnce(&mut BridgeRunner<C>),
-{
-    let args = BridgeArgs::parse_with_default(default_config);
-    let config = C::load(&args.config).map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    let mut runner = BridgeRunner::new_with_args(name, config, Some(&args))
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    setup(&mut runner);
-
-    runner.run().await.map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 #[cfg(test)]

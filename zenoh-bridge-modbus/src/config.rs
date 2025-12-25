@@ -298,13 +298,13 @@ impl ModbusBridgeConfig {
             }
 
             // Validate register group reference
-            if let Some(group_name) = &device.register_group {
-                if !self.modbus.register_groups.contains_key(group_name) {
-                    return Err(ConfigError::Validation(format!(
-                        "Device '{}': unknown register_group '{}'",
-                        device.name, group_name
-                    )));
-                }
+            if let Some(group_name) = &device.register_group
+                && !self.modbus.register_groups.contains_key(group_name)
+            {
+                return Err(ConfigError::Validation(format!(
+                    "Device '{}': unknown register_group '{}'",
+                    device.name, group_name
+                )));
             }
 
             // Validate RTU parity
@@ -349,10 +349,10 @@ impl DeviceConfig {
     pub fn all_registers(&self, groups: &HashMap<String, RegisterGroup>) -> Vec<RegisterConfig> {
         let mut registers = self.registers.clone();
 
-        if let Some(group_name) = &self.register_group {
-            if let Some(group) = groups.get(group_name) {
-                registers.extend(group.registers.clone());
-            }
+        if let Some(group_name) = &self.register_group
+            && let Some(group) = groups.get(group_name)
+        {
+            registers.extend(group.registers.clone());
         }
 
         registers

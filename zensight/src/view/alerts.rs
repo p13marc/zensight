@@ -52,17 +52,17 @@ impl AlertRule {
     /// Check if a metric matches this rule.
     pub fn matches(&self, device_id: &DeviceId, metric: &str) -> bool {
         // Check protocol filter
-        if let Some(ref proto) = self.protocol {
-            if device_id.protocol != *proto {
-                return false;
-            }
+        if let Some(ref proto) = self.protocol
+            && device_id.protocol != *proto
+        {
+            return false;
         }
 
         // Check device pattern
-        if let Some(ref pattern) = self.device_pattern {
-            if !device_id.source.contains(pattern) {
-                return false;
-            }
+        if let Some(ref pattern) = self.device_pattern
+            && !device_id.source.contains(pattern)
+        {
+            return false;
         }
 
         // Check metric pattern (simple contains match)
@@ -223,12 +223,17 @@ pub struct AlertsState {
 impl AlertsState {
     /// Create a new alerts state.
     pub fn new() -> Self {
+        Self::with_max_alerts(100)
+    }
+
+    /// Create a new alerts state with configurable max alerts.
+    pub fn with_max_alerts(max_alerts: usize) -> Self {
         Self {
             rules: Vec::new(),
             alerts: Vec::new(),
             next_rule_id: 1,
             next_alert_id: 1,
-            max_alerts: 100,
+            max_alerts,
             recent_alerts: HashMap::new(),
             alert_cooldown_ms: 60_000, // 1 minute
             new_rule_name: String::new(),
@@ -236,6 +241,19 @@ impl AlertsState {
             new_rule_threshold: String::new(),
             new_rule_operator: ComparisonOp::GreaterThan,
             unacknowledged_count: 0,
+        }
+    }
+
+    /// Update the max alerts setting.
+    pub fn set_max_alerts(&mut self, max_alerts: usize) {
+        self.max_alerts = max_alerts;
+        // Trim existing alerts if needed
+        while self.alerts.len() > max_alerts {
+            if let Some(removed) = self.alerts.pop()
+                && !removed.acknowledged
+            {
+                self.unacknowledged_count = self.unacknowledged_count.saturating_sub(1);
+            }
         }
     }
 
@@ -299,10 +317,10 @@ impl AlertsState {
     ) -> Option<Alert> {
         // Check cooldown
         let key = format!("{}/{}/{}", device_id.protocol, device_id.source, metric);
-        if let Some(&last_alert) = self.recent_alerts.get(&key) {
-            if timestamp - last_alert < self.alert_cooldown_ms {
-                return None;
-            }
+        if let Some(&last_alert) = self.recent_alerts.get(&key)
+            && timestamp - last_alert < self.alert_cooldown_ms
+        {
+            return None;
         }
 
         // Find matching rule that triggers
@@ -326,10 +344,10 @@ impl AlertsState {
 
                 // Trim old alerts
                 while self.alerts.len() > self.max_alerts {
-                    if let Some(removed) = self.alerts.pop() {
-                        if !removed.acknowledged {
-                            self.unacknowledged_count = self.unacknowledged_count.saturating_sub(1);
-                        }
+                    if let Some(removed) = self.alerts.pop()
+                        && !removed.acknowledged
+                    {
+                        self.unacknowledged_count = self.unacknowledged_count.saturating_sub(1);
                     }
                 }
 
@@ -342,11 +360,11 @@ impl AlertsState {
 
     /// Acknowledge an alert.
     pub fn acknowledge(&mut self, alert_id: u64) {
-        if let Some(alert) = self.alerts.iter_mut().find(|a| a.id == alert_id) {
-            if !alert.acknowledged {
-                alert.acknowledged = true;
-                self.unacknowledged_count = self.unacknowledged_count.saturating_sub(1);
-            }
+        if let Some(alert) = self.alerts.iter_mut().find(|a| a.id == alert_id)
+            && !alert.acknowledged
+        {
+            alert.acknowledged = true;
+            self.unacknowledged_count = self.unacknowledged_count.saturating_sub(1);
         }
     }
 

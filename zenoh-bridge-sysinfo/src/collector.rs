@@ -360,7 +360,7 @@ impl SystemCollector {
             } else {
                 0.0
             };
-            labels.remove(&"unit".to_string());
+            labels.remove("unit");
             self.publish(
                 &format!("disk/{}/usage_percent", mount_key),
                 TelemetryValue::Gauge(usage_pct),
@@ -433,7 +433,7 @@ impl SystemCollector {
             count += 1;
 
             // Errors
-            labels.remove(&"unit".to_string());
+            labels.remove("unit");
             self.publish(
                 &format!("network/{}/rx_errors", iface_key),
                 TelemetryValue::Counter(data.total_errors_on_received()),

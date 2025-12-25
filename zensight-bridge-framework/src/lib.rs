@@ -47,5 +47,5 @@ pub use status::BridgeStatus;
 
 // Re-export commonly used types from zensight-common
 pub use zensight_common::{
-    Format, LoggingConfig, Protocol, TelemetryPoint, TelemetryValue, ZenohConfig,
+    Format, LogFormat, LoggingConfig, Protocol, TelemetryPoint, TelemetryValue, ZenohConfig,
 };

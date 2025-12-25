@@ -138,10 +138,7 @@ async fn process_packet(
         .cloned()
         .unwrap_or_else(|| exporter_ip.clone());
 
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let timestamp = zensight_common::current_timestamp_millis();
 
     // Parse the packet
     let mut parser_guard = parser.lock().await;
@@ -554,7 +551,7 @@ pub fn build_key_expr(prefix: &str, record: &FlowRecord) -> String {
         .fields
         .get("src_addr")
         .map(|v| match v {
-            FlowFieldValue::IpAddr(s) => s.replace('.', "_").replace(':', "_"),
+            FlowFieldValue::IpAddr(s) => s.replace(['.', ':'], "_"),
             _ => "unknown".to_string(),
         })
         .unwrap_or_else(|| "unknown".to_string());
@@ -563,7 +560,7 @@ pub fn build_key_expr(prefix: &str, record: &FlowRecord) -> String {
         .fields
         .get("dst_addr")
         .map(|v| match v {
-            FlowFieldValue::IpAddr(s) => s.replace('.', "_").replace(':', "_"),
+            FlowFieldValue::IpAddr(s) => s.replace(['.', ':'], "_"),
             _ => "unknown".to_string(),
         })
         .unwrap_or_else(|| "unknown".to_string());

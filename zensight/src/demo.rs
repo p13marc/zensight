@@ -389,11 +389,10 @@ impl DemoSimulator {
                     server: s,
                     intensity,
                 } = &anomaly.anomaly_type
+                    && s == server
                 {
-                    if s == server {
-                        // Spike with some variation
-                        cpu = *intensity + self.rng.random_range(-5.0..5.0);
-                    }
+                    // Spike with some variation
+                    cpu = *intensity + self.rng.random_range(-5.0..5.0);
                 }
             }
 
@@ -422,11 +421,11 @@ impl DemoSimulator {
 
             // Check for memory leak anomaly
             for anomaly in &self.active_anomalies {
-                if let AnomalyType::MemoryLeak { server: s, rate } = &anomaly.anomaly_type {
-                    if s == server {
-                        let elapsed = self.tick - anomaly.start_tick;
-                        memory_pct += elapsed as f64 * rate;
-                    }
+                if let AnomalyType::MemoryLeak { server: s, rate } = &anomaly.anomaly_type
+                    && s == server
+                {
+                    let elapsed = self.tick - anomaly.start_tick;
+                    memory_pct += elapsed as f64 * rate;
                 }
             }
 
@@ -460,11 +459,11 @@ impl DemoSimulator {
 
             // Check for disk filling anomaly
             for anomaly in &self.active_anomalies {
-                if let AnomalyType::DiskFilling { server: s, rate } = &anomaly.anomaly_type {
-                    if s == server {
-                        let elapsed = self.tick - anomaly.start_tick;
-                        disk_pct += elapsed as f64 * rate;
-                    }
+                if let AnomalyType::DiskFilling { server: s, rate } = &anomaly.anomaly_type
+                    && s == server
+                {
+                    let elapsed = self.tick - anomaly.start_tick;
+                    disk_pct += elapsed as f64 * rate;
                 }
             }
 
@@ -558,10 +557,10 @@ impl DemoSimulator {
                     interface,
                     multiplier,
                 } = &anomaly.anomaly_type
+                    && device == router
+                    && *interface == iface
                 {
-                    if device == router && *interface == iface {
-                        traffic_mult = *multiplier;
-                    }
+                    traffic_mult = *multiplier;
                 }
             }
 
@@ -687,10 +686,10 @@ impl DemoSimulator {
 
             // Check for temperature spike
             for anomaly in &self.active_anomalies {
-                if let AnomalyType::TemperatureHigh { plc: p, temp: t } = &anomaly.anomaly_type {
-                    if p == plc {
-                        temp = *t + self.rng.random_range(-2.0..2.0);
-                    }
+                if let AnomalyType::TemperatureHigh { plc: p, temp: t } = &anomaly.anomaly_type
+                    && p == plc
+                {
+                    temp = *t + self.rng.random_range(-2.0..2.0);
                 }
             }
 

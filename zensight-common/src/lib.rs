@@ -17,27 +17,54 @@ pub mod session;
 pub mod telemetry;
 
 // Re-export commonly used types at the crate root
-pub use config::{BaseConfig, LoggingConfig, ZenohConfig, load_config, parse_config};
+pub use config::{BaseConfig, LogFormat, LoggingConfig, ZenohConfig, load_config, parse_config};
 pub use error::{Error, Result};
 pub use keyexpr::{
     KEY_PREFIX, KeyExprBuilder, ParsedKeyExpr, all_telemetry_wildcard, parse_key_expr,
 };
 pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;
-pub use telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+pub use telemetry::{Protocol, TelemetryPoint, TelemetryValue, current_timestamp_millis};
 
-/// Initialize tracing with the given log level.
+/// Initialize tracing with the given configuration.
+///
+/// Supports two output formats:
+/// - `LogFormat::Text` (default): Human-readable text format
+/// - `LogFormat::Json`: Structured JSON format for log aggregation systems
+///
+/// # Example
+///
+/// ```ignore
+/// use zensight_common::{LoggingConfig, LogFormat, init_tracing};
+///
+/// let config = LoggingConfig {
+///     level: "info".to_string(),
+///     format: LogFormat::Json,
+/// };
+/// init_tracing(&config)?;
+/// ```
 pub fn init_tracing(config: &LoggingConfig) -> Result<()> {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.level));
 
-    tracing_subscriber::registry()
-        .with(fmt::layer())
-        .with(filter)
-        .try_init()
-        .map_err(|e| Error::Config(format!("Failed to initialize tracing: {}", e)))?;
+    match config.format {
+        LogFormat::Text => {
+            tracing_subscriber::registry()
+                .with(fmt::layer())
+                .with(filter)
+                .try_init()
+                .map_err(|e| Error::Config(format!("Failed to initialize tracing: {}", e)))?;
+        }
+        LogFormat::Json => {
+            tracing_subscriber::registry()
+                .with(fmt::layer().json())
+                .with(filter)
+                .try_init()
+                .map_err(|e| Error::Config(format!("Failed to initialize tracing: {}", e)))?;
+        }
+    }
 
     Ok(())
 }

@@ -105,13 +105,6 @@ impl StatusPublisher {
             .publish(&self.publisher)
             .await
     }
-
-    /// Publish "error" status.
-    pub async fn publish_error(&self, error: impl Into<String>) -> Result<()> {
-        BridgeStatus::error(&self.bridge_name, &self.version, error)
-            .publish(&self.publisher)
-            .await
-    }
 }
 
 #[cfg(test)]

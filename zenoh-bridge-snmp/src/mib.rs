@@ -181,21 +181,6 @@ impl MibResolver {
         oid.to_string()
     }
 
-    /// Get detailed entry for an OID if available.
-    pub fn get_entry(&self, oid: &str) -> Option<&OidEntry> {
-        if let Some(entry) = self.exact_mappings.get(oid) {
-            return Some(entry);
-        }
-
-        for (prefix, entry) in &self.prefix_mappings {
-            if oid.starts_with(prefix) {
-                return Some(entry);
-            }
-        }
-
-        None
-    }
-
     /// Get list of loaded MIB modules.
     pub fn loaded_modules(&self) -> &[String] {
         &self.loaded_modules
@@ -770,10 +755,7 @@ mod tests {
         assert_eq!(resolver.resolve("1.3.6.1.2.1.2.2.1.16.5"), "ifOutOctets.5");
 
         // Check HOST-RESOURCES-MIB
-        assert_eq!(
-            resolver.resolve("1.3.6.1.2.1.25.1.1.0"),
-            "hrSystemUptime.0"
-        );
+        assert_eq!(resolver.resolve("1.3.6.1.2.1.25.1.1.0"), "hrSystemUptime.0");
         assert_eq!(
             resolver.resolve("1.3.6.1.2.1.25.3.3.1.2.1"),
             "hrProcessorLoad.1"
@@ -807,10 +789,7 @@ mod tests {
 
         resolver.load_json(json).unwrap();
 
-        assert_eq!(
-            resolver.resolve("1.3.6.1.4.1.12345.1.0"),
-            "testScalar.0"
-        );
+        assert_eq!(resolver.resolve("1.3.6.1.4.1.12345.1.0"), "testScalar.0");
         assert_eq!(
             resolver.resolve("1.3.6.1.4.1.12345.2.1.1.5"),
             "testTableEntry.5"
@@ -833,28 +812,11 @@ mod tests {
 
         resolver.add_custom_mappings(&custom);
 
-        assert_eq!(
-            resolver.resolve("1.3.6.1.4.1.9999.1.0"),
-            "myCustomOid.0"
-        );
+        assert_eq!(resolver.resolve("1.3.6.1.4.1.9999.1.0"), "myCustomOid.0");
         assert_eq!(
             resolver.resolve("1.3.6.1.4.1.9999.2.1.3"),
             "myTable/3/value"
         );
-    }
-
-    #[test]
-    fn test_get_entry() {
-        let mut resolver = MibResolver::new();
-        resolver.load_builtin_mibs().unwrap();
-
-        let entry = resolver.get_entry("1.3.6.1.2.1.1.3.0").unwrap();
-        assert_eq!(entry.name, "sysUpTime.0");
-        assert_eq!(entry.syntax, Some("TimeTicks".to_string()));
-
-        let table_entry = resolver.get_entry("1.3.6.1.2.1.2.2.1.10.1").unwrap();
-        assert_eq!(table_entry.name, "ifInOctets");
-        assert!(table_entry.is_table_entry);
     }
 
     #[test]

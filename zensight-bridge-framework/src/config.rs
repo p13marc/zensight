@@ -84,22 +84,6 @@ pub trait BridgeConfig: Sized + DeserializeOwned {
     }
 }
 
-/// Common configuration for protocol-specific settings.
-///
-/// Many bridges have similar structure for their protocol config.
-/// This trait provides optional common accessors.
-pub trait ProtocolConfig {
-    /// Get the serialization format (JSON or CBOR).
-    fn format(&self) -> zensight_common::Format {
-        zensight_common::Format::Json
-    }
-
-    /// Get the polling interval in seconds (for polling-based bridges).
-    fn poll_interval_secs(&self) -> Option<u64> {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

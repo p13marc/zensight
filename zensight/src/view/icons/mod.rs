@@ -121,6 +121,11 @@ pub fn trash<Message: 'static>(size: IconSize) -> Element<'static, Message> {
     svg_icon(include_bytes!("trash.svg"), size)
 }
 
+/// Search/magnifying glass icon.
+pub fn search<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("search.svg"), size)
+}
+
 // ============================================================================
 // Connection Icons
 // ============================================================================

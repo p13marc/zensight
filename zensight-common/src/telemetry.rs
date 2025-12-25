@@ -153,11 +153,13 @@ impl std::fmt::Display for Protocol {
 }
 
 /// Get the current timestamp in milliseconds since Unix epoch.
-fn current_timestamp_millis() -> i64 {
+///
+/// Returns 0 if system time is before Unix epoch (should never happen in practice).
+pub fn current_timestamp_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("System time before Unix epoch")
-        .as_millis() as i64
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

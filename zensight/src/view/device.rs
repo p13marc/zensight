@@ -36,14 +36,30 @@ pub struct DeviceDetailState {
 impl DeviceDetailState {
     /// Create a new device detail state.
     pub fn new(device_id: DeviceId) -> Self {
+        Self::with_max_history(device_id, 500)
+    }
+
+    /// Create a new device detail state with configurable max history.
+    pub fn with_max_history(device_id: DeviceId, max_history: usize) -> Self {
         Self {
             device_id: device_id.clone(),
             metrics: HashMap::new(),
             history: HashMap::new(),
-            max_history: 500,
+            max_history,
             selected_metric: None,
             chart: ChartState::new(format!("{}", device_id)),
             metric_filter: String::new(),
+        }
+    }
+
+    /// Update the max history setting.
+    pub fn set_max_history(&mut self, max_history: usize) {
+        self.max_history = max_history;
+        // Trim existing history if needed
+        for history in self.history.values_mut() {
+            while history.len() > max_history {
+                history.remove(0);
+            }
         }
     }
 
@@ -64,10 +80,10 @@ impl DeviceDetailState {
         }
 
         // Update chart if this metric is selected
-        if self.selected_metric.as_ref() == Some(&metric_name) {
-            if let Some(data_point) = DataPoint::from_telemetry(point.timestamp, &point.value) {
-                self.chart.push(data_point);
-            }
+        if self.selected_metric.as_ref() == Some(&metric_name)
+            && let Some(data_point) = DataPoint::from_telemetry(point.timestamp, &point.value)
+        {
+            self.chart.push(data_point);
         }
     }
 
@@ -284,7 +300,7 @@ fn render_chart_section<'a>(
 
     let chart_title = row![
         icons::chart(IconSize::Medium),
-        text(format!("{}", metric_name)).size(14)
+        text(metric_name.to_string()).size(14)
     ]
     .spacing(6)
     .align_y(Alignment::Center);
@@ -321,7 +337,7 @@ fn render_chart_section<'a>(
     let stats_row = row![
         text(format!(
             "Current: {}",
-            stats.current.map_or("-".to_string(), |v| format_value(v))
+            stats.current.map_or("-".to_string(), format_value)
         ))
         .size(12),
         text(format!("Min: {}", format_value(stats.min))).size(12),

@@ -115,8 +115,8 @@ impl ZenSight {
             AppTheme::Light
         };
 
-        // Create alerts state, with demo rules if in demo mode
-        let mut alerts = AlertsState::new();
+        // Create alerts state with configured max, with demo rules if in demo mode
+        let mut alerts = AlertsState::with_max_alerts(persistent.max_alerts);
         if demo_mode {
             use crate::demo::demo_alert_rules;
             for rule in demo_alert_rules() {
@@ -183,6 +183,22 @@ impl ZenSight {
                 self.dashboard.toggle_filter(protocol);
             }
 
+            Message::SetDeviceSearchFilter(filter) => {
+                self.dashboard.set_search_filter(filter);
+            }
+
+            Message::NextPage => {
+                self.dashboard.next_page();
+            }
+
+            Message::PrevPage => {
+                self.dashboard.prev_page();
+            }
+
+            Message::GoToPage(page) => {
+                self.dashboard.go_to_page(page);
+            }
+
             Message::SelectMetricForChart(metric_name) => {
                 if let Some(ref mut device) = self.selected_device {
                     device.select_metric(metric_name);
@@ -238,6 +254,14 @@ impl ZenSight {
 
             Message::SetStaleThreshold(threshold) => {
                 self.settings.set_stale_threshold(threshold);
+            }
+
+            Message::SetMaxHistory(max_history) => {
+                self.settings.set_max_history(max_history);
+            }
+
+            Message::SetMaxAlerts(max_alerts) => {
+                self.settings.set_max_alerts(max_alerts);
             }
 
             Message::SaveSettings => {
@@ -377,27 +401,26 @@ impl ZenSight {
         device_state.is_healthy = true;
 
         // Check alert rules for numeric values
-        if let Some(numeric_value) = telemetry_to_f64(&point.value) {
-            if let Some(alert) =
+        if let Some(numeric_value) = telemetry_to_f64(&point.value)
+            && let Some(alert) =
                 self.alerts
                     .check_metric(&device_id, &point.metric, numeric_value, point.timestamp)
-            {
-                tracing::warn!(
-                    rule = %alert.rule_name,
-                    device = %alert.device_id,
-                    metric = %alert.metric,
-                    value = %alert.value,
-                    threshold = %alert.threshold,
-                    "Alert triggered"
-                );
-            }
+        {
+            tracing::warn!(
+                rule = %alert.rule_name,
+                device = %alert.device_id,
+                metric = %alert.metric,
+                value = %alert.value,
+                threshold = %alert.threshold,
+                "Alert triggered"
+            );
         }
 
         // Update selected device if this telemetry is for it
-        if let Some(ref mut selected) = self.selected_device {
-            if selected.device_id == device_id {
-                selected.update(point);
-            }
+        if let Some(ref mut selected) = self.selected_device
+            && selected.device_id == device_id
+        {
+            selected.update(point);
         }
     }
 
@@ -406,7 +429,8 @@ impl ZenSight {
         tracing::info!(device = %device_id, "Selected device");
         // We don't have the full TelemetryPoints in the dashboard,
         // so the detail view will populate as new data arrives
-        let detail_state = DeviceDetailState::new(device_id);
+        let max_history = self.settings.max_history_value();
+        let detail_state = DeviceDetailState::with_max_history(device_id, max_history);
         self.selected_device = Some(detail_state);
         self.current_view = CurrentView::Device;
     }
@@ -421,6 +445,14 @@ impl ZenSight {
 
         // Apply stale threshold immediately
         self.stale_threshold_ms = self.settings.stale_threshold_ms();
+
+        // Apply max alerts setting
+        self.alerts.set_max_alerts(self.settings.max_alerts_value());
+
+        // Apply max history to current device view if any
+        if let Some(ref mut device) = self.selected_device {
+            device.set_max_history(self.settings.max_history_value());
+        }
 
         // Update Zenoh config (will require restart to take effect)
         self.zenoh_config.mode = self.settings.zenoh_mode.as_str().to_string();

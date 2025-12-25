@@ -185,12 +185,12 @@ impl SnmpPoller {
                 .as_ref()
                 .ok_or_else(|| anyhow!("SNMPv3 session not initialized"))?;
             let mut session = session_mutex.lock().await;
-            let response = timeout(self.request_timeout, session.get(&oid))
+            let mut response = timeout(self.request_timeout, session.get(&oid))
                 .await
                 .map_err(|_| anyhow!("SNMP GET timeout"))?
                 .context("SNMP GET error")?;
 
-            if let Some((resp_oid, value)) = response.varbinds.into_iter().next() {
+            if let Some((resp_oid, value)) = response.varbinds.next() {
                 let oid_string = oid_to_string(&resp_oid);
                 if let Some(tv) = snmp_value_to_telemetry(&value) {
                     return Ok(Some((oid_string, tv)));
@@ -198,12 +198,12 @@ impl SnmpPoller {
             }
         } else {
             let mut session = self.create_session().await?;
-            let response = timeout(self.request_timeout, session.get(&oid))
+            let mut response = timeout(self.request_timeout, session.get(&oid))
                 .await
                 .map_err(|_| anyhow!("SNMP GET timeout"))?
                 .context("SNMP GET error")?;
 
-            if let Some((resp_oid, value)) = response.varbinds.into_iter().next() {
+            if let Some((resp_oid, value)) = response.varbinds.next() {
                 let oid_string = oid_to_string(&resp_oid);
                 if let Some(tv) = snmp_value_to_telemetry(&value) {
                     return Ok(Some((oid_string, tv)));
@@ -229,12 +229,12 @@ impl SnmpPoller {
             let mut session = session_mutex.lock().await;
 
             loop {
-                let response = timeout(self.request_timeout, session.getnext(&current_oid))
+                let mut response = timeout(self.request_timeout, session.getnext(&current_oid))
                     .await
                     .map_err(|_| anyhow!("SNMP GETNEXT timeout"))?
                     .context("SNMP GETNEXT error")?;
 
-                let Some((resp_oid, value)) = response.varbinds.into_iter().next() else {
+                let Some((resp_oid, value)) = response.varbinds.next() else {
                     break;
                 };
 
@@ -257,12 +257,12 @@ impl SnmpPoller {
             let mut session = self.create_session().await?;
 
             loop {
-                let response = timeout(self.request_timeout, session.getnext(&current_oid))
+                let mut response = timeout(self.request_timeout, session.getnext(&current_oid))
                     .await
                     .map_err(|_| anyhow!("SNMP GETNEXT timeout"))?
                     .context("SNMP GETNEXT error")?;
 
-                let Some((resp_oid, value)) = response.varbinds.into_iter().next() else {
+                let Some((resp_oid, value)) = response.varbinds.next() else {
                     break;
                 };
 

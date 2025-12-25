@@ -159,20 +159,15 @@ fn default_poll_interval() -> u64 {
 }
 
 /// SNMP protocol version.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SnmpVersion {
     #[serde(rename = "v1")]
     V1,
+    #[default]
     #[serde(rename = "v2c")]
     V2c,
     #[serde(rename = "v3")]
     V3,
-}
-
-impl Default for SnmpVersion {
-    fn default() -> Self {
-        SnmpVersion::V2c
-    }
 }
 
 /// SNMPv3 security configuration (USM - User Security Model).
@@ -320,10 +315,10 @@ impl DeviceConfig {
     pub fn all_oids(&self, groups: &HashMap<String, OidGroup>) -> Vec<String> {
         let mut oids = self.oids.clone();
 
-        if let Some(group_name) = &self.oid_group {
-            if let Some(group) = groups.get(group_name) {
-                oids.extend(group.oids.clone());
-            }
+        if let Some(group_name) = &self.oid_group
+            && let Some(group) = groups.get(group_name)
+        {
+            oids.extend(group.oids.clone());
         }
 
         oids
@@ -333,10 +328,10 @@ impl DeviceConfig {
     pub fn all_walks(&self, groups: &HashMap<String, OidGroup>) -> Vec<String> {
         let mut walks = self.walks.clone();
 
-        if let Some(group_name) = &self.oid_group {
-            if let Some(group) = groups.get(group_name) {
-                walks.extend(group.walks.clone());
-            }
+        if let Some(group_name) = &self.oid_group
+            && let Some(group) = groups.get(group_name)
+        {
+            walks.extend(group.walks.clone());
         }
 
         walks

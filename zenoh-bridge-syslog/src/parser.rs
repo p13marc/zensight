@@ -145,6 +145,7 @@ impl Severity {
 
 /// Parsed syslog message.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // version field is used in tests and useful for API consumers
 pub struct SyslogMessage {
     /// Facility code.
     pub facility: Facility,

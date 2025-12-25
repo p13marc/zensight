@@ -65,14 +65,10 @@ pub struct ParsedTrap {
     pub community: Option<String>,
     /// Enterprise OID (v1 only).
     pub enterprise_oid: Option<String>,
-    /// Agent address (v1 only).
-    pub agent_addr: Option<String>,
     /// Generic trap type (v1 only).
     pub generic_trap: Option<GenericTrap>,
     /// Specific trap code (v1 only, used with enterprise-specific traps).
     pub specific_trap: Option<i64>,
-    /// Timestamp (sysUpTime) in hundredths of a second.
-    pub timestamp: Option<u64>,
     /// Trap OID (v2 only, from snmpTrapOID.0 varbind).
     pub trap_oid: Option<String>,
     /// Variable bindings from the trap.
@@ -220,10 +216,7 @@ impl TrapReceiver {
         let key = self.key_builder.build(&trap.source_ip, &metric_name);
 
         let point = TelemetryPoint {
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64,
+            timestamp: zensight_common::current_timestamp_millis(),
             source: trap.source_ip.clone(),
             protocol: Protocol::Snmp,
             metric: metric_name.clone(),
@@ -249,10 +242,7 @@ impl TrapReceiver {
             varbind_labels.insert("oid".to_string(), varbind.oid.clone());
 
             let varbind_point = TelemetryPoint {
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as i64,
+                timestamp: zensight_common::current_timestamp_millis(),
                 source: trap.source_ip.clone(),
                 protocol: Protocol::Snmp,
                 metric: varbind_metric,
@@ -296,15 +286,11 @@ fn parse_v1_trap(msg: v1::Message<v1::Pdus>, source_ip: &str) -> Result<ParsedTr
     match msg.data {
         v1::Pdus::Trap(trap) => {
             let enterprise_oid = oid_to_string(&trap.enterprise);
-            let agent_addr = network_addr_to_string(&trap.agent_addr);
 
             // Convert Integer to i64
             let generic_trap_value = integer_to_i64(&trap.generic_trap);
             let generic_trap = GenericTrap::from_integer(generic_trap_value);
             let specific_trap = integer_to_i64(&trap.specific_trap);
-
-            // TimeTicks is a newtype around u32
-            let timestamp: u64 = trap.time_stamp.0.into();
 
             let varbinds = parse_v1_varbinds(&trap.variable_bindings);
 
@@ -313,10 +299,8 @@ fn parse_v1_trap(msg: v1::Message<v1::Pdus>, source_ip: &str) -> Result<ParsedTr
                 version: 1,
                 community: Some(community),
                 enterprise_oid: Some(enterprise_oid),
-                agent_addr: Some(agent_addr),
                 generic_trap,
                 specific_trap: Some(specific_trap),
-                timestamp: Some(timestamp),
                 trap_oid: None,
                 varbinds,
             })
@@ -333,20 +317,14 @@ fn parse_v2c_trap(msg: v2c::Message<v2::Pdus>, source_ip: &str) -> Result<Parsed
         v2::Pdus::Trap(trap) => {
             let varbinds = parse_v2_varbinds(&trap.0.variable_bindings);
 
-            // Extract snmpTrapOID.0 (1.3.6.1.6.3.1.1.4.1.0) and sysUpTime.0 (1.3.6.1.2.1.1.3.0)
+            // Extract snmpTrapOID.0 (1.3.6.1.6.3.1.1.4.1.0)
             let mut trap_oid = None;
-            let mut timestamp = None;
 
             for vb in &varbinds {
                 if vb.oid == "1.3.6.1.6.3.1.1.4.1.0" {
                     // snmpTrapOID.0
                     if let TelemetryValue::Text(ref s) = vb.value {
                         trap_oid = Some(s.clone());
-                    }
-                } else if vb.oid == "1.3.6.1.2.1.1.3.0" {
-                    // sysUpTime.0
-                    if let TelemetryValue::Counter(v) = vb.value {
-                        timestamp = Some(v);
                     }
                 }
             }
@@ -356,10 +334,8 @@ fn parse_v2c_trap(msg: v2c::Message<v2::Pdus>, source_ip: &str) -> Result<Parsed
                 version: 2,
                 community: Some(community),
                 enterprise_oid: None,
-                agent_addr: None,
                 generic_trap: None,
                 specific_trap: None,
-                timestamp,
                 trap_oid,
                 varbinds,
             })
@@ -369,17 +345,12 @@ fn parse_v2c_trap(msg: v2c::Message<v2::Pdus>, source_ip: &str) -> Result<Parsed
             let varbinds = parse_v2_varbinds(&inform.0.variable_bindings);
 
             let mut trap_oid = None;
-            let mut timestamp = None;
 
             for vb in &varbinds {
-                if vb.oid == "1.3.6.1.6.3.1.1.4.1.0" {
-                    if let TelemetryValue::Text(ref s) = vb.value {
-                        trap_oid = Some(s.clone());
-                    }
-                } else if vb.oid == "1.3.6.1.2.1.1.3.0" {
-                    if let TelemetryValue::Counter(v) = vb.value {
-                        timestamp = Some(v);
-                    }
+                if vb.oid == "1.3.6.1.6.3.1.1.4.1.0"
+                    && let TelemetryValue::Text(ref s) = vb.value
+                {
+                    trap_oid = Some(s.clone());
                 }
             }
 
@@ -388,10 +359,8 @@ fn parse_v2c_trap(msg: v2c::Message<v2::Pdus>, source_ip: &str) -> Result<Parsed
                 version: 2,
                 community: Some(community),
                 enterprise_oid: None,
-                agent_addr: None,
                 generic_trap: None,
                 specific_trap: None,
-                timestamp,
                 trap_oid,
                 varbinds,
             })
@@ -617,8 +586,6 @@ mod tests {
         assert_eq!(parsed.specific_trap, Some(0));
         assert!(parsed.enterprise_oid.is_some());
         assert_eq!(parsed.enterprise_oid.unwrap(), "1.3.6.1.4.1.9.1.1");
-        assert!(parsed.timestamp.is_some());
-        assert_eq!(parsed.timestamp.unwrap(), 100);
     }
 
     #[test]
@@ -679,7 +646,6 @@ mod tests {
         assert_eq!(parsed.community, Some("public".to_string()));
         assert!(parsed.trap_oid.is_some());
         assert_eq!(parsed.trap_oid.unwrap(), "1.3.6.1.6.3.1.1.5.3");
-        assert_eq!(parsed.timestamp, Some(256));
         // v2 traps don't have enterprise/generic/specific fields
         assert!(parsed.enterprise_oid.is_none());
         assert!(parsed.generic_trap.is_none());

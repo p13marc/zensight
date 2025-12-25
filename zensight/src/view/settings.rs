@@ -25,10 +25,24 @@ pub struct PersistentSettings {
     /// Use dark theme (true) or light theme (false).
     #[serde(default = "default_dark_theme")]
     pub dark_theme: bool,
+    /// Maximum number of metric history entries per device.
+    #[serde(default = "default_max_history")]
+    pub max_history: usize,
+    /// Maximum number of alerts to keep.
+    #[serde(default = "default_max_alerts")]
+    pub max_alerts: usize,
 }
 
 fn default_dark_theme() -> bool {
     true
+}
+
+fn default_max_history() -> usize {
+    500
+}
+
+fn default_max_alerts() -> usize {
+    100
 }
 
 impl Default for PersistentSettings {
@@ -39,6 +53,8 @@ impl Default for PersistentSettings {
             zenoh_listen: vec![],
             stale_threshold_secs: 120,
             dark_theme: true,
+            max_history: default_max_history(),
+            max_alerts: default_max_alerts(),
         }
     }
 }
@@ -86,10 +102,10 @@ impl PersistentSettings {
         };
 
         // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                return Err(format!("Failed to create config directory: {}", e));
-            }
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            return Err(format!("Failed to create config directory: {}", e));
         }
 
         // Serialize to JSON5 (pretty-printed JSON is valid JSON5)
@@ -111,6 +127,8 @@ impl PersistentSettings {
             &self.zenoh_listen,
             (self.stale_threshold_secs * 1000) as i64,
             self.dark_theme,
+            self.max_history,
+            self.max_alerts,
         )
     }
 
@@ -122,6 +140,8 @@ impl PersistentSettings {
             zenoh_listen: state.listen_endpoints(),
             stale_threshold_secs: state.stale_threshold_secs.parse().unwrap_or(120),
             dark_theme: state.dark_theme,
+            max_history: state.max_history.parse().unwrap_or(default_max_history()),
+            max_alerts: state.max_alerts.parse().unwrap_or(default_max_alerts()),
         }
     }
 }
@@ -139,6 +159,10 @@ pub struct SettingsState {
     pub stale_threshold_secs: String,
     /// Use dark theme.
     pub dark_theme: bool,
+    /// Maximum metric history entries per device.
+    pub max_history: String,
+    /// Maximum alerts to keep.
+    pub max_alerts: String,
     /// Whether settings have been modified.
     pub modified: bool,
     /// Last error message (if any).
@@ -155,6 +179,8 @@ impl Default for SettingsState {
             zenoh_listen: String::new(),
             stale_threshold_secs: "120".to_string(),
             dark_theme: true,
+            max_history: "500".to_string(),
+            max_alerts: "100".to_string(),
             modified: false,
             error: None,
             success: None,
@@ -170,13 +196,17 @@ impl SettingsState {
         listen: &[String],
         stale_threshold_ms: i64,
         dark_theme: bool,
+        max_history: usize,
+        max_alerts: usize,
     ) -> Self {
         Self {
-            zenoh_mode: ZenohMode::from_str(mode),
+            zenoh_mode: ZenohMode::parse(mode),
             zenoh_connect: connect.join(", "),
             zenoh_listen: listen.join(", "),
             stale_threshold_secs: (stale_threshold_ms / 1000).to_string(),
             dark_theme,
+            max_history: max_history.to_string(),
+            max_alerts: max_alerts.to_string(),
             modified: false,
             error: None,
             success: None,
@@ -211,6 +241,20 @@ impl SettingsState {
         self.clear_messages();
     }
 
+    /// Update max history.
+    pub fn set_max_history(&mut self, max_history: String) {
+        self.max_history = max_history;
+        self.modified = true;
+        self.clear_messages();
+    }
+
+    /// Update max alerts.
+    pub fn set_max_alerts(&mut self, max_alerts: String) {
+        self.max_alerts = max_alerts;
+        self.modified = true;
+        self.clear_messages();
+    }
+
     /// Validate the settings.
     pub fn validate(&self) -> Result<(), String> {
         // Validate stale threshold
@@ -240,6 +284,34 @@ impl SettingsState {
             }
         }
 
+        // Validate max history
+        let max_history: usize = self
+            .max_history
+            .parse()
+            .map_err(|_| "Max history must be a number".to_string())?;
+
+        if max_history < 10 {
+            return Err("Max history must be at least 10".to_string());
+        }
+
+        if max_history > 10000 {
+            return Err("Max history cannot exceed 10000".to_string());
+        }
+
+        // Validate max alerts
+        let max_alerts: usize = self
+            .max_alerts
+            .parse()
+            .map_err(|_| "Max alerts must be a number".to_string())?;
+
+        if max_alerts < 10 {
+            return Err("Max alerts must be at least 10".to_string());
+        }
+
+        if max_alerts > 1000 {
+            return Err("Max alerts cannot exceed 1000".to_string());
+        }
+
         Ok(())
     }
 
@@ -265,6 +337,16 @@ impl SettingsState {
     /// Get stale threshold in milliseconds.
     pub fn stale_threshold_ms(&self) -> i64 {
         self.stale_threshold_secs.parse::<i64>().unwrap_or(120) * 1000
+    }
+
+    /// Get max history value.
+    pub fn max_history_value(&self) -> usize {
+        self.max_history.parse().unwrap_or(500)
+    }
+
+    /// Get max alerts value.
+    pub fn max_alerts_value(&self) -> usize {
+        self.max_alerts.parse().unwrap_or(100)
     }
 
     /// Mark settings as saved.
@@ -303,8 +385,8 @@ impl ZenohMode {
     /// All available modes.
     pub const ALL: &'static [ZenohMode] = &[ZenohMode::Client, ZenohMode::Peer, ZenohMode::Router];
 
-    /// Convert from string.
-    pub fn from_str(s: &str) -> Self {
+    /// Parse from string (defaults to Peer for unknown values).
+    pub fn parse(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "client" => ZenohMode::Client,
             "router" => ZenohMode::Router,
@@ -481,9 +563,51 @@ fn render_display_section(state: &SettingsState) -> Element<'_, Message> {
         .spacing(10)
         .align_y(Alignment::Center);
 
-    column![section_title, threshold_row, threshold_help,]
-        .spacing(8)
-        .into()
+    // Max history
+    let history_label = text("Max metric history per device:").size(14);
+    let history_input = text_input("500", &state.max_history)
+        .on_input(Message::SetMaxHistory)
+        .padding(8)
+        .width(Length::Fixed(100.0));
+
+    let history_help = text("Maximum data points to keep per metric (10-10000)")
+        .size(11)
+        .style(|_theme: &Theme| text::Style {
+            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        });
+
+    let history_row = row![history_label, history_input]
+        .spacing(10)
+        .align_y(Alignment::Center);
+
+    // Max alerts
+    let alerts_label = text("Max alerts to keep:").size(14);
+    let alerts_input = text_input("100", &state.max_alerts)
+        .on_input(Message::SetMaxAlerts)
+        .padding(8)
+        .width(Length::Fixed(100.0));
+
+    let alerts_help = text("Maximum alerts to keep in history (10-1000)")
+        .size(11)
+        .style(|_theme: &Theme| text::Style {
+            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        });
+
+    let alerts_row = row![alerts_label, alerts_input]
+        .spacing(10)
+        .align_y(Alignment::Center);
+
+    column![
+        section_title,
+        threshold_row,
+        threshold_help,
+        history_row,
+        history_help,
+        alerts_row,
+        alerts_help,
+    ]
+    .spacing(8)
+    .into()
 }
 
 /// Render action buttons and messages.
@@ -573,10 +697,10 @@ mod tests {
 
     #[test]
     fn test_zenoh_mode() {
-        assert_eq!(ZenohMode::from_str("client"), ZenohMode::Client);
-        assert_eq!(ZenohMode::from_str("peer"), ZenohMode::Peer);
-        assert_eq!(ZenohMode::from_str("router"), ZenohMode::Router);
-        assert_eq!(ZenohMode::from_str("unknown"), ZenohMode::Peer);
+        assert_eq!(ZenohMode::parse("client"), ZenohMode::Client);
+        assert_eq!(ZenohMode::parse("peer"), ZenohMode::Peer);
+        assert_eq!(ZenohMode::parse("router"), ZenohMode::Router);
+        assert_eq!(ZenohMode::parse("unknown"), ZenohMode::Peer);
     }
 
     #[test]
@@ -587,6 +711,8 @@ mod tests {
             zenoh_listen: vec!["tcp/0.0.0.0:7448".to_string()],
             stale_threshold_secs: 60,
             dark_theme: true,
+            max_history: 1000,
+            max_alerts: 200,
         };
 
         // Serialize to JSON
@@ -599,6 +725,8 @@ mod tests {
         assert_eq!(restored.zenoh_connect, vec!["tcp/localhost:7447"]);
         assert_eq!(restored.zenoh_listen, vec!["tcp/0.0.0.0:7448"]);
         assert_eq!(restored.stale_threshold_secs, 60);
+        assert_eq!(restored.max_history, 1000);
+        assert_eq!(restored.max_alerts, 200);
     }
 
     #[test]
@@ -609,6 +737,8 @@ mod tests {
             zenoh_listen: vec![],
             stale_threshold_secs: 90,
             dark_theme: false,
+            max_history: 750,
+            max_alerts: 150,
         };
 
         // Convert to UI state
@@ -617,6 +747,8 @@ mod tests {
         assert_eq!(state.zenoh_connect, "tcp/router:7447");
         assert!(state.zenoh_listen.is_empty());
         assert_eq!(state.stale_threshold_secs, "90");
+        assert_eq!(state.max_history, "750");
+        assert_eq!(state.max_alerts, "150");
 
         // Convert back to persistent
         let restored = PersistentSettings::from_state(&state);
@@ -624,5 +756,7 @@ mod tests {
         assert_eq!(restored.zenoh_connect, vec!["tcp/router:7447"]);
         assert!(restored.zenoh_listen.is_empty());
         assert_eq!(restored.stale_threshold_secs, 90);
+        assert_eq!(restored.max_history, 750);
+        assert_eq!(restored.max_alerts, 150);
     }
 }

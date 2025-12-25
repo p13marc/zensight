@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{Column, button, column, container, row, rule, scrollable, text};
+use iced::widget::{Column, button, column, container, row, rule, scrollable, text, text_input};
 use iced::{Alignment, Element, Length, Theme};
 
 use zensight_common::Protocol;
@@ -44,27 +44,60 @@ impl DeviceState {
     }
 }
 
+/// Default number of devices per page.
+pub const DEFAULT_DEVICES_PER_PAGE: usize = 20;
+
 /// Dashboard view state.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct DashboardState {
     /// All known devices, keyed by DeviceId.
     pub devices: HashMap<DeviceId, DeviceState>,
     /// Active protocol filters (empty = show all).
     pub protocol_filters: std::collections::HashSet<Protocol>,
+    /// Search filter for device names.
+    pub search_filter: String,
     /// Whether we are connected to Zenoh.
     pub connected: bool,
     /// Last error message, if any.
     pub last_error: Option<String>,
+    /// Current page number (0-indexed).
+    pub current_page: usize,
+    /// Number of devices per page.
+    pub devices_per_page: usize,
+}
+
+impl Default for DashboardState {
+    fn default() -> Self {
+        Self {
+            devices: HashMap::new(),
+            protocol_filters: std::collections::HashSet::new(),
+            search_filter: String::new(),
+            connected: false,
+            last_error: None,
+            current_page: 0,
+            devices_per_page: DEFAULT_DEVICES_PER_PAGE,
+        }
+    }
 }
 
 impl DashboardState {
-    /// Get devices filtered by active protocol filters.
+    /// Get devices filtered by active protocol filters and search term.
     pub fn filtered_devices(&self) -> Vec<&DeviceState> {
+        let search_lower = self.search_filter.to_lowercase();
+
         let mut devices: Vec<_> = self
             .devices
             .values()
             .filter(|d| {
-                self.protocol_filters.is_empty() || self.protocol_filters.contains(&d.id.protocol)
+                // Protocol filter
+                let protocol_match = self.protocol_filters.is_empty()
+                    || self.protocol_filters.contains(&d.id.protocol);
+
+                // Search filter (case-insensitive match on device source name)
+                let search_match =
+                    search_lower.is_empty() || d.id.source.to_lowercase().contains(&search_lower);
+
+                protocol_match && search_match
             })
             .collect();
 
@@ -84,6 +117,64 @@ impl DashboardState {
         } else {
             self.protocol_filters.insert(protocol);
         }
+    }
+
+    /// Set the search filter.
+    pub fn set_search_filter(&mut self, filter: String) {
+        self.search_filter = filter;
+        // Reset to first page when search changes
+        self.current_page = 0;
+    }
+
+    /// Get the total number of pages.
+    pub fn total_pages(&self) -> usize {
+        let filtered_count = self.filtered_devices().len();
+        if filtered_count == 0 {
+            1
+        } else {
+            (filtered_count + self.devices_per_page - 1) / self.devices_per_page
+        }
+    }
+
+    /// Go to the next page.
+    pub fn next_page(&mut self) {
+        let total = self.total_pages();
+        if self.current_page + 1 < total {
+            self.current_page += 1;
+        }
+    }
+
+    /// Go to the previous page.
+    pub fn prev_page(&mut self) {
+        if self.current_page > 0 {
+            self.current_page -= 1;
+        }
+    }
+
+    /// Go to a specific page.
+    pub fn go_to_page(&mut self, page: usize) {
+        let total = self.total_pages();
+        self.current_page = page.min(total.saturating_sub(1));
+    }
+
+    /// Get devices for the current page.
+    pub fn paginated_devices(&self) -> Vec<&DeviceState> {
+        let all = self.filtered_devices();
+        let start = self.current_page * self.devices_per_page;
+        let end = (start + self.devices_per_page).min(all.len());
+
+        if start >= all.len() {
+            vec![]
+        } else {
+            all[start..end].to_vec()
+        }
+    }
+
+    /// Set devices per page.
+    pub fn set_devices_per_page(&mut self, count: usize) {
+        self.devices_per_page = count.max(5); // Minimum 5 per page
+        // Reset to first page to avoid invalid page
+        self.current_page = 0;
     }
 
     /// Get all protocols that have devices.
@@ -218,7 +309,7 @@ fn render_header(
     header_col.spacing(5).into()
 }
 
-/// Render protocol filter buttons.
+/// Render protocol filter buttons and search input.
 fn render_protocol_filters(state: &DashboardState) -> Element<'_, Message> {
     let protocols = state.active_protocols();
 
@@ -226,7 +317,8 @@ fn render_protocol_filters(state: &DashboardState) -> Element<'_, Message> {
         return text("No devices yet...").size(12).into();
     }
 
-    let filter_label = text("Filter by protocol:").size(14);
+    // Protocol filter buttons
+    let filter_label = text("Filter:").size(14);
 
     let mut filter_row = row![filter_label].spacing(10).align_y(Alignment::Center);
 
@@ -246,14 +338,36 @@ fn render_protocol_filters(state: &DashboardState) -> Element<'_, Message> {
         filter_row = filter_row.push(btn);
     }
 
-    filter_row.into()
+    // Device search input
+    let search_input = text_input("Search devices...", &state.search_filter)
+        .on_input(Message::SetDeviceSearchFilter)
+        .padding(6)
+        .width(Length::Fixed(200.0));
+
+    let search_row = row![icons::search(IconSize::Small), search_input]
+        .spacing(6)
+        .align_y(Alignment::Center);
+
+    // Device count
+    let filtered_count = state.filtered_devices().len();
+    let total_count = state.devices.len();
+    let count_text = if filtered_count == total_count {
+        text(format!("{} devices", total_count)).size(12)
+    } else {
+        text(format!("{} of {} devices", filtered_count, total_count)).size(12)
+    };
+
+    row![filter_row, search_row, count_text]
+        .spacing(20)
+        .align_y(Alignment::Center)
+        .into()
 }
 
-/// Render the device grid.
+/// Render the device grid with pagination.
 fn render_device_grid(state: &DashboardState) -> Element<'_, Message> {
-    let devices = state.filtered_devices();
+    let all_devices = state.filtered_devices();
 
-    if devices.is_empty() {
+    if all_devices.is_empty() {
         let message = if state.devices.is_empty() {
             "Waiting for telemetry data..."
         } else {
@@ -267,16 +381,118 @@ fn render_device_grid(state: &DashboardState) -> Element<'_, Message> {
             .into();
     }
 
+    let devices = state.paginated_devices();
     let mut device_list = Column::new().spacing(10);
 
     for device in devices {
         device_list = device_list.push(render_device_card(device));
     }
 
+    // Add pagination controls if there are multiple pages
+    let total_pages = state.total_pages();
+    if total_pages > 1 {
+        let pagination = render_pagination_controls(state, total_pages);
+        device_list = device_list.push(pagination);
+    }
+
     scrollable(device_list)
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+/// Render pagination controls.
+fn render_pagination_controls(state: &DashboardState, total_pages: usize) -> Element<'_, Message> {
+    let current_page = state.current_page;
+
+    // Previous button
+    let prev_btn = if current_page > 0 {
+        button(text("<").size(14))
+            .on_press(Message::PrevPage)
+            .style(iced::widget::button::secondary)
+    } else {
+        button(text("<").size(14)).style(iced::widget::button::secondary)
+    };
+
+    // Next button
+    let next_btn = if current_page + 1 < total_pages {
+        button(text(">").size(14))
+            .on_press(Message::NextPage)
+            .style(iced::widget::button::secondary)
+    } else {
+        button(text(">").size(14)).style(iced::widget::button::secondary)
+    };
+
+    // Page numbers - show up to 7 page buttons with ellipsis
+    let mut page_row = row![prev_btn].spacing(5).align_y(Alignment::Center);
+
+    let pages_to_show = calculate_visible_pages(current_page, total_pages);
+    let mut last_shown: Option<usize> = None;
+
+    for page in pages_to_show {
+        // Add ellipsis if there's a gap
+        if let Some(last) = last_shown {
+            if page > last + 1 {
+                page_row = page_row.push(text("...").size(14));
+            }
+        }
+
+        let page_btn = if page == current_page {
+            button(text(format!("{}", page + 1)).size(14)).style(iced::widget::button::primary)
+        } else {
+            button(text(format!("{}", page + 1)).size(14))
+                .on_press(Message::GoToPage(page))
+                .style(iced::widget::button::secondary)
+        };
+        page_row = page_row.push(page_btn);
+        last_shown = Some(page);
+    }
+
+    page_row = page_row.push(next_btn);
+
+    // Page info
+    let filtered_count = state.filtered_devices().len();
+    let start = state.current_page * state.devices_per_page + 1;
+    let end = ((state.current_page + 1) * state.devices_per_page).min(filtered_count);
+    let info = text(format!("Showing {}-{} of {}", start, end, filtered_count)).size(12);
+
+    row![page_row, info]
+        .spacing(20)
+        .align_y(Alignment::Center)
+        .padding(10)
+        .into()
+}
+
+/// Calculate which page numbers to display.
+fn calculate_visible_pages(current: usize, total: usize) -> Vec<usize> {
+    if total <= 7 {
+        // Show all pages
+        (0..total).collect()
+    } else {
+        // Show first, last, and pages around current
+        let mut pages = Vec::new();
+
+        // Always show first page
+        pages.push(0);
+
+        // Calculate range around current page
+        let start = current.saturating_sub(2).max(1);
+        let end = (current + 3).min(total - 1);
+
+        for page in start..end {
+            if !pages.contains(&page) {
+                pages.push(page);
+            }
+        }
+
+        // Always show last page
+        if !pages.contains(&(total - 1)) {
+            pages.push(total - 1);
+        }
+
+        pages.sort();
+        pages
+    }
 }
 
 /// Render a single device card.
@@ -315,4 +531,123 @@ fn render_device_card(device: &DeviceState) -> Element<'_, Message> {
         .width(Length::Fill)
         .style(iced::widget::button::secondary)
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_state_with_devices(count: usize) -> DashboardState {
+        let mut state = DashboardState::default();
+        for i in 0..count {
+            let id = DeviceId::new(Protocol::Snmp, format!("device{:03}", i));
+            state.devices.insert(id.clone(), DeviceState::new(id));
+        }
+        state
+    }
+
+    #[test]
+    fn test_pagination_total_pages() {
+        let mut state = create_test_state_with_devices(50);
+        state.devices_per_page = 20;
+
+        assert_eq!(state.total_pages(), 3); // 50 / 20 = 2.5, rounds up to 3
+
+        state.devices_per_page = 25;
+        assert_eq!(state.total_pages(), 2); // 50 / 25 = 2
+    }
+
+    #[test]
+    fn test_pagination_empty_state() {
+        let state = DashboardState::default();
+        assert_eq!(state.total_pages(), 1); // Always at least 1 page
+        assert_eq!(state.paginated_devices().len(), 0);
+    }
+
+    #[test]
+    fn test_pagination_next_prev() {
+        let mut state = create_test_state_with_devices(50);
+        state.devices_per_page = 20;
+
+        assert_eq!(state.current_page, 0);
+
+        state.next_page();
+        assert_eq!(state.current_page, 1);
+
+        state.next_page();
+        assert_eq!(state.current_page, 2);
+
+        // Should not go past last page
+        state.next_page();
+        assert_eq!(state.current_page, 2);
+
+        state.prev_page();
+        assert_eq!(state.current_page, 1);
+
+        state.prev_page();
+        assert_eq!(state.current_page, 0);
+
+        // Should not go below 0
+        state.prev_page();
+        assert_eq!(state.current_page, 0);
+    }
+
+    #[test]
+    fn test_pagination_go_to_page() {
+        let mut state = create_test_state_with_devices(100);
+        state.devices_per_page = 20;
+
+        state.go_to_page(3);
+        assert_eq!(state.current_page, 3);
+
+        // Should clamp to max page
+        state.go_to_page(100);
+        assert_eq!(state.current_page, 4); // Last valid page (5 pages total: 0-4)
+    }
+
+    #[test]
+    fn test_paginated_devices_returns_correct_slice() {
+        let mut state = create_test_state_with_devices(50);
+        state.devices_per_page = 20;
+
+        assert_eq!(state.paginated_devices().len(), 20);
+
+        state.current_page = 1;
+        assert_eq!(state.paginated_devices().len(), 20);
+
+        state.current_page = 2;
+        assert_eq!(state.paginated_devices().len(), 10); // Last page has remainder
+    }
+
+    #[test]
+    fn test_search_resets_page() {
+        let mut state = create_test_state_with_devices(50);
+        state.devices_per_page = 20;
+        state.current_page = 2;
+
+        state.set_search_filter("device".to_string());
+        assert_eq!(state.current_page, 0);
+    }
+
+    #[test]
+    fn test_calculate_visible_pages_small() {
+        // With 5 pages, show all
+        let pages = calculate_visible_pages(2, 5);
+        assert_eq!(pages, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_calculate_visible_pages_large() {
+        // With 20 pages, current=0, should show first, nearby, and last
+        let pages = calculate_visible_pages(0, 20);
+        assert!(pages.contains(&0));
+        assert!(pages.contains(&19));
+        assert!(pages.len() <= 7);
+
+        // With 20 pages, current=10, should show first, nearby, and last
+        let pages = calculate_visible_pages(10, 20);
+        assert!(pages.contains(&0));
+        assert!(pages.contains(&10));
+        assert!(pages.contains(&19));
+    }
 }

@@ -25,6 +25,18 @@ pub enum Message {
     /// User toggled protocol filter.
     ToggleProtocolFilter(Protocol),
 
+    /// User changed device search filter.
+    SetDeviceSearchFilter(String),
+
+    /// Go to next page in dashboard.
+    NextPage,
+
+    /// Go to previous page in dashboard.
+    PrevPage,
+
+    /// Go to a specific page in dashboard.
+    GoToPage(usize),
+
     /// User selected a metric to graph.
     SelectMetricForChart(String),
 
@@ -58,6 +70,12 @@ pub enum Message {
 
     /// Set stale threshold.
     SetStaleThreshold(String),
+
+    /// Set max metric history per device.
+    SetMaxHistory(String),
+
+    /// Set max alerts to keep.
+    SetMaxAlerts(String),
 
     /// Save settings.
     SaveSettings,

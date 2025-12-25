@@ -34,12 +34,27 @@ impl Default for ZenohConfig {
     }
 }
 
+/// Log output format.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    /// Human-readable text format (default).
+    #[default]
+    Text,
+    /// Structured JSON format.
+    Json,
+}
+
 /// Common logging configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingConfig {
     /// Log level: "trace", "debug", "info", "warn", "error".
     #[serde(default = "default_log_level")]
     pub level: String,
+
+    /// Log output format: "text" or "json".
+    #[serde(default)]
+    pub format: LogFormat,
 }
 
 fn default_log_level() -> String {
@@ -50,12 +65,13 @@ impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
             level: default_log_level(),
+            format: LogFormat::default(),
         }
     }
 }
 
 /// Base configuration shared by all bridges.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BaseConfig {
     /// Zenoh connection settings.
     #[serde(default)]
@@ -68,16 +84,6 @@ pub struct BaseConfig {
     /// Logging configuration.
     #[serde(default)]
     pub logging: LoggingConfig,
-}
-
-impl Default for BaseConfig {
-    fn default() -> Self {
-        Self {
-            zenoh: ZenohConfig::default(),
-            serialization: Format::default(),
-            logging: LoggingConfig::default(),
-        }
-    }
 }
 
 /// Load a configuration file in JSON5 format.
@@ -141,5 +147,23 @@ mod tests {
         assert!(config.zenoh.connect.is_empty());
         assert_eq!(config.serialization, Format::Json);
         assert_eq!(config.logging.level, "info");
+        assert_eq!(config.logging.format, LogFormat::Text);
+    }
+
+    #[test]
+    fn test_json_logging_format() {
+        let json5 = r#"
+        {
+            logging: {
+                level: "debug",
+                format: "json",
+            },
+        }
+        "#;
+
+        let config: BaseConfig = parse_config(json5).unwrap();
+
+        assert_eq!(config.logging.level, "debug");
+        assert_eq!(config.logging.format, LogFormat::Json);
     }
 }
