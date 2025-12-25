@@ -1,0 +1,148 @@
+{
+  // Zenoh connection settings
+  zenoh: {
+    mode: "peer",                    // "client", "peer", or "router"
+    // connect: ["tcp/localhost:7447"], // Router endpoints (if client mode)
+    serialization: "json",           // "json" or "cbor"
+  },
+
+  // Modbus bridge settings
+  modbus: {
+    // Key expression prefix
+    key_prefix: "zensight/modbus",
+
+    // Devices to poll
+    devices: [
+      // Example: Modbus TCP device (PLC, power meter, etc.)
+      {
+        name: "plc01",
+        connection: {
+          type: "tcp",
+          host: "192.168.1.10",
+          port: 502,                 // Default Modbus TCP port
+        },
+        unit_id: 1,                  // Modbus slave ID (1-247)
+        poll_interval_secs: 10,
+        timeout_ms: 2000,
+        retries: 3,
+
+        // Inline register definitions
+        registers: [
+          // Holding registers (read/write, 16-bit)
+          {
+            type: "holding",
+            address: 0,
+            count: 4,
+            name: "temperature",
+            data_type: "f32",        // 2 registers = 32-bit float
+            scale: 1.0,
+            unit: "°C",
+          },
+          {
+            type: "holding",
+            address: 4,
+            count: 4,
+            name: "pressure",
+            data_type: "f32",
+            scale: 0.01,             // Raw value * 0.01
+            unit: "bar",
+          },
+          // Input registers (read-only, 16-bit)
+          {
+            type: "input",
+            address: 0,
+            count: 1,
+            name: "status_word",
+            data_type: "u16",
+          },
+        ],
+      },
+
+      // Example: Modbus RTU device (serial connection)
+      {
+        name: "sensor01",
+        connection: {
+          type: "rtu",
+          port: "/dev/ttyUSB0",      // Serial port
+          baud_rate: 9600,
+          data_bits: 8,
+          parity: "none",            // "none", "even", or "odd"
+          stop_bits: 1,
+        },
+        unit_id: 5,
+        poll_interval_secs: 5,
+        register_group: "power_meters", // Reference to predefined group
+      },
+    ],
+
+    // Predefined register groups (reusable across devices)
+    register_groups: {
+      power_meters: {
+        registers: [
+          {
+            type: "holding",
+            address: 0,
+            count: 2,
+            name: "voltage",
+            data_type: "f32",
+            unit: "V",
+          },
+          {
+            type: "holding",
+            address: 2,
+            count: 2,
+            name: "current",
+            data_type: "f32",
+            unit: "A",
+          },
+          {
+            type: "holding",
+            address: 4,
+            count: 2,
+            name: "power",
+            data_type: "f32",
+            unit: "W",
+          },
+          {
+            type: "holding",
+            address: 6,
+            count: 2,
+            name: "energy",
+            data_type: "u32",
+            scale: 0.001,            // Wh to kWh
+            unit: "kWh",
+          },
+        ],
+      },
+      digital_io: {
+        registers: [
+          {
+            type: "coil",
+            address: 0,
+            count: 8,
+            name: "outputs",
+          },
+          {
+            type: "discrete",
+            address: 0,
+            count: 8,
+            name: "inputs",
+          },
+        ],
+      },
+    },
+
+    // Optional: Human-readable names for register addresses
+    // Format: "register_type:address": "name"
+    register_names: {
+      "holding:100": "motor_speed",
+      "holding:101": "motor_torque",
+      "input:0": "running_status",
+    },
+  },
+
+  // Logging
+  logging: {
+    level: "info",                   // "trace", "debug", "info", "warn", "error"
+  },
+}

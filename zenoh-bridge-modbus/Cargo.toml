@@ -1,0 +1,46 @@
+[package]
+name = "zenoh-bridge-modbus"
+version = "0.1.0"
+edition = "2024"
+authors = ["Zensight Contributors"]
+description = "Zenoh bridge for Modbus protocol (TCP/RTU)"
+license = "Apache-2.0"
+
+[dependencies]
+zensight-common = { path = "../zensight-common" }
+
+# Async runtime
+tokio = { workspace = true, features = ["full", "net", "sync", "time", "io-util"] }
+tokio-serial = "5.4"
+
+# Modbus protocol
+tokio-modbus = { version = "0.16", default-features = false, features = ["tcp", "rtu"] }
+
+# Zenoh
+zenoh.workspace = true
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+json5.workspace = true
+
+# CLI
+clap = { workspace = true, features = ["derive"] }
+
+# Logging
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Time
+chrono = "0.4"
+
+[[bin]]
+name = "zenoh-bridge-modbus"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
