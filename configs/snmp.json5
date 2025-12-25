@@ -1,0 +1,107 @@
+{
+  // Zenoh connection settings
+  zenoh: {
+    mode: "peer",                      // "client", "peer", or "router"
+    connect: [],                       // Endpoints to connect to (for client mode)
+    // listen: ["tcp/0.0.0.0:7448"],   // Endpoints to listen on (for peer/router)
+  },
+
+  // Serialization format for telemetry
+  serialization: "json",               // "json" or "cbor"
+
+  // SNMP bridge settings
+  snmp: {
+    // Key expression prefix
+    key_prefix: "zensight/snmp",
+
+    // SNMP trap receiver (optional)
+    trap_listener: {
+      enabled: false,
+      bind: "0.0.0.0:162",
+    },
+
+    // Devices to poll
+    devices: [
+      {
+        name: "router01",              // Used in key expressions
+        address: "192.168.1.1:161",    // SNMP agent address
+        community: "public",           // Community string
+        version: "v2c",                // "v1" or "v2c"
+        poll_interval_secs: 30,        // Polling interval
+
+        // Individual OIDs to poll with GET
+        oids: [
+          "1.3.6.1.2.1.1.1.0",         // sysDescr
+          "1.3.6.1.2.1.1.3.0",         // sysUpTime
+          "1.3.6.1.2.1.1.5.0",         // sysName
+        ],
+
+        // OID subtrees to poll with WALK (GETNEXT)
+        walks: [
+          "1.3.6.1.2.1.2.2.1",         // ifTable
+        ],
+      },
+      // Add more devices here
+      // {
+      //   name: "switch01",
+      //   address: "192.168.1.2:161",
+      //   community: "public",
+      //   version: "v2c",
+      //   poll_interval_secs: 60,
+      //   oid_group: "network_interfaces",  // Reference a predefined group
+      // },
+    ],
+
+    // Predefined OID groups (reusable across devices)
+    oid_groups: {
+      system_info: {
+        oids: [
+          "1.3.6.1.2.1.1.1.0",         // sysDescr
+          "1.3.6.1.2.1.1.3.0",         // sysUpTime
+          "1.3.6.1.2.1.1.5.0",         // sysName
+          "1.3.6.1.2.1.1.6.0",         // sysLocation
+          "1.3.6.1.2.1.1.7.0",         // sysServices
+        ],
+        walks: [],
+      },
+      network_interfaces: {
+        oids: [],
+        walks: [
+          "1.3.6.1.2.1.2.2.1",         // ifTable
+        ],
+      },
+    },
+
+    // OID to human-readable name mapping
+    // Use {index} placeholder for table indices
+    oid_names: {
+      "1.3.6.1.2.1.1.1.0": "system/sysDescr",
+      "1.3.6.1.2.1.1.3.0": "system/sysUpTime",
+      "1.3.6.1.2.1.1.4.0": "system/sysContact",
+      "1.3.6.1.2.1.1.5.0": "system/sysName",
+      "1.3.6.1.2.1.1.6.0": "system/sysLocation",
+      "1.3.6.1.2.1.1.7.0": "system/sysServices",
+
+      // Interface table columns
+      "1.3.6.1.2.1.2.2.1.1": "if/{index}/ifIndex",
+      "1.3.6.1.2.1.2.2.1.2": "if/{index}/ifDescr",
+      "1.3.6.1.2.1.2.2.1.3": "if/{index}/ifType",
+      "1.3.6.1.2.1.2.2.1.5": "if/{index}/ifSpeed",
+      "1.3.6.1.2.1.2.2.1.7": "if/{index}/ifAdminStatus",
+      "1.3.6.1.2.1.2.2.1.8": "if/{index}/ifOperStatus",
+      "1.3.6.1.2.1.2.2.1.10": "if/{index}/ifInOctets",
+      "1.3.6.1.2.1.2.2.1.11": "if/{index}/ifInUcastPkts",
+      "1.3.6.1.2.1.2.2.1.13": "if/{index}/ifInDiscards",
+      "1.3.6.1.2.1.2.2.1.14": "if/{index}/ifInErrors",
+      "1.3.6.1.2.1.2.2.1.16": "if/{index}/ifOutOctets",
+      "1.3.6.1.2.1.2.2.1.17": "if/{index}/ifOutUcastPkts",
+      "1.3.6.1.2.1.2.2.1.19": "if/{index}/ifOutDiscards",
+      "1.3.6.1.2.1.2.2.1.20": "if/{index}/ifOutErrors",
+    },
+  },
+
+  // Logging
+  logging: {
+    level: "info",                     // "trace", "debug", "info", "warn", "error"
+  },
+}

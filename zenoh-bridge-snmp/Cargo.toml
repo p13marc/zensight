@@ -11,9 +11,13 @@ path = "src/main.rs"
 
 [dependencies]
 zensight-common.workspace = true
+zenoh.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
 
-# SNMP (to be added when implementing bridge)
-# rasn-snmp = "0.15"
+# SNMP client (async with tokio)
+snmp2 = { version = "0.3", features = ["tokio"] }

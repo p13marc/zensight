@@ -16,16 +16,18 @@
 
 **Total: 19 tests passing**
 
-### Phase 2: SNMP Bridge (zenoh-bridge-snmp) - NOT STARTED
+### Phase 2: SNMP Bridge (zenoh-bridge-snmp) - COMPLETE
 
-| Component | Status |
-|-----------|--------|
-| `zenoh-bridge-snmp/src/main.rs` | Stub only |
-| `zenoh-bridge-snmp/src/config.rs` | Not started |
-| `zenoh-bridge-snmp/src/poller.rs` | Not started |
-| `zenoh-bridge-snmp/src/trap.rs` | Not started |
-| `zenoh-bridge-snmp/src/oid.rs` | Not started |
-| `configs/snmp.json5` | Not started |
+| Component | Status | Tests |
+|-----------|--------|-------|
+| `zenoh-bridge-snmp/src/main.rs` | Done | - |
+| `zenoh-bridge-snmp/src/config.rs` | Done | 2 unit tests |
+| `zenoh-bridge-snmp/src/poller.rs` | Done | - |
+| `zenoh-bridge-snmp/src/trap.rs` | Done | - |
+| `zenoh-bridge-snmp/src/oid.rs` | Done | 4 unit tests |
+| `configs/snmp.json5` | Done | - |
+
+**Total: 6 tests passing**
 
 ### Phase 3: Iced Frontend (zensight) - NOT STARTED
 
@@ -72,8 +74,38 @@
 - Wildcard builders for subscriptions
 
 **Error Handling** (`error.rs`):
-- `Error` enum with variants for Config, Zenoh, JSON, CBOR, IO, KeyExpr
+- `Error` enum with variants for Config, Zenoh, JSON, CBOR, IO, KeyExpr (thiserror)
 - `Result<T>` type alias
+
+### zenoh-bridge-snmp
+
+**Configuration** (`config.rs`):
+- `SnmpBridgeConfig` - root config with Zenoh, serialization, logging, SNMP settings
+- `DeviceConfig` - per-device settings (address, community, version, OIDs)
+- `OidGroup` - reusable OID groups
+- SNMPv1/v2c support (v3 planned)
+
+**OID Utilities** (`oid.rs`):
+- `parse_oid()` - parse dotted string to snmp2::Oid
+- `oid_to_string()` - convert Oid back to string
+- `oid_starts_with()` - check OID prefix for WALK
+- `OidNameMapper` - map OIDs to human-readable names with {index} patterns
+
+**Poller** (`poller.rs`):
+- Per-device async polling loop
+- SNMP GET for individual OIDs
+- SNMP WALK (GETNEXT) for subtrees
+- Publishes `TelemetryPoint` to Zenoh
+
+**Trap Receiver** (`trap.rs`):
+- UDP listener for SNMP traps
+- Basic trap notification publishing (full PDU parsing planned)
+
+**Main** (`main.rs`):
+- CLI with clap (--config flag)
+- Spawns poller task per device
+- Optional trap receiver
+- Graceful shutdown on Ctrl+C
 
 ---
 
@@ -83,18 +115,24 @@
 # Check all crates compile
 cargo check --workspace
 
-# Run zensight-common tests
+# Run all tests
+cargo test --workspace
+
+# Run specific crate tests
 cargo test -p zensight-common
+cargo test -p zenoh-bridge-snmp
 
 # Build release
 cargo build --release --workspace
+
+# Run SNMP bridge
+./target/release/zenoh-bridge-snmp --config configs/snmp.json5
 ```
 
 ---
 
 ## Next Steps
 
-1. Implement `zenoh-bridge-snmp` with SNMP polling and trap receiver
-2. Add example configuration file
-3. Implement `zensight` Iced frontend
-4. Integration testing with real SNMP devices
+1. Implement `zensight` Iced frontend
+2. Integration testing with real SNMP devices
+3. Full SNMP trap PDU parsing
