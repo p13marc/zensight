@@ -2,22 +2,35 @@
 
 A unified observability platform that bridges legacy monitoring protocols into [Zenoh](https://zenoh.io/)'s pub/sub infrastructure.
 
+## Overview
+
+Zensight provides a suite of protocol bridges that collect telemetry from various sources and publish it to Zenoh using a unified data model. A desktop frontend allows real-time visualization of all collected metrics.
+
 ## Components
 
-| Crate | Description |
-|-------|-------------|
-| `zensight` | Iced 0.14 desktop frontend for visualizing telemetry |
-| `zensight-common` | Shared library (telemetry model, Zenoh helpers, config) |
-| `zenoh-bridge-snmp` | SNMP bridge (polling + trap receiver) |
+| Crate | Description | Status |
+|-------|-------------|--------|
+| `zensight` | Iced 0.14 desktop frontend for visualizing telemetry | Complete |
+| `zensight-common` | Shared library (telemetry model, Zenoh helpers, config) | Complete |
+| `zenoh-bridge-snmp` | SNMP bridge (v1/v2c/v3 polling + trap receiver, MIB loading) | Complete |
+| `zenoh-bridge-syslog` | Syslog receiver (RFC 3164/5424, UDP/TCP) | Complete |
+| `zenoh-bridge-netflow` | NetFlow/IPFIX receiver (v5, v7, v9, IPFIX) | Complete |
+| `zenoh-bridge-modbus` | Modbus bridge (TCP/RTU, all register types) | Complete |
+| `zenoh-bridge-sysinfo` | System monitoring (CPU, memory, disk, network) | Complete |
 
 ## Supported Protocols
 
-- **SNMP** (v1/v2c) - Network device monitoring
-- Syslog - Log aggregation *(planned)*
-- gNMI - Streaming telemetry *(planned)*
-- NetFlow/IPFIX - Flow analysis *(planned)*
-- OPC UA - Industrial automation *(planned)*
-- Modbus - Industrial devices *(planned)*
+| Protocol | Description | Key Expression |
+|----------|-------------|----------------|
+| **SNMP** | Network device monitoring (v1/v2c/v3) | `zensight/snmp/<device>/<oid_path>` |
+| **Syslog** | Log aggregation (RFC 3164/5424) | `zensight/syslog/<host>/<facility>/<severity>` |
+| **NetFlow/IPFIX** | Network flow telemetry | `zensight/netflow/<exporter>/<src>/<dst>` |
+| **Modbus** | Industrial device monitoring | `zensight/modbus/<device>/<register_type>/<addr>` |
+| **Sysinfo** | Host system metrics | `zensight/sysinfo/<hostname>/<metric>` |
+
+### Planned Protocols
+- gNMI - Streaming telemetry
+- OPC UA - Industrial automation
 
 ## Key Expression Hierarchy
 
@@ -28,9 +41,15 @@ zensight/<protocol>/<source>/<metric>
 ```
 
 Examples:
-- `zensight/snmp/router01/system/sysUpTime`
-- `zensight/snmp/switch01/if/1/ifInOctets`
-- `zensight/syslog/server01/daemon/warning`
+```
+zensight/snmp/router01/system/sysUpTime
+zensight/snmp/switch01/if/1/ifInOctets
+zensight/syslog/server01/daemon/warning
+zensight/netflow/exporter01/10.0.0.1/10.0.0.2
+zensight/modbus/plc01/holding/temperature
+zensight/sysinfo/server01/cpu/usage
+zensight/sysinfo/server01/memory/used
+```
 
 ## Quick Start
 
@@ -40,10 +59,23 @@ Examples:
 cargo build --release --workspace
 ```
 
-### Run SNMP Bridge
+### Run Bridges
 
 ```bash
+# SNMP bridge - monitor network devices
 ./target/release/zenoh-bridge-snmp --config configs/snmp.json5
+
+# Syslog bridge - collect log messages
+./target/release/zenoh-bridge-syslog --config configs/syslog.json5
+
+# NetFlow bridge - collect flow data
+./target/release/zenoh-bridge-netflow --config configs/netflow.json5
+
+# Modbus bridge - monitor industrial devices
+./target/release/zenoh-bridge-modbus --config configs/modbus.json5
+
+# Sysinfo bridge - monitor local system
+./target/release/zenoh-bridge-sysinfo --config configs/sysinfo.json5
 ```
 
 ### Run Frontend
@@ -54,15 +86,13 @@ cargo build --release --workspace
 
 ## Configuration
 
-Bridges use JSON5 configuration files. Example for SNMP:
+All bridges use JSON5 configuration files. See the `configs/` directory for examples.
+
+### SNMP Bridge
 
 ```json5
 {
-  zenoh: {
-    mode: "peer",
-    connect: ["tcp/localhost:7447"],
-  },
-  serialization: "json",  // or "cbor"
+  zenoh: { mode: "peer" },
   snmp: {
     devices: [
       {
@@ -71,27 +101,111 @@ Bridges use JSON5 configuration files. Example for SNMP:
         community: "public",
         version: "v2c",
         poll_interval_secs: 30,
-        oids: ["1.3.6.1.2.1.1.3.0"],
+        oids: ["1.3.6.1.2.1.1.3.0"],  // sysUpTime
+        walks: ["1.3.6.1.2.1.2.2.1"], // ifTable
       },
     ],
+    trap_listener: { enabled: true, bind: "0.0.0.0:162" },
   },
-  logging: { level: "info" },
 }
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for full configuration reference.
+### Syslog Bridge
+
+```json5
+{
+  zenoh: { mode: "peer" },
+  syslog: {
+    listeners: [
+      { protocol: "udp", bind: "0.0.0.0:514" },
+      { protocol: "tcp", bind: "0.0.0.0:514" },
+    ],
+  },
+}
+```
+
+### NetFlow Bridge
+
+```json5
+{
+  zenoh: { mode: "peer" },
+  netflow: {
+    listeners: [
+      { bind: "0.0.0.0:2055" },  // NetFlow
+      { bind: "0.0.0.0:4739" },  // IPFIX
+    ],
+  },
+}
+```
+
+### Modbus Bridge
+
+```json5
+{
+  zenoh: { mode: "peer" },
+  modbus: {
+    devices: [
+      {
+        name: "plc01",
+        connection: { type: "tcp", host: "192.168.1.10", port: 502 },
+        unit_id: 1,
+        poll_interval_secs: 10,
+        registers: [
+          { type: "holding", address: 0, count: 4, name: "temperature", data_type: "f32" },
+        ],
+      },
+    ],
+  },
+}
+```
+
+### Sysinfo Bridge
+
+```json5
+{
+  zenoh: { mode: "peer" },
+  sysinfo: {
+    hostname: "auto",
+    poll_interval_secs: 5,
+    collect: {
+      cpu: true,
+      memory: true,
+      disk: true,
+      network: true,
+      system: true,
+      processes: false,
+    },
+  },
+}
+```
+
+## Data Model
+
+All bridges emit a common `TelemetryPoint` structure:
+
+```rust
+pub struct TelemetryPoint {
+    pub timestamp: i64,           // Unix epoch milliseconds
+    pub source: String,           // Device/host identifier
+    pub protocol: Protocol,       // snmp, syslog, netflow, modbus, sysinfo
+    pub metric: String,           // Metric name/path
+    pub value: TelemetryValue,    // Counter, Gauge, Text, Boolean, Binary
+    pub labels: HashMap<String, String>,  // Additional context
+}
+```
 
 ## Development
 
 ```bash
-# Run all tests (45 tests)
+# Run all tests (146 tests)
 cargo test --workspace
 
-# Run specific test suites
-cargo test -p zensight-common                    # Unit tests
-cargo test -p zensight-common --test integration # Integration tests
-cargo test -p zensight-common --test zenoh_e2e   # Zenoh E2E tests
-cargo test -p zenoh-bridge-snmp                  # SNMP bridge tests
+# Run specific bridge tests
+cargo test -p zenoh-bridge-snmp      # 25 tests
+cargo test -p zenoh-bridge-syslog    # 26 tests
+cargo test -p zenoh-bridge-netflow   # 8 tests
+cargo test -p zenoh-bridge-modbus    # 11 tests
+cargo test -p zenoh-bridge-sysinfo   # 10 tests
 
 # Check all crates
 cargo check --workspace
@@ -105,20 +219,15 @@ cargo clippy --workspace
 
 ## Test Coverage
 
-| Test Suite | Tests | Description |
-|------------|-------|-------------|
-| zensight-common unit | 14 | Telemetry, serialization, config, keyexpr |
-| zensight-common integration | 10 | Full workflow, value types, key expressions |
-| zensight-common Zenoh E2E | 4 | Pub/sub, CBOR, wildcards, multi-publisher |
-| zenoh-bridge-snmp unit | 6 | Config parsing, OID utilities |
-| zenoh-bridge-snmp integration | 6 | Telemetry encoding, key expressions |
-| Doc tests | 5 | API usage examples |
-
-## Architecture
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design documentation.
-
-See [STATUS.md](STATUS.md) for current development progress.
+| Crate | Tests | Description |
+|-------|-------|-------------|
+| zensight-common | 14 + 10 + 4 + 5 | Unit, integration, E2E, doctests |
+| zensight (frontend) | 13 | Views, alerts, charts, settings |
+| zenoh-bridge-snmp | 19 + 6 | Unit + integration |
+| zenoh-bridge-syslog | 26 | Parser, receiver, config |
+| zenoh-bridge-netflow | 8 | Config, receiver, flow parsing |
+| zenoh-bridge-modbus | 11 | Config, register decoding |
+| zenoh-bridge-sysinfo | 10 | Config, filters, collection |
 
 ## License
 
