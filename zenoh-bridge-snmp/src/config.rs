@@ -85,13 +85,17 @@ pub struct DeviceConfig {
     /// Device address (e.g., "192.168.1.1:161").
     pub address: String,
 
-    /// SNMP community string.
+    /// SNMP community string (for v1/v2c).
     #[serde(default = "default_community")]
     pub community: String,
 
-    /// SNMP version ("v1" or "v2c").
+    /// SNMP version ("v1", "v2c", or "v3").
     #[serde(default = "default_version")]
     pub version: SnmpVersion,
+
+    /// SNMPv3 security settings (required if version is "v3").
+    #[serde(default)]
+    pub security: Option<SnmpV3Security>,
 
     /// Polling interval in seconds.
     #[serde(default = "default_poll_interval")]
@@ -129,12 +133,90 @@ pub enum SnmpVersion {
     V1,
     #[serde(rename = "v2c")]
     V2c,
+    #[serde(rename = "v3")]
+    V3,
 }
 
 impl Default for SnmpVersion {
     fn default() -> Self {
         SnmpVersion::V2c
     }
+}
+
+/// SNMPv3 security configuration (USM - User Security Model).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnmpV3Security {
+    /// SNMPv3 username.
+    pub username: String,
+
+    /// Authentication protocol.
+    #[serde(default)]
+    pub auth_protocol: AuthProtocol,
+
+    /// Authentication password (required if auth_protocol is not None).
+    #[serde(default)]
+    pub auth_password: Option<String>,
+
+    /// Privacy/encryption protocol.
+    #[serde(default)]
+    pub priv_protocol: PrivProtocol,
+
+    /// Privacy password (required if priv_protocol is not None).
+    #[serde(default)]
+    pub priv_password: Option<String>,
+
+    /// Optional pre-configured engine ID (hex string).
+    /// If not provided, will be discovered automatically.
+    #[serde(default)]
+    pub engine_id: Option<String>,
+}
+
+/// SNMPv3 authentication protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AuthProtocol {
+    /// No authentication (noAuthNoPriv).
+    #[default]
+    #[serde(rename = "none")]
+    None,
+    /// MD5 authentication (RFC 3414).
+    #[serde(rename = "MD5")]
+    Md5,
+    /// SHA-1 authentication (RFC 3414).
+    #[serde(rename = "SHA")]
+    Sha1,
+    /// SHA-224 authentication (non-standard).
+    #[serde(rename = "SHA224")]
+    Sha224,
+    /// SHA-256 authentication (non-standard).
+    #[serde(rename = "SHA256")]
+    Sha256,
+    /// SHA-384 authentication (non-standard).
+    #[serde(rename = "SHA384")]
+    Sha384,
+    /// SHA-512 authentication (non-standard).
+    #[serde(rename = "SHA512")]
+    Sha512,
+}
+
+/// SNMPv3 privacy/encryption protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PrivProtocol {
+    /// No encryption (noPriv).
+    #[default]
+    #[serde(rename = "none")]
+    None,
+    /// DES encryption (RFC 3414) - may not be available.
+    #[serde(rename = "DES")]
+    Des,
+    /// AES-128 encryption (RFC 3826).
+    #[serde(rename = "AES")]
+    Aes128,
+    /// AES-192 encryption (non-standard).
+    #[serde(rename = "AES192")]
+    Aes192,
+    /// AES-256 encryption (non-standard).
+    #[serde(rename = "AES256")]
+    Aes256,
 }
 
 /// A group of OIDs that can be referenced by devices.
@@ -256,6 +338,7 @@ mod tests {
             address: "127.0.0.1:161".to_string(),
             community: "public".to_string(),
             version: SnmpVersion::V2c,
+            security: None,
             poll_interval_secs: 30,
             oids: vec!["1.3.6.1.2.1.1.3.0".to_string()],
             walks: vec![],
@@ -267,5 +350,78 @@ mod tests {
 
         let all_walks = device.all_walks(&groups);
         assert_eq!(all_walks.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_snmpv3_config() {
+        let json5 = r#"
+        {
+            zenoh: { mode: "peer" },
+            snmp: {
+                devices: [
+                    {
+                        name: "secure-router",
+                        address: "192.168.1.1:161",
+                        version: "v3",
+                        security: {
+                            username: "admin",
+                            auth_protocol: "SHA256",
+                            auth_password: "authpass123",
+                            priv_protocol: "AES",
+                            priv_password: "privpass456",
+                        },
+                        poll_interval_secs: 60,
+                        oids: ["1.3.6.1.2.1.1.3.0"],
+                    },
+                ],
+            },
+        }
+        "#;
+
+        let config = SnmpBridgeConfig::parse(json5).unwrap();
+
+        assert_eq!(config.snmp.devices.len(), 1);
+        let device = &config.snmp.devices[0];
+        assert_eq!(device.name, "secure-router");
+        assert_eq!(device.version, SnmpVersion::V3);
+
+        let security = device.security.as_ref().unwrap();
+        assert_eq!(security.username, "admin");
+        assert_eq!(security.auth_protocol, AuthProtocol::Sha256);
+        assert_eq!(security.auth_password, Some("authpass123".to_string()));
+        assert_eq!(security.priv_protocol, PrivProtocol::Aes128);
+        assert_eq!(security.priv_password, Some("privpass456".to_string()));
+    }
+
+    #[test]
+    fn test_snmpv3_noauth_config() {
+        let json5 = r#"
+        {
+            zenoh: { mode: "peer" },
+            snmp: {
+                devices: [
+                    {
+                        name: "public-device",
+                        address: "192.168.1.2:161",
+                        version: "v3",
+                        security: {
+                            username: "public",
+                        },
+                        oids: ["1.3.6.1.2.1.1.1.0"],
+                    },
+                ],
+            },
+        }
+        "#;
+
+        let config = SnmpBridgeConfig::parse(json5).unwrap();
+
+        let device = &config.snmp.devices[0];
+        assert_eq!(device.version, SnmpVersion::V3);
+
+        let security = device.security.as_ref().unwrap();
+        assert_eq!(security.username, "public");
+        assert_eq!(security.auth_protocol, AuthProtocol::None);
+        assert_eq!(security.priv_protocol, PrivProtocol::None);
     }
 }

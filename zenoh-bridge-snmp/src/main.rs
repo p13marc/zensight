@@ -54,14 +54,24 @@ async fn main() -> Result<()> {
     let mut tasks = Vec::new();
 
     for device in config.snmp.devices.clone() {
-        let poller = SnmpPoller::new(
-            device,
+        let mut poller = SnmpPoller::new(
+            device.clone(),
             session.clone(),
             &config.snmp.key_prefix,
             &config.snmp.oid_names,
             &config.snmp.oid_groups,
             config.serialization,
         );
+
+        // Initialize poller (required for SNMPv3 to discover engine ID)
+        if let Err(e) = poller.init().await {
+            tracing::error!(
+                device = %device.name,
+                error = %e,
+                "Failed to initialize SNMP poller, skipping device"
+            );
+            continue;
+        }
 
         tasks.push(tokio::spawn(async move {
             poller.run().await;

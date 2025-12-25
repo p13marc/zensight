@@ -19,8 +19,8 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 
-# SNMP client (async with tokio)
-snmp2 = { version = "0.3", features = ["tokio"] }
+# SNMP client (async with tokio, v3 for SNMPv3/USM support)
+snmp2 = { version = "0.4", features = ["tokio", "v3"] }
 
 # SNMP PDU decoding (for trap parsing)
 rasn = "0.22"
