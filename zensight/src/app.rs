@@ -222,6 +222,24 @@ impl ZenSight {
                 }
             }
 
+            Message::AddMetricToChart(metric_name) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.add_metric_to_chart(metric_name);
+                }
+            }
+
+            Message::RemoveMetricFromChart(metric_name) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.remove_metric_from_chart(&metric_name);
+                }
+            }
+
+            Message::ToggleMetricVisibility(metric_name) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.toggle_metric_visibility(&metric_name);
+                }
+            }
+
             Message::SetChartTimeWindow(window) => {
                 if let Some(ref mut device) = self.selected_device {
                     device.set_time_window(window);

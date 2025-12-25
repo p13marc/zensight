@@ -37,11 +37,20 @@ pub enum Message {
     /// Go to a specific page in dashboard.
     GoToPage(usize),
 
-    /// User selected a metric to graph.
+    /// User selected a metric to graph (single-series mode).
     SelectMetricForChart(String),
 
     /// User cleared the chart selection.
     ClearChartSelection,
+
+    /// Add a metric to the comparison chart (multi-series mode).
+    AddMetricToChart(String),
+
+    /// Remove a metric from the comparison chart.
+    RemoveMetricFromChart(String),
+
+    /// Toggle visibility of a metric series in the chart.
+    ToggleMetricVisibility(String),
 
     /// User changed the chart time window.
     SetChartTimeWindow(TimeWindow),

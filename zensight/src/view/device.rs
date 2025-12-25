@@ -97,16 +97,28 @@ impl DeviceDetailState {
             history.remove(0);
         }
 
-        // Update chart if this metric is selected
+        // Update chart if this metric is selected (single-series mode)
         if self.selected_metric.as_ref() == Some(&metric_name)
             && let Some(data_point) = DataPoint::from_telemetry(point.timestamp, &point.value)
         {
             self.chart.push(data_point);
         }
+
+        // Update chart if this metric is in comparison mode (multi-series)
+        if self.chart.has_series(&metric_name)
+            && let Some(data_point) = DataPoint::from_telemetry(point.timestamp, &point.value)
+        {
+            self.chart.push_to_series(&metric_name, data_point);
+        }
     }
 
-    /// Select a metric for charting.
+    /// Select a metric for charting (single-metric mode).
     pub fn select_metric(&mut self, metric_name: String) {
+        // If already in multi-series mode with this metric, just switch to single mode
+        if self.chart.is_multi_series() {
+            self.chart.clear_series();
+        }
+
         self.selected_metric = Some(metric_name.clone());
         self.chart = ChartState::new(&metric_name);
 
@@ -123,6 +135,81 @@ impl DeviceDetailState {
     /// Clear the chart selection.
     pub fn clear_chart_selection(&mut self) {
         self.selected_metric = None;
+        self.chart.clear_series();
+    }
+
+    /// Add a metric to the comparison chart (multi-series mode).
+    pub fn add_metric_to_chart(&mut self, metric_name: String) {
+        // Check if metric is chartable
+        if !self.is_metric_chartable(&metric_name) {
+            return;
+        }
+
+        // If this is the first metric being added in comparison mode,
+        // set a generic title
+        if !self.chart.is_multi_series() && self.selected_metric.is_none() {
+            self.chart = ChartState::new("Metric Comparison");
+        }
+
+        // Clear single-series data when switching to multi-series
+        if self.selected_metric.is_some() && !self.chart.is_multi_series() {
+            // Convert current single metric to a series
+            if let Some(ref current_metric) = self.selected_metric {
+                if let Some(history) = self.history.get(current_metric) {
+                    let data_points: Vec<DataPoint> = history
+                        .iter()
+                        .filter_map(|p| DataPoint::from_telemetry(p.timestamp, &p.value))
+                        .collect();
+                    self.chart
+                        .add_series_with_data(current_metric.clone(), data_points);
+                }
+            }
+            self.selected_metric = None;
+            self.chart.set_data(Vec::new()); // Clear single-series data
+        }
+
+        // Add new series with historical data
+        if let Some(history) = self.history.get(&metric_name) {
+            let data_points: Vec<DataPoint> = history
+                .iter()
+                .filter_map(|p| DataPoint::from_telemetry(p.timestamp, &p.value))
+                .collect();
+            self.chart.add_series_with_data(&metric_name, data_points);
+        } else {
+            self.chart.add_series(&metric_name);
+        }
+    }
+
+    /// Remove a metric from the comparison chart.
+    pub fn remove_metric_from_chart(&mut self, metric_name: &str) {
+        self.chart.remove_series(metric_name);
+
+        // If only one series left, could switch back to single mode (optional)
+        // For now, keep in multi-series mode even with one series
+    }
+
+    /// Toggle visibility of a metric in the comparison chart.
+    pub fn toggle_metric_visibility(&mut self, metric_name: &str) {
+        self.chart.toggle_series_visibility(metric_name);
+    }
+
+    /// Check if a metric is currently in the chart (single or multi-series).
+    pub fn is_metric_in_chart(&self, metric_name: &str) -> bool {
+        if self.chart.is_multi_series() {
+            self.chart.has_series(metric_name)
+        } else {
+            self.selected_metric.as_ref() == Some(&metric_name.to_string())
+        }
+    }
+
+    /// Check if in multi-series (comparison) mode.
+    pub fn is_comparison_mode(&self) -> bool {
+        self.chart.is_multi_series()
+    }
+
+    /// Get the number of metrics in comparison chart.
+    pub fn comparison_count(&self) -> usize {
+        self.chart.series_count()
     }
 
     /// Set the chart time window.
@@ -315,9 +402,11 @@ fn format_value_for_export(value: &TelemetryValue) -> String {
 pub fn device_view(state: &DeviceDetailState) -> Element<'_, Message> {
     let header = render_header(state);
 
-    // If a metric is selected for charting, show the chart
+    // Show chart if a metric is selected (single) or in comparison mode (multi)
     let chart_section = if let Some(ref metric_name) = state.selected_metric {
-        render_chart_section(state, metric_name)
+        render_chart_section(state, Some(metric_name))
+    } else if state.is_comparison_mode() {
+        render_chart_section(state, None)
     } else {
         column![].into()
     };
@@ -380,19 +469,25 @@ fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
 /// Render the chart section.
 fn render_chart_section<'a>(
     state: &'a DeviceDetailState,
-    metric_name: &'a str,
+    metric_name: Option<&'a str>,
 ) -> Element<'a, Message> {
     // Chart header with close button and time window buttons
     let close_button = button(icons::close(IconSize::Small))
         .on_press(Message::ClearChartSelection)
         .style(iced::widget::button::secondary);
 
-    let chart_title = row![
-        icons::chart(IconSize::Medium),
-        text(metric_name.to_string()).size(14)
-    ]
-    .spacing(6)
-    .align_y(Alignment::Center);
+    // Title depends on mode
+    let title_text = if state.is_comparison_mode() {
+        format!("Comparing {} metrics", state.comparison_count())
+    } else if let Some(name) = metric_name {
+        name.to_string()
+    } else {
+        "Chart".to_string()
+    };
+
+    let chart_title = row![icons::chart(IconSize::Medium), text(title_text).size(14)]
+        .spacing(6)
+        .align_y(Alignment::Center);
 
     // Time window buttons
     let time_buttons: Element<'_, Message> = Row::with_children(
@@ -574,18 +669,38 @@ fn render_metric_row(
             text("").into()
         };
 
-    // Chart button (only for numeric types)
-    let chart_button: Element<'static, Message> = if state.is_metric_chartable(name) {
-        let is_selected = state.selected_metric.as_ref() == Some(&name.to_string());
-        let btn_text = if is_selected { "Charted" } else { "Chart" };
-        button(text(btn_text).size(11))
+    // Chart buttons (only for numeric types)
+    let chart_buttons: Element<'static, Message> = if state.is_metric_chartable(name) {
+        let is_in_chart = state.is_metric_in_chart(name);
+        let is_comparison = state.is_comparison_mode();
+
+        // Single chart button - switches to single-metric view
+        let chart_btn = button(text("Chart").size(11))
             .on_press(Message::SelectMetricForChart(name.to_string()))
-            .style(if is_selected {
+            .style(if !is_comparison && is_in_chart {
                 iced::widget::button::primary
             } else {
                 iced::widget::button::secondary
-            })
-            .into()
+            });
+
+        // Compare button - adds/removes from comparison view
+        let compare_btn = if is_comparison && is_in_chart {
+            // Already in comparison - show remove button
+            button(text("−").size(11))
+                .on_press(Message::RemoveMetricFromChart(name.to_string()))
+                .style(iced::widget::button::danger)
+        } else {
+            // Not in comparison or not this metric - show add button
+            button(text("+").size(11))
+                .on_press(Message::AddMetricToChart(name.to_string()))
+                .style(if is_comparison && is_in_chart {
+                    iced::widget::button::primary
+                } else {
+                    iced::widget::button::secondary
+                })
+        };
+
+        row![chart_btn, compare_btn].spacing(4).into()
     } else {
         text("").into()
     };
@@ -596,7 +711,7 @@ fn render_metric_row(
         value,
         type_indicator,
         history_indicator,
-        chart_button,
+        chart_buttons,
         time_text
     ]
     .spacing(15)
