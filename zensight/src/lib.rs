@@ -3,6 +3,7 @@
 //! This library exposes the core components for testing.
 
 pub mod app;
+pub mod demo;
 pub mod message;
 pub mod mock;
 pub mod subscription;

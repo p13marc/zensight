@@ -115,12 +115,23 @@ impl ZenSight {
             AppTheme::Light
         };
 
+        // Create alerts state, with demo rules if in demo mode
+        let mut alerts = AlertsState::new();
+        if demo_mode {
+            use crate::demo::demo_alert_rules;
+            for rule in demo_alert_rules() {
+                alerts.rules.push(rule);
+            }
+            // Set shorter cooldown for demo (10 seconds instead of 60)
+            alerts.alert_cooldown_ms = 10_000;
+        }
+
         let app = Self {
             zenoh_config,
             dashboard,
             selected_device: None,
             settings,
-            alerts: AlertsState::new(),
+            alerts,
             current_view: CurrentView::default(),
             stale_threshold_ms,
             demo_mode,
