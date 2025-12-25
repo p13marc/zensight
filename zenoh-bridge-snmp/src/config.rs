@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-use zensight_common::{Format, LoggingConfig, ZenohConfig};
+use zensight_common::{Format, ZenohConfig};
+
+// Re-export LoggingConfig from the framework for compatibility
+pub use zensight_bridge_framework::LoggingConfig;
 
 /// Root configuration for the SNMP bridge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,6 +273,45 @@ impl SnmpBridgeConfig {
     #[cfg(test)]
     pub fn parse(content: &str) -> zensight_common::Result<Self> {
         zensight_common::parse_config(content)
+    }
+}
+
+impl zensight_bridge_framework::BridgeConfig for SnmpBridgeConfig {
+    fn zenoh(&self) -> &ZenohConfig {
+        &self.zenoh
+    }
+
+    fn logging(&self) -> &LoggingConfig {
+        &self.logging
+    }
+
+    fn key_prefix(&self) -> &str {
+        &self.snmp.key_prefix
+    }
+
+    fn validate(&self) -> zensight_bridge_framework::Result<()> {
+        // Validate that devices have required fields
+        for device in &self.snmp.devices {
+            if device.name.is_empty() {
+                return Err(zensight_bridge_framework::BridgeError::config(
+                    "Device name cannot be empty",
+                ));
+            }
+            if device.address.is_empty() {
+                return Err(zensight_bridge_framework::BridgeError::config(format!(
+                    "Device '{}' has no address",
+                    device.name
+                )));
+            }
+            // Validate SNMPv3 security if specified
+            if device.version == SnmpVersion::V3 && device.security.is_none() {
+                return Err(zensight_bridge_framework::BridgeError::config(format!(
+                    "Device '{}' uses SNMPv3 but has no security configuration",
+                    device.name
+                )));
+            }
+        }
+        Ok(())
     }
 }
 

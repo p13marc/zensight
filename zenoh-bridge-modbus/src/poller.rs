@@ -5,12 +5,13 @@ use crate::config::{
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio_modbus::client::{Context, Reader};
 use tokio_modbus::prelude::*;
 use tracing::{debug, error, info, warn};
 use zenoh::Session;
-use zensight_common::serialization::{encode, Format};
+use zensight_common::serialization::{Format, encode};
 use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
 
 /// Error type for polling operations.
@@ -30,7 +31,7 @@ pub struct ModbusPoller {
     registers: Vec<RegisterConfig>,
     key_prefix: String,
     register_names: HashMap<String, String>,
-    session: Session,
+    session: Arc<Session>,
     format: Format,
 }
 
@@ -39,7 +40,7 @@ impl ModbusPoller {
     pub fn new(
         device: DeviceConfig,
         config: &ModbusConfig,
-        session: Session,
+        session: Arc<Session>,
         format: Format,
     ) -> Self {
         let registers = device.all_registers(&config.register_groups);

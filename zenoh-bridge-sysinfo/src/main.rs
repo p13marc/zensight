@@ -3,119 +3,68 @@
 //! This bridge collects local system metrics (CPU, memory, disk, network)
 //! and publishes them to Zenoh as telemetry.
 
-use anyhow::{Context, Result};
-use clap::Parser;
-use std::path::PathBuf;
-use tracing::info;
+use anyhow::Result;
+use zensight_bridge_framework::{BridgeArgs, BridgeConfig, BridgeRunner, Format};
+
 use zenoh_bridge_sysinfo::collector::SystemCollector;
 use zenoh_bridge_sysinfo::config::SysinfoBridgeConfig;
-use zensight_common::serialization::Format;
-use zensight_common::LoggingConfig;
-
-/// Zenoh bridge for system monitoring.
-#[derive(Parser, Debug)]
-#[command(name = "zenoh-bridge-sysinfo")]
-#[command(about = "Collects system metrics and publishes to Zenoh")]
-#[command(version)]
-struct Args {
-    /// Path to configuration file (JSON5 format).
-    #[arg(short, long, default_value = "sysinfo.json5")]
-    config: PathBuf,
-
-    /// Override log level (trace, debug, info, warn, error).
-    #[arg(long)]
-    log_level: Option<String>,
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    // Parse CLI arguments
+    let args = BridgeArgs::parse_with_default("sysinfo.json5");
 
-    // Load configuration
-    let config = SysinfoBridgeConfig::load_from_file(&args.config)
-        .with_context(|| format!("Failed to load config from {:?}", args.config))?;
-
-    // Initialize logging
-    let log_config = LoggingConfig {
-        level: args
-            .log_level
-            .clone()
-            .unwrap_or_else(|| config.logging.level.clone()),
-    };
-    zensight_common::init_tracing(&log_config)
-        .map_err(|e| anyhow::anyhow!("Failed to init tracing: {}", e))?;
-
-    info!("Starting zenoh-bridge-sysinfo");
-    info!("Config loaded from {:?}", args.config);
+    // Load configuration using the framework's BridgeConfig trait
+    let config = SysinfoBridgeConfig::load(&args.config).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // Resolve hostname
     let hostname = config.get_hostname();
-    info!("Hostname: {}", hostname);
 
-    // Connect to Zenoh
-    info!("Connecting to Zenoh...");
-    let session = zensight_common::connect(&config.zenoh)
+    // Create the bridge runner
+    let runner = BridgeRunner::new_with_args("sysinfo", config, Some(&args))
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to connect to Zenoh: {}", e))?;
-    info!("Connected to Zenoh");
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    // Serialization format
-    let format = Format::Json;
+    // Enable status publishing and set format
+    let runner = runner.with_status_publishing().with_format(Format::Json);
 
-    // Publish bridge status
-    let status_key = format!("{}/@/status", config.sysinfo.key_prefix);
-    let status = serde_json::json!({
-        "bridge": "sysinfo",
-        "version": env!("CARGO_PKG_VERSION"),
-        "hostname": hostname,
-        "collect": {
-            "cpu": config.sysinfo.collect.cpu,
-            "memory": config.sysinfo.collect.memory,
-            "disk": config.sysinfo.collect.disk,
-            "network": config.sysinfo.collect.network,
-            "system": config.sysinfo.collect.system,
-            "processes": config.sysinfo.collect.processes,
-        },
-        "poll_interval_secs": config.sysinfo.poll_interval_secs,
-        "status": "running"
-    });
+    // Get the config and publisher for the collector
+    let sysinfo_config = runner.config().sysinfo.clone();
+    let session = runner.session().clone();
 
-    if let Err(e) = session.put(&status_key, status.to_string()).await {
-        tracing::error!("Failed to publish bridge status: {}", e);
-    }
-
-    info!(
-        "Sysinfo bridge running (prefix: {}, interval: {}s)",
-        config.sysinfo.key_prefix, config.sysinfo.poll_interval_secs
+    tracing::info!(
+        "Sysinfo bridge running (prefix: {}, interval: {}s, hostname: {})",
+        sysinfo_config.key_prefix,
+        sysinfo_config.poll_interval_secs,
+        hostname
     );
 
-    // Start the collector
-    let collector = SystemCollector::new(hostname, config.sysinfo.clone(), session.clone(), format);
+    // Create and spawn the collector
+    let collector = SystemCollector::new(hostname, sysinfo_config, session, Format::Json);
 
-    // Run collector in a task
-    let collector_handle = tokio::spawn(async move {
+    // Spawn the collector task
+    let mut runner = runner;
+    runner.spawn(async move {
         collector.run().await;
     });
 
-    // Wait for shutdown signal
-    tokio::signal::ctrl_c().await?;
-    info!("Received shutdown signal");
-
-    // Cancel collector
-    collector_handle.abort();
-
-    // Publish offline status
-    let status = serde_json::json!({
-        "bridge": "sysinfo",
-        "status": "offline"
+    // Build status metadata
+    let metadata = serde_json::json!({
+        "hostname": runner.config().get_hostname(),
+        "collect": {
+            "cpu": runner.config().sysinfo.collect.cpu,
+            "memory": runner.config().sysinfo.collect.memory,
+            "disk": runner.config().sysinfo.collect.disk,
+            "network": runner.config().sysinfo.collect.network,
+            "system": runner.config().sysinfo.collect.system,
+            "processes": runner.config().sysinfo.collect.processes,
+        },
+        "poll_interval_secs": runner.config().sysinfo.poll_interval_secs,
     });
-    let _ = session.put(&status_key, status.to_string()).await;
 
-    session
-        .close()
+    // Run until Ctrl+C (handles shutdown gracefully)
+    runner
+        .run_with_metadata(Some(metadata))
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to close Zenoh session: {}", e))?;
-    info!("Sysinfo bridge stopped");
-
-    Ok(())
+        .map_err(|e| anyhow::anyhow!("{}", e))
 }

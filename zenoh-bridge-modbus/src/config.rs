@@ -6,6 +6,9 @@ use std::path::Path;
 use thiserror::Error;
 use zensight_common::config::ZenohConfig;
 
+// Re-export LoggingConfig from the framework for compatibility
+pub use zensight_bridge_framework::LoggingConfig;
+
 /// Configuration errors.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -252,37 +255,17 @@ pub enum DataType {
     F32Le,
 }
 
-/// Logging configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoggingConfig {
-    /// Log level: "trace", "debug", "info", "warn", "error"
-    #[serde(default = "default_log_level")]
-    pub level: String,
-}
-
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        Self {
-            level: default_log_level(),
-        }
-    }
-}
-
-fn default_log_level() -> String {
-    "info".to_string()
-}
-
 impl ModbusBridgeConfig {
     /// Load configuration from a JSON5 file.
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path)?;
         let config: ModbusBridgeConfig = json5::from_str(&content)?;
-        config.validate()?;
+        config.validate_config()?;
         Ok(config)
     }
 
     /// Validate the configuration.
-    pub fn validate(&self) -> Result<(), ConfigError> {
+    pub fn validate_config(&self) -> Result<(), ConfigError> {
         if self.modbus.devices.is_empty() {
             return Err(ConfigError::Validation(
                 "At least one device must be configured".to_string(),
@@ -339,6 +322,25 @@ impl ModbusBridgeConfig {
         }
 
         Ok(())
+    }
+}
+
+impl zensight_bridge_framework::BridgeConfig for ModbusBridgeConfig {
+    fn zenoh(&self) -> &ZenohConfig {
+        &self.zenoh
+    }
+
+    fn logging(&self) -> &LoggingConfig {
+        &self.logging
+    }
+
+    fn key_prefix(&self) -> &str {
+        &self.modbus.key_prefix
+    }
+
+    fn validate(&self) -> zensight_bridge_framework::Result<()> {
+        self.validate_config()
+            .map_err(|e| zensight_bridge_framework::BridgeError::config(e.to_string()))
     }
 }
 
@@ -456,7 +458,7 @@ mod tests {
         }"#;
 
         let config: ModbusBridgeConfig = json5::from_str(json).unwrap();
-        config.validate().unwrap();
+        config.validate_config().unwrap();
 
         let device = &config.modbus.devices[0];
         let registers = device.all_registers(&config.modbus.register_groups);
@@ -472,7 +474,7 @@ mod tests {
         }"#;
 
         let config: ModbusBridgeConfig = json5::from_str(json).unwrap();
-        assert!(config.validate().is_err());
+        assert!(config.validate_config().is_err());
     }
 
     #[test]
@@ -490,7 +492,7 @@ mod tests {
         }"#;
 
         let config: ModbusBridgeConfig = json5::from_str(json).unwrap();
-        assert!(config.validate().is_err());
+        assert!(config.validate_config().is_err());
     }
 
     #[test]

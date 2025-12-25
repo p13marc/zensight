@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use zensight_common::config::ZenohConfig;
 
+// Re-export LoggingConfig from the framework for compatibility
+pub use zensight_bridge_framework::LoggingConfig;
+
 /// Complete NetFlow bridge configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetFlowBridgeConfig {
@@ -69,37 +72,17 @@ fn default_max_packet_size() -> usize {
     65535
 }
 
-/// Logging configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoggingConfig {
-    /// Log level.
-    #[serde(default = "default_log_level")]
-    pub level: String,
-}
-
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        Self {
-            level: default_log_level(),
-        }
-    }
-}
-
-fn default_log_level() -> String {
-    "info".to_string()
-}
-
 impl NetFlowBridgeConfig {
     /// Load configuration from a JSON5 file.
     pub fn load_from_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path.as_ref())?;
         let config: Self = json5::from_str(&content)?;
-        config.validate()?;
+        config.validate_config()?;
         Ok(config)
     }
 
     /// Validate the configuration.
-    pub fn validate(&self) -> anyhow::Result<()> {
+    pub fn validate_config(&self) -> anyhow::Result<()> {
         if self.netflow.listeners.is_empty() {
             anyhow::bail!("At least one listener must be configured");
         }
@@ -118,6 +101,25 @@ impl NetFlowBridgeConfig {
         }
 
         Ok(())
+    }
+}
+
+impl zensight_bridge_framework::BridgeConfig for NetFlowBridgeConfig {
+    fn zenoh(&self) -> &ZenohConfig {
+        &self.zenoh
+    }
+
+    fn logging(&self) -> &LoggingConfig {
+        &self.logging
+    }
+
+    fn key_prefix(&self) -> &str {
+        &self.netflow.key_prefix
+    }
+
+    fn validate(&self) -> zensight_bridge_framework::Result<()> {
+        self.validate_config()
+            .map_err(|e| zensight_bridge_framework::BridgeError::config(e.to_string()))
     }
 }
 
@@ -207,7 +209,7 @@ mod tests {
         }"#;
 
         let config: NetFlowBridgeConfig = json5::from_str(json).unwrap();
-        assert!(config.validate().is_err());
+        assert!(config.validate_config().is_err());
     }
 
     #[test]
@@ -222,6 +224,6 @@ mod tests {
         }"#;
 
         let config: NetFlowBridgeConfig = json5::from_str(json).unwrap();
-        assert!(config.validate().is_err());
+        assert!(config.validate_config().is_err());
     }
 }

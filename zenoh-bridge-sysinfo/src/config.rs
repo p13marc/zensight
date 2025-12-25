@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
-use zensight_common::config::ZenohConfig;
+use zensight_bridge_framework::{BridgeConfig, BridgeError, ZenohConfig};
 
 /// Configuration errors.
 #[derive(Debug, Error)]
@@ -162,25 +162,8 @@ pub struct DiskConfig {
     pub exclude_pseudo: bool,
 }
 
-/// Logging configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoggingConfig {
-    /// Log level: "trace", "debug", "info", "warn", "error".
-    #[serde(default = "default_log_level")]
-    pub level: String,
-}
-
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        Self {
-            level: default_log_level(),
-        }
-    }
-}
-
-fn default_log_level() -> String {
-    "info".to_string()
-}
+// Re-export LoggingConfig from the framework (they're compatible)
+pub use zensight_bridge_framework::LoggingConfig;
 
 impl SysinfoBridgeConfig {
     /// Load configuration from a JSON5 file.
@@ -226,6 +209,26 @@ impl SysinfoBridgeConfig {
         } else {
             self.sysinfo.hostname.clone()
         }
+    }
+}
+
+/// Implement BridgeConfig trait for framework integration.
+impl BridgeConfig for SysinfoBridgeConfig {
+    fn zenoh(&self) -> &ZenohConfig {
+        &self.zenoh
+    }
+
+    fn logging(&self) -> &LoggingConfig {
+        &self.logging
+    }
+
+    fn key_prefix(&self) -> &str {
+        &self.sysinfo.key_prefix
+    }
+
+    fn validate(&self) -> zensight_bridge_framework::Result<()> {
+        // Call our existing validate method and convert the error
+        Self::validate(self).map_err(|e| BridgeError::validation(e.to_string()))
     }
 }
 

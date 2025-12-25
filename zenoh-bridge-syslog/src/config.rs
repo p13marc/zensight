@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use zensight_common::config::ZenohConfig;
 
+// Re-export LoggingConfig from the framework for compatibility
+pub use zensight_bridge_framework::LoggingConfig;
+
 /// Complete syslog bridge configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyslogBridgeConfig {
@@ -93,37 +96,17 @@ impl std::fmt::Display for ListenerProtocol {
     }
 }
 
-/// Logging configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoggingConfig {
-    /// Log level.
-    #[serde(default = "default_log_level")]
-    pub level: String,
-}
-
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        Self {
-            level: default_log_level(),
-        }
-    }
-}
-
-fn default_log_level() -> String {
-    "info".to_string()
-}
-
 impl SyslogBridgeConfig {
     /// Load configuration from a JSON5 file.
     pub fn load_from_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path.as_ref())?;
         let config: Self = json5::from_str(&content)?;
-        config.validate()?;
+        config.validate_config()?;
         Ok(config)
     }
 
     /// Validate the configuration.
-    pub fn validate(&self) -> anyhow::Result<()> {
+    pub fn validate_config(&self) -> anyhow::Result<()> {
         if self.syslog.listeners.is_empty() {
             anyhow::bail!("At least one listener must be configured");
         }
@@ -143,6 +126,25 @@ impl SyslogBridgeConfig {
         }
 
         Ok(())
+    }
+}
+
+impl zensight_bridge_framework::BridgeConfig for SyslogBridgeConfig {
+    fn zenoh(&self) -> &ZenohConfig {
+        &self.zenoh
+    }
+
+    fn logging(&self) -> &LoggingConfig {
+        &self.logging
+    }
+
+    fn key_prefix(&self) -> &str {
+        &self.syslog.key_prefix
+    }
+
+    fn validate(&self) -> zensight_bridge_framework::Result<()> {
+        self.validate_config()
+            .map_err(|e| zensight_bridge_framework::BridgeError::config(e.to_string()))
     }
 }
 
@@ -230,7 +232,7 @@ mod tests {
         }"#;
 
         let config: SyslogBridgeConfig = json5::from_str(json).unwrap();
-        assert!(config.validate().is_err());
+        assert!(config.validate_config().is_err());
     }
 
     #[test]
@@ -245,6 +247,6 @@ mod tests {
         }"#;
 
         let config: SyslogBridgeConfig = json5::from_str(json).unwrap();
-        assert!(config.validate().is_err());
+        assert!(config.validate_config().is_err());
     }
 }

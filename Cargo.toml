@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "zensight",
     "zensight-common",
+    "zensight-bridge-framework",
     "zenoh-bridge-snmp",
     "zenoh-bridge-syslog",
     "zenoh-bridge-netflow",
@@ -48,3 +49,4 @@ dirs = "5"
 
 # Internal crates
 zensight-common = { path = "zensight-common" }
+zensight-bridge-framework = { path = "zensight-bridge-framework" }

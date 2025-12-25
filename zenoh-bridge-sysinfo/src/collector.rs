@@ -2,6 +2,7 @@
 
 use crate::config::SysinfoConfig;
 use std::collections::HashMap;
+use std::sync::Arc;
 use sysinfo::{Disks, Networks, System};
 use tracing::{debug, warn};
 use zenoh::Session;
@@ -16,7 +17,7 @@ pub struct SystemCollector {
     hostname: String,
     key_prefix: String,
     config: SysinfoConfig,
-    session: Session,
+    session: Arc<Session>,
     format: Format,
     /// Previous network stats for calculating rates
     prev_network: HashMap<String, (u64, u64)>,
@@ -24,7 +25,12 @@ pub struct SystemCollector {
 
 impl SystemCollector {
     /// Create a new system collector.
-    pub fn new(hostname: String, config: SysinfoConfig, session: Session, format: Format) -> Self {
+    pub fn new(
+        hostname: String,
+        config: SysinfoConfig,
+        session: Arc<Session>,
+        format: Format,
+    ) -> Self {
         Self {
             system: System::new_all(),
             disks: Disks::new_with_refreshed_list(),

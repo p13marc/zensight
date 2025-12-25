@@ -3,6 +3,9 @@
 use serde::{Deserialize, Serialize};
 use zensight_common::ZenohConfig;
 
+// Re-export LoggingConfig from the framework for compatibility
+pub use zensight_bridge_framework::LoggingConfig;
+
 /// Top-level configuration for the gNMI bridge
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GnmiConfig {
@@ -156,22 +159,6 @@ pub enum SerializationFormat {
     Cbor,
 }
 
-/// Logging configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoggingConfig {
-    /// Log level
-    #[serde(default = "default_log_level")]
-    pub level: String,
-}
-
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        Self {
-            level: default_log_level(),
-        }
-    }
-}
-
 fn default_key_prefix() -> String {
     "zensight/gnmi".to_string()
 }
@@ -180,16 +167,48 @@ fn default_sample_interval() -> u64 {
     10000 // 10 seconds
 }
 
-fn default_log_level() -> String {
-    "info".to_string()
-}
-
 impl GnmiConfig {
     /// Load configuration from a JSON5 file
-    pub fn load_from_file(path: &str) -> anyhow::Result<Self> {
+    pub fn load_from_file(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let config: Self = json5::from_str(&content)?;
         Ok(config)
+    }
+}
+
+impl zensight_bridge_framework::BridgeConfig for GnmiConfig {
+    fn zenoh(&self) -> &ZenohConfig {
+        &self.zenoh
+    }
+
+    fn logging(&self) -> &LoggingConfig {
+        &self.logging
+    }
+
+    fn key_prefix(&self) -> &str {
+        &self.gnmi.key_prefix
+    }
+
+    fn validate(&self) -> zensight_bridge_framework::Result<()> {
+        if self.gnmi.targets.is_empty() {
+            return Err(zensight_bridge_framework::BridgeError::config(
+                "At least one target must be configured",
+            ));
+        }
+        for target in &self.gnmi.targets {
+            if target.name.is_empty() {
+                return Err(zensight_bridge_framework::BridgeError::config(
+                    "Target name cannot be empty",
+                ));
+            }
+            if target.address.is_empty() {
+                return Err(zensight_bridge_framework::BridgeError::config(format!(
+                    "Target '{}' has no address",
+                    target.name
+                )));
+            }
+        }
+        Ok(())
     }
 }
 

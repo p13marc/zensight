@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 zensight-common.workspace = true
+zensight-bridge-framework.workspace = true
 zenoh.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -8,6 +8,7 @@ license = "Apache-2.0"
 
 [dependencies]
 zensight-common = { path = "../zensight-common" }
+zensight-bridge-framework = { path = "../zensight-bridge-framework" }
 
 # System information
 sysinfo = "0.33"

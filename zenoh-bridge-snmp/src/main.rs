@@ -1,64 +1,53 @@
+//! Zenoh bridge for SNMP telemetry.
+//!
+//! This bridge polls SNMP devices and publishes telemetry to Zenoh.
+
 mod config;
 mod mib;
 mod oid;
 mod poller;
 mod trap;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use clap::Parser;
-use tokio::signal;
-
-use zensight_common::{connect, init_tracing};
+use anyhow::Result;
+use zensight_bridge_framework::{BridgeArgs, BridgeRunner};
 
 use crate::config::SnmpBridgeConfig;
 use crate::mib::MibResolver;
 use crate::poller::SnmpPoller;
 use crate::trap::TrapReceiver;
 
-/// Zenoh bridge for SNMP telemetry.
-#[derive(Parser, Debug)]
-#[command(name = "zenoh-bridge-snmp")]
-#[command(about = "Bridge SNMP telemetry to Zenoh", long_about = None)]
-struct Args {
-    /// Path to the configuration file (JSON5 format).
-    #[arg(short, long, default_value = "snmp.json5")]
-    config: PathBuf,
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    // Parse CLI arguments
+    let args = BridgeArgs::parse_with_default("snmp.json5");
 
-    // Load configuration
-    let config = SnmpBridgeConfig::load(&args.config)
-        .with_context(|| format!("Failed to load config from {:?}", args.config))?;
+    // Load configuration using the framework's BridgeConfig trait
+    let config = SnmpBridgeConfig::load(&args.config).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    // Initialize tracing
-    init_tracing(&config.logging).context("Failed to initialize tracing")?;
+    // Create the bridge runner
+    let runner = BridgeRunner::new_with_args("snmp", config, Some(&args))
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    tracing::info!(
-        config = ?args.config,
-        devices = config.snmp.devices.len(),
-        "Starting zenoh-bridge-snmp"
-    );
+    // Enable status publishing
+    let mut runner = runner.with_status_publishing();
 
-    // Connect to Zenoh
-    let session = Arc::new(
-        connect(&config.zenoh)
-            .await
-            .context("Failed to connect to Zenoh")?,
-    );
+    // Get session for setting up pollers
+    let session = runner.session().clone();
+
+    // Clone config data we need before spawning tasks
+    let snmp_config = runner.config().snmp.clone();
+    let serialization = runner.config().serialization;
 
     // Initialize MIB resolver
     let mut mib_resolver = MibResolver::new();
 
-    if config.snmp.mib.load_builtin {
+    if snmp_config.mib.load_builtin {
         mib_resolver
             .load_builtin_mibs()
-            .context("Failed to load built-in MIBs")?;
+            .map_err(|e| anyhow::anyhow!("Failed to load built-in MIBs: {}", e))?;
         tracing::info!(
             modules = ?mib_resolver.loaded_modules(),
             count = mib_resolver.mapping_count(),
@@ -67,7 +56,7 @@ async fn main() -> Result<()> {
     }
 
     // Load additional MIB files
-    for mib_file in &config.snmp.mib.files {
+    for mib_file in &snmp_config.mib.files {
         if let Err(e) = mib_resolver.load_file(mib_file) {
             tracing::warn!(file = %mib_file, error = %e, "Failed to load MIB file");
         } else {
@@ -76,10 +65,10 @@ async fn main() -> Result<()> {
     }
 
     // Add custom OID mappings from config
-    if !config.snmp.oid_names.is_empty() {
-        mib_resolver.add_custom_mappings(&config.snmp.oid_names);
+    if !snmp_config.oid_names.is_empty() {
+        mib_resolver.add_custom_mappings(&snmp_config.oid_names);
         tracing::info!(
-            count = config.snmp.oid_names.len(),
+            count = snmp_config.oid_names.len(),
             "Added custom OID mappings"
         );
     }
@@ -87,16 +76,14 @@ async fn main() -> Result<()> {
     let mib_resolver = Arc::new(mib_resolver);
 
     // Spawn device pollers
-    let mut tasks = Vec::new();
-
-    for device in config.snmp.devices.clone() {
+    for device in snmp_config.devices.clone() {
         let mut poller = SnmpPoller::new(
             device.clone(),
             session.clone(),
-            &config.snmp.key_prefix,
+            &snmp_config.key_prefix,
             mib_resolver.clone(),
-            &config.snmp.oid_groups,
-            config.serialization,
+            &snmp_config.oid_groups,
+            serialization,
         );
 
         // Initialize poller (required for SNMPv3 to discover engine ID)
@@ -109,46 +96,38 @@ async fn main() -> Result<()> {
             continue;
         }
 
-        tasks.push(tokio::spawn(async move {
+        runner.spawn(async move {
             poller.run().await;
-        }));
+        });
     }
 
     // Spawn trap receiver if enabled
-    if config.snmp.trap_listener.enabled {
+    if snmp_config.trap_listener.enabled {
         let trap_receiver = TrapReceiver::new(
-            &config.snmp.trap_listener.bind,
+            &snmp_config.trap_listener.bind,
             session.clone(),
-            &config.snmp.key_prefix,
+            &snmp_config.key_prefix,
             mib_resolver.clone(),
-            config.serialization,
+            serialization,
         );
 
-        tasks.push(tokio::spawn(async move {
+        runner.spawn(async move {
             if let Err(e) = trap_receiver.run().await {
                 tracing::error!(error = %e, "Trap receiver failed");
             }
-        }));
+        });
     }
 
-    tracing::info!("Bridge running. Press Ctrl+C to stop.");
+    // Build status metadata
+    let metadata = serde_json::json!({
+        "devices": snmp_config.devices.iter().map(|d| &d.name).collect::<Vec<_>>(),
+        "trap_listener": snmp_config.trap_listener.enabled,
+        "mib_modules": mib_resolver.loaded_modules(),
+    });
 
-    // Wait for shutdown signal
-    signal::ctrl_c().await?;
-
-    tracing::info!("Shutting down...");
-
-    // Abort all tasks
-    for task in tasks {
-        task.abort();
-    }
-
-    // Close Zenoh session
-    if let Err(e) = session.close().await {
-        tracing::warn!(error = %e, "Error closing Zenoh session");
-    }
-
-    tracing::info!("Goodbye!");
-
-    Ok(())
+    // Run until Ctrl+C (handles shutdown gracefully)
+    runner
+        .run_with_metadata(Some(metadata))
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))
 }
