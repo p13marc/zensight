@@ -113,6 +113,53 @@ impl TopologyState {
             self.layout_stable = false;
             self.cache.clear();
         }
+
+        // Regenerate edges to reflect current network activity
+        if self.nodes.len() >= 2 {
+            self.generate_edges();
+        }
+    }
+
+    /// Generate edges between nodes.
+    /// Since sysinfo doesn't provide flow data, we create edges between
+    /// nodes that have network activity (simulating a mesh network).
+    fn generate_edges(&mut self) {
+        // Clear existing edges
+        self.edges.clear();
+
+        // Get nodes with network activity
+        let active_nodes: Vec<_> = self
+            .nodes
+            .values()
+            .filter(|n| n.network_rx.is_some() || n.network_tx.is_some())
+            .map(|n| n.id.clone())
+            .collect();
+
+        // Create edges between active nodes (mesh topology for demo)
+        for (i, from) in active_nodes.iter().enumerate() {
+            for to in active_nodes.iter().skip(i + 1) {
+                // Calculate bandwidth as average of both nodes' network I/O
+                let from_node = &self.nodes[from];
+                let to_node = &self.nodes[to];
+
+                let from_bytes =
+                    from_node.network_rx.unwrap_or(0) + from_node.network_tx.unwrap_or(0);
+                let to_bytes = to_node.network_rx.unwrap_or(0) + to_node.network_tx.unwrap_or(0);
+                let avg_bytes = (from_bytes + to_bytes) / 2;
+
+                self.edges.push(Edge {
+                    from: from.clone(),
+                    to: to.clone(),
+                    bytes: avg_bytes,
+                    packets: 0,
+                    protocol: Some("tcp".to_string()),
+                    last_seen: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0),
+                });
+            }
+        }
     }
 
     /// Select a node by ID.
