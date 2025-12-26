@@ -90,6 +90,7 @@ zensight/                    # Workspace root
 ├── zensight-common/         # Shared library
 │   └── src/
 │       ├── telemetry.rs     # TelemetryPoint, Protocol
+│       ├── health.rs        # DeviceStatus, HealthSnapshot, DeviceLiveness
 │       ├── config.rs        # JSON5 config loading
 │       ├── session.rs       # Zenoh session helpers
 │       ├── keyexpr.rs       # Key expression builders
@@ -130,6 +131,31 @@ zensight/modbus/plc01/holding/temperature
 zensight/sysinfo/server01/cpu/usage
 zensight/gnmi/router01/interfaces/interface[name=eth0]/state/counters
 ```
+
+### Health & Liveness Data
+
+Bridges also publish health/liveness metadata:
+
+```
+zensight/<protocol>/@/health              # Bridge health snapshots
+zensight/<protocol>/@/devices/*/liveness  # Per-device liveness status
+zensight/<protocol>/@/errors              # Error reports
+zensight/_meta/bridges/*                  # Bridge registration info
+zensight/_meta/correlation/*              # Cross-bridge device correlation
+```
+
+### Device Status Model
+
+Devices display a 4-color status based on bridge liveness reports:
+
+| Status | Color | Meaning |
+|--------|-------|---------|
+| Online | Green | Device responding normally |
+| Degraded | Orange | Device responding with issues (high latency, partial failures) |
+| Offline | Red | Device not responding |
+| Unknown | Gray | No liveness data received yet |
+
+The frontend combines local staleness detection (no data received) with bridge-reported status to determine the effective display status.
 
 ## UI Testing
 
@@ -217,11 +243,27 @@ let protocol_icon = icons::protocol_icon::<Message>(Protocol::Snmp, IconSize::Sm
 ### View State Pattern
 
 Each view has its own state struct:
-- `DashboardState` - Device list, connection status
+- `DashboardState` - Device list, connection status, bridge health
 - `DeviceDetailState` - Selected device metrics, chart data
 - `AlertsState` - Alert rules, triggered alerts
 - `SettingsState` - Zenoh connection settings
 - `TopologyState` - Network topology graph, nodes, edges, layout
+
+### Bridge Health Summary
+
+The dashboard displays a health summary bar showing all connected bridges with:
+- Bridge name and status (healthy/degraded/unhealthy)
+- Device counts (total, responding, failed)
+- Last poll duration
+- Error count in the last hour
+
+### Demo Mode
+
+Run with `--demo` flag to simulate a full environment without real bridges:
+- Generates realistic telemetry from mock devices (routers, servers, PLCs)
+- Simulates periodic anomalies (CPU spikes, interface down, memory pressure)
+- Publishes health snapshots and liveness updates reflecting device conditions
+- Useful for UI development and demonstrations
 
 ### Network Topology View
 
