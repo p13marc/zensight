@@ -1,9 +1,18 @@
 //! SVG icons for the ZenSight UI.
 //!
 //! All icons are embedded at compile time using `include_bytes!`.
+//!
+//! Two types of icons are available:
+//! - Static icons: Standard SVG icons for general use
+//! - Animated icons: SVG icons that animate color on hover (for use in buttons)
 
-use iced::widget::svg::{Handle, Svg};
+use iced::widget::svg::Handle;
 use iced::{Element, Length};
+
+// Use iced_anim's animated SVG for hover effects
+use iced_anim::widget::svg::Svg as AnimatedSvg;
+// Keep standard SVG for static icons
+use iced::widget::svg::Svg;
 
 /// Icon size presets.
 #[derive(Debug, Clone, Copy, Default)]
@@ -34,6 +43,19 @@ impl IconSize {
 fn svg_icon<Message: 'static>(data: &'static [u8], size: IconSize) -> Element<'static, Message> {
     let handle = Handle::from_memory(data);
     Svg::new(handle)
+        .width(Length::Fixed(size.pixels()))
+        .height(Length::Fixed(size.pixels()))
+        .into()
+}
+
+/// Create an animated SVG element from raw bytes.
+/// Animated icons smoothly transition colors on hover - ideal for use in buttons.
+fn animated_svg_icon<Message: 'static>(
+    data: &'static [u8],
+    size: IconSize,
+) -> Element<'static, Message> {
+    let handle = Handle::from_memory(data);
+    AnimatedSvg::new(handle)
         .width(Length::Fixed(size.pixels()))
         .height(Length::Fixed(size.pixels()))
         .into()
@@ -96,14 +118,14 @@ pub fn close<Message: 'static>(size: IconSize) -> Element<'static, Message> {
     svg_icon(include_bytes!("close.svg"), size)
 }
 
-/// Settings/gear icon.
+/// Settings/gear icon (animated for smooth hover transitions).
 pub fn settings<Message: 'static>(size: IconSize) -> Element<'static, Message> {
-    svg_icon(include_bytes!("settings.svg"), size)
+    animated_svg_icon(include_bytes!("settings.svg"), size)
 }
 
-/// Alert/warning triangle icon.
+/// Alert/warning triangle icon (animated for smooth hover transitions).
 pub fn alert<Message: 'static>(size: IconSize) -> Element<'static, Message> {
-    svg_icon(include_bytes!("alert.svg"), size)
+    animated_svg_icon(include_bytes!("alert.svg"), size)
 }
 
 /// Info icon (circle with "i").
@@ -121,19 +143,19 @@ pub fn export<Message: 'static>(size: IconSize) -> Element<'static, Message> {
     svg_icon(include_bytes!("export.svg"), size)
 }
 
-/// Edit/pencil icon.
+/// Edit/pencil icon (animated for smooth hover transitions).
 pub fn edit<Message: 'static>(size: IconSize) -> Element<'static, Message> {
-    svg_icon(include_bytes!("edit.svg"), size)
+    animated_svg_icon(include_bytes!("edit.svg"), size)
 }
 
-/// Checkmark icon (green).
+/// Checkmark icon (green, animated for smooth hover transitions).
 pub fn check<Message: 'static>(size: IconSize) -> Element<'static, Message> {
-    svg_icon(include_bytes!("check.svg"), size)
+    animated_svg_icon(include_bytes!("check.svg"), size)
 }
 
-/// Trash/delete icon.
+/// Trash/delete icon (animated for smooth hover transitions).
 pub fn trash<Message: 'static>(size: IconSize) -> Element<'static, Message> {
-    svg_icon(include_bytes!("trash.svg"), size)
+    animated_svg_icon(include_bytes!("trash.svg"), size)
 }
 
 /// Search/magnifying glass icon.
@@ -219,14 +241,14 @@ pub fn protocol_icon<Message: 'static>(
 // Theme Icons
 // ============================================================================
 
-/// Sun icon (light theme indicator).
+/// Sun icon (light theme indicator, animated for smooth hover transitions).
 pub fn sun<Message: 'static>(size: IconSize) -> Element<'static, Message> {
-    svg_icon(include_bytes!("sun.svg"), size)
+    animated_svg_icon(include_bytes!("sun.svg"), size)
 }
 
-/// Moon icon (dark theme indicator).
+/// Moon icon (dark theme indicator, animated for smooth hover transitions).
 pub fn moon<Message: 'static>(size: IconSize) -> Element<'static, Message> {
-    svg_icon(include_bytes!("moon.svg"), size)
+    animated_svg_icon(include_bytes!("moon.svg"), size)
 }
 
 // ============================================================================
@@ -248,9 +270,9 @@ pub fn disk<Message: 'static>(size: IconSize) -> Element<'static, Message> {
     svg_icon(include_bytes!("disk.svg"), size)
 }
 
-/// Network/topology icon.
+/// Network/topology icon (animated for smooth hover transitions).
 pub fn network<Message: 'static>(size: IconSize) -> Element<'static, Message> {
-    svg_icon(include_bytes!("network.svg"), size)
+    animated_svg_icon(include_bytes!("network.svg"), size)
 }
 
 /// Log/document icon.
