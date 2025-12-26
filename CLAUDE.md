@@ -29,11 +29,11 @@ cargo run -p zenoh-bridge-snmp --release -- --config configs/snmp.json5
 ## Testing
 
 ```bash
-# Run all tests (187 total)
+# Run all tests
 cargo test --workspace
 
 # Run specific crate tests
-cargo test -p zensight              # 32 tests (23 unit + 9 UI)
+cargo test -p zensight              # 126 tests (104 unit + 22 UI)
 cargo test -p zensight-common       # 33 tests
 cargo test -p zenoh-bridge-snmp     # 25 tests
 cargo test -p zenoh-bridge-syslog   # 52 tests
@@ -78,9 +78,13 @@ zensight/                    # Workspace root
 │   │       ├── device.rs    # Device detail view
 │   │       ├── alerts.rs    # Alerts management
 │   │       ├── settings.rs  # Settings page
+│   │       ├── topology/    # Network topology visualization
+│   │       │   ├── mod.rs   # TopologyState, node info panel
+│   │       │   ├── graph.rs # Canvas-based graph rendering
+│   │       │   └── layout.rs# Force-directed layout algorithm
 │   │       ├── chart.rs     # Time-series charts
 │   │       ├── formatting.rs# Value formatting utilities
-│   │       └── icons/       # SVG icons (24 files)
+│   │       └── icons/       # SVG icons
 │   └── tests/
 │       └── ui_tests.rs      # Simulator-based UI tests
 ├── zensight-common/         # Shared library
@@ -217,6 +221,16 @@ Each view has its own state struct:
 - `DeviceDetailState` - Selected device metrics, chart data
 - `AlertsState` - Alert rules, triggered alerts
 - `SettingsState` - Zenoh connection settings
+- `TopologyState` - Network topology graph, nodes, edges, layout
+
+### Network Topology View
+
+The topology view (`view/topology/`) displays host interconnections as an interactive graph:
+- Force-directed layout algorithm positions nodes automatically
+- Nodes represent sysinfo hosts with CPU, memory, network metrics
+- Edges show network connections with bandwidth-based thickness
+- Click nodes to see info panel, "View Details" to navigate to device view
+- Supports zoom, pan, search, and manual node positioning
 
 ## Development Notes
 
