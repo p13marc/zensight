@@ -15,7 +15,7 @@ use crate::view::formatting::{format_timestamp, format_value};
 use crate::view::icons::{self, IconSize};
 
 /// Alert rule definition.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AlertRule {
     /// Unique rule ID.
     pub id: u32,
@@ -97,7 +97,7 @@ impl AlertRule {
 }
 
 /// Alert severity levels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Severity {
     /// Informational alert.
     Info,
@@ -138,7 +138,7 @@ impl std::fmt::Display for Severity {
 }
 
 /// Comparison operators for alert rules.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ComparisonOp {
     #[default]
     GreaterThan,

@@ -136,12 +136,17 @@ impl ZenSight {
             AppTheme::Light
         };
 
-        // Create alerts state with configured max, with demo rules if in demo mode
+        // Create alerts state with configured max
         let mut alerts = AlertsState::with_max_alerts(persistent.max_alerts);
+        // Load saved alert rules
+        alerts.rules = persistent.alert_rules.clone();
         if demo_mode {
             use crate::demo::demo_alert_rules;
-            for rule in demo_alert_rules() {
-                alerts.rules.push(rule);
+            // Add demo rules if none are saved
+            if alerts.rules.is_empty() {
+                for rule in demo_alert_rules() {
+                    alerts.rules.push(rule);
+                }
             }
             // Set shorter cooldown for demo (10 seconds instead of 60)
             alerts.alert_cooldown_ms = 10_000;
@@ -150,8 +155,10 @@ impl ZenSight {
         // Load groups from persistent settings
         let groups = persistent.groups.clone();
 
-        // Initialize overview state
-        let overview = OverviewState::default();
+        // Load overview state from persistent settings
+        let mut overview = OverviewState::default();
+        overview.selected_protocol = persistent.overview_selected_protocol;
+        overview.expanded = persistent.overview_expanded;
 
         // Initialize topology state
         let topology = TopologyState::default();
@@ -413,6 +420,8 @@ impl ZenSight {
             Message::AddAlertRule => {
                 if let Err(e) = self.alerts.add_rule() {
                     tracing::warn!(error = %e, "Failed to add alert rule");
+                } else {
+                    self.save_alert_rules();
                 }
             }
 
@@ -436,10 +445,12 @@ impl ZenSight {
 
             Message::RemoveAlertRule(rule_id) => {
                 self.alerts.remove_rule(rule_id);
+                self.save_alert_rules();
             }
 
             Message::ToggleAlertRule(rule_id) => {
                 self.alerts.toggle_rule(rule_id);
+                self.save_alert_rules();
             }
 
             Message::AcknowledgeAlert(alert_id) => {
@@ -539,10 +550,12 @@ impl ZenSight {
             // Overview messages
             Message::SelectOverviewProtocol(protocol) => {
                 self.overview.select_protocol(protocol);
+                self.save_overview_state();
             }
 
             Message::ToggleOverviewExpanded => {
                 self.overview.toggle_expanded();
+                self.save_overview_state();
             }
 
             // Topology messages
@@ -622,6 +635,25 @@ impl ZenSight {
         persistent.groups = self.groups.clone();
         if let Err(e) = persistent.save() {
             tracing::error!("Failed to save groups: {}", e);
+        }
+    }
+
+    /// Save alert rules to persistent settings.
+    fn save_alert_rules(&self) {
+        let mut persistent = PersistentSettings::load();
+        persistent.alert_rules = self.alerts.rules.clone();
+        if let Err(e) = persistent.save() {
+            tracing::error!("Failed to save alert rules: {}", e);
+        }
+    }
+
+    /// Save overview state to persistent settings.
+    fn save_overview_state(&self) {
+        let mut persistent = PersistentSettings::load();
+        persistent.overview_selected_protocol = self.overview.selected_protocol;
+        persistent.overview_expanded = self.overview.expanded;
+        if let Err(e) = persistent.save() {
+            tracing::error!("Failed to save overview state: {}", e);
         }
     }
 
@@ -825,8 +857,12 @@ impl ZenSight {
         self.zenoh_config.connect = self.settings.connect_endpoints();
         self.zenoh_config.listen = self.settings.listen_endpoints();
 
-        // Persist settings to disk
-        let persistent = PersistentSettings::from_state(&self.settings);
+        // Persist settings to disk (include all app state)
+        let mut persistent = PersistentSettings::from_state(&self.settings);
+        persistent.groups = self.groups.clone();
+        persistent.alert_rules = self.alerts.rules.clone();
+        persistent.overview_selected_protocol = self.overview.selected_protocol;
+        persistent.overview_expanded = self.overview.expanded;
         if let Err(error) = persistent.save() {
             self.settings.set_error(error);
             return;

@@ -9,8 +9,10 @@ use iced::{Alignment, Element, Length, Theme};
 use serde::{Deserialize, Serialize};
 
 use crate::message::Message;
+use crate::view::alerts::AlertRule;
 use crate::view::groups::GroupsState;
 use crate::view::icons::{self, IconSize};
+use zensight_common::Protocol;
 
 /// Persistent settings that are saved to disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +37,19 @@ pub struct PersistentSettings {
     /// Device groups configuration.
     #[serde(default)]
     pub groups: GroupsState,
+    /// Alert rules.
+    #[serde(default)]
+    pub alert_rules: Vec<AlertRule>,
+    /// Selected overview protocol tab.
+    #[serde(default)]
+    pub overview_selected_protocol: Option<Protocol>,
+    /// Whether the overview section is expanded.
+    #[serde(default = "default_overview_expanded")]
+    pub overview_expanded: bool,
+}
+
+fn default_overview_expanded() -> bool {
+    true
 }
 
 fn default_dark_theme() -> bool {
@@ -60,6 +75,9 @@ impl Default for PersistentSettings {
             max_history: default_max_history(),
             max_alerts: default_max_alerts(),
             groups: GroupsState::default(),
+            alert_rules: Vec::new(),
+            overview_selected_protocol: None,
+            overview_expanded: default_overview_expanded(),
         }
     }
 }
@@ -138,6 +156,7 @@ impl PersistentSettings {
     }
 
     /// Create from SettingsState.
+    /// Note: groups, alert_rules, and overview state should be set separately.
     pub fn from_state(state: &SettingsState) -> Self {
         Self {
             zenoh_mode: state.zenoh_mode.as_str().to_string(),
@@ -148,20 +167,9 @@ impl PersistentSettings {
             max_history: state.max_history.parse().unwrap_or(default_max_history()),
             max_alerts: state.max_alerts.parse().unwrap_or(default_max_alerts()),
             groups: GroupsState::default(),
-        }
-    }
-
-    /// Create from SettingsState with groups.
-    pub fn from_state_with_groups(state: &SettingsState, groups: GroupsState) -> Self {
-        Self {
-            zenoh_mode: state.zenoh_mode.as_str().to_string(),
-            zenoh_connect: state.connect_endpoints(),
-            zenoh_listen: state.listen_endpoints(),
-            stale_threshold_secs: state.stale_threshold_secs.parse().unwrap_or(120),
-            dark_theme: state.dark_theme,
-            max_history: state.max_history.parse().unwrap_or(default_max_history()),
-            max_alerts: state.max_alerts.parse().unwrap_or(default_max_alerts()),
-            groups,
+            alert_rules: Vec::new(),
+            overview_selected_protocol: None,
+            overview_expanded: default_overview_expanded(),
         }
     }
 }
@@ -734,6 +742,9 @@ mod tests {
             max_history: 1000,
             max_alerts: 200,
             groups: GroupsState::default(),
+            alert_rules: Vec::new(),
+            overview_selected_protocol: None,
+            overview_expanded: true,
         };
 
         // Serialize to JSON
@@ -761,6 +772,9 @@ mod tests {
             max_history: 750,
             max_alerts: 150,
             groups: GroupsState::default(),
+            alert_rules: Vec::new(),
+            overview_selected_protocol: None,
+            overview_expanded: true,
         };
 
         // Convert to UI state
