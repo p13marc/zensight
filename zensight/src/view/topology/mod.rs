@@ -9,7 +9,7 @@ pub mod layout;
 use std::collections::HashMap;
 
 use iced::widget::canvas::Cache;
-use iced::widget::{button, column, container, row, text};
+use iced::widget::{button, column, container, row, text, text_input};
 use iced::{Alignment, Element, Length};
 
 use crate::message::{DeviceId, Message};
@@ -324,11 +324,101 @@ pub fn topology_view<'a>(state: &'a TopologyState) -> Element<'a, Message> {
     let header = render_header(state);
     let graph = TopologyGraph::new(state);
 
-    let content = column![header, graph].spacing(10).padding(20);
+    // Show selection panel if a node is selected
+    let main_content: Element<'a, Message> = if let Some(ref node_id) = state.selected_node {
+        if let Some(node) = state.nodes.get(node_id) {
+            let panel = render_node_info_panel(node);
+            row![graph, panel].spacing(10).into()
+        } else {
+            graph
+        }
+    } else {
+        graph
+    };
+
+    let content = column![header, main_content].spacing(10).padding(20);
 
     container(content)
         .width(Length::Fill)
         .height(Length::Fill)
+        .into()
+}
+
+/// Render the node info panel (shown when a node is selected).
+fn render_node_info_panel(node: &Node) -> Element<'_, Message> {
+    let title = text(&node.label).size(18);
+
+    let status = if node.is_healthy {
+        row![
+            icons::status_healthy(IconSize::Small),
+            text("Healthy").size(12)
+        ]
+        .spacing(5)
+        .align_y(Alignment::Center)
+    } else {
+        row![
+            icons::status_warning(IconSize::Small),
+            text("Stale").size(12)
+        ]
+        .spacing(5)
+        .align_y(Alignment::Center)
+    };
+
+    let node_type = text(format!("Type: {:?}", node.node_type)).size(12);
+
+    let mut info_items = column![title, status, node_type].spacing(8);
+
+    // CPU usage
+    if let Some(cpu) = node.cpu_usage {
+        let cpu_text = text(format!("CPU: {:.1}%", cpu)).size(12);
+        info_items = info_items.push(cpu_text);
+    }
+
+    // Memory usage
+    if let Some(mem) = node.memory_usage {
+        let mem_text = text(format!("Memory: {:.1}%", mem)).size(12);
+        info_items = info_items.push(mem_text);
+    }
+
+    // Network I/O
+    if let Some(rx) = node.network_rx {
+        let rx_text = text(format!("Network RX: {}", graph::format_bytes(rx))).size(12);
+        info_items = info_items.push(rx_text);
+    }
+    if let Some(tx) = node.network_tx {
+        let tx_text = text(format!("Network TX: {}", graph::format_bytes(tx))).size(12);
+        info_items = info_items.push(tx_text);
+    }
+
+    // Position info
+    let pos_text = text(format!(
+        "Position: ({:.0}, {:.0})",
+        node.position.0, node.position.1
+    ))
+    .size(10);
+    info_items = info_items.push(pos_text);
+
+    if node.pinned {
+        let pinned_text = text("(Pinned)").size(10);
+        info_items = info_items.push(pinned_text);
+    }
+
+    // View device button
+    let view_btn = button(text("View Device Details").size(12))
+        .on_press(Message::TopologySelectNode(node.id.clone()))
+        .style(iced::widget::button::primary);
+    info_items = info_items.push(view_btn);
+
+    // Clear selection button
+    let clear_btn = button(text("Clear Selection").size(12))
+        .on_press(Message::TopologyClearSelection)
+        .style(iced::widget::button::secondary);
+    info_items = info_items.push(clear_btn);
+
+    container(info_items)
+        .padding(15)
+        .width(Length::Fixed(200.0))
+        .style(container::rounded_box)
         .into()
 }
 
@@ -376,11 +466,22 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
         iced::widget::button::secondary
     });
 
+    // Search input
+    let search_input = text_input("Search nodes...", &state.search_query)
+        .on_input(Message::TopologySetSearch)
+        .padding(6)
+        .width(Length::Fixed(150.0));
+
+    let search_row = row![icons::search(IconSize::Small), search_input]
+        .spacing(6)
+        .align_y(Alignment::Center);
+
     row![
         back_button,
         title,
         node_count,
         edge_count,
+        search_row,
         zoom_out_btn,
         zoom_label,
         zoom_in_btn,

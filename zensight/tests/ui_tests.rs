@@ -591,3 +591,13 @@ fn test_dashboard_topology_button() {
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(messages.iter().any(|m| matches!(m, Message::OpenTopology)));
 }
+
+/// Test topology search input.
+#[test]
+fn test_topology_search_input() {
+    let state = TopologyState::default();
+    let mut ui = simulator(topology_view(&state));
+
+    // Should show search placeholder
+    assert!(ui.find("Search nodes...").is_ok());
+}
