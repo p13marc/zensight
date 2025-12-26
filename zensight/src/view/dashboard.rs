@@ -327,6 +327,14 @@ fn render_header(
         iced::widget::button::secondary
     });
 
+    let topology_button = button(
+        row![icons::network(IconSize::Medium), text("Topology").size(14)]
+            .spacing(6)
+            .align_y(Alignment::Center),
+    )
+    .on_press(Message::OpenTopology)
+    .style(iced::widget::button::secondary);
+
     let settings_button = button(
         row![icons::settings(IconSize::Medium), text("Settings").size(14)]
             .spacing(6)
@@ -341,6 +349,7 @@ fn render_header(
         status,
         theme_button,
         alerts_button,
+        topology_button,
         settings_button
     ]
     .spacing(20)
@@ -512,9 +521,10 @@ fn render_pagination_controls_with_count(
 
     for page in pages_to_show {
         if let Some(last) = last_shown
-            && page > last + 1 {
-                page_row = page_row.push(text("...").size(14));
-            }
+            && page > last + 1
+        {
+            page_row = page_row.push(text("...").size(14));
+        }
 
         let page_btn = if page == current_page {
             button(text(format!("{}", page + 1)).size(14)).style(iced::widget::button::primary)
