@@ -245,10 +245,17 @@ impl TopologyState {
         }
     }
 
-    /// Run one iteration of the force-directed layout.
+    /// Run multiple iterations of the force-directed layout for faster convergence.
     /// Returns true if the layout is stable.
     pub fn run_layout_step(&mut self) -> bool {
-        self.layout_stable = layout_step(self, &self.layout_config.clone());
+        // Run multiple iterations per frame for faster convergence
+        let iterations = 5;
+        for _ in 0..iterations {
+            self.layout_stable = layout_step(self, &self.layout_config.clone());
+            if self.layout_stable {
+                break;
+            }
+        }
         self.layout_stable
     }
 
