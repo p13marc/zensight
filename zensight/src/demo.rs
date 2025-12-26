@@ -1508,14 +1508,13 @@ impl DemoSimulator {
                 device: d,
                 interface,
             } = &anomaly.anomaly_type
+                && d == device
             {
-                if d == device {
-                    return (
-                        DeviceStatus::Offline,
-                        3,
-                        Some(format!("Interface {} is down", interface)),
-                    );
-                }
+                return (
+                    DeviceStatus::Offline,
+                    3,
+                    Some(format!("Interface {} is down", interface)),
+                );
             }
         }
 

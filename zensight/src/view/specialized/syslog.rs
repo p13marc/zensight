@@ -636,7 +636,7 @@ fn render_log_stream<'a>(
 fn parse_syslog_messages(state: &DeviceDetailState) -> Vec<SyslogMessage> {
     let mut messages = Vec::new();
 
-    for (_key, point) in &state.metrics {
+    for point in state.metrics.values() {
         // Parse severity from metric path (format: facility/severity)
         let parts: Vec<&str> = point.metric.split('/').collect();
         let (facility, severity) = if parts.len() >= 2 {
@@ -706,10 +706,10 @@ fn apply_local_filters(
         .iter()
         .filter(|msg| {
             // Severity filter
-            if let Some(min_sev) = filter_state.min_severity {
-                if (msg.severity as u8) > min_sev {
-                    return false;
-                }
+            if let Some(min_sev) = filter_state.min_severity
+                && (msg.severity as u8) > min_sev
+            {
+                return false;
             }
 
             // Facility filter (if any selected, only show those)

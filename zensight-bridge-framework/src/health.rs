@@ -62,7 +62,7 @@ struct DeviceState {
 }
 
 /// Device availability status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DeviceStatus {
     /// Device is responding normally.
@@ -72,13 +72,8 @@ pub enum DeviceStatus {
     /// Device is responding but with errors.
     Degraded,
     /// Device status is unknown (never polled).
+    #[default]
     Unknown,
-}
-
-impl Default for DeviceStatus {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 impl std::fmt::Display for DeviceStatus {
@@ -148,7 +143,7 @@ pub struct ErrorReport {
 }
 
 /// Error type classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorType {
     /// Connection timeout.
@@ -166,13 +161,8 @@ pub enum ErrorType {
     /// Configuration error.
     ConfigError,
     /// Other/unknown error.
+    #[default]
     Other,
-}
-
-impl Default for ErrorType {
-    fn default() -> Self {
-        Self::Other
-    }
 }
 
 impl BridgeHealth {
@@ -250,14 +240,14 @@ impl BridgeHealth {
         self.record_device_success(device_id);
 
         // Declare liveliness token if configured
-        if let Some(ref liveliness) = self.liveliness_manager {
-            if let Err(e) = liveliness.declare_device_alive(device_id).await {
-                tracing::warn!(
-                    device = %device_id,
-                    error = %e,
-                    "Failed to declare device liveliness token"
-                );
-            }
+        if let Some(ref liveliness) = self.liveliness_manager
+            && let Err(e) = liveliness.declare_device_alive(device_id).await
+        {
+            tracing::warn!(
+                device = %device_id,
+                error = %e,
+                "Failed to declare device liveliness token"
+            );
         }
     }
 
@@ -319,10 +309,11 @@ impl BridgeHealth {
         };
 
         // Undeclare liveliness token if device just went offline
-        if was_online && is_now_offline {
-            if let Some(ref liveliness) = self.liveliness_manager {
-                liveliness.undeclare_device(device_id).await;
-            }
+        if was_online
+            && is_now_offline
+            && let Some(ref liveliness) = self.liveliness_manager
+        {
+            liveliness.undeclare_device(device_id).await;
         }
     }
 

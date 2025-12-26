@@ -170,9 +170,10 @@ impl ZenSight {
         let groups = persistent.groups.clone();
 
         // Load overview state from persistent settings
-        let mut overview = OverviewState::default();
-        overview.selected_protocol = persistent.overview_selected_protocol;
-        overview.expanded = persistent.overview_expanded;
+        let overview = OverviewState {
+            selected_protocol: persistent.overview_selected_protocol,
+            expanded: persistent.overview_expanded,
+        };
 
         // Initialize topology state
         let topology = TopologyState::default();

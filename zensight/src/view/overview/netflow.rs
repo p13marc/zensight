@@ -88,8 +88,8 @@ pub fn netflow_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Eleme
 fn collect_flows(devices: &HashMap<&DeviceId, &DeviceState>) -> Vec<FlowRecord> {
     let mut flows = Vec::new();
 
-    for (_device_id, state) in devices {
-        for (_key, point) in &state.metrics {
+    for state in devices.values() {
+        for point in state.metrics.values() {
             let src_ip = point
                 .labels
                 .get("src_ip")

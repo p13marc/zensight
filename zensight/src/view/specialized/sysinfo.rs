@@ -579,7 +579,7 @@ fn render_temperatures_section(state: &DeviceDetailState) -> Element<'_, Message
     // Find all temperature sensors: sensors/{chip}/{label}/temp
     let mut sensors: Vec<(String, String, f64, Option<f64>)> = Vec::new();
 
-    for (key, _point) in &state.metrics {
+    for key in state.metrics.keys() {
         if key.starts_with("sensors/") && key.ends_with("/temp") {
             let parts: Vec<&str> = key.split('/').collect();
             if parts.len() >= 4 {
@@ -672,10 +672,10 @@ fn render_tcp_states_section(state: &DeviceDetailState) -> Element<'_, Message> 
     let mut state_items: Vec<Element<'_, Message>> = Vec::new();
 
     for (key, label) in states {
-        if let Some(count) = get_metric_value(state, &format!("tcp/{}", key)) {
-            if count > 0.0 {
-                state_items.push(text(format!("{}: {:.0}", label, count)).size(11).into());
-            }
+        if let Some(count) = get_metric_value(state, &format!("tcp/{}", key))
+            && count > 0.0
+        {
+            state_items.push(text(format!("{}: {:.0}", label, count)).size(11).into());
         }
     }
 

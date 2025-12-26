@@ -72,7 +72,7 @@ pub struct DeviceLiveness {
 }
 
 /// Error type classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorType {
     /// Connection timeout.
@@ -90,13 +90,8 @@ pub enum ErrorType {
     /// Configuration error.
     ConfigError,
     /// Other/unknown error.
+    #[default]
     Other,
-}
-
-impl Default for ErrorType {
-    fn default() -> Self {
-        Self::Other
-    }
 }
 
 /// Error report from a bridge.

@@ -89,20 +89,20 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
             // Query existing liveliness tokens to get current state
             if let Ok(replies) = session.liveliness().get(BRIDGE_LIVELINESS_EXPR).await {
                 while let Ok(reply) = replies.recv_async().await {
-                    if let Ok(sample) = reply.result() {
-                        if let Some(msg) = parse_bridge_liveliness(sample.key_expr().as_str(), true) {
-                            yield msg;
-                        }
+                    if let Ok(sample) = reply.result()
+                        && let Some(msg) = parse_bridge_liveliness(sample.key_expr().as_str(), true)
+                    {
+                        yield msg;
                     }
                 }
             }
 
             if let Ok(replies) = session.liveliness().get(DEVICE_LIVELINESS_EXPR).await {
                 while let Ok(reply) = replies.recv_async().await {
-                    if let Ok(sample) = reply.result() {
-                        if let Some(msg) = parse_device_liveliness(sample.key_expr().as_str(), true) {
-                            yield msg;
-                        }
+                    if let Ok(sample) = reply.result()
+                        && let Some(msg) = parse_device_liveliness(sample.key_expr().as_str(), true)
+                    {
+                        yield msg;
                     }
                 }
             }
@@ -423,14 +423,14 @@ pub fn demo_subscription() -> Subscription<Message> {
                 simulator.record_metrics("syslog", syslog_count);
 
                 // Every 5 ticks (~3 seconds), generate health snapshots
-                if tick_count % 5 == 0 {
+                if tick_count.is_multiple_of(5) {
                     for snapshot in simulator.generate_health_snapshots() {
                         yield Message::HealthSnapshotReceived(snapshot);
                     }
                 }
 
                 // Every 3 ticks (~1.8 seconds), generate liveness updates
-                if tick_count % 3 == 0 {
+                if tick_count.is_multiple_of(3) {
                     for (protocol, mut liveness) in simulator.generate_liveness_updates() {
                         liveness.last_seen = now;
                         yield Message::DeviceLivenessReceived(protocol, liveness);

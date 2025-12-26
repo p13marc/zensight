@@ -211,9 +211,9 @@ impl LinuxMetrics {
             let stats = DiskIoStats {
                 read_bytes,
                 write_bytes,
-                read_ios: disk.reads as u64,
-                write_ios: disk.writes as u64,
-                io_time_ms: disk.time_in_progress as u64,
+                read_ios: disk.reads,
+                write_ios: disk.writes,
+                io_time_ms: disk.time_in_progress,
             };
 
             // Calculate rates if we have previous data
@@ -224,9 +224,9 @@ impl LinuxMetrics {
                             / interval_secs) as u64,
                         write_bytes: ((write_bytes.saturating_sub(prev.write_bytes)) as f64
                             / interval_secs) as u64,
-                        read_ios: ((disk.reads as u64).saturating_sub(prev.read_ios) as f64
+                        read_ios: ((disk.reads.saturating_sub(prev.read_ios)) as f64
                             / interval_secs) as u64,
-                        write_ios: ((disk.writes as u64).saturating_sub(prev.write_ios) as f64
+                        write_ios: ((disk.writes.saturating_sub(prev.write_ios)) as f64
                             / interval_secs) as u64,
                         io_time_ms: 0, // Rate doesn't make sense for cumulative time
                     })
@@ -243,8 +243,8 @@ impl LinuxMetrics {
                 PrevDiskIo {
                     read_bytes,
                     write_bytes,
-                    read_ios: disk.reads as u64,
-                    write_ios: disk.writes as u64,
+                    read_ios: disk.reads,
+                    write_ios: disk.writes,
                 },
             );
 

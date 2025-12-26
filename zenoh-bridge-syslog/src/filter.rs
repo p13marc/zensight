@@ -271,6 +271,7 @@ impl CompiledSyslogFilter {
     }
 
     /// Create an empty filter that passes all messages.
+    #[allow(dead_code)]
     pub fn pass_all() -> Self {
         Self {
             config: SyslogFilterConfig::default(),
@@ -406,6 +407,7 @@ impl FilterManager {
     }
 
     /// Create a filter manager that passes all messages.
+    #[allow(dead_code)]
     pub fn pass_all() -> Self {
         Self {
             base_filter: CompiledSyslogFilter::pass_all(),
