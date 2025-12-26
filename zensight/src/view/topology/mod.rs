@@ -391,75 +391,119 @@ pub fn topology_view<'a>(state: &'a TopologyState) -> Element<'a, Message> {
         .into()
 }
 
+/// Generate a simple text-based progress bar.
+fn progress_bar(percentage: f64, width: usize) -> String {
+    let filled = ((percentage / 100.0) * width as f64).round() as usize;
+    let empty = width.saturating_sub(filled);
+    format!("[{}{}]", "=".repeat(filled), " ".repeat(empty))
+}
+
 /// Render the node info panel (shown when a node is selected).
 fn render_node_info_panel(node: &Node) -> Element<'_, Message> {
-    let title = text(&node.label).size(18);
+    use iced::widget::rule;
 
+    // Header with icon and name
+    let header = row![
+        icons::protocol_sysinfo(IconSize::Large),
+        column![
+            text(&node.label).size(16),
+            text(format!("{:?}", node.node_type)).size(10),
+        ]
+        .spacing(2)
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
+
+    // Status indicator
     let status = if node.is_healthy {
         row![
             icons::status_healthy(IconSize::Small),
-            text("Healthy").size(12)
+            text("Healthy - receiving data").size(11)
         ]
         .spacing(5)
         .align_y(Alignment::Center)
     } else {
         row![
             icons::status_warning(IconSize::Small),
-            text("Stale").size(12)
+            text("Stale - no recent data").size(11)
         ]
         .spacing(5)
         .align_y(Alignment::Center)
     };
 
-    let node_type = text(format!("Type: {:?}", node.node_type)).size(12);
+    let mut info_items = column![header, status, rule::horizontal(1)].spacing(8);
 
-    let mut info_items = column![title, status, node_type].spacing(8);
+    // System resources section
+    let has_system_metrics = node.cpu_usage.is_some() || node.memory_usage.is_some();
+    if has_system_metrics {
+        info_items = info_items.push(text("System Resources").size(12));
 
-    // CPU usage
-    if let Some(cpu) = node.cpu_usage {
-        let cpu_text = text(format!("CPU: {:.1}%", cpu)).size(12);
-        info_items = info_items.push(cpu_text);
+        if let Some(cpu) = node.cpu_usage {
+            let cpu_bar = format!("CPU: {:.1}% {}", cpu, progress_bar(cpu, 20));
+            info_items = info_items.push(text(cpu_bar).size(11));
+        }
+
+        if let Some(mem) = node.memory_usage {
+            let mem_bar = format!("Mem: {:.1}% {}", mem, progress_bar(mem, 20));
+            info_items = info_items.push(text(mem_bar).size(11));
+        }
     }
 
-    // Memory usage
-    if let Some(mem) = node.memory_usage {
-        let mem_text = text(format!("Memory: {:.1}%", mem)).size(12);
-        info_items = info_items.push(mem_text);
+    // Network section
+    let has_network = node.network_rx.is_some() || node.network_tx.is_some();
+    if has_network {
+        info_items = info_items.push(rule::horizontal(1));
+        info_items = info_items.push(text("Network I/O").size(12));
+
+        if let Some(rx) = node.network_rx {
+            info_items =
+                info_items.push(text(format!("  RX: {}", graph::format_bytes(rx))).size(11));
+        }
+        if let Some(tx) = node.network_tx {
+            info_items =
+                info_items.push(text(format!("  TX: {}", graph::format_bytes(tx))).size(11));
+        }
+        // Total
+        let total = node.network_rx.unwrap_or(0) + node.network_tx.unwrap_or(0);
+        if total > 0 {
+            info_items =
+                info_items.push(text(format!("  Total: {}", graph::format_bytes(total))).size(11));
+        }
     }
 
-    // Network I/O
-    if let Some(rx) = node.network_rx {
-        let rx_text = text(format!("Network RX: {}", graph::format_bytes(rx))).size(12);
-        info_items = info_items.push(rx_text);
-    }
-    if let Some(tx) = node.network_tx {
-        let tx_text = text(format!("Network TX: {}", graph::format_bytes(tx))).size(12);
-        info_items = info_items.push(tx_text);
-    }
-
-    // Position info
-    let pos_text = text(format!(
-        "Position: ({:.0}, {:.0})",
-        node.position.0, node.position.1
-    ))
-    .size(10);
-    info_items = info_items.push(pos_text);
-
+    // Layout info
+    info_items = info_items.push(rule::horizontal(1));
     if node.pinned {
-        let pinned_text = text("(Pinned)").size(10);
-        info_items = info_items.push(pinned_text);
+        info_items = info_items.push(
+            row![
+                icons::status_warning(IconSize::Small),
+                text("Position pinned").size(10)
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center),
+        );
     }
 
-    // View device button
-    let view_btn = button(text("View Device Details").size(12))
-        .on_press(Message::TopologySelectNode(node.id.clone()))
-        .style(iced::widget::button::primary);
+    // Action buttons
+    info_items = info_items.push(rule::horizontal(1));
+
+    let view_btn = button(
+        row![
+            icons::arrow_right(IconSize::Small),
+            text("View Device Details").size(11)
+        ]
+        .spacing(5)
+        .align_y(Alignment::Center),
+    )
+    .on_press(Message::TopologySelectNode(node.id.clone()))
+    .style(iced::widget::button::primary)
+    .width(Length::Fill);
     info_items = info_items.push(view_btn);
 
-    // Clear selection button
-    let clear_btn = button(text("Clear Selection").size(12))
+    let clear_btn = button(text("Clear Selection").size(11))
         .on_press(Message::TopologyClearSelection)
-        .style(iced::widget::button::secondary);
+        .style(iced::widget::button::secondary)
+        .width(Length::Fill);
     info_items = info_items.push(clear_btn);
 
     container(info_items)

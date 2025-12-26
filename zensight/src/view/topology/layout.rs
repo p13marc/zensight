@@ -14,10 +14,14 @@ pub struct LayoutConfig {
     pub repulsion: f32,
     /// Attraction force constant (higher = stronger spring force).
     pub attraction: f32,
+    /// Centering force constant (pulls nodes toward origin).
+    pub centering: f32,
     /// Damping factor (0-1, higher = more damping).
     pub damping: f32,
     /// Minimum distance between nodes to prevent extreme forces.
     pub min_distance: f32,
+    /// Ideal distance between connected nodes.
+    pub ideal_distance: f32,
     /// Maximum velocity to prevent instability.
     pub max_velocity: f32,
     /// Velocity threshold below which nodes are considered stable.
@@ -27,11 +31,13 @@ pub struct LayoutConfig {
 impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
-            repulsion: 5000.0,
-            attraction: 0.01,
-            damping: 0.85,
-            min_distance: 50.0,
-            max_velocity: 50.0,
+            repulsion: 2000.0,
+            attraction: 0.05,
+            centering: 0.01,
+            damping: 0.8,
+            min_distance: 80.0,
+            ideal_distance: 150.0,
+            max_velocity: 20.0,
             stability_threshold: 0.5,
         }
     }
@@ -85,7 +91,7 @@ pub fn layout_step(state: &mut TopologyState, config: &LayoutConfig) -> bool {
         }
     }
 
-    // Attraction forces along edges
+    // Attraction forces along edges (spring toward ideal distance)
     for edge in &state.edges {
         if let (Some(from_node), Some(to_node)) =
             (state.nodes.get(&edge.from), state.nodes.get(&edge.to))
@@ -94,8 +100,9 @@ pub fn layout_step(state: &mut TopologyState, config: &LayoutConfig) -> bool {
             let dy = to_node.position.1 - from_node.position.1;
             let distance = (dx * dx + dy * dy).sqrt().max(1.0);
 
-            // Hooke's law: F = k * d
-            let force = config.attraction * distance;
+            // Spring force toward ideal distance
+            let displacement = distance - config.ideal_distance;
+            let force = config.attraction * displacement;
 
             let fx = (dx / distance) * force;
             let fy = (dy / distance) * force;
@@ -107,6 +114,19 @@ pub fn layout_step(state: &mut TopologyState, config: &LayoutConfig) -> bool {
             if let Some(f) = forces.get_mut(&edge.to) {
                 f.0 -= fx;
                 f.1 -= fy;
+            }
+        }
+    }
+
+    // Centering force - pull all nodes toward origin
+    for id in &node_ids {
+        if let Some(node) = state.nodes.get(id) {
+            let dx = -node.position.0;
+            let dy = -node.position.1;
+
+            if let Some(f) = forces.get_mut(id) {
+                f.0 += dx * config.centering;
+                f.1 += dy * config.centering;
             }
         }
     }
@@ -229,20 +249,27 @@ mod tests {
         let mut state = TopologyState::default();
 
         // Two nodes close together should repel
+        // Use a config with no centering to test pure repulsion
         state
             .nodes
-            .insert("a".to_string(), create_test_node("a", 0.0, 0.0));
+            .insert("a".to_string(), create_test_node("a", -20.0, 0.0));
         state
             .nodes
-            .insert("b".to_string(), create_test_node("b", 10.0, 0.0));
+            .insert("b".to_string(), create_test_node("b", 20.0, 0.0));
 
-        let config = LayoutConfig::default();
+        let config = LayoutConfig {
+            centering: 0.0, // Disable centering for this test
+            ..LayoutConfig::default()
+        };
         layout_step(&mut state, &config);
 
-        // Node A should move left (negative x)
-        assert!(state.nodes["a"].velocity.0 < 0.0);
-        // Node B should move right (positive x)
-        assert!(state.nodes["b"].velocity.0 > 0.0);
+        // Node A should move left (negative x) due to repulsion
+        assert!(state.nodes["a"].velocity.0 < 0.0, "Node A should move left");
+        // Node B should move right (positive x) due to repulsion
+        assert!(
+            state.nodes["b"].velocity.0 > 0.0,
+            "Node B should move right"
+        );
     }
 
     #[test]

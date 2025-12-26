@@ -250,7 +250,8 @@ impl<'a> TopologyGraphProgram<'a> {
     /// Draw a single node.
     fn draw_node(&self, frame: &mut Frame, node: &super::Node, center: Point) {
         let pos = self.apply_transform(node.position, center);
-        let radius = 25.0 * self.state.zoom;
+        // Node radius scales with zoom but has a minimum size
+        let radius = (25.0 * self.state.zoom).max(15.0);
 
         // Node color based on type and health
         let base_color = match node.node_type {
@@ -306,37 +307,39 @@ impl<'a> TopologyGraphProgram<'a> {
         // Draw label
         let label = Text {
             content: node.label.clone(),
-            position: Point::new(pos.x, pos.y + radius + 12.0),
+            position: Point::new(pos.x, pos.y + radius + 14.0),
             color: Color::WHITE,
-            size: (12.0 * self.state.zoom).max(8.0).into(),
+            size: (14.0 * self.state.zoom).max(11.0).into(),
             align_x: iced::alignment::Horizontal::Center.into(),
             ..Text::default()
         };
         frame.fill_text(label);
 
-        // Draw CPU/Memory mini-stats if available
-        if let Some(cpu) = node.cpu_usage {
-            let cpu_text = Text {
-                content: format!("CPU: {:.0}%", cpu),
-                position: Point::new(pos.x, pos.y - 5.0),
-                color: Color::WHITE,
-                size: (9.0 * self.state.zoom).max(7.0).into(),
-                align_x: iced::alignment::Horizontal::Center.into(),
-                ..Text::default()
-            };
-            frame.fill_text(cpu_text);
-        }
+        // Draw CPU/Memory mini-stats if available (only when zoomed in enough)
+        if self.state.zoom >= 0.6 {
+            if let Some(cpu) = node.cpu_usage {
+                let cpu_text = Text {
+                    content: format!("CPU: {:.0}%", cpu),
+                    position: Point::new(pos.x, pos.y - 5.0),
+                    color: Color::WHITE,
+                    size: (10.0 * self.state.zoom).max(9.0).into(),
+                    align_x: iced::alignment::Horizontal::Center.into(),
+                    ..Text::default()
+                };
+                frame.fill_text(cpu_text);
+            }
 
-        if let Some(mem) = node.memory_usage {
-            let mem_text = Text {
-                content: format!("Mem: {:.0}%", mem),
-                position: Point::new(pos.x, pos.y + 5.0),
-                color: Color::WHITE,
-                size: (9.0 * self.state.zoom).max(7.0).into(),
-                align_x: iced::alignment::Horizontal::Center.into(),
-                ..Text::default()
-            };
-            frame.fill_text(mem_text);
+            if let Some(mem) = node.memory_usage {
+                let mem_text = Text {
+                    content: format!("Mem: {:.0}%", mem),
+                    position: Point::new(pos.x, pos.y + 5.0),
+                    color: Color::WHITE,
+                    size: (10.0 * self.state.zoom).max(9.0).into(),
+                    align_x: iced::alignment::Horizontal::Center.into(),
+                    ..Text::default()
+                };
+                frame.fill_text(mem_text);
+            }
         }
     }
 
