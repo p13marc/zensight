@@ -14,6 +14,7 @@ use zensight::view::device::{DeviceDetailState, device_view};
 use zensight::view::groups::GroupsState;
 use zensight::view::overview::OverviewState;
 use zensight::view::settings::{SettingsState, settings_view};
+use zensight::view::topology::{TopologyState, topology_view};
 
 use zensight_common::Protocol;
 
@@ -516,4 +517,87 @@ fn test_overview_collapse_toggle() {
             .iter()
             .any(|m| matches!(m, Message::ToggleOverviewExpanded))
     );
+}
+
+// ============================================================================
+// Topology View Tests
+// ============================================================================
+
+/// Test that the topology view renders correctly with no nodes.
+#[test]
+fn test_topology_view_empty() {
+    let state = TopologyState::default();
+    let mut ui = simulator(topology_view(&state));
+
+    // Should show the title
+    assert!(ui.find("Network Topology").is_ok());
+    // Should show Back button
+    assert!(ui.find("Back").is_ok());
+    // Should show node count
+    assert!(ui.find("0 nodes").is_ok());
+    // Should show connection count
+    assert!(ui.find("0 connections").is_ok());
+}
+
+/// Test clicking Back button in topology view.
+#[test]
+fn test_topology_back_button() {
+    let state = TopologyState::default();
+    let mut ui = simulator(topology_view(&state));
+
+    // Click Back button
+    let _ = ui.click("Back");
+
+    // Should have produced CloseTopology message
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(messages.iter().any(|m| matches!(m, Message::CloseTopology)));
+}
+
+/// Test topology zoom buttons.
+#[test]
+fn test_topology_zoom_controls() {
+    let state = TopologyState::default();
+    let mut ui = simulator(topology_view(&state));
+
+    // Click zoom in button
+    let _ = ui.click("+");
+
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::TopologyZoomIn))
+    );
+}
+
+/// Test clicking Topology button in dashboard.
+#[test]
+fn test_dashboard_topology_button() {
+    let state = DashboardState::default();
+    let groups = GroupsState::default();
+    let overview = OverviewState::default();
+    let mut ui = simulator(dashboard_view(
+        &state,
+        AppTheme::Dark,
+        0,
+        &groups,
+        &overview,
+    ));
+
+    // Click Topology button
+    let _ = ui.click("Topology");
+
+    // Should have produced OpenTopology message
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(messages.iter().any(|m| matches!(m, Message::OpenTopology)));
+}
+
+/// Test topology search input.
+#[test]
+fn test_topology_search_input() {
+    let state = TopologyState::default();
+    let mut ui = simulator(topology_view(&state));
+
+    // Should show search placeholder
+    assert!(ui.find("Search nodes...").is_ok());
 }

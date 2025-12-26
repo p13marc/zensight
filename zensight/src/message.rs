@@ -226,6 +226,52 @@ pub enum Message {
 
     /// Toggle overview section expanded/collapsed.
     ToggleOverviewExpanded,
+
+    // Topology messages
+    /// Open the topology view.
+    OpenTopology,
+
+    /// Close the topology view.
+    CloseTopology,
+
+    /// Select a node in the topology.
+    TopologySelectNode(String),
+
+    /// Navigate to device detail for a topology node.
+    TopologyViewDeviceDetail(String),
+
+    /// Select an edge in the topology.
+    TopologySelectEdge(usize),
+
+    /// Clear topology selection.
+    TopologyClearSelection,
+
+    /// Start dragging a node.
+    TopologyDragNodeStart(String, f32, f32),
+
+    /// Update node position during drag.
+    TopologyDragNodeUpdate(String, f32, f32),
+
+    /// End node drag.
+    TopologyDragNodeEnd(String),
+
+    /// Update pan offset.
+    TopologyPanUpdate(f32, f32),
+
+    /// Zoom in on topology.
+    TopologyZoomIn,
+
+    /// Zoom out on topology.
+    TopologyZoomOut,
+
+    /// Reset topology zoom.
+    TopologyZoomReset,
+
+    /// Toggle auto-layout.
+    TopologyToggleAutoLayout,
+
+    /// Set topology search query.
+    TopologySetSearch(String),
 }
 
 /// Unique identifier for a device (protocol + source name).

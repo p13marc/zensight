@@ -11,3 +11,4 @@ pub mod icons;
 pub mod overview;
 pub mod settings;
 pub mod specialized;
+pub mod topology;

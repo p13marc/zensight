@@ -24,6 +24,7 @@ use crate::view::device::{DeviceDetailState, device_view};
 use crate::view::groups::{GroupsState, groups_panel};
 use crate::view::overview::OverviewState;
 use crate::view::settings::{PersistentSettings, SettingsState, settings_view};
+use crate::view::topology::{TopologyState, topology_view};
 
 /// Current view in the application.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -33,6 +34,7 @@ pub enum CurrentView {
     Device,
     Settings,
     Alerts,
+    Topology,
 }
 
 /// Application theme.
@@ -77,6 +79,8 @@ pub struct ZenSight {
     groups: GroupsState,
     /// Overview state.
     overview: OverviewState,
+    /// Topology state.
+    topology: TopologyState,
     /// Current view.
     current_view: CurrentView,
     /// Stale threshold in milliseconds (devices not updated within this time are marked unhealthy).
@@ -149,6 +153,9 @@ impl ZenSight {
         // Initialize overview state
         let overview = OverviewState::default();
 
+        // Initialize topology state
+        let topology = TopologyState::default();
+
         let app = Self {
             zenoh_config,
             dashboard,
@@ -157,6 +164,7 @@ impl ZenSight {
             alerts,
             groups,
             overview,
+            topology,
             current_view: CurrentView::default(),
             stale_threshold_ms,
             demo_mode,
@@ -536,6 +544,73 @@ impl ZenSight {
             Message::ToggleOverviewExpanded => {
                 self.overview.toggle_expanded();
             }
+
+            // Topology messages
+            Message::OpenTopology => {
+                // Update topology from current device data before showing
+                self.topology.update_from_devices(&self.dashboard.devices);
+                self.current_view = CurrentView::Topology;
+            }
+
+            Message::CloseTopology => {
+                self.current_view = CurrentView::Dashboard;
+            }
+
+            Message::TopologySelectNode(node_id) => {
+                // Select the node to show its info panel (don't navigate away)
+                self.topology.select_node(node_id);
+            }
+
+            Message::TopologyViewDeviceDetail(node_id) => {
+                // Navigate to device detail view
+                if let Some(device_id) = self.topology.node_to_device_id(&node_id) {
+                    self.select_device(device_id);
+                }
+            }
+
+            Message::TopologySelectEdge(edge_index) => {
+                self.topology.select_edge(edge_index);
+            }
+
+            Message::TopologyClearSelection => {
+                self.topology.clear_selection();
+            }
+
+            Message::TopologyDragNodeStart(node_id, _x, _y) => {
+                self.topology.start_node_drag(&node_id);
+            }
+
+            Message::TopologyDragNodeUpdate(node_id, x, y) => {
+                self.topology.update_node_drag(&node_id, x, y);
+            }
+
+            Message::TopologyDragNodeEnd(_node_id) => {
+                // Node stays pinned after drag
+            }
+
+            Message::TopologyPanUpdate(dx, dy) => {
+                self.topology.update_pan(dx, dy);
+            }
+
+            Message::TopologyZoomIn => {
+                self.topology.zoom_in();
+            }
+
+            Message::TopologyZoomOut => {
+                self.topology.zoom_out();
+            }
+
+            Message::TopologyZoomReset => {
+                self.topology.reset_zoom();
+            }
+
+            Message::TopologyToggleAutoLayout => {
+                self.topology.toggle_auto_layout();
+            }
+
+            Message::TopologySetSearch(query) => {
+                self.topology.set_search(query);
+            }
         }
 
         Task::none()
@@ -575,6 +650,14 @@ impl ZenSight {
                 } else {
                     CurrentView::Dashboard
                 };
+            }
+            CurrentView::Topology => {
+                // If something is selected, clear selection; otherwise go back to dashboard
+                if self.topology.selected_node.is_some() || self.topology.selected_edge.is_some() {
+                    self.topology.clear_selection();
+                } else {
+                    self.current_view = CurrentView::Dashboard;
+                }
             }
             CurrentView::Device => {
                 // If charting, close chart; otherwise go back to dashboard
@@ -624,6 +707,7 @@ impl ZenSight {
         let main_view: Element<'_, Message> = match self.current_view {
             CurrentView::Settings => settings_view(&self.settings),
             CurrentView::Alerts => alerts_view(&self.alerts),
+            CurrentView::Topology => topology_view(&self.topology),
             CurrentView::Device => {
                 if let Some(ref device_state) = self.selected_device {
                     device_view(device_state)
@@ -698,6 +782,11 @@ impl ZenSight {
             && selected.device_id == device_id
         {
             selected.update(point);
+        }
+
+        // Update topology if we're viewing it
+        if self.current_view == CurrentView::Topology {
+            self.topology.update_from_devices(&self.dashboard.devices);
         }
     }
 
@@ -806,6 +895,15 @@ impl ZenSight {
         // Update chart time for selected device
         if let Some(ref mut device) = self.selected_device {
             device.update_chart_time();
+        }
+
+        // Update topology when viewing it
+        if self.current_view == CurrentView::Topology {
+            self.topology.update_from_devices(&self.dashboard.devices);
+            // Run layout algorithm if not stable
+            if !self.topology.layout_stable {
+                self.topology.run_layout_step();
+            }
         }
     }
 }
