@@ -152,6 +152,23 @@ impl std::fmt::Display for Protocol {
     }
 }
 
+impl std::str::FromStr for Protocol {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "snmp" => Ok(Protocol::Snmp),
+            "syslog" => Ok(Protocol::Syslog),
+            "gnmi" => Ok(Protocol::Gnmi),
+            "netflow" => Ok(Protocol::Netflow),
+            "opcua" => Ok(Protocol::Opcua),
+            "modbus" => Ok(Protocol::Modbus),
+            "sysinfo" => Ok(Protocol::Sysinfo),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Get the current timestamp in milliseconds since Unix epoch.
 ///
 /// Returns 0 if system time is before Unix epoch (should never happen in practice).
@@ -190,6 +207,25 @@ mod tests {
     fn test_protocol_display() {
         assert_eq!(Protocol::Snmp.as_str(), "snmp");
         assert_eq!(Protocol::Syslog.as_str(), "syslog");
+    }
+
+    #[test]
+    fn test_protocol_from_str() {
+        assert_eq!("snmp".parse::<Protocol>(), Ok(Protocol::Snmp));
+        assert_eq!("syslog".parse::<Protocol>(), Ok(Protocol::Syslog));
+        assert_eq!("gnmi".parse::<Protocol>(), Ok(Protocol::Gnmi));
+        assert_eq!("netflow".parse::<Protocol>(), Ok(Protocol::Netflow));
+        assert_eq!("opcua".parse::<Protocol>(), Ok(Protocol::Opcua));
+        assert_eq!("modbus".parse::<Protocol>(), Ok(Protocol::Modbus));
+        assert_eq!("sysinfo".parse::<Protocol>(), Ok(Protocol::Sysinfo));
+
+        // Case insensitive
+        assert_eq!("SNMP".parse::<Protocol>(), Ok(Protocol::Snmp));
+        assert_eq!("Sysinfo".parse::<Protocol>(), Ok(Protocol::Sysinfo));
+
+        // Invalid
+        assert!("unknown".parse::<Protocol>().is_err());
+        assert!("".parse::<Protocol>().is_err());
     }
 
     #[test]

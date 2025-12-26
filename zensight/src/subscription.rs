@@ -1,12 +1,21 @@
 use iced::Subscription;
 use iced::keyboard::{self, Key, key};
 
+use zenoh::sample::SampleKind;
+use zenoh_ext::{AdvancedSubscriberBuilderExt, HistoryConfig, RecoveryConfig};
+
 use zensight_common::{
     BridgeInfo, CorrelationEntry, DeviceLiveness, ErrorReport, HealthSnapshot, TelemetryPoint,
     ZenohConfig, all_telemetry_wildcard, decode_auto,
 };
 
 use crate::message::Message;
+
+/// Key expression for bridge liveliness tokens.
+const BRIDGE_LIVELINESS_EXPR: &str = "zensight/*/@/alive";
+
+/// Key expression for device liveliness tokens.
+const DEVICE_LIVELINESS_EXPR: &str = "zensight/*/@/devices/*/alive";
 
 /// Create a subscription that connects to Zenoh and receives telemetry.
 pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
@@ -28,38 +37,178 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
                 }
             };
 
-            // Subscribe to all zensight telemetry (uses ** wildcard to catch everything)
+            // Subscribe to all zensight telemetry using AdvancedSubscriber
+            // This enables:
+            // - history(): Get cached samples from publishers on subscription
+            // - detect_late_publishers(): Get history from publishers that appear later
+            // - recovery(): Automatically recover missed samples
             let key_expr = all_telemetry_wildcard();
-            let subscriber = match session.declare_subscriber(&key_expr).await {
+            let subscriber = match session
+                .declare_subscriber(&key_expr)
+                .history(HistoryConfig::default().detect_late_publishers())
+                .recovery(RecoveryConfig::default())
+                .subscriber_detection()
+                .await
+            {
                 Ok(sub) => sub,
                 Err(e) => {
-                    tracing::error!(error = %e, "Failed to create subscriber");
+                    tracing::error!(error = %e, "Failed to create advanced subscriber");
                     yield Message::Disconnected(e.to_string());
                     return;
                 }
             };
 
-            // Process incoming samples
-            loop {
-                match subscriber.recv_async().await {
-                    Ok(sample) => {
-                        let key = sample.key_expr().as_str();
-                        let payload = sample.payload().to_bytes();
+            tracing::info!("Advanced subscriber created with history and recovery");
 
-                        // Route to appropriate handler based on key expression pattern
-                        if let Some(msg) = decode_sample(key, &payload) {
+            // Subscribe to bridge liveliness tokens
+            let bridge_liveliness = match session
+                .liveliness()
+                .declare_subscriber(BRIDGE_LIVELINESS_EXPR)
+                .await
+            {
+                Ok(sub) => Some(sub),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to create bridge liveliness subscriber");
+                    None
+                }
+            };
+
+            // Subscribe to device liveliness tokens
+            let device_liveliness = match session
+                .liveliness()
+                .declare_subscriber(DEVICE_LIVELINESS_EXPR)
+                .await
+            {
+                Ok(sub) => Some(sub),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to create device liveliness subscriber");
+                    None
+                }
+            };
+
+            // Query existing liveliness tokens to get current state
+            if let Ok(replies) = session.liveliness().get(BRIDGE_LIVELINESS_EXPR).await {
+                while let Ok(reply) = replies.recv_async().await {
+                    if let Ok(sample) = reply.result() {
+                        if let Some(msg) = parse_bridge_liveliness(sample.key_expr().as_str(), true) {
                             yield msg;
                         }
                     }
-                    Err(e) => {
-                        tracing::error!(error = %e, "Subscriber error");
-                        yield Message::Disconnected(e.to_string());
-                        return;
+                }
+            }
+
+            if let Ok(replies) = session.liveliness().get(DEVICE_LIVELINESS_EXPR).await {
+                while let Ok(reply) = replies.recv_async().await {
+                    if let Ok(sample) = reply.result() {
+                        if let Some(msg) = parse_device_liveliness(sample.key_expr().as_str(), true) {
+                            yield msg;
+                        }
+                    }
+                }
+            }
+
+            // Process incoming samples from all subscriptions
+            loop {
+                tokio::select! {
+                    // Telemetry subscription
+                    result = subscriber.recv_async() => {
+                        match result {
+                            Ok(sample) => {
+                                let key = sample.key_expr().as_str();
+                                let payload = sample.payload().to_bytes();
+                                if let Some(msg) = decode_sample(key, &payload) {
+                                    yield msg;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "Subscriber error");
+                                yield Message::Disconnected(e.to_string());
+                                return;
+                            }
+                        }
+                    }
+
+                    // Bridge liveliness subscription
+                    result = async {
+                        match &bridge_liveliness {
+                            Some(sub) => sub.recv_async().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Ok(sample) = result {
+                            let is_alive = sample.kind() == SampleKind::Put;
+                            if let Some(msg) = parse_bridge_liveliness(sample.key_expr().as_str(), is_alive) {
+                                yield msg;
+                            }
+                        }
+                    }
+
+                    // Device liveliness subscription
+                    result = async {
+                        match &device_liveliness {
+                            Some(sub) => sub.recv_async().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Ok(sample) = result {
+                            let is_alive = sample.kind() == SampleKind::Put;
+                            if let Some(msg) = parse_device_liveliness(sample.key_expr().as_str(), is_alive) {
+                                yield msg;
+                            }
+                        }
                     }
                 }
             }
         }
     })
+}
+
+/// Parse a bridge liveliness key expression.
+///
+/// Key format: `zensight/<protocol>/@/alive`
+/// Returns the protocol name.
+fn parse_bridge_liveliness(key: &str, is_alive: bool) -> Option<Message> {
+    let parts: Vec<&str> = key.split('/').collect();
+    // Expected: ["zensight", "<protocol>", "@", "alive"]
+    if parts.len() >= 4 && parts[0] == "zensight" && parts[2] == "@" && parts[3] == "alive" {
+        let protocol = parts[1].to_string();
+        if is_alive {
+            tracing::info!(protocol = %protocol, "Bridge came online");
+            Some(Message::BridgeOnline(protocol))
+        } else {
+            tracing::warn!(protocol = %protocol, "Bridge went offline");
+            Some(Message::BridgeOffline(protocol))
+        }
+    } else {
+        None
+    }
+}
+
+/// Parse a device liveliness key expression.
+///
+/// Key format: `zensight/<protocol>/@/devices/<device_id>/alive`
+/// Returns (protocol, device_id).
+fn parse_device_liveliness(key: &str, is_alive: bool) -> Option<Message> {
+    let parts: Vec<&str> = key.split('/').collect();
+    // Expected: ["zensight", "<protocol>", "@", "devices", "<device_id>", "alive"]
+    if parts.len() >= 6
+        && parts[0] == "zensight"
+        && parts[2] == "@"
+        && parts[3] == "devices"
+        && parts[5] == "alive"
+    {
+        let protocol = parts[1].to_string();
+        let device_id = parts[4].to_string();
+        if is_alive {
+            tracing::debug!(protocol = %protocol, device = %device_id, "Device came online");
+            Some(Message::DeviceOnline(protocol, device_id))
+        } else {
+            tracing::debug!(protocol = %protocol, device = %device_id, "Device went offline");
+            Some(Message::DeviceOffline(protocol, device_id))
+        }
+    } else {
+        None
+    }
 }
 
 /// Decode a sample based on its key expression pattern.
@@ -292,4 +441,68 @@ pub fn demo_subscription() -> Subscription<Message> {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_bridge_liveliness_online() {
+        let key = "zensight/snmp/@/alive";
+        let msg = parse_bridge_liveliness(key, true);
+        assert!(matches!(msg, Some(Message::BridgeOnline(ref p)) if p == "snmp"));
+    }
+
+    #[test]
+    fn test_parse_bridge_liveliness_offline() {
+        let key = "zensight/sysinfo/@/alive";
+        let msg = parse_bridge_liveliness(key, false);
+        assert!(matches!(msg, Some(Message::BridgeOffline(ref p)) if p == "sysinfo"));
+    }
+
+    #[test]
+    fn test_parse_bridge_liveliness_invalid() {
+        // Wrong format
+        assert!(parse_bridge_liveliness("zensight/snmp/device/metric", true).is_none());
+        // Missing alive
+        assert!(parse_bridge_liveliness("zensight/snmp/@/health", true).is_none());
+        // Wrong prefix
+        assert!(parse_bridge_liveliness("other/snmp/@/alive", true).is_none());
+    }
+
+    #[test]
+    fn test_parse_device_liveliness_online() {
+        let key = "zensight/snmp/@/devices/router01/alive";
+        let msg = parse_device_liveliness(key, true);
+        assert!(
+            matches!(msg, Some(Message::DeviceOnline(ref p, ref d)) if p == "snmp" && d == "router01")
+        );
+    }
+
+    #[test]
+    fn test_parse_device_liveliness_offline() {
+        let key = "zensight/sysinfo/@/devices/server01/alive";
+        let msg = parse_device_liveliness(key, false);
+        assert!(
+            matches!(msg, Some(Message::DeviceOffline(ref p, ref d)) if p == "sysinfo" && d == "server01")
+        );
+    }
+
+    #[test]
+    fn test_parse_device_liveliness_invalid() {
+        // Wrong format
+        assert!(parse_device_liveliness("zensight/snmp/@/alive", true).is_none());
+        // Missing alive
+        assert!(parse_device_liveliness("zensight/snmp/@/devices/router01/status", true).is_none());
+        // Too short
+        assert!(parse_device_liveliness("zensight/snmp/@/devices", true).is_none());
+    }
+
+    #[test]
+    fn test_liveliness_key_expressions() {
+        // Verify our constants match expected patterns
+        assert_eq!(BRIDGE_LIVELINESS_EXPR, "zensight/*/@/alive");
+        assert_eq!(DEVICE_LIVELINESS_EXPR, "zensight/*/@/devices/*/alive");
+    }
 }

@@ -20,7 +20,8 @@ repository = "https://github.com/mpardo/zensight"
 
 [workspace.dependencies]
 # Zenoh
-zenoh = "1.0"
+zenoh = { version = "1.0", features = ["unstable"] }
+zenoh-ext = { version = "1.0", features = ["unstable"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

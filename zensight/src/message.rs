@@ -34,6 +34,18 @@ pub enum Message {
     /// Zenoh connection lost or failed.
     Disconnected(String),
 
+    /// Bridge came online (liveliness token appeared).
+    BridgeOnline(String),
+
+    /// Bridge went offline (liveliness token disappeared).
+    BridgeOffline(String),
+
+    /// Device came online (liveliness token appeared).
+    DeviceOnline(String, String),
+
+    /// Device went offline (liveliness token disappeared).
+    DeviceOffline(String, String),
+
     /// User selected a device from the dashboard.
     SelectDevice(DeviceId),
 

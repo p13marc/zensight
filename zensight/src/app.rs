@@ -253,6 +253,41 @@ impl ZenSight {
                 self.dashboard.last_error = Some(error);
             }
 
+            Message::BridgeOnline(protocol) => {
+                tracing::info!(protocol = %protocol, "Bridge online (liveliness)");
+                // Bridge liveliness is informational - the bridge health system
+                // already tracks bridge status via HealthSnapshot messages.
+                // This provides instant notification when bridges appear.
+            }
+
+            Message::BridgeOffline(protocol) => {
+                tracing::warn!(protocol = %protocol, "Bridge offline (liveliness)");
+                // Mark all devices from this protocol as potentially offline.
+                // The health system will update their status on the next poll.
+            }
+
+            Message::DeviceOnline(protocol, device_id) => {
+                tracing::debug!(protocol = %protocol, device = %device_id, "Device online (liveliness)");
+                // Device came online - update its status if we're tracking it
+                if let Ok(proto) = protocol.parse::<Protocol>() {
+                    let dev_id = DeviceId::new(proto, &device_id);
+                    if let Some(device) = self.dashboard.devices.get_mut(&dev_id) {
+                        device.is_healthy = true;
+                    }
+                }
+            }
+
+            Message::DeviceOffline(protocol, device_id) => {
+                tracing::debug!(protocol = %protocol, device = %device_id, "Device offline (liveliness)");
+                // Device went offline - update its status if we're tracking it
+                if let Ok(proto) = protocol.parse::<Protocol>() {
+                    let dev_id = DeviceId::new(proto, &device_id);
+                    if let Some(device) = self.dashboard.devices.get_mut(&dev_id) {
+                        device.is_healthy = false;
+                    }
+                }
+            }
+
             Message::SelectDevice(device_id) => {
                 self.select_device(device_id);
             }

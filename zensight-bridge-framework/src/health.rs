@@ -13,6 +13,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
+use crate::liveliness::LivelinessManager;
 use crate::publisher::Publisher;
 
 /// Bridge health metrics.
@@ -41,6 +42,8 @@ pub struct BridgeHealth {
     device_liveness: Arc<RwLock<HashMap<String, DeviceState>>>,
     /// Publisher for health metrics.
     publisher: Option<Publisher>,
+    /// Liveliness manager for Zenoh presence tokens.
+    liveliness_manager: Option<Arc<LivelinessManager>>,
 }
 
 /// Device state for liveness tracking.
@@ -186,6 +189,7 @@ impl BridgeHealth {
             last_poll_duration_ms: AtomicU64::new(0),
             device_liveness: Arc::new(RwLock::new(HashMap::new())),
             publisher: None,
+            liveliness_manager: None,
         }
     }
 
@@ -195,12 +199,24 @@ impl BridgeHealth {
         self
     }
 
+    /// Set the liveliness manager for Zenoh presence tokens.
+    ///
+    /// When set, device success/failure will automatically declare/undeclare
+    /// liveliness tokens for instant presence detection by the frontend.
+    pub fn with_liveliness(mut self, liveliness: Arc<LivelinessManager>) -> Self {
+        self.liveliness_manager = Some(liveliness);
+        self
+    }
+
     /// Set the total number of devices.
     pub fn set_devices_total(&self, count: u64) {
         self.devices_total.store(count, Ordering::SeqCst);
     }
 
     /// Record that a device poll succeeded.
+    ///
+    /// This is the synchronous version. Use [`record_device_success_async`] if you
+    /// have a liveliness manager configured and want to declare the device token.
     pub fn record_device_success(&self, device_id: &str) {
         let now = chrono::Utc::now().timestamp_millis();
 
@@ -225,7 +241,30 @@ impl BridgeHealth {
         self.update_device_counters();
     }
 
+    /// Record that a device poll succeeded (async version).
+    ///
+    /// If a liveliness manager is configured, this will also declare
+    /// the device's liveliness token for instant presence detection.
+    pub async fn record_device_success_async(&self, device_id: &str) {
+        // Update internal state
+        self.record_device_success(device_id);
+
+        // Declare liveliness token if configured
+        if let Some(ref liveliness) = self.liveliness_manager {
+            if let Err(e) = liveliness.declare_device_alive(device_id).await {
+                tracing::warn!(
+                    device = %device_id,
+                    error = %e,
+                    "Failed to declare device liveliness token"
+                );
+            }
+        }
+    }
+
     /// Record that a device poll failed.
+    ///
+    /// This is the synchronous version. Use [`record_device_failure_async`] if you
+    /// have a liveliness manager configured and want to undeclare the device token.
     pub fn record_device_failure(&self, device_id: &str, error: &str) {
         let mut devices = self.device_liveness.write().unwrap();
         let state = devices
@@ -252,6 +291,39 @@ impl BridgeHealth {
         drop(devices);
         self.update_device_counters();
         self.errors_last_hour.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Record that a device poll failed (async version).
+    ///
+    /// If a liveliness manager is configured and the device transitions to
+    /// Offline status (3+ consecutive failures), this will undeclare the
+    /// device's liveliness token.
+    pub async fn record_device_failure_async(&self, device_id: &str, error: &str) {
+        // Get old status before update
+        let was_online = {
+            let devices = self.device_liveness.read().unwrap();
+            devices
+                .get(device_id)
+                .is_some_and(|s| s.status != DeviceStatus::Offline)
+        };
+
+        // Update internal state
+        self.record_device_failure(device_id, error);
+
+        // Check if device just went offline
+        let is_now_offline = {
+            let devices = self.device_liveness.read().unwrap();
+            devices
+                .get(device_id)
+                .is_some_and(|s| s.status == DeviceStatus::Offline)
+        };
+
+        // Undeclare liveliness token if device just went offline
+        if was_online && is_now_offline {
+            if let Some(ref liveliness) = self.liveliness_manager {
+                liveliness.undeclare_device(device_id).await;
+            }
+        }
     }
 
     /// Update device responding/failed counters based on liveness states.

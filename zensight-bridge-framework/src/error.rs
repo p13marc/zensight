@@ -40,6 +40,10 @@ pub enum BridgeError {
     #[error("Failed to publish to {key}: {message}")]
     Publish { key: String, message: String },
 
+    /// Liveliness token error.
+    #[error("Liveliness error: {0}")]
+    Liveliness(String),
+
     /// Worker error.
     #[error("Worker error: {0}")]
     Worker(String),
@@ -71,6 +75,11 @@ impl BridgeError {
     /// Create a worker error.
     pub fn worker(msg: impl Into<String>) -> Self {
         Self::Worker(msg.into())
+    }
+
+    /// Create a liveliness error.
+    pub fn liveliness(msg: impl Into<String>) -> Self {
+        Self::Liveliness(msg.into())
     }
 
     /// Wrap an error with context.

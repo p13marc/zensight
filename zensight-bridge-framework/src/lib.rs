@@ -31,15 +31,18 @@
 //! }
 //! ```
 
+mod advanced_publisher;
 mod args;
 mod config;
 mod correlation;
 mod error;
 mod health;
+mod liveliness;
 mod publisher;
 mod runner;
 mod status;
 
+pub use advanced_publisher::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
 pub use args::BridgeArgs;
 pub use config::BridgeConfig;
 pub use correlation::{BridgeInfo, CorrelationEntry, CorrelationRegistry, DeviceIdentity};
@@ -47,6 +50,7 @@ pub use error::{BridgeError, Result};
 pub use health::{
     BridgeHealth, DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot,
 };
+pub use liveliness::LivelinessManager;
 pub use publisher::Publisher;
 pub use runner::BridgeRunner;
 pub use status::BridgeStatus;

@@ -11,6 +11,7 @@ use zensight_common::{Format, LoggingConfig, connect, init_tracing};
 use crate::BridgeArgs;
 use crate::config::BridgeConfig;
 use crate::error::{BridgeError, Result};
+use crate::liveliness::LivelinessManager;
 use crate::publisher::Publisher;
 use crate::status::StatusPublisher;
 
@@ -58,6 +59,8 @@ pub struct BridgeRunner<C: BridgeConfig> {
     publisher: Publisher,
     /// Status publisher (optional).
     status_publisher: Option<StatusPublisher>,
+    /// Liveliness manager for presence detection.
+    liveliness: Option<LivelinessManager>,
     /// Spawned tasks.
     tasks: Vec<JoinHandle<()>>,
 }
@@ -124,6 +127,7 @@ impl<C: BridgeConfig> BridgeRunner<C> {
             session,
             publisher,
             status_publisher: None,
+            liveliness: None,
             tasks: Vec::new(),
         })
     }
@@ -138,6 +142,21 @@ impl<C: BridgeConfig> BridgeRunner<C> {
             &self.version,
         ));
         self
+    }
+
+    /// Enable liveliness tokens for presence detection.
+    ///
+    /// When enabled, the runner will declare a bridge-level liveliness token
+    /// that allows the frontend to instantly detect when this bridge comes
+    /// online or goes offline.
+    ///
+    /// The liveliness manager can also be used to declare device-level tokens
+    /// via [`LivelinessManager::declare_device_alive`].
+    pub async fn with_liveliness(mut self) -> Result<Self> {
+        let liveliness =
+            LivelinessManager::new(self.session.clone(), self.config.key_prefix()).await?;
+        self.liveliness = Some(liveliness);
+        Ok(self)
     }
 
     /// Set a custom serialization format for the publisher.
@@ -177,6 +196,13 @@ impl<C: BridgeConfig> BridgeRunner<C> {
     /// Get a clone of the publisher.
     pub fn publisher(&self) -> Publisher {
         self.publisher.clone()
+    }
+
+    /// Get a reference to the liveliness manager.
+    ///
+    /// Returns `None` if liveliness was not enabled via [`Self::with_liveliness`].
+    pub fn liveliness(&self) -> Option<&LivelinessManager> {
+        self.liveliness.as_ref()
     }
 
     /// Create a publisher with a different key prefix.
