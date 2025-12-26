@@ -223,3 +223,57 @@ pub fn sun<Message: 'static>(size: IconSize) -> Element<'static, Message> {
 pub fn moon<Message: 'static>(size: IconSize) -> Element<'static, Message> {
     svg_icon(include_bytes!("moon.svg"), size)
 }
+
+// ============================================================================
+// Specialized View Icons
+// ============================================================================
+
+/// CPU/processor icon.
+pub fn cpu<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("cpu.svg"), size)
+}
+
+/// Memory/RAM icon.
+pub fn memory<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("memory.svg"), size)
+}
+
+/// Disk/storage icon.
+pub fn disk<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("disk.svg"), size)
+}
+
+/// Network/topology icon.
+pub fn network<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("network.svg"), size)
+}
+
+/// Log/document icon.
+pub fn log<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("log.svg"), size)
+}
+
+/// Toggle/switch icon.
+pub fn toggle<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("toggle.svg"), size)
+}
+
+/// Table/grid icon.
+pub fn table<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("table.svg"), size)
+}
+
+/// Protocol/globe icon.
+pub fn protocol<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("protocol.svg"), size)
+}
+
+/// Subscription/rss icon.
+pub fn subscription<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("subscription.svg"), size)
+}
+
+/// Tree/hierarchy icon.
+pub fn tree<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("tree.svg"), size)
+}

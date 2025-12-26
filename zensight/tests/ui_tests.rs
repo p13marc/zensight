@@ -104,8 +104,9 @@ fn test_device_detail_view() {
     assert!(ui.find("server01").is_ok());
     // Should show Back button
     assert!(ui.find("Back").is_ok());
-    // Should show some metrics
-    assert!(ui.find("cpu/usage").is_ok());
+    // Should show section headers (specialized view shows CPU, Memory, etc.)
+    assert!(ui.find("CPU").is_ok());
+    assert!(ui.find("Memory").is_ok());
 }
 
 /// Test clicking Back button in device view.
@@ -184,4 +185,159 @@ fn test_device_metric_filter() {
     let filtered = state.sorted_metrics();
     assert!(filtered.iter().all(|(name, _)| name.contains("cpu")));
     assert!(filtered.len() < state.total_metric_count());
+}
+
+/// Test SNMP specialized view renders with interface table.
+#[test]
+fn test_snmp_specialized_view() {
+    let device_id = DeviceId {
+        protocol: Protocol::Snmp,
+        source: "router01".to_string(),
+    };
+    let mut state = DeviceDetailState::new(device_id);
+
+    // Add mock SNMP telemetry
+    for point in mock::snmp::router("router01") {
+        state.update(point);
+    }
+
+    let mut ui = simulator(device_view(&state));
+
+    // Should show the device name
+    assert!(ui.find("router01").is_ok());
+    // Should show Interfaces section (SNMP specialized view)
+    assert!(ui.find("Interfaces").is_ok());
+    // Should show System Metrics section
+    assert!(ui.find("System Metrics").is_ok());
+}
+
+/// Test syslog specialized view renders with severity distribution.
+#[test]
+fn test_syslog_specialized_view() {
+    use zensight_common::TelemetryPoint;
+    use zensight_common::TelemetryValue;
+
+    let device_id = DeviceId {
+        protocol: Protocol::Syslog,
+        source: "server01".to_string(),
+    };
+    let mut state = DeviceDetailState::new(device_id);
+
+    // Add a syslog message
+    let mut point = TelemetryPoint::new(
+        "server01",
+        Protocol::Syslog,
+        "message/1",
+        TelemetryValue::Text("Test log message".to_string()),
+    );
+    point.labels.insert("severity".to_string(), "4".to_string()); // Warning
+    point
+        .labels
+        .insert("app_name".to_string(), "test".to_string());
+    state.update(point);
+
+    let mut ui = simulator(device_view(&state));
+
+    // Should show the device name
+    assert!(ui.find("server01").is_ok());
+    // Should show Log Stream section (syslog specialized view)
+    assert!(ui.find("Log Stream").is_ok());
+}
+
+/// Test modbus specialized view renders with register sections.
+#[test]
+fn test_modbus_specialized_view() {
+    use zensight_common::TelemetryPoint;
+    use zensight_common::TelemetryValue;
+
+    let device_id = DeviceId {
+        protocol: Protocol::Modbus,
+        source: "plc01".to_string(),
+    };
+    let mut state = DeviceDetailState::new(device_id);
+
+    // Add a holding register
+    let point = TelemetryPoint::new(
+        "plc01",
+        Protocol::Modbus,
+        "holding/40001/temperature",
+        TelemetryValue::Gauge(72.5),
+    );
+    state.update(point);
+
+    let mut ui = simulator(device_view(&state));
+
+    // Should show the device name
+    assert!(ui.find("plc01").is_ok());
+    // Should show Holding Registers section (modbus specialized view)
+    assert!(ui.find("Holding Registers").is_ok());
+}
+
+/// Test netflow specialized view renders with traffic sections.
+#[test]
+fn test_netflow_specialized_view() {
+    use zensight_common::TelemetryPoint;
+    use zensight_common::TelemetryValue;
+
+    let device_id = DeviceId {
+        protocol: Protocol::Netflow,
+        source: "router01".to_string(),
+    };
+    let mut state = DeviceDetailState::new(device_id);
+
+    // Add a flow record
+    let mut point = TelemetryPoint::new(
+        "router01",
+        Protocol::Netflow,
+        "flow/1",
+        TelemetryValue::Counter(1000),
+    );
+    point
+        .labels
+        .insert("src_ip".to_string(), "10.0.0.1".to_string());
+    point
+        .labels
+        .insert("dst_ip".to_string(), "10.0.0.2".to_string());
+    point.labels.insert("protocol".to_string(), "6".to_string()); // TCP
+    state.update(point);
+
+    let mut ui = simulator(device_view(&state));
+
+    // Should show exporter name (NetFlow view shows "Exporter: <name>")
+    assert!(ui.find("Exporter: router01").is_ok());
+    // Should show Top Talkers section (netflow specialized view)
+    assert!(ui.find("Top Talkers (by bytes)").is_ok());
+    // Should show Recent Flows section
+    assert!(ui.find("Recent Flows").is_ok());
+}
+
+/// Test gNMI specialized view renders with path browser.
+#[test]
+fn test_gnmi_specialized_view() {
+    use zensight_common::TelemetryPoint;
+    use zensight_common::TelemetryValue;
+
+    let device_id = DeviceId {
+        protocol: Protocol::Gnmi,
+        source: "spine01".to_string(),
+    };
+    let mut state = DeviceDetailState::new(device_id);
+
+    // Add a gNMI path
+    let point = TelemetryPoint::new(
+        "spine01",
+        Protocol::Gnmi,
+        "interfaces/interface/state/name",
+        TelemetryValue::Text("eth0".to_string()),
+    );
+    state.update(point);
+
+    let mut ui = simulator(device_view(&state));
+
+    // Should show the device name
+    assert!(ui.find("spine01").is_ok());
+    // Should show Active Subscriptions section (gnmi specialized view)
+    assert!(ui.find("Active Subscriptions").is_ok());
+    // Should show Path Browser section
+    assert!(ui.find("Path Browser").is_ok());
 }

@@ -14,6 +14,7 @@ use crate::message::{DeviceId, Message};
 use crate::view::chart::{ChartState, DataPoint, TimeWindow, chart_view};
 use crate::view::formatting::{format_timestamp, format_value};
 use crate::view::icons::{self, IconSize};
+use crate::view::specialized;
 
 /// Debounce delay for metric search input in milliseconds.
 const SEARCH_DEBOUNCE_MS: i64 = 300;
@@ -399,7 +400,22 @@ fn format_value_for_export(value: &TelemetryValue) -> String {
 }
 
 /// Render the device detail view.
+///
+/// This function first tries to render a protocol-specific specialized view.
+/// If no specialized view is available for the protocol, it falls back to
+/// the generic device view.
 pub fn device_view(state: &DeviceDetailState) -> Element<'_, Message> {
+    // Try to use a specialized view for this protocol
+    if let Some(specialized_view) = specialized::specialized_view(state) {
+        return specialized_view;
+    }
+
+    // Fall back to generic view
+    generic_device_view(state)
+}
+
+/// Render the generic device detail view (fallback for protocols without specialized views).
+pub fn generic_device_view(state: &DeviceDetailState) -> Element<'_, Message> {
     let header = render_header(state);
 
     // Show chart if a metric is selected (single) or in comparison mode (multi)
