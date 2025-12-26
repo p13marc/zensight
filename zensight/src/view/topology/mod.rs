@@ -248,8 +248,8 @@ impl TopologyState {
     /// Run layout iterations for smooth convergence.
     /// Returns true if the layout is stable.
     pub fn run_layout_step(&mut self) -> bool {
-        // Run 2 iterations per frame - balance between speed and smoothness
-        for _ in 0..2 {
+        // Run 3 iterations per frame - balance between speed and smoothness
+        for _ in 0..3 {
             self.layout_stable = layout_step(self, &self.layout_config.clone());
             if self.layout_stable {
                 break;

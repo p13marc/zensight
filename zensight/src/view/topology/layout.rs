@@ -32,13 +32,13 @@ impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
             repulsion: 10000.0,       // Strong repulsion to keep nodes well apart
-            attraction: 0.008,        // Weak attraction so edges don't pull too hard
-            centering: 0.001,         // Very weak centering - just prevents drift
-            damping: 0.8,             // Higher damping for smooth motion
+            attraction: 0.015,        // Moderate attraction for faster settling
+            centering: 0.002,         // Weak centering - prevents drift
+            damping: 0.7,             // Lower damping for faster convergence
             min_distance: 180.0,      // Minimum node separation
             ideal_distance: 350.0,    // Large target distance for spread out graph
-            max_velocity: 12.0,       // Lower velocity for smoother animation
-            stability_threshold: 1.0, // Stabilizes fairly quickly
+            max_velocity: 20.0,       // Higher velocity for faster convergence
+            stability_threshold: 1.5, // Stabilizes quickly
         }
     }
 }
