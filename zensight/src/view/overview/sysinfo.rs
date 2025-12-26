@@ -109,7 +109,7 @@ fn calculate_average<F>(summaries: &[HostSummary], extractor: F) -> (f64, usize)
 where
     F: Fn(&HostSummary) -> Option<f64>,
 {
-    let values: Vec<f64> = summaries.iter().filter_map(|s| extractor(s)).collect();
+    let values: Vec<f64> = summaries.iter().filter_map(extractor).collect();
     let count = values.len();
     let avg = if count > 0 {
         values.iter().sum::<f64>() / count as f64
@@ -199,7 +199,7 @@ fn render_host_bars<'a>(summaries: &[HostSummary]) -> Element<'a, Message> {
 
     let host_rows: Vec<Element<'a, Message>> = display_hosts
         .into_iter()
-        .map(|host| render_host_row(host))
+        .map(render_host_row)
         .collect();
 
     let mut content = Column::with_children(host_rows).spacing(4);

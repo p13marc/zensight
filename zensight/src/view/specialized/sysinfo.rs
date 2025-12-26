@@ -225,15 +225,14 @@ fn render_memory_section(state: &DeviceDetailState) -> Element<'_, Message> {
     let swap_used = get_metric_value(state, "memory/swap_used");
     let swap_total = get_metric_value(state, "memory/swap_total");
 
-    if let (Some(used), Some(total)) = (swap_used, swap_total) {
-        if total > 0.0 {
+    if let (Some(used), Some(total)) = (swap_used, swap_total)
+        && total > 0.0 {
             let used_gb = used / 1_073_741_824.0;
             let total_gb = total / 1_073_741_824.0;
 
             let progress = ProgressBar::new(used_gb, total_gb, "Swap", "GB");
             mem_content = mem_content.push(progress.view());
         }
-    }
 
     // Memory available
     if let Some(available) = get_metric_value(state, "memory/available") {

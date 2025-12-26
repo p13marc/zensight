@@ -216,7 +216,7 @@ fn render_severity_bar<'a>(severity: Severity, count: usize, total: usize) -> El
         0.0
     };
 
-    let bar_width = (pct * 2.0).max(2.0).min(100.0) as f32;
+    let bar_width = (pct * 2.0).clamp(2.0, 100.0) as f32;
     let color = severity.color();
 
     let bar = container(text(""))

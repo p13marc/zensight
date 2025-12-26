@@ -168,26 +168,24 @@ fn render_system_info(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     // sysContact
-    if let Some(contact) = get_metric_text(state, "system/sysContact") {
-        if !contact.is_empty() {
+    if let Some(contact) = get_metric_text(state, "system/sysContact")
+        && !contact.is_empty() {
             info_items.push(
                 row![text("Contact:").size(12), text(contact).size(12)]
                     .spacing(8)
                     .into(),
             );
         }
-    }
 
     // sysLocation
-    if let Some(location) = get_metric_text(state, "system/sysLocation") {
-        if !location.is_empty() {
+    if let Some(location) = get_metric_text(state, "system/sysLocation")
+        && !location.is_empty() {
             info_items.push(
                 row![text("Location:").size(12), text(location).size(12)]
                     .spacing(8)
                     .into(),
             );
         }
-    }
 
     if info_items.is_empty() {
         info_items.push(
@@ -345,8 +343,8 @@ fn render_system_metrics(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     // Memory (hrStorageUsed/hrStorageSize for RAM type)
-    if let Some(mem_used) = get_metric_value(state, "host/hrStorageUsed") {
-        if let Some(mem_total) = get_metric_value(state, "host/hrStorageSize") {
+    if let Some(mem_used) = get_metric_value(state, "host/hrStorageUsed")
+        && let Some(mem_total) = get_metric_value(state, "host/hrStorageSize") {
             let pct = if mem_total > 0.0 {
                 (mem_used / mem_total) * 100.0
             } else {
@@ -356,7 +354,6 @@ fn render_system_metrics(state: &DeviceDetailState) -> Element<'_, Message> {
             metrics_content = metrics_content.push(gauge.view());
             has_metrics = true;
         }
-    }
 
     // Temperature sensors
     let temp_metrics: Vec<_> = state
@@ -367,7 +364,7 @@ fn render_system_metrics(state: &DeviceDetailState) -> Element<'_, Message> {
 
     for (name, point) in temp_metrics {
         if let TelemetryValue::Gauge(temp) = &point.value {
-            let short_name = name.split('/').last().unwrap_or(name);
+            let short_name = name.split('/').next_back().unwrap_or(name);
             metrics_content = metrics_content.push(
                 row![
                     text(format!("{}:", short_name)).size(12),

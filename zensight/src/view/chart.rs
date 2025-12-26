@@ -473,11 +473,10 @@ impl ChartState {
         let mut oldest = i64::MAX;
 
         // Check single-series data
-        if !self.data.is_empty() {
-            if let Some(min_ts) = self.data.iter().map(|p| p.timestamp).min() {
+        if !self.data.is_empty()
+            && let Some(min_ts) = self.data.iter().map(|p| p.timestamp).min() {
                 oldest = oldest.min(min_ts);
             }
-        }
 
         // Check multi-series data
         for series in &self.series {
@@ -817,14 +816,13 @@ impl<'a> canvas::Program<crate::message::Message> for Chart<'a> {
 
             // Handle mouse drag for panning
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                if cursor.is_over(bounds) {
-                    if let Some(pos) = cursor.position() {
+                if cursor.is_over(bounds)
+                    && let Some(pos) = cursor.position() {
                         state.dragging = true;
                         return Some(Action::publish(crate::message::Message::ChartDragStart(
                             pos.x,
                         )));
                     }
-                }
                 None
             }
 

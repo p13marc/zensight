@@ -87,15 +87,14 @@ fn render_device_info(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     // Also check labels
-    if let Some(point) = state.metrics.values().next() {
-        if let Some(target) = point.labels.get("target") {
+    if let Some(point) = state.metrics.values().next()
+        && let Some(target) = point.labels.get("target") {
             info_items.push(
                 row![text("Target:").size(12), text(target).size(12)]
                     .spacing(8)
                     .into(),
             );
         }
-    }
 
     if info_items.is_empty() {
         info_items.push(
@@ -199,7 +198,7 @@ fn render_path_browser(state: &DeviceDetailState) -> Element<'_, Message> {
         let indent_str = "  ".repeat(depth.min(6));
 
         // Get the last segment for display
-        let last_segment = path.split('/').last().unwrap_or(&path);
+        let last_segment = path.split('/').next_back().unwrap_or(&path);
 
         // Highlight keys like [name=value]
         let name_style = if last_segment.contains('[') {

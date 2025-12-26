@@ -379,7 +379,7 @@ fn render_flow_table(state: &DeviceDetailState) -> Element<'_, Message> {
 fn parse_flows(state: &DeviceDetailState) -> Vec<FlowRecord> {
     let mut flows = Vec::new();
 
-    for (_key, point) in &state.metrics {
+    for point in state.metrics.values() {
         // Expect format: flow/<src>/<dst> or similar
         let src_ip = point
             .labels

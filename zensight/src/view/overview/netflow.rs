@@ -87,8 +87,8 @@ pub fn netflow_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Eleme
 fn collect_flows(devices: &HashMap<&DeviceId, &DeviceState>) -> Vec<FlowRecord> {
     let mut flows = Vec::new();
 
-    for (_device_id, state) in devices {
-        for (_key, point) in &state.metrics {
+    for state in devices.values() {
+        for point in state.metrics.values() {
             let src_ip = point
                 .labels
                 .get("src_ip")
@@ -266,7 +266,7 @@ fn render_protocol_bar<'a>(
     pct: f64,
     color: iced::Color,
 ) -> Element<'a, Message> {
-    let bar_width = (pct * 2.0).max(5.0).min(100.0) as f32;
+    let bar_width = (pct * 2.0).clamp(5.0, 100.0) as f32;
 
     let bar = container(text(""))
         .width(Length::Fixed(bar_width))

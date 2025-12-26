@@ -172,7 +172,7 @@ impl DashboardState {
         if filtered_count == 0 {
             1
         } else {
-            (filtered_count + self.devices_per_page - 1) / self.devices_per_page
+            filtered_count.div_ceil(self.devices_per_page)
         }
     }
 
@@ -460,7 +460,7 @@ fn render_device_grid<'a>(
     let total_pages = if all_devices.is_empty() {
         1
     } else {
-        (all_devices.len() + state.devices_per_page - 1) / state.devices_per_page
+        all_devices.len().div_ceil(state.devices_per_page)
     };
 
     if total_pages > 1 {
@@ -511,11 +511,10 @@ fn render_pagination_controls_with_count(
     let mut last_shown: Option<usize> = None;
 
     for page in pages_to_show {
-        if let Some(last) = last_shown {
-            if page > last + 1 {
+        if let Some(last) = last_shown
+            && page > last + 1 {
                 page_row = page_row.push(text("...").size(14));
             }
-        }
 
         let page_btn = if page == current_page {
             button(text(format!("{}", page + 1)).size(14)).style(iced::widget::button::primary)
