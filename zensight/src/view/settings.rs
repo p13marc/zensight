@@ -2,10 +2,9 @@
 
 use std::path::PathBuf;
 
-use iced::widget::{
-    Column, button, column, container, pick_list, row, rule, scrollable, text, text_input,
-};
+use iced::widget::{Column, column, container, pick_list, row, rule, scrollable, text, text_input};
 use iced::{Alignment, Element, Length, Theme};
+use iced_anim::widget::button;
 use serde::{Deserialize, Serialize};
 
 use crate::app::CurrentView;

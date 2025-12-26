@@ -9,8 +9,9 @@ pub mod layout;
 use std::collections::HashMap;
 
 use iced::widget::canvas::Cache;
-use iced::widget::{button, column, container, row, text, text_input};
+use iced::widget::{column, container, row, text, text_input};
 use iced::{Alignment, Element, Length};
+use iced_anim::widget::button;
 
 use crate::message::{DeviceId, Message};
 use crate::view::dashboard::DeviceState;

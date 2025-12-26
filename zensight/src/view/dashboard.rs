@@ -2,10 +2,9 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{
-    Column, button, column, container, row, rule, scrollable, text, text_input, tooltip,
-};
+use iced::widget::{Column, column, container, row, rule, scrollable, text, text_input, tooltip};
 use iced::{Alignment, Element, Length, Theme};
+use iced_anim::widget::button;
 
 use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 

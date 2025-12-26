@@ -5,8 +5,9 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{Column, Row, button, column, container, row, rule, scrollable, text};
+use iced::widget::{Column, Row, column, container, row, rule, scrollable, text};
 use iced::{Alignment, Element, Length, Theme};
+use iced_anim::widget::button;
 
 use zensight_common::TelemetryValue;
 
@@ -88,13 +89,14 @@ fn render_device_info(state: &DeviceDetailState) -> Element<'_, Message> {
 
     // Also check labels
     if let Some(point) = state.metrics.values().next()
-        && let Some(target) = point.labels.get("target") {
-            info_items.push(
-                row![text("Target:").size(12), text(target).size(12)]
-                    .spacing(8)
-                    .into(),
-            );
-        }
+        && let Some(target) = point.labels.get("target")
+    {
+        info_items.push(
+            row![text("Target:").size(12), text(target).size(12)]
+                .spacing(8)
+                .into(),
+        );
+    }
 
     if info_items.is_empty() {
         info_items.push(

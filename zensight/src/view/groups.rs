@@ -2,8 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use iced::widget::{Column, Row, button, column, container, row, scrollable, text, text_input};
+use iced::widget::{Column, Row, column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length, Theme};
+use iced_anim::widget::button;
 
 use serde::{Deserialize, Serialize};
 

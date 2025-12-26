@@ -4,8 +4,9 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{Column, Row, button, column, container, row, rule, scrollable, text};
+use iced::widget::{Column, Row, column, container, row, rule, scrollable, text};
 use iced::{Alignment, Element, Length, Theme};
+use iced_anim::widget::button;
 
 use zensight_common::TelemetryValue;
 
