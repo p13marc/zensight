@@ -23,7 +23,7 @@ pub fn sysinfo_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
     let disk_section = render_disk_section(state);
     let network_section = render_network_section(state);
 
-    let content = column![
+    let mut content = column![
         header,
         rule::horizontal(1),
         system_overview,
@@ -38,6 +38,32 @@ pub fn sysinfo_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
     ]
     .spacing(15)
     .padding(20);
+
+    // Linux-specific sections (only show if data is present)
+    if has_cpu_times(state) {
+        content = content.push(rule::horizontal(1));
+        content = content.push(render_cpu_times_section(state));
+    }
+
+    if has_disk_io(state) {
+        content = content.push(rule::horizontal(1));
+        content = content.push(render_disk_io_section(state));
+    }
+
+    if has_temperatures(state) {
+        content = content.push(rule::horizontal(1));
+        content = content.push(render_temperatures_section(state));
+    }
+
+    if has_tcp_states(state) {
+        content = content.push(rule::horizontal(1));
+        content = content.push(render_tcp_states_section(state));
+    }
+
+    if has_processes(state) {
+        content = content.push(rule::horizontal(1));
+        content = content.push(render_processes_section(state));
+    }
 
     container(scrollable(content))
         .width(Length::Fill)
@@ -101,11 +127,19 @@ fn render_system_overview(state: &DeviceDetailState) -> Element<'_, Message> {
         );
     }
 
-    // Load average
-    if let Some(load1) = get_metric_value(state, "system/load_avg_1") {
-        let load5 = get_metric_value(state, "system/load_avg_5").unwrap_or(0.0);
-        let load15 = get_metric_value(state, "system/load_avg_15").unwrap_or(0.0);
-        let load_str = format!("{:.2} {:.2} {:.2}", load1, load5, load15);
+    // Load average - bridge publishes with "period" label (1m, 5m, 15m)
+    // Look for metrics with period labels
+    let load1 = get_metric_with_label(state, "system/load", "period", "1m");
+    let load5 = get_metric_with_label(state, "system/load", "period", "5m");
+    let load15 = get_metric_with_label(state, "system/load", "period", "15m");
+
+    if load1.is_some() || load5.is_some() || load15.is_some() {
+        let load_str = format!(
+            "{:.2} {:.2} {:.2}",
+            load1.unwrap_or(0.0),
+            load5.unwrap_or(0.0),
+            load15.unwrap_or(0.0)
+        );
 
         info_items.push(
             row![text("Load:").size(12), text(load_str).size(12)]
@@ -156,33 +190,45 @@ fn render_cpu_section(state: &DeviceDetailState) -> Element<'_, Message> {
         cpu_content = cpu_content.push(gauge.view());
     }
 
-    // CPU count
-    if let Some(cpu_count) = get_metric_value(state, "cpu/count") {
-        cpu_content = cpu_content.push(text(format!("{} cores", cpu_count as u32)).size(12).style(
+    // Count cores from available metrics
+    let core_count = (0..128)
+        .filter(|i| get_metric_value(state, &format!("cpu/{}/usage", i)).is_some())
+        .count();
+
+    if core_count > 0 {
+        cpu_content = cpu_content.push(text(format!("{} cores", core_count)).size(12).style(
             |t: &Theme| text::Style {
                 color: Some(theme::colors(t).text_muted()),
             },
         ));
     }
 
-    // Per-core usage (look for cpu/core/N/usage patterns)
-    let mut core_gauges: Vec<Element<'_, Message>> = Vec::new();
-    for i in 0..32 {
-        // Check up to 32 cores
-        let metric_name = format!("cpu/core/{}/usage", i);
-        if let Some(core_usage) = get_metric_value(state, &metric_name) {
-            let mini_gauge = Gauge::percentage(core_usage, format!("Core {}", i)).with_width(100.0);
-            core_gauges.push(mini_gauge.view());
+    // Per-core usage (bridge publishes as cpu/{N}/usage)
+    let mut core_items: Vec<Element<'_, Message>> = Vec::new();
+    for i in 0..128 {
+        let usage_metric = format!("cpu/{}/usage", i);
+        let freq_metric = format!("cpu/{}/frequency", i);
+
+        if let Some(core_usage) = get_metric_value(state, &usage_metric) {
+            let freq = get_metric_value(state, &freq_metric);
+            let label = if let Some(mhz) = freq {
+                format!("Core {} ({:.0} MHz)", i, mhz)
+            } else {
+                format!("Core {}", i)
+            };
+
+            let mini_gauge = Gauge::percentage(core_usage, label).with_width(140.0);
+            core_items.push(mini_gauge.view());
         }
     }
 
-    if !core_gauges.is_empty() {
+    if !core_items.is_empty() {
         cpu_content = cpu_content.push(text("Per-Core Usage").size(12));
         // Arrange in rows of 4
         let mut core_rows = Column::new().spacing(5);
         let mut current_row = Row::new().spacing(15);
         let mut count = 0;
-        for gauge in core_gauges {
+        for gauge in core_items {
             current_row = current_row.push(gauge);
             count += 1;
             if count % 4 == 0 {
@@ -334,9 +380,13 @@ fn render_network_section(state: &DeviceDetailState) -> Element<'_, Message> {
     for iface in interfaces {
         let rx_key = format!("network/{}/rx_bytes", iface);
         let tx_key = format!("network/{}/tx_bytes", iface);
+        let rx_rate_key = format!("network/{}/rx_rate", iface);
+        let tx_rate_key = format!("network/{}/tx_rate", iface);
 
         let rx = get_metric_value(state, &rx_key).unwrap_or(0.0);
         let tx = get_metric_value(state, &tx_key).unwrap_or(0.0);
+        let rx_rate = get_metric_value(state, &rx_rate_key);
+        let tx_rate = get_metric_value(state, &tx_rate_key);
 
         // Check if interface is up
         let status_key = format!("network/{}/is_up", iface);
@@ -354,13 +404,28 @@ fn render_network_section(state: &DeviceDetailState) -> Element<'_, Message> {
         let rx_str = format_bytes(rx);
         let tx_str = format_bytes(tx);
 
-        let iface_row = row![
+        let mut iface_row = row![
             status_led.view(),
             text(format!("rx: {}", rx_str)).size(11),
             text(format!("tx: {}", tx_str)).size(11),
         ]
         .spacing(20)
         .align_y(Alignment::Center);
+
+        // Add rates if available
+        if let (Some(rx_r), Some(tx_r)) = (rx_rate, tx_rate) {
+            iface_row = iface_row.push(
+                text(format!(
+                    "({}/s / {}/s)",
+                    format_bytes(rx_r),
+                    format_bytes(tx_r)
+                ))
+                .size(10)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
+                }),
+            );
+        }
 
         net_content = net_content.push(iface_row);
     }
@@ -374,6 +439,322 @@ fn render_network_section(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     column![title, net_content].spacing(10).into()
+}
+
+// =====================
+// Linux-specific sections
+// =====================
+
+/// Check if CPU times data is available.
+fn has_cpu_times(state: &DeviceDetailState) -> bool {
+    state
+        .metrics
+        .keys()
+        .any(|k| k.starts_with("cpu/times/") || k.contains("/times/"))
+}
+
+/// Render CPU times breakdown section (Linux-specific).
+fn render_cpu_times_section(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = row![icons::cpu(IconSize::Medium), text("CPU Times").size(16)]
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+    let mut content = Column::new().spacing(10);
+
+    // Look for aggregate CPU times
+    let time_types = [
+        ("user", "User"),
+        ("nice", "Nice"),
+        ("system", "System"),
+        ("idle", "Idle"),
+        ("iowait", "IO Wait"),
+        ("irq", "IRQ"),
+        ("softirq", "Soft IRQ"),
+        ("steal", "Steal"),
+    ];
+
+    let mut bars: Vec<Element<'_, Message>> = Vec::new();
+
+    for (key, label) in time_types {
+        if let Some(value) = get_metric_value(state, &format!("cpu/times/{}", key)) {
+            let bar = ProgressBar::new(value, 100.0, label, "%");
+            bars.push(bar.view());
+        }
+    }
+
+    if bars.is_empty() {
+        content = content.push(text("Waiting for CPU time metrics...").size(12).style(
+            |t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            },
+        ));
+    } else {
+        for bar in bars {
+            content = content.push(bar);
+        }
+    }
+
+    column![title, content].spacing(10).into()
+}
+
+/// Check if disk I/O data is available.
+fn has_disk_io(state: &DeviceDetailState) -> bool {
+    state.metrics.keys().any(|k| k.contains("/io/read_"))
+}
+
+/// Render disk I/O section (Linux-specific).
+fn render_disk_io_section(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = row![icons::disk(IconSize::Medium), text("Disk I/O").size(16)]
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+    let mut content = Column::new().spacing(8);
+
+    // Find all devices with I/O stats
+    let mut devices: Vec<String> = state
+        .metrics
+        .keys()
+        .filter_map(|k| {
+            if k.contains("/io/read_rate") {
+                // Extract device name: disk/{device}/io/read_rate
+                let parts: Vec<&str> = k.split('/').collect();
+                if parts.len() >= 4 && parts[0] == "disk" {
+                    return Some(parts[1].to_string());
+                }
+            }
+            None
+        })
+        .collect();
+
+    devices.sort();
+    devices.dedup();
+
+    for device in devices {
+        let read_rate = get_metric_value(state, &format!("disk/{}/io/read_rate", device));
+        let write_rate = get_metric_value(state, &format!("disk/{}/io/write_rate", device));
+        let read_iops = get_metric_value(state, &format!("disk/{}/io/read_iops", device));
+        let write_iops = get_metric_value(state, &format!("disk/{}/io/write_iops", device));
+
+        let mut row_items: Vec<Element<'_, Message>> = vec![text(device).size(12).into()];
+
+        if let (Some(rr), Some(wr)) = (read_rate, write_rate) {
+            row_items.push(text(format!("R: {}/s", format_bytes(rr))).size(11).into());
+            row_items.push(text(format!("W: {}/s", format_bytes(wr))).size(11).into());
+        }
+
+        if let (Some(ri), Some(wi)) = (read_iops, write_iops) {
+            row_items.push(
+                text(format!("{:.0}/{:.0} IOPS", ri, wi))
+                    .size(11)
+                    .style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).text_muted()),
+                    })
+                    .into(),
+            );
+        }
+
+        content = content.push(
+            Row::with_children(row_items)
+                .spacing(20)
+                .align_y(Alignment::Center),
+        );
+    }
+
+    column![title, content].spacing(10).into()
+}
+
+/// Check if temperature data is available.
+fn has_temperatures(state: &DeviceDetailState) -> bool {
+    state.metrics.keys().any(|k| k.starts_with("sensors/"))
+}
+
+/// Render temperature sensors section (Linux-specific).
+fn render_temperatures_section(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = row![text("Temperatures").size(16)]
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+    let mut content = Column::new().spacing(8);
+
+    // Find all temperature sensors: sensors/{chip}/{label}/temp
+    let mut sensors: Vec<(String, String, f64, Option<f64>)> = Vec::new();
+
+    for (key, _point) in &state.metrics {
+        if key.starts_with("sensors/") && key.ends_with("/temp") {
+            let parts: Vec<&str> = key.split('/').collect();
+            if parts.len() >= 4 {
+                let chip = parts[1];
+                let label = parts[2];
+                if let Some(temp) = get_metric_value(state, key) {
+                    let critical =
+                        get_metric_value(state, &format!("sensors/{}/{}/critical", chip, label));
+                    sensors.push((chip.to_string(), label.to_string(), temp, critical));
+                }
+            }
+        }
+    }
+
+    sensors.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+    for (chip, label, temp, critical) in &sensors {
+        let temp_text = text(format!("{:.1}°C", temp)).size(12);
+        let styled_temp = if let Some(crit) = critical {
+            if *temp >= *crit * 0.9 {
+                temp_text.style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).danger()),
+                })
+            } else if *temp >= *crit * 0.75 {
+                temp_text.style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).warning()),
+                })
+            } else {
+                temp_text.style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).success()),
+                })
+            }
+        } else {
+            temp_text
+        };
+
+        let sensor_row = row![text(format!("{}/{}", chip, label)).size(11), styled_temp,]
+            .spacing(15)
+            .align_y(Alignment::Center);
+
+        content = content.push(sensor_row);
+    }
+
+    if sensors.is_empty() {
+        content = content.push(
+            text("No temperature sensors found")
+                .size(12)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
+                }),
+        );
+    }
+
+    column![title, content].spacing(10).into()
+}
+
+/// Check if TCP states data is available.
+fn has_tcp_states(state: &DeviceDetailState) -> bool {
+    state.metrics.keys().any(|k| k.starts_with("tcp/"))
+}
+
+/// Render TCP connection states section (Linux-specific).
+fn render_tcp_states_section(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = row![text("TCP Connections").size(16)]
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+    let mut content = Column::new().spacing(8);
+
+    // Total connections
+    if let Some(total) = get_metric_value(state, "tcp/total") {
+        content = content.push(text(format!("Total: {:.0}", total)).size(12));
+    }
+
+    // State breakdown
+    let states = [
+        ("established", "Established"),
+        ("listen", "Listen"),
+        ("time_wait", "Time Wait"),
+        ("close_wait", "Close Wait"),
+        ("syn_sent", "SYN Sent"),
+        ("syn_recv", "SYN Recv"),
+        ("fin_wait1", "FIN Wait 1"),
+        ("fin_wait2", "FIN Wait 2"),
+        ("closing", "Closing"),
+        ("last_ack", "Last ACK"),
+        ("close", "Close"),
+    ];
+
+    let mut state_items: Vec<Element<'_, Message>> = Vec::new();
+
+    for (key, label) in states {
+        if let Some(count) = get_metric_value(state, &format!("tcp/{}", key)) {
+            if count > 0.0 {
+                state_items.push(text(format!("{}: {:.0}", label, count)).size(11).into());
+            }
+        }
+    }
+
+    if !state_items.is_empty() {
+        // Arrange in rows of 4
+        let mut rows = Column::new().spacing(5);
+        let mut current_row = Row::new().spacing(20);
+        let mut count = 0;
+        for item in state_items {
+            current_row = current_row.push(item);
+            count += 1;
+            if count % 4 == 0 {
+                rows = rows.push(current_row);
+                current_row = Row::new().spacing(20);
+            }
+        }
+        if count % 4 != 0 {
+            rows = rows.push(current_row);
+        }
+        content = content.push(rows);
+    }
+
+    column![title, content].spacing(10).into()
+}
+
+/// Check if process data is available.
+fn has_processes(state: &DeviceDetailState) -> bool {
+    state.metrics.keys().any(|k| k.starts_with("process/"))
+}
+
+/// Render top processes section.
+fn render_processes_section(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = row![text("Top Processes").size(16)]
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+    let mut content = Column::new().spacing(5);
+
+    // Header row
+    content = content.push(
+        row![
+            text("Rank").size(10).width(40),
+            text("Name").size(10).width(150),
+            text("CPU %").size(10).width(60),
+            text("Memory").size(10).width(80),
+        ]
+        .spacing(10),
+    );
+
+    // Find processes (process/{rank}/cpu)
+    for rank in 1..=10 {
+        let cpu_key = format!("process/{}/cpu", rank);
+        let mem_key = format!("process/{}/memory", rank);
+
+        if let Some(cpu) = get_metric_value(state, &cpu_key) {
+            let memory = get_metric_value(state, &mem_key).unwrap_or(0.0);
+
+            // Get process name from labels
+            let name = state
+                .metrics
+                .get(&cpu_key)
+                .and_then(|p| p.labels.get("name"))
+                .map(|s| s.as_str())
+                .unwrap_or("unknown");
+
+            let proc_row = row![
+                text(format!("{}", rank)).size(11).width(40),
+                text(name).size(11).width(150),
+                text(format!("{:.1}%", cpu)).size(11).width(60),
+                text(format_bytes(memory)).size(11).width(80),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center);
+
+            content = content.push(proc_row);
+        }
+    }
+
+    column![title, content].spacing(10).into()
 }
 
 // Helper functions
@@ -407,6 +788,27 @@ fn get_metric_bool(state: &DeviceDetailState, metric: &str) -> Option<bool> {
             TelemetryValue::Boolean(b) => Some(*b),
             TelemetryValue::Gauge(v) => Some(*v != 0.0),
             TelemetryValue::Counter(v) => Some(*v != 0),
+            _ => None,
+        })
+}
+
+/// Get a metric value with a specific label match.
+fn get_metric_with_label(
+    state: &DeviceDetailState,
+    metric_prefix: &str,
+    label_key: &str,
+    label_value: &str,
+) -> Option<f64> {
+    state
+        .metrics
+        .iter()
+        .find(|(k, point)| {
+            k.as_str() == metric_prefix
+                && point.labels.get(label_key).map(|v| v.as_str()) == Some(label_value)
+        })
+        .and_then(|(_, point)| match &point.value {
+            TelemetryValue::Counter(v) => Some(*v as f64),
+            TelemetryValue::Gauge(v) => Some(*v),
             _ => None,
         })
 }

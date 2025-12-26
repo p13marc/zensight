@@ -391,6 +391,55 @@ impl DemoSimulator {
         let servers = ["server01", "server02", "server03", "database01"];
 
         for server in servers {
+            // System uptime and boot time
+            let uptime_secs = self.tick * 5 + 86400; // Base uptime + simulated running time
+            points.push(self.make_point(
+                Protocol::Sysinfo,
+                server,
+                "system/uptime",
+                TelemetryValue::Counter(uptime_secs),
+                timestamp,
+            ));
+
+            let boot_time = timestamp / 1000 - uptime_secs as i64;
+            points.push(self.make_point(
+                Protocol::Sysinfo,
+                server,
+                "system/boot_time",
+                TelemetryValue::Counter(boot_time as u64),
+                timestamp,
+            ));
+
+            // Load averages (with period labels)
+            let load1 = self.oscillating_value(&format!("{}/load1", server), 1.5, 0.5);
+            let load5 = self.oscillating_value(&format!("{}/load5", server), 1.2, 0.3);
+            let load15 = self.oscillating_value(&format!("{}/load15", server), 1.0, 0.2);
+
+            points.push(self.make_point_with_labels(
+                Protocol::Sysinfo,
+                server,
+                "system/load",
+                TelemetryValue::Gauge(load1.max(0.0)),
+                timestamp,
+                vec![("period".to_string(), "1m".to_string())],
+            ));
+            points.push(self.make_point_with_labels(
+                Protocol::Sysinfo,
+                server,
+                "system/load",
+                TelemetryValue::Gauge(load5.max(0.0)),
+                timestamp,
+                vec![("period".to_string(), "5m".to_string())],
+            ));
+            points.push(self.make_point_with_labels(
+                Protocol::Sysinfo,
+                server,
+                "system/load",
+                TelemetryValue::Gauge(load15.max(0.0)),
+                timestamp,
+                vec![("period".to_string(), "15m".to_string())],
+            ));
+
             // CPU usage
             let mut cpu = self.oscillating_value(&format!("{}/cpu", server), 40.0, 10.0);
 
@@ -415,7 +464,8 @@ impl DemoSimulator {
                 timestamp,
             ));
 
-            // Per-core CPU (4 cores)
+            // Per-core CPU (4 cores) with frequency
+            let base_freq = 3200.0; // 3.2 GHz base
             for core in 0..4 {
                 let core_cpu = cpu + self.rng.random_range(-15.0..15.0);
                 points.push(self.make_point(
@@ -425,9 +475,20 @@ impl DemoSimulator {
                     TelemetryValue::Gauge(core_cpu.clamp(0.0, 100.0)),
                     timestamp,
                 ));
+
+                // CPU frequency varies with load
+                let freq =
+                    base_freq + (core_cpu / 100.0) * 800.0 + self.rng.random_range(-100.0..100.0);
+                points.push(self.make_point(
+                    Protocol::Sysinfo,
+                    server,
+                    &format!("cpu/{}/frequency", core),
+                    TelemetryValue::Gauge(freq.clamp(800.0, 4500.0)),
+                    timestamp,
+                ));
             }
 
-            // Memory usage
+            // Memory usage (using metric names that match the bridge)
             let mut memory_pct = self.oscillating_value(&format!("{}/memory", server), 60.0, 5.0);
 
             // Check for memory leak anomaly
@@ -440,21 +501,29 @@ impl DemoSimulator {
                 }
             }
 
-            let total_memory = 17_179_869_184.0_f64; // 16 GB
-            let used_memory = (memory_pct.clamp(0.0, 99.0) / 100.0) * total_memory;
+            let total_memory = 17_179_869_184u64; // 16 GB
+            let used_memory = ((memory_pct.clamp(0.0, 99.0) / 100.0) * total_memory as f64) as u64;
+            let available_memory = total_memory - used_memory;
 
             points.push(self.make_point(
                 Protocol::Sysinfo,
                 server,
-                "memory/used_bytes",
-                TelemetryValue::Gauge(used_memory),
+                "memory/total",
+                TelemetryValue::Counter(total_memory),
                 timestamp,
             ));
             points.push(self.make_point(
                 Protocol::Sysinfo,
                 server,
-                "memory/total_bytes",
-                TelemetryValue::Gauge(total_memory),
+                "memory/used",
+                TelemetryValue::Counter(used_memory),
+                timestamp,
+            ));
+            points.push(self.make_point(
+                Protocol::Sysinfo,
+                server,
+                "memory/available",
+                TelemetryValue::Counter(available_memory),
                 timestamp,
             ));
             points.push(self.make_point(
@@ -465,7 +534,27 @@ impl DemoSimulator {
                 timestamp,
             ));
 
-            // Disk usage
+            // Swap
+            let swap_total = 8_589_934_592u64; // 8 GB
+            let swap_pct = self.oscillating_value(&format!("{}/swap", server), 10.0, 5.0);
+            let swap_used = ((swap_pct.clamp(0.0, 99.0) / 100.0) * swap_total as f64) as u64;
+
+            points.push(self.make_point(
+                Protocol::Sysinfo,
+                server,
+                "memory/swap_total",
+                TelemetryValue::Counter(swap_total),
+                timestamp,
+            ));
+            points.push(self.make_point(
+                Protocol::Sysinfo,
+                server,
+                "memory/swap_used",
+                TelemetryValue::Counter(swap_used),
+                timestamp,
+            ));
+
+            // Disk usage (using metric names that match the bridge: disk/{mount}/used, disk/{mount}/total)
             let mut disk_pct = self.oscillating_value(&format!("{}/disk", server), 50.0, 2.0);
 
             // Check for disk filling anomaly
@@ -478,37 +567,46 @@ impl DemoSimulator {
                 }
             }
 
-            let total_disk = 536_870_912_000.0_f64; // 500 GB
-            let used_disk = (disk_pct.clamp(0.0, 99.0) / 100.0) * total_disk;
+            let total_disk = 536_870_912_000u64; // 500 GB
+            let used_disk = ((disk_pct.clamp(0.0, 99.0) / 100.0) * total_disk as f64) as u64;
+            let available_disk = total_disk - used_disk;
 
+            // Root partition
             points.push(self.make_point(
                 Protocol::Sysinfo,
                 server,
-                "disk/root/used_bytes",
-                TelemetryValue::Gauge(used_disk),
+                "disk/_/total",
+                TelemetryValue::Counter(total_disk),
                 timestamp,
             ));
             points.push(self.make_point(
                 Protocol::Sysinfo,
                 server,
-                "disk/root/total_bytes",
-                TelemetryValue::Gauge(total_disk),
+                "disk/_/used",
+                TelemetryValue::Counter(used_disk),
                 timestamp,
             ));
             points.push(self.make_point(
                 Protocol::Sysinfo,
                 server,
-                "disk/root/usage_percent",
+                "disk/_/available",
+                TelemetryValue::Counter(available_disk),
+                timestamp,
+            ));
+            points.push(self.make_point(
+                Protocol::Sysinfo,
+                server,
+                "disk/_/usage_percent",
                 TelemetryValue::Gauge(disk_pct.clamp(0.0, 99.0)),
                 timestamp,
             ));
 
-            // Network I/O
-            let rx_rate = self.rng.random_range(100_000u64..5_000_000u64);
-            let tx_rate = self.rng.random_range(50_000u64..2_000_000u64);
+            // Network I/O with rates
+            let rx_rate_val = self.rng.random_range(100_000.0..5_000_000.0);
+            let tx_rate_val = self.rng.random_range(50_000.0..2_000_000.0);
 
-            let rx = self.increment_counter(&format!("{}/eth0/rx", server), rx_rate);
-            let tx = self.increment_counter(&format!("{}/eth0/tx", server), tx_rate);
+            let rx = self.increment_counter(&format!("{}/eth0/rx", server), rx_rate_val as u64);
+            let tx = self.increment_counter(&format!("{}/eth0/tx", server), tx_rate_val as u64);
 
             points.push(self.make_point(
                 Protocol::Sysinfo,
@@ -524,6 +622,53 @@ impl DemoSimulator {
                 TelemetryValue::Counter(tx),
                 timestamp,
             ));
+            points.push(self.make_point(
+                Protocol::Sysinfo,
+                server,
+                "network/eth0/rx_rate",
+                TelemetryValue::Gauge(rx_rate_val),
+                timestamp,
+            ));
+            points.push(self.make_point(
+                Protocol::Sysinfo,
+                server,
+                "network/eth0/tx_rate",
+                TelemetryValue::Gauge(tx_rate_val),
+                timestamp,
+            ));
+
+            // Top processes (simulated)
+            let process_names = ["systemd", "postgres", "nginx", "java", "python3"];
+            for (rank, name) in process_names.iter().enumerate() {
+                let proc_cpu = self.rng.random_range(0.5..15.0) / (rank as f64 + 1.0);
+                let proc_mem =
+                    self.rng.random_range(50_000_000u64..500_000_000u64) / (rank as u64 + 1);
+
+                points.push(self.make_point_with_labels(
+                    Protocol::Sysinfo,
+                    server,
+                    &format!("process/{}/cpu", rank + 1),
+                    TelemetryValue::Gauge(proc_cpu),
+                    timestamp,
+                    vec![
+                        ("name".to_string(), name.to_string()),
+                        ("pid".to_string(), (1000 + rank * 100).to_string()),
+                        ("rank".to_string(), (rank + 1).to_string()),
+                    ],
+                ));
+                points.push(self.make_point_with_labels(
+                    Protocol::Sysinfo,
+                    server,
+                    &format!("process/{}/memory", rank + 1),
+                    TelemetryValue::Counter(proc_mem),
+                    timestamp,
+                    vec![
+                        ("name".to_string(), name.to_string()),
+                        ("pid".to_string(), (1000 + rank * 100).to_string()),
+                        ("rank".to_string(), (rank + 1).to_string()),
+                    ],
+                ));
+            }
         }
 
         points
@@ -895,6 +1040,26 @@ impl DemoSimulator {
             metric: metric.to_string(),
             value,
             labels: HashMap::new(),
+        }
+    }
+
+    /// Helper to create a telemetry point with labels.
+    fn make_point_with_labels(
+        &self,
+        protocol: Protocol,
+        source: &str,
+        metric: &str,
+        value: TelemetryValue,
+        timestamp: i64,
+        labels: Vec<(String, String)>,
+    ) -> TelemetryPoint {
+        TelemetryPoint {
+            timestamp,
+            source: source.to_string(),
+            protocol,
+            metric: metric.to_string(),
+            value,
+            labels: labels.into_iter().collect(),
         }
     }
 
