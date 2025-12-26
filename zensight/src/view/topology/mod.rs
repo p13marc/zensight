@@ -437,6 +437,31 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
     let node_count = text(format!("{} nodes", state.nodes.len())).size(14);
     let edge_count = text(format!("{} connections", state.edges.len())).size(14);
 
+    // Show layout status
+    let layout_status = if !state.auto_layout {
+        text("Layout: Manual").size(10)
+    } else if state.layout_stable {
+        text("Layout: Stable").size(10)
+    } else {
+        text("Layout: Adjusting...").size(10)
+    };
+
+    // Show search match count if searching
+    let search_matches = if !state.search_query.is_empty() {
+        let matches = state
+            .nodes
+            .values()
+            .filter(|n| {
+                n.label
+                    .to_lowercase()
+                    .contains(&state.search_query.to_lowercase())
+            })
+            .count();
+        Some(text(format!("{} matches", matches)).size(10))
+    } else {
+        None
+    };
+
     let zoom_label = text(format!("{}%", (state.zoom * 100.0) as i32)).size(12);
 
     let zoom_out_btn = button(text("-").size(14))
@@ -476,21 +501,29 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
         .spacing(6)
         .align_y(Alignment::Center);
 
-    row![
+    let mut header = row![
         back_button,
         title,
         node_count,
         edge_count,
+        layout_status,
         search_row,
-        zoom_out_btn,
-        zoom_label,
-        zoom_in_btn,
-        reset_btn,
-        auto_layout_btn,
     ]
     .spacing(15)
-    .align_y(Alignment::Center)
-    .into()
+    .align_y(Alignment::Center);
+
+    if let Some(matches) = search_matches {
+        header = header.push(matches);
+    }
+
+    header = header
+        .push(zoom_out_btn)
+        .push(zoom_label)
+        .push(zoom_in_btn)
+        .push(reset_btn)
+        .push(auto_layout_btn);
+
+    header.into()
 }
 
 #[cfg(test)]
