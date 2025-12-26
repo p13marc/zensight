@@ -109,6 +109,29 @@ pub fn status_error<Message: 'static>(size: IconSize) -> Element<'static, Messag
     svg_icon(include_bytes!("status-error.svg"), size)
 }
 
+/// Degraded status indicator (orange dot).
+pub fn status_degraded<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("status-degraded.svg"), size)
+}
+
+/// Unknown status indicator (gray dot).
+pub fn status_unknown<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("status-unknown.svg"), size)
+}
+
+/// Get status indicator icon for a DeviceStatus.
+pub fn device_status_icon<Message: 'static>(
+    status: zensight_common::DeviceStatus,
+    size: IconSize,
+) -> Element<'static, Message> {
+    match status {
+        zensight_common::DeviceStatus::Online => status_healthy(size),
+        zensight_common::DeviceStatus::Offline => status_error(size),
+        zensight_common::DeviceStatus::Degraded => status_degraded(size),
+        zensight_common::DeviceStatus::Unknown => status_unknown(size),
+    }
+}
+
 // ============================================================================
 // Action Icons
 // ============================================================================

@@ -1,4 +1,7 @@
-use zensight_common::{Protocol, TelemetryPoint};
+use zensight_common::{
+    BridgeInfo, CorrelationEntry, DeviceLiveness, ErrorReport, HealthSnapshot, Protocol,
+    TelemetryPoint,
+};
 
 use crate::view::alerts::{ComparisonOp, Severity};
 use crate::view::chart::TimeWindow;
@@ -9,6 +12,21 @@ use crate::view::settings::ZenohMode;
 pub enum Message {
     /// Telemetry received from Zenoh subscription.
     TelemetryReceived(TelemetryPoint),
+
+    /// Bridge health snapshot received.
+    HealthSnapshotReceived(HealthSnapshot),
+
+    /// Device liveness update received.
+    DeviceLivenessReceived(String, DeviceLiveness),
+
+    /// Bridge error report received.
+    ErrorReportReceived(ErrorReport),
+
+    /// Bridge discovery/info received.
+    BridgeInfoReceived(BridgeInfo),
+
+    /// Correlation entry received.
+    CorrelationReceived(CorrelationEntry),
 
     /// Zenoh connection established.
     Connected,

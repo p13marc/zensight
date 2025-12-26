@@ -6,7 +6,7 @@ use iced::widget::{Column, column, container, row, rule, scrollable, text, text_
 use iced::{Alignment, Element, Length, Theme};
 use iced_anim::widget::button;
 
-use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{DeviceStatus, HealthSnapshot, Protocol, TelemetryPoint, TelemetryValue};
 
 /// Get the current timestamp in milliseconds.
 fn current_timestamp() -> i64 {
@@ -34,7 +34,15 @@ pub struct DeviceState {
     /// Most recent metric values (metric name -> full telemetry point).
     pub metrics: HashMap<String, TelemetryPoint>,
     /// Whether this device is healthy (received recent updates).
+    /// This is based on local staleness detection.
     pub is_healthy: bool,
+    /// Device status from bridge liveness tracking.
+    /// This is more accurate as it comes from the bridge's polling results.
+    pub bridge_status: DeviceStatus,
+    /// Number of consecutive failures reported by bridge.
+    pub consecutive_failures: u32,
+    /// Last error message from bridge (if any).
+    pub last_error: Option<String>,
 }
 
 impl DeviceState {
@@ -46,12 +54,45 @@ impl DeviceState {
             metric_count: 0,
             metrics: HashMap::new(),
             is_healthy: true,
+            bridge_status: DeviceStatus::Unknown,
+            consecutive_failures: 0,
+            last_error: None,
         }
     }
 
     /// Update health status based on last update time.
     pub fn update_health(&mut self, now: i64, stale_threshold_ms: i64) {
         self.is_healthy = (now - self.last_update) < stale_threshold_ms;
+    }
+
+    /// Update device status from bridge liveness data.
+    pub fn update_from_liveness(
+        &mut self,
+        status: DeviceStatus,
+        consecutive_failures: u32,
+        last_error: Option<String>,
+    ) {
+        self.bridge_status = status;
+        self.consecutive_failures = consecutive_failures;
+        self.last_error = last_error;
+    }
+
+    /// Get the effective status for display.
+    ///
+    /// Combines local staleness detection with bridge liveness status.
+    /// Bridge status takes precedence when available.
+    pub fn effective_status(&self) -> DeviceStatus {
+        // If bridge has reported a status other than Unknown, use it
+        if self.bridge_status != DeviceStatus::Unknown {
+            return self.bridge_status;
+        }
+
+        // Fall back to local staleness detection
+        if self.is_healthy {
+            DeviceStatus::Online
+        } else {
+            DeviceStatus::Offline
+        }
     }
 }
 
@@ -237,8 +278,10 @@ pub fn dashboard_view<'a>(
     unacknowledged_alerts: usize,
     groups: &'a GroupsState,
     overview: &'a OverviewState,
+    bridge_health: &'a HashMap<String, HealthSnapshot>,
 ) -> Element<'a, Message> {
     let header = render_header(state, theme, unacknowledged_alerts);
+    let bridge_summary = render_bridge_health_summary(bridge_health);
     let filters = render_protocol_filters(state);
     let group_filters = group_filter_bar(groups);
     let overview_panel = overview_section(overview, &state.devices);
@@ -246,6 +289,7 @@ pub fn dashboard_view<'a>(
 
     let content = column![
         header,
+        bridge_summary,
         filters,
         group_filters,
         overview_panel,
@@ -367,6 +411,59 @@ fn render_header(
     }
 
     header_col.spacing(5).into()
+}
+
+/// Render bridge health summary bar.
+fn render_bridge_health_summary(
+    bridge_health: &HashMap<String, HealthSnapshot>,
+) -> Element<'_, Message> {
+    if bridge_health.is_empty() {
+        // No bridge health data received yet
+        return row![].into();
+    }
+
+    let label = text("Bridges:").size(12);
+
+    let mut bridge_row = row![label].spacing(10).align_y(Alignment::Center);
+
+    // Sort bridges by name for consistent display
+    let mut bridges: Vec<_> = bridge_health.values().collect();
+    bridges.sort_by(|a, b| a.bridge.cmp(&b.bridge));
+
+    for snapshot in bridges {
+        // Determine status color based on health
+        let status_icon = match snapshot.status.as_str() {
+            "healthy" => icons::status_healthy(IconSize::Small),
+            "degraded" => icons::status_degraded(IconSize::Small),
+            "error" => icons::status_error(IconSize::Small),
+            _ => icons::status_unknown(IconSize::Small),
+        };
+
+        // Build tooltip with detailed health info
+        let tooltip_content = format!(
+            "{}\nStatus: {}\nDevices: {}/{}\nMetrics: {}\nErrors (1h): {}",
+            snapshot.bridge,
+            snapshot.status,
+            snapshot.devices_responding,
+            snapshot.devices_total,
+            snapshot.metrics_published,
+            snapshot.errors_last_hour
+        );
+
+        let bridge_indicator = tooltip(
+            row![status_icon, text(&snapshot.bridge).size(11)]
+                .spacing(4)
+                .align_y(Alignment::Center),
+            container(text(tooltip_content).size(10))
+                .padding(6)
+                .style(container::rounded_box),
+            tooltip::Position::Bottom,
+        );
+
+        bridge_row = bridge_row.push(bridge_indicator);
+    }
+
+    bridge_row.into()
 }
 
 /// Render protocol filter buttons and search input.
@@ -608,11 +705,36 @@ fn render_device_card<'a>(
     device: &'a DeviceState,
     groups: &'a GroupsState,
 ) -> Element<'a, Message> {
-    let status_indicator = if device.is_healthy {
-        icons::status_healthy(IconSize::Small)
-    } else {
-        icons::status_warning(IconSize::Small)
+    // Use effective_status which combines bridge liveness with local staleness detection
+    let status = device.effective_status();
+    let status_icon = icons::device_status_icon(status, IconSize::Small);
+
+    // Add tooltip to status indicator showing status details
+    let status_tooltip_text = match status {
+        DeviceStatus::Online => "Online".to_string(),
+        DeviceStatus::Offline => {
+            if let Some(ref error) = device.last_error {
+                format!("Offline: {}", error)
+            } else {
+                format!("Offline ({} failures)", device.consecutive_failures)
+            }
+        }
+        DeviceStatus::Degraded => {
+            if let Some(ref error) = device.last_error {
+                format!("Degraded: {}", error)
+            } else {
+                format!("Degraded ({} failures)", device.consecutive_failures)
+            }
+        }
+        DeviceStatus::Unknown => "Status unknown".to_string(),
     };
+    let status_indicator = tooltip(
+        status_icon,
+        container(text(status_tooltip_text).size(11))
+            .padding(6)
+            .style(container::rounded_box),
+        tooltip::Position::Top,
+    );
 
     let protocol_icon = icons::protocol_icon(device.id.protocol, IconSize::Medium);
 

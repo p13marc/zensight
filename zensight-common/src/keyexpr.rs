@@ -109,6 +109,76 @@ pub fn all_telemetry_wildcard() -> String {
     format!("{}/**", KEY_PREFIX)
 }
 
+/// Build a wildcard key expression for all bridge health data.
+///
+/// Matches: `zensight/<protocol>/@/health`
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::all_health_wildcard;
+///
+/// assert_eq!(all_health_wildcard(), "zensight/*/@/health");
+/// ```
+pub fn all_health_wildcard() -> String {
+    format!("{}/*/@/health", KEY_PREFIX)
+}
+
+/// Build a wildcard key expression for all device liveness data.
+///
+/// Matches: `zensight/<protocol>/@/devices/<device>/liveness`
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::all_liveness_wildcard;
+///
+/// assert_eq!(all_liveness_wildcard(), "zensight/*/@/devices/*/liveness");
+/// ```
+pub fn all_liveness_wildcard() -> String {
+    format!("{}/*/@/devices/*/liveness", KEY_PREFIX)
+}
+
+/// Build a wildcard key expression for all bridge error reports.
+///
+/// Matches: `zensight/<protocol>/@/errors`
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::all_errors_wildcard;
+///
+/// assert_eq!(all_errors_wildcard(), "zensight/*/@/errors");
+/// ```
+pub fn all_errors_wildcard() -> String {
+    format!("{}/*/@/errors", KEY_PREFIX)
+}
+
+/// Build a wildcard key expression for all correlation data.
+///
+/// Matches: `zensight/_meta/correlation/<ip>`
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::all_correlation_wildcard;
+///
+/// assert_eq!(all_correlation_wildcard(), "zensight/_meta/correlation/*");
+/// ```
+pub fn all_correlation_wildcard() -> String {
+    format!("{}/_meta/correlation/*", KEY_PREFIX)
+}
+
+/// Build a wildcard key expression for all bridge discovery data.
+///
+/// Matches: `zensight/_meta/bridges/<bridge_name>`
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::all_bridges_wildcard;
+///
+/// assert_eq!(all_bridges_wildcard(), "zensight/_meta/bridges/*");
+/// ```
+pub fn all_bridges_wildcard() -> String {
+    format!("{}/_meta/bridges/*", KEY_PREFIX)
+}
+
 /// Parse a key expression to extract protocol, source, and metric path.
 ///
 /// Returns `None` if the key expression doesn't match the expected pattern.

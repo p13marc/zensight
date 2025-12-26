@@ -1,7 +1,10 @@
 use iced::Subscription;
 use iced::keyboard::{self, Key, key};
 
-use zensight_common::{TelemetryPoint, ZenohConfig, all_telemetry_wildcard, decode_auto};
+use zensight_common::{
+    BridgeInfo, CorrelationEntry, DeviceLiveness, ErrorReport, HealthSnapshot, TelemetryPoint,
+    ZenohConfig, all_telemetry_wildcard, decode_auto,
+};
 
 use crate::message::Message;
 
@@ -25,7 +28,7 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
                 }
             };
 
-            // Subscribe to all zensight telemetry
+            // Subscribe to all zensight telemetry (uses ** wildcard to catch everything)
             let key_expr = all_telemetry_wildcard();
             let subscriber = match session.declare_subscriber(&key_expr).await {
                 Ok(sub) => sub,
@@ -40,18 +43,12 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
             loop {
                 match subscriber.recv_async().await {
                     Ok(sample) => {
+                        let key = sample.key_expr().as_str();
                         let payload = sample.payload().to_bytes();
-                        match decode_auto::<TelemetryPoint>(&payload) {
-                            Ok(point) => {
-                                yield Message::TelemetryReceived(point);
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    key = %sample.key_expr(),
-                                    "Failed to decode telemetry"
-                                );
-                            }
+
+                        // Route to appropriate handler based on key expression pattern
+                        if let Some(msg) = decode_sample(key, &payload) {
+                            yield msg;
                         }
                     }
                     Err(e) => {
@@ -63,6 +60,91 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
             }
         }
     })
+}
+
+/// Decode a sample based on its key expression pattern.
+///
+/// Routes messages to the appropriate type based on the key structure:
+/// - `zensight/<protocol>/@/health` -> HealthSnapshot
+/// - `zensight/<protocol>/@/devices/<device>/liveness` -> DeviceLiveness
+/// - `zensight/<protocol>/@/errors` -> ErrorReport
+/// - `zensight/_meta/bridges/<name>` -> BridgeInfo
+/// - `zensight/_meta/correlation/<ip>` -> CorrelationEntry
+/// - `zensight/<protocol>/<source>/<metric>` -> TelemetryPoint
+fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
+    let parts: Vec<&str> = key.split('/').collect();
+
+    // Minimum valid key: zensight/<protocol>/<something>
+    if parts.len() < 3 || parts[0] != "zensight" {
+        return None;
+    }
+
+    // Check for metadata paths first
+    if parts[1] == "_meta" {
+        if parts.len() >= 4 && parts[2] == "bridges" {
+            // zensight/_meta/bridges/<name>
+            return match decode_auto::<BridgeInfo>(payload) {
+                Ok(info) => Some(Message::BridgeInfoReceived(info)),
+                Err(e) => {
+                    tracing::warn!(error = %e, key = %key, "Failed to decode BridgeInfo");
+                    None
+                }
+            };
+        } else if parts.len() >= 4 && parts[2] == "correlation" {
+            // zensight/_meta/correlation/<ip>
+            return match decode_auto::<CorrelationEntry>(payload) {
+                Ok(entry) => Some(Message::CorrelationReceived(entry)),
+                Err(e) => {
+                    tracing::warn!(error = %e, key = %key, "Failed to decode CorrelationEntry");
+                    None
+                }
+            };
+        }
+        return None;
+    }
+
+    // Check for @ paths (bridge health/liveness/errors)
+    if parts.len() >= 4 && parts[2] == "@" {
+        if parts[3] == "health" {
+            // zensight/<protocol>/@/health
+            return match decode_auto::<HealthSnapshot>(payload) {
+                Ok(snapshot) => Some(Message::HealthSnapshotReceived(snapshot)),
+                Err(e) => {
+                    tracing::warn!(error = %e, key = %key, "Failed to decode HealthSnapshot");
+                    None
+                }
+            };
+        } else if parts[3] == "errors" {
+            // zensight/<protocol>/@/errors
+            return match decode_auto::<ErrorReport>(payload) {
+                Ok(report) => Some(Message::ErrorReportReceived(report)),
+                Err(e) => {
+                    tracing::warn!(error = %e, key = %key, "Failed to decode ErrorReport");
+                    None
+                }
+            };
+        } else if parts[3] == "devices" && parts.len() >= 6 && parts[5] == "liveness" {
+            // zensight/<protocol>/@/devices/<device>/liveness
+            let protocol = parts[1].to_string();
+            return match decode_auto::<DeviceLiveness>(payload) {
+                Ok(liveness) => Some(Message::DeviceLivenessReceived(protocol, liveness)),
+                Err(e) => {
+                    tracing::warn!(error = %e, key = %key, "Failed to decode DeviceLiveness");
+                    None
+                }
+            };
+        }
+        return None;
+    }
+
+    // Regular telemetry: zensight/<protocol>/<source>/<metric...>
+    match decode_auto::<TelemetryPoint>(payload) {
+        Ok(point) => Some(Message::TelemetryReceived(point)),
+        Err(e) => {
+            tracing::warn!(error = %e, key = %key, "Failed to decode TelemetryPoint");
+            None
+        }
+    }
 }
 
 /// Connect to Zenoh using the provided configuration.

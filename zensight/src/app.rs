@@ -5,7 +5,10 @@ use iced::widget::operation::focus;
 use iced::{Element, Subscription, Task, Theme};
 use std::sync::LazyLock;
 
-use zensight_common::{TelemetryPoint, TelemetryValue, ZenohConfig};
+use zensight_common::{
+    BridgeInfo, CorrelationEntry, HealthSnapshot, Protocol, TelemetryPoint, TelemetryValue,
+    ZenohConfig,
+};
 
 /// Text input ID for dashboard search.
 pub static DASHBOARD_SEARCH_ID: LazyLock<Id> = LazyLock::new(|| Id::new("dashboard-search"));
@@ -91,6 +94,12 @@ pub struct ZenSight {
     demo_mode: bool,
     /// Current theme.
     theme: AppTheme,
+    /// Bridge health snapshots, keyed by bridge name.
+    bridge_health: std::collections::HashMap<String, HealthSnapshot>,
+    /// Known bridges, keyed by bridge name.
+    known_bridges: std::collections::HashMap<String, BridgeInfo>,
+    /// Device correlation entries, keyed by IP address.
+    correlations: std::collections::HashMap<String, CorrelationEntry>,
 }
 
 impl ZenSight {
@@ -181,6 +190,9 @@ impl ZenSight {
             stale_threshold_ms,
             demo_mode,
             theme,
+            bridge_health: std::collections::HashMap::new(),
+            known_bridges: std::collections::HashMap::new(),
+            correlations: std::collections::HashMap::new(),
         };
 
         (app, Task::none())
@@ -201,6 +213,32 @@ impl ZenSight {
         match message {
             Message::TelemetryReceived(point) => {
                 self.handle_telemetry(point);
+            }
+
+            Message::HealthSnapshotReceived(snapshot) => {
+                self.bridge_health.insert(snapshot.bridge.clone(), snapshot);
+            }
+
+            Message::DeviceLivenessReceived(protocol, liveness) => {
+                self.handle_device_liveness(&protocol, liveness);
+            }
+
+            Message::ErrorReportReceived(report) => {
+                // Log the error for now; could add an error log view later
+                tracing::warn!(
+                    bridge = ?report.device,
+                    error_type = ?report.error_type,
+                    message = %report.message,
+                    "Bridge error report received"
+                );
+            }
+
+            Message::BridgeInfoReceived(info) => {
+                self.known_bridges.insert(info.name.clone(), info);
+            }
+
+            Message::CorrelationReceived(entry) => {
+                self.correlations.insert(entry.ip.clone(), entry);
             }
 
             Message::Connected => {
@@ -777,6 +815,7 @@ impl ZenSight {
                         unack,
                         &self.groups,
                         &self.overview,
+                        &self.bridge_health,
                     )
                 }
             }
@@ -786,6 +825,7 @@ impl ZenSight {
                 unack,
                 &self.groups,
                 &self.overview,
+                &self.bridge_health,
             ),
         };
 
@@ -800,6 +840,38 @@ impl ZenSight {
     /// Get the application theme.
     pub fn theme(&self) -> Theme {
         self.theme.to_iced_theme()
+    }
+
+    /// Handle device liveness update from a bridge.
+    fn handle_device_liveness(
+        &mut self,
+        protocol_str: &str,
+        liveness: zensight_common::DeviceLiveness,
+    ) {
+        // Parse protocol from string
+        let protocol = match protocol_str {
+            "snmp" => Protocol::Snmp,
+            "syslog" => Protocol::Syslog,
+            "gnmi" => Protocol::Gnmi,
+            "netflow" => Protocol::Netflow,
+            "opcua" => Protocol::Opcua,
+            "modbus" => Protocol::Modbus,
+            "sysinfo" => Protocol::Sysinfo,
+            _ => return, // Unknown protocol, ignore
+        };
+
+        let device_id = DeviceId::new(protocol, &liveness.device);
+
+        // Update the device state if it exists
+        if let Some(device_state) = self.dashboard.devices.get_mut(&device_id) {
+            device_state.update_from_liveness(
+                liveness.status,
+                liveness.consecutive_failures,
+                liveness.last_error,
+            );
+        }
+        // Note: We don't create new devices from liveness data alone
+        // They should be created when telemetry arrives
     }
 
     /// Handle incoming telemetry.

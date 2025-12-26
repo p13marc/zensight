@@ -297,6 +297,21 @@ impl<'a> ThemeColors<'a> {
         }
     }
 
+    /// Degraded status (amber/orange, between healthy and error).
+    pub fn status_degraded(&self) -> Color {
+        Color::from_rgb(0.9, 0.6, 0.2)
+    }
+
+    /// Online status (bright green, same as connected).
+    pub fn status_online(&self) -> Color {
+        self.status_connected()
+    }
+
+    /// Offline status (red, same as disconnected).
+    pub fn status_offline(&self) -> Color {
+        self.status_disconnected()
+    }
+
     // ========================================================================
     // Protocol Colors (consistent for brand recognition)
     // ========================================================================
