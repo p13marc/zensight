@@ -27,11 +27,13 @@ use crate::view::settings::{PersistentSettings, SettingsState, settings_view};
 use crate::view::topology::{TopologyState, topology_view};
 
 /// Current view in the application.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum CurrentView {
     #[default]
     Dashboard,
+    #[serde(skip)]
     Device,
+    #[serde(skip)]
     Settings,
     Alerts,
     Topology,
@@ -163,6 +165,9 @@ impl ZenSight {
         // Initialize topology state
         let topology = TopologyState::default();
 
+        // Load last active view (only Dashboard, Alerts, Topology are persisted)
+        let current_view = persistent.current_view.clone();
+
         let app = Self {
             zenoh_config,
             dashboard,
@@ -172,7 +177,7 @@ impl ZenSight {
             groups,
             overview,
             topology,
-            current_view: CurrentView::default(),
+            current_view,
             stale_threshold_ms,
             demo_mode,
             theme,
@@ -387,6 +392,7 @@ impl ZenSight {
             // Alert messages
             Message::OpenAlerts => {
                 self.current_view = CurrentView::Alerts;
+                self.save_current_view();
             }
 
             Message::CloseAlerts => {
@@ -395,6 +401,7 @@ impl ZenSight {
                 } else {
                     CurrentView::Dashboard
                 };
+                self.save_current_view();
             }
 
             Message::SetAlertRuleName(name) => {
@@ -563,10 +570,12 @@ impl ZenSight {
                 // Update topology from current device data before showing
                 self.topology.update_from_devices(&self.dashboard.devices);
                 self.current_view = CurrentView::Topology;
+                self.save_current_view();
             }
 
             Message::CloseTopology => {
                 self.current_view = CurrentView::Dashboard;
+                self.save_current_view();
             }
 
             Message::TopologySelectNode(node_id) => {
@@ -663,6 +672,15 @@ impl ZenSight {
         persistent.dark_theme = matches!(self.theme, AppTheme::Dark);
         if let Err(e) = persistent.save() {
             tracing::error!("Failed to save theme: {}", e);
+        }
+    }
+
+    /// Save current view to persistent settings.
+    fn save_current_view(&self) {
+        let mut persistent = PersistentSettings::load();
+        persistent.current_view = self.current_view.clone();
+        if let Err(e) = persistent.save() {
+            tracing::error!("Failed to save current view: {}", e);
         }
     }
 

@@ -8,6 +8,7 @@ use iced::widget::{
 use iced::{Alignment, Element, Length, Theme};
 use serde::{Deserialize, Serialize};
 
+use crate::app::CurrentView;
 use crate::message::Message;
 use crate::view::alerts::AlertRule;
 use crate::view::groups::GroupsState;
@@ -46,6 +47,9 @@ pub struct PersistentSettings {
     /// Whether the overview section is expanded.
     #[serde(default = "default_overview_expanded")]
     pub overview_expanded: bool,
+    /// Last active view (Dashboard, Alerts, or Topology).
+    #[serde(default)]
+    pub current_view: CurrentView,
 }
 
 fn default_overview_expanded() -> bool {
@@ -78,6 +82,7 @@ impl Default for PersistentSettings {
             alert_rules: Vec::new(),
             overview_selected_protocol: None,
             overview_expanded: default_overview_expanded(),
+            current_view: CurrentView::default(),
         }
     }
 }
@@ -175,6 +180,7 @@ impl PersistentSettings {
             alert_rules: Vec::new(),
             overview_selected_protocol: None,
             overview_expanded: default_overview_expanded(),
+            current_view: CurrentView::default(),
         }
     }
 }
@@ -750,6 +756,7 @@ mod tests {
             alert_rules: Vec::new(),
             overview_selected_protocol: None,
             overview_expanded: true,
+            current_view: CurrentView::default(),
         };
 
         // Serialize to JSON
@@ -780,6 +787,7 @@ mod tests {
             alert_rules: Vec::new(),
             overview_selected_protocol: None,
             overview_expanded: true,
+            current_view: CurrentView::default(),
         };
 
         // Convert to UI state
