@@ -11,8 +11,8 @@ use crate::message::Message;
 pub struct TopologyGraph;
 
 impl TopologyGraph {
-    /// Create a new topology graph.
-    pub fn new(state: &TopologyState) -> Element<'_, Message> {
+    /// Create a topology graph element.
+    pub fn view(state: &TopologyState) -> Element<'_, Message> {
         Canvas::new(TopologyGraphProgram { state })
             .width(Length::Fill)
             .height(Length::Fill)
@@ -230,7 +230,7 @@ impl<'a> TopologyGraphProgram<'a> {
                 color: Color::from_rgb(0.5, 0.5, 0.5),
                 size: 16.0.into(),
                 align_x: iced::alignment::Horizontal::Center.into(),
-                align_y: iced::alignment::Vertical::Center.into(),
+                align_y: iced::alignment::Vertical::Center,
                 ..Text::default()
             };
             frame.fill_text(text);

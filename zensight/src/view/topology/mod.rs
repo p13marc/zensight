@@ -325,10 +325,11 @@ impl Node {
                         if let TelemetryValue::Counter(v) = &point.value {
                             self.network_rx = Some(*v);
                         }
-                    } else if name.starts_with("network/") && name.ends_with("/tx_bytes") {
-                        if let TelemetryValue::Counter(v) = &point.value {
-                            self.network_tx = Some(*v);
-                        }
+                    } else if name.starts_with("network/")
+                        && name.ends_with("/tx_bytes")
+                        && let TelemetryValue::Counter(v) = &point.value
+                    {
+                        self.network_tx = Some(*v);
                     }
                 }
             }
@@ -369,7 +370,7 @@ pub struct Edge {
 /// Render the topology view.
 pub fn topology_view<'a>(state: &'a TopologyState) -> Element<'a, Message> {
     let header = render_header(state);
-    let graph = TopologyGraph::new(state);
+    let graph = TopologyGraph::view(state);
 
     // Show selection panel if a node is selected
     let main_content: Element<'a, Message> = if let Some(ref node_id) = state.selected_node {
