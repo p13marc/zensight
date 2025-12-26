@@ -88,7 +88,7 @@ impl PersistentSettings {
         dirs::config_dir().map(|p| p.join("zensight").join("settings.json5"))
     }
 
-    /// Load settings from disk, or return defaults if not found.
+    /// Load settings from disk, or create defaults if not found.
     pub fn load() -> Self {
         let Some(path) = Self::config_path() else {
             tracing::warn!("Could not determine config directory");
@@ -96,8 +96,13 @@ impl PersistentSettings {
         };
 
         if !path.exists() {
-            tracing::info!("No settings file found at {:?}, using defaults", path);
-            return Self::default();
+            tracing::info!("No settings file found at {:?}, creating defaults", path);
+            let defaults = Self::default();
+            // Create the config file with defaults
+            if let Err(e) = defaults.save() {
+                tracing::warn!("Failed to create default settings file: {}", e);
+            }
+            return defaults;
         }
 
         match std::fs::read_to_string(&path) {
