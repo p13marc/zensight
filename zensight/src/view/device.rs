@@ -415,6 +415,25 @@ pub fn device_view(state: &DeviceDetailState) -> Element<'_, Message> {
     generic_device_view(state)
 }
 
+/// Render the device detail view with syslog filter state.
+///
+/// This is used when the device is a syslog source and we need to pass
+/// the filter state for the specialized view.
+pub fn device_view_with_syslog_filter<'a>(
+    state: &'a DeviceDetailState,
+    syslog_filter: &'a specialized::SyslogFilterState,
+) -> Element<'a, Message> {
+    use zensight_common::Protocol;
+
+    // For syslog devices, use the specialized view with filter state
+    if state.device_id.protocol == Protocol::Syslog {
+        return specialized::syslog_view(state, syslog_filter);
+    }
+
+    // For other protocols, use the standard device view
+    device_view(state)
+}
+
 /// Render the generic device detail view (fallback for protocols without specialized views).
 pub fn generic_device_view(state: &DeviceDetailState) -> Element<'_, Message> {
     let header = render_header(state);

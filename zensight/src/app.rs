@@ -23,10 +23,11 @@ use crate::subscription::{
 };
 use crate::view::alerts::{AlertsState, alerts_view};
 use crate::view::dashboard::{DashboardState, DeviceState, dashboard_view};
-use crate::view::device::{DeviceDetailState, device_view};
+use crate::view::device::{DeviceDetailState, device_view_with_syslog_filter};
 use crate::view::groups::{GroupsState, groups_panel};
 use crate::view::overview::OverviewState;
 use crate::view::settings::{PersistentSettings, SettingsState, settings_view};
+use crate::view::specialized::SyslogFilterState;
 use crate::view::topology::{TopologyState, topology_view};
 
 /// Current view in the application.
@@ -86,6 +87,8 @@ pub struct ZenSight {
     overview: OverviewState,
     /// Topology state.
     topology: TopologyState,
+    /// Syslog filter state.
+    syslog_filter: SyslogFilterState,
     /// Current view.
     current_view: CurrentView,
     /// Stale threshold in milliseconds (devices not updated within this time are marked unhealthy).
@@ -174,6 +177,9 @@ impl ZenSight {
         // Initialize topology state
         let topology = TopologyState::default();
 
+        // Initialize syslog filter state
+        let syslog_filter = SyslogFilterState::default();
+
         // Load last active view (only Dashboard, Alerts, Topology are persisted)
         let current_view = persistent.current_view.clone();
 
@@ -186,6 +192,7 @@ impl ZenSight {
             groups,
             overview,
             topology,
+            syslog_filter,
             current_view,
             stale_threshold_ms,
             demo_mode,
@@ -706,6 +713,42 @@ impl ZenSight {
             Message::TopologySetSearch(query) => {
                 self.topology.set_search(query);
             }
+
+            // Syslog filter messages
+            Message::ToggleSyslogFilterPanel => {
+                self.syslog_filter.panel_open = !self.syslog_filter.panel_open;
+            }
+
+            Message::SetSyslogMinSeverity(severity) => {
+                self.syslog_filter.set_min_severity(severity);
+            }
+
+            Message::ToggleSyslogFacility(facility) => {
+                self.syslog_filter.toggle_facility(facility);
+            }
+
+            Message::SetSyslogAppFilter(filter) => {
+                self.syslog_filter.set_app_filter(filter);
+            }
+
+            Message::SetSyslogMessageFilter(filter) => {
+                self.syslog_filter.set_message_filter(filter);
+            }
+
+            Message::ApplySyslogFilters => {
+                // TODO: Send filter command to bridge via Zenoh
+                // For now, just mark as applied
+                self.syslog_filter.mark_applied();
+                tracing::info!("Syslog filters applied (local only for now)");
+            }
+
+            Message::ClearSyslogFilters => {
+                self.syslog_filter.clear();
+            }
+
+            Message::SyslogFilterStatusReceived(status) => {
+                self.syslog_filter.stats = Some(status);
+            }
         }
 
         Task::none()
@@ -842,7 +885,7 @@ impl ZenSight {
             CurrentView::Topology => topology_view(&self.topology, self.theme),
             CurrentView::Device => {
                 if let Some(ref device_state) = self.selected_device {
-                    device_view(device_state)
+                    device_view_with_syslog_filter(device_state, &self.syslog_filter)
                 } else {
                     dashboard_view(
                         &self.dashboard,

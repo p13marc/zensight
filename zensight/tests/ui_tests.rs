@@ -10,10 +10,11 @@ use zensight::app::AppTheme;
 use zensight::message::{DeviceId, Message};
 use zensight::mock;
 use zensight::view::dashboard::{DashboardState, DeviceState, dashboard_view};
-use zensight::view::device::{DeviceDetailState, device_view};
+use zensight::view::device::{DeviceDetailState, device_view_with_syslog_filter};
 use zensight::view::groups::GroupsState;
 use zensight::view::overview::OverviewState;
 use zensight::view::settings::{SettingsState, settings_view};
+use zensight::view::specialized::SyslogFilterState;
 use zensight::view::topology::{TopologyState, topology_view};
 
 use std::collections::HashMap;
@@ -137,7 +138,8 @@ fn test_device_detail_view() {
         state.update(point);
     }
 
-    let mut ui = simulator(device_view(&state));
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
 
     // Should show the device name
     assert!(ui.find("server01").is_ok());
@@ -157,7 +159,8 @@ fn test_device_back_button() {
     };
     let state = DeviceDetailState::new(device_id);
 
-    let mut ui = simulator(device_view(&state));
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
 
     // Click Back button
     let _ = ui.click("Back");
@@ -240,7 +243,8 @@ fn test_snmp_specialized_view() {
         state.update(point);
     }
 
-    let mut ui = simulator(device_view(&state));
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
 
     // Should show the device name
     assert!(ui.find("router01").is_ok());
@@ -275,7 +279,8 @@ fn test_syslog_specialized_view() {
         .insert("app_name".to_string(), "test".to_string());
     state.update(point);
 
-    let mut ui = simulator(device_view(&state));
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
 
     // Should show the device name
     assert!(ui.find("server01").is_ok());
@@ -304,7 +309,8 @@ fn test_modbus_specialized_view() {
     );
     state.update(point);
 
-    let mut ui = simulator(device_view(&state));
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
 
     // Should show the device name
     assert!(ui.find("plc01").is_ok());
@@ -340,7 +346,8 @@ fn test_netflow_specialized_view() {
     point.labels.insert("protocol".to_string(), "6".to_string()); // TCP
     state.update(point);
 
-    let mut ui = simulator(device_view(&state));
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
 
     // Should show exporter name (NetFlow view shows "Exporter: <name>")
     assert!(ui.find("Exporter: router01").is_ok());
@@ -371,7 +378,8 @@ fn test_gnmi_specialized_view() {
     );
     state.update(point);
 
-    let mut ui = simulator(device_view(&state));
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
 
     // Should show the device name
     assert!(ui.find("spine01").is_ok());

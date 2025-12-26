@@ -20,6 +20,8 @@
 //! zensight/syslog/webserver/daemon/info
 //! ```
 
+pub mod commands;
 pub mod config;
+pub mod filter;
 pub mod parser;
 pub mod receiver;

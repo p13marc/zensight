@@ -302,6 +302,39 @@ pub enum Message {
 
     /// Set topology search query.
     TopologySetSearch(String),
+
+    // Syslog filter messages
+    /// Toggle syslog filter panel visibility.
+    ToggleSyslogFilterPanel,
+
+    /// Set minimum severity filter (None = all severities).
+    SetSyslogMinSeverity(Option<u8>),
+
+    /// Toggle inclusion of a facility in the filter.
+    ToggleSyslogFacility(String),
+
+    /// Set syslog app name filter pattern.
+    SetSyslogAppFilter(String),
+
+    /// Set syslog message content filter pattern.
+    SetSyslogMessageFilter(String),
+
+    /// Apply syslog filters (send to bridge).
+    ApplySyslogFilters,
+
+    /// Clear all syslog filters.
+    ClearSyslogFilters,
+
+    /// Syslog filter status received from bridge.
+    SyslogFilterStatusReceived(SyslogFilterStatus),
+}
+
+/// Syslog filter status from bridge.
+#[derive(Debug, Clone)]
+pub struct SyslogFilterStatus {
+    pub messages_received: u64,
+    pub messages_passed: u64,
+    pub messages_filtered: u64,
 }
 
 /// Unique identifier for a device (protocol + source name).

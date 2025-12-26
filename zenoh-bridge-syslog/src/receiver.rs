@@ -1,32 +1,49 @@
-//! Syslog message receivers (UDP and TCP).
+//! Syslog message receivers (UDP, TCP, and Unix socket).
 
 use crate::config::{ListenerConfig, ListenerProtocol, SyslogConfig};
 use crate::parser::{self, SyslogMessage};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{TcpListener, TcpStream, UdpSocket, UnixListener, UnixStream};
 use tokio::sync::mpsc;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
 
-/// Received syslog message with source address.
+/// Received syslog message with source information.
 #[derive(Debug)]
 pub struct ReceivedMessage {
     /// Parsed syslog message.
     pub message: SyslogMessage,
-    /// Source address.
-    pub source_addr: SocketAddr,
+    /// Source address (for network protocols) or path (for Unix socket).
+    pub source: MessageSource,
     /// Resolved hostname (from aliases or reverse DNS).
     pub resolved_hostname: String,
 }
 
+/// Source of a received message.
+#[derive(Debug, Clone)]
+pub enum MessageSource {
+    /// Network source (UDP or TCP).
+    Network(SocketAddr),
+    /// Unix socket source.
+    Unix,
+}
+
+impl std::fmt::Display for MessageSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MessageSource::Network(addr) => write!(f, "{}", addr),
+            MessageSource::Unix => write!(f, "unix"),
+        }
+    }
+}
+
 /// Start all configured listeners and return a channel for receiving messages.
-pub async fn start_listeners(
-    config: &SyslogConfig,
-) -> Result<mpsc::Receiver<ReceivedMessage>> {
+pub async fn start_listeners(config: &SyslogConfig) -> Result<mpsc::Receiver<ReceivedMessage>> {
     let (tx, rx) = mpsc::channel(1000);
     let hostname_aliases = Arc::new(config.hostname_aliases.clone());
 
@@ -47,6 +64,13 @@ pub async fn start_listeners(
                 tokio::spawn(async move {
                     if let Err(e) = run_tcp_listener(&config, tx, aliases).await {
                         tracing::error!("TCP listener error: {}", e);
+                    }
+                });
+            }
+            ListenerProtocol::Unix => {
+                tokio::spawn(async move {
+                    if let Err(e) = run_unix_listener(&config, tx, aliases).await {
+                        tracing::error!("Unix listener error: {}", e);
                     }
                 });
             }
@@ -85,11 +109,11 @@ async fn run_udp_listener(
                 };
 
                 if let Some(message) = parser::parse(text) {
-                    let resolved_hostname = resolve_hostname(&addr, &message, &aliases);
+                    let resolved_hostname = resolve_hostname_network(&addr, &message, &aliases);
 
                     let received = ReceivedMessage {
                         message,
-                        source_addr: addr,
+                        source: MessageSource::Network(addr),
                         resolved_hostname,
                     };
 
@@ -136,13 +160,10 @@ async fn run_tcp_listener(
                     Ok(permit) => {
                         tokio::spawn(async move {
                             let _permit = permit; // Hold permit until connection closes
-                            if let Err(e) = handle_tcp_connection(
-                                stream,
-                                addr,
-                                tx,
-                                aliases,
-                                connection_timeout,
-                            ).await {
+                            if let Err(e) =
+                                handle_tcp_connection(stream, addr, tx, aliases, connection_timeout)
+                                    .await
+                            {
                                 tracing::debug!("TCP connection error from {}: {}", addr, e);
                             }
                         });
@@ -180,11 +201,11 @@ async fn handle_tcp_connection(
         match line_result {
             Ok(Ok(Some(line))) => {
                 if let Some(message) = parser::parse(&line) {
-                    let resolved_hostname = resolve_hostname(&addr, &message, &aliases);
+                    let resolved_hostname = resolve_hostname_network(&addr, &message, &aliases);
 
                     let received = ReceivedMessage {
                         message,
-                        source_addr: addr,
+                        source: MessageSource::Network(addr),
                         resolved_hostname,
                     };
 
@@ -212,8 +233,127 @@ async fn handle_tcp_connection(
     Ok(())
 }
 
-/// Resolve hostname from message, aliases, or source address.
-fn resolve_hostname(
+/// Run a Unix socket syslog listener.
+async fn run_unix_listener(
+    config: &ListenerConfig,
+    tx: mpsc::Sender<ReceivedMessage>,
+    aliases: Arc<HashMap<String, String>>,
+) -> Result<()> {
+    let socket_path = Path::new(&config.bind);
+
+    // Remove existing socket if configured
+    if config.remove_existing_socket && socket_path.exists() {
+        std::fs::remove_file(socket_path).with_context(|| {
+            format!(
+                "Failed to remove existing socket at {}",
+                socket_path.display()
+            )
+        })?;
+    }
+
+    let listener = UnixListener::bind(socket_path)
+        .with_context(|| format!("Failed to bind Unix socket to {}", socket_path.display()))?;
+
+    // Set socket permissions
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = std::fs::Permissions::from_mode(config.socket_mode);
+        std::fs::set_permissions(socket_path, permissions).with_context(|| {
+            format!(
+                "Failed to set permissions on socket {}",
+                socket_path.display()
+            )
+        })?;
+    }
+
+    tracing::info!("Unix syslog listener started on {}", socket_path.display());
+
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_connections));
+    let connection_timeout = Duration::from_secs(config.connection_timeout_secs);
+
+    loop {
+        match listener.accept().await {
+            Ok((stream, _addr)) => {
+                let tx = tx.clone();
+                let aliases = aliases.clone();
+                let permit = semaphore.clone().try_acquire_owned();
+
+                match permit {
+                    Ok(permit) => {
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            if let Err(e) =
+                                handle_unix_connection(stream, tx, aliases, connection_timeout)
+                                    .await
+                            {
+                                tracing::debug!("Unix connection error: {}", e);
+                            }
+                        });
+                    }
+                    Err(_) => {
+                        tracing::warn!("Max connections reached, rejecting Unix connection");
+                        drop(stream);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Unix accept error: {}", e);
+            }
+        }
+    }
+}
+
+/// Handle a single Unix socket connection.
+async fn handle_unix_connection(
+    stream: UnixStream,
+    tx: mpsc::Sender<ReceivedMessage>,
+    aliases: Arc<HashMap<String, String>>,
+    connection_timeout: Duration,
+) -> Result<()> {
+    tracing::debug!("Unix connection accepted");
+
+    let reader = BufReader::new(stream);
+    let mut lines = reader.lines();
+
+    loop {
+        let line_result = timeout(connection_timeout, lines.next_line()).await;
+
+        match line_result {
+            Ok(Ok(Some(line))) => {
+                if let Some(message) = parser::parse(&line) {
+                    let resolved_hostname = resolve_hostname_unix(&message, &aliases);
+
+                    let received = ReceivedMessage {
+                        message,
+                        source: MessageSource::Unix,
+                        resolved_hostname,
+                    };
+
+                    if tx.send(received).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            Ok(Ok(None)) => {
+                break;
+            }
+            Ok(Err(e)) => {
+                return Err(e.into());
+            }
+            Err(_) => {
+                tracing::debug!("Unix connection timeout");
+                break;
+            }
+        }
+    }
+
+    tracing::debug!("Unix connection closed");
+    Ok(())
+}
+
+/// Resolve hostname from message, aliases, or source address (network).
+fn resolve_hostname_network(
     addr: &SocketAddr,
     message: &SyslogMessage,
     aliases: &HashMap<String, String>,
@@ -234,11 +374,28 @@ fn resolve_hostname(
     ip
 }
 
+/// Resolve hostname from message or aliases (Unix socket).
+fn resolve_hostname_unix(message: &SyslogMessage, aliases: &HashMap<String, String>) -> String {
+    // Use hostname from message if available
+    if let Some(ref hostname) = message.hostname {
+        // Check aliases for the hostname
+        if let Some(alias) = aliases.get(hostname) {
+            return alias.clone();
+        }
+        return hostname.clone();
+    }
+
+    // Check for localhost alias
+    if let Some(alias) = aliases.get("localhost") {
+        return alias.clone();
+    }
+
+    // Default to localhost for Unix socket connections
+    "localhost".to_string()
+}
+
 /// Convert a syslog message to a TelemetryPoint.
-pub fn to_telemetry_point(
-    received: &ReceivedMessage,
-    include_raw: bool,
-) -> TelemetryPoint {
+pub fn to_telemetry_point(received: &ReceivedMessage, include_raw: bool) -> TelemetryPoint {
     let msg = &received.message;
 
     let mut labels = HashMap::new();
@@ -269,15 +426,16 @@ pub fn to_telemetry_point(
         }
     }
 
-    // Add source address
-    labels.insert("source_addr".to_string(), received.source_addr.to_string());
+    // Add source information
+    labels.insert("source_type".to_string(), received.source.to_string());
 
     // Add raw message if configured
     if include_raw {
         labels.insert("raw".to_string(), msg.raw.clone());
     }
 
-    let timestamp = msg.timestamp
+    let timestamp = msg
+        .timestamp
         .map(|dt| dt.timestamp_millis())
         .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
 
@@ -292,10 +450,7 @@ pub fn to_telemetry_point(
 }
 
 /// Build the key expression for a syslog message.
-pub fn build_key_expr(
-    prefix: &str,
-    received: &ReceivedMessage,
-) -> String {
+pub fn build_key_expr(prefix: &str, received: &ReceivedMessage) -> String {
     let msg = &received.message;
     format!(
         "{}/{}/{}/{}",
@@ -311,44 +466,73 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_resolve_hostname_alias() {
+    fn test_resolve_hostname_network_alias() {
         let addr: SocketAddr = "192.168.1.1:514".parse().unwrap();
         let msg = parser::parse("<14>test message").unwrap();
         let mut aliases = HashMap::new();
         aliases.insert("192.168.1.1".to_string(), "router01".to_string());
 
-        let hostname = resolve_hostname(&addr, &msg, &aliases);
+        let hostname = resolve_hostname_network(&addr, &msg, &aliases);
         assert_eq!(hostname, "router01");
     }
 
     #[test]
-    fn test_resolve_hostname_from_message() {
+    fn test_resolve_hostname_network_from_message() {
         let addr: SocketAddr = "192.168.1.1:514".parse().unwrap();
         let msg = parser::parse("<34>Jan  5 14:30:00 myhost sshd: test").unwrap();
         let aliases = HashMap::new();
 
-        let hostname = resolve_hostname(&addr, &msg, &aliases);
+        let hostname = resolve_hostname_network(&addr, &msg, &aliases);
         assert_eq!(hostname, "myhost");
     }
 
     #[test]
-    fn test_resolve_hostname_fallback_ip() {
+    fn test_resolve_hostname_network_fallback_ip() {
         let addr: SocketAddr = "192.168.1.1:514".parse().unwrap();
         let msg = parser::parse("<14>test message").unwrap();
         let aliases = HashMap::new();
 
-        let hostname = resolve_hostname(&addr, &msg, &aliases);
+        let hostname = resolve_hostname_network(&addr, &msg, &aliases);
         assert_eq!(hostname, "192.168.1.1");
+    }
+
+    #[test]
+    fn test_resolve_hostname_unix() {
+        let msg = parser::parse("<34>Jan  5 14:30:00 myhost sshd: test").unwrap();
+        let aliases = HashMap::new();
+
+        let hostname = resolve_hostname_unix(&msg, &aliases);
+        assert_eq!(hostname, "myhost");
+    }
+
+    #[test]
+    fn test_resolve_hostname_unix_default() {
+        let msg = parser::parse("<14>test message").unwrap();
+        let aliases = HashMap::new();
+
+        let hostname = resolve_hostname_unix(&msg, &aliases);
+        assert_eq!(hostname, "localhost");
+    }
+
+    #[test]
+    fn test_resolve_hostname_unix_with_alias() {
+        let msg = parser::parse("<14>test message").unwrap();
+        let mut aliases = HashMap::new();
+        aliases.insert("localhost".to_string(), "server01".to_string());
+
+        let hostname = resolve_hostname_unix(&msg, &aliases);
+        assert_eq!(hostname, "server01");
     }
 
     #[test]
     fn test_to_telemetry_point() {
         let addr: SocketAddr = "192.168.1.1:514".parse().unwrap();
-        let msg = parser::parse("<34>Jan  5 14:30:00 myhost sshd[1234]: Connection from 10.0.0.1").unwrap();
+        let msg = parser::parse("<34>Jan  5 14:30:00 myhost sshd[1234]: Connection from 10.0.0.1")
+            .unwrap();
 
         let received = ReceivedMessage {
             message: msg,
-            source_addr: addr,
+            source: MessageSource::Network(addr),
             resolved_hostname: "myhost".to_string(),
         };
 
@@ -365,17 +549,42 @@ mod tests {
     }
 
     #[test]
+    fn test_to_telemetry_point_unix() {
+        let msg = parser::parse("<14>Jan  5 14:30:00 localhost app: test message").unwrap();
+
+        let received = ReceivedMessage {
+            message: msg,
+            source: MessageSource::Unix,
+            resolved_hostname: "localhost".to_string(),
+        };
+
+        let point = to_telemetry_point(&received, false);
+
+        assert_eq!(point.source, "localhost");
+        assert_eq!(point.labels.get("source_type"), Some(&"unix".to_string()));
+    }
+
+    #[test]
     fn test_build_key_expr() {
         let addr: SocketAddr = "192.168.1.1:514".parse().unwrap();
         let msg = parser::parse("<34>Jan  5 14:30:00 myhost sshd: test").unwrap();
 
         let received = ReceivedMessage {
             message: msg,
-            source_addr: addr,
+            source: MessageSource::Network(addr),
             resolved_hostname: "myhost".to_string(),
         };
 
         let key = build_key_expr("zensight/syslog", &received);
         assert_eq!(key, "zensight/syslog/myhost/auth/crit");
+    }
+
+    #[test]
+    fn test_message_source_display() {
+        let network = MessageSource::Network("192.168.1.1:514".parse().unwrap());
+        assert_eq!(network.to_string(), "192.168.1.1:514");
+
+        let unix = MessageSource::Unix;
+        assert_eq!(unix.to_string(), "unix");
     }
 }

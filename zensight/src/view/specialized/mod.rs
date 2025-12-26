@@ -17,6 +17,8 @@ use zensight_common::Protocol;
 use crate::message::Message;
 use crate::view::device::DeviceDetailState;
 
+pub use syslog::SyslogFilterState;
+
 /// Select and render the appropriate specialized view based on protocol.
 ///
 /// This function examines the device's protocol and delegates to the
@@ -27,12 +29,20 @@ pub fn specialized_view<'a>(state: &'a DeviceDetailState) -> Option<Element<'a, 
     match state.device_id.protocol {
         Protocol::Snmp => Some(snmp::snmp_device_view(state)),
         Protocol::Sysinfo => Some(sysinfo::sysinfo_host_view(state)),
-        Protocol::Syslog => Some(syslog::syslog_event_view(state)),
+        Protocol::Syslog => None, // Syslog needs filter state, handled separately
         Protocol::Modbus => Some(modbus::modbus_plc_view(state)),
         Protocol::Netflow => Some(netflow::netflow_traffic_view(state)),
         Protocol::Gnmi => Some(gnmi::gnmi_streaming_view(state)),
         Protocol::Opcua => None, // No specialized view yet, use generic
     }
+}
+
+/// Render the syslog specialized view with filter state.
+pub fn syslog_view<'a>(
+    state: &'a DeviceDetailState,
+    filter_state: &'a SyslogFilterState,
+) -> Element<'a, Message> {
+    syslog::syslog_event_view(state, filter_state)
 }
 
 /// Check if a protocol has a specialized view available.
