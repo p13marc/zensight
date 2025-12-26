@@ -22,6 +22,7 @@ use crate::view::alerts::{AlertsState, alerts_view};
 use crate::view::dashboard::{DashboardState, DeviceState, dashboard_view};
 use crate::view::device::{DeviceDetailState, device_view};
 use crate::view::groups::{GroupsState, groups_panel};
+use crate::view::overview::OverviewState;
 use crate::view::settings::{PersistentSettings, SettingsState, settings_view};
 
 /// Current view in the application.
@@ -74,6 +75,8 @@ pub struct ZenSight {
     alerts: AlertsState,
     /// Groups state.
     groups: GroupsState,
+    /// Overview state.
+    overview: OverviewState,
     /// Current view.
     current_view: CurrentView,
     /// Stale threshold in milliseconds (devices not updated within this time are marked unhealthy).
@@ -117,7 +120,7 @@ impl ZenSight {
                 device_state.metric_count = device_state.metrics.len() + 1;
                 device_state
                     .metrics
-                    .insert(point.metric.clone(), format_telemetry_value(&point.value));
+                    .insert(point.metric.clone(), point.clone());
                 device_state.is_healthy = true;
             }
         }
@@ -143,6 +146,9 @@ impl ZenSight {
         // Load groups from persistent settings
         let groups = persistent.groups.clone();
 
+        // Initialize overview state
+        let overview = OverviewState::default();
+
         let app = Self {
             zenoh_config,
             dashboard,
@@ -150,6 +156,7 @@ impl ZenSight {
             settings,
             alerts,
             groups,
+            overview,
             current_view: CurrentView::default(),
             stale_threshold_ms,
             demo_mode,
@@ -408,15 +415,9 @@ impl ZenSight {
                     .devices
                     .values()
                     .flat_map(|device| {
-                        // We need numeric values for testing
-                        // For now, just use a placeholder since we don't store raw values
-                        // In a real implementation, we'd need to track numeric values
-                        device.metrics.iter().filter_map(|(name, value_str)| {
-                            // Try to parse the displayed value back to a number
-                            let value: f64 = value_str
-                                .trim_end_matches(|c: char| !c.is_numeric() && c != '.' && c != '-')
-                                .parse()
-                                .ok()?;
+                        device.metrics.iter().filter_map(|(name, point)| {
+                            // Extract numeric value from TelemetryPoint
+                            let value = telemetry_to_f64(&point.value)?;
                             Some((device.id.source.clone(), name.clone(), value))
                         })
                     })
@@ -526,6 +527,15 @@ impl ZenSight {
                 self.groups.toggle_assignment(&device_id, group_id);
                 self.save_groups();
             }
+
+            // Overview messages
+            Message::SelectOverviewProtocol(protocol) => {
+                self.overview.select_protocol(protocol);
+            }
+
+            Message::ToggleOverviewExpanded => {
+                self.overview.toggle_expanded();
+            }
         }
 
         Task::none()
@@ -618,12 +628,22 @@ impl ZenSight {
                 if let Some(ref device_state) = self.selected_device {
                     device_view(device_state)
                 } else {
-                    dashboard_view(&self.dashboard, self.theme, unack, &self.groups)
+                    dashboard_view(
+                        &self.dashboard,
+                        self.theme,
+                        unack,
+                        &self.groups,
+                        &self.overview,
+                    )
                 }
             }
-            CurrentView::Dashboard => {
-                dashboard_view(&self.dashboard, self.theme, unack, &self.groups)
-            }
+            CurrentView::Dashboard => dashboard_view(
+                &self.dashboard,
+                self.theme,
+                unack,
+                &self.groups,
+                &self.overview,
+            ),
         };
 
         // Show groups panel as a sidebar if open
@@ -654,7 +674,7 @@ impl ZenSight {
         device_state.metric_count = device_state.metrics.len() + 1;
         device_state
             .metrics
-            .insert(point.metric.clone(), format_telemetry_value(&point.value));
+            .insert(point.metric.clone(), point.clone());
         device_state.is_healthy = true;
 
         // Check alert rules for numeric values
@@ -787,23 +807,6 @@ impl ZenSight {
         if let Some(ref mut device) = self.selected_device {
             device.update_chart_time();
         }
-    }
-}
-
-/// Format a telemetry value as a string for the dashboard preview.
-fn format_telemetry_value(value: &TelemetryValue) -> String {
-    match value {
-        TelemetryValue::Counter(v) => format!("{}", v),
-        TelemetryValue::Gauge(v) => format!("{:.2}", v),
-        TelemetryValue::Text(s) => {
-            if s.len() > 30 {
-                format!("{}...", &s[..27])
-            } else {
-                s.clone()
-            }
-        }
-        TelemetryValue::Boolean(b) => if *b { "true" } else { "false" }.to_string(),
-        TelemetryValue::Binary(data) => format!("<{} bytes>", data.len()),
     }
 }
 

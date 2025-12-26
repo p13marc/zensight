@@ -219,6 +219,13 @@ pub enum Message {
 
     /// Toggle device assignment to a group.
     ToggleDeviceGroup(DeviceId, u32),
+
+    // Overview messages
+    /// Select a protocol for the overview section.
+    SelectOverviewProtocol(Protocol),
+
+    /// Toggle overview section expanded/collapsed.
+    ToggleOverviewExpanded,
 }
 
 /// Unique identifier for a device (protocol + source name).

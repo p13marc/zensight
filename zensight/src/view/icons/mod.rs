@@ -58,6 +58,11 @@ pub fn arrow_down<Message: 'static>(size: IconSize) -> Element<'static, Message>
     svg_icon(include_bytes!("arrow-down.svg"), size)
 }
 
+/// Right arrow (collapsed indicator).
+pub fn arrow_right<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("arrow-right.svg"), size)
+}
+
 /// Stable indicator (horizontal line - gray).
 pub fn arrow_stable<Message: 'static>(size: IconSize) -> Element<'static, Message> {
     svg_icon(include_bytes!("arrow-stable.svg"), size)
