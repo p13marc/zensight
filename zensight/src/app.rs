@@ -478,7 +478,7 @@ impl ZenSight {
                 self.theme = self.theme.toggle();
                 // Persist the theme preference
                 self.settings.dark_theme = matches!(self.theme, AppTheme::Dark);
-                self.settings.modified = true;
+                self.save_theme();
             }
 
             // Keyboard shortcuts
@@ -654,6 +654,15 @@ impl ZenSight {
         persistent.overview_expanded = self.overview.expanded;
         if let Err(e) = persistent.save() {
             tracing::error!("Failed to save overview state: {}", e);
+        }
+    }
+
+    /// Save theme preference to persistent settings.
+    fn save_theme(&self) {
+        let mut persistent = PersistentSettings::load();
+        persistent.dark_theme = matches!(self.theme, AppTheme::Dark);
+        if let Err(e) = persistent.save() {
+            tracing::error!("Failed to save theme: {}", e);
         }
     }
 
