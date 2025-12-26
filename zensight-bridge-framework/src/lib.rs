@@ -33,6 +33,7 @@
 
 mod args;
 mod config;
+mod correlation;
 mod error;
 mod health;
 mod publisher;
@@ -41,6 +42,7 @@ mod status;
 
 pub use args::BridgeArgs;
 pub use config::BridgeConfig;
+pub use correlation::{BridgeInfo, CorrelationEntry, CorrelationRegistry, DeviceIdentity};
 pub use error::{BridgeError, Result};
 pub use health::{
     BridgeHealth, DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot,

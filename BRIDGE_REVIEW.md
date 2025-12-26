@@ -244,10 +244,20 @@ zensight/_meta/correlation/<ip>
 - `ErrorReport` - Unified error format with error_type, retryable flag
 - `ErrorType` - Timeout, AuthFailed, ConnectionRefused, ParseError, etc.
 
-### Phase 3: Cross-Bridge Correlation - TODO
-1. IP/hostname correlation registry
-2. Link SNMP ↔ NetFlow ↔ Syslog data
-3. Bridge discovery via Zenoh
+### Phase 3: Cross-Bridge Correlation - COMPLETED
+1. ✅ IP/hostname correlation registry (`CorrelationRegistry`)
+2. ✅ Device identity linking across bridges (`DeviceIdentity`, `CorrelationEntry`)
+3. ✅ Bridge discovery via Zenoh (`BridgeInfo`)
+
+**New framework types:**
+- `CorrelationRegistry` - Central registry for device identity correlation
+- `DeviceIdentity` - Device identity from a single bridge
+- `CorrelationEntry` - Aggregated identity across all bridges (IP, hostnames, sources)
+- `BridgeInfo` - Bridge discovery/announcement information
+
+Key expressions:
+- `zensight/_meta/correlation/<ip>` - Correlation data per device
+- `zensight/_meta/bridges/<name>` - Bridge discovery announcements
 
 ---
 
