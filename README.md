@@ -13,7 +13,7 @@ ZenSight provides a suite of protocol bridges that collect telemetry from variou
 | `zensight` | Iced 0.14 desktop frontend for visualizing telemetry | Complete |
 | `zensight-common` | Shared library (telemetry model, Zenoh helpers, config) | Complete |
 | `zenoh-bridge-snmp` | SNMP bridge (v1/v2c/v3 polling + trap receiver, MIB loading) | Complete |
-| `zenoh-bridge-syslog` | Syslog receiver (RFC 3164/5424, UDP/TCP) | Complete |
+| `zenoh-bridge-syslog` | Syslog receiver (RFC 3164/5424, UDP/TCP/Unix, filtering) | Complete |
 | `zenoh-bridge-netflow` | NetFlow/IPFIX receiver (v5, v7, v9, IPFIX) | Complete |
 | `zenoh-bridge-modbus` | Modbus bridge (TCP/RTU, all register types) | Complete |
 | `zenoh-bridge-sysinfo` | System monitoring (CPU, memory, disk, network) | Complete |
@@ -124,7 +124,17 @@ All bridges use JSON5 configuration files. See the `configs/` directory for exam
     listeners: [
       { protocol: "udp", bind: "0.0.0.0:514" },
       { protocol: "tcp", bind: "0.0.0.0:514" },
+      { protocol: "unix", bind: "/var/run/zensight-syslog.sock" },
     ],
+    // Optional: message filtering
+    filter: {
+      min_severity: 4,  // Warning and above
+      exclude_facilities: ["local7"],
+      exclude_app_patterns: [
+        { pattern: "systemd-*", pattern_type: "glob" },
+      ],
+    },
+    enable_dynamic_filters: true,
   },
 }
 ```
@@ -305,15 +315,15 @@ let points = mock::mock_environment();
 
 | Crate | Tests | Description |
 |-------|-------|-------------|
-| zensight-common | 33 | 14 unit + 10 integration + 4 E2E + 5 doctests |
-| zensight (frontend) | 32 | 23 unit + 9 UI tests (Simulator) |
-| zenoh-bridge-snmp | 25 | 19 unit + 6 integration |
-| zenoh-bridge-syslog | 52 | 26 unit + 26 integration |
-| zenoh-bridge-netflow | 16 | 8 unit + 8 integration |
+| zensight (frontend) | 114 | Unit + UI tests (Simulator) |
+| zensight-common | 21 | Telemetry, config, key expressions |
+| zenoh-bridge-snmp | 16 | Polling, traps, MIB loading |
+| zenoh-bridge-syslog | 52 | Parser, receiver, filtering |
+| zenoh-bridge-netflow | 8 | Flow parsing, templates |
 | zenoh-bridge-modbus | 11 | Config, register decoding |
-| zenoh-bridge-sysinfo | 10 | Config, filters, collection |
+| zenoh-bridge-sysinfo | 15 | Config, collectors, metrics |
 | zenoh-bridge-gnmi | 8 | Config, path parsing, subscriber |
-| **Total** | **187** | All tests passing |
+| **Total** | **245** | All tests passing |
 
 ## License
 

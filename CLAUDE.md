@@ -33,13 +33,13 @@ cargo run -p zenoh-bridge-snmp --release -- --config configs/snmp.json5
 cargo test --workspace
 
 # Run specific crate tests
-cargo test -p zensight              # 126 tests (104 unit + 22 UI)
-cargo test -p zensight-common       # 33 tests
-cargo test -p zenoh-bridge-snmp     # 25 tests
-cargo test -p zenoh-bridge-syslog   # 52 tests
-cargo test -p zenoh-bridge-netflow  # 16 tests
+cargo test -p zensight              # 114 tests (unit + UI)
+cargo test -p zensight-common       # 21 tests
+cargo test -p zenoh-bridge-snmp     # 16 tests
+cargo test -p zenoh-bridge-syslog   # 52 tests (parser, receiver, filtering)
+cargo test -p zenoh-bridge-netflow  # 8 tests
 cargo test -p zenoh-bridge-modbus   # 11 tests
-cargo test -p zenoh-bridge-sysinfo  # 10 tests
+cargo test -p zenoh-bridge-sysinfo  # 15 tests
 cargo test -p zenoh-bridge-gnmi     # 8 tests
 
 # Run a single test
@@ -96,7 +96,7 @@ zensight/                    # Workspace root
 │       ├── keyexpr.rs       # Key expression builders
 │       └── serialization.rs # JSON/CBOR encoding
 ├── zenoh-bridge-snmp/       # SNMP v1/v2c/v3 bridge
-├── zenoh-bridge-syslog/     # RFC 3164/5424 bridge
+├── zenoh-bridge-syslog/     # RFC 3164/5424 bridge (UDP/TCP/Unix, filtering)
 ├── zenoh-bridge-netflow/    # NetFlow/IPFIX bridge
 ├── zenoh-bridge-modbus/     # Modbus TCP/RTU bridge
 ├── zenoh-bridge-sysinfo/    # System metrics bridge
@@ -227,6 +227,27 @@ Common Zenoh settings:
 
 - Frontend subscribes to `zensight/**` wildcard
 - Bridges are auto-discovered via Zenoh
+
+### Syslog Filtering
+
+The syslog bridge supports message filtering at multiple levels:
+
+**Static Filters** (configured in JSON5):
+- `min_severity`: Filter by severity level (0=emergency to 7=debug)
+- `include/exclude_facilities`: Filter by syslog facility
+- `include/exclude_app_patterns`: Filter by app name (glob or regex)
+- `include/exclude_hostname_patterns`: Filter by hostname
+- `include/exclude_message_patterns`: Filter by message content
+
+**Dynamic Filters** (via Zenoh commands at runtime):
+- Command key: `zensight/syslog/@/commands/filter`
+- Status queryable: `zensight/syslog/@/status`
+- Commands: `add_filter`, `remove_filter`, `clear_filters`
+
+**Frontend Integration**:
+- `SyslogFilterState` in `zensight/src/view/specialized/syslog.rs`
+- Filter panel with severity dropdown, facility toggles, pattern inputs
+- Filters applied locally in frontend before display
 - No frontend config needed to add new bridges
 
 ### SVG Icons
