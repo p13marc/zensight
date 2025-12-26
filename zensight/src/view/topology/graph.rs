@@ -417,10 +417,14 @@ impl<'a> TopologyGraphProgram<'a> {
 
     /// Convert screen coordinates to graph coordinates.
     fn screen_to_graph(&self, screen_pos: Point, bounds: Rectangle) -> Point {
-        let center = Point::new(bounds.width / 2.0, bounds.height / 2.0);
+        // Convert from window coordinates to canvas-relative coordinates
+        let canvas_x = screen_pos.x - bounds.x;
+        let canvas_y = screen_pos.y - bounds.y;
+        let center_x = bounds.width / 2.0;
+        let center_y = bounds.height / 2.0;
         Point::new(
-            (screen_pos.x - center.x) / self.state.zoom - self.state.pan.0,
-            (screen_pos.y - center.y) / self.state.zoom - self.state.pan.1,
+            (canvas_x - center_x) / self.state.zoom - self.state.pan.0,
+            (canvas_y - center_y) / self.state.zoom - self.state.pan.1,
         )
     }
 
