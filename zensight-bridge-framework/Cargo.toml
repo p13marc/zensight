@@ -20,5 +20,8 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 json5 = { workspace = true }
 
+# Time
+chrono = "0.4"
+
 [dev-dependencies]
 tokio-test = "0.4"

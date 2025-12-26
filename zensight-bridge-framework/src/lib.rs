@@ -34,6 +34,7 @@
 mod args;
 mod config;
 mod error;
+mod health;
 mod publisher;
 mod runner;
 mod status;
@@ -41,6 +42,9 @@ mod status;
 pub use args::BridgeArgs;
 pub use config::BridgeConfig;
 pub use error::{BridgeError, Result};
+pub use health::{
+    BridgeHealth, DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot,
+};
 pub use publisher::Publisher;
 pub use runner::BridgeRunner;
 pub use status::BridgeStatus;

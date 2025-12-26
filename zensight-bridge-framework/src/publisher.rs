@@ -10,7 +10,7 @@ use crate::error::{BridgeError, Result};
 ///
 /// Wraps a Zenoh session and provides convenient methods for publishing
 /// [`TelemetryPoint`] values with automatic serialization.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Publisher {
     session: Arc<zenoh::Session>,
     key_prefix: String,

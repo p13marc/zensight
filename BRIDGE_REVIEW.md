@@ -223,20 +223,28 @@ zensight/_meta/correlation/<ip>
 
 ## Implementation Roadmap
 
-### Phase 1: Sysinfo Enhancements
-1. CPU breakdown (user/system/iowait/steal)
-2. Disk I/O stats (read/write bytes, IOPS)
-3. I/O wait metrics
-4. Temperature sensors (Linux hwmon)
-5. Docker container metrics
+### Phase 1: Sysinfo Enhancements - COMPLETED
+1. ✅ CPU breakdown (user/system/iowait/steal/nice/idle/irq/softirq)
+2. ✅ Disk I/O stats (read/write bytes, IOPS, rates)
+3. ✅ I/O wait metrics (included in CPU breakdown)
+4. ✅ Temperature sensors (Linux hwmon)
+5. ✅ TCP connection state counts
+6. ⏸️ Docker container metrics (deferred)
 
-### Phase 2: Cross-Bridge Infrastructure
-1. Bridge health metrics publishing
-2. Device liveness tracking
-3. Unified error reporting
-4. Data freshness/staleness detection
+### Phase 2: Cross-Bridge Infrastructure - COMPLETED
+1. ✅ Bridge health metrics (`BridgeHealth` in framework)
+2. ✅ Device liveness tracking (`DeviceLiveness`, `DeviceStatus`)
+3. ✅ Unified error reporting (`ErrorReport`, `ErrorType`)
+4. ✅ Data freshness tracking (via `last_seen` timestamps)
 
-### Phase 3: Cross-Bridge Correlation
+**New framework types:**
+- `BridgeHealth` - Tracks devices_total, devices_responding, errors, metrics_published
+- `DeviceLiveness` - Per-device status with last_seen, consecutive_failures
+- `DeviceStatus` - Online, Offline, Degraded, Unknown
+- `ErrorReport` - Unified error format with error_type, retryable flag
+- `ErrorType` - Timeout, AuthFailed, ConnectionRefused, ParseError, etc.
+
+### Phase 3: Cross-Bridge Correlation - TODO
 1. IP/hostname correlation registry
 2. Link SNMP ↔ NetFlow ↔ Syslog data
 3. Bridge discovery via Zenoh
