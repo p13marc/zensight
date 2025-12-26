@@ -306,10 +306,11 @@ fn render_header(
         .style(iced::widget::button::secondary);
 
     let alerts_label = if unacknowledged_alerts > 0 {
+        // White text for contrast on danger (red) button background
         text(format!("Alerts ({})", unacknowledged_alerts))
             .size(14)
             .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(1.0, 0.3, 0.3)),
+                color: Some(iced::Color::WHITE),
             })
     } else {
         text("Alerts").size(14)
