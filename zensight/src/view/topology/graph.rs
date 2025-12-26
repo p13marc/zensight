@@ -417,32 +417,13 @@ impl<'a> TopologyGraphProgram<'a> {
 
     /// Convert screen coordinates to graph coordinates.
     fn screen_to_graph(&self, screen_pos: Point, bounds: Rectangle) -> Point {
-        // Convert from window coordinates to canvas-relative coordinates
-        let canvas_x = screen_pos.x - bounds.x;
-        let canvas_y = screen_pos.y - bounds.y;
-        let center_x = bounds.width / 2.0;
-        let center_y = bounds.height / 2.0;
-        Point::new(
-            (canvas_x - center_x) / self.state.zoom - self.state.pan.0,
-            (canvas_y - center_y) / self.state.zoom - self.state.pan.1,
-        )
+        screen_to_graph_coords(screen_pos, bounds, self.state.zoom, self.state.pan)
     }
 
     /// Find the node at the given graph position.
     fn find_node_at(&self, pos: Point) -> Option<String> {
-        let hit_radius = 25.0; // Same as node radius
-
-        for node in self.state.nodes.values() {
-            let dx = pos.x - node.position.0;
-            let dy = pos.y - node.position.1;
-            let distance = (dx * dx + dy * dy).sqrt();
-
-            if distance <= hit_radius {
-                return Some(node.id.clone());
-            }
-        }
-
-        None
+        const HIT_RADIUS: f32 = 25.0; // Same as node radius
+        find_node_at_position(pos, &self.state.nodes, HIT_RADIUS)
     }
 }
 
@@ -459,9 +440,56 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// Convert screen coordinates to graph coordinates.
+///
+/// This is the core coordinate transformation used for hit testing.
+/// - `screen_pos`: cursor position in window coordinates
+/// - `bounds`: the canvas bounds (position and size)
+/// - `zoom`: current zoom level
+/// - `pan`: current pan offset (x, y)
+pub fn screen_to_graph_coords(
+    screen_pos: Point,
+    bounds: Rectangle,
+    zoom: f32,
+    pan: (f32, f32),
+) -> Point {
+    // Convert from window coordinates to canvas-relative coordinates
+    let canvas_x = screen_pos.x - bounds.x;
+    let canvas_y = screen_pos.y - bounds.y;
+    let center_x = bounds.width / 2.0;
+    let center_y = bounds.height / 2.0;
+    Point::new(
+        (canvas_x - center_x) / zoom - pan.0,
+        (canvas_y - center_y) / zoom - pan.1,
+    )
+}
+
+/// Find a node at the given graph position.
+///
+/// Returns the node ID if a node is found within the hit radius.
+pub fn find_node_at_position(
+    pos: Point,
+    nodes: &std::collections::HashMap<super::NodeId, super::Node>,
+    hit_radius: f32,
+) -> Option<String> {
+    for node in nodes.values() {
+        let dx = pos.x - node.position.0;
+        let dy = pos.y - node.position.1;
+        let distance = (dx * dx + dy * dy).sqrt();
+
+        if distance <= hit_radius {
+            return Some(node.id.clone());
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::view::topology::{Node, NodeType};
+    use std::collections::HashMap;
 
     #[test]
     fn test_format_bytes() {
@@ -469,5 +497,275 @@ mod tests {
         assert_eq!(format_bytes(1500), "1.5 KB");
         assert_eq!(format_bytes(1_500_000), "1.5 MB");
         assert_eq!(format_bytes(1_500_000_000), "1.5 GB");
+    }
+
+    // ========================================================================
+    // Coordinate conversion tests
+    // ========================================================================
+
+    #[test]
+    fn test_screen_to_graph_center_click() {
+        // Canvas at origin (0,0), size 800x600
+        let bounds = Rectangle::new(Point::new(0.0, 0.0), iced::Size::new(800.0, 600.0));
+        // Click at center of canvas
+        let screen_pos = Point::new(400.0, 300.0);
+        let zoom = 1.0;
+        let pan = (0.0, 0.0);
+
+        let graph_pos = screen_to_graph_coords(screen_pos, bounds, zoom, pan);
+
+        // Center of canvas should map to origin in graph coords
+        assert!(
+            (graph_pos.x).abs() < 0.001,
+            "Expected x=0, got {}",
+            graph_pos.x
+        );
+        assert!(
+            (graph_pos.y).abs() < 0.001,
+            "Expected y=0, got {}",
+            graph_pos.y
+        );
+    }
+
+    #[test]
+    fn test_screen_to_graph_with_canvas_offset() {
+        // Canvas NOT at origin - offset by (100, 50) to simulate header/sidebar
+        let bounds = Rectangle::new(Point::new(100.0, 50.0), iced::Size::new(800.0, 600.0));
+        // Click at center of canvas (in window coords: 100 + 400 = 500, 50 + 300 = 350)
+        let screen_pos = Point::new(500.0, 350.0);
+        let zoom = 1.0;
+        let pan = (0.0, 0.0);
+
+        let graph_pos = screen_to_graph_coords(screen_pos, bounds, zoom, pan);
+
+        // Should still map to origin since we clicked at canvas center
+        assert!(
+            (graph_pos.x).abs() < 0.001,
+            "Expected x=0, got {}",
+            graph_pos.x
+        );
+        assert!(
+            (graph_pos.y).abs() < 0.001,
+            "Expected y=0, got {}",
+            graph_pos.y
+        );
+    }
+
+    #[test]
+    fn test_screen_to_graph_with_zoom() {
+        let bounds = Rectangle::new(Point::new(0.0, 0.0), iced::Size::new(800.0, 600.0));
+        // Click 100 pixels right of center
+        let screen_pos = Point::new(500.0, 300.0);
+        let zoom = 2.0; // 200% zoom
+        let pan = (0.0, 0.0);
+
+        let graph_pos = screen_to_graph_coords(screen_pos, bounds, zoom, pan);
+
+        // At 200% zoom, 100 screen pixels = 50 graph units
+        assert!(
+            (graph_pos.x - 50.0).abs() < 0.001,
+            "Expected x=50, got {}",
+            graph_pos.x
+        );
+        assert!(
+            (graph_pos.y).abs() < 0.001,
+            "Expected y=0, got {}",
+            graph_pos.y
+        );
+    }
+
+    #[test]
+    fn test_screen_to_graph_with_pan() {
+        let bounds = Rectangle::new(Point::new(0.0, 0.0), iced::Size::new(800.0, 600.0));
+        // Click at center
+        let screen_pos = Point::new(400.0, 300.0);
+        let zoom = 1.0;
+        let pan = (100.0, 50.0); // Panned right 100, down 50
+
+        let graph_pos = screen_to_graph_coords(screen_pos, bounds, zoom, pan);
+
+        // Pan shifts the view, so center click maps to (-pan.x, -pan.y)
+        assert!(
+            (graph_pos.x - (-100.0)).abs() < 0.001,
+            "Expected x=-100, got {}",
+            graph_pos.x
+        );
+        assert!(
+            (graph_pos.y - (-50.0)).abs() < 0.001,
+            "Expected y=-50, got {}",
+            graph_pos.y
+        );
+    }
+
+    #[test]
+    fn test_screen_to_graph_combined_offset_zoom_pan() {
+        // Comprehensive test with all transformations
+        let bounds = Rectangle::new(Point::new(50.0, 30.0), iced::Size::new(800.0, 600.0));
+        // Click at canvas center (window coords: 50 + 400 = 450, 30 + 300 = 330)
+        let screen_pos = Point::new(450.0, 330.0);
+        let zoom = 0.5; // 50% zoom
+        let pan = (20.0, 10.0);
+
+        let graph_pos = screen_to_graph_coords(screen_pos, bounds, zoom, pan);
+
+        // At center with pan, should get (-pan.x, -pan.y)
+        assert!(
+            (graph_pos.x - (-20.0)).abs() < 0.001,
+            "Expected x=-20, got {}",
+            graph_pos.x
+        );
+        assert!(
+            (graph_pos.y - (-10.0)).abs() < 0.001,
+            "Expected y=-10, got {}",
+            graph_pos.y
+        );
+    }
+
+    // ========================================================================
+    // Node hit testing
+    // ========================================================================
+
+    fn create_test_node(id: &str, x: f32, y: f32) -> Node {
+        Node {
+            id: id.to_string(),
+            label: id.to_string(),
+            position: (x, y),
+            velocity: (0.0, 0.0),
+            node_type: NodeType::Host,
+            cpu_usage: None,
+            memory_usage: None,
+            network_rx: None,
+            network_tx: None,
+            is_healthy: true,
+            pinned: false,
+        }
+    }
+
+    #[test]
+    fn test_find_node_at_exact_position() {
+        let mut nodes = HashMap::new();
+        nodes.insert("node1".to_string(), create_test_node("node1", 100.0, 100.0));
+
+        // Click exactly on node
+        let pos = Point::new(100.0, 100.0);
+        let result = find_node_at_position(pos, &nodes, 25.0);
+
+        assert_eq!(result, Some("node1".to_string()));
+    }
+
+    #[test]
+    fn test_find_node_at_edge_of_radius() {
+        let mut nodes = HashMap::new();
+        nodes.insert("node1".to_string(), create_test_node("node1", 100.0, 100.0));
+
+        // Click just inside the hit radius (24 pixels away)
+        let pos = Point::new(124.0, 100.0);
+        let result = find_node_at_position(pos, &nodes, 25.0);
+
+        assert_eq!(result, Some("node1".to_string()));
+    }
+
+    #[test]
+    fn test_find_node_miss_outside_radius() {
+        let mut nodes = HashMap::new();
+        nodes.insert("node1".to_string(), create_test_node("node1", 100.0, 100.0));
+
+        // Click just outside the hit radius (26 pixels away)
+        let pos = Point::new(126.0, 100.0);
+        let result = find_node_at_position(pos, &nodes, 25.0);
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_find_node_multiple_nodes() {
+        let mut nodes = HashMap::new();
+        nodes.insert("node1".to_string(), create_test_node("node1", 0.0, 0.0));
+        nodes.insert("node2".to_string(), create_test_node("node2", 200.0, 0.0));
+        nodes.insert("node3".to_string(), create_test_node("node3", 100.0, 200.0));
+
+        // Click on node2
+        let pos = Point::new(200.0, 0.0);
+        let result = find_node_at_position(pos, &nodes, 25.0);
+
+        assert_eq!(result, Some("node2".to_string()));
+    }
+
+    #[test]
+    fn test_find_node_empty_graph() {
+        let nodes: HashMap<String, Node> = HashMap::new();
+
+        let pos = Point::new(100.0, 100.0);
+        let result = find_node_at_position(pos, &nodes, 25.0);
+
+        assert_eq!(result, None);
+    }
+
+    // ========================================================================
+    // Integration test: screen click to node detection
+    // ========================================================================
+
+    #[test]
+    fn test_click_on_node_with_canvas_offset() {
+        // Simulate a real scenario: canvas is offset due to header
+        let bounds = Rectangle::new(Point::new(0.0, 80.0), iced::Size::new(1200.0, 720.0));
+
+        // Node at graph origin (0, 0)
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "server01".to_string(),
+            create_test_node("server01", 0.0, 0.0),
+        );
+
+        // At zoom 1.0, no pan, the node at (0,0) is at canvas center
+        // Canvas center in window coords: (600, 80 + 360) = (600, 440)
+        let zoom = 1.0;
+        let pan = (0.0, 0.0);
+
+        let screen_pos = Point::new(600.0, 440.0);
+        let graph_pos = screen_to_graph_coords(screen_pos, bounds, zoom, pan);
+        let result = find_node_at_position(graph_pos, &nodes, 25.0);
+
+        assert_eq!(
+            result,
+            Some("server01".to_string()),
+            "Should find node at center. graph_pos = ({}, {})",
+            graph_pos.x,
+            graph_pos.y
+        );
+    }
+
+    #[test]
+    fn test_click_on_node_with_zoom_and_pan() {
+        let bounds = Rectangle::new(Point::new(100.0, 100.0), iced::Size::new(800.0, 600.0));
+
+        // Node at (150, 100) in graph coordinates
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "router01".to_string(),
+            create_test_node("router01", 150.0, 100.0),
+        );
+
+        let zoom = 0.8;
+        let pan = (-50.0, -30.0);
+
+        // Calculate where the node appears on screen
+        // Node graph pos: (150, 100)
+        // After pan: (150 + (-50), 100 + (-30)) = (100, 70) relative to center
+        // After zoom: (100 * 0.8, 70 * 0.8) = (80, 56) pixels from canvas center
+        // Canvas center in window: (100 + 400, 100 + 300) = (500, 400)
+        // Node screen pos: (500 + 80, 400 + 56) = (580, 456)
+        let screen_pos = Point::new(580.0, 456.0);
+
+        let graph_pos = screen_to_graph_coords(screen_pos, bounds, zoom, pan);
+        let result = find_node_at_position(graph_pos, &nodes, 25.0);
+
+        assert_eq!(
+            result,
+            Some("router01".to_string()),
+            "Should find node. graph_pos = ({}, {}), expected (150, 100)",
+            graph_pos.x,
+            graph_pos.y
+        );
     }
 }
