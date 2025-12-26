@@ -16,7 +16,8 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/mpardo/zensight"
+repository = "https://github.com/p13marc/zensight"
+authors = ["Marc Pardo <p13marc@gmail.com>"]
 
 [workspace.dependencies]
 # Zenoh
