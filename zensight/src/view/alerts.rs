@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 
 use iced::widget::{
-    Column, Row, button, column, container, pick_list, row, rule, scrollable, text, text_input,
-    tooltip,
+    Column, Row, column, container, pick_list, row, rule, scrollable, text, text_input, tooltip,
 };
 use iced::{Alignment, Element, Length, Theme};
+use iced_anim::widget::button;
 
 use zensight_common::Protocol;
 

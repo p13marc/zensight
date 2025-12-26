@@ -3,9 +3,10 @@
 use std::collections::HashMap;
 
 use iced::widget::{
-    Column, Row, button, column, container, row, rule, scrollable, text, text_input, tooltip,
+    Column, Row, column, container, row, rule, scrollable, text, text_input, tooltip,
 };
 use iced::{Alignment, Element, Length, Theme};
+use iced_anim::widget::button;
 
 use zensight_common::{TelemetryPoint, TelemetryValue};
 
@@ -156,14 +157,15 @@ impl DeviceDetailState {
         if self.selected_metric.is_some() && !self.chart.is_multi_series() {
             // Convert current single metric to a series
             if let Some(ref current_metric) = self.selected_metric
-                && let Some(history) = self.history.get(current_metric) {
-                    let data_points: Vec<DataPoint> = history
-                        .iter()
-                        .filter_map(|p| DataPoint::from_telemetry(p.timestamp, &p.value))
-                        .collect();
-                    self.chart
-                        .add_series_with_data(current_metric.clone(), data_points);
-                }
+                && let Some(history) = self.history.get(current_metric)
+            {
+                let data_points: Vec<DataPoint> = history
+                    .iter()
+                    .filter_map(|p| DataPoint::from_telemetry(p.timestamp, &p.value))
+                    .collect();
+                self.chart
+                    .add_series_with_data(current_metric.clone(), data_points);
+            }
             self.selected_metric = None;
             self.chart.set_data(Vec::new()); // Clear single-series data
         }

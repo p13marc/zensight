@@ -12,8 +12,9 @@ pub mod syslog;
 
 use std::collections::HashMap;
 
-use iced::widget::{Row, button, column, container, row, text};
+use iced::widget::{Row, column, container, row, text};
 use iced::{Alignment, Element, Length, Theme};
+use iced_anim::widget::button;
 
 use zensight_common::Protocol;
 
