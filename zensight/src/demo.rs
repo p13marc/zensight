@@ -680,7 +680,7 @@ impl DemoSimulator {
 
         // Router
         let router = "router01";
-        let uptime = self.tick * 100; // centiseconds
+        let uptime = self.tick * 100 + 8640000; // centiseconds (base 1 day uptime)
         points.push(self.make_point(
             Protocol::Snmp,
             router,
@@ -695,6 +695,63 @@ impl DemoSimulator {
             TelemetryValue::Text(router.to_string()),
             timestamp,
         ));
+        points.push(self.make_point(
+            Protocol::Snmp,
+            router,
+            "system/sysDescr",
+            TelemetryValue::Text("Cisco IOS XE Software, ASR1002-X, Version 17.3.4a".to_string()),
+            timestamp,
+        ));
+        points.push(self.make_point(
+            Protocol::Snmp,
+            router,
+            "system/sysContact",
+            TelemetryValue::Text("netops@example.com".to_string()),
+            timestamp,
+        ));
+        points.push(self.make_point(
+            Protocol::Snmp,
+            router,
+            "system/sysLocation",
+            TelemetryValue::Text("DC1 Rack 42".to_string()),
+            timestamp,
+        ));
+
+        // Router CPU and memory
+        let router_cpu = self.oscillating_value(&format!("{}/cpu", router), 25.0, 10.0);
+        points.push(self.make_point(
+            Protocol::Snmp,
+            router,
+            "host/hrProcessorLoad",
+            TelemetryValue::Gauge(router_cpu.clamp(0.0, 100.0)),
+            timestamp,
+        ));
+
+        let mem_total = 8_589_934_592u64; // 8 GB
+        let mem_pct = self.oscillating_value(&format!("{}/mem", router), 45.0, 5.0);
+        let mem_used = ((mem_pct.clamp(0.0, 99.0) / 100.0) * mem_total as f64) as u64;
+        points.push(self.make_point(
+            Protocol::Snmp,
+            router,
+            "host/hrStorageSize",
+            TelemetryValue::Counter(mem_total),
+            timestamp,
+        ));
+        points.push(self.make_point(
+            Protocol::Snmp,
+            router,
+            "host/hrStorageUsed",
+            TelemetryValue::Counter(mem_used),
+            timestamp,
+        ));
+
+        // Router interface names
+        let router_ifaces = [
+            "GigabitEthernet0/0/0",
+            "GigabitEthernet0/0/1",
+            "GigabitEthernet0/0/2",
+            "TenGigabitEthernet0/1/0",
+        ];
 
         // Router interfaces
         for iface in 1..=4 {
@@ -735,11 +792,35 @@ impl DemoSimulator {
             let out_octets =
                 self.increment_counter(&format!("{}/if/{}/out", router, iface), base_out);
 
+            // Interface name and description
+            let iface_name = router_ifaces.get(iface as usize - 1).unwrap_or(&"Unknown");
+            points.push(self.make_point(
+                Protocol::Snmp,
+                router,
+                &format!("if/{}/ifName", iface),
+                TelemetryValue::Text(iface_name.to_string()),
+                timestamp,
+            ));
+            points.push(self.make_point(
+                Protocol::Snmp,
+                router,
+                &format!("if/{}/ifDescr", iface),
+                TelemetryValue::Text(format!("{} - Uplink {}", iface_name, iface)),
+                timestamp,
+            ));
+
             points.push(self.make_point(
                 Protocol::Snmp,
                 router,
                 &format!("if/{}/ifOperStatus", iface),
                 TelemetryValue::Gauge(status),
+                timestamp,
+            ));
+            points.push(self.make_point(
+                Protocol::Snmp,
+                router,
+                &format!("if/{}/ifAdminStatus", iface),
+                TelemetryValue::Gauge(1.0), // Admin up
                 timestamp,
             ));
             points.push(self.make_point(
@@ -781,6 +862,63 @@ impl DemoSimulator {
             TelemetryValue::Counter(uptime + 50000),
             timestamp,
         ));
+        points.push(self.make_point(
+            Protocol::Snmp,
+            switch,
+            "system/sysName",
+            TelemetryValue::Text(switch.to_string()),
+            timestamp,
+        ));
+        points.push(self.make_point(
+            Protocol::Snmp,
+            switch,
+            "system/sysDescr",
+            TelemetryValue::Text("Cisco Catalyst 9300-48P, Version 17.6.3".to_string()),
+            timestamp,
+        ));
+        points.push(self.make_point(
+            Protocol::Snmp,
+            switch,
+            "system/sysContact",
+            TelemetryValue::Text("netops@example.com".to_string()),
+            timestamp,
+        ));
+        points.push(self.make_point(
+            Protocol::Snmp,
+            switch,
+            "system/sysLocation",
+            TelemetryValue::Text("DC1 Rack 43".to_string()),
+            timestamp,
+        ));
+
+        // Switch CPU and memory
+        let switch_cpu = self.oscillating_value(&format!("{}/cpu", switch), 15.0, 5.0);
+        points.push(self.make_point(
+            Protocol::Snmp,
+            switch,
+            "host/hrProcessorLoad",
+            TelemetryValue::Gauge(switch_cpu.clamp(0.0, 100.0)),
+            timestamp,
+        ));
+
+        let switch_mem_total = 4_294_967_296u64; // 4 GB
+        let switch_mem_pct = self.oscillating_value(&format!("{}/mem", switch), 35.0, 5.0);
+        let switch_mem_used =
+            ((switch_mem_pct.clamp(0.0, 99.0) / 100.0) * switch_mem_total as f64) as u64;
+        points.push(self.make_point(
+            Protocol::Snmp,
+            switch,
+            "host/hrStorageSize",
+            TelemetryValue::Counter(switch_mem_total),
+            timestamp,
+        ));
+        points.push(self.make_point(
+            Protocol::Snmp,
+            switch,
+            "host/hrStorageUsed",
+            TelemetryValue::Counter(switch_mem_used),
+            timestamp,
+        ));
 
         for port in 1..=8 {
             let is_down = self.active_anomalies.iter().any(|a| {
@@ -805,11 +943,34 @@ impl DemoSimulator {
                 self.increment_counter(&format!("{}/if/{}/out", switch, port), out_rate)
             };
 
+            // Interface name and description
+            points.push(self.make_point(
+                Protocol::Snmp,
+                switch,
+                &format!("if/{}/ifName", port),
+                TelemetryValue::Text(format!("Gi1/0/{}", port)),
+                timestamp,
+            ));
+            points.push(self.make_point(
+                Protocol::Snmp,
+                switch,
+                &format!("if/{}/ifDescr", port),
+                TelemetryValue::Text(format!("GigabitEthernet1/0/{} - Access Port", port)),
+                timestamp,
+            ));
+
             points.push(self.make_point(
                 Protocol::Snmp,
                 switch,
                 &format!("if/{}/ifOperStatus", port),
                 TelemetryValue::Gauge(status),
+                timestamp,
+            ));
+            points.push(self.make_point(
+                Protocol::Snmp,
+                switch,
+                &format!("if/{}/ifAdminStatus", port),
+                TelemetryValue::Gauge(1.0),
                 timestamp,
             ));
             points.push(self.make_point(
@@ -909,111 +1070,261 @@ impl DemoSimulator {
     }
 
     /// Generate syslog messages.
+    /// Uses message/{id} format with severity, facility, and app_name labels.
     fn generate_syslog(&mut self, timestamp: i64) -> Vec<TelemetryPoint> {
         let mut points = Vec::new();
 
-        // Normal operation logs (occasional)
-        if self.rng.random_range(0..5) == 0 {
-            let messages = [
-                ("server01", "auth/info", "User admin logged in successfully"),
-                ("server02", "cron/info", "CRON job completed: backup.sh"),
-                ("database01", "daemon/info", "Database checkpoint completed"),
-                ("server03", "kernel/info", "Network interface eth0 link up"),
+        // Helper to create a syslog message with proper format
+        let make_syslog = |id: u64,
+                           server: &str,
+                           severity: u64,
+                           facility: &str,
+                           app_name: &str,
+                           msg: &str,
+                           ts: i64| {
+            TelemetryPoint {
+                timestamp: ts,
+                source: server.to_string(),
+                protocol: Protocol::Syslog,
+                metric: format!("message/{}", id),
+                value: TelemetryValue::Text(msg.to_string()),
+                labels: [
+                    ("severity".to_string(), severity.to_string()),
+                    ("facility".to_string(), facility.to_string()),
+                    ("app_name".to_string(), app_name.to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            }
+        };
+
+        let base_id = self.tick * 100; // Unique ID base per tick
+
+        // Normal operation logs (frequent)
+        if self.rng.random_range(0..3) == 0 {
+            // severity 6 = Informational
+            let info_messages = [
+                (
+                    "server01",
+                    "auth",
+                    "sshd",
+                    "Accepted publickey for admin from 10.0.0.50",
+                ),
+                ("server01", "auth", "sshd", "session opened for user admin"),
+                ("server02", "cron", "crond", "CMD: /usr/local/bin/backup.sh"),
+                (
+                    "server02",
+                    "cron",
+                    "crond",
+                    "CRON job completed successfully",
+                ),
+                (
+                    "database01",
+                    "daemon",
+                    "postgres",
+                    "checkpoint complete: wrote 1234 buffers",
+                ),
+                (
+                    "database01",
+                    "daemon",
+                    "postgres",
+                    "automatic vacuum of table public.events",
+                ),
+                (
+                    "server03",
+                    "daemon",
+                    "nginx",
+                    "10.0.0.100 GET /api/health 200 0.003s",
+                ),
+                (
+                    "server03",
+                    "daemon",
+                    "nginx",
+                    "10.0.0.101 POST /api/data 201 0.015s",
+                ),
+                (
+                    "server01",
+                    "daemon",
+                    "systemd",
+                    "Started Daily apt download activities",
+                ),
+                (
+                    "server02",
+                    "daemon",
+                    "docker",
+                    "Container web-app started successfully",
+                ),
             ];
 
-            let (server, facility, msg) = messages[self.rng.random_range(0..messages.len())];
-            points.push(self.make_point(
-                Protocol::Syslog,
+            let idx = self.rng.random_range(0..info_messages.len());
+            let (server, facility, app, msg) = info_messages[idx];
+            points.push(make_syslog(
+                base_id, server, 6, facility, app, msg, timestamp,
+            ));
+        }
+
+        // Notice logs (less frequent)
+        if self.rng.random_range(0..8) == 0 {
+            // severity 5 = Notice
+            let notice_messages = [
+                (
+                    "server01",
+                    "auth",
+                    "sudo",
+                    "admin : TTY=pts/0 ; PWD=/home/admin ; COMMAND=/bin/systemctl restart nginx",
+                ),
+                (
+                    "database01",
+                    "daemon",
+                    "postgres",
+                    "received fast shutdown request",
+                ),
+                ("server03", "daemon", "nginx", "signal process started"),
+                ("server02", "kern", "kernel", "eth0: link becomes ready"),
+            ];
+
+            let idx = self.rng.random_range(0..notice_messages.len());
+            let (server, facility, app, msg) = notice_messages[idx];
+            points.push(make_syslog(
+                base_id + 1,
                 server,
+                5,
                 facility,
-                TelemetryValue::Text(msg.to_string()),
+                app,
+                msg,
                 timestamp,
             ));
         }
 
-        // Warning logs (less frequent)
-        if self.rng.random_range(0..15) == 0 {
+        // Warning logs (occasional)
+        if self.rng.random_range(0..12) == 0 {
+            // severity 4 = Warning
             let warnings = [
-                ("server01", "kernel/warning", "High memory usage detected"),
+                (
+                    "server01",
+                    "kern",
+                    "kernel",
+                    "possible SYN flooding on port 443. Sending cookies",
+                ),
                 (
                     "server02",
-                    "daemon/warning",
-                    "Connection pool nearly exhausted",
+                    "daemon",
+                    "docker",
+                    "Container memory usage exceeds 80%",
                 ),
-                ("database01", "daemon/warning", "Slow query detected: 2.3s"),
-                ("router01", "daemon/warning", "BGP neighbor flapping"),
+                (
+                    "database01",
+                    "daemon",
+                    "postgres",
+                    "checkpoints are occurring too frequently (10 second intervals)",
+                ),
+                (
+                    "server03",
+                    "daemon",
+                    "nginx",
+                    "upstream server temporarily disabled",
+                ),
+                (
+                    "router01",
+                    "daemon",
+                    "bgpd",
+                    "neighbor 10.0.0.1 state changed from Established to Idle",
+                ),
             ];
 
-            let (server, facility, msg) = warnings[self.rng.random_range(0..warnings.len())];
-            points.push(self.make_point(
-                Protocol::Syslog,
+            let idx = self.rng.random_range(0..warnings.len());
+            let (server, facility, app, msg) = warnings[idx];
+            points.push(make_syslog(
+                base_id + 2,
                 server,
+                4,
                 facility,
-                TelemetryValue::Text(msg.to_string()),
+                app,
+                msg,
                 timestamp,
             ));
         }
 
         // Error logs during anomalies
-        for anomaly in &self.active_anomalies {
+        for (i, anomaly) in self.active_anomalies.iter().enumerate() {
             if self.rng.random_range(0..3) == 0 {
+                let msg_id = base_id + 10 + i as u64;
                 match &anomaly.anomaly_type {
-                    AnomalyType::CpuSpike { server, .. } => {
-                        points.push(self.make_point(
-                            Protocol::Syslog,
-                            server,
-                            "daemon/error",
-                            TelemetryValue::Text("Process consuming excessive CPU".to_string()),
-                            timestamp,
+                    AnomalyType::CpuSpike { server, intensity } => {
+                        // severity 3 = Error
+                        let msg = format!(
+                            "Process java consuming {:.0}% CPU, system unresponsive",
+                            intensity
+                        );
+                        points.push(make_syslog(
+                            msg_id, server, 3, "daemon", "monit", &msg, timestamp,
                         ));
                     }
                     AnomalyType::MemoryLeak { server, .. } => {
-                        points.push(self.make_point(
-                            Protocol::Syslog,
-                            server,
-                            "kernel/warning",
-                            TelemetryValue::Text("Memory pressure increasing".to_string()),
-                            timestamp,
+                        // severity 4 = Warning
+                        let msg = "Memory pressure increasing, swap usage at 85%";
+                        points.push(make_syslog(
+                            msg_id, server, 4, "kern", "kernel", msg, timestamp,
                         ));
                     }
                     AnomalyType::InterfaceDown { device, interface } => {
-                        points.push(self.make_point(
-                            Protocol::Syslog,
-                            device,
-                            "kernel/error",
-                            TelemetryValue::Text(format!("Interface {} link down", interface)),
-                            timestamp,
+                        // severity 3 = Error
+                        let msg = format!("interface {} link down, carrier lost", interface);
+                        points.push(make_syslog(
+                            msg_id, device, 3, "kern", "kernel", &msg, timestamp,
                         ));
                     }
                     AnomalyType::TemperatureHigh { plc, temp } => {
-                        points.push(self.make_point(
-                            Protocol::Syslog,
+                        // severity 2 = Critical
+                        let msg = format!(
+                            "CRITICAL: Temperature sensor reads {:.1}C, threshold 60C exceeded",
+                            temp
+                        );
+                        points.push(make_syslog(
+                            msg_id,
                             plc,
-                            "daemon/error",
-                            TelemetryValue::Text(format!(
-                                "Temperature alarm: {:.1}C exceeds threshold",
-                                temp
-                            )),
+                            2,
+                            "daemon",
+                            "plc-monitor",
+                            &msg,
                             timestamp,
                         ));
                     }
                     AnomalyType::ErrorBurst { server } => {
+                        // severity 3 = Error
                         let error_messages = [
-                            "Connection refused: upstream server unreachable",
-                            "Database query timeout after 30s",
-                            "Failed to write to disk: I/O error",
-                            "SSL handshake failed: certificate expired",
-                            "Out of file descriptors",
-                            "Service health check failed",
-                            "Request queue overflow, dropping requests",
+                            (
+                                "daemon",
+                                "nginx",
+                                "upstream connection refused: 10.0.0.200:8080",
+                            ),
+                            (
+                                "daemon",
+                                "postgres",
+                                "FATAL: too many connections for role \"app\"",
+                            ),
+                            (
+                                "kern",
+                                "kernel",
+                                "EXT4-fs error: I/O error writing to journal",
+                            ),
+                            (
+                                "daemon",
+                                "sshd",
+                                "error: maximum authentication attempts exceeded",
+                            ),
+                            (
+                                "daemon",
+                                "docker",
+                                "OOM killer terminated container web-app",
+                            ),
+                            ("daemon", "nginx", "worker process exited on signal 9"),
+                            ("daemon", "redis", "Background save error: fork failed"),
                         ];
-                        let msg = error_messages[self.tick as usize % error_messages.len()];
-                        points.push(self.make_point(
-                            Protocol::Syslog,
-                            server,
-                            "daemon/error",
-                            TelemetryValue::Text(msg.to_string()),
-                            timestamp,
+                        let idx = self.tick as usize % error_messages.len();
+                        let (facility, app, msg) = error_messages[idx];
+                        points.push(make_syslog(
+                            msg_id, server, 3, facility, app, msg, timestamp,
                         ));
                     }
                     _ => {}
