@@ -527,7 +527,7 @@ fn test_overview_collapse_toggle() {
 #[test]
 fn test_topology_view_empty() {
     let state = TopologyState::default();
-    let mut ui = simulator(topology_view(&state));
+    let mut ui = simulator(topology_view(&state, AppTheme::Dark));
 
     // Should show the title
     assert!(ui.find("Network Topology").is_ok());
@@ -543,7 +543,7 @@ fn test_topology_view_empty() {
 #[test]
 fn test_topology_back_button() {
     let state = TopologyState::default();
-    let mut ui = simulator(topology_view(&state));
+    let mut ui = simulator(topology_view(&state, AppTheme::Dark));
 
     // Click Back button
     let _ = ui.click("Back");
@@ -557,7 +557,7 @@ fn test_topology_back_button() {
 #[test]
 fn test_topology_zoom_controls() {
     let state = TopologyState::default();
-    let mut ui = simulator(topology_view(&state));
+    let mut ui = simulator(topology_view(&state, AppTheme::Dark));
 
     // Click zoom in button
     let _ = ui.click("+");
@@ -596,7 +596,7 @@ fn test_dashboard_topology_button() {
 #[test]
 fn test_topology_search_input() {
     let state = TopologyState::default();
-    let mut ui = simulator(topology_view(&state));
+    let mut ui = simulator(topology_view(&state, AppTheme::Dark));
 
     // Should show search placeholder
     assert!(ui.find("Search nodes...").is_ok());

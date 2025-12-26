@@ -10,6 +10,7 @@ use zensight_common::TelemetryValue;
 use crate::message::{DeviceId, Message};
 use crate::view::components::{StatusLed, StatusLedState};
 use crate::view::dashboard::DeviceState;
+use crate::view::theme;
 
 /// Interface summary data.
 #[derive(Debug)]
@@ -27,8 +28,8 @@ pub fn snmp_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Element<
     if devices.is_empty() {
         return text("No SNMP devices available")
             .size(12)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
             })
             .into();
     }
@@ -157,8 +158,8 @@ fn get_text_metric(state: &DeviceState, metric: &str) -> Option<String> {
 /// Render a stat label and value.
 fn render_stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
     column![
-        text(label).size(10).style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text(label).size(10).style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
         }),
         text(value).size(16)
     ]
@@ -175,8 +176,8 @@ fn render_status_stat<'a>(
     let led = StatusLed::new(state).with_size(10.0);
 
     column![
-        text(label).size(10).style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text(label).size(10).style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
         }),
         row![led.view(), text(count.to_string()).size(16)]
             .spacing(6)
@@ -190,8 +191,8 @@ fn render_status_stat<'a>(
 fn render_top_interfaces<'a>(interfaces: &[InterfaceSummary]) -> Element<'a, Message> {
     let title = text("Top Interfaces by Traffic")
         .size(12)
-        .style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.6, 0.6, 0.6)),
+        .style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
         });
 
     // Sort by total traffic
@@ -227,16 +228,16 @@ fn render_error_interfaces<'a>(interfaces: &[InterfaceSummary]) -> Element<'a, M
     if error_ifaces.is_empty() {
         return text("No interface errors")
             .size(11)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.4, 0.8, 0.4)),
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).success()),
             })
             .into();
     }
 
     let title = text(format!("Interfaces with Errors ({})", error_ifaces.len()))
         .size(12)
-        .style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.9, 0.5, 0.3)),
+        .style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).warning()),
         });
 
     let rows: Vec<Element<'a, Message>> = error_ifaces
@@ -247,8 +248,8 @@ fn render_error_interfaces<'a>(interfaces: &[InterfaceSummary]) -> Element<'a, M
                 text(format!("{}/{}", iface.device, iface.name)).size(11),
                 text(format!("{} errors", iface.errors))
                     .size(11)
-                    .style(|_theme: &Theme| text::Style {
-                        color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)),
+                    .style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).danger()),
                     })
             ]
             .spacing(15)
@@ -284,8 +285,8 @@ fn render_interface_row<'a>(rank: usize, iface: &InterfaceSummary) -> Element<'a
         text(format!("Out: {}", format_bytes(iface.out_octets))).size(10),
         text(format!("Total: {}", format_bytes(total)))
             .size(10)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.4, 0.7, 0.9)),
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).primary()),
             }),
     ]
     .spacing(10)

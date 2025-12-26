@@ -21,6 +21,7 @@ use zensight_common::Protocol;
 use crate::message::{DeviceId, Message};
 use crate::view::dashboard::DeviceState;
 use crate::view::icons::{self, IconSize};
+use crate::view::theme;
 
 /// State for the overview section.
 #[derive(Debug, Clone)]
@@ -118,8 +119,8 @@ pub fn overview_section<'a>(
     } else {
         text("Select a protocol tab to view aggregated metrics")
             .size(12)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
             })
             .into()
     };
@@ -128,12 +129,10 @@ pub fn overview_section<'a>(
         container(content)
             .padding(15)
             .width(Length::Fill)
-            .style(|_theme: &Theme| container::Style {
-                background: Some(iced::Background::Color(iced::Color::from_rgb(
-                    0.1, 0.1, 0.12,
-                ))),
+            .style(|t: &Theme| container::Style {
+                background: Some(iced::Background::Color(theme::colors(t).card_background())),
                 border: iced::Border {
-                    color: iced::Color::from_rgb(0.2, 0.2, 0.25),
+                    color: theme::colors(t).border(),
                     width: 1.0,
                     radius: 6.0.into(),
                 },

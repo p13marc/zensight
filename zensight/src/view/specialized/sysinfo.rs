@@ -12,6 +12,7 @@ use crate::view::components::{Gauge, ProgressBar, StatusLed, StatusLedState};
 use crate::view::device::DeviceDetailState;
 use crate::view::formatting::format_timestamp;
 use crate::view::icons::{self, IconSize};
+use crate::view::theme;
 
 /// Render the sysinfo host specialized view.
 pub fn sysinfo_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
@@ -64,8 +65,8 @@ fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
         .or_else(|| get_metric_text(state, "system/kernel_version"))
         .unwrap_or_else(|| "Unknown OS".to_string());
 
-    let os_text = text(os_info).size(14).style(|_theme: &Theme| text::Style {
-        color: Some(iced::Color::from_rgb(0.6, 0.6, 0.6)),
+    let os_text = text(os_info).size(14).style(|t: &Theme| text::Style {
+        color: Some(theme::colors(t).text_muted()),
     });
 
     let metric_count = text(format!("{} metrics", state.metrics.len())).size(14);
@@ -91,11 +92,9 @@ fn render_system_overview(state: &DeviceDetailState) -> Element<'_, Message> {
         info_items.push(
             row![
                 text("Uptime:").size(12),
-                text(uptime_str)
-                    .size(12)
-                    .style(|_theme: &Theme| text::Style {
-                        color: Some(iced::Color::from_rgb(0.4, 0.8, 0.4)),
-                    })
+                text(uptime_str).size(12).style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).success()),
+                })
             ]
             .spacing(8)
             .into(),
@@ -129,8 +128,8 @@ fn render_system_overview(state: &DeviceDetailState) -> Element<'_, Message> {
         info_items.push(
             text("Waiting for system metrics...")
                 .size(12)
-                .style(|_theme: &Theme| text::Style {
-                    color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
                 })
                 .into(),
         );
@@ -160,8 +159,8 @@ fn render_cpu_section(state: &DeviceDetailState) -> Element<'_, Message> {
     // CPU count
     if let Some(cpu_count) = get_metric_value(state, "cpu/count") {
         cpu_content = cpu_content.push(text(format!("{} cores", cpu_count as u32)).size(12).style(
-            |_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.6, 0.6, 0.6)),
+            |t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
             },
         ));
     }
@@ -226,13 +225,14 @@ fn render_memory_section(state: &DeviceDetailState) -> Element<'_, Message> {
     let swap_total = get_metric_value(state, "memory/swap_total");
 
     if let (Some(used), Some(total)) = (swap_used, swap_total)
-        && total > 0.0 {
-            let used_gb = used / 1_073_741_824.0;
-            let total_gb = total / 1_073_741_824.0;
+        && total > 0.0
+    {
+        let used_gb = used / 1_073_741_824.0;
+        let total_gb = total / 1_073_741_824.0;
 
-            let progress = ProgressBar::new(used_gb, total_gb, "Swap", "GB");
-            mem_content = mem_content.push(progress.view());
-        }
+        let progress = ProgressBar::new(used_gb, total_gb, "Swap", "GB");
+        mem_content = mem_content.push(progress.view());
+    }
 
     // Memory available
     if let Some(available) = get_metric_value(state, "memory/available") {
@@ -240,8 +240,8 @@ fn render_memory_section(state: &DeviceDetailState) -> Element<'_, Message> {
         mem_content = mem_content.push(
             text(format!("Available: {:.1} GB", available_gb))
                 .size(11)
-                .style(|_theme: &Theme| text::Style {
-                    color: Some(iced::Color::from_rgb(0.6, 0.6, 0.6)),
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
                 }),
         );
     }
@@ -296,8 +296,8 @@ fn render_disk_section(state: &DeviceDetailState) -> Element<'_, Message> {
 
     if disk_count == 0 {
         disk_content = disk_content.push(text("No disk metrics available").size(12).style(
-            |_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+            |t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
             },
         ));
     }
@@ -367,8 +367,8 @@ fn render_network_section(state: &DeviceDetailState) -> Element<'_, Message> {
 
     if iface_count == 0 {
         net_content = net_content.push(text("No network metrics available").size(12).style(
-            |_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+            |t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
             },
         ));
     }
@@ -423,13 +423,11 @@ fn format_bytes(bytes: f64) -> String {
     }
 }
 
-fn section_style(_theme: &Theme) -> container::Style {
+fn section_style(t: &Theme) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(iced::Color::from_rgb(
-            0.12, 0.12, 0.14,
-        ))),
+        background: Some(iced::Background::Color(theme::colors(t).card_background())),
         border: iced::Border {
-            color: iced::Color::from_rgb(0.25, 0.25, 0.3),
+            color: theme::colors(t).border(),
             width: 1.0,
             radius: 6.0.into(),
         },

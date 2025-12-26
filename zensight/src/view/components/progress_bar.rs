@@ -3,6 +3,8 @@
 use iced::widget::{Column, container, row, text};
 use iced::{Alignment, Element, Length, Theme};
 
+use crate::view::theme;
+
 /// Style configuration for a progress bar.
 #[derive(Debug, Clone, Copy)]
 pub struct ProgressBarStyle {
@@ -102,18 +104,16 @@ impl ProgressBar {
         let empty_bar = container(text(""))
             .width(Length::FillPortion(((1.0 - ratio) * 100.0) as u16))
             .height(Length::Fixed(self.style.height))
-            .style(|_theme: &Theme| container::Style {
-                background: Some(iced::Background::Color(iced::Color::from_rgb(
-                    0.15, 0.15, 0.15,
-                ))),
+            .style(|t: &Theme| container::Style {
+                background: Some(iced::Background::Color(theme::colors(t).row_background())),
                 ..Default::default()
             });
 
         let bar = container(row![filled_bar, empty_bar].width(Length::Fill))
             .width(Length::Fill)
-            .style(|_theme: &Theme| container::Style {
+            .style(|t: &Theme| container::Style {
                 border: iced::Border {
-                    color: iced::Color::from_rgb(0.3, 0.3, 0.3),
+                    color: theme::colors(t).border(),
                     width: 1.0,
                     radius: 4.0.into(),
                 },
@@ -126,8 +126,8 @@ impl ProgressBar {
             self.used, self.unit, self.total, self.unit
         ))
         .size(11)
-        .style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.6, 0.6, 0.6)),
+        .style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
         });
 
         Column::new()

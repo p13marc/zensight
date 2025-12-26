@@ -10,6 +10,7 @@ use zensight_common::TelemetryValue;
 use crate::message::{DeviceId, Message};
 use crate::view::components::{StatusLed, StatusLedState};
 use crate::view::dashboard::DeviceState;
+use crate::view::theme;
 
 /// Host resource summary.
 struct HostSummary {
@@ -25,8 +26,8 @@ pub fn sysinfo_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Eleme
     if devices.is_empty() {
         return text("No sysinfo hosts available")
             .size(12)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
             })
             .into();
     }
@@ -109,7 +110,7 @@ fn calculate_average<F>(summaries: &[HostSummary], extractor: F) -> (f64, usize)
 where
     F: Fn(&HostSummary) -> Option<f64>,
 {
-    let values: Vec<f64> = summaries.iter().filter_map(extractor).collect();
+    let values: Vec<f64> = summaries.iter().filter_map(|s| extractor(s)).collect();
     let count = values.len();
     let avg = if count > 0 {
         values.iter().sum::<f64>() / count as f64
@@ -148,8 +149,8 @@ fn calculate_memory_average(summaries: &[HostSummary]) -> (f64, usize) {
 /// Render a stat label and value.
 fn render_stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
     column![
-        text(label).size(10).style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text(label).size(10).style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
         }),
         text(value).size(16)
     ]
@@ -159,19 +160,18 @@ fn render_stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
 
 /// Render an alert stat (red if > 0).
 fn render_alert_stat<'a>(label: &'a str, count: usize) -> Element<'a, Message> {
-    let color = if count > 0 {
-        iced::Color::from_rgb(0.9, 0.3, 0.3)
-    } else {
-        iced::Color::from_rgb(0.4, 0.8, 0.4)
-    };
-
     column![
-        text(label).size(10).style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text(label).size(10).style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
         }),
-        text(count.to_string())
-            .size(16)
-            .style(move |_theme: &Theme| text::Style { color: Some(color) })
+        text(count.to_string()).size(16).style(move |t: &Theme| {
+            let color = if count > 0 {
+                theme::colors(t).danger()
+            } else {
+                theme::colors(t).success()
+            };
+            text::Style { color: Some(color) }
+        })
     ]
     .spacing(2)
     .into()
@@ -185,8 +185,8 @@ fn render_host_bars<'a>(summaries: &[HostSummary]) -> Element<'a, Message> {
 
     let title = text("Host Resources")
         .size(12)
-        .style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.6, 0.6, 0.6)),
+        .style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
         });
 
     // Sort by name
@@ -199,7 +199,7 @@ fn render_host_bars<'a>(summaries: &[HostSummary]) -> Element<'a, Message> {
 
     let host_rows: Vec<Element<'a, Message>> = display_hosts
         .into_iter()
-        .map(render_host_row)
+        .map(|host| render_host_row(host))
         .collect();
 
     let mut content = Column::with_children(host_rows).spacing(4);
@@ -208,8 +208,8 @@ fn render_host_bars<'a>(summaries: &[HostSummary]) -> Element<'a, Message> {
         content = content.push(
             text(format!("... and {} more hosts", remaining))
                 .size(10)
-                .style(|_theme: &Theme| text::Style {
-                    color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
                 }),
         );
     }
@@ -277,16 +277,14 @@ fn render_mini_bar<'a>(value: Option<f64>, _label: &str) -> Element<'a, Message>
     let empty_bar = container(text(""))
         .width(Length::Fixed(width - filled))
         .height(Length::Fixed(8.0))
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(iced::Color::from_rgb(
-                0.2, 0.2, 0.2,
-            ))),
+        .style(|t: &Theme| container::Style {
+            background: Some(iced::Background::Color(theme::colors(t).border_subtle())),
             ..Default::default()
         });
 
-    let bar = container(row![filled_bar, empty_bar]).style(|_theme: &Theme| container::Style {
+    let bar = container(row![filled_bar, empty_bar]).style(|t: &Theme| container::Style {
         border: iced::Border {
-            color: iced::Color::from_rgb(0.3, 0.3, 0.3),
+            color: theme::colors(t).border(),
             width: 1.0,
             radius: 2.0.into(),
         },

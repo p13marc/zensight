@@ -3,6 +3,8 @@
 use iced::widget::{container, row, text};
 use iced::{Alignment, Element, Length, Theme};
 
+use crate::view::theme;
+
 /// State of a status LED.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusLedState {
@@ -101,10 +103,10 @@ impl StatusLed {
         let led = container(text(""))
             .width(Length::Fixed(self.size))
             .height(Length::Fixed(self.size))
-            .style(move |_theme: &Theme| container::Style {
+            .style(move |t: &Theme| container::Style {
                 background: Some(iced::Background::Color(color)),
                 border: iced::Border {
-                    color: iced::Color::from_rgb(0.3, 0.3, 0.3),
+                    color: theme::colors(t).border(),
                     width: 1.0,
                     radius: (self.size / 2.0).into(),
                 },

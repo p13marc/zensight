@@ -766,7 +766,7 @@ impl ZenSight {
         let main_view: Element<'_, Message> = match self.current_view {
             CurrentView::Settings => settings_view(&self.settings),
             CurrentView::Alerts => alerts_view(&self.alerts),
-            CurrentView::Topology => topology_view(&self.topology),
+            CurrentView::Topology => topology_view(&self.topology, self.theme),
             CurrentView::Device => {
                 if let Some(ref device_state) = self.selected_device {
                     device_view(device_state)

@@ -9,6 +9,7 @@ use zensight_common::TelemetryValue;
 
 use crate::message::{DeviceId, Message};
 use crate::view::dashboard::DeviceState;
+use crate::view::theme;
 
 /// Flow record summary.
 struct FlowRecord {
@@ -37,8 +38,8 @@ pub fn netflow_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Eleme
     if devices.is_empty() {
         return text("No NetFlow exporters available")
             .size(12)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
             })
             .into();
     }
@@ -87,8 +88,8 @@ pub fn netflow_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Eleme
 fn collect_flows(devices: &HashMap<&DeviceId, &DeviceState>) -> Vec<FlowRecord> {
     let mut flows = Vec::new();
 
-    for state in devices.values() {
-        for point in state.metrics.values() {
+    for (_device_id, state) in devices {
+        for (_key, point) in &state.metrics {
             let src_ip = point
                 .labels
                 .get("src_ip")
@@ -137,8 +138,8 @@ fn collect_flows(devices: &HashMap<&DeviceId, &DeviceState>) -> Vec<FlowRecord> 
 /// Render a stat label and value.
 fn render_stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
     column![
-        text(label).size(10).style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text(label).size(10).style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
         }),
         text(value).size(16)
     ]
@@ -150,8 +151,8 @@ fn render_stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
 fn render_top_talkers<'a>(flows: &[FlowRecord]) -> Element<'a, Message> {
     let title = text("Top Talkers (by bytes)")
         .size(12)
-        .style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.6, 0.6, 0.6)),
+        .style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
         });
 
     // Aggregate by src -> dst pair
@@ -194,14 +195,14 @@ fn render_talker_row<'a>(
             .size(10)
             .width(Length::Fixed(20.0)),
         text(src).size(11).width(Length::Fixed(120.0)),
-        text("→").size(11).style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text("→").size(11).style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
         }),
         text(dst).size(11).width(Length::Fixed(120.0)),
         text(format_bytes(bytes))
             .size(11)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.4, 0.7, 0.9)),
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).primary()),
             }),
     ]
     .spacing(10)
@@ -213,8 +214,8 @@ fn render_talker_row<'a>(
 fn render_protocol_distribution<'a>(flows: &[FlowRecord]) -> Element<'a, Message> {
     let title = text("Protocol Distribution")
         .size(12)
-        .style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.6, 0.6, 0.6)),
+        .style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
         });
 
     // Aggregate by protocol

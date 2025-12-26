@@ -3,6 +3,8 @@
 use iced::widget::{container, row, text};
 use iced::{Alignment, Element, Length, Theme};
 
+use crate::view::theme;
+
 /// Style configuration for a gauge.
 #[derive(Debug, Clone, Copy)]
 pub struct GaugeStyle {
@@ -112,17 +114,15 @@ impl Gauge {
         let empty_bar = container(text(""))
             .width(Length::Fixed(empty_width))
             .height(Length::Fixed(16.0))
-            .style(|_theme: &Theme| container::Style {
-                background: Some(iced::Background::Color(iced::Color::from_rgb(
-                    0.2, 0.2, 0.2,
-                ))),
+            .style(|t: &Theme| container::Style {
+                background: Some(iced::Background::Color(theme::colors(t).border_subtle())),
                 border: iced::Border::default(),
                 ..Default::default()
             });
 
-        let bar = container(row![filled_bar, empty_bar]).style(|_theme: &Theme| container::Style {
+        let bar = container(row![filled_bar, empty_bar]).style(|t: &Theme| container::Style {
             border: iced::Border {
-                color: iced::Color::from_rgb(0.3, 0.3, 0.3),
+                color: theme::colors(t).border(),
                 width: 1.0,
                 radius: 3.0.into(),
             },

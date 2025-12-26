@@ -591,8 +591,8 @@ fn render_header(state: &AlertsState) -> Element<'_, Message> {
             icons::status_warning(IconSize::Small),
             text(format!("{} unacknowledged", state.unacknowledged_count))
                 .size(14)
-                .style(|_theme: &Theme| text::Style {
-                    color: Some(iced::Color::from_rgb(1.0, 0.5, 0.0)),
+                .style(|theme: &Theme| text::Style {
+                    color: Some(crate::view::theme::colors(theme).warning()),
                 })
         ]
         .spacing(5)
@@ -664,34 +664,32 @@ fn render_new_rule_form(state: &AlertsState) -> Element<'_, Message> {
 
     if let Some(ref result) = state.test_result {
         let is_error = result.starts_with("Error:");
-        let result_color = if is_error {
-            iced::Color::from_rgb(1.0, 0.3, 0.3)
-        } else if result.starts_with("No matches") {
-            iced::Color::from_rgb(0.7, 0.7, 0.7)
-        } else {
-            iced::Color::from_rgb(0.3, 0.8, 0.3)
-        };
+        let is_no_match = result.starts_with("No matches");
 
-        let result_text = text(result.clone())
-            .size(12)
-            .style(move |_theme: &Theme| text::Style {
-                color: Some(result_color),
-            });
+        let result_text = text(result.clone()).size(12).style(move |theme: &Theme| {
+            let colors = crate::view::theme::colors(theme);
+            let color = if is_error {
+                colors.danger()
+            } else if is_no_match {
+                colors.text_muted()
+            } else {
+                colors.success()
+            };
+            text::Style { color: Some(color) }
+        });
 
-        let result_container =
-            container(result_text)
-                .padding(8)
-                .style(|_theme: &Theme| container::Style {
-                    background: Some(iced::Background::Color(iced::Color::from_rgb(
-                        0.12, 0.12, 0.14,
-                    ))),
-                    border: iced::Border {
-                        color: iced::Color::from_rgb(0.25, 0.25, 0.3),
-                        width: 1.0,
-                        radius: 4.0.into(),
-                    },
-                    ..Default::default()
-                });
+        let result_container = container(result_text).padding(8).style(|theme: &Theme| {
+            let colors = crate::view::theme::colors(theme);
+            container::Style {
+                background: Some(iced::Background::Color(colors.card_background())),
+                border: iced::Border {
+                    color: colors.border(),
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            }
+        });
 
         form_content = form_content.push(result_container);
     }
@@ -743,8 +741,8 @@ fn render_rule_row(rule: &AlertRule) -> Element<'_, Message> {
         format_value(rule.threshold)
     ))
     .size(12)
-    .style(|_theme: &Theme| text::Style {
-        color: Some(iced::Color::from_rgb(0.6, 0.6, 0.6)),
+    .style(|theme: &Theme| text::Style {
+        color: Some(crate::view::theme::colors(theme).text_muted()),
     });
 
     let toggle_label = if rule.enabled { "Disable" } else { "Enable" };
@@ -848,8 +846,8 @@ fn render_alert_row(alert: &Alert) -> Element<'_, Message> {
 
     let time = text(format_timestamp(alert.timestamp))
         .size(11)
-        .style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        .style(|theme: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(theme).text_dimmed()),
         });
 
     let mut row_content: Row<'_, Message> = Row::new()

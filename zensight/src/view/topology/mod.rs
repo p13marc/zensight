@@ -13,6 +13,7 @@ use iced::widget::{column, container, row, text, text_input};
 use iced::{Alignment, Element, Length};
 use iced_anim::widget::button;
 
+use crate::app::AppTheme;
 use crate::message::{DeviceId, Message};
 use crate::view::dashboard::DeviceState;
 use crate::view::icons::{self, IconSize};
@@ -375,9 +376,10 @@ pub struct Edge {
 }
 
 /// Render the topology view.
-pub fn topology_view<'a>(state: &'a TopologyState) -> Element<'a, Message> {
+pub fn topology_view<'a>(state: &'a TopologyState, theme: AppTheme) -> Element<'a, Message> {
+    let is_dark = matches!(theme, AppTheme::Dark);
     let header = render_header(state);
-    let graph = TopologyGraph::view(state);
+    let graph = TopologyGraph::view(state, is_dark);
 
     // Show selection panel if a node is selected
     let main_content: Element<'a, Message> = if let Some(ref node_id) = state.selected_node {

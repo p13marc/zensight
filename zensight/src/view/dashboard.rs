@@ -278,14 +278,14 @@ fn render_header(
     let status_text = if state.connected {
         text("Connected")
             .size(14)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.2, 0.8, 0.2)),
+            .style(|theme: &Theme| text::Style {
+                color: Some(crate::view::theme::colors(theme).status_connected()),
             })
     } else {
         text("Disconnected")
             .size(14)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.8, 0.2, 0.2)),
+            .style(|theme: &Theme| text::Style {
+                color: Some(crate::view::theme::colors(theme).status_disconnected()),
             })
     };
 
@@ -360,8 +360,8 @@ fn render_header(
     if let Some(ref error) = state.last_error {
         let error_text = text(format!("Error: {}", error))
             .size(12)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.8, 0.2, 0.2)),
+            .style(|theme: &Theme| text::Style {
+                color: Some(crate::view::theme::colors(theme).danger()),
             });
         header_col = header_col.push(error_text);
     }

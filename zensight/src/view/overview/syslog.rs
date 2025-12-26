@@ -9,6 +9,7 @@ use zensight_common::TelemetryValue;
 
 use crate::message::{DeviceId, Message};
 use crate::view::dashboard::DeviceState;
+use crate::view::theme;
 
 /// Syslog severity levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -89,8 +90,8 @@ pub fn syslog_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Elemen
     if devices.is_empty() {
         return text("No syslog sources available")
             .size(12)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
             })
             .into();
     }
@@ -170,8 +171,8 @@ fn collect_messages(devices: &HashMap<&DeviceId, &DeviceState>) -> Vec<LogMessag
 /// Render a stat label and value.
 fn render_stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
     column![
-        text(label).size(10).style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text(label).size(10).style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
         }),
         text(value).size(16)
     ]
@@ -186,8 +187,8 @@ fn render_severity_distribution<'a>(
 ) -> Element<'a, Message> {
     let title = text("Severity Distribution")
         .size(12)
-        .style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.6, 0.6, 0.6)),
+        .style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
         });
 
     let bars: Vec<Element<'a, Message>> = Severity::all()
@@ -254,8 +255,8 @@ fn render_critical_messages<'a>(messages: Vec<LogMessage>) -> Element<'a, Messag
     if critical.is_empty() {
         return text("No critical messages")
             .size(11)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.4, 0.8, 0.4)),
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).success()),
             })
             .into();
     }
@@ -266,8 +267,8 @@ fn render_critical_messages<'a>(messages: Vec<LogMessage>) -> Element<'a, Messag
     let count = critical.len();
     let title = text(format!("Recent Critical Messages ({})", count))
         .size(12)
-        .style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.9, 0.5, 0.3)),
+        .style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).warning()),
         });
 
     let rows: Vec<Element<'a, Message>> =
@@ -286,17 +287,13 @@ fn render_log_row<'a>(msg: LogMessage) -> Element<'a, Message> {
         .size(10)
         .style(move |_theme: &Theme| text::Style { color: Some(color) });
 
-    let source = text(msg.source)
-        .size(10)
-        .style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
-        });
+    let source = text(msg.source).size(10).style(|t: &Theme| text::Style {
+        color: Some(theme::colors(t).text_muted()),
+    });
 
-    let app = text(msg.app_name)
-        .size(10)
-        .style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.6, 0.7, 0.9)),
-        });
+    let app = text(msg.app_name).size(10).style(|t: &Theme| text::Style {
+        color: Some(theme::colors(t).primary()),
+    });
 
     let message_text = if msg.message.len() > 60 {
         format!("{}...", &msg.message[..57])

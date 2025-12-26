@@ -8,14 +8,15 @@ use iced::{Alignment, Element, Length, Theme};
 use crate::message::{DeviceId, Message};
 use crate::view::components::{StatusLed, StatusLedState};
 use crate::view::dashboard::DeviceState;
+use crate::view::theme;
 
 /// Render the gNMI overview.
 pub fn gnmi_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Element<'a, Message> {
     if devices.is_empty() {
         return text("No gNMI targets available")
             .size(12)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
             })
             .into();
     }
@@ -66,8 +67,8 @@ pub fn gnmi_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Element<
 /// Render a stat label and value.
 fn render_stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
     column![
-        text(label).size(10).style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text(label).size(10).style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
         }),
         text(value).size(16)
     ]
@@ -84,8 +85,8 @@ fn render_status_stat<'a>(
     let led = StatusLed::new(state).with_size(10.0);
 
     column![
-        text(label).size(10).style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text(label).size(10).style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
         }),
         row![led.view(), text(count.to_string()).size(16)]
             .spacing(6)
@@ -100,16 +101,16 @@ fn render_top_subscriptions<'a>(subscriptions: &HashMap<String, usize>) -> Eleme
     if subscriptions.is_empty() {
         return text("No subscription data")
             .size(11)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
             })
             .into();
     }
 
     let title = text("Top Subscriptions")
         .size(12)
-        .style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.6, 0.6, 0.6)),
+        .style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
         });
 
     let mut sorted: Vec<_> = subscriptions.iter().collect();
@@ -120,18 +121,18 @@ fn render_top_subscriptions<'a>(subscriptions: &HashMap<String, usize>) -> Eleme
         .take(5)
         .map(|(prefix, count)| {
             row![
-                text("•").size(11).style(|_theme: &Theme| text::Style {
-                    color: Some(iced::Color::from_rgb(0.4, 0.8, 0.4)),
+                text("•").size(11).style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).success()),
                 }),
                 text(prefix.to_string())
                     .size(11)
-                    .style(|_theme: &Theme| text::Style {
-                        color: Some(iced::Color::from_rgb(0.6, 0.8, 0.9)),
+                    .style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).primary()),
                     }),
                 text(format!("({} paths)", count))
                     .size(10)
-                    .style(|_theme: &Theme| text::Style {
-                        color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+                    .style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).text_muted()),
                     }),
             ]
             .spacing(8)

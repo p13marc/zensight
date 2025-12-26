@@ -13,6 +13,7 @@ use crate::message::Message;
 use crate::view::components::{StatusLed, StatusLedState};
 use crate::view::device::DeviceDetailState;
 use crate::view::icons::{self, IconSize};
+use crate::view::theme;
 
 /// Register type in Modbus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,8 +139,8 @@ fn render_connection_info(state: &DeviceDetailState) -> Element<'_, Message> {
         info_items.push(
             text("Modbus Device")
                 .size(12)
-                .style(|_theme: &Theme| text::Style {
-                    color: Some(iced::Color::from_rgb(0.6, 0.6, 0.6)),
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
                 })
                 .into(),
         );
@@ -192,11 +193,13 @@ fn render_register_sections(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     if is_empty {
-        sections = sections.push(text("No register data available").size(12).style(
-            |_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
-            },
-        ));
+        sections = sections.push(
+            text("No register data available")
+                .size(12)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
+                }),
+        );
     }
 
     sections.into()
@@ -278,10 +281,8 @@ fn render_register_table<'a>(
         .align_y(Alignment::Center),
     )
     .padding(8)
-    .style(|_theme: &Theme| container::Style {
-        background: Some(iced::Background::Color(iced::Color::from_rgb(
-            0.18, 0.18, 0.2,
-        ))),
+    .style(|t: &Theme| container::Style {
+        background: Some(iced::Background::Color(theme::colors(t).table_header())),
         ..Default::default()
     });
 
@@ -304,13 +305,12 @@ fn render_register_table<'a>(
         let value_text = text(value_str).size(11).width(Length::Fixed(100.0));
 
         let unit_str = reg.unit.unwrap_or_else(|| "-".to_string());
-        let unit_text =
-            text(unit_str)
-                .size(11)
-                .width(Length::Fixed(60.0))
-                .style(|_theme: &Theme| text::Style {
-                    color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
-                });
+        let unit_text = text(unit_str)
+            .size(11)
+            .width(Length::Fixed(60.0))
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            });
 
         let row_content = row![addr_text, name_text, value_text, unit_text]
             .spacing(10)
@@ -320,12 +320,10 @@ fn render_register_table<'a>(
             container(row_content)
                 .padding(8)
                 .width(Length::Fill)
-                .style(|_theme: &Theme| container::Style {
-                    background: Some(iced::Background::Color(iced::Color::from_rgb(
-                        0.13, 0.13, 0.15,
-                    ))),
+                .style(|t: &Theme| container::Style {
+                    background: Some(iced::Background::Color(theme::colors(t).row_background())),
                     border: iced::Border {
-                        color: iced::Color::from_rgb(0.2, 0.2, 0.22),
+                        color: theme::colors(t).border_subtle(),
                         width: 1.0,
                         radius: 2.0.into(),
                     },
@@ -398,13 +396,11 @@ fn parse_registers(state: &DeviceDetailState) -> Vec<ModbusRegister> {
     registers
 }
 
-fn section_style(_theme: &Theme) -> container::Style {
+fn section_style(t: &Theme) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(iced::Color::from_rgb(
-            0.12, 0.12, 0.14,
-        ))),
+        background: Some(iced::Background::Color(theme::colors(t).card_background())),
         border: iced::Border {
-            color: iced::Color::from_rgb(0.25, 0.25, 0.3),
+            color: theme::colors(t).border(),
             width: 1.0,
             radius: 6.0.into(),
         },

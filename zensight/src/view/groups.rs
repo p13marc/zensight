@@ -302,16 +302,19 @@ pub fn color_indicator(color: (f32, f32, f32), size: f32) -> Element<'static, Me
     container(text(""))
         .width(Length::Fixed(size))
         .height(Length::Fixed(size))
-        .style(move |_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(iced::Color::from_rgb(
-                color.0, color.1, color.2,
-            ))),
-            border: iced::Border {
-                color: iced::Color::from_rgb(0.4, 0.4, 0.4),
-                width: 1.0,
-                radius: 3.0.into(),
-            },
-            ..Default::default()
+        .style(move |theme: &Theme| {
+            let colors = crate::view::theme::colors(theme);
+            container::Style {
+                background: Some(iced::Background::Color(iced::Color::from_rgb(
+                    color.0, color.1, color.2,
+                ))),
+                border: iced::Border {
+                    color: colors.border(),
+                    width: 1.0,
+                    radius: 3.0.into(),
+                },
+                ..Default::default()
+            }
         })
         .into()
 }
@@ -449,16 +452,17 @@ pub fn groups_panel(state: &GroupsState) -> Element<'_, Message> {
     container(scrollable(content))
         .width(Length::Fixed(400.0))
         .height(Length::Fill)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(iced::Color::from_rgb(
-                0.12, 0.12, 0.14,
-            ))),
-            border: iced::Border {
-                color: iced::Color::from_rgb(0.3, 0.3, 0.35),
-                width: 1.0,
-                radius: 8.0.into(),
-            },
-            ..Default::default()
+        .style(|theme: &Theme| {
+            let colors = crate::view::theme::colors(theme);
+            container::Style {
+                background: Some(iced::Background::Color(colors.card_background())),
+                border: iced::Border {
+                    color: colors.border(),
+                    width: 1.0,
+                    radius: 8.0.into(),
+                },
+                ..Default::default()
+            }
         })
         .into()
 }
@@ -570,16 +574,17 @@ fn render_group_row<'a>(
             .spacing(6),
         )
         .padding(8)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(iced::Color::from_rgb(
-                0.18, 0.18, 0.2,
-            ))),
-            border: iced::Border {
-                color: iced::Color::from_rgb(0.35, 0.35, 0.4),
-                width: 1.0,
-                radius: 4.0.into(),
-            },
-            ..Default::default()
+        .style(|theme: &Theme| {
+            let colors = crate::view::theme::colors(theme);
+            container::Style {
+                background: Some(iced::Background::Color(colors.table_header())),
+                border: iced::Border {
+                    color: colors.border(),
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            }
         })
         .into()
     } else {
@@ -591,8 +596,8 @@ fn render_group_row<'a>(
             text(&group.name).size(13),
             text(format!("({} devices)", device_count))
                 .size(11)
-                .style(|_theme: &Theme| text::Style {
-                    color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+                .style(|theme: &Theme| text::Style {
+                    color: Some(crate::view::theme::colors(theme).text_dimmed()),
                 })
         ]
         .spacing(8)
@@ -613,16 +618,17 @@ fn render_group_row<'a>(
         )
         .padding(8)
         .width(Length::Fill)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(iced::Color::from_rgb(
-                0.15, 0.15, 0.17,
-            ))),
-            border: iced::Border {
-                color: iced::Color::from_rgb(0.3, 0.3, 0.35),
-                width: 1.0,
-                radius: 4.0.into(),
-            },
-            ..Default::default()
+        .style(|theme: &Theme| {
+            let colors = crate::view::theme::colors(theme);
+            container::Style {
+                background: Some(iced::Background::Color(colors.row_background())),
+                border: iced::Border {
+                    color: colors.border(),
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            }
         })
         .into()
     }
@@ -677,16 +683,17 @@ pub fn device_group_menu<'a>(
 
     container(menu_col)
         .padding(8)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(iced::Color::from_rgb(
-                0.15, 0.15, 0.18,
-            ))),
-            border: iced::Border {
-                color: iced::Color::from_rgb(0.35, 0.35, 0.4),
-                width: 1.0,
-                radius: 4.0.into(),
-            },
-            ..Default::default()
+        .style(|theme: &Theme| {
+            let colors = crate::view::theme::colors(theme);
+            container::Style {
+                background: Some(iced::Background::Color(colors.row_background())),
+                border: iced::Border {
+                    color: colors.border(),
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            }
         })
         .into()
 }

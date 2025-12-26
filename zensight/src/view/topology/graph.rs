@@ -12,8 +12,8 @@ pub struct TopologyGraph;
 
 impl TopologyGraph {
     /// Create a topology graph element.
-    pub fn view(state: &TopologyState) -> Element<'_, Message> {
-        Canvas::new(TopologyGraphProgram { state })
+    pub fn view(state: &TopologyState, is_dark: bool) -> Element<'_, Message> {
+        Canvas::new(TopologyGraphProgram { state, is_dark })
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -23,6 +23,7 @@ impl TopologyGraph {
 /// Canvas program for the topology graph.
 struct TopologyGraphProgram<'a> {
     state: &'a TopologyState,
+    is_dark: bool,
 }
 
 /// Interaction state for the graph.
@@ -94,6 +95,87 @@ impl<'a> canvas::Program<Message> for TopologyGraphProgram<'a> {
 }
 
 impl<'a> TopologyGraphProgram<'a> {
+    // Theme-aware color helpers
+    fn background_color(&self) -> Color {
+        if self.is_dark {
+            Color::from_rgb(0.08, 0.08, 0.1)
+        } else {
+            Color::from_rgb(0.95, 0.95, 0.96)
+        }
+    }
+
+    fn empty_state_text_color(&self) -> Color {
+        if self.is_dark {
+            Color::from_rgb(0.5, 0.5, 0.5)
+        } else {
+            Color::from_rgb(0.4, 0.4, 0.4)
+        }
+    }
+
+    fn zoom_indicator_color(&self) -> Color {
+        if self.is_dark {
+            Color::from_rgb(0.4, 0.4, 0.4)
+        } else {
+            Color::from_rgb(0.5, 0.5, 0.5)
+        }
+    }
+
+    fn node_host_healthy_color(&self) -> Color {
+        Color::from_rgb(0.3, 0.6, 0.9)
+    }
+
+    fn node_host_unhealthy_color(&self) -> Color {
+        Color::from_rgb(0.9, 0.3, 0.3)
+    }
+
+    fn node_router_color(&self) -> Color {
+        Color::from_rgb(0.4, 0.8, 0.4)
+    }
+
+    fn node_switch_color(&self) -> Color {
+        Color::from_rgb(0.8, 0.6, 0.3)
+    }
+
+    fn node_unknown_color(&self) -> Color {
+        Color::from_rgb(0.5, 0.5, 0.5)
+    }
+
+    fn selection_ring_color(&self) -> Color {
+        Color::from_rgb(1.0, 0.8, 0.2)
+    }
+
+    fn highlight_ring_color(&self) -> Color {
+        Color::from_rgb(0.9, 0.5, 0.9)
+    }
+
+    fn pinned_indicator_color(&self) -> Color {
+        Color::from_rgb(1.0, 0.5, 0.2)
+    }
+
+    fn node_label_color(&self) -> Color {
+        if self.is_dark {
+            Color::WHITE
+        } else {
+            Color::from_rgb(0.1, 0.1, 0.1)
+        }
+    }
+
+    fn edge_default_color(&self) -> Color {
+        if self.is_dark {
+            Color::from_rgb(0.4, 0.5, 0.6)
+        } else {
+            Color::from_rgb(0.5, 0.6, 0.7)
+        }
+    }
+
+    fn edge_label_color(&self) -> Color {
+        if self.is_dark {
+            Color::from_rgb(0.7, 0.7, 0.7)
+        } else {
+            Color::from_rgb(0.3, 0.3, 0.3)
+        }
+    }
+
     /// Handle mouse events.
     fn handle_mouse(
         &self,
@@ -209,7 +291,7 @@ impl<'a> TopologyGraphProgram<'a> {
         // Draw background
         frame.fill(
             &Path::rectangle(Point::ORIGIN, bounds.size()),
-            Color::from_rgb(0.08, 0.08, 0.1),
+            self.background_color(),
         );
 
         // Draw edges first (behind nodes)
@@ -227,7 +309,7 @@ impl<'a> TopologyGraphProgram<'a> {
             let text = Text {
                 content: "No hosts detected. Waiting for sysinfo telemetry...".to_string(),
                 position: center,
-                color: Color::from_rgb(0.5, 0.5, 0.5),
+                color: self.empty_state_text_color(),
                 size: 16.0.into(),
                 align_x: iced::alignment::Horizontal::Center.into(),
                 align_y: iced::alignment::Vertical::Center,
@@ -240,7 +322,7 @@ impl<'a> TopologyGraphProgram<'a> {
         let zoom_text = Text {
             content: format!("Zoom: {}%", (self.state.zoom * 100.0) as i32),
             position: Point::new(10.0, bounds.height - 20.0),
-            color: Color::from_rgb(0.4, 0.4, 0.4),
+            color: self.zoom_indicator_color(),
             size: 12.0.into(),
             ..Text::default()
         };
@@ -257,14 +339,14 @@ impl<'a> TopologyGraphProgram<'a> {
         let base_color = match node.node_type {
             NodeType::Host => {
                 if node.is_healthy {
-                    Color::from_rgb(0.3, 0.6, 0.9)
+                    self.node_host_healthy_color()
                 } else {
-                    Color::from_rgb(0.9, 0.3, 0.3)
+                    self.node_host_unhealthy_color()
                 }
             }
-            NodeType::Router => Color::from_rgb(0.4, 0.8, 0.4),
-            NodeType::Switch => Color::from_rgb(0.8, 0.6, 0.3),
-            NodeType::Unknown => Color::from_rgb(0.5, 0.5, 0.5),
+            NodeType::Router => self.node_router_color(),
+            NodeType::Switch => self.node_switch_color(),
+            NodeType::Unknown => self.node_unknown_color(),
         };
 
         // Highlight if selected
@@ -281,7 +363,7 @@ impl<'a> TopologyGraphProgram<'a> {
             frame.stroke(
                 &ring,
                 Stroke::default()
-                    .with_color(Color::from_rgb(1.0, 0.8, 0.2))
+                    .with_color(self.selection_ring_color())
                     .with_width(3.0),
             );
         } else if is_highlighted {
@@ -289,7 +371,7 @@ impl<'a> TopologyGraphProgram<'a> {
             frame.stroke(
                 &ring,
                 Stroke::default()
-                    .with_color(Color::from_rgb(0.9, 0.5, 0.9))
+                    .with_color(self.highlight_ring_color())
                     .with_width(2.0),
             );
         }
@@ -301,14 +383,14 @@ impl<'a> TopologyGraphProgram<'a> {
         // Draw pinned indicator
         if node.pinned {
             let pin = Path::circle(Point::new(pos.x + radius * 0.7, pos.y - radius * 0.7), 5.0);
-            frame.fill(&pin, Color::from_rgb(1.0, 0.5, 0.2));
+            frame.fill(&pin, self.pinned_indicator_color());
         }
 
         // Draw label
         let label = Text {
             content: node.label.clone(),
             position: Point::new(pos.x, pos.y + radius + 14.0),
-            color: Color::WHITE,
+            color: self.node_label_color(),
             size: (14.0 * self.state.zoom).max(11.0).into(),
             align_x: iced::alignment::Horizontal::Center.into(),
             ..Text::default()
@@ -321,7 +403,7 @@ impl<'a> TopologyGraphProgram<'a> {
                 let cpu_text = Text {
                     content: format!("CPU: {:.0}%", cpu),
                     position: Point::new(pos.x, pos.y - 5.0),
-                    color: Color::WHITE,
+                    color: self.node_label_color(),
                     size: (10.0 * self.state.zoom).max(9.0).into(),
                     align_x: iced::alignment::Horizontal::Center.into(),
                     ..Text::default()
@@ -333,7 +415,7 @@ impl<'a> TopologyGraphProgram<'a> {
                 let mem_text = Text {
                     content: format!("Mem: {:.0}%", mem),
                     position: Point::new(pos.x, pos.y + 5.0),
-                    color: Color::WHITE,
+                    color: self.node_label_color(),
                     size: (10.0 * self.state.zoom).max(9.0).into(),
                     align_x: iced::alignment::Horizontal::Center.into(),
                     ..Text::default()
@@ -374,9 +456,9 @@ impl<'a> TopologyGraphProgram<'a> {
             );
 
         let color = if is_selected {
-            Color::from_rgb(1.0, 0.8, 0.2)
+            self.selection_ring_color()
         } else {
-            Color::from_rgb(0.4, 0.5, 0.6)
+            self.edge_default_color()
         };
 
         // Draw edge line
@@ -398,7 +480,7 @@ impl<'a> TopologyGraphProgram<'a> {
             let label = Text {
                 content: format_bytes(edge.bytes),
                 position: Point::new(mid.x, mid.y - 8.0),
-                color: Color::from_rgb(0.7, 0.7, 0.7),
+                color: self.edge_label_color(),
                 size: (10.0 * self.state.zoom).max(8.0).into(),
                 align_x: iced::alignment::Horizontal::Center.into(),
                 ..Text::default()

@@ -15,6 +15,7 @@ use crate::message::Message;
 use crate::view::components::{Gauge, StatusLed, StatusLedState};
 use crate::view::device::DeviceDetailState;
 use crate::view::icons::{self, IconSize};
+use crate::view::theme;
 
 /// Parsed interface data from SNMP metrics.
 #[derive(Debug, Clone)]
@@ -101,8 +102,8 @@ fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
     let sys_name =
         get_metric_text(state, "system/sysName").unwrap_or_else(|| "Unknown Device".to_string());
 
-    let sys_name_text = text(sys_name).size(14).style(|_theme: &Theme| text::Style {
-        color: Some(iced::Color::from_rgb(0.6, 0.6, 0.6)),
+    let sys_name_text = text(sys_name).size(14).style(|t: &Theme| text::Style {
+        color: Some(theme::colors(t).text_muted()),
     });
 
     // Health status based on sysUpTime presence
@@ -157,11 +158,9 @@ fn render_system_info(state: &DeviceDetailState) -> Element<'_, Message> {
         info_items.push(
             row![
                 text("Uptime:").size(12),
-                text(uptime_str)
-                    .size(12)
-                    .style(|_theme: &Theme| text::Style {
-                        color: Some(iced::Color::from_rgb(0.4, 0.8, 0.4)),
-                    })
+                text(uptime_str).size(12).style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).success()),
+                })
             ]
             .spacing(8)
             .into(),
@@ -194,8 +193,8 @@ fn render_system_info(state: &DeviceDetailState) -> Element<'_, Message> {
         info_items.push(
             text("Waiting for system information...")
                 .size(12)
-                .style(|_theme: &Theme| text::Style {
-                    color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
                 })
                 .into(),
         );
@@ -224,8 +223,8 @@ fn render_interface_table(state: &DeviceDetailState) -> Element<'_, Message> {
             title,
             text("No interface data available")
                 .size(12)
-                .style(|_theme: &Theme| text::Style {
-                    color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
                 })
         ]
         .spacing(10)
@@ -246,10 +245,8 @@ fn render_interface_table(state: &DeviceDetailState) -> Element<'_, Message> {
         .align_y(Alignment::Center),
     )
     .padding(8)
-    .style(|_theme: &Theme| container::Style {
-        background: Some(iced::Background::Color(iced::Color::from_rgb(
-            0.18, 0.18, 0.2,
-        ))),
+    .style(|t: &Theme| container::Style {
+        background: Some(iced::Background::Color(theme::colors(t).table_header())),
         ..Default::default()
     });
 
@@ -281,12 +278,12 @@ fn render_interface_table(state: &DeviceDetailState) -> Element<'_, Message> {
         };
 
         let errors_style = if errors > 0 {
-            |_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.9, 0.3, 0.3)),
+            |t: &Theme| text::Style {
+                color: Some(theme::colors(t).danger()),
             }
         } else {
-            |_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+            |t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
             }
         };
 
@@ -308,12 +305,10 @@ fn render_interface_table(state: &DeviceDetailState) -> Element<'_, Message> {
             container(row_content)
                 .padding(8)
                 .width(Length::Fill)
-                .style(|_theme: &Theme| container::Style {
-                    background: Some(iced::Background::Color(iced::Color::from_rgb(
-                        0.13, 0.13, 0.15,
-                    ))),
+                .style(|t: &Theme| container::Style {
+                    background: Some(iced::Background::Color(theme::colors(t).row_background())),
                     border: iced::Border {
-                        color: iced::Color::from_rgb(0.2, 0.2, 0.22),
+                        color: theme::colors(t).border_subtle(),
                         width: 1.0,
                         radius: 2.0.into(),
                     },
@@ -382,8 +377,8 @@ fn render_system_metrics(state: &DeviceDetailState) -> Element<'_, Message> {
 
     if !has_metrics {
         metrics_content = metrics_content.push(text("No system metrics available").size(12).style(
-            |_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+            |t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
             },
         ));
     }
@@ -523,13 +518,11 @@ fn format_bytes(bytes: f64) -> String {
     }
 }
 
-fn section_style(_theme: &Theme) -> container::Style {
+fn section_style(t: &Theme) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(iced::Color::from_rgb(
-            0.12, 0.12, 0.14,
-        ))),
+        background: Some(iced::Background::Color(theme::colors(t).card_background())),
         border: iced::Border {
-            color: iced::Color::from_rgb(0.25, 0.25, 0.3),
+            color: theme::colors(t).border(),
             width: 1.0,
             radius: 6.0.into(),
         },

@@ -549,16 +549,17 @@ fn render_chart_section<'a>(
     .spacing(20);
 
     let chart_container = container(column![header, chart, stats_row].spacing(10).padding(10))
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(iced::Color::from_rgb(
-                0.12, 0.12, 0.14,
-            ))),
-            border: iced::Border {
-                color: iced::Color::from_rgb(0.25, 0.25, 0.3),
-                width: 1.0,
-                radius: 6.0.into(),
-            },
-            ..Default::default()
+        .style(|theme: &Theme| {
+            let colors = crate::view::theme::colors(theme);
+            container::Style {
+                background: Some(iced::Background::Color(colors.card_background())),
+                border: iced::Border {
+                    color: colors.border(),
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
+                ..Default::default()
+            }
         })
         .width(Length::Fill);
 
@@ -662,17 +663,15 @@ fn render_metric_row(
     // Type indicator
     let type_indicator = text(format!("({})", value_type_name(&point.value)))
         .size(11)
-        .style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        .style(|theme: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(theme).text_dimmed()),
         });
 
     // Timestamp (relative or absolute)
     let timestamp = format_timestamp(point.timestamp);
-    let time_text = text(timestamp)
-        .size(11)
-        .style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
-        });
+    let time_text = text(timestamp).size(11).style(|theme: &Theme| text::Style {
+        color: Some(crate::view::theme::colors(theme).text_dimmed()),
+    });
 
     // History indicator (if we have history)
     let history_indicator: Element<'static, Message> =
@@ -743,8 +742,8 @@ fn render_metric_row(
             .join(", ");
         let labels_text = text(format!("[{}]", labels_str))
             .size(10)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.4, 0.4, 0.6)),
+            .style(|theme: &Theme| text::Style {
+                color: Some(crate::view::theme::colors(theme).secondary()),
             });
         row_content = row_content.push(labels_text);
     }
@@ -752,16 +751,17 @@ fn render_metric_row(
     container(row_content)
         .width(Length::Fill)
         .padding(8)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(iced::Background::Color(iced::Color::from_rgb(
-                0.15, 0.15, 0.15,
-            ))),
-            border: iced::Border {
-                color: iced::Color::from_rgb(0.3, 0.3, 0.3),
-                width: 1.0,
-                radius: 4.0.into(),
-            },
-            ..Default::default()
+        .style(|theme: &Theme| {
+            let colors = crate::view::theme::colors(theme);
+            container::Style {
+                background: Some(iced::Background::Color(colors.row_background())),
+                border: iced::Border {
+                    color: colors.border_subtle(),
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            }
         })
         .into()
 }

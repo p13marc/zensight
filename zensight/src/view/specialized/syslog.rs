@@ -14,6 +14,7 @@ use crate::message::Message;
 use crate::view::device::DeviceDetailState;
 use crate::view::formatting::format_timestamp;
 use crate::view::icons::{self, IconSize};
+use crate::view::theme;
 
 /// Syslog severity levels (RFC 5424).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -191,8 +192,8 @@ fn render_log_stream(state: &DeviceDetailState) -> Element<'_, Message> {
             title,
             text("No log messages received yet...")
                 .size(12)
-                .style(|_theme: &Theme| text::Style {
-                    color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
                 })
         ]
         .spacing(10)
@@ -210,11 +211,9 @@ fn render_log_stream(state: &DeviceDetailState) -> Element<'_, Message> {
         let severity_color = msg.severity.color();
 
         let time_text = format_timestamp(msg.timestamp);
-        let time = text(time_text)
-            .size(10)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
-            });
+        let time = text(time_text).size(10).style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
+        });
 
         let severity = text(msg.severity.label())
             .size(10)
@@ -222,11 +221,9 @@ fn render_log_stream(state: &DeviceDetailState) -> Element<'_, Message> {
                 color: Some(severity_color),
             });
 
-        let app = text(msg.app_name)
-            .size(10)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.6, 0.7, 0.9)),
-            });
+        let app = text(msg.app_name).size(10).style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).primary()),
+        });
 
         let message_text = if msg.message.len() > 80 {
             format!("{}...", &msg.message[..77])
@@ -239,23 +236,23 @@ fn render_log_stream(state: &DeviceDetailState) -> Element<'_, Message> {
             .spacing(10)
             .align_y(Alignment::Center);
 
-        let row_bg = match msg.severity {
-            SyslogSeverity::Emergency | SyslogSeverity::Alert | SyslogSeverity::Critical => {
-                iced::Color::from_rgb(0.2, 0.1, 0.1)
-            }
-            SyslogSeverity::Error => iced::Color::from_rgb(0.18, 0.12, 0.1),
-            SyslogSeverity::Warning => iced::Color::from_rgb(0.18, 0.16, 0.1),
-            _ => iced::Color::from_rgb(0.12, 0.12, 0.14),
-        };
+        let is_critical = matches!(
+            msg.severity,
+            SyslogSeverity::Emergency | SyslogSeverity::Alert | SyslogSeverity::Critical
+        );
+        let is_error = matches!(msg.severity, SyslogSeverity::Error);
+        let is_warning = matches!(msg.severity, SyslogSeverity::Warning);
 
         let row_container =
             container(row_content)
                 .padding(6)
                 .width(Length::Fill)
-                .style(move |_theme: &Theme| container::Style {
-                    background: Some(iced::Background::Color(row_bg)),
+                .style(move |t: &Theme| container::Style {
+                    background: Some(iced::Background::Color(
+                        theme::colors(t).syslog_row_background(is_critical, is_error, is_warning),
+                    )),
                     border: iced::Border {
-                        color: iced::Color::from_rgb(0.2, 0.2, 0.22),
+                        color: theme::colors(t).border_subtle(),
                         width: 1.0,
                         radius: 2.0.into(),
                     },
@@ -329,13 +326,11 @@ fn parse_syslog_messages(state: &DeviceDetailState) -> Vec<SyslogMessage> {
     messages
 }
 
-fn section_style(_theme: &Theme) -> container::Style {
+fn section_style(t: &Theme) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(iced::Color::from_rgb(
-            0.12, 0.12, 0.14,
-        ))),
+        background: Some(iced::Background::Color(theme::colors(t).card_background())),
         border: iced::Border {
-            color: iced::Color::from_rgb(0.25, 0.25, 0.3),
+            color: theme::colors(t).border(),
             width: 1.0,
             radius: 6.0.into(),
         },

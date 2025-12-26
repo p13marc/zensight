@@ -14,6 +14,7 @@ use zensight_common::TelemetryValue;
 use crate::message::Message;
 use crate::view::device::DeviceDetailState;
 use crate::view::icons::{self, IconSize};
+use crate::view::theme;
 
 /// Render the gNMI streaming telemetry specialized view.
 pub fn gnmi_streaming_view(state: &DeviceDetailState) -> Element<'_, Message> {
@@ -102,8 +103,8 @@ fn render_device_info(state: &DeviceDetailState) -> Element<'_, Message> {
         info_items.push(
             text("gNMI Target")
                 .size(12)
-                .style(|_theme: &Theme| text::Style {
-                    color: Some(iced::Color::from_rgb(0.6, 0.6, 0.6)),
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
                 })
                 .into(),
         );
@@ -148,16 +149,16 @@ fn render_subscriptions(state: &DeviceDetailState) -> Element<'_, Message> {
 
     for (prefix, count) in sorted_subs.into_iter().take(10) {
         let sub_row = row![
-            text("•").size(12).style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.4, 0.8, 0.4)),
+            text("•").size(12).style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).success()),
             }),
-            text(prefix).size(12).style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.6, 0.8, 0.9)),
+            text(prefix).size(12).style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).primary()),
             }),
             text(format!("({} paths)", count))
                 .size(10)
-                .style(|_theme: &Theme| text::Style {
-                    color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
                 }),
         ]
         .spacing(8)
@@ -167,11 +168,11 @@ fn render_subscriptions(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     if is_empty {
-        sub_list = sub_list.push(text("No active subscriptions").size(12).style(
-            |_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
-            },
-        ));
+        sub_list = sub_list.push(text("No active subscriptions").size(12).style(|t: &Theme| {
+            text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            }
+        }));
     }
 
     column![title, sub_list].spacing(10).into()
@@ -204,12 +205,12 @@ fn render_path_browser(state: &DeviceDetailState) -> Element<'_, Message> {
 
         // Highlight keys like [name=value]
         let name_style = if last_segment.contains('[') {
-            |_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.8, 0.6, 0.4)),
+            |t: &Theme| text::Style {
+                color: Some(theme::colors(t).warning()),
             }
         } else {
-            |_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.6, 0.8, 0.9)),
+            |t: &Theme| text::Style {
+                color: Some(theme::colors(t).primary()),
             }
         };
 
@@ -221,14 +222,14 @@ fn render_path_browser(state: &DeviceDetailState) -> Element<'_, Message> {
 
         let path_row = row![
             text(indent_str).size(10),
-            text("○").size(10).style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.5, 0.7, 0.9)),
+            text("○").size(10).style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).primary()),
             }),
             text(last_segment.to_string()).size(11).style(name_style),
             text(format!(": {}", value_display))
                 .size(10)
-                .style(|_theme: &Theme| text::Style {
-                    color: Some(iced::Color::from_rgb(0.5, 0.8, 0.5)),
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).success()),
                 }),
         ]
         .spacing(4)
@@ -239,11 +240,14 @@ fn render_path_browser(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     if is_empty {
-        path_list = path_list.push(text("No paths available").size(12).style(|_theme: &Theme| {
-            text::Style {
-                color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
-            }
-        }));
+        path_list =
+            path_list.push(
+                text("No paths available")
+                    .size(12)
+                    .style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).text_muted()),
+                    }),
+            );
     }
 
     let scroll = scrollable(path_list)
@@ -282,13 +286,11 @@ fn format_value(value: &TelemetryValue) -> String {
     }
 }
 
-fn section_style(_theme: &Theme) -> container::Style {
+fn section_style(t: &Theme) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(iced::Color::from_rgb(
-            0.12, 0.12, 0.14,
-        ))),
+        background: Some(iced::Background::Color(theme::colors(t).card_background())),
         border: iced::Border {
-            color: iced::Color::from_rgb(0.25, 0.25, 0.3),
+            color: theme::colors(t).border(),
             width: 1.0,
             radius: 6.0.into(),
         },

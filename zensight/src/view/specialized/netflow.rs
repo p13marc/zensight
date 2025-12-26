@@ -14,6 +14,7 @@ use zensight_common::TelemetryValue;
 use crate::message::Message;
 use crate::view::device::DeviceDetailState;
 use crate::view::icons::{self, IconSize};
+use crate::view::theme;
 
 /// Parsed flow record.
 #[derive(Debug, Clone)]
@@ -156,8 +157,8 @@ fn render_top_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
 
         let src_text = text(src).size(11).width(Length::Fixed(120.0));
 
-        let arrow = text("→").size(11).style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        let arrow = text("→").size(11).style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
         });
 
         let dst_text = text(dst).size(11).width(Length::Fixed(120.0));
@@ -165,8 +166,8 @@ fn render_top_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
         let bytes_text = text(format_bytes(bytes as f64))
             .size(11)
             .width(Length::Fixed(80.0))
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.4, 0.7, 0.9)),
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).primary()),
             });
 
         let row_content = row![rank, src_text, arrow, dst_text, bytes_text]
@@ -174,12 +175,10 @@ fn render_top_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
             .align_y(Alignment::Center);
 
         rows = rows.push(container(row_content).padding(6).width(Length::Fill).style(
-            |_theme: &Theme| container::Style {
-                background: Some(iced::Background::Color(iced::Color::from_rgb(
-                    0.13, 0.13, 0.15,
-                ))),
+            |t: &Theme| container::Style {
+                background: Some(iced::Background::Color(theme::colors(t).row_background())),
                 border: iced::Border {
-                    color: iced::Color::from_rgb(0.2, 0.2, 0.22),
+                    color: theme::colors(t).border_subtle(),
                     width: 1.0,
                     radius: 2.0.into(),
                 },
@@ -192,8 +191,8 @@ fn render_top_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
         rows = rows.push(
             text("No flow data available")
                 .size(12)
-                .style(|_theme: &Theme| text::Style {
-                    color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
                 }),
         );
     }
@@ -269,8 +268,8 @@ fn render_protocol_distribution(state: &DeviceDetailState) -> Element<'_, Messag
         bars.push(
             text("No protocol data")
                 .size(12)
-                .style(|_theme: &Theme| text::Style {
-                    color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
                 })
                 .into(),
         );
@@ -307,10 +306,8 @@ fn render_flow_table(state: &DeviceDetailState) -> Element<'_, Message> {
         .align_y(Alignment::Center),
     )
     .padding(6)
-    .style(|_theme: &Theme| container::Style {
-        background: Some(iced::Background::Color(iced::Color::from_rgb(
-            0.18, 0.18, 0.2,
-        ))),
+    .style(|t: &Theme| container::Style {
+        background: Some(iced::Background::Color(theme::colors(t).table_header())),
         ..Default::default()
     });
 
@@ -347,12 +344,10 @@ fn render_flow_table(state: &DeviceDetailState) -> Element<'_, Message> {
             container(row_content)
                 .padding(6)
                 .width(Length::Fill)
-                .style(|_theme: &Theme| container::Style {
-                    background: Some(iced::Background::Color(iced::Color::from_rgb(
-                        0.13, 0.13, 0.15,
-                    ))),
+                .style(|t: &Theme| container::Style {
+                    background: Some(iced::Background::Color(theme::colors(t).row_background())),
                     border: iced::Border {
-                        color: iced::Color::from_rgb(0.2, 0.2, 0.22),
+                        color: theme::colors(t).border_subtle(),
                         width: 1.0,
                         radius: 2.0.into(),
                     },
@@ -367,8 +362,8 @@ fn render_flow_table(state: &DeviceDetailState) -> Element<'_, Message> {
             table_rows.push(
                 text("No flow records")
                     .size(12)
-                    .style(|_theme: &Theme| text::Style {
-                        color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+                    .style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).text_muted()),
                     }),
             );
     }
@@ -463,13 +458,11 @@ fn format_count(count: u64) -> String {
     }
 }
 
-fn section_style(_theme: &Theme) -> container::Style {
+fn section_style(t: &Theme) -> container::Style {
     container::Style {
-        background: Some(iced::Background::Color(iced::Color::from_rgb(
-            0.12, 0.12, 0.14,
-        ))),
+        background: Some(iced::Background::Color(theme::colors(t).card_background())),
         border: iced::Border {
-            color: iced::Color::from_rgb(0.25, 0.25, 0.3),
+            color: theme::colors(t).border(),
             width: 1.0,
             radius: 6.0.into(),
         },

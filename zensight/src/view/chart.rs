@@ -474,9 +474,10 @@ impl ChartState {
 
         // Check single-series data
         if !self.data.is_empty()
-            && let Some(min_ts) = self.data.iter().map(|p| p.timestamp).min() {
-                oldest = oldest.min(min_ts);
-            }
+            && let Some(min_ts) = self.data.iter().map(|p| p.timestamp).min()
+        {
+            oldest = oldest.min(min_ts);
+        }
 
         // Check multi-series data
         for series in &self.series {
@@ -735,12 +736,23 @@ pub struct ChartStats {
 /// Chart widget that renders the time-series data.
 pub struct Chart<'a> {
     state: &'a ChartState,
+    /// Whether the theme is dark (affects colors).
+    is_dark: bool,
 }
 
 impl<'a> Chart<'a> {
     /// Create a new chart widget.
     pub fn new(state: &'a ChartState) -> Self {
-        Self { state }
+        Self {
+            state,
+            is_dark: true, // Default to dark
+        }
+    }
+
+    /// Set whether the theme is dark.
+    pub fn dark(mut self, is_dark: bool) -> Self {
+        self.is_dark = is_dark;
+        self
     }
 }
 
@@ -817,12 +829,13 @@ impl<'a> canvas::Program<crate::message::Message> for Chart<'a> {
             // Handle mouse drag for panning
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if cursor.is_over(bounds)
-                    && let Some(pos) = cursor.position() {
-                        state.dragging = true;
-                        return Some(Action::publish(crate::message::Message::ChartDragStart(
-                            pos.x,
-                        )));
-                    }
+                    && let Some(pos) = cursor.position()
+                {
+                    state.dragging = true;
+                    return Some(Action::publish(crate::message::Message::ChartDragStart(
+                        pos.x,
+                    )));
+                }
                 None
             }
 
@@ -881,6 +894,103 @@ impl<'a> canvas::Program<crate::message::Message> for Chart<'a> {
 }
 
 impl<'a> Chart<'a> {
+    // Theme-aware color helpers
+    fn background_color(&self) -> Color {
+        if self.is_dark {
+            Color::from_rgb(0.1, 0.1, 0.12)
+        } else {
+            Color::from_rgb(0.95, 0.95, 0.96)
+        }
+    }
+
+    fn chart_background_color(&self) -> Color {
+        if self.is_dark {
+            Color::from_rgb(0.08, 0.08, 0.1)
+        } else {
+            Color::from_rgb(0.98, 0.98, 0.99)
+        }
+    }
+
+    fn text_color(&self) -> Color {
+        if self.is_dark {
+            Color::WHITE
+        } else {
+            Color::from_rgb(0.1, 0.1, 0.1)
+        }
+    }
+
+    fn muted_text_color(&self) -> Color {
+        if self.is_dark {
+            Color::from_rgb(0.6, 0.6, 0.6)
+        } else {
+            Color::from_rgb(0.4, 0.4, 0.4)
+        }
+    }
+
+    fn grid_color(&self) -> Color {
+        if self.is_dark {
+            Color::from_rgb(0.2, 0.2, 0.25)
+        } else {
+            Color::from_rgb(0.85, 0.85, 0.88)
+        }
+    }
+
+    fn label_color(&self) -> Color {
+        if self.is_dark {
+            Color::from_rgb(0.5, 0.5, 0.5)
+        } else {
+            Color::from_rgb(0.4, 0.4, 0.4)
+        }
+    }
+
+    fn tooltip_background(&self) -> Color {
+        if self.is_dark {
+            Color::from_rgba(0.0, 0.0, 0.0, 0.85)
+        } else {
+            Color::from_rgba(1.0, 1.0, 1.0, 0.95)
+        }
+    }
+
+    fn highlight_color(&self) -> Color {
+        if self.is_dark {
+            Color::from_rgb(0.3, 0.8, 1.0)
+        } else {
+            Color::from_rgb(0.1, 0.5, 0.8)
+        }
+    }
+
+    fn dimmed_series_color(&self) -> Color {
+        if self.is_dark {
+            Color::from_rgb(0.4, 0.4, 0.4)
+        } else {
+            Color::from_rgb(0.7, 0.7, 0.7)
+        }
+    }
+
+    fn legend_text_color(&self) -> Color {
+        if self.is_dark {
+            Color::from_rgb(0.8, 0.8, 0.8)
+        } else {
+            Color::from_rgb(0.2, 0.2, 0.2)
+        }
+    }
+
+    fn legend_text_hidden_color(&self) -> Color {
+        if self.is_dark {
+            Color::from_rgb(0.5, 0.5, 0.5)
+        } else {
+            Color::from_rgb(0.6, 0.6, 0.6)
+        }
+    }
+
+    fn stats_text_color(&self) -> Color {
+        if self.is_dark {
+            Color::from_rgb(0.7, 0.7, 0.7)
+        } else {
+            Color::from_rgb(0.3, 0.3, 0.3)
+        }
+    }
+
     /// Draw the chart onto the frame.
     fn draw_chart(&self, frame: &mut Frame, size: Size) {
         let padding = 50.0;
@@ -893,20 +1003,20 @@ impl<'a> Chart<'a> {
 
         // Draw background
         let background = Path::rectangle(Point::ORIGIN, size);
-        frame.fill(&background, Color::from_rgb(0.1, 0.1, 0.12));
+        frame.fill(&background, self.background_color());
 
         // Draw chart area background
         let chart_bg = Path::rectangle(
             Point::new(padding, padding),
             Size::new(chart_width, chart_height),
         );
-        frame.fill(&chart_bg, Color::from_rgb(0.08, 0.08, 0.1));
+        frame.fill(&chart_bg, self.chart_background_color());
 
         // Draw title
         let title = Text {
             content: self.state.title.clone(),
             position: Point::new(padding, 10.0),
-            color: Color::WHITE,
+            color: self.text_color(),
             size: 14.0.into(),
             ..Text::default()
         };
@@ -921,7 +1031,7 @@ impl<'a> Chart<'a> {
                 zoom_pct
             ),
             position: Point::new(size.width - padding - 140.0, 10.0),
-            color: Color::from_rgb(0.6, 0.6, 0.6),
+            color: self.muted_text_color(),
             size: 12.0.into(),
             ..Text::default()
         };
@@ -960,7 +1070,7 @@ impl<'a> Chart<'a> {
             let no_data = Text {
                 content: "No data".to_string(),
                 position: Point::new(size.width / 2.0 - 30.0, size.height / 2.0),
-                color: Color::from_rgb(0.5, 0.5, 0.5),
+                color: self.label_color(),
                 size: 16.0.into(),
                 ..Text::default()
             };
@@ -1030,7 +1140,7 @@ impl<'a> Chart<'a> {
                 frame.stroke(
                     &path,
                     Stroke::default()
-                        .with_color(Color::from_rgb(0.2, 0.7, 1.0))
+                        .with_color(self.highlight_color())
                         .with_width(2.0),
                 );
             }
@@ -1043,7 +1153,7 @@ impl<'a> Chart<'a> {
                     - ((point.value - value_min) / value_range) as f32 * chart_height;
 
                 let dot = Path::circle(Point::new(x, y), 3.0);
-                frame.fill(&dot, Color::from_rgb(0.3, 0.8, 1.0));
+                frame.fill(&dot, self.highlight_color());
             }
 
             // Draw stats for single series
@@ -1062,8 +1172,8 @@ impl<'a> Chart<'a> {
         value_min: f64,
         value_max: f64,
     ) {
-        let grid_color = Color::from_rgb(0.2, 0.2, 0.25);
-        let label_color = Color::from_rgb(0.5, 0.5, 0.5);
+        let grid_color = self.grid_color();
+        let label_color = self.label_color();
 
         // Horizontal grid lines (value axis)
         let num_h_lines = 5;
@@ -1132,13 +1242,13 @@ impl<'a> Chart<'a> {
         let box_y = (size.height - box_height) / 2.0;
 
         let bg = Path::rectangle(Point::new(box_x, box_y), Size::new(box_width, box_height));
-        frame.fill(&bg, Color::from_rgba(0.0, 0.0, 0.0, 0.7));
+        frame.fill(&bg, self.tooltip_background());
 
         // Border
         frame.stroke(
             &bg,
             Stroke::default()
-                .with_color(Color::from_rgb(0.3, 0.8, 1.0))
+                .with_color(self.highlight_color())
                 .with_width(2.0),
         );
 
@@ -1153,7 +1263,7 @@ impl<'a> Chart<'a> {
         let zoom_text = Text {
             content: format!("{}{}%", icon_text, zoom_pct),
             position: Point::new(box_x + box_width / 2.0 - 25.0, box_y + 15.0),
-            color: Color::WHITE,
+            color: self.text_color(),
             size: 20.0.into(),
             ..Text::default()
         };
@@ -1163,7 +1273,7 @@ impl<'a> Chart<'a> {
         let hint = Text {
             content: "Ctrl+Scroll or +/-".to_string(),
             position: Point::new(box_x + 10.0, box_y + box_height - 15.0),
-            color: Color::from_rgb(0.6, 0.6, 0.6),
+            color: self.muted_text_color(),
             size: 9.0.into(),
             ..Text::default()
         };
@@ -1178,12 +1288,12 @@ impl<'a> Chart<'a> {
         let box_y = (size.height - box_height) / 2.0;
 
         let bg = Path::rectangle(Point::new(box_x, box_y), Size::new(box_width, box_height));
-        frame.fill(&bg, Color::from_rgba(0.0, 0.0, 0.0, 0.7));
+        frame.fill(&bg, self.tooltip_background());
 
         frame.stroke(
             &bg,
             Stroke::default()
-                .with_color(Color::from_rgb(0.3, 0.8, 1.0))
+                .with_color(self.highlight_color())
                 .with_width(2.0),
         );
 
@@ -1197,7 +1307,7 @@ impl<'a> Chart<'a> {
         let pan_text = Text {
             content: format!("{} {}", icon, label),
             position: Point::new(box_x + 15.0, box_y + 15.0),
-            color: Color::WHITE,
+            color: self.text_color(),
             size: 16.0.into(),
             ..Text::default()
         };
@@ -1206,7 +1316,7 @@ impl<'a> Chart<'a> {
         let hint = Text {
             content: "Drag or Arrow keys".to_string(),
             position: Point::new(box_x + 15.0, box_y + box_height - 15.0),
-            color: Color::from_rgb(0.6, 0.6, 0.6),
+            color: self.muted_text_color(),
             size: 9.0.into(),
             ..Text::default()
         };
@@ -1225,6 +1335,7 @@ impl<'a> Chart<'a> {
             Point::new(badge_x, badge_y),
             Size::new(badge_width, badge_height),
         );
+        // Warning badge color stays the same (amber/orange for visibility)
         frame.fill(&bg, Color::from_rgba(1.0, 0.6, 0.0, 0.8));
 
         let text = Text {
@@ -1240,7 +1351,7 @@ impl<'a> Chart<'a> {
         let hint = Text {
             content: "(Home to reset)".to_string(),
             position: Point::new(badge_x + badge_width + 10.0, badge_y + 4.0),
-            color: Color::from_rgb(0.6, 0.6, 0.6),
+            color: self.muted_text_color(),
             size: 10.0.into(),
             ..Text::default()
         };
@@ -1382,7 +1493,7 @@ impl<'a> Chart<'a> {
             let color = if series.visible {
                 Color::from_rgb(series.color.0, series.color.1, series.color.2)
             } else {
-                Color::from_rgb(0.4, 0.4, 0.4) // Dimmed for hidden series
+                self.dimmed_series_color()
             };
             let box_path = Path::rectangle(Point::new(x, y), Size::new(12.0, 12.0));
             frame.fill(&box_path, color);
@@ -1395,9 +1506,9 @@ impl<'a> Chart<'a> {
             };
 
             let text_color = if series.visible {
-                Color::from_rgb(0.8, 0.8, 0.8)
+                self.legend_text_color()
             } else {
-                Color::from_rgb(0.5, 0.5, 0.5)
+                self.legend_text_hidden_color()
             };
 
             let label = Text {
@@ -1431,7 +1542,7 @@ impl<'a> Chart<'a> {
             let text = Text {
                 content: line.clone(),
                 position: Point::new(stats_x, stats_y + i as f32 * line_height),
-                color: Color::from_rgb(0.7, 0.7, 0.7),
+                color: self.stats_text_color(),
                 size: 11.0.into(),
                 ..Text::default()
             };

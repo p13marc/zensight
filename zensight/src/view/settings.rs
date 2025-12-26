@@ -492,8 +492,8 @@ fn render_header(state: &SettingsState) -> Element<'_, Message> {
             icons::status_warning(IconSize::Small),
             text("(unsaved changes)")
                 .size(12)
-                .style(|_theme: &Theme| text::Style {
-                    color: Some(iced::Color::from_rgb(1.0, 0.7, 0.0)),
+                .style(|theme: &Theme| text::Style {
+                    color: Some(crate::view::theme::colors(theme).warning()),
                 })
         ]
         .spacing(5)
@@ -528,8 +528,8 @@ fn render_zenoh_section(state: &SettingsState) -> Element<'_, Message> {
         ZenohMode::Router => "Accepts connections, routes traffic between nodes",
     })
     .size(11)
-    .style(|_theme: &Theme| text::Style {
-        color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+    .style(|theme: &Theme| text::Style {
+        color: Some(crate::view::theme::colors(theme).text_dimmed()),
     });
 
     let mode_row = row![mode_label, mode_picker]
@@ -548,8 +548,8 @@ fn render_zenoh_section(state: &SettingsState) -> Element<'_, Message> {
 
     let connect_help = text("Comma-separated Zenoh locators to connect to")
         .size(11)
-        .style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        .style(|theme: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(theme).text_dimmed()),
         });
 
     // Listen endpoints
@@ -561,8 +561,8 @@ fn render_zenoh_section(state: &SettingsState) -> Element<'_, Message> {
 
     let listen_help = text("Comma-separated Zenoh locators to listen on (for router/peer mode)")
         .size(11)
-        .style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        .style(|theme: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(theme).text_dimmed()),
         });
 
     column![
@@ -593,8 +593,8 @@ fn render_display_section(state: &SettingsState) -> Element<'_, Message> {
 
     let threshold_help = text("Devices not updated within this time are marked as unhealthy")
         .size(11)
-        .style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        .style(|theme: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(theme).text_dimmed()),
         });
 
     let threshold_row = row![threshold_label, threshold_input]
@@ -610,8 +610,8 @@ fn render_display_section(state: &SettingsState) -> Element<'_, Message> {
 
     let history_help = text("Maximum data points to keep per metric (10-10000)")
         .size(11)
-        .style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        .style(|theme: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(theme).text_dimmed()),
         });
 
     let history_row = row![history_label, history_input]
@@ -627,8 +627,8 @@ fn render_display_section(state: &SettingsState) -> Element<'_, Message> {
 
     let alerts_help = text("Maximum alerts to keep in history (10-1000)")
         .size(11)
-        .style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        .style(|theme: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(theme).text_dimmed()),
         });
 
     let alerts_row = row![alerts_label, alerts_input]
@@ -656,16 +656,16 @@ fn render_actions(state: &SettingsState) -> Element<'_, Message> {
     if let Some(error) = &state.error {
         let error_text = text(format!("Error: {}", error))
             .size(14)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(1.0, 0.3, 0.3)),
+            .style(|theme: &Theme| text::Style {
+                color: Some(crate::view::theme::colors(theme).danger()),
             });
         content = content.push(error_text);
     }
 
     // Success message
     if let Some(success) = &state.success {
-        let success_text = text(success).size(14).style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.3, 1.0, 0.3)),
+        let success_text = text(success).size(14).style(|theme: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(theme).success()),
         });
         content = content.push(success_text);
     }
@@ -686,8 +686,8 @@ fn render_actions(state: &SettingsState) -> Element<'_, Message> {
     // Note about restart
     let note = text("Note: Zenoh connection changes require application restart to take effect")
         .size(11)
-        .style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.6, 0.6, 0.6)),
+        .style(|theme: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(theme).text_muted()),
         });
 
     content = content.push(note);

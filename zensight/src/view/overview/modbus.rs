@@ -10,6 +10,7 @@ use zensight_common::TelemetryValue;
 use crate::message::{DeviceId, Message};
 use crate::view::components::{StatusLed, StatusLedState};
 use crate::view::dashboard::DeviceState;
+use crate::view::theme;
 
 /// Register type counts.
 struct RegisterCounts {
@@ -25,8 +26,8 @@ pub fn modbus_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Elemen
     if devices.is_empty() {
         return text("No Modbus devices available")
             .size(12)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
             })
             .into();
     }
@@ -62,8 +63,8 @@ pub fn modbus_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Elemen
         devices.len()
     ))
     .size(11)
-    .style(|_theme: &Theme| text::Style {
-        color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+    .style(|t: &Theme| text::Style {
+        color: Some(theme::colors(t).text_muted()),
     });
 
     column![summary_row, total_row]
@@ -112,8 +113,8 @@ fn count_registers(devices: &HashMap<&DeviceId, &DeviceState>) -> RegisterCounts
 /// Render a stat label and value.
 fn render_stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
     column![
-        text(label).size(10).style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text(label).size(10).style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
         }),
         text(value).size(16)
     ]
@@ -130,8 +131,8 @@ fn render_status_stat<'a>(
     let led = StatusLed::new(state).with_size(10.0);
 
     column![
-        text(label).size(10).style(|_theme: &Theme| text::Style {
-            color: Some(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+        text(label).size(10).style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
         }),
         row![led.view(), text(count.to_string()).size(16)]
             .spacing(6)
