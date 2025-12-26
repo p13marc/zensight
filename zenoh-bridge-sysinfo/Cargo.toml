@@ -13,6 +13,10 @@ zensight-bridge-framework = { path = "../zensight-bridge-framework" }
 # System information
 sysinfo = "0.33"
 
+# Linux-specific metrics (CPU times, disk I/O, TCP states)
+[target.'cfg(target_os = "linux")'.dependencies]
+procfs = "0.17"
+
 # Async runtime
 tokio = { workspace = true, features = ["full", "sync", "time"] }
 

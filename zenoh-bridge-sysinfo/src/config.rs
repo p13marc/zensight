@@ -78,6 +78,11 @@ pub struct CollectConfig {
     #[serde(default = "default_true")]
     pub cpu: bool,
 
+    /// Collect detailed CPU time breakdown (user/system/iowait/steal/nice/idle).
+    /// Only available on Linux. Requires reading /proc/stat.
+    #[serde(default = "default_true")]
+    pub cpu_times: bool,
+
     /// Collect memory metrics (used, available, swap).
     #[serde(default = "default_true")]
     pub memory: bool,
@@ -86,6 +91,11 @@ pub struct CollectConfig {
     #[serde(default = "default_true")]
     pub disk: bool,
 
+    /// Collect disk I/O stats (read/write bytes, IOPS).
+    /// Only available on Linux. Requires reading /proc/diskstats.
+    #[serde(default = "default_true")]
+    pub disk_io: bool,
+
     /// Collect network metrics (bytes/packets in/out per interface).
     #[serde(default = "default_true")]
     pub network: bool,
@@ -93,6 +103,16 @@ pub struct CollectConfig {
     /// Collect system info (uptime, load averages).
     #[serde(default = "default_true")]
     pub system: bool,
+
+    /// Collect temperature sensor readings.
+    /// Only available on Linux with hwmon support.
+    #[serde(default)]
+    pub temperatures: bool,
+
+    /// Collect TCP connection state counts (ESTABLISHED, TIME_WAIT, etc.).
+    /// Only available on Linux. Requires reading /proc/net/tcp.
+    #[serde(default)]
+    pub tcp_states: bool,
 
     /// Collect process metrics (top N by CPU/memory).
     /// Can be resource-intensive on systems with many processes.
@@ -108,10 +128,14 @@ impl Default for CollectConfig {
     fn default() -> Self {
         Self {
             cpu: true,
+            cpu_times: true,
             memory: true,
             disk: true,
+            disk_io: true,
             network: true,
             system: true,
+            temperatures: false,
+            tcp_states: false,
             processes: false,
             top_processes: 10,
         }
@@ -185,10 +209,14 @@ impl SysinfoBridgeConfig {
         // At least one metric type should be enabled
         let collect = &self.sysinfo.collect;
         if !collect.cpu
+            && !collect.cpu_times
             && !collect.memory
             && !collect.disk
+            && !collect.disk_io
             && !collect.network
             && !collect.system
+            && !collect.temperatures
+            && !collect.tcp_states
             && !collect.processes
         {
             return Err(ConfigError::Validation(
@@ -383,10 +411,14 @@ mod tests {
             sysinfo: {
                 collect: {
                     cpu: false,
+                    cpu_times: false,
                     memory: false,
                     disk: false,
+                    disk_io: false,
                     network: false,
                     system: false,
+                    temperatures: false,
+                    tcp_states: false,
                     processes: false
                 }
             }

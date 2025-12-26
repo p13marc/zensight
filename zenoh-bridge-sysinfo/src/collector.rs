@@ -9,6 +9,9 @@ use zenoh::Session;
 use zensight_common::serialization::{Format, encode};
 use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
 
+#[cfg(target_os = "linux")]
+use crate::linux::LinuxMetrics;
+
 /// Collector for system metrics.
 pub struct SystemCollector {
     system: System,
@@ -21,6 +24,9 @@ pub struct SystemCollector {
     format: Format,
     /// Previous network stats for calculating rates
     prev_network: HashMap<String, (u64, u64)>,
+    /// Linux-specific metrics collector
+    #[cfg(target_os = "linux")]
+    linux_metrics: LinuxMetrics,
 }
 
 impl SystemCollector {
@@ -41,6 +47,8 @@ impl SystemCollector {
             session,
             format,
             prev_network: HashMap::new(),
+            #[cfg(target_os = "linux")]
+            linux_metrics: LinuxMetrics::new(),
         }
     }
 
@@ -73,6 +81,12 @@ impl SystemCollector {
             count += self.collect_cpu(timestamp).await;
         }
 
+        // Linux-specific: CPU time breakdown
+        #[cfg(target_os = "linux")]
+        if self.config.collect.cpu_times {
+            count += self.collect_cpu_times(timestamp).await;
+        }
+
         if self.config.collect.memory {
             count += self.collect_memory(timestamp).await;
         }
@@ -81,8 +95,26 @@ impl SystemCollector {
             count += self.collect_disk(timestamp).await;
         }
 
+        // Linux-specific: Disk I/O stats
+        #[cfg(target_os = "linux")]
+        if self.config.collect.disk_io {
+            count += self.collect_disk_io(timestamp).await;
+        }
+
         if self.config.collect.network {
             count += self.collect_network(timestamp).await;
+        }
+
+        // Linux-specific: Temperature sensors
+        #[cfg(target_os = "linux")]
+        if self.config.collect.temperatures {
+            count += self.collect_temperatures(timestamp).await;
+        }
+
+        // Linux-specific: TCP connection states
+        #[cfg(target_os = "linux")]
+        if self.config.collect.tcp_states {
+            count += self.collect_tcp_states(timestamp).await;
         }
 
         if self.config.collect.processes {
@@ -530,6 +562,315 @@ impl SystemCollector {
             .await;
             count += 1;
         }
+
+        count
+    }
+
+    /// Collect CPU time breakdown (Linux-specific).
+    #[cfg(target_os = "linux")]
+    async fn collect_cpu_times(&mut self, timestamp: i64) -> usize {
+        let mut count = 0;
+
+        let cpu_times = self.linux_metrics.collect_cpu_times();
+
+        for (cpu_name, times) in cpu_times {
+            let is_total = cpu_name == "cpu";
+            let prefix = if is_total {
+                "cpu/times".to_string()
+            } else {
+                format!("{}/times", cpu_name)
+            };
+
+            let mut labels = HashMap::new();
+            if !is_total {
+                labels.insert(
+                    "core".to_string(),
+                    cpu_name
+                        .strip_prefix("cpu")
+                        .unwrap_or(&cpu_name)
+                        .to_string(),
+                );
+            }
+
+            // Publish each CPU time component
+            self.publish(
+                &format!("{}/user", prefix),
+                TelemetryValue::Gauge(times.user),
+                timestamp,
+                labels.clone(),
+            )
+            .await;
+            count += 1;
+
+            self.publish(
+                &format!("{}/nice", prefix),
+                TelemetryValue::Gauge(times.nice),
+                timestamp,
+                labels.clone(),
+            )
+            .await;
+            count += 1;
+
+            self.publish(
+                &format!("{}/system", prefix),
+                TelemetryValue::Gauge(times.system),
+                timestamp,
+                labels.clone(),
+            )
+            .await;
+            count += 1;
+
+            self.publish(
+                &format!("{}/idle", prefix),
+                TelemetryValue::Gauge(times.idle),
+                timestamp,
+                labels.clone(),
+            )
+            .await;
+            count += 1;
+
+            self.publish(
+                &format!("{}/iowait", prefix),
+                TelemetryValue::Gauge(times.iowait),
+                timestamp,
+                labels.clone(),
+            )
+            .await;
+            count += 1;
+
+            self.publish(
+                &format!("{}/irq", prefix),
+                TelemetryValue::Gauge(times.irq),
+                timestamp,
+                labels.clone(),
+            )
+            .await;
+            count += 1;
+
+            self.publish(
+                &format!("{}/softirq", prefix),
+                TelemetryValue::Gauge(times.softirq),
+                timestamp,
+                labels.clone(),
+            )
+            .await;
+            count += 1;
+
+            self.publish(
+                &format!("{}/steal", prefix),
+                TelemetryValue::Gauge(times.steal),
+                timestamp,
+                labels,
+            )
+            .await;
+            count += 1;
+        }
+
+        count
+    }
+
+    /// Collect disk I/O statistics (Linux-specific).
+    #[cfg(target_os = "linux")]
+    async fn collect_disk_io(&mut self, timestamp: i64) -> usize {
+        let mut count = 0;
+        let interval = self.config.poll_interval_secs as f64;
+
+        let disk_io = self.linux_metrics.collect_disk_io(interval);
+
+        for (device, (stats, rates)) in disk_io {
+            let mut labels = HashMap::new();
+            labels.insert("device".to_string(), device.clone());
+
+            // Cumulative counters
+            labels.insert("unit".to_string(), "bytes".to_string());
+            self.publish(
+                &format!("disk/{}/io/read_bytes", device),
+                TelemetryValue::Counter(stats.read_bytes),
+                timestamp,
+                labels.clone(),
+            )
+            .await;
+            count += 1;
+
+            self.publish(
+                &format!("disk/{}/io/write_bytes", device),
+                TelemetryValue::Counter(stats.write_bytes),
+                timestamp,
+                labels.clone(),
+            )
+            .await;
+            count += 1;
+
+            labels.insert("unit".to_string(), "ops".to_string());
+            self.publish(
+                &format!("disk/{}/io/read_ops", device),
+                TelemetryValue::Counter(stats.read_ios),
+                timestamp,
+                labels.clone(),
+            )
+            .await;
+            count += 1;
+
+            self.publish(
+                &format!("disk/{}/io/write_ops", device),
+                TelemetryValue::Counter(stats.write_ios),
+                timestamp,
+                labels.clone(),
+            )
+            .await;
+            count += 1;
+
+            labels.insert("unit".to_string(), "ms".to_string());
+            self.publish(
+                &format!("disk/{}/io/time_ms", device),
+                TelemetryValue::Counter(stats.io_time_ms),
+                timestamp,
+                labels.clone(),
+            )
+            .await;
+            count += 1;
+
+            // Rates (if available)
+            if let Some(rates) = rates {
+                labels.insert("unit".to_string(), "bytes/s".to_string());
+                self.publish(
+                    &format!("disk/{}/io/read_rate", device),
+                    TelemetryValue::Gauge(rates.read_bytes as f64),
+                    timestamp,
+                    labels.clone(),
+                )
+                .await;
+                count += 1;
+
+                self.publish(
+                    &format!("disk/{}/io/write_rate", device),
+                    TelemetryValue::Gauge(rates.write_bytes as f64),
+                    timestamp,
+                    labels.clone(),
+                )
+                .await;
+                count += 1;
+
+                labels.insert("unit".to_string(), "iops".to_string());
+                self.publish(
+                    &format!("disk/{}/io/read_iops", device),
+                    TelemetryValue::Gauge(rates.read_ios as f64),
+                    timestamp,
+                    labels.clone(),
+                )
+                .await;
+                count += 1;
+
+                self.publish(
+                    &format!("disk/{}/io/write_iops", device),
+                    TelemetryValue::Gauge(rates.write_ios as f64),
+                    timestamp,
+                    labels,
+                )
+                .await;
+                count += 1;
+            }
+        }
+
+        count
+    }
+
+    /// Collect temperature sensor readings (Linux-specific).
+    #[cfg(target_os = "linux")]
+    async fn collect_temperatures(&mut self, timestamp: i64) -> usize {
+        let mut count = 0;
+
+        let temps = LinuxMetrics::collect_temperatures();
+
+        for temp in temps {
+            let chip_key = sanitize_key(&temp.chip);
+            let label_key = sanitize_key(&temp.label);
+
+            let mut labels = HashMap::new();
+            labels.insert("chip".to_string(), temp.chip.clone());
+            labels.insert("label".to_string(), temp.label.clone());
+            labels.insert("unit".to_string(), "celsius".to_string());
+
+            self.publish(
+                &format!("sensors/{}/{}/temp", chip_key, label_key),
+                TelemetryValue::Gauge(temp.temp_celsius),
+                timestamp,
+                labels.clone(),
+            )
+            .await;
+            count += 1;
+
+            if let Some(critical) = temp.critical {
+                self.publish(
+                    &format!("sensors/{}/{}/critical", chip_key, label_key),
+                    TelemetryValue::Gauge(critical),
+                    timestamp,
+                    labels.clone(),
+                )
+                .await;
+                count += 1;
+            }
+
+            if let Some(max) = temp.max {
+                self.publish(
+                    &format!("sensors/{}/{}/max", chip_key, label_key),
+                    TelemetryValue::Gauge(max),
+                    timestamp,
+                    labels,
+                )
+                .await;
+                count += 1;
+            }
+        }
+
+        count
+    }
+
+    /// Collect TCP connection state counts (Linux-specific).
+    #[cfg(target_os = "linux")]
+    async fn collect_tcp_states(&mut self, timestamp: i64) -> usize {
+        let mut count = 0;
+
+        let states = LinuxMetrics::collect_tcp_states();
+
+        let state_values = [
+            ("established", states.established),
+            ("syn_sent", states.syn_sent),
+            ("syn_recv", states.syn_recv),
+            ("fin_wait1", states.fin_wait1),
+            ("fin_wait2", states.fin_wait2),
+            ("time_wait", states.time_wait),
+            ("close", states.close),
+            ("close_wait", states.close_wait),
+            ("last_ack", states.last_ack),
+            ("listen", states.listen),
+            ("closing", states.closing),
+        ];
+
+        for (state_name, value) in state_values {
+            let mut labels = HashMap::new();
+            labels.insert("state".to_string(), state_name.to_string());
+
+            self.publish(
+                &format!("tcp/{}", state_name),
+                TelemetryValue::Counter(value),
+                timestamp,
+                labels,
+            )
+            .await;
+            count += 1;
+        }
+
+        // Also publish total connections
+        let total: u64 = state_values.iter().map(|(_, v)| v).sum();
+        self.publish(
+            "tcp/total",
+            TelemetryValue::Counter(total),
+            timestamp,
+            HashMap::new(),
+        )
+        .await;
+        count += 1;
 
         count
     }
