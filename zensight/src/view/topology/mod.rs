@@ -109,7 +109,7 @@ impl TopologyState {
 
         // If new nodes were added, arrange in circle and trigger layout
         if self.nodes.len() > initial_count {
-            self.arrange_in_circle(250.0);
+            self.arrange_in_circle(400.0);
             self.layout_stable = false;
             self.cache.clear();
         }
@@ -245,12 +245,11 @@ impl TopologyState {
         }
     }
 
-    /// Run multiple iterations of the force-directed layout for faster convergence.
+    /// Run layout iterations for smooth convergence.
     /// Returns true if the layout is stable.
     pub fn run_layout_step(&mut self) -> bool {
-        // Run multiple iterations per frame for faster convergence
-        let iterations = 5;
-        for _ in 0..iterations {
+        // Run 2 iterations per frame - balance between speed and smoothness
+        for _ in 0..2 {
             self.layout_stable = layout_step(self, &self.layout_config.clone());
             if self.layout_stable {
                 break;
