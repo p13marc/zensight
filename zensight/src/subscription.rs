@@ -223,6 +223,8 @@ pub fn keyboard_subscription() -> Subscription<Message> {
 ///
 /// This subscription uses the [`DemoSimulator`](crate::demo::DemoSimulator) to generate
 /// realistic, time-varying telemetry with random anomalies and events that trigger alerts.
+/// It also generates bridge health snapshots and device liveness updates to showcase
+/// the health monitoring features.
 pub fn demo_subscription() -> Subscription<Message> {
     Subscription::run(|| {
         async_stream::stream! {
@@ -233,6 +235,7 @@ pub fn demo_subscription() -> Subscription<Message> {
 
             // Create the demo simulator
             let mut simulator = DemoSimulator::new();
+            let mut tick_count = 0u64;
 
             loop {
                 // Update interval (500-800ms for responsive UI)
@@ -246,10 +249,46 @@ pub fn demo_subscription() -> Subscription<Message> {
                 // Generate a tick of telemetry
                 let points = simulator.tick(now);
 
-                // Yield all points
+                // Track metrics per bridge
+                let mut sysinfo_count = 0u64;
+                let mut snmp_count = 0u64;
+                let mut modbus_count = 0u64;
+                let mut syslog_count = 0u64;
+
+                // Yield all telemetry points
                 for point in points {
+                    match point.protocol {
+                        zensight_common::Protocol::Sysinfo => sysinfo_count += 1,
+                        zensight_common::Protocol::Snmp => snmp_count += 1,
+                        zensight_common::Protocol::Modbus => modbus_count += 1,
+                        zensight_common::Protocol::Syslog => syslog_count += 1,
+                        _ => {}
+                    }
                     yield Message::TelemetryReceived(point);
                 }
+
+                // Update metrics counts
+                simulator.record_metrics("sysinfo", sysinfo_count);
+                simulator.record_metrics("snmp", snmp_count);
+                simulator.record_metrics("modbus", modbus_count);
+                simulator.record_metrics("syslog", syslog_count);
+
+                // Every 5 ticks (~3 seconds), generate health snapshots
+                if tick_count % 5 == 0 {
+                    for snapshot in simulator.generate_health_snapshots() {
+                        yield Message::HealthSnapshotReceived(snapshot);
+                    }
+                }
+
+                // Every 3 ticks (~1.8 seconds), generate liveness updates
+                if tick_count % 3 == 0 {
+                    for (protocol, mut liveness) in simulator.generate_liveness_updates() {
+                        liveness.last_seen = now;
+                        yield Message::DeviceLivenessReceived(protocol, liveness);
+                    }
+                }
+
+                tick_count += 1;
             }
         }
     })

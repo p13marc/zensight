@@ -9,7 +9,9 @@ use std::f64::consts::PI;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 
-use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{
+    DeviceLiveness, DeviceStatus, HealthSnapshot, Protocol, TelemetryPoint, TelemetryValue,
+};
 
 /// Demo simulation state.
 ///
@@ -27,6 +29,12 @@ pub struct DemoSimulator {
     events: Vec<ScheduledEvent>,
     /// Currently active anomalies.
     active_anomalies: Vec<Anomaly>,
+    /// Start time for uptime calculation.
+    start_tick: u64,
+    /// Metrics published counter per bridge.
+    metrics_published: HashMap<String, u64>,
+    /// Errors per bridge in the last "hour" (scaled for demo).
+    errors_per_bridge: HashMap<String, u64>,
 }
 
 /// A scheduled event that affects the simulation.
@@ -112,6 +120,9 @@ impl DemoSimulator {
             base_values: HashMap::new(),
             events: Vec::new(),
             active_anomalies: Vec::new(),
+            start_tick: 0,
+            metrics_published: HashMap::new(),
+            errors_per_bridge: HashMap::new(),
         };
 
         // Initialize base values for servers
@@ -885,6 +896,200 @@ impl DemoSimulator {
             value,
             labels: HashMap::new(),
         }
+    }
+
+    /// Generate bridge health snapshots.
+    pub fn generate_health_snapshots(&mut self) -> Vec<HealthSnapshot> {
+        let uptime = self.tick - self.start_tick;
+
+        // Define bridges and their device counts
+        let bridges = [
+            ("sysinfo", 4u64), // 4 servers
+            ("snmp", 2u64),    // router + switch
+            ("modbus", 2u64),  // 2 PLCs
+            ("syslog", 4u64),  // Same servers that generate syslog
+        ];
+
+        bridges
+            .iter()
+            .map(|(name, device_count)| {
+                // Count devices with active anomalies
+                let devices_with_issues = self.count_devices_with_issues(name);
+                let devices_failed = devices_with_issues.min(*device_count);
+                let devices_responding = device_count.saturating_sub(devices_failed);
+
+                // Determine overall status
+                let status = if devices_failed == 0 {
+                    "healthy"
+                } else if devices_responding > 0 {
+                    "degraded"
+                } else {
+                    "error"
+                };
+
+                let metrics = *self.metrics_published.get(*name).unwrap_or(&0);
+                let errors = *self.errors_per_bridge.get(*name).unwrap_or(&0);
+
+                HealthSnapshot {
+                    bridge: name.to_string(),
+                    status: status.to_string(),
+                    uptime_secs: uptime, // Each tick is ~0.6s in demo, but we use tick count
+                    devices_total: *device_count,
+                    devices_responding,
+                    devices_failed,
+                    last_poll_duration_ms: self.rng.random_range(50..200),
+                    errors_last_hour: errors,
+                    metrics_published: metrics,
+                }
+            })
+            .collect()
+    }
+
+    /// Count devices with active issues for a bridge.
+    fn count_devices_with_issues(&self, bridge: &str) -> u64 {
+        let mut count = 0u64;
+
+        for anomaly in &self.active_anomalies {
+            let device_affected = match &anomaly.anomaly_type {
+                AnomalyType::CpuSpike { server, .. } => {
+                    bridge == "sysinfo" && self.is_server(server)
+                }
+                AnomalyType::MemoryLeak { server, .. } => {
+                    bridge == "sysinfo" && self.is_server(server)
+                }
+                AnomalyType::DiskFilling { server, .. } => {
+                    bridge == "sysinfo" && self.is_server(server)
+                }
+                AnomalyType::InterfaceDown { device, .. } => {
+                    bridge == "snmp" && self.is_network_device(device)
+                }
+                AnomalyType::TrafficBurst { device, .. } => {
+                    bridge == "snmp" && self.is_network_device(device)
+                }
+                AnomalyType::TemperatureHigh { plc, .. } => bridge == "modbus" && self.is_plc(plc),
+                AnomalyType::ErrorBurst { server } => bridge == "syslog" && self.is_server(server),
+            };
+
+            if device_affected {
+                count += 1;
+            }
+        }
+
+        count
+    }
+
+    fn is_server(&self, name: &str) -> bool {
+        matches!(name, "server01" | "server02" | "server03" | "database01")
+    }
+
+    fn is_network_device(&self, name: &str) -> bool {
+        matches!(name, "router01" | "switch01")
+    }
+
+    fn is_plc(&self, name: &str) -> bool {
+        matches!(name, "plc01" | "plc02")
+    }
+
+    /// Generate device liveness updates based on active anomalies.
+    pub fn generate_liveness_updates(&self) -> Vec<(String, DeviceLiveness)> {
+        let mut updates = Vec::new();
+
+        // Define all devices per protocol
+        let devices: Vec<(&str, &[&str])> = vec![
+            (
+                "sysinfo",
+                &["server01", "server02", "server03", "database01"],
+            ),
+            ("snmp", &["router01", "switch01"]),
+            ("modbus", &["plc01", "plc02"]),
+        ];
+
+        for (protocol, device_list) in devices {
+            for device in device_list.iter() {
+                let (status, failures, error) = self.get_device_status(device);
+
+                updates.push((
+                    protocol.to_string(),
+                    DeviceLiveness {
+                        device: device.to_string(),
+                        status,
+                        last_seen: 0, // Will be set by caller with actual timestamp
+                        consecutive_failures: failures,
+                        last_error: error,
+                    },
+                ));
+            }
+        }
+
+        updates
+    }
+
+    /// Get the status of a specific device based on active anomalies.
+    fn get_device_status(&self, device: &str) -> (DeviceStatus, u32, Option<String>) {
+        // Check for severe anomalies (interface down = offline)
+        for anomaly in &self.active_anomalies {
+            if let AnomalyType::InterfaceDown {
+                device: d,
+                interface,
+            } = &anomaly.anomaly_type
+            {
+                if d == device {
+                    return (
+                        DeviceStatus::Offline,
+                        3,
+                        Some(format!("Interface {} is down", interface)),
+                    );
+                }
+            }
+        }
+
+        // Check for degrading anomalies
+        for anomaly in &self.active_anomalies {
+            let (is_affected, error_msg) = match &anomaly.anomaly_type {
+                AnomalyType::CpuSpike {
+                    server, intensity, ..
+                } if server == device => (true, Some(format!("High CPU usage: {:.0}%", intensity))),
+                AnomalyType::MemoryLeak { server, .. } if server == device => {
+                    (true, Some("Memory leak detected".to_string()))
+                }
+                AnomalyType::DiskFilling { server, .. } if server == device => {
+                    (true, Some("Disk space critically low".to_string()))
+                }
+                AnomalyType::TemperatureHigh { plc, temp, .. } if plc == device => {
+                    (true, Some(format!("Temperature alarm: {:.1}°C", temp)))
+                }
+                AnomalyType::TrafficBurst { device: d, .. } if d == device => {
+                    (true, Some("Traffic burst detected".to_string()))
+                }
+                AnomalyType::ErrorBurst { server } if server == device => {
+                    (true, Some("Error burst detected".to_string()))
+                }
+                _ => (false, None),
+            };
+
+            if is_affected {
+                return (DeviceStatus::Degraded, 1, error_msg);
+            }
+        }
+
+        // No anomalies affecting this device
+        (DeviceStatus::Online, 0, None)
+    }
+
+    /// Record metrics published for a bridge.
+    pub fn record_metrics(&mut self, bridge: &str, count: u64) {
+        *self
+            .metrics_published
+            .entry(bridge.to_string())
+            .or_insert(0) += count;
+    }
+
+    /// Record an error for a bridge.
+    pub fn record_error(&mut self, bridge: &str) {
+        *self
+            .errors_per_bridge
+            .entry(bridge.to_string())
+            .or_insert(0) += 1;
     }
 }
 
