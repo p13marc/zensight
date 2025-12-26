@@ -557,11 +557,14 @@ impl ZenSight {
             }
 
             Message::TopologySelectNode(node_id) => {
-                // Navigate to device detail if node corresponds to a device
+                // Select the node to show its info panel (don't navigate away)
+                self.topology.select_node(node_id);
+            }
+
+            Message::TopologyViewDeviceDetail(node_id) => {
+                // Navigate to device detail view
                 if let Some(device_id) = self.topology.node_to_device_id(&node_id) {
                     self.select_device(device_id);
-                } else {
-                    self.topology.select_node(node_id);
                 }
             }
 

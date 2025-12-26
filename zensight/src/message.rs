@@ -237,6 +237,9 @@ pub enum Message {
     /// Select a node in the topology.
     TopologySelectNode(String),
 
+    /// Navigate to device detail for a topology node.
+    TopologyViewDeviceDetail(String),
+
     /// Select an edge in the topology.
     TopologySelectEdge(usize),
 

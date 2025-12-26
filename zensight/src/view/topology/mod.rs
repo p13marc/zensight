@@ -109,7 +109,7 @@ impl TopologyState {
 
         // If new nodes were added, arrange in circle and trigger layout
         if self.nodes.len() > initial_count {
-            self.arrange_in_circle(150.0);
+            self.arrange_in_circle(250.0);
             self.layout_stable = false;
             self.cache.clear();
         }
@@ -496,7 +496,7 @@ fn render_node_info_panel(node: &Node) -> Element<'_, Message> {
         .spacing(5)
         .align_y(Alignment::Center),
     )
-    .on_press(Message::TopologySelectNode(node.id.clone()))
+    .on_press(Message::TopologyViewDeviceDetail(node.id.clone()))
     .style(iced::widget::button::primary)
     .width(Length::Fill);
     info_items = info_items.push(view_btn);

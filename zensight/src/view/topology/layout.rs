@@ -31,14 +31,14 @@ pub struct LayoutConfig {
 impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
-            repulsion: 2000.0,
-            attraction: 0.05,
-            centering: 0.01,
-            damping: 0.8,
-            min_distance: 80.0,
-            ideal_distance: 150.0,
-            max_velocity: 20.0,
-            stability_threshold: 0.5,
+            repulsion: 5000.0,     // Strong repulsion to keep nodes apart
+            attraction: 0.02,      // Weak attraction so edges don't pull too hard
+            centering: 0.002,      // Very weak centering - just prevents drift
+            damping: 0.85,         // Higher damping for stability
+            min_distance: 100.0,   // Minimum node separation
+            ideal_distance: 200.0, // Target distance for connected nodes
+            max_velocity: 15.0,    // Lower max velocity for smoother motion
+            stability_threshold: 0.3,
         }
     }
 }
