@@ -12,6 +12,7 @@ use zensight::mock;
 use zensight::view::dashboard::{DashboardState, DeviceState, dashboard_view};
 use zensight::view::device::{DeviceDetailState, device_view};
 use zensight::view::groups::GroupsState;
+use zensight::view::overview::OverviewState;
 use zensight::view::settings::{SettingsState, settings_view};
 
 use zensight_common::Protocol;
@@ -21,7 +22,14 @@ use zensight_common::Protocol;
 fn test_dashboard_empty() {
     let state = DashboardState::default();
     let groups = GroupsState::default();
-    let mut ui = simulator(dashboard_view(&state, AppTheme::Dark, 0, &groups));
+    let overview = OverviewState::default();
+    let mut ui = simulator(dashboard_view(
+        &state,
+        AppTheme::Dark,
+        0,
+        &groups,
+        &overview,
+    ));
 
     // Should show "Waiting for telemetry data..." message
     assert!(ui.find("Waiting for telemetry data...").is_ok());
@@ -44,7 +52,14 @@ fn test_dashboard_with_devices() {
     state.devices.insert(device_id, device);
 
     let groups = GroupsState::default();
-    let mut ui = simulator(dashboard_view(&state, AppTheme::Dark, 0, &groups));
+    let overview = OverviewState::default();
+    let mut ui = simulator(dashboard_view(
+        &state,
+        AppTheme::Dark,
+        0,
+        &groups,
+        &overview,
+    ));
 
     // Should show the device name
     assert!(ui.find("router01").is_ok());
@@ -59,7 +74,14 @@ fn test_dashboard_with_devices() {
 fn test_dashboard_settings_button() {
     let state = DashboardState::default();
     let groups = GroupsState::default();
-    let mut ui = simulator(dashboard_view(&state, AppTheme::Dark, 0, &groups));
+    let overview = OverviewState::default();
+    let mut ui = simulator(dashboard_view(
+        &state,
+        AppTheme::Dark,
+        0,
+        &groups,
+        &overview,
+    ));
 
     // Click Settings button
     let _ = ui.click("Settings");
@@ -74,7 +96,14 @@ fn test_dashboard_settings_button() {
 fn test_dashboard_alerts_button() {
     let state = DashboardState::default();
     let groups = GroupsState::default();
-    let mut ui = simulator(dashboard_view(&state, AppTheme::Dark, 0, &groups));
+    let overview = OverviewState::default();
+    let mut ui = simulator(dashboard_view(
+        &state,
+        AppTheme::Dark,
+        0,
+        &groups,
+        &overview,
+    ));
 
     // Click Alerts button
     let _ = ui.click("Alerts");
@@ -340,4 +369,151 @@ fn test_gnmi_specialized_view() {
     assert!(ui.find("Active Subscriptions").is_ok());
     // Should show Path Browser section
     assert!(ui.find("Path Browser").is_ok());
+}
+
+// ============================================================================
+// Overview Section Tests
+// ============================================================================
+
+/// Test that overview section shows when devices are present.
+#[test]
+fn test_overview_section_renders() {
+    use zensight_common::TelemetryPoint;
+    use zensight_common::TelemetryValue;
+
+    let mut state = DashboardState::default();
+    state.connected = true;
+
+    // Add a sysinfo device with metrics
+    let device_id = DeviceId {
+        protocol: Protocol::Sysinfo,
+        source: "server01".to_string(),
+    };
+    let mut device = DeviceState::new(device_id.clone());
+    device.metric_count = 3;
+    device.is_healthy = true;
+
+    // Add actual telemetry points
+    let point = TelemetryPoint::new(
+        "server01",
+        Protocol::Sysinfo,
+        "cpu/usage",
+        TelemetryValue::Gauge(45.0),
+    );
+    device.metrics.insert("cpu/usage".to_string(), point);
+
+    state.devices.insert(device_id, device);
+
+    let groups = GroupsState::default();
+    let overview = OverviewState::default();
+    let mut ui = simulator(dashboard_view(
+        &state,
+        AppTheme::Dark,
+        0,
+        &groups,
+        &overview,
+    ));
+
+    // Should show Protocol Overviews header
+    assert!(ui.find("Protocol Overviews").is_ok());
+    // Should show Sysinfo tab since we have a sysinfo device
+    assert!(ui.find("Sysinfo (1)").is_ok());
+}
+
+/// Test clicking overview protocol tab.
+#[test]
+fn test_overview_protocol_tab_click() {
+    use zensight_common::TelemetryPoint;
+    use zensight_common::TelemetryValue;
+
+    let mut state = DashboardState::default();
+    state.connected = true;
+
+    // Add an SNMP device
+    let device_id = DeviceId {
+        protocol: Protocol::Snmp,
+        source: "router01".to_string(),
+    };
+    let mut device = DeviceState::new(device_id.clone());
+    device.metric_count = 1;
+    device.is_healthy = true;
+
+    let point = TelemetryPoint::new(
+        "router01",
+        Protocol::Snmp,
+        "ifAdminStatus/1",
+        TelemetryValue::Counter(1),
+    );
+    device.metrics.insert("ifAdminStatus/1".to_string(), point);
+
+    state.devices.insert(device_id, device);
+
+    let groups = GroupsState::default();
+    let overview = OverviewState::default();
+    let mut ui = simulator(dashboard_view(
+        &state,
+        AppTheme::Dark,
+        0,
+        &groups,
+        &overview,
+    ));
+
+    // Click SNMP tab
+    let _ = ui.click("SNMP (1)");
+
+    // Should produce SelectOverviewProtocol message
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::SelectOverviewProtocol(Protocol::Snmp)))
+    );
+}
+
+/// Test overview section can be collapsed.
+#[test]
+fn test_overview_collapse_toggle() {
+    use zensight_common::TelemetryPoint;
+    use zensight_common::TelemetryValue;
+
+    let mut state = DashboardState::default();
+    state.connected = true;
+
+    // Add a device so overview shows
+    let device_id = DeviceId {
+        protocol: Protocol::Sysinfo,
+        source: "server01".to_string(),
+    };
+    let mut device = DeviceState::new(device_id.clone());
+
+    let point = TelemetryPoint::new(
+        "server01",
+        Protocol::Sysinfo,
+        "cpu/usage",
+        TelemetryValue::Gauge(50.0),
+    );
+    device.metrics.insert("cpu/usage".to_string(), point);
+
+    state.devices.insert(device_id, device);
+
+    let groups = GroupsState::default();
+    let overview = OverviewState::default();
+    let mut ui = simulator(dashboard_view(
+        &state,
+        AppTheme::Dark,
+        0,
+        &groups,
+        &overview,
+    ));
+
+    // Click the Protocol Overviews header to toggle
+    let _ = ui.click("Protocol Overviews");
+
+    // Should produce ToggleOverviewExpanded message
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::ToggleOverviewExpanded))
+    );
 }

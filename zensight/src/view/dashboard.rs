@@ -7,7 +7,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Element, Length, Theme};
 
-use zensight_common::Protocol;
+use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
 /// Get the current timestamp in milliseconds.
 fn current_timestamp() -> i64 {
@@ -21,6 +21,7 @@ use crate::app::{AppTheme, DASHBOARD_SEARCH_ID};
 use crate::message::{DeviceId, Message};
 use crate::view::groups::{GroupTag, GroupsState, device_group_tags, group_filter_bar};
 use crate::view::icons::{self, IconSize};
+use crate::view::overview::{OverviewState, overview_section};
 
 /// State for a single device on the dashboard.
 #[derive(Debug, Clone)]
@@ -31,8 +32,8 @@ pub struct DeviceState {
     pub last_update: i64,
     /// Number of metrics received.
     pub metric_count: usize,
-    /// Most recent metric values (metric name -> formatted value).
-    pub metrics: HashMap<String, String>,
+    /// Most recent metric values (metric name -> full telemetry point).
+    pub metrics: HashMap<String, TelemetryPoint>,
     /// Whether this device is healthy (received recent updates).
     pub is_healthy: bool,
 }
@@ -236,15 +237,24 @@ pub fn dashboard_view<'a>(
     theme: AppTheme,
     unacknowledged_alerts: usize,
     groups: &'a GroupsState,
+    overview: &'a OverviewState,
 ) -> Element<'a, Message> {
     let header = render_header(state, theme, unacknowledged_alerts);
     let filters = render_protocol_filters(state);
     let group_filters = group_filter_bar(groups);
+    let overview_panel = overview_section(overview, &state.devices);
     let devices = render_device_grid(state, groups);
 
-    let content = column![header, filters, group_filters, rule::horizontal(1), devices]
-        .spacing(10)
-        .padding(20);
+    let content = column![
+        header,
+        filters,
+        group_filters,
+        overview_panel,
+        rule::horizontal(1),
+        devices
+    ]
+    .spacing(10)
+    .padding(20);
 
     container(content)
         .width(Length::Fill)
@@ -567,6 +577,23 @@ fn calculate_visible_pages(current: usize, total: usize) -> Vec<usize> {
 /// Maximum length for displayed metric values before truncation.
 const MAX_VALUE_DISPLAY_LEN: usize = 30;
 
+/// Format a telemetry value for display.
+fn format_telemetry_value(value: &TelemetryValue) -> String {
+    match value {
+        TelemetryValue::Counter(v) => format!("{}", v),
+        TelemetryValue::Gauge(v) => {
+            if v.fract() == 0.0 {
+                format!("{:.0}", v)
+            } else {
+                format!("{:.2}", v)
+            }
+        }
+        TelemetryValue::Text(s) => s.clone(),
+        TelemetryValue::Boolean(b) => if *b { "true" } else { "false" }.to_string(),
+        TelemetryValue::Binary(data) => format!("<{} bytes>", data.len()),
+    }
+}
+
 /// Render a single device card.
 fn render_device_card<'a>(
     device: &'a DeviceState,
@@ -612,7 +639,8 @@ fn render_device_card<'a>(
 
     // Show a few recent metrics as preview with tooltips for full values
     let mut preview = Column::new().spacing(2);
-    for (name, value) in device.metrics.iter().take(3) {
+    for (name, point) in device.metrics.iter().take(3) {
+        let value = format_telemetry_value(&point.value);
         let display_value = if value.len() > MAX_VALUE_DISPLAY_LEN {
             format!("{}...", &value[..MAX_VALUE_DISPLAY_LEN])
         } else {
