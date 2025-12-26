@@ -780,6 +780,11 @@ impl ZenSight {
         {
             selected.update(point);
         }
+
+        // Update topology if we're viewing it
+        if self.current_view == CurrentView::Topology {
+            self.topology.update_from_devices(&self.dashboard.devices);
+        }
     }
 
     /// Select a device to view in detail.
@@ -887,6 +892,15 @@ impl ZenSight {
         // Update chart time for selected device
         if let Some(ref mut device) = self.selected_device {
             device.update_chart_time();
+        }
+
+        // Update topology when viewing it
+        if self.current_view == CurrentView::Topology {
+            self.topology.update_from_devices(&self.dashboard.devices);
+            // Run layout algorithm if not stable
+            if !self.topology.layout_stable {
+                self.topology.run_layout_step();
+            }
         }
     }
 }

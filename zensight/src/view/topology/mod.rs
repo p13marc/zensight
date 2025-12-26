@@ -4,6 +4,7 @@
 //! showing network bandwidth between each link.
 
 pub mod graph;
+pub mod layout;
 
 use std::collections::HashMap;
 
@@ -16,6 +17,7 @@ use crate::view::dashboard::DeviceState;
 use crate::view::icons::{self, IconSize};
 
 pub use graph::TopologyGraph;
+pub use layout::{LayoutConfig, arrange_circle, center_layout, layout_step};
 
 /// Unique identifier for a topology node.
 pub type NodeId = String;
@@ -41,6 +43,10 @@ pub struct TopologyState {
     pub cache: Cache,
     /// Search query for highlighting nodes.
     pub search_query: String,
+    /// Layout algorithm configuration.
+    pub layout_config: LayoutConfig,
+    /// Whether the layout is currently stable.
+    pub layout_stable: bool,
 }
 
 impl Default for TopologyState {
@@ -55,6 +61,8 @@ impl Default for TopologyState {
             auto_layout: true,
             cache: Cache::new(),
             search_query: String::new(),
+            layout_config: LayoutConfig::default(),
+            layout_stable: true,
         }
     }
 }
@@ -62,6 +70,8 @@ impl Default for TopologyState {
 impl TopologyState {
     /// Update topology from dashboard device states.
     pub fn update_from_devices(&mut self, devices: &HashMap<DeviceId, DeviceState>) {
+        let initial_count = self.nodes.len();
+
         // For now, create a node for each sysinfo device
         for (device_id, device_state) in devices {
             if device_id.protocol != zensight_common::Protocol::Sysinfo {
@@ -71,16 +81,13 @@ impl TopologyState {
             let node_id = device_id.source.clone();
 
             if !self.nodes.contains_key(&node_id) {
-                // Create new node at random position
-                let x = (self.nodes.len() as f32 * 100.0) % 400.0 + 100.0;
-                let y = (self.nodes.len() as f32 * 80.0) % 300.0 + 100.0;
-
+                // Create new node - position will be set by arrange_in_circle
                 self.nodes.insert(
                     node_id.clone(),
                     Node {
                         id: node_id.clone(),
                         label: device_id.source.clone(),
-                        position: (x, y),
+                        position: (0.0, 0.0),
                         velocity: (0.0, 0.0),
                         node_type: NodeType::Host,
                         cpu_usage: None,
@@ -91,7 +98,6 @@ impl TopologyState {
                         pinned: false,
                     },
                 );
-                self.cache.clear();
             }
 
             // Update node metrics from telemetry
@@ -99,6 +105,13 @@ impl TopologyState {
                 node.is_healthy = device_state.is_healthy;
                 node.update_from_metrics(&device_state.metrics);
             }
+        }
+
+        // If new nodes were added, arrange in circle and trigger layout
+        if self.nodes.len() > initial_count {
+            self.arrange_in_circle(150.0);
+            self.layout_stable = false;
+            self.cache.clear();
         }
     }
 
@@ -179,6 +192,28 @@ impl TopologyState {
     /// Toggle auto-layout.
     pub fn toggle_auto_layout(&mut self) {
         self.auto_layout = !self.auto_layout;
+        if self.auto_layout {
+            // Reset layout stability when re-enabling
+            self.layout_stable = false;
+        }
+    }
+
+    /// Run one iteration of the force-directed layout.
+    /// Returns true if the layout is stable.
+    pub fn run_layout_step(&mut self) -> bool {
+        self.layout_stable = layout_step(self, &self.layout_config.clone());
+        self.layout_stable
+    }
+
+    /// Arrange nodes in a circle (useful for initial layout).
+    pub fn arrange_in_circle(&mut self, radius: f32) {
+        arrange_circle(self, radius);
+        self.layout_stable = false;
+    }
+
+    /// Center the layout around the origin.
+    pub fn center(&mut self) {
+        center_layout(self);
     }
 
     /// Get the DeviceId for a node (if it corresponds to a device).
