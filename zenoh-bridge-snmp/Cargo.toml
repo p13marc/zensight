@@ -28,3 +28,28 @@ snmp2 = { version = "0.4", features = ["tokio", "v3"] }
 rasn = "0.22"
 rasn-smi = "0.22"
 rasn-snmp = "0.22"
+
+# =============================================================================
+# Package metadata for cargo-deb
+# =============================================================================
+[package.metadata.deb]
+maintainer = "Marc Pardo <p13marc@gmail.com>"
+copyright = "2024, Marc Pardo"
+license-file = ["../LICENSE", "0"]
+extended-description = """Zenoh bridge for SNMP telemetry. Polls SNMP agents and receives
+SNMP traps, publishing the data to Zenoh for consumption by ZenSight
+or other Zenoh subscribers. Supports SNMPv1, v2c, and v3."""
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/zenoh-bridge-snmp", "usr/bin/", "755"],
+]
+depends = "$auto"
+
+# =============================================================================
+# Package metadata for cargo-generate-rpm
+# =============================================================================
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/zenoh-bridge-snmp", dest = "/usr/bin/zenoh-bridge-snmp", mode = "755" },
+]

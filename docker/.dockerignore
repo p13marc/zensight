@@ -1,0 +1,31 @@
+# Build artifacts
+target/
+**/*.rs.bk
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Documentation
+*.md
+docs/
+
+# Flatpak build artifacts
+flatpak/.flatpak-builder/
+flatpak/build-dir/
+
+# Test files
+**/tests/
+**/*_test.rs
+
+# Example configs (we want fresh configs in containers)
+configs/
+
+# GitHub workflows
+.github/

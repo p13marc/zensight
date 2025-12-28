@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.github.p13marc.ZenSight</id>
+  <name>ZenSight</name>
+  <summary>Observability frontend for Zenoh telemetry</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="com.github.p13marc">
+    <name>Marc Pardo</name>
+  </developer>
+  <description>
+    <p>
+      ZenSight is a unified observability platform that bridges legacy monitoring
+      protocols into Zenoh's pub/sub infrastructure. It provides a modern GUI for
+      visualizing telemetry data from multiple sources.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Real-time telemetry visualization from SNMP, Syslog, NetFlow, Modbus, and more</li>
+      <li>Network topology view with force-directed graph layout</li>
+      <li>Device health monitoring and alerting</li>
+      <li>Time-series charts for metrics analysis</li>
+      <li>Demo mode for testing without live bridges</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">com.github.p13marc.ZenSight.desktop</launchable>
+  <url type="homepage">https://github.com/p13marc/zensight</url>
+  <url type="bugtracker">https://github.com/p13marc/zensight/issues</url>
+  <url type="vcs-browser">https://github.com/p13marc/zensight</url>
+  <content_rating type="oars-1.1" />
+  <branding>
+    <color type="primary" scheme_preference="light">#3584e4</color>
+    <color type="primary" scheme_preference="dark">#1a5fb4</color>
+  </branding>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <categories>
+    <category>Network</category>
+    <category>System</category>
+    <category>Monitor</category>
+  </categories>
+  <keywords>
+    <keyword>zenoh</keyword>
+    <keyword>telemetry</keyword>
+    <keyword>monitoring</keyword>
+    <keyword>observability</keyword>
+    <keyword>snmp</keyword>
+    <keyword>syslog</keyword>
+    <keyword>netflow</keyword>
+    <keyword>modbus</keyword>
+  </keywords>
+  <releases>
+    <release version="0.1.0" date="2024-12-28">
+      <description>
+        <p>Initial release</p>
+      </description>
+    </release>
+  </releases>
+</component>

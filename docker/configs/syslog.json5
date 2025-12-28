@@ -1,0 +1,34 @@
+{
+  // Docker-optimized configuration for zenoh-bridge-syslog
+
+  zenoh: {
+    mode: "peer",
+    // Connect to external Zenoh router/peers
+    // connect: ["tcp/zenoh-router:7447"],
+  },
+
+  syslog: {
+    key_prefix: "zensight/syslog",
+
+    listeners: [
+      {
+        protocol: "udp",
+        bind: "0.0.0.0:514",
+        max_message_size: 65535,
+      },
+      {
+        protocol: "tcp",
+        bind: "0.0.0.0:514",
+        max_connections: 1000,
+        connection_timeout_secs: 300,
+      },
+    ],
+
+    hostname_aliases: {},
+    include_raw_message: false,
+  },
+
+  logging: {
+    level: "info",
+  },
+}

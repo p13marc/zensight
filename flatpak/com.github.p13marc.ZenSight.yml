@@ -1,0 +1,44 @@
+app-id: com.github.p13marc.ZenSight
+runtime: org.freedesktop.Platform
+runtime-version: "24.08"
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: zensight
+
+finish-args:
+  # Wayland and X11 display access
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # GPU acceleration for Iced/wgpu
+  - --device=dri
+  # Network access for Zenoh connections
+  - --share=network
+  # Access to config directory
+  - --filesystem=xdg-config/zensight:create
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/zensight/cargo
+    RUST_BACKTRACE: "1"
+
+modules:
+  - name: zensight
+    buildsystem: simple
+    build-options:
+      # Allow network during build to fetch crates
+      build-args:
+        - --share=network
+    build-commands:
+      - cargo fetch --manifest-path Cargo.toml
+      - cargo build --release -p zensight
+      - install -Dm755 target/release/zensight ${FLATPAK_DEST}/bin/zensight
+      - install -Dm644 flatpak/com.github.p13marc.ZenSight.desktop ${FLATPAK_DEST}/share/applications/com.github.p13marc.ZenSight.desktop
+      - install -Dm644 flatpak/com.github.p13marc.ZenSight.metainfo.xml ${FLATPAK_DEST}/share/metainfo/com.github.p13marc.ZenSight.metainfo.xml
+      - install -Dm644 flatpak/icons/hicolor/scalable/apps/com.github.p13marc.ZenSight.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/com.github.p13marc.ZenSight.svg
+      - install -Dm644 flatpak/icons/hicolor/symbolic/apps/com.github.p13marc.ZenSight-symbolic.svg ${FLATPAK_DEST}/share/icons/hicolor/symbolic/apps/com.github.p13marc.ZenSight-symbolic.svg
+    sources:
+      - type: dir
+        path: ..

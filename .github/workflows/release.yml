@@ -1,0 +1,282 @@
+name: Release Packages
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (e.g., 0.1.0)"
+        required: false
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/zensight
+
+jobs:
+  # =============================================================================
+  # Build Debian packages for zensight frontend
+  # =============================================================================
+  build-deb:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            name: ubuntu22.04
+          - os: ubuntu-24.04
+            name: ubuntu24.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libxkbcommon-dev libwayland-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+
+      - name: Build release binary
+        run: cargo build --release -p zensight
+
+      - name: Build .deb package for zensight
+        run: cargo deb -p zensight --no-build
+
+      - name: Rename package with distro suffix
+        run: |
+          cd target/debian
+          for f in *.deb; do
+            mv "$f" "${f%.deb}-${{ matrix.name }}.deb"
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-zensight-${{ matrix.name }}
+          path: target/debian/*.deb
+
+  # =============================================================================
+  # Build Debian packages for bridges
+  # =============================================================================
+  build-deb-bridges:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            name: ubuntu22.04
+          - os: ubuntu-24.04
+            name: ubuntu24.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+
+      - name: Build release binaries
+        run: |
+          cargo build --release -p zenoh-bridge-syslog
+          cargo build --release -p zenoh-bridge-sysinfo
+          cargo build --release -p zenoh-bridge-snmp
+
+      - name: Build .deb packages for bridges
+        run: |
+          cargo deb -p zenoh-bridge-syslog --no-build
+          cargo deb -p zenoh-bridge-sysinfo --no-build
+          cargo deb -p zenoh-bridge-snmp --no-build
+
+      - name: Rename packages with distro suffix
+        run: |
+          cd target/debian
+          for f in *.deb; do
+            mv "$f" "${f%.deb}-${{ matrix.name }}.deb"
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-bridges-${{ matrix.name }}
+          path: target/debian/*.deb
+
+  # =============================================================================
+  # Build RPM packages using Fedora container
+  # =============================================================================
+  build-rpm-fedora:
+    runs-on: ubuntu-latest
+    container: fedora:41
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          dnf install -y gcc pkg-config protobuf-compiler \
+            libxkbcommon-devel wayland-devel
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install cargo-generate-rpm
+        run: |
+          source $HOME/.cargo/env
+          cargo install cargo-generate-rpm
+
+      - name: Build release binaries
+        run: |
+          source $HOME/.cargo/env
+          cargo build --release -p zensight
+          cargo build --release -p zenoh-bridge-syslog
+          cargo build --release -p zenoh-bridge-sysinfo
+          cargo build --release -p zenoh-bridge-snmp
+
+      - name: Build .rpm packages
+        run: |
+          source $HOME/.cargo/env
+          cargo generate-rpm -p zensight
+          cargo generate-rpm -p zenoh-bridge-syslog
+          cargo generate-rpm -p zenoh-bridge-sysinfo
+          cargo generate-rpm -p zenoh-bridge-snmp
+
+      - name: Rename packages with distro suffix
+        run: |
+          cd target/generate-rpm
+          for f in *.rpm; do
+            mv "$f" "${f%.rpm}-fc41.rpm"
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-fedora41
+          path: target/generate-rpm/*.rpm
+
+  # =============================================================================
+  # Build Flatpak for zensight frontend
+  # =============================================================================
+  build-flatpak:
+    runs-on: ubuntu-latest
+    container:
+      image: bilelmoussaoui/flatpak-github-actions:freedesktop-24.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Flatpak
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: flatpak/com.github.p13marc.ZenSight.yml
+          bundle: zensight.flatpak
+          cache-key: flatpak-builder-${{ github.sha }}
+
+      - name: Upload Flatpak bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-zensight
+          path: zensight.flatpak
+
+  # =============================================================================
+  # Build Docker images for bridges
+  # =============================================================================
+  build-docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        bridge:
+          - name: syslog
+            package: zenoh-bridge-syslog
+          - name: sysinfo
+            package: zenoh-bridge-sysinfo
+          - name: snmp
+            package: zenoh-bridge-snmp
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_PREFIX }}-bridge-${{ matrix.bridge.name }}
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.bridge
+          build-args: |
+            BRIDGE_PACKAGE=${{ matrix.bridge.package }}
+            BRIDGE_NAME=${{ matrix.bridge.name }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+  # =============================================================================
+  # Create GitHub Release with all artifacts
+  # =============================================================================
+  release:
+    needs: [build-deb, build-deb-bridges, build-rpm-fedora, build-flatpak, build-docker]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/**/*.deb
+            artifacts/**/*.rpm
+            artifacts/**/*.flatpak

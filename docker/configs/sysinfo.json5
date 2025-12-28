@@ -1,0 +1,43 @@
+{
+  // Docker-optimized configuration for zenoh-bridge-sysinfo
+  // Note: Mount /proc and /sys from host for accurate metrics
+
+  zenoh: {
+    mode: "peer",
+    // Connect to external Zenoh router/peers
+    // connect: ["tcp/zenoh-router:7447"],
+  },
+
+  sysinfo: {
+    key_prefix: "zensight/sysinfo",
+    hostname: "auto",
+    poll_interval_secs: 5,
+
+    collect: {
+      cpu: true,
+      memory: true,
+      disk: true,
+      network: true,
+      system: true,
+      processes: false,
+      top_processes: 10,
+    },
+
+    network: {
+      include: [],
+      exclude: [],
+      exclude_loopback: true,
+      exclude_virtual: false,
+    },
+
+    disk: {
+      include: [],
+      exclude: [],
+      exclude_pseudo: true,
+    },
+  },
+
+  logging: {
+    level: "info",
+  },
+}

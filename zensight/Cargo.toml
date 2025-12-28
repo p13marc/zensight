@@ -45,3 +45,32 @@ tester = ["iced/tester"]
 
 [dev-dependencies]
 iced_test = "0.14"
+
+# =============================================================================
+# Package metadata for cargo-deb
+# =============================================================================
+[package.metadata.deb]
+maintainer = "Marc Pardo <p13marc@gmail.com>"
+copyright = "2024, Marc Pardo"
+license-file = ["../LICENSE", "0"]
+extended-description = """ZenSight is a unified observability platform that bridges legacy
+monitoring protocols into Zenoh's pub/sub infrastructure. This package
+provides the desktop frontend for visualizing telemetry data."""
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/zensight", "usr/bin/", "755"],
+    ["../flatpak/com.github.p13marc.ZenSight.desktop", "usr/share/applications/", "644"],
+    ["../flatpak/icons/hicolor/scalable/apps/com.github.p13marc.ZenSight.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+]
+depends = "$auto"
+
+# =============================================================================
+# Package metadata for cargo-generate-rpm
+# =============================================================================
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/zensight", dest = "/usr/bin/zensight", mode = "755" },
+    { source = "../flatpak/com.github.p13marc.ZenSight.desktop", dest = "/usr/share/applications/com.github.p13marc.ZenSight.desktop", mode = "644" },
+    { source = "../flatpak/icons/hicolor/scalable/apps/com.github.p13marc.ZenSight.svg", dest = "/usr/share/icons/hicolor/scalable/apps/com.github.p13marc.ZenSight.svg", mode = "644" },
+]

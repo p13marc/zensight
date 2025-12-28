@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <!-- Eye shape -->
+  <ellipse cx="8" cy="8" rx="6" ry="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <!-- Pupil -->
+  <circle cx="8" cy="8" r="2" fill="currentColor"/>
+  <!-- Network dots -->
+  <circle cx="2" cy="8" r="1" fill="currentColor" opacity="0.7"/>
+  <circle cx="14" cy="8" r="1" fill="currentColor" opacity="0.7"/>
+</svg>

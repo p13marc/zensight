@@ -36,3 +36,28 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+# =============================================================================
+# Package metadata for cargo-deb
+# =============================================================================
+[package.metadata.deb]
+maintainer = "Marc Pardo <p13marc@gmail.com>"
+copyright = "2024, Marc Pardo"
+license-file = ["../LICENSE", "0"]
+extended-description = """Zenoh bridge for Syslog telemetry. Receives syslog messages via
+UDP, TCP, or Unix socket and publishes them to Zenoh for consumption
+by ZenSight or other Zenoh subscribers."""
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/zenoh-bridge-syslog", "usr/bin/", "755"],
+]
+depends = "$auto"
+
+# =============================================================================
+# Package metadata for cargo-generate-rpm
+# =============================================================================
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/zenoh-bridge-syslog", dest = "/usr/bin/zenoh-bridge-syslog", mode = "755" },
+]

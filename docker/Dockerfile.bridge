@@ -1,0 +1,80 @@
+# Multi-stage Dockerfile for ZenSight bridges
+# Build with: docker build --build-arg BRIDGE_PACKAGE=zenoh-bridge-syslog -f docker/Dockerfile.bridge .
+
+ARG BRIDGE_PACKAGE=zenoh-bridge-syslog
+ARG BRIDGE_NAME=syslog
+
+# =============================================================================
+# Stage 1: Build the bridge binary
+# =============================================================================
+FROM rust:1.83-bookworm AS builder
+
+ARG BRIDGE_PACKAGE
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy workspace files first for better layer caching
+COPY Cargo.toml Cargo.lock ./
+COPY zensight-common ./zensight-common
+COPY zensight-bridge-framework ./zensight-bridge-framework
+COPY zenoh-bridge-syslog ./zenoh-bridge-syslog
+COPY zenoh-bridge-sysinfo ./zenoh-bridge-sysinfo
+COPY zenoh-bridge-snmp ./zenoh-bridge-snmp
+COPY zenoh-bridge-netflow ./zenoh-bridge-netflow
+COPY zenoh-bridge-modbus ./zenoh-bridge-modbus
+COPY zenoh-bridge-gnmi ./zenoh-bridge-gnmi
+
+# Copy zensight crate (needed for workspace resolution, not built)
+COPY zensight ./zensight
+
+# Build the specified bridge in release mode
+RUN cargo build --release -p ${BRIDGE_PACKAGE}
+
+# =============================================================================
+# Stage 2: Create minimal runtime image
+# =============================================================================
+FROM debian:bookworm-slim
+
+ARG BRIDGE_PACKAGE
+ARG BRIDGE_NAME
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for running the bridge
+RUN useradd --create-home --shell /bin/bash zensight
+
+# Copy the built binary
+COPY --from=builder /build/target/release/${BRIDGE_PACKAGE} /usr/local/bin/${BRIDGE_PACKAGE}
+
+# Create config directory
+RUN mkdir -p /etc/zensight && chown zensight:zensight /etc/zensight
+
+# Switch to non-root user
+USER zensight
+WORKDIR /home/zensight
+
+# Default ports:
+# - 7447: Zenoh default port (TCP)
+# - 514: Syslog (UDP) - for syslog bridge
+# - 161: SNMP (UDP) - for snmp bridge
+EXPOSE 7447
+
+# Bridge-specific ports
+# Syslog: 514/udp, 514/tcp, /run/zensight/syslog.sock
+# SNMP: 162/udp (traps)
+# Sysinfo: no additional ports
+
+# Set the binary name as environment variable for the entrypoint
+ENV BRIDGE_BINARY=${BRIDGE_PACKAGE}
+
+# Default command runs the bridge with config from /etc/zensight
+ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/${BRIDGE_BINARY} \"$@\"", "--"]
+CMD ["--help"]

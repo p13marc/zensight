@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=ZenSight
+Comment=Observability frontend for Zenoh telemetry
+Exec=zensight
+Icon=com.github.p13marc.ZenSight
+Terminal=false
+Type=Application
+Categories=Network;System;Monitor;
+Keywords=zenoh;telemetry;monitoring;observability;snmp;syslog;netflow;modbus;
+StartupWMClass=zensight

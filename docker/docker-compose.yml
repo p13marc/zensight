@@ -1,0 +1,56 @@
+# Docker Compose for ZenSight bridges
+# Usage: docker compose -f docker/docker-compose.yml up
+
+services:
+  # Syslog bridge - receives syslog messages and publishes to Zenoh
+  bridge-syslog:
+    image: ghcr.io/p13marc/zensight-bridge-syslog:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.bridge
+      args:
+        BRIDGE_PACKAGE: zenoh-bridge-syslog
+        BRIDGE_NAME: syslog
+    ports:
+      - "514:514/udp"   # Syslog UDP
+      - "514:514/tcp"   # Syslog TCP
+      - "7447:7447"     # Zenoh
+    volumes:
+      - ./configs/syslog.json5:/etc/zensight/config.json5:ro
+    command: ["--config", "/etc/zensight/config.json5"]
+    restart: unless-stopped
+
+  # Sysinfo bridge - collects system metrics and publishes to Zenoh
+  bridge-sysinfo:
+    image: ghcr.io/p13marc/zensight-bridge-sysinfo:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.bridge
+      args:
+        BRIDGE_PACKAGE: zenoh-bridge-sysinfo
+        BRIDGE_NAME: sysinfo
+    ports:
+      - "7448:7447"     # Zenoh (different port to avoid conflict)
+    volumes:
+      - ./configs/sysinfo.json5:/etc/zensight/config.json5:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+    command: ["--config", "/etc/zensight/config.json5"]
+    restart: unless-stopped
+
+  # SNMP bridge - polls SNMP agents and publishes to Zenoh
+  bridge-snmp:
+    image: ghcr.io/p13marc/zensight-bridge-snmp:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.bridge
+      args:
+        BRIDGE_PACKAGE: zenoh-bridge-snmp
+        BRIDGE_NAME: snmp
+    ports:
+      - "162:162/udp"   # SNMP traps
+      - "7449:7447"     # Zenoh (different port to avoid conflict)
+    volumes:
+      - ./configs/snmp.json5:/etc/zensight/config.json5:ro
+    command: ["--config", "/etc/zensight/config.json5"]
+    restart: unless-stopped

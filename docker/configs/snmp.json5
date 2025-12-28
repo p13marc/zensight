@@ -1,0 +1,72 @@
+{
+  // Docker-optimized configuration for zenoh-bridge-snmp
+
+  zenoh: {
+    mode: "peer",
+    // Connect to external Zenoh router/peers
+    // connect: ["tcp/zenoh-router:7447"],
+  },
+
+  serialization: "json",
+
+  snmp: {
+    key_prefix: "zensight/snmp",
+
+    trap_listener: {
+      enabled: true,
+      bind: "0.0.0.0:162",
+    },
+
+    // Add your SNMP devices here
+    devices: [
+      // Example device configuration:
+      // {
+      //   name: "router01",
+      //   address: "192.168.1.1:161",
+      //   community: "public",
+      //   version: "v2c",
+      //   poll_interval_secs: 30,
+      //   oids: [
+      //     "1.3.6.1.2.1.1.1.0",   // sysDescr
+      //     "1.3.6.1.2.1.1.3.0",   // sysUpTime
+      //     "1.3.6.1.2.1.1.5.0",   // sysName
+      //   ],
+      //   walks: [
+      //     "1.3.6.1.2.1.2.2.1",   // ifTable
+      //   ],
+      // },
+    ],
+
+    oid_groups: {
+      system_info: {
+        oids: [
+          "1.3.6.1.2.1.1.1.0",
+          "1.3.6.1.2.1.1.3.0",
+          "1.3.6.1.2.1.1.5.0",
+          "1.3.6.1.2.1.1.6.0",
+        ],
+        walks: [],
+      },
+      network_interfaces: {
+        oids: [],
+        walks: ["1.3.6.1.2.1.2.2.1"],
+      },
+    },
+
+    oid_names: {
+      "1.3.6.1.2.1.1.1.0": "system/sysDescr",
+      "1.3.6.1.2.1.1.3.0": "system/sysUpTime",
+      "1.3.6.1.2.1.1.5.0": "system/sysName",
+      "1.3.6.1.2.1.1.6.0": "system/sysLocation",
+      "1.3.6.1.2.1.2.2.1.1": "if/{index}/ifIndex",
+      "1.3.6.1.2.1.2.2.1.2": "if/{index}/ifDescr",
+      "1.3.6.1.2.1.2.2.1.8": "if/{index}/ifOperStatus",
+      "1.3.6.1.2.1.2.2.1.10": "if/{index}/ifInOctets",
+      "1.3.6.1.2.1.2.2.1.16": "if/{index}/ifOutOctets",
+    },
+  },
+
+  logging: {
+    level: "info",
+  },
+}
