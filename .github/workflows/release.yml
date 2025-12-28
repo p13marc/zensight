@@ -213,6 +213,8 @@ jobs:
             package: zenoh-bridge-snmp
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -256,7 +258,14 @@ jobs:
   # Create GitHub Release with all artifacts
   # =============================================================================
   release:
-    needs: [build-deb, build-deb-bridges, build-rpm-fedora, build-flatpak, build-docker]
+    needs:
+      [
+        build-deb,
+        build-deb-bridges,
+        build-rpm-fedora,
+        build-flatpak,
+        build-docker,
+      ]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
