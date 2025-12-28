@@ -7,7 +7,7 @@ ARG BRIDGE_NAME=syslog
 # =============================================================================
 # Stage 1: Build the bridge binary
 # =============================================================================
-FROM rust:1.85-bookworm AS builder
+FROM rust:1.92-bookworm AS builder
 
 ARG BRIDGE_PACKAGE
 
