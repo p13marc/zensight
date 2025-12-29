@@ -5,8 +5,9 @@ use std::collections::HashMap;
 use iced::widget::{
     Column, column, container, row, rule, scrollable, table, text, text_input, tooltip,
 };
-use iced::{Alignment, Element, Length, Theme};
+use iced::{Alignment, Color, Element, Length, Theme};
 use iced_anim::widget::button;
+use iced_anim::{AnimationBuilder, Easing};
 
 use zensight_common::{DeviceStatus, HealthSnapshot, Protocol, TelemetryPoint, TelemetryValue};
 
@@ -653,27 +654,20 @@ fn render_device_cards<'a>(
 fn render_device_table(devices: Vec<&DeviceState>) -> Element<'_, Message> {
     use crate::view::theme;
 
-    // Status column with colored indicator
+    // Status column with animated indicator
     let status_column = table::column(
         text("Status").size(12),
         |device: &DeviceState| -> Element<'_, Message> {
             let status = device.effective_status();
-            let (color, label) = match status {
-                DeviceStatus::Online => (iced::Color::from_rgb(0.2, 0.8, 0.2), "Online"),
-                DeviceStatus::Degraded => (iced::Color::from_rgb(1.0, 0.6, 0.0), "Degraded"),
-                DeviceStatus::Offline => (iced::Color::from_rgb(0.9, 0.2, 0.2), "Offline"),
-                DeviceStatus::Unknown => (iced::Color::from_rgb(0.5, 0.5, 0.5), "Unknown"),
+            let label = match status {
+                DeviceStatus::Online => "Online",
+                DeviceStatus::Degraded => "Degraded",
+                DeviceStatus::Offline => "Offline",
+                DeviceStatus::Unknown => "Unknown",
             };
 
             row![
-                container(text("").size(8))
-                    .width(10)
-                    .height(10)
-                    .style(move |_theme: &Theme| container::Style {
-                        background: Some(iced::Background::Color(color)),
-                        border: iced::Border::default().rounded(5),
-                        ..Default::default()
-                    }),
+                animated_status_indicator(status, 10.0),
                 text(label).size(11)
             ]
             .spacing(6)
@@ -910,6 +904,36 @@ fn format_telemetry_value(value: &TelemetryValue) -> String {
     }
 }
 
+/// Get the color for a device status.
+fn status_color(status: DeviceStatus) -> Color {
+    match status {
+        DeviceStatus::Online => Color::from_rgb(0.2, 0.8, 0.2), // Green
+        DeviceStatus::Degraded => Color::from_rgb(1.0, 0.6, 0.0), // Orange
+        DeviceStatus::Offline => Color::from_rgb(0.9, 0.2, 0.2), // Red
+        DeviceStatus::Unknown => Color::from_rgb(0.5, 0.5, 0.5), // Gray
+    }
+}
+
+/// Render an animated status indicator dot.
+/// The color smoothly transitions when the status changes.
+fn animated_status_indicator<'a>(status: DeviceStatus, size: f32) -> Element<'a, Message> {
+    let color = status_color(status);
+
+    AnimationBuilder::new(color, move |animated_color| {
+        container(text(""))
+            .width(size)
+            .height(size)
+            .style(move |_theme: &Theme| container::Style {
+                background: Some(iced::Background::Color(animated_color)),
+                border: iced::Border::default().rounded(size / 2.0),
+                ..Default::default()
+            })
+            .into()
+    })
+    .animation(Easing::EASE_IN_OUT.quick())
+    .into()
+}
+
 /// Render a single device card.
 fn render_device_card<'a>(
     device: &'a DeviceState,
@@ -917,7 +941,9 @@ fn render_device_card<'a>(
 ) -> Element<'a, Message> {
     // Use effective_status which combines bridge liveness with local staleness detection
     let status = device.effective_status();
-    let status_icon = icons::device_status_icon(status, IconSize::Small);
+
+    // Use animated status indicator instead of static SVG
+    let status_indicator_dot = animated_status_indicator(status, 12.0);
 
     // Add tooltip to status indicator showing status details
     let status_tooltip_text = match status {
@@ -939,7 +965,7 @@ fn render_device_card<'a>(
         DeviceStatus::Unknown => "Status unknown".to_string(),
     };
     let status_indicator = tooltip(
-        status_icon,
+        status_indicator_dot,
         container(text(status_tooltip_text).size(11))
             .padding(6)
             .style(container::rounded_box),
