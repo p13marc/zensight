@@ -183,18 +183,29 @@ mouse_area(device_card)
 
 **Task:** Review Iced 0.14 `sensor` widget API and determine applicability
 
-**Questions to answer:**
-- Does it support custom styling?
-- Can it display arbitrary telemetry values?
-- Does it integrate with our `TelemetryValue` types?
+**Status:** ✅ Evaluated - Not applicable for our use case
 
-**Potential uses:**
-- Replace Gauge component for CPU/memory display
-- Real-time metric cards in overview
-- Network throughput indicators
+**Findings:**
+The `sensor` widget is for detecting when content pops in and out of view (visibility detection), not for displaying sensor/telemetry data. It provides:
+- `on_show` - triggered when content becomes visible
+- `on_hide` - triggered when content goes out of view
+- `on_resize` - triggered when visible content changes size
+- `anticipate` - trigger early at a given distance before visibility
 
-**Effort:** Low (research) + Medium (implementation)
-**Impact:** Medium - Consistent widget behavior
+**Actual potential uses:**
+- Lazy loading device cards as user scrolls (performance optimization)
+- Triggering data fetching when elements come into view
+- Infinite scroll implementations
+
+**Not applicable for:**
+- ~~Replace Gauge component for CPU/memory display~~
+- ~~Real-time metric cards in overview~~
+- ~~Network throughput indicators~~
+
+**Conclusion:** Keep existing custom Gauge/Sparkline components. The sensor widget serves a different purpose (visibility detection vs data display).
+
+**Effort:** N/A (not implementing)
+**Impact:** N/A
 
 ---
 
@@ -329,9 +340,9 @@ node.position.set_target(calculated_position);
 | 5 | 4.1 Chart zoom/pan animations | Medium | Medium | ✅ Already has feedback overlays |
 | 6 | 1.2 Double-click to open | Low | Low | ✅ Done |
 | 7 | 2.3 Dashboard table view | Medium | Medium | ✅ Done |
-| 8 | 5.1 Grid widget for dashboard | Low | Low | Pending |
-| 9 | 4.3 Page transitions | Medium | Low | Pending |
-| 10 | 3.1 Sensor widget evaluation | Low | TBD | Pending |
+| 8 | 5.1 Grid widget for dashboard | Low | Low | ✅ Done |
+| 9 | 4.3 Page transitions | Medium | Low | Pending (complex) |
+| 10 | 3.1 Sensor widget evaluation | Low | TBD | ✅ Evaluated (N/A) |
 
 ---
 
