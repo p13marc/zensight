@@ -2,11 +2,35 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{Column, column, container, row, rule, scrollable, text, text_input, tooltip};
-use iced::{Alignment, Element, Length, Theme};
+use iced::widget::{
+    Column, column, container, grid, mouse_area, row, rule, scrollable, table, text, text_input,
+    tooltip,
+};
+use iced::{Alignment, Color, Element, Length, Theme};
 use iced_anim::widget::button;
+use iced_anim::{AnimationBuilder, Easing};
 
 use zensight_common::{DeviceStatus, HealthSnapshot, Protocol, TelemetryPoint, TelemetryValue};
+
+/// Dashboard view mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DashboardViewMode {
+    /// Card grid view (default).
+    #[default]
+    Grid,
+    /// Table view with sortable columns.
+    Table,
+}
+
+impl DashboardViewMode {
+    /// Toggle between view modes.
+    pub fn toggle(self) -> Self {
+        match self {
+            DashboardViewMode::Grid => DashboardViewMode::Table,
+            DashboardViewMode::Table => DashboardViewMode::Grid,
+        }
+    }
+}
 
 /// Get the current timestamp in milliseconds.
 fn current_timestamp() -> i64 {
@@ -123,6 +147,8 @@ pub struct DashboardState {
     pub current_page: usize,
     /// Number of devices per page.
     pub devices_per_page: usize,
+    /// Current view mode (grid or table).
+    pub view_mode: DashboardViewMode,
 }
 
 impl Default for DashboardState {
@@ -137,6 +163,7 @@ impl Default for DashboardState {
             last_error: None,
             current_page: 0,
             devices_per_page: DEFAULT_DEVICES_PER_PAGE,
+            view_mode: DashboardViewMode::default(),
         }
     }
 }
@@ -269,6 +296,11 @@ impl DashboardState {
         protocols.sort();
         protocols
     }
+
+    /// Toggle the view mode between grid and table.
+    pub fn toggle_view_mode(&mut self) {
+        self.view_mode = self.view_mode.toggle();
+    }
 }
 
 /// Render the dashboard view.
@@ -387,10 +419,28 @@ fn render_header(
     .on_press(Message::OpenSettings)
     .style(iced::widget::button::secondary);
 
+    // View mode toggle button (grid vs table)
+    let view_mode_icon = match state.view_mode {
+        DashboardViewMode::Grid => icons::table(IconSize::Medium),
+        DashboardViewMode::Table => icons::protocol(IconSize::Medium), // grid-like icon
+    };
+    let view_mode_label = match state.view_mode {
+        DashboardViewMode::Grid => "Table",
+        DashboardViewMode::Table => "Grid",
+    };
+    let view_mode_button = button(
+        row![view_mode_icon, text(view_mode_label).size(14)]
+            .spacing(6)
+            .align_y(Alignment::Center),
+    )
+    .on_press(Message::ToggleDashboardViewMode)
+    .style(iced::widget::button::secondary);
+
     let header_row = row![
         title,
         device_count,
         status,
+        view_mode_button,
         theme_button,
         alerts_button,
         topology_button,
@@ -550,17 +600,17 @@ fn render_device_grid<'a>(
     // Paginate the filtered devices
     let start = state.current_page * state.devices_per_page;
     let end = (start + state.devices_per_page).min(all_devices.len());
-    let devices = if start < all_devices.len() {
-        &all_devices[start..end]
+    let devices: Vec<_> = if start < all_devices.len() {
+        all_devices[start..end].to_vec()
     } else {
-        &[]
+        vec![]
     };
 
-    let mut device_list = Column::new().spacing(10);
-
-    for device in devices {
-        device_list = device_list.push(render_device_card(device, groups));
-    }
+    // Render based on view mode
+    let content: Element<'a, Message> = match state.view_mode {
+        DashboardViewMode::Grid => render_device_cards(&devices, groups),
+        DashboardViewMode::Table => render_device_table(devices),
+    };
 
     // Add pagination controls if there are multiple pages
     let total_pages = if all_devices.is_empty() {
@@ -568,6 +618,8 @@ fn render_device_grid<'a>(
     } else {
         all_devices.len().div_ceil(state.devices_per_page)
     };
+
+    let mut device_list = Column::new().spacing(10).push(content);
 
     if total_pages > 1 {
         let pagination = render_pagination_controls_with_count(
@@ -583,6 +635,168 @@ fn render_device_grid<'a>(
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+/// Minimum card width for responsive grid layout.
+const CARD_MIN_WIDTH: f32 = 350.0;
+
+/// Render devices as cards (grid view).
+/// Uses a responsive grid layout that adjusts columns based on available width.
+fn render_device_cards<'a>(
+    devices: &[&'a DeviceState],
+    groups: &'a GroupsState,
+) -> Element<'a, Message> {
+    let cards: Vec<Element<'a, Message>> = devices
+        .iter()
+        .map(|device| render_device_card(device, groups))
+        .collect();
+
+    // Use fluid grid layout - automatically adjusts columns based on container width
+    // Cards will be at least CARD_MIN_WIDTH pixels wide
+    grid(cards)
+        .fluid(CARD_MIN_WIDTH)
+        .spacing(10)
+        .height(Length::Shrink)
+        .into()
+}
+
+/// Render devices as a table.
+fn render_device_table(devices: Vec<&DeviceState>) -> Element<'_, Message> {
+    use crate::view::theme;
+
+    // Status column with animated indicator
+    let status_column = table::column(
+        text("Status").size(12),
+        |device: &DeviceState| -> Element<'_, Message> {
+            let status = device.effective_status();
+            let label = match status {
+                DeviceStatus::Online => "Online",
+                DeviceStatus::Degraded => "Degraded",
+                DeviceStatus::Offline => "Offline",
+                DeviceStatus::Unknown => "Unknown",
+            };
+
+            row![
+                animated_status_indicator(status, 10.0),
+                text(label).size(11)
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .into()
+        },
+    )
+    .width(80);
+
+    // Device name column (clickable)
+    let name_column = table::column(
+        text("Device").size(12),
+        |device: &DeviceState| -> Element<'_, Message> {
+            let device_id = device.id.clone();
+            button(text(&device.id.source).size(11))
+                .on_press(Message::SelectDevice(device_id))
+                .style(iced::widget::button::text)
+                .padding(0)
+                .into()
+        },
+    )
+    .width(Length::FillPortion(2));
+
+    // Protocol column with icon
+    let protocol_column = table::column(
+        text("Protocol").size(12),
+        |device: &DeviceState| -> Element<'_, Message> {
+            row![
+                icons::protocol_icon::<Message>(device.id.protocol, IconSize::Small),
+                text(format!("{:?}", device.id.protocol)).size(11)
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center)
+            .into()
+        },
+    )
+    .width(100);
+
+    // Metrics count column
+    let metrics_column = table::column(
+        text("Metrics").size(12),
+        |device: &DeviceState| -> Element<'_, Message> {
+            text(format!("{}", device.metric_count)).size(11).into()
+        },
+    )
+    .width(70);
+
+    // Last update column
+    let update_column = table::column(
+        text("Last Update").size(12),
+        |device: &DeviceState| -> Element<'_, Message> {
+            let ago = format_time_ago(device.last_update);
+            text(ago)
+                .size(11)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
+                })
+                .into()
+        },
+    )
+    .width(100);
+
+    // Actions column
+    let actions_column = table::column(
+        text("").size(12),
+        |device: &DeviceState| -> Element<'_, Message> {
+            let device_id = device.id.clone();
+            button(text("View").size(10))
+                .on_press(Message::SelectDevice(device_id))
+                .style(iced::widget::button::secondary)
+                .padding([2, 8])
+                .into()
+        },
+    )
+    .width(60);
+
+    // Table API: columns first, then data
+    let tbl = table(
+        [
+            status_column,
+            name_column,
+            protocol_column,
+            metrics_column,
+            update_column,
+            actions_column,
+        ],
+        devices,
+    )
+    .padding(6)
+    .padding_y(4);
+
+    container(tbl).width(Length::Fill).padding(10).into()
+}
+
+/// Format a timestamp as "X ago" string.
+fn format_time_ago(timestamp: i64) -> String {
+    let now = current_timestamp();
+    let diff_ms = now - timestamp;
+
+    if diff_ms < 0 {
+        return "just now".to_string();
+    }
+
+    let seconds = diff_ms / 1000;
+    let minutes = seconds / 60;
+    let hours = minutes / 60;
+    let days = hours / 24;
+
+    if days > 0 {
+        format!("{}d ago", days)
+    } else if hours > 0 {
+        format!("{}h ago", hours)
+    } else if minutes > 0 {
+        format!("{}m ago", minutes)
+    } else if seconds > 0 {
+        format!("{}s ago", seconds)
+    } else {
+        "just now".to_string()
+    }
 }
 
 /// Render pagination controls with explicit count (for group-filtered lists).
@@ -700,6 +914,36 @@ fn format_telemetry_value(value: &TelemetryValue) -> String {
     }
 }
 
+/// Get the color for a device status.
+fn status_color(status: DeviceStatus) -> Color {
+    match status {
+        DeviceStatus::Online => Color::from_rgb(0.2, 0.8, 0.2), // Green
+        DeviceStatus::Degraded => Color::from_rgb(1.0, 0.6, 0.0), // Orange
+        DeviceStatus::Offline => Color::from_rgb(0.9, 0.2, 0.2), // Red
+        DeviceStatus::Unknown => Color::from_rgb(0.5, 0.5, 0.5), // Gray
+    }
+}
+
+/// Render an animated status indicator dot.
+/// The color smoothly transitions when the status changes.
+fn animated_status_indicator<'a>(status: DeviceStatus, size: f32) -> Element<'a, Message> {
+    let color = status_color(status);
+
+    AnimationBuilder::new(color, move |animated_color| {
+        container(text(""))
+            .width(size)
+            .height(size)
+            .style(move |_theme: &Theme| container::Style {
+                background: Some(iced::Background::Color(animated_color)),
+                border: iced::Border::default().rounded(size / 2.0),
+                ..Default::default()
+            })
+            .into()
+    })
+    .animation(Easing::EASE_IN_OUT.quick())
+    .into()
+}
+
 /// Render a single device card.
 fn render_device_card<'a>(
     device: &'a DeviceState,
@@ -707,7 +951,9 @@ fn render_device_card<'a>(
 ) -> Element<'a, Message> {
     // Use effective_status which combines bridge liveness with local staleness detection
     let status = device.effective_status();
-    let status_icon = icons::device_status_icon(status, IconSize::Small);
+
+    // Use animated status indicator instead of static SVG
+    let status_indicator_dot = animated_status_indicator(status, 12.0);
 
     // Add tooltip to status indicator showing status details
     let status_tooltip_text = match status {
@@ -729,7 +975,7 @@ fn render_device_card<'a>(
         DeviceStatus::Unknown => "Status unknown".to_string(),
     };
     let status_indicator = tooltip(
-        status_icon,
+        status_indicator_dot,
         container(text(status_tooltip_text).size(11))
             .padding(6)
             .style(container::rounded_box),
@@ -802,11 +1048,16 @@ fn render_device_card<'a>(
 
     let card_content = column![header, preview].spacing(5);
 
-    button(card_content)
+    let card_button = button(card_content)
         .on_press(Message::SelectDevice(device.id.clone()))
         .padding(10)
         .width(Length::Fill)
-        .style(iced::widget::button::secondary)
+        .style(iced::widget::button::secondary);
+
+    // Wrap in mouse_area for double-click support
+    // Double-click also opens the device (same as single click for now)
+    mouse_area(card_button)
+        .on_double_click(Message::SelectDevice(device.id.clone()))
         .into()
 }
 

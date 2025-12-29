@@ -1,8 +1,11 @@
 //! ZenSight Iced application.
 
-use iced::widget::Id;
 use iced::widget::operation::focus;
-use iced::{Element, Subscription, Task, Theme};
+use iced::widget::{Id, container};
+use iced::{Element, Length, Subscription, Task, Theme};
+// Note: iced_anim is available but AnimationBuilder requires Fn closures,
+// which doesn't work well with view transitions. Consider using iced's
+// built-in animation support or widget-level animations instead.
 use std::sync::LazyLock;
 
 use zensight_common::{
@@ -91,6 +94,8 @@ pub struct ZenSight {
     syslog_filter: SyslogFilterState,
     /// Current view.
     current_view: CurrentView,
+    /// View transition counter - increments on each view change for animation.
+    view_transition_key: u32,
     /// Stale threshold in milliseconds (devices not updated within this time are marked unhealthy).
     stale_threshold_ms: i64,
     /// Demo mode (use mock data instead of Zenoh).
@@ -195,6 +200,7 @@ impl ZenSight {
             topology,
             syslog_filter,
             current_view,
+            view_transition_key: 0,
             stale_threshold_ms,
             demo_mode,
             theme,
@@ -302,7 +308,7 @@ impl ZenSight {
 
             Message::ClearSelection => {
                 self.selected_device = None;
-                self.current_view = CurrentView::Dashboard;
+                self.set_view(CurrentView::Dashboard);
             }
 
             Message::ToggleProtocolFilter(protocol) => {
@@ -323,6 +329,10 @@ impl ZenSight {
 
             Message::GoToPage(page) => {
                 self.dashboard.go_to_page(page);
+            }
+
+            Message::ToggleDashboardViewMode => {
+                self.dashboard.toggle_view_mode();
             }
 
             Message::SelectMetricForChart(metric_name) => {
@@ -427,15 +437,16 @@ impl ZenSight {
 
             // Settings messages
             Message::OpenSettings => {
-                self.current_view = CurrentView::Settings;
+                self.set_view(CurrentView::Settings);
             }
 
             Message::CloseSettings => {
-                self.current_view = if self.selected_device.is_some() {
+                let target = if self.selected_device.is_some() {
                     CurrentView::Device
                 } else {
                     CurrentView::Dashboard
                 };
+                self.set_view(target);
             }
 
             Message::SetZenohMode(mode) => {
@@ -472,16 +483,17 @@ impl ZenSight {
 
             // Alert messages
             Message::OpenAlerts => {
-                self.current_view = CurrentView::Alerts;
+                self.set_view(CurrentView::Alerts);
                 self.save_current_view();
             }
 
             Message::CloseAlerts => {
-                self.current_view = if self.selected_device.is_some() {
+                let target = if self.selected_device.is_some() {
                     CurrentView::Device
                 } else {
                     CurrentView::Dashboard
                 };
+                self.set_view(target);
                 self.save_current_view();
             }
 
@@ -650,12 +662,12 @@ impl ZenSight {
             Message::OpenTopology => {
                 // Update topology from current device data before showing
                 self.topology.update_from_devices(&self.dashboard.devices);
-                self.current_view = CurrentView::Topology;
+                self.set_view(CurrentView::Topology);
                 self.save_current_view();
             }
 
             Message::CloseTopology => {
-                self.current_view = CurrentView::Dashboard;
+                self.set_view(CurrentView::Dashboard);
                 self.save_current_view();
             }
 
@@ -801,6 +813,14 @@ impl ZenSight {
         }
     }
 
+    /// Set the current view and trigger a transition animation.
+    fn set_view(&mut self, view: CurrentView) {
+        if self.current_view != view {
+            self.current_view = view;
+            self.view_transition_key = self.view_transition_key.wrapping_add(1);
+        }
+    }
+
     /// Focus the appropriate search input based on current view.
     fn focus_search(&self) -> Task<Message> {
         match self.current_view {
@@ -814,25 +834,27 @@ impl ZenSight {
     fn handle_escape(&mut self) {
         match self.current_view {
             CurrentView::Settings => {
-                self.current_view = if self.selected_device.is_some() {
+                let target = if self.selected_device.is_some() {
                     CurrentView::Device
                 } else {
                     CurrentView::Dashboard
                 };
+                self.set_view(target);
             }
             CurrentView::Alerts => {
-                self.current_view = if self.selected_device.is_some() {
+                let target = if self.selected_device.is_some() {
                     CurrentView::Device
                 } else {
                     CurrentView::Dashboard
                 };
+                self.set_view(target);
             }
             CurrentView::Topology => {
                 // If something is selected, clear selection; otherwise go back to dashboard
                 if self.topology.selected_node.is_some() || self.topology.selected_edge.is_some() {
                     self.topology.clear_selection();
                 } else {
-                    self.current_view = CurrentView::Dashboard;
+                    self.set_view(CurrentView::Dashboard);
                 }
             }
             CurrentView::Device => {
@@ -842,7 +864,7 @@ impl ZenSight {
                         device.clear_chart_selection();
                     } else {
                         self.selected_device = None;
-                        self.current_view = CurrentView::Dashboard;
+                        self.set_view(CurrentView::Dashboard);
                     }
                 }
             }
@@ -908,11 +930,20 @@ impl ZenSight {
             ),
         };
 
+        // Wrap main view in container
+        // Note: view_transition_key is available for future animation implementations
+        // once iced provides better support for view-level transitions
+        let _transition_key = self.view_transition_key;
+        let view_container: Element<'_, Message> = container(main_view)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+
         // Show groups panel as a sidebar if open
         if self.groups.panel_open {
-            row![main_view, groups_panel(&self.groups)].into()
+            row![view_container, groups_panel(&self.groups)].into()
         } else {
-            main_view
+            view_container
         }
     }
 
@@ -1008,7 +1039,7 @@ impl ZenSight {
         let max_history = self.settings.max_history_value();
         let detail_state = DeviceDetailState::with_max_history(device_id, max_history);
         self.selected_device = Some(detail_state);
-        self.current_view = CurrentView::Device;
+        self.set_view(CurrentView::Device);
     }
 
     /// Save settings.

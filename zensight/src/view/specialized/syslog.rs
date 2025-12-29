@@ -1,11 +1,12 @@
 //! Syslog event specialized view.
 //!
 //! Displays log events with severity filtering, search, and real-time streaming.
+//! Uses Iced 0.14's table widget for structured log display.
 
 use std::collections::HashMap;
 
 use iced::widget::{
-    Column, Row, column, container, pick_list, row, rule, scrollable, text, text_input,
+    Row, column, container, pick_list, row, rule, scrollable, table, text, text_input,
 };
 use iced::{Alignment, Element, Length, Theme};
 use iced_anim::widget::button;
@@ -532,7 +533,7 @@ fn render_severity_summary<'a>(
         .into()
 }
 
-/// Render the log stream.
+/// Render the log stream using Iced 0.14's table widget.
 fn render_log_stream<'a>(
     state: &'a DeviceDetailState,
     filter_state: &'a SyslogFilterState,
@@ -560,69 +561,89 @@ fn render_log_stream<'a>(
         .into();
     }
 
-    // Sort by timestamp descending (newest first)
+    // Sort by timestamp descending (newest first) and limit to 100
     let mut sorted_messages = filtered_messages;
     sorted_messages.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    sorted_messages.truncate(100);
 
-    let mut log_rows = Column::new().spacing(4);
+    // Define table columns with explicit Element type
+    let time_column = table::column(
+        text("Time").size(11),
+        |msg: SyslogMessage| -> Element<'_, Message> {
+            let time_text = format_timestamp(msg.timestamp);
+            text(time_text)
+                .size(10)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
+                })
+                .into()
+        },
+    );
 
-    for msg in sorted_messages.into_iter().take(100) {
-        // Limit to 100 most recent
-        let severity_color = msg.severity.color();
+    let severity_column = table::column(
+        text("Severity").size(11),
+        |msg: SyslogMessage| -> Element<'_, Message> {
+            let severity_color = msg.severity.color();
+            text(msg.severity.label())
+                .size(10)
+                .style(move |_theme: &Theme| text::Style {
+                    color: Some(severity_color),
+                })
+                .into()
+        },
+    );
 
-        let time_text = format_timestamp(msg.timestamp);
-        let time = text(time_text).size(10).style(|t: &Theme| text::Style {
-            color: Some(theme::colors(t).text_muted()),
-        });
+    let facility_column = table::column(
+        text("Facility").size(11),
+        |msg: SyslogMessage| -> Element<'_, Message> {
+            text(msg.facility)
+                .size(10)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
+                })
+                .into()
+        },
+    );
 
-        let severity = text(msg.severity.label())
-            .size(10)
-            .style(move |_theme: &Theme| text::Style {
-                color: Some(severity_color),
-            });
+    let app_column = table::column(
+        text("App").size(11),
+        |msg: SyslogMessage| -> Element<'_, Message> {
+            text(msg.app_name)
+                .size(10)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).primary()),
+                })
+                .into()
+        },
+    );
 
-        let app = text(msg.app_name).size(10).style(|t: &Theme| text::Style {
-            color: Some(theme::colors(t).primary()),
-        });
+    let message_column = table::column(
+        text("Message").size(11),
+        |msg: SyslogMessage| -> Element<'_, Message> {
+            let message_text = if msg.message.len() > 100 {
+                format!("{}...", &msg.message[..97])
+            } else {
+                msg.message
+            };
+            text(message_text).size(11).into()
+        },
+    );
 
-        let message_text = if msg.message.len() > 80 {
-            format!("{}...", &msg.message[..77])
-        } else {
-            msg.message
-        };
-        let message = text(message_text).size(11);
+    // Build the table
+    let log_table = table(
+        [
+            time_column,
+            severity_column,
+            facility_column,
+            app_column,
+            message_column,
+        ],
+        sorted_messages,
+    )
+    .padding(6)
+    .padding_y(4);
 
-        let row_content = row![time, severity, app, message]
-            .spacing(10)
-            .align_y(Alignment::Center);
-
-        let is_critical = matches!(
-            msg.severity,
-            SyslogSeverity::Emergency | SyslogSeverity::Alert | SyslogSeverity::Critical
-        );
-        let is_error = matches!(msg.severity, SyslogSeverity::Error);
-        let is_warning = matches!(msg.severity, SyslogSeverity::Warning);
-
-        let row_container =
-            container(row_content)
-                .padding(6)
-                .width(Length::Fill)
-                .style(move |t: &Theme| container::Style {
-                    background: Some(iced::Background::Color(
-                        theme::colors(t).syslog_row_background(is_critical, is_error, is_warning),
-                    )),
-                    border: iced::Border {
-                        color: theme::colors(t).border_subtle(),
-                        width: 1.0,
-                        radius: 2.0.into(),
-                    },
-                    ..Default::default()
-                });
-
-        log_rows = log_rows.push(row_container);
-    }
-
-    let scroll = scrollable(log_rows)
+    let scroll = scrollable(log_table)
         .width(Length::Fill)
         .height(Length::Fill);
 
