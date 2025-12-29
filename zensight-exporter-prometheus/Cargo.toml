@@ -1,0 +1,52 @@
+[package]
+name = "zensight-exporter-prometheus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Prometheus metrics exporter for ZenSight telemetry"
+
+[dependencies]
+# Internal crates
+zensight-common = { path = "../zensight-common" }
+
+# Zenoh
+zenoh.workspace = true
+
+# Async runtime
+tokio.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+ciborium.workspace = true
+
+# Configuration
+json5.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# CLI
+clap.workspace = true
+
+# Prometheus
+prometheus-client = "0.22"
+
+# HTTP server
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors"] }
+
+# Utilities
+parking_lot = "0.12"
+glob = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

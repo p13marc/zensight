@@ -1,0 +1,73 @@
+{
+  // Zenoh connection settings
+  zenoh: {
+    // Mode: "client", "peer", or "router"
+    mode: "peer",
+
+    // Endpoints to connect to (for client mode)
+    // connect: ["tcp/localhost:7447"],
+
+    // Endpoints to listen on (for peer/router mode)
+    // listen: ["tcp/0.0.0.0:7448"],
+  },
+
+  // Prometheus exporter settings
+  prometheus: {
+    // Address to listen on for HTTP requests
+    listen: "0.0.0.0:9090",
+
+    // Path for the metrics endpoint
+    path: "/metrics",
+
+    // Metric name prefix (metrics will be named {prefix}_{protocol}_{metric})
+    prefix: "zensight",
+
+    // Default labels to add to all metrics
+    default_labels: {
+      // environment: "production",
+      // datacenter: "us-east-1",
+    },
+  },
+
+  // Metric aggregation settings
+  aggregation: {
+    // How long to keep metrics without updates before expiring (seconds)
+    stale_timeout_secs: 300,
+
+    // Maximum unique time series (memory protection)
+    max_series: 100000,
+
+    // How often to run cleanup of stale metrics (seconds)
+    cleanup_interval_secs: 60,
+  },
+
+  // Metric filtering (optional)
+  filters: {
+    // Only include these protocols (empty = all)
+    // include_protocols: ["snmp", "sysinfo"],
+
+    // Exclude these protocols
+    // exclude_protocols: ["syslog"],
+
+    // Glob patterns for metrics to include (empty = all)
+    // include_metrics: ["cpu/**", "memory/**"],
+
+    // Glob patterns for metrics to exclude
+    // exclude_metrics: ["**/debug/**"],
+
+    // Only include these sources (empty = all)
+    // include_sources: ["router01", "server01"],
+
+    // Exclude these sources
+    // exclude_sources: ["test-device"],
+  },
+
+  // Logging configuration
+  logging: {
+    // Log level: "trace", "debug", "info", "warn", "error"
+    level: "info",
+
+    // Log format: "text" or "json"
+    format: "text",
+  },
+}
