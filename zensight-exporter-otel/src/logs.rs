@@ -18,7 +18,7 @@ pub enum SyslogSeverity {
 
 impl SyslogSeverity {
     /// Parse from a string (number or name).
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         // Try numeric first
         if let Ok(n) = s.parse::<u8>() {
             return Self::from_number(n);
@@ -144,7 +144,7 @@ impl SyslogFacility {
     }
 
     /// Parse from a string (number or name).
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         if let Ok(n) = s.parse::<u8>() {
             return Self::from_number(n);
         }
@@ -244,14 +244,14 @@ impl LogRecord {
         let severity = point
             .labels
             .get("severity")
-            .and_then(|s| SyslogSeverity::from_str(s))
+            .and_then(|s| SyslogSeverity::parse(s))
             .unwrap_or(SyslogSeverity::Informational);
 
         // Extract facility from labels
         let facility = point
             .labels
             .get("facility")
-            .and_then(|s| SyslogFacility::from_str(s));
+            .and_then(|s| SyslogFacility::parse(s));
 
         // Extract appname from labels
         let appname = point.labels.get("appname").cloned();
@@ -279,31 +279,25 @@ mod tests {
 
     #[test]
     fn test_syslog_severity_from_str() {
-        assert_eq!(
-            SyslogSeverity::from_str("0"),
-            Some(SyslogSeverity::Emergency)
-        );
-        assert_eq!(SyslogSeverity::from_str("3"), Some(SyslogSeverity::Error));
-        assert_eq!(SyslogSeverity::from_str("7"), Some(SyslogSeverity::Debug));
+        assert_eq!(SyslogSeverity::parse("0"), Some(SyslogSeverity::Emergency));
+        assert_eq!(SyslogSeverity::parse("3"), Some(SyslogSeverity::Error));
+        assert_eq!(SyslogSeverity::parse("7"), Some(SyslogSeverity::Debug));
 
         assert_eq!(
-            SyslogSeverity::from_str("emergency"),
+            SyslogSeverity::parse("emergency"),
             Some(SyslogSeverity::Emergency)
         );
+        assert_eq!(SyslogSeverity::parse("error"), Some(SyslogSeverity::Error));
         assert_eq!(
-            SyslogSeverity::from_str("error"),
-            Some(SyslogSeverity::Error)
-        );
-        assert_eq!(
-            SyslogSeverity::from_str("warning"),
+            SyslogSeverity::parse("warning"),
             Some(SyslogSeverity::Warning)
         );
         assert_eq!(
-            SyslogSeverity::from_str("info"),
+            SyslogSeverity::parse("info"),
             Some(SyslogSeverity::Informational)
         );
 
-        assert_eq!(SyslogSeverity::from_str("invalid"), None);
+        assert_eq!(SyslogSeverity::parse("invalid"), None);
     }
 
     #[test]
@@ -320,18 +314,18 @@ mod tests {
 
     #[test]
     fn test_syslog_facility_from_str() {
-        assert_eq!(SyslogFacility::from_str("0"), Some(SyslogFacility::Kern));
-        assert_eq!(SyslogFacility::from_str("3"), Some(SyslogFacility::Daemon));
+        assert_eq!(SyslogFacility::parse("0"), Some(SyslogFacility::Kern));
+        assert_eq!(SyslogFacility::parse("3"), Some(SyslogFacility::Daemon));
         assert_eq!(
-            SyslogFacility::from_str("daemon"),
+            SyslogFacility::parse("daemon"),
             Some(SyslogFacility::Daemon)
         );
         assert_eq!(
-            SyslogFacility::from_str("local0"),
+            SyslogFacility::parse("local0"),
             Some(SyslogFacility::Local0)
         );
 
-        assert_eq!(SyslogFacility::from_str("invalid"), None);
+        assert_eq!(SyslogFacility::parse("invalid"), None);
     }
 
     #[test]

@@ -16,12 +16,11 @@ pub fn sanitize_metric_name(name: &str) -> String {
 
     // Handle first character specially - must be letter or underscore
     // If it's a digit, prefix with underscore and keep the digit
-    if let Some(&first) = chars.peek() {
-        if first.is_ascii_digit() {
+    if let Some(&first) = chars.peek()
+        && first.is_ascii_digit() {
             result.push('_');
             last_was_underscore = true;
         }
-    }
 
     for c in chars {
         // After first char handling, all alphanumeric, underscore, and colon are valid

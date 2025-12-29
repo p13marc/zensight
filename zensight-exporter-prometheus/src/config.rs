@@ -19,6 +19,7 @@ pub enum ConfigError {
 
 /// Complete exporter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct ExporterConfig {
     /// Zenoh connection settings.
     #[serde(default)]
@@ -244,17 +245,6 @@ impl ExporterConfig {
     }
 }
 
-impl Default for ExporterConfig {
-    fn default() -> Self {
-        Self {
-            zenoh: ZenohConfig::default(),
-            prometheus: PrometheusConfig::default(),
-            aggregation: AggregationConfig::default(),
-            filters: FilterConfig::default(),
-            logging: LoggingConfig::default(),
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

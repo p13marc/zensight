@@ -254,50 +254,38 @@ fn test_syslog_severity_mapping() {
 #[test]
 fn test_syslog_severity_parsing() {
     assert_eq!(
-        SyslogSeverity::from_str("emergency"),
+        SyslogSeverity::parse("emergency"),
         Some(SyslogSeverity::Emergency)
     );
+    assert_eq!(SyslogSeverity::parse("alert"), Some(SyslogSeverity::Alert));
     assert_eq!(
-        SyslogSeverity::from_str("alert"),
-        Some(SyslogSeverity::Alert)
-    );
-    assert_eq!(
-        SyslogSeverity::from_str("critical"),
+        SyslogSeverity::parse("critical"),
         Some(SyslogSeverity::Critical)
     );
+    assert_eq!(SyslogSeverity::parse("error"), Some(SyslogSeverity::Error));
     assert_eq!(
-        SyslogSeverity::from_str("error"),
-        Some(SyslogSeverity::Error)
-    );
-    assert_eq!(
-        SyslogSeverity::from_str("warning"),
+        SyslogSeverity::parse("warning"),
         Some(SyslogSeverity::Warning)
     );
     assert_eq!(
-        SyslogSeverity::from_str("notice"),
+        SyslogSeverity::parse("notice"),
         Some(SyslogSeverity::Notice)
     );
     assert_eq!(
-        SyslogSeverity::from_str("info"),
+        SyslogSeverity::parse("info"),
         Some(SyslogSeverity::Informational)
     );
-    assert_eq!(
-        SyslogSeverity::from_str("debug"),
-        Some(SyslogSeverity::Debug)
-    );
+    assert_eq!(SyslogSeverity::parse("debug"), Some(SyslogSeverity::Debug));
 
     // Case insensitive
     assert_eq!(
-        SyslogSeverity::from_str("WARNING"),
+        SyslogSeverity::parse("WARNING"),
         Some(SyslogSeverity::Warning)
     );
-    assert_eq!(
-        SyslogSeverity::from_str("Error"),
-        Some(SyslogSeverity::Error)
-    );
+    assert_eq!(SyslogSeverity::parse("Error"), Some(SyslogSeverity::Error));
 
     // Unknown returns None
-    assert_eq!(SyslogSeverity::from_str("unknown"), None);
+    assert_eq!(SyslogSeverity::parse("unknown"), None);
 }
 
 // =============================================================================

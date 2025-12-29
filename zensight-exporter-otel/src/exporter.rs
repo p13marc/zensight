@@ -351,17 +351,15 @@ impl OtelExporter {
     pub fn shutdown(&self) -> anyhow::Result<()> {
         info!("Shutting down OpenTelemetry exporter");
 
-        if let Some(meter_provider) = &self.meter_provider {
-            if let Err(e) = meter_provider.shutdown() {
+        if let Some(meter_provider) = &self.meter_provider
+            && let Err(e) = meter_provider.shutdown() {
                 error!("Error shutting down meter provider: {:?}", e);
             }
-        }
 
-        if let Some(logger_provider) = &self.logger_provider {
-            if let Err(e) = logger_provider.shutdown() {
+        if let Some(logger_provider) = &self.logger_provider
+            && let Err(e) = logger_provider.shutdown() {
                 error!("Error shutting down logger provider: {:?}", e);
             }
-        }
 
         info!("OpenTelemetry exporter shutdown complete");
         Ok(())
