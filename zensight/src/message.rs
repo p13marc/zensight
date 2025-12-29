@@ -67,6 +67,9 @@ pub enum Message {
     /// Go to a specific page in dashboard.
     GoToPage(usize),
 
+    /// Toggle dashboard view mode (grid vs table).
+    ToggleDashboardViewMode,
+
     /// User selected a metric to graph (single-series mode).
     SelectMetricForChart(String),
 

@@ -325,6 +325,10 @@ impl ZenSight {
                 self.dashboard.go_to_page(page);
             }
 
+            Message::ToggleDashboardViewMode => {
+                self.dashboard.toggle_view_mode();
+            }
+
             Message::SelectMetricForChart(metric_name) => {
                 if let Some(ref mut device) = self.selected_device {
                     device.select_metric(metric_name);
