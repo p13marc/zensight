@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use iced::widget::{
-    Column, column, container, mouse_area, row, rule, scrollable, table, text, text_input, tooltip,
+    Column, column, container, grid, mouse_area, row, rule, scrollable, table, text, text_input,
+    tooltip,
 };
 use iced::{Alignment, Color, Element, Length, Theme};
 use iced_anim::widget::button;
@@ -636,18 +637,27 @@ fn render_device_grid<'a>(
         .into()
 }
 
+/// Minimum card width for responsive grid layout.
+const CARD_MIN_WIDTH: f32 = 350.0;
+
 /// Render devices as cards (grid view).
+/// Uses a responsive grid layout that adjusts columns based on available width.
 fn render_device_cards<'a>(
     devices: &[&'a DeviceState],
     groups: &'a GroupsState,
 ) -> Element<'a, Message> {
-    let mut device_list = Column::new().spacing(10);
+    let cards: Vec<Element<'a, Message>> = devices
+        .iter()
+        .map(|device| render_device_card(device, groups))
+        .collect();
 
-    for device in devices {
-        device_list = device_list.push(render_device_card(device, groups));
-    }
-
-    device_list.into()
+    // Use fluid grid layout - automatically adjusts columns based on container width
+    // Cards will be at least CARD_MIN_WIDTH pixels wide
+    grid(cards)
+        .fluid(CARD_MIN_WIDTH)
+        .spacing(10)
+        .height(Length::Shrink)
+        .into()
 }
 
 /// Render devices as a table.
