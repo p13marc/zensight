@@ -320,18 +320,18 @@ node.position.set_target(calculated_position);
 
 ## Implementation Priority
 
-| Priority | Item | Effort | Impact |
-|----------|------|--------|--------|
-| 1 | 1.1 Expand iced_anim (status colors, transitions) | Low | Medium |
-| 2 | 2.1 Syslog table widget | Medium | High |
-| 3 | 4.2 Topology node animations | Medium | Medium |
-| 4 | 2.2 Device metrics table | Medium | Medium |
-| 5 | 4.1 Chart zoom/pan animations | Medium | Medium |
-| 6 | 1.2 Double-click to open | Low | Low |
-| 7 | 2.3 Dashboard table view | Medium | Medium |
-| 8 | 5.1 Grid widget for dashboard | Low | Low |
-| 9 | 4.3 Page transitions | Medium | Low |
-| 10 | 3.1 Sensor widget evaluation | Low | TBD |
+| Priority | Item | Effort | Impact | Status |
+|----------|------|--------|--------|--------|
+| 1 | 1.1 Expand iced_anim (status colors, transitions) | Low | Medium | ✅ Done |
+| 2 | 2.1 Syslog table widget | Medium | High | ✅ Done |
+| 3 | 4.2 Topology node animations | Medium | Medium | ✅ Already implemented (force-directed layout) |
+| 4 | 2.2 Device metrics table | Medium | Medium | ⏸️ Deferred (table widget limitations) |
+| 5 | 4.1 Chart zoom/pan animations | Medium | Medium | ✅ Already has feedback overlays |
+| 6 | 1.2 Double-click to open | Low | Low | ✅ Done |
+| 7 | 2.3 Dashboard table view | Medium | Medium | ✅ Done |
+| 8 | 5.1 Grid widget for dashboard | Low | Low | Pending |
+| 9 | 4.3 Page transitions | Medium | Low | Pending |
+| 10 | 3.1 Sensor widget evaluation | Low | TBD | Pending |
 
 ---
 
