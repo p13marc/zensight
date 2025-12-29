@@ -12,6 +12,8 @@ ZenSight provides a suite of protocol bridges that collect telemetry from variou
 |-------|-------------|--------|
 | `zensight` | Iced 0.14 desktop frontend for visualizing telemetry | Complete |
 | `zensight-common` | Shared library (telemetry model, Zenoh helpers, config) | Complete |
+| `zensight-exporter-prometheus` | Prometheus metrics exporter (HTTP /metrics endpoint) | Complete |
+| `zensight-exporter-otel` | OpenTelemetry exporter (OTLP gRPC/HTTP) | Complete |
 | `zenoh-bridge-snmp` | SNMP bridge (v1/v2c/v3 polling + trap receiver, MIB loading) | Complete |
 | `zenoh-bridge-syslog` | Syslog receiver (RFC 3164/5424, UDP/TCP/Unix, filtering) | Complete |
 | `zenoh-bridge-netflow` | NetFlow/IPFIX receiver (v5, v7, v9, IPFIX) | Complete |
@@ -216,6 +218,70 @@ All bridges use JSON5 configuration files. See the `configs/` directory for exam
 }
 ```
 
+## Exporters
+
+ZenSight includes exporters that subscribe to Zenoh telemetry and forward it to external observability systems.
+
+### Prometheus Exporter
+
+Exposes metrics via HTTP `/metrics` endpoint in Prometheus exposition format.
+
+```json5
+{
+  zenoh: { mode: "peer" },
+  prometheus: {
+    listen: "0.0.0.0:9090",
+    metrics_path: "/metrics",
+    // Metric filtering
+    filter: {
+      include_protocols: ["snmp", "sysinfo"],
+      include_sources: ["router01", "server01"],
+    },
+    // Aggregation settings
+    aggregation: {
+      staleness_secs: 300,      // Remove stale metrics after 5 minutes
+      max_series: 100000,       // Memory protection
+    },
+  },
+  serialization: "json",
+}
+```
+
+Run the exporter:
+```bash
+./target/release/zensight-exporter-prometheus --config configs/prometheus.json5
+```
+
+### OpenTelemetry Exporter
+
+Exports metrics and logs via OTLP (gRPC or HTTP).
+
+```json5
+{
+  zenoh: { mode: "peer" },
+  otel: {
+    endpoint: "http://localhost:4317",  // OTLP gRPC endpoint
+    protocol: "grpc",                   // "grpc" or "http"
+    export_metrics: true,               // Export TelemetryPoint as metrics
+    export_logs: true,                  // Export syslog messages as logs
+    resource_attributes: {
+      "service.name": "zensight",
+      "deployment.environment": "production",
+    },
+    // Metric filtering (same as Prometheus)
+    filter: {
+      include_protocols: ["snmp", "sysinfo", "modbus"],
+    },
+  },
+  serialization: "json",
+}
+```
+
+Run the exporter:
+```bash
+./target/release/zensight-exporter-otel --config configs/otel.json5
+```
+
 ## Data Model
 
 All bridges emit a common `TelemetryPoint` structure:
@@ -317,13 +383,15 @@ let points = mock::mock_environment();
 |-------|-------|-------------|
 | zensight (frontend) | 114 | Unit + UI tests (Simulator) |
 | zensight-common | 21 | Telemetry, config, key expressions |
+| zensight-exporter-prometheus | 38 | Metric mapping, sanitization, collector, HTTP |
+| zensight-exporter-otel | 22 | OTEL metrics, logs, severity mapping |
 | zenoh-bridge-snmp | 16 | Polling, traps, MIB loading |
 | zenoh-bridge-syslog | 52 | Parser, receiver, filtering |
 | zenoh-bridge-netflow | 8 | Flow parsing, templates |
 | zenoh-bridge-modbus | 11 | Config, register decoding |
 | zenoh-bridge-sysinfo | 15 | Config, collectors, metrics |
 | zenoh-bridge-gnmi | 8 | Config, path parsing, subscriber |
-| **Total** | **245** | All tests passing |
+| **Total** | **305** | All tests passing |
 
 ## License
 

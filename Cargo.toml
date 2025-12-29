@@ -4,6 +4,8 @@ members = [
     "zensight",
     "zensight-common",
     "zensight-bridge-framework",
+    "zensight-exporter-prometheus",
+    "zensight-exporter-otel",
     "zenoh-bridge-snmp",
     "zenoh-bridge-syslog",
     "zenoh-bridge-netflow",
