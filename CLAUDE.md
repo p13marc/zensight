@@ -9,6 +9,7 @@ ZenSight is a unified observability platform that bridges legacy monitoring prot
 1. **zensight** - Iced 0.14 desktop frontend for visualizing telemetry
 2. **zensight-common** - Shared library (telemetry model, Zenoh helpers, config)
 3. **zenoh-bridge-*** - Protocol bridges publishing telemetry to Zenoh
+4. **zensight-exporter-*** - Exporters forwarding Zenoh telemetry to external systems
 
 ## Build Commands
 
@@ -24,6 +25,10 @@ cargo run -p zensight --release
 
 # Run a bridge
 cargo run -p zenoh-bridge-snmp --release -- --config configs/snmp.json5
+
+# Run an exporter
+cargo run -p zensight-exporter-prometheus --release -- --config configs/prometheus.json5
+cargo run -p zensight-exporter-otel --release -- --config configs/otel.json5
 ```
 
 ## Testing
@@ -41,6 +46,8 @@ cargo test -p zenoh-bridge-netflow  # 8 tests
 cargo test -p zenoh-bridge-modbus   # 11 tests
 cargo test -p zenoh-bridge-sysinfo  # 15 tests
 cargo test -p zenoh-bridge-gnmi     # 8 tests
+cargo test -p zensight-exporter-prometheus  # 38 tests (mapping, collector, HTTP)
+cargo test -p zensight-exporter-otel        # 22 tests (metrics, logs, severity)
 
 # Run a single test
 cargo test -p zensight test_dashboard_empty
@@ -101,6 +108,19 @@ zensight/                    # Workspace root
 ├── zenoh-bridge-modbus/     # Modbus TCP/RTU bridge
 ├── zenoh-bridge-sysinfo/    # System metrics bridge
 ├── zenoh-bridge-gnmi/       # gNMI streaming bridge
+├── zensight-exporter-prometheus/  # Prometheus metrics exporter
+│   └── src/
+│       ├── config.rs        # Configuration parsing
+│       ├── mapping.rs       # TelemetryPoint to Prometheus conversion
+│       ├── collector.rs     # Metric storage with staleness
+│       ├── subscriber.rs    # Zenoh subscriber
+│       └── http.rs          # Axum HTTP server (/metrics endpoint)
+├── zensight-exporter-otel/  # OpenTelemetry exporter
+│   └── src/
+│       ├── config.rs        # OTEL configuration
+│       ├── metrics.rs       # TelemetryPoint to OTEL metrics
+│       ├── logs.rs          # Syslog to OTEL logs
+│       └── exporter.rs      # OTLP exporter setup
 └── configs/                 # Example configurations
 ```
 
@@ -294,6 +314,29 @@ The topology view (`view/topology/`) displays host interconnections as an intera
 - Edges show network connections with bandwidth-based thickness
 - Click nodes to see info panel, "View Details" to navigate to device view
 - Supports zoom, pan, search, and manual node positioning
+
+### Observability Exporters
+
+ZenSight includes exporters that forward Zenoh telemetry to external observability systems:
+
+**Prometheus Exporter** (`zensight-exporter-prometheus`):
+- Subscribes to `zensight/**` and exposes metrics via HTTP `/metrics` endpoint
+- Converts TelemetryPoint to Prometheus types (Counter → counter, Gauge → gauge, Text → info)
+- Metric name sanitization for Prometheus compatibility (valid chars: `[a-zA-Z0-9_:]`)
+- Staleness-based expiry to prevent unbounded memory growth
+- Configurable filtering by protocol, source, and metric patterns
+
+**OpenTelemetry Exporter** (`zensight-exporter-otel`):
+- Subscribes to `zensight/**` and exports via OTLP (gRPC or HTTP)
+- Exports both metrics and logs signals
+- Syslog messages converted to OTEL logs with severity mapping
+- Resource attributes for service identification
+- Same filtering capabilities as Prometheus exporter
+
+Key files:
+- `zensight-exporter-prometheus/src/mapping.rs` - Metric type conversion and name sanitization
+- `zensight-exporter-prometheus/src/collector.rs` - Metric storage with staleness tracking
+- `zensight-exporter-otel/src/logs.rs` - Syslog severity to OTEL severity mapping
 
 ## Development Notes
 
