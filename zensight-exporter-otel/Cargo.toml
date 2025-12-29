@@ -1,0 +1,48 @@
+[package]
+name = "zensight-exporter-otel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "OpenTelemetry exporter for ZenSight telemetry"
+
+[dependencies]
+# Internal crates
+zensight-common = { path = "../zensight-common" }
+
+# Zenoh
+zenoh.workspace = true
+
+# Async runtime
+tokio.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+ciborium.workspace = true
+
+# Configuration
+json5.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# CLI
+clap.workspace = true
+
+# OpenTelemetry
+opentelemetry = "0.28"
+opentelemetry_sdk = { version = "0.28", features = ["rt-tokio", "metrics"] }
+opentelemetry-otlp = { version = "0.28", features = ["grpc-tonic", "metrics", "logs"] }
+
+# Utilities
+parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = "3"

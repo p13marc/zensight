@@ -1,0 +1,75 @@
+{
+  // Zenoh connection settings
+  zenoh: {
+    // Mode: "client", "peer", or "router"
+    mode: "peer",
+
+    // Endpoints to connect to (for client mode)
+    // connect: ["tcp/localhost:7447"],
+
+    // Endpoints to listen on (for peer/router mode)
+    // listen: ["tcp/0.0.0.0:7448"],
+  },
+
+  // OpenTelemetry OTLP exporter settings
+  opentelemetry: {
+    // OTLP endpoint (gRPC default port: 4317, HTTP: 4318)
+    endpoint: "http://localhost:4317",
+
+    // Protocol: "grpc" or "http"
+    protocol: "grpc",
+
+    // Export interval in seconds
+    export_interval_secs: 10,
+
+    // Export timeout in seconds
+    timeout_secs: 30,
+
+    // Export metrics (Counter, Gauge, Boolean values)
+    export_metrics: true,
+
+    // Export logs (Syslog text messages)
+    export_logs: true,
+
+    // Service name for OTEL resource
+    service_name: "zensight",
+
+    // Service version (optional)
+    // service_version: "1.0.0",
+
+    // Headers for authentication (optional)
+    // headers: {
+    //   "Authorization": "Bearer your-token-here",
+    // },
+
+    // Additional resource attributes
+    resource: {
+      // "deployment.environment": "production",
+      // "service.namespace": "monitoring",
+    },
+  },
+
+  // Telemetry filtering (optional)
+  filters: {
+    // Only include these protocols (empty = all)
+    // include_protocols: ["snmp", "sysinfo", "syslog"],
+
+    // Exclude these protocols
+    // exclude_protocols: [],
+
+    // Only include these sources (empty = all)
+    // include_sources: ["router01", "server01"],
+
+    // Exclude these sources
+    // exclude_sources: ["test-device"],
+  },
+
+  // Logging configuration
+  logging: {
+    // Log level: "trace", "debug", "info", "warn", "error"
+    level: "info",
+
+    // Log format: "text" or "json"
+    format: "text",
+  },
+}
