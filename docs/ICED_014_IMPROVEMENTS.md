@@ -274,6 +274,22 @@ node.position.set_target(calculated_position);
 - Dashboard ↔ Alerts
 - Dashboard ↔ Topology
 
+**Status:** ⚠️ Partial Implementation
+
+**What was implemented:**
+- Added `view_transition_key: u32` field to `ZenSight` struct
+- Added `set_view()` helper method that increments the transition key on view changes
+- Updated all view change locations to use `set_view()` instead of direct assignment
+- Infrastructure is in place for future animation support
+
+**Limitation encountered:**
+The `iced_anim::AnimationBuilder` requires a `Fn` closure (callable multiple times), but view elements can only be consumed once (`FnOnce`). This makes wrapping the entire view in an animation builder impractical without restructuring the view function to reconstruct the view on each animation frame.
+
+**Future options:**
+1. Wait for iced to add native view transition support
+2. Animate individual properties (opacity, transform) at the container level using widget-level animations
+3. Use a state machine approach with separate "transitioning" view states
+
 **Effort:** Medium
 **Impact:** Low-Medium - Polish
 
@@ -336,12 +352,12 @@ node.position.set_target(calculated_position);
 | 1 | 1.1 Expand iced_anim (status colors, transitions) | Low | Medium | ✅ Done |
 | 2 | 2.1 Syslog table widget | Medium | High | ✅ Done |
 | 3 | 4.2 Topology node animations | Medium | Medium | ✅ Already implemented (force-directed layout) |
-| 4 | 2.2 Device metrics table | Medium | Medium | ⏸️ Deferred (table widget limitations) |
+| 4 | 2.2 Device metrics table | Medium | Medium | ✅ Done (uses table widget with trend indicators) |
 | 5 | 4.1 Chart zoom/pan animations | Medium | Medium | ✅ Already has feedback overlays |
 | 6 | 1.2 Double-click to open | Low | Low | ✅ Done |
 | 7 | 2.3 Dashboard table view | Medium | Medium | ✅ Done |
 | 8 | 5.1 Grid widget for dashboard | Low | Low | ✅ Done |
-| 9 | 4.3 Page transitions | Medium | Low | ⏸️ Deferred (requires architectural changes) |
+| 9 | 4.3 Page transitions | Medium | Low | ⚠️ Partial (infrastructure added, animation deferred - AnimationBuilder requires Fn closures) |
 | 10 | 3.1 Sensor widget evaluation | Low | TBD | ✅ Evaluated (N/A) |
 
 ---
