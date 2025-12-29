@@ -122,6 +122,59 @@ jobs:
           if-no-files-found: error
 
   # =============================================================================
+  # Build Debian packages for exporters
+  # =============================================================================
+  build-deb-exporters:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            name: ubuntu22.04
+          - os: ubuntu-24.04
+            name: ubuntu24.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+
+      - name: Build release binaries
+        run: |
+          cargo build --release -p zensight-exporter-prometheus
+          cargo build --release -p zensight-exporter-otel
+
+      - name: Build .deb packages for exporters
+        run: |
+          cargo deb -p zensight-exporter-prometheus --no-build
+          cargo deb -p zensight-exporter-otel --no-build
+
+      - name: Rename packages with distro suffix
+        run: |
+          cd target/debian
+          for f in *.deb; do
+            mv "$f" "${f%.deb}-${{ matrix.name }}.deb"
+          done
+
+      - name: Upload artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-exporters-${{ matrix.name }}
+          path: target/debian/*.deb
+          if-no-files-found: error
+
+  # =============================================================================
   # Build RPM packages using Fedora container
   # =============================================================================
   build-rpm-fedora:
@@ -152,6 +205,8 @@ jobs:
           cargo build --release -p zenoh-bridge-syslog
           cargo build --release -p zenoh-bridge-sysinfo
           cargo build --release -p zenoh-bridge-snmp
+          cargo build --release -p zensight-exporter-prometheus
+          cargo build --release -p zensight-exporter-otel
 
       - name: Build .rpm packages
         run: |
@@ -160,6 +215,8 @@ jobs:
           cargo generate-rpm -p zenoh-bridge-syslog
           cargo generate-rpm -p zenoh-bridge-sysinfo
           cargo generate-rpm -p zenoh-bridge-snmp
+          cargo generate-rpm -p zensight-exporter-prometheus
+          cargo generate-rpm -p zensight-exporter-otel
 
       - name: Rename packages with distro suffix
         run: |
@@ -263,10 +320,75 @@ jobs:
           platforms: linux/amd64
 
   # =============================================================================
+  # Build Docker images for exporters
+  # =============================================================================
+  build-docker-exporters:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        exporter:
+          - name: prometheus
+            package: zensight-exporter-prometheus
+          - name: otel
+            package: zensight-exporter-otel
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_PREFIX }}-exporter-${{ matrix.exporter.name }}
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.exporter
+          build-args: |
+            EXPORTER_PACKAGE=${{ matrix.exporter.package }}
+            EXPORTER_NAME=${{ matrix.exporter.name }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+  # =============================================================================
   # Create GitHub Release with all artifacts
   # =============================================================================
   release:
-    needs: [build-deb, build-deb-bridges, build-rpm-fedora, build-flatpak]
+    needs:
+      [
+        build-deb,
+        build-deb-bridges,
+        build-deb-exporters,
+        build-rpm-fedora,
+        build-flatpak,
+      ]
     runs-on: ubuntu-latest
     # Run after build-docker completes but don't block on it for artifacts
     # build-docker only pushes to registry, doesn't produce downloadable artifacts
@@ -287,6 +409,12 @@ jobs:
         with:
           path: artifacts
           pattern: deb-bridges-*
+
+      - name: Download deb-exporters artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: deb-exporters-*
 
       - name: Download rpm artifacts
         uses: actions/download-artifact@v4

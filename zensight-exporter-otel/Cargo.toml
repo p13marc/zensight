@@ -46,3 +46,28 @@ parking_lot = "0.12"
 
 [dev-dependencies]
 tempfile = "3"
+
+# =============================================================================
+# Package metadata for cargo-deb
+# =============================================================================
+[package.metadata.deb]
+maintainer = "Marc Pardo <p13marc@gmail.com>"
+copyright = "2024, Marc Pardo"
+license-file = ["../LICENSE", "0"]
+extended-description = """OpenTelemetry exporter for ZenSight telemetry. Subscribes to
+Zenoh telemetry and exports metrics and logs via OTLP (gRPC or HTTP)
+to OpenTelemetry-compatible backends."""
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/zensight-exporter-otel", "usr/bin/", "755"],
+]
+depends = "$auto"
+
+# =============================================================================
+# Package metadata for cargo-generate-rpm
+# =============================================================================
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/zensight-exporter-otel", dest = "/usr/bin/zensight-exporter-otel", mode = "755" },
+]

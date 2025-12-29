@@ -1,0 +1,80 @@
+# Multi-stage Dockerfile for ZenSight exporters
+# Build with: docker build --build-arg EXPORTER_PACKAGE=zensight-exporter-prometheus -f docker/Dockerfile.exporter .
+
+ARG EXPORTER_PACKAGE=zensight-exporter-prometheus
+ARG EXPORTER_NAME=prometheus
+
+# =============================================================================
+# Stage 1: Build the exporter binary
+# =============================================================================
+FROM rust:1.92-bookworm AS builder
+
+ARG EXPORTER_PACKAGE
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    protobuf-compiler \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy workspace files first for better layer caching
+COPY Cargo.toml Cargo.lock ./
+COPY zensight-common ./zensight-common
+COPY zensight-exporter-prometheus ./zensight-exporter-prometheus
+COPY zensight-exporter-otel ./zensight-exporter-otel
+
+# Copy other crates needed for workspace resolution (not built)
+COPY zensight ./zensight
+COPY zensight-bridge-framework ./zensight-bridge-framework
+COPY zenoh-bridge-syslog ./zenoh-bridge-syslog
+COPY zenoh-bridge-sysinfo ./zenoh-bridge-sysinfo
+COPY zenoh-bridge-snmp ./zenoh-bridge-snmp
+COPY zenoh-bridge-netflow ./zenoh-bridge-netflow
+COPY zenoh-bridge-modbus ./zenoh-bridge-modbus
+COPY zenoh-bridge-gnmi ./zenoh-bridge-gnmi
+
+# Build the specified exporter in release mode
+RUN cargo build --release -p ${EXPORTER_PACKAGE}
+
+# =============================================================================
+# Stage 2: Create minimal runtime image
+# =============================================================================
+FROM debian:bookworm-slim
+
+ARG EXPORTER_PACKAGE
+ARG EXPORTER_NAME
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for running the exporter
+RUN useradd --create-home --shell /bin/bash zensight
+
+# Copy the built binary
+COPY --from=builder /build/target/release/${EXPORTER_PACKAGE} /usr/local/bin/${EXPORTER_PACKAGE}
+
+# Create config directory
+RUN mkdir -p /etc/zensight && chown zensight:zensight /etc/zensight
+
+# Switch to non-root user
+USER zensight
+WORKDIR /home/zensight
+
+# Default ports:
+# - 7447: Zenoh default port (TCP)
+# - 9090: Prometheus metrics endpoint (for prometheus exporter)
+# - 4317: OTLP gRPC (for otel exporter, outbound)
+# - 4318: OTLP HTTP (for otel exporter, outbound)
+EXPOSE 7447 9090
+
+# Set the binary name as environment variable for the entrypoint
+ENV EXPORTER_BINARY=${EXPORTER_PACKAGE}
+
+# Default command runs the exporter with config from /etc/zensight
+ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/${EXPORTER_BINARY} \"$@\"", "--"]
+CMD ["--help"]

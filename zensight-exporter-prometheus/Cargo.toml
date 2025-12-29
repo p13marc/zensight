@@ -51,3 +51,28 @@ glob = "0.3"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# =============================================================================
+# Package metadata for cargo-deb
+# =============================================================================
+[package.metadata.deb]
+maintainer = "Marc Pardo <p13marc@gmail.com>"
+copyright = "2024, Marc Pardo"
+license-file = ["../LICENSE", "0"]
+extended-description = """Prometheus metrics exporter for ZenSight telemetry. Subscribes to
+Zenoh telemetry and exposes metrics via HTTP /metrics endpoint for
+Prometheus scraping."""
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/zensight-exporter-prometheus", "usr/bin/", "755"],
+]
+depends = "$auto"
+
+# =============================================================================
+# Package metadata for cargo-generate-rpm
+# =============================================================================
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/zensight-exporter-prometheus", dest = "/usr/bin/zensight-exporter-prometheus", mode = "755" },
+]
