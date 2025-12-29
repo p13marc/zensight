@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use iced::widget::{
-    Column, Row, column, container, row, rule, scrollable, text, text_input, tooltip,
+    Row, column, container, row, rule, scrollable, table, text, text_input, tooltip,
 };
 use iced::{Alignment, Element, Length, Theme};
 use iced_anim::widget::button;
@@ -19,6 +19,28 @@ use crate::view::specialized;
 
 /// Debounce delay for metric search input in milliseconds.
 const SEARCH_DEBOUNCE_MS: i64 = 300;
+
+/// A row in the metrics table, containing pre-formatted data for display.
+/// This struct is Clone so it can be used with the table widget.
+#[derive(Debug, Clone)]
+struct MetricTableRow {
+    /// Metric name.
+    name: String,
+    /// Formatted value for display.
+    value: String,
+    /// Full value (if truncated).
+    full_value: Option<String>,
+    /// Type name (Counter, Gauge, Text, etc.).
+    type_name: String,
+    /// Formatted timestamp.
+    timestamp: String,
+    /// Whether this metric is chartable (numeric).
+    is_chartable: bool,
+    /// Whether this metric is currently in the chart.
+    is_in_chart: bool,
+    /// Trend indicator: "up", "down", "stable", or empty.
+    trend: String,
+}
 
 /// Get the current timestamp in milliseconds.
 fn current_timestamp() -> i64 {
@@ -587,11 +609,74 @@ fn render_chart_section<'a>(
         .into()
 }
 
-/// Render the list of all metrics.
+/// Convert metrics to table rows.
+fn build_metric_table_rows(state: &DeviceDetailState) -> Vec<MetricTableRow> {
+    state
+        .sorted_metrics()
+        .into_iter()
+        .map(|(name, point)| {
+            let (value, full_value) = format_value_display_with_full(&point.value);
+            let trend = if let Some(history) = state.history.get(name) {
+                if history.len() > 1 {
+                    compute_trend(history)
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
+            MetricTableRow {
+                name: name.to_string(),
+                value,
+                full_value,
+                type_name: value_type_name(&point.value).to_string(),
+                timestamp: format_timestamp(point.timestamp),
+                is_chartable: state.is_metric_chartable(name),
+                is_in_chart: state.is_metric_in_chart(name),
+                trend,
+            }
+        })
+        .collect()
+}
+
+/// Compute trend direction from history.
+fn compute_trend(history: &[TelemetryPoint]) -> String {
+    if history.len() < 2 {
+        return String::new();
+    }
+
+    let last = &history[history.len() - 1];
+    let prev = &history[history.len() - 2];
+
+    match (&last.value, &prev.value) {
+        (TelemetryValue::Gauge(a), TelemetryValue::Gauge(b)) => {
+            if a > b {
+                "↑".to_string()
+            } else if a < b {
+                "↓".to_string()
+            } else {
+                "→".to_string()
+            }
+        }
+        (TelemetryValue::Counter(a), TelemetryValue::Counter(b)) => {
+            if a > b {
+                "↑".to_string()
+            } else if a < b {
+                "↓".to_string()
+            } else {
+                "→".to_string()
+            }
+        }
+        _ => String::new(),
+    }
+}
+
+/// Render the list of all metrics using a table widget.
 fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
     let total_count = state.total_metric_count();
-    let metrics = state.sorted_metrics();
-    let filtered_count = metrics.len();
+    let table_rows = build_metric_table_rows(state);
+    let filtered_count = table_rows.len();
 
     // Search filter input (with ID for keyboard focus)
     let search_input = text_input("Search metrics... (Ctrl+F)", state.filter_input())
@@ -625,7 +710,7 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
         .into();
     }
 
-    if metrics.is_empty() {
+    if table_rows.is_empty() {
         return column![
             search_row,
             container(text("No metrics match the filter").size(16))
@@ -638,151 +723,145 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
         .into();
     }
 
-    let mut metric_list = Column::new().spacing(8);
+    // Build table columns
+    // Note: closures consume MetricTableRow, so we clone strings for owned values
+    let name_column = table::column(
+        text("Metric").size(12),
+        |row: MetricTableRow| -> Element<'_, Message> {
+            let name = row.name.clone();
+            let name_display = row.name;
+            // Make the name clickable to select for chart
+            if row.is_chartable {
+                button(text(name_display).size(12))
+                    .on_press(Message::SelectMetricForChart(name))
+                    .style(if row.is_in_chart {
+                        iced::widget::button::primary
+                    } else {
+                        iced::widget::button::text
+                    })
+                    .padding(0)
+                    .into()
+            } else {
+                text(name_display).size(12).into()
+            }
+        },
+    )
+    .width(Length::FillPortion(3));
 
-    for (name, point) in metrics {
-        metric_list = metric_list.push(render_metric_row(name, point, state));
-    }
+    let value_column = table::column(
+        text("Value").size(12),
+        |row: MetricTableRow| -> Element<'_, Message> {
+            let value = row.value;
+            let value_widget = text(value).size(12);
+            if let Some(full) = row.full_value {
+                tooltip(
+                    value_widget,
+                    container(text(full).size(11))
+                        .padding(6)
+                        .max_width(400.0)
+                        .style(container::rounded_box),
+                    tooltip::Position::Bottom,
+                )
+                .into()
+            } else {
+                value_widget.into()
+            }
+        },
+    )
+    .width(Length::FillPortion(2));
+
+    let type_column = table::column(
+        text("Type").size(12),
+        |row: MetricTableRow| -> Element<'_, Message> {
+            let type_name = row.type_name;
+            text(type_name)
+                .size(11)
+                .style(|theme: &Theme| text::Style {
+                    color: Some(crate::view::theme::colors(theme).text_dimmed()),
+                })
+                .into()
+        },
+    )
+    .width(80);
+
+    let trend_column = table::column(
+        text("Trend").size(12),
+        |row: MetricTableRow| -> Element<'_, Message> {
+            let trend = row.trend;
+            let color = match trend.as_str() {
+                "↑" => iced::Color::from_rgb(0.2, 0.8, 0.2),
+                "↓" => iced::Color::from_rgb(0.9, 0.2, 0.2),
+                _ => iced::Color::from_rgb(0.5, 0.5, 0.5),
+            };
+            text(trend)
+                .size(14)
+                .style(move |_: &Theme| text::Style { color: Some(color) })
+                .into()
+        },
+    )
+    .width(50);
+
+    let time_column = table::column(
+        text("Updated").size(12),
+        |row: MetricTableRow| -> Element<'_, Message> {
+            let timestamp = row.timestamp;
+            text(timestamp)
+                .size(11)
+                .style(|theme: &Theme| text::Style {
+                    color: Some(crate::view::theme::colors(theme).text_dimmed()),
+                })
+                .into()
+        },
+    )
+    .width(100);
+
+    let actions_column = table::column(
+        text("").size(12),
+        |row: MetricTableRow| -> Element<'_, Message> {
+            if row.is_chartable {
+                let metric_name = row.name.clone();
+                button(text(if row.is_in_chart { "−" } else { "+" }).size(11))
+                    .on_press(if row.is_in_chart {
+                        Message::RemoveMetricFromChart(metric_name)
+                    } else {
+                        Message::AddMetricToChart(metric_name)
+                    })
+                    .style(if row.is_in_chart {
+                        iced::widget::button::danger
+                    } else {
+                        iced::widget::button::secondary
+                    })
+                    .padding([2, 8])
+                    .into()
+            } else {
+                text("").into()
+            }
+        },
+    )
+    .width(40);
+
+    let metrics_table = table(
+        [
+            name_column,
+            value_column,
+            type_column,
+            trend_column,
+            time_column,
+            actions_column,
+        ],
+        table_rows,
+    )
+    .padding(6)
+    .padding_y(4);
 
     column![
         search_row,
-        scrollable(metric_list)
+        scrollable(metrics_table)
             .width(Length::Fill)
             .height(Length::Fill)
     ]
     .spacing(10)
     .into()
-}
-
-/// Render a single metric row.
-fn render_metric_row(
-    name: &str,
-    point: &TelemetryPoint,
-    state: &DeviceDetailState,
-) -> Element<'static, Message> {
-    let metric_name = text(name.to_string()).size(14);
-    let (value_text, full_value) = format_value_display_with_full(&point.value);
-    let value_widget = text(value_text.clone()).size(14);
-
-    // Wrap in tooltip if value was truncated
-    let value: Element<'static, Message> = if let Some(ref full) = full_value {
-        tooltip(
-            value_widget,
-            container(text(full.clone()).size(12))
-                .padding(8)
-                .max_width(400.0)
-                .style(container::rounded_box),
-            tooltip::Position::Bottom,
-        )
-        .into()
-    } else {
-        value_widget.into()
-    };
-
-    // Type indicator
-    let type_indicator = text(format!("({})", value_type_name(&point.value)))
-        .size(11)
-        .style(|theme: &Theme| text::Style {
-            color: Some(crate::view::theme::colors(theme).text_dimmed()),
-        });
-
-    // Timestamp (relative or absolute)
-    let timestamp = format_timestamp(point.timestamp);
-    let time_text = text(timestamp).size(11).style(|theme: &Theme| text::Style {
-        color: Some(crate::view::theme::colors(theme).text_dimmed()),
-    });
-
-    // History indicator (if we have history)
-    let history_indicator: Element<'static, Message> =
-        if let Some(history) = state.history.get(name) {
-            if history.len() > 1 {
-                trend_icon(history)
-            } else {
-                text("").into()
-            }
-        } else {
-            text("").into()
-        };
-
-    // Chart buttons (only for numeric types)
-    let chart_buttons: Element<'static, Message> = if state.is_metric_chartable(name) {
-        let is_in_chart = state.is_metric_in_chart(name);
-        let is_comparison = state.is_comparison_mode();
-
-        // Single chart button - switches to single-metric view
-        let chart_btn = button(text("Chart").size(11))
-            .on_press(Message::SelectMetricForChart(name.to_string()))
-            .style(if !is_comparison && is_in_chart {
-                iced::widget::button::primary
-            } else {
-                iced::widget::button::secondary
-            });
-
-        // Compare button - adds/removes from comparison view
-        let compare_btn = if is_comparison && is_in_chart {
-            // Already in comparison - show remove button
-            button(text("−").size(11))
-                .on_press(Message::RemoveMetricFromChart(name.to_string()))
-                .style(iced::widget::button::danger)
-        } else {
-            // Not in comparison or not this metric - show add button
-            button(text("+").size(11))
-                .on_press(Message::AddMetricToChart(name.to_string()))
-                .style(if is_comparison && is_in_chart {
-                    iced::widget::button::primary
-                } else {
-                    iced::widget::button::secondary
-                })
-        };
-
-        row![chart_btn, compare_btn].spacing(4).into()
-    } else {
-        text("").into()
-    };
-
-    // Labels (if any)
-    let mut row_content = row![
-        metric_name,
-        value,
-        type_indicator,
-        history_indicator,
-        chart_buttons,
-        time_text
-    ]
-    .spacing(15)
-    .align_y(Alignment::Center);
-
-    if !point.labels.is_empty() {
-        let labels_str: String = point
-            .labels
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let labels_text = text(format!("[{}]", labels_str))
-            .size(10)
-            .style(|theme: &Theme| text::Style {
-                color: Some(crate::view::theme::colors(theme).secondary()),
-            });
-        row_content = row_content.push(labels_text);
-    }
-
-    container(row_content)
-        .width(Length::Fill)
-        .padding(8)
-        .style(|theme: &Theme| {
-            let colors = crate::view::theme::colors(theme);
-            container::Style {
-                background: Some(iced::Background::Color(colors.row_background())),
-                border: iced::Border {
-                    color: colors.border_subtle(),
-                    width: 1.0,
-                    radius: 4.0.into(),
-                },
-                ..Default::default()
-            }
-        })
-        .into()
 }
 
 /// Format a telemetry value for display.
@@ -818,30 +897,6 @@ fn value_type_name(value: &TelemetryValue) -> &'static str {
         TelemetryValue::Text(_) => "text",
         TelemetryValue::Boolean(_) => "bool",
         TelemetryValue::Binary(_) => "binary",
-    }
-}
-
-/// Create a trend indicator icon for numeric values.
-fn trend_icon(history: &[TelemetryPoint]) -> Element<'static, Message> {
-    if history.len() < 2 {
-        return text("").into();
-    }
-
-    let last = &history[history.len() - 1];
-    let prev = &history[history.len() - 2];
-
-    let (last_val, prev_val) = match (&last.value, &prev.value) {
-        (TelemetryValue::Counter(a), TelemetryValue::Counter(b)) => (*a as f64, *b as f64),
-        (TelemetryValue::Gauge(a), TelemetryValue::Gauge(b)) => (*a, *b),
-        _ => return text("").into(),
-    };
-
-    if last_val > prev_val {
-        icons::arrow_up(IconSize::Small)
-    } else if last_val < prev_val {
-        icons::arrow_down(IconSize::Small)
-    } else {
-        icons::arrow_stable(IconSize::Small)
     }
 }
 
