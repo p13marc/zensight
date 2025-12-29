@@ -31,8 +31,10 @@ COPY zenoh-bridge-netflow ./zenoh-bridge-netflow
 COPY zenoh-bridge-modbus ./zenoh-bridge-modbus
 COPY zenoh-bridge-gnmi ./zenoh-bridge-gnmi
 
-# Copy zensight crate (needed for workspace resolution, not built)
+# Copy remaining crates (needed for workspace resolution, not built)
 COPY zensight ./zensight
+COPY zensight-exporter-prometheus ./zensight-exporter-prometheus
+COPY zensight-exporter-otel ./zensight-exporter-otel
 
 # Build the specified bridge in release mode
 RUN cargo build --release -p ${BRIDGE_PACKAGE}
