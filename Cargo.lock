@@ -8231,7 +8231,7 @@ dependencies = [
 
 [[package]]
 name = "zenoh-bridge-gnmi"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8258,7 +8258,7 @@ dependencies = [
 
 [[package]]
 name = "zenoh-bridge-modbus"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8279,7 +8279,7 @@ dependencies = [
 
 [[package]]
 name = "zenoh-bridge-netflow"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -8298,7 +8298,7 @@ dependencies = [
 
 [[package]]
 name = "zenoh-bridge-snmp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -8318,7 +8318,7 @@ dependencies = [
 
 [[package]]
 name = "zenoh-bridge-sysinfo"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8340,7 +8340,7 @@ dependencies = [
 
 [[package]]
 name = "zenoh-bridge-syslog"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8848,7 +8848,7 @@ dependencies = [
 
 [[package]]
 name = "zensight"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -8870,7 +8870,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-bridge-framework"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8890,7 +8890,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-common"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ciborium",
  "json5",
@@ -8905,7 +8905,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-exporter-otel"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "ciborium",
@@ -8928,7 +8928,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-exporter-prometheus"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum 0.7.9",

@@ -1,8 +1,8 @@
 [package]
 name = "zenoh-bridge-gnmi"
-version = "0.1.0"
-edition = "2024"
-authors = ["ZenSight Contributors"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
 description = "Zenoh bridge for gNMI (gRPC Network Management Interface) streaming telemetry"
 license = "Apache-2.0"
 
