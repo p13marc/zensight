@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use iced::widget::{
-    Column, column, container, row, rule, scrollable, table, text, text_input, tooltip,
+    Column, column, container, mouse_area, row, rule, scrollable, table, text, text_input, tooltip,
 };
 use iced::{Alignment, Color, Element, Length, Theme};
 use iced_anim::widget::button;
@@ -1038,11 +1038,16 @@ fn render_device_card<'a>(
 
     let card_content = column![header, preview].spacing(5);
 
-    button(card_content)
+    let card_button = button(card_content)
         .on_press(Message::SelectDevice(device.id.clone()))
         .padding(10)
         .width(Length::Fill)
-        .style(iced::widget::button::secondary)
+        .style(iced::widget::button::secondary);
+
+    // Wrap in mouse_area for double-click support
+    // Double-click also opens the device (same as single click for now)
+    mouse_area(card_button)
+        .on_double_click(Message::SelectDevice(device.id.clone()))
         .into()
 }
 
