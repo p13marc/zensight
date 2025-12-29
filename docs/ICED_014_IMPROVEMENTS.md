@@ -341,7 +341,7 @@ node.position.set_target(calculated_position);
 | 6 | 1.2 Double-click to open | Low | Low | ✅ Done |
 | 7 | 2.3 Dashboard table view | Medium | Medium | ✅ Done |
 | 8 | 5.1 Grid widget for dashboard | Low | Low | ✅ Done |
-| 9 | 4.3 Page transitions | Medium | Low | Pending (complex) |
+| 9 | 4.3 Page transitions | Medium | Low | ⏸️ Deferred (requires architectural changes) |
 | 10 | 3.1 Sensor widget evaluation | Low | TBD | ✅ Evaluated (N/A) |
 
 ---
