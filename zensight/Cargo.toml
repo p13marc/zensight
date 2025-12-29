@@ -27,7 +27,7 @@ json5.workspace = true
 
 # GUI
 iced = { version = "0.14", features = ["tokio", "canvas", "svg"] }
-iced_anim = { version = "0.3", features = ["widgets"] }
+iced_anim = { version = "0.3", features = ["widgets", "derive"] }
 
 # Async utilities
 async-stream = "0.3"

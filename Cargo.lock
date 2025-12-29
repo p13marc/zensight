@@ -2351,6 +2351,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f559b4d5a2487cfe7e2a0b824c9e9e792fe2a3506d90cfefbc1abf40d7b31f4"
 dependencies = [
  "iced",
+ "iced_anim_derive",
+]
+
+[[package]]
+name = "iced_anim_derive"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c22810793dcb18c4dedbf7d72f391f84877836f727917c3491df8141fe651b85"
+dependencies = [
+ "quote",
+ "syn 2.0.111",
 ]
 
 [[package]]
