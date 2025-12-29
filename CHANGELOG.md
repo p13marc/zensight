@@ -5,6 +5,18 @@ All notable changes to ZenSight will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2025-12-29
+
+### Added
+
+- **Device Metrics Table**: Replace metrics list with Iced 0.14 table widget for better data presentation
+- **Page Transition Infrastructure**: Add animated page transitions between views
+- **Dashboard Table View Toggle**: Switch between card and table views on dashboard
+- **Syslog Table Widget**: Replace log stream with Iced 0.14 table widget
+- **Responsive Grid Layout**: Dashboard device cards now use responsive grid
+- **Double-Click Support**: Navigate to device details with double-click on cards
+- **Animated Status Indicators**: Status dots use iced_anim for smooth animations
+
 ## [0.3.0] - 2025-12-29
 
 ### Added
