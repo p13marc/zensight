@@ -1,242 +1,515 @@
-# ZenSight Architecture Plan
+# ZenSight Architecture
 
-## Overview
+This document describes the high-level architecture and component relationships in ZenSight.
 
-**ZenSight** is a unified observability platform consisting of:
-1. **zensight** - Iced 0.14 desktop frontend for visualizing telemetry
-2. **zensight-common** - Shared library (telemetry model, Zenoh helpers, config)
-3. **zenoh-bridge-*** - Protocol bridges publishing telemetry to Zenoh
+## System Overview
 
-### Target Protocols
-- **SNMP** (network device monitoring) - *First bridge implementation*
-- Syslog (log aggregation)
-- gNMI (streaming telemetry)
-- NetFlow/IPFIX (flow analysis)
-- OPC UA (industrial automation)
-- Modbus (industrial devices)
+```
+                                    ZenSight Platform
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐   │
+│  │                         Protocol Sources (External)                          │   │
+│  │                                                                              │   │
+│  │   ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐   │   │
+│  │   │  SNMP   │ │ Syslog  │ │ Sysinfo │ │ NetFlow │ │ Modbus  │ │  gNMI   │   │   │
+│  │   │ Devices │ │ Sources │ │  Hosts  │ │Exporters│ │   PLCs  │ │ Routers │   │   │
+│  │   └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘   │   │
+│  └────────│───────────│───────────│───────────│───────────│───────────│────────┘   │
+│           │           │           │           │           │           │            │
+│           ▼           ▼           ▼           ▼           ▼           ▼            │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐   │
+│  │                              Protocol Bridges                                │   │
+│  │                                                                              │   │
+│  │   ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐           │   │
+│  │   │ zenoh-      │ │ zenoh-      │ │ zenoh-      │ │ zenoh-      │           │   │
+│  │   │ bridge-snmp │ │ bridge-     │ │ bridge-     │ │ bridge-     │  ...      │   │
+│  │   │             │ │ syslog      │ │ sysinfo     │ │ netflow     │           │   │
+│  │   └──────┬──────┘ └──────┬──────┘ └──────┬──────┘ └──────┬──────┘           │   │
+│  │          │               │               │               │                  │   │
+│  │          │  Uses zensight-bridge-framework (BridgeRunner, Publisher)        │   │
+│  │          │  Uses zensight-common (TelemetryPoint, config, serialization)    │   │
+│  └──────────│───────────────│───────────────│───────────────│──────────────────┘   │
+│             │               │               │               │                      │
+│             ▼               ▼               ▼               ▼                      │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐   │
+│  │                                                                              │   │
+│  │                         Zenoh Pub/Sub Infrastructure                         │   │
+│  │                                                                              │   │
+│  │   Key Expressions:                                                           │   │
+│  │   ├── zensight/<protocol>/<source>/<metric>     (telemetry data)            │   │
+│  │   ├── zensight/<protocol>/@/health              (bridge health)             │   │
+│  │   ├── zensight/<protocol>/@/devices/*/liveness  (device liveness)           │   │
+│  │   ├── zensight/<protocol>/@/errors              (error reports)             │   │
+│  │   ├── zensight/_meta/bridges/*                  (bridge registration)       │   │
+│  │   └── zensight/_meta/correlation/*              (device correlation)        │   │
+│  │                                                                              │   │
+│  └───────────────────────────────┬──────────────────────────────────────────────┘   │
+│                                  │                                                  │
+│             ┌────────────────────┼────────────────────┐                            │
+│             │                    │                    │                            │
+│             ▼                    ▼                    ▼                            │
+│  ┌───────────────────┐ ┌─────────────────┐ ┌─────────────────────┐                 │
+│  │                   │ │                 │ │                     │                 │
+│  │   ZenSight GUI    │ │   Prometheus    │ │   OpenTelemetry     │                 │
+│  │   (Iced 0.14)     │ │   Exporter      │ │   Exporter          │                 │
+│  │                   │ │                 │ │                     │                 │
+│  │  ┌─────────────┐  │ │  /metrics       │ │  OTLP (gRPC/HTTP)   │                 │
+│  │  │ Dashboard   │  │ │  endpoint       │ │  → metrics + logs   │                 │
+│  │  │ Device View │  │ │                 │ │                     │                 │
+│  │  │ Topology    │  │ └────────┬────────┘ └──────────┬──────────┘                 │
+│  │  │ Alerts      │  │          │                     │                            │
+│  │  │ Settings    │  │          ▼                     ▼                            │
+│  │  └─────────────┘  │   ┌────────────┐        ┌────────────┐                      │
+│  │                   │   │ Prometheus │        │ OTEL       │                      │
+│  └───────────────────┘   │ Server     │        │ Backends   │                      │
+│                          └────────────┘        └────────────┘                      │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
 
----
+## Crate Dependencies
 
-## Project Structure
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                              Workspace Crates                                       │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│   ┌─────────────────────────────────────────────────────────────────────────────┐  │
+│   │                          Shared Libraries                                    │  │
+│   │                                                                              │  │
+│   │   ┌────────────────────────────┐  ┌────────────────────────────────────┐    │  │
+│   │   │      zensight-common       │  │    zensight-bridge-framework       │    │  │
+│   │   │                            │  │                                    │    │  │
+│   │   │  • TelemetryPoint          │  │  • BridgeRunner                    │    │  │
+│   │   │  • TelemetryValue          │◄─┤  • Publisher                       │    │  │
+│   │   │  • Protocol enum           │  │  • LivelinessManager               │    │  │
+│   │   │  • DeviceStatus            │  │  • HealthSnapshot publishing       │    │  │
+│   │   │  • HealthSnapshot          │  │  • CorrelationRegistry             │    │  │
+│   │   │  • KeyExprBuilder          │  │                                    │    │  │
+│   │   │  • Config loading          │  └──────────────────────────────────────┘  │  │
+│   │   │  • Serialization           │                                           │  │
+│   │   └────────────────────────────┘                                           │  │
+│   │              ▲                                                              │  │
+│   └──────────────│──────────────────────────────────────────────────────────────┘  │
+│                  │                                                                  │
+│   ┌──────────────┴───────────────────────────────────────────────────────────────┐ │
+│   │                              Applications                                     │ │
+│   │                                                                               │ │
+│   │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐  │ │
+│   │  │   zensight    │  │ zenoh-bridge- │  │ zensight-     │  │ zensight-     │  │ │
+│   │  │   (frontend)  │  │ *             │  │ exporter-     │  │ exporter-     │  │ │
+│   │  │               │  │               │  │ prometheus    │  │ otel          │  │ │
+│   │  │  Iced 0.14    │  │  SNMP         │  │               │  │               │  │ │
+│   │  │  GUI          │  │  Syslog       │  │  HTTP         │  │  OTLP         │  │ │
+│   │  │               │  │  Sysinfo      │  │  /metrics     │  │  gRPC/HTTP    │  │ │
+│   │  │               │  │  NetFlow      │  │               │  │               │  │ │
+│   │  │               │  │  Modbus       │  │               │  │               │  │ │
+│   │  │               │  │  gNMI         │  │               │  │               │  │ │
+│   │  └───────────────┘  └───────────────┘  └───────────────┘  └───────────────┘  │ │
+│   │                                                                               │ │
+│   └───────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Data Flow
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                                 Data Flow                                        │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  1. COLLECTION                                                                   │
+│  ═════════════                                                                   │
+│                                                                                  │
+│     External Device          Bridge                      Zenoh                   │
+│     ───────────────          ──────                      ─────                   │
+│                                                                                  │
+│     ┌───────────┐     poll   ┌───────────────┐  publish  ┌──────────────────┐   │
+│     │   SNMP    │──────────▶│zenoh-bridge-  │──────────▶│ zensight/snmp/   │   │
+│     │   Agent   │    GET     │snmp           │           │ router01/        │   │
+│     └───────────┘            └───────────────┘           │ system/sysUpTime │   │
+│                                                          └──────────────────┘   │
+│                                                                                  │
+│     ┌───────────┐   UDP/TCP  ┌───────────────┐  publish  ┌──────────────────┐   │
+│     │  Syslog   │──────────▶│zenoh-bridge-  │──────────▶│ zensight/syslog/ │   │
+│     │  Source   │   514      │syslog         │           │ server01/...     │   │
+│     └───────────┘            └───────────────┘           └──────────────────┘   │
+│                                                                                  │
+│  2. COMMON DATA MODEL                                                            │
+│  ════════════════════                                                            │
+│                                                                                  │
+│     All bridges normalize data into TelemetryPoint:                              │
+│                                                                                  │
+│     ┌────────────────────────────────────────────────────────────────────────┐  │
+│     │  TelemetryPoint {                                                       │  │
+│     │      timestamp: 1704412800000,        // Unix epoch ms                  │  │
+│     │      source: "router01",              // Device identifier              │  │
+│     │      protocol: Protocol::Snmp,        // Origin protocol                │  │
+│     │      metric: "system/sysUpTime",      // Metric path                    │  │
+│     │      value: TelemetryValue::Counter(123456),                            │  │
+│     │      labels: {"location": "dc1", "vendor": "cisco"},                    │  │
+│     │  }                                                                      │  │
+│     └────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                  │
+│  3. CONSUMPTION                                                                  │
+│  ══════════════                                                                  │
+│                                                                                  │
+│     Zenoh                           Consumer                                     │
+│     ─────                           ────────                                     │
+│                                                                                  │
+│     zensight/**  ──subscribe──▶  ┌─────────────────────────────────────────┐    │
+│                                  │  ZenSight Frontend                       │    │
+│                                  │  • Displays in Dashboard/Device views    │    │
+│                                  │  • Tracks device health & liveness       │    │
+│                                  │  • Builds topology graph                 │    │
+│                                  └─────────────────────────────────────────┘    │
+│                                                                                  │
+│     zensight/**  ──subscribe──▶  ┌─────────────────────────────────────────┐    │
+│                                  │  Prometheus Exporter                     │    │
+│                                  │  • Converts to Prometheus metrics        │    │
+│                                  │  • Exposes /metrics HTTP endpoint        │    │
+│                                  └─────────────────────────────────────────┘    │
+│                                                                                  │
+│     zensight/**  ──subscribe──▶  ┌─────────────────────────────────────────┐    │
+│                                  │  OpenTelemetry Exporter                  │    │
+│                                  │  • Exports metrics via OTLP              │    │
+│                                  │  • Converts syslog to OTEL logs          │    │
+│                                  └─────────────────────────────────────────┘    │
+│                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Key Expression Hierarchy
+
+```
+zensight/
+├── <protocol>/                          # snmp, syslog, sysinfo, netflow, modbus, gnmi
+│   ├── <source>/                        # Device/host identifier
+│   │   └── <metric_path>                # Hierarchical metric name
+│   │       Example: zensight/snmp/router01/interfaces/eth0/ifInOctets
+│   │
+│   └── @/                               # Metadata namespace
+│       ├── health                       # Bridge HealthSnapshot (periodic)
+│       ├── errors                       # ErrorReport publications
+│       ├── alive                        # Bridge liveliness token
+│       ├── commands/                    # Runtime commands (e.g., syslog filters)
+│       │   └── filter
+│       └── devices/
+│           └── <device_id>/
+│               ├── liveness             # DeviceLiveness status
+│               └── alive                # Device liveliness token
+│
+└── _meta/
+    ├── bridges/
+    │   └── <bridge_name>                # Bridge registration info
+    └── correlation/
+        └── <ip_address>                 # Cross-bridge device correlation
+```
+
+## Frontend Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                            ZenSight Frontend (Iced 0.14)                         │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│   ┌────────────────────────────────────────────────────────────────────────┐    │
+│   │                           Main Application                              │    │
+│   │                                                                         │    │
+│   │   ┌─────────────────┐      ┌─────────────────┐      ┌───────────────┐  │    │
+│   │   │   ZenSight      │      │   Message       │      │   Views       │  │    │
+│   │   │   (app.rs)      │◄────▶│   (message.rs)  │◄────▶│   (view/)     │  │    │
+│   │   │                 │      │                 │      │               │  │    │
+│   │   │  boot()         │      │  Telemetry      │      │  dashboard    │  │    │
+│   │   │  update()       │      │  Health         │      │  device       │  │    │
+│   │   │  view()         │      │  Liveness       │      │  alerts       │  │    │
+│   │   │  subscription() │      │  UI events      │      │  settings     │  │    │
+│   │   └────────┬────────┘      │  Keyboard       │      │  topology     │  │    │
+│   │            │               │  Tick           │      └───────────────┘  │    │
+│   │            │               └─────────────────┘                          │    │
+│   └────────────│────────────────────────────────────────────────────────────┘    │
+│                │                                                                  │
+│                ▼                                                                  │
+│   ┌────────────────────────────────────────────────────────────────────────┐    │
+│   │                        Subscriptions (subscription.rs)                  │    │
+│   │                                                                         │    │
+│   │   ┌─────────────────────────────────────────────────────────────────┐  │    │
+│   │   │  Zenoh Subscriber                                                │  │    │
+│   │   │  • zensight/** (wildcard for all telemetry)                     │  │    │
+│   │   │  • History recovery for late joiners                             │  │    │
+│   │   │  • Late publisher detection                                      │  │    │
+│   │   └─────────────────────────────────────────────────────────────────┘  │    │
+│   │                                                                         │    │
+│   │   ┌─────────────────────────────────────────────────────────────────┐  │    │
+│   │   │  Liveliness Subscriber                                           │  │    │
+│   │   │  • Bridge presence: zensight/<protocol>/@/alive                  │  │    │
+│   │   │  • Device presence: zensight/<protocol>/@/devices/*/alive        │  │    │
+│   │   └─────────────────────────────────────────────────────────────────┘  │    │
+│   │                                                                         │    │
+│   │   ┌───────────────────────┐  ┌───────────────────────┐                 │    │
+│   │   │  Tick (1s interval)   │  │  Keyboard (Ctrl+F,    │                 │    │
+│   │   │  • UI refresh         │  │  Escape, etc.)        │                 │    │
+│   │   └───────────────────────┘  └───────────────────────┘                 │    │
+│   │                                                                         │    │
+│   └─────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                  │
+│   ┌────────────────────────────────────────────────────────────────────────┐    │
+│   │                              State Management                           │    │
+│   │                                                                         │    │
+│   │   ┌────────────────┐ ┌────────────────┐ ┌────────────────┐             │    │
+│   │   │ DashboardState │ │DeviceDetail-   │ │ TopologyState  │             │    │
+│   │   │                │ │State           │ │                │             │    │
+│   │   │ • devices      │ │ • device_id    │ │ • nodes        │             │    │
+│   │   │ • bridge_health│ │ • metrics      │ │ • edges        │             │    │
+│   │   │ • connection   │ │ • history      │ │ • layout       │             │    │
+│   │   └────────────────┘ └────────────────┘ └────────────────┘             │    │
+│   │                                                                         │    │
+│   │   ┌────────────────┐ ┌────────────────┐ ┌────────────────┐             │    │
+│   │   │ AlertsState    │ │ SettingsState  │ │SyslogFilter-   │             │    │
+│   │   │                │ │                │ │State           │             │    │
+│   │   │ • rules        │ │ • zenoh config │ │ • severity     │             │    │
+│   │   │ • triggered    │ │ • theme        │ │ • facilities   │             │    │
+│   │   │ • acknowledged │ │ • groups       │ │ • patterns     │             │    │
+│   │   └────────────────┘ └────────────────┘ └────────────────┘             │    │
+│   │                                                                         │    │
+│   └─────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Bridge Lifecycle
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                   Bridge Lifecycle (via BridgeRunner)                            │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│   1. STARTUP                                                                     │
+│   ──────────                                                                     │
+│                                                                                  │
+│   ┌────────────────┐    ┌────────────────┐    ┌────────────────┐                │
+│   │  Parse CLI     │───▶│  Load Config   │───▶│  Init Logging  │                │
+│   │  Arguments     │    │  (JSON5)       │    │  (tracing)     │                │
+│   └────────────────┘    └────────────────┘    └────────────────┘                │
+│           │                                                                      │
+│           ▼                                                                      │
+│   ┌────────────────┐    ┌────────────────┐    ┌────────────────┐                │
+│   │  Connect to    │───▶│  Create        │───▶│  Declare       │                │
+│   │  Zenoh         │    │  Publisher     │    │  Liveliness    │                │
+│   └────────────────┘    └────────────────┘    └────────────────┘                │
+│                                                                                  │
+│   2. RUNNING                                                                     │
+│   ──────────                                                                     │
+│                                                                                  │
+│   ┌─────────────────────────────────────────────────────────────────────────┐   │
+│   │                                                                          │   │
+│   │   ┌──────────────────┐     ┌──────────────────┐     ┌────────────────┐  │   │
+│   │   │  Protocol Task   │     │  Health Task     │     │ Liveliness     │  │   │
+│   │   │                  │     │                  │     │ Token          │  │   │
+│   │   │  • Poll devices  │     │  • Periodic      │     │                │  │   │
+│   │   │  • Receive data  │     │    snapshots     │     │  • Automatic   │  │   │
+│   │   │  • Publish       │     │  • Update status │     │    keep-alive  │  │   │
+│   │   │    telemetry     │     │  • Publish       │     │                │  │   │
+│   │   │                  │     │    liveness      │     │                │  │   │
+│   │   └────────┬─────────┘     └────────┬─────────┘     └────────────────┘  │   │
+│   │            │                        │                                    │   │
+│   │            ▼                        ▼                                    │   │
+│   │   ┌──────────────────────────────────────────────────────────────────┐  │   │
+│   │   │                      Zenoh Publisher                              │  │   │
+│   │   │                                                                   │  │   │
+│   │   │   zensight/<protocol>/<source>/<metric>  →  TelemetryPoint       │  │   │
+│   │   │   zensight/<protocol>/@/health           →  HealthSnapshot       │  │   │
+│   │   │   zensight/<protocol>/@/devices/*/...    →  DeviceLiveness       │  │   │
+│   │   │                                                                   │  │   │
+│   │   └──────────────────────────────────────────────────────────────────┘  │   │
+│   │                                                                          │   │
+│   └─────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                  │
+│   3. SHUTDOWN                                                                    │
+│   ────────────                                                                   │
+│                                                                                  │
+│   ┌────────────────┐    ┌────────────────┐    ┌────────────────┐                │
+│   │  Receive       │───▶│  Cancel Tasks  │───▶│  Close Zenoh   │                │
+│   │  SIGINT/SIGTERM│    │  Gracefully    │    │  Session       │                │
+│   └────────────────┘    └────────────────┘    └────────────────┘                │
+│                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Device Health Model
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                              Device Health Model                                 │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│   Status Determination                                                           │
+│   ════════════════════                                                           │
+│                                                                                  │
+│   ┌─────────────────────────────────────────────────────────────────────────┐   │
+│   │                                                                          │   │
+│   │    Bridge Reports                 Frontend Combines                      │   │
+│   │    ───────────────                ─────────────────                      │   │
+│   │                                                                          │   │
+│   │    DeviceLiveness {               Effective Status =                     │   │
+│   │        status: Online,              max_severity(                        │   │
+│   │        last_seen: ...,                bridge_reported_status,            │   │
+│   │        latency_ms: 42,                local_staleness_status             │   │
+│   │    }                                )                                    │   │
+│   │              │                              │                            │   │
+│   │              ▼                              ▼                            │   │
+│   │    ┌────────────────────────────────────────────────────────────────┐   │   │
+│   │    │                                                                 │   │   │
+│   │    │   ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐      │   │   │
+│   │    │   │  Online  │  │ Degraded │  │ Offline  │  │ Unknown  │      │   │   │
+│   │    │   │  (Green) │  │ (Orange) │  │  (Red)   │  │  (Gray)  │      │   │   │
+│   │    │   │          │  │          │  │          │  │          │      │   │   │
+│   │    │   │ Device   │  │ Device   │  │ Device   │  │ No data  │      │   │   │
+│   │    │   │ responds │  │ has      │  │ not      │  │ received │      │   │   │
+│   │    │   │ normally │  │ issues   │  │ responding│  │ yet      │      │   │   │
+│   │    │   └──────────┘  └──────────┘  └──────────┘  └──────────┘      │   │   │
+│   │    │                                                                 │   │   │
+│   │    └─────────────────────────────────────────────────────────────────┘   │   │
+│   │                                                                          │   │
+│   └─────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                  │
+│   Staleness Detection                                                            │
+│   ═══════════════════                                                            │
+│                                                                                  │
+│   Frontend tracks last_received timestamp per device.                            │
+│   If no data for > staleness_threshold (default 30s):                           │
+│     → Device marked as locally stale                                             │
+│     → Combines with bridge status for final determination                        │
+│                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Exporter Data Transformation
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                         Exporter Data Transformation                             │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│   Prometheus Exporter                                                            │
+│   ═══════════════════                                                            │
+│                                                                                  │
+│   TelemetryPoint                           Prometheus Metric                     │
+│   ──────────────                           ─────────────────                     │
+│                                                                                  │
+│   value: Counter(123)        ───▶          # TYPE metric_name counter            │
+│                                            metric_name{labels...} 123            │
+│                                                                                  │
+│   value: Gauge(45.6)         ───▶          # TYPE metric_name gauge              │
+│                                            metric_name{labels...} 45.6           │
+│                                                                                  │
+│   value: Text("running")     ───▶          # TYPE metric_name_info info          │
+│                                            metric_name_info{value="running"} 1   │
+│                                                                                  │
+│   Metric naming: sanitize(protocol + "_" + metric)                               │
+│   Valid chars: [a-zA-Z0-9_:]                                                     │
+│                                                                                  │
+│   OpenTelemetry Exporter                                                         │
+│   ══════════════════════                                                         │
+│                                                                                  │
+│   TelemetryPoint                           OTEL Signal                           │
+│   ──────────────                           ───────────                           │
+│                                                                                  │
+│   protocol: Syslog           ───▶          Log {                                 │
+│   value: Text(message)                       severity: map_severity(level),      │
+│                                              body: message,                       │
+│                                              attributes: labels,                  │
+│                                            }                                      │
+│                                                                                  │
+│   protocol: *                ───▶          Metric {                              │
+│   value: Counter/Gauge                       type: Sum/Gauge,                     │
+│                                              value: ...,                          │
+│                                              attributes: labels,                  │
+│                                            }                                      │
+│                                                                                  │
+│   Syslog Severity Mapping:                                                       │
+│   0 (Emergency)  → FATAL                                                         │
+│   1 (Alert)      → FATAL                                                         │
+│   2 (Critical)   → FATAL                                                         │
+│   3 (Error)      → ERROR                                                         │
+│   4 (Warning)    → WARN                                                          │
+│   5 (Notice)     → INFO                                                          │
+│   6 (Info)       → INFO                                                          │
+│   7 (Debug)      → DEBUG                                                         │
+│                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Directory Structure
 
 ```
 zensight/                            # Workspace root
 ├── Cargo.toml                       # Workspace manifest
-├── zensight/                        # Iced 0.14 frontend application
-│   ├── Cargo.toml
-│   └── src/
-│       ├── main.rs                  # Entry point
-│       ├── app.rs                   # Iced Application impl
-│       ├── message.rs               # Iced messages
-│       ├── subscription.rs          # Zenoh subscription as Iced Subscription
-│       └── view/                    # UI components
-│           ├── mod.rs
-│           ├── dashboard.rs
-│           └── device.rs
+├── ARCHITECTURE.md                  # This file
+├── CLAUDE.md                        # AI assistant guidance
+├── README.md                        # Project overview
+│
+├── zensight/                        # Frontend application
+│   ├── src/
+│   │   ├── main.rs                  # Binary entry
+│   │   ├── lib.rs                   # Library (for testing)
+│   │   ├── app.rs                   # Iced Application
+│   │   ├── message.rs               # Message enum
+│   │   ├── subscription.rs          # Zenoh subscription bridge
+│   │   ├── mock.rs                  # Mock data generators
+│   │   └── view/                    # UI components
+│   │       ├── dashboard.rs
+│   │       ├── device.rs
+│   │       ├── alerts.rs
+│   │       ├── settings.rs
+│   │       ├── topology/
+│   │       └── icons/
+│   └── tests/
+│       └── ui_tests.rs
+│
 ├── zensight-common/                 # Shared library
-│   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs
-│       ├── config.rs                # Configuration framework (JSON5)
+│       ├── telemetry.rs             # TelemetryPoint, Protocol
+│       ├── health.rs                # DeviceStatus, HealthSnapshot
+│       ├── config.rs                # Configuration loading
+│       ├── session.rs               # Zenoh session helpers
 │       ├── keyexpr.rs               # Key expression builders
-│       ├── session.rs               # Zenoh session management
-│       ├── telemetry.rs             # Common telemetry data model
-│       ├── serialization.rs         # JSON/CBOR encoding (configurable)
-│       └── error.rs                 # Error types
-├── zenoh-bridge-snmp/               # SNMP bridge (first bridge)
-│   ├── Cargo.toml
+│       └── serialization.rs         # JSON/CBOR encoding
+│
+├── zensight-bridge-framework/       # Bridge abstraction
 │   └── src/
-│       ├── main.rs
-│       ├── config.rs                # SNMP-specific config
-│       ├── poller.rs                # SNMP GET/WALK polling
-│       ├── trap.rs                  # SNMP trap receiver
-│       └── oid.rs                   # OID utilities and mapping
-├── zenoh-bridge-syslog/             # (future)
-├── zenoh-bridge-gnmi/               # (future)
-├── zenoh-bridge-netflow/            # (future)
-├── zenoh-bridge-opcua/              # (future)
-├── zenoh-bridge-modbus/             # (future)
-└── configs/
-    └── snmp.json5                   # Example SNMP configuration
+│       ├── lib.rs
+│       ├── runner.rs                # BridgeRunner
+│       ├── publisher.rs             # Zenoh publisher
+│       └── liveliness.rs            # Presence management
+│
+├── zenoh-bridge-snmp/               # SNMP bridge
+├── zenoh-bridge-syslog/             # Syslog bridge
+├── zenoh-bridge-sysinfo/            # System metrics bridge
+├── zenoh-bridge-netflow/            # NetFlow bridge
+├── zenoh-bridge-modbus/             # Modbus bridge
+├── zenoh-bridge-gnmi/               # gNMI bridge
+│
+├── zensight-exporter-prometheus/    # Prometheus exporter
+│   └── src/
+│       ├── config.rs
+│       ├── mapping.rs               # Type conversion
+│       ├── collector.rs             # Metric storage
+│       └── http.rs                  # /metrics endpoint
+│
+├── zensight-exporter-otel/          # OpenTelemetry exporter
+│   └── src/
+│       ├── config.rs
+│       ├── metrics.rs
+│       ├── logs.rs                  # Syslog → OTEL logs
+│       └── exporter.rs
+│
+└── configs/                         # Example configurations
+    ├── snmp.json5
+    ├── syslog.json5
+    ├── prometheus.json5
+    └── otel.json5
 ```
-
----
-
-## Key Expression Hierarchy
-
-All bridges publish to a unified `zensight/` prefix:
-
-```
-zensight/<protocol>/<source>/<entity>/<metric>
-```
-
-### SNMP Key Expressions
-
-```
-zensight/snmp/<device>/<oid_path>
-```
-
-**Examples:**
-- `zensight/snmp/router01/system/sysUpTime`
-- `zensight/snmp/switch01/if/1/ifInOctets`
-- `zensight/snmp/switch01/if/1/ifOperStatus`
-
-**OID Mapping**: OIDs are converted to readable paths via configuration or MIB lookup.
-
-| OID | Key Expression |
-|-----|----------------|
-| `1.3.6.1.2.1.1.3.0` | `zensight/snmp/<device>/system/sysUpTime` |
-| `1.3.6.1.2.1.2.2.1.10.1` | `zensight/snmp/<device>/if/1/ifInOctets` |
-
-### Queryable Endpoints
-
-Each bridge exposes:
-- `zensight/snmp/<device>/**` - Query all metrics for a device
-- `zensight/snmp/@/status` - Bridge health/status
-
----
-
-## Common Data Model
-
-All bridges emit normalized telemetry:
-
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TelemetryPoint {
-    pub timestamp: i64,                        // Unix epoch milliseconds
-    pub source: String,                        // Device/host identifier
-    pub protocol: Protocol,                    // Origin protocol
-    pub metric: String,                        // Metric name/path
-    pub value: TelemetryValue,                 // Typed value
-    pub labels: HashMap<String, String>,       // Additional context
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum TelemetryValue {
-    Counter(u64),
-    Gauge(f64),
-    Text(String),
-    Boolean(bool),
-    Binary(Vec<u8>),
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Protocol {
-    Snmp, Syslog, Gnmi, Netflow, Opcua, Modbus,
-}
-```
-
-### Serialization
-
-Configurable per bridge:
-- **JSON** (default) - Human-readable, good for debugging
-- **CBOR** - Compact binary, better for high-volume telemetry
-
----
-
-## SNMP Bridge Design
-
-### Features
-
-1. **Multi-device polling**: Single bridge instance polls multiple SNMP devices
-2. **SNMP trap receiver**: Listen for incoming traps (UDP 162)
-3. **Configurable OID sets**: Define which OIDs to poll per device or device group
-4. **OID-to-name mapping**: Convert numeric OIDs to readable metric names
-5. **Polling intervals**: Per-device or per-OID-group intervals
-6. **SNMPv1/v2c support**: (SNMPv3 planned for future)
-
-### SNMP Configuration Example (JSON5)
-
-```json5
-{
-  zenoh: {
-    mode: "peer",
-    connect: ["tcp/localhost:7447"],
-  },
-  serialization: "json",
-  snmp: {
-    key_prefix: "zensight/snmp",
-    trap_listener: { enabled: true, bind: "0.0.0.0:162" },
-    devices: [
-      {
-        name: "router01",
-        address: "192.168.1.1:161",
-        community: "public",
-        version: "v2c",
-        poll_interval_secs: 30,
-        oids: ["1.3.6.1.2.1.1.3.0", "1.3.6.1.2.1.1.5.0"],
-        walks: ["1.3.6.1.2.1.2.2.1"],
-      },
-    ],
-    oid_groups: {
-      system_info: {
-        oids: ["1.3.6.1.2.1.1.1.0", "1.3.6.1.2.1.1.3.0"],
-        walks: [],
-      },
-    },
-    oid_names: {
-      "1.3.6.1.2.1.1.3.0": "system/sysUpTime",
-      "1.3.6.1.2.1.2.2.1.10": "if/{index}/ifInOctets",
-    },
-  },
-  logging: { level: "info" },
-}
-```
-
----
-
-## Iced Frontend Design
-
-### Multi-Bridge Support
-
-The frontend subscribes to `zensight/**` and handles telemetry from any number of bridges (including multiple instances of the same protocol type).
-
-```
-zensight/snmp/router01/...      # From bridge instance A
-zensight/snmp/switch01/...      # From bridge instance A
-zensight/snmp/datacenter/...    # From bridge instance B (different network)
-zensight/syslog/server01/...    # From syslog bridge
-```
-
-The frontend organizes data by:
-1. **Protocol** (snmp, syslog, etc.)
-2. **Source** (device/host name from key expression)
-
-No configuration needed in frontend to add new bridges - they're discovered automatically via Zenoh subscriptions.
-
-### Views
-
-- **Dashboard**: Grid/list of all monitored devices across all bridges, grouped by protocol
-- **Device Detail**: Metrics, graphs, and raw telemetry for a selected device
-- **Protocol Filter**: Filter dashboard by protocol type
-
----
-
-## Dependencies
-
-### zensight-common
-- `zenoh = "1.0"`
-- `tokio`, `serde`, `serde_json`, `ciborium`, `json5`
-- `tracing`, `tracing-subscriber`, `thiserror`
-
-### zensight (frontend)
-- `zensight-common`
-- `iced = "0.14"` with tokio feature
-- `zenoh = "1.0"`
-
-### zenoh-bridge-snmp
-- `zensight-common`
-- `rasn-snmp = "0.15"` (Pure Rust SNMP)
-- `tokio`, `clap`
-
----
-
-## Future Considerations
-
-- **SNMPv3**: USM authentication and encryption
-- **Backpressure handling**: Rate limiting when Zenoh can't keep up
-- **Authentication**: Zenoh TLS/auth
-- **Bidirectional operations**: SNMP SET, Modbus writes, etc.
-- **MIB loading**: Automatic OID-to-name resolution from MIB files
