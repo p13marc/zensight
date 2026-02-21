@@ -12,4 +12,5 @@ pub mod overview;
 pub mod settings;
 pub mod specialized;
 pub mod theme;
+pub mod toast;
 pub mod topology;

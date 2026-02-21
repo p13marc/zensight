@@ -32,6 +32,14 @@ pub enum BridgeError {
     #[error("Zenoh session error: {0}")]
     ZenohSession(String),
 
+    /// Zenoh publish error.
+    #[error("Zenoh publish error on '{key}': {message}")]
+    ZenohPublish { key: String, message: String },
+
+    /// Zenoh subscription error.
+    #[error("Zenoh subscription error on '{key_expr}': {message}")]
+    ZenohSubscription { key_expr: String, message: String },
+
     /// Serialization error.
     #[error("Serialization error: {0}")]
     Serialization(String),
@@ -80,6 +88,22 @@ impl BridgeError {
     /// Create a liveliness error.
     pub fn liveliness(msg: impl Into<String>) -> Self {
         Self::Liveliness(msg.into())
+    }
+
+    /// Create a Zenoh publish error.
+    pub fn zenoh_publish(key: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::ZenohPublish {
+            key: key.into(),
+            message: message.into(),
+        }
+    }
+
+    /// Create a Zenoh subscription error.
+    pub fn zenoh_subscription(key_expr: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::ZenohSubscription {
+            key_expr: key_expr.into(),
+            message: message.into(),
+        }
     }
 
     /// Wrap an error with context.

@@ -3,6 +3,22 @@ use crate::telemetry::Protocol;
 /// Default key expression prefix for all ZenSight telemetry.
 pub const KEY_PREFIX: &str = "zensight";
 
+/// Error type for key expression parsing.
+#[derive(Debug, thiserror::Error)]
+pub enum ParseError {
+    #[error("key expression too short: expected at least 4 segments, got {0}")]
+    TooFewSegments(usize),
+    #[error("invalid prefix: expected '{expected}', got '{actual}'")]
+    InvalidPrefix {
+        expected: &'static str,
+        actual: String,
+    },
+    #[error("unknown protocol: '{0}'")]
+    UnknownProtocol(String),
+    #[error("empty source identifier")]
+    EmptySource,
+}
+
 /// Builder for constructing ZenSight key expressions.
 ///
 /// Key expressions follow the pattern:
@@ -32,6 +48,11 @@ impl KeyExprBuilder {
 
     /// Build a key expression for a specific source and metric.
     ///
+    /// # Panics
+    ///
+    /// Debug-asserts that `source` and `metric` are non-empty and don't contain
+    /// double slashes (`//`).
+    ///
     /// # Example
     /// ```
     /// use zensight_common::keyexpr::KeyExprBuilder;
@@ -42,6 +63,12 @@ impl KeyExprBuilder {
     /// assert_eq!(key, "zensight/snmp/router01/system/sysUpTime");
     /// ```
     pub fn build(&self, source: &str, metric: &str) -> String {
+        debug_assert!(!source.is_empty(), "source must not be empty");
+        debug_assert!(!metric.is_empty(), "metric must not be empty");
+        debug_assert!(
+            !source.contains("//") && !metric.contains("//"),
+            "source and metric must not contain '//'"
+        );
         format!(
             "{}/{}/{}/{}",
             self.prefix,
@@ -181,12 +208,19 @@ pub fn all_bridges_wildcard() -> String {
 
 /// Parse a key expression to extract protocol, source, and metric path.
 ///
-/// Returns `None` if the key expression doesn't match the expected pattern.
-pub fn parse_key_expr(key: &str) -> Option<ParsedKeyExpr<'_>> {
+/// Returns a descriptive error if the key expression doesn't match the expected pattern.
+pub fn parse_key_expr(key: &str) -> Result<ParsedKeyExpr<'_>, ParseError> {
     let parts: Vec<&str> = key.split('/').collect();
 
-    if parts.len() < 4 || parts[0] != KEY_PREFIX {
-        return None;
+    if parts.len() < 4 {
+        return Err(ParseError::TooFewSegments(parts.len()));
+    }
+
+    if parts[0] != KEY_PREFIX {
+        return Err(ParseError::InvalidPrefix {
+            expected: KEY_PREFIX,
+            actual: parts[0].to_string(),
+        });
     }
 
     let protocol = match parts[1] {
@@ -196,13 +230,18 @@ pub fn parse_key_expr(key: &str) -> Option<ParsedKeyExpr<'_>> {
         "netflow" => Protocol::Netflow,
         "opcua" => Protocol::Opcua,
         "modbus" => Protocol::Modbus,
-        _ => return None,
+        "sysinfo" => Protocol::Sysinfo,
+        other => return Err(ParseError::UnknownProtocol(other.to_string())),
     };
 
     let source = parts[2];
+    if source.is_empty() {
+        return Err(ParseError::EmptySource);
+    }
+
     let metric = parts[3..].join("/");
 
-    Some(ParsedKeyExpr {
+    Ok(ParsedKeyExpr {
         protocol,
         source,
         metric,
@@ -250,10 +289,27 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_sysinfo_key_expr() {
+        let parsed = parse_key_expr("zensight/sysinfo/server01/cpu/usage").unwrap();
+        assert_eq!(parsed.protocol, Protocol::Sysinfo);
+        assert_eq!(parsed.source, "server01");
+        assert_eq!(parsed.metric, "cpu/usage");
+    }
+
+    #[test]
     fn test_parse_invalid_key() {
-        assert!(parse_key_expr("invalid/key").is_none());
-        assert!(parse_key_expr("zensight/unknown/device/metric").is_none());
-        assert!(parse_key_expr("other/snmp/device/metric").is_none());
+        assert!(matches!(
+            parse_key_expr("invalid/key"),
+            Err(ParseError::TooFewSegments(2))
+        ));
+        assert!(matches!(
+            parse_key_expr("zensight/unknown/device/metric"),
+            Err(ParseError::UnknownProtocol(_))
+        ));
+        assert!(matches!(
+            parse_key_expr("other/snmp/device/metric"),
+            Err(ParseError::InvalidPrefix { .. })
+        ));
     }
 
     #[test]

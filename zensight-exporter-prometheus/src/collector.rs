@@ -245,6 +245,8 @@ pub struct CollectorStats {
     pub points_dropped_max_series: u64,
     /// Number of stale metrics removed.
     pub stale_metrics_removed: u64,
+    /// Number of render errors (write failures during exposition).
+    pub render_errors: u64,
 }
 
 impl MetricCollector {
@@ -362,6 +364,17 @@ impl MetricCollector {
     pub fn render(&self) -> String {
         let metrics = self.metrics.read();
         let mut output = Vec::with_capacity(metrics.len() * 100);
+        let mut render_errors = 0u64;
+
+        // Helper macro to handle write errors
+        macro_rules! write_or_count {
+            ($dst:expr, $($arg:tt)*) => {
+                if let Err(e) = writeln!($dst, $($arg)*) {
+                    render_errors += 1;
+                    warn!(error = %e, "Failed to write metric line");
+                }
+            };
+        }
 
         // Group metrics by name for TYPE/HELP comments
         let mut by_name: HashMap<&str, Vec<&StoredMetric>> = HashMap::new();
@@ -383,7 +396,7 @@ impl MetricCollector {
             let metric_type = series[0].metric_type;
 
             // Write TYPE comment
-            writeln!(output, "# TYPE {} {}", name, metric_type.as_str()).ok();
+            write_or_count!(output, "# TYPE {} {}", name, metric_type.as_str());
 
             // Write each series
             for metric in series {
@@ -396,19 +409,18 @@ impl MetricCollector {
                             labels.sort_by(|a, b| a.0.cmp(&b.0));
 
                             let label_str = format_labels(&labels);
-                            writeln!(output, "{}{} 1", metric.key.name, label_str).ok();
+                            write_or_count!(output, "{}{} 1", metric.key.name, label_str);
                         }
                     }
                     _ => {
                         if let Some(value) = metric.value {
-                            writeln!(
+                            write_or_count!(
                                 output,
                                 "{}{} {}",
                                 metric.key.name,
                                 metric.key.format_labels(),
                                 format_value(value)
-                            )
-                            .ok();
+                            );
                         }
                     }
                 }
@@ -417,59 +429,58 @@ impl MetricCollector {
 
         // Add collector stats as metrics
         let stats = self.stats.read();
-        writeln!(output).ok();
-        writeln!(
+        let _ = writeln!(output);
+        write_or_count!(
             output,
             "# TYPE {}_exporter_series_total gauge",
             self.prometheus_config.prefix
-        )
-        .ok();
-        writeln!(
+        );
+        write_or_count!(
             output,
             "{}_exporter_series_total {}",
             self.prometheus_config.prefix,
             metrics.len()
-        )
-        .ok();
+        );
 
-        writeln!(
+        write_or_count!(
             output,
             "# TYPE {}_exporter_points_received_total counter",
             self.prometheus_config.prefix
-        )
-        .ok();
-        writeln!(
+        );
+        write_or_count!(
             output,
             "{}_exporter_points_received_total {}",
             self.prometheus_config.prefix, stats.points_received
-        )
-        .ok();
+        );
 
-        writeln!(
+        write_or_count!(
             output,
             "# TYPE {}_exporter_points_accepted_total counter",
             self.prometheus_config.prefix
-        )
-        .ok();
-        writeln!(
+        );
+        write_or_count!(
             output,
             "{}_exporter_points_accepted_total {}",
             self.prometheus_config.prefix, stats.points_accepted
-        )
-        .ok();
+        );
 
-        writeln!(
+        write_or_count!(
             output,
             "# TYPE {}_exporter_points_filtered_total counter",
             self.prometheus_config.prefix
-        )
-        .ok();
-        writeln!(
+        );
+        write_or_count!(
             output,
             "{}_exporter_points_filtered_total {}",
             self.prometheus_config.prefix, stats.points_filtered
-        )
-        .ok();
+        );
+
+        // Record render errors in stats
+        if render_errors > 0 {
+            drop(stats);
+            let mut stats = self.stats.write();
+            stats.render_errors += render_errors;
+        }
 
         String::from_utf8(output).unwrap_or_default()
     }

@@ -28,6 +28,9 @@ pub enum Message {
     /// Correlation entry received.
     CorrelationReceived(CorrelationEntry),
 
+    /// Zenoh connection attempt started.
+    Connecting,
+
     /// Zenoh connection established.
     Connected,
 
@@ -330,6 +333,9 @@ pub enum Message {
 
     /// Syslog filter status received from bridge.
     SyslogFilterStatusReceived(SyslogFilterStatus),
+
+    /// Dismiss a toast notification.
+    DismissToast(u64),
 }
 
 /// Syslog filter status from bridge.

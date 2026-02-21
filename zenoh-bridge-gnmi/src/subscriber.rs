@@ -40,19 +40,40 @@ impl GnmiSubscriber {
             self.target.name, self.target.address
         );
 
+        let mut backoff = Duration::from_secs(5);
+        let max_backoff = Duration::from_secs(300);
+        let mut attempt = 0u64;
+
         loop {
+            attempt += 1;
+            info!(
+                attempt,
+                backoff_secs = backoff.as_secs(),
+                target = %self.target.name,
+                "Connecting to gNMI target"
+            );
+
             match self.subscribe_loop(&session).await {
                 Ok(()) => {
                     info!("Subscription completed normally for {}", self.target.name);
+                    // Reset on successful connection
+                    backoff = Duration::from_secs(5);
+                    attempt = 0;
                 }
                 Err(e) => {
-                    error!(
-                        "Subscription error for {}: {}. Reconnecting in 5s...",
-                        self.target.name, e
+                    warn!(
+                        attempt,
+                        error = %e,
+                        next_retry_secs = backoff.as_secs(),
+                        target = %self.target.name,
+                        "gNMI connection failed"
                     );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(max_backoff);
+                    continue;
                 }
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(backoff).await;
         }
     }
 
@@ -173,9 +194,9 @@ impl GnmiSubscriber {
         gnmi::Subscription {
             path: Some(path),
             mode,
-            sample_interval: sub.sample_interval_ms * 1_000_000, // Convert to nanoseconds
+            sample_interval: sub.sample_interval_ms.saturating_mul(1_000_000),
             suppress_redundant: sub.suppress_redundant,
-            heartbeat_interval: sub.heartbeat_interval_ms * 1_000_000,
+            heartbeat_interval: sub.heartbeat_interval_ms.saturating_mul(1_000_000),
         }
     }
 
@@ -220,7 +241,7 @@ impl GnmiSubscriber {
         session: &Arc<zenoh::Session>,
         notification: gnmi::Notification,
     ) -> anyhow::Result<()> {
-        let timestamp = notification.timestamp / 1_000_000; // Convert nanoseconds to milliseconds
+        let timestamp = notification.timestamp.checked_div(1_000_000).unwrap_or(0); // Convert nanoseconds to milliseconds
         let prefix_path = notification.prefix.as_ref().map(|p| self.path_to_string(p));
 
         for update in notification.update {

@@ -10,7 +10,8 @@ use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 
 use zensight_common::{
-    DeviceLiveness, DeviceStatus, HealthSnapshot, Protocol, TelemetryPoint, TelemetryValue,
+    DeviceLiveness, DeviceStatus, HealthSnapshot, HealthStatus, Protocol, TelemetryPoint,
+    TelemetryValue,
 };
 
 /// Demo simulation state.
@@ -1396,11 +1397,11 @@ impl DemoSimulator {
 
                 // Determine overall status
                 let status = if devices_failed == 0 {
-                    "healthy"
+                    HealthStatus::Healthy
                 } else if devices_responding > 0 {
-                    "degraded"
+                    HealthStatus::Degraded
                 } else {
-                    "error"
+                    HealthStatus::Error
                 };
 
                 let metrics = *self.metrics_published.get(*name).unwrap_or(&0);
@@ -1408,7 +1409,7 @@ impl DemoSimulator {
 
                 HealthSnapshot {
                     bridge: name.to_string(),
-                    status: status.to_string(),
+                    status,
                     uptime_secs: uptime, // Each tick is ~0.6s in demo, but we use tick count
                     devices_total: *device_count,
                     devices_responding,

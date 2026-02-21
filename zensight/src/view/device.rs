@@ -1,6 +1,6 @@
 //! Device detail view showing all metrics for a selected device.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use iced::widget::{
     Row, column, container, row, rule, scrollable, table, text, text_input, tooltip,
@@ -19,6 +19,9 @@ use crate::view::specialized;
 
 /// Debounce delay for metric search input in milliseconds.
 const SEARCH_DEBOUNCE_MS: i64 = 300;
+
+/// Threshold for marking individual metrics as stale (60 seconds in ms).
+const METRIC_STALE_THRESHOLD_MS: i64 = 60_000;
 
 /// A row in the metrics table, containing pre-formatted data for display.
 /// This struct is Clone so it can be used with the table widget.
@@ -40,6 +43,8 @@ struct MetricTableRow {
     is_in_chart: bool,
     /// Trend indicator: "up", "down", "stable", or empty.
     trend: String,
+    /// Whether this metric is stale (not updated recently).
+    is_stale: bool,
 }
 
 /// Get the current timestamp in milliseconds.
@@ -58,7 +63,7 @@ pub struct DeviceDetailState {
     /// All metrics for this device (metric name -> telemetry point).
     pub metrics: HashMap<String, TelemetryPoint>,
     /// Metric history (for graphing).
-    pub history: HashMap<String, Vec<TelemetryPoint>>,
+    pub history: HashMap<String, VecDeque<TelemetryPoint>>,
     /// Maximum history size per metric.
     pub max_history: usize,
     /// Currently selected metric for the chart (if any).
@@ -100,7 +105,7 @@ impl DeviceDetailState {
         // Trim existing history if needed
         for history in self.history.values_mut() {
             while history.len() > max_history {
-                history.remove(0);
+                history.pop_front();
             }
         }
     }
@@ -114,11 +119,11 @@ impl DeviceDetailState {
 
         // Update history
         let history = self.history.entry(metric_name.clone()).or_default();
-        history.push(point.clone());
+        history.push_back(point.clone());
 
         // Trim history if needed
         if history.len() > self.max_history {
-            history.remove(0);
+            history.pop_front();
         }
 
         // Update chart if this metric is selected (single-series mode)
@@ -626,6 +631,9 @@ fn build_metric_table_rows(state: &DeviceDetailState) -> Vec<MetricTableRow> {
                 String::new()
             };
 
+            let is_stale =
+                (current_timestamp() - point.timestamp) > METRIC_STALE_THRESHOLD_MS;
+
             MetricTableRow {
                 name: name.to_string(),
                 value,
@@ -635,13 +643,14 @@ fn build_metric_table_rows(state: &DeviceDetailState) -> Vec<MetricTableRow> {
                 is_chartable: state.is_metric_chartable(name),
                 is_in_chart: state.is_metric_in_chart(name),
                 trend,
+                is_stale,
             }
         })
         .collect()
 }
 
 /// Compute trend direction from history.
-fn compute_trend(history: &[TelemetryPoint]) -> String {
+fn compute_trend(history: &VecDeque<TelemetryPoint>) -> String {
     if history.len() < 2 {
         return String::new();
     }
@@ -752,7 +761,16 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
         text("Value").size(12),
         |row: MetricTableRow| -> Element<'_, Message> {
             let value = row.value;
-            let value_widget = text(value).size(12);
+            let is_stale = row.is_stale;
+            let value_widget = text(value).size(12).style(move |theme: &Theme| {
+                if is_stale {
+                    text::Style {
+                        color: Some(crate::view::theme::colors(theme).text_dimmed()),
+                    }
+                } else {
+                    text::Style::default()
+                }
+            });
             if let Some(full) = row.full_value {
                 tooltip(
                     value_widget,
@@ -805,15 +823,32 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
         text("Updated").size(12),
         |row: MetricTableRow| -> Element<'_, Message> {
             let timestamp = row.timestamp;
-            text(timestamp)
-                .size(11)
-                .style(|theme: &Theme| text::Style {
-                    color: Some(crate::view::theme::colors(theme).text_dimmed()),
-                })
+            let is_stale = row.is_stale;
+            if is_stale {
+                row![
+                    text(timestamp).size(11).style(|theme: &Theme| text::Style {
+                        color: Some(crate::view::theme::colors(theme).text_dimmed()),
+                    }),
+                    text("stale")
+                        .size(9)
+                        .style(|_theme: &Theme| text::Style {
+                            color: Some(iced::Color::from_rgb(0.7, 0.4, 0.1)),
+                        })
+                ]
+                .spacing(4)
+                .align_y(Alignment::Center)
                 .into()
+            } else {
+                text(timestamp)
+                    .size(11)
+                    .style(|theme: &Theme| text::Style {
+                        color: Some(crate::view::theme::colors(theme).text_dimmed()),
+                    })
+                    .into()
+            }
         },
     )
-    .width(100);
+    .width(120);
 
     let actions_column = table::column(
         text("").size(12),

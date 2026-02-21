@@ -6,6 +6,35 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Bridge health status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HealthStatus {
+    /// Bridge is fully operational, all devices healthy.
+    #[default]
+    Healthy,
+    /// Bridge is partially operational, some devices failing.
+    Degraded,
+    /// Bridge has critical issues, no devices responding.
+    Unhealthy,
+    /// Bridge is starting up.
+    Starting,
+    /// Bridge encountered a fatal error.
+    Error,
+}
+
+impl std::fmt::Display for HealthStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HealthStatus::Healthy => write!(f, "healthy"),
+            HealthStatus::Degraded => write!(f, "degraded"),
+            HealthStatus::Unhealthy => write!(f, "unhealthy"),
+            HealthStatus::Starting => write!(f, "starting"),
+            HealthStatus::Error => write!(f, "error"),
+        }
+    }
+}
+
 /// Device availability status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -38,7 +67,7 @@ pub struct HealthSnapshot {
     /// Bridge name.
     pub bridge: String,
     /// Overall health status.
-    pub status: String,
+    pub status: HealthStatus,
     /// Uptime in seconds.
     pub uptime_secs: u64,
     /// Total devices configured.
@@ -139,7 +168,7 @@ pub struct BridgeInfo {
     /// Number of devices being monitored.
     pub device_count: u64,
     /// Bridge status.
-    pub status: String,
+    pub status: HealthStatus,
     /// Last heartbeat timestamp.
     pub last_heartbeat: i64,
 }
@@ -177,6 +206,7 @@ mod tests {
 
         let snapshot: HealthSnapshot = serde_json::from_str(json).unwrap();
         assert_eq!(snapshot.bridge, "snmp");
+        assert_eq!(snapshot.status, HealthStatus::Healthy);
         assert_eq!(snapshot.devices_total, 10);
     }
 

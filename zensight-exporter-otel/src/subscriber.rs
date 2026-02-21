@@ -1,7 +1,9 @@
 //! Zenoh subscriber for receiving telemetry points.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use tokio::sync::watch;
-use tracing::{debug, info, trace, warn};
+use tracing::{info, trace, warn};
 use zenoh::sample::SampleKind;
 use zensight_common::config::ZenohConfig;
 use zensight_common::telemetry::TelemetryPoint;
@@ -11,11 +13,20 @@ use crate::exporter::SharedExporter;
 /// Default key expression to subscribe to.
 pub const DEFAULT_KEY_EXPR: &str = "zensight/**";
 
+/// Statistics for the subscriber.
+#[derive(Debug, Default)]
+pub struct SubscriberStats {
+    pub samples_received: AtomicU64,
+    pub samples_decoded: AtomicU64,
+    pub decode_failures: AtomicU64,
+}
+
 /// Zenoh subscriber that feeds telemetry to the OTEL exporter.
 pub struct TelemetrySubscriber {
     exporter: SharedExporter,
     zenoh_config: ZenohConfig,
     key_expr: String,
+    stats: SubscriberStats,
 }
 
 impl TelemetrySubscriber {
@@ -25,6 +36,7 @@ impl TelemetrySubscriber {
             exporter,
             zenoh_config,
             key_expr: DEFAULT_KEY_EXPR.to_string(),
+            stats: SubscriberStats::default(),
         }
     }
 
@@ -113,6 +125,7 @@ impl TelemetrySubscriber {
                             }
 
                             let payload = sample.payload().to_bytes();
+                            self.stats.samples_received.fetch_add(1, Ordering::Relaxed);
 
                             // Try JSON first, then CBOR
                             let point: Option<TelemetryPoint> =
@@ -122,6 +135,7 @@ impl TelemetrySubscriber {
 
                             match point {
                                 Some(point) => {
+                                    self.stats.samples_decoded.fetch_add(1, Ordering::Relaxed);
                                     trace!(
                                         source = %point.source,
                                         protocol = %point.protocol,
@@ -131,10 +145,11 @@ impl TelemetrySubscriber {
                                     self.exporter.record(&point);
                                 }
                                 None => {
-                                    debug!(
+                                    self.stats.decode_failures.fetch_add(1, Ordering::Relaxed);
+                                    warn!(
                                         key = %sample.key_expr(),
                                         payload_len = payload.len(),
-                                        "Failed to decode telemetry point"
+                                        "Failed to decode telemetry point as JSON or CBOR"
                                     );
                                 }
                             }

@@ -2,15 +2,16 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use opentelemetry::logs::{LogRecord as _, Logger, LoggerProvider as _};
-use opentelemetry::metrics::MeterProvider as _;
+use opentelemetry::metrics::{Meter, MeterProvider as _};
 use opentelemetry_otlp::{LogExporter, MetricExporter, WithExportConfig};
 use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::logs::SdkLoggerProvider;
+use opentelemetry_sdk::logs::{SdkLogger, SdkLoggerProvider};
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use parking_lot::RwLock;
-use tracing::{error, info, trace};
+use tracing::{error, info, trace, warn};
 use zensight_common::telemetry::TelemetryPoint;
 
 use crate::config::{FilterConfig, OtelConfig, OtlpProtocol};
@@ -79,16 +80,41 @@ pub struct ExporterStats {
     pub points_received: u64,
     pub points_filtered: u64,
     pub metrics_exported: u64,
+    pub metrics_failed: u64,
     pub logs_exported: u64,
     pub export_errors: u64,
+}
+
+/// Build a collision-resistant gauge key from metric name and attributes.
+///
+/// Attributes are sorted and separated by null bytes to prevent collisions.
+fn build_gauge_key(metric_name: &str, attributes: &[opentelemetry::KeyValue]) -> String {
+    let mut sorted_attrs: Vec<_> = attributes
+        .iter()
+        .map(|kv| format!("{}={}", kv.key, kv.value.as_str()))
+        .collect();
+    sorted_attrs.sort();
+    format!("{}\x00{}", metric_name, sorted_attrs.join("\x00"))
+}
+
+/// A stored gauge value with staleness tracking.
+#[derive(Debug, Clone)]
+struct GaugeEntry {
+    #[allow(dead_code)]
+    value: f64,
+    last_updated: Instant,
 }
 
 /// OpenTelemetry exporter that receives telemetry and exports via OTLP.
 pub struct OtelExporter {
     /// Meter provider for metrics.
     meter_provider: Option<SdkMeterProvider>,
+    /// Cached meter instance (avoids re-creating on every metric).
+    meter: Option<Meter>,
     /// Logger provider for logs.
     logger_provider: Option<SdkLoggerProvider>,
+    /// Cached logger instance (avoids re-creating on every log).
+    logger: Option<SdkLogger>,
     /// Whether metrics export is enabled.
     export_metrics: bool,
     /// Whether logs export is enabled.
@@ -97,8 +123,10 @@ pub struct OtelExporter {
     filter: TelemetryFilter,
     /// Export statistics.
     stats: RwLock<ExporterStats>,
-    /// Registered gauges for updating.
-    gauges: RwLock<HashMap<String, f64>>,
+    /// Registered gauges for updating, with staleness tracking.
+    gauges: RwLock<HashMap<String, GaugeEntry>>,
+    /// Maximum number of gauge series to store.
+    max_gauge_series: usize,
 }
 
 impl OtelExporter {
@@ -135,14 +163,20 @@ impl OtelExporter {
             None
         };
 
+        let meter = meter_provider.as_ref().map(|mp| mp.meter("zensight"));
+        let logger = logger_provider.as_ref().map(|lp| lp.logger("zensight.syslog"));
+
         Ok(Self {
             meter_provider,
+            meter,
             logger_provider,
+            logger,
             export_metrics: otel_config.export_metrics,
             export_logs: otel_config.export_logs,
             filter: TelemetryFilter::new(filter_config),
             stats: RwLock::new(ExporterStats::default()),
             gauges: RwLock::new(HashMap::new()),
+            max_gauge_series: 100_000,
         })
     }
 
@@ -237,75 +271,89 @@ impl OtelExporter {
     }
 
     fn record_metric(&self, point: &TelemetryPoint) {
-        let Some(meter_provider) = &self.meter_provider else {
+        let Some(meter) = &self.meter else {
             return;
         };
 
         let metric_name = build_metric_name(point.protocol, &point.metric);
         let attributes = build_metric_attributes(point);
 
-        let meter = meter_provider.meter("zensight");
-
         match OtelMetricType::from_value(&point.value) {
             OtelMetricType::Counter => {
-                if let Some(value) = extract_value(&point.value) {
-                    let counter = meter.u64_counter(metric_name.clone()).build();
-                    counter.add(value as u64, &attributes);
-
-                    trace!(
+                let Some(value) = extract_value(&point.value) else {
+                    warn!(
                         metric = %metric_name,
-                        value = value,
-                        "Recorded counter"
+                        source = %point.source,
+                        "Counter marked as exportable but value extraction failed"
                     );
-
                     let mut stats = self.stats.write();
-                    stats.metrics_exported += 1;
-                }
+                    stats.metrics_failed += 1;
+                    return;
+                };
+                let counter = meter.u64_counter(metric_name.clone()).build();
+                counter.add(value as u64, &attributes);
+
+                trace!(
+                    metric = %metric_name,
+                    value = value,
+                    "Recorded counter"
+                );
+
+                let mut stats = self.stats.write();
+                stats.metrics_exported += 1;
             }
             OtelMetricType::Gauge => {
-                if let Some(value) = extract_value(&point.value) {
-                    // For gauges, we use an observable gauge pattern
-                    // Store the value and let the SDK read it periodically
-                    let key = format!(
-                        "{}:{}",
-                        metric_name,
-                        attributes
-                            .iter()
-                            .map(|kv| format!("{}={}", kv.key, kv.value.as_str()))
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    );
-
-                    self.gauges.write().insert(key, value);
-
-                    // Create/update gauge
-                    let gauge = meter.f64_gauge(metric_name.clone()).build();
-                    gauge.record(value, &attributes);
-
-                    trace!(
+                let Some(value) = extract_value(&point.value) else {
+                    warn!(
                         metric = %metric_name,
-                        value = value,
-                        "Recorded gauge"
+                        source = %point.source,
+                        "Gauge marked as exportable but value extraction failed"
                     );
-
                     let mut stats = self.stats.write();
-                    stats.metrics_exported += 1;
+                    stats.metrics_failed += 1;
+                    return;
+                };
+                // For gauges, we use an observable gauge pattern
+                // Store the value and let the SDK read it periodically
+                let key = build_gauge_key(&metric_name, &attributes);
+
+                let mut gauges = self.gauges.write();
+                if !gauges.contains_key(&key) && gauges.len() >= self.max_gauge_series {
+                    warn!(
+                        max = self.max_gauge_series,
+                        "Max gauge series limit reached, dropping new gauge"
+                    );
+                    let mut stats = self.stats.write();
+                    stats.metrics_failed += 1;
+                    return;
                 }
+                gauges.insert(key, GaugeEntry { value, last_updated: Instant::now() });
+
+                // Create/update gauge
+                let gauge = meter.f64_gauge(metric_name.clone()).build();
+                gauge.record(value, &attributes);
+
+                trace!(
+                    metric = %metric_name,
+                    value = value,
+                    "Recorded gauge"
+                );
+
+                let mut stats = self.stats.write();
+                stats.metrics_exported += 1;
             }
             OtelMetricType::NotExportable => {}
         }
     }
 
     fn record_log(&self, point: &TelemetryPoint) {
-        let Some(logger_provider) = &self.logger_provider else {
+        let Some(logger) = &self.logger else {
             return;
         };
 
         let Some(record) = LogRecord::from_telemetry(point) else {
             return;
         };
-
-        let logger = logger_provider.logger("zensight.syslog");
 
         // Create a new log record
         let mut log_record = logger.create_log_record();
@@ -340,6 +388,23 @@ impl OtelExporter {
 
         let mut stats = self.stats.write();
         stats.logs_exported += 1;
+    }
+
+    /// Remove stale gauge entries that haven't been updated within the given duration.
+    pub fn cleanup_stale_gauges(&self, max_age: Duration) -> usize {
+        let mut gauges = self.gauges.write();
+        let before = gauges.len();
+        gauges.retain(|_, entry| entry.last_updated.elapsed() < max_age);
+        let removed = before - gauges.len();
+        if removed > 0 {
+            info!(removed, remaining = gauges.len(), "Cleaned up stale gauges");
+        }
+        removed
+    }
+
+    /// Get the number of stored gauge series.
+    pub fn gauge_count(&self) -> usize {
+        self.gauges.read().len()
     }
 
     /// Get current statistics.

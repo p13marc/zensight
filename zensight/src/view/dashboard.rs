@@ -10,7 +10,9 @@ use iced::{Alignment, Color, Element, Length, Theme};
 use iced_anim::widget::button;
 use iced_anim::{AnimationBuilder, Easing};
 
-use zensight_common::{DeviceStatus, HealthSnapshot, Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{
+    DeviceStatus, HealthSnapshot, HealthStatus, Protocol, TelemetryPoint, TelemetryValue,
+};
 
 /// Dashboard view mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -126,6 +128,18 @@ pub const DEFAULT_DEVICES_PER_PAGE: usize = 20;
 /// Debounce delay for search input in milliseconds.
 pub const SEARCH_DEBOUNCE_MS: i64 = 300;
 
+/// Connection state for Zenoh session.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ConnectionState {
+    /// Not connected and not attempting.
+    #[default]
+    Disconnected,
+    /// Actively connecting to Zenoh.
+    Connecting,
+    /// Successfully connected.
+    Connected,
+}
+
 /// Dashboard view state.
 #[derive(Debug)]
 pub struct DashboardState {
@@ -141,6 +155,8 @@ pub struct DashboardState {
     pub pending_search_time: i64,
     /// Whether we are connected to Zenoh.
     pub connected: bool,
+    /// Current connection state (more granular than `connected`).
+    pub connection_state: ConnectionState,
     /// Last error message, if any.
     pub last_error: Option<String>,
     /// Current page number (0-indexed).
@@ -160,6 +176,7 @@ impl Default for DashboardState {
             pending_search: String::new(),
             pending_search_time: 0,
             connected: false,
+            connection_state: ConnectionState::default(),
             last_error: None,
             current_page: 0,
             devices_per_page: DEFAULT_DEVICES_PER_PAGE,
@@ -312,12 +329,15 @@ pub fn dashboard_view<'a>(
     overview: &'a OverviewState,
     bridge_health: &'a HashMap<String, HealthSnapshot>,
 ) -> Element<'a, Message> {
+    // Compute filtered devices once and pass through to avoid redundant work
+    let filtered = state.filtered_devices();
+
     let header = render_header(state, theme, unacknowledged_alerts);
     let bridge_summary = render_bridge_health_summary(bridge_health);
-    let filters = render_protocol_filters(state);
+    let filters = render_protocol_filters(state, &filtered);
     let group_filters = group_filter_bar(groups);
     let overview_panel = overview_section(overview, &state.devices);
-    let devices = render_device_grid(state, groups);
+    let devices = render_device_grid(state, groups, &filtered);
 
     let content = column![
         header,
@@ -345,24 +365,31 @@ fn render_header(
 ) -> Element<'_, Message> {
     let title = text("ZenSight Dashboard").size(24);
 
-    let status_icon = if state.connected {
-        icons::connected(IconSize::Medium)
-    } else {
-        icons::disconnected(IconSize::Medium)
-    };
-
-    let status_text = if state.connected {
-        text("Connected")
-            .size(14)
-            .style(|theme: &Theme| text::Style {
-                color: Some(crate::view::theme::colors(theme).status_connected()),
-            })
-    } else {
-        text("Disconnected")
-            .size(14)
-            .style(|theme: &Theme| text::Style {
-                color: Some(crate::view::theme::colors(theme).status_disconnected()),
-            })
+    let (status_icon, status_text) = match state.connection_state {
+        ConnectionState::Connected => (
+            icons::connected(IconSize::Medium),
+            text("Connected")
+                .size(14)
+                .style(|theme: &Theme| text::Style {
+                    color: Some(crate::view::theme::colors(theme).status_connected()),
+                }),
+        ),
+        ConnectionState::Connecting => (
+            icons::disconnected(IconSize::Medium),
+            text("Connecting...")
+                .size(14)
+                .style(|_theme: &Theme| text::Style {
+                    color: Some(Color::from_rgb(0.9, 0.7, 0.0)),
+                }),
+        ),
+        ConnectionState::Disconnected => (
+            icons::disconnected(IconSize::Medium),
+            text("Disconnected")
+                .size(14)
+                .style(|theme: &Theme| text::Style {
+                    color: Some(crate::view::theme::colors(theme).status_disconnected()),
+                }),
+        ),
     };
 
     let status = row![status_icon, status_text]
@@ -482,10 +509,10 @@ fn render_bridge_health_summary(
 
     for snapshot in bridges {
         // Determine status color based on health
-        let status_icon = match snapshot.status.as_str() {
-            "healthy" => icons::status_healthy(IconSize::Small),
-            "degraded" => icons::status_degraded(IconSize::Small),
-            "error" => icons::status_error(IconSize::Small),
+        let status_icon = match snapshot.status {
+            HealthStatus::Healthy => icons::status_healthy(IconSize::Small),
+            HealthStatus::Degraded => icons::status_degraded(IconSize::Small),
+            HealthStatus::Error | HealthStatus::Unhealthy => icons::status_error(IconSize::Small),
             _ => icons::status_unknown(IconSize::Small),
         };
 
@@ -517,7 +544,10 @@ fn render_bridge_health_summary(
 }
 
 /// Render protocol filter buttons and search input.
-fn render_protocol_filters(state: &DashboardState) -> Element<'_, Message> {
+fn render_protocol_filters<'a>(
+    state: &'a DashboardState,
+    filtered: &[&DeviceState],
+) -> Element<'a, Message> {
     let protocols = state.active_protocols();
 
     if protocols.is_empty() {
@@ -556,8 +586,8 @@ fn render_protocol_filters(state: &DashboardState) -> Element<'_, Message> {
         .spacing(6)
         .align_y(Alignment::Center);
 
-    // Device count
-    let filtered_count = state.filtered_devices().len();
+    // Device count (use pre-computed filtered list)
+    let filtered_count = filtered.len();
     let total_count = state.devices.len();
     let count_text = if filtered_count == total_count {
         text(format!("{} devices", total_count)).size(12)
@@ -575,11 +605,12 @@ fn render_protocol_filters(state: &DashboardState) -> Element<'_, Message> {
 fn render_device_grid<'a>(
     state: &'a DashboardState,
     groups: &'a GroupsState,
+    filtered: &[&'a DeviceState],
 ) -> Element<'a, Message> {
-    // Filter devices by both protocol/search and group filters
-    let all_devices: Vec<_> = state
-        .filtered_devices()
-        .into_iter()
+    // Apply group filter on top of pre-computed protocol/search filter
+    let all_devices: Vec<_> = filtered
+        .iter()
+        .copied()
         .filter(|d| groups.device_passes_filter(&d.id))
         .collect();
 

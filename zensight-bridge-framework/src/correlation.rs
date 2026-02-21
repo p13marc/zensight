@@ -140,7 +140,7 @@ impl CorrelationRegistry {
 
         // Update the main entries map
         {
-            let mut entries = self.entries.write().unwrap();
+            let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
             entries
                 .entry(ip)
                 .and_modify(|entry| entry.merge(&identity))
@@ -149,7 +149,7 @@ impl CorrelationRegistry {
 
         // Update hostname index
         {
-            let mut hostname_index = self.hostname_index.write().unwrap();
+            let mut hostname_index = self.hostname_index.write().unwrap_or_else(|e| e.into_inner());
             for hostname in &identity.hostnames {
                 hostname_index.insert(hostname.to_lowercase(), ip);
             }
@@ -181,7 +181,7 @@ impl CorrelationRegistry {
 
     /// Look up a correlation entry by IP.
     pub fn lookup_by_ip(&self, ip: IpAddr) -> Option<CorrelationEntry> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
         entries.get(&ip).cloned()
     }
 
@@ -189,7 +189,7 @@ impl CorrelationRegistry {
     pub fn lookup_by_hostname(&self, hostname: &str) -> Option<CorrelationEntry> {
         let hostname_lower = hostname.to_lowercase();
         let ip = {
-            let hostname_index = self.hostname_index.read().unwrap();
+            let hostname_index = self.hostname_index.read().unwrap_or_else(|e| e.into_inner());
             hostname_index.get(&hostname_lower).copied()
         };
 
@@ -198,19 +198,19 @@ impl CorrelationRegistry {
 
     /// Get the IP address for a hostname.
     pub fn resolve_hostname(&self, hostname: &str) -> Option<IpAddr> {
-        let hostname_index = self.hostname_index.read().unwrap();
+        let hostname_index = self.hostname_index.read().unwrap_or_else(|e| e.into_inner());
         hostname_index.get(&hostname.to_lowercase()).copied()
     }
 
     /// Get all correlation entries.
     pub fn all_entries(&self) -> Vec<CorrelationEntry> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
         entries.values().cloned().collect()
     }
 
     /// Get the number of correlated devices.
     pub fn device_count(&self) -> usize {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
         entries.len()
     }
 
@@ -221,7 +221,7 @@ impl CorrelationRegistry {
         };
 
         let entry = {
-            let entries = self.entries.read().unwrap();
+            let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
             entries.get(&ip).cloned()
         };
 
@@ -240,7 +240,7 @@ impl CorrelationRegistry {
         };
 
         let entries: Vec<_> = {
-            let entries = self.entries.read().unwrap();
+            let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
             entries
                 .iter()
                 .map(|(ip, entry)| (*ip, entry.clone()))
@@ -276,7 +276,7 @@ pub struct BridgeInfo {
     /// Number of devices being monitored.
     pub device_count: u64,
     /// Bridge status.
-    pub status: String,
+    pub status: zensight_common::HealthStatus,
     /// Last heartbeat timestamp.
     pub last_heartbeat: i64,
 }
@@ -290,7 +290,7 @@ impl BridgeInfo {
             key_prefix: key_prefix.to_string(),
             protocol: protocol.to_string(),
             device_count: 0,
-            status: "running".to_string(),
+            status: zensight_common::HealthStatus::Healthy,
             last_heartbeat: chrono::Utc::now().timestamp_millis(),
         }
     }
@@ -408,6 +408,6 @@ mod tests {
 
         assert_eq!(info.name, "snmp");
         assert_eq!(info.device_count, 10);
-        assert_eq!(info.status, "running");
+        assert_eq!(info.status, zensight_common::HealthStatus::Healthy);
     }
 }

@@ -6,8 +6,8 @@
 //! - [`BridgeError`] for unified error reporting
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,79 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 use crate::liveliness::LivelinessManager;
 use crate::publisher::Publisher;
+
+/// Rolling window error counter with 1-minute buckets over the last hour.
+struct RollingErrorCounter {
+    /// 60 buckets, one per minute.
+    buckets: Mutex<[u64; 60]>,
+    /// Current bucket index (0-59).
+    current_bucket: AtomicUsize,
+    /// Unix timestamp (seconds) of the last rotation.
+    last_rotation: AtomicI64,
+}
+
+impl RollingErrorCounter {
+    fn new() -> Self {
+        Self {
+            buckets: Mutex::new([0; 60]),
+            current_bucket: AtomicUsize::new(0),
+            last_rotation: AtomicI64::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0),
+            ),
+        }
+    }
+
+    fn increment(&self) {
+        self.rotate_if_needed();
+        let idx = self.current_bucket.load(Ordering::SeqCst);
+        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        buckets[idx] += 1;
+    }
+
+    fn count(&self) -> u64 {
+        self.rotate_if_needed();
+        let buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        buckets.iter().sum()
+    }
+
+    fn rotate_if_needed(&self) {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let last = self.last_rotation.load(Ordering::SeqCst);
+        let elapsed_minutes = ((now_secs - last) / 60) as usize;
+
+        if elapsed_minutes == 0 {
+            return;
+        }
+
+        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        let current = self.current_bucket.load(Ordering::SeqCst);
+
+        // Zero out expired buckets
+        let to_clear = elapsed_minutes.min(60);
+        for i in 1..=to_clear {
+            buckets[(current + i) % 60] = 0;
+        }
+
+        let new_bucket = (current + elapsed_minutes) % 60;
+        self.current_bucket.store(new_bucket, Ordering::SeqCst);
+        self.last_rotation.store(now_secs, Ordering::SeqCst);
+    }
+}
+
+impl std::fmt::Debug for RollingErrorCounter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RollingErrorCounter")
+            .field("count", &self.count())
+            .finish()
+    }
+}
 
 /// Bridge health metrics.
 ///
@@ -34,8 +107,8 @@ pub struct BridgeHealth {
     devices_failed: AtomicU64,
     /// Total metrics published.
     metrics_published: AtomicU64,
-    /// Errors in the last hour (rolling).
-    errors_last_hour: AtomicU64,
+    /// Errors in the last hour (rolling window with 1-minute buckets).
+    errors_last_hour: RollingErrorCounter,
     /// Last poll duration in milliseconds.
     last_poll_duration_ms: AtomicU64,
     /// Per-device liveness tracking.
@@ -93,7 +166,7 @@ pub struct HealthSnapshot {
     /// Bridge name.
     pub bridge: String,
     /// Overall health status.
-    pub status: String,
+    pub status: zensight_common::HealthStatus,
     /// Uptime in seconds.
     pub uptime_secs: u64,
     /// Total devices configured.
@@ -175,7 +248,7 @@ impl BridgeHealth {
             devices_responding: AtomicU64::new(0),
             devices_failed: AtomicU64::new(0),
             metrics_published: AtomicU64::new(0),
-            errors_last_hour: AtomicU64::new(0),
+            errors_last_hour: RollingErrorCounter::new(),
             last_poll_duration_ms: AtomicU64::new(0),
             device_liveness: Arc::new(RwLock::new(HashMap::new())),
             publisher: None,
@@ -210,7 +283,7 @@ impl BridgeHealth {
     pub fn record_device_success(&self, device_id: &str) {
         let now = chrono::Utc::now().timestamp_millis();
 
-        let mut devices = self.device_liveness.write().unwrap();
+        let mut devices = self.device_liveness.write().unwrap_or_else(|e| e.into_inner());
         let state = devices
             .entry(device_id.to_string())
             .or_insert_with(|| DeviceState {
@@ -256,7 +329,7 @@ impl BridgeHealth {
     /// This is the synchronous version. Use [`record_device_failure_async`] if you
     /// have a liveliness manager configured and want to undeclare the device token.
     pub fn record_device_failure(&self, device_id: &str, error: &str) {
-        let mut devices = self.device_liveness.write().unwrap();
+        let mut devices = self.device_liveness.write().unwrap_or_else(|e| e.into_inner());
         let state = devices
             .entry(device_id.to_string())
             .or_insert_with(|| DeviceState {
@@ -280,7 +353,7 @@ impl BridgeHealth {
         // Update counters
         drop(devices);
         self.update_device_counters();
-        self.errors_last_hour.fetch_add(1, Ordering::SeqCst);
+        self.errors_last_hour.increment();
     }
 
     /// Record that a device poll failed (async version).
@@ -291,7 +364,7 @@ impl BridgeHealth {
     pub async fn record_device_failure_async(&self, device_id: &str, error: &str) {
         // Get old status before update
         let was_online = {
-            let devices = self.device_liveness.read().unwrap();
+            let devices = self.device_liveness.read().unwrap_or_else(|e| e.into_inner());
             devices
                 .get(device_id)
                 .is_some_and(|s| s.status != DeviceStatus::Offline)
@@ -302,7 +375,7 @@ impl BridgeHealth {
 
         // Check if device just went offline
         let is_now_offline = {
-            let devices = self.device_liveness.read().unwrap();
+            let devices = self.device_liveness.read().unwrap_or_else(|e| e.into_inner());
             devices
                 .get(device_id)
                 .is_some_and(|s| s.status == DeviceStatus::Offline)
@@ -319,7 +392,7 @@ impl BridgeHealth {
 
     /// Update device responding/failed counters based on liveness states.
     fn update_device_counters(&self) {
-        let devices = self.device_liveness.read().unwrap();
+        let devices = self.device_liveness.read().unwrap_or_else(|e| e.into_inner());
         let mut responding = 0u64;
         let mut failed = 0u64;
 
@@ -354,31 +427,31 @@ impl BridgeHealth {
         let devices_failed = self.devices_failed.load(Ordering::SeqCst);
 
         let status = if devices_failed == 0 && devices_responding == devices_total {
-            "healthy"
+            zensight_common::HealthStatus::Healthy
         } else if devices_failed > 0 && devices_responding > 0 {
-            "degraded"
+            zensight_common::HealthStatus::Degraded
         } else if devices_responding == 0 && devices_total > 0 {
-            "error"
+            zensight_common::HealthStatus::Error
         } else {
-            "healthy"
+            zensight_common::HealthStatus::Healthy
         };
 
         HealthSnapshot {
             bridge: self.bridge_name.clone(),
-            status: status.to_string(),
+            status,
             uptime_secs: uptime,
             devices_total,
             devices_responding,
             devices_failed,
             last_poll_duration_ms: self.last_poll_duration_ms.load(Ordering::SeqCst),
-            errors_last_hour: self.errors_last_hour.load(Ordering::SeqCst),
+            errors_last_hour: self.errors_last_hour.count(),
             metrics_published: self.metrics_published.load(Ordering::SeqCst),
         }
     }
 
     /// Get liveness info for a specific device.
     pub fn device_liveness(&self, device_id: &str) -> Option<DeviceLiveness> {
-        let devices = self.device_liveness.read().unwrap();
+        let devices = self.device_liveness.read().unwrap_or_else(|e| e.into_inner());
         devices.get(device_id).map(|state| DeviceLiveness {
             device: state.device_id.clone(),
             status: state.status,
@@ -390,7 +463,7 @@ impl BridgeHealth {
 
     /// Get liveness info for all devices.
     pub fn all_device_liveness(&self) -> Vec<DeviceLiveness> {
-        let devices = self.device_liveness.read().unwrap();
+        let devices = self.device_liveness.read().unwrap_or_else(|e| e.into_inner());
         devices
             .values()
             .map(|state| DeviceLiveness {
@@ -501,7 +574,7 @@ mod tests {
 
         let snapshot = health.snapshot();
         assert_eq!(snapshot.bridge, "test");
-        assert_eq!(snapshot.status, "healthy");
+        assert_eq!(snapshot.status, zensight_common::HealthStatus::Healthy);
         assert_eq!(snapshot.devices_total, 0);
     }
 
@@ -569,13 +642,13 @@ mod tests {
         // All healthy
         health.record_device_success("d1");
         health.record_device_success("d2");
-        assert_eq!(health.snapshot().status, "healthy");
+        assert_eq!(health.snapshot().status, zensight_common::HealthStatus::Healthy);
 
         // One failed - degraded
         health.record_device_failure("d1", "error");
         health.record_device_failure("d1", "error");
         health.record_device_failure("d1", "error");
-        assert_eq!(health.snapshot().status, "degraded");
+        assert_eq!(health.snapshot().status, zensight_common::HealthStatus::Degraded);
     }
 
     #[test]

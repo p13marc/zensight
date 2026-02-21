@@ -58,21 +58,26 @@ impl TelemetryPoint {
 
 /// Typed telemetry value.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(untagged)]
+#[serde(tag = "type", content = "value")]
 pub enum TelemetryValue {
     /// Counter (monotonically increasing).
+    #[serde(rename = "counter")]
     Counter(u64),
 
     /// Gauge (can go up or down).
+    #[serde(rename = "gauge")]
     Gauge(f64),
 
     /// Text value.
+    #[serde(rename = "text")]
     Text(String),
 
     /// Boolean value.
+    #[serde(rename = "boolean")]
     Boolean(bool),
 
     /// Binary data.
+    #[serde(rename = "binary")]
     Binary(Vec<u8>),
 }
 
@@ -84,7 +89,11 @@ impl From<u64> for TelemetryValue {
 
 impl From<i64> for TelemetryValue {
     fn from(v: i64) -> Self {
-        TelemetryValue::Gauge(v as f64)
+        if v >= 0 {
+            TelemetryValue::Counter(v as u64)
+        } else {
+            TelemetryValue::Gauge(v as f64)
+        }
     }
 }
 
@@ -237,5 +246,21 @@ mod tests {
             TelemetryValue::Text("test".to_string())
         );
         assert_eq!(TelemetryValue::from(true), TelemetryValue::Boolean(true));
+    }
+
+    #[test]
+    fn test_i64_conversion_preserves_precision() {
+        // Positive i64 values become Counter (no f64 precision loss)
+        assert_eq!(TelemetryValue::from(42i64), TelemetryValue::Counter(42));
+        assert_eq!(
+            TelemetryValue::from(i64::MAX),
+            TelemetryValue::Counter(i64::MAX as u64)
+        );
+
+        // Negative values become Gauge (f64 is appropriate for negative values)
+        assert_eq!(TelemetryValue::from(-1i64), TelemetryValue::Gauge(-1.0));
+
+        // Zero is non-negative, becomes Counter
+        assert_eq!(TelemetryValue::from(0i64), TelemetryValue::Counter(0));
     }
 }

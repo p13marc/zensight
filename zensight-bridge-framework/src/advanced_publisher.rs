@@ -154,18 +154,20 @@ impl AdvancedPublisherRegistry {
 
     /// Get or create an advanced publisher for the given key.
     async fn get_or_create_publisher(&self, key: &str) -> Result<()> {
-        // Check if publisher already exists
-        {
-            let publishers = self.publishers.read().await;
-            if publishers.contains_key(key) {
-                return Ok(());
-            }
+        // Take write lock upfront to avoid TOCTOU race between read-check and write-insert
+        let mut publishers = self.publishers.write().await;
+        if publishers.contains_key(key) {
+            return Ok(());
         }
 
-        // Create new publisher with cache, miss detection, and publisher detection
-        let publisher: AdvancedPublisher<'_> = self
+        // Pass owned String to declare_publisher so the resulting KeyExpr uses the
+        // Owned variant (KeyExprInner::Owned), making the publisher genuinely 'static.
+        // This avoids needing unsafe transmute since String -> KeyExpr<'_> produces
+        // KeyExpr<'static> via TryFrom<String>.
+        let owned_key = key.to_string();
+        let publisher: AdvancedPublisher<'static> = self
             .session
-            .declare_publisher(key)
+            .declare_publisher(owned_key)
             .cache(CacheConfig::default().max_samples(self.config.cache_size))
             .sample_miss_detection(
                 MissDetectionConfig::default().heartbeat(self.config.heartbeat_interval),
@@ -177,12 +179,6 @@ impl AdvancedPublisherRegistry {
                 message: format!("Failed to create advanced publisher: {}", e),
             })?;
 
-        // Store the publisher
-        // Safety: We're using 'static lifetime because the publisher is stored
-        // in the registry and the session is kept alive by Arc
-        let publisher: AdvancedPublisher<'static> = unsafe { std::mem::transmute(publisher) };
-
-        let mut publishers = self.publishers.write().await;
         publishers.insert(key.to_string(), publisher);
 
         tracing::debug!(key = %key, cache_size = %self.config.cache_size, "Created advanced publisher");

@@ -9,7 +9,7 @@ use iced_test::simulator;
 use zensight::app::AppTheme;
 use zensight::message::{DeviceId, Message};
 use zensight::mock;
-use zensight::view::dashboard::{DashboardState, DeviceState, dashboard_view};
+use zensight::view::dashboard::{ConnectionState, DashboardState, DeviceState, dashboard_view};
 use zensight::view::device::{DeviceDetailState, device_view_with_syslog_filter};
 use zensight::view::groups::GroupsState;
 use zensight::view::overview::OverviewState;
@@ -45,6 +45,7 @@ fn test_dashboard_empty() {
 fn test_dashboard_with_devices() {
     let mut state = DashboardState::default();
     state.connected = true;
+    state.connection_state = ConnectionState::Connected;
 
     // Add mock devices
     let device_id = DeviceId {

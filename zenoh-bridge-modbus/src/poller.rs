@@ -91,7 +91,13 @@ impl ModbusPoller {
             match self.read_register(&mut ctx, register).await {
                 Ok(values) => {
                     for (addr_offset, value) in values.into_iter().enumerate() {
-                        let addr = register.address + addr_offset as u16;
+                        let Some(addr) = register.address.checked_add(addr_offset as u16) else {
+                            warn!(
+                                "Device '{}': register address overflow: {} + {} exceeds u16",
+                                self.device.name, register.address, addr_offset
+                            );
+                            break;
+                        };
                         self.publish_value(register, addr, value).await;
                         count += 1;
                     }

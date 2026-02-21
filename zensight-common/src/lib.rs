@@ -22,12 +22,12 @@ pub use config::{BaseConfig, LogFormat, LoggingConfig, ZenohConfig, load_config,
 pub use error::{Error, Result};
 pub use health::{
     BridgeInfo, CorrelationEntry, DeviceLiveness, DeviceStatus, ErrorReport, ErrorType,
-    HealthSnapshot,
+    HealthSnapshot, HealthStatus,
 };
 pub use keyexpr::{
-    KEY_PREFIX, KeyExprBuilder, ParsedKeyExpr, all_bridges_wildcard, all_correlation_wildcard,
-    all_errors_wildcard, all_health_wildcard, all_liveness_wildcard, all_telemetry_wildcard,
-    parse_key_expr,
+    KEY_PREFIX, KeyExprBuilder, ParseError, ParsedKeyExpr, all_bridges_wildcard,
+    all_correlation_wildcard, all_errors_wildcard, all_health_wildcard, all_liveness_wildcard,
+    all_telemetry_wildcard, parse_key_expr,
 };
 pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;

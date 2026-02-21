@@ -31,6 +31,7 @@ use crate::view::groups::{GroupsState, groups_panel};
 use crate::view::overview::OverviewState;
 use crate::view::settings::{PersistentSettings, SettingsState, settings_view};
 use crate::view::specialized::SyslogFilterState;
+use crate::view::toast::{ToastSeverity, ToastState, toast_overlay};
 use crate::view::topology::{TopologyState, topology_view};
 
 /// Current view in the application.
@@ -108,6 +109,8 @@ pub struct ZenSight {
     known_bridges: std::collections::HashMap<String, BridgeInfo>,
     /// Device correlation entries, keyed by IP address.
     correlations: std::collections::HashMap<String, CorrelationEntry>,
+    /// Toast notification state.
+    toasts: ToastState,
 }
 
 impl ZenSight {
@@ -132,6 +135,7 @@ impl ZenSight {
         // In demo mode, pre-populate with mock data and mark as connected
         if demo_mode {
             dashboard.connected = true;
+            dashboard.connection_state = crate::view::dashboard::ConnectionState::Connected;
             for point in mock::mock_environment() {
                 let device_id = DeviceId::from_telemetry(&point);
                 let device_state = dashboard
@@ -207,6 +211,7 @@ impl ZenSight {
             bridge_health: std::collections::HashMap::new(),
             known_bridges: std::collections::HashMap::new(),
             correlations: std::collections::HashMap::new(),
+            toasts: ToastState::default(),
         };
 
         (app, Task::none())
@@ -255,15 +260,25 @@ impl ZenSight {
                 self.correlations.insert(entry.ip.clone(), entry);
             }
 
+            Message::Connecting => {
+                tracing::info!("Connecting to Zenoh...");
+                self.dashboard.connection_state =
+                    crate::view::dashboard::ConnectionState::Connecting;
+            }
+
             Message::Connected => {
                 tracing::info!("Connected to Zenoh");
                 self.dashboard.connected = true;
+                self.dashboard.connection_state =
+                    crate::view::dashboard::ConnectionState::Connected;
                 self.dashboard.last_error = None;
             }
 
             Message::Disconnected(error) => {
                 tracing::warn!(error = %error, "Disconnected from Zenoh");
                 self.dashboard.connected = false;
+                self.dashboard.connection_state =
+                    crate::view::dashboard::ConnectionState::Disconnected;
                 self.dashboard.last_error = Some(error);
             }
 
@@ -762,6 +777,10 @@ impl ZenSight {
             Message::SyslogFilterStatusReceived(status) => {
                 self.syslog_filter.stats = Some(status);
             }
+
+            Message::DismissToast(id) => {
+                self.toasts.dismiss(id);
+            }
         }
 
         Task::none()
@@ -898,7 +917,7 @@ impl ZenSight {
 
     /// Render the view.
     pub fn view(&self) -> Element<'_, Message> {
-        use iced::widget::row;
+        use iced::widget::{row, stack};
 
         let unack = self.alerts.unacknowledged_count;
 
@@ -940,10 +959,24 @@ impl ZenSight {
             .into();
 
         // Show groups panel as a sidebar if open
-        if self.groups.panel_open {
+        let base_view: Element<'_, Message> = if self.groups.panel_open {
             row![view_container, groups_panel(&self.groups)].into()
         } else {
             view_container
+        };
+
+        // Overlay toast notifications in the bottom-right corner
+        if !self.toasts.is_empty() {
+            let toasts = container(toast_overlay(&self.toasts))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_right(Length::Shrink)
+                .align_bottom(Length::Shrink)
+                .padding(20);
+
+            stack![base_view, toasts].into()
+        } else {
+            base_view
         }
     }
 
@@ -1079,6 +1112,7 @@ impl ZenSight {
 
         self.settings.mark_saved();
         tracing::info!("Settings saved");
+        self.toasts.push(ToastSeverity::Success, "Settings saved");
     }
 
     /// Reset settings to defaults.
@@ -1088,7 +1122,7 @@ impl ZenSight {
     }
 
     /// Export current device metrics to CSV file.
-    fn export_to_csv(&self) {
+    fn export_to_csv(&mut self) {
         if let Some(ref device) = self.selected_device {
             let csv = device.export_to_csv();
             let filename = format!(
@@ -1097,16 +1131,23 @@ impl ZenSight {
                 chrono_timestamp()
             );
 
-            if let Err(e) = std::fs::write(&filename, csv) {
-                tracing::error!(error = %e, filename = %filename, "Failed to export CSV");
-            } else {
-                tracing::info!(filename = %filename, "Exported metrics to CSV");
+            match std::fs::write(&filename, csv) {
+                Ok(()) => {
+                    tracing::info!(filename = %filename, "Exported metrics to CSV");
+                    self.toasts
+                        .push(ToastSeverity::Success, format!("Exported to {}", filename));
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, filename = %filename, "Failed to export CSV");
+                    self.toasts
+                        .push(ToastSeverity::Error, format!("Export failed: {}", e));
+                }
             }
         }
     }
 
     /// Export current device metrics to JSON file.
-    fn export_to_json(&self) {
+    fn export_to_json(&mut self) {
         if let Some(ref device) = self.selected_device {
             let json = device.export_to_json();
             let filename = format!(
@@ -1115,10 +1156,17 @@ impl ZenSight {
                 chrono_timestamp()
             );
 
-            if let Err(e) = std::fs::write(&filename, json) {
-                tracing::error!(error = %e, filename = %filename, "Failed to export JSON");
-            } else {
-                tracing::info!(filename = %filename, "Exported metrics to JSON");
+            match std::fs::write(&filename, json) {
+                Ok(()) => {
+                    tracing::info!(filename = %filename, "Exported metrics to JSON");
+                    self.toasts
+                        .push(ToastSeverity::Success, format!("Exported to {}", filename));
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, filename = %filename, "Failed to export JSON");
+                    self.toasts
+                        .push(ToastSeverity::Error, format!("Export failed: {}", e));
+                }
             }
         }
     }
@@ -1141,6 +1189,9 @@ impl ZenSight {
         if let Some(ref mut device) = self.selected_device {
             device.update_chart_time();
         }
+
+        // Clean up expired toasts
+        self.toasts.cleanup_expired();
 
         // Update topology when viewing it
         if self.current_view == CurrentView::Topology {

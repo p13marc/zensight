@@ -22,6 +22,9 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
     Subscription::run_with(config, move |config| {
         let config = config.clone();
         async_stream::stream! {
+            // Signal that we're attempting to connect
+            yield Message::Connecting;
+
             // Connect to Zenoh
             let session = match connect_zenoh(&config).await {
                 Ok(session) => {
@@ -168,19 +171,19 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
 /// Key format: `zensight/<protocol>/@/alive`
 /// Returns the protocol name.
 fn parse_bridge_liveliness(key: &str, is_alive: bool) -> Option<Message> {
-    let parts: Vec<&str> = key.split('/').collect();
-    // Expected: ["zensight", "<protocol>", "@", "alive"]
-    if parts.len() >= 4 && parts[0] == "zensight" && parts[2] == "@" && parts[3] == "alive" {
-        let protocol = parts[1].to_string();
-        if is_alive {
-            tracing::info!(protocol = %protocol, "Bridge came online");
-            Some(Message::BridgeOnline(protocol))
-        } else {
-            tracing::warn!(protocol = %protocol, "Bridge went offline");
-            Some(Message::BridgeOffline(protocol))
-        }
+    // Parse without allocating a Vec: "zensight/<protocol>/@/alive"
+    let rest = key.strip_prefix("zensight/")?;
+    let (protocol, rest) = rest.split_once('/')?;
+    if rest != "@/alive" {
+        return None;
+    }
+    let protocol = protocol.to_string();
+    if is_alive {
+        tracing::info!(protocol = %protocol, "Bridge came online");
+        Some(Message::BridgeOnline(protocol))
     } else {
-        None
+        tracing::warn!(protocol = %protocol, "Bridge went offline");
+        Some(Message::BridgeOffline(protocol))
     }
 }
 
@@ -189,25 +192,22 @@ fn parse_bridge_liveliness(key: &str, is_alive: bool) -> Option<Message> {
 /// Key format: `zensight/<protocol>/@/devices/<device_id>/alive`
 /// Returns (protocol, device_id).
 fn parse_device_liveliness(key: &str, is_alive: bool) -> Option<Message> {
-    let parts: Vec<&str> = key.split('/').collect();
-    // Expected: ["zensight", "<protocol>", "@", "devices", "<device_id>", "alive"]
-    if parts.len() >= 6
-        && parts[0] == "zensight"
-        && parts[2] == "@"
-        && parts[3] == "devices"
-        && parts[5] == "alive"
-    {
-        let protocol = parts[1].to_string();
-        let device_id = parts[4].to_string();
-        if is_alive {
-            tracing::debug!(protocol = %protocol, device = %device_id, "Device came online");
-            Some(Message::DeviceOnline(protocol, device_id))
-        } else {
-            tracing::debug!(protocol = %protocol, device = %device_id, "Device went offline");
-            Some(Message::DeviceOffline(protocol, device_id))
-        }
+    // Parse without allocating a Vec: "zensight/<protocol>/@/devices/<device_id>/alive"
+    let rest = key.strip_prefix("zensight/")?;
+    let (protocol, rest) = rest.split_once('/')?;
+    let rest = rest.strip_prefix("@/devices/")?;
+    let (device_id, rest) = rest.split_once('/')?;
+    if rest != "alive" {
+        return None;
+    }
+    let protocol = protocol.to_string();
+    let device_id = device_id.to_string();
+    if is_alive {
+        tracing::debug!(protocol = %protocol, device = %device_id, "Device came online");
+        Some(Message::DeviceOnline(protocol, device_id))
     } else {
-        None
+        tracing::debug!(protocol = %protocol, device = %device_id, "Device went offline");
+        Some(Message::DeviceOffline(protocol, device_id))
     }
 }
 
@@ -221,17 +221,16 @@ fn parse_device_liveliness(key: &str, is_alive: bool) -> Option<Message> {
 /// - `zensight/_meta/correlation/<ip>` -> CorrelationEntry
 /// - `zensight/<protocol>/<source>/<metric>` -> TelemetryPoint
 fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
-    let parts: Vec<&str> = key.split('/').collect();
+    // Parse without allocating a Vec — use positional split_once
+    let rest = key.strip_prefix("zensight/")?;
 
-    // Minimum valid key: zensight/<protocol>/<something>
-    if parts.len() < 3 || parts[0] != "zensight" {
-        return None;
-    }
+    // Get the second segment (protocol or _meta)
+    let (segment1, rest) = rest.split_once('/')?;
 
     // Check for metadata paths first
-    if parts[1] == "_meta" {
-        if parts.len() >= 4 && parts[2] == "bridges" {
-            // zensight/_meta/bridges/<name>
+    if segment1 == "_meta" {
+        let (segment2, _remainder) = rest.split_once('/').unwrap_or((rest, ""));
+        if segment2 == "bridges" {
             return match decode_auto::<BridgeInfo>(payload) {
                 Ok(info) => Some(Message::BridgeInfoReceived(info)),
                 Err(e) => {
@@ -239,8 +238,7 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
                     None
                 }
             };
-        } else if parts.len() >= 4 && parts[2] == "correlation" {
-            // zensight/_meta/correlation/<ip>
+        } else if segment2 == "correlation" {
             return match decode_auto::<CorrelationEntry>(payload) {
                 Ok(entry) => Some(Message::CorrelationReceived(entry)),
                 Err(e) => {
@@ -253,9 +251,13 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
     }
 
     // Check for @ paths (bridge health/liveness/errors)
-    if parts.len() >= 4 && parts[2] == "@" {
-        if parts[3] == "health" {
-            // zensight/<protocol>/@/health
+    // rest is now: "@/<subpath>" or "<source>/<metric...>"
+    let (segment2, rest_after_seg2) = rest.split_once('/').unwrap_or((rest, ""));
+    if segment2 == "@" {
+        let (segment3, rest_after_seg3) = rest_after_seg2
+            .split_once('/')
+            .unwrap_or((rest_after_seg2, ""));
+        if segment3 == "health" {
             return match decode_auto::<HealthSnapshot>(payload) {
                 Ok(snapshot) => Some(Message::HealthSnapshotReceived(snapshot)),
                 Err(e) => {
@@ -263,8 +265,7 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
                     None
                 }
             };
-        } else if parts[3] == "errors" {
-            // zensight/<protocol>/@/errors
+        } else if segment3 == "errors" {
             return match decode_auto::<ErrorReport>(payload) {
                 Ok(report) => Some(Message::ErrorReportReceived(report)),
                 Err(e) => {
@@ -272,13 +273,18 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
                     None
                 }
             };
-        } else if parts[3] == "devices" && parts.len() >= 6 && parts[5] == "liveness" {
-            // zensight/<protocol>/@/devices/<device>/liveness
-            let protocol = parts[1].to_string();
+        } else if segment3 == "devices"
+            && let Some((device, suffix)) = rest_after_seg3.split_once('/')
+            && suffix == "liveness"
+        {
+            let protocol = segment1.to_string();
             return match decode_auto::<DeviceLiveness>(payload) {
                 Ok(liveness) => Some(Message::DeviceLivenessReceived(protocol, liveness)),
                 Err(e) => {
-                    tracing::warn!(error = %e, key = %key, "Failed to decode DeviceLiveness");
+                    tracing::warn!(
+                        error = %e, key = %key, device = %device,
+                        "Failed to decode DeviceLiveness"
+                    );
                     None
                 }
             };

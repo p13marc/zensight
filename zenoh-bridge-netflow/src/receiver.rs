@@ -9,7 +9,7 @@ use netflow_parser::variable_versions::ipfix::{FlowSetBody as IpFixFlowSetBody, 
 use netflow_parser::variable_versions::v9::{FlowSetBody as V9FlowSetBody, V9FieldPair};
 use netflow_parser::{NetflowPacket, NetflowParser};
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
@@ -99,8 +99,10 @@ async fn run_listener(
 
     let mut buf = vec![0u8; config.max_packet_size];
 
-    // Parser maintains template state for NetFlow v9/IPFIX
-    let parser = Arc::new(Mutex::new(NetflowParser::default()));
+    // Per-exporter parsers to avoid mutex contention between different exporters.
+    // NetFlow v9/IPFIX parsers maintain template state per exporter.
+    let parsers: Arc<Mutex<HashMap<IpAddr, Arc<Mutex<NetflowParser>>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
     loop {
         match socket.recv_from(&mut buf).await {
@@ -108,7 +110,14 @@ async fn run_listener(
                 let data = buf[..len].to_vec();
                 let tx = tx.clone();
                 let names = exporter_names.clone();
-                let parser = parser.clone();
+
+                // Get or create a parser for this exporter
+                let parser = {
+                    let mut map = parsers.lock().await;
+                    map.entry(addr.ip())
+                        .or_insert_with(|| Arc::new(Mutex::new(NetflowParser::default())))
+                        .clone()
+                };
 
                 // Process in a separate task to not block the receiver
                 tokio::spawn(async move {

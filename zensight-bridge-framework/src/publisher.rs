@@ -47,7 +47,13 @@ impl Publisher {
     }
 
     /// Build a full key expression from a suffix.
+    ///
+    /// Debug-asserts that `suffix` doesn't contain double slashes.
     pub fn build_key(&self, suffix: &str) -> String {
+        debug_assert!(
+            !suffix.contains("//"),
+            "key suffix must not contain '//'"
+        );
         if suffix.is_empty() {
             self.key_prefix.clone()
         } else {

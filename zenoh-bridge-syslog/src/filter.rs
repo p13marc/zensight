@@ -120,6 +120,8 @@ impl CompiledPattern {
 }
 
 /// Convert a glob pattern to a regex pattern.
+///
+/// Escapes all regex metacharacters except `*` (→ `.*`) and `?` (→ `.`).
 fn glob_to_regex(glob: &str) -> String {
     let mut regex = String::with_capacity(glob.len() * 2 + 2);
     regex.push('^');
@@ -128,7 +130,9 @@ fn glob_to_regex(glob: &str) -> String {
         match c {
             '*' => regex.push_str(".*"),
             '?' => regex.push('.'),
-            '.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '\\' => {
+            // Escape all regex metacharacters
+            '.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '\\'
+            | '<' | '>' | '!' | '#' | '&' => {
                 regex.push('\\');
                 regex.push(c);
             }
@@ -501,6 +505,15 @@ mod tests {
         assert_eq!(glob_to_regex("systemd-*"), "^systemd-.*$");
         assert_eq!(glob_to_regex("*.log"), "^.*\\.log$");
         assert_eq!(glob_to_regex("test?"), "^test.$");
+    }
+
+    #[test]
+    fn test_glob_special_chars() {
+        // Ensure regex metacharacters in glob patterns are properly escaped
+        let regex = glob_to_regex("app.name+version");
+        let re = Regex::new(&regex).unwrap();
+        assert!(re.is_match("app.name+version"));
+        assert!(!re.is_match("appXnameXversion"));
     }
 
     #[test]
