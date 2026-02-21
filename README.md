@@ -12,6 +12,7 @@ ZenSight provides a suite of protocol bridges that collect telemetry from variou
 |-------|-------------|--------|
 | `zensight` | Iced 0.14 desktop frontend for visualizing telemetry | Complete |
 | `zensight-common` | Shared library (telemetry model, Zenoh helpers, config) | Complete |
+| `zensight-bridge-framework` | Shared bridge framework (publisher, health, correlation) | Complete |
 | `zensight-exporter-prometheus` | Prometheus metrics exporter (HTTP /metrics endpoint) | Complete |
 | `zensight-exporter-otel` | OpenTelemetry exporter (OTLP gRPC/HTTP) | Complete |
 | `zenoh-bridge-snmp` | SNMP bridge (v1/v2c/v3 polling + trap receiver, MIB loading) | Complete |
@@ -31,9 +32,6 @@ ZenSight provides a suite of protocol bridges that collect telemetry from variou
 | **Modbus** | Industrial device monitoring | `zensight/modbus/<device>/<register_type>/<addr>` |
 | **Sysinfo** | Host system metrics | `zensight/sysinfo/<hostname>/<metric>` |
 | **gNMI** | Streaming telemetry (gRPC) | `zensight/gnmi/<device>/<path>` |
-
-### Planned Protocols
-- OPC UA - Industrial automation
 
 ## Key Expression Hierarchy
 
@@ -290,7 +288,7 @@ All bridges emit a common `TelemetryPoint` structure:
 pub struct TelemetryPoint {
     pub timestamp: i64,           // Unix epoch milliseconds
     pub source: String,           // Device/host identifier
-    pub protocol: Protocol,       // snmp, syslog, netflow, modbus, sysinfo
+    pub protocol: Protocol,       // snmp, syslog, netflow, modbus, sysinfo, gnmi
     pub metric: String,           // Metric name/path
     pub value: TelemetryValue,    // Counter, Gauge, Text, Boolean, Binary
     pub labels: HashMap<String, String>,  // Additional context
@@ -303,16 +301,16 @@ pub struct TelemetryPoint {
 # Run all tests
 cargo test --workspace
 
-# Run specific bridge tests
-cargo test -p zenoh-bridge-snmp      # 25 tests
-cargo test -p zenoh-bridge-syslog    # 26 tests
-cargo test -p zenoh-bridge-netflow   # 8 tests
+# Run specific crate tests
+cargo test -p zenoh-bridge-snmp      # 22 tests
+cargo test -p zenoh-bridge-syslog    # 106 tests
+cargo test -p zenoh-bridge-netflow   # 16 tests
 cargo test -p zenoh-bridge-modbus    # 11 tests
-cargo test -p zenoh-bridge-sysinfo   # 10 tests
+cargo test -p zenoh-bridge-sysinfo   # 15 tests
 cargo test -p zenoh-bridge-gnmi      # 8 tests
 
 # Run frontend tests (includes UI tests with Simulator)
-cargo test -p zensight               # 32 tests
+cargo test -p zensight               # 139 tests
 
 # Check all crates
 cargo check --workspace
@@ -381,17 +379,18 @@ let points = mock::mock_environment();
 
 | Crate | Tests | Description |
 |-------|-------|-------------|
-| zensight (frontend) | 114 | Unit + UI tests (Simulator) |
-| zensight-common | 21 | Telemetry, config, key expressions |
-| zensight-exporter-prometheus | 38 | Metric mapping, sanitization, collector, HTTP |
-| zensight-exporter-otel | 22 | OTEL metrics, logs, severity mapping |
-| zenoh-bridge-snmp | 16 | Polling, traps, MIB loading |
-| zenoh-bridge-syslog | 52 | Parser, receiver, filtering |
-| zenoh-bridge-netflow | 8 | Flow parsing, templates |
+| zensight (frontend) | 139 | Unit + UI tests (Simulator) |
+| zensight-common | 47 | Telemetry, config, key expressions |
+| zensight-bridge-framework | 23 | Publisher, health, correlation |
+| zensight-exporter-prometheus | 50 | Metric mapping, sanitization, collector, HTTP |
+| zensight-exporter-otel | 41 | OTEL metrics, logs, severity mapping |
+| zenoh-bridge-snmp | 22 | Polling, traps, MIB loading |
+| zenoh-bridge-syslog | 106 | Parser, receiver, filtering |
+| zenoh-bridge-netflow | 16 | Flow parsing, templates |
 | zenoh-bridge-modbus | 11 | Config, register decoding |
 | zenoh-bridge-sysinfo | 15 | Config, collectors, metrics |
 | zenoh-bridge-gnmi | 8 | Config, path parsing, subscriber |
-| **Total** | **305** | All tests passing |
+| **Total** | **478** | All tests passing |
 
 ## License
 

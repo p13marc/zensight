@@ -38,16 +38,17 @@ cargo run -p zensight-exporter-otel --release -- --config configs/otel.json5
 cargo test --workspace
 
 # Run specific crate tests
-cargo test -p zensight              # 114 tests (unit + UI)
-cargo test -p zensight-common       # 21 tests
-cargo test -p zenoh-bridge-snmp     # 16 tests
-cargo test -p zenoh-bridge-syslog   # 52 tests (parser, receiver, filtering)
-cargo test -p zenoh-bridge-netflow  # 8 tests
+cargo test -p zensight              # 139 tests (unit + UI)
+cargo test -p zensight-common       # 47 tests
+cargo test -p zensight-bridge-framework  # 23 tests
+cargo test -p zenoh-bridge-snmp     # 22 tests
+cargo test -p zenoh-bridge-syslog   # 106 tests (parser, receiver, filtering)
+cargo test -p zenoh-bridge-netflow  # 16 tests
 cargo test -p zenoh-bridge-modbus   # 11 tests
 cargo test -p zenoh-bridge-sysinfo  # 15 tests
 cargo test -p zenoh-bridge-gnmi     # 8 tests
-cargo test -p zensight-exporter-prometheus  # 38 tests (mapping, collector, HTTP)
-cargo test -p zensight-exporter-otel        # 22 tests (metrics, logs, severity)
+cargo test -p zensight-exporter-prometheus  # 50 tests (mapping, collector, HTTP)
+cargo test -p zensight-exporter-otel        # 41 tests (metrics, logs, severity)
 
 # Run a single test
 cargo test -p zensight test_dashboard_empty
@@ -89,6 +90,7 @@ zensight/                    # Workspace root
 │   │       │   ├── mod.rs   # TopologyState, node info panel
 │   │       │   ├── graph.rs # Canvas-based graph rendering
 │   │       │   └── layout.rs# Force-directed layout algorithm
+│   │       ├── toast.rs     # Toast notification system
 │   │       ├── chart.rs     # Time-series charts
 │   │       ├── formatting.rs# Value formatting utilities
 │   │       └── icons/       # SVG icons
@@ -102,6 +104,14 @@ zensight/                    # Workspace root
 │       ├── session.rs       # Zenoh session helpers
 │       ├── keyexpr.rs       # Key expression builders
 │       └── serialization.rs # JSON/CBOR encoding
+├── zensight-bridge-framework/ # Shared bridge framework
+│   └── src/
+│       ├── publisher.rs     # Zenoh publisher with key building
+│       ├── advanced_publisher.rs # Publisher with caching registry
+│       ├── health.rs        # HealthReporter with rolling error window
+│       ├── correlation.rs   # Cross-bridge device correlation
+│       ├── error.rs         # Bridge error categorization
+│       └── liveliness.rs    # Device liveness tracking
 ├── zenoh-bridge-snmp/       # SNMP v1/v2c/v3 bridge
 ├── zenoh-bridge-syslog/     # RFC 3164/5424 bridge (UDP/TCP/Unix, filtering)
 ├── zenoh-bridge-netflow/    # NetFlow/IPFIX bridge
