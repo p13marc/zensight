@@ -5,6 +5,45 @@ All notable changes to ZenSight will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-02-21
+
+### Fixed
+
+- **Critical**: Remove unsafe `transmute` in AdvancedPublisher registry, replaced with safe `Arc` cloning
+- **Critical**: Fix TOCTOU race condition in publisher cache with atomic check-and-insert
+- **Critical**: Add missing `Sysinfo` protocol variant to `parse_key_expr()`
+- **Data Integrity**: Fix `i64` to `f64` precision loss in `TelemetryValue::From<i64>` conversion
+- **Data Integrity**: Tag `TelemetryValue` enum with `#[serde(tag)]` for unambiguous serialization
+- **Exporters**: Fix silent metric rendering failures in Prometheus collector
+- **Exporters**: Fix silent export failures in OTEL exporter
+- **Exporters**: Fix gauge key collision with sorted attributes in OTEL exporter
+- **Bridges**: Fix gNMI nanosecond timestamp conversion overflow
+- **Bridges**: Fix Modbus address overflow with checked arithmetic
+- **Bridges**: Fix incomplete regex escaping in syslog `glob_to_regex()`
+
+### Changed
+
+- `parse_key_expr()` now returns `Result` with descriptive errors instead of `Option`
+- `KeyExprBuilder::build()` validates inputs (no empty strings, no invalid chars)
+- Replace string-typed status fields with `HealthStatus` enum in bridge health
+- `errors_last_hour` now uses a rolling window instead of monotonic counter
+- Handle lock poisoning gracefully in `CorrelationRegistry`
+- Improved error categorization for Zenoh errors (`BridgeError` variants)
+- gNMI reconnection uses exponential backoff (5s to 5min) instead of fixed 5s
+- Reduced NetFlow mutex contention by narrowing lock scope
+- Dashboard uses cached filtered results for better performance
+- Metric history uses `VecDeque` instead of `Vec` for efficient bounded storage
+- Reduced string allocations in subscription key expression parsing
+
+### Added
+
+- **Toast Notifications**: Non-intrusive notification system for user feedback
+- **Loading Indicator**: Visual feedback during Zenoh connection establishment
+- **Stale Metric Indicators**: Visual cue for metrics that haven't updated recently
+- **Decode Failure Metrics**: Both exporters now track deserialization error counts
+- **OTEL Staleness Cleanup**: Automatic expiry of stale gauge entries in OTEL exporter
+- **OTEL Instrument Caching**: Cache `Meter` and `Logger` instances to avoid recreation
+
 ## [0.4.0] - 2025-12-29
 
 ### Added
