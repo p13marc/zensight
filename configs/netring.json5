@@ -1,0 +1,28 @@
+{
+  // Zenoh connection settings
+  zenoh: { mode: "peer" },
+
+  // Netring sensor settings
+  netring: {
+    key_prefix: "zensight/netring",
+    sensor_id: "auto",
+
+    // Live capture interfaces (needs CAP_NET_RAW). Leave empty and set `pcap`
+    // below to replay an offline capture instead (no privileges required).
+    interfaces: ["eth0"],
+    // pcap: "/path/to/capture.pcap",
+
+    collect: {
+      bandwidth: true,   // per-application bytes/sec
+      flows: true,       // flow lifecycle aggregates
+    },
+    bandwidth_period_secs: 5,
+
+    // Pillar A — network anomaly detectors.
+    anomalies: {
+      port_scan: true,   // TRW port-scan detection -> alerts
+    },
+  },
+
+  logging: { level: "info" },
+}
