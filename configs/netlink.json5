@@ -1,0 +1,23 @@
+{
+  // Zenoh connection settings
+  zenoh: {
+    mode: "peer",
+  },
+
+  // Netlink sensor settings
+  netlink: {
+    key_prefix: "zensight/netlink",
+    hostname: "auto",
+    poll_interval_secs: 2,
+    collect: {
+      interfaces: true,
+      sockets: true,
+    },
+    interfaces: {
+      exclude_loopback: false,
+      exclude_virtual: false,
+    },
+  },
+
+  logging: { level: "info" },
+}

@@ -12,6 +12,7 @@ members = [
     "zensight-sensor-modbus",
     "zensight-sensor-sysinfo",
     "zensight-sensor-gnmi",
+    "zensight-sensor-netlink",
 ]
 
 [workspace.package]

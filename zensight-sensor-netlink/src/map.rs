@@ -1,0 +1,237 @@
+//! Pure mapping from observed kernel state to [`TelemetryPoint`]s.
+//!
+//! The collector reads nlink and fills these plain sample structs; the mapping
+//! to telemetry is kept here, free of any kernel/nlink dependency, so it is
+//! unit-testable without privileges or a live netlink socket.
+
+use std::collections::HashMap;
+
+use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+/// A snapshot of one network interface.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IfaceSample {
+    pub name: String,
+    pub ifindex: u32,
+    pub up: bool,
+    pub carrier: Option<bool>,
+    pub mtu: Option<u32>,
+    pub mac: Option<String>,
+    pub oper_state: Option<String>,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub rx_packets: u64,
+    pub tx_packets: u64,
+    pub rx_errors: u64,
+    pub tx_errors: u64,
+    pub rx_dropped: u64,
+    pub tx_dropped: u64,
+}
+
+/// Aggregate TCP socket counts (from sockdiag).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SocketCounts {
+    pub established: u64,
+    pub listen: u64,
+    pub time_wait: u64,
+    pub syn_sent: u64,
+    pub close_wait: u64,
+    pub retransmits_total: u64,
+    pub max_rtt_us: u64,
+}
+
+fn point(host: &str, metric: impl Into<String>, value: TelemetryValue) -> TelemetryPoint {
+    TelemetryPoint::new(host, Protocol::Netlink, metric, value)
+}
+
+/// Build telemetry points for one interface. Metric paths are
+/// `iface/<name>/<stat>`.
+pub fn iface_points(host: &str, s: &IfaceSample) -> Vec<TelemetryPoint> {
+    let pfx = format!("iface/{}", s.name);
+    let ifindex = s.ifindex.to_string();
+    let counter = |metric: String, v: u64| {
+        point(host, metric, TelemetryValue::Counter(v)).with_label("ifindex", ifindex.clone())
+    };
+
+    let mut out = vec![
+        counter(format!("{pfx}/rx_bytes"), s.rx_bytes),
+        counter(format!("{pfx}/tx_bytes"), s.tx_bytes),
+        counter(format!("{pfx}/rx_packets"), s.rx_packets),
+        counter(format!("{pfx}/tx_packets"), s.tx_packets),
+        counter(format!("{pfx}/rx_errors"), s.rx_errors),
+        counter(format!("{pfx}/tx_errors"), s.tx_errors),
+        counter(format!("{pfx}/rx_dropped"), s.rx_dropped),
+        counter(format!("{pfx}/tx_dropped"), s.tx_dropped),
+        point(
+            host,
+            format!("{pfx}/oper_state"),
+            TelemetryValue::Text(
+                s.oper_state
+                    .clone()
+                    .unwrap_or_else(|| if s.up { "up".into() } else { "down".into() }),
+            ),
+        )
+        .with_label("ifindex", ifindex.clone()),
+        point(host, format!("{pfx}/up"), TelemetryValue::Boolean(s.up))
+            .with_label("ifindex", ifindex.clone()),
+    ];
+
+    if let Some(carrier) = s.carrier {
+        out.push(
+            point(
+                host,
+                format!("{pfx}/carrier"),
+                TelemetryValue::Boolean(carrier),
+            )
+            .with_label("ifindex", ifindex.clone()),
+        );
+    }
+    if let Some(mtu) = s.mtu {
+        out.push(
+            point(
+                host,
+                format!("{pfx}/mtu"),
+                TelemetryValue::Gauge(mtu as f64),
+            )
+            .with_label("ifindex", ifindex.clone()),
+        );
+    }
+    if let Some(mac) = &s.mac {
+        let mut labels = HashMap::new();
+        labels.insert("ifindex".to_string(), ifindex.clone());
+        labels.insert("mac".to_string(), mac.clone());
+        out.push(
+            point(
+                host,
+                format!("{pfx}/info"),
+                TelemetryValue::Text(mac.clone()),
+            )
+            .with_labels(labels),
+        );
+    }
+    out
+}
+
+/// Build telemetry points for the TCP socket aggregates. Metric paths are
+/// `sockets/tcp/<stat>`.
+pub fn socket_points(host: &str, c: &SocketCounts) -> Vec<TelemetryPoint> {
+    vec![
+        point(
+            host,
+            "sockets/tcp/established",
+            TelemetryValue::Gauge(c.established as f64),
+        ),
+        point(
+            host,
+            "sockets/tcp/listen",
+            TelemetryValue::Gauge(c.listen as f64),
+        ),
+        point(
+            host,
+            "sockets/tcp/time_wait",
+            TelemetryValue::Gauge(c.time_wait as f64),
+        ),
+        point(
+            host,
+            "sockets/tcp/syn_sent",
+            TelemetryValue::Gauge(c.syn_sent as f64),
+        ),
+        point(
+            host,
+            "sockets/tcp/close_wait",
+            TelemetryValue::Gauge(c.close_wait as f64),
+        ),
+        point(
+            host,
+            "sockets/tcp/retransmits_total",
+            TelemetryValue::Counter(c.retransmits_total),
+        ),
+        point(
+            host,
+            "sockets/tcp/max_rtt_us",
+            TelemetryValue::Gauge(c.max_rtt_us as f64),
+        ),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> IfaceSample {
+        IfaceSample {
+            name: "eth0".into(),
+            ifindex: 2,
+            up: true,
+            carrier: Some(true),
+            mtu: Some(1500),
+            mac: Some("aa:bb:cc:dd:ee:ff".into()),
+            oper_state: Some("up".into()),
+            rx_bytes: 1000,
+            tx_bytes: 2000,
+            rx_packets: 10,
+            tx_packets: 20,
+            rx_errors: 1,
+            tx_errors: 0,
+            rx_dropped: 3,
+            tx_dropped: 0,
+        }
+    }
+
+    #[test]
+    fn iface_points_cover_counters_and_state() {
+        let pts = iface_points("host1", &sample());
+        let find = |m: &str| pts.iter().find(|p| p.metric == m);
+        assert_eq!(
+            find("iface/eth0/rx_bytes").unwrap().value,
+            TelemetryValue::Counter(1000)
+        );
+        assert_eq!(
+            find("iface/eth0/up").unwrap().value,
+            TelemetryValue::Boolean(true)
+        );
+        assert_eq!(
+            find("iface/eth0/mtu").unwrap().value,
+            TelemetryValue::Gauge(1500.0)
+        );
+        // Every point is sourced + labelled with the interface index.
+        for p in &pts {
+            assert_eq!(p.source, "host1");
+            assert_eq!(p.protocol, Protocol::Netlink);
+            assert_eq!(p.labels.get("ifindex").map(String::as_str), Some("2"));
+        }
+    }
+
+    #[test]
+    fn iface_points_omit_absent_optionals() {
+        let mut s = sample();
+        s.carrier = None;
+        s.mtu = None;
+        s.mac = None;
+        let pts = iface_points("h", &s);
+        assert!(pts.iter().all(|p| p.metric != "iface/eth0/carrier"));
+        assert!(pts.iter().all(|p| p.metric != "iface/eth0/mtu"));
+        assert!(pts.iter().all(|p| p.metric != "iface/eth0/info"));
+    }
+
+    #[test]
+    fn socket_points_shape() {
+        let c = SocketCounts {
+            established: 5,
+            listen: 3,
+            retransmits_total: 12,
+            max_rtt_us: 400,
+            ..Default::default()
+        };
+        let pts = socket_points("h", &c);
+        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        assert_eq!(
+            find("sockets/tcp/established").value,
+            TelemetryValue::Gauge(5.0)
+        );
+        assert_eq!(
+            find("sockets/tcp/retransmits_total").value,
+            TelemetryValue::Counter(12)
+        );
+    }
+}
