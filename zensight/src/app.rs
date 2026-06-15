@@ -260,6 +260,31 @@ impl ZenSight {
                 self.correlations.insert(entry.ip.clone(), entry);
             }
 
+            Message::AlertReceived(alert) => {
+                use crate::view::alerts::ExternalAlertOutcome;
+                let summary = alert.summary.clone();
+                let severity = alert.severity;
+                match self.alerts.ingest_external(alert) {
+                    ExternalAlertOutcome::New => {
+                        self.toasts.push(alert_toast_severity(severity), summary);
+                    }
+                    ExternalAlertOutcome::Resolved => {
+                        self.toasts
+                            .push(ToastSeverity::Success, format!("Resolved: {summary}"));
+                    }
+                    ExternalAlertOutcome::Updated | ExternalAlertOutcome::Unknown => {}
+                }
+            }
+
+            Message::AlertCleared { alert_key, .. } => {
+                if let Some(alert) = self.alerts.clear_external(&alert_key) {
+                    self.toasts.push(
+                        ToastSeverity::Success,
+                        format!("Resolved: {}", alert.summary),
+                    );
+                }
+            }
+
             Message::Connecting => {
                 tracing::info!("Connecting to Zenoh...");
                 self.dashboard.connection_state =
@@ -1210,6 +1235,16 @@ fn telemetry_to_f64(value: &TelemetryValue) -> Option<f64> {
         TelemetryValue::Counter(v) => Some(*v as f64),
         TelemetryValue::Gauge(v) => Some(*v),
         _ => None,
+    }
+}
+
+/// Map a sensor alert severity onto a toast severity.
+fn alert_toast_severity(severity: zensight_common::AlertSeverity) -> ToastSeverity {
+    use zensight_common::AlertSeverity;
+    match severity {
+        AlertSeverity::Info => ToastSeverity::Info,
+        AlertSeverity::Warning => ToastSeverity::Warning,
+        AlertSeverity::Critical => ToastSeverity::Error,
     }
 }
 

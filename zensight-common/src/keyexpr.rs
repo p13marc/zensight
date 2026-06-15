@@ -122,6 +122,30 @@ impl KeyExprBuilder {
     pub fn status_key(&self) -> String {
         format!("{}/{}/@/status", self.prefix, self.protocol.as_str())
     }
+
+    /// Build a key expression for a single keyed alert.
+    ///
+    /// Matches: `zensight/<protocol>/@/alerts/<alert_key>`
+    ///
+    /// # Example
+    /// ```
+    /// use zensight_common::keyexpr::KeyExprBuilder;
+    /// use zensight_common::telemetry::Protocol;
+    ///
+    /// let builder = KeyExprBuilder::new(Protocol::Netlink);
+    /// assert_eq!(
+    ///     builder.alert_key_expr("ssh-listening-0011223344556677"),
+    ///     "zensight/netlink/@/alerts/ssh-listening-0011223344556677"
+    /// );
+    /// ```
+    pub fn alert_key_expr(&self, alert_key: &str) -> String {
+        format!(
+            "{}/{}/@/alerts/{}",
+            self.prefix,
+            self.protocol.as_str(),
+            alert_key
+        )
+    }
 }
 
 /// Build a wildcard key expression for all ZenSight telemetry.
@@ -204,6 +228,20 @@ pub fn all_correlation_wildcard() -> String {
 /// ```
 pub fn all_sensors_wildcard() -> String {
     format!("{}/_meta/sensors/*", KEY_PREFIX)
+}
+
+/// Build a wildcard key expression for all sensor-emitted alerts.
+///
+/// Matches: `zensight/<protocol>/@/alerts/<alert_key>`
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::all_alerts_wildcard;
+///
+/// assert_eq!(all_alerts_wildcard(), "zensight/*/@/alerts/*");
+/// ```
+pub fn all_alerts_wildcard() -> String {
+    format!("{}/*/@/alerts/*", KEY_PREFIX)
 }
 
 /// Parse a key expression to extract protocol, source, and metric path.

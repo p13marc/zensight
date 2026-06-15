@@ -1,5 +1,5 @@
 use zensight_common::{
-    CorrelationEntry, DeviceLiveness, ErrorReport, HealthSnapshot, Protocol, SensorInfo,
+    Alert, CorrelationEntry, DeviceLiveness, ErrorReport, HealthSnapshot, Protocol, SensorInfo,
     TelemetryPoint,
 };
 
@@ -27,6 +27,13 @@ pub enum Message {
 
     /// Correlation entry received.
     CorrelationReceived(CorrelationEntry),
+
+    /// A sensor-emitted alert was received (firing or resolved). Published on
+    /// `zensight/<protocol>/@/alerts/<alert_key>`.
+    AlertReceived(Alert),
+
+    /// A sensor alert key was deleted (resolve tombstone).
+    AlertCleared { protocol: String, alert_key: String },
 
     /// Zenoh connection attempt started.
     Connecting,

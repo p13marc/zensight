@@ -32,6 +32,7 @@
 //! ```
 
 mod advanced_publisher;
+mod alert;
 mod args;
 mod config;
 mod correlation;
@@ -43,6 +44,7 @@ mod runner;
 mod status;
 
 pub use advanced_publisher::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
+pub use alert::AlertReporter;
 pub use args::SensorArgs;
 pub use config::SensorConfig;
 pub use correlation::{CorrelationEntry, CorrelationRegistry, DeviceIdentity, SensorInfo};
@@ -57,5 +59,6 @@ pub use status::SensorStatus;
 
 // Re-export commonly used types from zensight-common
 pub use zensight_common::{
-    Format, LogFormat, LoggingConfig, Protocol, TelemetryPoint, TelemetryValue, ZenohConfig,
+    Alert, AlertKind, AlertSeverity, AlertState, Format, LogFormat, LoggingConfig, Protocol,
+    TelemetryPoint, TelemetryValue, ZenohConfig,
 };

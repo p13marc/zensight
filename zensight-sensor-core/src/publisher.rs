@@ -133,6 +133,19 @@ impl Publisher {
         let payload = serde_json::to_vec(value)?;
         self.publish_raw(key, payload).await
     }
+
+    /// Delete (tombstone) a key — used to clear keyed, lifecycle-managed state
+    /// such as resolved alerts so late subscribers don't see stale values.
+    pub async fn delete(&self, key: &str) -> Result<()> {
+        self.session
+            .delete(key)
+            .await
+            .map_err(|e| SensorError::Publish {
+                key: key.to_string(),
+                message: e.to_string(),
+            })?;
+        Ok(())
+    }
 }
 
 /// Statistics from a batch publish operation.

@@ -9,6 +9,7 @@
 //! - [`keyexpr`] - Key expression builders and parsers
 //! - [`error`] - Error types
 
+pub mod alert;
 pub mod config;
 pub mod error;
 pub mod health;
@@ -18,6 +19,7 @@ pub mod session;
 pub mod telemetry;
 
 // Re-export commonly used types at the crate root
+pub use alert::{Alert, AlertKind, AlertSeverity, AlertState};
 pub use config::{BaseConfig, LogFormat, LoggingConfig, ZenohConfig, load_config, parse_config};
 pub use error::{Error, Result};
 pub use health::{
@@ -25,9 +27,9 @@ pub use health::{
     HealthStatus, SensorInfo,
 };
 pub use keyexpr::{
-    KEY_PREFIX, KeyExprBuilder, ParseError, ParsedKeyExpr, all_correlation_wildcard,
-    all_errors_wildcard, all_health_wildcard, all_liveness_wildcard, all_sensors_wildcard,
-    all_telemetry_wildcard, parse_key_expr,
+    KEY_PREFIX, KeyExprBuilder, ParseError, ParsedKeyExpr, all_alerts_wildcard,
+    all_correlation_wildcard, all_errors_wildcard, all_health_wildcard, all_liveness_wildcard,
+    all_sensors_wildcard, all_telemetry_wildcard, parse_key_expr,
 };
 pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;

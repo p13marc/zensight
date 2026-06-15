@@ -138,6 +138,10 @@ pub enum Protocol {
     Opcua,
     Modbus,
     Sysinfo,
+    /// Linux kernel networking state (interfaces, sockets, routes) via netlink.
+    Netlink,
+    /// Wire-level packet/flow telemetry via netring (AF_PACKET / AF_XDP).
+    Netring,
 }
 
 impl Protocol {
@@ -151,6 +155,8 @@ impl Protocol {
             Protocol::Opcua => "opcua",
             Protocol::Modbus => "modbus",
             Protocol::Sysinfo => "sysinfo",
+            Protocol::Netlink => "netlink",
+            Protocol::Netring => "netring",
         }
     }
 }
@@ -173,6 +179,8 @@ impl std::str::FromStr for Protocol {
             "opcua" => Ok(Protocol::Opcua),
             "modbus" => Ok(Protocol::Modbus),
             "sysinfo" => Ok(Protocol::Sysinfo),
+            "netlink" => Ok(Protocol::Netlink),
+            "netring" => Ok(Protocol::Netring),
             _ => Err(()),
         }
     }

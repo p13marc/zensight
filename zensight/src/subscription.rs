@@ -5,8 +5,8 @@ use zenoh::sample::SampleKind;
 use zenoh_ext::{AdvancedSubscriberBuilderExt, HistoryConfig, RecoveryConfig};
 
 use zensight_common::{
-    CorrelationEntry, DeviceLiveness, ErrorReport, HealthSnapshot, SensorInfo, TelemetryPoint,
-    ZenohConfig, all_telemetry_wildcard, decode_auto,
+    Alert, CorrelationEntry, DeviceLiveness, ErrorReport, HealthSnapshot, SensorInfo,
+    TelemetryPoint, ZenohConfig, all_telemetry_wildcard, decode_auto,
 };
 
 use crate::message::Message;
@@ -118,9 +118,16 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
                         match result {
                             Ok(sample) => {
                                 let key = sample.key_expr().as_str();
-                                let payload = sample.payload().to_bytes();
-                                if let Some(msg) = decode_sample(key, &payload) {
-                                    yield msg;
+                                // A Delete on an alert key is a resolve tombstone.
+                                if sample.kind() == SampleKind::Delete {
+                                    if let Some(msg) = parse_alert_cleared(key) {
+                                        yield msg;
+                                    }
+                                } else {
+                                    let payload = sample.payload().to_bytes();
+                                    if let Some(msg) = decode_sample(key, &payload) {
+                                        yield msg;
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -211,6 +218,22 @@ fn parse_device_liveliness(key: &str, is_alive: bool) -> Option<Message> {
     }
 }
 
+/// Parse an alert-key Delete tombstone into an [`Message::AlertCleared`].
+///
+/// Key format: `zensight/<protocol>/@/alerts/<alert_key>`.
+fn parse_alert_cleared(key: &str) -> Option<Message> {
+    let rest = key.strip_prefix("zensight/")?;
+    let (protocol, rest) = rest.split_once('/')?;
+    let rest = rest.strip_prefix("@/alerts/")?;
+    if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    Some(Message::AlertCleared {
+        protocol: protocol.to_string(),
+        alert_key: rest.to_string(),
+    })
+}
+
 /// Decode a sample based on its key expression pattern.
 ///
 /// Routes messages to the appropriate type based on the key structure:
@@ -285,6 +308,15 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
                         error = %e, key = %key, device = %device,
                         "Failed to decode DeviceLiveness"
                     );
+                    None
+                }
+            };
+        } else if segment3 == "alerts" {
+            // zensight/<protocol>/@/alerts/<alert_key> (Put = firing/resolved).
+            return match decode_auto::<Alert>(payload) {
+                Ok(alert) => Some(Message::AlertReceived(alert)),
+                Err(e) => {
+                    tracing::warn!(error = %e, key = %key, "Failed to decode Alert");
                     None
                 }
             };
@@ -510,5 +542,42 @@ mod tests {
         // Verify our constants match expected patterns
         assert_eq!(SENSOR_LIVELINESS_EXPR, "zensight/*/@/alive");
         assert_eq!(DEVICE_LIVELINESS_EXPR, "zensight/*/@/devices/*/alive");
+    }
+
+    #[test]
+    fn test_parse_alert_cleared() {
+        let msg = parse_alert_cleared("zensight/netlink/@/alerts/ssh-listening-00ff").unwrap();
+        match msg {
+            Message::AlertCleared {
+                protocol,
+                alert_key,
+            } => {
+                assert_eq!(protocol, "netlink");
+                assert_eq!(alert_key, "ssh-listening-00ff");
+            }
+            _ => panic!("expected AlertCleared"),
+        }
+        // Not an alert key.
+        assert!(parse_alert_cleared("zensight/netlink/@/health").is_none());
+        // Nested key (has extra slash) is rejected.
+        assert!(parse_alert_cleared("zensight/netlink/@/alerts/a/b").is_none());
+    }
+
+    #[test]
+    fn test_decode_sample_alert() {
+        let alert = zensight_common::Alert::new(
+            "host1",
+            zensight_common::Protocol::Netring,
+            zensight_common::AlertKind::Anomaly,
+            "port_scan",
+            zensight_common::AlertSeverity::Warning,
+            "scan",
+        );
+        let key = format!("zensight/netring/@/alerts/{}", alert.alert_key());
+        let payload = zensight_common::encode(&alert, zensight_common::Format::Json).unwrap();
+        match decode_sample(&key, &payload) {
+            Some(Message::AlertReceived(got)) => assert_eq!(got.rule, "port_scan"),
+            other => panic!("expected AlertReceived, got {other:?}"),
+        }
     }
 }
