@@ -137,6 +137,17 @@ impl std::fmt::Display for Severity {
     }
 }
 
+impl From<zensight_common::AlertSeverity> for Severity {
+    fn from(s: zensight_common::AlertSeverity) -> Self {
+        use zensight_common::AlertSeverity;
+        match s {
+            AlertSeverity::Info => Severity::Info,
+            AlertSeverity::Warning => Severity::Warning,
+            AlertSeverity::Critical => Severity::Critical,
+        }
+    }
+}
+
 /// Comparison operators for alert rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ComparisonOp {
@@ -610,12 +621,15 @@ impl AlertsState {
 /// Render the alerts view.
 pub fn alerts_view(state: &AlertsState) -> Element<'_, Message> {
     let header = render_header(state);
+    let external_section = render_external_alerts_section(state);
     let new_rule_form = render_new_rule_form(state);
     let rules_section = render_rules_section(state);
     let alerts_section = render_alerts_section(state);
 
     let content = column![
         header,
+        rule::horizontal(1),
+        external_section,
         rule::horizontal(1),
         new_rule_form,
         rule::horizontal(1),
@@ -835,6 +849,95 @@ fn render_rule_row(rule: &AlertRule) -> Element<'_, Message> {
 }
 
 /// Render the alerts section.
+/// Render the sensor-pushed alerts section (anomalies + expectation violations).
+fn render_external_alerts_section(state: &AlertsState) -> Element<'_, Message> {
+    let active = state.active_external();
+    let section_title = text(format!("Anomalies & Expectations ({})", active.len())).size(18);
+
+    if active.is_empty() {
+        return column![
+            section_title,
+            text("No active sensor alerts")
+                .size(14)
+                .style(|theme: &Theme| {
+                    text::Style {
+                        color: Some(crate::view::theme::colors(theme).text_dimmed()),
+                    }
+                })
+        ]
+        .spacing(10)
+        .into();
+    }
+
+    let mut list = Column::new().spacing(5);
+    for alert in active.iter().take(100) {
+        list = list.push(render_external_alert_row(alert));
+    }
+
+    column![section_title, list].spacing(10).into()
+}
+
+/// Render a single sensor-pushed alert row.
+fn render_external_alert_row<'a>(alert: &'a SensorAlert) -> Element<'a, Message> {
+    let severity: Severity = alert.severity.into();
+    let icon: Element<'a, Message> = match severity {
+        Severity::Critical => icons::status_error(IconSize::Small),
+        Severity::Warning => icons::status_warning(IconSize::Small),
+        Severity::Info => icons::info(IconSize::Small),
+    };
+
+    let severity_color = severity.color();
+    let severity_badge = text(severity.name())
+        .size(10)
+        .style(move |_theme: &Theme| text::Style {
+            color: Some(severity_color),
+        });
+
+    let kind = text(alert.kind.as_str())
+        .size(10)
+        .style(|theme: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(theme).text_dimmed()),
+        });
+
+    let summary: Element<'a, Message> = if alert.summary.len() > MAX_ALERT_MESSAGE_LEN {
+        let truncated = format!("{}...", &alert.summary[..MAX_ALERT_MESSAGE_LEN]);
+        tooltip(
+            text(truncated).size(13),
+            container(text(alert.summary.clone()).size(12))
+                .padding(8)
+                .max_width(400.0)
+                .style(container::rounded_box),
+            tooltip::Position::Bottom,
+        )
+        .into()
+    } else {
+        text(alert.summary.clone()).size(13).into()
+    };
+
+    let source = text(format!("{}/{}", alert.protocol, alert.source))
+        .size(11)
+        .style(|theme: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(theme).text_dimmed()),
+        });
+
+    let time = text(format_timestamp(alert.timestamp))
+        .size(11)
+        .style(|theme: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(theme).text_dimmed()),
+        });
+
+    Row::new()
+        .push(icon)
+        .push(severity_badge)
+        .push(kind)
+        .push(summary)
+        .push(source)
+        .push(time)
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into()
+}
+
 fn render_alerts_section(state: &AlertsState) -> Element<'_, Message> {
     let section_title = text(format!("Alert History ({})", state.alerts.len())).size(18);
 

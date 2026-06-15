@@ -627,3 +627,43 @@ fn test_topology_search_input() {
     // Should show search placeholder
     assert!(ui.find("Search nodes...").is_ok());
 }
+
+/// Sensor-pushed alerts render in the alerts view's "Anomalies & Expectations"
+/// section, and resolved alerts disappear.
+#[test]
+fn test_external_alerts_render_and_resolve() {
+    use zensight::view::alerts::{AlertsState, alerts_view};
+    use zensight_common::{Alert, AlertKind, AlertSeverity};
+
+    let mut state = AlertsState::new();
+    // Empty: section present, no alerts.
+    {
+        let mut ui = simulator(alerts_view(&state));
+        assert!(ui.find("Anomalies & Expectations (0)").is_ok());
+        assert!(ui.find("No active sensor alerts").is_ok());
+    }
+
+    // Ingest a firing expectation alert.
+    let alert = Alert::new(
+        "router01",
+        Protocol::Netlink,
+        AlertKind::Expectation,
+        "ssh-listening",
+        AlertSeverity::Critical,
+        "sshd not listening on :22",
+    );
+    state.ingest_external(alert.clone());
+    {
+        let mut ui = simulator(alerts_view(&state));
+        assert!(ui.find("Anomalies & Expectations (1)").is_ok());
+        assert!(ui.find("sshd not listening on :22").is_ok());
+        assert!(ui.find("netlink/router01").is_ok());
+    }
+
+    // Resolve it → section back to empty.
+    state.ingest_external(alert.resolved());
+    {
+        let mut ui = simulator(alerts_view(&state));
+        assert!(ui.find("Anomalies & Expectations (0)").is_ok());
+    }
+}

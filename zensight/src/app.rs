@@ -944,7 +944,9 @@ impl ZenSight {
     pub fn view(&self) -> Element<'_, Message> {
         use iced::widget::{row, stack};
 
-        let unack = self.alerts.unacknowledged_count;
+        // Badge counts both unacknowledged rule alerts and active sensor-pushed
+        // alerts (anomalies + expectation violations).
+        let unack = self.alerts.unacknowledged_count + self.alerts.external_count();
 
         let main_view: Element<'_, Message> = match self.current_view {
             CurrentView::Settings => settings_view(&self.settings),
