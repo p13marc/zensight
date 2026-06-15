@@ -1,16 +1,16 @@
-# Docker Compose for ZenSight bridges
+# Docker Compose for ZenSight sensors
 # Usage: docker compose -f docker/docker-compose.yml up
 
 services:
-  # Syslog bridge - receives syslog messages and publishes to Zenoh
-  bridge-syslog:
-    image: ghcr.io/p13marc/zensight-bridge-syslog:latest
+  # Syslog sensor - receives syslog messages and publishes to Zenoh
+  sensor-syslog:
+    image: ghcr.io/p13marc/zensight-sensor-syslog:latest
     build:
       context: ..
-      dockerfile: docker/Dockerfile.bridge
+      dockerfile: docker/Dockerfile.sensor
       args:
-        BRIDGE_PACKAGE: zenoh-bridge-syslog
-        BRIDGE_NAME: syslog
+        SENSOR_PACKAGE: zensight-sensor-syslog
+        SENSOR_NAME: syslog
     ports:
       - "514:514/udp"   # Syslog UDP
       - "514:514/tcp"   # Syslog TCP
@@ -20,15 +20,15 @@ services:
     command: ["--config", "/etc/zensight/config.json5"]
     restart: unless-stopped
 
-  # Sysinfo bridge - collects system metrics and publishes to Zenoh
-  bridge-sysinfo:
-    image: ghcr.io/p13marc/zensight-bridge-sysinfo:latest
+  # Sysinfo sensor - collects system metrics and publishes to Zenoh
+  sensor-sysinfo:
+    image: ghcr.io/p13marc/zensight-sensor-sysinfo:latest
     build:
       context: ..
-      dockerfile: docker/Dockerfile.bridge
+      dockerfile: docker/Dockerfile.sensor
       args:
-        BRIDGE_PACKAGE: zenoh-bridge-sysinfo
-        BRIDGE_NAME: sysinfo
+        SENSOR_PACKAGE: zensight-sensor-sysinfo
+        SENSOR_NAME: sysinfo
     ports:
       - "7448:7447"     # Zenoh (different port to avoid conflict)
     volumes:
@@ -38,15 +38,15 @@ services:
     command: ["--config", "/etc/zensight/config.json5"]
     restart: unless-stopped
 
-  # SNMP bridge - polls SNMP agents and publishes to Zenoh
-  bridge-snmp:
-    image: ghcr.io/p13marc/zensight-bridge-snmp:latest
+  # SNMP sensor - polls SNMP agents and publishes to Zenoh
+  sensor-snmp:
+    image: ghcr.io/p13marc/zensight-sensor-snmp:latest
     build:
       context: ..
-      dockerfile: docker/Dockerfile.bridge
+      dockerfile: docker/Dockerfile.sensor
       args:
-        BRIDGE_PACKAGE: zenoh-bridge-snmp
-        BRIDGE_NAME: snmp
+        SENSOR_PACKAGE: zensight-sensor-snmp
+        SENSOR_NAME: snmp
     ports:
       - "162:162/udp"   # SNMP traps
       - "7449:7447"     # Zenoh (different port to avoid conflict)

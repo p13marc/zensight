@@ -19,15 +19,15 @@ This document describes the high-level architecture and component relationships 
 │           │           │           │           │           │           │            │
 │           ▼           ▼           ▼           ▼           ▼           ▼            │
 │  ┌─────────────────────────────────────────────────────────────────────────────┐   │
-│  │                              Protocol Bridges                                │   │
+│  │                              Protocol Sensors                                │   │
 │  │                                                                              │   │
 │  │   ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐           │   │
 │  │   │ zenoh-      │ │ zenoh-      │ │ zenoh-      │ │ zenoh-      │           │   │
-│  │   │ bridge-snmp │ │ bridge-     │ │ bridge-     │ │ bridge-     │  ...      │   │
+│  │   │ sensor-snmp │ │ sensor-     │ │ sensor-     │ │ sensor-     │  ...      │   │
 │  │   │             │ │ syslog      │ │ sysinfo     │ │ netflow     │           │   │
 │  │   └──────┬──────┘ └──────┬──────┘ └──────┬──────┘ └──────┬──────┘           │   │
 │  │          │               │               │               │                  │   │
-│  │          │  Uses zensight-bridge-framework (BridgeRunner, Publisher)        │   │
+│  │          │  Uses zensight-sensor-core (SensorRunner, Publisher)        │   │
 │  │          │  Uses zensight-common (TelemetryPoint, config, serialization)    │   │
 │  └──────────│───────────────│───────────────│───────────────│──────────────────┘   │
 │             │               │               │               │                      │
@@ -38,10 +38,10 @@ This document describes the high-level architecture and component relationships 
 │  │                                                                              │   │
 │  │   Key Expressions:                                                           │   │
 │  │   ├── zensight/<protocol>/<source>/<metric>     (telemetry data)            │   │
-│  │   ├── zensight/<protocol>/@/health              (bridge health)             │   │
+│  │   ├── zensight/<protocol>/@/health              (sensor health)             │   │
 │  │   ├── zensight/<protocol>/@/devices/*/liveness  (device liveness)           │   │
 │  │   ├── zensight/<protocol>/@/errors              (error reports)             │   │
-│  │   ├── zensight/_meta/bridges/*                  (bridge registration)       │   │
+│  │   ├── zensight/_meta/sensors/*                  (sensor registration)       │   │
 │  │   └── zensight/_meta/correlation/*              (device correlation)        │   │
 │  │                                                                              │   │
 │  └───────────────────────────────┬──────────────────────────────────────────────┘   │
@@ -79,9 +79,9 @@ This document describes the high-level architecture and component relationships 
 │   │                          Shared Libraries                                    │  │
 │   │                                                                              │  │
 │   │   ┌────────────────────────────┐  ┌────────────────────────────────────┐    │  │
-│   │   │      zensight-common       │  │    zensight-bridge-framework       │    │  │
+│   │   │      zensight-common       │  │    zensight-sensor-core       │    │  │
 │   │   │                            │  │                                    │    │  │
-│   │   │  • TelemetryPoint          │  │  • BridgeRunner                    │    │  │
+│   │   │  • TelemetryPoint          │  │  • SensorRunner                    │    │  │
 │   │   │  • TelemetryValue          │◄─┤  • Publisher                       │    │  │
 │   │   │  • Protocol enum           │  │  • LivelinessManager               │    │  │
 │   │   │  • DeviceStatus            │  │  • HealthSnapshot publishing       │    │  │
@@ -97,7 +97,7 @@ This document describes the high-level architecture and component relationships 
 │   │                              Applications                                     │ │
 │   │                                                                               │ │
 │   │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐  │ │
-│   │  │   zensight    │  │ zenoh-bridge- │  │ zensight-     │  │ zensight-     │  │ │
+│   │  │   zensight    │  │ zenoh-sensor- │  │ zensight-     │  │ zensight-     │  │ │
 │   │  │   (frontend)  │  │ *             │  │ exporter-     │  │ exporter-     │  │ │
 │   │  │               │  │               │  │ prometheus    │  │ otel          │  │ │
 │   │  │  Iced 0.14    │  │  SNMP         │  │               │  │               │  │ │
@@ -123,24 +123,24 @@ This document describes the high-level architecture and component relationships 
 │  1. COLLECTION                                                                   │
 │  ═════════════                                                                   │
 │                                                                                  │
-│     External Device          Bridge                      Zenoh                   │
+│     External Device          Sensor                      Zenoh                   │
 │     ───────────────          ──────                      ─────                   │
 │                                                                                  │
 │     ┌───────────┐     poll   ┌───────────────┐  publish  ┌──────────────────┐   │
-│     │   SNMP    │──────────▶│zenoh-bridge-  │──────────▶│ zensight/snmp/   │   │
+│     │   SNMP    │──────────▶│zenoh-sensor-  │──────────▶│ zensight/snmp/   │   │
 │     │   Agent   │    GET     │snmp           │           │ router01/        │   │
 │     └───────────┘            └───────────────┘           │ system/sysUpTime │   │
 │                                                          └──────────────────┘   │
 │                                                                                  │
 │     ┌───────────┐   UDP/TCP  ┌───────────────┐  publish  ┌──────────────────┐   │
-│     │  Syslog   │──────────▶│zenoh-bridge-  │──────────▶│ zensight/syslog/ │   │
+│     │  Syslog   │──────────▶│zenoh-sensor-  │──────────▶│ zensight/syslog/ │   │
 │     │  Source   │   514      │syslog         │           │ server01/...     │   │
 │     └───────────┘            └───────────────┘           └──────────────────┘   │
 │                                                                                  │
 │  2. COMMON DATA MODEL                                                            │
 │  ════════════════════                                                            │
 │                                                                                  │
-│     All bridges normalize data into TelemetryPoint:                              │
+│     All sensors normalize data into TelemetryPoint:                              │
 │                                                                                  │
 │     ┌────────────────────────────────────────────────────────────────────────┐  │
 │     │  TelemetryPoint {                                                       │  │
@@ -191,9 +191,9 @@ zensight/
 │   │       Example: zensight/snmp/router01/interfaces/eth0/ifInOctets
 │   │
 │   └── @/                               # Metadata namespace
-│       ├── health                       # Bridge HealthSnapshot (periodic)
+│       ├── health                       # Sensor HealthSnapshot (periodic)
 │       ├── errors                       # ErrorReport publications
-│       ├── alive                        # Bridge liveliness token
+│       ├── alive                        # Sensor liveliness token
 │       ├── commands/                    # Runtime commands (e.g., syslog filters)
 │       │   └── filter
 │       └── devices/
@@ -202,10 +202,10 @@ zensight/
 │               └── alive                # Device liveliness token
 │
 └── _meta/
-    ├── bridges/
-    │   └── <bridge_name>                # Bridge registration info
+    ├── sensors/
+    │   └── <sensor_name>                # Sensor registration info
     └── correlation/
-        └── <ip_address>                 # Cross-bridge device correlation
+        └── <ip_address>                 # Cross-sensor device correlation
 ```
 
 ## Frontend Architecture
@@ -244,7 +244,7 @@ zensight/
 │   │                                                                         │    │
 │   │   ┌─────────────────────────────────────────────────────────────────┐  │    │
 │   │   │  Liveliness Subscriber                                           │  │    │
-│   │   │  • Bridge presence: zensight/<protocol>/@/alive                  │  │    │
+│   │   │  • Sensor presence: zensight/<protocol>/@/alive                  │  │    │
 │   │   │  • Device presence: zensight/<protocol>/@/devices/*/alive        │  │    │
 │   │   └─────────────────────────────────────────────────────────────────┘  │    │
 │   │                                                                         │    │
@@ -262,7 +262,7 @@ zensight/
 │   │   │ DashboardState │ │DeviceDetail-   │ │ TopologyState  │             │    │
 │   │   │                │ │State           │ │                │             │    │
 │   │   │ • devices      │ │ • device_id    │ │ • nodes        │             │    │
-│   │   │ • bridge_health│ │ • metrics      │ │ • edges        │             │    │
+│   │   │ • sensor_health│ │ • metrics      │ │ • edges        │             │    │
 │   │   │ • connection   │ │ • history      │ │ • layout       │             │    │
 │   │   └────────────────┘ └────────────────┘ └────────────────┘             │    │
 │   │                                                                         │    │
@@ -279,11 +279,11 @@ zensight/
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Bridge Lifecycle
+## Sensor Lifecycle
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────┐
-│                   Bridge Lifecycle (via BridgeRunner)                            │
+│                   Sensor Lifecycle (via SensorRunner)                            │
 ├──────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                  │
 │   1. STARTUP                                                                     │
@@ -350,12 +350,12 @@ zensight/
 │                                                                                  │
 │   ┌─────────────────────────────────────────────────────────────────────────┐   │
 │   │                                                                          │   │
-│   │    Bridge Reports                 Frontend Combines                      │   │
+│   │    Sensor Reports                 Frontend Combines                      │   │
 │   │    ───────────────                ─────────────────                      │   │
 │   │                                                                          │   │
 │   │    DeviceLiveness {               Effective Status =                     │   │
 │   │        status: Online,              max_severity(                        │   │
-│   │        last_seen: ...,                bridge_reported_status,            │   │
+│   │        last_seen: ...,                sensor_reported_status,            │   │
 │   │        latency_ms: 42,                local_staleness_status             │   │
 │   │    }                                )                                    │   │
 │   │              │                              │                            │   │
@@ -381,7 +381,7 @@ zensight/
 │   Frontend tracks last_received timestamp per device.                            │
 │   If no data for > staleness_threshold (default 30s):                           │
 │     → Device marked as locally stale                                             │
-│     → Combines with bridge status for final determination                        │
+│     → Combines with sensor status for final determination                        │
 │                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -457,7 +457,7 @@ zensight/                            # Workspace root
 │   │   ├── lib.rs                   # Library (for testing)
 │   │   ├── app.rs                   # Iced Application
 │   │   ├── message.rs               # Message enum
-│   │   ├── subscription.rs          # Zenoh subscription bridge
+│   │   ├── subscription.rs          # Zenoh subscription sensor
 │   │   ├── mock.rs                  # Mock data generators
 │   │   └── view/                    # UI components
 │   │       ├── dashboard.rs
@@ -479,19 +479,19 @@ zensight/                            # Workspace root
 │       ├── keyexpr.rs               # Key expression builders
 │       └── serialization.rs         # JSON/CBOR encoding
 │
-├── zensight-bridge-framework/       # Bridge abstraction
+├── zensight-sensor-core/       # Sensor abstraction
 │   └── src/
 │       ├── lib.rs
-│       ├── runner.rs                # BridgeRunner
+│       ├── runner.rs                # SensorRunner
 │       ├── publisher.rs             # Zenoh publisher
 │       └── liveliness.rs            # Presence management
 │
-├── zenoh-bridge-snmp/               # SNMP bridge
-├── zenoh-bridge-syslog/             # Syslog bridge
-├── zenoh-bridge-sysinfo/            # System metrics bridge
-├── zenoh-bridge-netflow/            # NetFlow bridge
-├── zenoh-bridge-modbus/             # Modbus bridge
-├── zenoh-bridge-gnmi/               # gNMI bridge
+├── zensight-sensor-snmp/               # SNMP sensor
+├── zensight-sensor-syslog/             # Syslog sensor
+├── zensight-sensor-sysinfo/            # System metrics sensor
+├── zensight-sensor-netflow/            # NetFlow sensor
+├── zensight-sensor-modbus/             # Modbus sensor
+├── zensight-sensor-gnmi/               # gNMI sensor
 │
 ├── zensight-exporter-prometheus/    # Prometheus exporter
 │   └── src/

@@ -1,6 +1,6 @@
 //! ZenSight Common Library
 //!
-//! This crate provides shared types and utilities for ZenSight observability bridges:
+//! This crate provides shared types and utilities for ZenSight observability sensors:
 //!
 //! - [`telemetry`] - Common telemetry data model (`TelemetryPoint`, `TelemetryValue`, `Protocol`)
 //! - [`serialization`] - JSON/CBOR encoding and decoding
@@ -21,12 +21,12 @@ pub mod telemetry;
 pub use config::{BaseConfig, LogFormat, LoggingConfig, ZenohConfig, load_config, parse_config};
 pub use error::{Error, Result};
 pub use health::{
-    BridgeInfo, CorrelationEntry, DeviceLiveness, DeviceStatus, ErrorReport, ErrorType,
-    HealthSnapshot, HealthStatus,
+    CorrelationEntry, DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot,
+    HealthStatus, SensorInfo,
 };
 pub use keyexpr::{
-    KEY_PREFIX, KeyExprBuilder, ParseError, ParsedKeyExpr, all_bridges_wildcard,
-    all_correlation_wildcard, all_errors_wildcard, all_health_wildcard, all_liveness_wildcard,
+    KEY_PREFIX, KeyExprBuilder, ParseError, ParsedKeyExpr, all_correlation_wildcard,
+    all_errors_wildcard, all_health_wildcard, all_liveness_wildcard, all_sensors_wildcard,
     all_telemetry_wildcard, parse_key_expr,
 };
 pub use serialization::{Format, decode, decode_auto, encode};

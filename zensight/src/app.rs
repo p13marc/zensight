@@ -9,7 +9,7 @@ use iced::{Element, Length, Subscription, Task, Theme};
 use std::sync::LazyLock;
 
 use zensight_common::{
-    BridgeInfo, CorrelationEntry, HealthSnapshot, Protocol, TelemetryPoint, TelemetryValue,
+    CorrelationEntry, HealthSnapshot, Protocol, SensorInfo, TelemetryPoint, TelemetryValue,
     ZenohConfig,
 };
 
@@ -103,10 +103,10 @@ pub struct ZenSight {
     demo_mode: bool,
     /// Current theme.
     theme: AppTheme,
-    /// Bridge health snapshots, keyed by bridge name.
-    bridge_health: std::collections::HashMap<String, HealthSnapshot>,
-    /// Known bridges, keyed by bridge name.
-    known_bridges: std::collections::HashMap<String, BridgeInfo>,
+    /// Sensor health snapshots, keyed by sensor name.
+    sensor_health: std::collections::HashMap<String, HealthSnapshot>,
+    /// Known sensors, keyed by sensor name.
+    known_sensors: std::collections::HashMap<String, SensorInfo>,
     /// Device correlation entries, keyed by IP address.
     correlations: std::collections::HashMap<String, CorrelationEntry>,
     /// Toast notification state.
@@ -208,8 +208,8 @@ impl ZenSight {
             stale_threshold_ms,
             demo_mode,
             theme,
-            bridge_health: std::collections::HashMap::new(),
-            known_bridges: std::collections::HashMap::new(),
+            sensor_health: std::collections::HashMap::new(),
+            known_sensors: std::collections::HashMap::new(),
             correlations: std::collections::HashMap::new(),
             toasts: ToastState::default(),
         };
@@ -235,7 +235,7 @@ impl ZenSight {
             }
 
             Message::HealthSnapshotReceived(snapshot) => {
-                self.bridge_health.insert(snapshot.bridge.clone(), snapshot);
+                self.sensor_health.insert(snapshot.sensor.clone(), snapshot);
             }
 
             Message::DeviceLivenessReceived(protocol, liveness) => {
@@ -245,15 +245,15 @@ impl ZenSight {
             Message::ErrorReportReceived(report) => {
                 // Log the error for now; could add an error log view later
                 tracing::warn!(
-                    bridge = ?report.device,
+                    sensor = ?report.device,
                     error_type = ?report.error_type,
                     message = %report.message,
-                    "Bridge error report received"
+                    "Sensor error report received"
                 );
             }
 
-            Message::BridgeInfoReceived(info) => {
-                self.known_bridges.insert(info.name.clone(), info);
+            Message::SensorInfoReceived(info) => {
+                self.known_sensors.insert(info.name.clone(), info);
             }
 
             Message::CorrelationReceived(entry) => {
@@ -282,15 +282,15 @@ impl ZenSight {
                 self.dashboard.last_error = Some(error);
             }
 
-            Message::BridgeOnline(protocol) => {
-                tracing::info!(protocol = %protocol, "Bridge online (liveliness)");
-                // Bridge liveliness is informational - the bridge health system
-                // already tracks bridge status via HealthSnapshot messages.
-                // This provides instant notification when bridges appear.
+            Message::SensorOnline(protocol) => {
+                tracing::info!(protocol = %protocol, "Sensor online (liveliness)");
+                // Sensor liveliness is informational - the sensor health system
+                // already tracks sensor status via HealthSnapshot messages.
+                // This provides instant notification when sensors appear.
             }
 
-            Message::BridgeOffline(protocol) => {
-                tracing::warn!(protocol = %protocol, "Bridge offline (liveliness)");
+            Message::SensorOffline(protocol) => {
+                tracing::warn!(protocol = %protocol, "Sensor offline (liveliness)");
                 // Mark all devices from this protocol as potentially offline.
                 // The health system will update their status on the next poll.
             }
@@ -764,7 +764,7 @@ impl ZenSight {
             }
 
             Message::ApplySyslogFilters => {
-                // TODO: Send filter command to bridge via Zenoh
+                // TODO: Send filter command to sensor via Zenoh
                 // For now, just mark as applied
                 self.syslog_filter.mark_applied();
                 tracing::info!("Syslog filters applied (local only for now)");
@@ -935,7 +935,7 @@ impl ZenSight {
                         unack,
                         &self.groups,
                         &self.overview,
-                        &self.bridge_health,
+                        &self.sensor_health,
                     )
                 }
             }
@@ -945,7 +945,7 @@ impl ZenSight {
                 unack,
                 &self.groups,
                 &self.overview,
-                &self.bridge_health,
+                &self.sensor_health,
             ),
         };
 
@@ -985,7 +985,7 @@ impl ZenSight {
         self.theme.to_iced_theme()
     }
 
-    /// Handle device liveness update from a bridge.
+    /// Handle device liveness update from a sensor.
     fn handle_device_liveness(
         &mut self,
         protocol_str: &str,

@@ -67,9 +67,9 @@ jobs:
           if-no-files-found: error
 
   # =============================================================================
-  # Build Debian packages for bridges
+  # Build Debian packages for sensors
   # =============================================================================
-  build-deb-bridges:
+  build-deb-sensors:
     strategy:
       matrix:
         include:
@@ -96,15 +96,15 @@ jobs:
 
       - name: Build release binaries
         run: |
-          cargo build --release -p zenoh-bridge-syslog
-          cargo build --release -p zenoh-bridge-sysinfo
-          cargo build --release -p zenoh-bridge-snmp
+          cargo build --release -p zensight-sensor-syslog
+          cargo build --release -p zensight-sensor-sysinfo
+          cargo build --release -p zensight-sensor-snmp
 
-      - name: Build .deb packages for bridges
+      - name: Build .deb packages for sensors
         run: |
-          cargo deb -p zenoh-bridge-syslog --no-build
-          cargo deb -p zenoh-bridge-sysinfo --no-build
-          cargo deb -p zenoh-bridge-snmp --no-build
+          cargo deb -p zensight-sensor-syslog --no-build
+          cargo deb -p zensight-sensor-sysinfo --no-build
+          cargo deb -p zensight-sensor-snmp --no-build
 
       - name: Rename packages with distro suffix
         run: |
@@ -117,7 +117,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: deb-bridges-${{ matrix.name }}
+          name: deb-sensors-${{ matrix.name }}
           path: target/debian/*.deb
           if-no-files-found: error
 
@@ -202,9 +202,9 @@ jobs:
         run: |
           source $HOME/.cargo/env
           cargo build --release -p zensight
-          cargo build --release -p zenoh-bridge-syslog
-          cargo build --release -p zenoh-bridge-sysinfo
-          cargo build --release -p zenoh-bridge-snmp
+          cargo build --release -p zensight-sensor-syslog
+          cargo build --release -p zensight-sensor-sysinfo
+          cargo build --release -p zensight-sensor-snmp
           cargo build --release -p zensight-exporter-prometheus
           cargo build --release -p zensight-exporter-otel
 
@@ -212,9 +212,9 @@ jobs:
         run: |
           source $HOME/.cargo/env
           cargo generate-rpm -p zensight
-          cargo generate-rpm -p zenoh-bridge-syslog
-          cargo generate-rpm -p zenoh-bridge-sysinfo
-          cargo generate-rpm -p zenoh-bridge-snmp
+          cargo generate-rpm -p zensight-sensor-syslog
+          cargo generate-rpm -p zensight-sensor-sysinfo
+          cargo generate-rpm -p zensight-sensor-snmp
           cargo generate-rpm -p zensight-exporter-prometheus
           cargo generate-rpm -p zensight-exporter-otel
 
@@ -260,7 +260,7 @@ jobs:
           if-no-files-found: error
 
   # =============================================================================
-  # Build Docker images for bridges
+  # Build Docker images for sensors
   # =============================================================================
   build-docker:
     runs-on: ubuntu-latest
@@ -269,13 +269,13 @@ jobs:
       packages: write
     strategy:
       matrix:
-        bridge:
+        sensor:
           - name: syslog
-            package: zenoh-bridge-syslog
+            package: zensight-sensor-syslog
           - name: sysinfo
-            package: zenoh-bridge-sysinfo
+            package: zensight-sensor-sysinfo
           - name: snmp
-            package: zenoh-bridge-snmp
+            package: zensight-sensor-snmp
     steps:
       - uses: actions/checkout@v4
         with:
@@ -296,7 +296,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE_PREFIX }}-bridge-${{ matrix.bridge.name }}
+          images: ${{ env.IMAGE_PREFIX }}-sensor-${{ matrix.sensor.name }}
           tags: |
             type=ref,event=tag
             type=semver,pattern={{version}}
@@ -308,10 +308,10 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: docker/Dockerfile.bridge
+          file: docker/Dockerfile.sensor
           build-args: |
-            BRIDGE_PACKAGE=${{ matrix.bridge.package }}
-            BRIDGE_NAME=${{ matrix.bridge.name }}
+            SENSOR_PACKAGE=${{ matrix.sensor.package }}
+            SENSOR_NAME=${{ matrix.sensor.name }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -384,7 +384,7 @@ jobs:
     needs:
       [
         build-deb,
-        build-deb-bridges,
+        build-deb-sensors,
         build-deb-exporters,
         build-rpm-fedora,
         build-flatpak,
@@ -404,11 +404,11 @@ jobs:
           path: artifacts
           pattern: deb-zensight-*
 
-      - name: Download deb-bridges artifacts
+      - name: Download deb-sensors artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: deb-bridges-*
+          pattern: deb-sensors-*
 
       - name: Download deb-exporters artifacts
         uses: actions/download-artifact@v4

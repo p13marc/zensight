@@ -1,4 +1,4 @@
-// Example gNMI bridge configuration
+// Example gNMI sensor configuration
 {
   // Zenoh connection settings
   zenoh: {
@@ -6,7 +6,7 @@
     // connect: ["tcp/localhost:7447"],  // Uncomment for client mode
   },
 
-  // gNMI bridge settings
+  // gNMI sensor settings
   gnmi: {
     // Key expression prefix for publishing telemetry
     key_prefix: "zensight/gnmi",

@@ -631,8 +631,7 @@ fn build_metric_table_rows(state: &DeviceDetailState) -> Vec<MetricTableRow> {
                 String::new()
             };
 
-            let is_stale =
-                (current_timestamp() - point.timestamp) > METRIC_STALE_THRESHOLD_MS;
+            let is_stale = (current_timestamp() - point.timestamp) > METRIC_STALE_THRESHOLD_MS;
 
             MetricTableRow {
                 name: name.to_string(),
@@ -829,11 +828,9 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
                     text(timestamp).size(11).style(|theme: &Theme| text::Style {
                         color: Some(crate::view::theme::colors(theme).text_dimmed()),
                     }),
-                    text("stale")
-                        .size(9)
-                        .style(|_theme: &Theme| text::Style {
-                            color: Some(iced::Color::from_rgb(0.7, 0.4, 0.1)),
-                        })
+                    text("stale").size(9).style(|_theme: &Theme| text::Style {
+                        color: Some(iced::Color::from_rgb(0.7, 0.4, 0.1)),
+                    })
                 ]
                 .spacing(4)
                 .align_y(Alignment::Center)

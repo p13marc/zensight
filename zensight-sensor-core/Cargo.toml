@@ -1,0 +1,28 @@
+[package]
+name = "zensight-sensor-core"
+description = "Common framework for ZenSight protocol sensors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Workspace dependencies
+zensight-common = { workspace = true }
+zenoh = { workspace = true }
+zenoh-ext = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+json5 = { workspace = true }
+
+# Time
+chrono = "0.4"
+
+[dev-dependencies]
+tokio-test = "0.4"

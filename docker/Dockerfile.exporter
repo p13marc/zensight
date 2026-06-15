@@ -28,13 +28,13 @@ COPY zensight-exporter-otel ./zensight-exporter-otel
 
 # Copy other crates needed for workspace resolution (not built)
 COPY zensight ./zensight
-COPY zensight-bridge-framework ./zensight-bridge-framework
-COPY zenoh-bridge-syslog ./zenoh-bridge-syslog
-COPY zenoh-bridge-sysinfo ./zenoh-bridge-sysinfo
-COPY zenoh-bridge-snmp ./zenoh-bridge-snmp
-COPY zenoh-bridge-netflow ./zenoh-bridge-netflow
-COPY zenoh-bridge-modbus ./zenoh-bridge-modbus
-COPY zenoh-bridge-gnmi ./zenoh-bridge-gnmi
+COPY zensight-sensor-core ./zensight-sensor-core
+COPY zensight-sensor-syslog ./zensight-sensor-syslog
+COPY zensight-sensor-sysinfo ./zensight-sensor-sysinfo
+COPY zensight-sensor-snmp ./zensight-sensor-snmp
+COPY zensight-sensor-netflow ./zensight-sensor-netflow
+COPY zensight-sensor-modbus ./zensight-sensor-modbus
+COPY zensight-sensor-gnmi ./zensight-sensor-gnmi
 
 # Build the specified exporter in release mode
 RUN cargo build --release -p ${EXPORTER_PACKAGE}

@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use zensight_common::{decode_auto, encode, Format, Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{Format, Protocol, TelemetryPoint, TelemetryValue, decode_auto, encode};
 
 /// Generate a unique test prefix to avoid test interference.
 fn unique_prefix() -> String {

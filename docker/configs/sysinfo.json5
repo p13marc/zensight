@@ -1,5 +1,5 @@
 {
-  // Docker-optimized configuration for zenoh-bridge-sysinfo
+  // Docker-optimized configuration for zensight-sensor-sysinfo
   // Note: Mount /proc and /sys from host for accurate metrics
 
   zenoh: {

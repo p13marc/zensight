@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ZenSight is a unified observability platform that bridges legacy monitoring protocols into Zenoh's pub/sub infrastructure. It consists of:
+ZenSight is a unified observability platform that sensors legacy monitoring protocols into Zenoh's pub/sub infrastructure. It consists of:
 
 1. **zensight** - Iced 0.14 desktop frontend for visualizing telemetry
 2. **zensight-common** - Shared library (telemetry model, Zenoh helpers, config)
-3. **zenoh-bridge-*** - Protocol bridges publishing telemetry to Zenoh
+3. **zenoh-sensor-*** - Protocol sensors publishing telemetry to Zenoh
 4. **zensight-exporter-*** - Exporters forwarding Zenoh telemetry to external systems
 
 ## Build Commands
@@ -23,8 +23,8 @@ cargo build -p zensight --features tester
 # Run the frontend
 cargo run -p zensight --release
 
-# Run a bridge
-cargo run -p zenoh-bridge-snmp --release -- --config configs/snmp.json5
+# Run a sensor
+cargo run -p zensight-sensor-snmp --release -- --config configs/snmp.json5
 
 # Run an exporter
 cargo run -p zensight-exporter-prometheus --release -- --config configs/prometheus.json5
@@ -40,13 +40,13 @@ cargo test --workspace
 # Run specific crate tests
 cargo test -p zensight              # 139 tests (unit + UI)
 cargo test -p zensight-common       # 47 tests
-cargo test -p zensight-bridge-framework  # 23 tests
-cargo test -p zenoh-bridge-snmp     # 22 tests
-cargo test -p zenoh-bridge-syslog   # 106 tests (parser, receiver, filtering)
-cargo test -p zenoh-bridge-netflow  # 16 tests
-cargo test -p zenoh-bridge-modbus   # 11 tests
-cargo test -p zenoh-bridge-sysinfo  # 15 tests
-cargo test -p zenoh-bridge-gnmi     # 8 tests
+cargo test -p zensight-sensor-core  # 23 tests
+cargo test -p zensight-sensor-snmp     # 22 tests
+cargo test -p zensight-sensor-syslog   # 106 tests (parser, receiver, filtering)
+cargo test -p zensight-sensor-netflow  # 16 tests
+cargo test -p zensight-sensor-modbus   # 11 tests
+cargo test -p zensight-sensor-sysinfo  # 15 tests
+cargo test -p zensight-sensor-gnmi     # 8 tests
 cargo test -p zensight-exporter-prometheus  # 50 tests (mapping, collector, HTTP)
 cargo test -p zensight-exporter-otel        # 41 tests (metrics, logs, severity)
 
@@ -79,7 +79,7 @@ zensight/                    # Workspace root
 │   │   ├── lib.rs           # Library for testing
 │   │   ├── app.rs           # Iced Application
 │   │   ├── message.rs       # Iced messages
-│   │   ├── subscription.rs  # Zenoh subscription bridge
+│   │   ├── subscription.rs  # Zenoh subscription sensor
 │   │   ├── mock.rs          # Mock telemetry generators
 │   │   └── view/            # UI components
 │   │       ├── dashboard.rs # Main dashboard
@@ -104,20 +104,20 @@ zensight/                    # Workspace root
 │       ├── session.rs       # Zenoh session helpers
 │       ├── keyexpr.rs       # Key expression builders
 │       └── serialization.rs # JSON/CBOR encoding
-├── zensight-bridge-framework/ # Shared bridge framework
+├── zensight-sensor-core/ # Shared sensor framework
 │   └── src/
 │       ├── publisher.rs     # Zenoh publisher with key building
 │       ├── advanced_publisher.rs # Publisher with caching registry
 │       ├── health.rs        # HealthReporter with rolling error window
-│       ├── correlation.rs   # Cross-bridge device correlation
-│       ├── error.rs         # Bridge error categorization
+│       ├── correlation.rs   # Cross-sensor device correlation
+│       ├── error.rs         # Sensor error categorization
 │       └── liveliness.rs    # Device liveness tracking
-├── zenoh-bridge-snmp/       # SNMP v1/v2c/v3 bridge
-├── zenoh-bridge-syslog/     # RFC 3164/5424 bridge (UDP/TCP/Unix, filtering)
-├── zenoh-bridge-netflow/    # NetFlow/IPFIX bridge
-├── zenoh-bridge-modbus/     # Modbus TCP/RTU bridge
-├── zenoh-bridge-sysinfo/    # System metrics bridge
-├── zenoh-bridge-gnmi/       # gNMI streaming bridge
+├── zensight-sensor-snmp/       # SNMP v1/v2c/v3 sensor
+├── zensight-sensor-syslog/     # RFC 3164/5424 sensor (UDP/TCP/Unix, filtering)
+├── zensight-sensor-netflow/    # NetFlow/IPFIX sensor
+├── zensight-sensor-modbus/     # Modbus TCP/RTU sensor
+├── zensight-sensor-sysinfo/    # System metrics sensor
+├── zensight-sensor-gnmi/       # gNMI streaming sensor
 ├── zensight-exporter-prometheus/  # Prometheus metrics exporter
 │   └── src/
 │       ├── config.rs        # Configuration parsing
@@ -136,7 +136,7 @@ zensight/                    # Workspace root
 
 ### Common Data Model
 
-All bridges emit a unified `TelemetryPoint`:
+All sensors emit a unified `TelemetryPoint`:
 
 ```rust
 pub struct TelemetryPoint {
@@ -151,7 +151,7 @@ pub struct TelemetryPoint {
 
 ### Key Expression Hierarchy
 
-All bridges publish to `zensight/<protocol>/<source>/<metric>`:
+All sensors publish to `zensight/<protocol>/<source>/<metric>`:
 
 ```
 zensight/snmp/router01/system/sysUpTime
@@ -164,19 +164,19 @@ zensight/gnmi/router01/interfaces/interface[name=eth0]/state/counters
 
 ### Health & Liveness Data
 
-Bridges also publish health/liveness metadata:
+Sensors also publish health/liveness metadata:
 
 ```
-zensight/<protocol>/@/health              # Bridge health snapshots
+zensight/<protocol>/@/health              # Sensor health snapshots
 zensight/<protocol>/@/devices/*/liveness  # Per-device liveness status
 zensight/<protocol>/@/errors              # Error reports
-zensight/_meta/bridges/*                  # Bridge registration info
-zensight/_meta/correlation/*              # Cross-bridge device correlation
+zensight/_meta/sensors/*                  # Sensor registration info
+zensight/_meta/correlation/*              # Cross-sensor device correlation
 ```
 
 ### Device Status Model
 
-Devices display a 4-color status based on bridge liveness reports:
+Devices display a 4-color status based on sensor liveness reports:
 
 | Status | Color | Meaning |
 |--------|-------|---------|
@@ -185,7 +185,7 @@ Devices display a 4-color status based on bridge liveness reports:
 | Offline | Red | Device not responding |
 | Unknown | Gray | No liveness data received yet |
 
-The frontend combines local staleness detection (no data received) with bridge-reported status to determine the effective display status.
+The frontend combines local staleness detection (no data received) with sensor-reported status to determine the effective display status.
 
 ## UI Testing
 
@@ -237,7 +237,7 @@ Build with `--features tester` and press F12 to:
 
 ## Configuration
 
-All bridges use JSON5 configuration. See `configs/` for examples.
+All sensors use JSON5 configuration. See `configs/` for examples.
 
 Common Zenoh settings:
 ```json5
@@ -256,11 +256,11 @@ Common Zenoh settings:
 ### Zenoh Integration
 
 - Frontend subscribes to `zensight/**` wildcard
-- Bridges are auto-discovered via Zenoh
+- Sensors are auto-discovered via Zenoh
 
 ### Syslog Filtering
 
-The syslog bridge supports message filtering at multiple levels:
+The syslog sensor supports message filtering at multiple levels:
 
 **Static Filters** (configured in JSON5):
 - `min_severity`: Filter by severity level (0=emergency to 7=debug)
@@ -278,7 +278,7 @@ The syslog bridge supports message filtering at multiple levels:
 - `SyslogFilterState` in `zensight/src/view/specialized/syslog.rs`
 - Filter panel with severity dropdown, facility toggles, pattern inputs
 - Filters applied locally in frontend before display
-- No frontend config needed to add new bridges
+- No frontend config needed to add new sensors
 
 ### SVG Icons
 
@@ -294,23 +294,23 @@ let protocol_icon = icons::protocol_icon::<Message>(Protocol::Snmp, IconSize::Sm
 ### View State Pattern
 
 Each view has its own state struct:
-- `DashboardState` - Device list, connection status, bridge health
+- `DashboardState` - Device list, connection status, sensor health
 - `DeviceDetailState` - Selected device metrics, chart data
 - `AlertsState` - Alert rules, triggered alerts
 - `SettingsState` - Zenoh connection settings
 - `TopologyState` - Network topology graph, nodes, edges, layout
 
-### Bridge Health Summary
+### Sensor Health Summary
 
-The dashboard displays a health summary bar showing all connected bridges with:
-- Bridge name and status (healthy/degraded/unhealthy)
+The dashboard displays a health summary bar showing all connected sensors with:
+- Sensor name and status (healthy/degraded/unhealthy)
 - Device counts (total, responding, failed)
 - Last poll duration
 - Error count in the last hour
 
 ### Demo Mode
 
-Run with `--demo` flag to simulate a full environment without real bridges:
+Run with `--demo` flag to simulate a full environment without real sensors:
 - Generates realistic telemetry from mock devices (routers, servers, PLCs)
 - Simulates periodic anomalies (CPU spikes, interface down, memory pressure)
 - Publishes health snapshots and liveness updates reflecting device conditions

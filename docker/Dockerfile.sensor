@@ -1,0 +1,84 @@
+# Multi-stage Dockerfile for ZenSight sensors
+# Build with: docker build --build-arg SENSOR_PACKAGE=zensight-sensor-syslog -f docker/Dockerfile.sensor .
+
+ARG SENSOR_PACKAGE=zensight-sensor-syslog
+ARG SENSOR_NAME=syslog
+
+# =============================================================================
+# Stage 1: Build the sensor binary
+# =============================================================================
+FROM rust:1.92-bookworm AS builder
+
+ARG SENSOR_PACKAGE
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    protobuf-compiler \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy workspace files first for better layer caching
+COPY Cargo.toml Cargo.lock ./
+COPY zensight-common ./zensight-common
+COPY zensight-sensor-core ./zensight-sensor-core
+COPY zensight-sensor-syslog ./zensight-sensor-syslog
+COPY zensight-sensor-sysinfo ./zensight-sensor-sysinfo
+COPY zensight-sensor-snmp ./zensight-sensor-snmp
+COPY zensight-sensor-netflow ./zensight-sensor-netflow
+COPY zensight-sensor-modbus ./zensight-sensor-modbus
+COPY zensight-sensor-gnmi ./zensight-sensor-gnmi
+
+# Copy remaining crates (needed for workspace resolution, not built)
+COPY zensight ./zensight
+COPY zensight-exporter-prometheus ./zensight-exporter-prometheus
+COPY zensight-exporter-otel ./zensight-exporter-otel
+
+# Build the specified sensor in release mode
+RUN cargo build --release -p ${SENSOR_PACKAGE}
+
+# =============================================================================
+# Stage 2: Create minimal runtime image
+# =============================================================================
+FROM debian:bookworm-slim
+
+ARG SENSOR_PACKAGE
+ARG SENSOR_NAME
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for running the sensor
+RUN useradd --create-home --shell /bin/bash zensight
+
+# Copy the built binary
+COPY --from=builder /build/target/release/${SENSOR_PACKAGE} /usr/local/bin/${SENSOR_PACKAGE}
+
+# Create config directory
+RUN mkdir -p /etc/zensight && chown zensight:zensight /etc/zensight
+
+# Switch to non-root user
+USER zensight
+WORKDIR /home/zensight
+
+# Default ports:
+# - 7447: Zenoh default port (TCP)
+# - 514: Syslog (UDP) - for syslog sensor
+# - 161: SNMP (UDP) - for snmp sensor
+EXPOSE 7447
+
+# Sensor-specific ports
+# Syslog: 514/udp, 514/tcp, /run/zensight/syslog.sock
+# SNMP: 162/udp (traps)
+# Sysinfo: no additional ports
+
+# Set the binary name as environment variable for the entrypoint
+ENV SENSOR_BINARY=${SENSOR_PACKAGE}
+
+# Default command runs the sensor with config from /etc/zensight
+ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/${SENSOR_BINARY} \"$@\"", "--"]
+CMD ["--help"]

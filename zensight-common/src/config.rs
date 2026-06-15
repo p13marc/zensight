@@ -70,7 +70,7 @@ impl Default for LoggingConfig {
     }
 }
 
-/// Base configuration shared by all bridges.
+/// Base configuration shared by all sensors.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BaseConfig {
     /// Zenoh connection settings.

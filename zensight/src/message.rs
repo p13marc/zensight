@@ -1,5 +1,5 @@
 use zensight_common::{
-    BridgeInfo, CorrelationEntry, DeviceLiveness, ErrorReport, HealthSnapshot, Protocol,
+    CorrelationEntry, DeviceLiveness, ErrorReport, HealthSnapshot, Protocol, SensorInfo,
     TelemetryPoint,
 };
 
@@ -13,17 +13,17 @@ pub enum Message {
     /// Telemetry received from Zenoh subscription.
     TelemetryReceived(TelemetryPoint),
 
-    /// Bridge health snapshot received.
+    /// Sensor health snapshot received.
     HealthSnapshotReceived(HealthSnapshot),
 
     /// Device liveness update received.
     DeviceLivenessReceived(String, DeviceLiveness),
 
-    /// Bridge error report received.
+    /// Sensor error report received.
     ErrorReportReceived(ErrorReport),
 
-    /// Bridge discovery/info received.
-    BridgeInfoReceived(BridgeInfo),
+    /// Sensor discovery/info received.
+    SensorInfoReceived(SensorInfo),
 
     /// Correlation entry received.
     CorrelationReceived(CorrelationEntry),
@@ -37,11 +37,11 @@ pub enum Message {
     /// Zenoh connection lost or failed.
     Disconnected(String),
 
-    /// Bridge came online (liveliness token appeared).
-    BridgeOnline(String),
+    /// Sensor came online (liveliness token appeared).
+    SensorOnline(String),
 
-    /// Bridge went offline (liveliness token disappeared).
-    BridgeOffline(String),
+    /// Sensor went offline (liveliness token disappeared).
+    SensorOffline(String),
 
     /// Device came online (liveliness token appeared).
     DeviceOnline(String, String),
@@ -325,20 +325,20 @@ pub enum Message {
     /// Set syslog message content filter pattern.
     SetSyslogMessageFilter(String),
 
-    /// Apply syslog filters (send to bridge).
+    /// Apply syslog filters (send to sensor).
     ApplySyslogFilters,
 
     /// Clear all syslog filters.
     ClearSyslogFilters,
 
-    /// Syslog filter status received from bridge.
+    /// Syslog filter status received from sensor.
     SyslogFilterStatusReceived(SyslogFilterStatus),
 
     /// Dismiss a toast notification.
     DismissToast(u64),
 }
 
-/// Syslog filter status from bridge.
+/// Syslog filter status from sensor.
 #[derive(Debug, Clone)]
 pub struct SyslogFilterStatus {
     pub messages_received: u64,

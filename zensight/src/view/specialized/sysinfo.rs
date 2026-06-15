@@ -127,7 +127,7 @@ fn render_system_overview(state: &DeviceDetailState) -> Element<'_, Message> {
         );
     }
 
-    // Load average - bridge publishes with "period" label (1m, 5m, 15m)
+    // Load average - sensor publishes with "period" label (1m, 5m, 15m)
     // Look for metrics with period labels
     let load1 = get_metric_with_label(state, "system/load", "period", "1m");
     let load5 = get_metric_with_label(state, "system/load", "period", "5m");
@@ -203,7 +203,7 @@ fn render_cpu_section(state: &DeviceDetailState) -> Element<'_, Message> {
         ));
     }
 
-    // Per-core usage (bridge publishes as cpu/{N}/usage)
+    // Per-core usage (sensor publishes as cpu/{N}/usage)
     let mut core_items: Vec<Element<'_, Message>> = Vec::new();
     for i in 0..128 {
         let usage_metric = format!("cpu/{}/usage", i);

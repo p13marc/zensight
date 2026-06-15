@@ -8378,137 +8378,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zenoh-bridge-gnmi"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "chrono",
- "ciborium",
- "clap",
- "json5",
- "prost",
- "prost-types",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-rustls",
- "tokio-stream",
- "tonic 0.13.1",
- "tonic-build",
- "tracing",
- "tracing-subscriber",
- "zenoh",
- "zensight-bridge-framework",
- "zensight-common",
-]
-
-[[package]]
-name = "zenoh-bridge-modbus"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "json5",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-modbus",
- "tokio-serial",
- "tracing",
- "tracing-subscriber",
- "zenoh",
- "zensight-bridge-framework",
- "zensight-common",
-]
-
-[[package]]
-name = "zenoh-bridge-netflow"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "clap",
- "json5",
- "netflow_parser",
- "serde",
- "serde_json",
- "tokio",
- "tokio-test",
- "tracing",
- "tracing-subscriber",
- "zenoh",
- "zensight-bridge-framework",
- "zensight-common",
-]
-
-[[package]]
-name = "zenoh-bridge-snmp"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "clap",
- "json5",
- "rasn",
- "rasn-smi",
- "rasn-snmp",
- "serde",
- "serde_json",
- "snmp2",
- "tokio",
- "tracing",
- "zenoh",
- "zensight-bridge-framework",
- "zensight-common",
-]
-
-[[package]]
-name = "zenoh-bridge-sysinfo"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "hostname",
- "json5",
- "procfs",
- "serde",
- "serde_json",
- "sysinfo",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "zenoh",
- "zensight-bridge-framework",
- "zensight-common",
-]
-
-[[package]]
-name = "zenoh-bridge-syslog"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "json5",
- "once_cell",
- "regex",
- "serde",
- "serde_json",
- "tokio",
- "tokio-test",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "zenoh",
- "zensight-bridge-framework",
- "zensight-common",
-]
-
-[[package]]
 name = "zenoh-buffers"
 version = "1.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9017,26 +8886,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zensight-bridge-framework"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "json5",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-test",
- "tracing",
- "tracing-subscriber",
- "zenoh",
- "zenoh-ext",
- "zensight-common",
-]
-
-[[package]]
 name = "zensight-common"
 version = "0.5.0"
 dependencies = [
@@ -9098,6 +8947,157 @@ dependencies = [
  "tracing-subscriber",
  "zenoh",
  "zensight-common",
+]
+
+[[package]]
+name = "zensight-sensor-core"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "json5",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "tracing-subscriber",
+ "zenoh",
+ "zenoh-ext",
+ "zensight-common",
+]
+
+[[package]]
+name = "zensight-sensor-gnmi"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "ciborium",
+ "clap",
+ "json5",
+ "prost",
+ "prost-types",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tonic 0.13.1",
+ "tonic-build",
+ "tracing",
+ "tracing-subscriber",
+ "zenoh",
+ "zensight-common",
+ "zensight-sensor-core",
+]
+
+[[package]]
+name = "zensight-sensor-modbus"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "json5",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-modbus",
+ "tokio-serial",
+ "tracing",
+ "tracing-subscriber",
+ "zenoh",
+ "zensight-common",
+ "zensight-sensor-core",
+]
+
+[[package]]
+name = "zensight-sensor-netflow"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "json5",
+ "netflow_parser",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "tracing-subscriber",
+ "zenoh",
+ "zensight-common",
+ "zensight-sensor-core",
+]
+
+[[package]]
+name = "zensight-sensor-snmp"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "json5",
+ "rasn",
+ "rasn-smi",
+ "rasn-snmp",
+ "serde",
+ "serde_json",
+ "snmp2",
+ "tokio",
+ "tracing",
+ "zenoh",
+ "zensight-common",
+ "zensight-sensor-core",
+]
+
+[[package]]
+name = "zensight-sensor-sysinfo"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "hostname",
+ "json5",
+ "procfs",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zenoh",
+ "zensight-common",
+ "zensight-sensor-core",
+]
+
+[[package]]
+name = "zensight-sensor-syslog"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "json5",
+ "once_cell",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zenoh",
+ "zensight-common",
+ "zensight-sensor-core",
 ]
 
 [[package]]

@@ -3,15 +3,15 @@ resolver = "2"
 members = [
     "zensight",
     "zensight-common",
-    "zensight-bridge-framework",
+    "zensight-sensor-core",
     "zensight-exporter-prometheus",
     "zensight-exporter-otel",
-    "zenoh-bridge-snmp",
-    "zenoh-bridge-syslog",
-    "zenoh-bridge-netflow",
-    "zenoh-bridge-modbus",
-    "zenoh-bridge-sysinfo",
-    "zenoh-bridge-gnmi",
+    "zensight-sensor-snmp",
+    "zensight-sensor-syslog",
+    "zensight-sensor-netflow",
+    "zensight-sensor-modbus",
+    "zensight-sensor-sysinfo",
+    "zensight-sensor-gnmi",
 ]
 
 [workspace.package]
@@ -53,4 +53,4 @@ dirs = "5"
 
 # Internal crates
 zensight-common = { path = "zensight-common" }
-zensight-bridge-framework = { path = "zensight-bridge-framework" }
+zensight-sensor-core = { path = "zensight-sensor-core" }

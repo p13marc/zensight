@@ -137,24 +137,25 @@ pub fn toast_overlay<'a>(state: &'a ToastState) -> Element<'a, Message> {
         .spacing(8)
         .align_y(Alignment::Start);
 
-        let toast_container = container(toast_row)
-            .padding(10)
-            .width(Length::Fill)
-            .style(move |theme: &Theme| {
-                let bg = match theme {
-                    Theme::Dark => Color::from_rgb(0.15, 0.15, 0.18),
-                    _ => Color::from_rgb(0.97, 0.97, 0.97),
-                };
-                container::Style {
-                    background: Some(iced::Background::Color(bg)),
-                    border: iced::Border {
-                        color: severity_color,
-                        width: 1.0,
-                        radius: 6.0.into(),
-                    },
-                    ..Default::default()
-                }
-            });
+        let toast_container =
+            container(toast_row)
+                .padding(10)
+                .width(Length::Fill)
+                .style(move |theme: &Theme| {
+                    let bg = match theme {
+                        Theme::Dark => Color::from_rgb(0.15, 0.15, 0.18),
+                        _ => Color::from_rgb(0.97, 0.97, 0.97),
+                    };
+                    container::Style {
+                        background: Some(iced::Background::Color(bg)),
+                        border: iced::Border {
+                            color: severity_color,
+                            width: 1.0,
+                            radius: 6.0.into(),
+                        },
+                        ..Default::default()
+                    }
+                });
 
         toast_column = toast_column.push(toast_container);
     }

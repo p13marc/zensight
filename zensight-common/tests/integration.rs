@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 use zensight_common::{
-    all_telemetry_wildcard, decode, decode_auto, encode, parse_key_expr, Format, KeyExprBuilder,
-    Protocol, TelemetryPoint, TelemetryValue,
+    Format, KeyExprBuilder, Protocol, TelemetryPoint, TelemetryValue, all_telemetry_wildcard,
+    decode, decode_auto, encode, parse_key_expr,
 };
 
 #[test]

@@ -9,7 +9,7 @@
   // Serialization format for telemetry
   serialization: "json",               // "json" or "cbor"
 
-  // SNMP bridge settings
+  // SNMP sensor settings
   snmp: {
     // Key expression prefix
     key_prefix: "zensight/snmp",

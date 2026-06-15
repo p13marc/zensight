@@ -1,7 +1,7 @@
 //! UI tests using iced_test Simulator.
 //!
 //! These tests verify the UI behavior without needing actual Zenoh connections
-//! or hardware bridges.
+//! or hardware sensors.
 
 use iced_test::simulator;
 
@@ -26,14 +26,14 @@ fn test_dashboard_empty() {
     let state = DashboardState::default();
     let groups = GroupsState::default();
     let overview = OverviewState::default();
-    let bridge_health = HashMap::new();
+    let sensor_health = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
         0,
         &groups,
         &overview,
-        &bridge_health,
+        &sensor_health,
     ));
 
     // Should show "Waiting for telemetry data..." message
@@ -59,14 +59,14 @@ fn test_dashboard_with_devices() {
 
     let groups = GroupsState::default();
     let overview = OverviewState::default();
-    let bridge_health = HashMap::new();
+    let sensor_health = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
         0,
         &groups,
         &overview,
-        &bridge_health,
+        &sensor_health,
     ));
 
     // Should show the device name
@@ -83,14 +83,14 @@ fn test_dashboard_settings_button() {
     let state = DashboardState::default();
     let groups = GroupsState::default();
     let overview = OverviewState::default();
-    let bridge_health = HashMap::new();
+    let sensor_health = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
         0,
         &groups,
         &overview,
-        &bridge_health,
+        &sensor_health,
     ));
 
     // Click Settings button
@@ -107,14 +107,14 @@ fn test_dashboard_alerts_button() {
     let state = DashboardState::default();
     let groups = GroupsState::default();
     let overview = OverviewState::default();
-    let bridge_health = HashMap::new();
+    let sensor_health = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
         0,
         &groups,
         &overview,
-        &bridge_health,
+        &sensor_health,
     ));
 
     // Click Alerts button
@@ -425,14 +425,14 @@ fn test_overview_section_renders() {
 
     let groups = GroupsState::default();
     let overview = OverviewState::default();
-    let bridge_health = HashMap::new();
+    let sensor_health = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
         0,
         &groups,
         &overview,
-        &bridge_health,
+        &sensor_health,
     ));
 
     // Should show Protocol Overviews header
@@ -471,14 +471,14 @@ fn test_overview_protocol_tab_click() {
 
     let groups = GroupsState::default();
     let overview = OverviewState::default();
-    let bridge_health = HashMap::new();
+    let sensor_health = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
         0,
         &groups,
         &overview,
-        &bridge_health,
+        &sensor_health,
     ));
 
     // Click SNMP tab
@@ -521,14 +521,14 @@ fn test_overview_collapse_toggle() {
 
     let groups = GroupsState::default();
     let overview = OverviewState::default();
-    let bridge_health = HashMap::new();
+    let sensor_health = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
         0,
         &groups,
         &overview,
-        &bridge_health,
+        &sensor_health,
     ));
 
     // Click the Protocol Overviews header to toggle
@@ -600,14 +600,14 @@ fn test_dashboard_topology_button() {
     let state = DashboardState::default();
     let groups = GroupsState::default();
     let overview = OverviewState::default();
-    let bridge_health = HashMap::new();
+    let sensor_health = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
         0,
         &groups,
         &overview,
-        &bridge_health,
+        &sensor_health,
     ));
 
     // Click Topology button

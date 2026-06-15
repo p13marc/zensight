@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// A single telemetry data point emitted by bridges.
+/// A single telemetry data point emitted by sensors.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelemetryPoint {
     /// Unix epoch milliseconds when the measurement was taken.

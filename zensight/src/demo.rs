@@ -1,7 +1,7 @@
 //! Demo mode simulation engine.
 //!
 //! Provides realistic, time-varying telemetry data for demonstrating
-//! ZenSight without actual bridges or Zenoh connections.
+//! ZenSight without actual sensors or Zenoh connections.
 
 use std::collections::HashMap;
 use std::f64::consts::PI;
@@ -32,10 +32,10 @@ pub struct DemoSimulator {
     active_anomalies: Vec<Anomaly>,
     /// Start time for uptime calculation.
     start_tick: u64,
-    /// Metrics published counter per bridge.
+    /// Metrics published counter per sensor.
     metrics_published: HashMap<String, u64>,
-    /// Errors per bridge in the last "hour" (scaled for demo).
-    errors_per_bridge: HashMap<String, u64>,
+    /// Errors per sensor in the last "hour" (scaled for demo).
+    errors_per_sensor: HashMap<String, u64>,
 }
 
 /// A scheduled event that affects the simulation.
@@ -123,7 +123,7 @@ impl DemoSimulator {
             active_anomalies: Vec::new(),
             start_tick: 0,
             metrics_published: HashMap::new(),
-            errors_per_bridge: HashMap::new(),
+            errors_per_sensor: HashMap::new(),
         };
 
         // Initialize base values for servers
@@ -489,7 +489,7 @@ impl DemoSimulator {
                 ));
             }
 
-            // Memory usage (using metric names that match the bridge)
+            // Memory usage (using metric names that match the sensor)
             let mut memory_pct = self.oscillating_value(&format!("{}/memory", server), 60.0, 5.0);
 
             // Check for memory leak anomaly
@@ -555,7 +555,7 @@ impl DemoSimulator {
                 timestamp,
             ));
 
-            // Disk usage (using metric names that match the bridge: disk/{mount}/used, disk/{mount}/total)
+            // Disk usage (using metric names that match the sensor: disk/{mount}/used, disk/{mount}/total)
             let mut disk_pct = self.oscillating_value(&format!("{}/disk", server), 50.0, 2.0);
 
             // Check for disk filling anomaly
@@ -1375,19 +1375,19 @@ impl DemoSimulator {
         }
     }
 
-    /// Generate bridge health snapshots.
+    /// Generate sensor health snapshots.
     pub fn generate_health_snapshots(&mut self) -> Vec<HealthSnapshot> {
         let uptime = self.tick - self.start_tick;
 
-        // Define bridges and their device counts
-        let bridges = [
+        // Define sensors and their device counts
+        let sensors = [
             ("sysinfo", 4u64), // 4 servers
             ("snmp", 2u64),    // router + switch
             ("modbus", 2u64),  // 2 PLCs
             ("syslog", 4u64),  // Same servers that generate syslog
         ];
 
-        bridges
+        sensors
             .iter()
             .map(|(name, device_count)| {
                 // Count devices with active anomalies
@@ -1405,10 +1405,10 @@ impl DemoSimulator {
                 };
 
                 let metrics = *self.metrics_published.get(*name).unwrap_or(&0);
-                let errors = *self.errors_per_bridge.get(*name).unwrap_or(&0);
+                let errors = *self.errors_per_sensor.get(*name).unwrap_or(&0);
 
                 HealthSnapshot {
-                    bridge: name.to_string(),
+                    sensor: name.to_string(),
                     status,
                     uptime_secs: uptime, // Each tick is ~0.6s in demo, but we use tick count
                     devices_total: *device_count,
@@ -1422,29 +1422,29 @@ impl DemoSimulator {
             .collect()
     }
 
-    /// Count devices with active issues for a bridge.
-    fn count_devices_with_issues(&self, bridge: &str) -> u64 {
+    /// Count devices with active issues for a sensor.
+    fn count_devices_with_issues(&self, sensor: &str) -> u64 {
         let mut count = 0u64;
 
         for anomaly in &self.active_anomalies {
             let device_affected = match &anomaly.anomaly_type {
                 AnomalyType::CpuSpike { server, .. } => {
-                    bridge == "sysinfo" && self.is_server(server)
+                    sensor == "sysinfo" && self.is_server(server)
                 }
                 AnomalyType::MemoryLeak { server, .. } => {
-                    bridge == "sysinfo" && self.is_server(server)
+                    sensor == "sysinfo" && self.is_server(server)
                 }
                 AnomalyType::DiskFilling { server, .. } => {
-                    bridge == "sysinfo" && self.is_server(server)
+                    sensor == "sysinfo" && self.is_server(server)
                 }
                 AnomalyType::InterfaceDown { device, .. } => {
-                    bridge == "snmp" && self.is_network_device(device)
+                    sensor == "snmp" && self.is_network_device(device)
                 }
                 AnomalyType::TrafficBurst { device, .. } => {
-                    bridge == "snmp" && self.is_network_device(device)
+                    sensor == "snmp" && self.is_network_device(device)
                 }
-                AnomalyType::TemperatureHigh { plc, .. } => bridge == "modbus" && self.is_plc(plc),
-                AnomalyType::ErrorBurst { server } => bridge == "syslog" && self.is_server(server),
+                AnomalyType::TemperatureHigh { plc, .. } => sensor == "modbus" && self.is_plc(plc),
+                AnomalyType::ErrorBurst { server } => sensor == "syslog" && self.is_server(server),
             };
 
             if device_affected {
@@ -1552,19 +1552,19 @@ impl DemoSimulator {
         (DeviceStatus::Online, 0, None)
     }
 
-    /// Record metrics published for a bridge.
-    pub fn record_metrics(&mut self, bridge: &str, count: u64) {
+    /// Record metrics published for a sensor.
+    pub fn record_metrics(&mut self, sensor: &str, count: u64) {
         *self
             .metrics_published
-            .entry(bridge.to_string())
+            .entry(sensor.to_string())
             .or_insert(0) += count;
     }
 
-    /// Record an error for a bridge.
-    pub fn record_error(&mut self, bridge: &str) {
+    /// Record an error for a sensor.
+    pub fn record_error(&mut self, sensor: &str) {
         *self
-            .errors_per_bridge
-            .entry(bridge.to_string())
+            .errors_per_sensor
+            .entry(sensor.to_string())
             .or_insert(0) += 1;
     }
 }

@@ -125,7 +125,7 @@ pub struct SyslogFilterState {
     pub message_filter: String,
     /// Whether filters have been modified (need to apply).
     pub modified: bool,
-    /// Bridge filter stats.
+    /// Sensor filter stats.
     pub stats: Option<crate::message::SyslogFilterStatus>,
 }
 
@@ -324,7 +324,7 @@ fn render_filter_panel<'a>(
 ) -> Element<'a, Message> {
     let title = row![
         icons::toggle(IconSize::Medium),
-        text("Bridge Filters").size(16)
+        text("Sensor Filters").size(16)
     ]
     .spacing(8)
     .align_y(Alignment::Center);
@@ -415,7 +415,7 @@ fn render_filter_panel<'a>(
     .align_y(Alignment::Center);
 
     // Action buttons
-    let apply_button = button(row![text("Apply to Bridge").size(13)].align_y(Alignment::Center))
+    let apply_button = button(row![text("Apply to Sensor").size(13)].align_y(Alignment::Center))
         .on_press(Message::ApplySyslogFilters)
         .style(if filter_state.modified {
             iced::widget::button::primary
@@ -437,7 +437,7 @@ fn render_filter_panel<'a>(
             100
         };
         text(format!(
-            "Bridge stats: {} received, {} passed ({}%), {} filtered",
+            "Sensor stats: {} received, {} passed ({}%), {} filtered",
             stats.messages_received, stats.messages_passed, passed_pct, stats.messages_filtered
         ))
         .size(11)

@@ -1,10 +1,10 @@
 # ZenSight
 
-A unified observability platform that bridges legacy monitoring protocols into [Zenoh](https://zenoh.io/)'s pub/sub infrastructure.
+A unified observability platform that sensors legacy monitoring protocols into [Zenoh](https://zenoh.io/)'s pub/sub infrastructure.
 
 ## Overview
 
-ZenSight provides a suite of protocol bridges that collect telemetry from various sources and publish it to Zenoh using a unified data model. A desktop frontend allows real-time visualization of all collected metrics.
+ZenSight provides a suite of protocol sensors that collect telemetry from various sources and publish it to Zenoh using a unified data model. A desktop frontend allows real-time visualization of all collected metrics.
 
 ## Components
 
@@ -12,15 +12,15 @@ ZenSight provides a suite of protocol bridges that collect telemetry from variou
 |-------|-------------|--------|
 | `zensight` | Iced 0.14 desktop frontend for visualizing telemetry | Complete |
 | `zensight-common` | Shared library (telemetry model, Zenoh helpers, config) | Complete |
-| `zensight-bridge-framework` | Shared bridge framework (publisher, health, correlation) | Complete |
+| `zensight-sensor-core` | Shared sensor framework (publisher, health, correlation) | Complete |
 | `zensight-exporter-prometheus` | Prometheus metrics exporter (HTTP /metrics endpoint) | Complete |
 | `zensight-exporter-otel` | OpenTelemetry exporter (OTLP gRPC/HTTP) | Complete |
-| `zenoh-bridge-snmp` | SNMP bridge (v1/v2c/v3 polling + trap receiver, MIB loading) | Complete |
-| `zenoh-bridge-syslog` | Syslog receiver (RFC 3164/5424, UDP/TCP/Unix, filtering) | Complete |
-| `zenoh-bridge-netflow` | NetFlow/IPFIX receiver (v5, v7, v9, IPFIX) | Complete |
-| `zenoh-bridge-modbus` | Modbus bridge (TCP/RTU, all register types) | Complete |
-| `zenoh-bridge-sysinfo` | System monitoring (CPU, memory, disk, network) | Complete |
-| `zenoh-bridge-gnmi` | gNMI streaming telemetry (gRPC) | Complete |
+| `zensight-sensor-snmp` | SNMP sensor (v1/v2c/v3 polling + trap receiver, MIB loading) | Complete |
+| `zensight-sensor-syslog` | Syslog receiver (RFC 3164/5424, UDP/TCP/Unix, filtering) | Complete |
+| `zensight-sensor-netflow` | NetFlow/IPFIX receiver (v5, v7, v9, IPFIX) | Complete |
+| `zensight-sensor-modbus` | Modbus sensor (TCP/RTU, all register types) | Complete |
+| `zensight-sensor-sysinfo` | System monitoring (CPU, memory, disk, network) | Complete |
+| `zensight-sensor-gnmi` | gNMI streaming telemetry (gRPC) | Complete |
 
 ## Supported Protocols
 
@@ -35,7 +35,7 @@ ZenSight provides a suite of protocol bridges that collect telemetry from variou
 
 ## Key Expression Hierarchy
 
-All bridges publish to a unified `zensight/` prefix:
+All sensors publish to a unified `zensight/` prefix:
 
 ```
 zensight/<protocol>/<source>/<metric>
@@ -61,26 +61,26 @@ zensight/gnmi/router01/interfaces/interface[name=eth0]/state/counters
 cargo build --release --workspace
 ```
 
-### Run Bridges
+### Run Sensors
 
 ```bash
-# SNMP bridge - monitor network devices
-./target/release/zenoh-bridge-snmp --config configs/snmp.json5
+# SNMP sensor - monitor network devices
+./target/release/zensight-sensor-snmp --config configs/snmp.json5
 
-# Syslog bridge - collect log messages
-./target/release/zenoh-bridge-syslog --config configs/syslog.json5
+# Syslog sensor - collect log messages
+./target/release/zensight-sensor-syslog --config configs/syslog.json5
 
-# NetFlow bridge - collect flow data
-./target/release/zenoh-bridge-netflow --config configs/netflow.json5
+# NetFlow sensor - collect flow data
+./target/release/zensight-sensor-netflow --config configs/netflow.json5
 
-# Modbus bridge - monitor industrial devices
-./target/release/zenoh-bridge-modbus --config configs/modbus.json5
+# Modbus sensor - monitor industrial devices
+./target/release/zensight-sensor-modbus --config configs/modbus.json5
 
-# Sysinfo bridge - monitor local system
-./target/release/zenoh-bridge-sysinfo --config configs/sysinfo.json5
+# Sysinfo sensor - monitor local system
+./target/release/zensight-sensor-sysinfo --config configs/sysinfo.json5
 
-# gNMI bridge - streaming telemetry from network devices
-./target/release/zenoh-bridge-gnmi --config configs/gnmi.json5
+# gNMI sensor - streaming telemetry from network devices
+./target/release/zensight-sensor-gnmi --config configs/gnmi.json5
 ```
 
 ### Run Frontend
@@ -91,9 +91,9 @@ cargo build --release --workspace
 
 ## Configuration
 
-All bridges use JSON5 configuration files. See the `configs/` directory for examples.
+All sensors use JSON5 configuration files. See the `configs/` directory for examples.
 
-### SNMP Bridge
+### SNMP Sensor
 
 ```json5
 {
@@ -115,7 +115,7 @@ All bridges use JSON5 configuration files. See the `configs/` directory for exam
 }
 ```
 
-### Syslog Bridge
+### Syslog Sensor
 
 ```json5
 {
@@ -139,7 +139,7 @@ All bridges use JSON5 configuration files. See the `configs/` directory for exam
 }
 ```
 
-### NetFlow Bridge
+### NetFlow Sensor
 
 ```json5
 {
@@ -153,7 +153,7 @@ All bridges use JSON5 configuration files. See the `configs/` directory for exam
 }
 ```
 
-### Modbus Bridge
+### Modbus Sensor
 
 ```json5
 {
@@ -174,7 +174,7 @@ All bridges use JSON5 configuration files. See the `configs/` directory for exam
 }
 ```
 
-### Sysinfo Bridge
+### Sysinfo Sensor
 
 ```json5
 {
@@ -194,7 +194,7 @@ All bridges use JSON5 configuration files. See the `configs/` directory for exam
 }
 ```
 
-### gNMI Bridge
+### gNMI Sensor
 
 ```json5
 {
@@ -282,7 +282,7 @@ Run the exporter:
 
 ## Data Model
 
-All bridges emit a common `TelemetryPoint` structure:
+All sensors emit a common `TelemetryPoint` structure:
 
 ```rust
 pub struct TelemetryPoint {
@@ -302,12 +302,12 @@ pub struct TelemetryPoint {
 cargo test --workspace
 
 # Run specific crate tests
-cargo test -p zenoh-bridge-snmp      # 22 tests
-cargo test -p zenoh-bridge-syslog    # 106 tests
-cargo test -p zenoh-bridge-netflow   # 16 tests
-cargo test -p zenoh-bridge-modbus    # 11 tests
-cargo test -p zenoh-bridge-sysinfo   # 15 tests
-cargo test -p zenoh-bridge-gnmi      # 8 tests
+cargo test -p zensight-sensor-snmp      # 22 tests
+cargo test -p zensight-sensor-syslog    # 106 tests
+cargo test -p zensight-sensor-netflow   # 16 tests
+cargo test -p zensight-sensor-modbus    # 11 tests
+cargo test -p zensight-sensor-sysinfo   # 15 tests
+cargo test -p zensight-sensor-gnmi      # 8 tests
 
 # Run frontend tests (includes UI tests with Simulator)
 cargo test -p zensight               # 139 tests
@@ -381,15 +381,15 @@ let points = mock::mock_environment();
 |-------|-------|-------------|
 | zensight (frontend) | 139 | Unit + UI tests (Simulator) |
 | zensight-common | 47 | Telemetry, config, key expressions |
-| zensight-bridge-framework | 23 | Publisher, health, correlation |
+| zensight-sensor-core | 23 | Publisher, health, correlation |
 | zensight-exporter-prometheus | 50 | Metric mapping, sanitization, collector, HTTP |
 | zensight-exporter-otel | 41 | OTEL metrics, logs, severity mapping |
-| zenoh-bridge-snmp | 22 | Polling, traps, MIB loading |
-| zenoh-bridge-syslog | 106 | Parser, receiver, filtering |
-| zenoh-bridge-netflow | 16 | Flow parsing, templates |
-| zenoh-bridge-modbus | 11 | Config, register decoding |
-| zenoh-bridge-sysinfo | 15 | Config, collectors, metrics |
-| zenoh-bridge-gnmi | 8 | Config, path parsing, subscriber |
+| zensight-sensor-snmp | 22 | Polling, traps, MIB loading |
+| zensight-sensor-syslog | 106 | Parser, receiver, filtering |
+| zensight-sensor-netflow | 16 | Flow parsing, templates |
+| zensight-sensor-modbus | 11 | Config, register decoding |
+| zensight-sensor-sysinfo | 15 | Config, collectors, metrics |
+| zensight-sensor-gnmi | 8 | Config, path parsing, subscriber |
 | **Total** | **478** | All tests passing |
 
 ## License

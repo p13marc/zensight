@@ -1,5 +1,5 @@
 {
-  // Docker-optimized configuration for zenoh-bridge-syslog
+  // Docker-optimized configuration for zensight-sensor-syslog
 
   zenoh: {
     mode: "peer",
