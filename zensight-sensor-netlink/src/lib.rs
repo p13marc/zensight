@@ -10,6 +10,8 @@
 pub mod collector;
 pub mod config;
 pub mod map;
+pub mod sentinel;
 
 pub use collector::Collector;
 pub use config::{NetlinkConfig, NetlinkSensorConfig};
+pub use sentinel::{Evaluator, ExpectationsConfig};

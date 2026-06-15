@@ -39,6 +39,10 @@ pub struct NetlinkConfig {
     pub collect: CollectConfig,
     #[serde(default)]
     pub interfaces: IfaceFilter,
+    /// Pillar B — declared expectations for this host (sentinel). When present,
+    /// the sensor evaluates them and emits alerts on deviation.
+    #[serde(default)]
+    pub expectations: Option<crate::sentinel::ExpectationsConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

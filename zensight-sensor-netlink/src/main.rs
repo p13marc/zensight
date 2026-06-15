@@ -45,7 +45,24 @@ async fn main() -> Result<()> {
         collector.run().await;
     });
 
+    // Pillar B — sentinel: evaluate declared expectations and emit alerts.
+    let expectations = netlink_config.expectations.clone();
+    let has_expectations = expectations.as_ref().is_some_and(|e| !e.is_empty());
+    if let Some(exp_cfg) = expectations.filter(|e| !e.is_empty()) {
+        use std::time::Duration;
+        use zensight_sensor_core::{AlertReporter, Protocol};
+        let reporter = AlertReporter::new(runner.publisher(), Protocol::Netlink, Format::Json)
+            .with_debounce(Duration::from_secs(exp_cfg.default_for_secs));
+        let evaluator =
+            zensight_sensor_netlink::Evaluator::new(hostname.clone(), exp_cfg, reporter);
+        tracing::info!("Sentinel enabled: evaluating expectations");
+        runner.spawn(async move {
+            evaluator.run().await;
+        });
+    }
+
     let metadata = serde_json::json!({
+        "sentinel": has_expectations,
         "host": hostname,
         "collect": {
             "interfaces": netlink_config.collect.interfaces,
