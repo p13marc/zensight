@@ -28,7 +28,7 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
             // Connect to Zenoh
             let session = match connect_zenoh(&config).await {
                 Ok(session) => {
-                    yield Message::Connected;
+                    yield Message::Connected(Some(std::sync::Arc::new(session.clone())));
                     session
                 }
                 Err(e) => {
@@ -417,8 +417,8 @@ pub fn demo_subscription() -> Subscription<Message> {
         async_stream::stream! {
             use crate::demo::DemoSimulator;
 
-            // Signal connected state
-            yield Message::Connected;
+            // Signal connected state (demo mode has no real session)
+            yield Message::Connected(None);
 
             // Create the demo simulator
             let mut simulator = DemoSimulator::new();

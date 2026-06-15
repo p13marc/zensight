@@ -111,6 +111,9 @@ pub struct ZenSight {
     correlations: std::collections::HashMap<String, CorrelationEntry>,
     /// Toast notification state.
     toasts: ToastState,
+    /// Live Zenoh session handle (set on connect) for sending commands to
+    /// sensors. `None` while disconnected or in demo mode.
+    session: Option<std::sync::Arc<zenoh::Session>>,
 }
 
 impl ZenSight {
@@ -212,6 +215,7 @@ impl ZenSight {
             known_sensors: std::collections::HashMap::new(),
             correlations: std::collections::HashMap::new(),
             toasts: ToastState::default(),
+            session: None,
         };
 
         (app, Task::none())
@@ -291,8 +295,9 @@ impl ZenSight {
                     crate::view::dashboard::ConnectionState::Connecting;
             }
 
-            Message::Connected => {
+            Message::Connected(session) => {
                 tracing::info!("Connected to Zenoh");
+                self.session = session;
                 self.dashboard.connected = true;
                 self.dashboard.connection_state =
                     crate::view::dashboard::ConnectionState::Connected;
@@ -301,6 +306,7 @@ impl ZenSight {
 
             Message::Disconnected(error) => {
                 tracing::warn!(error = %error, "Disconnected from Zenoh");
+                self.session = None;
                 self.dashboard.connected = false;
                 self.dashboard.connection_state =
                     crate::view::dashboard::ConnectionState::Disconnected;
@@ -789,10 +795,47 @@ impl ZenSight {
             }
 
             Message::ApplySyslogFilters => {
-                // TODO: Send filter command to sensor via Zenoh
-                // For now, just mark as applied
+                // Build a syslog filter command and push it to the sensor's
+                // control channel. A stable filter id means re-applying replaces
+                // the same dynamic filter rather than stacking duplicates.
+                let f = &self.syslog_filter;
+                let mut filter = serde_json::Map::new();
+                if let Some(sev) = f.min_severity {
+                    filter.insert("min_severity".into(), serde_json::json!(sev));
+                }
+                if !f.selected_facilities.is_empty() {
+                    let facs: Vec<&String> = f.selected_facilities.iter().collect();
+                    filter.insert("include_facilities".into(), serde_json::json!(facs));
+                }
+                if !f.app_filter.is_empty() {
+                    filter.insert(
+                        "include_app_patterns".into(),
+                        serde_json::json!([{ "pattern": f.app_filter, "pattern_type": "glob" }]),
+                    );
+                }
+                if !f.message_filter.is_empty() {
+                    filter.insert(
+                        "include_message_patterns".into(),
+                        serde_json::json!([{ "pattern": f.message_filter, "pattern_type": "glob" }]),
+                    );
+                }
+                let command = serde_json::json!({
+                    "type": "add_filter",
+                    "id": "frontend-panel",
+                    "filter": serde_json::Value::Object(filter),
+                });
+                let key = zensight_common::command_key("zensight/syslog", "filter");
                 self.syslog_filter.mark_applied();
-                tracing::info!("Syslog filters applied (local only for now)");
+                return self.send_command(key, &command, "Syslog filters applied".to_string());
+            }
+
+            Message::CommandFeedback { success, message } => {
+                let severity = if success {
+                    ToastSeverity::Success
+                } else {
+                    ToastSeverity::Error
+                };
+                self.toasts.push(severity, message);
             }
 
             Message::ClearSyslogFilters => {
@@ -872,6 +915,47 @@ impl ZenSight {
             CurrentView::Device => focus(DEVICE_SEARCH_ID.clone()),
             _ => Task::none(),
         }
+    }
+
+    /// Send a command to a sensor's control channel over Zenoh.
+    ///
+    /// `key` is the full command key (build with
+    /// [`zensight_common::command_key`]); `body` is serialized as JSON. Returns
+    /// a [`Task`] that publishes asynchronously and reports the outcome via
+    /// [`Message::CommandFeedback`]. No-op feedback if disconnected.
+    fn send_command<T: serde::Serialize>(
+        &self,
+        key: String,
+        body: &T,
+        ok_message: String,
+    ) -> Task<Message> {
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::CommandFeedback {
+                success: false,
+                message: "Not connected to Zenoh".to_string(),
+            });
+        };
+        let payload = match serde_json::to_vec(body) {
+            Ok(p) => p,
+            Err(e) => {
+                return Task::done(Message::CommandFeedback {
+                    success: false,
+                    message: format!("Failed to encode command: {e}"),
+                });
+            }
+        };
+        Task::future(async move {
+            match session.put(&key, payload).await {
+                Ok(()) => Message::CommandFeedback {
+                    success: true,
+                    message: ok_message,
+                },
+                Err(e) => Message::CommandFeedback {
+                    success: false,
+                    message: format!("Command failed: {e}"),
+                },
+            }
+        })
     }
 
     /// Handle Escape key - close dialogs or go back.

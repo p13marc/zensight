@@ -38,11 +38,15 @@ pub enum Message {
     /// Zenoh connection attempt started.
     Connecting,
 
-    /// Zenoh connection established.
-    Connected,
+    /// Zenoh connection established. Carries the session handle so the app can
+    /// send commands back to sensors (`None` in demo mode — no real session).
+    Connected(Option<std::sync::Arc<zenoh::Session>>),
 
     /// Zenoh connection lost or failed.
     Disconnected(String),
+
+    /// Result of a command sent to a sensor (drives a feedback toast).
+    CommandFeedback { success: bool, message: String },
 
     /// Sensor came online (liveliness token appeared).
     SensorOnline(String),

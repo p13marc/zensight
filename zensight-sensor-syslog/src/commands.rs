@@ -5,15 +5,18 @@
 use crate::filter::{DynamicFilterInfo, FilterStatsSnapshot, SyslogFilterConfig};
 use serde::{Deserialize, Serialize};
 
+/// Topic for syslog filter commands/status on the shared control channel.
+pub const FILTER_TOPIC: &str = "filter";
+
 /// Key expression for filter commands.
 /// The `@` in the path indicates an administrative/control channel.
 pub fn command_key(prefix: &str) -> String {
-    format!("{}/@/commands/filter", prefix)
+    zensight_common::command_key(prefix, FILTER_TOPIC)
 }
 
 /// Key expression for filter status queries.
 pub fn status_key(prefix: &str) -> String {
-    format!("{}/@/status/filter", prefix)
+    zensight_common::status_key(prefix, FILTER_TOPIC)
 }
 
 /// Filter command sent from frontend to sensor.
