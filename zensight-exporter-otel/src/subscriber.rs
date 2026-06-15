@@ -13,6 +13,12 @@ use crate::exporter::SharedExporter;
 /// Default key expression to subscribe to.
 pub const DEFAULT_KEY_EXPR: &str = "zensight/**";
 
+/// Whether a key carries a [`TelemetryPoint`]. Control/metadata channels
+/// (`.../@/...` and `zensight/_meta/...`) do not.
+pub(crate) fn is_telemetry_key(key: &str) -> bool {
+    !key.contains("/@/") && !key.starts_with("zensight/_meta/")
+}
+
 /// Statistics for the subscriber.
 #[derive(Debug, Default)]
 pub struct SubscriberStats {
@@ -124,6 +130,13 @@ impl TelemetrySubscriber {
                                 continue;
                             }
 
+                            // Skip non-telemetry channels (health/liveness/errors/
+                            // alerts/_meta) so they don't count as decode failures.
+                            if !is_telemetry_key(sample.key_expr().as_str()) {
+                                trace!(key = %sample.key_expr(), "Ignoring non-telemetry key");
+                                continue;
+                            }
+
                             let payload = sample.payload().to_bytes();
                             self.stats.samples_received.fetch_add(1, Ordering::Relaxed);
 
@@ -187,5 +200,15 @@ mod tests {
     #[test]
     fn test_default_key_expr() {
         assert_eq!(DEFAULT_KEY_EXPR, "zensight/**");
+    }
+
+    #[test]
+    fn telemetry_key_guard() {
+        assert!(is_telemetry_key(
+            "zensight/netlink/host/iface/eth0/rx_bytes"
+        ));
+        assert!(!is_telemetry_key("zensight/netlink/@/alerts/foo-00"));
+        assert!(!is_telemetry_key("zensight/snmp/@/health"));
+        assert!(!is_telemetry_key("zensight/_meta/sensors/snmp"));
     }
 }
