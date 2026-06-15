@@ -6,6 +6,8 @@
 pub mod gnmi;
 pub mod modbus;
 pub mod netflow;
+pub mod netlink;
+pub mod netring;
 pub mod snmp;
 pub mod sysinfo;
 pub mod syslog;
@@ -34,9 +36,8 @@ pub fn specialized_view<'a>(state: &'a DeviceDetailState) -> Option<Element<'a, 
         Protocol::Netflow => Some(netflow::netflow_traffic_view(state)),
         Protocol::Gnmi => Some(gnmi::gnmi_streaming_view(state)),
         Protocol::Opcua => None, // No specialized view yet, use generic
-        // TODO(Plan 09): netlink/netring specialized views (need side state).
-        Protocol::Netlink => None,
-        Protocol::Netring => None,
+        Protocol::Netlink => Some(netlink::netlink_host_view(state)),
+        Protocol::Netring => Some(netring::netring_sensor_view(state)),
     }
 }
 
@@ -50,9 +51,5 @@ pub fn syslog_view<'a>(
 
 /// Check if a protocol has a specialized view available.
 pub fn has_specialized_view(protocol: Protocol) -> bool {
-    // TODO(Plan 09): netlink/netring gain specialized views.
-    !matches!(
-        protocol,
-        Protocol::Opcua | Protocol::Netlink | Protocol::Netring
-    )
+    !matches!(protocol, Protocol::Opcua)
 }

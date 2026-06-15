@@ -628,6 +628,67 @@ fn test_topology_search_input() {
     assert!(ui.find("Search nodes...").is_ok());
 }
 
+/// The netlink specialized view renders interfaces + socket aggregates.
+#[test]
+fn test_netlink_specialized_view() {
+    use zensight::view::specialized::netlink::netlink_host_view;
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netlink, "router01");
+    let mut state = DeviceDetailState::new(device_id);
+    for (metric, value) in [
+        ("iface/eth0/rx_bytes", TelemetryValue::Counter(1000)),
+        ("iface/eth0/tx_bytes", TelemetryValue::Counter(2000)),
+        ("iface/eth0/oper_state", TelemetryValue::Text("up".into())),
+        ("iface/eth0/mtu", TelemetryValue::Gauge(1500.0)),
+        ("sockets/tcp/established", TelemetryValue::Gauge(7.0)),
+        ("sockets/tcp/listen", TelemetryValue::Gauge(3.0)),
+    ] {
+        state.update(TelemetryPoint::new(
+            "router01",
+            Protocol::Netlink,
+            metric,
+            value,
+        ));
+    }
+
+    let mut ui = simulator(netlink_host_view(&state));
+    assert!(ui.find("Netlink: router01").is_ok());
+    assert!(ui.find("eth0").is_ok());
+    assert!(ui.find("TCP Sockets").is_ok());
+}
+
+/// The netring specialized view renders flows + top talkers.
+#[test]
+fn test_netring_specialized_view() {
+    use zensight::view::specialized::netring::netring_sensor_view;
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let mut state = DeviceDetailState::new(device_id);
+    for (metric, value) in [
+        ("flow/started_total", TelemetryValue::Counter(10)),
+        ("flow/active", TelemetryValue::Gauge(2.0)),
+        (
+            "bandwidth/https/bytes_per_sec",
+            TelemetryValue::Gauge(50000.0),
+        ),
+        ("bandwidth/dns/bytes_per_sec", TelemetryValue::Gauge(1200.0)),
+    ] {
+        state.update(TelemetryPoint::new(
+            "wiretap1",
+            Protocol::Netring,
+            metric,
+            value,
+        ));
+    }
+
+    let mut ui = simulator(netring_sensor_view(&state));
+    assert!(ui.find("Netring: wiretap1").is_ok());
+    assert!(ui.find("Flows").is_ok());
+    assert!(ui.find("https").is_ok());
+}
+
 /// Sensor-pushed alerts render in the alerts view's "Anomalies & Expectations"
 /// section, and resolved alerts disappear.
 #[test]
