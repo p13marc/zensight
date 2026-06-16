@@ -679,7 +679,11 @@ fn render_header(state: &AlertsState) -> Element<'_, Message> {
         row![].into()
     };
 
-    row![back_button, title, unack_badge]
+    let expectations_button = button(text("Expectations").size(13))
+        .on_press(Message::OpenExpectations)
+        .style(iced::widget::button::secondary);
+
+    row![back_button, title, unack_badge, expectations_button]
         .spacing(15)
         .align_y(Alignment::Center)
         .into()

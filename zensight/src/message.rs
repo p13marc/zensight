@@ -48,6 +48,28 @@ pub enum Message {
     /// Result of a command sent to a sensor (drives a feedback toast).
     CommandFeedback { success: bool, message: String },
 
+    // ── Expectations authoring (netlink sentinel, Plan 08) ──────────────────
+    /// Open the expectations authoring view.
+    OpenExpectations,
+    /// Close the expectations view.
+    CloseExpectations,
+    /// Set the kind of expectation being authored.
+    SetExpectationKind(crate::view::expectations::ExpKind),
+    /// Set the expectation name (socket) or interface (link).
+    SetExpectationName(String),
+    /// Set the expectation port.
+    SetExpectationPort(String),
+    /// Set the expectation severity.
+    SetExpectationSeverity(crate::view::alerts::Severity),
+    /// Build + push the authored expectation to the sentinel.
+    AddExpectation,
+    /// Remove an expectation by rule slug.
+    RemoveExpectation(String),
+    /// Query the sentinel's current expectation set.
+    RefreshExpectations,
+    /// A sentinel status reply (ExpectationsConfig JSON).
+    ExpectationStatusReceived(String),
+
     /// Sensor came online (liveliness token appeared).
     SensorOnline(String),
 

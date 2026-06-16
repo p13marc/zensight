@@ -628,6 +628,30 @@ fn test_topology_search_input() {
     assert!(ui.find("Search nodes...").is_ok());
 }
 
+/// The expectations authoring view renders and "Add & Push" emits a message.
+#[test]
+fn test_expectations_view() {
+    use zensight::view::expectations::{ExpectationsState, expectations_view, parse_status};
+
+    let mut state = ExpectationsState::default();
+    state.current = parse_status(
+        r#"{"sockets":[{"name":"sshd","listen":22,"severity":"critical"}],"links":[]}"#,
+    );
+
+    let mut ui = simulator(expectations_view(&state));
+    assert!(ui.find("Expectations (netlink sentinel)").is_ok());
+    assert!(ui.find("socket:sshd").is_ok());
+    assert!(ui.find("listen :22").is_ok());
+
+    let _ = ui.click("Add & Push");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::AddExpectation))
+    );
+}
+
 /// The netlink specialized view renders interfaces + socket aggregates.
 #[test]
 fn test_netlink_specialized_view() {

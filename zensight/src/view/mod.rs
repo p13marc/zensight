@@ -5,6 +5,7 @@ pub mod chart;
 pub mod components;
 pub mod dashboard;
 pub mod device;
+pub mod expectations;
 pub mod formatting;
 pub mod groups;
 pub mod icons;
