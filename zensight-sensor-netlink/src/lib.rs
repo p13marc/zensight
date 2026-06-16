@@ -8,10 +8,11 @@
 //! Reads are unprivileged (no `CAP_NET_ADMIN` needed). Linux only.
 
 pub mod collector;
+pub mod command;
 pub mod config;
 pub mod map;
 pub mod sentinel;
 
 pub use collector::Collector;
 pub use config::{NetlinkConfig, NetlinkSensorConfig};
-pub use sentinel::{Evaluator, ExpectationsConfig};
+pub use sentinel::{Evaluator, ExpectationsConfig, SentinelHandle};

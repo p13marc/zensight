@@ -7,9 +7,11 @@
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 use zensight_common::{Alert, AlertKind, AlertSeverity, Protocol};
 use zensight_sensor_core::AlertReporter;
 
@@ -186,19 +188,77 @@ pub fn check_link(exp: &LinkExpectation, observed_up: Option<bool>) -> Vec<Viola
 
 // ---- Evaluator (live nlink + AlertReporter) ---------------------------------
 
+/// Shared, hot-swappable expectation set. Cloning is cheap (Arc).
+#[derive(Clone)]
+pub struct SentinelHandle {
+    expectations: Arc<RwLock<ExpectationsConfig>>,
+}
+
+impl SentinelHandle {
+    /// Build a standalone handle over an expectation set (useful for tests and
+    /// for sharing a set the [`Evaluator`] also reads).
+    pub fn new(cfg: ExpectationsConfig) -> Self {
+        Self {
+            expectations: Arc::new(RwLock::new(cfg)),
+        }
+    }
+
+    /// Replace the entire live expectation set.
+    pub async fn replace(&self, cfg: ExpectationsConfig) {
+        *self.expectations.write().await = cfg;
+    }
+    /// Add (or replace by name) a socket expectation.
+    pub async fn add_socket(&self, exp: SocketExpectation) {
+        let mut c = self.expectations.write().await;
+        c.sockets.retain(|e| e.name != exp.name);
+        c.sockets.push(exp);
+    }
+    /// Add (or replace by iface) a link expectation.
+    pub async fn add_link(&self, exp: LinkExpectation) {
+        let mut c = self.expectations.write().await;
+        c.links.retain(|e| e.iface != exp.iface);
+        c.links.push(exp);
+    }
+    /// Remove an expectation by rule slug (`socket:<name>` / `link:<iface>`).
+    pub async fn remove(&self, rule: &str) {
+        let mut c = self.expectations.write().await;
+        if let Some(name) = rule.strip_prefix("socket:") {
+            c.sockets.retain(|e| e.name != name);
+        } else if let Some(iface) = rule.strip_prefix("link:") {
+            c.links.retain(|e| e.iface != iface);
+        }
+    }
+    /// Snapshot the current expectation set (for the status queryable).
+    pub async fn snapshot(&self) -> ExpectationsConfig {
+        self.expectations.read().await.clone()
+    }
+}
+
 /// Runs expectation sweeps on a cadence and feeds an [`AlertReporter`].
 pub struct Evaluator {
     host: String,
-    config: ExpectationsConfig,
+    expectations: Arc<RwLock<ExpectationsConfig>>,
     reporter: AlertReporter,
+    /// Rules evaluated on the previous sweep — used to resolve alerts for rules
+    /// that were removed (hot-swap) so they don't linger forever.
+    seen_rules: std::sync::Mutex<HashSet<String>>,
 }
 
 impl Evaluator {
     pub fn new(host: String, config: ExpectationsConfig, reporter: AlertReporter) -> Self {
         Self {
             host,
-            config,
+            expectations: Arc::new(RwLock::new(config)),
             reporter,
+            seen_rules: std::sync::Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// A cloneable handle to mutate the live expectation set (for the command
+    /// channel / GUI authoring).
+    pub fn handle(&self) -> SentinelHandle {
+        SentinelHandle {
+            expectations: self.expectations.clone(),
         }
     }
 
@@ -212,10 +272,9 @@ impl Evaluator {
             tracing::error!("sentinel: cannot open sockdiag; socket expectations disabled");
         }
 
-        let mut tick =
-            tokio::time::interval(Duration::from_secs(self.config.eval_interval_secs.max(1)));
         loop {
-            tick.tick().await;
+            let interval = self.expectations.read().await.eval_interval_secs.max(1);
+            tokio::time::sleep(Duration::from_secs(interval)).await;
             self.sweep(route.as_ref(), sockdiag.as_ref()).await;
         }
     }
@@ -225,14 +284,18 @@ impl Evaluator {
         route: Option<&Connection<Route>>,
         sockdiag: Option<&Connection<SockDiag>>,
     ) {
+        let config = self.expectations.read().await.clone();
+        let mut current_rules: HashSet<String> = HashSet::new();
+
         // Socket expectations.
-        if !self.config.sockets.is_empty()
+        if !config.sockets.is_empty()
             && let Some(sd) = sockdiag
         {
             match observe_sockets(sd).await {
                 Ok(obs) => {
-                    for exp in &self.config.sockets {
+                    for exp in &config.sockets {
                         let rule = format!("socket:{}", exp.name);
+                        current_rules.insert(rule.clone());
                         let violations = check_socket(exp, &obs);
                         self.report(&rule, exp.severity, exp.for_secs, violations)
                             .await;
@@ -243,13 +306,14 @@ impl Evaluator {
         }
 
         // Link expectations.
-        if !self.config.links.is_empty()
+        if !config.links.is_empty()
             && let Some(rt) = route
         {
             match observe_links(rt).await {
                 Ok(links) => {
-                    for exp in &self.config.links {
+                    for exp in &config.links {
                         let rule = format!("link:{}", exp.iface);
+                        current_rules.insert(rule.clone());
                         let observed = links.iter().find(|(n, _)| n == &exp.iface).map(|(_, u)| *u);
                         let violations = check_link(exp, observed);
                         self.report(&rule, exp.severity, exp.for_secs, violations)
@@ -257,6 +321,19 @@ impl Evaluator {
                     }
                 }
                 Err(e) => tracing::warn!(error = %e, "sentinel: link observation failed"),
+            }
+        }
+
+        // Resolve alerts for rules removed since the last sweep (hot-swap).
+        let removed: Vec<String> = {
+            let mut seen = self.seen_rules.lock().unwrap();
+            let removed = seen.difference(&current_rules).cloned().collect::<Vec<_>>();
+            *seen = current_rules;
+            removed
+        };
+        for rule in removed {
+            if let Err(e) = self.reporter.reconcile(&rule, &[]).await {
+                tracing::warn!(error = %e, rule = %rule, "sentinel: failed to resolve removed rule");
             }
         }
     }

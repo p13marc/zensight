@@ -45,24 +45,31 @@ async fn main() -> Result<()> {
         collector.run().await;
     });
 
-    // Pillar B — sentinel: evaluate declared expectations and emit alerts.
-    let expectations = netlink_config.expectations.clone();
-    let has_expectations = expectations.as_ref().is_some_and(|e| !e.is_empty());
-    if let Some(exp_cfg) = expectations.filter(|e| !e.is_empty()) {
+    // Pillar B — sentinel: evaluate declared expectations and emit alerts, and
+    // accept runtime expectation commands from the GUI (always on, so the GUI
+    // can author expectations even when none are configured on disk).
+    {
         use std::time::Duration;
         use zensight_sensor_core::{AlertReporter, Protocol};
+        let exp_cfg = netlink_config.expectations.clone().unwrap_or_default();
         let reporter = AlertReporter::new(runner.publisher(), Protocol::Netlink, Format::Json)
             .with_debounce(Duration::from_secs(exp_cfg.default_for_secs));
         let evaluator =
             zensight_sensor_netlink::Evaluator::new(hostname.clone(), exp_cfg, reporter);
-        tracing::info!("Sentinel enabled: evaluating expectations");
+        let handle = evaluator.handle();
+        let cmd_session = runner.session().clone();
+        let cmd_prefix = netlink_config.key_prefix.clone();
         runner.spawn(async move {
             evaluator.run().await;
         });
+        runner.spawn(async move {
+            zensight_sensor_netlink::command::run(cmd_session, cmd_prefix, handle).await;
+        });
+        tracing::info!("Sentinel + expectation command channel enabled");
     }
 
     let metadata = serde_json::json!({
-        "sentinel": has_expectations,
+        "sentinel": true,
         "host": hostname,
         "collect": {
             "interfaces": netlink_config.collect.interfaces,
