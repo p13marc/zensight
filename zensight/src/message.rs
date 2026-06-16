@@ -70,6 +70,11 @@ pub enum Message {
     /// A sentinel status reply (ExpectationsConfig JSON).
     ExpectationStatusReceived(String),
 
+    /// Open the security (network anomalies) view.
+    OpenSecurity,
+    /// Close the security view.
+    CloseSecurity,
+
     /// Sensor came online (liveliness token appeared).
     SensorOnline(String),
 

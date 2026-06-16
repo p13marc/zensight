@@ -683,10 +683,20 @@ fn render_header(state: &AlertsState) -> Element<'_, Message> {
         .on_press(Message::OpenExpectations)
         .style(iced::widget::button::secondary);
 
-    row![back_button, title, unack_badge, expectations_button]
-        .spacing(15)
-        .align_y(Alignment::Center)
-        .into()
+    let security_button = button(text("Security").size(13))
+        .on_press(Message::OpenSecurity)
+        .style(iced::widget::button::secondary);
+
+    row![
+        back_button,
+        title,
+        unack_badge,
+        expectations_button,
+        security_button
+    ]
+    .spacing(15)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 /// Render the new rule form.

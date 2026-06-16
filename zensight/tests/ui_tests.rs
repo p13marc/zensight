@@ -628,6 +628,43 @@ fn test_topology_search_input() {
     assert!(ui.find("Search nodes...").is_ok());
 }
 
+/// The security view lists network anomalies (not expectation alerts).
+#[test]
+fn test_security_view() {
+    use zensight::view::alerts::AlertsState;
+    use zensight::view::security::security_view;
+    use zensight_common::{Alert, AlertKind, AlertSeverity};
+
+    let mut alerts = AlertsState::new();
+    // An anomaly (shown) and an expectation (hidden by the security lens).
+    alerts.ingest_external(
+        Alert::new(
+            "wiretap1",
+            Protocol::Netring,
+            AlertKind::Anomaly,
+            "PortScanTRW",
+            AlertSeverity::Warning,
+            "PortScanTRW from 10.0.0.5",
+        )
+        .with_label("src", "10.0.0.5"),
+    );
+    alerts.ingest_external(Alert::new(
+        "router01",
+        Protocol::Netlink,
+        AlertKind::Expectation,
+        "socket:sshd",
+        AlertSeverity::Critical,
+        "sshd not listening",
+    ));
+
+    let mut ui = simulator(security_view(&alerts));
+    assert!(ui.find("Security — Network Anomalies").is_ok());
+    assert!(ui.find("PortScanTRW from 10.0.0.5").is_ok());
+    assert!(ui.find("10.0.0.5").is_ok());
+    // The expectation alert must NOT appear in the security lens.
+    assert!(ui.find("sshd not listening").is_err());
+}
+
 /// The expectations authoring view renders and "Add & Push" emits a message.
 #[test]
 fn test_expectations_view() {

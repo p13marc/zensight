@@ -10,6 +10,7 @@ pub mod formatting;
 pub mod groups;
 pub mod icons;
 pub mod overview;
+pub mod security;
 pub mod settings;
 pub mod specialized;
 pub mod theme;
