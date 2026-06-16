@@ -1,6 +1,9 @@
 # ZenSight Redesign: Sensors + Alerting — Master Plan
 
-**Status:** ready for review · **revised after a critical review pass (2026-06-15)**
+**Status:** ✅ **IMPLEMENTED** on branch `redesign/sensors-alerting` (Plans 01–11).
+Both sensors verified live/pcap; sentinel + GUI authoring verified live; full
+workspace green (excl. snmp/gnmi which need openssl/protoc). · revised after a
+critical review pass (2026-06-15)
 **Source proposal:** [`docs/SENSORS_NLINK_NETRING.md`](../SENSORS_NLINK_NETRING.md)
 **Scope:** rename the crate family, add an alert model, add two new sensors
 (`nlink`, `netring`), add an expectation/anomaly alert engine, **and fully wire
