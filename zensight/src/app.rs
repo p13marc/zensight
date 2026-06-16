@@ -282,6 +282,9 @@ impl ZenSight {
                     }
                     ExternalAlertOutcome::Updated | ExternalAlertOutcome::Unknown => {}
                 }
+                if self.current_view == CurrentView::Topology {
+                    self.topology.apply_alerts(&self.alerts.external);
+                }
             }
 
             Message::AlertCleared { alert_key, .. } => {
@@ -290,6 +293,9 @@ impl ZenSight {
                         ToastSeverity::Success,
                         format!("Resolved: {}", alert.summary),
                     );
+                }
+                if self.current_view == CurrentView::Topology {
+                    self.topology.apply_alerts(&self.alerts.external);
                 }
             }
 
@@ -712,6 +718,7 @@ impl ZenSight {
             Message::OpenTopology => {
                 // Update topology from current device data before showing
                 self.topology.update_from_devices(&self.dashboard.devices);
+                self.topology.apply_alerts(&self.alerts.external);
                 self.set_view(CurrentView::Topology);
                 self.save_current_view();
             }

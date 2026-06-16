@@ -335,18 +335,23 @@ impl<'a> TopologyGraphProgram<'a> {
         // Node radius scales with zoom but has a minimum size
         let radius = (25.0 * self.state.zoom).max(15.0);
 
-        // Node color based on type and health
-        let base_color = match node.node_type {
-            NodeType::Host => {
-                if node.is_healthy {
-                    self.node_host_healthy_color()
-                } else {
-                    self.node_host_unhealthy_color()
+        // Node color based on type and health, overridden by a firing alert.
+        let base_color = match node.alert {
+            Some(zensight_common::AlertSeverity::Critical) => Color::from_rgb(0.95, 0.2, 0.2),
+            Some(zensight_common::AlertSeverity::Warning) => Color::from_rgb(0.95, 0.6, 0.1),
+            Some(zensight_common::AlertSeverity::Info) => Color::from_rgb(0.3, 0.6, 1.0),
+            None => match node.node_type {
+                NodeType::Host => {
+                    if node.is_healthy {
+                        self.node_host_healthy_color()
+                    } else {
+                        self.node_host_unhealthy_color()
+                    }
                 }
-            }
-            NodeType::Router => self.node_router_color(),
-            NodeType::Switch => self.node_switch_color(),
-            NodeType::Unknown => self.node_unknown_color(),
+                NodeType::Router => self.node_router_color(),
+                NodeType::Switch => self.node_switch_color(),
+                NodeType::Unknown => self.node_unknown_color(),
+            },
         };
 
         // Highlight if selected
@@ -720,6 +725,7 @@ mod tests {
             network_tx: None,
             is_healthy: true,
             pinned: false,
+            alert: None,
         }
     }
 

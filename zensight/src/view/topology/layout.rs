@@ -241,6 +241,7 @@ mod tests {
             network_tx: None,
             is_healthy: true,
             pinned: false,
+            alert: None,
         }
     }
 
