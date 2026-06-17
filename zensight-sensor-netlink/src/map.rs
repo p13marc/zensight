@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use serde::Serialize;
 use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
 /// A snapshot of one network interface.
@@ -248,6 +249,98 @@ pub fn neighbor_points(host: &str, n: &NeighborSummary) -> Vec<TelemetryPoint> {
     ]
 }
 
+// ---------------------------------------------------------------------------
+// On-demand detail records (principle P2): served via the query channel
+// (`@/query/{routes,neighbors,sockets}`), never streamed onto the telemetry bus.
+// These are the full, higher-cardinality tables the GUI fetches when a user
+// drills into a host. Kept here (pure + serde) so their shape is unit-tested
+// without a kernel; `query.rs` builds them from live nlink dumps.
+// ---------------------------------------------------------------------------
+
+/// One row of the routing table (full detail).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RouteRecord {
+    /// IP family: 4 or 6.
+    pub family: u8,
+    /// Destination: `"default"` or `"<cidr>"`.
+    pub dst: String,
+    pub gateway: Option<String>,
+    /// Output interface index.
+    pub oif: Option<u32>,
+    pub priority: Option<u32>,
+    pub protocol: String,
+    pub scope: String,
+    pub table: u32,
+}
+
+/// One ARP/NDP neighbor entry (full detail).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct NeighborRecord {
+    pub family: u8,
+    pub ip: Option<String>,
+    pub mac: Option<String>,
+    pub ifindex: u32,
+    pub state: String,
+    pub is_router: bool,
+}
+
+/// One TCP socket (full detail), served filterable by state/port.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SocketRecord {
+    pub local: String,
+    pub remote: String,
+    pub state: String,
+    pub uid: u32,
+    pub recv_q: u32,
+    pub send_q: u32,
+    pub rtt_us: u32,
+    pub retrans: u32,
+    pub inode: u32,
+}
+
+/// Selector parameters for the sockets query (`?state=&port=`). Both optional;
+/// absent means "no filter on that field".
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SocketSelector {
+    /// Match `SocketRecord::state` case-insensitively (e.g. `"established"`).
+    pub state: Option<String>,
+    /// Match local OR remote port.
+    pub port: Option<u16>,
+}
+
+impl SocketSelector {
+    /// Parse a Zenoh selector parameter string (`"state=established&port=22"`).
+    /// Unknown keys and unparseable ports are ignored (best-effort filter).
+    pub fn parse(params: &str) -> Self {
+        let mut sel = SocketSelector::default();
+        for pair in params.split('&').filter(|s| !s.is_empty()) {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            match k.trim() {
+                "state" if !v.is_empty() => sel.state = Some(v.trim().to_lowercase()),
+                "port" => sel.port = v.trim().parse().ok(),
+                _ => {}
+            }
+        }
+        sel
+    }
+
+    /// Does `rec` pass this selector? Port matches either endpoint.
+    pub fn matches(&self, rec: &SocketRecord) -> bool {
+        if let Some(state) = &self.state
+            && !rec.state.eq_ignore_ascii_case(state)
+        {
+            return false;
+        }
+        if let Some(port) = self.port {
+            let suffix = format!(":{port}");
+            if !rec.local.ends_with(&suffix) && !rec.remote.ends_with(&suffix) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,5 +467,50 @@ mod tests {
             find("sockets/tcp/retransmits_total").value,
             TelemetryValue::Counter(12)
         );
+    }
+
+    fn sock(local: &str, remote: &str, state: &str) -> SocketRecord {
+        SocketRecord {
+            local: local.into(),
+            remote: remote.into(),
+            state: state.into(),
+            uid: 0,
+            recv_q: 0,
+            send_q: 0,
+            rtt_us: 0,
+            retrans: 0,
+            inode: 0,
+        }
+    }
+
+    #[test]
+    fn socket_selector_parse() {
+        let s = SocketSelector::parse("state=Established&port=22");
+        assert_eq!(s.state.as_deref(), Some("established"));
+        assert_eq!(s.port, Some(22));
+
+        // Empty / partial / junk.
+        assert_eq!(SocketSelector::parse(""), SocketSelector::default());
+        assert_eq!(SocketSelector::parse("port=notnum").port, None);
+        assert_eq!(SocketSelector::parse("foo=bar"), SocketSelector::default());
+    }
+
+    #[test]
+    fn socket_selector_matches() {
+        let rec = sock("10.0.0.1:5555", "1.1.1.1:22", "established");
+        // No filter → matches.
+        assert!(SocketSelector::default().matches(&rec));
+        // State filter is case-insensitive.
+        assert!(SocketSelector::parse("state=ESTABLISHED").matches(&rec));
+        assert!(!SocketSelector::parse("state=listen").matches(&rec));
+        // Port matches either endpoint (remote here).
+        assert!(SocketSelector::parse("port=22").matches(&rec));
+        // Port matches local endpoint.
+        assert!(SocketSelector::parse("port=5555").matches(&rec));
+        // Non-matching port (and not a substring false-positive on :555).
+        assert!(!SocketSelector::parse("port=555").matches(&rec));
+        // Combined: state AND port must both hold.
+        assert!(SocketSelector::parse("state=established&port=22").matches(&rec));
+        assert!(!SocketSelector::parse("state=listen&port=22").matches(&rec));
     }
 }

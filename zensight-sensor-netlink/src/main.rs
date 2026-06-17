@@ -45,6 +45,16 @@ async fn main() -> Result<()> {
         collector.run().await;
     });
 
+    // On-demand detail query channel (principle P2): serves full route/neighbor/
+    // socket tables to the GUI on demand, without streaming them onto the bus.
+    {
+        let query_session = runner.session().clone();
+        let query_prefix = netlink_config.key_prefix.clone();
+        runner.spawn(async move {
+            zensight_sensor_netlink::query::run(query_session, query_prefix).await;
+        });
+    }
+
     // Pillar B — sentinel: evaluate declared expectations and emit alerts, and
     // accept runtime expectation commands from the GUI (always on, so the GUI
     // can author expectations even when none are configured on disk).
