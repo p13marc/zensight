@@ -1,8 +1,14 @@
 # Plan 04 (enh) — netring GUI v2: flow explorer, L7 panels, JA4 inventory, NDR
 
 **Crate:** `zensight` (frontend). **Depends on:** enh-03 (flow/L7 telemetry +
-detector alerts + query/command channels). **Effort:** M–L. Pure frontend + the
+detector alerts + query/command channels) and **[Plan 05](05-keyspace-redesign.md)**
+(typed subscriptions, per-host/fleet keys). **Effort:** M–L. Pure frontend + the
 query-channel client (shared with Plan 02).
+
+> **Keys (Plan 05):** flow/L7 drill-down `get`s
+> `zensight/sensor/<host>/netring/query/{flows,dns,http,tls}`; detector/filter
+> commands `put` to `sensor/<host>/netring/cmd/{detectors,filter}` or the
+> `fleet/netring/cmd/…` broadcast.
 
 Goal: turn `specialized/netring.rs` (flows + bandwidth) into a wire-analytics +
 NDR console — flow explorer, DNS/HTTP/TLS panels, JA4 asset inventory, capture-

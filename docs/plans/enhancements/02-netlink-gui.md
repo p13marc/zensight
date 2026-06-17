@@ -1,7 +1,14 @@
 # Plan 02 (enh) — netlink GUI v2: tabbed host view, charts, drill-down, topology
 
 **Crate:** `zensight` (frontend). **Depends on:** enh-01 (telemetry + query +
-command channels). **Effort:** M–L. Pure frontend + the query-channel client.
+command channels) and **[Plan 05](05-keyspace-redesign.md)** (typed subscriptions
++ per-host/fleet command + query keys). **Effort:** M–L. Pure frontend + the
+query-channel client.
+
+> **Keys (Plan 05):** the drill-down client `get`s
+> `zensight/sensor/<host>/netlink/query/<topic>`; collection commands `put` to
+> `sensor/<host>/netlink/cmd/collection` (one host) or `fleet/netlink/cmd/collection`
+> (all). A fleet status view `get`s `sensor/*/netlink/status/<topic>`.
 
 Goal: turn the flat `specialized/netlink.rs` (interfaces + sockets list) into a
 rich host-network cockpit that surfaces everything enh-01 produces, fetches

@@ -1,9 +1,11 @@
 # ZenSight v2 — Greatly Improve the netlink & netring Sensors (+ GUI)
 
-**Status:** proposal for review
+**Status:** proposal for review · **revised: backward compatibility may break**,
+including a Zenoh **key-space redesign** (new foundational Plan 05).
 **Date:** 2026-06-17
 **Builds on:** the implemented sensors+alerting redesign (`docs/plans/00-INDEX.md`,
-Plans 01–11, merged to master). This series *extends* what those shipped.
+Plans 01–11, merged to master). This series *extends* — and now also *re-bases* —
+what those shipped.
 
 The v1 sensors deliberately shipped a thin slice: netlink does interface counters
 + socket aggregates + a few expectations; netring does flow counts + per-app
@@ -15,16 +17,31 @@ configurable, alert-heavy observability + security sensors.
 
 | # | Plan | Theme |
 |---|------|-------|
+| **05** | [**key-space + control-plane redesign**](05-keyspace-redesign.md) | **FOUNDATIONAL — do first.** Type-pure key hierarchy (`telemetry/` vs `sensor/<host>/<proto>/…` vs `meta/`), per-instance + fleet addressing, a reusable `ControlPlane`, typed frontend subscriptions, exporter simplification. Breaks wire compat. |
 | 01 | [netlink sensor v2](01-netlink-sensor.md) | many more metrics (routes, neighbors, QoS/TC, ethtool, WireGuard, per-socket health, diagnostics, push events), more expectations, dynamic config |
 | 02 | [netlink GUI v2](02-netlink-gui.md) | tabbed host view, charts, drill-down, expectation status inline, topology neighbor-edge enrichment |
 | 03 | [netring sensor v2](03-netring-sensor.md) | real flow records (IPFIX fields), L7 (DNS/HTTP/TLS+JA4), capture health, ICMP/RST, many detectors (beacon/DGA/exfil/lateral/ECH), dynamic config (BPF/detector tuning) |
 | 04 | [netring GUI v2](04-netring-gui.md) | flow explorer, top-talkers, L7 panels, JA4 asset inventory, security drill-down |
+
+> **Land Plan 05 first.** It re-bases the addressing model every other plan uses
+> (the query/command/alert keys in 01–04 assume the new `sensor/<host>/<proto>/…`
+> scheme). Doing the metric/alert work on the old `@/`-infix keys would mean
+> redoing it.
 
 ---
 
 ## 1. Cross-cutting design principles
 
 These govern every plan below — read first.
+
+### P0 — Type-pure, instance-addressable key space *(new — Plan 05)*
+Every wildcard subscription yields exactly one payload type (Zenoh's own
+guidance), and every control channel is addressed per **sensor instance**
+(`<host>/<protocol>`), with a `fleet/` broadcast for whole-kind commands. This
+replaces the `zensight/<protocol>/@/…` scheme (which mixed types under `**` and
+collided across hosts). Concretely: `zensight/telemetry/**` = only telemetry,
+`zensight/sensor/*/*/alerts/**` = only alerts, commands target one host or the
+fleet. See [Plan 05](05-keyspace-redesign.md) — land it before the rest.
 
 ### P1 — Detect at the edge; manage centrally
 Per the architecture analysis (`what's-next` discussion): the sensor evaluates
@@ -88,11 +105,13 @@ TTL/quiet-period sweep, not linger forever.
 
 ## 3. Sequencing
 
-Land sensor-side first (telemetry/alerts/query channels), then the GUI that
-consumes them. Suggested order:
+Land the key-space redesign first, then sensor-side telemetry, then alerts/config,
+then GUI. Suggested order:
 
+0. **05 (key-space + control-plane)** — foundational re-base. Everything else
+   targets the new keys; doing it first avoids redoing 01–04.
 1. **01 §A (netlink metrics)** + **03 §A (netring flows/L7)** — the telemetry +
-   query channels. Highest value, unblocks the GUI.
+   query channels (served via the new `ControlPlane`). Highest value, unblocks GUI.
 2. **01 §B/§C** + **03 §B/§C** — new alerts + dynamic config.
 3. **02** + **04** — the GUI views that surface it all.
 4. Topology neighbor-edge enrichment (02 §5) last — depends on 01 neighbor data.

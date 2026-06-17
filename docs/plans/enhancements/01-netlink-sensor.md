@@ -1,8 +1,13 @@
 # Plan 01 (enh) — netlink sensor v2: many more metrics, alerts, dynamic config
 
 **Crate:** `zensight-sensor-netlink`. **Depends on:** v1 sensor + `AlertReporter`
-+ command channel (shipped). **Effort:** L (split into independently-shippable
-sub-plans A–D).
++ command channel (shipped), and **[Plan 05](05-keyspace-redesign.md)** (land
+first). **Effort:** L (split into independently-shippable sub-plans A–D).
+
+> **Keys:** this plan's tables show channel *topics*; under Plan 05 the actual
+> keys are `zensight/sensor/<host>/netlink/{query,cmd,status}/<topic>` and
+> telemetry is `zensight/telemetry/netlink/<source>/<metric>`. The query/command
+> channels are served via the `ControlPlane` (Plan 05 §2), not hand-rolled.
 
 Goal: go from "interface counters + socket aggregates + 4 expectations" to a
 full host-network sensor — routes, neighbors, QoS, ethtool, WireGuard,
@@ -132,10 +137,10 @@ Generalize Plan 08's command channel. New topics on
   `{ "type": "set", "collect": { "routes": true, "tc": false, ... } }`.
   Status queryable `@/status/collection` returns the live toggles.
 - **`expectations`** — already shipped; extend with the §B families.
-- **Per-host targeting (fleet):** the command key is shared by all netlink
-  sensors. Add an optional `host` field; a sensor applies a command only if it
-  matches its hostname (or `host` omitted = all). Lets the GUI target one host or
-  the fleet.
+- **Per-host vs fleet targeting:** handled by the **key**, not a payload field
+  (Plan 05). The GUI `put`s to `sensor/<host>/netlink/cmd/<topic>` for one host or
+  `fleet/netlink/cmd/<topic>` for all — each sensor subscribes to both. (The v1
+  in-payload host-filter idea is dropped.)
 
 `collector.rs` reads its toggles from an `Arc<RwLock<CollectConfig>>` (same
 hot-swap pattern as the sentinel), so `set` takes effect on the next poll tick.

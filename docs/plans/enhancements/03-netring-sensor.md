@@ -1,8 +1,15 @@
 # Plan 03 (enh) — netring sensor v2: flows, L7, detectors, dynamic config
 
 **Crate:** `zensight-sensor-netring`. **Depends on:** v1 sensor + `AlertReporter`
-(shipped). **Effort:** L (split A–E). **Verification:** pcap replay (no privileges),
-as in v1.
+(shipped), and **[Plan 05](05-keyspace-redesign.md)** (land first — netring gets
+its control plane "for free" from the `ControlPlane`, so §C/§D below stop being
+hand-rolled). **Effort:** L (split A–E). **Verification:** pcap replay (no
+privileges), as in v1.
+
+> **Keys (Plan 05):** telemetry → `zensight/telemetry/netring/<sensor>/<metric>`;
+> alerts → `zensight/sensor/<host>/netring/alerts/<key>`; commands/queries →
+> `zensight/sensor/<host>/netring/{cmd,query,status}/<topic>` (+ `fleet/netring/
+> cmd/<topic>` for broadcast).
 
 Goal: go from "flow counts + per-app bandwidth + one port-scan detector" to a
 real flow + L7 + NDR sensor — IPFIX-grade flow analytics, DNS/HTTP/TLS visibility,
