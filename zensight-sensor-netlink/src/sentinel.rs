@@ -36,11 +36,13 @@ pub struct ExpectationsConfig {
     pub sockets: Vec<SocketExpectation>,
     #[serde(default)]
     pub links: Vec<LinkExpectation>,
+    #[serde(default)]
+    pub neighbors: Vec<NeighborExpectation>,
 }
 
 impl ExpectationsConfig {
     pub fn is_empty(&self) -> bool {
-        self.sockets.is_empty() && self.links.is_empty()
+        self.sockets.is_empty() && self.links.is_empty() && self.neighbors.is_empty()
     }
 }
 
@@ -90,6 +92,20 @@ pub struct LinkExpectation {
 
 fn default_true() -> bool {
     true
+}
+
+/// A neighbor (gateway/peer) reachability expectation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NeighborExpectation {
+    /// IP address that must be a reachable neighbor (ARP/NDP).
+    pub ip: String,
+    /// Must be reachable (default true).
+    #[serde(default = "default_true")]
+    pub reachable: bool,
+    #[serde(default = "default_severity")]
+    pub severity: AlertSeverity,
+    #[serde(default)]
+    pub for_secs: Option<u64>,
 }
 
 /// A single currently-violated fact.
@@ -186,6 +202,62 @@ pub fn check_link(exp: &LinkExpectation, observed_up: Option<bool>) -> Vec<Viola
     }
 }
 
+/// Evaluate a neighbor expectation. `observed_reachable` is `None` when the IP is
+/// absent from the neighbor table.
+pub fn check_neighbor(
+    exp: &NeighborExpectation,
+    observed_reachable: Option<bool>,
+) -> Vec<Violation> {
+    match observed_reachable {
+        None if exp.reachable => vec![Violation {
+            summary: format!("neighbor {} not found in ARP/NDP table", exp.ip),
+            labels: vec![
+                ("expected".into(), "reachable".into()),
+                ("ip".into(), exp.ip.clone()),
+                ("actual".into(), "absent".into()),
+            ],
+        }],
+        Some(reachable) if reachable != exp.reachable => vec![Violation {
+            summary: format!(
+                "neighbor {} is {} (expected {})",
+                exp.ip,
+                if reachable {
+                    "reachable"
+                } else {
+                    "unreachable"
+                },
+                if exp.reachable {
+                    "reachable"
+                } else {
+                    "unreachable"
+                }
+            ),
+            labels: vec![
+                (
+                    "expected".into(),
+                    if exp.reachable {
+                        "reachable"
+                    } else {
+                        "unreachable"
+                    }
+                    .into(),
+                ),
+                ("ip".into(), exp.ip.clone()),
+                (
+                    "actual".into(),
+                    if reachable {
+                        "reachable"
+                    } else {
+                        "unreachable"
+                    }
+                    .into(),
+                ),
+            ],
+        }],
+        _ => Vec::new(),
+    }
+}
+
 // ---- Evaluator (live nlink + AlertReporter) ---------------------------------
 
 /// Shared, hot-swappable expectation set. Cloning is cheap (Arc).
@@ -219,13 +291,22 @@ impl SentinelHandle {
         c.links.retain(|e| e.iface != exp.iface);
         c.links.push(exp);
     }
-    /// Remove an expectation by rule slug (`socket:<name>` / `link:<iface>`).
+    /// Add (or replace by ip) a neighbor expectation.
+    pub async fn add_neighbor(&self, exp: NeighborExpectation) {
+        let mut c = self.expectations.write().await;
+        c.neighbors.retain(|e| e.ip != exp.ip);
+        c.neighbors.push(exp);
+    }
+    /// Remove an expectation by rule slug (`socket:<name>` / `link:<iface>` /
+    /// `neighbor:<ip>`).
     pub async fn remove(&self, rule: &str) {
         let mut c = self.expectations.write().await;
         if let Some(name) = rule.strip_prefix("socket:") {
             c.sockets.retain(|e| e.name != name);
         } else if let Some(iface) = rule.strip_prefix("link:") {
             c.links.retain(|e| e.iface != iface);
+        } else if let Some(ip) = rule.strip_prefix("neighbor:") {
+            c.neighbors.retain(|e| e.ip != ip);
         }
     }
     /// Snapshot the current expectation set (for the status queryable).
@@ -324,6 +405,28 @@ impl Evaluator {
             }
         }
 
+        // Neighbor (gateway/peer reachability) expectations.
+        if !config.neighbors.is_empty()
+            && let Some(rt) = route
+        {
+            match observe_neighbors(rt).await {
+                Ok(neighbors) => {
+                    for exp in &config.neighbors {
+                        let rule = format!("neighbor:{}", exp.ip);
+                        current_rules.insert(rule.clone());
+                        let observed = neighbors
+                            .iter()
+                            .find(|(ip, _)| ip == &exp.ip)
+                            .map(|(_, r)| *r);
+                        let violations = check_neighbor(exp, observed);
+                        self.report(&rule, exp.severity, exp.for_secs, violations)
+                            .await;
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "sentinel: neighbor observation failed"),
+            }
+        }
+
         // Resolve alerts for rules removed since the last sweep (hot-swap).
         let removed: Vec<String> = {
             let mut seen = self.seen_rules.lock().unwrap();
@@ -403,6 +506,28 @@ async fn observe_links(conn: &Connection<Route>) -> nlink::netlink::Result<Vec<(
         .collect())
 }
 
+/// Build a list of `(ip, reachable)` from the live neighbor table. "Reachable"
+/// excludes Failed/Incomplete/None (Stale/Delay/Probe/Reachable/Permanent count
+/// as reachable — the entry resolves or is being revalidated).
+async fn observe_neighbors(
+    conn: &Connection<Route>,
+) -> nlink::netlink::Result<Vec<(String, bool)>> {
+    use nlink::netlink::neigh::State as NeighborState;
+    let neighbors = conn.get_neighbors().await?;
+    Ok(neighbors
+        .into_iter()
+        .filter_map(|n| {
+            n.destination().map(|ip| {
+                let reachable = !matches!(
+                    n.state(),
+                    NeighborState::Failed | NeighborState::Incomplete | NeighborState::None
+                );
+                (ip.to_string(), reachable)
+            })
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,5 +602,18 @@ mod tests {
         assert!(check_link(&exp, Some(true)).is_empty());
         assert_eq!(check_link(&exp, Some(false)).len(), 1);
         assert_eq!(check_link(&exp, None).len(), 1); // absent
+    }
+
+    #[test]
+    fn neighbor_expectations() {
+        let exp = NeighborExpectation {
+            ip: "10.0.0.1".into(),
+            reachable: true,
+            severity: AlertSeverity::Warning,
+            for_secs: None,
+        };
+        assert!(check_neighbor(&exp, Some(true)).is_empty()); // reachable → ok
+        assert_eq!(check_neighbor(&exp, Some(false)).len(), 1); // unreachable → fire
+        assert_eq!(check_neighbor(&exp, None).len(), 1); // absent → fire
     }
 }
