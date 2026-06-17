@@ -110,6 +110,37 @@ pub fn flow_volume_points(
     ]
 }
 
+/// Nearest-rank percentile of a sample set (sorts in place). 0 if empty.
+pub fn percentile(values: &mut [u64], p: u8) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    let rank = ((p as usize * values.len()).div_ceil(100)).max(1);
+    values[rank - 1]
+}
+
+/// Flow-duration percentile points (RED: duration) over the durations of flows
+/// ended in the current window. `durations_ms` is consumed (sorted) in place.
+///
+/// Returns an empty vec when no flows ended this window — we deliberately do NOT
+/// publish zeros, so the cached gauge keeps its last meaningful value instead of
+/// being clobbered to 0 every idle tick.
+pub fn flow_latency_points(sensor_id: &str, durations_ms: &mut [u64]) -> Vec<TelemetryPoint> {
+    if durations_ms.is_empty() {
+        return Vec::new();
+    }
+    let p50 = percentile(durations_ms, 50);
+    let p95 = percentile(durations_ms, 95);
+    let g = |metric: &str, v: u64| {
+        TelemetryPoint::new(sensor_id, Protocol::Netring, metric, TelemetryValue::Gauge(v as f64))
+    };
+    vec![
+        g("flow/duration_p50_ms", p50),
+        g("flow/duration_p95_ms", p95),
+    ]
+}
+
 /// TCP reset aggregate points.
 pub fn tcp_reset_points(sensor_id: &str, resets: u64, refused: u64) -> Vec<TelemetryPoint> {
     vec![
@@ -197,6 +228,28 @@ mod tests {
         assert_eq!(pts[1].value, TelemetryValue::Counter(12));
         assert_eq!(pts[2].metric, "flow/retransmits_total");
         assert_eq!(pts[2].value, TelemetryValue::Counter(2));
+    }
+
+    #[test]
+    fn percentile_nearest_rank() {
+        assert_eq!(percentile(&mut [], 50), 0);
+        assert_eq!(percentile(&mut [42], 95), 42);
+        let mut v: Vec<u64> = (1..=10).collect();
+        assert_eq!(percentile(&mut v, 50), 5);
+        assert_eq!(percentile(&mut v, 95), 10);
+    }
+
+    #[test]
+    fn flow_latency_points_shape() {
+        // durations 10..=100ms: p50 -> 50, p95 -> 100 (nearest-rank).
+        let mut d: Vec<u64> = (1..=10).map(|n| n * 10).collect();
+        let pts = flow_latency_points("s", &mut d);
+        assert_eq!(pts[0].metric, "flow/duration_p50_ms");
+        assert_eq!(pts[0].value, TelemetryValue::Gauge(50.0));
+        assert_eq!(pts[1].metric, "flow/duration_p95_ms");
+        assert_eq!(pts[1].value, TelemetryValue::Gauge(100.0));
+        // Empty window → no points (don't clobber the cached gauge to 0).
+        assert!(flow_latency_points("s", &mut []).is_empty());
     }
 
     #[test]

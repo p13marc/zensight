@@ -26,8 +26,14 @@ pub async fn run_drains(
     let flow_bytes = channels.flow_bytes.clone();
     let flow_packets = channels.flow_packets.clone();
     let flow_retransmits = channels.flow_retransmits.clone();
+    let flow_durations = channels.flow_durations_ms.clone();
     let tcp_resets = channels.tcp_resets.clone();
     let tcp_refused = channels.tcp_refused.clone();
+
+    // Take (and clear) the current window's flow durations for percentile points.
+    let drain_durations = |buf: &std::sync::Mutex<Vec<u64>>| -> Vec<u64> {
+        buf.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
+    };
 
     // Cached publishers so late-joining consumers get current values on connect.
     let registry = AdvancedPublisherRegistry::new(
@@ -56,9 +62,11 @@ pub async fn run_drains(
                         let bytes = flow_bytes.load(Ordering::Relaxed);
                         let pkts = flow_packets.load(Ordering::Relaxed);
                         let retx = flow_retransmits.load(Ordering::Relaxed);
+                        let mut durs = drain_durations(&flow_durations);
                         let points = map::flow_points(&sensor_id, s, e, s.saturating_sub(e))
                             .into_iter()
                             .chain(map::flow_volume_points(&sensor_id, bytes, pkts, retx))
+                            .chain(map::flow_latency_points(&sensor_id, &mut durs))
                             .chain(map::tcp_reset_points(&sensor_id, resets, refused));
                         for point in points {
                             let suffix = format!("{}/{}", point.source, point.metric);
@@ -90,9 +98,11 @@ pub async fn run_drains(
                 let bytes = flow_bytes.load(Ordering::Relaxed);
                 let pkts = flow_packets.load(Ordering::Relaxed);
                 let retx = flow_retransmits.load(Ordering::Relaxed);
+                let mut durs = drain_durations(&flow_durations);
                 let points = map::flow_points(&sensor_id, s, e, active)
                     .into_iter()
                     .chain(map::flow_volume_points(&sensor_id, bytes, pkts, retx))
+                    .chain(map::flow_latency_points(&sensor_id, &mut durs))
                     .chain(map::tcp_reset_points(&sensor_id, resets, refused));
                 for point in points {
                     let suffix = format!("{}/{}", point.source, point.metric);

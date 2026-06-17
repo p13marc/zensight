@@ -2,8 +2,8 @@
 //! publishing via channels (handlers stay cheap; publishing happens off the
 //! capture path).
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -31,6 +31,10 @@ pub struct MonitorChannels {
     pub flow_bytes: Arc<AtomicU64>,
     pub flow_packets: Arc<AtomicU64>,
     pub flow_retransmits: Arc<AtomicU64>,
+    /// Per-flow durations (ms) of flows ended since the last aggregate tick. The
+    /// drain task takes (clears) this each window to compute duration percentiles,
+    /// so it stays bounded and yields a windowed distribution.
+    pub flow_durations_ms: Arc<Mutex<Vec<u64>>>,
     /// TCP RST counters: total resets and the subset that are connection refusals
     /// (zero-payload RST = "connection refused" vs a mid-transfer abort).
     pub tcp_resets: Arc<AtomicU64>,
@@ -91,6 +95,7 @@ pub fn build(
     let flow_bytes = Arc::new(AtomicU64::new(0));
     let flow_packets = Arc::new(AtomicU64::new(0));
     let flow_retransmits = Arc::new(AtomicU64::new(0));
+    let flow_durations_ms = Arc::new(Mutex::new(Vec::<u64>::new()));
     let tcp_resets = Arc::new(AtomicU64::new(0));
     let tcp_refused = Arc::new(AtomicU64::new(0));
 
@@ -120,11 +125,19 @@ pub fn build(
         let bytes = flow_bytes.clone();
         let packets = flow_packets.clone();
         let retransmits = flow_retransmits.clone();
+        let durations = flow_durations_ms.clone();
         b = b.on_ctx::<FlowEnded<Tcp>>(move |e: &FlowEnded<Tcp>, _ctx: &mut Ctx<'_>| {
             ended.fetch_add(1, Ordering::Relaxed);
             bytes.fetch_add(e.stats.total_bytes(), Ordering::Relaxed);
             packets.fetch_add(e.stats.total_packets(), Ordering::Relaxed);
             retransmits.fetch_add(e.stats.total_retransmits(), Ordering::Relaxed);
+            // Record the flow's lifetime for windowed duration percentiles. Guard
+            // against unbounded growth if the drain task ever stalls.
+            if let Ok(mut d) = durations.lock()
+                && d.len() < 1_000_000
+            {
+                d.push(e.stats.duration().as_millis() as u64);
+            }
             Ok(())
         });
     }
@@ -195,6 +208,7 @@ pub fn build(
             flow_bytes,
             flow_packets,
             flow_retransmits,
+            flow_durations_ms,
             tcp_resets,
             tcp_refused,
         },
