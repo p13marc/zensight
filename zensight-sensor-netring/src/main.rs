@@ -50,6 +50,10 @@ async fn main() -> Result<()> {
     let flow_period = cfg.bandwidth_period_secs;
     let mut runner = runner;
 
+    // Late-joiner seed: serve the current firing set to consumers that connect
+    // after an anomaly fired.
+    runner.spawn(zensight_sensor_core::serve_alerts_query(reporter.clone()));
+
     // Drain task (telemetry + anomalies + periodic flow aggregates).
     runner.spawn(publish::run_drains(
         channels,

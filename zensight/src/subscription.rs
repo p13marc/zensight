@@ -110,6 +110,19 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
                 }
             }
 
+            // Late-joiner alert seed: fetch each sensor's current firing set so a
+            // GUI opened after an alert fired shows it immediately.
+            if let Ok(replies) = session.get("zensight/*/@/query/alerts").await {
+                while let Ok(reply) = replies.recv_async().await {
+                    if let Ok(sample) = reply.result()
+                        && let Ok(alerts) =
+                            serde_json::from_slice::<Vec<Alert>>(&sample.payload().to_bytes())
+                    {
+                        yield Message::AlertsSeed(alerts);
+                    }
+                }
+            }
+
             // Process incoming samples from all subscriptions
             loop {
                 tokio::select! {

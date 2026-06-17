@@ -49,13 +49,19 @@ async fn main() -> Result<()> {
     // accept runtime expectation commands from the GUI (always on, so the GUI
     // can author expectations even when none are configured on disk).
     {
+        use std::sync::Arc;
         use std::time::Duration;
-        use zensight_sensor_core::{AlertReporter, Protocol};
+        use zensight_sensor_core::{AlertReporter, Protocol, serve_alerts_query};
         let exp_cfg = netlink_config.expectations.clone().unwrap_or_default();
-        let reporter = AlertReporter::new(runner.publisher(), Protocol::Netlink, Format::Json)
-            .with_debounce(Duration::from_secs(exp_cfg.default_for_secs));
+        let reporter = Arc::new(
+            AlertReporter::new(runner.publisher(), Protocol::Netlink, Format::Json)
+                .with_debounce(Duration::from_secs(exp_cfg.default_for_secs)),
+        );
+        // Late-joiner seed: serve the current firing set to consumers that connect
+        // after an alert fired.
+        runner.spawn(serve_alerts_query(reporter.clone()));
         let evaluator =
-            zensight_sensor_netlink::Evaluator::new(hostname.clone(), exp_cfg, reporter);
+            zensight_sensor_netlink::Evaluator::new(hostname.clone(), exp_cfg, reporter.clone());
         let handle = evaluator.handle();
         let cmd_session = runner.session().clone();
         let cmd_prefix = netlink_config.key_prefix.clone();

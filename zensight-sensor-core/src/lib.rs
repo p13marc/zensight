@@ -44,7 +44,7 @@ mod runner;
 mod status;
 
 pub use advanced_publisher::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
-pub use alert::AlertReporter;
+pub use alert::{AlertReporter, serve_alerts_query};
 pub use args::SensorArgs;
 pub use config::SensorConfig;
 pub use correlation::{CorrelationEntry, CorrelationRegistry, DeviceIdentity, SensorInfo};

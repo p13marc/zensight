@@ -35,6 +35,11 @@ pub enum Message {
     /// A sensor alert key was deleted (resolve tombstone).
     AlertCleared { protocol: String, alert_key: String },
 
+    /// Seed of currently-firing alerts fetched on connect from sensors'
+    /// `@/query/alerts` queryables (late-joiner recovery — populates without
+    /// toasting, since these aren't newly-fired).
+    AlertsSeed(Vec<Alert>),
+
     /// Zenoh connection attempt started.
     Connecting,
 

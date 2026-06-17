@@ -300,6 +300,17 @@ impl ZenSight {
                 }
             }
 
+            Message::AlertsSeed(alerts) => {
+                // Late-joiner seed: populate the firing set without toasting (these
+                // alerts fired before we connected).
+                for alert in alerts {
+                    self.alerts.ingest_external(alert);
+                }
+                if self.current_view == CurrentView::Topology {
+                    self.topology.apply_alerts(&self.alerts.external);
+                }
+            }
+
             Message::Connecting => {
                 tracing::info!("Connecting to Zenoh...");
                 self.dashboard.connection_state =

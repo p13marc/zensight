@@ -165,6 +165,33 @@ impl AlertReporter {
             .count()
     }
 
+    /// The current set of firing (published) alerts.
+    ///
+    /// Used to answer the `@/query/alerts` queryable so a late-joining consumer
+    /// (a GUI opened *after* an alert fired) can seed its firing set — alerts are
+    /// only published on state change, so without this seed a late joiner would
+    /// never see an already-firing alert.
+    pub fn firing_alerts(&self) -> Vec<Alert> {
+        self.active
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|a| a.published)
+            .map(|a| a.last.clone())
+            .collect()
+    }
+
+    /// The protocol namespace this reporter publishes under.
+    pub fn protocol(&self) -> Protocol {
+        self.protocol
+    }
+
+    /// A reference to the underlying publisher (for declaring the alerts query
+    /// on the same session).
+    pub fn publisher(&self) -> &Publisher {
+        &self.publisher
+    }
+
     async fn apply(&self, _key: &str, action: Action) -> Result<()> {
         match action {
             Action::None => Ok(()),
@@ -186,5 +213,33 @@ impl AlertReporter {
         let payload = encode(alert, self.format)
             .map_err(|e| crate::error::SensorError::Serialization(e.to_string()))?;
         self.publisher.publish_raw(&key, payload).await
+    }
+}
+
+/// Serve `zensight/<protocol>/@/query/alerts` — replies with the reporter's
+/// current firing-alert set as JSON (`Vec<Alert>`). Spawn this as a task; it runs
+/// until the session closes. Lets a late-joining GUI seed its firing set on
+/// connect (the alerts late-joiner fix — see plans/enhancements/05 §1b).
+pub async fn serve_alerts_query(reporter: std::sync::Arc<AlertReporter>) {
+    let session = reporter.publisher().session().clone();
+    let key = format!("zensight/{}/@/query/alerts", reporter.protocol().as_str());
+    let queryable = match session.declare_queryable(&key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %key, "failed to declare alerts queryable");
+            return;
+        }
+    };
+    tracing::info!(key = %key, "alerts firing-set queryable ready");
+    while let Ok(query) = queryable.recv_async().await {
+        let firing = reporter.firing_alerts();
+        match serde_json::to_vec(&firing) {
+            Ok(payload) => {
+                if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                    tracing::warn!(error = %e, "failed to reply to alerts query");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "failed to serialize firing alerts"),
+        }
     }
 }

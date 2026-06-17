@@ -238,14 +238,14 @@ impl SentinelHandle {
 pub struct Evaluator {
     host: String,
     expectations: Arc<RwLock<ExpectationsConfig>>,
-    reporter: AlertReporter,
+    reporter: Arc<AlertReporter>,
     /// Rules evaluated on the previous sweep — used to resolve alerts for rules
     /// that were removed (hot-swap) so they don't linger forever.
     seen_rules: std::sync::Mutex<HashSet<String>>,
 }
 
 impl Evaluator {
-    pub fn new(host: String, config: ExpectationsConfig, reporter: AlertReporter) -> Self {
+    pub fn new(host: String, config: ExpectationsConfig, reporter: Arc<AlertReporter>) -> Self {
         Self {
             host,
             expectations: Arc::new(RwLock::new(config)),
