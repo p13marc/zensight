@@ -79,11 +79,67 @@ Design notes, each tied to Zenoh guidance:
 
 ---
 
+## 1b. Delivery semantics: late-joiner **state** vs **events** (Advanced Pub/Sub)
+
+The key design must encode *recoverability*, because a GUI/exporter that connects
+**after** a value was published still needs the current state. Zenoh's
+`zenoh-ext` `AdvancedPublisher`/`AdvancedSubscriber` exist exactly for this
+(cache + history → late joiners pull recent samples; sample-miss-detection +
+recovery → no dropped samples). ZenSight already half-uses them: the frontend
+subscribes with `.history(HistoryConfig::default().detect_late_publishers())
+.recovery(RecoveryConfig::default())`, and `sensor-core` has an
+`AdvancedPublisherRegistry` (`CacheConfig::max_samples`, `MissDetectionConfig`,
+`publisher_detection`).
+
+> **The bug this fixes.** `AlertReporter` and `Publisher` currently publish with
+> **plain `session.put`** — *not* the AdvancedPublisher. So there is **no cache**
+> for the frontend's `history()` to retrieve. Telemetry self-heals on the next
+> poll, but **alerts only publish on state change**, so a GUI opened after an
+> alert fired **never sees the firing alert**. The redesign makes every *state*
+> channel late-joiner-recoverable.
+
+**The rule:** anything representing *current state* must be retrievable by a late
+joiner — via a **cached `AdvancedPublisher`** (push) **or a queryable** (pull).
+**Commands are events** and must be **cacheless** (never replay stale config).
+
+| Channel | Semantics | Delivery |
+|---|---|---|
+| `telemetry/…` (aggregates) | state (latest matters) | **AdvancedPublisher**, cache last 1 per key (small N for sparklines); subscriber `history()` → current values on connect |
+| `…/alerts/<key>` | state (firing set must survive late join) | **AdvancedPublisher** + cache (latest per `alert_key`) + `sample_miss_detection`+heartbeat; subscriber `history()`+`recovery()` |
+| `…/health`, `…/errors`, `meta/sensor/…` | state (current snapshot) | AdvancedPublisher, cache last 1 per key; subscriber `history()` |
+| `…/status/<topic>`, `…/query/<topic>` | pull state | **queryable** — inherently late-joiner-safe (no cache needed) |
+| `…/cmd/<topic>`, `fleet/…/cmd/…` | **events** | **plain** publisher/subscriber — **no cache/history** (replaying old commands would re-apply stale config) |
+| `…/alive` | state | Zenoh **liveliness** token + initial `get` |
+
+Two subtleties to bake in:
+- **Alert cache + tombstones.** A resolved alert is `Put(resolved)`→`Delete`; the
+  cache's latest sample for that key becomes the `Delete`, so a late joiner's
+  `history()` sees the cleared state (not a stale firing). **Verify** `zenoh-ext`
+  serves `Delete` samples in history; if not, fall back to a **`query/alerts`
+  queryable** the GUI `get`s on connect to seed the firing set (authoritative,
+  bulletproof), then the live subscription keeps it current. Recommend shipping
+  the `query/alerts` seed regardless — it's cheap and removes any doubt.
+- **Cache stays bounded by P2.** Cache size is *per key*; because we stream only
+  low-cardinality aggregates (never per-flow/per-socket — P2), the number of keys
+  (and thus total cached samples) is bounded. The cardinality discipline is what
+  makes caching affordable.
+
+The `ControlPlane` (§2) is where this is enforced: it hands out
+AdvancedPublishers for the state channels and plain publishers for commands, with
+sensible per-channel cache/recovery defaults — so individual sensors can't get it
+wrong.
+
+---
+
 ## 2. `zensight-sensor-core`: a reusable `ControlPlane`
 
 Today each sensor hand-rolls its admin channels (netlink's `command.rs`
 subscriber+queryable loop; netring would duplicate it). Replace with one library
 type so every sensor gets the standard control plane uniformly:
+
+Per §1b, the control plane hands out **AdvancedPublishers (cached)** for state
+channels and **plain** publishers for command events — so a sensor can't
+accidentally publish alerts/telemetry without late-joiner recovery:
 
 ```rust
 pub struct ControlPlane { session: Arc<Session>, host: String, protocol: Protocol }
@@ -91,19 +147,26 @@ pub struct ControlPlane { session: Arc<Session>, host: String, protocol: Protoco
 impl ControlPlane {
     pub fn new(session, host, protocol) -> Self;
 
-    // Publishers
-    pub fn alert_reporter(&self, format) -> AlertReporter;   // -> sensor/<h>/<p>/alerts/<key>
-    pub async fn publish_health(&self, &HealthSnapshot);     // -> sensor/<h>/<p>/health
-    pub async fn publish_error(&self, &ErrorReport);         // -> sensor/<h>/<p>/errors
-    pub async fn liveliness(&self) -> LivelinessToken;       // -> sensor/<h>/<p>/alive
+    // State publishers — AdvancedPublisher w/ cache + miss-detection (§1b)
+    pub fn telemetry_publisher(&self) -> Publisher;          // AdvancedPub, cache N -> telemetry/<p>/…
+    pub fn alert_reporter(&self, format) -> AlertReporter;   // AdvancedPub, cache+heartbeat -> …/alerts/<key>
+    pub async fn publish_health(&self, &HealthSnapshot);     // AdvancedPub, cache 1 -> …/health
+    pub async fn publish_error(&self, &ErrorReport);         // AdvancedPub, cache N -> …/errors
+    pub async fn liveliness(&self) -> LivelinessToken;       // …/alive
 
-    // Handlers (spawn their own tasks; subscribe own + fleet key)
-    pub fn on_command<T, F>(&self, topic, handler: F)        // cmd/<topic> + fleet/<p>/cmd/<topic>
-        where T: DeserializeOwned, F: Fn(T) -> Fut;
+    // Pull state — queryables (late-joiner-safe by construction)
     pub fn serve_status<F>(&self, topic, reply: F);          // queryable status/<topic>
     pub fn serve_query<F>(&self, topic, reply: F);           // queryable query/<topic>
+    pub fn serve_alerts_query(&self, reporter: &AlertReporter); // query/alerts seed (§1b fallback)
+
+    // Events — PLAIN sub (no history), own + fleet key
+    pub fn on_command<T, F>(&self, topic, handler: F)        // cmd/<topic> + fleet/<p>/cmd/<topic>
+        where T: DeserializeOwned, F: Fn(T) -> Fut;
 }
 ```
+`AlertReporter` is refactored to publish via the cached AdvancedPublisher (fixing
+the §1b bug) and to expose its firing set so `serve_alerts_query` can seed late
+joiners. The existing `AdvancedPublisherRegistry` is the implementation vehicle.
 
 `SensorRunner` constructs the `ControlPlane` from the configured host+protocol and
 exposes it. A sensor then writes, e.g.:
@@ -155,22 +218,29 @@ types that exist in *both* `zensight-common` and `zensight-sensor-core` into one
 ## 4. Frontend — typed subscriptions, no mega-decoder
 
 Replace the single `zensight/**` subscriber + `decode_sample` guesser with **one
-subscriber per type** (each is type-pure, so its decoder can't be wrong, and Zenoh
-matches a tighter prefix):
+`AdvancedSubscriber` per type** (each is type-pure, so its decoder can't be wrong,
+Zenoh matches a tighter prefix, and each gets the right late-joiner config per
+§1b):
 ```
-sub ALL_TELEMETRY        -> decode TelemetryPoint  -> Message::TelemetryReceived
-sub ALL_ALERTS           -> decode Alert (Put) / parse key (Delete) -> AlertReceived/Cleared
-sub ALL_HEALTH           -> decode HealthSnapshot
-sub ALL_ERRORS           -> decode ErrorReport
-sub ALL_DEVICE_LIVENESS  -> decode DeviceLiveness
-sub ALL_META_SENSORS     -> decode SensorInfo
-sub ALL_CORRELATION      -> decode CorrelationEntry
-liveliness ALL_ALIVE     -> SensorOnline/Offline
+sub ALL_TELEMETRY        history()                 -> TelemetryPoint -> TelemetryReceived
+sub ALL_ALERTS           history()+recovery()      -> Alert(Put)/key(Delete) -> AlertReceived/Cleared
+sub ALL_HEALTH           history()                 -> HealthSnapshot
+sub ALL_ERRORS           history()                 -> ErrorReport
+sub ALL_DEVICE_LIVENESS  history()                 -> DeviceLiveness
+sub ALL_META_SENSORS     history()                 -> SensorInfo
+sub ALL_CORRELATION      history()                 -> CorrelationEntry
+liveliness ALL_ALIVE     + initial get             -> SensorOnline/Offline
 ```
-`decode_sample` is deleted; each subscription has a trivial, single-type decoder.
-Command/query helpers (`send_command`, `query_json`) target the per-host or fleet
-keys from §1. The `parse_alert_cleared` Delete handler parses the new
-`sensor/<host>/<proto>/alerts/<key>` shape.
+- **On connect**, `history()` pulls the current value of every cached state key —
+  so the dashboard shows current telemetry + the **firing-alert set** immediately,
+  not after the next poll/state-change (the §1b fix, observed from the consumer).
+- The **alerts** subscriber adds `recovery()` so a missed firing/resolved is
+  re-fetched. As a belt-and-suspenders seed (§1b), on connect the app also `get`s
+  `sensor/*/*/query/alerts` to populate `AlertsState.external` authoritatively.
+- `decode_sample` is deleted; each subscription has a trivial, single-type decoder.
+  Command/query helpers (`send_command`, `query_json`) target the per-host/fleet
+  keys from §1. The `parse_alert_cleared` Delete handler parses the new
+  `sensor/<host>/<proto>/alerts/<key>` shape.
 
 ## 5. Exporters — delete the skip-hack
 
@@ -216,6 +286,11 @@ wanted, prepend `zensight/v2/…` — note it, don't build it now.
   `sensor/*/netlink/status/expectations` aggregates replies (simulate 2 peers).
 - End-to-end: run netlink + netring + frontend, confirm telemetry/alerts/commands
   flow on the new keys (live netlink unprivileged; netring pcap replay).
+- **Late-joiner (the §1b fix):** fire an alert, *then* start a fresh subscriber
+  with `history()` → it receives the firing alert (and the current telemetry
+  values) without waiting for the next state change/poll. Resolve it → the late
+  subscriber sees the cleared state (via cached `Delete` or the `query/alerts`
+  seed). This is the test that would have caught the current bug.
 
 ## 9. Acceptance criteria
 - `zensight/telemetry/**` yields only `TelemetryPoint`; `…/alerts/**` only `Alert`
@@ -228,6 +303,9 @@ wanted, prepend `zensight/v2/…` — note it, don't build it now.
 - Exporters have no `@/` guard and log no decode errors.
 - A new (unknown) sensor kind appears in the GUI with the generic view and no
   recompile of exhaustive matches.
+- **A GUI opened *after* an alert fired shows that alert immediately** (cached
+  AdvancedPublisher + `history()` / `query/alerts` seed), and shows current
+  telemetry values on connect rather than a blank panel until the next poll.
 
 ---
 

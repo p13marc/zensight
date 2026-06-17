@@ -34,14 +34,22 @@ configurable, alert-heavy observability + security sensors.
 
 These govern every plan below — read first.
 
-### P0 — Type-pure, instance-addressable key space *(new — Plan 05)*
-Every wildcard subscription yields exactly one payload type (Zenoh's own
-guidance), and every control channel is addressed per **sensor instance**
-(`<host>/<protocol>`), with a `fleet/` broadcast for whole-kind commands. This
-replaces the `zensight/<protocol>/@/…` scheme (which mixed types under `**` and
-collided across hosts). Concretely: `zensight/telemetry/**` = only telemetry,
-`zensight/sensor/*/*/alerts/**` = only alerts, commands target one host or the
-fleet. See [Plan 05](05-keyspace-redesign.md) — land it before the rest.
+### P0 — Type-pure, instance-addressable, late-joiner-recoverable key space *(new — Plan 05)*
+Three properties, all from [Plan 05](05-keyspace-redesign.md) (land it first):
+- **Type-pure:** every wildcard subscription yields exactly one payload type
+  (Zenoh's own guidance). `zensight/telemetry/**` = only telemetry,
+  `zensight/sensor/*/*/alerts/**` = only alerts.
+- **Instance-addressable:** control channels are keyed per **sensor instance**
+  (`sensor/<host>/<protocol>/…`) with a `fleet/<protocol>/cmd/…` broadcast — so a
+  command targets one host or the whole kind (no in-payload host filter). Replaces
+  the old `zensight/<protocol>/@/…` scheme that mixed types and collided across
+  hosts.
+- **Late-joiner-recoverable:** *state* channels (telemetry, alerts, health) use
+  cached `AdvancedPublisher` + `AdvancedSubscriber` `history()`/`recovery()` (or a
+  queryable) so a consumer that connects late gets current state — notably the
+  **firing-alert set**. *Command* channels are cacheless **events** (never replay
+  stale config). This fixes a real bug: today alerts are plain `put`s with no
+  cache, so a GUI opened after an alert fired never sees it.
 
 ### P1 — Detect at the edge; manage centrally
 Per the architecture analysis (`what's-next` discussion): the sensor evaluates
