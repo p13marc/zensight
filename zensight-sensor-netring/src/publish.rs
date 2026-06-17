@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use zensight_common::{Format, encode};
-use zensight_sensor_core::AlertReporter;
+use zensight_common::Format;
+use zensight_sensor_core::{AdvancedPublisherConfig, AdvancedPublisherRegistry, AlertReporter};
 
 use crate::map;
 use crate::monitor::{MonitorChannels, to_view};
@@ -24,6 +24,14 @@ pub async fn run_drains(
     let started = channels.flow_started.clone();
     let ended = channels.flow_ended.clone();
 
+    // Cached publishers so late-joining consumers get current values on connect.
+    let registry = AdvancedPublisherRegistry::new(
+        session,
+        key_prefix,
+        format,
+        AdvancedPublisherConfig::default(),
+    );
+
     let mut flow_tick = tokio::time::interval(Duration::from_secs(flow_period_secs.max(1)));
 
     loop {
@@ -31,7 +39,8 @@ pub async fn run_drains(
             // Telemetry points from monitor callbacks.
             point = channels.telemetry.recv() => {
                 match point {
-                    Some(point) => publish_point(&session, &key_prefix, &point, format).await,
+                    Some(point) => { let suffix = format!("{}/{}", point.source, point.metric);
+                        if let Err(e) = registry.publish(&suffix, &point).await { tracing::warn!(error=%e, "publish failed"); } }
                     None => break, // monitor finished (e.g. pcap EOF)
                 }
             }
@@ -51,26 +60,10 @@ pub async fn run_drains(
                 let e = ended.load(Ordering::Relaxed);
                 let active = s.saturating_sub(e);
                 for point in map::flow_points(&sensor_id, s, e, active) {
-                    publish_point(&session, &key_prefix, &point, format).await;
+                    let suffix = format!("{}/{}", point.source, point.metric);
+                    if let Err(e) = registry.publish(&suffix, &point).await { tracing::warn!(error=%e, "publish failed"); }
                 }
             }
         }
-    }
-}
-
-async fn publish_point(
-    session: &zenoh::Session,
-    key_prefix: &str,
-    point: &zensight_common::TelemetryPoint,
-    format: Format,
-) {
-    let key = format!("{}/{}/{}", key_prefix, point.source, point.metric);
-    match encode(point, format) {
-        Ok(payload) => {
-            if let Err(e) = session.put(&key, payload).await {
-                tracing::warn!(error = %e, key = %key, "publish failed");
-            }
-        }
-        Err(e) => tracing::warn!(error = %e, "encode failed"),
     }
 }
