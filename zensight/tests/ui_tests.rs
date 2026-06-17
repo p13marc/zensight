@@ -689,6 +689,38 @@ fn test_expectations_view() {
     );
 }
 
+/// Every specialized device view is wrapped with the shared nav header, so a
+/// Back button is present and clicking it clears the selection (returns to the
+/// dashboard). Regression guard for "specialized views had no Back button".
+#[test]
+fn test_specialized_device_view_has_back_button() {
+    use zensight::view::device::device_view;
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netlink, "router01");
+    let mut state = DeviceDetailState::new(device_id);
+    state.update(TelemetryPoint::new(
+        "router01",
+        Protocol::Netlink,
+        "iface/eth0/rx_bytes",
+        TelemetryValue::Counter(1000),
+    ));
+
+    let mut ui = simulator(device_view(&state));
+    // The specialized netlink content is present...
+    assert!(ui.find("Netlink: router01").is_ok());
+    // ...AND a Back button now wraps it.
+    assert!(ui.find("Back").is_ok());
+    let _ = ui.click("Back");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::ClearSelection)),
+        "clicking Back should clear the device selection"
+    );
+}
+
 /// The netlink specialized view renders interfaces + socket aggregates.
 #[test]
 fn test_netlink_specialized_view() {

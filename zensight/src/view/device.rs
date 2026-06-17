@@ -442,11 +442,30 @@ fn format_value_for_export(value: &TelemetryValue) -> String {
 pub fn device_view(state: &DeviceDetailState) -> Element<'_, Message> {
     // Try to use a specialized view for this protocol
     if let Some(specialized_view) = specialized::specialized_view(state) {
-        return specialized_view;
+        // Wrap it with the shared nav header so every device screen has a Back
+        // button + consistent chrome (specialized views don't render their own).
+        return with_device_nav(state, specialized_view);
     }
 
     // Fall back to generic view
     generic_device_view(state)
+}
+
+/// Wrap a specialized device view with the shared navigation header (Back +
+/// device identity + export buttons). Specialized views render only their domain
+/// content, so this guarantees consistent navigation chrome across every device.
+fn with_device_nav<'a>(
+    state: &'a DeviceDetailState,
+    content: Element<'a, Message>,
+) -> Element<'a, Message> {
+    column![
+        container(render_header(state)).padding([12, 20]),
+        rule::horizontal(1),
+        content,
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 /// Render the device detail view with syslog filter state.
@@ -461,7 +480,7 @@ pub fn device_view_with_syslog_filter<'a>(
 
     // For syslog devices, use the specialized view with filter state
     if state.device_id.protocol == Protocol::Syslog {
-        return specialized::syslog_view(state, syslog_filter);
+        return with_device_nav(state, specialized::syslog_view(state, syslog_filter));
     }
 
     // For other protocols, use the standard device view
