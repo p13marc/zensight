@@ -9,6 +9,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use zensight_common::{command_key, status_key};
 
+use crate::collector::CollectHandle;
+use crate::config::CollectConfig;
 use crate::sentinel::{
     ExpectationsConfig, LinkExpectation, NeighborExpectation, RouteExpectation, SentinelHandle,
     SocketExpectation,
@@ -16,6 +18,98 @@ use crate::sentinel::{
 
 /// Topic for the expectations control surface.
 pub const EXPECTATIONS_TOPIC: &str = "expectations";
+
+/// Topic for the collector-toggle control surface.
+pub const COLLECTION_TOPIC: &str = "collection";
+
+/// A command to reconfigure which collectors run, at runtime (P4).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CollectionCommand {
+    /// Replace the full toggle set (absent fields default to enabled).
+    Set { collect: CollectConfig },
+    /// Flip a single collector by name (interfaces/sockets/neighbors/routes/diagnostics).
+    Toggle { name: String, enabled: bool },
+}
+
+/// Apply a collection command to the live toggles.
+pub async fn apply_collection(handle: &CollectHandle, cmd: CollectionCommand) {
+    match cmd {
+        CollectionCommand::Set { collect } => {
+            tracing::info!("collection: replacing collector toggles via command");
+            handle.replace(collect).await;
+        }
+        CollectionCommand::Toggle { name, enabled } => {
+            if handle.set(&name, enabled).await {
+                tracing::info!(collector = %name, enabled, "collection: toggled collector");
+            } else {
+                tracing::warn!(collector = %name, "collection: unknown collector name");
+            }
+        }
+    }
+}
+
+/// Run the collection command subscriber + status queryable until session close.
+/// Commands: `<prefix>/@/commands/collection`; status: `<prefix>/@/status/collection`.
+pub async fn run_collection(session: Arc<zenoh::Session>, key_prefix: String, handle: CollectHandle) {
+    let cmd_key = command_key(&key_prefix, COLLECTION_TOPIC);
+    let stat_key = status_key(&key_prefix, COLLECTION_TOPIC);
+
+    let subscriber = match session.declare_subscriber(&cmd_key).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, key = %cmd_key, "collection: failed to subscribe to commands");
+            return;
+        }
+    };
+    let queryable = match session.declare_queryable(&stat_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %stat_key, "collection: failed to declare status queryable");
+            return;
+        }
+    };
+    tracing::info!(commands = %cmd_key, status = %stat_key, "collection: control channel ready");
+
+    loop {
+        tokio::select! {
+            sample = subscriber.recv_async() => {
+                match sample {
+                    Ok(sample) => {
+                        let payload = sample.payload().to_bytes();
+                        match serde_json::from_slice::<CollectionCommand>(&payload) {
+                            Ok(cmd) => apply_collection(&handle, cmd).await,
+                            Err(e) => tracing::warn!(error = %e, "collection: bad command"),
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "collection: command subscriber ended");
+                        return;
+                    }
+                }
+            }
+            query = queryable.recv_async() => {
+                match query {
+                    Ok(query) => {
+                        let snapshot = handle.snapshot().await;
+                        match serde_json::to_vec(&snapshot) {
+                            Ok(payload) => {
+                                if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                                    tracing::warn!(error = %e, "collection: failed to reply to status query");
+                                }
+                            }
+                            Err(e) => tracing::warn!(error = %e, "collection: failed to serialize status"),
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "collection: status queryable ended");
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// A command pushed to the sentinel from the GUI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +219,60 @@ mod tests {
         assert!(json.contains("add_socket"));
         let back: ExpectationCommand = serde_json::from_str(&json).unwrap();
         matches!(back, ExpectationCommand::AddSocket(_));
+    }
+
+    #[tokio::test]
+    async fn collection_toggle_and_set() {
+        let handle = CollectHandle::new(CollectConfig::default());
+        assert!(handle.snapshot().await.routes);
+
+        // Toggle one collector off, others untouched.
+        apply_collection(
+            &handle,
+            CollectionCommand::Toggle {
+                name: "routes".into(),
+                enabled: false,
+            },
+        )
+        .await;
+        let snap = handle.snapshot().await;
+        assert!(!snap.routes);
+        assert!(snap.interfaces && snap.sockets);
+
+        // Unknown name is a no-op (no panic, no change).
+        apply_collection(
+            &handle,
+            CollectionCommand::Toggle {
+                name: "bogus".into(),
+                enabled: false,
+            },
+        )
+        .await;
+        assert!(handle.snapshot().await.interfaces);
+
+        // Set replaces wholesale.
+        let cfg = CollectConfig {
+            interfaces: false,
+            sockets: false,
+            neighbors: false,
+            routes: false,
+            diagnostics: false,
+        };
+        apply_collection(&handle, CollectionCommand::Set { collect: cfg }).await;
+        let snap = handle.snapshot().await;
+        assert!(!snap.interfaces && !snap.diagnostics);
+    }
+
+    #[test]
+    fn collection_command_json_roundtrip() {
+        let cmd = CollectionCommand::Toggle {
+            name: "diagnostics".into(),
+            enabled: true,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("toggle") && json.contains("diagnostics"));
+        let back: CollectionCommand = serde_json::from_str(&json).unwrap();
+        matches!(back, CollectionCommand::Toggle { .. });
     }
 }
 

@@ -41,6 +41,8 @@ async fn main() -> Result<()> {
         Format::Json,
     );
     let mut runner = runner;
+    // Hot-swappable collector toggles, driven by the `collection` command channel.
+    let collect_handle = collector.collect_handle();
     runner.spawn(async move {
         collector.run().await;
     });
@@ -52,6 +54,16 @@ async fn main() -> Result<()> {
         let query_prefix = netlink_config.key_prefix.clone();
         runner.spawn(async move {
             zensight_sensor_netlink::query::run(query_session, query_prefix).await;
+        });
+    }
+
+    // Dynamic configuration (P4): toggle any collector at runtime, no restart.
+    {
+        let cmd_session = runner.session().clone();
+        let cmd_prefix = netlink_config.key_prefix.clone();
+        runner.spawn(async move {
+            zensight_sensor_netlink::command::run_collection(cmd_session, cmd_prefix, collect_handle)
+                .await;
         });
     }
 

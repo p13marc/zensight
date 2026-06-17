@@ -4,6 +4,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::RwLock;
+
 use nlink::netlink::diagnostics::{Bottleneck, DiagnosticReport, Diagnostics, Severity};
 use nlink::netlink::{
     Connection, Route, SockDiag, messages::NeighborMessage, messages::RouteMessage,
@@ -13,7 +15,7 @@ use nlink::sockdiag::{SocketFilter, SocketInfo, SocketState, TcpState};
 use zensight_common::Format;
 use zensight_sensor_core::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
 
-use crate::config::NetlinkConfig;
+use crate::config::{CollectConfig, NetlinkConfig};
 use crate::map::{
     self, DiagnosticsSummary, IfaceSample, NeighborSummary, RouteSummary, SocketCounts,
 };
@@ -21,10 +23,52 @@ use crate::map::{
 const AF_INET: u8 = 2;
 const AF_INET6: u8 = 10;
 
+/// Hot-swappable collector toggles, shared between the poll loop and the runtime
+/// `collection` command channel (same pattern as the sentinel's `SentinelHandle`).
+/// A `set`/`replace` takes effect on the next poll tick — no restart (P4).
+#[derive(Clone)]
+pub struct CollectHandle {
+    inner: Arc<RwLock<CollectConfig>>,
+}
+
+impl CollectHandle {
+    pub fn new(cfg: CollectConfig) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(cfg)),
+        }
+    }
+
+    /// Current toggles (cloned snapshot).
+    pub async fn snapshot(&self) -> CollectConfig {
+        self.inner.read().await.clone()
+    }
+
+    /// Replace the full toggle set.
+    pub async fn replace(&self, cfg: CollectConfig) {
+        *self.inner.write().await = cfg;
+    }
+
+    /// Toggle one collector by name. Returns `false` for an unknown name.
+    pub async fn set(&self, name: &str, enabled: bool) -> bool {
+        let mut g = self.inner.write().await;
+        match name {
+            "interfaces" => g.interfaces = enabled,
+            "sockets" => g.sockets = enabled,
+            "neighbors" => g.neighbors = enabled,
+            "routes" => g.routes = enabled,
+            "diagnostics" => g.diagnostics = enabled,
+            _ => return false,
+        }
+        true
+    }
+}
+
 /// Polls netlink on an interval and publishes interface + socket telemetry.
 pub struct Collector {
     host: String,
     config: NetlinkConfig,
+    /// Live collector toggles (runtime-reconfigurable via the command channel).
+    collect: CollectHandle,
     /// Cached advanced publishers so late-joining consumers get the current value
     /// of every metric on connect (via their AdvancedSubscriber `history()`),
     /// instead of waiting for the next poll.
@@ -44,11 +88,18 @@ impl Collector {
             format,
             AdvancedPublisherConfig::default(),
         );
+        let collect = CollectHandle::new(config.collect.clone());
         Self {
             host,
             config,
+            collect,
             registry,
         }
+    }
+
+    /// A clonable handle to this collector's live toggles, for the command channel.
+    pub fn collect_handle(&self) -> CollectHandle {
+        self.collect.clone()
     }
 
     pub async fn run(self) {
@@ -60,41 +111,43 @@ impl Collector {
             }
         };
         let sockdiag = Connection::<SockDiag>::new().ok();
-        if self.config.collect.sockets && sockdiag.is_none() {
+        if sockdiag.is_none() {
             tracing::warn!("sockdiag unavailable; socket telemetry disabled");
         }
 
         // The diagnostics scanner takes ownership of its own Route connection.
-        let diagnostics = if self.config.collect.diagnostics {
-            match Connection::<Route>::new() {
-                Ok(c) => Some(Diagnostics::new(c)),
-                Err(e) => {
-                    tracing::warn!(error = %e, "diagnostics connection failed; disabled");
-                    None
-                }
+        // Opened unconditionally (cheap, unprivileged) so the `diagnostics`
+        // toggle can be flipped on at runtime without a restart.
+        let diagnostics = match Connection::<Route>::new() {
+            Ok(c) => Some(Diagnostics::new(c)),
+            Err(e) => {
+                tracing::warn!(error = %e, "diagnostics connection failed; disabled");
+                None
             }
-        } else {
-            None
         };
 
         let mut tick = tokio::time::interval(Duration::from_secs(self.config.poll_interval_secs));
         loop {
             tick.tick().await;
-            if self.config.collect.interfaces {
+            // Re-read live toggles each tick (runtime-reconfigurable, P4).
+            let collect = self.collect.snapshot().await;
+            if collect.interfaces {
                 self.poll_interfaces(&route).await;
             }
-            if self.config.collect.sockets
+            if collect.sockets
                 && let Some(sd) = &sockdiag
             {
                 self.poll_sockets(sd).await;
             }
-            if self.config.collect.neighbors {
+            if collect.neighbors {
                 self.poll_neighbors(&route).await;
             }
-            if self.config.collect.routes {
+            if collect.routes {
                 self.poll_routes(&route).await;
             }
-            if let Some(diag) = &diagnostics {
+            if collect.diagnostics
+                && let Some(diag) = &diagnostics
+            {
                 self.poll_diagnostics(diag).await;
             }
         }
