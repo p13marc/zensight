@@ -175,6 +175,7 @@ impl Collector {
 /// Aggregate a set of sockdiag results into [`SocketCounts`]. Pure; unit-tested.
 pub fn aggregate_sockets(socks: &[SocketInfo]) -> SocketCounts {
     let mut c = SocketCounts::default();
+    let mut rtts: Vec<u64> = Vec::new();
     for s in socks {
         let SocketInfo::Inet(inet) = s else { continue };
         match inet.state {
@@ -190,9 +191,24 @@ pub fn aggregate_sockets(socks: &[SocketInfo]) -> SocketCounts {
         if let Some(ti) = &inet.tcp_info {
             c.retransmits_total += ti.retrans as u64;
             c.max_rtt_us = c.max_rtt_us.max(ti.rtt as u64);
+            if ti.rtt > 0 {
+                rtts.push(ti.rtt as u64);
+            }
         }
     }
+    c.rtt_p50_us = percentile(&mut rtts, 50);
+    c.rtt_p95_us = percentile(&mut rtts, 95);
     c
+}
+
+/// Nearest-rank percentile of a sample set (sorts in place). 0 if empty.
+fn percentile(values: &mut [u64], p: u8) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    let rank = ((p as usize * values.len()).div_ceil(100)).max(1);
+    values[rank - 1]
 }
 
 /// Aggregate route messages into a [`RouteSummary`].
@@ -235,4 +251,20 @@ pub fn aggregate_neighbors(neighbors: &[NeighborMessage]) -> NeighborSummary {
         }
     }
     n
+}
+
+#[cfg(test)]
+mod tests {
+    use super::percentile;
+
+    #[test]
+    fn percentile_nearest_rank() {
+        assert_eq!(percentile(&mut [], 50), 0);
+        assert_eq!(percentile(&mut [10], 50), 10);
+        // p50 of 1..=10 (nearest-rank) = 5th value = 5; p95 = 10th = 10.
+        let mut v: Vec<u64> = (1..=10).collect();
+        assert_eq!(percentile(&mut v, 50), 5);
+        assert_eq!(percentile(&mut v, 95), 10);
+        assert_eq!(percentile(&mut v, 100), 10);
+    }
 }

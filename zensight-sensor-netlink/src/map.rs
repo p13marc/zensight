@@ -64,6 +64,9 @@ pub struct SocketCounts {
     pub close_wait: u64,
     pub retransmits_total: u64,
     pub max_rtt_us: u64,
+    /// RTT percentiles across established sockets (microseconds).
+    pub rtt_p50_us: u64,
+    pub rtt_p95_us: u64,
 }
 
 fn point(host: &str, metric: impl Into<String>, value: TelemetryValue) -> TelemetryPoint {
@@ -178,6 +181,16 @@ pub fn socket_points(host: &str, c: &SocketCounts) -> Vec<TelemetryPoint> {
             host,
             "sockets/tcp/max_rtt_us",
             TelemetryValue::Gauge(c.max_rtt_us as f64),
+        ),
+        point(
+            host,
+            "sockets/tcp/rtt_p50_us",
+            TelemetryValue::Gauge(c.rtt_p50_us as f64),
+        ),
+        point(
+            host,
+            "sockets/tcp/rtt_p95_us",
+            TelemetryValue::Gauge(c.rtt_p95_us as f64),
         ),
     ]
 }
