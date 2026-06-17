@@ -83,11 +83,22 @@ pub fn to_view(a: &flowscope::OwnedAnomaly) -> AnomalyView {
 
 /// Build a netring `Monitor` from config plus the channels it emits on.
 ///
-/// Returns the built `Monitor` and the receiving ends. The caller spawns the
-/// monitor's run loop and the drain tasks.
+/// Returns the built `Monitor`, the receiving ends, and a telemetry-channel
+/// **keepalive** sender. The caller must hold the keepalive for the monitor's
+/// lifetime (move it into the monitor-run task): it keeps the telemetry channel
+/// open even when no telemetry-producing collector (e.g. bandwidth) is enabled,
+/// so the drain's "monitor finished" detection (channel close) fires only when
+/// the monitor actually stops — not immediately at startup.
 pub fn build(
     cfg: &NetringConfig,
-) -> Result<(netring::monitor::Monitor, MonitorChannels), Box<dyn std::error::Error>> {
+) -> Result<
+    (
+        netring::monitor::Monitor,
+        MonitorChannels,
+        mpsc::UnboundedSender<TelemetryPoint>,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let (tel_tx, tel_rx) = mpsc::unbounded_channel::<TelemetryPoint>();
     let (anom_tx, anom_rx) = mpsc::unbounded_channel::<flowscope::OwnedAnomaly>();
     let flow_started = Arc::new(AtomicU64::new(0));
@@ -198,6 +209,8 @@ pub fn build(
     b = b.sink(ChannelSink::new(anom_tx));
 
     let monitor = b.build()?;
+    // Keepalive: a spare sender the caller holds for the monitor's lifetime.
+    let keepalive = tel_tx.clone();
     Ok((
         monitor,
         MonitorChannels {
@@ -212,5 +225,6 @@ pub fn build(
             tcp_resets,
             tcp_refused,
         },
+        keepalive,
     ))
 }

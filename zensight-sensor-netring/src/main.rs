@@ -43,8 +43,9 @@ async fn main() -> Result<()> {
         Format::Json,
     ));
 
-    // Build the netring monitor + drain channels.
-    let (mon, channels) = monitor::build(&cfg).map_err(|e| anyhow::anyhow!("{}", e))?;
+    // Build the netring monitor + drain channels (+ telemetry-channel keepalive).
+    let (mon, channels, keepalive) =
+        monitor::build(&cfg).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let is_pcap = cfg.pcap.is_some();
     let flow_period = cfg.bandwidth_period_secs;
@@ -66,7 +67,10 @@ async fn main() -> Result<()> {
     ));
 
     // Monitor run loop: pcap replay (bounded) or live capture (until signal).
+    // Holds the telemetry-channel keepalive so the drain sees the channel close
+    // (and flushes its final aggregate) only when the monitor actually stops.
     runner.spawn(async move {
+        let _keepalive = keepalive;
         let result = if is_pcap {
             mon.replay().await
         } else {
