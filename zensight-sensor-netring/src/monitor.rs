@@ -2,12 +2,19 @@
 //! publishing via channels (handlers stay cheap; publishing happens off the
 //! capture path).
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use zensight_common::TelemetryPoint;
+use zensight_common::{FlowRecord, TelemetryPoint};
+
+/// Bounded ring of recent ended-flow records served via `@/query/flows`.
+pub type FlowRing = Arc<Mutex<VecDeque<FlowRecord>>>;
+
+/// Max recent flows retained for the on-demand `@/query/flows` channel.
+const FLOW_RING_CAP: usize = 512;
 
 use flowscope::EndReason;
 use flowscope::detect::patterns::{PortScanDetector, ScanScore, ScanVerdict};
@@ -35,6 +42,9 @@ pub struct MonitorChannels {
     /// drain task takes (clears) this each window to compute duration percentiles,
     /// so it stays bounded and yields a windowed distribution.
     pub flow_durations_ms: Arc<Mutex<Vec<u64>>>,
+    /// Bounded ring of recent ended-flow detail records (5-tuple, volume,
+    /// duration, close reason) for the on-demand `@/query/flows` channel.
+    pub flow_records: FlowRing,
     /// TCP RST counters: total resets and the subset that are connection refusals
     /// (zero-payload RST = "connection refused" vs a mid-transfer abort).
     pub tcp_resets: Arc<AtomicU64>,
@@ -107,6 +117,7 @@ pub fn build(
     let flow_packets = Arc::new(AtomicU64::new(0));
     let flow_retransmits = Arc::new(AtomicU64::new(0));
     let flow_durations_ms = Arc::new(Mutex::new(Vec::<u64>::new()));
+    let flow_records: FlowRing = Arc::new(Mutex::new(VecDeque::with_capacity(FLOW_RING_CAP)));
     let tcp_resets = Arc::new(AtomicU64::new(0));
     let tcp_refused = Arc::new(AtomicU64::new(0));
 
@@ -137,17 +148,37 @@ pub fn build(
         let packets = flow_packets.clone();
         let retransmits = flow_retransmits.clone();
         let durations = flow_durations_ms.clone();
+        let records = flow_records.clone();
         b = b.on_ctx::<FlowEnded<Tcp>>(move |e: &FlowEnded<Tcp>, _ctx: &mut Ctx<'_>| {
             ended.fetch_add(1, Ordering::Relaxed);
             bytes.fetch_add(e.stats.total_bytes(), Ordering::Relaxed);
             packets.fetch_add(e.stats.total_packets(), Ordering::Relaxed);
             retransmits.fetch_add(e.stats.total_retransmits(), Ordering::Relaxed);
+            let duration_ms = e.stats.duration().as_millis() as u64;
             // Record the flow's lifetime for windowed duration percentiles. Guard
             // against unbounded growth if the drain task ever stalls.
             if let Ok(mut d) = durations.lock()
                 && d.len() < 1_000_000
             {
-                d.push(e.stats.duration().as_millis() as u64);
+                d.push(duration_ms);
+            }
+            // Record the full flow detail into the bounded ring for @/query/flows.
+            let proto = e.l4.map(|p| p.to_string().to_lowercase()).unwrap_or_else(|| "tcp".into());
+            let reason = format!("{:?}", e.reason).to_lowercase();
+            let rec = crate::map::flow_record(
+                e.key.a.to_string(),
+                e.key.b.to_string(),
+                &proto,
+                e.stats.total_bytes(),
+                e.stats.total_packets(),
+                duration_ms,
+                &reason,
+            );
+            if let Ok(mut r) = records.lock() {
+                if r.len() == FLOW_RING_CAP {
+                    r.pop_front();
+                }
+                r.push_back(rec);
             }
             Ok(())
         });
@@ -222,6 +253,7 @@ pub fn build(
             flow_packets,
             flow_retransmits,
             flow_durations_ms,
+            flow_records,
             tcp_resets,
             tcp_refused,
         },

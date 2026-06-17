@@ -55,6 +55,14 @@ async fn main() -> Result<()> {
     // after an anomaly fired.
     runner.spawn(zensight_sensor_core::serve_alerts_query(reporter.clone()));
 
+    // On-demand flow detail query channel (P2): serves the recent-flow ring.
+    {
+        let q_session = runner.session().clone();
+        let q_prefix = key_prefix.clone();
+        let flows = channels.flow_records.clone();
+        runner.spawn(zensight_sensor_netring::query::run(q_session, q_prefix, flows));
+    }
+
     // Drain task (telemetry + anomalies + periodic flow aggregates).
     runner.spawn(publish::run_drains(
         channels,

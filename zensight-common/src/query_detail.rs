@@ -34,6 +34,24 @@ pub struct NeighborRecord {
     pub is_router: bool,
 }
 
+/// One recent network flow (netring), served on demand from a bounded ring of
+/// the most-recently-ended flows. The 5-tuple + volume + lifetime + close reason
+/// — the NetFlow/IPFIX-style detail behind the streamed flow aggregates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlowRecord {
+    /// Initiator endpoint `ip:port`.
+    pub src: String,
+    /// Responder endpoint `ip:port`.
+    pub dst: String,
+    /// L4 protocol label (e.g. `"tcp"`).
+    pub proto: String,
+    pub bytes: u64,
+    pub packets: u64,
+    pub duration_ms: u64,
+    /// How the flow ended: `fin` / `rst` / `idle_timeout` / `evicted` / ...
+    pub reason: String,
+}
+
 /// One TCP socket (served filterable by state/port).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SocketRecord {

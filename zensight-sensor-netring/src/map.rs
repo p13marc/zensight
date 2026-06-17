@@ -4,7 +4,32 @@
 //! without privileges. `monitor.rs` decomposes netring callbacks into these
 //! plain views; here we map them to [`TelemetryPoint`]s and [`Alert`]s.
 
-use zensight_common::{Alert, AlertKind, AlertSeverity, Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{
+    Alert, AlertKind, AlertSeverity, FlowRecord, Protocol, TelemetryPoint, TelemetryValue,
+};
+
+/// Build a [`FlowRecord`] (on-demand flow detail) from already-extracted fields.
+/// Kept pure so its shape is unit-testable without the netring capture machinery.
+#[allow(clippy::too_many_arguments)]
+pub fn flow_record(
+    src: String,
+    dst: String,
+    proto: &str,
+    bytes: u64,
+    packets: u64,
+    duration_ms: u64,
+    reason: &str,
+) -> FlowRecord {
+    FlowRecord {
+        src,
+        dst,
+        proto: proto.to_string(),
+        bytes,
+        packets,
+        duration_ms,
+        reason: reason.to_string(),
+    }
+}
 
 /// A flattened anomaly, decomposed from `flowscope::OwnedAnomaly`.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -250,6 +275,25 @@ mod tests {
         assert_eq!(pts[1].value, TelemetryValue::Gauge(100.0));
         // Empty window → no points (don't clobber the cached gauge to 0).
         assert!(flow_latency_points("s", &mut []).is_empty());
+    }
+
+    #[test]
+    fn flow_record_shape() {
+        let r = flow_record(
+            "10.0.0.1:5555".into(),
+            "1.1.1.1:443".into(),
+            "tcp",
+            694,
+            10,
+            100,
+            "fin",
+        );
+        assert_eq!(r.src, "10.0.0.1:5555");
+        assert_eq!(r.dst, "1.1.1.1:443");
+        assert_eq!(r.proto, "tcp");
+        assert_eq!(r.bytes, 694);
+        assert_eq!(r.duration_ms, 100);
+        assert_eq!(r.reason, "fin");
     }
 
     #[test]
