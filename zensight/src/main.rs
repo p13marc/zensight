@@ -1,7 +1,7 @@
 //! ZenSight - Observability frontend for Zenoh telemetry.
 //!
 //! This application subscribes to `zensight/**` and displays telemetry
-//! from all connected bridges (SNMP, Syslog, gNMI, etc.).
+//! from all connected sensors (SNMP, Syslog, gNMI, etc.).
 
 use std::env;
 

@@ -6,7 +6,7 @@
     // listen: ["tcp/0.0.0.0:7448"],    // Listen endpoints (if peer/router)
   },
 
-  // NetFlow/IPFIX bridge settings
+  // NetFlow/IPFIX sensor settings
   netflow: {
     // Key expression prefix for publishing
     key_prefix: "zensight/netflow",

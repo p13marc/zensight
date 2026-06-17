@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// A single telemetry data point emitted by bridges.
+/// A single telemetry data point emitted by sensors.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelemetryPoint {
     /// Unix epoch milliseconds when the measurement was taken.
@@ -138,6 +138,10 @@ pub enum Protocol {
     Opcua,
     Modbus,
     Sysinfo,
+    /// Linux kernel networking state (interfaces, sockets, routes) via netlink.
+    Netlink,
+    /// Wire-level packet/flow telemetry via netring (AF_PACKET / AF_XDP).
+    Netring,
 }
 
 impl Protocol {
@@ -151,6 +155,8 @@ impl Protocol {
             Protocol::Opcua => "opcua",
             Protocol::Modbus => "modbus",
             Protocol::Sysinfo => "sysinfo",
+            Protocol::Netlink => "netlink",
+            Protocol::Netring => "netring",
         }
     }
 }
@@ -173,6 +179,8 @@ impl std::str::FromStr for Protocol {
             "opcua" => Ok(Protocol::Opcua),
             "modbus" => Ok(Protocol::Modbus),
             "sysinfo" => Ok(Protocol::Sysinfo),
+            "netlink" => Ok(Protocol::Netlink),
+            "netring" => Ok(Protocol::Netring),
             _ => Err(()),
         }
     }

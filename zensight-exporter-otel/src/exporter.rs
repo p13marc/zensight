@@ -164,7 +164,9 @@ impl OtelExporter {
         };
 
         let meter = meter_provider.as_ref().map(|mp| mp.meter("zensight"));
-        let logger = logger_provider.as_ref().map(|lp| lp.logger("zensight.syslog"));
+        let logger = logger_provider
+            .as_ref()
+            .map(|lp| lp.logger("zensight.syslog"));
 
         Ok(Self {
             meter_provider,
@@ -327,7 +329,13 @@ impl OtelExporter {
                     stats.metrics_failed += 1;
                     return;
                 }
-                gauges.insert(key, GaugeEntry { value, last_updated: Instant::now() });
+                gauges.insert(
+                    key,
+                    GaugeEntry {
+                        value,
+                        last_updated: Instant::now(),
+                    },
+                );
 
                 // Create/update gauge
                 let gauge = meter.f64_gauge(metric_name.clone()).build();
@@ -417,14 +425,16 @@ impl OtelExporter {
         info!("Shutting down OpenTelemetry exporter");
 
         if let Some(meter_provider) = &self.meter_provider
-            && let Err(e) = meter_provider.shutdown() {
-                error!("Error shutting down meter provider: {:?}", e);
-            }
+            && let Err(e) = meter_provider.shutdown()
+        {
+            error!("Error shutting down meter provider: {:?}", e);
+        }
 
         if let Some(logger_provider) = &self.logger_provider
-            && let Err(e) = logger_provider.shutdown() {
-                error!("Error shutting down logger provider: {:?}", e);
-            }
+            && let Err(e) = logger_provider.shutdown()
+        {
+            error!("Error shutting down logger provider: {:?}", e);
+        }
 
         info!("OpenTelemetry exporter shutdown complete");
         Ok(())

@@ -8,7 +8,7 @@ use iced::widget::{
 use iced::{Alignment, Element, Length, Theme};
 use iced_anim::widget::button;
 
-use zensight_common::Protocol;
+use zensight_common::{Alert as SensorAlert, AlertState as SensorAlertState, Protocol};
 
 use crate::message::{DeviceId, Message};
 use crate::view::formatting::{format_timestamp, format_value};
@@ -134,6 +134,17 @@ impl Severity {
 impl std::fmt::Display for Severity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.name())
+    }
+}
+
+impl From<zensight_common::AlertSeverity> for Severity {
+    fn from(s: zensight_common::AlertSeverity) -> Self {
+        use zensight_common::AlertSeverity;
+        match s {
+            AlertSeverity::Info => Severity::Info,
+            AlertSeverity::Warning => Severity::Warning,
+            AlertSeverity::Critical => Severity::Critical,
+        }
     }
 }
 
@@ -288,6 +299,21 @@ pub struct AlertsState {
     pub unacknowledged_count: usize,
     /// Test result message (None if not tested, Some(result) if tested).
     pub test_result: Option<String>,
+    /// Sensor-pushed alerts (anomalies + expectation violations), keyed by the
+    /// alert's stable `alert_key`. Lifecycle-managed: firing inserts/updates,
+    /// resolved removes. Rendered alongside rule-triggered alerts (Plan 07).
+    pub external: HashMap<String, SensorAlert>,
+}
+
+/// Outcome of ingesting a sensor-pushed alert, so the app can decide whether to
+/// raise a toast (new), stay quiet (update), or toast a recovery (resolved).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalAlertOutcome {
+    New,
+    Updated,
+    Resolved,
+    /// A resolve for an alert we weren't tracking — ignored.
+    Unknown,
 }
 
 impl AlertsState {
@@ -313,7 +339,55 @@ impl AlertsState {
             new_rule_severity: Severity::Warning,
             unacknowledged_count: 0,
             test_result: None,
+            external: HashMap::new(),
         }
+    }
+
+    /// Ingest a sensor-pushed alert. Firing alerts are inserted/updated by
+    /// `alert_key`; resolved alerts are removed. Returns what happened so the
+    /// caller can toast appropriately.
+    pub fn ingest_external(&mut self, alert: SensorAlert) -> ExternalAlertOutcome {
+        let key = alert.alert_key();
+        match alert.state {
+            SensorAlertState::Resolved => {
+                if self.external.remove(&key).is_some() {
+                    ExternalAlertOutcome::Resolved
+                } else {
+                    ExternalAlertOutcome::Unknown
+                }
+            }
+            SensorAlertState::Firing => {
+                let outcome = if self.external.contains_key(&key) {
+                    ExternalAlertOutcome::Updated
+                } else {
+                    ExternalAlertOutcome::New
+                };
+                self.external.insert(key, alert);
+                outcome
+            }
+        }
+    }
+
+    /// Clear an external alert by its key (resolve tombstone / Delete). Returns
+    /// the removed alert, if any.
+    pub fn clear_external(&mut self, alert_key: &str) -> Option<SensorAlert> {
+        self.external.remove(alert_key)
+    }
+
+    /// Iterate currently-firing sensor-pushed alerts, severity-then-recency order.
+    pub fn active_external(&self) -> Vec<&SensorAlert> {
+        let mut v: Vec<&SensorAlert> = self.external.values().collect();
+        v.sort_by(|a, b| {
+            b.severity
+                .cmp(&a.severity)
+                .then(b.timestamp.cmp(&a.timestamp))
+        });
+        v
+    }
+
+    /// Count of firing external alerts (for the sidebar badge).
+    pub fn external_count(&self) -> usize {
+        self.external.len()
     }
 
     /// Update the max alerts setting.
@@ -547,12 +621,15 @@ impl AlertsState {
 /// Render the alerts view.
 pub fn alerts_view(state: &AlertsState) -> Element<'_, Message> {
     let header = render_header(state);
+    let external_section = render_external_alerts_section(state);
     let new_rule_form = render_new_rule_form(state);
     let rules_section = render_rules_section(state);
     let alerts_section = render_alerts_section(state);
 
     let content = column![
         header,
+        rule::horizontal(1),
+        external_section,
         rule::horizontal(1),
         new_rule_form,
         rule::horizontal(1),
@@ -602,10 +679,24 @@ fn render_header(state: &AlertsState) -> Element<'_, Message> {
         row![].into()
     };
 
-    row![back_button, title, unack_badge]
-        .spacing(15)
-        .align_y(Alignment::Center)
-        .into()
+    let expectations_button = button(text("Expectations").size(13))
+        .on_press(Message::OpenExpectations)
+        .style(iced::widget::button::secondary);
+
+    let security_button = button(text("Security").size(13))
+        .on_press(Message::OpenSecurity)
+        .style(iced::widget::button::secondary);
+
+    row![
+        back_button,
+        title,
+        unack_badge,
+        expectations_button,
+        security_button
+    ]
+    .spacing(15)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 /// Render the new rule form.
@@ -772,6 +863,95 @@ fn render_rule_row(rule: &AlertRule) -> Element<'_, Message> {
 }
 
 /// Render the alerts section.
+/// Render the sensor-pushed alerts section (anomalies + expectation violations).
+fn render_external_alerts_section(state: &AlertsState) -> Element<'_, Message> {
+    let active = state.active_external();
+    let section_title = text(format!("Anomalies & Expectations ({})", active.len())).size(18);
+
+    if active.is_empty() {
+        return column![
+            section_title,
+            text("No active sensor alerts")
+                .size(14)
+                .style(|theme: &Theme| {
+                    text::Style {
+                        color: Some(crate::view::theme::colors(theme).text_dimmed()),
+                    }
+                })
+        ]
+        .spacing(10)
+        .into();
+    }
+
+    let mut list = Column::new().spacing(5);
+    for alert in active.iter().take(100) {
+        list = list.push(render_external_alert_row(alert));
+    }
+
+    column![section_title, list].spacing(10).into()
+}
+
+/// Render a single sensor-pushed alert row.
+fn render_external_alert_row<'a>(alert: &'a SensorAlert) -> Element<'a, Message> {
+    let severity: Severity = alert.severity.into();
+    let icon: Element<'a, Message> = match severity {
+        Severity::Critical => icons::status_error(IconSize::Small),
+        Severity::Warning => icons::status_warning(IconSize::Small),
+        Severity::Info => icons::info(IconSize::Small),
+    };
+
+    let severity_color = severity.color();
+    let severity_badge = text(severity.name())
+        .size(10)
+        .style(move |_theme: &Theme| text::Style {
+            color: Some(severity_color),
+        });
+
+    let kind = text(alert.kind.as_str())
+        .size(10)
+        .style(|theme: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(theme).text_dimmed()),
+        });
+
+    let summary: Element<'a, Message> = if alert.summary.len() > MAX_ALERT_MESSAGE_LEN {
+        let truncated = format!("{}...", &alert.summary[..MAX_ALERT_MESSAGE_LEN]);
+        tooltip(
+            text(truncated).size(13),
+            container(text(alert.summary.clone()).size(12))
+                .padding(8)
+                .max_width(400.0)
+                .style(container::rounded_box),
+            tooltip::Position::Bottom,
+        )
+        .into()
+    } else {
+        text(alert.summary.clone()).size(13).into()
+    };
+
+    let source = text(format!("{}/{}", alert.protocol, alert.source))
+        .size(11)
+        .style(|theme: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(theme).text_dimmed()),
+        });
+
+    let time = text(format_timestamp(alert.timestamp))
+        .size(11)
+        .style(|theme: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(theme).text_dimmed()),
+        });
+
+    Row::new()
+        .push(icon)
+        .push(severity_badge)
+        .push(kind)
+        .push(summary)
+        .push(source)
+        .push(time)
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into()
+}
+
 fn render_alerts_section(state: &AlertsState) -> Element<'_, Message> {
     let section_title = text(format!("Alert History ({})", state.alerts.len())).size(18);
 
@@ -964,5 +1144,56 @@ mod tests {
         assert_eq!(ComparisonOp::GreaterThan.symbol(), ">");
         assert_eq!(ComparisonOp::LessOrEqual.symbol(), "<=");
         assert_eq!(ComparisonOp::NotEqual.symbol(), "!=");
+    }
+
+    fn ext_alert(rule: &str, sev: zensight_common::AlertSeverity) -> SensorAlert {
+        SensorAlert::new(
+            "host1",
+            Protocol::Netlink,
+            zensight_common::AlertKind::Expectation,
+            rule,
+            sev,
+            "summary",
+        )
+    }
+
+    #[test]
+    fn ingest_external_lifecycle() {
+        use zensight_common::AlertSeverity;
+        let mut state = AlertsState::new();
+        let a = ext_alert("ssh-listening", AlertSeverity::Critical);
+        let key = a.alert_key();
+
+        assert_eq!(state.ingest_external(a.clone()), ExternalAlertOutcome::New);
+        assert_eq!(state.external_count(), 1);
+        // Same key again → Updated, no duplicate.
+        assert_eq!(
+            state.ingest_external(a.clone()),
+            ExternalAlertOutcome::Updated
+        );
+        assert_eq!(state.external_count(), 1);
+        // Resolve removes it.
+        assert_eq!(
+            state.ingest_external(a.resolved()),
+            ExternalAlertOutcome::Resolved
+        );
+        assert_eq!(state.external_count(), 0);
+        // Resolve again → Unknown.
+        let b = ext_alert("ssh-listening", AlertSeverity::Critical).resolved();
+        assert_eq!(state.ingest_external(b), ExternalAlertOutcome::Unknown);
+        // clear_external by key is a no-op now.
+        assert!(state.clear_external(&key).is_none());
+    }
+
+    #[test]
+    fn active_external_sorted_by_severity() {
+        use zensight_common::AlertSeverity;
+        let mut state = AlertsState::new();
+        state.ingest_external(ext_alert("a", AlertSeverity::Info));
+        state.ingest_external(ext_alert("b", AlertSeverity::Critical));
+        state.ingest_external(ext_alert("c", AlertSeverity::Warning));
+        let active = state.active_external();
+        assert_eq!(active[0].severity, AlertSeverity::Critical);
+        assert_eq!(active[2].severity, AlertSeverity::Info);
     }
 }

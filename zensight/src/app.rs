@@ -9,7 +9,7 @@ use iced::{Element, Length, Subscription, Task, Theme};
 use std::sync::LazyLock;
 
 use zensight_common::{
-    BridgeInfo, CorrelationEntry, HealthSnapshot, Protocol, TelemetryPoint, TelemetryValue,
+    CorrelationEntry, HealthSnapshot, Protocol, SensorInfo, TelemetryPoint, TelemetryValue,
     ZenohConfig,
 };
 
@@ -45,6 +45,8 @@ pub enum CurrentView {
     Settings,
     Alerts,
     Topology,
+    Expectations,
+    Security,
 }
 
 /// Application theme.
@@ -103,14 +105,19 @@ pub struct ZenSight {
     demo_mode: bool,
     /// Current theme.
     theme: AppTheme,
-    /// Bridge health snapshots, keyed by bridge name.
-    bridge_health: std::collections::HashMap<String, HealthSnapshot>,
-    /// Known bridges, keyed by bridge name.
-    known_bridges: std::collections::HashMap<String, BridgeInfo>,
+    /// Sensor health snapshots, keyed by sensor name.
+    sensor_health: std::collections::HashMap<String, HealthSnapshot>,
+    /// Known sensors, keyed by sensor name.
+    known_sensors: std::collections::HashMap<String, SensorInfo>,
     /// Device correlation entries, keyed by IP address.
     correlations: std::collections::HashMap<String, CorrelationEntry>,
     /// Toast notification state.
     toasts: ToastState,
+    /// Live Zenoh session handle (set on connect) for sending commands to
+    /// sensors. `None` while disconnected or in demo mode.
+    session: Option<std::sync::Arc<zenoh::Session>>,
+    /// Expectations authoring view state (netlink sentinel, Plan 08).
+    expectations: crate::view::expectations::ExpectationsState,
 }
 
 impl ZenSight {
@@ -208,10 +215,12 @@ impl ZenSight {
             stale_threshold_ms,
             demo_mode,
             theme,
-            bridge_health: std::collections::HashMap::new(),
-            known_bridges: std::collections::HashMap::new(),
+            sensor_health: std::collections::HashMap::new(),
+            known_sensors: std::collections::HashMap::new(),
             correlations: std::collections::HashMap::new(),
             toasts: ToastState::default(),
+            session: None,
+            expectations: crate::view::expectations::ExpectationsState::default(),
         };
 
         (app, Task::none())
@@ -235,7 +244,7 @@ impl ZenSight {
             }
 
             Message::HealthSnapshotReceived(snapshot) => {
-                self.bridge_health.insert(snapshot.bridge.clone(), snapshot);
+                self.sensor_health.insert(snapshot.sensor.clone(), snapshot);
             }
 
             Message::DeviceLivenessReceived(protocol, liveness) => {
@@ -245,19 +254,50 @@ impl ZenSight {
             Message::ErrorReportReceived(report) => {
                 // Log the error for now; could add an error log view later
                 tracing::warn!(
-                    bridge = ?report.device,
+                    sensor = ?report.device,
                     error_type = ?report.error_type,
                     message = %report.message,
-                    "Bridge error report received"
+                    "Sensor error report received"
                 );
             }
 
-            Message::BridgeInfoReceived(info) => {
-                self.known_bridges.insert(info.name.clone(), info);
+            Message::SensorInfoReceived(info) => {
+                self.known_sensors.insert(info.name.clone(), info);
             }
 
             Message::CorrelationReceived(entry) => {
                 self.correlations.insert(entry.ip.clone(), entry);
+            }
+
+            Message::AlertReceived(alert) => {
+                use crate::view::alerts::ExternalAlertOutcome;
+                let summary = alert.summary.clone();
+                let severity = alert.severity;
+                match self.alerts.ingest_external(alert) {
+                    ExternalAlertOutcome::New => {
+                        self.toasts.push(alert_toast_severity(severity), summary);
+                    }
+                    ExternalAlertOutcome::Resolved => {
+                        self.toasts
+                            .push(ToastSeverity::Success, format!("Resolved: {summary}"));
+                    }
+                    ExternalAlertOutcome::Updated | ExternalAlertOutcome::Unknown => {}
+                }
+                if self.current_view == CurrentView::Topology {
+                    self.topology.apply_alerts(&self.alerts.external);
+                }
+            }
+
+            Message::AlertCleared { alert_key, .. } => {
+                if let Some(alert) = self.alerts.clear_external(&alert_key) {
+                    self.toasts.push(
+                        ToastSeverity::Success,
+                        format!("Resolved: {}", alert.summary),
+                    );
+                }
+                if self.current_view == CurrentView::Topology {
+                    self.topology.apply_alerts(&self.alerts.external);
+                }
             }
 
             Message::Connecting => {
@@ -266,8 +306,9 @@ impl ZenSight {
                     crate::view::dashboard::ConnectionState::Connecting;
             }
 
-            Message::Connected => {
+            Message::Connected(session) => {
                 tracing::info!("Connected to Zenoh");
+                self.session = session;
                 self.dashboard.connected = true;
                 self.dashboard.connection_state =
                     crate::view::dashboard::ConnectionState::Connected;
@@ -276,21 +317,22 @@ impl ZenSight {
 
             Message::Disconnected(error) => {
                 tracing::warn!(error = %error, "Disconnected from Zenoh");
+                self.session = None;
                 self.dashboard.connected = false;
                 self.dashboard.connection_state =
                     crate::view::dashboard::ConnectionState::Disconnected;
                 self.dashboard.last_error = Some(error);
             }
 
-            Message::BridgeOnline(protocol) => {
-                tracing::info!(protocol = %protocol, "Bridge online (liveliness)");
-                // Bridge liveliness is informational - the bridge health system
-                // already tracks bridge status via HealthSnapshot messages.
-                // This provides instant notification when bridges appear.
+            Message::SensorOnline(protocol) => {
+                tracing::info!(protocol = %protocol, "Sensor online (liveliness)");
+                // Sensor liveliness is informational - the sensor health system
+                // already tracks sensor status via HealthSnapshot messages.
+                // This provides instant notification when sensors appear.
             }
 
-            Message::BridgeOffline(protocol) => {
-                tracing::warn!(protocol = %protocol, "Bridge offline (liveliness)");
+            Message::SensorOffline(protocol) => {
+                tracing::warn!(protocol = %protocol, "Sensor offline (liveliness)");
                 // Mark all devices from this protocol as potentially offline.
                 // The health system will update their status on the next poll.
             }
@@ -677,6 +719,7 @@ impl ZenSight {
             Message::OpenTopology => {
                 // Update topology from current device data before showing
                 self.topology.update_from_devices(&self.dashboard.devices);
+                self.topology.apply_alerts(&self.alerts.external);
                 self.set_view(CurrentView::Topology);
                 self.save_current_view();
             }
@@ -764,10 +807,129 @@ impl ZenSight {
             }
 
             Message::ApplySyslogFilters => {
-                // TODO: Send filter command to bridge via Zenoh
-                // For now, just mark as applied
+                // Build a syslog filter command and push it to the sensor's
+                // control channel. A stable filter id means re-applying replaces
+                // the same dynamic filter rather than stacking duplicates.
+                let f = &self.syslog_filter;
+                let mut filter = serde_json::Map::new();
+                if let Some(sev) = f.min_severity {
+                    filter.insert("min_severity".into(), serde_json::json!(sev));
+                }
+                if !f.selected_facilities.is_empty() {
+                    let facs: Vec<&String> = f.selected_facilities.iter().collect();
+                    filter.insert("include_facilities".into(), serde_json::json!(facs));
+                }
+                if !f.app_filter.is_empty() {
+                    filter.insert(
+                        "include_app_patterns".into(),
+                        serde_json::json!([{ "pattern": f.app_filter, "pattern_type": "glob" }]),
+                    );
+                }
+                if !f.message_filter.is_empty() {
+                    filter.insert(
+                        "include_message_patterns".into(),
+                        serde_json::json!([{ "pattern": f.message_filter, "pattern_type": "glob" }]),
+                    );
+                }
+                let command = serde_json::json!({
+                    "type": "add_filter",
+                    "id": "frontend-panel",
+                    "filter": serde_json::Value::Object(filter),
+                });
+                let key = zensight_common::command_key("zensight/syslog", "filter");
                 self.syslog_filter.mark_applied();
-                tracing::info!("Syslog filters applied (local only for now)");
+                return self.send_command(key, &command, "Syslog filters applied".to_string());
+            }
+
+            Message::CommandFeedback { success, message } => {
+                let severity = if success {
+                    ToastSeverity::Success
+                } else {
+                    ToastSeverity::Error
+                };
+                self.toasts.push(severity, message);
+            }
+
+            Message::OpenExpectations => {
+                self.set_view(CurrentView::Expectations);
+                return self.query_expectations();
+            }
+            Message::CloseExpectations => {
+                self.set_view(CurrentView::Dashboard);
+            }
+            Message::SetExpectationKind(kind) => {
+                self.expectations.new_kind = kind;
+            }
+            Message::SetExpectationName(name) => {
+                self.expectations.new_name = name;
+            }
+            Message::SetExpectationPort(port) => {
+                self.expectations.new_port = port;
+            }
+            Message::SetExpectationSeverity(sev) => {
+                self.expectations.new_severity = sev;
+            }
+            Message::AddExpectation => {
+                use crate::view::expectations::ExpKind;
+                let e = &self.expectations;
+                let sev = severity_str(e.new_severity);
+                if e.new_name.trim().is_empty() {
+                    self.toasts
+                        .push(ToastSeverity::Error, "Name/interface is required");
+                    return Task::none();
+                }
+                let command = match e.new_kind {
+                    ExpKind::SocketListen | ExpKind::SocketForbid => {
+                        let Ok(port) = e.new_port.trim().parse::<u16>() else {
+                            self.toasts
+                                .push(ToastSeverity::Error, "Port must be a number");
+                            return Task::none();
+                        };
+                        let field = if e.new_kind == ExpKind::SocketListen {
+                            "listen"
+                        } else {
+                            "forbid_listen"
+                        };
+                        serde_json::json!({
+                            "type": "add_socket",
+                            "name": e.new_name.trim(),
+                            field: port,
+                            "severity": sev,
+                        })
+                    }
+                    ExpKind::LinkUp => serde_json::json!({
+                        "type": "add_link",
+                        "iface": e.new_name.trim(),
+                        "up": true,
+                        "severity": sev,
+                    }),
+                };
+                let key = zensight_common::command_key("zensight/netlink", "expectations");
+                return self
+                    .send_command(key, &command, "Expectation pushed".to_string())
+                    .chain(self.query_expectations());
+            }
+            Message::RemoveExpectation(rule) => {
+                let command = serde_json::json!({ "type": "remove", "rule": rule });
+                let key = zensight_common::command_key("zensight/netlink", "expectations");
+                return self
+                    .send_command(key, &command, format!("Removed {rule}"))
+                    .chain(self.query_expectations());
+            }
+            Message::RefreshExpectations => {
+                return self.query_expectations();
+            }
+            Message::ExpectationStatusReceived(json) => {
+                self.expectations.current = crate::view::expectations::parse_status(&json);
+                self.expectations.status_note =
+                    Some(format!("{} configured", self.expectations.current.len()));
+            }
+
+            Message::OpenSecurity => {
+                self.set_view(CurrentView::Security);
+            }
+            Message::CloseSecurity => {
+                self.set_view(CurrentView::Dashboard);
             }
 
             Message::ClearSyslogFilters => {
@@ -849,6 +1011,76 @@ impl ZenSight {
         }
     }
 
+    /// Send a command to a sensor's control channel over Zenoh.
+    ///
+    /// `key` is the full command key (build with
+    /// [`zensight_common::command_key`]); `body` is serialized as JSON. Returns
+    /// a [`Task`] that publishes asynchronously and reports the outcome via
+    /// [`Message::CommandFeedback`]. No-op feedback if disconnected.
+    fn send_command<T: serde::Serialize>(
+        &self,
+        key: String,
+        body: &T,
+        ok_message: String,
+    ) -> Task<Message> {
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::CommandFeedback {
+                success: false,
+                message: "Not connected to Zenoh".to_string(),
+            });
+        };
+        let payload = match serde_json::to_vec(body) {
+            Ok(p) => p,
+            Err(e) => {
+                return Task::done(Message::CommandFeedback {
+                    success: false,
+                    message: format!("Failed to encode command: {e}"),
+                });
+            }
+        };
+        Task::future(async move {
+            match session.put(&key, payload).await {
+                Ok(()) => Message::CommandFeedback {
+                    success: true,
+                    message: ok_message,
+                },
+                Err(e) => Message::CommandFeedback {
+                    success: false,
+                    message: format!("Command failed: {e}"),
+                },
+            }
+        })
+    }
+
+    /// Query the netlink sentinel's current expectation set (status queryable).
+    fn query_expectations(&self) -> Task<Message> {
+        let Some(session) = self.session.clone() else {
+            return Task::none();
+        };
+        let key = zensight_common::status_key("zensight/netlink", "expectations");
+        Task::future(async move {
+            match session.get(&key).await {
+                Ok(replies) => {
+                    if let Ok(reply) = replies.recv_async().await
+                        && let Ok(sample) = reply.result()
+                    {
+                        let body =
+                            String::from_utf8_lossy(&sample.payload().to_bytes()).to_string();
+                        return Message::ExpectationStatusReceived(body);
+                    }
+                    Message::CommandFeedback {
+                        success: false,
+                        message: "No sentinel responded".to_string(),
+                    }
+                }
+                Err(e) => Message::CommandFeedback {
+                    success: false,
+                    message: format!("Status query failed: {e}"),
+                },
+            }
+        })
+    }
+
     /// Handle Escape key - close dialogs or go back.
     fn handle_escape(&mut self) {
         match self.current_view {
@@ -887,6 +1119,9 @@ impl ZenSight {
                     }
                 }
             }
+            CurrentView::Expectations | CurrentView::Security => {
+                self.set_view(CurrentView::Dashboard);
+            }
             CurrentView::Dashboard => {
                 // Clear search filter if set
                 if !self.dashboard.search_filter.is_empty() {
@@ -919,12 +1154,18 @@ impl ZenSight {
     pub fn view(&self) -> Element<'_, Message> {
         use iced::widget::{row, stack};
 
-        let unack = self.alerts.unacknowledged_count;
+        // Badge counts both unacknowledged rule alerts and active sensor-pushed
+        // alerts (anomalies + expectation violations).
+        let unack = self.alerts.unacknowledged_count + self.alerts.external_count();
 
         let main_view: Element<'_, Message> = match self.current_view {
             CurrentView::Settings => settings_view(&self.settings),
             CurrentView::Alerts => alerts_view(&self.alerts),
             CurrentView::Topology => topology_view(&self.topology, self.theme),
+            CurrentView::Expectations => {
+                crate::view::expectations::expectations_view(&self.expectations)
+            }
+            CurrentView::Security => crate::view::security::security_view(&self.alerts),
             CurrentView::Device => {
                 if let Some(ref device_state) = self.selected_device {
                     device_view_with_syslog_filter(device_state, &self.syslog_filter)
@@ -935,7 +1176,7 @@ impl ZenSight {
                         unack,
                         &self.groups,
                         &self.overview,
-                        &self.bridge_health,
+                        &self.sensor_health,
                     )
                 }
             }
@@ -945,7 +1186,7 @@ impl ZenSight {
                 unack,
                 &self.groups,
                 &self.overview,
-                &self.bridge_health,
+                &self.sensor_health,
             ),
         };
 
@@ -985,7 +1226,7 @@ impl ZenSight {
         self.theme.to_iced_theme()
     }
 
-    /// Handle device liveness update from a bridge.
+    /// Handle device liveness update from a sensor.
     fn handle_device_liveness(
         &mut self,
         protocol_str: &str,
@@ -1210,6 +1451,26 @@ fn telemetry_to_f64(value: &TelemetryValue) -> Option<f64> {
         TelemetryValue::Counter(v) => Some(*v as f64),
         TelemetryValue::Gauge(v) => Some(*v),
         _ => None,
+    }
+}
+
+/// Lowercase wire string for a frontend severity (matches common::AlertSeverity).
+fn severity_str(s: crate::view::alerts::Severity) -> &'static str {
+    use crate::view::alerts::Severity;
+    match s {
+        Severity::Info => "info",
+        Severity::Warning => "warning",
+        Severity::Critical => "critical",
+    }
+}
+
+/// Map a sensor alert severity onto a toast severity.
+fn alert_toast_severity(severity: zensight_common::AlertSeverity) -> ToastSeverity {
+    use zensight_common::AlertSeverity;
+    match severity {
+        AlertSeverity::Info => ToastSeverity::Info,
+        AlertSeverity::Warning => ToastSeverity::Warning,
+        AlertSeverity::Critical => ToastSeverity::Error,
     }
 }
 

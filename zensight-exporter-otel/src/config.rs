@@ -19,8 +19,7 @@ pub enum ConfigError {
 }
 
 /// Complete exporter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ExporterConfig {
     /// Zenoh connection settings.
     #[serde(default)]
@@ -246,7 +245,6 @@ impl ExporterConfig {
         Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod tests {

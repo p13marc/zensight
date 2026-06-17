@@ -450,7 +450,8 @@ impl MetricCollector {
         write_or_count!(
             output,
             "{}_exporter_points_received_total {}",
-            self.prometheus_config.prefix, stats.points_received
+            self.prometheus_config.prefix,
+            stats.points_received
         );
 
         write_or_count!(
@@ -461,7 +462,8 @@ impl MetricCollector {
         write_or_count!(
             output,
             "{}_exporter_points_accepted_total {}",
-            self.prometheus_config.prefix, stats.points_accepted
+            self.prometheus_config.prefix,
+            stats.points_accepted
         );
 
         write_or_count!(
@@ -472,7 +474,8 @@ impl MetricCollector {
         write_or_count!(
             output,
             "{}_exporter_points_filtered_total {}",
-            self.prometheus_config.prefix, stats.points_filtered
+            self.prometheus_config.prefix,
+            stats.points_filtered
         );
 
         // Record render errors in stats

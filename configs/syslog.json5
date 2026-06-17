@@ -7,7 +7,7 @@
     // serialization: "json",           // "json" or "cbor"
   },
 
-  // Syslog bridge settings
+  // Syslog sensor settings
   syslog: {
     // Key expression prefix for publishing
     key_prefix: "zensight/syslog",

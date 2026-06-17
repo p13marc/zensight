@@ -1,0 +1,33 @@
+[package]
+name = "zensight-sensor-netlink"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Zenoh sensor for Linux kernel networking state (interfaces, sockets, routes) via netlink"
+license = "Apache-2.0"
+
+[[bin]]
+name = "zensight-sensor-netlink"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+zensight-common = { path = "../zensight-common" }
+zensight-sensor-core = { path = "../zensight-sensor-core" }
+
+# Netlink (Linux kernel networking) — reads are unprivileged.
+nlink = { git = "https://github.com/p13marc/nlink", features = ["sockdiag"] }
+
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = "0.1"
+zenoh.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+json5.workspace = true
+clap = { workspace = true, features = ["derive"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+anyhow.workspace = true
+hostname = "0.4"

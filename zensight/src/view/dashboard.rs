@@ -62,12 +62,12 @@ pub struct DeviceState {
     /// Whether this device is healthy (received recent updates).
     /// This is based on local staleness detection.
     pub is_healthy: bool,
-    /// Device status from bridge liveness tracking.
-    /// This is more accurate as it comes from the bridge's polling results.
-    pub bridge_status: DeviceStatus,
-    /// Number of consecutive failures reported by bridge.
+    /// Device status from sensor liveness tracking.
+    /// This is more accurate as it comes from the sensor's polling results.
+    pub sensor_status: DeviceStatus,
+    /// Number of consecutive failures reported by sensor.
     pub consecutive_failures: u32,
-    /// Last error message from bridge (if any).
+    /// Last error message from sensor (if any).
     pub last_error: Option<String>,
 }
 
@@ -80,7 +80,7 @@ impl DeviceState {
             metric_count: 0,
             metrics: HashMap::new(),
             is_healthy: true,
-            bridge_status: DeviceStatus::Unknown,
+            sensor_status: DeviceStatus::Unknown,
             consecutive_failures: 0,
             last_error: None,
         }
@@ -91,26 +91,26 @@ impl DeviceState {
         self.is_healthy = (now - self.last_update) < stale_threshold_ms;
     }
 
-    /// Update device status from bridge liveness data.
+    /// Update device status from sensor liveness data.
     pub fn update_from_liveness(
         &mut self,
         status: DeviceStatus,
         consecutive_failures: u32,
         last_error: Option<String>,
     ) {
-        self.bridge_status = status;
+        self.sensor_status = status;
         self.consecutive_failures = consecutive_failures;
         self.last_error = last_error;
     }
 
     /// Get the effective status for display.
     ///
-    /// Combines local staleness detection with bridge liveness status.
-    /// Bridge status takes precedence when available.
+    /// Combines local staleness detection with sensor liveness status.
+    /// Sensor status takes precedence when available.
     pub fn effective_status(&self) -> DeviceStatus {
-        // If bridge has reported a status other than Unknown, use it
-        if self.bridge_status != DeviceStatus::Unknown {
-            return self.bridge_status;
+        // If sensor has reported a status other than Unknown, use it
+        if self.sensor_status != DeviceStatus::Unknown {
+            return self.sensor_status;
         }
 
         // Fall back to local staleness detection
@@ -327,13 +327,13 @@ pub fn dashboard_view<'a>(
     unacknowledged_alerts: usize,
     groups: &'a GroupsState,
     overview: &'a OverviewState,
-    bridge_health: &'a HashMap<String, HealthSnapshot>,
+    sensor_health: &'a HashMap<String, HealthSnapshot>,
 ) -> Element<'a, Message> {
     // Compute filtered devices once and pass through to avoid redundant work
     let filtered = state.filtered_devices();
 
     let header = render_header(state, theme, unacknowledged_alerts);
-    let bridge_summary = render_bridge_health_summary(bridge_health);
+    let sensor_summary = render_sensor_health_summary(sensor_health);
     let filters = render_protocol_filters(state, &filtered);
     let group_filters = group_filter_bar(groups);
     let overview_panel = overview_section(overview, &state.devices);
@@ -341,7 +341,7 @@ pub fn dashboard_view<'a>(
 
     let content = column![
         header,
-        bridge_summary,
+        sensor_summary,
         filters,
         group_filters,
         overview_panel,
@@ -490,24 +490,24 @@ fn render_header(
     header_col.spacing(5).into()
 }
 
-/// Render bridge health summary bar.
-fn render_bridge_health_summary(
-    bridge_health: &HashMap<String, HealthSnapshot>,
+/// Render sensor health summary bar.
+fn render_sensor_health_summary(
+    sensor_health: &HashMap<String, HealthSnapshot>,
 ) -> Element<'_, Message> {
-    if bridge_health.is_empty() {
-        // No bridge health data received yet
+    if sensor_health.is_empty() {
+        // No sensor health data received yet
         return row![].into();
     }
 
-    let label = text("Bridges:").size(12);
+    let label = text("Sensors:").size(12);
 
-    let mut bridge_row = row![label].spacing(10).align_y(Alignment::Center);
+    let mut sensor_row = row![label].spacing(10).align_y(Alignment::Center);
 
-    // Sort bridges by name for consistent display
-    let mut bridges: Vec<_> = bridge_health.values().collect();
-    bridges.sort_by(|a, b| a.bridge.cmp(&b.bridge));
+    // Sort sensors by name for consistent display
+    let mut sensors: Vec<_> = sensor_health.values().collect();
+    sensors.sort_by(|a, b| a.sensor.cmp(&b.sensor));
 
-    for snapshot in bridges {
+    for snapshot in sensors {
         // Determine status color based on health
         let status_icon = match snapshot.status {
             HealthStatus::Healthy => icons::status_healthy(IconSize::Small),
@@ -519,7 +519,7 @@ fn render_bridge_health_summary(
         // Build tooltip with detailed health info
         let tooltip_content = format!(
             "{}\nStatus: {}\nDevices: {}/{}\nMetrics: {}\nErrors (1h): {}",
-            snapshot.bridge,
+            snapshot.sensor,
             snapshot.status,
             snapshot.devices_responding,
             snapshot.devices_total,
@@ -527,8 +527,8 @@ fn render_bridge_health_summary(
             snapshot.errors_last_hour
         );
 
-        let bridge_indicator = tooltip(
-            row![status_icon, text(&snapshot.bridge).size(11)]
+        let sensor_indicator = tooltip(
+            row![status_icon, text(&snapshot.sensor).size(11)]
                 .spacing(4)
                 .align_y(Alignment::Center),
             container(text(tooltip_content).size(10))
@@ -537,10 +537,10 @@ fn render_bridge_health_summary(
             tooltip::Position::Bottom,
         );
 
-        bridge_row = bridge_row.push(bridge_indicator);
+        sensor_row = sensor_row.push(sensor_indicator);
     }
 
-    bridge_row.into()
+    sensor_row.into()
 }
 
 /// Render protocol filter buttons and search input.
@@ -980,7 +980,7 @@ fn render_device_card<'a>(
     device: &'a DeviceState,
     groups: &'a GroupsState,
 ) -> Element<'a, Message> {
-    // Use effective_status which combines bridge liveness with local staleness detection
+    // Use effective_status which combines sensor liveness with local staleness detection
     let status = device.effective_status();
 
     // Use animated status indicator instead of static SVG

@@ -1,7 +1,7 @@
 //! UI tests using iced_test Simulator.
 //!
 //! These tests verify the UI behavior without needing actual Zenoh connections
-//! or hardware bridges.
+//! or hardware sensors.
 
 use iced_test::simulator;
 
@@ -26,14 +26,14 @@ fn test_dashboard_empty() {
     let state = DashboardState::default();
     let groups = GroupsState::default();
     let overview = OverviewState::default();
-    let bridge_health = HashMap::new();
+    let sensor_health = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
         0,
         &groups,
         &overview,
-        &bridge_health,
+        &sensor_health,
     ));
 
     // Should show "Waiting for telemetry data..." message
@@ -59,14 +59,14 @@ fn test_dashboard_with_devices() {
 
     let groups = GroupsState::default();
     let overview = OverviewState::default();
-    let bridge_health = HashMap::new();
+    let sensor_health = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
         0,
         &groups,
         &overview,
-        &bridge_health,
+        &sensor_health,
     ));
 
     // Should show the device name
@@ -83,14 +83,14 @@ fn test_dashboard_settings_button() {
     let state = DashboardState::default();
     let groups = GroupsState::default();
     let overview = OverviewState::default();
-    let bridge_health = HashMap::new();
+    let sensor_health = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
         0,
         &groups,
         &overview,
-        &bridge_health,
+        &sensor_health,
     ));
 
     // Click Settings button
@@ -107,14 +107,14 @@ fn test_dashboard_alerts_button() {
     let state = DashboardState::default();
     let groups = GroupsState::default();
     let overview = OverviewState::default();
-    let bridge_health = HashMap::new();
+    let sensor_health = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
         0,
         &groups,
         &overview,
-        &bridge_health,
+        &sensor_health,
     ));
 
     // Click Alerts button
@@ -425,14 +425,14 @@ fn test_overview_section_renders() {
 
     let groups = GroupsState::default();
     let overview = OverviewState::default();
-    let bridge_health = HashMap::new();
+    let sensor_health = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
         0,
         &groups,
         &overview,
-        &bridge_health,
+        &sensor_health,
     ));
 
     // Should show Protocol Overviews header
@@ -471,14 +471,14 @@ fn test_overview_protocol_tab_click() {
 
     let groups = GroupsState::default();
     let overview = OverviewState::default();
-    let bridge_health = HashMap::new();
+    let sensor_health = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
         0,
         &groups,
         &overview,
-        &bridge_health,
+        &sensor_health,
     ));
 
     // Click SNMP tab
@@ -521,14 +521,14 @@ fn test_overview_collapse_toggle() {
 
     let groups = GroupsState::default();
     let overview = OverviewState::default();
-    let bridge_health = HashMap::new();
+    let sensor_health = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
         0,
         &groups,
         &overview,
-        &bridge_health,
+        &sensor_health,
     ));
 
     // Click the Protocol Overviews header to toggle
@@ -600,14 +600,14 @@ fn test_dashboard_topology_button() {
     let state = DashboardState::default();
     let groups = GroupsState::default();
     let overview = OverviewState::default();
-    let bridge_health = HashMap::new();
+    let sensor_health = HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
         0,
         &groups,
         &overview,
-        &bridge_health,
+        &sensor_health,
     ));
 
     // Click Topology button
@@ -626,4 +626,166 @@ fn test_topology_search_input() {
 
     // Should show search placeholder
     assert!(ui.find("Search nodes...").is_ok());
+}
+
+/// The security view lists network anomalies (not expectation alerts).
+#[test]
+fn test_security_view() {
+    use zensight::view::alerts::AlertsState;
+    use zensight::view::security::security_view;
+    use zensight_common::{Alert, AlertKind, AlertSeverity};
+
+    let mut alerts = AlertsState::new();
+    // An anomaly (shown) and an expectation (hidden by the security lens).
+    alerts.ingest_external(
+        Alert::new(
+            "wiretap1",
+            Protocol::Netring,
+            AlertKind::Anomaly,
+            "PortScanTRW",
+            AlertSeverity::Warning,
+            "PortScanTRW from 10.0.0.5",
+        )
+        .with_label("src", "10.0.0.5"),
+    );
+    alerts.ingest_external(Alert::new(
+        "router01",
+        Protocol::Netlink,
+        AlertKind::Expectation,
+        "socket:sshd",
+        AlertSeverity::Critical,
+        "sshd not listening",
+    ));
+
+    let mut ui = simulator(security_view(&alerts));
+    assert!(ui.find("Security — Network Anomalies").is_ok());
+    assert!(ui.find("PortScanTRW from 10.0.0.5").is_ok());
+    assert!(ui.find("10.0.0.5").is_ok());
+    // The expectation alert must NOT appear in the security lens.
+    assert!(ui.find("sshd not listening").is_err());
+}
+
+/// The expectations authoring view renders and "Add & Push" emits a message.
+#[test]
+fn test_expectations_view() {
+    use zensight::view::expectations::{ExpectationsState, expectations_view, parse_status};
+
+    let mut state = ExpectationsState::default();
+    state.current = parse_status(
+        r#"{"sockets":[{"name":"sshd","listen":22,"severity":"critical"}],"links":[]}"#,
+    );
+
+    let mut ui = simulator(expectations_view(&state));
+    assert!(ui.find("Expectations (netlink sentinel)").is_ok());
+    assert!(ui.find("socket:sshd").is_ok());
+    assert!(ui.find("listen :22").is_ok());
+
+    let _ = ui.click("Add & Push");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::AddExpectation))
+    );
+}
+
+/// The netlink specialized view renders interfaces + socket aggregates.
+#[test]
+fn test_netlink_specialized_view() {
+    use zensight::view::specialized::netlink::netlink_host_view;
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netlink, "router01");
+    let mut state = DeviceDetailState::new(device_id);
+    for (metric, value) in [
+        ("iface/eth0/rx_bytes", TelemetryValue::Counter(1000)),
+        ("iface/eth0/tx_bytes", TelemetryValue::Counter(2000)),
+        ("iface/eth0/oper_state", TelemetryValue::Text("up".into())),
+        ("iface/eth0/mtu", TelemetryValue::Gauge(1500.0)),
+        ("sockets/tcp/established", TelemetryValue::Gauge(7.0)),
+        ("sockets/tcp/listen", TelemetryValue::Gauge(3.0)),
+    ] {
+        state.update(TelemetryPoint::new(
+            "router01",
+            Protocol::Netlink,
+            metric,
+            value,
+        ));
+    }
+
+    let mut ui = simulator(netlink_host_view(&state));
+    assert!(ui.find("Netlink: router01").is_ok());
+    assert!(ui.find("eth0").is_ok());
+    assert!(ui.find("TCP Sockets").is_ok());
+}
+
+/// The netring specialized view renders flows + top talkers.
+#[test]
+fn test_netring_specialized_view() {
+    use zensight::view::specialized::netring::netring_sensor_view;
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let mut state = DeviceDetailState::new(device_id);
+    for (metric, value) in [
+        ("flow/started_total", TelemetryValue::Counter(10)),
+        ("flow/active", TelemetryValue::Gauge(2.0)),
+        (
+            "bandwidth/https/bytes_per_sec",
+            TelemetryValue::Gauge(50000.0),
+        ),
+        ("bandwidth/dns/bytes_per_sec", TelemetryValue::Gauge(1200.0)),
+    ] {
+        state.update(TelemetryPoint::new(
+            "wiretap1",
+            Protocol::Netring,
+            metric,
+            value,
+        ));
+    }
+
+    let mut ui = simulator(netring_sensor_view(&state));
+    assert!(ui.find("Netring: wiretap1").is_ok());
+    assert!(ui.find("Flows").is_ok());
+    assert!(ui.find("https").is_ok());
+}
+
+/// Sensor-pushed alerts render in the alerts view's "Anomalies & Expectations"
+/// section, and resolved alerts disappear.
+#[test]
+fn test_external_alerts_render_and_resolve() {
+    use zensight::view::alerts::{AlertsState, alerts_view};
+    use zensight_common::{Alert, AlertKind, AlertSeverity};
+
+    let mut state = AlertsState::new();
+    // Empty: section present, no alerts.
+    {
+        let mut ui = simulator(alerts_view(&state));
+        assert!(ui.find("Anomalies & Expectations (0)").is_ok());
+        assert!(ui.find("No active sensor alerts").is_ok());
+    }
+
+    // Ingest a firing expectation alert.
+    let alert = Alert::new(
+        "router01",
+        Protocol::Netlink,
+        AlertKind::Expectation,
+        "ssh-listening",
+        AlertSeverity::Critical,
+        "sshd not listening on :22",
+    );
+    state.ingest_external(alert.clone());
+    {
+        let mut ui = simulator(alerts_view(&state));
+        assert!(ui.find("Anomalies & Expectations (1)").is_ok());
+        assert!(ui.find("sshd not listening on :22").is_ok());
+        assert!(ui.find("netlink/router01").is_ok());
+    }
+
+    // Resolve it → section back to empty.
+    state.ingest_external(alert.resolved());
+    {
+        let mut ui = simulator(alerts_view(&state));
+        assert!(ui.find("Anomalies & Expectations (0)").is_ok());
+    }
 }

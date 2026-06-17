@@ -1,5 +1,5 @@
 use zensight_common::{
-    BridgeInfo, CorrelationEntry, DeviceLiveness, ErrorReport, HealthSnapshot, Protocol,
+    Alert, CorrelationEntry, DeviceLiveness, ErrorReport, HealthSnapshot, Protocol, SensorInfo,
     TelemetryPoint,
 };
 
@@ -13,35 +13,73 @@ pub enum Message {
     /// Telemetry received from Zenoh subscription.
     TelemetryReceived(TelemetryPoint),
 
-    /// Bridge health snapshot received.
+    /// Sensor health snapshot received.
     HealthSnapshotReceived(HealthSnapshot),
 
     /// Device liveness update received.
     DeviceLivenessReceived(String, DeviceLiveness),
 
-    /// Bridge error report received.
+    /// Sensor error report received.
     ErrorReportReceived(ErrorReport),
 
-    /// Bridge discovery/info received.
-    BridgeInfoReceived(BridgeInfo),
+    /// Sensor discovery/info received.
+    SensorInfoReceived(SensorInfo),
 
     /// Correlation entry received.
     CorrelationReceived(CorrelationEntry),
 
+    /// A sensor-emitted alert was received (firing or resolved). Published on
+    /// `zensight/<protocol>/@/alerts/<alert_key>`.
+    AlertReceived(Alert),
+
+    /// A sensor alert key was deleted (resolve tombstone).
+    AlertCleared { protocol: String, alert_key: String },
+
     /// Zenoh connection attempt started.
     Connecting,
 
-    /// Zenoh connection established.
-    Connected,
+    /// Zenoh connection established. Carries the session handle so the app can
+    /// send commands back to sensors (`None` in demo mode — no real session).
+    Connected(Option<std::sync::Arc<zenoh::Session>>),
 
     /// Zenoh connection lost or failed.
     Disconnected(String),
 
-    /// Bridge came online (liveliness token appeared).
-    BridgeOnline(String),
+    /// Result of a command sent to a sensor (drives a feedback toast).
+    CommandFeedback { success: bool, message: String },
 
-    /// Bridge went offline (liveliness token disappeared).
-    BridgeOffline(String),
+    // ── Expectations authoring (netlink sentinel, Plan 08) ──────────────────
+    /// Open the expectations authoring view.
+    OpenExpectations,
+    /// Close the expectations view.
+    CloseExpectations,
+    /// Set the kind of expectation being authored.
+    SetExpectationKind(crate::view::expectations::ExpKind),
+    /// Set the expectation name (socket) or interface (link).
+    SetExpectationName(String),
+    /// Set the expectation port.
+    SetExpectationPort(String),
+    /// Set the expectation severity.
+    SetExpectationSeverity(crate::view::alerts::Severity),
+    /// Build + push the authored expectation to the sentinel.
+    AddExpectation,
+    /// Remove an expectation by rule slug.
+    RemoveExpectation(String),
+    /// Query the sentinel's current expectation set.
+    RefreshExpectations,
+    /// A sentinel status reply (ExpectationsConfig JSON).
+    ExpectationStatusReceived(String),
+
+    /// Open the security (network anomalies) view.
+    OpenSecurity,
+    /// Close the security view.
+    CloseSecurity,
+
+    /// Sensor came online (liveliness token appeared).
+    SensorOnline(String),
+
+    /// Sensor went offline (liveliness token disappeared).
+    SensorOffline(String),
 
     /// Device came online (liveliness token appeared).
     DeviceOnline(String, String),
@@ -325,20 +363,20 @@ pub enum Message {
     /// Set syslog message content filter pattern.
     SetSyslogMessageFilter(String),
 
-    /// Apply syslog filters (send to bridge).
+    /// Apply syslog filters (send to sensor).
     ApplySyslogFilters,
 
     /// Clear all syslog filters.
     ClearSyslogFilters,
 
-    /// Syslog filter status received from bridge.
+    /// Syslog filter status received from sensor.
     SyslogFilterStatusReceived(SyslogFilterStatus),
 
     /// Dismiss a toast notification.
     DismissToast(u64),
 }
 
-/// Syslog filter status from bridge.
+/// Syslog filter status from sensor.
 #[derive(Debug, Clone)]
 pub struct SyslogFilterStatus {
     pub messages_received: u64,

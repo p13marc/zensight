@@ -5,14 +5,14 @@ use zenoh::sample::SampleKind;
 use zenoh_ext::{AdvancedSubscriberBuilderExt, HistoryConfig, RecoveryConfig};
 
 use zensight_common::{
-    BridgeInfo, CorrelationEntry, DeviceLiveness, ErrorReport, HealthSnapshot, TelemetryPoint,
-    ZenohConfig, all_telemetry_wildcard, decode_auto,
+    Alert, CorrelationEntry, DeviceLiveness, ErrorReport, HealthSnapshot, SensorInfo,
+    TelemetryPoint, ZenohConfig, all_telemetry_wildcard, decode_auto,
 };
 
 use crate::message::Message;
 
-/// Key expression for bridge liveliness tokens.
-const BRIDGE_LIVELINESS_EXPR: &str = "zensight/*/@/alive";
+/// Key expression for sensor liveliness tokens.
+const SENSOR_LIVELINESS_EXPR: &str = "zensight/*/@/alive";
 
 /// Key expression for device liveliness tokens.
 const DEVICE_LIVELINESS_EXPR: &str = "zensight/*/@/devices/*/alive";
@@ -28,7 +28,7 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
             // Connect to Zenoh
             let session = match connect_zenoh(&config).await {
                 Ok(session) => {
-                    yield Message::Connected;
+                    yield Message::Connected(Some(std::sync::Arc::new(session.clone())));
                     session
                 }
                 Err(e) => {
@@ -63,15 +63,15 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
 
             tracing::info!("Advanced subscriber created with history and recovery");
 
-            // Subscribe to bridge liveliness tokens
-            let bridge_liveliness = match session
+            // Subscribe to sensor liveliness tokens
+            let sensor_liveliness = match session
                 .liveliness()
-                .declare_subscriber(BRIDGE_LIVELINESS_EXPR)
+                .declare_subscriber(SENSOR_LIVELINESS_EXPR)
                 .await
             {
                 Ok(sub) => Some(sub),
                 Err(e) => {
-                    tracing::warn!(error = %e, "Failed to create bridge liveliness subscriber");
+                    tracing::warn!(error = %e, "Failed to create sensor liveliness subscriber");
                     None
                 }
             };
@@ -90,10 +90,10 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
             };
 
             // Query existing liveliness tokens to get current state
-            if let Ok(replies) = session.liveliness().get(BRIDGE_LIVELINESS_EXPR).await {
+            if let Ok(replies) = session.liveliness().get(SENSOR_LIVELINESS_EXPR).await {
                 while let Ok(reply) = replies.recv_async().await {
                     if let Ok(sample) = reply.result()
-                        && let Some(msg) = parse_bridge_liveliness(sample.key_expr().as_str(), true)
+                        && let Some(msg) = parse_sensor_liveliness(sample.key_expr().as_str(), true)
                     {
                         yield msg;
                     }
@@ -118,9 +118,16 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
                         match result {
                             Ok(sample) => {
                                 let key = sample.key_expr().as_str();
-                                let payload = sample.payload().to_bytes();
-                                if let Some(msg) = decode_sample(key, &payload) {
-                                    yield msg;
+                                // A Delete on an alert key is a resolve tombstone.
+                                if sample.kind() == SampleKind::Delete {
+                                    if let Some(msg) = parse_alert_cleared(key) {
+                                        yield msg;
+                                    }
+                                } else {
+                                    let payload = sample.payload().to_bytes();
+                                    if let Some(msg) = decode_sample(key, &payload) {
+                                        yield msg;
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -131,16 +138,16 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
                         }
                     }
 
-                    // Bridge liveliness subscription
+                    // Sensor liveliness subscription
                     result = async {
-                        match &bridge_liveliness {
+                        match &sensor_liveliness {
                             Some(sub) => sub.recv_async().await,
                             None => std::future::pending().await,
                         }
                     } => {
                         if let Ok(sample) = result {
                             let is_alive = sample.kind() == SampleKind::Put;
-                            if let Some(msg) = parse_bridge_liveliness(sample.key_expr().as_str(), is_alive) {
+                            if let Some(msg) = parse_sensor_liveliness(sample.key_expr().as_str(), is_alive) {
                                 yield msg;
                             }
                         }
@@ -166,11 +173,11 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
     })
 }
 
-/// Parse a bridge liveliness key expression.
+/// Parse a sensor liveliness key expression.
 ///
 /// Key format: `zensight/<protocol>/@/alive`
 /// Returns the protocol name.
-fn parse_bridge_liveliness(key: &str, is_alive: bool) -> Option<Message> {
+fn parse_sensor_liveliness(key: &str, is_alive: bool) -> Option<Message> {
     // Parse without allocating a Vec: "zensight/<protocol>/@/alive"
     let rest = key.strip_prefix("zensight/")?;
     let (protocol, rest) = rest.split_once('/')?;
@@ -179,11 +186,11 @@ fn parse_bridge_liveliness(key: &str, is_alive: bool) -> Option<Message> {
     }
     let protocol = protocol.to_string();
     if is_alive {
-        tracing::info!(protocol = %protocol, "Bridge came online");
-        Some(Message::BridgeOnline(protocol))
+        tracing::info!(protocol = %protocol, "Sensor came online");
+        Some(Message::SensorOnline(protocol))
     } else {
-        tracing::warn!(protocol = %protocol, "Bridge went offline");
-        Some(Message::BridgeOffline(protocol))
+        tracing::warn!(protocol = %protocol, "Sensor went offline");
+        Some(Message::SensorOffline(protocol))
     }
 }
 
@@ -211,13 +218,29 @@ fn parse_device_liveliness(key: &str, is_alive: bool) -> Option<Message> {
     }
 }
 
+/// Parse an alert-key Delete tombstone into an [`Message::AlertCleared`].
+///
+/// Key format: `zensight/<protocol>/@/alerts/<alert_key>`.
+fn parse_alert_cleared(key: &str) -> Option<Message> {
+    let rest = key.strip_prefix("zensight/")?;
+    let (protocol, rest) = rest.split_once('/')?;
+    let rest = rest.strip_prefix("@/alerts/")?;
+    if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    Some(Message::AlertCleared {
+        protocol: protocol.to_string(),
+        alert_key: rest.to_string(),
+    })
+}
+
 /// Decode a sample based on its key expression pattern.
 ///
 /// Routes messages to the appropriate type based on the key structure:
 /// - `zensight/<protocol>/@/health` -> HealthSnapshot
 /// - `zensight/<protocol>/@/devices/<device>/liveness` -> DeviceLiveness
 /// - `zensight/<protocol>/@/errors` -> ErrorReport
-/// - `zensight/_meta/bridges/<name>` -> BridgeInfo
+/// - `zensight/_meta/sensors/<name>` -> SensorInfo
 /// - `zensight/_meta/correlation/<ip>` -> CorrelationEntry
 /// - `zensight/<protocol>/<source>/<metric>` -> TelemetryPoint
 fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
@@ -230,11 +253,11 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
     // Check for metadata paths first
     if segment1 == "_meta" {
         let (segment2, _remainder) = rest.split_once('/').unwrap_or((rest, ""));
-        if segment2 == "bridges" {
-            return match decode_auto::<BridgeInfo>(payload) {
-                Ok(info) => Some(Message::BridgeInfoReceived(info)),
+        if segment2 == "sensors" {
+            return match decode_auto::<SensorInfo>(payload) {
+                Ok(info) => Some(Message::SensorInfoReceived(info)),
                 Err(e) => {
-                    tracing::warn!(error = %e, key = %key, "Failed to decode BridgeInfo");
+                    tracing::warn!(error = %e, key = %key, "Failed to decode SensorInfo");
                     None
                 }
             };
@@ -250,7 +273,7 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
         return None;
     }
 
-    // Check for @ paths (bridge health/liveness/errors)
+    // Check for @ paths (sensor health/liveness/errors)
     // rest is now: "@/<subpath>" or "<source>/<metric...>"
     let (segment2, rest_after_seg2) = rest.split_once('/').unwrap_or((rest, ""));
     if segment2 == "@" {
@@ -285,6 +308,15 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
                         error = %e, key = %key, device = %device,
                         "Failed to decode DeviceLiveness"
                     );
+                    None
+                }
+            };
+        } else if segment3 == "alerts" {
+            // zensight/<protocol>/@/alerts/<alert_key> (Put = firing/resolved).
+            return match decode_auto::<Alert>(payload) {
+                Ok(alert) => Some(Message::AlertReceived(alert)),
+                Err(e) => {
+                    tracing::warn!(error = %e, key = %key, "Failed to decode Alert");
                     None
                 }
             };
@@ -378,15 +410,15 @@ pub fn keyboard_subscription() -> Subscription<Message> {
 ///
 /// This subscription uses the [`DemoSimulator`](crate::demo::DemoSimulator) to generate
 /// realistic, time-varying telemetry with random anomalies and events that trigger alerts.
-/// It also generates bridge health snapshots and device liveness updates to showcase
+/// It also generates sensor health snapshots and device liveness updates to showcase
 /// the health monitoring features.
 pub fn demo_subscription() -> Subscription<Message> {
     Subscription::run(|| {
         async_stream::stream! {
             use crate::demo::DemoSimulator;
 
-            // Signal connected state
-            yield Message::Connected;
+            // Signal connected state (demo mode has no real session)
+            yield Message::Connected(None);
 
             // Create the demo simulator
             let mut simulator = DemoSimulator::new();
@@ -404,7 +436,7 @@ pub fn demo_subscription() -> Subscription<Message> {
                 // Generate a tick of telemetry
                 let points = simulator.tick(now);
 
-                // Track metrics per bridge
+                // Track metrics per sensor
                 let mut sysinfo_count = 0u64;
                 let mut snmp_count = 0u64;
                 let mut modbus_count = 0u64;
@@ -454,27 +486,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_bridge_liveliness_online() {
+    fn test_parse_sensor_liveliness_online() {
         let key = "zensight/snmp/@/alive";
-        let msg = parse_bridge_liveliness(key, true);
-        assert!(matches!(msg, Some(Message::BridgeOnline(ref p)) if p == "snmp"));
+        let msg = parse_sensor_liveliness(key, true);
+        assert!(matches!(msg, Some(Message::SensorOnline(ref p)) if p == "snmp"));
     }
 
     #[test]
-    fn test_parse_bridge_liveliness_offline() {
+    fn test_parse_sensor_liveliness_offline() {
         let key = "zensight/sysinfo/@/alive";
-        let msg = parse_bridge_liveliness(key, false);
-        assert!(matches!(msg, Some(Message::BridgeOffline(ref p)) if p == "sysinfo"));
+        let msg = parse_sensor_liveliness(key, false);
+        assert!(matches!(msg, Some(Message::SensorOffline(ref p)) if p == "sysinfo"));
     }
 
     #[test]
-    fn test_parse_bridge_liveliness_invalid() {
+    fn test_parse_sensor_liveliness_invalid() {
         // Wrong format
-        assert!(parse_bridge_liveliness("zensight/snmp/device/metric", true).is_none());
+        assert!(parse_sensor_liveliness("zensight/snmp/device/metric", true).is_none());
         // Missing alive
-        assert!(parse_bridge_liveliness("zensight/snmp/@/health", true).is_none());
+        assert!(parse_sensor_liveliness("zensight/snmp/@/health", true).is_none());
         // Wrong prefix
-        assert!(parse_bridge_liveliness("other/snmp/@/alive", true).is_none());
+        assert!(parse_sensor_liveliness("other/snmp/@/alive", true).is_none());
     }
 
     #[test]
@@ -508,7 +540,44 @@ mod tests {
     #[test]
     fn test_liveliness_key_expressions() {
         // Verify our constants match expected patterns
-        assert_eq!(BRIDGE_LIVELINESS_EXPR, "zensight/*/@/alive");
+        assert_eq!(SENSOR_LIVELINESS_EXPR, "zensight/*/@/alive");
         assert_eq!(DEVICE_LIVELINESS_EXPR, "zensight/*/@/devices/*/alive");
+    }
+
+    #[test]
+    fn test_parse_alert_cleared() {
+        let msg = parse_alert_cleared("zensight/netlink/@/alerts/ssh-listening-00ff").unwrap();
+        match msg {
+            Message::AlertCleared {
+                protocol,
+                alert_key,
+            } => {
+                assert_eq!(protocol, "netlink");
+                assert_eq!(alert_key, "ssh-listening-00ff");
+            }
+            _ => panic!("expected AlertCleared"),
+        }
+        // Not an alert key.
+        assert!(parse_alert_cleared("zensight/netlink/@/health").is_none());
+        // Nested key (has extra slash) is rejected.
+        assert!(parse_alert_cleared("zensight/netlink/@/alerts/a/b").is_none());
+    }
+
+    #[test]
+    fn test_decode_sample_alert() {
+        let alert = zensight_common::Alert::new(
+            "host1",
+            zensight_common::Protocol::Netring,
+            zensight_common::AlertKind::Anomaly,
+            "port_scan",
+            zensight_common::AlertSeverity::Warning,
+            "scan",
+        );
+        let key = format!("zensight/netring/@/alerts/{}", alert.alert_key());
+        let payload = zensight_common::encode(&alert, zensight_common::Format::Json).unwrap();
+        match decode_sample(&key, &payload) {
+            Some(Message::AlertReceived(got)) => assert_eq!(got.rule, "port_scan"),
+            other => panic!("expected AlertReceived, got {other:?}"),
+        }
     }
 }

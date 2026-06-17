@@ -1,0 +1,39 @@
+{
+  // Zenoh connection settings
+  zenoh: {
+    mode: "peer",
+  },
+
+  // Netlink sensor settings
+  netlink: {
+    key_prefix: "zensight/netlink",
+    hostname: "auto",
+    poll_interval_secs: 2,
+    collect: {
+      interfaces: true,
+      sockets: true,
+    },
+    interfaces: {
+      exclude_loopback: false,
+      exclude_virtual: false,
+    },
+
+    // Pillar B — declared expectations for THIS host (sentinel). When present,
+    // the sensor evaluates them and emits alerts (zensight/netlink/@/alerts/*)
+    // on deviation, auto-resolving when satisfied again.
+    // expectations: {
+    //   eval_interval_secs: 10,
+    //   default_for_secs: 15,        // debounce: violated continuously for N s
+    //   sockets: [
+    //     { name: "sshd", listen: 22, severity: "critical" },
+    //     { name: "db", established_to: "10.0.0.5:5432", min: 1, severity: "warning" },
+    //     { name: "no-telnet", forbid_listen: 23, severity: "critical" },
+    //   ],
+    //   links: [
+    //     { iface: "eth0", up: true, severity: "critical" },
+    //   ],
+    // },
+  },
+
+  logging: { level: "info" },
+}

@@ -1,5 +1,5 @@
 {
-  // Docker-optimized configuration for zenoh-bridge-snmp
+  // Docker-optimized configuration for zensight-sensor-snmp
 
   zenoh: {
     mode: "peer",

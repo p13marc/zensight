@@ -1,7 +1,7 @@
 //! Mock telemetry generator for testing.
 //!
 //! Provides functions to generate realistic telemetry data without
-//! connecting to actual bridges or Zenoh.
+//! connecting to actual sensors or Zenoh.
 
 use std::collections::HashMap;
 

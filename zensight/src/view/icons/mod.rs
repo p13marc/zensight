@@ -257,6 +257,9 @@ pub fn protocol_icon<Message: 'static>(
         zensight_common::Protocol::Sysinfo => protocol_sysinfo(size),
         zensight_common::Protocol::Gnmi => protocol_gnmi(size),
         zensight_common::Protocol::Opcua => protocol_opcua(size),
+        // TODO(Plan 09): dedicated netlink/netring icons.
+        zensight_common::Protocol::Netlink => protocol_generic(size),
+        zensight_common::Protocol::Netring => protocol_generic(size),
     }
 }
 

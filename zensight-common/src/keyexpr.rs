@@ -108,7 +108,7 @@ impl KeyExprBuilder {
         format!("{}/{}/**", self.prefix, self.protocol.as_str())
     }
 
-    /// Build a key expression for bridge status.
+    /// Build a key expression for sensor status.
     ///
     /// # Example
     /// ```
@@ -121,6 +121,30 @@ impl KeyExprBuilder {
     /// ```
     pub fn status_key(&self) -> String {
         format!("{}/{}/@/status", self.prefix, self.protocol.as_str())
+    }
+
+    /// Build a key expression for a single keyed alert.
+    ///
+    /// Matches: `zensight/<protocol>/@/alerts/<alert_key>`
+    ///
+    /// # Example
+    /// ```
+    /// use zensight_common::keyexpr::KeyExprBuilder;
+    /// use zensight_common::telemetry::Protocol;
+    ///
+    /// let builder = KeyExprBuilder::new(Protocol::Netlink);
+    /// assert_eq!(
+    ///     builder.alert_key_expr("ssh-listening-0011223344556677"),
+    ///     "zensight/netlink/@/alerts/ssh-listening-0011223344556677"
+    /// );
+    /// ```
+    pub fn alert_key_expr(&self, alert_key: &str) -> String {
+        format!(
+            "{}/{}/@/alerts/{}",
+            self.prefix,
+            self.protocol.as_str(),
+            alert_key
+        )
     }
 }
 
@@ -136,7 +160,7 @@ pub fn all_telemetry_wildcard() -> String {
     format!("{}/**", KEY_PREFIX)
 }
 
-/// Build a wildcard key expression for all bridge health data.
+/// Build a wildcard key expression for all sensor health data.
 ///
 /// Matches: `zensight/<protocol>/@/health`
 ///
@@ -164,7 +188,7 @@ pub fn all_liveness_wildcard() -> String {
     format!("{}/*/@/devices/*/liveness", KEY_PREFIX)
 }
 
-/// Build a wildcard key expression for all bridge error reports.
+/// Build a wildcard key expression for all sensor error reports.
 ///
 /// Matches: `zensight/<protocol>/@/errors`
 ///
@@ -192,18 +216,32 @@ pub fn all_correlation_wildcard() -> String {
     format!("{}/_meta/correlation/*", KEY_PREFIX)
 }
 
-/// Build a wildcard key expression for all bridge discovery data.
+/// Build a wildcard key expression for all sensor discovery data.
 ///
-/// Matches: `zensight/_meta/bridges/<bridge_name>`
+/// Matches: `zensight/_meta/sensors/<sensor_name>`
 ///
 /// # Example
 /// ```
-/// use zensight_common::keyexpr::all_bridges_wildcard;
+/// use zensight_common::keyexpr::all_sensors_wildcard;
 ///
-/// assert_eq!(all_bridges_wildcard(), "zensight/_meta/bridges/*");
+/// assert_eq!(all_sensors_wildcard(), "zensight/_meta/sensors/*");
 /// ```
-pub fn all_bridges_wildcard() -> String {
-    format!("{}/_meta/bridges/*", KEY_PREFIX)
+pub fn all_sensors_wildcard() -> String {
+    format!("{}/_meta/sensors/*", KEY_PREFIX)
+}
+
+/// Build a wildcard key expression for all sensor-emitted alerts.
+///
+/// Matches: `zensight/<protocol>/@/alerts/<alert_key>`
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::all_alerts_wildcard;
+///
+/// assert_eq!(all_alerts_wildcard(), "zensight/*/@/alerts/*");
+/// ```
+pub fn all_alerts_wildcard() -> String {
+    format!("{}/*/@/alerts/*", KEY_PREFIX)
 }
 
 /// Parse a key expression to extract protocol, source, and metric path.

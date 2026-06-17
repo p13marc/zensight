@@ -6,7 +6,7 @@
     serialization: "json",           // "json" or "cbor"
   },
 
-  // Modbus bridge settings
+  // Modbus sensor settings
   modbus: {
     // Key expression prefix
     key_prefix: "zensight/modbus",

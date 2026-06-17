@@ -72,11 +72,13 @@ impl Default for TopologyState {
 impl TopologyState {
     /// Update topology from dashboard device states.
     pub fn update_from_devices(&mut self, devices: &HashMap<DeviceId, DeviceState>) {
+        use zensight_common::Protocol;
         let initial_count = self.nodes.len();
 
-        // For now, create a node for each sysinfo device
+        // A node per host: sysinfo or netlink devices (a host running both is one
+        // node, merged by source).
         for (device_id, device_state) in devices {
-            if device_id.protocol != zensight_common::Protocol::Sysinfo {
+            if !matches!(device_id.protocol, Protocol::Sysinfo | Protocol::Netlink) {
                 continue;
             }
 
@@ -98,6 +100,7 @@ impl TopologyState {
                         network_tx: None,
                         is_healthy: device_state.is_healthy,
                         pinned: false,
+                        alert: None,
                     },
                 );
             }
@@ -120,6 +123,23 @@ impl TopologyState {
         if self.nodes.len() >= 2 {
             self.generate_edges();
         }
+    }
+
+    /// Overlay firing sensor alerts onto nodes: a node whose `source` matches a
+    /// firing alert is tinted by the highest severity seen for that host.
+    pub fn apply_alerts(&mut self, external: &HashMap<String, zensight_common::Alert>) {
+        for node in self.nodes.values_mut() {
+            node.alert = None;
+        }
+        for alert in external.values() {
+            if let Some(node) = self.nodes.get_mut(&alert.source) {
+                node.alert = Some(match node.alert {
+                    Some(cur) => cur.max(alert.severity),
+                    None => alert.severity,
+                });
+            }
+        }
+        self.cache.clear();
     }
 
     /// Generate edges between nodes.
@@ -305,6 +325,8 @@ pub struct Node {
     pub is_healthy: bool,
     /// Whether the node position is pinned (not affected by layout).
     pub pinned: bool,
+    /// Highest-severity firing sensor alert for this host, if any (overlay).
+    pub alert: Option<zensight_common::AlertSeverity>,
 }
 
 impl Node {
@@ -675,6 +697,7 @@ mod tests {
                 network_tx: None,
                 is_healthy: true,
                 pinned: false,
+                alert: None,
             },
         );
 
@@ -683,5 +706,58 @@ mod tests {
 
         state.clear_selection();
         assert!(state.selected_node.is_none());
+    }
+
+    #[test]
+    fn test_alert_overlay() {
+        use std::collections::HashMap;
+        use zensight_common::{Alert, AlertKind, AlertSeverity, Protocol};
+
+        let mut state = TopologyState::default();
+        state.nodes.insert(
+            "host1".to_string(),
+            Node {
+                id: "host1".to_string(),
+                label: "host1".to_string(),
+                position: (0.0, 0.0),
+                velocity: (0.0, 0.0),
+                node_type: NodeType::Host,
+                cpu_usage: None,
+                memory_usage: None,
+                network_rx: None,
+                network_tx: None,
+                is_healthy: true,
+                pinned: false,
+                alert: None,
+            },
+        );
+
+        let mut external = HashMap::new();
+        let warn = Alert::new(
+            "host1",
+            Protocol::Netlink,
+            AlertKind::Expectation,
+            "link:eth0",
+            AlertSeverity::Warning,
+            "down",
+        );
+        let crit = Alert::new(
+            "host1",
+            Protocol::Netlink,
+            AlertKind::Expectation,
+            "socket:sshd",
+            AlertSeverity::Critical,
+            "not listening",
+        );
+        external.insert(warn.alert_key(), warn);
+        external.insert(crit.alert_key(), crit);
+
+        state.apply_alerts(&external);
+        // Highest severity wins.
+        assert_eq!(state.nodes["host1"].alert, Some(AlertSeverity::Critical));
+
+        // Clearing resolves the overlay.
+        state.apply_alerts(&HashMap::new());
+        assert_eq!(state.nodes["host1"].alert, None);
     }
 }

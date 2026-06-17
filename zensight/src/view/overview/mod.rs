@@ -115,6 +115,9 @@ pub fn overview_section<'a>(
             Protocol::Modbus => modbus::modbus_overview(&protocol_devices),
             Protocol::Gnmi => gnmi::gnmi_overview(&protocol_devices),
             Protocol::Opcua => text("OPC-UA overview not implemented").size(12).into(),
+            // TODO(Plan 09): dedicated netlink/netring overviews.
+            Protocol::Netlink => text("Netlink overview not implemented").size(12).into(),
+            Protocol::Netring => text("Netring overview not implemented").size(12).into(),
         }
     } else {
         text("Select a protocol tab to view aggregated metrics")
@@ -207,6 +210,8 @@ fn protocol_short_name(protocol: Protocol) -> &'static str {
         Protocol::Modbus => "Modbus",
         Protocol::Gnmi => "gNMI",
         Protocol::Opcua => "OPC-UA",
+        Protocol::Netlink => "Netlink",
+        Protocol::Netring => "Netring",
     }
 }
 

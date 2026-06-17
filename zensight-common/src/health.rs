@@ -1,25 +1,25 @@
 //! Health and liveness types for frontend consumption.
 //!
-//! These types mirror the bridge-framework health types but are designed
+//! These types mirror the sensor-framework health types but are designed
 //! for deserialization in the frontend without requiring the full framework.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Bridge health status.
+/// Sensor health status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum HealthStatus {
-    /// Bridge is fully operational, all devices healthy.
+    /// Sensor is fully operational, all devices healthy.
     #[default]
     Healthy,
-    /// Bridge is partially operational, some devices failing.
+    /// Sensor is partially operational, some devices failing.
     Degraded,
-    /// Bridge has critical issues, no devices responding.
+    /// Sensor has critical issues, no devices responding.
     Unhealthy,
-    /// Bridge is starting up.
+    /// Sensor is starting up.
     Starting,
-    /// Bridge encountered a fatal error.
+    /// Sensor encountered a fatal error.
     Error,
 }
 
@@ -61,11 +61,11 @@ impl std::fmt::Display for DeviceStatus {
     }
 }
 
-/// Health snapshot from a bridge.
+/// Health snapshot from a sensor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthSnapshot {
-    /// Bridge name.
-    pub bridge: String,
+    /// Sensor name.
+    pub sensor: String,
     /// Overall health status.
     pub status: HealthStatus,
     /// Uptime in seconds.
@@ -123,7 +123,7 @@ pub enum ErrorType {
     Other,
 }
 
-/// Error report from a bridge.
+/// Error report from a sensor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorReport {
     /// Timestamp (millis since epoch).
@@ -139,35 +139,35 @@ pub struct ErrorReport {
     pub retryable: bool,
 }
 
-/// Correlation entry from cross-bridge device correlation.
+/// Correlation entry from cross-sensor device correlation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorrelationEntry {
     /// Primary IP address (as string for frontend compatibility).
     pub ip: String,
-    /// All known hostnames across bridges.
+    /// All known hostnames across sensors.
     pub hostnames: Vec<String>,
-    /// Bridges that have seen this device.
-    pub bridges: Vec<String>,
-    /// Source IDs per bridge.
+    /// Sensors that have seen this device.
+    pub sensors: Vec<String>,
+    /// Source IDs per sensor.
     pub sources: HashMap<String, String>,
     /// Last update timestamp.
     pub last_updated: i64,
 }
 
-/// Bridge discovery information.
+/// Sensor discovery information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BridgeInfo {
-    /// Bridge name (e.g., "snmp", "syslog").
+pub struct SensorInfo {
+    /// Sensor name (e.g., "snmp", "syslog").
     pub name: String,
-    /// Bridge version.
+    /// Sensor version.
     pub version: String,
-    /// Key prefix used by this bridge.
+    /// Key prefix used by this sensor.
     pub key_prefix: String,
     /// Protocol handled.
     pub protocol: String,
     /// Number of devices being monitored.
     pub device_count: u64,
-    /// Bridge status.
+    /// Sensor status.
     pub status: HealthStatus,
     /// Last heartbeat timestamp.
     pub last_heartbeat: i64,
@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn test_health_snapshot_deserialize() {
         let json = r#"{
-            "bridge": "snmp",
+            "sensor": "snmp",
             "status": "healthy",
             "uptime_secs": 3600,
             "devices_total": 10,
@@ -205,7 +205,7 @@ mod tests {
         }"#;
 
         let snapshot: HealthSnapshot = serde_json::from_str(json).unwrap();
-        assert_eq!(snapshot.bridge, "snmp");
+        assert_eq!(snapshot.sensor, "snmp");
         assert_eq!(snapshot.status, HealthStatus::Healthy);
         assert_eq!(snapshot.devices_total, 10);
     }
@@ -230,13 +230,13 @@ mod tests {
         let json = r#"{
             "ip": "10.0.0.1",
             "hostnames": ["router01", "router01.local"],
-            "bridges": ["snmp", "syslog"],
+            "sensors": ["snmp", "syslog"],
             "sources": {"snmp": "router01", "syslog": "router01.local"},
             "last_updated": 1703500000000
         }"#;
 
         let entry: CorrelationEntry = serde_json::from_str(json).unwrap();
         assert_eq!(entry.ip, "10.0.0.1");
-        assert_eq!(entry.bridges.len(), 2);
+        assert_eq!(entry.sensors.len(), 2);
     }
 }

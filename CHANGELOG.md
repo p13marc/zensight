@@ -5,6 +5,22 @@ All notable changes to ZenSight will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **BREAKING**: Renamed the "bridge" crate family to "sensor". `zenoh-bridge-*`
+  crates/binaries are now `zensight-sensor-*`; `zensight-bridge-framework` is now
+  `zensight-sensor-core`. Framework types renamed (`BridgeRunner`→`SensorRunner`,
+  `BridgeConfig`→`SensorConfig`, `BridgeArgs`→`SensorArgs`, `BridgeHealth`→
+  `SensorHealth`, `BridgeError`→`SensorError`, `BridgeInfo`→`SensorInfo`,
+  `BridgeStatus`→`SensorStatus`).
+- **BREAKING (wire)**: Renamed the `_meta/bridges/*` discovery key to
+  `_meta/sensors/*`, and the `bridge`/`bridges` JSON fields in `HealthSnapshot`,
+  `SensorInfo`, and `CorrelationEntry` to `sensor`/`sensors`. All sensors and the
+  frontend cut over together; the `zensight/<protocol>/<source>/<metric>`
+  telemetry prefix is unchanged.
+
 ## [0.5.0] - 2026-02-21
 
 ### Fixed
@@ -151,15 +167,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Core Platform**
   - `zensight`: Iced 0.14 desktop frontend
   - `zensight-common`: Shared telemetry model and Zenoh helpers
-  - `zensight-bridge-framework`: Common bridge infrastructure
+  - `zensight-sensor-core`: Common bridge infrastructure
 
 - **Protocol Bridges**
-  - `zenoh-bridge-snmp`: SNMP v1/v2c/v3 with full USM support, MIB loading
-  - `zenoh-bridge-syslog`: RFC 3164/5424, UDP/TCP/Unix socket
-  - `zenoh-bridge-netflow`: NetFlow v5/v7/v9 and IPFIX
-  - `zenoh-bridge-modbus`: Modbus TCP/RTU
-  - `zenoh-bridge-sysinfo`: System metrics (CPU, memory, disk, network)
-  - `zenoh-bridge-gnmi`: gNMI streaming telemetry with TLS
+  - `zensight-sensor-snmp`: SNMP v1/v2c/v3 with full USM support, MIB loading
+  - `zensight-sensor-syslog`: RFC 3164/5424, UDP/TCP/Unix socket
+  - `zensight-sensor-netflow`: NetFlow v5/v7/v9 and IPFIX
+  - `zensight-sensor-modbus`: Modbus TCP/RTU
+  - `zensight-sensor-sysinfo`: System metrics (CPU, memory, disk, network)
+  - `zensight-sensor-gnmi`: gNMI streaming telemetry with TLS
 
 - **Frontend Features**
   - Dashboard with device overview

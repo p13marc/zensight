@@ -1,0 +1,33 @@
+[package]
+name = "zensight-sensor-netring"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Zenoh sensor for wire-level flow/L7/anomaly telemetry via netring (AF_PACKET/AF_XDP)"
+license = "Apache-2.0"
+
+[[bin]]
+name = "zensight-sensor-netring"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+zensight-common = { path = "../zensight-common" }
+zensight-sensor-core = { path = "../zensight-sensor-core" }
+
+# Wire-level packet/flow telemetry. Capture needs CAP_NET_RAW; pcap replay does not.
+netring = { git = "https://github.com/p13marc/netring", features = ["monitor", "pcap"] }
+flowscope = "0.16"
+
+tokio = { workspace = true, features = ["full"] }
+zenoh.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+json5.workspace = true
+clap = { workspace = true, features = ["derive"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+anyhow.workspace = true
+hostname = "0.4"

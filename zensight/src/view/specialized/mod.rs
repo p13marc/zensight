@@ -6,6 +6,8 @@
 pub mod gnmi;
 pub mod modbus;
 pub mod netflow;
+pub mod netlink;
+pub mod netring;
 pub mod snmp;
 pub mod sysinfo;
 pub mod syslog;
@@ -34,6 +36,8 @@ pub fn specialized_view<'a>(state: &'a DeviceDetailState) -> Option<Element<'a, 
         Protocol::Netflow => Some(netflow::netflow_traffic_view(state)),
         Protocol::Gnmi => Some(gnmi::gnmi_streaming_view(state)),
         Protocol::Opcua => None, // No specialized view yet, use generic
+        Protocol::Netlink => Some(netlink::netlink_host_view(state)),
+        Protocol::Netring => Some(netring::netring_sensor_view(state)),
     }
 }
 
