@@ -936,6 +936,15 @@ impl ZenSight {
                     Some(format!("{} configured", self.expectations.current.len()));
             }
 
+            Message::FetchNetlinkDetail(topic) => {
+                return self.query_netlink_detail(topic);
+            }
+            Message::NetlinkDetailReceived(data) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netlink_detail.apply(data);
+                }
+            }
+
             Message::OpenSecurity => {
                 self.set_view(CurrentView::Security);
             }
@@ -1087,6 +1096,43 @@ impl ZenSight {
                 Err(e) => Message::CommandFeedback {
                     success: false,
                     message: format!("Status query failed: {e}"),
+                },
+            }
+        })
+    }
+
+    /// Fetch an on-demand netlink detail table from the sensor's query channel.
+    fn query_netlink_detail(
+        &self,
+        topic: crate::view::specialized::netlink_detail::NetlinkDetailTopic,
+    ) -> Task<Message> {
+        use crate::view::specialized::netlink_detail::{
+            NetlinkDetailData, NetlinkDetailTopic, fetch_records,
+        };
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::CommandFeedback {
+                success: false,
+                message: "Not connected to Zenoh".to_string(),
+            });
+        };
+        let key = topic.key();
+        Task::future(async move {
+            let data = match topic {
+                NetlinkDetailTopic::Sockets => fetch_records(session, key)
+                    .await
+                    .map(NetlinkDetailData::Sockets),
+                NetlinkDetailTopic::Routes => fetch_records(session, key)
+                    .await
+                    .map(NetlinkDetailData::Routes),
+                NetlinkDetailTopic::Neighbors => fetch_records(session, key)
+                    .await
+                    .map(NetlinkDetailData::Neighbors),
+            };
+            match data {
+                Some(d) => Message::NetlinkDetailReceived(d),
+                None => Message::CommandFeedback {
+                    success: false,
+                    message: format!("No netlink detail for {}", topic.label()),
                 },
             }
         })

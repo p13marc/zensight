@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 
-use serde::Serialize;
 use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
 /// A snapshot of one network interface.
@@ -313,53 +312,14 @@ pub fn diagnostics_points(host: &str, d: &DiagnosticsSummary) -> Vec<TelemetryPo
 }
 
 // ---------------------------------------------------------------------------
-// On-demand detail records (principle P2): served via the query channel
+// On-demand detail (principle P2): served via the query channel
 // (`@/query/{routes,neighbors,sockets}`), never streamed onto the telemetry bus.
-// These are the full, higher-cardinality tables the GUI fetches when a user
-// drills into a host. Kept here (pure + serde) so their shape is unit-tested
-// without a kernel; `query.rs` builds them from live nlink dumps.
+// The record DTOs live in `zensight-common` (shared with the GUI decoder);
+// `query.rs` builds them from live nlink dumps. The `SocketSelector` below is
+// sensor-side filtering logic, kept here and unit-tested.
 // ---------------------------------------------------------------------------
 
-/// One row of the routing table (full detail).
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct RouteRecord {
-    /// IP family: 4 or 6.
-    pub family: u8,
-    /// Destination: `"default"` or `"<cidr>"`.
-    pub dst: String,
-    pub gateway: Option<String>,
-    /// Output interface index.
-    pub oif: Option<u32>,
-    pub priority: Option<u32>,
-    pub protocol: String,
-    pub scope: String,
-    pub table: u32,
-}
-
-/// One ARP/NDP neighbor entry (full detail).
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct NeighborRecord {
-    pub family: u8,
-    pub ip: Option<String>,
-    pub mac: Option<String>,
-    pub ifindex: u32,
-    pub state: String,
-    pub is_router: bool,
-}
-
-/// One TCP socket (full detail), served filterable by state/port.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct SocketRecord {
-    pub local: String,
-    pub remote: String,
-    pub state: String,
-    pub uid: u32,
-    pub recv_q: u32,
-    pub send_q: u32,
-    pub rtt_us: u32,
-    pub retrans: u32,
-    pub inode: u32,
-}
+pub use zensight_common::{NeighborRecord, RouteRecord, SocketRecord};
 
 /// Selector parameters for the sockets query (`?state=&port=`). Both optional;
 /// absent means "no filter on that field".

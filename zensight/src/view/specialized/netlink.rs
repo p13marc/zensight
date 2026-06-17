@@ -2,12 +2,13 @@
 
 use std::collections::BTreeMap;
 
-use iced::widget::{Column, column, container, row, rule, scrollable, text};
+use iced::widget::{Column, button, column, container, row, rule, scrollable, text};
 use iced::{Element, Length, Theme};
 use zensight_common::TelemetryValue;
 
 use crate::message::Message;
 use crate::view::device::DeviceDetailState;
+use crate::view::specialized::netlink_detail::NetlinkDetailTopic;
 use crate::view::theme;
 
 /// Render the netlink host specialized view.
@@ -24,6 +25,8 @@ pub fn netlink_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
         render_neighbors(state),
         rule::horizontal(1),
         render_routes(state),
+        rule::horizontal(1),
+        render_detail(state),
     ]
     .spacing(15)
     .padding(20);
@@ -226,6 +229,101 @@ fn render_routes(state: &DeviceDetailState) -> Element<'_, Message> {
     ]
     .spacing(4)
     .into()
+}
+
+/// On-demand detail: fetch buttons + the fetched full tables (P2 — pulled from
+/// the sensor's `@/query/*` channels only when the user asks, never streamed).
+fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = text("On-demand Detail").size(18);
+    let fetch = |topic: NetlinkDetailTopic| {
+        button(text(format!("Fetch {}", topic.label())).size(12))
+            .on_press(Message::FetchNetlinkDetail(topic))
+            .padding([4, 10])
+    };
+    let buttons = row![
+        fetch(NetlinkDetailTopic::Sockets),
+        fetch(NetlinkDetailTopic::Routes),
+        fetch(NetlinkDetailTopic::Neighbors),
+    ]
+    .spacing(8);
+
+    let mut col = column![title, buttons].spacing(10);
+    let d = &state.netlink_detail;
+
+    if let Some(socks) = &d.sockets {
+        let mut list = Column::new().spacing(3).push(
+            row![
+                cell("local", 200),
+                cell("remote", 200),
+                cell("state", 110),
+                cell("rtt_us", 80),
+                cell("retx", 60),
+            ]
+            .spacing(8),
+        );
+        for s in socks.iter().take(200) {
+            list = list.push(
+                row![
+                    cell(&s.local, 200),
+                    cell(&s.remote, 200),
+                    cell(&s.state, 110),
+                    cell(&s.rtt_us.to_string(), 80),
+                    cell(&s.retrans.to_string(), 60),
+                ]
+                .spacing(8),
+            );
+        }
+        col = col
+            .push(text(format!("Sockets ({})", socks.len())).size(15))
+            .push(list);
+    }
+
+    if let Some(routes) = &d.routes {
+        let mut list = Column::new().spacing(3).push(
+            row![
+                cell("destination", 220),
+                cell("gateway", 160),
+                cell("proto", 90),
+                cell("scope", 90),
+            ]
+            .spacing(8),
+        );
+        for r in routes.iter().take(200) {
+            list = list.push(
+                row![
+                    cell(&r.dst, 220),
+                    cell(r.gateway.as_deref().unwrap_or("-"), 160),
+                    cell(&r.protocol, 90),
+                    cell(&r.scope, 90),
+                ]
+                .spacing(8),
+            );
+        }
+        col = col
+            .push(text(format!("Routes ({})", routes.len())).size(15))
+            .push(list);
+    }
+
+    if let Some(neighbors) = &d.neighbors {
+        let mut list = Column::new().spacing(3).push(
+            row![cell("ip", 200), cell("mac", 200), cell("state", 120)].spacing(8),
+        );
+        for n in neighbors.iter().take(200) {
+            list = list.push(
+                row![
+                    cell(n.ip.as_deref().unwrap_or("-"), 200),
+                    cell(n.mac.as_deref().unwrap_or("-"), 200),
+                    cell(&n.state, 120),
+                ]
+                .spacing(8),
+            );
+        }
+        col = col
+            .push(text(format!("Neighbors ({})", neighbors.len())).size(15))
+            .push(list);
+    }
+
+    col.into()
 }
 
 // ---- small helpers ----------------------------------------------------------

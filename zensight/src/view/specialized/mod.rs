@@ -7,6 +7,7 @@ pub mod gnmi;
 pub mod modbus;
 pub mod netflow;
 pub mod netlink;
+pub mod netlink_detail;
 pub mod netring;
 pub mod snmp;
 pub mod sysinfo;

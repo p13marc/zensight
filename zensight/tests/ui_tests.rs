@@ -725,6 +725,24 @@ fn test_netlink_specialized_view() {
         ));
     }
 
+    // Pre-populate an on-demand fetched socket detail table (as if the query
+    // channel had replied) to exercise the drill-down render path.
+    state.netlink_detail.apply(
+        zensight::view::specialized::netlink_detail::NetlinkDetailData::Sockets(vec![
+            zensight_common::SocketRecord {
+                local: "10.0.0.1:5555".into(),
+                remote: "1.1.1.1:443".into(),
+                state: "established".into(),
+                uid: 1000,
+                recv_q: 0,
+                send_q: 0,
+                rtt_us: 1234,
+                retrans: 0,
+                inode: 9999,
+            },
+        ]),
+    );
+
     let mut ui = simulator(netlink_host_view(&state));
     assert!(ui.find("Netlink: router01").is_ok());
     assert!(ui.find("eth0").is_ok());
@@ -733,6 +751,10 @@ fn test_netlink_specialized_view() {
     assert!(ui.find("Diagnostics").is_ok());
     assert!(ui.find("Neighbors (ARP/NDP)").is_ok());
     assert!(ui.find("Routes").is_ok());
+    // enh-02 §3 on-demand detail: fetch buttons + the fetched socket table.
+    assert!(ui.find("On-demand Detail").is_ok());
+    assert!(ui.find("Fetch Sockets").is_ok());
+    assert!(ui.find("10.0.0.1:5555").is_ok());
 }
 
 /// The netring specialized view renders flows + top talkers.

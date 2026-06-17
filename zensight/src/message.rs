@@ -75,6 +75,11 @@ pub enum Message {
     /// A sentinel status reply (ExpectationsConfig JSON).
     ExpectationStatusReceived(String),
 
+    /// Fetch an on-demand netlink detail table (sockets/routes/neighbors).
+    FetchNetlinkDetail(crate::view::specialized::netlink_detail::NetlinkDetailTopic),
+    /// A decoded netlink detail table reply.
+    NetlinkDetailReceived(crate::view::specialized::netlink_detail::NetlinkDetailData),
+
     /// Open the security (network anomalies) view.
     OpenSecurity,
     /// Close the security view.

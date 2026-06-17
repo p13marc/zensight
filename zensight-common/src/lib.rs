@@ -16,6 +16,7 @@ pub mod config;
 pub mod error;
 pub mod health;
 pub mod keyexpr;
+pub mod query_detail;
 pub mod serialization;
 pub mod session;
 pub mod telemetry;
@@ -35,6 +36,7 @@ pub use keyexpr::{
     all_correlation_wildcard, all_errors_wildcard, all_health_wildcard, all_liveness_wildcard,
     all_sensors_wildcard, all_telemetry_wildcard, parse_key_expr,
 };
+pub use query_detail::{NeighborRecord, RouteRecord, SocketRecord};
 pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;
 pub use telemetry::{Protocol, TelemetryPoint, TelemetryValue, current_timestamp_millis};

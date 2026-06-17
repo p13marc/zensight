@@ -76,6 +76,9 @@ pub struct DeviceDetailState {
     pub pending_filter: String,
     /// Timestamp when pending filter was last updated.
     pub pending_filter_time: i64,
+    /// On-demand netlink detail tables (sockets/routes/neighbors), fetched lazily
+    /// from the sensor's query channel when the user drills in.
+    pub netlink_detail: crate::view::specialized::netlink_detail::NetlinkDetailState,
 }
 
 impl DeviceDetailState {
@@ -96,6 +99,7 @@ impl DeviceDetailState {
             metric_filter: String::new(),
             pending_filter: String::new(),
             pending_filter_time: 0,
+            netlink_detail: Default::default(),
         }
     }
 
