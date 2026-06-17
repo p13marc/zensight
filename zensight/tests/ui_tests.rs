@@ -746,6 +746,10 @@ fn test_netring_specialized_view() {
     for (metric, value) in [
         ("flow/started_total", TelemetryValue::Counter(10)),
         ("flow/active", TelemetryValue::Gauge(2.0)),
+        ("flow/bytes_total", TelemetryValue::Counter(582)),
+        ("flow/packets_total", TelemetryValue::Counter(10)),
+        ("tcp/resets_total", TelemetryValue::Counter(1)),
+        ("tcp/refused_total", TelemetryValue::Counter(0)),
         (
             "bandwidth/https/bytes_per_sec",
             TelemetryValue::Gauge(50000.0),
@@ -764,6 +768,9 @@ fn test_netring_specialized_view() {
     assert!(ui.find("Netring: wiretap1").is_ok());
     assert!(ui.find("Flows").is_ok());
     assert!(ui.find("https").is_ok());
+    // enh-03 flow-volume + TCP health sections.
+    assert!(ui.find("TCP Health").is_ok());
+    assert!(ui.find("bytes (total)").is_ok());
 }
 
 /// Sensor-pushed alerts render in the alerts view's "Anomalies & Expectations"

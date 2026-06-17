@@ -16,6 +16,8 @@ pub fn netring_sensor_view(state: &DeviceDetailState) -> Element<'_, Message> {
         rule::horizontal(1),
         render_flows(state),
         rule::horizontal(1),
+        render_tcp_health(state),
+        rule::horizontal(1),
         render_bandwidth(state),
     ]
     .spacing(15)
@@ -54,6 +56,43 @@ fn render_flows(state: &DeviceDetailState) -> Element<'_, Message> {
         ]
         .spacing(8),
         row![cell("active", 160), cell(&get("flow/active"), 100)].spacing(8),
+        row![
+            cell("bytes (total)", 160),
+            cell(&get("flow/bytes_total"), 100)
+        ]
+        .spacing(8),
+        row![
+            cell("packets (total)", 160),
+            cell(&get("flow/packets_total"), 100)
+        ]
+        .spacing(8),
+        row![
+            cell("retransmits (total)", 160),
+            cell(&get("flow/retransmits_total"), 100)
+        ]
+        .spacing(8),
+    ]
+    .spacing(4)
+    .into()
+}
+
+/// TCP health: reset / connection-refused counters.
+fn render_tcp_health(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = text("TCP Health").size(18);
+    if !state.metrics.keys().any(|k| k.starts_with("tcp/")) {
+        return column![title, text("No TCP reset data").size(13).style(dim)]
+            .spacing(8)
+            .into();
+    }
+    let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
+    column![
+        title,
+        row![cell("resets (total)", 160), cell(&get("tcp/resets_total"), 100)].spacing(8),
+        row![
+            cell("refused (total)", 160),
+            cell(&get("tcp/refused_total"), 100)
+        ]
+        .spacing(8),
     ]
     .spacing(4)
     .into()
