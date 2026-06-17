@@ -148,59 +148,9 @@ impl From<zensight_common::AlertSeverity> for Severity {
     }
 }
 
-/// Comparison operators for alert rules.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub enum ComparisonOp {
-    #[default]
-    GreaterThan,
-    GreaterOrEqual,
-    LessThan,
-    LessOrEqual,
-    Equal,
-    NotEqual,
-}
-
-impl ComparisonOp {
-    /// All comparison operators.
-    pub const ALL: &'static [ComparisonOp] = &[
-        ComparisonOp::GreaterThan,
-        ComparisonOp::GreaterOrEqual,
-        ComparisonOp::LessThan,
-        ComparisonOp::LessOrEqual,
-        ComparisonOp::Equal,
-        ComparisonOp::NotEqual,
-    ];
-
-    /// Get the symbol for this operator.
-    pub fn symbol(&self) -> &'static str {
-        match self {
-            ComparisonOp::GreaterThan => ">",
-            ComparisonOp::GreaterOrEqual => ">=",
-            ComparisonOp::LessThan => "<",
-            ComparisonOp::LessOrEqual => "<=",
-            ComparisonOp::Equal => "==",
-            ComparisonOp::NotEqual => "!=",
-        }
-    }
-
-    /// Evaluate the comparison.
-    pub fn evaluate(&self, value: f64, threshold: f64) -> bool {
-        match self {
-            ComparisonOp::GreaterThan => value > threshold,
-            ComparisonOp::GreaterOrEqual => value >= threshold,
-            ComparisonOp::LessThan => value < threshold,
-            ComparisonOp::LessOrEqual => value <= threshold,
-            ComparisonOp::Equal => (value - threshold).abs() < f64::EPSILON,
-            ComparisonOp::NotEqual => (value - threshold).abs() >= f64::EPSILON,
-        }
-    }
-}
-
-impl std::fmt::Display for ComparisonOp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.symbol())
-    }
-}
+/// Comparison operators for alert rules — shared with the sensors' headless
+/// `metric-threshold` expectations (see `zensight_common::ComparisonOp`).
+pub use zensight_common::ComparisonOp;
 
 /// A triggered alert.
 #[derive(Debug, Clone)]

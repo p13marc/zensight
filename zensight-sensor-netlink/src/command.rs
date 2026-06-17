@@ -12,8 +12,8 @@ use zensight_common::{command_key, status_key};
 use crate::collector::CollectHandle;
 use crate::config::CollectConfig;
 use crate::sentinel::{
-    ExpectationsConfig, LinkExpectation, NeighborExpectation, RouteExpectation, SentinelHandle,
-    SocketExpectation,
+    ExpectationsConfig, LinkExpectation, MetricExpectation, NeighborExpectation, RouteExpectation,
+    SentinelHandle, SocketExpectation,
 };
 
 /// Topic for the expectations control surface.
@@ -125,6 +125,8 @@ pub enum ExpectationCommand {
     AddNeighbor(NeighborExpectation),
     /// Add (or replace by name) a route expectation.
     AddRoute(RouteExpectation),
+    /// Add (or replace by name) a metric-threshold expectation.
+    AddMetric(MetricExpectation),
     /// Remove an expectation by rule slug.
     Remove { rule: String },
 }
@@ -151,6 +153,10 @@ pub async fn apply(handle: &SentinelHandle, cmd: ExpectationCommand) {
         ExpectationCommand::AddRoute(exp) => {
             tracing::info!(name = %exp.name, "sentinel: add route expectation");
             handle.add_route(exp).await;
+        }
+        ExpectationCommand::AddMetric(exp) => {
+            tracing::info!(name = %exp.name, metric = %exp.metric, "sentinel: add metric expectation");
+            handle.add_metric(exp).await;
         }
         ExpectationCommand::Remove { rule } => {
             tracing::info!(rule = %rule, "sentinel: remove expectation");

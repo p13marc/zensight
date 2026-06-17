@@ -16,4 +16,5 @@ pub mod sentinel;
 
 pub use collector::Collector;
 pub use config::{NetlinkConfig, NetlinkSensorConfig};
-pub use sentinel::{Evaluator, ExpectationsConfig, SentinelHandle};
+pub use collector::MetricCache;
+pub use sentinel::{Evaluator, ExpectationsConfig, MetricExpectation, SentinelHandle};

@@ -43,6 +43,8 @@ async fn main() -> Result<()> {
     let mut runner = runner;
     // Hot-swappable collector toggles, driven by the `collection` command channel.
     let collect_handle = collector.collect_handle();
+    // Latest-metric cache shared with the sentinel's metric-threshold expectations.
+    let metric_cache = collector.metric_cache();
     runner.spawn(async move {
         collector.run().await;
     });
@@ -82,8 +84,12 @@ async fn main() -> Result<()> {
         // Late-joiner seed: serve the current firing set to consumers that connect
         // after an alert fired.
         runner.spawn(serve_alerts_query(reporter.clone()));
-        let evaluator =
-            zensight_sensor_netlink::Evaluator::new(hostname.clone(), exp_cfg, reporter.clone());
+        let evaluator = zensight_sensor_netlink::Evaluator::new(
+            hostname.clone(),
+            exp_cfg,
+            reporter.clone(),
+            metric_cache,
+        );
         let handle = evaluator.handle();
         let cmd_session = runner.session().clone();
         let cmd_prefix = netlink_config.key_prefix.clone();

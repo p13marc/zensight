@@ -11,6 +11,7 @@
 
 pub mod alert;
 pub mod command;
+pub mod comparison;
 pub mod config;
 pub mod error;
 pub mod health;
@@ -22,6 +23,7 @@ pub mod telemetry;
 // Re-export commonly used types at the crate root
 pub use alert::{Alert, AlertKind, AlertSeverity, AlertState};
 pub use command::{Command, command_key, status_key};
+pub use comparison::ComparisonOp;
 pub use config::{BaseConfig, LogFormat, LoggingConfig, ZenohConfig, load_config, parse_config};
 pub use error::{Error, Result};
 pub use health::{

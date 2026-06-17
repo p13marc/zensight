@@ -23,6 +23,44 @@ use crate::map::{
 const AF_INET: u8 = 2;
 const AF_INET6: u8 = 10;
 
+/// A shared cache of the latest numeric value of every published metric, keyed
+/// by metric path (e.g. `sockets/tcp/established`). The collector writes it as it
+/// publishes; the sentinel reads it to evaluate `metric-threshold` expectations
+/// without re-deriving the data (P4 generic threshold / GUI rule-promotion).
+#[derive(Clone, Default)]
+pub struct MetricCache {
+    inner: Arc<RwLock<std::collections::HashMap<String, f64>>>,
+}
+
+impl MetricCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record the latest numeric value for `metric`. No-op for non-numeric points.
+    pub async fn update(&self, metric: &str, value: &zensight_common::TelemetryValue) {
+        use zensight_common::TelemetryValue as V;
+        let n = match value {
+            V::Counter(c) => *c as f64,
+            V::Gauge(g) => *g,
+            V::Boolean(b) => {
+                if *b {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            _ => return,
+        };
+        self.inner.write().await.insert(metric.to_string(), n);
+    }
+
+    /// Latest value for `metric`, if seen.
+    pub async fn get(&self, metric: &str) -> Option<f64> {
+        self.inner.read().await.get(metric).copied()
+    }
+}
+
 /// Hot-swappable collector toggles, shared between the poll loop and the runtime
 /// `collection` command channel (same pattern as the sentinel's `SentinelHandle`).
 /// A `set`/`replace` takes effect on the next poll tick — no restart (P4).
@@ -69,6 +107,9 @@ pub struct Collector {
     config: NetlinkConfig,
     /// Live collector toggles (runtime-reconfigurable via the command channel).
     collect: CollectHandle,
+    /// Latest numeric value of every published metric (read by the sentinel's
+    /// metric-threshold expectations).
+    metric_cache: MetricCache,
     /// Cached advanced publishers so late-joining consumers get the current value
     /// of every metric on connect (via their AdvancedSubscriber `history()`),
     /// instead of waiting for the next poll.
@@ -93,6 +134,7 @@ impl Collector {
             host,
             config,
             collect,
+            metric_cache: MetricCache::new(),
             registry,
         }
     }
@@ -100,6 +142,12 @@ impl Collector {
     /// A clonable handle to this collector's live toggles, for the command channel.
     pub fn collect_handle(&self) -> CollectHandle {
         self.collect.clone()
+    }
+
+    /// A clonable handle to the latest-metric cache, for the sentinel's
+    /// metric-threshold expectations.
+    pub fn metric_cache(&self) -> MetricCache {
+        self.metric_cache.clone()
     }
 
     pub async fn run(self) {
@@ -251,6 +299,8 @@ impl Collector {
     }
 
     async fn publish(&self, point: &zensight_common::TelemetryPoint) {
+        // Tap the latest numeric value for the sentinel's metric-threshold checks.
+        self.metric_cache.update(&point.metric, &point.value).await;
         // Key = <prefix>/<source>/<metric>, published via a cached AdvancedPublisher.
         let suffix = format!("{}/{}", point.source, point.metric);
         if let Err(e) = self.registry.publish(&suffix, point).await {

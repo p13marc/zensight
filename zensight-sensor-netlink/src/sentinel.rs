@@ -12,11 +12,13 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use zensight_common::{Alert, AlertKind, AlertSeverity, Protocol};
+use zensight_common::{Alert, AlertKind, AlertSeverity, ComparisonOp, Protocol};
 use zensight_sensor_core::AlertReporter;
 
 use nlink::netlink::{Connection, Route, SockDiag};
 use nlink::sockdiag::{SocketFilter, SocketInfo, SocketState, TcpState};
+
+use crate::collector::MetricCache;
 
 fn default_eval_interval() -> u64 {
     10
@@ -40,6 +42,8 @@ pub struct ExpectationsConfig {
     pub neighbors: Vec<NeighborExpectation>,
     #[serde(default)]
     pub routes: Vec<RouteExpectation>,
+    #[serde(default)]
+    pub metrics: Vec<MetricExpectation>,
 }
 
 impl ExpectationsConfig {
@@ -48,6 +52,7 @@ impl ExpectationsConfig {
             && self.links.is_empty()
             && self.neighbors.is_empty()
             && self.routes.is_empty()
+            && self.metrics.is_empty()
     }
 }
 
@@ -124,6 +129,25 @@ pub struct RouteExpectation {
     /// If set, the default route must go via this gateway IP.
     #[serde(default)]
     pub default_via: Option<String>,
+    #[serde(default = "default_severity")]
+    pub severity: AlertSeverity,
+    #[serde(default)]
+    pub for_secs: Option<u64>,
+}
+
+/// A generic metric-threshold expectation: "metric `<op>` value should hold".
+/// The keystone for promoting a GUI threshold rule into a headless expectation
+/// (shares [`ComparisonOp`] with the frontend).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricExpectation {
+    /// Label for the rule slug `metric:<name>`.
+    pub name: String,
+    /// Metric path to watch, e.g. `sockets/tcp/retransmits_total`.
+    pub metric: String,
+    /// Comparison operator the metric value must satisfy.
+    pub op: ComparisonOp,
+    /// Right-hand side of the comparison.
+    pub value: f64,
     #[serde(default = "default_severity")]
     pub severity: AlertSeverity,
     #[serde(default)]
@@ -318,6 +342,33 @@ pub fn check_route(exp: &RouteExpectation, obs: &RouteObservation) -> Vec<Violat
     Vec::new()
 }
 
+/// Evaluate a metric-threshold expectation. `observed` is the metric's latest
+/// value (`None` if not yet published). Absent → no violation (matches the GUI
+/// threshold-rule semantics: a rule only fires on data it has actually seen).
+pub fn check_metric(exp: &MetricExpectation, observed: Option<f64>) -> Vec<Violation> {
+    match observed {
+        Some(v) if !exp.op.evaluate(v, exp.value) => vec![Violation {
+            summary: format!(
+                "{}: {} is {} (expected {} {})",
+                exp.name,
+                exp.metric,
+                v,
+                exp.op.symbol(),
+                exp.value
+            ),
+            labels: vec![
+                (
+                    "expected".into(),
+                    format!("{} {} {}", exp.metric, exp.op.symbol(), exp.value),
+                ),
+                ("metric".into(), exp.metric.clone()),
+                ("actual".into(), v.to_string()),
+            ],
+        }],
+        _ => Vec::new(),
+    }
+}
+
 // ---- Evaluator (live nlink + AlertReporter) ---------------------------------
 
 /// Shared, hot-swappable expectation set. Cloning is cheap (Arc).
@@ -363,6 +414,12 @@ impl SentinelHandle {
         c.routes.retain(|e| e.name != exp.name);
         c.routes.push(exp);
     }
+    /// Add (or replace by name) a metric-threshold expectation.
+    pub async fn add_metric(&self, exp: MetricExpectation) {
+        let mut c = self.expectations.write().await;
+        c.metrics.retain(|e| e.name != exp.name);
+        c.metrics.push(exp);
+    }
     /// Remove an expectation by rule slug (`socket:<name>` / `link:<iface>` /
     /// `neighbor:<ip>`).
     pub async fn remove(&self, rule: &str) {
@@ -375,6 +432,8 @@ impl SentinelHandle {
             c.neighbors.retain(|e| e.ip != ip);
         } else if let Some(name) = rule.strip_prefix("route:") {
             c.routes.retain(|e| e.name != name);
+        } else if let Some(name) = rule.strip_prefix("metric:") {
+            c.metrics.retain(|e| e.name != name);
         }
     }
     /// Snapshot the current expectation set (for the status queryable).
@@ -388,17 +447,25 @@ pub struct Evaluator {
     host: String,
     expectations: Arc<RwLock<ExpectationsConfig>>,
     reporter: Arc<AlertReporter>,
+    /// Latest published metric values, for metric-threshold expectations.
+    metric_cache: MetricCache,
     /// Rules evaluated on the previous sweep — used to resolve alerts for rules
     /// that were removed (hot-swap) so they don't linger forever.
     seen_rules: std::sync::Mutex<HashSet<String>>,
 }
 
 impl Evaluator {
-    pub fn new(host: String, config: ExpectationsConfig, reporter: Arc<AlertReporter>) -> Self {
+    pub fn new(
+        host: String,
+        config: ExpectationsConfig,
+        reporter: Arc<AlertReporter>,
+        metric_cache: MetricCache,
+    ) -> Self {
         Self {
             host,
             expectations: Arc::new(RwLock::new(config)),
             reporter,
+            metric_cache,
             seen_rules: std::sync::Mutex::new(HashSet::new()),
         }
     }
@@ -511,6 +578,17 @@ impl Evaluator {
                 }
                 Err(e) => tracing::warn!(error = %e, "sentinel: route observation failed"),
             }
+        }
+
+        // Metric-threshold expectations (read the collector's latest-value cache;
+        // no nlink needed). Generic op/value comparison — the GUI-rule-promotion path.
+        for exp in &config.metrics {
+            let rule = format!("metric:{}", exp.name);
+            current_rules.insert(rule.clone());
+            let observed = self.metric_cache.get(&exp.metric).await;
+            let violations = check_metric(exp, observed);
+            self.report(&rule, exp.severity, exp.for_secs, violations)
+                .await;
         }
 
         // Resolve alerts for rules removed since the last sweep (hot-swap).
@@ -717,6 +795,28 @@ mod tests {
         assert!(check_neighbor(&exp, Some(true)).is_empty()); // reachable → ok
         assert_eq!(check_neighbor(&exp, Some(false)).len(), 1); // unreachable → fire
         assert_eq!(check_neighbor(&exp, None).len(), 1); // absent → fire
+    }
+
+    #[test]
+    fn metric_expectations() {
+        // "retransmits should stay <= 100": observed 5 → ok; observed 250 → fire.
+        let exp = MetricExpectation {
+            name: "retrans".into(),
+            metric: "sockets/tcp/retransmits_total".into(),
+            op: ComparisonOp::LessOrEqual,
+            value: 100.0,
+            severity: AlertSeverity::Warning,
+            for_secs: None,
+        };
+        assert!(check_metric(&exp, Some(5.0)).is_empty());
+        assert_eq!(check_metric(&exp, Some(250.0)).len(), 1);
+        // Absent metric → no violation (only fires on data it has seen).
+        assert!(check_metric(&exp, None).is_empty());
+        // The firing violation carries metric + actual labels.
+        let v = &check_metric(&exp, Some(250.0))[0];
+        assert!(v.labels.iter().any(|(k, val)| k == "metric"
+            && val == "sockets/tcp/retransmits_total"));
+        assert!(v.labels.iter().any(|(k, val)| k == "actual" && val == "250"));
     }
 
     #[test]
