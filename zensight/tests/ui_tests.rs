@@ -786,6 +786,17 @@ fn test_netring_specialized_view() {
         ));
     }
 
+    // Pre-populate on-demand flow detail (as if @/query/flows had replied).
+    state.netring_detail.apply(vec![zensight_common::FlowRecord {
+        src: "10.0.0.1:54321".into(),
+        dst: "10.0.0.2:80".into(),
+        proto: "tcp".into(),
+        bytes: 694,
+        packets: 10,
+        duration_ms: 100,
+        reason: "fin".into(),
+    }]);
+
     let mut ui = simulator(netring_sensor_view(&state));
     assert!(ui.find("Netring: wiretap1").is_ok());
     assert!(ui.find("Flows").is_ok());
@@ -793,6 +804,10 @@ fn test_netring_specialized_view() {
     // enh-03 flow-volume + TCP health sections.
     assert!(ui.find("TCP Health").is_ok());
     assert!(ui.find("bytes (total)").is_ok());
+    // enh-03 §D on-demand flow detail: fetch button + fetched flow row.
+    assert!(ui.find("Recent Flows (on demand)").is_ok());
+    assert!(ui.find("Fetch Flows").is_ok());
+    assert!(ui.find("10.0.0.1:54321").is_ok());
 }
 
 /// Sensor-pushed alerts render in the alerts view's "Anomalies & Expectations"

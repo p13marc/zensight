@@ -79,6 +79,8 @@ pub struct DeviceDetailState {
     /// On-demand netlink detail tables (sockets/routes/neighbors), fetched lazily
     /// from the sensor's query channel when the user drills in.
     pub netlink_detail: crate::view::specialized::netlink_detail::NetlinkDetailState,
+    /// On-demand netring flow detail, fetched lazily from `@/query/flows`.
+    pub netring_detail: crate::view::specialized::netring_detail::NetringDetailState,
 }
 
 impl DeviceDetailState {
@@ -100,6 +102,7 @@ impl DeviceDetailState {
             pending_filter: String::new(),
             pending_filter_time: 0,
             netlink_detail: Default::default(),
+            netring_detail: Default::default(),
         }
     }
 

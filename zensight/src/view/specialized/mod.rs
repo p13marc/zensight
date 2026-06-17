@@ -9,6 +9,7 @@ pub mod netflow;
 pub mod netlink;
 pub mod netlink_detail;
 pub mod netring;
+pub mod netring_detail;
 pub mod snmp;
 pub mod sysinfo;
 pub mod syslog;

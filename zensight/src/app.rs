@@ -945,6 +945,15 @@ impl ZenSight {
                 }
             }
 
+            Message::FetchNetringFlows => {
+                return self.query_netring_flows();
+            }
+            Message::NetringFlowsReceived(flows) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply(flows);
+                }
+            }
+
             Message::OpenSecurity => {
                 self.set_view(CurrentView::Security);
             }
@@ -1133,6 +1142,26 @@ impl ZenSight {
                 None => Message::CommandFeedback {
                     success: false,
                     message: format!("No netlink detail for {}", topic.label()),
+                },
+            }
+        })
+    }
+
+    /// Fetch the on-demand netring flow detail from the sensor's query channel.
+    fn query_netring_flows(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_flows;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::CommandFeedback {
+                success: false,
+                message: "Not connected to Zenoh".to_string(),
+            });
+        };
+        Task::future(async move {
+            match fetch_flows(session).await {
+                Some(flows) => Message::NetringFlowsReceived(flows),
+                None => Message::CommandFeedback {
+                    success: false,
+                    message: "No netring flow detail".to_string(),
                 },
             }
         })

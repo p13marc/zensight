@@ -79,6 +79,10 @@ pub enum Message {
     FetchNetlinkDetail(crate::view::specialized::netlink_detail::NetlinkDetailTopic),
     /// A decoded netlink detail table reply.
     NetlinkDetailReceived(crate::view::specialized::netlink_detail::NetlinkDetailData),
+    /// Fetch the on-demand netring flow detail (recent flows).
+    FetchNetringFlows,
+    /// A decoded netring flow detail reply.
+    NetringFlowsReceived(Vec<zensight_common::FlowRecord>),
 
     /// Open the security (network anomalies) view.
     OpenSecurity,

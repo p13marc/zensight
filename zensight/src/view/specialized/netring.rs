@@ -1,7 +1,7 @@
 //! Netring sensor specialized view — flows + per-app bandwidth.
 
 use iced::Element;
-use iced::widget::{Column, column, container, row, rule, scrollable, text};
+use iced::widget::{Column, button, column, container, row, rule, scrollable, text};
 use iced::{Length, Theme};
 use zensight_common::TelemetryValue;
 
@@ -19,6 +19,8 @@ pub fn netring_sensor_view(state: &DeviceDetailState) -> Element<'_, Message> {
         render_tcp_health(state),
         rule::horizontal(1),
         render_bandwidth(state),
+        rule::horizontal(1),
+        render_flow_detail(state),
     ]
     .spacing(15)
     .padding(20);
@@ -96,6 +98,47 @@ fn render_tcp_health(state: &DeviceDetailState) -> Element<'_, Message> {
     ]
     .spacing(4)
     .into()
+}
+
+/// On-demand recent-flow detail: a fetch button + the fetched flow table (P2 —
+/// pulled from the sensor's `@/query/flows` channel, never streamed).
+fn render_flow_detail(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = text("Recent Flows (on demand)").size(18);
+    let fetch = button(text("Fetch Flows").size(12))
+        .on_press(Message::FetchNetringFlows)
+        .padding([4, 10]);
+    let mut col = column![title, fetch].spacing(10);
+
+    if let Some(flows) = &state.netring_detail.flows {
+        let mut list = Column::new().spacing(3).push(
+            row![
+                cell("src", 190),
+                cell("dst", 190),
+                cell("proto", 60),
+                cell("bytes", 90),
+                cell("dur_ms", 80),
+                cell("reason", 90),
+            ]
+            .spacing(8),
+        );
+        for f in flows.iter().take(200) {
+            list = list.push(
+                row![
+                    cell(&f.src, 190),
+                    cell(&f.dst, 190),
+                    cell(&f.proto, 60),
+                    cell(&f.bytes.to_string(), 90),
+                    cell(&f.duration_ms.to_string(), 80),
+                    cell(&f.reason, 90),
+                ]
+                .spacing(8),
+            );
+        }
+        col = col
+            .push(text(format!("{} flows", flows.len())).size(15))
+            .push(list);
+    }
+    col.into()
 }
 
 fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
