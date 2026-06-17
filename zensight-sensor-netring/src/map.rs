@@ -92,6 +92,24 @@ pub fn flow_points(
     ]
 }
 
+/// Flow-volume RED counters, accumulated from ended-flow stats: total bytes,
+/// packets and retransmits across all completed flows (utilization/errors).
+pub fn flow_volume_points(
+    sensor_id: &str,
+    bytes_total: u64,
+    packets_total: u64,
+    retransmits_total: u64,
+) -> Vec<TelemetryPoint> {
+    let c = |metric: &str, v: u64| {
+        TelemetryPoint::new(sensor_id, Protocol::Netring, metric, TelemetryValue::Counter(v))
+    };
+    vec![
+        c("flow/bytes_total", bytes_total),
+        c("flow/packets_total", packets_total),
+        c("flow/retransmits_total", retransmits_total),
+    ]
+}
+
 /// TCP reset aggregate points.
 pub fn tcp_reset_points(sensor_id: &str, resets: u64, refused: u64) -> Vec<TelemetryPoint> {
     vec![
@@ -168,6 +186,17 @@ mod tests {
         let fps = flow_points("s", 10, 8, 2);
         assert_eq!(fps[0].value, TelemetryValue::Counter(10));
         assert_eq!(fps[2].value, TelemetryValue::Gauge(2.0));
+    }
+
+    #[test]
+    fn flow_volume_points_shape() {
+        let pts = flow_volume_points("s", 4096, 12, 2);
+        assert_eq!(pts[0].metric, "flow/bytes_total");
+        assert_eq!(pts[0].value, TelemetryValue::Counter(4096));
+        assert_eq!(pts[1].metric, "flow/packets_total");
+        assert_eq!(pts[1].value, TelemetryValue::Counter(12));
+        assert_eq!(pts[2].metric, "flow/retransmits_total");
+        assert_eq!(pts[2].value, TelemetryValue::Counter(2));
     }
 
     #[test]

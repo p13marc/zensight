@@ -26,6 +26,11 @@ pub struct MonitorChannels {
     /// Shared flow counters (started, ended) for the periodic aggregate task.
     pub flow_started: Arc<AtomicU64>,
     pub flow_ended: Arc<AtomicU64>,
+    /// Flow volume RED counters, accumulated from ended-flow stats: total bytes,
+    /// packets and retransmits across all completed flows.
+    pub flow_bytes: Arc<AtomicU64>,
+    pub flow_packets: Arc<AtomicU64>,
+    pub flow_retransmits: Arc<AtomicU64>,
     /// TCP RST counters: total resets and the subset that are connection refusals
     /// (zero-payload RST = "connection refused" vs a mid-transfer abort).
     pub tcp_resets: Arc<AtomicU64>,
@@ -83,6 +88,9 @@ pub fn build(
     let (anom_tx, anom_rx) = mpsc::unbounded_channel::<flowscope::OwnedAnomaly>();
     let flow_started = Arc::new(AtomicU64::new(0));
     let flow_ended = Arc::new(AtomicU64::new(0));
+    let flow_bytes = Arc::new(AtomicU64::new(0));
+    let flow_packets = Arc::new(AtomicU64::new(0));
+    let flow_retransmits = Arc::new(AtomicU64::new(0));
     let tcp_resets = Arc::new(AtomicU64::new(0));
     let tcp_refused = Arc::new(AtomicU64::new(0));
 
@@ -109,8 +117,14 @@ pub fn build(
             Ok(())
         });
         let ended = flow_ended.clone();
-        b = b.on_ctx::<FlowEnded<Tcp>>(move |_e: &FlowEnded<Tcp>, _ctx: &mut Ctx<'_>| {
+        let bytes = flow_bytes.clone();
+        let packets = flow_packets.clone();
+        let retransmits = flow_retransmits.clone();
+        b = b.on_ctx::<FlowEnded<Tcp>>(move |e: &FlowEnded<Tcp>, _ctx: &mut Ctx<'_>| {
             ended.fetch_add(1, Ordering::Relaxed);
+            bytes.fetch_add(e.stats.total_bytes(), Ordering::Relaxed);
+            packets.fetch_add(e.stats.total_packets(), Ordering::Relaxed);
+            retransmits.fetch_add(e.stats.total_retransmits(), Ordering::Relaxed);
             Ok(())
         });
     }
@@ -178,6 +192,9 @@ pub fn build(
             anomalies: anom_rx,
             flow_started,
             flow_ended,
+            flow_bytes,
+            flow_packets,
+            flow_retransmits,
             tcp_resets,
             tcp_refused,
         },

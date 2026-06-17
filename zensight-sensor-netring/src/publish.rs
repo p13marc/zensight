@@ -23,6 +23,9 @@ pub async fn run_drains(
 ) {
     let started = channels.flow_started.clone();
     let ended = channels.flow_ended.clone();
+    let flow_bytes = channels.flow_bytes.clone();
+    let flow_packets = channels.flow_packets.clone();
+    let flow_retransmits = channels.flow_retransmits.clone();
     let tcp_resets = channels.tcp_resets.clone();
     let tcp_refused = channels.tcp_refused.clone();
 
@@ -50,8 +53,12 @@ pub async fn run_drains(
                         let e = ended.load(Ordering::Relaxed);
                         let resets = tcp_resets.load(Ordering::Relaxed);
                         let refused = tcp_refused.load(Ordering::Relaxed);
+                        let bytes = flow_bytes.load(Ordering::Relaxed);
+                        let pkts = flow_packets.load(Ordering::Relaxed);
+                        let retx = flow_retransmits.load(Ordering::Relaxed);
                         let points = map::flow_points(&sensor_id, s, e, s.saturating_sub(e))
                             .into_iter()
+                            .chain(map::flow_volume_points(&sensor_id, bytes, pkts, retx))
                             .chain(map::tcp_reset_points(&sensor_id, resets, refused));
                         for point in points {
                             let suffix = format!("{}/{}", point.source, point.metric);
@@ -80,8 +87,12 @@ pub async fn run_drains(
                 let active = s.saturating_sub(e);
                 let resets = tcp_resets.load(Ordering::Relaxed);
                 let refused = tcp_refused.load(Ordering::Relaxed);
+                let bytes = flow_bytes.load(Ordering::Relaxed);
+                let pkts = flow_packets.load(Ordering::Relaxed);
+                let retx = flow_retransmits.load(Ordering::Relaxed);
                 let points = map::flow_points(&sensor_id, s, e, active)
                     .into_iter()
+                    .chain(map::flow_volume_points(&sensor_id, bytes, pkts, retx))
                     .chain(map::tcp_reset_points(&sensor_id, resets, refused));
                 for point in points {
                     let suffix = format!("{}/{}", point.source, point.metric);
