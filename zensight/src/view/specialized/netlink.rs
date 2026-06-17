@@ -15,9 +15,15 @@ pub fn netlink_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
     let content = column![
         render_header(state),
         rule::horizontal(1),
+        render_diagnostics(state),
+        rule::horizontal(1),
         render_interfaces(state),
         rule::horizontal(1),
         render_sockets(state),
+        rule::horizontal(1),
+        render_neighbors(state),
+        rule::horizontal(1),
+        render_routes(state),
     ]
     .spacing(15)
     .padding(20);
@@ -125,6 +131,98 @@ fn render_sockets(state: &DeviceDetailState) -> Element<'_, Message> {
         line("close_wait", "sockets/tcp/close_wait"),
         line("retransmits (total)", "sockets/tcp/retransmits_total"),
         line("max RTT (us)", "sockets/tcp/max_rtt_us"),
+    ]
+    .spacing(4)
+    .into()
+}
+
+/// Diagnostics summary: bottleneck score + issue counts (from the nlink scan).
+fn render_diagnostics(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = text("Diagnostics").size(18);
+    if !state
+        .metrics
+        .keys()
+        .any(|k| k.starts_with("diagnostics/"))
+    {
+        return column![title, text("No diagnostics data").size(13).style(dim)]
+            .spacing(8)
+            .into();
+    }
+    let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
+    let line =
+        |label: &str, metric: &str| row![cell(label, 180), cell(&get(metric), 120)].spacing(8);
+
+    let mut col = column![
+        title,
+        line("bottleneck score", "diagnostics/bottleneck_score"),
+        line("issues (total)", "diagnostics/issues/total"),
+        line("  critical", "diagnostics/issues/critical"),
+        line("  error", "diagnostics/issues/error"),
+        line("  warning", "diagnostics/issues/warning"),
+        line("  info", "diagnostics/issues/info"),
+    ]
+    .spacing(4);
+
+    // The worst bottleneck (if any) carries its location/recommendation as labels.
+    if let Some(point) = state.metrics.get("diagnostics/bottleneck") {
+        let kind = match &point.value {
+            TelemetryValue::Text(s) => s.clone(),
+            _ => "-".into(),
+        };
+        let loc = point.labels.get("location").cloned().unwrap_or_default();
+        let rec = point
+            .labels
+            .get("recommendation")
+            .cloned()
+            .unwrap_or_default();
+        col = col
+            .push(row![cell("bottleneck", 180), cell(&format!("{kind} @ {loc}"), 360)].spacing(8))
+            .push(row![cell("  recommendation", 180), cell(&rec, 360)].spacing(8));
+    }
+    col.into()
+}
+
+/// ARP/NDP neighbor state summary.
+fn render_neighbors(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = text("Neighbors (ARP/NDP)").size(18);
+    if !state.metrics.keys().any(|k| k.starts_with("neighbors/")) {
+        return column![title, text("No neighbor data").size(13).style(dim)]
+            .spacing(8)
+            .into();
+    }
+    let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
+    let line =
+        |label: &str, metric: &str| row![cell(label, 180), cell(&get(metric), 100)].spacing(8);
+    column![
+        title,
+        line("total", "neighbors/total"),
+        line("reachable", "neighbors/by_state/reachable"),
+        line("stale", "neighbors/by_state/stale"),
+        line("failed", "neighbors/by_state/failed"),
+        line("incomplete", "neighbors/by_state/incomplete"),
+        line("permanent", "neighbors/by_state/permanent"),
+    ]
+    .spacing(4)
+    .into()
+}
+
+/// Routing-table summary.
+fn render_routes(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = text("Routes").size(18);
+    if !state.metrics.keys().any(|k| k.starts_with("routes/")) {
+        return column![title, text("No route data").size(13).style(dim)]
+            .spacing(8)
+            .into();
+    }
+    let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
+    let line =
+        |label: &str, metric: &str| row![cell(label, 180), cell(&get(metric), 160)].spacing(8);
+    column![
+        title,
+        line("IPv4 routes", "routes/ipv4_count"),
+        line("IPv6 routes", "routes/ipv6_count"),
+        line("default route (v4)", "routes/default_v4_present"),
+        line("default gateway (v4)", "routes/default_v4_gw"),
     ]
     .spacing(4)
     .into()

@@ -704,6 +704,18 @@ fn test_netlink_specialized_view() {
         ("iface/eth0/mtu", TelemetryValue::Gauge(1500.0)),
         ("sockets/tcp/established", TelemetryValue::Gauge(7.0)),
         ("sockets/tcp/listen", TelemetryValue::Gauge(3.0)),
+        ("diagnostics/bottleneck_score", TelemetryValue::Gauge(0.0)),
+        ("diagnostics/issues/total", TelemetryValue::Gauge(0.0)),
+        ("neighbors/total", TelemetryValue::Gauge(4.0)),
+        (
+            "neighbors/by_state/reachable",
+            TelemetryValue::Gauge(2.0),
+        ),
+        ("routes/ipv4_count", TelemetryValue::Gauge(5.0)),
+        (
+            "routes/default_v4_present",
+            TelemetryValue::Boolean(true),
+        ),
     ] {
         state.update(TelemetryPoint::new(
             "router01",
@@ -717,6 +729,10 @@ fn test_netlink_specialized_view() {
     assert!(ui.find("Netlink: router01").is_ok());
     assert!(ui.find("eth0").is_ok());
     assert!(ui.find("TCP Sockets").is_ok());
+    // New enh-01 sections surface diagnostics, neighbors, and routes.
+    assert!(ui.find("Diagnostics").is_ok());
+    assert!(ui.find("Neighbors (ARP/NDP)").is_ok());
+    assert!(ui.find("Routes").is_ok());
 }
 
 /// The netring specialized view renders flows + top talkers.
