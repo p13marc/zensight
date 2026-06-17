@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use nlink::netlink::{Connection, Route, SockDiag};
 use nlink::sockdiag::{SocketFilter, SocketInfo, SocketState, TcpState};
-use zensight_common::{Format, encode};
+use zensight_common::Format;
+use zensight_sensor_core::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
 
 use crate::config::NetlinkConfig;
 use crate::map::{self, IfaceSample, SocketCounts};
@@ -14,10 +15,11 @@ use crate::map::{self, IfaceSample, SocketCounts};
 /// Polls netlink on an interval and publishes interface + socket telemetry.
 pub struct Collector {
     host: String,
-    key_prefix: String,
     config: NetlinkConfig,
-    session: Arc<zenoh::Session>,
-    format: Format,
+    /// Cached advanced publishers so late-joining consumers get the current value
+    /// of every metric on connect (via their AdvancedSubscriber `history()`),
+    /// instead of waiting for the next poll.
+    registry: AdvancedPublisherRegistry,
 }
 
 impl Collector {
@@ -27,12 +29,16 @@ impl Collector {
         session: Arc<zenoh::Session>,
         format: Format,
     ) -> Self {
+        let registry = AdvancedPublisherRegistry::new(
+            session,
+            config.key_prefix.clone(),
+            format,
+            AdvancedPublisherConfig::default(),
+        );
         Self {
             host,
-            key_prefix: config.key_prefix.clone(),
             config,
-            session,
-            format,
+            registry,
         }
     }
 
@@ -116,14 +122,10 @@ impl Collector {
     }
 
     async fn publish(&self, point: &zensight_common::TelemetryPoint) {
-        let key = format!("{}/{}/{}", self.key_prefix, point.source, point.metric);
-        match encode(point, self.format) {
-            Ok(payload) => {
-                if let Err(e) = self.session.put(&key, payload).await {
-                    tracing::warn!(error = %e, key = %key, "publish failed");
-                }
-            }
-            Err(e) => tracing::warn!(error = %e, "encode failed"),
+        // Key = <prefix>/<source>/<metric>, published via a cached AdvancedPublisher.
+        let suffix = format!("{}/{}", point.source, point.metric);
+        if let Err(e) = self.registry.publish(&suffix, point).await {
+            tracing::warn!(error = %e, "publish failed");
         }
     }
 }
