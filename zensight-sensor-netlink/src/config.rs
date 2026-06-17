@@ -53,6 +53,9 @@ pub struct CollectConfig {
     /// TCP socket-state aggregates (sockdiag).
     #[serde(default = "default_true")]
     pub sockets: bool,
+    /// ARP/NDP neighbor state summary.
+    #[serde(default = "default_true")]
+    pub neighbors: bool,
 }
 
 impl Default for CollectConfig {
@@ -60,6 +63,7 @@ impl Default for CollectConfig {
         Self {
             interfaces: true,
             sockets: true,
+            neighbors: true,
         }
     }
 }

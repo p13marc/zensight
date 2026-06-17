@@ -4,13 +4,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use nlink::netlink::{Connection, Route, SockDiag};
+use nlink::netlink::{
+    Connection, Route, SockDiag, messages::NeighborMessage, neigh::State as NeighborState,
+};
 use nlink::sockdiag::{SocketFilter, SocketInfo, SocketState, TcpState};
 use zensight_common::Format;
 use zensight_sensor_core::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
 
 use crate::config::NetlinkConfig;
-use crate::map::{self, IfaceSample, SocketCounts};
+use crate::map::{self, IfaceSample, NeighborSummary, SocketCounts};
 
 /// Polls netlink on an interval and publishes interface + socket telemetry.
 pub struct Collector {
@@ -66,6 +68,23 @@ impl Collector {
             {
                 self.poll_sockets(sd).await;
             }
+            if self.config.collect.neighbors {
+                self.poll_neighbors(&route).await;
+            }
+        }
+    }
+
+    async fn poll_neighbors(&self, conn: &Connection<Route>) {
+        let neighbors = match conn.get_neighbors().await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(error = %e, "get_neighbors failed");
+                return;
+            }
+        };
+        let summary = aggregate_neighbors(&neighbors);
+        for point in map::neighbor_points(&self.host, &summary) {
+            self.publish(&point).await;
         }
     }
 
@@ -99,6 +118,8 @@ impl Collector {
                 tx_errors: stats.map(|s| s.tx_errors).unwrap_or(0),
                 rx_dropped: stats.map(|s| s.rx_dropped).unwrap_or(0),
                 tx_dropped: stats.map(|s| s.tx_dropped).unwrap_or(0),
+                multicast: stats.map(|s| s.multicast).unwrap_or(0),
+                collisions: stats.map(|s| s.collisions).unwrap_or(0),
             };
             for point in map::iface_points(&self.host, &sample) {
                 self.publish(&point).await;
@@ -151,4 +172,21 @@ pub fn aggregate_sockets(socks: &[SocketInfo]) -> SocketCounts {
         }
     }
     c
+}
+
+/// Aggregate neighbor messages into a [`NeighborSummary`] (counts by state).
+pub fn aggregate_neighbors(neighbors: &[NeighborMessage]) -> NeighborSummary {
+    let mut n = NeighborSummary::default();
+    for nb in neighbors {
+        n.total += 1;
+        match nb.state() {
+            NeighborState::Reachable => n.reachable += 1,
+            NeighborState::Stale => n.stale += 1,
+            NeighborState::Failed => n.failed += 1,
+            NeighborState::Incomplete => n.incomplete += 1,
+            NeighborState::Permanent => n.permanent += 1,
+            _ => n.other += 1,
+        }
+    }
+    n
 }

@@ -26,6 +26,20 @@ pub struct IfaceSample {
     pub tx_errors: u64,
     pub rx_dropped: u64,
     pub tx_dropped: u64,
+    pub multicast: u64,
+    pub collisions: u64,
+}
+
+/// Aggregate ARP/NDP neighbor counts by reachability state.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NeighborSummary {
+    pub reachable: u64,
+    pub stale: u64,
+    pub failed: u64,
+    pub incomplete: u64,
+    pub permanent: u64,
+    pub other: u64,
+    pub total: u64,
 }
 
 /// Aggregate TCP socket counts (from sockdiag).
@@ -62,6 +76,8 @@ pub fn iface_points(host: &str, s: &IfaceSample) -> Vec<TelemetryPoint> {
         counter(format!("{pfx}/tx_errors"), s.tx_errors),
         counter(format!("{pfx}/rx_dropped"), s.rx_dropped),
         counter(format!("{pfx}/tx_dropped"), s.tx_dropped),
+        counter(format!("{pfx}/multicast"), s.multicast),
+        counter(format!("{pfx}/collisions"), s.collisions),
         point(
             host,
             format!("{pfx}/oper_state"),
@@ -154,6 +170,21 @@ pub fn socket_points(host: &str, c: &SocketCounts) -> Vec<TelemetryPoint> {
     ]
 }
 
+/// Build telemetry points for the neighbor (ARP/NDP) summary. Metric paths are
+/// `neighbors/by_state/<state>` plus `neighbors/total`.
+pub fn neighbor_points(host: &str, n: &NeighborSummary) -> Vec<TelemetryPoint> {
+    let g = |metric: &str, v: u64| point(host, metric, TelemetryValue::Gauge(v as f64));
+    vec![
+        g("neighbors/by_state/reachable", n.reachable),
+        g("neighbors/by_state/stale", n.stale),
+        g("neighbors/by_state/failed", n.failed),
+        g("neighbors/by_state/incomplete", n.incomplete),
+        g("neighbors/by_state/permanent", n.permanent),
+        g("neighbors/by_state/other", n.other),
+        g("neighbors/total", n.total),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,7 +206,31 @@ mod tests {
             tx_errors: 0,
             rx_dropped: 3,
             tx_dropped: 0,
+            multicast: 7,
+            collisions: 0,
         }
+    }
+
+    #[test]
+    fn neighbor_points_shape() {
+        let n = NeighborSummary {
+            reachable: 3,
+            stale: 1,
+            failed: 2,
+            total: 6,
+            ..Default::default()
+        };
+        let pts = neighbor_points("h", &n);
+        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        assert_eq!(
+            find("neighbors/by_state/reachable").value,
+            TelemetryValue::Gauge(3.0)
+        );
+        assert_eq!(
+            find("neighbors/by_state/failed").value,
+            TelemetryValue::Gauge(2.0)
+        );
+        assert_eq!(find("neighbors/total").value, TelemetryValue::Gauge(6.0));
     }
 
     #[test]

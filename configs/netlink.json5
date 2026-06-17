@@ -12,6 +12,7 @@
     collect: {
       interfaces: true,
       sockets: true,
+      neighbors: true,   // ARP/NDP neighbor state summary
     },
     interfaces: {
       exclude_loopback: false,
