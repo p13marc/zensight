@@ -13,6 +13,7 @@
       interfaces: true,
       sockets: true,
       neighbors: true,   // ARP/NDP neighbor state summary
+      routes: true,      // routing-table summary
     },
     interfaces: {
       exclude_loopback: false,

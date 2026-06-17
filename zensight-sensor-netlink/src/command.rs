@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use zensight_common::{command_key, status_key};
 
 use crate::sentinel::{
-    ExpectationsConfig, LinkExpectation, NeighborExpectation, SentinelHandle, SocketExpectation,
+    ExpectationsConfig, LinkExpectation, NeighborExpectation, RouteExpectation, SentinelHandle,
+    SocketExpectation,
 };
 
 /// Topic for the expectations control surface.
@@ -28,6 +29,8 @@ pub enum ExpectationCommand {
     AddLink(LinkExpectation),
     /// Add (or replace by ip) a neighbor expectation.
     AddNeighbor(NeighborExpectation),
+    /// Add (or replace by name) a route expectation.
+    AddRoute(RouteExpectation),
     /// Remove an expectation by rule slug.
     Remove { rule: String },
 }
@@ -50,6 +53,10 @@ pub async fn apply(handle: &SentinelHandle, cmd: ExpectationCommand) {
         ExpectationCommand::AddNeighbor(exp) => {
             tracing::info!(ip = %exp.ip, "sentinel: add neighbor expectation");
             handle.add_neighbor(exp).await;
+        }
+        ExpectationCommand::AddRoute(exp) => {
+            tracing::info!(name = %exp.name, "sentinel: add route expectation");
+            handle.add_route(exp).await;
         }
         ExpectationCommand::Remove { rule } => {
             tracing::info!(rule = %rule, "sentinel: remove expectation");

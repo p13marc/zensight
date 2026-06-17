@@ -5,14 +5,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nlink::netlink::{
-    Connection, Route, SockDiag, messages::NeighborMessage, neigh::State as NeighborState,
+    Connection, Route, SockDiag, messages::NeighborMessage, messages::RouteMessage,
+    neigh::State as NeighborState,
 };
 use nlink::sockdiag::{SocketFilter, SocketInfo, SocketState, TcpState};
 use zensight_common::Format;
 use zensight_sensor_core::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
 
 use crate::config::NetlinkConfig;
-use crate::map::{self, IfaceSample, NeighborSummary, SocketCounts};
+use crate::map::{self, IfaceSample, NeighborSummary, RouteSummary, SocketCounts};
+
+const AF_INET: u8 = 2;
+const AF_INET6: u8 = 10;
 
 /// Polls netlink on an interval and publishes interface + socket telemetry.
 pub struct Collector {
@@ -71,6 +75,23 @@ impl Collector {
             if self.config.collect.neighbors {
                 self.poll_neighbors(&route).await;
             }
+            if self.config.collect.routes {
+                self.poll_routes(&route).await;
+            }
+        }
+    }
+
+    async fn poll_routes(&self, conn: &Connection<Route>) {
+        let routes = match conn.get_routes().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "get_routes failed");
+                return;
+            }
+        };
+        let summary = aggregate_routes(&routes);
+        for point in map::route_points(&self.host, &summary) {
+            self.publish(&point).await;
         }
     }
 
@@ -172,6 +193,31 @@ pub fn aggregate_sockets(socks: &[SocketInfo]) -> SocketCounts {
         }
     }
     c
+}
+
+/// Aggregate route messages into a [`RouteSummary`].
+pub fn aggregate_routes(routes: &[RouteMessage]) -> RouteSummary {
+    let mut r = RouteSummary::default();
+    for rt in routes {
+        r.total += 1;
+        let v6 = rt.family() == AF_INET6;
+        if rt.family() == AF_INET {
+            r.ipv4_count += 1;
+        } else if v6 {
+            r.ipv6_count += 1;
+        }
+        if rt.is_default() {
+            if v6 {
+                r.default_v6_present = true;
+            } else {
+                r.default_v4_present = true;
+                if r.default_v4_gw.is_none() {
+                    r.default_v4_gw = rt.gateway().map(|g| g.to_string());
+                }
+            }
+        }
+    }
+    r
 }
 
 /// Aggregate neighbor messages into a [`NeighborSummary`] (counts by state).

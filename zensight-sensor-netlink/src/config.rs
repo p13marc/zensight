@@ -56,6 +56,9 @@ pub struct CollectConfig {
     /// ARP/NDP neighbor state summary.
     #[serde(default = "default_true")]
     pub neighbors: bool,
+    /// Routing-table summary.
+    #[serde(default = "default_true")]
+    pub routes: bool,
 }
 
 impl Default for CollectConfig {
@@ -64,6 +67,7 @@ impl Default for CollectConfig {
             interfaces: true,
             sockets: true,
             neighbors: true,
+            routes: true,
         }
     }
 }

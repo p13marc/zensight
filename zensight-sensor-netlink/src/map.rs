@@ -30,6 +30,18 @@ pub struct IfaceSample {
     pub collisions: u64,
 }
 
+/// Summary of the routing table.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RouteSummary {
+    pub ipv4_count: u64,
+    pub ipv6_count: u64,
+    pub total: u64,
+    pub default_v4_present: bool,
+    pub default_v6_present: bool,
+    /// The IPv4 default gateway, if any (label/text).
+    pub default_v4_gw: Option<String>,
+}
+
 /// Aggregate ARP/NDP neighbor counts by reachability state.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NeighborSummary {
@@ -170,6 +182,44 @@ pub fn socket_points(host: &str, c: &SocketCounts) -> Vec<TelemetryPoint> {
     ]
 }
 
+/// Build telemetry points for the routing-table summary.
+pub fn route_points(host: &str, r: &RouteSummary) -> Vec<TelemetryPoint> {
+    let mut out = vec![
+        point(
+            host,
+            "routes/ipv4_count",
+            TelemetryValue::Gauge(r.ipv4_count as f64),
+        ),
+        point(
+            host,
+            "routes/ipv6_count",
+            TelemetryValue::Gauge(r.ipv6_count as f64),
+        ),
+        point(host, "routes/total", TelemetryValue::Gauge(r.total as f64)),
+        point(
+            host,
+            "routes/default_v4_present",
+            TelemetryValue::Boolean(r.default_v4_present),
+        ),
+        point(
+            host,
+            "routes/default_v6_present",
+            TelemetryValue::Boolean(r.default_v6_present),
+        ),
+    ];
+    if let Some(gw) = &r.default_v4_gw {
+        out.push(
+            point(
+                host,
+                "routes/default_v4_gw",
+                TelemetryValue::Text(gw.clone()),
+            )
+            .with_label("gateway", gw.clone()),
+        );
+    }
+    out
+}
+
 /// Build telemetry points for the neighbor (ARP/NDP) summary. Metric paths are
 /// `neighbors/by_state/<state>` plus `neighbors/total`.
 pub fn neighbor_points(host: &str, n: &NeighborSummary) -> Vec<TelemetryPoint> {
@@ -209,6 +259,29 @@ mod tests {
             multicast: 7,
             collisions: 0,
         }
+    }
+
+    #[test]
+    fn route_points_shape() {
+        let r = RouteSummary {
+            ipv4_count: 5,
+            ipv6_count: 2,
+            total: 7,
+            default_v4_present: true,
+            default_v6_present: false,
+            default_v4_gw: Some("10.0.0.1".into()),
+        };
+        let pts = route_points("h", &r);
+        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        assert_eq!(find("routes/ipv4_count").value, TelemetryValue::Gauge(5.0));
+        assert_eq!(
+            find("routes/default_v4_present").value,
+            TelemetryValue::Boolean(true)
+        );
+        assert_eq!(
+            find("routes/default_v4_gw").value,
+            TelemetryValue::Text("10.0.0.1".into())
+        );
     }
 
     #[test]

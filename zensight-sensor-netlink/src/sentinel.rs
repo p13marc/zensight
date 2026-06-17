@@ -38,11 +38,16 @@ pub struct ExpectationsConfig {
     pub links: Vec<LinkExpectation>,
     #[serde(default)]
     pub neighbors: Vec<NeighborExpectation>,
+    #[serde(default)]
+    pub routes: Vec<RouteExpectation>,
 }
 
 impl ExpectationsConfig {
     pub fn is_empty(&self) -> bool {
-        self.sockets.is_empty() && self.links.is_empty() && self.neighbors.is_empty()
+        self.sockets.is_empty()
+            && self.links.is_empty()
+            && self.neighbors.is_empty()
+            && self.routes.is_empty()
     }
 }
 
@@ -106,6 +111,30 @@ pub struct NeighborExpectation {
     pub severity: AlertSeverity,
     #[serde(default)]
     pub for_secs: Option<u64>,
+}
+
+/// A default-route expectation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteExpectation {
+    /// Label for the rule slug `route:<name>` (e.g. "default").
+    pub name: String,
+    /// A default route must be present.
+    #[serde(default = "default_true")]
+    pub default_present: bool,
+    /// If set, the default route must go via this gateway IP.
+    #[serde(default)]
+    pub default_via: Option<String>,
+    #[serde(default = "default_severity")]
+    pub severity: AlertSeverity,
+    #[serde(default)]
+    pub for_secs: Option<u64>,
+}
+
+/// Observed default-route facts.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RouteObservation {
+    pub default_present: bool,
+    pub default_gw: Option<String>,
 }
 
 /// A single currently-violated fact.
@@ -258,6 +287,37 @@ pub fn check_neighbor(
     }
 }
 
+/// Evaluate a default-route expectation against observed routing state.
+pub fn check_route(exp: &RouteExpectation, obs: &RouteObservation) -> Vec<Violation> {
+    if exp.default_present && !obs.default_present {
+        return vec![Violation {
+            summary: format!("{}: no default route present", exp.name),
+            labels: vec![("expected".into(), "default-route".into())],
+        }];
+    }
+    if let Some(want_gw) = &exp.default_via
+        && obs.default_present
+        && obs.default_gw.as_deref() != Some(want_gw.as_str())
+    {
+        return vec![Violation {
+            summary: format!(
+                "{}: default gateway is {} (expected {})",
+                exp.name,
+                obs.default_gw.as_deref().unwrap_or("none"),
+                want_gw
+            ),
+            labels: vec![
+                ("expected".into(), format!("via {want_gw}")),
+                (
+                    "actual".into(),
+                    obs.default_gw.clone().unwrap_or_else(|| "none".into()),
+                ),
+            ],
+        }];
+    }
+    Vec::new()
+}
+
 // ---- Evaluator (live nlink + AlertReporter) ---------------------------------
 
 /// Shared, hot-swappable expectation set. Cloning is cheap (Arc).
@@ -297,6 +357,12 @@ impl SentinelHandle {
         c.neighbors.retain(|e| e.ip != exp.ip);
         c.neighbors.push(exp);
     }
+    /// Add (or replace by name) a route expectation.
+    pub async fn add_route(&self, exp: RouteExpectation) {
+        let mut c = self.expectations.write().await;
+        c.routes.retain(|e| e.name != exp.name);
+        c.routes.push(exp);
+    }
     /// Remove an expectation by rule slug (`socket:<name>` / `link:<iface>` /
     /// `neighbor:<ip>`).
     pub async fn remove(&self, rule: &str) {
@@ -307,6 +373,8 @@ impl SentinelHandle {
             c.links.retain(|e| e.iface != iface);
         } else if let Some(ip) = rule.strip_prefix("neighbor:") {
             c.neighbors.retain(|e| e.ip != ip);
+        } else if let Some(name) = rule.strip_prefix("route:") {
+            c.routes.retain(|e| e.name != name);
         }
     }
     /// Snapshot the current expectation set (for the status queryable).
@@ -427,6 +495,24 @@ impl Evaluator {
             }
         }
 
+        // Default-route expectations.
+        if !config.routes.is_empty()
+            && let Some(rt) = route
+        {
+            match observe_routes(rt).await {
+                Ok(obs) => {
+                    for exp in &config.routes {
+                        let rule = format!("route:{}", exp.name);
+                        current_rules.insert(rule.clone());
+                        let violations = check_route(exp, &obs);
+                        self.report(&rule, exp.severity, exp.for_secs, violations)
+                            .await;
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "sentinel: route observation failed"),
+            }
+        }
+
         // Resolve alerts for rules removed since the last sweep (hot-swap).
         let removed: Vec<String> = {
             let mut seen = self.seen_rules.lock().unwrap();
@@ -528,6 +614,22 @@ async fn observe_neighbors(
         .collect())
 }
 
+/// Observe the default-route state from live netlink.
+async fn observe_routes(conn: &Connection<Route>) -> nlink::netlink::Result<RouteObservation> {
+    let routes = conn.get_routes().await?;
+    let mut obs = RouteObservation::default();
+    for rt in &routes {
+        // IPv4 default route (family AF_INET = 2).
+        if rt.is_default() && rt.family() == 2 {
+            obs.default_present = true;
+            if obs.default_gw.is_none() {
+                obs.default_gw = rt.gateway().map(|g| g.to_string());
+            }
+        }
+    }
+    Ok(obs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,5 +717,41 @@ mod tests {
         assert!(check_neighbor(&exp, Some(true)).is_empty()); // reachable → ok
         assert_eq!(check_neighbor(&exp, Some(false)).len(), 1); // unreachable → fire
         assert_eq!(check_neighbor(&exp, None).len(), 1); // absent → fire
+    }
+
+    #[test]
+    fn route_expectations() {
+        let exp = RouteExpectation {
+            name: "default".into(),
+            default_present: true,
+            default_via: Some("10.0.0.1".into()),
+            severity: AlertSeverity::Critical,
+            for_secs: None,
+        };
+        // present + correct gw → ok
+        assert!(
+            check_route(
+                &exp,
+                &RouteObservation {
+                    default_present: true,
+                    default_gw: Some("10.0.0.1".into())
+                }
+            )
+            .is_empty()
+        );
+        // absent → fire
+        assert_eq!(check_route(&exp, &RouteObservation::default()).len(), 1);
+        // present but wrong gw → fire
+        assert_eq!(
+            check_route(
+                &exp,
+                &RouteObservation {
+                    default_present: true,
+                    default_gw: Some("10.0.0.254".into())
+                }
+            )
+            .len(),
+            1
+        );
     }
 }
