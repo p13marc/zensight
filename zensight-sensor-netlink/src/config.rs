@@ -59,6 +59,9 @@ pub struct CollectConfig {
     /// Routing-table summary.
     #[serde(default = "default_true")]
     pub routes: bool,
+    /// nlink built-in diagnostics scan (bottleneck score + issue counts).
+    #[serde(default = "default_true")]
+    pub diagnostics: bool,
 }
 
 impl Default for CollectConfig {
@@ -68,6 +71,7 @@ impl Default for CollectConfig {
             sockets: true,
             neighbors: true,
             routes: true,
+            diagnostics: true,
         }
     }
 }

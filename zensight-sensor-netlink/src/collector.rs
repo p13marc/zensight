@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use nlink::netlink::diagnostics::{Bottleneck, DiagnosticReport, Diagnostics, Severity};
 use nlink::netlink::{
     Connection, Route, SockDiag, messages::NeighborMessage, messages::RouteMessage,
     neigh::State as NeighborState,
@@ -13,7 +14,9 @@ use zensight_common::Format;
 use zensight_sensor_core::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
 
 use crate::config::NetlinkConfig;
-use crate::map::{self, IfaceSample, NeighborSummary, RouteSummary, SocketCounts};
+use crate::map::{
+    self, DiagnosticsSummary, IfaceSample, NeighborSummary, RouteSummary, SocketCounts,
+};
 
 const AF_INET: u8 = 2;
 const AF_INET6: u8 = 10;
@@ -61,6 +64,19 @@ impl Collector {
             tracing::warn!("sockdiag unavailable; socket telemetry disabled");
         }
 
+        // The diagnostics scanner takes ownership of its own Route connection.
+        let diagnostics = if self.config.collect.diagnostics {
+            match Connection::<Route>::new() {
+                Ok(c) => Some(Diagnostics::new(c)),
+                Err(e) => {
+                    tracing::warn!(error = %e, "diagnostics connection failed; disabled");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let mut tick = tokio::time::interval(Duration::from_secs(self.config.poll_interval_secs));
         loop {
             tick.tick().await;
@@ -78,6 +94,24 @@ impl Collector {
             if self.config.collect.routes {
                 self.poll_routes(&route).await;
             }
+            if let Some(diag) = &diagnostics {
+                self.poll_diagnostics(diag).await;
+            }
+        }
+    }
+
+    async fn poll_diagnostics(&self, diag: &Diagnostics) {
+        let report = match diag.scan().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "diagnostics scan failed");
+                return;
+            }
+        };
+        let bottleneck = diag.find_bottleneck().await.ok().flatten();
+        let summary = aggregate_diagnostics(&report, bottleneck.as_ref());
+        for point in map::diagnostics_points(&self.host, &summary) {
+            self.publish(&point).await;
         }
     }
 
@@ -251,6 +285,33 @@ pub fn aggregate_neighbors(neighbors: &[NeighborMessage]) -> NeighborSummary {
         }
     }
     n
+}
+
+/// Aggregate a diagnostics report + worst bottleneck into a [`DiagnosticsSummary`].
+/// `Bottleneck::score()` is nlink's documented 0..=1 severity formula.
+pub fn aggregate_diagnostics(
+    report: &DiagnosticReport,
+    bottleneck: Option<&Bottleneck>,
+) -> DiagnosticsSummary {
+    let mut d = DiagnosticsSummary::default();
+    for issue in &report.issues {
+        match issue.severity {
+            Severity::Info => d.issues_info += 1,
+            Severity::Warning => d.issues_warning += 1,
+            Severity::Error => d.issues_error += 1,
+            Severity::Critical => d.issues_critical += 1,
+            // `Severity` is #[non_exhaustive]; ignore unknown future variants.
+            _ => {}
+        }
+    }
+    if let Some(b) = bottleneck {
+        d.bottleneck_score = b.score();
+        d.bottleneck_location = Some(b.location.clone());
+        d.bottleneck_type = Some(b.bottleneck_type.to_string());
+        d.bottleneck_recommendation = Some(b.recommendation.clone());
+        d.bottleneck_drop_rate = b.drop_rate;
+    }
+    d
 }
 
 #[cfg(test)]

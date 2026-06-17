@@ -55,6 +55,30 @@ pub struct NeighborSummary {
     pub total: u64,
 }
 
+/// Summary of nlink's built-in network diagnostics scan: issue counts by
+/// severity plus the single worst bottleneck (if any). The per-issue detail is
+/// intentionally collapsed to counts here (cardinality discipline, P2).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DiagnosticsSummary {
+    pub issues_info: u64,
+    pub issues_warning: u64,
+    pub issues_error: u64,
+    pub issues_critical: u64,
+    /// Normalized 0..=1 severity of the worst bottleneck (0 if none).
+    pub bottleneck_score: f64,
+    /// Worst-bottleneck descriptors (labels on the bottleneck point), if any.
+    pub bottleneck_location: Option<String>,
+    pub bottleneck_type: Option<String>,
+    pub bottleneck_recommendation: Option<String>,
+    pub bottleneck_drop_rate: f64,
+}
+
+impl DiagnosticsSummary {
+    pub fn issues_total(&self) -> u64 {
+        self.issues_info + self.issues_warning + self.issues_error + self.issues_critical
+    }
+}
+
 /// Aggregate TCP socket counts (from sockdiag).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SocketCounts {
@@ -247,6 +271,45 @@ pub fn neighbor_points(host: &str, n: &NeighborSummary) -> Vec<TelemetryPoint> {
         g("neighbors/by_state/other", n.other),
         g("neighbors/total", n.total),
     ]
+}
+
+/// Build telemetry points for the diagnostics summary. Metric paths are
+/// `diagnostics/issues/<severity>`, `diagnostics/issues/total`,
+/// `diagnostics/bottleneck_score`, and (when a bottleneck exists)
+/// `diagnostics/bottleneck` (Text = type, with location/recommendation labels).
+pub fn diagnostics_points(host: &str, d: &DiagnosticsSummary) -> Vec<TelemetryPoint> {
+    let g = |metric: &str, v: u64| point(host, metric, TelemetryValue::Gauge(v as f64));
+    let mut out = vec![
+        g("diagnostics/issues/info", d.issues_info),
+        g("diagnostics/issues/warning", d.issues_warning),
+        g("diagnostics/issues/error", d.issues_error),
+        g("diagnostics/issues/critical", d.issues_critical),
+        g("diagnostics/issues/total", d.issues_total()),
+        point(
+            host,
+            "diagnostics/bottleneck_score",
+            TelemetryValue::Gauge(d.bottleneck_score),
+        ),
+    ];
+    if let Some(kind) = &d.bottleneck_type {
+        let mut labels = HashMap::new();
+        if let Some(loc) = &d.bottleneck_location {
+            labels.insert("location".to_string(), loc.clone());
+        }
+        if let Some(rec) = &d.bottleneck_recommendation {
+            labels.insert("recommendation".to_string(), rec.clone());
+        }
+        labels.insert("drop_rate".to_string(), format!("{}", d.bottleneck_drop_rate));
+        out.push(
+            point(
+                host,
+                "diagnostics/bottleneck",
+                TelemetryValue::Text(kind.clone()),
+            )
+            .with_labels(labels),
+        );
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -466,6 +529,56 @@ mod tests {
         assert_eq!(
             find("sockets/tcp/retransmits_total").value,
             TelemetryValue::Counter(12)
+        );
+    }
+
+    #[test]
+    fn diagnostics_points_shape() {
+        // No bottleneck → no bottleneck point, score 0.
+        let clean = DiagnosticsSummary {
+            issues_info: 2,
+            issues_warning: 1,
+            ..Default::default()
+        };
+        let pts = diagnostics_points("h", &clean);
+        let find = |m: &str| pts.iter().find(|p| p.metric == m);
+        assert_eq!(
+            find("diagnostics/issues/info").unwrap().value,
+            TelemetryValue::Gauge(2.0)
+        );
+        assert_eq!(
+            find("diagnostics/issues/total").unwrap().value,
+            TelemetryValue::Gauge(3.0)
+        );
+        assert_eq!(
+            find("diagnostics/bottleneck_score").unwrap().value,
+            TelemetryValue::Gauge(0.0)
+        );
+        assert!(find("diagnostics/bottleneck").is_none());
+
+        // With a bottleneck → Text point carrying location/recommendation labels.
+        let busy = DiagnosticsSummary {
+            issues_critical: 1,
+            bottleneck_score: 0.82,
+            bottleneck_location: Some("eth0 egress qdisc".into()),
+            bottleneck_type: Some("Qdisc Drops".into()),
+            bottleneck_recommendation: Some("increase txqueuelen".into()),
+            bottleneck_drop_rate: 0.03,
+            ..Default::default()
+        };
+        let pts = diagnostics_points("h", &busy);
+        let b = pts
+            .iter()
+            .find(|p| p.metric == "diagnostics/bottleneck")
+            .unwrap();
+        assert_eq!(b.value, TelemetryValue::Text("Qdisc Drops".into()));
+        assert_eq!(
+            b.labels.get("location").map(String::as_str),
+            Some("eth0 egress qdisc")
+        );
+        assert_eq!(
+            b.labels.get("recommendation").map(String::as_str),
+            Some("increase txqueuelen")
         );
     }
 
