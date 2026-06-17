@@ -23,6 +23,8 @@ pub async fn run_drains(
 ) {
     let started = channels.flow_started.clone();
     let ended = channels.flow_ended.clone();
+    let tcp_resets = channels.tcp_resets.clone();
+    let tcp_refused = channels.tcp_refused.clone();
 
     // Cached publishers so late-joining consumers get current values on connect.
     let registry = AdvancedPublisherRegistry::new(
@@ -41,7 +43,24 @@ pub async fn run_drains(
                 match point {
                     Some(point) => { let suffix = format!("{}/{}", point.source, point.metric);
                         if let Err(e) = registry.publish(&suffix, &point).await { tracing::warn!(error=%e, "publish failed"); } }
-                    None => break, // monitor finished (e.g. pcap EOF)
+                    None => {
+                        // Monitor finished (e.g. pcap EOF / shutdown): flush a final
+                        // aggregate so short replays still emit flow + TCP counts.
+                        let s = started.load(Ordering::Relaxed);
+                        let e = ended.load(Ordering::Relaxed);
+                        let resets = tcp_resets.load(Ordering::Relaxed);
+                        let refused = tcp_refused.load(Ordering::Relaxed);
+                        let points = map::flow_points(&sensor_id, s, e, s.saturating_sub(e))
+                            .into_iter()
+                            .chain(map::tcp_reset_points(&sensor_id, resets, refused));
+                        for point in points {
+                            let suffix = format!("{}/{}", point.source, point.metric);
+                            let _ = registry.publish(&suffix, &point).await;
+                        }
+                        // Give late subscribers a moment to pull from the cache.
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        break;
+                    }
                 }
             }
             // Anomalies → alerts.
@@ -54,12 +73,17 @@ pub async fn run_drains(
                     }
                 }
             }
-            // Periodic flow aggregates.
+            // Periodic flow + TCP-reset aggregates.
             _ = flow_tick.tick() => {
                 let s = started.load(Ordering::Relaxed);
                 let e = ended.load(Ordering::Relaxed);
                 let active = s.saturating_sub(e);
-                for point in map::flow_points(&sensor_id, s, e, active) {
+                let resets = tcp_resets.load(Ordering::Relaxed);
+                let refused = tcp_refused.load(Ordering::Relaxed);
+                let points = map::flow_points(&sensor_id, s, e, active)
+                    .into_iter()
+                    .chain(map::tcp_reset_points(&sensor_id, resets, refused));
+                for point in points {
                     let suffix = format!("{}/{}", point.source, point.metric);
                     if let Err(e) = registry.publish(&suffix, &point).await { tracing::warn!(error=%e, "publish failed"); }
                 }

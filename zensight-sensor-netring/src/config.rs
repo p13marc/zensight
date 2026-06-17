@@ -54,6 +54,9 @@ pub struct CollectConfig {
     /// Flow lifecycle aggregates.
     #[serde(default = "default_true")]
     pub flows: bool,
+    /// TCP reset counters (resets + connection refusals).
+    #[serde(default = "default_true")]
+    pub tcp_resets: bool,
 }
 
 impl Default for CollectConfig {
@@ -61,6 +64,7 @@ impl Default for CollectConfig {
         Self {
             bandwidth: true,
             flows: true,
+            tcp_resets: true,
         }
     }
 }

@@ -15,6 +15,7 @@
     collect: {
       bandwidth: true,   // per-application bytes/sec
       flows: true,       // flow lifecycle aggregates
+      tcp_resets: true,  // TCP reset + connection-refused counters
     },
     bandwidth_period_secs: 5,
 

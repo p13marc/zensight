@@ -26,6 +26,10 @@ pub struct MonitorChannels {
     /// Shared flow counters (started, ended) for the periodic aggregate task.
     pub flow_started: Arc<AtomicU64>,
     pub flow_ended: Arc<AtomicU64>,
+    /// TCP RST counters: total resets and the subset that are connection refusals
+    /// (zero-payload RST = "connection refused" vs a mid-transfer abort).
+    pub tcp_resets: Arc<AtomicU64>,
+    pub tcp_refused: Arc<AtomicU64>,
 }
 
 /// Detector wrapper bridging `feed`→`verdict` for the TRW port-scan detector.
@@ -79,6 +83,8 @@ pub fn build(
     let (anom_tx, anom_rx) = mpsc::unbounded_channel::<flowscope::OwnedAnomaly>();
     let flow_started = Arc::new(AtomicU64::new(0));
     let flow_ended = Arc::new(AtomicU64::new(0));
+    let tcp_resets = Arc::new(AtomicU64::new(0));
+    let tcp_refused = Arc::new(AtomicU64::new(0));
 
     let mut b = Monitor::builder();
     b = b.name(cfg.sensor_id.clone());
@@ -105,6 +111,20 @@ pub fn build(
         let ended = flow_ended.clone();
         b = b.on_ctx::<FlowEnded<Tcp>>(move |_e: &FlowEnded<Tcp>, _ctx: &mut Ctx<'_>| {
             ended.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        });
+    }
+
+    // TCP resets (connection refused vs mid-transfer abort).
+    if cfg.collect.tcp_resets {
+        use netring::protocol::event_typed::TcpRst;
+        let resets = tcp_resets.clone();
+        let refused = tcp_refused.clone();
+        b = b.on_tcp_reset(move |rst: &TcpRst, _ctx: &mut Ctx<'_>| {
+            resets.fetch_add(1, Ordering::Relaxed);
+            if rst.zero_payload {
+                refused.fetch_add(1, Ordering::Relaxed);
+            }
             Ok(())
         });
     }
@@ -158,6 +178,8 @@ pub fn build(
             anomalies: anom_rx,
             flow_started,
             flow_ended,
+            tcp_resets,
+            tcp_refused,
         },
     ))
 }

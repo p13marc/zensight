@@ -92,6 +92,24 @@ pub fn flow_points(
     ]
 }
 
+/// TCP reset aggregate points.
+pub fn tcp_reset_points(sensor_id: &str, resets: u64, refused: u64) -> Vec<TelemetryPoint> {
+    vec![
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            "tcp/resets_total",
+            TelemetryValue::Counter(resets),
+        ),
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            "tcp/refused_total",
+            TelemetryValue::Counter(refused),
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +168,15 @@ mod tests {
         let fps = flow_points("s", 10, 8, 2);
         assert_eq!(fps[0].value, TelemetryValue::Counter(10));
         assert_eq!(fps[2].value, TelemetryValue::Gauge(2.0));
+    }
+
+    #[test]
+    fn tcp_reset_points_shape() {
+        let pts = tcp_reset_points("s", 5, 3);
+        assert_eq!(pts[0].metric, "tcp/resets_total");
+        assert_eq!(pts[0].value, TelemetryValue::Counter(5));
+        assert_eq!(pts[1].metric, "tcp/refused_total");
+        assert_eq!(pts[1].value, TelemetryValue::Counter(3));
     }
 
     #[test]
