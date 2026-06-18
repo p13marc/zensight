@@ -97,8 +97,6 @@ pub struct ZenSight {
     syslog_filter: SyslogFilterState,
     /// Current view.
     current_view: CurrentView,
-    /// View transition counter - increments on each view change for animation.
-    view_transition_key: u32,
     /// Stale threshold in milliseconds (devices not updated within this time are marked unhealthy).
     stale_threshold_ms: i64,
     /// Demo mode (use mock data instead of Zenoh).
@@ -211,7 +209,6 @@ impl ZenSight {
             topology,
             syslog_filter,
             current_view,
-            view_transition_key: 0,
             stale_threshold_ms,
             demo_mode,
             theme,
@@ -1023,12 +1020,9 @@ impl ZenSight {
         }
     }
 
-    /// Set the current view and trigger a transition animation.
+    /// Set the current view.
     fn set_view(&mut self, view: CurrentView) {
-        if self.current_view != view {
-            self.current_view = view;
-            self.view_transition_key = self.view_transition_key.wrapping_add(1);
-        }
+        self.current_view = view;
     }
 
     /// Focus the appropriate search input based on current view.
@@ -1277,9 +1271,6 @@ impl ZenSight {
         };
 
         // Wrap main view in container
-        // Note: view_transition_key is available for future animation implementations
-        // once iced provides better support for view-level transitions
-        let _transition_key = self.view_transition_key;
         let view_container: Element<'_, Message> = container(main_view)
             .width(Length::Fill)
             .height(Length::Fill)

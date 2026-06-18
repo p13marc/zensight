@@ -674,14 +674,14 @@ fn build_metric_table_rows(state: &DeviceDetailState) -> Vec<MetricTableRow> {
         .collect()
 }
 
-/// Compute trend direction from history.
+/// Compute trend direction from history. Panic-proof: reads the last two points
+/// via a reverse iterator, so any history length (0, 1, …) is handled by the
+/// `else` branch rather than by indexing.
 fn compute_trend(history: &VecDeque<TelemetryPoint>) -> String {
-    if history.len() < 2 {
+    let mut recent = history.iter().rev();
+    let (Some(last), Some(prev)) = (recent.next(), recent.next()) else {
         return String::new();
-    }
-
-    let last = &history[history.len() - 1];
-    let prev = &history[history.len() - 2];
+    };
 
     match (&last.value, &prev.value) {
         (TelemetryValue::Gauge(a), TelemetryValue::Gauge(b)) => {
