@@ -39,10 +39,29 @@ pub struct NetlinkConfig {
     pub collect: CollectConfig,
     #[serde(default)]
     pub interfaces: IfaceFilter,
+    /// WireGuard peer monitoring (handshake age, rx/tx, up/down). Needs the
+    /// `wireguard` kernel module; full peer data needs CAP_NET_ADMIN.
+    #[serde(default)]
+    pub wireguard: WireguardConfig,
     /// Pillar B — declared expectations for this host (sentinel). When present,
     /// the sensor evaluates them and emits alerts on deviation.
     #[serde(default)]
     pub expectations: Option<crate::sentinel::ExpectationsConfig>,
+}
+
+/// WireGuard monitoring config. Lists the WG interfaces to poll (empty = off).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WireguardConfig {
+    /// WG interface names to monitor, e.g. `["wg0"]`.
+    #[serde(default)]
+    pub interfaces: Vec<String>,
+    /// A peer is "up" when its last handshake is within this many seconds.
+    #[serde(default = "default_wg_stale")]
+    pub stale_after_secs: u64,
+}
+
+fn default_wg_stale() -> u64 {
+    180
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

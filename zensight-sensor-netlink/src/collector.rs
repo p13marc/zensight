@@ -8,10 +8,12 @@ use tokio::sync::RwLock;
 
 use nlink::netlink::diagnostics::{Bottleneck, DiagnosticReport, Diagnostics, Severity};
 use nlink::netlink::{
-    Connection, Netfilter, Route, SockDiag, messages::NeighborMessage, messages::RouteMessage,
-    neigh::State as NeighborState,
+    Connection, Netfilter, Route, SockDiag, Wireguard, genl::wireguard::WgPeer,
+    messages::NeighborMessage, messages::RouteMessage, neigh::State as NeighborState,
     netfilter::{ConntrackEntry, IpProtocol},
 };
+
+use crate::map::WgPeerView;
 use nlink::sockdiag::{SocketFilter, SocketInfo, SocketState, TcpState};
 use zensight_common::Format;
 use zensight_sensor_core::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
@@ -198,6 +200,20 @@ impl Collector {
         // nf_conntrack_max is a one-shot read from procfs (capacity rarely changes).
         let conntrack_max = read_conntrack_max();
 
+        // WireGuard genl handle (needs the wireguard module; full peer data needs
+        // CAP_NET_ADMIN). Only opened when interfaces are configured.
+        let wireguard = if self.config.wireguard.interfaces.is_empty() {
+            None
+        } else {
+            match Connection::<Wireguard>::new_async().await {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    tracing::warn!(error = %e, "wireguard connection failed; disabled");
+                    None
+                }
+            }
+        };
+
         // This sensor monitors one host (itself).
         self.health.set_devices_total(1);
 
@@ -231,11 +247,31 @@ impl Collector {
             {
                 self.poll_conntrack(nf, conntrack_max).await;
             }
+            if let Some(wg) = &wireguard {
+                self.poll_wireguard(wg).await;
+            }
             // Record this poll's latency + that the host responded, for the
             // Sensors view.
             self.health
                 .record_poll_duration(started.elapsed().as_millis() as u64);
             self.health.record_device_success(&self.host);
+        }
+    }
+
+    async fn poll_wireguard(&self, conn: &Connection<Wireguard>) {
+        let stale = self.config.wireguard.stale_after_secs;
+        for iface in &self.config.wireguard.interfaces {
+            let device = match conn.get_device(iface).await {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(error = %e, iface = %iface, "wireguard get_device failed");
+                    continue;
+                }
+            };
+            let views: Vec<WgPeerView> = device.peers.iter().map(wg_peer_view).collect();
+            for point in map::wireguard_points(&self.host, iface, &views, stale) {
+                self.publish(&point).await;
+            }
         }
     }
 
@@ -464,6 +500,53 @@ pub fn aggregate_conntrack(entries: &[ConntrackEntry]) -> ConntrackSummary {
         }
     }
     c
+}
+
+/// Decompose an nlink [`WgPeer`] into the pure [`WgPeerView`] (computes the
+/// handshake age relative to now and a short, stable peer id from the pubkey).
+fn wg_peer_view(peer: &WgPeer) -> WgPeerView {
+    // Short id: first 8 chars of the base64 public key (bounded-cardinality
+    // label that still distinguishes peers).
+    let b64 = base64_encode(&peer.public_key);
+    let id: String = b64.chars().take(8).collect();
+    let handshake_age_s = peer.last_handshake.and_then(|t| {
+        std::time::SystemTime::now()
+            .duration_since(t)
+            .ok()
+            .map(|d| d.as_secs())
+    });
+    WgPeerView {
+        id,
+        endpoint: peer.endpoint.map(|e| e.to_string()),
+        handshake_age_s,
+        rx_bytes: peer.rx_bytes,
+        tx_bytes: peer.tx_bytes,
+    }
+}
+
+/// Minimal standard-base64 of a 32-byte key (no external dep), for a short peer
+/// id label.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        out.push(ALPHABET[(n >> 18 & 63) as usize] as char);
+        out.push(ALPHABET[(n >> 12 & 63) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[(n >> 6 & 63) as usize] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(n & 63) as usize] as char);
+        }
+    }
+    out
 }
 
 /// Read `nf_conntrack_max` from procfs (the table capacity). `None` if the file

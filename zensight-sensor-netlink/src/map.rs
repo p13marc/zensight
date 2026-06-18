@@ -42,6 +42,72 @@ pub struct RouteSummary {
     pub default_v4_gw: Option<String>,
 }
 
+/// A decomposed WireGuard peer (built from nlink's `WgPeer`, kept pure so the
+/// mapping is unit-testable without a live WG device).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WgPeerView {
+    /// Short peer identifier (e.g. first chars of the base64 public key).
+    pub id: String,
+    pub endpoint: Option<String>,
+    /// Seconds since the last successful handshake; `None` if it never happened.
+    pub handshake_age_s: Option<u64>,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
+/// Build telemetry for one WireGuard interface's peers. Metric paths are
+/// `wireguard/<iface>/<peer>/<stat>` plus `wireguard/<iface>/peers`. A peer is
+/// `up` when its last handshake is within `stale_after_s`.
+pub fn wireguard_points(
+    host: &str,
+    iface: &str,
+    peers: &[WgPeerView],
+    stale_after_s: u64,
+) -> Vec<TelemetryPoint> {
+    let mut out = vec![point(
+        host,
+        format!("wireguard/{iface}/peers"),
+        TelemetryValue::Gauge(peers.len() as f64),
+    )];
+    for p in peers {
+        let pfx = format!("wireguard/{iface}/{}", p.id);
+        let mut endpoint_label = std::collections::HashMap::new();
+        if let Some(ep) = &p.endpoint {
+            endpoint_label.insert("endpoint".to_string(), ep.clone());
+        }
+        out.push(
+            point(
+                host,
+                format!("{pfx}/rx_bytes"),
+                TelemetryValue::Counter(p.rx_bytes),
+            )
+            .with_labels(endpoint_label.clone()),
+        );
+        out.push(point(
+            host,
+            format!("{pfx}/tx_bytes"),
+            TelemetryValue::Counter(p.tx_bytes),
+        ));
+        // Handshake age (large sentinel when never handshaked) + up/down.
+        let age = p.handshake_age_s.unwrap_or(u64::MAX);
+        let up = p.handshake_age_s.map(|a| a <= stale_after_s).unwrap_or(false);
+        if let Some(a) = p.handshake_age_s {
+            out.push(point(
+                host,
+                format!("{pfx}/last_handshake_age_s"),
+                TelemetryValue::Gauge(a as f64),
+            ));
+        }
+        let _ = age;
+        out.push(point(
+            host,
+            format!("{pfx}/up"),
+            TelemetryValue::Boolean(up),
+        ));
+    }
+    out
+}
+
 /// Aggregate of the netfilter connection-tracking table (NAT/flow-table health).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ConntrackSummary {
@@ -448,6 +514,34 @@ mod tests {
             find("routes/default_v4_gw").value,
             TelemetryValue::Text("10.0.0.1".into())
         );
+    }
+
+    #[test]
+    fn wireguard_points_shape() {
+        let peers = vec![
+            WgPeerView {
+                id: "AbCd1234".into(),
+                endpoint: Some("203.0.113.5:51820".into()),
+                handshake_age_s: Some(30),
+                rx_bytes: 1000,
+                tx_bytes: 2000,
+            },
+            WgPeerView {
+                id: "Zz99".into(),
+                endpoint: None,
+                handshake_age_s: None, // never handshaked → down
+                rx_bytes: 0,
+                tx_bytes: 0,
+            },
+        ];
+        let pts = wireguard_points("h", "wg0", &peers, 180);
+        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        assert_eq!(find("wireguard/wg0/peers").value, TelemetryValue::Gauge(2.0));
+        assert_eq!(find("wireguard/wg0/AbCd1234/rx_bytes").value, TelemetryValue::Counter(1000));
+        assert_eq!(find("wireguard/wg0/AbCd1234/up").value, TelemetryValue::Boolean(true));
+        assert_eq!(find("wireguard/wg0/Zz99/up").value, TelemetryValue::Boolean(false));
+        // The never-handshaked peer has no age point.
+        assert!(pts.iter().all(|p| p.metric != "wireguard/wg0/Zz99/last_handshake_age_s"));
     }
 
     #[test]
