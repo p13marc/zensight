@@ -14,5 +14,6 @@ pub mod security;
 pub mod settings;
 pub mod specialized;
 pub mod theme;
+pub mod tokens;
 pub mod toast;
 pub mod topology;
