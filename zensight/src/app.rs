@@ -948,11 +948,14 @@ impl ZenSight {
             }
 
             Message::FetchNetringFlows => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading();
+                }
                 return self.query_netring_flows();
             }
-            Message::NetringFlowsReceived(flows) => {
+            Message::NetringFlowsReceived(result) => {
                 if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply(flows);
+                    device.netring_detail.apply(result);
                 }
             }
 
@@ -1156,13 +1159,10 @@ impl ZenSight {
             });
         };
         Task::future(async move {
-            match fetch_flows(session).await {
-                Some(flows) => Message::NetringFlowsReceived(flows),
-                None => Message::CommandFeedback {
-                    success: false,
-                    message: "No netring flow detail".to_string(),
-                },
-            }
+            let result = fetch_flows(session)
+                .await
+                .ok_or_else(|| "No netring sensor responded".to_string());
+            Message::NetringFlowsReceived(result)
         })
     }
 

@@ -794,7 +794,7 @@ fn test_netring_specialized_view() {
     }
 
     // Pre-populate on-demand flow detail (as if @/query/flows had replied).
-    state.netring_detail.apply(vec![zensight_common::FlowRecord {
+    state.netring_detail.apply(Ok(vec![zensight_common::FlowRecord {
         src: "10.0.0.1:54321".into(),
         dst: "10.0.0.2:80".into(),
         proto: "tcp".into(),
@@ -802,7 +802,23 @@ fn test_netring_specialized_view() {
         packets: 10,
         duration_ms: 100,
         reason: "fin".into(),
-    }]);
+    }]));
+
+    // Loading state: button reads "Fetching…" while a fetch is in flight; an
+    // error renders inline. Use a fresh state so the main assertions below still
+    // see the ready flow table.
+    {
+        let mut s = DeviceDetailState::new(DeviceId::new(Protocol::Netring, "wiretap1"));
+        s.netring_detail.loading();
+        {
+            let mut ui = simulator(netring_sensor_view(&s));
+            assert!(ui.find("Fetching…").is_ok());
+        }
+
+        s.netring_detail.apply(Err("no sensor".into()));
+        let mut ui = simulator(netring_sensor_view(&s));
+        assert!(ui.find("Fetch failed: no sensor").is_ok());
+    }
 
     let mut ui = simulator(netring_sensor_view(&state));
     assert!(ui.find("Netring: wiretap1").is_ok());

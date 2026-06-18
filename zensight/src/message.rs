@@ -81,8 +81,8 @@ pub enum Message {
     NetlinkDetailReceived(crate::view::specialized::netlink_detail::NetlinkDetailData),
     /// Fetch the on-demand netring flow detail (recent flows).
     FetchNetringFlows,
-    /// A decoded netring flow detail reply.
-    NetringFlowsReceived(Vec<zensight_common::FlowRecord>),
+    /// A netring flow-detail reply: the decoded flows, or an error message.
+    NetringFlowsReceived(Result<Vec<zensight_common::FlowRecord>, String>),
 
     /// Open the security (network anomalies) view.
     OpenSecurity,

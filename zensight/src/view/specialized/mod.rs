@@ -3,6 +3,7 @@
 //! Each protocol gets a tailored interface that highlights the most relevant
 //! metrics and provides domain-appropriate visualizations.
 
+pub mod fetch;
 pub mod gnmi;
 pub mod modbus;
 pub mod netflow;

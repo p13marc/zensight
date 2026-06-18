@@ -9,6 +9,8 @@ use std::sync::Arc;
 
 use zensight_common::FlowRecord;
 
+use crate::view::specialized::fetch::Fetch;
+
 /// The flow-detail queryable key (matches the netring sensor's `query.rs`).
 pub fn flows_key() -> String {
     "zensight/netring/@/query/flows".to_string()
@@ -17,12 +19,18 @@ pub fn flows_key() -> String {
 /// Recent flow records fetched on demand for the selected netring host.
 #[derive(Debug, Clone, Default)]
 pub struct NetringDetailState {
-    pub flows: Option<Vec<FlowRecord>>,
+    pub flows: Fetch<Vec<FlowRecord>>,
 }
 
 impl NetringDetailState {
-    pub fn apply(&mut self, flows: Vec<FlowRecord>) {
-        self.flows = Some(flows);
+    /// Mark a fetch as in flight (called when the request is sent).
+    pub fn loading(&mut self) {
+        self.flows = Fetch::Loading;
+    }
+
+    /// Store the fetch outcome (success or failure).
+    pub fn apply(&mut self, result: Result<Vec<FlowRecord>, String>) {
+        self.flows = Fetch::from_result(result);
     }
 }
 
@@ -43,8 +51,10 @@ mod tests {
     #[test]
     fn apply_stores_flows() {
         let mut s = NetringDetailState::default();
-        assert!(s.flows.is_none());
-        s.apply(vec![FlowRecord {
+        assert!(s.flows.ready().is_none());
+        s.loading();
+        assert!(s.flows.is_loading());
+        s.apply(Ok(vec![FlowRecord {
             src: "10.0.0.1:5555".into(),
             dst: "1.1.1.1:443".into(),
             proto: "tcp".into(),
@@ -52,7 +62,9 @@ mod tests {
             packets: 10,
             duration_ms: 100,
             reason: "fin".into(),
-        }]);
-        assert_eq!(s.flows.as_ref().unwrap().len(), 1);
+        }]));
+        assert_eq!(s.flows.ready().map(|v| v.len()), Some(1));
+        s.apply(Err("no sensor".into()));
+        assert_eq!(s.flows.error(), Some("no sensor"));
     }
 }

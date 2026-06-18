@@ -102,40 +102,51 @@ fn render_tcp_health(state: &DeviceDetailState) -> Element<'_, Message> {
 /// On-demand recent-flow detail: a fetch button + the fetched flow table (P2 —
 /// pulled from the sensor's `@/query/flows` channel, never streamed).
 fn render_flow_detail(state: &DeviceDetailState) -> Element<'_, Message> {
+    let loading = state.netring_detail.flows.is_loading();
     let title = section_header("Recent Flows (on demand)", None);
-    let fetch = button(text("Fetch Flows").size(font::CAPTION))
-        .on_press(Message::FetchNetringFlows)
-        .padding([4, 10]);
-    let mut col = column![title, fetch].spacing(10);
 
-    if let Some(flows) = &state.netring_detail.flows {
-        let mut list = Column::new().spacing(3).push(
-            row![
-                cell("src", 190),
-                cell("dst", 190),
-                cell("proto", 60),
-                cell("bytes", 90),
-                cell("dur_ms", 80),
-                cell("reason", 90),
-            ]
-            .spacing(8),
-        );
-        for f in flows.iter().take(200) {
-            list = list.push(
+    // The button is disabled (no on_press) while a fetch is in flight.
+    let label = if loading { "Fetching…" } else { "Fetch Flows" };
+    let mut fetch = button(text(label).size(font::CAPTION)).padding([4, 10]);
+    if !loading {
+        fetch = fetch.on_press(Message::FetchNetringFlows);
+    }
+    let mut col = column![title, fetch].spacing(space::SM);
+
+    if let Some(err) = state.netring_detail.flows.error() {
+        col = col.push(empty_state(format!("Fetch failed: {err}"), None));
+    } else if let Some(flows) = state.netring_detail.flows.ready() {
+        if flows.is_empty() {
+            col = col.push(empty_state("No recent flows", None));
+        } else {
+            let mut list = Column::new().spacing(3).push(
                 row![
-                    cell(&f.src, 190),
-                    cell(&f.dst, 190),
-                    cell(&f.proto, 60),
-                    cell(&f.bytes.to_string(), 90),
-                    cell(&f.duration_ms.to_string(), 80),
-                    cell(&f.reason, 90),
+                    cell("src", 190),
+                    cell("dst", 190),
+                    cell("proto", 60),
+                    cell("bytes", 90),
+                    cell("dur_ms", 80),
+                    cell("reason", 90),
                 ]
                 .spacing(8),
             );
+            for f in flows.iter().take(200) {
+                list = list.push(
+                    row![
+                        cell(&f.src, 190),
+                        cell(&f.dst, 190),
+                        cell(&f.proto, 60),
+                        cell(&f.bytes.to_string(), 90),
+                        cell(&f.duration_ms.to_string(), 80),
+                        cell(&f.reason, 90),
+                    ]
+                    .spacing(8),
+                );
+            }
+            col = col
+                .push(text(format!("{} flows", flows.len())).size(font::EMPHASIS))
+                .push(list);
         }
-        col = col
-            .push(text(format!("{} flows", flows.len())).size(font::EMPHASIS))
-            .push(list);
     }
     col.into()
 }
