@@ -1,6 +1,6 @@
 //! Alerts view for threshold-based notifications.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use iced::widget::{
     Column, Row, column, container, pick_list, row, rule, scrollable, text, text_input, tooltip,
@@ -11,8 +11,10 @@ use iced_anim::widget::button;
 use zensight_common::{Alert as SensorAlert, AlertState as SensorAlertState, Protocol};
 
 use crate::message::{DeviceId, Message};
+use crate::view::components::{badge, section_header};
 use crate::view::formatting::{format_timestamp, format_value};
 use crate::view::icons::{self, IconSize};
+use crate::view::tokens::{font, space};
 
 /// Alert rule definition.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -253,6 +255,21 @@ pub struct AlertsState {
     /// alert's stable `alert_key`. Lifecycle-managed: firing inserts/updates,
     /// resolved removes. Rendered alongside rule-triggered alerts (Plan 07).
     pub external: HashMap<String, SensorAlert>,
+    /// `alert_key`s of external alerts the user has acknowledged. Acknowledged
+    /// alerts stay visible (dimmed) but drop out of the active count / badge.
+    acknowledged_external: HashSet<String>,
+}
+
+/// A group of firing external alerts from one source (an "incident"), for the
+/// grouped/acknowledge-able anomalies feed.
+pub struct ExternalIncident<'a> {
+    pub source: &'a str,
+    /// Alerts in this group, severity-then-recency order.
+    pub alerts: Vec<&'a SensorAlert>,
+    /// How many of them are not yet acknowledged.
+    pub unacked: usize,
+    /// Highest severity in the group.
+    pub top_severity: Option<zensight_common::AlertSeverity>,
 }
 
 /// Outcome of ingesting a sensor-pushed alert, so the app can decide whether to
@@ -290,6 +307,7 @@ impl AlertsState {
             unacknowledged_count: 0,
             test_result: None,
             external: HashMap::new(),
+            acknowledged_external: HashSet::new(),
         }
     }
 
@@ -321,6 +339,7 @@ impl AlertsState {
     /// Clear an external alert by its key (resolve tombstone / Delete). Returns
     /// the removed alert, if any.
     pub fn clear_external(&mut self, alert_key: &str) -> Option<SensorAlert> {
+        self.acknowledged_external.remove(alert_key);
         self.external.remove(alert_key)
     }
 
@@ -335,9 +354,70 @@ impl AlertsState {
         v
     }
 
-    /// Count of firing external alerts (for the sidebar badge).
+    /// Has this external alert been acknowledged?
+    pub fn is_external_acked(&self, alert_key: &str) -> bool {
+        self.acknowledged_external.contains(alert_key)
+    }
+
+    /// Acknowledge every currently-firing external alert from `source`.
+    pub fn acknowledge_external_source(&mut self, source: &str) {
+        for (key, alert) in &self.external {
+            if alert.source == source {
+                self.acknowledged_external.insert(key.clone());
+            }
+        }
+    }
+
+    /// Acknowledge all currently-firing external alerts.
+    pub fn acknowledge_all_external(&mut self) {
+        self.acknowledged_external
+            .extend(self.external.keys().cloned());
+    }
+
+    /// Firing external alerts grouped by source, each group sorted by severity
+    /// then recency, with its un-acknowledged count and highest severity. Groups
+    /// are ordered by (has-unacked, highest-severity, source).
+    pub fn external_by_source(&self) -> Vec<ExternalIncident<'_>> {
+        let mut by_source: HashMap<&str, Vec<&SensorAlert>> = HashMap::new();
+        for alert in self.external.values() {
+            by_source.entry(&alert.source).or_default().push(alert);
+        }
+        let mut groups: Vec<ExternalIncident<'_>> = by_source
+            .into_iter()
+            .map(|(source, mut alerts)| {
+                alerts.sort_by(|a, b| {
+                    b.severity
+                        .cmp(&a.severity)
+                        .then(b.timestamp.cmp(&a.timestamp))
+                });
+                let unacked = alerts
+                    .iter()
+                    .filter(|a| !self.acknowledged_external.contains(&a.alert_key()))
+                    .count();
+                let top_severity = alerts.iter().map(|a| a.severity).max();
+                ExternalIncident {
+                    source,
+                    alerts,
+                    unacked,
+                    top_severity,
+                }
+            })
+            .collect();
+        groups.sort_by(|a, b| {
+            (b.unacked > 0)
+                .cmp(&(a.unacked > 0))
+                .then(b.top_severity.cmp(&a.top_severity))
+                .then(a.source.cmp(b.source))
+        });
+        groups
+    }
+
+    /// Count of *un-acknowledged* firing external alerts (for the sidebar badge).
     pub fn external_count(&self) -> usize {
-        self.external.len()
+        self.external
+            .keys()
+            .filter(|k| !self.acknowledged_external.contains(*k))
+            .count()
     }
 
     /// Update the max alerts setting.
@@ -815,34 +895,92 @@ fn render_rule_row(rule: &AlertRule) -> Element<'_, Message> {
 /// Render the alerts section.
 /// Render the sensor-pushed alerts section (anomalies + expectation violations).
 fn render_external_alerts_section(state: &AlertsState) -> Element<'_, Message> {
-    let active = state.active_external();
-    let section_title = text(format!("Anomalies & Expectations ({})", active.len())).size(18);
+    let groups = state.external_by_source();
+    let total: usize = groups.iter().map(|g| g.alerts.len()).sum();
 
-    if active.is_empty() {
+    let actions: Option<Element<'_, Message>> = if state.external_count() > 0 {
+        Some(
+            button(text("Ack all").size(font::CAPTION))
+                .on_press(Message::AcknowledgeAllExternal)
+                .padding([space::XS, space::SM])
+                .style(iced::widget::button::secondary)
+                .into(),
+        )
+    } else {
+        None
+    };
+    let section_title = section_header(format!("Anomalies & Expectations ({total})"), actions);
+
+    if groups.is_empty() {
         return column![
             section_title,
             text("No active sensor alerts")
-                .size(14)
+                .size(font::BODY)
                 .style(|theme: &Theme| {
                     text::Style {
                         color: Some(crate::view::theme::colors(theme).text_dimmed()),
                     }
                 })
         ]
-        .spacing(10)
+        .spacing(space::SM)
         .into();
     }
 
-    let mut list = Column::new().spacing(5);
-    for alert in active.iter().take(100) {
-        list = list.push(render_external_alert_row(alert));
+    let mut list = Column::new().spacing(space::SM);
+    for group in &groups {
+        list = list.push(render_incident(state, group));
     }
 
-    column![section_title, list].spacing(10).into()
+    column![section_title, list].spacing(space::SM).into()
 }
 
-/// Render a single sensor-pushed alert row.
-fn render_external_alert_row<'a>(alert: &'a SensorAlert) -> Element<'a, Message> {
+/// Render one source-grouped incident: a header (source · count · severity ·
+/// Ack) followed by its alert rows.
+fn render_incident<'a>(
+    state: &'a AlertsState,
+    incident: &ExternalIncident<'a>,
+) -> Element<'a, Message> {
+    let sev_color = incident
+        .top_severity
+        .map(|s| Severity::from(s).color())
+        .unwrap_or_else(|| Severity::Info.color());
+
+    let count_label = if incident.unacked > 0 {
+        format!("{} ({} new)", incident.alerts.len(), incident.unacked)
+    } else {
+        format!("{} acknowledged", incident.alerts.len())
+    };
+
+    let mut header = row![
+        badge(sev_color, incident.source.to_string()),
+        text(count_label)
+            .size(font::CAPTION)
+            .style(|theme: &Theme| text::Style {
+                color: Some(crate::view::theme::colors(theme).text_dimmed()),
+            }),
+    ]
+    .spacing(space::SM)
+    .align_y(Alignment::Center);
+
+    if incident.unacked > 0 {
+        let spacer = container(text("")).width(Length::Fill);
+        let ack = button(text("Ack").size(font::CAPTION))
+            .on_press(Message::AcknowledgeExternalSource(incident.source.to_string()))
+            .padding([space::XS, space::SM])
+            .style(iced::widget::button::secondary);
+        header = header.push(spacer).push(ack);
+    }
+
+    let mut col = Column::new().spacing(2).push(header);
+    for alert in &incident.alerts {
+        let acked = state.is_external_acked(&alert.alert_key());
+        col = col.push(render_external_alert_row(alert, acked));
+    }
+    col.into()
+}
+
+/// Render a single sensor-pushed alert row (dimmed when acknowledged).
+fn render_external_alert_row<'a>(alert: &'a SensorAlert, acked: bool) -> Element<'a, Message> {
     let severity: Severity = alert.severity.into();
     let icon: Element<'a, Message> = match severity {
         Severity::Critical => icons::status_error(IconSize::Small),
@@ -857,7 +995,7 @@ fn render_external_alert_row<'a>(alert: &'a SensorAlert) -> Element<'a, Message>
             color: Some(severity_color),
         });
 
-    let kind = text(alert.kind.as_str())
+    let kind = text(if acked { "ack'd" } else { alert.kind.as_str() })
         .size(10)
         .style(|theme: &Theme| text::Style {
             color: Some(crate::view::theme::colors(theme).text_dimmed()),
@@ -1145,5 +1283,36 @@ mod tests {
         let active = state.active_external();
         assert_eq!(active[0].severity, AlertSeverity::Critical);
         assert_eq!(active[2].severity, AlertSeverity::Info);
+    }
+
+    #[test]
+    fn external_grouping_and_acknowledge() {
+        use zensight_common::{AlertKind, AlertSeverity};
+        let mk = |source: &str, rule: &str, sev| {
+            SensorAlert::new(source, Protocol::Netlink, AlertKind::Anomaly, rule, sev, "s")
+        };
+        let mut state = AlertsState::new();
+        state.ingest_external(mk("hostA", "r1", AlertSeverity::Warning));
+        state.ingest_external(mk("hostA", "r2", AlertSeverity::Critical));
+        state.ingest_external(mk("hostB", "r3", AlertSeverity::Info));
+
+        // Two source groups; hostA (Critical) sorts first with 2 alerts.
+        let groups = state.external_by_source();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].source, "hostA");
+        assert_eq!(groups[0].alerts.len(), 2);
+        assert_eq!(groups[0].unacked, 2);
+        assert_eq!(state.external_count(), 3);
+
+        // Acknowledging hostA drops it from the count and below the un-acked hostB.
+        state.acknowledge_external_source("hostA");
+        assert_eq!(state.external_count(), 1);
+        let groups = state.external_by_source();
+        assert_eq!(groups[0].source, "hostB");
+        let host_a = groups.iter().find(|g| g.source == "hostA").unwrap();
+        assert_eq!(host_a.unacked, 0);
+
+        state.acknowledge_all_external();
+        assert_eq!(state.external_count(), 0);
     }
 }

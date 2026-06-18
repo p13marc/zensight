@@ -636,6 +636,13 @@ impl ZenSight {
                 self.alerts.acknowledge_all();
             }
 
+            Message::AcknowledgeExternalSource(source) => {
+                self.alerts.acknowledge_external_source(&source);
+            }
+            Message::AcknowledgeAllExternal => {
+                self.alerts.acknowledge_all_external();
+            }
+
             Message::ClearAlerts => {
                 self.alerts.clear_alerts();
             }

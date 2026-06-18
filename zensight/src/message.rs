@@ -257,6 +257,11 @@ pub enum Message {
     /// Acknowledge all alerts.
     AcknowledgeAllAlerts,
 
+    /// Acknowledge all firing external (sensor-pushed) alerts from one source.
+    AcknowledgeExternalSource(String),
+    /// Acknowledge all firing external alerts.
+    AcknowledgeAllExternal,
+
     /// Clear all alerts.
     ClearAlerts,
 
