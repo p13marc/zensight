@@ -11,6 +11,29 @@ use zensight_common::TelemetryValue;
 
 use super::formatting::{format_time_offset, format_value};
 
+/// Map a timestamp to a horizontal fraction `[0,1]` of the plot area, centering
+/// the point when the time range is zero (single sample / all-same timestamp).
+/// Guards against dividing by a zero range, which would yield NaN/inf canvas
+/// coordinates and a blank or broken chart.
+fn x_fraction(timestamp: i64, time_start: i64, time_range: f64) -> f32 {
+    if time_range > 0.0 {
+        ((timestamp - time_start) as f64 / time_range) as f32
+    } else {
+        0.5
+    }
+}
+
+/// Map a value to a vertical fraction `[0,1]` of the plot area, centering the
+/// point when the value range is zero (a flat/constant metric — very common for
+/// gauges and idle counters). Guards against division by a zero range.
+fn y_fraction(value: f64, value_min: f64, value_range: f64) -> f32 {
+    if value_range > 0.0 {
+        ((value - value_min) / value_range) as f32
+    } else {
+        0.5
+    }
+}
+
 /// Minimum zoom level (100% = no zoom).
 pub const MIN_ZOOM: f32 = 1.0;
 /// Maximum zoom level (10x zoom).
@@ -1123,10 +1146,9 @@ impl<'a> Chart<'a> {
                 let mut first = true;
 
                 for point in &visible_data {
-                    let x = padding
-                        + ((point.timestamp - time_start) as f64 / time_range) as f32 * chart_width;
+                    let x = padding + x_fraction(point.timestamp, time_start, time_range) * chart_width;
                     let y = padding + chart_height
-                        - ((point.value - value_min) / value_range) as f32 * chart_height;
+                        - y_fraction(point.value, value_min, value_range) * chart_height;
 
                     if first {
                         path_builder.move_to(Point::new(x, y));
@@ -1147,10 +1169,9 @@ impl<'a> Chart<'a> {
 
             // Draw data points
             for point in &visible_data {
-                let x = padding
-                    + ((point.timestamp - time_start) as f64 / time_range) as f32 * chart_width;
+                let x = padding + x_fraction(point.timestamp, time_start, time_range) * chart_width;
                 let y = padding + chart_height
-                    - ((point.value - value_min) / value_range) as f32 * chart_height;
+                    - y_fraction(point.value, value_min, value_range) * chart_height;
 
                 let dot = Path::circle(Point::new(x, y), 3.0);
                 frame.fill(&dot, self.highlight_color());
@@ -1440,10 +1461,9 @@ impl<'a> Chart<'a> {
             let mut first = true;
 
             for point in &visible_data {
-                let x = padding
-                    + ((point.timestamp - time_start) as f64 / time_range) as f32 * chart_width;
+                let x = padding + x_fraction(point.timestamp, time_start, time_range) * chart_width;
                 let y = padding + chart_height
-                    - ((point.value - value_min) / value_range) as f32 * chart_height;
+                    - y_fraction(point.value, value_min, value_range) * chart_height;
 
                 if first {
                     path_builder.move_to(Point::new(x, y));
@@ -1459,10 +1479,9 @@ impl<'a> Chart<'a> {
 
             // Draw data points
             for point in &visible_data {
-                let x = padding
-                    + ((point.timestamp - time_start) as f64 / time_range) as f32 * chart_width;
+                let x = padding + x_fraction(point.timestamp, time_start, time_range) * chart_width;
                 let y = padding + chart_height
-                    - ((point.value - value_min) / value_range) as f32 * chart_height;
+                    - y_fraction(point.value, value_min, value_range) * chart_height;
 
                 // Slightly brighter color for points
                 let point_color = Color::from_rgb(
@@ -1570,6 +1589,23 @@ fn current_timestamp() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn axis_fractions_are_finite_and_guard_zero_range() {
+        // Normal ranges map linearly.
+        assert!((x_fraction(50, 0, 100.0) - 0.5).abs() < 1e-6);
+        assert!((y_fraction(5.0, 0.0, 10.0) - 0.5).abs() < 1e-6);
+        assert!((x_fraction(0, 0, 100.0)).abs() < 1e-6);
+        assert!((y_fraction(10.0, 0.0, 10.0) - 1.0).abs() < 1e-6);
+
+        // Zero range (flat metric / single timestamp) → centered, never NaN/inf.
+        let x = x_fraction(123, 123, 0.0);
+        let y = y_fraction(42.0, 42.0, 0.0);
+        assert!(x.is_finite() && (x - 0.5).abs() < 1e-6);
+        assert!(y.is_finite() && (y - 0.5).abs() < 1e-6);
+        // Constant non-zero value with zero range must also stay finite.
+        assert!(y_fraction(7.0, 7.0, 0.0).is_finite());
+    }
 
     #[test]
     fn test_time_window_duration() {
