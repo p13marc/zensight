@@ -904,6 +904,15 @@ impl ZenSight {
             Message::SetExpectationSeverity(sev) => {
                 self.expectations.new_severity = sev;
             }
+            Message::SetExpectationMetric(metric) => {
+                self.expectations.new_metric = metric;
+            }
+            Message::SetExpectationOp(op) => {
+                self.expectations.new_op = op;
+            }
+            Message::SetExpectationValue(value) => {
+                self.expectations.new_value = value;
+            }
             Message::AddExpectation => {
                 use crate::view::expectations::ExpKind;
                 let e = &self.expectations;
@@ -938,6 +947,26 @@ impl ZenSight {
                         "up": true,
                         "severity": sev,
                     }),
+                    ExpKind::MetricThreshold => {
+                        if e.new_metric.trim().is_empty() {
+                            self.toasts
+                                .push(ToastSeverity::Error, "Metric path is required");
+                            return Task::none();
+                        }
+                        let Ok(value) = e.new_value.trim().parse::<f64>() else {
+                            self.toasts
+                                .push(ToastSeverity::Error, "Value must be a number");
+                            return Task::none();
+                        };
+                        serde_json::json!({
+                            "type": "add_metric",
+                            "name": e.new_name.trim(),
+                            "metric": e.new_metric.trim(),
+                            "op": e.new_op,
+                            "value": value,
+                            "severity": sev,
+                        })
+                    }
                 };
                 let key = zensight_common::command_key("zensight/netlink", "expectations");
                 return self

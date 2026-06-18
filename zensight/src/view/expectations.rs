@@ -9,6 +9,7 @@ use crate::message::Message;
 use crate::view::alerts::Severity;
 use crate::view::icons::{self, IconSize};
 use crate::view::theme;
+use zensight_common::ComparisonOp;
 
 /// The kind of expectation being authored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +20,10 @@ pub enum ExpKind {
     SocketForbid,
     /// An interface that must be up.
     LinkUp,
+    /// A metric must satisfy `<op> <value>` (the generic threshold; lets any
+    /// netlink metric — conntrack utilization, socket retransmits, … — be alerted
+    /// on without a restart).
+    MetricThreshold,
 }
 
 impl ExpKind {
@@ -26,12 +31,14 @@ impl ExpKind {
         ExpKind::SocketListen,
         ExpKind::SocketForbid,
         ExpKind::LinkUp,
+        ExpKind::MetricThreshold,
     ];
     fn label(&self) -> &'static str {
         match self {
             ExpKind::SocketListen => "Socket must listen",
             ExpKind::SocketForbid => "Socket must NOT listen",
             ExpKind::LinkUp => "Interface must be up",
+            ExpKind::MetricThreshold => "Metric threshold",
         }
     }
 }
@@ -54,10 +61,14 @@ pub struct ExpRow {
 #[derive(Debug)]
 pub struct ExpectationsState {
     pub new_kind: ExpKind,
-    /// Name (socket) or interface (link).
+    /// Name (socket) or interface (link) or rule label (metric).
     pub new_name: String,
     pub new_port: String,
     pub new_severity: Severity,
+    /// Metric-threshold fields.
+    pub new_metric: String,
+    pub new_op: ComparisonOp,
+    pub new_value: String,
     /// Current expectation set fetched from the sensor's status queryable.
     pub current: Vec<ExpRow>,
     pub status_note: Option<String>,
@@ -70,6 +81,9 @@ impl Default for ExpectationsState {
             new_name: String::new(),
             new_port: String::new(),
             new_severity: Severity::Critical,
+            new_metric: String::new(),
+            new_op: ComparisonOp::GreaterThan,
+            new_value: String::new(),
             current: Vec::new(),
             status_note: None,
         }
@@ -126,19 +140,40 @@ fn render_form(state: &ExpectationsState) -> Element<'_, Message> {
     .width(Length::Fixed(220.0));
 
     let is_link = state.new_kind == ExpKind::LinkUp;
+    let is_metric = state.new_kind == ExpKind::MetricThreshold;
     let name_placeholder = if is_link {
         "interface (eth0)"
+    } else if is_metric {
+        "rule name"
     } else {
         "name (sshd)"
     };
     let name = text_input(name_placeholder, &state.new_name)
         .on_input(Message::SetExpectationName)
         .padding(8)
-        .width(Length::Fixed(160.0));
+        .width(Length::Fixed(140.0));
 
     let mut form = row![kind, name].spacing(10).align_y(Alignment::Center);
 
-    if !is_link {
+    if is_metric {
+        // metric path + operator + threshold value.
+        form = form.push(
+            text_input("metric (conntrack/utilization)", &state.new_metric)
+                .on_input(Message::SetExpectationMetric)
+                .padding(8)
+                .width(Length::Fixed(220.0)),
+        );
+        form = form.push(
+            pick_list(ComparisonOp::ALL, Some(state.new_op), Message::SetExpectationOp)
+                .width(Length::Fixed(70.0)),
+        );
+        form = form.push(
+            text_input("value", &state.new_value)
+                .on_input(Message::SetExpectationValue)
+                .padding(8)
+                .width(Length::Fixed(90.0)),
+        );
+    } else if !is_link {
         let port = text_input("port", &state.new_port)
             .on_input(Message::SetExpectationPort)
             .padding(8)

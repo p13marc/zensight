@@ -66,6 +66,12 @@ pub enum Message {
     SetExpectationPort(String),
     /// Set the expectation severity.
     SetExpectationSeverity(crate::view::alerts::Severity),
+    /// Set the metric path (metric-threshold expectation).
+    SetExpectationMetric(String),
+    /// Set the comparison operator (metric-threshold expectation).
+    SetExpectationOp(ComparisonOp),
+    /// Set the threshold value (metric-threshold expectation).
+    SetExpectationValue(String),
     /// Build + push the authored expectation to the sentinel.
     AddExpectation,
     /// Remove an expectation by rule slug.

@@ -662,6 +662,16 @@ fn test_expectations_view() {
             .iter()
             .any(|m| matches!(m, Message::AddExpectation))
     );
+
+    // Metric-threshold kind renders the metric form (no panic) and Add & Push
+    // still emits AddExpectation (the app builds an add_metric command from it).
+    state.new_kind = zensight::view::expectations::ExpKind::MetricThreshold;
+    state.new_metric = "conntrack/utilization".into();
+    state.new_value = "0.9".into();
+    let mut ui = simulator(expectations_view(&state));
+    let _ = ui.click("Add & Push");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(messages.iter().any(|m| matches!(m, Message::AddExpectation)));
 }
 
 /// Every specialized device view is wrapped with the shared nav header, so a
