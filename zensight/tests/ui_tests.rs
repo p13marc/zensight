@@ -920,13 +920,14 @@ fn test_netlink_netring_overviews_render() {
 /// The Sensors view surfaces sensor health (previously collected but never shown).
 #[test]
 fn test_sensors_view() {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use zensight::view::sensors::sensors_view;
-    use zensight_common::{HealthSnapshot, HealthStatus};
+    use zensight_common::{ErrorReport, ErrorType, HealthSnapshot, HealthStatus};
 
     // Empty state.
     let empty: HashMap<String, HealthSnapshot> = HashMap::new();
-    let mut ui = simulator(sensors_view(&empty));
+    let no_errors: HashMap<String, VecDeque<ErrorReport>> = HashMap::new();
+    let mut ui = simulator(sensors_view(&empty, &no_errors));
     assert!(ui.find("Sensors").is_ok());
     assert!(ui.find("No sensor health received yet.").is_ok());
 
@@ -946,10 +947,23 @@ fn test_sensors_view() {
             metrics_published: 1234,
         },
     );
-    let mut ui = simulator(sensors_view(&health));
+    // ...with a recent error report.
+    let mut errors = HashMap::new();
+    let mut ring = VecDeque::new();
+    ring.push_back(ErrorReport {
+        timestamp: 1_700_000_000_000,
+        device: Some("router01".into()),
+        error_type: ErrorType::Timeout,
+        message: "poll timed out".into(),
+        retryable: true,
+    });
+    errors.insert("snmp".to_string(), ring);
+
+    let mut ui = simulator(sensors_view(&health, &errors));
     assert!(ui.find("snmp").is_ok());
     assert!(ui.find("Degraded").is_ok());
     assert!(ui.find("Responding").is_ok());
+    assert!(ui.find("Recent errors (1)").is_ok());
 }
 
 /// Settings shows an inline validation warning and disables Save on bad input.

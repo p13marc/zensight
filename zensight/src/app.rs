@@ -9,8 +9,8 @@ use iced::{Element, Length, Subscription, Task, Theme};
 use std::sync::LazyLock;
 
 use zensight_common::{
-    CorrelationEntry, HealthSnapshot, Protocol, SensorInfo, TelemetryPoint, TelemetryValue,
-    ZenohConfig,
+    CorrelationEntry, ErrorReport, HealthSnapshot, Protocol, SensorInfo, TelemetryPoint,
+    TelemetryValue, ZenohConfig,
 };
 
 /// Text input ID for dashboard search.
@@ -106,6 +106,8 @@ pub struct ZenSight {
     theme: AppTheme,
     /// Sensor health snapshots, keyed by sensor name.
     sensor_health: std::collections::HashMap<String, HealthSnapshot>,
+    /// Recent error reports per sensor (bounded ring), for the Sensors view.
+    recent_errors: std::collections::HashMap<String, std::collections::VecDeque<ErrorReport>>,
     /// Known sensors, keyed by sensor name.
     known_sensors: std::collections::HashMap<String, SensorInfo>,
     /// Device correlation entries, keyed by IP address.
@@ -214,6 +216,7 @@ impl ZenSight {
             demo_mode,
             theme,
             sensor_health: std::collections::HashMap::new(),
+            recent_errors: std::collections::HashMap::new(),
             known_sensors: std::collections::HashMap::new(),
             correlations: std::collections::HashMap::new(),
             toasts: ToastState::default(),
@@ -249,14 +252,21 @@ impl ZenSight {
                 self.handle_device_liveness(&protocol, liveness);
             }
 
-            Message::ErrorReportReceived(report) => {
-                // Log the error for now; could add an error log view later
+            Message::ErrorReportReceived(sensor, report) => {
                 tracing::warn!(
-                    sensor = ?report.device,
+                    sensor = %sensor,
+                    device = ?report.device,
                     error_type = ?report.error_type,
                     message = %report.message,
                     "Sensor error report received"
                 );
+                // Keep a bounded ring of recent errors per sensor for the
+                // Sensors view (newest at the back).
+                let ring = self.recent_errors.entry(sensor).or_default();
+                ring.push_back(report);
+                while ring.len() > 20 {
+                    ring.pop_front();
+                }
             }
 
             Message::SensorInfoReceived(info) => {
@@ -1290,7 +1300,9 @@ impl ZenSight {
                 crate::view::expectations::expectations_view(&self.expectations)
             }
             CurrentView::Security => crate::view::security::security_view(&self.alerts),
-            CurrentView::Sensors => crate::view::sensors::sensors_view(&self.sensor_health),
+            CurrentView::Sensors => {
+                crate::view::sensors::sensors_view(&self.sensor_health, &self.recent_errors)
+            }
             CurrentView::Device => {
                 if let Some(ref device_state) = self.selected_device {
                     device_view_with_syslog_filter(device_state, &self.syslog_filter)

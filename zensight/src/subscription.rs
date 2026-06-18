@@ -341,7 +341,7 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
             };
         } else if segment3 == "errors" {
             return match decode_auto::<ErrorReport>(payload) {
-                Ok(report) => Some(Message::ErrorReportReceived(report)),
+                Ok(report) => Some(Message::ErrorReportReceived(segment1.to_string(), report)),
                 Err(e) => {
                     tracing::warn!(error = %e, key = %key, "Failed to decode ErrorReport");
                     None

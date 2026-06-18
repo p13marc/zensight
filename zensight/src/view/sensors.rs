@@ -4,20 +4,24 @@
 //!
 //! See docs/plans/gui/04-features-and-stubs.md (F2).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use iced::widget::{column, container, row, scrollable, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
-use zensight_common::{HealthSnapshot, HealthStatus};
+use zensight_common::{ErrorReport, HealthSnapshot, HealthStatus};
 
 use crate::message::Message;
 use crate::view::components::{card, empty_state, section_header};
+use crate::view::formatting::format_timestamp;
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
 /// Render the sensors view.
-pub fn sensors_view(sensor_health: &HashMap<String, HealthSnapshot>) -> Element<'_, Message> {
+pub fn sensors_view<'a>(
+    sensor_health: &'a HashMap<String, HealthSnapshot>,
+    recent_errors: &'a HashMap<String, VecDeque<ErrorReport>>,
+) -> Element<'a, Message> {
     let title = text("Sensors").size(font::TITLE);
 
     if sensor_health.is_empty() {
@@ -33,7 +37,8 @@ pub fn sensors_view(sensor_health: &HashMap<String, HealthSnapshot>) -> Element<
 
     let mut list = column![title].spacing(space::MD).padding(space::LG);
     for snap in sensors {
-        list = list.push(card(sensor_card(snap)));
+        let errors = recent_errors.get(&snap.sensor);
+        list = list.push(card(sensor_card(snap, errors)));
     }
 
     container(scrollable(list))
@@ -42,11 +47,11 @@ pub fn sensors_view(sensor_health: &HashMap<String, HealthSnapshot>) -> Element<
         .into()
 }
 
-fn sensor_card(snap: &HealthSnapshot) -> Element<'_, Message> {
-    let header = section_header(
-        snap.sensor.clone(),
-        Some(health_badge(snap.status)),
-    );
+fn sensor_card<'a>(
+    snap: &'a HealthSnapshot,
+    errors: Option<&'a VecDeque<ErrorReport>>,
+) -> Element<'a, Message> {
+    let header = section_header(snap.sensor.clone(), Some(health_badge(snap.status)));
 
     let stats = row![
         stat("Devices", format!("{}", snap.devices_total)),
@@ -60,7 +65,30 @@ fn sensor_card(snap: &HealthSnapshot) -> Element<'_, Message> {
     .spacing(space::LG)
     .align_y(Alignment::Center);
 
-    column![header, stats].spacing(space::SM).into()
+    let mut col = column![header, stats].spacing(space::SM);
+
+    // Recent errors (newest first), if any have arrived for this sensor.
+    if let Some(errors) = errors.filter(|e| !e.is_empty()) {
+        col = col.push(
+            text(format!("Recent errors ({})", errors.len()))
+                .size(font::CAPTION)
+                .style(|theme: &Theme| text::Style {
+                    color: Some(theme::colors(theme).text_muted()),
+                }),
+        );
+        for report in errors.iter().rev().take(5) {
+            let when = format_timestamp(report.timestamp);
+            let dev = report.device.as_deref().unwrap_or("-");
+            let line = format!("{when}  [{:?}] {dev}: {}", report.error_type, report.message);
+            col = col.push(text(line).size(font::CAPTION).style(|theme: &Theme| {
+                text::Style {
+                    color: Some(theme::colors(theme).danger()),
+                }
+            }));
+        }
+    }
+
+    col.into()
 }
 
 /// A status badge (colored dot + label), themed so the dot color follows the

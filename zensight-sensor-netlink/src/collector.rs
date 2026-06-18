@@ -223,13 +223,20 @@ impl Collector {
             // Re-read live toggles each tick (runtime-reconfigurable, P4).
             let collect = self.collect.snapshot().await;
             let started = std::time::Instant::now();
-            if collect.interfaces {
-                self.poll_interfaces(&route).await;
+            // Track the first error of the tick so the host's health reflects a
+            // failed poll (errors_last_hour + degraded/error status) and the GUI
+            // gets an error report.
+            let mut tick_error: Option<String> = None;
+            if collect.interfaces
+                && let Err(e) = self.poll_interfaces(&route).await
+            {
+                tick_error.get_or_insert(e);
             }
             if collect.sockets
                 && let Some(sd) = &sockdiag
+                && let Err(e) = self.poll_sockets(sd).await
             {
-                self.poll_sockets(sd).await;
+                tick_error.get_or_insert(e);
             }
             if collect.neighbors {
                 self.poll_neighbors(&route).await;
@@ -250,11 +257,22 @@ impl Collector {
             if let Some(wg) = &wireguard {
                 self.poll_wireguard(wg).await;
             }
-            // Record this poll's latency + that the host responded, for the
-            // Sensors view.
             self.health
                 .record_poll_duration(started.elapsed().as_millis() as u64);
-            self.health.record_device_success(&self.host);
+            match tick_error {
+                Some(err) => {
+                    self.health.record_device_failure(&self.host, &err);
+                    let report = zensight_sensor_core::ErrorReport::new(
+                        zensight_sensor_core::ErrorType::ProtocolError,
+                        err,
+                    )
+                    .with_device(self.host.clone());
+                    if let Err(e) = self.health.publish_error(&report).await {
+                        tracing::warn!(error = %e, "failed to publish error report");
+                    }
+                }
+                None => self.health.record_device_success(&self.host),
+            }
         }
     }
 
@@ -339,14 +357,11 @@ impl Collector {
         }
     }
 
-    async fn poll_interfaces(&self, conn: &Connection<Route>) {
-        let links = match conn.get_links().await {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::warn!(error = %e, "get_links failed");
-                return;
-            }
-        };
+    async fn poll_interfaces(&self, conn: &Connection<Route>) -> Result<(), String> {
+        let links = conn
+            .get_links()
+            .await
+            .map_err(|e| format!("get_links failed: {e}"))?;
         for link in links {
             let name = link.name_or("?").to_string();
             if name == "?" || !self.config.interfaces.should_include(&name) {
@@ -376,21 +391,20 @@ impl Collector {
                 self.publish(&point).await;
             }
         }
+        Ok(())
     }
 
-    async fn poll_sockets(&self, conn: &Connection<SockDiag>) {
+    async fn poll_sockets(&self, conn: &Connection<SockDiag>) -> Result<(), String> {
         let filter = SocketFilter::tcp().all_states().with_tcp_info().build();
-        let socks = match conn.query(&filter).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(error = %e, "sockdiag query failed");
-                return;
-            }
-        };
+        let socks = conn
+            .query(&filter)
+            .await
+            .map_err(|e| format!("sockdiag query failed: {e}"))?;
         let counts = aggregate_sockets(&socks);
         for point in map::socket_points(&self.host, &counts) {
             self.publish(&point).await;
         }
+        Ok(())
     }
 
     async fn publish(&self, point: &zensight_common::TelemetryPoint) {

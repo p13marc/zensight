@@ -19,8 +19,8 @@ pub enum Message {
     /// Device liveness update received.
     DeviceLivenessReceived(String, DeviceLiveness),
 
-    /// Sensor error report received.
-    ErrorReportReceived(ErrorReport),
+    /// Sensor error report received (with the publishing sensor/protocol name).
+    ErrorReportReceived(String, ErrorReport),
 
     /// Sensor discovery/info received.
     SensorInfoReceived(SensorInfo),
