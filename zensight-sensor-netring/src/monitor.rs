@@ -258,6 +258,25 @@ pub fn build(
         );
     }
 
+    // Capture self-health (live capture only — the kernel ring has no drops to
+    // report under pcap replay). Feeds the operator "is my telemetry lossy?".
+    if cfg.collect.capture_stats {
+        use netring::monitor::telemetry::CaptureTelemetry;
+        let tx = tel_tx.clone();
+        let sensor_id = cfg.sensor_id.clone();
+        b = b.on_capture_stats(
+            Duration::from_secs(cfg.bandwidth_period_secs.max(1)),
+            move |t: &CaptureTelemetry, _ctx: &mut Ctx<'_>| {
+                for p in crate::map::capture_points(
+                    &sensor_id, t.source.0, t.packets, t.drops, t.freezes, t.drop_rate,
+                ) {
+                    let _ = tx.send(p);
+                }
+                Ok(())
+            },
+        );
+    }
+
     // Port-scan detector (Pillar A).
     if cfg.anomalies.port_scan {
         let scan = netring::pattern_detector! {

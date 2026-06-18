@@ -61,6 +61,10 @@ pub struct CollectConfig {
     /// (CAP_NET_RAW), same as all netring collection.
     #[serde(default = "default_true")]
     pub tls: bool,
+    /// Capture self-health (packets/drops/drop_rate per source). Only fires on
+    /// LIVE capture — the kernel ring has no drops to report under pcap replay.
+    #[serde(default = "default_true")]
+    pub capture_stats: bool,
 }
 
 impl Default for CollectConfig {
@@ -70,6 +74,7 @@ impl Default for CollectConfig {
             flows: true,
             tcp_resets: true,
             tls: true,
+            capture_stats: true,
         }
     }
 }

@@ -166,6 +166,29 @@ pub fn flow_latency_points(sensor_id: &str, durations_ms: &mut [u64]) -> Vec<Tel
     ]
 }
 
+/// Capture self-health points: packets/drops/freezes (Counter) + windowed
+/// drop_rate (Gauge) per capture source. Honesty signal — non-zero drops mean
+/// the sensor's *other* telemetry is incomplete.
+pub fn capture_points(
+    sensor_id: &str,
+    source: u8,
+    packets: u64,
+    drops: u64,
+    freezes: u64,
+    drop_rate: f64,
+) -> Vec<TelemetryPoint> {
+    let p = |metric: String, v: TelemetryValue| {
+        TelemetryPoint::new(sensor_id, Protocol::Netring, metric, v)
+    };
+    let pfx = format!("capture/{source}");
+    vec![
+        p(format!("{pfx}/packets"), TelemetryValue::Counter(packets)),
+        p(format!("{pfx}/drops"), TelemetryValue::Counter(drops)),
+        p(format!("{pfx}/freezes"), TelemetryValue::Counter(freezes)),
+        p(format!("{pfx}/drop_rate"), TelemetryValue::Gauge(drop_rate)),
+    ]
+}
+
 /// TLS handshake aggregate: total ClientHellos fingerprinted + distinct
 /// fingerprints seen (asset-inventory size).
 pub fn tls_points(sensor_id: &str, handshakes: u64, distinct: u64) -> Vec<TelemetryPoint> {
@@ -313,6 +336,15 @@ mod tests {
         assert_eq!(r.bytes, 694);
         assert_eq!(r.duration_ms, 100);
         assert_eq!(r.reason, "fin");
+    }
+
+    #[test]
+    fn capture_points_shape() {
+        let pts = capture_points("s", 0, 10_000, 42, 1, 0.004);
+        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        assert_eq!(find("capture/0/packets").value, TelemetryValue::Counter(10_000));
+        assert_eq!(find("capture/0/drops").value, TelemetryValue::Counter(42));
+        assert_eq!(find("capture/0/drop_rate").value, TelemetryValue::Gauge(0.004));
     }
 
     #[test]
