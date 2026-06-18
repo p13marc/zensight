@@ -10,6 +10,8 @@ use std::sync::Arc;
 use serde::de::DeserializeOwned;
 use zensight_common::{NeighborRecord, RouteRecord, SocketRecord};
 
+use crate::view::specialized::fetch::Fetch;
+
 /// Which detail table to fetch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetlinkDetailTopic {
@@ -46,21 +48,36 @@ pub enum NetlinkDetailData {
     Neighbors(Vec<NeighborRecord>),
 }
 
-/// Fetched detail tables for the selected host (each populated on demand).
+/// Fetched detail tables for the selected host (each fetched on demand, each with
+/// its own loading/error state).
 #[derive(Debug, Clone, Default)]
 pub struct NetlinkDetailState {
-    pub sockets: Option<Vec<SocketRecord>>,
-    pub routes: Option<Vec<RouteRecord>>,
-    pub neighbors: Option<Vec<NeighborRecord>>,
+    pub sockets: Fetch<Vec<SocketRecord>>,
+    pub routes: Fetch<Vec<RouteRecord>>,
+    pub neighbors: Fetch<Vec<NeighborRecord>>,
 }
 
 impl NetlinkDetailState {
-    /// Store a freshly-fetched table.
-    pub fn apply(&mut self, data: NetlinkDetailData) {
-        match data {
-            NetlinkDetailData::Sockets(v) => self.sockets = Some(v),
-            NetlinkDetailData::Routes(v) => self.routes = Some(v),
-            NetlinkDetailData::Neighbors(v) => self.neighbors = Some(v),
+    /// Mark a topic's fetch as in flight.
+    pub fn loading(&mut self, topic: NetlinkDetailTopic) {
+        match topic {
+            NetlinkDetailTopic::Sockets => self.sockets = Fetch::Loading,
+            NetlinkDetailTopic::Routes => self.routes = Fetch::Loading,
+            NetlinkDetailTopic::Neighbors => self.neighbors = Fetch::Loading,
+        }
+    }
+
+    /// Store a topic's fetch outcome (success data or an error message).
+    pub fn apply(&mut self, topic: NetlinkDetailTopic, result: Result<NetlinkDetailData, String>) {
+        match result {
+            Ok(NetlinkDetailData::Sockets(v)) => self.sockets = Fetch::Ready(v),
+            Ok(NetlinkDetailData::Routes(v)) => self.routes = Fetch::Ready(v),
+            Ok(NetlinkDetailData::Neighbors(v)) => self.neighbors = Fetch::Ready(v),
+            Err(e) => match topic {
+                NetlinkDetailTopic::Sockets => self.sockets = Fetch::Error(e),
+                NetlinkDetailTopic::Routes => self.routes = Fetch::Error(e),
+                NetlinkDetailTopic::Neighbors => self.neighbors = Fetch::Error(e),
+            },
         }
     }
 }
@@ -100,18 +117,26 @@ mod tests {
     #[test]
     fn apply_stores_each_topic() {
         let mut s = NetlinkDetailState::default();
-        s.apply(NetlinkDetailData::Routes(vec![RouteRecord {
-            family: 4,
-            dst: "default".into(),
-            gateway: Some("10.0.0.1".into()),
-            oif: Some(2),
-            priority: Some(100),
-            protocol: "dhcp".into(),
-            scope: "universe".into(),
-            table: 254,
-        }]));
-        assert_eq!(s.routes.as_ref().unwrap().len(), 1);
-        assert!(s.sockets.is_none());
+        s.loading(NetlinkDetailTopic::Routes);
+        assert!(s.routes.is_loading());
+        s.apply(
+            NetlinkDetailTopic::Routes,
+            Ok(NetlinkDetailData::Routes(vec![RouteRecord {
+                family: 4,
+                dst: "default".into(),
+                gateway: Some("10.0.0.1".into()),
+                oif: Some(2),
+                priority: Some(100),
+                protocol: "dhcp".into(),
+                scope: "universe".into(),
+                table: 254,
+            }])),
+        );
+        assert_eq!(s.routes.ready().map(|v| v.len()), Some(1));
+        assert!(matches!(s.sockets, Fetch::Idle));
+        // An error on a topic is recorded as such.
+        s.apply(NetlinkDetailTopic::Sockets, Err("no sensor".into()));
+        assert_eq!(s.sockets.error(), Some("no sensor"));
     }
 
     /// End-to-end: `fetch_records` against a real in-process Zenoh queryable

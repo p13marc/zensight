@@ -77,8 +77,11 @@ pub enum Message {
 
     /// Fetch an on-demand netlink detail table (sockets/routes/neighbors).
     FetchNetlinkDetail(crate::view::specialized::netlink_detail::NetlinkDetailTopic),
-    /// A decoded netlink detail table reply.
-    NetlinkDetailReceived(crate::view::specialized::netlink_detail::NetlinkDetailData),
+    /// A netlink detail reply for a topic: the decoded table, or an error message.
+    NetlinkDetailReceived(
+        crate::view::specialized::netlink_detail::NetlinkDetailTopic,
+        Result<crate::view::specialized::netlink_detail::NetlinkDetailData, String>,
+    ),
     /// Fetch the on-demand netring flow detail (recent flows).
     FetchNetringFlows,
     /// A netring flow-detail reply: the decoded flows, or an error message.

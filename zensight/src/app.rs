@@ -939,11 +939,14 @@ impl ZenSight {
             }
 
             Message::FetchNetlinkDetail(topic) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netlink_detail.loading(topic);
+                }
                 return self.query_netlink_detail(topic);
             }
-            Message::NetlinkDetailReceived(data) => {
+            Message::NetlinkDetailReceived(topic, result) => {
                 if let Some(device) = self.selected_device.as_mut() {
-                    device.netlink_detail.apply(data);
+                    device.netlink_detail.apply(topic, result);
                 }
             }
 
@@ -1121,10 +1124,10 @@ impl ZenSight {
             NetlinkDetailData, NetlinkDetailTopic, fetch_records,
         };
         let Some(session) = self.session.clone() else {
-            return Task::done(Message::CommandFeedback {
-                success: false,
-                message: "Not connected to Zenoh".to_string(),
-            });
+            return Task::done(Message::NetlinkDetailReceived(
+                topic,
+                Err("Not connected to Zenoh".to_string()),
+            ));
         };
         let key = topic.key();
         Task::future(async move {
@@ -1139,13 +1142,9 @@ impl ZenSight {
                     .await
                     .map(NetlinkDetailData::Neighbors),
             };
-            match data {
-                Some(d) => Message::NetlinkDetailReceived(d),
-                None => Message::CommandFeedback {
-                    success: false,
-                    message: format!("No netlink detail for {}", topic.label()),
-                },
-            }
+            let result =
+                data.ok_or_else(|| format!("No netlink sensor responded for {}", topic.label()));
+            Message::NetlinkDetailReceived(topic, result)
         })
     }
 

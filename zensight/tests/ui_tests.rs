@@ -734,9 +734,11 @@ fn test_netlink_specialized_view() {
 
     // Pre-populate an on-demand fetched socket detail table (as if the query
     // channel had replied) to exercise the drill-down render path.
-    state.netlink_detail.apply(
-        zensight::view::specialized::netlink_detail::NetlinkDetailData::Sockets(vec![
-            zensight_common::SocketRecord {
+    {
+        use zensight::view::specialized::netlink_detail::{NetlinkDetailData, NetlinkDetailTopic};
+        state.netlink_detail.apply(
+            NetlinkDetailTopic::Sockets,
+            Ok(NetlinkDetailData::Sockets(vec![zensight_common::SocketRecord {
                 local: "10.0.0.1:5555".into(),
                 remote: "1.1.1.1:443".into(),
                 state: "established".into(),
@@ -746,9 +748,9 @@ fn test_netlink_specialized_view() {
                 rtt_us: 1234,
                 retrans: 0,
                 inode: 9999,
-            },
-        ]),
-    );
+            }])),
+        );
+    }
 
     let mut ui = simulator(netlink_host_view(&state));
     assert!(ui.find("Netlink: router01").is_ok());

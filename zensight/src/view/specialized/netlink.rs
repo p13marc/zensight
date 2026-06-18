@@ -231,23 +231,35 @@ fn render_routes(state: &DeviceDetailState) -> Element<'_, Message> {
 /// On-demand detail: fetch buttons + the fetched full tables (P2 — pulled from
 /// the sensor's `@/query/*` channels only when the user asks, never streamed).
 fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = text("On-demand Detail").size(18);
-    let fetch = |topic: NetlinkDetailTopic| {
-        button(text(format!("Fetch {}", topic.label())).size(12))
-            .on_press(Message::FetchNetlinkDetail(topic))
-            .padding([4, 10])
-    };
-    let buttons = row![
-        fetch(NetlinkDetailTopic::Sockets),
-        fetch(NetlinkDetailTopic::Routes),
-        fetch(NetlinkDetailTopic::Neighbors),
-    ]
-    .spacing(8);
-
-    let mut col = column![title, buttons].spacing(10);
+    let title = section_header("On-demand Detail", None);
     let d = &state.netlink_detail;
 
-    if let Some(socks) = &d.sockets {
+    // A fetch button per topic; disabled (and relabelled) while that topic loads.
+    let fetch = |topic: NetlinkDetailTopic, loading: bool| {
+        let label = if loading {
+            format!("Fetching {}…", topic.label())
+        } else {
+            format!("Fetch {}", topic.label())
+        };
+        let mut b = button(text(label).size(font::CAPTION)).padding([4, 10]);
+        if !loading {
+            b = b.on_press(Message::FetchNetlinkDetail(topic));
+        }
+        b
+    };
+    let buttons = row![
+        fetch(NetlinkDetailTopic::Sockets, d.sockets.is_loading()),
+        fetch(NetlinkDetailTopic::Routes, d.routes.is_loading()),
+        fetch(NetlinkDetailTopic::Neighbors, d.neighbors.is_loading()),
+    ]
+    .spacing(space::SM);
+
+    let mut col = column![title, buttons].spacing(space::SM);
+
+    // Sockets
+    if let Some(err) = d.sockets.error() {
+        col = col.push(empty_state(format!("Sockets fetch failed: {err}"), None));
+    } else if let Some(socks) = d.sockets.ready() {
         let mut list = Column::new().spacing(3).push(
             row![
                 cell("local", 200),
@@ -271,11 +283,14 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
             );
         }
         col = col
-            .push(text(format!("Sockets ({})", socks.len())).size(15))
+            .push(text(format!("Sockets ({})", socks.len())).size(font::EMPHASIS))
             .push(list);
     }
 
-    if let Some(routes) = &d.routes {
+    // Routes
+    if let Some(err) = d.routes.error() {
+        col = col.push(empty_state(format!("Routes fetch failed: {err}"), None));
+    } else if let Some(routes) = d.routes.ready() {
         let mut list = Column::new().spacing(3).push(
             row![
                 cell("destination", 220),
@@ -297,11 +312,14 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
             );
         }
         col = col
-            .push(text(format!("Routes ({})", routes.len())).size(15))
+            .push(text(format!("Routes ({})", routes.len())).size(font::EMPHASIS))
             .push(list);
     }
 
-    if let Some(neighbors) = &d.neighbors {
+    // Neighbors
+    if let Some(err) = d.neighbors.error() {
+        col = col.push(empty_state(format!("Neighbors fetch failed: {err}"), None));
+    } else if let Some(neighbors) = d.neighbors.ready() {
         let mut list = Column::new().spacing(3).push(
             row![cell("ip", 200), cell("mac", 200), cell("state", 120)].spacing(8),
         );
@@ -316,7 +334,7 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
             );
         }
         col = col
-            .push(text(format!("Neighbors ({})", neighbors.len())).size(15))
+            .push(text(format!("Neighbors ({})", neighbors.len())).size(font::EMPHASIS))
             .push(list);
     }
 
