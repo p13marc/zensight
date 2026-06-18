@@ -61,6 +61,10 @@ pub struct SensorRunner<C: SensorConfig> {
     status_publisher: Option<StatusPublisher>,
     /// Liveliness manager for presence detection.
     liveliness: Option<LivelinessManager>,
+    /// Sensor health tracker, published periodically to `<prefix>/@/health` so
+    /// the frontend's Sensors view / health bar populate. Sensors may update it
+    /// (device counts, poll durations) via [`Self::health`].
+    health: Arc<crate::health::SensorHealth>,
     /// Spawned tasks.
     tasks: Vec<JoinHandle<()>>,
 }
@@ -120,6 +124,13 @@ impl<C: SensorConfig> SensorRunner<C> {
             Format::Json, // Default to JSON, can be overridden
         );
 
+        // Health tracker publishes JSON to `<prefix>/@/health` (publish_health
+        // ignores the publisher's format, so the initial publisher is fine even
+        // if `with_format` later changes telemetry encoding).
+        let health = Arc::new(
+            crate::health::SensorHealth::new(name.clone()).with_publisher(publisher.clone()),
+        );
+
         Ok(Self {
             name,
             version,
@@ -128,6 +139,7 @@ impl<C: SensorConfig> SensorRunner<C> {
             publisher,
             status_publisher: None,
             liveliness: None,
+            health,
             tasks: Vec::new(),
         })
     }
@@ -198,6 +210,12 @@ impl<C: SensorConfig> SensorRunner<C> {
         self.publisher.clone()
     }
 
+    /// Get the shared sensor-health tracker. Sensors may update it (device
+    /// counts, poll durations, errors); the runner publishes it periodically.
+    pub fn health(&self) -> Arc<crate::health::SensorHealth> {
+        self.health.clone()
+    }
+
     /// Get a reference to the liveliness manager.
     ///
     /// Returns `None` if liveliness was not enabled via [`Self::with_liveliness`].
@@ -250,12 +268,30 @@ impl<C: SensorConfig> SensorRunner<C> {
     }
 
     /// Run the sensor with custom status metadata.
-    pub async fn run_with_metadata(self, metadata: Option<serde_json::Value>) -> Result<()> {
+    pub async fn run_with_metadata(mut self, metadata: Option<serde_json::Value>) -> Result<()> {
         // Publish running status
         if let Some(ref status_pub) = self.status_publisher
             && let Err(e) = status_pub.publish_running(metadata).await
         {
             tracing::warn!(error = %e, "Failed to publish running status");
+        }
+
+        // Periodically publish sensor health to `<prefix>/@/health` so the
+        // frontend's Sensors view and dashboard health bar populate. The first
+        // tick fires immediately, then every 10s.
+        {
+            let health = self.health.clone();
+            let task = tokio::spawn(async move {
+                let mut tick =
+                    tokio::time::interval(std::time::Duration::from_secs(10));
+                loop {
+                    tick.tick().await;
+                    if let Err(e) = health.publish_health().await {
+                        tracing::warn!(error = %e, "Failed to publish sensor health");
+                    }
+                }
+            });
+            self.tasks.push(task);
         }
 
         tracing::info!(
