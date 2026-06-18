@@ -39,11 +39,12 @@ async fn main() -> Result<()> {
         hostname
     );
 
-    // Create and spawn the collector
-    let collector = SystemCollector::new(hostname, sysinfo_config, session, Format::Json);
-
     // Spawn the collector task
     let mut runner = runner;
+
+    // Create and spawn the collector
+    let collector = SystemCollector::new(hostname, sysinfo_config, session, Format::Json)
+        .with_health(runner.health());
     runner.spawn(async move {
         collector.run().await;
     });

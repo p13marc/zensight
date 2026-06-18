@@ -114,6 +114,9 @@ pub struct Collector {
     /// of every metric on connect (via their AdvancedSubscriber `history()`),
     /// instead of waiting for the next poll.
     registry: AdvancedPublisherRegistry,
+    /// Sensor health, updated each poll (poll latency, metrics published, host
+    /// liveness) so the frontend's Sensors view shows real activity.
+    health: Arc<zensight_sensor_core::SensorHealth>,
 }
 
 impl Collector {
@@ -130,13 +133,22 @@ impl Collector {
             AdvancedPublisherConfig::default(),
         );
         let collect = CollectHandle::new(config.collect.clone());
+        let health = Arc::new(zensight_sensor_core::SensorHealth::new("netlink"));
         Self {
             host,
             config,
             collect,
             metric_cache: MetricCache::new(),
             registry,
+            health,
         }
+    }
+
+    /// Use the runner's shared health tracker (so updates reach the published
+    /// `@/health` snapshot). Without this the collector updates a local tracker.
+    pub fn with_health(mut self, health: Arc<zensight_sensor_core::SensorHealth>) -> Self {
+        self.health = health;
+        self
     }
 
     /// A clonable handle to this collector's live toggles, for the command channel.
@@ -174,11 +186,15 @@ impl Collector {
             }
         };
 
+        // This sensor monitors one host (itself).
+        self.health.set_devices_total(1);
+
         let mut tick = tokio::time::interval(Duration::from_secs(self.config.poll_interval_secs));
         loop {
             tick.tick().await;
             // Re-read live toggles each tick (runtime-reconfigurable, P4).
             let collect = self.collect.snapshot().await;
+            let started = std::time::Instant::now();
             if collect.interfaces {
                 self.poll_interfaces(&route).await;
             }
@@ -198,6 +214,11 @@ impl Collector {
             {
                 self.poll_diagnostics(diag).await;
             }
+            // Record this poll's latency + that the host responded, for the
+            // Sensors view.
+            self.health
+                .record_poll_duration(started.elapsed().as_millis() as u64);
+            self.health.record_device_success(&self.host);
         }
     }
 
@@ -299,6 +320,7 @@ impl Collector {
     }
 
     async fn publish(&self, point: &zensight_common::TelemetryPoint) {
+        self.health.record_metrics_published(1);
         // Tap the latest numeric value for the sentinel's metric-threshold checks.
         self.metric_cache.update(&point.metric, &point.value).await;
         // Key = <prefix>/<source>/<metric>, published via a cached AdvancedPublisher.

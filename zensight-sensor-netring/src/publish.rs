@@ -12,6 +12,7 @@ use crate::monitor::{MonitorChannels, to_view};
 
 /// Drain telemetry points and publish them. Also emits periodic flow aggregates
 /// from the shared counters.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_drains(
     mut channels: MonitorChannels,
     session: Arc<zenoh::Session>,
@@ -20,7 +21,11 @@ pub async fn run_drains(
     format: Format,
     reporter: Arc<AlertReporter>,
     flow_period_secs: u64,
+    health: Arc<zensight_sensor_core::SensorHealth>,
 ) {
+    // This sensor monitors one capture host (itself).
+    health.set_devices_total(1);
+    health.record_device_success(&sensor_id);
     let started = channels.flow_started.clone();
     let ended = channels.flow_ended.clone();
     let flow_bytes = channels.flow_bytes.clone();
@@ -50,7 +55,8 @@ pub async fn run_drains(
             // Telemetry points from monitor callbacks.
             point = channels.telemetry.recv() => {
                 match point {
-                    Some(point) => { let suffix = format!("{}/{}", point.source, point.metric);
+                    Some(point) => { health.record_metrics_published(1);
+                        let suffix = format!("{}/{}", point.source, point.metric);
                         if let Err(e) = registry.publish(&suffix, &point).await { tracing::warn!(error=%e, "publish failed"); } }
                     None => {
                         // Monitor finished (e.g. pcap EOF / shutdown): flush a final
@@ -105,9 +111,12 @@ pub async fn run_drains(
                     .chain(map::flow_latency_points(&sensor_id, &mut durs))
                     .chain(map::tcp_reset_points(&sensor_id, resets, refused));
                 for point in points {
+                    health.record_metrics_published(1);
                     let suffix = format!("{}/{}", point.source, point.metric);
                     if let Err(e) = registry.publish(&suffix, &point).await { tracing::warn!(error=%e, "publish failed"); }
                 }
+                // The capture host responded this window.
+                health.record_device_success(&sensor_id);
             }
         }
     }

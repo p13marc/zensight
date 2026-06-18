@@ -24,6 +24,8 @@ pub struct SystemCollector {
     format: Format,
     /// Previous network stats for calculating rates
     prev_network: HashMap<String, (u64, u64)>,
+    /// Sensor health, updated each poll for the frontend's Sensors view.
+    health: Arc<zensight_sensor_core::SensorHealth>,
     /// Linux-specific metrics collector
     #[cfg(target_os = "linux")]
     linux_metrics: LinuxMetrics,
@@ -47,9 +49,16 @@ impl SystemCollector {
             session,
             format,
             prev_network: HashMap::new(),
+            health: Arc::new(zensight_sensor_core::SensorHealth::new("sysinfo")),
             #[cfg(target_os = "linux")]
             linux_metrics: LinuxMetrics::new(),
         }
+    }
+
+    /// Use the runner's shared health tracker (so updates reach `@/health`).
+    pub fn with_health(mut self, health: Arc<zensight_sensor_core::SensorHealth>) -> Self {
+        self.health = health;
+        self
     }
 
     /// Run the collection loop.
@@ -62,8 +71,15 @@ impl SystemCollector {
             self.config.poll_interval_secs
         );
 
+        // This sensor monitors one host (itself).
+        self.health.set_devices_total(1);
+
         loop {
+            let started = std::time::Instant::now();
             self.collect_and_publish().await;
+            self.health
+                .record_poll_duration(started.elapsed().as_millis() as u64);
+            self.health.record_device_success(&self.hostname);
             tokio::time::sleep(interval).await;
         }
     }
@@ -883,6 +899,7 @@ impl SystemCollector {
         timestamp: i64,
         labels: HashMap<String, String>,
     ) {
+        self.health.record_metrics_published(1);
         let key = format!("{}/{}/{}", self.key_prefix, self.hostname, metric);
 
         let point = TelemetryPoint {

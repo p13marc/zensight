@@ -282,8 +282,7 @@ impl<C: SensorConfig> SensorRunner<C> {
         {
             let health = self.health.clone();
             let task = tokio::spawn(async move {
-                let mut tick =
-                    tokio::time::interval(std::time::Duration::from_secs(10));
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
                 loop {
                     tick.tick().await;
                     if let Err(e) = health.publish_health().await {

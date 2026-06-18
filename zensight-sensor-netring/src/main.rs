@@ -64,6 +64,7 @@ async fn main() -> Result<()> {
     }
 
     // Drain task (telemetry + anomalies + periodic flow aggregates).
+    let health = runner.health();
     runner.spawn(publish::run_drains(
         channels,
         session,
@@ -72,6 +73,7 @@ async fn main() -> Result<()> {
         Format::Json,
         reporter,
         flow_period,
+        health,
     ));
 
     // Monitor run loop: pcap replay (bounded) or live capture (until signal).

@@ -39,7 +39,8 @@ async fn main() -> Result<()> {
         netlink_config.clone(),
         session,
         Format::Json,
-    );
+    )
+    .with_health(runner.health());
     let mut runner = runner;
     // Hot-swappable collector toggles, driven by the `collection` command channel.
     let collect_handle = collector.collect_handle();
