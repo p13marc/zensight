@@ -8,8 +8,9 @@ use tokio::sync::RwLock;
 
 use nlink::netlink::diagnostics::{Bottleneck, DiagnosticReport, Diagnostics, Severity};
 use nlink::netlink::{
-    Connection, Route, SockDiag, messages::NeighborMessage, messages::RouteMessage,
+    Connection, Netfilter, Route, SockDiag, messages::NeighborMessage, messages::RouteMessage,
     neigh::State as NeighborState,
+    netfilter::{ConntrackEntry, IpProtocol},
 };
 use nlink::sockdiag::{SocketFilter, SocketInfo, SocketState, TcpState};
 use zensight_common::Format;
@@ -17,7 +18,8 @@ use zensight_sensor_core::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
 
 use crate::config::{CollectConfig, NetlinkConfig};
 use crate::map::{
-    self, DiagnosticsSummary, IfaceSample, NeighborSummary, RouteSummary, SocketCounts,
+    self, ConntrackSummary, DiagnosticsSummary, IfaceSample, NeighborSummary, RouteSummary,
+    SocketCounts,
 };
 
 const AF_INET: u8 = 2;
@@ -95,6 +97,7 @@ impl CollectHandle {
             "neighbors" => g.neighbors = enabled,
             "routes" => g.routes = enabled,
             "diagnostics" => g.diagnostics = enabled,
+            "conntrack" => g.conntrack = enabled,
             _ => return false,
         }
         true
@@ -186,6 +189,15 @@ impl Collector {
             }
         };
 
+        // Conntrack needs CAP_NET_ADMIN; open it lazily so the sensor still runs
+        // unprivileged (conntrack telemetry just stays absent).
+        let conntrack = Connection::<Netfilter>::new().ok();
+        if self.config.collect.conntrack && conntrack.is_none() {
+            tracing::warn!("conntrack unavailable (needs CAP_NET_ADMIN); disabled");
+        }
+        // nf_conntrack_max is a one-shot read from procfs (capacity rarely changes).
+        let conntrack_max = read_conntrack_max();
+
         // This sensor monitors one host (itself).
         self.health.set_devices_total(1);
 
@@ -214,11 +226,37 @@ impl Collector {
             {
                 self.poll_diagnostics(diag).await;
             }
+            if collect.conntrack
+                && let Some(nf) = &conntrack
+            {
+                self.poll_conntrack(nf, conntrack_max).await;
+            }
             // Record this poll's latency + that the host responded, for the
             // Sensors view.
             self.health
                 .record_poll_duration(started.elapsed().as_millis() as u64);
             self.health.record_device_success(&self.host);
+        }
+    }
+
+    async fn poll_conntrack(&self, conn: &Connection<Netfilter>, max: Option<u64>) {
+        let v4 = conn.get_conntrack().await.unwrap_or_default();
+        let v6 = conn.get_conntrack_v6().await.unwrap_or_default();
+        if v4.is_empty() && v6.is_empty() {
+            // Either the table is empty or we lack permission; either way nothing
+            // to publish (avoids emitting a misleading all-zero summary).
+            return;
+        }
+        let mut summary = aggregate_conntrack(&v4);
+        let v6_summary = aggregate_conntrack(&v6);
+        summary.total += v6_summary.total;
+        summary.tcp += v6_summary.tcp;
+        summary.udp += v6_summary.udp;
+        summary.icmp += v6_summary.icmp;
+        summary.other += v6_summary.other;
+        summary.max = max;
+        for point in map::conntrack_points(&self.host, &summary) {
+            self.publish(&point).await;
         }
     }
 
@@ -410,6 +448,32 @@ pub fn aggregate_neighbors(neighbors: &[NeighborMessage]) -> NeighborSummary {
         }
     }
     n
+}
+
+/// Aggregate conntrack entries by protocol (does not set `max`). Pure;
+/// unit-tested via [`map::ConntrackSummary`] shape.
+pub fn aggregate_conntrack(entries: &[ConntrackEntry]) -> ConntrackSummary {
+    let mut c = ConntrackSummary::default();
+    for e in entries {
+        c.total += 1;
+        match e.proto {
+            IpProtocol::Tcp => c.tcp += 1,
+            IpProtocol::Udp => c.udp += 1,
+            IpProtocol::Icmp | IpProtocol::Icmpv6 => c.icmp += 1,
+            _ => c.other += 1,
+        }
+    }
+    c
+}
+
+/// Read `nf_conntrack_max` from procfs (the table capacity). `None` if the file
+/// is absent or unreadable (e.g. conntrack module not loaded).
+fn read_conntrack_max() -> Option<u64> {
+    std::fs::read_to_string("/proc/sys/net/netfilter/nf_conntrack_max")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// Aggregate a diagnostics report + worst bottleneck into a [`DiagnosticsSummary`].

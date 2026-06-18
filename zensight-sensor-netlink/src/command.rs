@@ -263,6 +263,7 @@ mod tests {
             neighbors: false,
             routes: false,
             diagnostics: false,
+            conntrack: false,
         };
         apply_collection(&handle, CollectionCommand::Set { collect: cfg }).await;
         let snap = handle.snapshot().await;

@@ -42,6 +42,18 @@ pub struct RouteSummary {
     pub default_v4_gw: Option<String>,
 }
 
+/// Aggregate of the netfilter connection-tracking table (NAT/flow-table health).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConntrackSummary {
+    pub total: u64,
+    pub tcp: u64,
+    pub udp: u64,
+    pub icmp: u64,
+    pub other: u64,
+    /// `nf_conntrack_max` (table capacity), if readable.
+    pub max: Option<u64>,
+}
+
 /// Aggregate ARP/NDP neighbor counts by reachability state.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NeighborSummary {
@@ -364,6 +376,31 @@ impl SocketSelector {
     }
 }
 
+/// Build telemetry points for the conntrack summary. Metric paths are
+/// `conntrack/entries`, `conntrack/by_proto/<proto>`, `conntrack/max`,
+/// `conntrack/utilization`.
+pub fn conntrack_points(host: &str, c: &ConntrackSummary) -> Vec<TelemetryPoint> {
+    let g = |metric: &str, v: u64| point(host, metric, TelemetryValue::Gauge(v as f64));
+    let mut out = vec![
+        g("conntrack/entries", c.total),
+        g("conntrack/by_proto/tcp", c.tcp),
+        g("conntrack/by_proto/udp", c.udp),
+        g("conntrack/by_proto/icmp", c.icmp),
+        g("conntrack/by_proto/other", c.other),
+    ];
+    if let Some(max) = c.max {
+        out.push(g("conntrack/max", max));
+        // Utilization in [0,1]; the classic outage predictor when near 1.
+        let util = if max > 0 { c.total as f64 / max as f64 } else { 0.0 };
+        out.push(point(
+            host,
+            "conntrack/utilization",
+            TelemetryValue::Gauge(util),
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,6 +448,28 @@ mod tests {
             find("routes/default_v4_gw").value,
             TelemetryValue::Text("10.0.0.1".into())
         );
+    }
+
+    #[test]
+    fn conntrack_points_shape() {
+        let c = ConntrackSummary {
+            total: 1500,
+            tcp: 1000,
+            udp: 400,
+            icmp: 50,
+            other: 50,
+            max: Some(2000),
+        };
+        let pts = conntrack_points("h", &c);
+        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        assert_eq!(find("conntrack/entries").value, TelemetryValue::Gauge(1500.0));
+        assert_eq!(find("conntrack/by_proto/tcp").value, TelemetryValue::Gauge(1000.0));
+        assert_eq!(find("conntrack/max").value, TelemetryValue::Gauge(2000.0));
+        assert_eq!(find("conntrack/utilization").value, TelemetryValue::Gauge(0.75));
+        // No max → no max/utilization points.
+        let c2 = ConntrackSummary { total: 10, max: None, ..Default::default() };
+        let pts2 = conntrack_points("h", &c2);
+        assert!(pts2.iter().all(|p| p.metric != "conntrack/utilization"));
     }
 
     #[test]

@@ -62,6 +62,10 @@ pub struct CollectConfig {
     /// nlink built-in diagnostics scan (bottleneck score + issue counts).
     #[serde(default = "default_true")]
     pub diagnostics: bool,
+    /// Netfilter conntrack table summary (entries/proto/utilization). Requires
+    /// CAP_NET_ADMIN, so OFF by default — enable on a NAT gateway / firewall.
+    #[serde(default)]
+    pub conntrack: bool,
 }
 
 impl Default for CollectConfig {
@@ -72,6 +76,7 @@ impl Default for CollectConfig {
             neighbors: true,
             routes: true,
             diagnostics: true,
+            conntrack: false,
         }
     }
 }
