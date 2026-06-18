@@ -2,34 +2,30 @@
 
 use std::collections::BTreeMap;
 
-use iced::widget::{Column, button, column, container, row, rule, scrollable, text};
+use iced::widget::{Column, button, column, container, row, scrollable, text};
 use iced::{Element, Length, Theme};
 use zensight_common::TelemetryValue;
 
 use crate::message::Message;
+use crate::view::components::{card, empty_state, section_header};
 use crate::view::device::DeviceDetailState;
 use crate::view::specialized::netlink_detail::NetlinkDetailTopic;
 use crate::view::theme;
+use crate::view::tokens::{font, space};
 
 /// Render the netlink host specialized view.
 pub fn netlink_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
     let content = column![
         render_header(state),
-        rule::horizontal(1),
-        render_diagnostics(state),
-        rule::horizontal(1),
-        render_interfaces(state),
-        rule::horizontal(1),
-        render_sockets(state),
-        rule::horizontal(1),
-        render_neighbors(state),
-        rule::horizontal(1),
-        render_routes(state),
-        rule::horizontal(1),
-        render_detail(state),
+        card(render_diagnostics(state)),
+        card(render_interfaces(state)),
+        card(render_sockets(state)),
+        card(render_neighbors(state)),
+        card(render_routes(state)),
+        card(render_detail(state)),
     ]
-    .spacing(15)
-    .padding(20);
+    .spacing(space::MD)
+    .padding(space::LG);
 
     container(scrollable(content))
         .width(Length::Fill)
@@ -39,12 +35,13 @@ pub fn netlink_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
 
 fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
     row![
-        text(format!("Netlink: {}", state.device_id.source)).size(22),
+        text(format!("Netlink: {}", state.device_id.source)).size(font::TITLE),
         text(format!("({} metrics)", state.metrics.len()))
-            .size(12)
+            .size(font::CAPTION)
             .style(dim),
     ]
-    .spacing(12)
+    .spacing(space::SM)
+    .align_y(iced::Alignment::Center)
     .into()
 }
 
@@ -65,11 +62,11 @@ fn interfaces(state: &DeviceDetailState) -> BTreeMap<String, BTreeMap<String, &T
 
 fn render_interfaces(state: &DeviceDetailState) -> Element<'_, Message> {
     let ifaces = interfaces(state);
-    let title = text(format!("Interfaces ({})", ifaces.len())).size(18);
+    let title = section_header(format!("Interfaces ({})", ifaces.len()), None);
 
     if ifaces.is_empty() {
-        return column![title, text("No interface data").size(13).style(dim)]
-            .spacing(8)
+        return column![title, empty_state("No interface data", None)]
+            .spacing(space::SM)
             .into();
     }
 
@@ -114,14 +111,14 @@ fn render_interfaces(state: &DeviceDetailState) -> Element<'_, Message> {
 }
 
 fn render_sockets(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = text("TCP Sockets").size(18);
+    let title = section_header("TCP Sockets", None);
     let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
     let line =
         |label: &str, metric: &str| row![cell(label, 180), cell(&get(metric), 100)].spacing(8);
 
     if !state.metrics.keys().any(|k| k.starts_with("sockets/tcp/")) {
-        return column![title, text("No socket data").size(13).style(dim)]
-            .spacing(8)
+        return column![title, empty_state("No socket data", None)]
+            .spacing(space::SM)
             .into();
     }
 
@@ -141,14 +138,14 @@ fn render_sockets(state: &DeviceDetailState) -> Element<'_, Message> {
 
 /// Diagnostics summary: bottleneck score + issue counts (from the nlink scan).
 fn render_diagnostics(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = text("Diagnostics").size(18);
+    let title = section_header("Diagnostics", None);
     if !state
         .metrics
         .keys()
         .any(|k| k.starts_with("diagnostics/"))
     {
-        return column![title, text("No diagnostics data").size(13).style(dim)]
-            .spacing(8)
+        return column![title, empty_state("No diagnostics data", None)]
+            .spacing(space::SM)
             .into();
     }
     let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
@@ -187,10 +184,10 @@ fn render_diagnostics(state: &DeviceDetailState) -> Element<'_, Message> {
 
 /// ARP/NDP neighbor state summary.
 fn render_neighbors(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = text("Neighbors (ARP/NDP)").size(18);
+    let title = section_header("Neighbors (ARP/NDP)", None);
     if !state.metrics.keys().any(|k| k.starts_with("neighbors/")) {
-        return column![title, text("No neighbor data").size(13).style(dim)]
-            .spacing(8)
+        return column![title, empty_state("No neighbor data", None)]
+            .spacing(space::SM)
             .into();
     }
     let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
@@ -211,10 +208,10 @@ fn render_neighbors(state: &DeviceDetailState) -> Element<'_, Message> {
 
 /// Routing-table summary.
 fn render_routes(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = text("Routes").size(18);
+    let title = section_header("Routes", None);
     if !state.metrics.keys().any(|k| k.starts_with("routes/")) {
-        return column![title, text("No route data").size(13).style(dim)]
-            .spacing(8)
+        return column![title, empty_state("No route data", None)]
+            .spacing(space::SM)
             .into();
     }
     let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
