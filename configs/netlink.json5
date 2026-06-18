@@ -20,21 +20,27 @@
       exclude_virtual: false,
     },
 
-    // Pillar B — declared expectations for THIS host (sentinel). When present,
-    // the sensor evaluates them and emits alerts (zensight/netlink/@/alerts/*)
-    // on deviation, auto-resolving when satisfied again.
-    // expectations: {
-    //   eval_interval_secs: 10,
-    //   default_for_secs: 15,        // debounce: violated continuously for N s
-    //   sockets: [
-    //     { name: "sshd", listen: 22, severity: "critical" },
-    //     { name: "db", established_to: "10.0.0.5:5432", min: 1, severity: "warning" },
-    //     { name: "no-telnet", forbid_listen: 23, severity: "critical" },
-    //   ],
-    //   links: [
-    //     { iface: "eth0", up: true, severity: "critical" },
-    //   ],
-    // },
+    // Pillar B — declared expectations for THIS host (sentinel). The sensor
+    // evaluates these and emits alerts (zensight/netlink/@/alerts/*) on
+    // deviation, auto-resolving when satisfied again. Expectations added live
+    // from the GUI (Expectations view) are merged with these.
+    expectations: {
+      eval_interval_secs: 3,
+      default_for_secs: 3,         // debounce: violated continuously for N s
+      sockets: [
+        // Security baseline: nothing should be listening on telnet. Safe on a
+        // clean host (won't false-fire), demonstrates a forbid_listen rule.
+        { name: "no-telnet", forbid_listen: 23, severity: "critical" },
+
+        // Demo: a service that should be listening but (intentionally) isn't —
+        // this FIRES on `just run` so you can see the alert pipeline end to end.
+        // Change the port to a real service (e.g. 22 for sshd) for a live check.
+        { name: "demo-expected-service", listen: 65000, severity: "warning" },
+      ],
+      // links: [
+      //   { iface: "eth0", up: true, severity: "critical" },
+      // ],
+    },
   },
 
   logging: { level: "info" },
