@@ -1002,3 +1002,37 @@ fn test_netlink_conntrack_wireguard_sections() {
     assert!(ui.find("75.0%").is_ok()); // utilization as a percentage
     assert!(ui.find("wg0 — 1 peers").is_ok());
 }
+
+/// The netring view shows the TLS section (with a fetched inventory) and the
+/// Capture Health section when capture/* metrics are present.
+#[test]
+fn test_netring_tls_capture_sections() {
+    use zensight::view::specialized::netring::netring_sensor_view;
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue, TlsRecord};
+
+    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let mut state = DeviceDetailState::new(device_id);
+    for (m, v) in [
+        ("tls/handshakes_total", TelemetryValue::Counter(12)),
+        ("tls/distinct_fingerprints", TelemetryValue::Gauge(3.0)),
+        ("capture/0/packets", TelemetryValue::Counter(100000)),
+        ("capture/0/drops", TelemetryValue::Counter(5)),
+        ("capture/0/drop_rate", TelemetryValue::Gauge(0.0001)),
+    ] {
+        state.update(TelemetryPoint::new("wiretap1", Protocol::Netring, m, v));
+    }
+    // Pre-populate the fetched TLS inventory.
+    state.netring_detail.apply_tls(Ok(vec![TlsRecord {
+        sni: Some("api.example.com".into()),
+        alpn: Some("h2".into()),
+        ja3: None,
+        ja4: Some("t13d1516h2_8daaf6152771_b186095e22b6".into()),
+        count: 7,
+    }]));
+
+    let mut ui = simulator(netring_sensor_view(&state));
+    assert!(ui.find("TLS").is_ok());
+    assert!(ui.find("Fetch inventory").is_ok());
+    assert!(ui.find("api.example.com").is_ok());
+    assert!(ui.find("Capture Health").is_ok());
+}

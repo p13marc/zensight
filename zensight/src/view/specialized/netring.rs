@@ -13,20 +13,118 @@ use crate::view::tokens::{font, space};
 
 /// Render the netring sensor specialized view.
 pub fn netring_sensor_view(state: &DeviceDetailState) -> Element<'_, Message> {
-    let content = column![
+    let mut content = column![
         render_header(state),
         card(render_flows(state)),
         card(render_tcp_health(state)),
         card(render_bandwidth(state)),
-        card(render_flow_detail(state)),
+        card(render_tls(state)),
     ]
     .spacing(space::MD)
     .padding(space::LG);
+
+    // Capture self-health only exists under live capture (not pcap replay).
+    if state.metrics.keys().any(|k| k.starts_with("capture/")) {
+        content = content.push(card(render_capture(state)));
+    }
+    content = content.push(card(render_flow_detail(state)));
 
     container(scrollable(content))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+/// TLS section: streamed handshake aggregates + an on-demand fingerprint
+/// inventory (SNI / JA4) fetched from `@/query/tls`.
+fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
+    let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
+    let loading = state.netring_detail.tls.is_loading();
+    let label = if loading { "Fetching…" } else { "Fetch inventory" };
+    let mut fetch = button(text(label).size(font::CAPTION)).padding([4, 10]);
+    if !loading {
+        fetch = fetch.on_press(Message::FetchNetringTls);
+    }
+
+    let mut col = column![
+        section_header("TLS", Some(fetch.into())),
+        row![cell("handshakes (total)", 180), cell(&get("tls/handshakes_total"), 100)].spacing(8),
+        row![cell("distinct fingerprints", 180), cell(&get("tls/distinct_fingerprints"), 100)].spacing(8),
+    ]
+    .spacing(space::SM);
+
+    if let Some(err) = state.netring_detail.tls.error() {
+        col = col.push(empty_state(format!("Fetch failed: {err}"), None));
+    } else if let Some(records) = state.netring_detail.tls.ready() {
+        if records.is_empty() {
+            col = col.push(empty_state("No TLS handshakes observed", None));
+        } else {
+            let mut list = Column::new().spacing(3).push(
+                row![cell("sni", 240), cell("ja4", 240), cell("alpn", 90), cell("count", 60)]
+                    .spacing(8),
+            );
+            for r in records.iter().take(200) {
+                list = list.push(
+                    row![
+                        cell(r.sni.as_deref().unwrap_or("-"), 240),
+                        cell(r.ja4.as_deref().unwrap_or("-"), 240),
+                        cell(r.alpn.as_deref().unwrap_or("-"), 90),
+                        cell(&r.count.to_string(), 60),
+                    ]
+                    .spacing(8),
+                );
+            }
+            col = col
+                .push(text(format!("{} fingerprints", records.len())).size(font::EMPHASIS))
+                .push(list);
+        }
+    }
+    col.into()
+}
+
+/// Capture self-health section: packets/drops/drop_rate per capture source.
+fn render_capture(state: &DeviceDetailState) -> Element<'_, Message> {
+    let mut col = column![section_header("Capture Health", None)].spacing(space::SM);
+    // Group capture/<src>/<stat>.
+    let mut sources: std::collections::BTreeMap<String, std::collections::BTreeMap<String, &TelemetryValue>> =
+        Default::default();
+    for (metric, point) in &state.metrics {
+        if let Some(rest) = metric.strip_prefix("capture/")
+            && let Some((src, stat)) = rest.split_once('/')
+        {
+            sources
+                .entry(src.to_string())
+                .or_default()
+                .insert(stat.to_string(), &point.value);
+        }
+    }
+    let mut list = Column::new().spacing(3).push(
+        row![
+            cell("source", 90),
+            cell("packets", 120),
+            cell("drops", 100),
+            cell("drop rate", 100),
+        ]
+        .spacing(8),
+    );
+    for (src, stats) in sources {
+        let g = |s: &str| num(stats.get(s).copied());
+        let drop_rate = match stats.get("drop_rate") {
+            Some(TelemetryValue::Gauge(r)) => format!("{:.2}%", r * 100.0),
+            _ => "-".into(),
+        };
+        list = list.push(
+            row![
+                cell(&src, 90),
+                cell(&g("packets"), 120),
+                cell(&g("drops"), 100),
+                cell(&drop_rate, 100),
+            ]
+            .spacing(8),
+        );
+    }
+    col = col.push(list);
+    col.into()
 }
 
 fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {

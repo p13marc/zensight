@@ -86,6 +86,10 @@ pub enum Message {
     FetchNetringFlows,
     /// A netring flow-detail reply: the decoded flows, or an error message.
     NetringFlowsReceived(Result<Vec<zensight_common::FlowRecord>, String>),
+    /// Fetch the on-demand netring TLS asset inventory.
+    FetchNetringTls,
+    /// A netring TLS-inventory reply: the decoded records, or an error message.
+    NetringTlsReceived(Result<Vec<zensight_common::TlsRecord>, String>),
 
     /// Open the security (network anomalies) view.
     OpenSecurity,

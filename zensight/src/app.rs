@@ -973,6 +973,17 @@ impl ZenSight {
                     device.netring_detail.apply(result);
                 }
             }
+            Message::FetchNetringTls => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_tls();
+                }
+                return self.query_netring_tls();
+            }
+            Message::NetringTlsReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_tls(result);
+                }
+            }
 
             Message::OpenSecurity => {
                 self.set_view(CurrentView::Security);
@@ -1174,6 +1185,23 @@ impl ZenSight {
                 .await
                 .ok_or_else(|| "No netring sensor responded".to_string());
             Message::NetringFlowsReceived(result)
+        })
+    }
+
+    /// Fetch the on-demand netring TLS asset inventory.
+    fn query_netring_tls(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_tls;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::CommandFeedback {
+                success: false,
+                message: "Not connected to Zenoh".to_string(),
+            });
+        };
+        Task::future(async move {
+            let result = fetch_tls(session)
+                .await
+                .ok_or_else(|| "No netring sensor responded".to_string());
+            Message::NetringTlsReceived(result)
         })
     }
 

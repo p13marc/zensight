@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use zensight_common::FlowRecord;
+use zensight_common::{FlowRecord, TlsRecord};
 
 use crate::view::specialized::fetch::Fetch;
 
@@ -16,27 +16,48 @@ pub fn flows_key() -> String {
     "zensight/netring/@/query/flows".to_string()
 }
 
-/// Recent flow records fetched on demand for the selected netring host.
+/// The TLS-inventory queryable key.
+pub fn tls_key() -> String {
+    "zensight/netring/@/query/tls".to_string()
+}
+
+/// On-demand detail fetched for the selected netring host.
 #[derive(Debug, Clone, Default)]
 pub struct NetringDetailState {
     pub flows: Fetch<Vec<FlowRecord>>,
+    pub tls: Fetch<Vec<TlsRecord>>,
 }
 
 impl NetringDetailState {
-    /// Mark a fetch as in flight (called when the request is sent).
+    /// Mark a flow fetch as in flight (called when the request is sent).
     pub fn loading(&mut self) {
         self.flows = Fetch::Loading;
     }
 
-    /// Store the fetch outcome (success or failure).
+    /// Store the flow fetch outcome (success or failure).
     pub fn apply(&mut self, result: Result<Vec<FlowRecord>, String>) {
         self.flows = Fetch::from_result(result);
+    }
+
+    /// Mark a TLS-inventory fetch as in flight.
+    pub fn loading_tls(&mut self) {
+        self.tls = Fetch::Loading;
+    }
+
+    /// Store the TLS-inventory fetch outcome.
+    pub fn apply_tls(&mut self, result: Result<Vec<TlsRecord>, String>) {
+        self.tls = Fetch::from_result(result);
     }
 }
 
 /// Fetch + decode the recent-flow ring. Thin wrapper over the shared helper.
 pub async fn fetch_flows(session: Arc<zenoh::Session>) -> Option<Vec<FlowRecord>> {
     super::netlink_detail::fetch_records(session, flows_key()).await
+}
+
+/// Fetch + decode the TLS asset inventory.
+pub async fn fetch_tls(session: Arc<zenoh::Session>) -> Option<Vec<TlsRecord>> {
+    super::netlink_detail::fetch_records(session, tls_key()).await
 }
 
 #[cfg(test)]
