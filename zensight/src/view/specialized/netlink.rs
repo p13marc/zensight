@@ -15,17 +15,27 @@ use crate::view::tokens::{font, space};
 
 /// Render the netlink host specialized view.
 pub fn netlink_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
-    let content = column![
+    let mut content = column![
         render_header(state),
         card(render_diagnostics(state)),
         card(render_interfaces(state)),
         card(render_sockets(state)),
         card(render_neighbors(state)),
         card(render_routes(state)),
-        card(render_detail(state)),
     ]
     .spacing(space::MD)
     .padding(space::LG);
+
+    // Conntrack + WireGuard are environment-specific (NAT gateway / VPN host),
+    // so only show their cards when the host actually publishes them.
+    if has_prefix(state, "conntrack/") {
+        content = content.push(card(render_conntrack(state)));
+    }
+    if has_prefix(state, "wireguard/") {
+        content = content.push(card(render_wireguard(state)));
+    }
+
+    content = content.push(card(render_detail(state)));
 
     container(scrollable(content))
         .width(Length::Fill)
@@ -339,6 +349,107 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     col.into()
+}
+
+/// Conntrack (NAT/flow-table health) section.
+fn render_conntrack(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = section_header("Conntrack", None);
+    let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
+    let line =
+        |label: &str, metric: &str| row![cell(label, 180), cell(&get(metric), 120)].spacing(8);
+
+    let mut col = column![
+        title,
+        line("entries", "conntrack/entries"),
+        line("tcp", "conntrack/by_proto/tcp"),
+        line("udp", "conntrack/by_proto/udp"),
+        line("icmp", "conntrack/by_proto/icmp"),
+        line("other", "conntrack/by_proto/other"),
+        line("max", "conntrack/max"),
+    ]
+    .spacing(4);
+
+    // Utilization is a 0..1 ratio — render as a percentage (num() would floor it).
+    if let Some(TelemetryValue::Gauge(u)) = state.metrics.get("conntrack/utilization").map(|p| &p.value) {
+        col = col.push(
+            row![cell("utilization", 180), cell(&format!("{:.1}%", u * 100.0), 120)].spacing(8),
+        );
+    }
+    col.into()
+}
+
+/// WireGuard peers section: one sub-table per WG interface.
+fn render_wireguard(state: &DeviceDetailState) -> Element<'_, Message> {
+    let mut col = column![section_header("WireGuard", None)].spacing(space::SM);
+    for (iface, peers) in wireguard(state) {
+        let count = num(state.metrics.get(&format!("wireguard/{iface}/peers")).map(|p| &p.value));
+        col = col.push(text(format!("{iface} — {count} peers")).size(font::EMPHASIS));
+        let mut list = Column::new().spacing(3).push(
+            row![
+                cell("peer", 110),
+                cell("endpoint", 190),
+                cell("handshake", 110),
+                cell("rx", 90),
+                cell("tx", 90),
+                cell("up", 50),
+            ]
+            .spacing(8),
+        );
+        for (peer, stats) in peers {
+            let endpoint = stats
+                .get("rx_bytes")
+                .and_then(|p| p.labels.get("endpoint"))
+                .cloned()
+                .unwrap_or_else(|| "-".into());
+            let g = |s: &str| num(stats.get(s).map(|p| &p.value));
+            let handshake = match stats.get("last_handshake_age_s").map(|p| &p.value) {
+                Some(TelemetryValue::Gauge(a)) => format!("{a:.0}s ago"),
+                _ => "never".into(),
+            };
+            let up = matches!(
+                stats.get("up").map(|p| &p.value),
+                Some(TelemetryValue::Boolean(true))
+            );
+            list = list.push(
+                row![
+                    cell(&peer, 110),
+                    cell(&endpoint, 190),
+                    cell(&handshake, 110),
+                    cell(&g("rx_bytes"), 90),
+                    cell(&g("tx_bytes"), 90),
+                    cell(if up { "yes" } else { "no" }, 50),
+                ]
+                .spacing(8),
+            );
+        }
+        col = col.push(list);
+    }
+    col.into()
+}
+
+/// Group `wireguard/<iface>/<peer>/<stat>` metrics by interface then peer.
+type WgPeers<'a> = std::collections::BTreeMap<String, std::collections::BTreeMap<String, &'a zensight_common::TelemetryPoint>>;
+fn wireguard(state: &DeviceDetailState) -> std::collections::BTreeMap<String, WgPeers<'_>> {
+    let mut map: std::collections::BTreeMap<String, WgPeers<'_>> = Default::default();
+    for (metric, point) in &state.metrics {
+        let Some(rest) = metric.strip_prefix("wireguard/") else {
+            continue;
+        };
+        // `<iface>/peers` is the count (no peer segment) — skip here.
+        let parts: Vec<&str> = rest.splitn(3, '/').collect();
+        if let [iface, peer, stat] = parts.as_slice() {
+            map.entry(iface.to_string())
+                .or_default()
+                .entry(peer.to_string())
+                .or_default()
+                .insert(stat.to_string(), point);
+        }
+    }
+    map
+}
+
+fn has_prefix(state: &DeviceDetailState, prefix: &str) -> bool {
+    state.metrics.keys().any(|k| k.starts_with(prefix))
 }
 
 // ---- small helpers ----------------------------------------------------------

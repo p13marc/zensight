@@ -966,3 +966,39 @@ fn test_settings_invalid_disables_save() {
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(!messages.iter().any(|m| matches!(m, Message::SaveSettings)));
 }
+
+/// The netlink view shows Conntrack + WireGuard sections when those metrics
+/// are present (NAT gateway / VPN host), and hides them otherwise.
+#[test]
+fn test_netlink_conntrack_wireguard_sections() {
+    use zensight::view::specialized::netlink::netlink_host_view;
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let mut state = DeviceDetailState::new(device_id);
+
+    // Without conntrack/wireguard metrics: sections absent.
+    state.update(TelemetryPoint::new("gw01", Protocol::Netlink, "iface/eth0/up", TelemetryValue::Boolean(true)));
+    {
+        let mut ui = simulator(netlink_host_view(&state));
+        assert!(ui.find("Conntrack").is_err());
+        assert!(ui.find("WireGuard").is_err());
+    }
+
+    // Add conntrack + a WireGuard peer.
+    for (m, v) in [
+        ("conntrack/entries", TelemetryValue::Gauge(1500.0)),
+        ("conntrack/by_proto/tcp", TelemetryValue::Gauge(1000.0)),
+        ("conntrack/utilization", TelemetryValue::Gauge(0.75)),
+        ("wireguard/wg0/peers", TelemetryValue::Gauge(1.0)),
+        ("wireguard/wg0/AbCd1234/rx_bytes", TelemetryValue::Counter(1000)),
+        ("wireguard/wg0/AbCd1234/up", TelemetryValue::Boolean(true)),
+    ] {
+        state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
+    }
+    let mut ui = simulator(netlink_host_view(&state));
+    assert!(ui.find("Conntrack").is_ok());
+    assert!(ui.find("WireGuard").is_ok());
+    assert!(ui.find("75.0%").is_ok()); // utilization as a percentage
+    assert!(ui.find("wg0 — 1 peers").is_ok());
+}
