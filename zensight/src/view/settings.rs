@@ -670,10 +670,23 @@ fn render_actions(state: &SettingsState) -> Element<'_, Message> {
         content = content.push(success_text);
     }
 
+    // Live validation: show the first problem inline and disable Save until the
+    // form is valid (rather than only failing on click).
+    let validation = state.validate();
+    if let Err(ref problem) = validation {
+        let warn = text(format!("⚠ {problem}"))
+            .size(12)
+            .style(|theme: &Theme| text::Style {
+                color: Some(crate::view::theme::colors(theme).warning()),
+            });
+        content = content.push(warn);
+    }
+
     // Buttons
-    let save_button = button(text("Save Settings").size(14))
-        .on_press(Message::SaveSettings)
-        .style(iced::widget::button::primary);
+    let mut save_button = button(text("Save Settings").size(14)).style(iced::widget::button::primary);
+    if validation.is_ok() {
+        save_button = save_button.on_press(Message::SaveSettings);
+    }
 
     let reset_button = button(text("Reset to Defaults").size(14))
         .on_press(Message::ResetSettings)

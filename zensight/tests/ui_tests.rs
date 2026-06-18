@@ -951,3 +951,18 @@ fn test_sensors_view() {
     assert!(ui.find("Degraded").is_ok());
     assert!(ui.find("Responding").is_ok());
 }
+
+/// Settings shows an inline validation warning and disables Save on bad input.
+#[test]
+fn test_settings_invalid_disables_save() {
+    let mut state = SettingsState::default();
+    state.max_history = "abc".to_string(); // not a number
+
+    let mut ui = simulator(settings_view(&state));
+    // Inline warning is shown.
+    assert!(ui.find("⚠ Max history must be a number").is_ok());
+    // Clicking Save produces NO SaveSettings message (button disabled).
+    let _ = ui.click("Save Settings");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(!messages.iter().any(|m| matches!(m, Message::SaveSettings)));
+}
