@@ -5,13 +5,15 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{Column, Row, column, container, row, rule, scrollable, text};
+use iced::widget::{Column, Row, column, container, row, scrollable, text};
 use iced::{Alignment, Element, Length, Theme};
 use iced_anim::widget::button;
 
 use zensight_common::TelemetryValue;
 
 use crate::message::Message;
+use crate::view::components::card;
+use crate::view::tokens::space;
 use crate::view::device::DeviceDetailState;
 use crate::view::icons::{self, IconSize};
 use crate::view::theme;
@@ -25,15 +27,12 @@ pub fn gnmi_streaming_view(state: &DeviceDetailState) -> Element<'_, Message> {
 
     let content = column![
         header,
-        rule::horizontal(1),
-        device_info,
-        rule::horizontal(1),
-        subscriptions,
-        rule::horizontal(1),
-        path_browser,
+        card(device_info),
+        card(subscriptions),
+        card(path_browser),
     ]
-    .spacing(15)
-    .padding(20);
+    .spacing(space::MD)
+    .padding(space::LG);
 
     container(scrollable(content))
         .width(Length::Fill)

@@ -5,17 +5,18 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{Column, column, container, row, rule, scrollable, text};
+use iced::widget::{Column, column, container, row, scrollable, text};
 use iced::{Alignment, Element, Length, Theme};
 use iced_anim::widget::button;
 
 use zensight_common::TelemetryValue;
 
 use crate::message::Message;
-use crate::view::components::{Gauge, StatusLed, StatusLedState};
+use crate::view::components::{Gauge, StatusLed, StatusLedState, card};
 use crate::view::device::DeviceDetailState;
 use crate::view::icons::{self, IconSize};
 use crate::view::theme;
+use crate::view::tokens::space;
 
 /// Parsed interface data from SNMP metrics.
 #[derive(Debug, Clone)]
@@ -69,15 +70,12 @@ pub fn snmp_device_view(state: &DeviceDetailState) -> Element<'_, Message> {
 
     let content = column![
         header,
-        rule::horizontal(1),
-        system_info,
-        rule::horizontal(1),
-        interfaces,
-        rule::horizontal(1),
-        system_metrics,
+        card(system_info),
+        card(interfaces),
+        card(system_metrics),
     ]
-    .spacing(15)
-    .padding(20);
+    .spacing(space::MD)
+    .padding(space::LG);
 
     container(scrollable(content))
         .width(Length::Fill)

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use iced::widget::{
-    Row, column, container, pick_list, row, rule, scrollable, table, text, text_input,
+    Row, column, container, pick_list, row, scrollable, table, text, text_input,
 };
 use iced::{Alignment, Element, Length, Theme};
 use iced_anim::widget::button;
@@ -14,7 +14,9 @@ use iced_anim::widget::button;
 use zensight_common::TelemetryValue;
 
 use crate::message::Message;
+use crate::view::components::card;
 use crate::view::device::DeviceDetailState;
+use crate::view::tokens::space;
 use crate::view::formatting::format_timestamp;
 use crate::view::icons::{self, IconSize};
 use crate::view::theme;
@@ -238,25 +240,14 @@ pub fn syslog_event_view<'a>(
     state: &'a DeviceDetailState,
     filter_state: &'a SyslogFilterState,
 ) -> Element<'a, Message> {
-    let header = render_header(state, filter_state);
-    let filter_panel = if filter_state.panel_open {
-        render_filter_panel(state, filter_state)
-    } else {
-        column![].into()
-    };
-    let severity_summary = render_severity_summary(state, filter_state);
-    let log_stream = render_log_stream(state, filter_state);
-
-    let content = column![
-        header,
-        rule::horizontal(1),
-        filter_panel,
-        severity_summary,
-        rule::horizontal(1),
-        log_stream,
-    ]
-    .spacing(15)
-    .padding(20);
+    let mut content = column![render_header(state, filter_state)]
+        .spacing(space::MD)
+        .padding(space::LG);
+    if filter_state.panel_open {
+        content = content.push(card(render_filter_panel(state, filter_state)));
+    }
+    content = content.push(card(render_severity_summary(state, filter_state)));
+    content = content.push(card(render_log_stream(state, filter_state)));
 
     container(content)
         .width(Length::Fill)

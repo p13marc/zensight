@@ -3,13 +3,15 @@
 //! Displays register tables with live values, gauges for analog values,
 //! and boolean indicators for discrete values.
 
-use iced::widget::{Column, Row, column, container, row, rule, scrollable, text};
+use iced::widget::{Column, Row, column, container, row, scrollable, text};
 use iced::{Alignment, Element, Length, Theme};
 use iced_anim::widget::button;
 
 use zensight_common::TelemetryValue;
 
 use crate::message::Message;
+use crate::view::components::card;
+use crate::view::tokens::space;
 use crate::view::components::{StatusLed, StatusLedState};
 use crate::view::device::DeviceDetailState;
 use crate::view::icons::{self, IconSize};
@@ -66,13 +68,11 @@ pub fn modbus_plc_view(state: &DeviceDetailState) -> Element<'_, Message> {
 
     let content = column![
         header,
-        rule::horizontal(1),
-        connection_info,
-        rule::horizontal(1),
-        register_sections,
+        card(connection_info),
+        card(register_sections),
     ]
-    .spacing(15)
-    .padding(20);
+    .spacing(space::MD)
+    .padding(space::LG);
 
     container(scrollable(content))
         .width(Length::Fill)

@@ -5,13 +5,15 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{Column, Row, column, container, row, rule, scrollable, text};
+use iced::widget::{Column, Row, column, container, row, scrollable, text};
 use iced::{Alignment, Element, Length, Theme};
 use iced_anim::widget::button;
 
 use zensight_common::TelemetryValue;
 
 use crate::message::Message;
+use crate::view::components::card;
+use crate::view::tokens::space;
 use crate::view::device::DeviceDetailState;
 use crate::view::icons::{self, IconSize};
 use crate::view::theme;
@@ -52,17 +54,13 @@ pub fn netflow_traffic_view(state: &DeviceDetailState) -> Element<'_, Message> {
 
     let content = column![
         header,
-        rule::horizontal(1),
-        summary,
-        rule::horizontal(1),
-        top_talkers,
-        rule::horizontal(1),
-        protocol_dist,
-        rule::horizontal(1),
-        flow_table,
+        card(summary),
+        card(top_talkers),
+        card(protocol_dist),
+        card(flow_table),
     ]
-    .spacing(15)
-    .padding(20);
+    .spacing(space::MD)
+    .padding(space::LG);
 
     container(scrollable(content))
         .width(Length::Fill)

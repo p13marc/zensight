@@ -2,12 +2,14 @@
 //!
 //! Displays system metrics with gauges for CPU, memory, and disk usage.
 
-use iced::widget::{Column, Row, column, container, row, rule, scrollable, text};
+use iced::widget::{Column, Row, column, container, row, scrollable, text};
 use iced::{Alignment, Element, Length, Theme};
 
 use zensight_common::TelemetryValue;
 
 use crate::message::Message;
+use crate::view::components::card;
+use crate::view::tokens::space;
 use crate::view::components::{Gauge, ProgressBar, StatusLed, StatusLedState};
 use crate::view::device::DeviceDetailState;
 use crate::view::formatting::format_timestamp;
@@ -25,44 +27,34 @@ pub fn sysinfo_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
 
     let mut content = column![
         header,
-        rule::horizontal(1),
-        system_overview,
-        rule::horizontal(1),
-        cpu_section,
-        rule::horizontal(1),
-        memory_section,
-        rule::horizontal(1),
-        disk_section,
-        rule::horizontal(1),
-        network_section,
+        card(system_overview),
+        card(cpu_section),
+        card(memory_section),
+        card(disk_section),
+        card(network_section),
     ]
-    .spacing(15)
-    .padding(20);
+    .spacing(space::MD)
+    .padding(space::LG);
 
     // Linux-specific sections (only show if data is present)
     if has_cpu_times(state) {
-        content = content.push(rule::horizontal(1));
-        content = content.push(render_cpu_times_section(state));
+        content = content.push(card(render_cpu_times_section(state)));
     }
 
     if has_disk_io(state) {
-        content = content.push(rule::horizontal(1));
-        content = content.push(render_disk_io_section(state));
+        content = content.push(card(render_disk_io_section(state)));
     }
 
     if has_temperatures(state) {
-        content = content.push(rule::horizontal(1));
-        content = content.push(render_temperatures_section(state));
+        content = content.push(card(render_temperatures_section(state)));
     }
 
     if has_tcp_states(state) {
-        content = content.push(rule::horizontal(1));
-        content = content.push(render_tcp_states_section(state));
+        content = content.push(card(render_tcp_states_section(state)));
     }
 
     if has_processes(state) {
-        content = content.push(rule::horizontal(1));
-        content = content.push(render_processes_section(state));
+        content = content.push(card(render_processes_section(state)));
     }
 
     container(scrollable(content))
