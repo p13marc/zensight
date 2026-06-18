@@ -166,6 +166,25 @@ pub fn flow_latency_points(sensor_id: &str, durations_ms: &mut [u64]) -> Vec<Tel
     ]
 }
 
+/// TLS handshake aggregate: total ClientHellos fingerprinted + distinct
+/// fingerprints seen (asset-inventory size).
+pub fn tls_points(sensor_id: &str, handshakes: u64, distinct: u64) -> Vec<TelemetryPoint> {
+    vec![
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            "tls/handshakes_total",
+            TelemetryValue::Counter(handshakes),
+        ),
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            "tls/distinct_fingerprints",
+            TelemetryValue::Gauge(distinct as f64),
+        ),
+    ]
+}
+
 /// TCP reset aggregate points.
 pub fn tcp_reset_points(sensor_id: &str, resets: u64, refused: u64) -> Vec<TelemetryPoint> {
     vec![

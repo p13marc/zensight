@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use zensight_common::{FlowRecord, TelemetryPoint};
+use zensight_common::{FlowRecord, TelemetryPoint, TlsRecord};
 
 /// Bounded ring of recent ended-flow records served via `@/query/flows`.
 pub type FlowRing = Arc<Mutex<VecDeque<FlowRecord>>>;
@@ -20,6 +20,7 @@ use flowscope::EndReason;
 use flowscope::detect::patterns::{PortScanDetector, ScanScore, ScanVerdict};
 use flowscope::extract::FiveTupleKey;
 use netring::anomaly::shipped_sinks::ChannelSink;
+use netring::monitor::fingerprint::TlsFingerprint;
 use netring::prelude::*;
 use netring::protocol::event_typed::FlowEnded;
 
@@ -49,7 +50,17 @@ pub struct MonitorChannels {
     /// (zero-payload RST = "connection refused" vs a mid-transfer abort).
     pub tcp_resets: Arc<AtomicU64>,
     pub tcp_refused: Arc<AtomicU64>,
+    /// Total TLS handshakes seen (ClientHello fingerprinted).
+    pub tls_handshakes: Arc<AtomicU64>,
+    /// Passive TLS asset inventory keyed by (sni, ja4): the served `@/query/tls`.
+    pub tls_inventory: TlsInventory,
 }
+
+/// Passive TLS fingerprint inventory: (sni, ja4) → record with a hit count.
+pub type TlsInventory = Arc<Mutex<std::collections::HashMap<(String, String), TlsRecord>>>;
+
+/// Max distinct TLS fingerprints retained (cardinality guard).
+const TLS_INVENTORY_CAP: usize = 4096;
 
 /// Detector wrapper bridging `feed`→`verdict` for the TRW port-scan detector.
 struct PortScan {
@@ -120,6 +131,8 @@ pub fn build(
     let flow_records: FlowRing = Arc::new(Mutex::new(VecDeque::with_capacity(FLOW_RING_CAP)));
     let tcp_resets = Arc::new(AtomicU64::new(0));
     let tcp_refused = Arc::new(AtomicU64::new(0));
+    let tls_handshakes = Arc::new(AtomicU64::new(0));
+    let tls_inventory: TlsInventory = Arc::new(Mutex::new(std::collections::HashMap::new()));
 
     let mut b = Monitor::builder();
     b = b.name(cfg.sensor_id.clone());
@@ -198,6 +211,38 @@ pub fn build(
         });
     }
 
+    // Passive TLS fingerprinting (ClientHello → SNI + JA3/JA4 asset inventory).
+    if cfg.collect.tls {
+        let count = tls_handshakes.clone();
+        let inventory = tls_inventory.clone();
+        b = b.on_fingerprint(move |fp: &TlsFingerprint, _ctx: &mut Ctx<'_>| {
+            count.fetch_add(1, Ordering::Relaxed);
+            // Key by (sni, ja4) so repeat handshakes of the same client/host
+            // collapse to one inventory entry with a hit count (cardinality).
+            let key = (
+                fp.sni.clone().unwrap_or_default(),
+                fp.ja4.clone().unwrap_or_default(),
+            );
+            if let Ok(mut inv) = inventory.lock() {
+                if let Some(rec) = inv.get_mut(&key) {
+                    rec.count += 1;
+                } else if inv.len() < TLS_INVENTORY_CAP {
+                    inv.insert(
+                        key,
+                        TlsRecord {
+                            sni: fp.sni.clone(),
+                            alpn: fp.alpn.clone(),
+                            ja3: fp.ja3.clone(),
+                            ja4: fp.ja4.clone(),
+                            count: 1,
+                        },
+                    );
+                }
+            }
+            Ok(())
+        });
+    }
+
     // Per-application bandwidth (periodic report).
     if cfg.collect.bandwidth {
         let tx = tel_tx.clone();
@@ -256,6 +301,8 @@ pub fn build(
             flow_records,
             tcp_resets,
             tcp_refused,
+            tls_handshakes,
+            tls_inventory,
         },
         keepalive,
     ))

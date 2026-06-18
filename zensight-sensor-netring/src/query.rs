@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::monitor::FlowRing;
+use crate::monitor::{FlowRing, TlsInventory};
 
 /// Run the flow-detail query channel until the session closes. Replies with the
 /// recent ended-flow records (most-recent first) as JSON `Vec<FlowRecord>`.
@@ -37,6 +37,37 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, flows: FlowRi
                 }
             }
             Err(e) => tracing::warn!(error = %e, "query: flows serialize failed"),
+        }
+    }
+}
+
+/// Run the TLS asset-inventory query channel: `zensight/netring/@/query/tls`
+/// replies with the passive fingerprint inventory (most-seen first) as JSON
+/// `Vec<TlsRecord>`.
+pub async fn run_tls(session: Arc<zenoh::Session>, key_prefix: String, inventory: TlsInventory) {
+    let key = format!("{key_prefix}/@/query/tls");
+    let queryable = match session.declare_queryable(&key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %key, "query: declare tls failed");
+            return;
+        }
+    };
+    tracing::info!(key = %key, "on-demand TLS inventory query channel ready");
+
+    while let Ok(query) = queryable.recv_async().await {
+        let mut records: Vec<_> = match inventory.lock() {
+            Ok(inv) => inv.values().cloned().collect(),
+            Err(_) => Vec::new(),
+        };
+        records.sort_by_key(|r| std::cmp::Reverse(r.count));
+        match serde_json::to_vec(&records) {
+            Ok(payload) => {
+                if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                    tracing::warn!(error = %e, "query: tls reply failed");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "query: tls serialize failed"),
         }
     }
 }

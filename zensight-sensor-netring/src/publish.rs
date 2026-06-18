@@ -34,6 +34,8 @@ pub async fn run_drains(
     let flow_durations = channels.flow_durations_ms.clone();
     let tcp_resets = channels.tcp_resets.clone();
     let tcp_refused = channels.tcp_refused.clone();
+    let tls_handshakes = channels.tls_handshakes.clone();
+    let tls_inventory = channels.tls_inventory.clone();
 
     // Take (and clear) the current window's flow durations for percentile points.
     let drain_durations = |buf: &std::sync::Mutex<Vec<u64>>| -> Vec<u64> {
@@ -110,6 +112,10 @@ pub async fn run_drains(
                     .chain(map::flow_volume_points(&sensor_id, bytes, pkts, retx))
                     .chain(map::flow_latency_points(&sensor_id, &mut durs))
                     .chain(map::tcp_reset_points(&sensor_id, resets, refused));
+                // TLS handshake aggregates (passive asset inventory size).
+                let tls_n = tls_handshakes.load(Ordering::Relaxed);
+                let tls_distinct = tls_inventory.lock().map(|i| i.len() as u64).unwrap_or(0);
+                let points = points.chain(map::tls_points(&sensor_id, tls_n, tls_distinct));
                 for point in points {
                     health.record_metrics_published(1);
                     let suffix = format!("{}/{}", point.source, point.metric);

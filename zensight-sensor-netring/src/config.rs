@@ -57,6 +57,10 @@ pub struct CollectConfig {
     /// TCP reset counters (resets + connection refusals).
     #[serde(default = "default_true")]
     pub tcp_resets: bool,
+    /// Passive TLS fingerprinting (SNI + JA3/JA4 asset inventory). Needs capture
+    /// (CAP_NET_RAW), same as all netring collection.
+    #[serde(default = "default_true")]
+    pub tls: bool,
 }
 
 impl Default for CollectConfig {
@@ -65,6 +69,7 @@ impl Default for CollectConfig {
             bandwidth: true,
             flows: true,
             tcp_resets: true,
+            tls: true,
         }
     }
 }

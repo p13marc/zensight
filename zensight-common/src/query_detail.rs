@@ -52,6 +52,18 @@ pub struct FlowRecord {
     pub reason: String,
 }
 
+/// One observed TLS client fingerprint (passive asset inventory from netring's
+/// ClientHello parsing) — SNI + JA3/JA4 + negotiated ALPN, with how many
+/// handshakes matched it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TlsRecord {
+    pub sni: Option<String>,
+    pub alpn: Option<String>,
+    pub ja3: Option<String>,
+    pub ja4: Option<String>,
+    pub count: u64,
+}
+
 /// One TCP socket (served filterable by state/port).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SocketRecord {
