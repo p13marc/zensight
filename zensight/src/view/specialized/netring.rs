@@ -1,29 +1,27 @@
 //! Netring sensor specialized view — flows + per-app bandwidth.
 
 use iced::Element;
-use iced::widget::{Column, button, column, container, row, rule, scrollable, text};
+use iced::widget::{Column, button, column, container, row, scrollable, text};
 use iced::{Length, Theme};
 use zensight_common::TelemetryValue;
 
 use crate::message::Message;
+use crate::view::components::{card, empty_state, section_header};
 use crate::view::device::DeviceDetailState;
 use crate::view::theme;
+use crate::view::tokens::{font, space};
 
 /// Render the netring sensor specialized view.
 pub fn netring_sensor_view(state: &DeviceDetailState) -> Element<'_, Message> {
     let content = column![
         render_header(state),
-        rule::horizontal(1),
-        render_flows(state),
-        rule::horizontal(1),
-        render_tcp_health(state),
-        rule::horizontal(1),
-        render_bandwidth(state),
-        rule::horizontal(1),
-        render_flow_detail(state),
+        card(render_flows(state)),
+        card(render_tcp_health(state)),
+        card(render_bandwidth(state)),
+        card(render_flow_detail(state)),
     ]
-    .spacing(15)
-    .padding(20);
+    .spacing(space::MD)
+    .padding(space::LG);
 
     container(scrollable(content))
         .width(Length::Fill)
@@ -33,17 +31,18 @@ pub fn netring_sensor_view(state: &DeviceDetailState) -> Element<'_, Message> {
 
 fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
     row![
-        text(format!("Netring: {}", state.device_id.source)).size(22),
+        text(format!("Netring: {}", state.device_id.source)).size(font::TITLE),
         text(format!("({} metrics)", state.metrics.len()))
-            .size(12)
+            .size(font::CAPTION)
             .style(dim),
     ]
-    .spacing(12)
+    .spacing(space::SM)
+    .align_y(iced::Alignment::Center)
     .into()
 }
 
 fn render_flows(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = text("Flows").size(18);
+    let title = section_header("Flows", None);
     let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
     column![
         title,
@@ -80,10 +79,10 @@ fn render_flows(state: &DeviceDetailState) -> Element<'_, Message> {
 
 /// TCP health: reset / connection-refused counters.
 fn render_tcp_health(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = text("TCP Health").size(18);
+    let title = section_header("TCP Health", None);
     if !state.metrics.keys().any(|k| k.starts_with("tcp/")) {
-        return column![title, text("No TCP reset data").size(13).style(dim)]
-            .spacing(8)
+        return column![title, empty_state("No TCP reset data", None)]
+            .spacing(space::SM)
             .into();
     }
     let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
@@ -103,8 +102,8 @@ fn render_tcp_health(state: &DeviceDetailState) -> Element<'_, Message> {
 /// On-demand recent-flow detail: a fetch button + the fetched flow table (P2 —
 /// pulled from the sensor's `@/query/flows` channel, never streamed).
 fn render_flow_detail(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = text("Recent Flows (on demand)").size(18);
-    let fetch = button(text("Fetch Flows").size(12))
+    let title = section_header("Recent Flows (on demand)", None);
+    let fetch = button(text("Fetch Flows").size(font::CAPTION))
         .on_press(Message::FetchNetringFlows)
         .padding([4, 10]);
     let mut col = column![title, fetch].spacing(10);
@@ -135,7 +134,7 @@ fn render_flow_detail(state: &DeviceDetailState) -> Element<'_, Message> {
             );
         }
         col = col
-            .push(text(format!("{} flows", flows.len())).size(15))
+            .push(text(format!("{} flows", flows.len())).size(font::EMPHASIS))
             .push(list);
     }
     col.into()
@@ -160,10 +159,10 @@ fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
         .collect();
     rows.sort_by(|a, b| b.1.total_cmp(&a.1));
 
-    let title = text(format!("Top Talkers ({})", rows.len())).size(18);
+    let title = section_header(format!("Top Talkers ({})", rows.len()), None);
     if rows.is_empty() {
-        return column![title, text("No bandwidth data").size(13).style(dim)]
-            .spacing(8)
+        return column![title, empty_state("No bandwidth data", None)]
+            .spacing(space::SM)
             .into();
     }
 
