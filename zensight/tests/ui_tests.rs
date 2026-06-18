@@ -6,7 +6,7 @@
 use iced_test::simulator;
 
 // Re-export view components for testing
-use zensight::app::AppTheme;
+use zensight::app::{AppTheme, CurrentView};
 use zensight::message::{DeviceId, Message};
 use zensight::mock;
 use zensight::view::dashboard::{ConnectionState, DashboardState, DeviceState, dashboard_view};
@@ -73,56 +73,46 @@ fn test_dashboard_with_devices() {
     assert!(ui.find("router01").is_ok());
     // Should show metric count
     assert!(ui.find("5 metrics").is_ok());
-    // Should show Connected status
-    assert!(ui.find("Connected").is_ok());
+    // (Connection status now lives in the app shell, not the dashboard view.)
 }
 
-/// Test clicking the Settings button.
-#[test]
-fn test_dashboard_settings_button() {
-    let state = DashboardState::default();
-    let groups = GroupsState::default();
-    let overview = OverviewState::default();
-    let sensor_health = HashMap::new();
-    let mut ui = simulator(dashboard_view(
-        &state,
-        AppTheme::Dark,
+/// Render the persistent app shell around a dummy page, for nav-rail tests.
+fn shell_ui() -> iced_test::Simulator<'static, Message> {
+    let content = iced::widget::text("content").into();
+    simulator(zensight::view::shell::app_shell(
+        CurrentView::Dashboard,
+        None,
+        ConnectionState::Connected,
         0,
-        &groups,
-        &overview,
-        &sensor_health,
-    ));
+        content,
+    ))
+}
 
-    // Click Settings button
+/// The nav rail's Settings button emits OpenSettings.
+#[test]
+fn test_shell_settings_button() {
+    let mut ui = shell_ui();
     let _ = ui.click("Settings");
-
-    // Should have produced OpenSettings message
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(messages.iter().any(|m| matches!(m, Message::OpenSettings)));
 }
 
-/// Test clicking the Alerts button.
+/// The nav rail's Alerts button emits OpenAlerts.
 #[test]
-fn test_dashboard_alerts_button() {
-    let state = DashboardState::default();
-    let groups = GroupsState::default();
-    let overview = OverviewState::default();
-    let sensor_health = HashMap::new();
-    let mut ui = simulator(dashboard_view(
-        &state,
-        AppTheme::Dark,
-        0,
-        &groups,
-        &overview,
-        &sensor_health,
-    ));
-
-    // Click Alerts button
+fn test_shell_alerts_button() {
+    let mut ui = shell_ui();
     let _ = ui.click("Alerts");
-
-    // Should have produced OpenAlerts message
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(messages.iter().any(|m| matches!(m, Message::OpenAlerts)));
+}
+
+/// The shell shows the connection status (here: Connected) on every screen.
+#[test]
+fn test_shell_shows_connection_status() {
+    let ui = shell_ui();
+    let mut ui = ui;
+    assert!(ui.find("Connected").is_ok());
+    assert!(ui.find("Dashboard").is_ok());
 }
 
 /// Test device detail view with mock data.
@@ -594,26 +584,11 @@ fn test_topology_zoom_controls() {
     );
 }
 
-/// Test clicking Topology button in dashboard.
+/// The nav rail's Topology button emits OpenTopology.
 #[test]
-fn test_dashboard_topology_button() {
-    let state = DashboardState::default();
-    let groups = GroupsState::default();
-    let overview = OverviewState::default();
-    let sensor_health = HashMap::new();
-    let mut ui = simulator(dashboard_view(
-        &state,
-        AppTheme::Dark,
-        0,
-        &groups,
-        &overview,
-        &sensor_health,
-    ));
-
-    // Click Topology button
+fn test_shell_topology_button() {
+    let mut ui = shell_ui();
     let _ = ui.click("Topology");
-
-    // Should have produced OpenTopology message
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(messages.iter().any(|m| matches!(m, Message::OpenTopology)));
 }

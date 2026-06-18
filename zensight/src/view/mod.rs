@@ -12,6 +12,7 @@ pub mod icons;
 pub mod overview;
 pub mod security;
 pub mod settings;
+pub mod shell;
 pub mod specialized;
 pub mod theme;
 pub mod tokens;

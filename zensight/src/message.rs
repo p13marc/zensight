@@ -176,6 +176,10 @@ pub enum Message {
     /// Tick for periodic UI updates (e.g., relative timestamps).
     Tick,
 
+    /// Navigate to the dashboard (clears any device selection). Used by the
+    /// persistent nav rail.
+    OpenDashboard,
+
     // Settings messages
     /// Open the settings view.
     OpenSettings,

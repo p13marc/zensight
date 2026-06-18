@@ -35,7 +35,7 @@ use crate::view::toast::{ToastSeverity, ToastState, toast_overlay};
 use crate::view::topology::{TopologyState, topology_view};
 
 /// Current view in the application.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum CurrentView {
     #[default]
     Dashboard,
@@ -196,7 +196,7 @@ impl ZenSight {
         let syslog_filter = SyslogFilterState::default();
 
         // Load last active view (only Dashboard, Alerts, Topology are persisted)
-        let current_view = persistent.current_view.clone();
+        let current_view = persistent.current_view;
 
         let app = Self {
             zenoh_config,
@@ -501,6 +501,11 @@ impl ZenSight {
             }
 
             // Settings messages
+            Message::OpenDashboard => {
+                self.selected_device = None;
+                self.set_view(CurrentView::Dashboard);
+            }
+
             Message::OpenSettings => {
                 self.set_view(CurrentView::Settings);
             }
@@ -1014,7 +1019,7 @@ impl ZenSight {
     /// Save current view to persistent settings.
     fn save_current_view(&self) {
         let mut persistent = PersistentSettings::load();
-        persistent.current_view = self.current_view.clone();
+        persistent.current_view = self.current_view;
         if let Err(e) = persistent.save() {
             tracing::error!("Failed to save current view: {}", e);
         }
@@ -1270,8 +1275,22 @@ impl ZenSight {
             ),
         };
 
-        // Wrap main view in container
-        let view_container: Element<'_, Message> = container(main_view)
+        // Wrap the page in the persistent shell (left nav rail + top bar with
+        // breadcrumb, alert badge, and connection status visible on every screen).
+        let device_name = self
+            .selected_device
+            .as_ref()
+            .filter(|_| self.current_view == CurrentView::Device)
+            .map(|d| d.device_id.source.as_str());
+        let shelled = crate::view::shell::app_shell(
+            self.current_view,
+            device_name,
+            self.dashboard.connection_state,
+            unack,
+            main_view,
+        );
+
+        let view_container: Element<'_, Message> = container(shelled)
             .width(Length::Fill)
             .height(Length::Fill)
             .into();

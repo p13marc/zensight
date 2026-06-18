@@ -129,7 +129,7 @@ pub const DEFAULT_DEVICES_PER_PAGE: usize = 20;
 pub const SEARCH_DEBOUNCE_MS: i64 = 300;
 
 /// Connection state for Zenoh session.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConnectionState {
     /// Not connected and not attempting.
     #[default]
@@ -361,40 +361,9 @@ pub fn dashboard_view<'a>(
 fn render_header(
     state: &DashboardState,
     theme: AppTheme,
-    unacknowledged_alerts: usize,
+    _unacknowledged_alerts: usize,
 ) -> Element<'_, Message> {
     let title = text("ZenSight Dashboard").size(24);
-
-    let (status_icon, status_text) = match state.connection_state {
-        ConnectionState::Connected => (
-            icons::connected(IconSize::Medium),
-            text("Connected")
-                .size(14)
-                .style(|theme: &Theme| text::Style {
-                    color: Some(crate::view::theme::colors(theme).status_connected()),
-                }),
-        ),
-        ConnectionState::Connecting => (
-            icons::disconnected(IconSize::Medium),
-            text("Connecting...")
-                .size(14)
-                .style(|_theme: &Theme| text::Style {
-                    color: Some(Color::from_rgb(0.9, 0.7, 0.0)),
-                }),
-        ),
-        ConnectionState::Disconnected => (
-            icons::disconnected(IconSize::Medium),
-            text("Disconnected")
-                .size(14)
-                .style(|theme: &Theme| text::Style {
-                    color: Some(crate::view::theme::colors(theme).status_disconnected()),
-                }),
-        ),
-    };
-
-    let status = row![status_icon, status_text]
-        .spacing(5)
-        .align_y(Alignment::Center);
 
     let device_count = text(format!("{} devices", state.devices.len())).size(14);
 
@@ -406,45 +375,6 @@ fn render_header(
     let theme_button = button(theme_icon)
         .on_press(Message::ToggleTheme)
         .style(iced::widget::button::secondary);
-
-    let alerts_label = if unacknowledged_alerts > 0 {
-        // White text for contrast on danger (red) button background
-        text(format!("Alerts ({})", unacknowledged_alerts))
-            .size(14)
-            .style(|_theme: &Theme| text::Style {
-                color: Some(iced::Color::WHITE),
-            })
-    } else {
-        text("Alerts").size(14)
-    };
-
-    let alerts_button = button(
-        row![icons::alert(IconSize::Medium), alerts_label]
-            .spacing(6)
-            .align_y(Alignment::Center),
-    )
-    .on_press(Message::OpenAlerts)
-    .style(if unacknowledged_alerts > 0 {
-        iced::widget::button::danger
-    } else {
-        iced::widget::button::secondary
-    });
-
-    let topology_button = button(
-        row![icons::network(IconSize::Medium), text("Topology").size(14)]
-            .spacing(6)
-            .align_y(Alignment::Center),
-    )
-    .on_press(Message::OpenTopology)
-    .style(iced::widget::button::secondary);
-
-    let settings_button = button(
-        row![icons::settings(IconSize::Medium), text("Settings").size(14)]
-            .spacing(6)
-            .align_y(Alignment::Center),
-    )
-    .on_press(Message::OpenSettings)
-    .style(iced::widget::button::secondary);
 
     // View mode toggle button (grid vs table)
     let view_mode_icon = match state.view_mode {
@@ -463,18 +393,12 @@ fn render_header(
     .on_press(Message::ToggleDashboardViewMode)
     .style(iced::widget::button::secondary);
 
-    let header_row = row![
-        title,
-        device_count,
-        status,
-        view_mode_button,
-        theme_button,
-        alerts_button,
-        topology_button,
-        settings_button
-    ]
-    .spacing(20)
-    .align_y(Alignment::Center);
+    // Connection status + primary navigation (Alerts/Topology/Settings) now live
+    // in the persistent app shell (view/shell.rs), so the dashboard header keeps
+    // only its page-local controls.
+    let header_row = row![title, device_count, view_mode_button, theme_button]
+        .spacing(20)
+        .align_y(Alignment::Center);
 
     let mut header_col = Column::new().push(header_row);
 
