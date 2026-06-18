@@ -63,6 +63,20 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
 
             tracing::info!("Advanced subscriber created with history and recovery");
 
+            // The AdvancedSubscriber only delivers AdvancedPublisher samples — it
+            // silently drops plain `session.put`s. The control plane (health,
+            // errors, alerts, liveness) is published with plain puts, so it needs
+            // a *plain* subscriber. Matches `zensight/<proto>/@/<...>` only (never
+            // telemetry, which has a source segment instead of `@`), so there's no
+            // double-delivery with the advanced telemetry subscriber.
+            let control = session
+                .declare_subscriber("zensight/*/@/**")
+                .await
+                .ok();
+            if control.is_none() {
+                tracing::warn!("Failed to create control-plane subscriber (health/alerts)");
+            }
+
             // Subscribe to sensor liveliness tokens
             let sensor_liveliness = match session
                 .liveliness()
@@ -177,6 +191,30 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
                             let is_alive = sample.kind() == SampleKind::Put;
                             if let Some(msg) = parse_device_liveliness(sample.key_expr().as_str(), is_alive) {
                                 yield msg;
+                            }
+                        }
+                    }
+
+                    // Control plane (plain puts: health / errors / alerts /
+                    // device liveness) — the AdvancedSubscriber doesn't deliver
+                    // these, so they come through a plain subscriber here.
+                    result = async {
+                        match &control {
+                            Some(sub) => sub.recv_async().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Ok(sample) = result {
+                            let key = sample.key_expr().as_str();
+                            if sample.kind() == SampleKind::Delete {
+                                if let Some(msg) = parse_alert_cleared(key) {
+                                    yield msg;
+                                }
+                            } else {
+                                let payload = sample.payload().to_bytes();
+                                if let Some(msg) = decode_sample(key, &payload) {
+                                    yield msg;
+                                }
                             }
                         }
                     }
