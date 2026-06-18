@@ -874,3 +874,45 @@ fn test_external_alerts_render_and_resolve() {
         assert!(ui.find("Anomalies & Expectations (0)").is_ok());
     }
 }
+
+/// The netlink and netring overviews render real aggregates (replacing the old
+/// "not implemented" placeholders).
+#[test]
+fn test_netlink_netring_overviews_render() {
+    use std::collections::HashMap;
+    use zensight::view::dashboard::DeviceState;
+    use zensight::view::overview::{netlink::netlink_overview, netring::netring_overview};
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    // Netlink host with an up interface + established sockets.
+    let nl_id = DeviceId::new(Protocol::Netlink, "router01");
+    let mut nl = DeviceState::new(nl_id.clone());
+    nl.metrics.insert(
+        "iface/eth0/up".into(),
+        TelemetryPoint::new("router01", Protocol::Netlink, "iface/eth0/up", TelemetryValue::Boolean(true)),
+    );
+    nl.metrics.insert(
+        "sockets/tcp/established".into(),
+        TelemetryPoint::new("router01", Protocol::Netlink, "sockets/tcp/established", TelemetryValue::Gauge(7.0)),
+    );
+    let nl_map: HashMap<&DeviceId, &DeviceState> = std::iter::once((&nl_id, &nl)).collect();
+    let mut ui = simulator(netlink_overview(&nl_map));
+    assert!(ui.find("Interfaces up").is_ok());
+    assert!(ui.find("TCP established").is_ok());
+
+    // Netring sensor with flow + reset metrics.
+    let nr_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let mut nr = DeviceState::new(nr_id.clone());
+    nr.metrics.insert(
+        "flow/active".into(),
+        TelemetryPoint::new("wiretap1", Protocol::Netring, "flow/active", TelemetryValue::Gauge(3.0)),
+    );
+    nr.metrics.insert(
+        "tcp/resets_total".into(),
+        TelemetryPoint::new("wiretap1", Protocol::Netring, "tcp/resets_total", TelemetryValue::Counter(5)),
+    );
+    let nr_map: HashMap<&DeviceId, &DeviceState> = std::iter::once((&nr_id, &nr)).collect();
+    let mut ui = simulator(netring_overview(&nr_map));
+    assert!(ui.find("Active flows").is_ok());
+    assert!(ui.find("TCP resets").is_ok());
+}

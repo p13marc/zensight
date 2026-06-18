@@ -6,6 +6,8 @@
 pub mod gnmi;
 pub mod modbus;
 pub mod netflow;
+pub mod netlink;
+pub mod netring;
 pub mod snmp;
 pub mod sysinfo;
 pub mod syslog;
@@ -114,10 +116,9 @@ pub fn overview_section<'a>(
             Protocol::Netflow => netflow::netflow_overview(&protocol_devices),
             Protocol::Modbus => modbus::modbus_overview(&protocol_devices),
             Protocol::Gnmi => gnmi::gnmi_overview(&protocol_devices),
-            Protocol::Opcua => text("OPC-UA overview not implemented").size(12).into(),
-            // TODO(Plan 09): dedicated netlink/netring overviews.
-            Protocol::Netlink => text("Netlink overview not implemented").size(12).into(),
-            Protocol::Netring => text("Netring overview not implemented").size(12).into(),
+            Protocol::Netlink => netlink::netlink_overview(&protocol_devices),
+            Protocol::Netring => netring::netring_overview(&protocol_devices),
+            Protocol::Opcua => generic_overview(&protocol_devices, "OPC-UA nodes"),
         }
     } else {
         text("Select a protocol tab to view aggregated metrics")
@@ -160,6 +161,9 @@ fn render_protocol_tabs<'a>(
         Protocol::Netflow,
         Protocol::Modbus,
         Protocol::Gnmi,
+        Protocol::Netlink,
+        Protocol::Netring,
+        Protocol::Opcua,
     ];
 
     let tabs: Vec<Element<'a, Message>> = protocols
@@ -189,6 +193,50 @@ fn render_protocol_tabs<'a>(
         .spacing(8)
         .align_y(Alignment::Center)
         .into()
+}
+
+/// A minimal count-and-health overview for protocols without richer aggregates
+/// (e.g. OPC-UA, whose specialized telemetry isn't modelled yet).
+fn generic_overview<'a>(
+    devices: &HashMap<&DeviceId, &DeviceState>,
+    noun: &'a str,
+) -> Element<'a, Message> {
+    if devices.is_empty() {
+        return text(format!("No {noun} available"))
+            .size(12)
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            })
+            .into();
+    }
+    let healthy = devices.values().filter(|d| d.is_healthy).count();
+    let metrics: usize = devices.values().map(|d| d.metric_count).sum();
+    row![
+        column![
+            text("Devices").size(10).style(muted),
+            text(devices.len().to_string()).size(16)
+        ]
+        .spacing(2),
+        column![
+            text("Online").size(10).style(muted),
+            text(healthy.to_string()).size(16)
+        ]
+        .spacing(2),
+        column![
+            text("Metrics").size(10).style(muted),
+            text(metrics.to_string()).size(16)
+        ]
+        .spacing(2),
+    ]
+    .spacing(25)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+fn muted(t: &Theme) -> text::Style {
+    text::Style {
+        color: Some(theme::colors(t).text_muted()),
+    }
 }
 
 /// Count devices by protocol.
