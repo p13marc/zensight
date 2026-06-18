@@ -47,6 +47,7 @@ pub enum CurrentView {
     Topology,
     Expectations,
     Security,
+    Sensors,
 }
 
 /// Application theme.
@@ -504,6 +505,10 @@ impl ZenSight {
             Message::OpenDashboard => {
                 self.selected_device = None;
                 self.set_view(CurrentView::Dashboard);
+            }
+
+            Message::OpenSensors => {
+                self.set_view(CurrentView::Sensors);
             }
 
             Message::OpenSettings => {
@@ -1203,7 +1208,7 @@ impl ZenSight {
                     }
                 }
             }
-            CurrentView::Expectations | CurrentView::Security => {
+            CurrentView::Expectations | CurrentView::Security | CurrentView::Sensors => {
                 self.set_view(CurrentView::Dashboard);
             }
             CurrentView::Dashboard => {
@@ -1250,6 +1255,7 @@ impl ZenSight {
                 crate::view::expectations::expectations_view(&self.expectations)
             }
             CurrentView::Security => crate::view::security::security_view(&self.alerts),
+            CurrentView::Sensors => crate::view::sensors::sensors_view(&self.sensor_health),
             CurrentView::Device => {
                 if let Some(ref device_state) = self.selected_device {
                     device_view_with_syslog_filter(device_state, &self.syslog_filter)

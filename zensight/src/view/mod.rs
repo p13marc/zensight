@@ -11,6 +11,7 @@ pub mod groups;
 pub mod icons;
 pub mod overview;
 pub mod security;
+pub mod sensors;
 pub mod settings;
 pub mod shell;
 pub mod specialized;

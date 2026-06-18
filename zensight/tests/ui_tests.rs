@@ -916,3 +916,38 @@ fn test_netlink_netring_overviews_render() {
     assert!(ui.find("Active flows").is_ok());
     assert!(ui.find("TCP resets").is_ok());
 }
+
+/// The Sensors view surfaces sensor health (previously collected but never shown).
+#[test]
+fn test_sensors_view() {
+    use std::collections::HashMap;
+    use zensight::view::sensors::sensors_view;
+    use zensight_common::{HealthSnapshot, HealthStatus};
+
+    // Empty state.
+    let empty: HashMap<String, HealthSnapshot> = HashMap::new();
+    let mut ui = simulator(sensors_view(&empty));
+    assert!(ui.find("Sensors").is_ok());
+    assert!(ui.find("No sensor health received yet.").is_ok());
+
+    // Populated: a degraded sensor renders its name, badge, and stats.
+    let mut health = HashMap::new();
+    health.insert(
+        "snmp".to_string(),
+        HealthSnapshot {
+            sensor: "snmp".into(),
+            status: HealthStatus::Degraded,
+            uptime_secs: 7200,
+            devices_total: 10,
+            devices_responding: 8,
+            devices_failed: 2,
+            last_poll_duration_ms: 42,
+            errors_last_hour: 3,
+            metrics_published: 1234,
+        },
+    );
+    let mut ui = simulator(sensors_view(&health));
+    assert!(ui.find("snmp").is_ok());
+    assert!(ui.find("Degraded").is_ok());
+    assert!(ui.find("Responding").is_ok());
+}

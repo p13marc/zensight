@@ -183,6 +183,9 @@ pub enum Message {
     /// persistent nav rail.
     OpenDashboard,
 
+    /// Open the sensors (sensor health) view.
+    OpenSensors,
+
     // Settings messages
     /// Open the settings view.
     OpenSettings,
