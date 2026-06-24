@@ -16,26 +16,41 @@ ZenSight provides a suite of protocol sensors that collect telemetry from variou
 | `zensight-exporter-prometheus` | Prometheus metrics exporter (HTTP /metrics endpoint) | Complete |
 | `zensight-exporter-otel` | OpenTelemetry exporter (OTLP gRPC/HTTP) | Complete |
 | `zensight-sensor-snmp` | SNMP sensor (v1/v2c/v3 polling + trap receiver, MIB loading) | Complete |
-| `zensight-sensor-syslog` | Syslog receiver (RFC 3164/5424, UDP/TCP/Unix, filtering) | Complete |
+| `zensight-sensor-syslog` | Logs sensor — network syslog (RFC 3164/5424, UDP/TCP/Unix, filtering) + systemd journald (known-event alerts) | Complete |
 | `zensight-sensor-netflow` | NetFlow/IPFIX receiver (v5, v7, v9, IPFIX) | Complete |
 | `zensight-sensor-modbus` | Modbus sensor (TCP/RTU, all register types) | Complete |
 | `zensight-sensor-sysinfo` | System monitoring (CPU, memory, disk, network) | Complete |
 | `zensight-sensor-gnmi` | gNMI streaming telemetry (gRPC) | Complete |
+| `zensight-sensor-netlink` | Linux kernel networking (RTNETLINK/sock_diag) + sentinel expectation alerts | Complete |
+| `zensight-sensor-netring` | Wire-level flow/L7/NDR (AF_PACKET/AF_XDP or pcap) + detectors & threat-intel alerts | Complete |
 
 ## Supported Protocols
 
 | Protocol | Description | Key Expression |
 |----------|-------------|----------------|
 | **SNMP** | Network device monitoring (v1/v2c/v3) | `zensight/snmp/<device>/<oid_path>` |
-| **Syslog** | Log aggregation (RFC 3164/5424) | `zensight/syslog/<host>/<facility>/<severity>` |
+| **Syslog / journald** | Log aggregation (RFC 3164/5424) + systemd journal | `zensight/syslog/<host>/<facility>/<severity>` |
 | **NetFlow/IPFIX** | Network flow telemetry | `zensight/netflow/<exporter>/<src>/<dst>` |
 | **Modbus** | Industrial device monitoring | `zensight/modbus/<device>/<register_type>/<addr>` |
 | **Sysinfo** | Host system metrics | `zensight/sysinfo/<hostname>/<metric>` |
 | **gNMI** | Streaming telemetry (gRPC) | `zensight/gnmi/<device>/<path>` |
+| **netlink** | Linux kernel networking | `zensight/netlink/<host>/<metric>` |
+| **netring** | Wire-level flow/L7/NDR | `zensight/netring/<sensor>/<metric>` |
+
+## Documentation
+
+Detailed documentation lives in [`docs/`](docs/):
+
+- [Architecture](docs/ARCHITECTURE.md) — system overview, data flow, lifecycle, health model
+- [Sensors](docs/SENSORS.md) — per-sensor reference (sources, config, Zenoh keys)
+- [Keyspace](docs/KEYSPACE.md) — the canonical Zenoh key reference
+- [UI Testing](docs/UI_TESTING.md) — frontend testing with `iced_test`
 
 ## Key Expression Hierarchy
 
-All sensors publish to a unified `zensight/` prefix:
+All sensors publish to a unified `zensight/` prefix; the full key tree
+(telemetry, control-plane, metadata, wildcards) is in
+[docs/KEYSPACE.md](docs/KEYSPACE.md).
 
 ```
 zensight/<protocol>/<source>/<metric>
@@ -61,13 +76,24 @@ zensight/gnmi/router01/interfaces/interface[name=eth0]/state/counters
 cargo build --release --workspace
 ```
 
-### Run Sensors
+### Run everything (recommended)
+
+The `justfile` builds, grants capabilities, generates run configs, and launches
+the GUI with the local sensors (netring, netlink, sysinfo, and **logs** via
+journald). Close the GUI to stop everything.
+
+```bash
+just run                 # GUI + local sensors
+just <sensor>            # one sensor: netring | netlink | sysinfo | logs
+```
+
+### Run individual sensors
 
 ```bash
 # SNMP sensor - monitor network devices
 ./target/release/zensight-sensor-snmp --config configs/snmp.json5
 
-# Syslog sensor - collect log messages
+# Logs sensor - network syslog, or systemd journald (see configs/logs.json5)
 ./target/release/zensight-sensor-syslog --config configs/syslog.json5
 
 # NetFlow sensor - collect flow data
@@ -81,6 +107,12 @@ cargo build --release --workspace
 
 # gNMI sensor - streaming telemetry from network devices
 ./target/release/zensight-sensor-gnmi --config configs/gnmi.json5
+
+# netlink sensor - Linux kernel networking
+./target/release/zensight-sensor-netlink --config configs/netlink.json5
+
+# netring sensor - wire-level flow/L7/NDR (live capture needs CAP_NET_RAW)
+./target/release/zensight-sensor-netring --config configs/netring.json5
 ```
 
 ### Run Frontend

@@ -48,14 +48,14 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
     let xfrm = Connection::<Xfrm>::new().ok();
     let nft = Connection::<Nftables>::new().ok();
 
-    let routes_key = format!("{key_prefix}/@/query/routes");
-    let neighbors_key = format!("{key_prefix}/@/query/neighbors");
-    let sockets_key = format!("{key_prefix}/@/query/sockets");
-    let addresses_key = format!("{key_prefix}/@/query/addresses");
-    let events_key = format!("{key_prefix}/@/query/events");
-    let tc_key = format!("{key_prefix}/@/query/tc");
-    let xfrm_key = format!("{key_prefix}/@/query/xfrm");
-    let nft_key = format!("{key_prefix}/@/query/nft");
+    let routes_key = zensight_common::command::query_key(&key_prefix, "routes");
+    let neighbors_key = zensight_common::command::query_key(&key_prefix, "neighbors");
+    let sockets_key = zensight_common::command::query_key(&key_prefix, "sockets");
+    let addresses_key = zensight_common::command::query_key(&key_prefix, "addresses");
+    let events_key = zensight_common::command::query_key(&key_prefix, "events");
+    let tc_key = zensight_common::command::query_key(&key_prefix, "tc");
+    let xfrm_key = zensight_common::command::query_key(&key_prefix, "xfrm");
+    let nft_key = zensight_common::command::query_key(&key_prefix, "nft");
 
     let routes_q = match session.declare_queryable(&routes_key).await {
         Ok(q) => q,

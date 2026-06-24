@@ -1,0 +1,34 @@
+{
+  // Logs sensor configured for local systemd-journald ingestion (used by
+  // `just run`). For network syslog (UDP/TCP/Unix listeners) see syslog.json5.
+  zenoh: {
+    mode: "peer",
+  },
+
+  syslog: {
+    key_prefix: "zensight/syslog",
+
+    // No network listeners — this instance reads the local journal only.
+    listeners: [],
+
+    // systemd-journald source (#57). Reads the local journal directly via
+    // libsystemd (no `journalctl` subprocess).
+    journald: {
+      enabled: true,
+
+      // Which journal to read. "system" = full host journal and the kernel;
+      // needs journal-read access (add your user to the `systemd-journal`
+      // group, or run as a system service). Use "user" for the per-user journal.
+      scope: "system",
+
+      // Only entries from launch onward. Use "cursor" for gap-free resume
+      // across restarts (persists a cursor file), or "since" with `since`.
+      start_from: "tail",
+
+      // detect_events defaults to true: coredump / unit-failed / OOM journal
+      // events (matched by MESSAGE_ID) are raised as alerts on @/alerts.
+    },
+  },
+
+  logging: { level: "info" },
+}
