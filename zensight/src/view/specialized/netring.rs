@@ -23,6 +23,17 @@ pub fn netring_sensor_view(state: &DeviceDetailState) -> Element<'_, Message> {
     .spacing(space::MD)
     .padding(space::LG);
 
+    // L7 RED + per-protocol breakdowns — only when the sensor publishes them (#45).
+    if has_prefix(state, "dns/") {
+        content = content.push(card(render_dns(state)));
+    }
+    if has_prefix(state, "http/") {
+        content = content.push(card(render_http(state)));
+    }
+    if has_prefix(state, "flow/by_l4/") {
+        content = content.push(card(render_per_l4(state)));
+    }
+
     // Capture self-health only exists under live capture (not pcap replay).
     if state.metrics.keys().any(|k| k.starts_with("capture/")) {
         content = content.push(card(render_capture(state)));
@@ -215,9 +226,122 @@ fn render_tcp_health(state: &DeviceDetailState) -> Element<'_, Message> {
             cell(&get("tcp/refused_total"), 100)
         ]
         .spacing(8),
+        // Close-reason breakdown (#45).
+        row![
+            cell("closed fin (total)", 160),
+            cell(&get("tcp/closed_fin_total"), 100)
+        ]
+        .spacing(8),
+        row![
+            cell("closed rst (total)", 160),
+            cell(&get("tcp/closed_rst_total"), 100)
+        ]
+        .spacing(8),
+        row![
+            cell("closed idle (total)", 160),
+            cell(&get("tcp/closed_idle_total"), 100)
+        ]
+        .spacing(8),
     ]
     .spacing(4)
     .into()
+}
+
+/// Whether any metric key starts with `prefix` (#45).
+fn has_prefix(state: &DeviceDetailState, prefix: &str) -> bool {
+    state.metrics.keys().any(|k| k.starts_with(prefix))
+}
+
+/// DNS RED card (#45): rates, RTT percentiles, and rcode breakdown.
+fn render_dns(state: &DeviceDetailState) -> Element<'_, Message> {
+    let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
+    let line =
+        |label: &str, metric: &str| row![cell(label, 200), cell(&get(metric), 120)].spacing(8);
+
+    let mut col = column![
+        section_header("DNS (RED)", None),
+        line("queries (total)", "dns/queries_total"),
+        line("unanswered (total)", "dns/unanswered_total"),
+        line("RTT p50 (ms)", "dns/query_rtt_p50_ms"),
+        line("RTT p95 (ms)", "dns/query_rtt_p95_ms"),
+        line("RTT p99 (ms)", "dns/query_rtt_p99_ms"),
+    ]
+    .spacing(4);
+
+    // Response-code breakdown (dynamic `dns/responses_by_rcode/<rcode>_total`).
+    let mut rcodes: Vec<(String, String)> = state
+        .metrics
+        .iter()
+        .filter_map(|(m, p)| {
+            let r = m.strip_prefix("dns/responses_by_rcode/")?;
+            Some((r.to_string(), num(Some(&p.value))))
+        })
+        .collect();
+    rcodes.sort();
+    if !rcodes.is_empty() {
+        col = col.push(text("by rcode").size(font::CAPTION).style(dim));
+        for (r, v) in rcodes {
+            col = col.push(row![cell(&format!("  {r}"), 200), cell(&v, 120)].spacing(8));
+        }
+    }
+    col.into()
+}
+
+/// HTTP RED card (#45): requests, status-class breakdown, latency, methods.
+fn render_http(state: &DeviceDetailState) -> Element<'_, Message> {
+    let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
+    let line =
+        |label: &str, metric: &str| row![cell(label, 200), cell(&get(metric), 120)].spacing(8);
+
+    let mut col = column![
+        section_header("HTTP (RED)", None),
+        line("requests (total)", "http/requests_total"),
+        line("2xx", "http/status_2xx_total"),
+        line("3xx", "http/status_3xx_total"),
+        line("4xx", "http/status_4xx_total"),
+        line("5xx", "http/status_5xx_total"),
+        line("latency p50 (ms)", "http/latency_p50_ms"),
+        line("latency p95 (ms)", "http/latency_p95_ms"),
+    ]
+    .spacing(4);
+
+    let mut methods: Vec<(String, String)> = state
+        .metrics
+        .iter()
+        .filter_map(|(m, p)| {
+            let meth = m.strip_prefix("http/methods/")?.strip_suffix("_total")?;
+            Some((meth.to_string(), num(Some(&p.value))))
+        })
+        .collect();
+    methods.sort();
+    if !methods.is_empty() {
+        col = col.push(text("by method").size(font::CAPTION).style(dim));
+        for (meth, v) in methods {
+            col = col.push(row![cell(&format!("  {meth}"), 200), cell(&v, 120)].spacing(8));
+        }
+    }
+    col.into()
+}
+
+/// Per-L4 (tcp/udp/icmp) flow + byte split (#45).
+fn render_per_l4(state: &DeviceDetailState) -> Element<'_, Message> {
+    let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
+    let mut col = column![
+        section_header("Per-protocol (L4)", None),
+        row![cell("proto", 120), cell("flows", 120), cell("bytes", 140)].spacing(8),
+    ]
+    .spacing(4);
+    for proto in ["tcp", "udp", "icmp"] {
+        col = col.push(
+            row![
+                cell(proto, 120),
+                cell(&get(&format!("flow/by_l4/{proto}/flows_total")), 120),
+                cell(&get(&format!("flow/by_l4/{proto}/bytes_total")), 140),
+            ]
+            .spacing(8),
+        );
+    }
+    col.into()
 }
 
 /// On-demand recent-flow detail: a fetch button + the fetched flow table (P2 —

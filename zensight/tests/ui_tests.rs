@@ -412,6 +412,34 @@ fn test_netlink_depth_cards() {
     assert!(ui.find("RTT p95 (us)").is_ok());
 }
 
+/// #45: netring renders DNS RED, HTTP RED, and per-L4 cards when present.
+#[test]
+fn test_netring_red_cards() {
+    use zensight_common::TelemetryValue;
+
+    let device_id = DeviceId::new(Protocol::Netring, "sensor01");
+    let mut state = DeviceDetailState::new(device_id);
+    let mut put = |metric: &str, v: f64| {
+        state.update(zensight_common::TelemetryPoint {
+            timestamp: 0,
+            source: "sensor01".to_string(),
+            protocol: Protocol::Netring,
+            metric: metric.to_string(),
+            value: TelemetryValue::Counter(v as u64),
+            labels: HashMap::new(),
+        });
+    };
+    put("dns/queries_total", 100.0);
+    put("http/requests_total", 50.0);
+    put("flow/by_l4/tcp/flows_total", 7.0);
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    assert!(ui.find("DNS (RED)").is_ok());
+    assert!(ui.find("HTTP (RED)").is_ok());
+    assert!(ui.find("Per-protocol (L4)").is_ok());
+}
+
 /// Test settings view renders correctly.
 #[test]
 fn test_settings_view() {
