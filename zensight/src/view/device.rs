@@ -85,6 +85,10 @@ pub struct DeviceDetailState {
     pub netlink_detail: crate::view::specialized::netlink_detail::NetlinkDetailState,
     /// On-demand netring flow detail, fetched lazily from `@/query/flows`.
     pub netring_detail: crate::view::specialized::netring_detail::NetringDetailState,
+    /// Whether the chart panel is expanded to a taller height (#36).
+    pub chart_expanded: bool,
+    /// Text-input buffer for the custom relative window in minutes (#36).
+    pub chart_custom_input: String,
 }
 
 impl DeviceDetailState {
@@ -108,6 +112,23 @@ impl DeviceDetailState {
             pending_filter_time: 0,
             netlink_detail: Default::default(),
             netring_detail: Default::default(),
+            chart_expanded: false,
+            chart_custom_input: String::new(),
+        }
+    }
+
+    /// Toggle the chart panel between default and expanded height (#36).
+    pub fn toggle_chart_expand(&mut self) {
+        self.chart_expanded = !self.chart_expanded;
+    }
+
+    /// Apply a custom relative window from the text input (#36). Empty input or
+    /// an unparseable value clears the custom window.
+    pub fn set_chart_custom_minutes(&mut self, input: String) {
+        self.chart_custom_input = input;
+        match self.chart_custom_input.trim().parse::<f64>() {
+            Ok(minutes) => self.chart.set_custom_duration_minutes(minutes),
+            Err(_) => self.chart.set_custom_duration_minutes(0.0),
         }
     }
 
@@ -657,12 +678,74 @@ fn render_chart_section<'a>(
     .spacing(5)
     .into();
 
-    let header = row![chart_title, time_buttons, close_button]
-        .spacing(15)
+    // Custom relative window input (#36): "last N minutes", overrides presets.
+    let custom_input = text_input("min", &state.chart_custom_input)
+        .on_input(Message::SetChartCustomMinutes)
+        .width(Length::Fixed(64.0))
+        .size(11);
+    let custom_window = row![text("Custom:").size(11), custom_input]
+        .spacing(4)
         .align_y(Alignment::Center);
 
-    // The chart canvas
-    let chart: Element<'_, Message> = chart_view(&state.chart);
+    // Expand/collapse the chart height (#36): no more fixed 200px sliver.
+    let expand_button = button(
+        text(if state.chart_expanded {
+            "Collapse"
+        } else {
+            "Expand"
+        })
+        .size(11),
+    )
+    .on_press(Message::ToggleChartExpand)
+    .style(iced::widget::button::secondary);
+
+    let header = row![
+        chart_title,
+        time_buttons,
+        custom_window,
+        expand_button,
+        close_button
+    ]
+    .spacing(15)
+    .align_y(Alignment::Center);
+
+    // Inline per-series legend with toggle/remove (#36) — manage a comparison
+    // without switching back to the metrics table.
+    let legend: Element<'_, Message> = if state.is_comparison_mode() {
+        let mut legend_row = Row::new().spacing(12).align_y(Alignment::Center);
+        for series in state.chart.series() {
+            let (r, g, b) = series.color;
+            let swatch_color = iced::Color::from_rgb(r, g, b);
+            let swatch = container(text(""))
+                .width(10)
+                .height(10)
+                .style(move |_t: &Theme| container::Style {
+                    background: Some(iced::Background::Color(swatch_color)),
+                    border: iced::Border::default().rounded(2.0),
+                    ..Default::default()
+                });
+            let name = series.name.clone();
+            let toggle = button(text(if series.visible { "shown" } else { "hidden" }).size(10))
+                .on_press(Message::ToggleMetricVisibility(name.clone()))
+                .style(iced::widget::button::text);
+            let remove = button(text("×").size(12))
+                .on_press(Message::RemoveMetricFromChart(name.clone()))
+                .style(iced::widget::button::text);
+            legend_row = legend_row.push(
+                row![swatch, text(name).size(11), toggle, remove]
+                    .spacing(4)
+                    .align_y(Alignment::Center),
+            );
+        }
+        legend_row.into()
+    } else {
+        column![].into()
+    };
+
+    // Default to a usable height; expand for detailed inspection. The custom
+    // window doesn't change height — only the visible time range.
+    let chart_height = if state.chart_expanded { 520.0 } else { 320.0 };
+    let chart: Element<'_, Message> = chart_view(&state.chart, chart_height);
 
     // Stats row
     let stats = state.chart.stats();
@@ -679,7 +762,11 @@ fn render_chart_section<'a>(
     ]
     .spacing(20);
 
-    let chart_container = container(column![header, chart, stats_row].spacing(10).padding(10))
+    let chart_container = container(
+        column![header, legend, chart, stats_row]
+            .spacing(10)
+            .padding(10),
+    )
         .style(|theme: &Theme| {
             let colors = crate::view::theme::colors(theme);
             container::Style {

@@ -184,6 +184,12 @@ pub enum Message {
     /// User changed the chart time window.
     SetChartTimeWindow(TimeWindow),
 
+    /// User typed a custom relative window (minutes) for the chart (#36).
+    SetChartCustomMinutes(String),
+
+    /// Toggle the chart panel between default and expanded height (#36).
+    ToggleChartExpand,
+
     /// Zoom in on the chart.
     ChartZoomIn,
 

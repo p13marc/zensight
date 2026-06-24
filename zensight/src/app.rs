@@ -513,6 +513,18 @@ impl ZenSight {
                 }
             }
 
+            Message::SetChartCustomMinutes(input) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.set_chart_custom_minutes(input);
+                }
+            }
+
+            Message::ToggleChartExpand => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.toggle_chart_expand();
+                }
+            }
+
             Message::ChartZoomIn => {
                 if let Some(ref mut device) = self.selected_device {
                     device.zoom_in();
