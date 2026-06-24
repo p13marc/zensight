@@ -183,30 +183,27 @@ This document describes the high-level architecture and component relationships 
 
 ## Key Expression Hierarchy
 
+Telemetry is `zensight/<protocol>/<source>/<metric>`; per-sensor control-plane
+lives under `zensight/<protocol>/@/…`; cross-sensor metadata under
+`zensight/_meta/…`.
+
 ```
 zensight/
-├── <protocol>/                          # snmp, syslog, sysinfo, netflow, modbus, gnmi
-│   ├── <source>/                        # Device/host identifier
-│   │   └── <metric_path>                # Hierarchical metric name
+├── <protocol>/                          # snmp, syslog, netflow, modbus, sysinfo, gnmi, netlink, netring
+│   ├── <source>/<metric_path>           # telemetry — TelemetryPoint
 │   │       Example: zensight/snmp/router01/interfaces/eth0/ifInOctets
-│   │
-│   └── @/                               # Metadata namespace
-│       ├── health                       # Sensor HealthSnapshot (periodic)
-│       ├── errors                       # ErrorReport publications
-│       ├── alive                        # Sensor liveliness token
-│       ├── commands/                    # Runtime commands (e.g., syslog filters)
-│       │   └── filter
-│       └── devices/
-│           └── <device_id>/
-│               ├── liveness             # DeviceLiveness status
-│               └── alive                # Device liveliness token
-│
-└── _meta/
-    ├── sensors/
-    │   └── <sensor_name>                # Sensor registration info
-    └── correlation/
-        └── <ip_address>                 # Cross-sensor device correlation
+│   └── @/                               # control-plane (verbatim @ — wildcards don't cross it)
+│       ├── health · errors · status · alive
+│       ├── devices/<device>/{liveness,alive}
+│       ├── alerts/<alert_key>           # Alert (firing/resolved)
+│       ├── query/{alerts,<topic>}       # firing-set seed + on-demand detail
+│       └── {commands,status}/<topic>    # runtime control
+└── _meta/{sensors/<name>, correlation/<ip>}
 ```
+
+**[KEYSPACE.md](KEYSPACE.md) is the canonical, exhaustive reference** — every key,
+which sensors use it, the wildcards, and the key-building helpers. Keep that
+document authoritative; this is only a sketch.
 
 ## Frontend Architecture
 
@@ -447,9 +444,16 @@ zensight/
 ```
 zensight/                            # Workspace root
 ├── Cargo.toml                       # Workspace manifest
-├── ARCHITECTURE.md                  # This file
 ├── CLAUDE.md                        # AI assistant guidance
 ├── README.md                        # Project overview
+├── justfile                         # build / configure / run recipes
+│
+├── docs/                            # Documentation (this directory)
+│   ├── README.md                    # Docs index
+│   ├── ARCHITECTURE.md              # This file
+│   ├── SENSORS.md                   # Per-sensor reference
+│   ├── KEYSPACE.md                  # Canonical Zenoh keyspace reference
+│   └── UI_TESTING.md                # Frontend testing guide
 │
 ├── zensight/                        # Frontend application
 │   ├── src/
@@ -487,11 +491,13 @@ zensight/                            # Workspace root
 │       └── liveliness.rs            # Presence management
 │
 ├── zensight-sensor-snmp/               # SNMP sensor
-├── zensight-sensor-syslog/             # Syslog sensor
+├── zensight-sensor-syslog/             # Syslog + journald (logs) sensor
 ├── zensight-sensor-sysinfo/            # System metrics sensor
 ├── zensight-sensor-netflow/            # NetFlow sensor
 ├── zensight-sensor-modbus/             # Modbus sensor
 ├── zensight-sensor-gnmi/               # gNMI sensor
+├── zensight-sensor-netlink/            # Linux kernel networking sensor
+├── zensight-sensor-netring/            # Wire-level flow/L7/NDR sensor
 │
 ├── zensight-exporter-prometheus/    # Prometheus exporter
 │   └── src/
@@ -509,7 +515,14 @@ zensight/                            # Workspace root
 │
 └── configs/                         # Example configurations
     ├── snmp.json5
-    ├── syslog.json5
+    ├── syslog.json5                 # network syslog listeners
+    ├── logs.json5                   # journald (used by `just run`)
+    ├── netlink.json5
+    ├── netring.json5
+    ├── sysinfo.json5
     ├── prometheus.json5
     └── otel.json5
 ```
+
+> For the full key tree see [KEYSPACE.md](KEYSPACE.md); for per-sensor details
+> see [SENSORS.md](SENSORS.md).

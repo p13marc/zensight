@@ -34,6 +34,19 @@ pub fn status_key(prefix: &str, topic: &str) -> String {
     format!("{}/@/status/{}", prefix, topic)
 }
 
+/// Build the on-demand detail-query (queryable) key for a sensor `prefix` and
+/// `topic`. High-cardinality detail (flow tables, socket lists, …) is served
+/// here on request, never streamed onto the telemetry bus.
+///
+/// # Example
+/// ```
+/// use zensight_common::command::query_key;
+/// assert_eq!(query_key("zensight/netring", "flows"), "zensight/netring/@/query/flows");
+/// ```
+pub fn query_key(prefix: &str, topic: &str) -> String {
+    format!("{}/@/query/{}", prefix, topic)
+}
+
 /// Optional envelope carrying a correlation id alongside a command body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Command<T> {

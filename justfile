@@ -1,12 +1,14 @@
-# ZenSight — build / configure / run the GUI + sensors (netring, netlink, sysinfo)
+# ZenSight — build / configure / run the GUI + sensors (netring, netlink, sysinfo, logs)
 #
 #   just run            # build, grant caps, configure, then launch everything
 #   just setup          # build + grant capabilities only
 #   just gui            # run just the GUI
-#   just <sensor>       # run a single sensor (netring | netlink | sysinfo)
+#   just <sensor>       # run a single sensor (netring | netlink | sysinfo | logs)
 #
 # netring captures packets and needs CAP_NET_RAW (+CAP_IPC_LOCK for AF_XDP);
 # `just caps` grants them via sudo. netlink reads and sysinfo are unprivileged.
+# logs ingests the systemd journal (journald); reading the *system* journal needs
+# journal-read access — add your user to the `systemd-journal` group if it can't.
 
 # Build profile: "release" (default) or "dev".
 profile := "release"
@@ -26,13 +28,14 @@ _default:
 
 # ── Build ────────────────────────────────────────────────────────────────────
 
-# Build the GUI + the three sensors.
+# Build the GUI + the sensors.
 build:
     cargo build {{relflag}} \
         -p zensight \
         -p zensight-sensor-netring \
         -p zensight-sensor-netlink \
-        -p zensight-sensor-sysinfo
+        -p zensight-sensor-sysinfo \
+        -p zensight-sensor-syslog
 
 # ── Capabilities ─────────────────────────────────────────────────────────────
 
@@ -55,10 +58,11 @@ configure:
     # netring: point capture at the chosen interface.
     sed -E 's#interfaces: \[[^]]*\]#interfaces: ["{{iface}}"]#' \
         configs/netring.json5 > {{rundir}}/netring.json5
-    # netlink + sysinfo configs are machine-agnostic (hostname auto-detected).
+    # netlink + sysinfo + logs configs are machine-agnostic (hostname auto-detected).
     cp -f configs/netlink.json5 {{rundir}}/netlink.json5
     cp -f configs/sysinfo.json5 {{rundir}}/sysinfo.json5
-    echo "Configured: netring iface='{{iface}}'  (configs in {{rundir}}/)"
+    cp -f configs/logs.json5 {{rundir}}/syslog.json5
+    echo "Configured: netring iface='{{iface}}', logs=journald  (configs in {{rundir}}/)"
 
 # ── Run (individual) ─────────────────────────────────────────────────────────
 
@@ -78,6 +82,10 @@ netlink: build configure
 sysinfo: build configure
     {{bindir}}/zensight-sensor-sysinfo --config {{rundir}}/sysinfo.json5
 
+# Run the logs sensor (systemd journal via journald + known-event alerts).
+logs: build configure
+    {{bindir}}/zensight-sensor-syslog --config {{rundir}}/syslog.json5
+
 # ── Run (everything) ─────────────────────────────────────────────────────────
 
 # Build + caps + configure, then launch the 3 sensors + GUI (close GUI to stop all).
@@ -88,6 +96,7 @@ run: setup configure
     {{bindir}}/zensight-sensor-sysinfo --config {{rundir}}/sysinfo.json5 > {{rundir}}/sysinfo.log 2>&1 &
     {{bindir}}/zensight-sensor-netlink --config {{rundir}}/netlink.json5 > {{rundir}}/netlink.log 2>&1 &
     {{bindir}}/zensight-sensor-netring --config {{rundir}}/netring.json5 > {{rundir}}/netring.log 2>&1 &
+    {{bindir}}/zensight-sensor-syslog --config {{rundir}}/syslog.json5 > {{rundir}}/syslog.log 2>&1 &
     # Stop all sensors when the GUI exits (or on Ctrl-C).
     trap 'echo; echo "Stopping sensors…"; kill 0' EXIT
     sleep 1
@@ -96,7 +105,7 @@ run: setup configure
 
 # Stop any running sensors started by `just run`.
 stop:
-    -pkill -f 'zensight-sensor-(netring|netlink|sysinfo)' || true
+    -pkill -f 'zensight-sensor-(netring|netlink|sysinfo|syslog)' || true
 
 # Remove generated run configs and logs.
 clean-run:

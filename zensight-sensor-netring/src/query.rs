@@ -29,7 +29,7 @@ fn top_n(query: &zenoh::query::Query) -> usize {
 /// Run the flow-detail query channel until the session closes. Replies with the
 /// recent ended-flow records (most-recent first) as JSON `Vec<FlowRecord>`.
 pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, flows: FlowRing) {
-    let key = format!("{key_prefix}/@/query/flows");
+    let key = zensight_common::command::query_key(&key_prefix, "flows");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -62,7 +62,7 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, flows: FlowRi
 /// replies with the passive fingerprint inventory (most-seen first) as JSON
 /// `Vec<TlsRecord>`.
 pub async fn run_tls(session: Arc<zenoh::Session>, key_prefix: String, inventory: TlsInventory) {
-    let key = format!("{key_prefix}/@/query/tls");
+    let key = zensight_common::command::query_key(&key_prefix, "tls");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -92,7 +92,7 @@ pub async fn run_tls(session: Arc<zenoh::Session>, key_prefix: String, inventory
 /// Run the top-talkers query channel: `zensight/netring/@/query/talkers?top=N`
 /// replies with the top-N destinations by byte volume as JSON `Vec<TalkerRecord>`.
 pub async fn run_talkers(session: Arc<zenoh::Session>, key_prefix: String, hist: TalkerHist) {
-    let key = format!("{key_prefix}/@/query/talkers");
+    let key = zensight_common::command::query_key(&key_prefix, "talkers");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -115,7 +115,7 @@ pub async fn run_talkers(session: Arc<zenoh::Session>, key_prefix: String, hist:
 /// Run the elephant-flows query channel: `zensight/netring/@/query/elephant_flows`
 /// replies with the recent largest flows (biggest first) as `Vec<ElephantRecord>`.
 pub async fn run_elephants(session: Arc<zenoh::Session>, key_prefix: String, ring: ElephantRing) {
-    let key = format!("{key_prefix}/@/query/elephant_flows");
+    let key = zensight_common::command::query_key(&key_prefix, "elephant_flows");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -138,7 +138,7 @@ pub async fn run_elephants(session: Arc<zenoh::Session>, key_prefix: String, rin
 /// Run the top-DNS-domains query channel: `zensight/netring/@/query/dns?top=N`
 /// replies with the top-N SLDs by query count as JSON `Vec<DnsRecord>`.
 pub async fn run_dns(session: Arc<zenoh::Session>, key_prefix: String, inventory: DnsInventory) {
-    let key = format!("{key_prefix}/@/query/dns");
+    let key = zensight_common::command::query_key(&key_prefix, "dns");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -161,7 +161,7 @@ pub async fn run_dns(session: Arc<zenoh::Session>, key_prefix: String, inventory
 /// Run the top-HTTP-hosts query channel: `zensight/netring/@/query/http?top=N`
 /// replies with the top-N hosts by request count as JSON `Vec<HttpHostRecord>`.
 pub async fn run_http(session: Arc<zenoh::Session>, key_prefix: String, inventory: HttpInventory) {
-    let key = format!("{key_prefix}/@/query/http");
+    let key = zensight_common::command::query_key(&key_prefix, "http");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
