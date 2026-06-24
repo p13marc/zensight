@@ -1838,49 +1838,57 @@ impl ZenSight {
     /// Export current device metrics to CSV file.
     fn export_to_csv(&mut self) {
         if let Some(ref device) = self.selected_device {
-            let csv = device.export_to_csv();
+            // Prefer the full time series (the trend on screen, #37); fall back
+            // to the latest-value snapshot only when no history exists yet.
+            let csv = if device.has_history() {
+                device.export_history_to_csv()
+            } else {
+                device.export_to_csv()
+            };
             let filename = format!(
                 "zensight_{}_{}.csv",
                 device.device_id.source,
                 chrono_timestamp()
             );
-
-            match std::fs::write(&filename, csv) {
-                Ok(()) => {
-                    tracing::info!(filename = %filename, "Exported metrics to CSV");
-                    self.toasts
-                        .push(ToastSeverity::Success, format!("Exported to {}", filename));
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, filename = %filename, "Failed to export CSV");
-                    self.toasts
-                        .push(ToastSeverity::Error, format!("Export failed: {}", e));
-                }
-            }
+            self.write_export(&filename, csv);
         }
     }
 
-    /// Export current device metrics to JSON file.
+    /// Export current device time series to JSON file.
     fn export_to_json(&mut self) {
         if let Some(ref device) = self.selected_device {
-            let json = device.export_to_json();
+            let json = if device.has_history() {
+                device.export_history_to_json()
+            } else {
+                device.export_to_json()
+            };
             let filename = format!(
                 "zensight_{}_{}.json",
                 device.device_id.source,
                 chrono_timestamp()
             );
+            self.write_export(&filename, json);
+        }
+    }
 
-            match std::fs::write(&filename, json) {
-                Ok(()) => {
-                    tracing::info!(filename = %filename, "Exported metrics to JSON");
-                    self.toasts
-                        .push(ToastSeverity::Success, format!("Exported to {}", filename));
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, filename = %filename, "Failed to export JSON");
-                    self.toasts
-                        .push(ToastSeverity::Error, format!("Export failed: {}", e));
-                }
+    /// Write an export to a discoverable directory and toast the absolute path
+    /// (#37) — no more blind writes to the process CWD where files get lost.
+    fn write_export(&mut self, filename: &str, contents: String) {
+        let dir = dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let path = dir.join(filename);
+        match std::fs::write(&path, contents) {
+            Ok(()) => {
+                let shown = path.display().to_string();
+                tracing::info!(path = %shown, "Exported device data");
+                self.toasts
+                    .push(ToastSeverity::Success, format!("Exported to {shown}"));
+            }
+            Err(e) => {
+                tracing::error!(error = %e, path = %path.display(), "Export failed");
+                self.toasts
+                    .push(ToastSeverity::Error, format!("Export failed: {e}"));
             }
         }
     }

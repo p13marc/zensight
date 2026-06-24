@@ -479,6 +479,52 @@ impl DeviceDetailState {
 
         serde_json::to_string_pretty(&metrics).unwrap_or_else(|_| "[]".to_string())
     }
+
+    /// Export the full per-metric **time series** to CSV (#37) — every point the
+    /// view holds, not just the latest snapshot. One row per (metric, sample),
+    /// sorted by metric then timestamp, so the trend on screen is exportable.
+    pub fn export_history_to_csv(&self) -> String {
+        let mut csv = String::new();
+        csv.push_str("timestamp,protocol,source,metric,value,type\n");
+
+        let mut names: Vec<&String> = self.history.keys().collect();
+        names.sort();
+        for name in names {
+            let Some(history) = self.history.get(name) else {
+                continue;
+            };
+            for point in history.iter() {
+                let value_str = format_value_for_export(&point.value);
+                let type_str = value_type_name(&point.value);
+                csv.push_str(&format!(
+                    "{},{},{},{},{},{}\n",
+                    point.timestamp,
+                    point.protocol,
+                    escape_csv(&point.source),
+                    escape_csv(&point.metric),
+                    escape_csv(&value_str),
+                    type_str
+                ));
+            }
+        }
+        csv
+    }
+
+    /// Export the full per-metric time series to JSON (#37): a map of metric name
+    /// to its ordered list of telemetry points.
+    pub fn export_history_to_json(&self) -> String {
+        let mut ordered: std::collections::BTreeMap<&String, Vec<&TelemetryPoint>> =
+            std::collections::BTreeMap::new();
+        for (name, history) in &self.history {
+            ordered.insert(name, history.iter().collect());
+        }
+        serde_json::to_string_pretty(&ordered).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// Whether there is any time-series history to export (#37).
+    pub fn has_history(&self) -> bool {
+        self.history.values().any(|h| !h.is_empty())
+    }
 }
 
 /// Escape a string for CSV (handle commas and quotes).
@@ -1118,6 +1164,35 @@ mod tests {
             value: TelemetryValue::Gauge(42.0),
             labels: std::collections::HashMap::new(),
         }
+    }
+
+    #[test]
+    fn test_history_export_is_time_series_not_snapshot() {
+        let device_id = DeviceId {
+            protocol: Protocol::Snmp,
+            source: "test".to_string(),
+        };
+        let mut state = DeviceDetailState::new(device_id);
+
+        // Three samples of the same metric over time.
+        for (ts, v) in [(1000, 1.0), (2000, 2.0), (3000, 3.0)] {
+            let mut p = make_test_point("cpu/usage");
+            p.timestamp = ts;
+            p.value = TelemetryValue::Gauge(v);
+            state.update(p);
+        }
+
+        assert!(state.has_history());
+        let csv = state.export_history_to_csv();
+        // header + 3 data rows (the trend), not a single snapshot row.
+        let rows = csv.lines().count();
+        assert_eq!(rows, 4, "expected header + 3 samples, got:\n{csv}");
+        assert!(csv.contains("1000,"));
+        assert!(csv.contains("3000,"));
+
+        // The latest-snapshot export keeps only one row per metric.
+        let snapshot = state.export_to_csv();
+        assert_eq!(snapshot.lines().count(), 2);
     }
 
     #[test]
