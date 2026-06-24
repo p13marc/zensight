@@ -9367,6 +9367,7 @@ dependencies = [
  "hostname",
  "json5",
  "procfs",
+ "rustix 1.1.3",
  "serde",
  "serde_json",
  "sysinfo",
