@@ -356,6 +356,35 @@ fn test_metric_promote_to_alert() {
     );
 }
 
+/// #47: sysinfo renders PSI, cgroup, and system-health cards when the host
+/// publishes those metric families.
+#[test]
+fn test_sysinfo_depth_cards() {
+    use zensight_common::TelemetryValue;
+
+    let device_id = DeviceId::new(Protocol::Sysinfo, "server01");
+    let mut state = DeviceDetailState::new(device_id);
+    let mut put = |metric: &str, v: f64| {
+        state.update(zensight_common::TelemetryPoint {
+            timestamp: 0,
+            source: "server01".to_string(),
+            protocol: Protocol::Sysinfo,
+            metric: metric.to_string(),
+            value: TelemetryValue::Gauge(v),
+            labels: HashMap::new(),
+        });
+    };
+    put("pressure/cpu/some_avg10", 12.5);
+    put("cgroup/memory/used_percent", 80.0);
+    put("system/file_descriptors_used_percent", 42.0);
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    assert!(ui.find("Pressure (PSI)").is_ok());
+    assert!(ui.find("cgroup").is_ok());
+    assert!(ui.find("System health").is_ok());
+}
+
 /// Test settings view renders correctly.
 #[test]
 fn test_settings_view() {
