@@ -49,6 +49,10 @@ impl Metric {
 
 /// Sanitize a string for use in a Zenoh key expression: collapse runs of
 /// reserved characters into a single `_`, then trim leading/trailing `_`.
+///
+/// An input that reduces to the empty string (notably the root mount `"/"`)
+/// would produce an empty key chunk, which Zenoh rejects (`disk//total`), so it
+/// is mapped to the literal `root`.
 pub fn sanitize_key(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     for c in s.chars() {
@@ -61,7 +65,12 @@ pub fn sanitize_key(s: &str) -> String {
             _ => result.push(c),
         }
     }
-    result.trim_matches('_').to_string()
+    let trimmed = result.trim_matches('_');
+    if trimmed.is_empty() {
+        "root".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 // ===========================================================================
@@ -758,7 +767,9 @@ mod tests {
 
     #[test]
     fn test_sanitize_key() {
-        assert_eq!(sanitize_key("/"), "");
+        // The root mount reduces to the literal `root` (empty chunks are
+        // forbidden in Zenoh key expressions).
+        assert_eq!(sanitize_key("/"), "root");
         assert_eq!(sanitize_key("/home"), "home");
         assert_eq!(sanitize_key("/home/user"), "home_user");
         assert_eq!(sanitize_key("eth0"), "eth0");
