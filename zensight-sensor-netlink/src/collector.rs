@@ -14,6 +14,7 @@ use nlink::netlink::{
     genl::wireguard::WgPeer,
     messages::NeighborMessage,
     messages::RouteMessage,
+    messages::TcMessage,
     neigh::State as NeighborState,
     netfilter::{ConntrackEntry, IpProtocol},
     types::addr::Scope,
@@ -28,7 +29,7 @@ use zensight_sensor_core::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
 use crate::config::{CollectConfig, NetlinkConfig};
 use crate::map::{
     self, AddrEntry, AddressSummary, ConntrackSummary, DiagnosticsSummary, DuplexKind,
-    EthtoolSample, IfaceSample, NeighborSummary, RouteSummary, SocketCounts,
+    EthtoolSample, IfaceSample, NeighborSummary, RouteSummary, SocketCounts, TcQdiscSample,
 };
 
 const AF_INET: u8 = 2;
@@ -109,6 +110,7 @@ impl CollectHandle {
             "events" => g.events = enabled,
             "ethtool" => g.ethtool = enabled,
             "addresses" => g.addresses = enabled,
+            "tc" => g.tc = enabled,
             "conntrack" => g.conntrack = enabled,
             _ => return false,
         }
@@ -321,6 +323,9 @@ impl Collector {
                 && let Some(et) = &ethtool
             {
                 self.poll_ethtool(&route, et).await;
+            }
+            if collect.tc {
+                self.poll_tc(&route).await;
             }
             if collect.events {
                 // Publish the cumulative event counters each tick (the per-event
@@ -568,6 +573,56 @@ impl Collector {
         s
     }
 
+    /// Poll TC/QoS qdisc stats (#12): per-(iface,qdisc) drops/overlimits/backlog.
+    /// Bounded by the TC hierarchy (one series set per qdisc). Interfaces are
+    /// resolved to names via a single `get_links` map; filtered/`lo` are skipped.
+    /// Full tree is served on demand via `@/query/tc`.
+    async fn poll_tc(&self, conn: &Connection<Route>) {
+        let qdiscs = match conn.get_qdiscs().await {
+            Ok(q) => q,
+            Err(e) => {
+                tracing::warn!(error = %e, "get_qdiscs failed");
+                return;
+            }
+        };
+        if qdiscs.is_empty() {
+            return;
+        }
+        let names = self.ifindex_names(conn).await;
+        for q in &qdiscs {
+            let Some(iface) = names.get(&q.ifindex()) else {
+                continue;
+            };
+            if iface == "lo" || !self.config.interfaces.should_include(iface) {
+                continue;
+            }
+            let sample = tc_qdisc_sample(q, iface);
+            for point in map::tc_points(&self.host, &sample) {
+                self.publish(&point).await;
+            }
+        }
+    }
+
+    /// Build an `ifindex -> name` map from a single `get_links` dump.
+    async fn ifindex_names(
+        &self,
+        conn: &Connection<Route>,
+    ) -> std::collections::HashMap<u32, String> {
+        match conn.get_links().await {
+            Ok(links) => links
+                .into_iter()
+                .filter_map(|l| {
+                    let name = l.name_or("?").to_string();
+                    (name != "?").then_some((l.ifindex(), name))
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "tc: get_links (for ifindex map) failed");
+                std::collections::HashMap::new()
+            }
+        }
+    }
+
     async fn poll_sockets(&self, conn: &Connection<SockDiag>) -> Result<(), String> {
         // Request mem + congestion extensions (#11) on top of tcp_info so the
         // aggregate carries per-algorithm counts and buffer totals.
@@ -747,6 +802,23 @@ pub fn aggregate_addresses(entries: &[AddrEntry]) -> AddressSummary {
         }
     }
     a
+}
+
+/// Decode a TC qdisc [`TcMessage`] into the pure [`TcQdiscSample`] (#12).
+/// `backlog()` is the byte backlog; `qlen()` is the queued-packet count.
+fn tc_qdisc_sample(q: &TcMessage, iface: &str) -> TcQdiscSample {
+    TcQdiscSample {
+        iface: iface.to_string(),
+        kind: q.kind().unwrap_or("unknown").to_string(),
+        handle: q.handle_str(),
+        bytes: q.bytes(),
+        packets: q.packets(),
+        drops: q.drops() as u64,
+        overlimits: q.overlimits() as u64,
+        requeues: q.requeues() as u64,
+        backlog_bytes: q.backlog() as u64,
+        backlog_pkts: q.qlen() as u64,
+    }
 }
 
 /// Consume the real-time RTNETLINK event stream (#8): fold each event into the

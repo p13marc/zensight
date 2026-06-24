@@ -270,6 +270,7 @@ mod tests {
             events: false,
             ethtool: false,
             addresses: false,
+            tc: false,
             conntrack: false,
         };
         apply_collection(&handle, CollectionCommand::Set { collect: cfg }).await;

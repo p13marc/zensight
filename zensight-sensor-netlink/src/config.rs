@@ -114,6 +114,10 @@ pub struct CollectConfig {
     /// IP address inventory summary (per-family + global counts) (#10).
     #[serde(default = "default_true")]
     pub addresses: bool,
+    /// TC/QoS qdisc stats (drops/overlimits/backlog) per interface (#12). Read is
+    /// unprivileged; absent where no qdiscs are configured.
+    #[serde(default = "default_true")]
+    pub tc: bool,
     /// Netfilter conntrack table summary (entries/proto/utilization). Requires
     /// CAP_NET_ADMIN, so OFF by default — enable on a NAT gateway / firewall.
     #[serde(default)]
@@ -131,6 +135,7 @@ impl Default for CollectConfig {
             events: true,
             ethtool: true,
             addresses: true,
+            tc: true,
             conntrack: false,
         }
     }

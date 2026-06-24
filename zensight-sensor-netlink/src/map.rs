@@ -706,6 +706,93 @@ pub struct AddressRecord {
     pub ifindex: u32,
 }
 
+// ---------------------------------------------------------------------------
+// TC / QoS qdisc stats (issue #12): per-(iface,qdisc) aggregates streamed,
+// bounded by the TC hierarchy; full tree served via `@/query/tc`.
+// ---------------------------------------------------------------------------
+
+/// A decoded TC qdisc snapshot (nlink-free), the pure input to [`tc_points`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TcQdiscSample {
+    /// Interface name (label); the metric path uses it.
+    pub iface: String,
+    /// Qdisc kind, e.g. `fq_codel`, `htb`, `pfifo_fast`, `noqueue`.
+    pub kind: String,
+    /// Handle string, e.g. `8001:` (label only — bounded; kept off the path).
+    pub handle: String,
+    pub bytes: u64,
+    pub packets: u64,
+    pub drops: u64,
+    pub overlimits: u64,
+    pub requeues: u64,
+    /// Backlog still queued, in bytes and packets (egress-congestion signal).
+    pub backlog_bytes: u64,
+    pub backlog_pkts: u64,
+}
+
+/// Build telemetry points for one qdisc (#12). Metric paths are
+/// `tc/<iface>/<kind>/<stat>`. Drops/overlimits/requeues are counters (monotonic
+/// kernel stats); backlog is an instantaneous gauge.
+pub fn tc_points(host: &str, s: &TcQdiscSample) -> Vec<TelemetryPoint> {
+    let pfx = format!("tc/{}/{}", s.iface, s.kind);
+    let label = |p: TelemetryPoint| p.with_label("handle", s.handle.clone());
+    vec![
+        label(point(
+            host,
+            format!("{pfx}/drops"),
+            TelemetryValue::Counter(s.drops),
+        )),
+        label(point(
+            host,
+            format!("{pfx}/overlimits"),
+            TelemetryValue::Counter(s.overlimits),
+        )),
+        label(point(
+            host,
+            format!("{pfx}/requeues"),
+            TelemetryValue::Counter(s.requeues),
+        )),
+        label(point(
+            host,
+            format!("{pfx}/bytes"),
+            TelemetryValue::Counter(s.bytes),
+        )),
+        label(point(
+            host,
+            format!("{pfx}/packets"),
+            TelemetryValue::Counter(s.packets),
+        )),
+        label(point(
+            host,
+            format!("{pfx}/backlog_bytes"),
+            TelemetryValue::Gauge(s.backlog_bytes as f64),
+        )),
+        label(point(
+            host,
+            format!("{pfx}/backlog_pkts"),
+            TelemetryValue::Gauge(s.backlog_pkts as f64),
+        )),
+    ]
+}
+
+/// One TC qdisc/class entry (served via `@/query/tc`). The GUI mirrors this JSON
+/// shape. `node` is `qdisc` or `class`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TcRecord {
+    pub iface: String,
+    pub node: String,
+    pub kind: Option<String>,
+    pub handle: String,
+    pub parent: String,
+    pub bytes: u64,
+    pub packets: u64,
+    pub drops: u64,
+    pub overlimits: u64,
+    pub requeues: u64,
+    pub backlog_bytes: u64,
+    pub backlog_pkts: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1128,5 +1215,43 @@ mod tests {
             TelemetryValue::Gauge(4.0)
         );
         assert_eq!(find("addresses/total").value, TelemetryValue::Gauge(5.0));
+    }
+
+    #[test]
+    fn tc_points_shape() {
+        let s = TcQdiscSample {
+            iface: "eth0".into(),
+            kind: "fq_codel".into(),
+            handle: "8001:".into(),
+            bytes: 5000,
+            packets: 40,
+            drops: 7,
+            overlimits: 2,
+            requeues: 1,
+            backlog_bytes: 1448,
+            backlog_pkts: 1,
+        };
+        let pts = tc_points("h", &s);
+        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        assert_eq!(
+            find("tc/eth0/fq_codel/drops").value,
+            TelemetryValue::Counter(7)
+        );
+        assert_eq!(
+            find("tc/eth0/fq_codel/overlimits").value,
+            TelemetryValue::Counter(2)
+        );
+        assert_eq!(
+            find("tc/eth0/fq_codel/backlog_bytes").value,
+            TelemetryValue::Gauge(1448.0)
+        );
+        assert_eq!(
+            find("tc/eth0/fq_codel/backlog_pkts").value,
+            TelemetryValue::Gauge(1.0)
+        );
+        // Every point carries the qdisc handle label.
+        for p in &pts {
+            assert_eq!(p.labels.get("handle").map(String::as_str), Some("8001:"));
+        }
     }
 }

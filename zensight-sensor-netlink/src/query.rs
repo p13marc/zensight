@@ -18,7 +18,9 @@ use nlink::netlink::{Connection, Route, SockDiag, types::addr::Scope};
 use nlink::sockdiag::{SocketFilter, SocketInfo, SocketState, TcpState};
 
 use crate::events::EventState;
-use crate::map::{AddressRecord, NeighborRecord, RouteRecord, SocketRecord, SocketSelector};
+use crate::map::{
+    AddressRecord, NeighborRecord, RouteRecord, SocketRecord, SocketSelector, TcRecord,
+};
 
 const AF_INET: u8 = 2;
 const AF_INET6: u8 = 10;
@@ -43,6 +45,7 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
     let sockets_key = format!("{key_prefix}/@/query/sockets");
     let addresses_key = format!("{key_prefix}/@/query/addresses");
     let events_key = format!("{key_prefix}/@/query/events");
+    let tc_key = format!("{key_prefix}/@/query/tc");
 
     let routes_q = match session.declare_queryable(&routes_key).await {
         Ok(q) => q,
@@ -76,6 +79,13 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %events_key, "query: declare events failed");
+            return;
+        }
+    };
+    let tc_q = match session.declare_queryable(&tc_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %tc_key, "query: declare tc failed");
             return;
         }
     };
@@ -114,6 +124,11 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
             q = events_q.recv_async() => {
                 let Ok(query) = q else { return };
                 reply_json(&query, &events.recent()).await;
+            }
+            q = tc_q.recv_async() => {
+                let Ok(query) = q else { return };
+                let records = collect_tc(&route).await;
+                reply_json(&query, &records).await;
             }
         }
     }
@@ -182,6 +197,54 @@ async fn collect_neighbors(conn: &Connection<Route>) -> Vec<NeighborRecord> {
             is_router: nb.is_router(),
         })
         .collect()
+}
+
+/// Build the full TC tree (#12): every qdisc + class on every interface, with
+/// counters/backlog. Served on demand via `@/query/tc`.
+async fn collect_tc(conn: &Connection<Route>) -> Vec<TcRecord> {
+    let names: std::collections::HashMap<u32, String> = match conn.get_links().await {
+        Ok(links) => links
+            .into_iter()
+            .filter_map(|l| {
+                let n = l.name_or("?").to_string();
+                (n != "?").then_some((l.ifindex(), n))
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "query: tc get_links failed");
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    let mut push = |msgs: Vec<nlink::netlink::messages::TcMessage>, node: &str| {
+        for m in &msgs {
+            let iface = names
+                .get(&m.ifindex())
+                .cloned()
+                .unwrap_or_else(|| m.ifindex().to_string());
+            out.push(TcRecord {
+                iface,
+                node: node.to_string(),
+                kind: m.kind().map(|s| s.to_string()),
+                handle: m.handle_str(),
+                parent: m.parent_str(),
+                bytes: m.bytes(),
+                packets: m.packets(),
+                drops: m.drops() as u64,
+                overlimits: m.overlimits() as u64,
+                requeues: m.requeues() as u64,
+                backlog_bytes: m.backlog() as u64,
+                backlog_pkts: m.qlen() as u64,
+            });
+        }
+    };
+    if let Ok(q) = conn.get_qdiscs().await {
+        push(q, "qdisc");
+    }
+    if let Ok(c) = conn.get_classes().await {
+        push(c, "class");
+    }
+    out
 }
 
 /// Build the per-address detail (#10) from a live address dump. Each record
