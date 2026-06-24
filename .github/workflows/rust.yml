@@ -8,6 +8,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Shrink the target dir so the large workspace (zenoh + iced + all sensors and
+  # exporters) doesn't exhaust the runner disk. Debuginfo dominates target size;
+  # CI doesn't need it. Also disables incremental artifacts. (#52 follow-up: the
+  # post-merge run hit "No space left on device".)
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   build:
@@ -15,6 +22,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # Reclaim ~25 GB of preinstalled toolchains we don't use, so the
+      # whole-workspace debug build + test binaries fit on disk.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android
+          sudo docker image prune --all --force || true
+          df -h /
 
       - name: Install protoc
         run: |
