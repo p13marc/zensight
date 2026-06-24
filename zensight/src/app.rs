@@ -1904,6 +1904,16 @@ impl ZenSight {
             device.update_health(now, self.stale_threshold_ms);
         }
 
+        // Bound the device map over long sessions: reap devices gone for a day
+        // (#40). Logged so the drop is never silent.
+        let evicted = self.dashboard.evict_stale_devices(
+            now,
+            crate::view::dashboard::DEVICE_EVICTION_AGE_MS,
+        );
+        if evicted > 0 {
+            tracing::info!(evicted, "Evicted stale devices from dashboard");
+        }
+
         // Expire alert silences whose window has passed (#26).
         self.alerts.prune_silences(now);
 

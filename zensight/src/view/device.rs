@@ -147,30 +147,32 @@ impl DeviceDetailState {
     pub fn update(&mut self, point: TelemetryPoint) {
         let metric_name = point.metric.clone();
 
-        // Update current value
+        // Derive the chart data point up front (cheap: timestamp + value) so we
+        // can move `point` into history below without re-deriving (#40).
+        let data_point = DataPoint::from_telemetry(point.timestamp, &point.value);
+
+        // Update current value (one clone — the snapshot map needs its own copy).
         self.metrics.insert(metric_name.clone(), point.clone());
 
-        // Update history
-        let history = self.history.entry(metric_name.clone()).or_default();
-        history.push_back(point.clone());
+        // Update the chart while we still hold `metric_name`.
+        if let Some(dp) = data_point {
+            // Single-series mode.
+            if self.selected_metric.as_deref() == Some(metric_name.as_str()) {
+                self.chart.push(dp.clone());
+            }
+            // Comparison mode (multi-series).
+            if self.chart.has_series(&metric_name) {
+                self.chart.push_to_series(&metric_name, dp);
+            }
+        }
 
-        // Trim history if needed
+        // Update history — move the original `point` in (its last use, no clone).
+        let history = self.history.entry(metric_name).or_default();
+        history.push_back(point);
+
+        // Trim history if needed.
         if history.len() > self.max_history {
             history.pop_front();
-        }
-
-        // Update chart if this metric is selected (single-series mode)
-        if self.selected_metric.as_ref() == Some(&metric_name)
-            && let Some(data_point) = DataPoint::from_telemetry(point.timestamp, &point.value)
-        {
-            self.chart.push(data_point);
-        }
-
-        // Update chart if this metric is in comparison mode (multi-series)
-        if self.chart.has_series(&metric_name)
-            && let Some(data_point) = DataPoint::from_telemetry(point.timestamp, &point.value)
-        {
-            self.chart.push_to_series(&metric_name, data_point);
         }
     }
 

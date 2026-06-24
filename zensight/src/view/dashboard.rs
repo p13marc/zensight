@@ -130,6 +130,11 @@ pub const DEFAULT_DEVICES_PER_PAGE: usize = 20;
 /// Debounce delay for search input in milliseconds.
 pub const SEARCH_DEBOUNCE_MS: i64 = 300;
 
+/// Age after which a device that has received no telemetry is evicted from the
+/// device map to bound memory over a long session (#40). 24h — generous enough
+/// that known-down devices remain visible; only long-gone ones are reaped.
+pub const DEVICE_EVICTION_AGE_MS: i64 = 24 * 60 * 60 * 1000;
+
 /// Connection state for Zenoh session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConnectionState {
@@ -247,6 +252,18 @@ impl DashboardState {
         });
 
         devices
+    }
+
+    /// Drop devices not seen for longer than `max_age_ms` so a long-running
+    /// session can't grow the device map unbounded (#40). The threshold is
+    /// deliberately generous (see `DEVICE_EVICTION_AGE_MS`) so known-down
+    /// devices stay visible — only truly-gone ones are reaped. Returns the
+    /// number of devices removed.
+    pub fn evict_stale_devices(&mut self, now: i64, max_age_ms: i64) -> usize {
+        let before = self.devices.len();
+        self.devices
+            .retain(|_, d| now.saturating_sub(d.last_update) <= max_age_ms);
+        before - self.devices.len()
     }
 
     /// Set (or clear) the status filter, resetting pagination (#34).
@@ -1235,6 +1252,24 @@ mod tests {
             .collect();
         assert_eq!(order[0], "b-offline");
         assert_eq!(order[1], "c-degraded");
+    }
+
+    #[test]
+    fn test_evict_stale_devices() {
+        let mut state = DashboardState::default();
+        let mut fresh = device_with_status("fresh", DeviceStatus::Online);
+        fresh.last_update = 10_000;
+        let mut old = device_with_status("old", DeviceStatus::Offline);
+        old.last_update = 1_000;
+        state.devices.insert(fresh.id.clone(), fresh);
+        state.devices.insert(old.id.clone(), old);
+
+        // At now=60_000 with max_age=55_000: fresh age 50_000 (kept),
+        // old age 59_000 (reaped).
+        let removed = state.evict_stale_devices(60_000, 55_000);
+        assert_eq!(removed, 1);
+        assert_eq!(state.devices.len(), 1);
+        assert!(state.devices.keys().any(|id| id.source == "fresh"));
     }
 
     #[test]
