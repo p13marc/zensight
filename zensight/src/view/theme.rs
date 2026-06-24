@@ -102,7 +102,9 @@ impl<'a> ThemeColors<'a> {
         if self.is_dark() {
             Color::from_rgb(0.9, 0.7, 0.2)
         } else {
-            Color::from_rgb(0.8, 0.6, 0.0)
+            // Darkened amber so the warning glyph clears WCAG 3:1 against the
+            // light section background (the brighter 0.8/0.6/0.0 was 2.37:1).
+            Color::from_rgb(0.6, 0.45, 0.0)
         }
     }
 
@@ -263,29 +265,51 @@ impl<'a> ThemeColors<'a> {
     // Status Colors (consistent across themes for recognition)
     // ========================================================================
 
-    /// Connected/online status.
+    /// Connected/online status. Darkened on the light theme to keep >=3:1
+    /// contrast against light surfaces (WCAG graphic minimum) — see the
+    /// contrast unit test.
     pub fn status_connected(&self) -> Color {
-        Color::from_rgb(0.2, 0.8, 0.2)
+        if self.is_dark() {
+            Color::from_rgb(0.2, 0.8, 0.2)
+        } else {
+            Color::from_rgb(0.1, 0.5, 0.1)
+        }
     }
 
     /// Disconnected/offline status.
     pub fn status_disconnected(&self) -> Color {
-        Color::from_rgb(0.8, 0.2, 0.2)
+        if self.is_dark() {
+            Color::from_rgb(0.8, 0.2, 0.2)
+        } else {
+            Color::from_rgb(0.75, 0.1, 0.1)
+        }
     }
 
     /// Healthy status.
     pub fn status_healthy(&self) -> Color {
-        Color::from_rgb(0.2, 0.8, 0.3)
+        if self.is_dark() {
+            Color::from_rgb(0.2, 0.8, 0.3)
+        } else {
+            Color::from_rgb(0.1, 0.5, 0.2)
+        }
     }
 
     /// Warning status.
     pub fn status_warning(&self) -> Color {
-        Color::from_rgb(0.9, 0.7, 0.2)
+        if self.is_dark() {
+            Color::from_rgb(0.9, 0.7, 0.2)
+        } else {
+            Color::from_rgb(0.7, 0.5, 0.0)
+        }
     }
 
     /// Error/critical status.
     pub fn status_error(&self) -> Color {
-        Color::from_rgb(0.9, 0.2, 0.2)
+        if self.is_dark() {
+            Color::from_rgb(0.9, 0.2, 0.2)
+        } else {
+            Color::from_rgb(0.8, 0.1, 0.1)
+        }
     }
 
     /// Unknown/inactive status.
@@ -432,4 +456,83 @@ impl<'a> ThemeColors<'a> {
 /// Convenience function to create ThemeColors.
 pub fn colors(theme: &Theme) -> ThemeColors<'_> {
     ThemeColors::new(theme)
+}
+
+/// WCAG 2.1 relative luminance of an sRGB color (alpha ignored). Pure.
+pub fn relative_luminance(c: Color) -> f32 {
+    fn lin(ch: f32) -> f32 {
+        if ch <= 0.03928 {
+            ch / 12.92
+        } else {
+            ((ch + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+}
+
+/// WCAG 2.1 contrast ratio between two colors (1.0..=21.0). Pure.
+pub fn contrast_ratio(a: Color, b: Color) -> f32 {
+    let la = relative_luminance(a);
+    let lb = relative_luminance(b);
+    let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WCAG: text needs >= 4.5:1; large/graphic elements need >= 3:1.
+    const TEXT_MIN: f32 = 4.5;
+    const GRAPHIC_MIN: f32 = 3.0;
+
+    fn both_themes() -> [Theme; 2] {
+        [Theme::Dark, Theme::Light]
+    }
+
+    #[test]
+    fn contrast_ratio_known_values() {
+        // Black on white is the canonical 21:1.
+        let r = contrast_ratio(Color::BLACK, Color::WHITE);
+        assert!((r - 21.0).abs() < 0.1, "black/white was {r}");
+        // A color against itself is 1:1.
+        assert!((contrast_ratio(Color::WHITE, Color::WHITE) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn body_text_meets_wcag_aa() {
+        for theme in both_themes() {
+            let c = colors(&theme);
+            let bg = c.background();
+            for (name, fg) in [("text", c.text()), ("text_muted", c.text_muted())] {
+                let r = contrast_ratio(fg, bg);
+                assert!(
+                    r >= TEXT_MIN,
+                    "{name} on background is {r:.2}:1 (< {TEXT_MIN}) in {theme:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn status_graphics_meet_wcag_graphic_contrast() {
+        // Status dots / severity glyphs are graphic elements (>=3:1). These are
+        // always paired with a text label (redundant encoding), but the dot
+        // itself should still be distinguishable from its panel background.
+        for theme in both_themes() {
+            let c = colors(&theme);
+            let bg = c.section_background();
+            for (name, fg) in [
+                ("status_connected", c.status_connected()),
+                ("status_disconnected", c.status_disconnected()),
+                ("warning", c.warning()),
+            ] {
+                let r = contrast_ratio(fg, bg);
+                assert!(
+                    r >= GRAPHIC_MIN,
+                    "{name} on section bg is {r:.2}:1 (< {GRAPHIC_MIN}) in {theme:?}"
+                );
+            }
+        }
+    }
 }

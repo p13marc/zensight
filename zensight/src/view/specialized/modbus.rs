@@ -11,11 +11,11 @@ use zensight_common::TelemetryValue;
 
 use crate::message::Message;
 use crate::view::components::card;
-use crate::view::tokens::space;
 use crate::view::components::{StatusLed, StatusLedState};
 use crate::view::device::DeviceDetailState;
 use crate::view::icons::{self, IconSize};
 use crate::view::theme;
+use crate::view::tokens::space;
 
 /// Register type in Modbus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,13 +66,9 @@ pub fn modbus_plc_view(state: &DeviceDetailState) -> Element<'_, Message> {
     let connection_info = render_connection_info(state);
     let register_sections = render_register_sections(state);
 
-    let content = column![
-        header,
-        card(connection_info),
-        card(register_sections),
-    ]
-    .spacing(space::MD)
-    .padding(space::LG);
+    let content = column![header, card(connection_info), card(register_sections),]
+        .spacing(space::MD)
+        .padding(space::LG);
 
     container(scrollable(content))
         .width(Length::Fill)

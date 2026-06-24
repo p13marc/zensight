@@ -166,15 +166,12 @@ mod tests {
         let queryable = qsession.declare_queryable(&qkey).await.unwrap();
         tokio::spawn(async move {
             while let Ok(query) = queryable.recv_async().await {
-                let _ = query
-                    .reply(query.key_expr().clone(), payload.clone())
-                    .await;
+                let _ = query.reply(query.key_expr().clone(), payload.clone()).await;
             }
         });
 
         // Fetch + decode through the production helper.
-        let got: Option<Vec<SocketRecord>> =
-            fetch_records(session.clone(), key.to_string()).await;
+        let got: Option<Vec<SocketRecord>> = fetch_records(session.clone(), key.to_string()).await;
         let got = got.expect("decoded socket records");
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].local, "10.0.0.1:5555");

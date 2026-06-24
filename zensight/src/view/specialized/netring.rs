@@ -40,7 +40,11 @@ pub fn netring_sensor_view(state: &DeviceDetailState) -> Element<'_, Message> {
 fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
     let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
     let loading = state.netring_detail.tls.is_loading();
-    let label = if loading { "Fetching…" } else { "Fetch inventory" };
+    let label = if loading {
+        "Fetching…"
+    } else {
+        "Fetch inventory"
+    };
     let mut fetch = button(text(label).size(font::CAPTION)).padding([4, 10]);
     if !loading {
         fetch = fetch.on_press(Message::FetchNetringTls);
@@ -48,8 +52,16 @@ fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
 
     let mut col = column![
         section_header("TLS", Some(fetch.into())),
-        row![cell("handshakes (total)", 180), cell(&get("tls/handshakes_total"), 100)].spacing(8),
-        row![cell("distinct fingerprints", 180), cell(&get("tls/distinct_fingerprints"), 100)].spacing(8),
+        row![
+            cell("handshakes (total)", 180),
+            cell(&get("tls/handshakes_total"), 100)
+        ]
+        .spacing(8),
+        row![
+            cell("distinct fingerprints", 180),
+            cell(&get("tls/distinct_fingerprints"), 100)
+        ]
+        .spacing(8),
     ]
     .spacing(space::SM);
 
@@ -60,8 +72,13 @@ fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
             col = col.push(empty_state("No TLS handshakes observed", None));
         } else {
             let mut list = Column::new().spacing(3).push(
-                row![cell("sni", 240), cell("ja4", 240), cell("alpn", 90), cell("count", 60)]
-                    .spacing(8),
+                row![
+                    cell("sni", 240),
+                    cell("ja4", 240),
+                    cell("alpn", 90),
+                    cell("count", 60)
+                ]
+                .spacing(8),
             );
             for r in records.iter().take(200) {
                 list = list.push(
@@ -86,8 +103,10 @@ fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
 fn render_capture(state: &DeviceDetailState) -> Element<'_, Message> {
     let mut col = column![section_header("Capture Health", None)].spacing(space::SM);
     // Group capture/<src>/<stat>.
-    let mut sources: std::collections::BTreeMap<String, std::collections::BTreeMap<String, &TelemetryValue>> =
-        Default::default();
+    let mut sources: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, &TelemetryValue>,
+    > = Default::default();
     for (metric, point) in &state.metrics {
         if let Some(rest) = metric.strip_prefix("capture/")
             && let Some((src, stat)) = rest.split_once('/')
@@ -186,7 +205,11 @@ fn render_tcp_health(state: &DeviceDetailState) -> Element<'_, Message> {
     let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
     column![
         title,
-        row![cell("resets (total)", 160), cell(&get("tcp/resets_total"), 100)].spacing(8),
+        row![
+            cell("resets (total)", 160),
+            cell(&get("tcp/resets_total"), 100)
+        ]
+        .spacing(8),
         row![
             cell("refused (total)", 160),
             cell(&get("tcp/refused_total"), 100)
@@ -204,7 +227,11 @@ fn render_flow_detail(state: &DeviceDetailState) -> Element<'_, Message> {
     let title = section_header("Recent Flows (on demand)", None);
 
     // The button is disabled (no on_press) while a fetch is in flight.
-    let label = if loading { "Fetching…" } else { "Fetch Flows" };
+    let label = if loading {
+        "Fetching…"
+    } else {
+        "Fetch Flows"
+    };
     let mut fetch = button(text(label).size(font::CAPTION)).padding([4, 10]);
     if !loading {
         fetch = fetch.on_press(Message::FetchNetringFlows);
