@@ -815,19 +815,19 @@ fn render_chart_section<'a>(
             .spacing(10)
             .padding(10),
     )
-        .style(|theme: &Theme| {
-            let colors = crate::view::theme::colors(theme);
-            container::Style {
-                background: Some(iced::Background::Color(colors.card_background())),
-                border: iced::Border {
-                    color: colors.border(),
-                    width: 1.0,
-                    radius: 6.0.into(),
-                },
-                ..Default::default()
-            }
-        })
-        .width(Length::Fill);
+    .style(|theme: &Theme| {
+        let colors = crate::view::theme::colors(theme);
+        container::Style {
+            background: Some(iced::Background::Color(colors.card_background())),
+            border: iced::Border {
+                color: colors.border(),
+                width: 1.0,
+                radius: 6.0.into(),
+            },
+            ..Default::default()
+        }
+    })
+    .width(Length::Fill);
 
     column![chart_container, rule::horizontal(1)]
         .spacing(10)

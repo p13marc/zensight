@@ -416,10 +416,8 @@ impl ZenSight {
                 // #35: alert → device → metric → chart in one hop.
                 self.global_search.close();
                 let task = self.select_device(device);
-                if let Some(metric) = metric {
-                    if let Some(d) = self.selected_device.as_mut() {
-                        d.select_metric(metric);
-                    }
+                if let (Some(metric), Some(d)) = (metric, self.selected_device.as_mut()) {
+                    d.select_metric(metric);
                 }
                 return task;
             }
@@ -429,16 +427,15 @@ impl ZenSight {
                 // bouncing back to the dashboard each time.
                 if let Some(current) = self.selected_device.as_ref().map(|d| d.device_id.clone()) {
                     let ids = self.dashboard.ordered_device_ids();
+                    // position() returning Some guarantees ids is non-empty.
                     if let Some(pos) = ids.iter().position(|id| *id == current) {
-                        if !ids.is_empty() {
-                            let next = if forward {
-                                (pos + 1) % ids.len()
-                            } else {
-                                (pos + ids.len() - 1) % ids.len()
-                            };
-                            if ids[next] != current {
-                                return self.select_device(ids[next].clone());
-                            }
+                        let next = if forward {
+                            (pos + 1) % ids.len()
+                        } else {
+                            (pos + ids.len() - 1) % ids.len()
+                        };
+                        if ids[next] != current {
+                            return self.select_device(ids[next].clone());
                         }
                     }
                 }
@@ -1804,8 +1801,7 @@ impl ZenSight {
         if connection_changed && !self.demo_mode {
             // Reflect the impending reconnect immediately; the restarted
             // subscription will drive Connecting → Connected/Disconnected.
-            self.dashboard.connection_state =
-                crate::view::dashboard::ConnectionState::Connecting;
+            self.dashboard.connection_state = crate::view::dashboard::ConnectionState::Connecting;
             self.dashboard.connected = false;
             self.toasts.push(
                 ToastSeverity::Info,
@@ -1906,10 +1902,9 @@ impl ZenSight {
 
         // Bound the device map over long sessions: reap devices gone for a day
         // (#40). Logged so the drop is never silent.
-        let evicted = self.dashboard.evict_stale_devices(
-            now,
-            crate::view::dashboard::DEVICE_EVICTION_AGE_MS,
-        );
+        let evicted = self
+            .dashboard
+            .evict_stale_devices(now, crate::view::dashboard::DEVICE_EVICTION_AGE_MS);
         if evicted > 0 {
             tracing::info!(evicted, "Evicted stale devices from dashboard");
         }

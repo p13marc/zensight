@@ -817,7 +817,7 @@ fn render_header(state: &AlertsState) -> Element<'_, Message> {
         .on_press(Message::OpenSecurity)
         .style(iced::widget::button::secondary);
 
-    row![
+    let header_row = row![
         back_button,
         title,
         unack_badge,
@@ -825,8 +825,17 @@ fn render_header(state: &AlertsState) -> Element<'_, Message> {
         security_button
     ]
     .spacing(15)
-    .align_y(Alignment::Center)
-    .into()
+    .align_y(Alignment::Center);
+
+    // Scope subtitle so Alerts vs Security is legible (#39): this view owns
+    // operational, threshold-based alerts; Security owns network anomalies.
+    let subtitle = text("Operational threshold alerts — rule-based and sensor-pushed")
+        .size(font::CAPTION)
+        .style(|theme: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(theme).text_dimmed()),
+        });
+
+    column![header_row, subtitle].spacing(4).into()
 }
 
 /// Render the new rule form.

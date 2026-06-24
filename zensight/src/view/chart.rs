@@ -630,8 +630,7 @@ impl ChartState {
 
     /// The active custom window in minutes, if any (#36).
     pub fn custom_duration_minutes(&self) -> Option<f64> {
-        self.custom_duration_ms
-            .map(|ms| ms as f64 / 60_000.0)
+        self.custom_duration_ms.map(|ms| ms as f64 / 60_000.0)
     }
 
     /// Add a data point.

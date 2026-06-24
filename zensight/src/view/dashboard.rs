@@ -233,9 +233,7 @@ impl DashboardState {
                     search_lower.is_empty() || d.id.source.to_lowercase().contains(&search_lower);
 
                 // Status filter (driven by the fleet summary chips, #34)
-                let status_match = self
-                    .status_filter
-                    .is_none_or(|s| d.effective_status() == s);
+                let status_match = self.status_filter.is_none_or(|s| d.effective_status() == s);
 
                 protocol_match && search_match && status_match
             })
@@ -441,15 +439,17 @@ pub fn dashboard_view<'a>(
 /// Render the fleet-health summary bar: a click-to-filter rollup of how many
 /// devices are offline / degraded / unknown / online, plus a firing-alert chip
 /// (#34). Answers "what's wrong right now?" at the top of the dashboard.
-fn render_fleet_summary(state: &DashboardState, unacknowledged_alerts: usize) -> Element<'_, Message> {
+fn render_fleet_summary(
+    state: &DashboardState,
+    unacknowledged_alerts: usize,
+) -> Element<'_, Message> {
     let (online, degraded, offline, unknown) = state.status_counts();
 
     // A click-to-filter chip for one status; highlighted when it's the active
     // filter. Toggling the same chip clears the filter (see set_status_filter).
     let chip = |status: DeviceStatus, count: usize, label: &'static str| -> Element<'_, Message> {
         let active = state.status_filter == Some(status);
-        let content: Element<'_, Message> =
-            badge(status_color(status), format!("{count} {label}"));
+        let content: Element<'_, Message> = badge(status_color(status), format!("{count} {label}"));
         let mut b = button(content)
             .on_press(Message::SetStatusFilter(Some(status)))
             .padding([4, 10]);
@@ -1275,10 +1275,7 @@ mod tests {
     #[test]
     fn test_status_filter_narrows_and_toggles() {
         let mut state = DashboardState::default();
-        for (src, st) in [
-            ("a", DeviceStatus::Online),
-            ("b", DeviceStatus::Offline),
-        ] {
+        for (src, st) in [("a", DeviceStatus::Online), ("b", DeviceStatus::Offline)] {
             let d = device_with_status(src, st);
             state.devices.insert(d.id.clone(), d);
         }

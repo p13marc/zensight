@@ -137,9 +137,7 @@ pub enum Message {
 
     /// Navigate to the previous/next device within the current filtered set
     /// (#35 cross-device navigation on the device detail view).
-    SelectAdjacentDevice {
-        forward: bool,
-    },
+    SelectAdjacentDevice { forward: bool },
 
     /// User cleared device selection (back to dashboard).
     ClearSelection,

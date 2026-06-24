@@ -299,9 +299,14 @@ fn test_alert_investigate_navigates_to_device_metric() {
     let mut state = AlertsState::new();
     let rule = AlertRule::new(1, "High CPU", "cpu/usage").with_severity(Severity::Critical);
     let device = DeviceId::new(Protocol::Sysinfo, "server01");
-    state
-        .alerts
-        .push(Alert::new(1, &rule, device.clone(), "cpu/usage".into(), 95.0, 0));
+    state.alerts.push(Alert::new(
+        1,
+        &rule,
+        device.clone(),
+        "cpu/usage".into(),
+        95.0,
+        0,
+    ));
 
     let mut ui = simulator(alerts_view(&state));
     let _ = ui.click("View");
