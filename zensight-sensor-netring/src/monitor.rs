@@ -34,7 +34,7 @@ use netring::monitor::fingerprint::TlsFingerprint;
 use netring::prelude::*;
 use netring::protocol::event_typed::{FlowEnded, FlowPacket};
 
-use crate::config::NetringConfig;
+use crate::config::{IocConfig, NetringConfig};
 use crate::map::{self, AnomalyView, DnsRcodeClass};
 
 /// Per-destination talker histogram: `dst -> (bytes, packets, flows)`.
@@ -223,6 +223,45 @@ fn allowlisted(host: &str, allowlist: &[String]) -> bool {
     allowlist
         .iter()
         .any(|a| !a.is_empty() && h.contains(&a.to_ascii_lowercase()))
+}
+
+/// Compile the IOC config (inline lists + indicator files) into an `IocSet`.
+/// Each file line is one indicator; a value that parses as an IP becomes a host
+/// indicator, otherwise it's treated as a domain. Blank lines and `#` comments
+/// are skipped; unreadable files are warned and skipped (not fatal).
+fn build_ioc_set(cfg: &IocConfig) -> IocSet {
+    let mut set = IocSet::new();
+    for ip in &cfg.ips {
+        match ip.parse::<std::net::IpAddr>() {
+            Ok(addr) => set = set.ip(addr),
+            Err(_) => tracing::warn!(value = %ip, "ioc: ignoring unparseable IP"),
+        }
+    }
+    set = set.domains(cfg.domains.iter());
+    for fp in &cfg.ja4 {
+        set = set.ja4(fp.clone());
+    }
+    for fp in &cfg.ja3 {
+        set = set.ja3(fp.clone());
+    }
+    for path in &cfg.files {
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
+                for line in content.lines() {
+                    let l = line.trim();
+                    if l.is_empty() || l.starts_with('#') {
+                        continue;
+                    }
+                    match l.parse::<std::net::IpAddr>() {
+                        Ok(addr) => set = set.ip(addr),
+                        Err(_) => set = set.domain(l),
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(path, error = %e, "ioc: failed to read indicator file"),
+        }
+    }
+    set
 }
 
 /// Build a netring `Monitor` from config plus the channels it emits on.
@@ -703,6 +742,33 @@ pub fn build(
         b = b.detect(dga);
     }
 
+    // Threat-intel detection (netring 0.27). flow-risk / IOC / Sigma hits are
+    // emitted as anomalies, so they ride the same ChannelSink → drain →
+    // AlertReporter path as the built-in detectors — no extra plumbing.
+    if cfg.threat.flow_risk {
+        b = b.flow_risk();
+        tracing::info!("netring: flow-risk scoring enabled");
+    }
+    let ioc = build_ioc_set(&cfg.threat.ioc);
+    if !ioc.is_empty() {
+        tracing::info!("netring: IOC matching enabled");
+        b = b.ioc(ioc);
+    }
+    if cfg.threat.sigma.enabled {
+        #[cfg(feature = "sigma")]
+        if let Some(dir) = &cfg.threat.sigma.dir {
+            match SigmaRuleSet::from_dir(dir) {
+                Ok(rules) => {
+                    b = b.sigma(rules);
+                    tracing::info!(dir, "netring: Sigma rules loaded");
+                }
+                Err(e) => tracing::warn!(dir, error = %e, "netring: failed to load Sigma rules"),
+            }
+        }
+        #[cfg(not(feature = "sigma"))]
+        tracing::warn!("netring: threat.sigma is enabled but built without the `sigma` feature");
+    }
+
     // Anomaly sink → channel → drain → AlertReporter.
     b = b.sink(ChannelSink::new(anom_tx));
 
@@ -865,4 +931,54 @@ pub fn dns_snapshot(s: &DnsState) -> (u64, Vec<(DnsRcodeClass, u64)>, u64) {
         (DnsRcodeClass::Other, s.rcode_other.load(Ordering::Relaxed)),
     ];
     (queries, by_rcode, unanswered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::IocConfig;
+    use std::net::IpAddr;
+
+    #[test]
+    fn ioc_set_empty_by_default() {
+        assert!(build_ioc_set(&IocConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn ioc_set_from_inline_lists() {
+        let cfg = IocConfig {
+            ips: vec!["10.0.0.2".into()],
+            domains: vec!["evil.example".into()],
+            ..Default::default()
+        };
+        let set = build_ioc_set(&cfg);
+        assert!(!set.is_empty());
+        assert!(set.matches_ip(&"10.0.0.2".parse::<IpAddr>().unwrap()));
+        // subdomain-aware
+        assert!(set.matches_domain("host.evil.example").is_some());
+        assert!(set.matches_domain("good.example").is_none());
+    }
+
+    #[test]
+    fn ioc_set_skips_unparseable_ip() {
+        let cfg = IocConfig {
+            ips: vec!["not-an-ip".into()],
+            ..Default::default()
+        };
+        assert!(build_ioc_set(&cfg).is_empty());
+    }
+
+    #[test]
+    fn ioc_set_loads_indicator_file() {
+        let path = std::env::temp_dir().join(format!("zs-ioc-{}.txt", std::process::id()));
+        std::fs::write(&path, "# bad stuff\n198.51.100.7\nmalware.test\n\n").unwrap();
+        let cfg = IocConfig {
+            files: vec![path.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        let set = build_ioc_set(&cfg);
+        assert!(set.matches_ip(&"198.51.100.7".parse::<IpAddr>().unwrap()));
+        assert!(set.matches_domain("sub.malware.test").is_some());
+        let _ = std::fs::remove_file(&path);
+    }
 }

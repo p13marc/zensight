@@ -23,6 +23,23 @@
     anomalies: {
       port_scan: true,   // TRW port-scan detection -> alerts
     },
+
+    // Threat-intel detection (netring 0.27). Hits become alerts on @/alerts via
+    // the same path as the detectors above.
+    threat: {
+      // Passive flow-risk scoring: obsolete TLS, cleartext HTTP credentials.
+      flow_risk: true,
+      // Indicator-of-compromise matching (bad IPs / domains / JA3 / JA4).
+      ioc: {
+        ips: [],          // e.g. ["203.0.113.6"] — matched against flow src/dst
+        domains: [],      // e.g. ["evil.example"] — DNS qname / TLS SNI / HTTP Host
+        ja4: [],          // bad JA4 client fingerprints
+        ja3: [],          // bad JA3 client fingerprints
+        files: [],        // newline IOC feeds (IP or domain per line, # comments)
+      },
+      // Sigma rule evaluation (build with `--features sigma`).
+      sigma: { enabled: false, dir: null },
+    },
   },
 
   logging: { level: "info" },

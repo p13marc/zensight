@@ -44,6 +44,58 @@ pub struct NetringConfig {
     pub bandwidth_period_secs: u64,
     #[serde(default)]
     pub anomalies: AnomalyConfig,
+    /// Threat-intel detection (netring 0.27): flow-risk scoring, IOC matching,
+    /// Sigma rules. Hits surface as anomalies → alerts via the same path as the
+    /// built-in detectors.
+    #[serde(default)]
+    pub threat: ThreatConfig,
+}
+
+/// Threat-intel detection config (netring 0.27).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ThreatConfig {
+    /// nDPI-style passive flow-risk scoring (obsolete TLS, cleartext HTTP
+    /// credentials). Requires the `tls`/`http` collectors for the respective arms.
+    #[serde(default)]
+    pub flow_risk: bool,
+    /// Indicator-of-compromise matching (bad IPs / domains / JA3 / JA4).
+    #[serde(default)]
+    pub ioc: IocConfig,
+    /// Sigma rule evaluation (needs the `sigma` build feature).
+    #[serde(default)]
+    pub sigma: SigmaConfig,
+}
+
+/// Indicator-of-compromise indicator set, from inline lists and/or files.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IocConfig {
+    /// Bad host IPs (matched against flow src/dst).
+    #[serde(default)]
+    pub ips: Vec<String>,
+    /// Bad domains (subdomain-aware; matched against DNS qname / TLS SNI / HTTP Host).
+    #[serde(default)]
+    pub domains: Vec<String>,
+    /// Bad JA4 TLS client fingerprints.
+    #[serde(default)]
+    pub ja4: Vec<String>,
+    /// Bad JA3 TLS client fingerprints.
+    #[serde(default)]
+    pub ja3: Vec<String>,
+    /// Files of newline-separated indicators (IP or domain inferred per line;
+    /// `#` comments allowed). Useful for external IOC feeds.
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+
+/// Sigma rule evaluation config.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SigmaConfig {
+    /// Enable Sigma evaluation (no-op unless built with the `sigma` feature).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Directory of `.yml` Sigma rules to load.
+    #[serde(default)]
+    pub dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -13,6 +13,11 @@ path = "src/main.rs"
 [lib]
 path = "src/lib.rs"
 
+[features]
+# Sigma rule evaluation (netring 0.27). Off by default — pulls the pure-Rust
+# `sigma-rust` parser via netring. Enable with `--features sigma`.
+sigma = ["netring/sigma"]
+
 [dependencies]
 zensight-common = { path = "../zensight-common" }
 zensight-sensor-core = { path = "../zensight-sensor-core" }
