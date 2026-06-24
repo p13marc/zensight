@@ -38,6 +38,33 @@
     // Include the raw syslog message in telemetry labels
     // Useful for debugging but increases message size
     include_raw_message: false,
+
+    // systemd-journald source (#57). Reads the local journal directly via
+    // libsystemd (no `journalctl` subprocess) and feeds the same pipeline as
+    // the network listeners above. Disabled by default; uncomment to enable.
+    //
+    // Reading the system journal needs journal-read access (run as a system
+    // service, or join the systemd-journal / adm group). Cursor-based no-loss
+    // resume (#58) and server-side unit/priority matching (#59) build on this.
+    // journald: {
+    //   enabled: true,
+    //   scope: "system",          // system | user | local_only | runtime_only
+    //   // namespace: "myns",      // a journald log namespace, if any
+    //   // extra_fields: ["_SELINUX_CONTEXT"],  // copy extra raw fields to labels
+    //   // include_dev_fields: false,           // CODE_FILE/LINE/FUNC, ERRNO
+    //
+    //   // Start position + no-loss resume (#58):
+    //   // start_from: "cursor",   // cursor | tail | head | boot | since
+    //   // since: "15m",           // lookback when start_from = "since"
+    //   // cursor_file: null,      // null = $STATE_DIRECTORY / XDG state default
+    //   // on_missing_cursor: "tail",  // tail | since (when saved cursor rotated out)
+    //
+    //   // Server-side filters (#59) — applied in the journal, before transport:
+    //   // units: ["sshd.service", "nginx.service"],  // only these units ([]=all)
+    //   // min_priority: 4,        // 0..7; warning and worse (null=all)
+    //   // transports: ["kernel", "journal"],         // _TRANSPORT allowlist
+    //   // match: { "_SYSTEMD_UNIT": "cron.service" }, // raw FIELD=value matches
+    // },
   },
 
   // Logging configuration
