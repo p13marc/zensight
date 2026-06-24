@@ -146,6 +146,24 @@ pub struct CollectConfig {
     /// Only available on Linux.
     #[serde(default = "default_true")]
     pub net_dev_extended: bool,
+
+    /// Collect cgroup-v2 container-saturation metrics (CPU throttling, memory
+    /// limit/OOM, per-cgroup pressure) from `/sys/fs/cgroup`. Default off
+    /// (opt-in for container hosts). Reads the sensor's own cgroup plus any in
+    /// `cgroup_paths`. Absent cgroup-v2 => skipped gracefully.
+    #[serde(default)]
+    pub cgroups: bool,
+
+    /// Extra cgroup-v2 paths to monitor in addition to the sensor's own
+    /// (e.g. `["/system.slice/foo.service"]`). Only used when `cgroups` is on.
+    #[serde(default)]
+    pub cgroup_paths: Vec<String>,
+
+    /// Collect thermal/power depth: RAPL energy->watts, hwmon fan RPM, battery
+    /// capacity/status, kernel entropy pool. Default off (hardware-specific,
+    /// higher cardinality). Missing hardware/files => skipped gracefully.
+    #[serde(default)]
+    pub power: bool,
 }
 
 impl Default for CollectConfig {
@@ -166,6 +184,9 @@ impl Default for CollectConfig {
             vmstat: true,
             fd_inode: true,
             net_dev_extended: true,
+            cgroups: false,
+            cgroup_paths: Vec::new(),
+            power: false,
         }
     }
 }

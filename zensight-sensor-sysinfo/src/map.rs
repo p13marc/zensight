@@ -409,6 +409,282 @@ pub fn map_net_dev(stats: &[NetDevStat]) -> Vec<Metric> {
     out
 }
 
+// ===========================================================================
+// E. cgroup-v2 (container saturation): throttling / OOM / memory / pressure
+// ===========================================================================
+
+/// Saturation-relevant cgroup-v2 sample for a single cgroup. Every field is
+/// `Option` so a controller that is not enabled for this cgroup (or a kernel
+/// without that file) is skipped rather than reported as a misleading zero.
+/// The high-signal fields here are *throttling* and *OOM*, not raw usage
+/// (cAdvisor dropped these on v2 — we read the files directly).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CgroupSample {
+    /// The cgroup path (e.g. `/system.slice/foo.service`), used as the metric
+    /// key suffix and a `cgroup` label.
+    pub path: String,
+    /// `cpu.stat` `nr_throttled` — number of throttled enforcement periods.
+    pub cpu_nr_throttled: Option<u64>,
+    /// `cpu.stat` `throttled_usec` — total time the cgroup was throttled.
+    pub cpu_throttled_usec: Option<u64>,
+    /// `memory.current` — current memory usage in bytes.
+    pub memory_current: Option<u64>,
+    /// `memory.max` — the hard limit in bytes (`None` when set to `max`).
+    pub memory_max: Option<u64>,
+    /// `memory.events` `oom_kill` — processes OOM-killed in this cgroup.
+    pub memory_oom_kills: Option<u64>,
+    /// `memory.events` `oom` — times the cgroup hit its limit.
+    pub memory_oom: Option<u64>,
+    /// `cpu.pressure` `some` PSI line.
+    pub cpu_pressure_some: Option<PressureSample>,
+    /// `memory.pressure` `some` PSI line.
+    pub memory_pressure_some: Option<PressureSample>,
+    /// `memory.pressure` `full` PSI line.
+    pub memory_pressure_full: Option<PressureSample>,
+    /// `io.pressure` `some` PSI line.
+    pub io_pressure_some: Option<PressureSample>,
+    /// `io.pressure` `full` PSI line.
+    pub io_pressure_full: Option<PressureSample>,
+}
+
+/// Parse a flat cgroup-v2 `key value` file (e.g. `cpu.stat`, `memory.events`)
+/// into a small lookup. Values that do not parse as `u64` are skipped.
+pub fn parse_flat_kv(content: &str) -> std::collections::HashMap<String, u64> {
+    let mut map = std::collections::HashMap::new();
+    for line in content.lines() {
+        let mut parts = line.split_whitespace();
+        if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
+            if let Ok(n) = v.parse::<u64>() {
+                map.insert(k.to_string(), n);
+            }
+        }
+    }
+    map
+}
+
+/// Parse a single-value cgroup file (e.g. `memory.current`, `memory.max`).
+/// The literal `max` (no limit) yields `None`; a numeric value yields `Some`.
+pub fn parse_cgroup_scalar(content: &str) -> Option<u64> {
+    let t = content.trim();
+    if t == "max" {
+        return None;
+    }
+    t.parse::<u64>().ok()
+}
+
+/// Parse a kernel PSI-format file (`/proc/pressure/*` or a cgroup `*.pressure`).
+/// Lines look like `some avg10=0.00 avg60=0.00 avg300=0.00 total=12345`.
+/// Returns `(some, full)` where each is present only if its line exists.
+pub fn parse_pressure_file(content: &str) -> (Option<PressureSample>, Option<PressureSample>) {
+    let mut some = None;
+    let mut full = None;
+    for line in content.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(scope) = parts.next() else { continue };
+        let mut p = PressureSample::default();
+        for kv in parts {
+            let Some((k, v)) = kv.split_once('=') else {
+                continue;
+            };
+            match k {
+                "avg10" => p.avg10 = v.parse().unwrap_or(0.0),
+                "avg60" => p.avg60 = v.parse().unwrap_or(0.0),
+                "avg300" => p.avg300 = v.parse().unwrap_or(0.0),
+                "total" => p.total_us = v.parse().unwrap_or(0),
+                _ => {}
+            }
+        }
+        match scope {
+            "some" => some = Some(p),
+            "full" => full = Some(p),
+            _ => {}
+        }
+    }
+    (some, full)
+}
+
+/// Map a cgroup-v2 sample to wire metrics under `cgroup/...`, keyed by resource
+/// and carrying the cgroup `path` as a `cgroup` label. Only present fields are
+/// emitted (graceful degradation per controller availability).
+pub fn map_cgroup(c: &CgroupSample) -> Vec<Metric> {
+    let mut out = Vec::new();
+    let label = |m: Metric| m.label("cgroup", c.path.clone());
+
+    if let Some(v) = c.cpu_nr_throttled {
+        out.push(label(Metric::counter("cgroup/cpu/nr_throttled", v)));
+    }
+    if let Some(v) = c.cpu_throttled_usec {
+        out.push(label(Metric::counter("cgroup/cpu/throttled_usec", v)));
+    }
+    if let Some(v) = c.memory_current {
+        out.push(label(Metric::gauge("cgroup/memory/current", v as f64)));
+    }
+    if let Some(v) = c.memory_max {
+        out.push(label(Metric::gauge("cgroup/memory/max", v as f64)));
+    }
+    // A used-percent against the limit is the actionable container signal.
+    if let (Some(cur), Some(max)) = (c.memory_current, c.memory_max) {
+        if max > 0 {
+            out.push(label(Metric::gauge(
+                "cgroup/memory/used_percent",
+                (cur as f64 / max as f64) * 100.0,
+            )));
+        }
+    }
+    if let Some(v) = c.memory_oom_kills {
+        out.push(label(Metric::counter("cgroup/memory/oom_kills_total", v)));
+    }
+    if let Some(v) = c.memory_oom {
+        out.push(label(Metric::counter("cgroup/memory/oom_total", v)));
+    }
+
+    let mut emit_psi = |res: &'static str, scope: &'static str, p: &PressureSample| {
+        out.push(label(
+            Metric::gauge(format!("cgroup/{res}/pressure/{scope}_avg10"), p.avg10)
+                .label("resource", res)
+                .label("scope", scope),
+        ));
+        out.push(label(
+            Metric::counter(
+                format!("cgroup/{res}/pressure/{scope}_total_us"),
+                p.total_us,
+            )
+            .label("resource", res)
+            .label("scope", scope),
+        ));
+    };
+    if let Some(p) = &c.cpu_pressure_some {
+        emit_psi("cpu", "some", p);
+    }
+    if let Some(p) = &c.memory_pressure_some {
+        emit_psi("memory", "some", p);
+    }
+    if let Some(p) = &c.memory_pressure_full {
+        emit_psi("memory", "full", p);
+    }
+    if let Some(p) = &c.io_pressure_some {
+        emit_psi("io", "some", p);
+    }
+    if let Some(p) = &c.io_pressure_full {
+        emit_psi("io", "full", p);
+    }
+    out
+}
+
+// ===========================================================================
+// G. Thermal / power depth (RAPL, fans, battery, entropy)
+// ===========================================================================
+
+/// A RAPL energy domain (`/sys/class/powercap/<zone>`). `energy_uj` is the
+/// monotonic energy counter in microjoules; the collector derives instantaneous
+/// watts from the delta across ticks. `max_energy_uj` is the wraparound range.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RaplDomain {
+    pub zone: String,
+    pub name: String,
+    pub energy_uj: u64,
+    pub max_energy_uj: Option<u64>,
+}
+
+/// A hwmon fan reading (`fan*_input`, RPM).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FanReading {
+    pub chip: String,
+    pub label: String,
+    pub rpm: f64,
+}
+
+/// A battery / power-supply reading (`/sys/class/power_supply/<name>`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BatteryReading {
+    pub name: String,
+    /// `capacity` percent (0..100), if present.
+    pub capacity: Option<f64>,
+    /// `status` string (Charging / Discharging / Full / ...), if present.
+    pub status: Option<String>,
+}
+
+/// A bundle of the thermal/power-depth readings (§G). `entropy_avail` is the
+/// kernel CSPRNG pool fill (`/proc/sys/kernel/random/entropy_avail`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PowerSample {
+    /// Per-RAPL-domain instantaneous watts (already rate-derived by the
+    /// collector from the energy counter delta).
+    pub rapl_watts: Vec<(String, String, f64)>,
+    pub fans: Vec<FanReading>,
+    pub batteries: Vec<BatteryReading>,
+    pub entropy_avail: Option<u64>,
+}
+
+/// Derive watts from two RAPL energy readings taken `interval_secs` apart,
+/// handling the counter wrap at `max_energy_uj`. Returns `None` if the interval
+/// is non-positive or the reading is the first for this domain.
+pub fn rapl_watts(prev_uj: u64, cur_uj: u64, max_uj: Option<u64>, interval_secs: f64) -> Option<f64> {
+    if interval_secs <= 0.0 {
+        return None;
+    }
+    let delta_uj = if cur_uj >= prev_uj {
+        cur_uj - prev_uj
+    } else {
+        // Counter wrapped.
+        match max_uj {
+            Some(m) if m > 0 => (m - prev_uj).saturating_add(cur_uj),
+            _ => return None,
+        }
+    };
+    // microjoules / 1e6 = joules; joules / seconds = watts.
+    Some((delta_uj as f64 / 1_000_000.0) / interval_secs)
+}
+
+/// Map the thermal/power-depth bundle to wire metrics under `power/...`,
+/// `sensors/<chip>/<fan>/rpm`, `battery/<name>/...`, `system/entropy_avail`.
+pub fn map_power(s: &PowerSample) -> Vec<Metric> {
+    let mut out = Vec::new();
+    for (zone, name, watts) in &s.rapl_watts {
+        out.push(
+            Metric::gauge(format!("power/rapl/{}/watts", sanitize_key(zone)), *watts)
+                .label("zone", zone.clone())
+                .label("name", name.clone()),
+        );
+    }
+    for f in &s.fans {
+        out.push(
+            Metric::gauge(
+                format!(
+                    "sensors/{}/{}/rpm",
+                    sanitize_key(&f.chip),
+                    sanitize_key(&f.label)
+                ),
+                f.rpm,
+            )
+            .label("chip", f.chip.clone())
+            .label("label", f.label.clone()),
+        );
+    }
+    for b in &s.batteries {
+        let key = sanitize_key(&b.name);
+        if let Some(cap) = b.capacity {
+            out.push(
+                Metric::gauge(format!("battery/{key}/capacity"), cap).label("name", b.name.clone()),
+            );
+        }
+        if let Some(status) = &b.status {
+            out.push(
+                Metric {
+                    metric: format!("battery/{key}/status"),
+                    value: TelemetryValue::Text(status.clone()),
+                    labels: Vec::new(),
+                }
+                .label("name", b.name.clone()),
+            );
+        }
+    }
+    if let Some(e) = s.entropy_avail {
+        out.push(Metric::gauge("system/entropy_avail", e as f64));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,5 +923,182 @@ mod tests {
             .unwrap();
         assert_eq!(rx.value, TelemetryValue::Counter(2));
         assert!(rx.labels.contains(&("interface", "eth0".to_string())));
+    }
+
+    // --- E. cgroup-v2 -----------------------------------------------------
+
+    #[test]
+    fn test_parse_flat_kv() {
+        let m = parse_flat_kv("nr_periods 100\nnr_throttled 5\nthrottled_usec 123456\n");
+        assert_eq!(m.get("nr_throttled"), Some(&5));
+        assert_eq!(m.get("throttled_usec"), Some(&123456));
+        assert_eq!(m.get("nr_periods"), Some(&100));
+    }
+
+    #[test]
+    fn test_parse_cgroup_scalar() {
+        assert_eq!(parse_cgroup_scalar("1048576\n"), Some(1048576));
+        assert_eq!(parse_cgroup_scalar("max\n"), None);
+        assert_eq!(parse_cgroup_scalar("garbage"), None);
+    }
+
+    #[test]
+    fn test_parse_pressure_file() {
+        let fixture = "some avg10=1.50 avg60=0.50 avg300=0.10 total=12345\n\
+                       full avg10=0.20 avg60=0.10 avg300=0.00 total=99\n";
+        let (some, full) = parse_pressure_file(fixture);
+        let some = some.unwrap();
+        assert_eq!(some.avg10, 1.50);
+        assert_eq!(some.total_us, 12345);
+        let full = full.unwrap();
+        assert_eq!(full.total_us, 99);
+        // cpu.pressure has no `full` line.
+        let (s, f) = parse_pressure_file("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n");
+        assert!(s.is_some());
+        assert!(f.is_none());
+    }
+
+    #[test]
+    fn test_map_cgroup_throttle_oom_and_pct() {
+        let c = CgroupSample {
+            path: "/system.slice/app.service".to_string(),
+            cpu_nr_throttled: Some(5),
+            cpu_throttled_usec: Some(123456),
+            memory_current: Some(50),
+            memory_max: Some(200),
+            memory_oom_kills: Some(2),
+            memory_pressure_full: Some(PressureSample {
+                avg10: 9.0,
+                total_us: 7,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let m = map_cgroup(&c);
+        assert_eq!(
+            m.iter()
+                .find(|x| x.metric == "cgroup/cpu/nr_throttled")
+                .unwrap()
+                .value,
+            TelemetryValue::Counter(5)
+        );
+        assert_eq!(
+            m.iter()
+                .find(|x| x.metric == "cgroup/memory/oom_kills_total")
+                .unwrap()
+                .value,
+            TelemetryValue::Counter(2)
+        );
+        // used_percent = 50/200 = 25%.
+        assert_eq!(
+            m.iter()
+                .find(|x| x.metric == "cgroup/memory/used_percent")
+                .unwrap()
+                .value,
+            TelemetryValue::Gauge(25.0)
+        );
+        assert!(
+            m.iter()
+                .any(|x| x.metric == "cgroup/memory/pressure/full_total_us")
+        );
+        // cgroup label is attached.
+        assert!(m.iter().all(|x| x
+            .labels
+            .iter()
+            .any(|(k, v)| *k == "cgroup" && v == "/system.slice/app.service")));
+    }
+
+    #[test]
+    fn test_map_cgroup_unlimited_memory_no_pct() {
+        // memory.max == "max" => memory_max None => no used_percent emitted.
+        let c = CgroupSample {
+            path: "/".to_string(),
+            memory_current: Some(100),
+            memory_max: None,
+            ..Default::default()
+        };
+        let m = map_cgroup(&c);
+        assert!(!m.iter().any(|x| x.metric == "cgroup/memory/used_percent"));
+        assert!(m.iter().any(|x| x.metric == "cgroup/memory/current"));
+    }
+
+    // --- G. thermal / power ----------------------------------------------
+
+    #[test]
+    fn test_rapl_watts_basic() {
+        // 1,000,000 uj over 1s = 1 J/s = 1 W.
+        assert_eq!(rapl_watts(0, 1_000_000, None, 1.0), Some(1.0));
+        // 2,000,000 uj over 2s = 1 W.
+        assert_eq!(rapl_watts(0, 2_000_000, None, 2.0), Some(1.0));
+    }
+
+    #[test]
+    fn test_rapl_watts_wraparound() {
+        // prev near max, cur small: (max-prev)+cur uj.
+        // (1000-900)+100 = 200 uj over 1s = 0.0002 W.
+        let w = rapl_watts(900, 100, Some(1000), 1.0).unwrap();
+        assert!((w - 0.0002).abs() < 1e-9);
+        // No max known on wrap => None.
+        assert_eq!(rapl_watts(900, 100, None, 1.0), None);
+    }
+
+    #[test]
+    fn test_rapl_watts_guards() {
+        assert_eq!(rapl_watts(0, 100, None, 0.0), None);
+        assert_eq!(rapl_watts(0, 100, None, -1.0), None);
+    }
+
+    #[test]
+    fn test_map_power() {
+        let s = PowerSample {
+            rapl_watts: vec![("package-0".to_string(), "package-0".to_string(), 12.5)],
+            fans: vec![FanReading {
+                chip: "nct6798".to_string(),
+                label: "fan1".to_string(),
+                rpm: 1200.0,
+            }],
+            batteries: vec![BatteryReading {
+                name: "BAT0".to_string(),
+                capacity: Some(87.0),
+                status: Some("Discharging".to_string()),
+            }],
+            entropy_avail: Some(3500),
+        };
+        let m = map_power(&s);
+        assert_eq!(
+            m.iter()
+                .find(|x| x.metric == "power/rapl/package-0/watts")
+                .unwrap()
+                .value,
+            TelemetryValue::Gauge(12.5)
+        );
+        assert_eq!(
+            m.iter()
+                .find(|x| x.metric == "sensors/nct6798/fan1/rpm")
+                .unwrap()
+                .value,
+            TelemetryValue::Gauge(1200.0)
+        );
+        assert_eq!(
+            m.iter()
+                .find(|x| x.metric == "battery/BAT0/capacity")
+                .unwrap()
+                .value,
+            TelemetryValue::Gauge(87.0)
+        );
+        assert_eq!(
+            m.iter()
+                .find(|x| x.metric == "battery/BAT0/status")
+                .unwrap()
+                .value,
+            TelemetryValue::Text("Discharging".to_string())
+        );
+        assert_eq!(
+            m.iter()
+                .find(|x| x.metric == "system/entropy_avail")
+                .unwrap()
+                .value,
+            TelemetryValue::Gauge(3500.0)
+        );
     }
 }
