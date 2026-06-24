@@ -385,6 +385,33 @@ fn test_sysinfo_depth_cards() {
     assert!(ui.find("System health").is_ok());
 }
 
+/// #46: netlink renders the IPsec/xfrm card and RTT-percentile socket lines.
+#[test]
+fn test_netlink_depth_cards() {
+    use zensight_common::TelemetryValue;
+
+    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let mut state = DeviceDetailState::new(device_id);
+    let mut put = |metric: &str, v: f64| {
+        state.update(zensight_common::TelemetryPoint {
+            timestamp: 0,
+            source: "gw01".to_string(),
+            protocol: Protocol::Netlink,
+            metric: metric.to_string(),
+            value: TelemetryValue::Gauge(v),
+            labels: HashMap::new(),
+        });
+    };
+    put("sockets/tcp/established", 10.0);
+    put("sockets/tcp/rtt_p95_us", 1234.0);
+    put("xfrm/sa/total", 4.0);
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    assert!(ui.find("IPsec / xfrm").is_ok());
+    assert!(ui.find("RTT p95 (us)").is_ok());
+}
+
 /// Test settings view renders correctly.
 #[test]
 fn test_settings_view() {
