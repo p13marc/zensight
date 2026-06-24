@@ -1786,10 +1786,32 @@ impl ZenSight {
             device.set_max_history(self.settings.max_history_value());
         }
 
-        // Update Zenoh config (will require restart to take effect)
-        self.zenoh_config.mode = self.settings.zenoh_mode.as_str().to_string();
-        self.zenoh_config.connect = self.settings.connect_endpoints();
-        self.zenoh_config.listen = self.settings.listen_endpoints();
+        // Update the Zenoh config. The live subscription is keyed on this config
+        // (`Subscription::run_with(zenoh_config, …)`), so changing it makes Iced
+        // tear down the current session and reconnect with the new settings — no
+        // restart needed. We surface that to the user instead of doing it
+        // silently (#38).
+        let new_mode = self.settings.zenoh_mode.as_str().to_string();
+        let new_connect = self.settings.connect_endpoints();
+        let new_listen = self.settings.listen_endpoints();
+        let connection_changed = self.zenoh_config.mode != new_mode
+            || self.zenoh_config.connect != new_connect
+            || self.zenoh_config.listen != new_listen;
+        self.zenoh_config.mode = new_mode;
+        self.zenoh_config.connect = new_connect;
+        self.zenoh_config.listen = new_listen;
+
+        if connection_changed && !self.demo_mode {
+            // Reflect the impending reconnect immediately; the restarted
+            // subscription will drive Connecting → Connected/Disconnected.
+            self.dashboard.connection_state =
+                crate::view::dashboard::ConnectionState::Connecting;
+            self.dashboard.connected = false;
+            self.toasts.push(
+                ToastSeverity::Info,
+                "Reconnecting to Zenoh with new connection settings…",
+            );
+        }
 
         // Persist settings to disk (include all app state)
         let mut persistent = PersistentSettings::from_state(&self.settings);
