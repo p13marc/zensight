@@ -1667,9 +1667,9 @@ checksum = "8bf7cc16383c4b8d58b9905a8509f02926ce3058053c056376248d958c9df1e8"
 
 [[package]]
 name = "flowscope"
-version = "0.16.0"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "231f44afaf87d9bac388e40607f95b3931a4fe02de8054ff2d830efe3126a694"
+checksum = "2212e001e53c94b693beecedbba7f2adec3762ebddd3e9958b1018a8bfcdc8b8"
 dependencies = [
  "ahash",
  "arrayvec",
@@ -1679,8 +1679,11 @@ dependencies = [
  "etherparse",
  "hex",
  "httparse",
+ "kerberos-parser",
+ "ldap-parser",
  "lru 0.16.3",
  "md-5",
+ "quic-parser",
  "serde",
  "sha2",
  "simple-dns",
@@ -2934,6 +2937,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kerberos-parser"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b3b09400a16aeeb6a39dcfcd74f8e879e1327cabed1a13203ae5b0237eb8a87"
+dependencies = [
+ "der-parser",
+ "nom 7.1.3",
+ "rusticata-macros",
+]
+
+[[package]]
 name = "keyed-set"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2987,6 +3001,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 dependencies = [
  "spin 0.9.8",
+]
+
+[[package]]
+name = "ldap-parser"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db3356a3bd19e90fdc8b29f32c48e21b1bb1c5d129c1df7000ce3071c6f9e6b1"
+dependencies = [
+ "asn1-rs 0.7.1",
+ "rusticata-macros",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -3451,8 +3476,8 @@ dependencies = [
 
 [[package]]
 name = "netring"
-version = "0.25.0"
-source = "git+https://github.com/p13marc/netring#4bb91d7cf04cc7c9d4919b61ea733a854bba34ee"
+version = "0.26.0"
+source = "git+https://github.com/p13marc/netring#57290db7c4bd281231cd0c97d76f9cb460077171"
 dependencies = [
  "ahash",
  "arrayvec",
@@ -4798,6 +4823,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52c2c1bf36ddb1a1c396b3601a3cec27c2462e45f07c386894ec3ccf5332bd16"
 dependencies = [
  "prost",
+]
+
+[[package]]
+name = "quic-parser"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "528d91b77f6062ecd2cff9d27b9b39fa3e14447260b076b761358d95ff174a39"
+dependencies = [
+ "aes",
+ "ring",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
