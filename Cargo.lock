@@ -1683,9 +1683,9 @@ checksum = "8bf7cc16383c4b8d58b9905a8509f02926ce3058053c056376248d958c9df1e8"
 
 [[package]]
 name = "flowscope"
-version = "0.18.0"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2212e001e53c94b693beecedbba7f2adec3762ebddd3e9958b1018a8bfcdc8b8"
+checksum = "3e195b5530b4dbe7c2e7bf06130f25c83781f4748e5fec3ebdce665ab9e9f574"
 dependencies = [
  "ahash",
  "arrayvec",
@@ -3504,10 +3504,12 @@ dependencies = [
 
 [[package]]
 name = "netring"
-version = "0.26.0"
-source = "git+https://github.com/p13marc/netring#57290db7c4bd281231cd0c97d76f9cb460077171"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "124cdfb56a6d73d880b7515dede91bdde374a5526308eadad45b3471a956afc3"
 dependencies = [
  "ahash",
+ "arc-swap",
  "arrayvec",
  "bitflags 2.11.0",
  "bytes",
