@@ -15,7 +15,8 @@
 use std::sync::Arc;
 
 use nlink::netlink::{
-    Connection, Route, SockDiag, Xfrm,
+    Connection, Nftables, Route, SockDiag, Xfrm,
+    nftables::types::Family as NftFamily,
     types::addr::Scope,
     xfrm::{IpsecProtocol, SecurityAssociation, XfrmMode},
 };
@@ -23,8 +24,8 @@ use nlink::sockdiag::{SocketFilter, SocketInfo, SocketState, TcpState};
 
 use crate::events::EventState;
 use crate::map::{
-    AddressRecord, NeighborRecord, RouteRecord, SocketRecord, SocketSelector, TcRecord,
-    XfrmSaRecord,
+    AddressRecord, NeighborRecord, NftRuleRecord, RouteRecord, SocketRecord, SocketSelector,
+    TcRecord, XfrmSaRecord,
 };
 
 const AF_INET: u8 = 2;
@@ -45,6 +46,7 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
     };
     let sockdiag = Connection::<SockDiag>::new().ok();
     let xfrm = Connection::<Xfrm>::new().ok();
+    let nft = Connection::<Nftables>::new().ok();
 
     let routes_key = format!("{key_prefix}/@/query/routes");
     let neighbors_key = format!("{key_prefix}/@/query/neighbors");
@@ -53,6 +55,7 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
     let events_key = format!("{key_prefix}/@/query/events");
     let tc_key = format!("{key_prefix}/@/query/tc");
     let xfrm_key = format!("{key_prefix}/@/query/xfrm");
+    let nft_key = format!("{key_prefix}/@/query/nft");
 
     let routes_q = match session.declare_queryable(&routes_key).await {
         Ok(q) => q,
@@ -103,6 +106,13 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
             return;
         }
     };
+    let nft_q = match session.declare_queryable(&nft_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %nft_key, "query: declare nft failed");
+            return;
+        }
+    };
     tracing::info!(
         routes = %routes_key, neighbors = %neighbors_key, sockets = %sockets_key,
         addresses = %addresses_key, events = %events_key,
@@ -148,6 +158,14 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
                 let Ok(query) = q else { return };
                 let records = match &xfrm {
                     Some(x) => collect_xfrm(x).await,
+                    None => Vec::new(),
+                };
+                reply_json(&query, &records).await;
+            }
+            q = nft_q.recv_async() => {
+                let Ok(query) = q else { return };
+                let records = match &nft {
+                    Some(n) => collect_nft(n).await,
                     None => Vec::new(),
                 };
                 reply_json(&query, &records).await;
@@ -219,6 +237,46 @@ async fn collect_neighbors(conn: &Connection<Route>) -> Vec<NeighborRecord> {
             is_router: nb.is_router(),
         })
         .collect()
+}
+
+/// Build the full nftables rule inventory (#14): every rule across every table,
+/// with table/chain/family/handle and any comment. Served via `@/query/nft`.
+async fn collect_nft(conn: &Connection<Nftables>) -> Vec<NftRuleRecord> {
+    let tables = match conn.list_tables().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "query: nft list_tables failed");
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for t in &tables {
+        let family = nft_family_label(t.family);
+        if let Ok(rules) = conn.list_rules(&t.name, t.family).await {
+            for r in &rules {
+                out.push(NftRuleRecord {
+                    family: family.to_string(),
+                    table: r.table.clone(),
+                    chain: r.chain.clone(),
+                    handle: r.handle,
+                    comment: r.comment.clone(),
+                });
+            }
+        }
+    }
+    out
+}
+
+fn nft_family_label(f: NftFamily) -> &'static str {
+    match f {
+        NftFamily::Ip => "ip",
+        NftFamily::Ip6 => "ip6",
+        NftFamily::Inet => "inet",
+        NftFamily::Arp => "arp",
+        NftFamily::Bridge => "bridge",
+        NftFamily::Netdev => "netdev",
+        _ => "other",
+    }
 }
 
 /// Build the per-SA IPsec detail (#13). Each record carries src/dst/spi/proto/

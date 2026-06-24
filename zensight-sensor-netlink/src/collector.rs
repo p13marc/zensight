@@ -10,13 +10,14 @@ use tokio_stream::StreamExt;
 use nlink::netlink::diagnostics::{Bottleneck, DiagnosticReport, Diagnostics, Severity};
 use nlink::netlink::genl::ethtool::Duplex;
 use nlink::netlink::{
-    Connection, Ethtool, Netfilter, Route, RtnetlinkGroup, SockDiag, Wireguard, Xfrm,
+    Connection, Ethtool, Netfilter, Nftables, Route, RtnetlinkGroup, SockDiag, Wireguard, Xfrm,
     genl::wireguard::WgPeer,
     messages::NeighborMessage,
     messages::RouteMessage,
     messages::TcMessage,
     neigh::State as NeighborState,
     netfilter::{ConntrackEntry, IpProtocol},
+    nftables::types::Family as NftFamily,
     types::addr::Scope,
     xfrm::{SecurityAssociation, XfrmMode},
 };
@@ -30,8 +31,8 @@ use zensight_sensor_core::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
 use crate::config::{CollectConfig, NetlinkConfig};
 use crate::map::{
     self, AddrEntry, AddressSummary, ConntrackSummary, DiagnosticsSummary, DuplexKind,
-    EthtoolSample, IfaceSample, NeighborSummary, RouteSummary, SocketCounts, TcQdiscSample,
-    XfrmSaEntry, XfrmSummary,
+    EthtoolSample, IfaceSample, NeighborSummary, NftSummary, NftTableSample, RouteSummary,
+    SocketCounts, TcQdiscSample, XfrmSaEntry, XfrmSummary,
 };
 
 const AF_INET: u8 = 2;
@@ -144,6 +145,9 @@ pub struct Collector {
     /// Nudged whenever a sentinel-relevant event arrives so the sentinel
     /// re-evaluates instantly (~0s) instead of at its next sweep tick (#8).
     sentinel_wake: Arc<Notify>,
+    /// Warn-once latch for the XFRM SA dump (EPERM where the host gates it):
+    /// avoids a WARN every poll tick for an expected recurring failure (P05 §4).
+    warned_xfrm: std::sync::atomic::AtomicBool,
 }
 
 impl Collector {
@@ -171,6 +175,7 @@ impl Collector {
             health,
             event_state,
             sentinel_wake: Arc::new(Notify::new()),
+            warned_xfrm: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -227,6 +232,13 @@ impl Collector {
                 None
             }
         };
+
+        // nftables (#14): listing rules typically needs CAP_NET_ADMIN. Open it
+        // lazily so the sensor still runs unprivileged (nft telemetry stays absent).
+        let nftables = Connection::<Nftables>::new().ok();
+        if self.config.collect.nftables && nftables.is_none() {
+            tracing::warn!("nftables unavailable (needs CAP_NET_ADMIN); disabled");
+        }
 
         // Conntrack needs CAP_NET_ADMIN; open it lazily so the sensor still runs
         // unprivileged (conntrack telemetry just stays absent).
@@ -345,6 +357,11 @@ impl Collector {
                 && let Some(x) = &xfrm
             {
                 self.poll_xfrm(x).await;
+            }
+            if collect.nftables
+                && let Some(nft) = &nftables
+            {
+                self.poll_nftables(nft).await;
             }
             if collect.events {
                 // Publish the cumulative event counters each tick (the per-event
@@ -599,7 +616,13 @@ impl Collector {
         let sas = match conn.get_security_associations().await {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(error = %e, "get_security_associations failed");
+                // Warn-once: on hosts that gate the SA dump this fails every tick.
+                if !self
+                    .warned_xfrm
+                    .swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    tracing::warn!(error = %e, "get_security_associations failed; XFRM disabled (warn-once)");
+                }
                 return;
             }
         };
@@ -615,6 +638,50 @@ impl Collector {
         let entries: Vec<XfrmSaEntry> = sas.iter().map(xfrm_sa_entry).collect();
         let summary = aggregate_xfrm(&entries, policy_total);
         for point in map::xfrm_points(&self.host, &summary) {
+            self.publish(&point).await;
+        }
+    }
+
+    /// Poll nftables (#14): per-table chain/rule counts + host totals — firewall
+    /// ruleset shape / policy-drift visibility. Full inventory served on demand
+    /// via `@/query/nft`. Graceful on failure / empty ruleset.
+    async fn poll_nftables(&self, conn: &Connection<Nftables>) {
+        let tables = match conn.list_tables().await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "nftables list_tables failed");
+                return;
+            }
+        };
+        if tables.is_empty() {
+            return;
+        }
+        let chains = conn.list_chains().await.unwrap_or_default();
+        let mut summary = NftSummary {
+            tables_total: tables.len() as u64,
+            ..Default::default()
+        };
+        for t in &tables {
+            let family = nft_family_label(t.family);
+            let chain_count = chains
+                .iter()
+                .filter(|c| c.table == t.name && c.family == t.family)
+                .count() as u64;
+            let rule_count = conn
+                .list_rules(&t.name, t.family)
+                .await
+                .map(|r| r.len() as u64)
+                .unwrap_or(0);
+            summary.chains_total += chain_count;
+            summary.rules_total += rule_count;
+            summary.tables.push(NftTableSample {
+                family: family.to_string(),
+                table: t.name.clone(),
+                chains: chain_count,
+                rules: rule_count,
+            });
+        }
+        for point in map::nft_points(&self.host, &summary) {
             self.publish(&point).await;
         }
     }
@@ -848,6 +915,20 @@ pub fn aggregate_addresses(entries: &[AddrEntry]) -> AddressSummary {
         }
     }
     a
+}
+
+/// Stable lowercase label for an nftables address family (#14).
+fn nft_family_label(f: NftFamily) -> &'static str {
+    match f {
+        NftFamily::Ip => "ip",
+        NftFamily::Ip6 => "ip6",
+        NftFamily::Inet => "inet",
+        NftFamily::Arp => "arp",
+        NftFamily::Bridge => "bridge",
+        NftFamily::Netdev => "netdev",
+        // `Family` is #[non_exhaustive] upstream.
+        _ => "other",
+    }
 }
 
 /// Decode an XFRM [`SecurityAssociation`] into the pure [`XfrmSaEntry`] (#13).

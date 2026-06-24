@@ -850,6 +850,63 @@ pub struct XfrmSaRecord {
     pub packets: u64,
 }
 
+// ---------------------------------------------------------------------------
+// nftables rule counters (issue #14): per-table chain/rule counts streamed;
+// full table/chain/rule inventory served via `@/query/nft`.
+//
+// NOTE: the pinned nlink `RuleInfo` exposes no *decoded* per-rule packet/byte
+// counters (only the raw expression bytes), so the streamed signal is ruleset
+// shape (counts) — firewall policy-drift / ruleset-size visibility — rather than
+// per-rule traffic. Per-rule traffic would require decoding the counter
+// expression from `expression_bytes`, deferred.
+// ---------------------------------------------------------------------------
+
+/// One nftables table's shape (nlink-free), pure input to [`nft_points`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NftTableSample {
+    pub family: String,
+    pub table: String,
+    pub chains: u64,
+    pub rules: u64,
+}
+
+/// Host-level nftables summary across all tables.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NftSummary {
+    pub tables: Vec<NftTableSample>,
+    pub tables_total: u64,
+    pub chains_total: u64,
+    pub rules_total: u64,
+}
+
+/// Build telemetry points for the nftables summary (#14). Metric paths are
+/// `nft/{tables,chains,rules}_total` and per-table
+/// `nft/<family>/<table>/{chains,rules}`.
+pub fn nft_points(host: &str, s: &NftSummary) -> Vec<TelemetryPoint> {
+    let g = |metric: String, v: u64| point(host, metric, TelemetryValue::Gauge(v as f64));
+    let mut out = vec![
+        g("nft/tables_total".into(), s.tables_total),
+        g("nft/chains_total".into(), s.chains_total),
+        g("nft/rules_total".into(), s.rules_total),
+    ];
+    for t in &s.tables {
+        let pfx = format!("nft/{}/{}", t.family, t.table);
+        out.push(g(format!("{pfx}/chains"), t.chains));
+        out.push(g(format!("{pfx}/rules"), t.rules));
+    }
+    out
+}
+
+/// One nftables rule (served via `@/query/nft`). GUI mirrors this JSON shape.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NftRuleRecord {
+    pub family: String,
+    pub table: String,
+    pub chain: String,
+    pub handle: u64,
+    pub comment: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1336,5 +1393,37 @@ mod tests {
             TelemetryValue::Gauge(2.0)
         );
         assert_eq!(find("xfrm/policy/total").value, TelemetryValue::Gauge(4.0));
+    }
+
+    #[test]
+    fn nft_points_shape() {
+        let s = NftSummary {
+            tables: vec![
+                NftTableSample {
+                    family: "inet".into(),
+                    table: "filter".into(),
+                    chains: 3,
+                    rules: 12,
+                },
+                NftTableSample {
+                    family: "ip".into(),
+                    table: "nat".into(),
+                    chains: 2,
+                    rules: 4,
+                },
+            ],
+            tables_total: 2,
+            chains_total: 5,
+            rules_total: 16,
+        };
+        let pts = nft_points("h", &s);
+        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        assert_eq!(find("nft/tables_total").value, TelemetryValue::Gauge(2.0));
+        assert_eq!(find("nft/rules_total").value, TelemetryValue::Gauge(16.0));
+        assert_eq!(
+            find("nft/inet/filter/rules").value,
+            TelemetryValue::Gauge(12.0)
+        );
+        assert_eq!(find("nft/ip/nat/chains").value, TelemetryValue::Gauge(2.0));
     }
 }
