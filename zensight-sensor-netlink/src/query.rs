@@ -9,13 +9,24 @@
 //! - `zensight/netlink/@/query/routes`    → `Vec<RouteRecord>`
 //! - `zensight/netlink/@/query/neighbors` → `Vec<NeighborRecord>`
 //! - `zensight/netlink/@/query/sockets?state=&port=` → `Vec<SocketRecord>`
+//! - `zensight/netlink/@/query/addresses` → `Vec<AddressRecord>` (#10)
+//! - `zensight/netlink/@/query/events`    → `Vec<EventRecord>` (#8, recent ring)
 
 use std::sync::Arc;
 
-use nlink::netlink::{Connection, Route, SockDiag};
+use nlink::netlink::{
+    Connection, Nftables, Route, SockDiag, Xfrm,
+    nftables::types::Family as NftFamily,
+    types::addr::Scope,
+    xfrm::{IpsecProtocol, SecurityAssociation, XfrmMode},
+};
 use nlink::sockdiag::{SocketFilter, SocketInfo, SocketState, TcpState};
 
-use crate::map::{NeighborRecord, RouteRecord, SocketRecord, SocketSelector};
+use crate::events::EventState;
+use crate::map::{
+    AddressRecord, NeighborRecord, NftRuleRecord, RouteRecord, SocketRecord, SocketSelector,
+    TcRecord, XfrmSaRecord,
+};
 
 const AF_INET: u8 = 2;
 const AF_INET6: u8 = 10;
@@ -23,8 +34,9 @@ const AF_INET6: u8 = 10;
 /// Run the on-demand detail query channel until the session closes.
 ///
 /// `key_prefix` is the sensor's telemetry prefix (e.g. `zensight/netlink`); the
-/// queryables live under `<key_prefix>/@/query/<topic>`.
-pub async fn run(session: Arc<zenoh::Session>, key_prefix: String) {
+/// queryables live under `<key_prefix>/@/query/<topic>`. `events` is the shared
+/// real-time event ring (#8), served on `@/query/events`.
+pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: EventState) {
     let route = match Connection::<Route>::new() {
         Ok(c) => c,
         Err(e) => {
@@ -33,10 +45,17 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String) {
         }
     };
     let sockdiag = Connection::<SockDiag>::new().ok();
+    let xfrm = Connection::<Xfrm>::new().ok();
+    let nft = Connection::<Nftables>::new().ok();
 
     let routes_key = format!("{key_prefix}/@/query/routes");
     let neighbors_key = format!("{key_prefix}/@/query/neighbors");
     let sockets_key = format!("{key_prefix}/@/query/sockets");
+    let addresses_key = format!("{key_prefix}/@/query/addresses");
+    let events_key = format!("{key_prefix}/@/query/events");
+    let tc_key = format!("{key_prefix}/@/query/tc");
+    let xfrm_key = format!("{key_prefix}/@/query/xfrm");
+    let nft_key = format!("{key_prefix}/@/query/nft");
 
     let routes_q = match session.declare_queryable(&routes_key).await {
         Ok(q) => q,
@@ -59,8 +78,44 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String) {
             return;
         }
     };
+    let addresses_q = match session.declare_queryable(&addresses_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %addresses_key, "query: declare addresses failed");
+            return;
+        }
+    };
+    let events_q = match session.declare_queryable(&events_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %events_key, "query: declare events failed");
+            return;
+        }
+    };
+    let tc_q = match session.declare_queryable(&tc_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %tc_key, "query: declare tc failed");
+            return;
+        }
+    };
+    let xfrm_q = match session.declare_queryable(&xfrm_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %xfrm_key, "query: declare xfrm failed");
+            return;
+        }
+    };
+    let nft_q = match session.declare_queryable(&nft_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %nft_key, "query: declare nft failed");
+            return;
+        }
+    };
     tracing::info!(
         routes = %routes_key, neighbors = %neighbors_key, sockets = %sockets_key,
+        addresses = %addresses_key, events = %events_key,
         "on-demand detail query channel ready"
     );
 
@@ -81,6 +136,36 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String) {
                 let sel = SocketSelector::parse(query.parameters().as_str());
                 let records = match &sockdiag {
                     Some(sd) => collect_sockets(sd, &sel).await,
+                    None => Vec::new(),
+                };
+                reply_json(&query, &records).await;
+            }
+            q = addresses_q.recv_async() => {
+                let Ok(query) = q else { return };
+                let records = collect_addresses(&route).await;
+                reply_json(&query, &records).await;
+            }
+            q = events_q.recv_async() => {
+                let Ok(query) = q else { return };
+                reply_json(&query, &events.recent()).await;
+            }
+            q = tc_q.recv_async() => {
+                let Ok(query) = q else { return };
+                let records = collect_tc(&route).await;
+                reply_json(&query, &records).await;
+            }
+            q = xfrm_q.recv_async() => {
+                let Ok(query) = q else { return };
+                let records = match &xfrm {
+                    Some(x) => collect_xfrm(x).await,
+                    None => Vec::new(),
+                };
+                reply_json(&query, &records).await;
+            }
+            q = nft_q.recv_async() => {
+                let Ok(query) = q else { return };
+                let records = match &nft {
+                    Some(n) => collect_nft(n).await,
                     None => Vec::new(),
                 };
                 reply_json(&query, &records).await;
@@ -154,8 +239,182 @@ async fn collect_neighbors(conn: &Connection<Route>) -> Vec<NeighborRecord> {
         .collect()
 }
 
+/// Build the full nftables rule inventory (#14): every rule across every table,
+/// with table/chain/family/handle and any comment. Served via `@/query/nft`.
+async fn collect_nft(conn: &Connection<Nftables>) -> Vec<NftRuleRecord> {
+    let tables = match conn.list_tables().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "query: nft list_tables failed");
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for t in &tables {
+        let family = nft_family_label(t.family);
+        if let Ok(rules) = conn.list_rules(&t.name, t.family).await {
+            for r in &rules {
+                out.push(NftRuleRecord {
+                    family: family.to_string(),
+                    table: r.table.clone(),
+                    chain: r.chain.clone(),
+                    handle: r.handle,
+                    comment: r.comment.clone(),
+                });
+            }
+        }
+    }
+    out
+}
+
+fn nft_family_label(f: NftFamily) -> &'static str {
+    match f {
+        NftFamily::Ip => "ip",
+        NftFamily::Ip6 => "ip6",
+        NftFamily::Inet => "inet",
+        NftFamily::Arp => "arp",
+        NftFamily::Bridge => "bridge",
+        NftFamily::Netdev => "netdev",
+        _ => "other",
+    }
+}
+
+/// Build the per-SA IPsec detail (#13). Each record carries src/dst/spi/proto/
+/// mode/reqid + processed bytes/packets.
+async fn collect_xfrm(conn: &Connection<Xfrm>) -> Vec<XfrmSaRecord> {
+    let sas = match conn.get_security_associations().await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "query: get_security_associations failed");
+            return Vec::new();
+        }
+    };
+    sas.iter()
+        .map(|sa: &SecurityAssociation| XfrmSaRecord {
+            src: sa.src_addr.map(|a| a.to_string()),
+            dst: sa.dst_addr.map(|a| a.to_string()),
+            spi: sa.spi,
+            proto: ipsec_proto_label(&sa.protocol).to_string(),
+            mode: xfrm_mode_label(&sa.mode).to_string(),
+            reqid: sa.reqid,
+            bytes: sa.bytes,
+            packets: sa.packets,
+        })
+        .collect()
+}
+
+fn ipsec_proto_label(p: &IpsecProtocol) -> &'static str {
+    match p {
+        IpsecProtocol::Esp => "esp",
+        IpsecProtocol::Ah => "ah",
+        IpsecProtocol::Comp => "comp",
+        _ => "other",
+    }
+}
+
+fn xfrm_mode_label(m: &XfrmMode) -> &'static str {
+    match m {
+        XfrmMode::Transport => "transport",
+        XfrmMode::Tunnel => "tunnel",
+        XfrmMode::Beet => "beet",
+        // `XfrmMode` is #[non_exhaustive] upstream (also covers `Other`).
+        _ => "other",
+    }
+}
+
+/// Build the full TC tree (#12): every qdisc + class on every interface, with
+/// counters/backlog. Served on demand via `@/query/tc`.
+async fn collect_tc(conn: &Connection<Route>) -> Vec<TcRecord> {
+    let names: std::collections::HashMap<u32, String> = match conn.get_links().await {
+        Ok(links) => links
+            .into_iter()
+            .filter_map(|l| {
+                let n = l.name_or("?").to_string();
+                (n != "?").then_some((l.ifindex(), n))
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "query: tc get_links failed");
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    let mut push = |msgs: Vec<nlink::netlink::messages::TcMessage>, node: &str| {
+        for m in &msgs {
+            let iface = names
+                .get(&m.ifindex())
+                .cloned()
+                .unwrap_or_else(|| m.ifindex().to_string());
+            out.push(TcRecord {
+                iface,
+                node: node.to_string(),
+                kind: m.kind().map(|s| s.to_string()),
+                handle: m.handle_str(),
+                parent: m.parent_str(),
+                bytes: m.bytes(),
+                packets: m.packets(),
+                drops: m.drops() as u64,
+                overlimits: m.overlimits() as u64,
+                requeues: m.requeues() as u64,
+                backlog_bytes: m.backlog() as u64,
+                backlog_pkts: m.qlen() as u64,
+            });
+        }
+    };
+    if let Ok(q) = conn.get_qdiscs().await {
+        push(q, "qdisc");
+    }
+    if let Ok(c) = conn.get_classes().await {
+        push(c, "class");
+    }
+    out
+}
+
+/// Build the per-address detail (#10) from a live address dump. Each record
+/// carries family/ip/prefix/scope/label/ifindex — the GUI mirrors this shape.
+async fn collect_addresses(conn: &Connection<Route>) -> Vec<AddressRecord> {
+    let addrs = match conn.get_addresses().await {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(error = %e, "query: get_addresses failed");
+            return Vec::new();
+        }
+    };
+    addrs
+        .iter()
+        .map(|a| AddressRecord {
+            family: fam(a.family()),
+            ip: a.address().or_else(|| a.local()).map(|ip| ip.to_string()),
+            prefix_len: a.prefix_len(),
+            scope: scope_label(a.scope()).to_string(),
+            label: a.label().map(|s| s.to_string()),
+            ifindex: a.ifindex(),
+        })
+        .collect()
+}
+
+/// Lowercase label for an address scope (matches the iproute2 vocabulary).
+fn scope_label(scope: Scope) -> &'static str {
+    match scope {
+        Scope::Universe => "global",
+        Scope::Site => "site",
+        Scope::Link => "link",
+        Scope::Host => "host",
+        Scope::Nowhere => "nowhere",
+        // `Scope` is #[non_exhaustive] upstream.
+        _ => "other",
+    }
+}
+
 async fn collect_sockets(conn: &Connection<SockDiag>, sel: &SocketSelector) -> Vec<SocketRecord> {
-    let filter = SocketFilter::tcp().all_states().with_tcp_info().build();
+    // Mirror the streamed aggregate's extensions (#11) so the drill-down shows
+    // congestion algorithm / window and per-socket buffer sizes.
+    let filter = SocketFilter::tcp()
+        .all_states()
+        .with_tcp_info()
+        .with_mem_info()
+        .with_congestion()
+        .build();
     let socks = match conn.query(&filter).await {
         Ok(s) => s,
         Err(e) => {
@@ -169,10 +428,15 @@ async fn collect_sockets(conn: &Connection<SockDiag>, sel: &SocketSelector) -> V
             let SocketInfo::Inet(inet) = s else {
                 return None;
             };
-            let (rtt_us, retrans) = inet
+            let (rtt_us, retrans, snd_cwnd) = inet
                 .tcp_info
                 .as_ref()
-                .map(|ti| (ti.rtt, ti.retrans))
+                .map(|ti| (ti.rtt, ti.retrans, ti.snd_cwnd))
+                .unwrap_or((0, 0, 0));
+            let (snd_buf, rcv_buf) = inet
+                .mem_info
+                .as_ref()
+                .map(|m| (m.sndbuf, m.rcvbuf))
                 .unwrap_or((0, 0));
             let rec = SocketRecord {
                 local: inet.local.to_string(),
@@ -184,6 +448,10 @@ async fn collect_sockets(conn: &Connection<SockDiag>, sel: &SocketSelector) -> V
                 rtt_us,
                 retrans,
                 inode: inet.inode,
+                congestion: inet.congestion.clone(),
+                snd_cwnd,
+                snd_buf,
+                rcv_buf,
             };
             sel.matches(&rec).then_some(rec)
         })

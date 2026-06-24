@@ -886,6 +886,10 @@ fn test_netlink_specialized_view() {
                     rtt_us: 1234,
                     retrans: 0,
                     inode: 9999,
+                    congestion: Some("cubic".into()),
+                    snd_cwnd: 10,
+                    snd_buf: 16384,
+                    rcv_buf: 32768,
                 },
             ])),
         );

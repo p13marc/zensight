@@ -4,15 +4,25 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
+use tokio_stream::StreamExt;
 
 use nlink::netlink::diagnostics::{Bottleneck, DiagnosticReport, Diagnostics, Severity};
+use nlink::netlink::genl::ethtool::Duplex;
 use nlink::netlink::{
-    Connection, Netfilter, Route, SockDiag, Wireguard, genl::wireguard::WgPeer,
-    messages::NeighborMessage, messages::RouteMessage, neigh::State as NeighborState,
+    Connection, Ethtool, Netfilter, Nftables, Route, RtnetlinkGroup, SockDiag, Wireguard, Xfrm,
+    genl::wireguard::WgPeer,
+    messages::NeighborMessage,
+    messages::RouteMessage,
+    messages::TcMessage,
+    neigh::State as NeighborState,
     netfilter::{ConntrackEntry, IpProtocol},
+    nftables::types::Family as NftFamily,
+    types::addr::Scope,
+    xfrm::{SecurityAssociation, XfrmMode},
 };
 
+use crate::events::EventState;
 use crate::map::WgPeerView;
 use nlink::sockdiag::{SocketFilter, SocketInfo, SocketState, TcpState};
 use zensight_common::Format;
@@ -20,8 +30,9 @@ use zensight_sensor_core::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
 
 use crate::config::{CollectConfig, NetlinkConfig};
 use crate::map::{
-    self, ConntrackSummary, DiagnosticsSummary, IfaceSample, NeighborSummary, RouteSummary,
-    SocketCounts,
+    self, AddrEntry, AddressSummary, ConntrackSummary, DiagnosticsSummary, DuplexKind,
+    EthtoolSample, IfaceSample, NeighborSummary, NftSummary, NftTableSample, RouteSummary,
+    SocketCounts, TcQdiscSample, XfrmSaEntry, XfrmSummary,
 };
 
 const AF_INET: u8 = 2;
@@ -99,6 +110,12 @@ impl CollectHandle {
             "neighbors" => g.neighbors = enabled,
             "routes" => g.routes = enabled,
             "diagnostics" => g.diagnostics = enabled,
+            "events" => g.events = enabled,
+            "ethtool" => g.ethtool = enabled,
+            "addresses" => g.addresses = enabled,
+            "tc" => g.tc = enabled,
+            "xfrm" => g.xfrm = enabled,
+            "nftables" => g.nftables = enabled,
             "conntrack" => g.conntrack = enabled,
             _ => return false,
         }
@@ -122,6 +139,15 @@ pub struct Collector {
     /// Sensor health, updated each poll (poll latency, metrics published, host
     /// liveness) so the frontend's Sensors view shows real activity.
     health: Arc<zensight_sensor_core::SensorHealth>,
+    /// Real-time RTNETLINK event counters + recent-events ring (issue #8).
+    /// Shared with the `@/query/events` channel.
+    event_state: EventState,
+    /// Nudged whenever a sentinel-relevant event arrives so the sentinel
+    /// re-evaluates instantly (~0s) instead of at its next sweep tick (#8).
+    sentinel_wake: Arc<Notify>,
+    /// Warn-once latch for the XFRM SA dump (EPERM where the host gates it):
+    /// avoids a WARN every poll tick for an expected recurring failure (P05 §4).
+    warned_xfrm: std::sync::atomic::AtomicBool,
 }
 
 impl Collector {
@@ -139,6 +165,7 @@ impl Collector {
         );
         let collect = CollectHandle::new(config.collect.clone());
         let health = Arc::new(zensight_sensor_core::SensorHealth::new("netlink"));
+        let event_state = EventState::new(config.events.ring_capacity);
         Self {
             host,
             config,
@@ -146,7 +173,22 @@ impl Collector {
             metric_cache: MetricCache::new(),
             registry,
             health,
+            event_state,
+            sentinel_wake: Arc::new(Notify::new()),
+            warned_xfrm: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// A clonable handle to the real-time event state (counters + recent ring),
+    /// for the `@/query/events` channel.
+    pub fn event_state(&self) -> EventState {
+        self.event_state.clone()
+    }
+
+    /// A clonable handle to the sentinel-wake signal: the event task nudges this
+    /// on a relevant transition so the sentinel re-evaluates immediately (#8).
+    pub fn sentinel_wake(&self) -> Arc<Notify> {
+        self.sentinel_wake.clone()
     }
 
     /// Use the runner's shared health tracker (so updates reach the published
@@ -191,6 +233,13 @@ impl Collector {
             }
         };
 
+        // nftables (#14): listing rules typically needs CAP_NET_ADMIN. Open it
+        // lazily so the sensor still runs unprivileged (nft telemetry stays absent).
+        let nftables = Connection::<Nftables>::new().ok();
+        if self.config.collect.nftables && nftables.is_none() {
+            tracing::warn!("nftables unavailable (needs CAP_NET_ADMIN); disabled");
+        }
+
         // Conntrack needs CAP_NET_ADMIN; open it lazily so the sensor still runs
         // unprivileged (conntrack telemetry just stays absent).
         let conntrack = Connection::<Netfilter>::new().ok();
@@ -199,6 +248,55 @@ impl Collector {
         }
         // nf_conntrack_max is a one-shot read from procfs (capacity rarely changes).
         let conntrack_max = read_conntrack_max();
+
+        // ethtool genl handle (link speed/duplex, rings, pause, offloads, #9).
+        // Read is unprivileged; absence (no genl family) just disables it.
+        let ethtool = match Connection::<Ethtool>::new_async().await {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!(error = %e, "ethtool connection failed; ethtool telemetry disabled");
+                None
+            }
+        };
+
+        // XFRM/IPsec handle (#13). Read is unprivileged; absence (no xfrm) just
+        // disables it. Opened unconditionally so the toggle can flip at runtime.
+        let xfrm = match Connection::<Xfrm>::new() {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!(error = %e, "xfrm connection failed; IPsec telemetry disabled");
+                None
+            }
+        };
+
+        // Real-time RTNETLINK events (#8): a *dedicated* Route connection holds the
+        // events stream's request lock for its lifetime, so the poll loop's
+        // connection stays free for dumps. Subscribe + consume in a background task
+        // that folds events into `event_state` and nudges the sentinel.
+        if self.config.collect.events {
+            match Connection::<Route>::new() {
+                Ok(ev_conn) => {
+                    if let Err(e) = ev_conn.subscribe(&[
+                        RtnetlinkGroup::Link,
+                        RtnetlinkGroup::Ipv4Addr,
+                        RtnetlinkGroup::Ipv6Addr,
+                        RtnetlinkGroup::Ipv4Route,
+                        RtnetlinkGroup::Ipv6Route,
+                        RtnetlinkGroup::Neigh,
+                    ]) {
+                        tracing::warn!(error = %e, "event subscribe failed; events disabled");
+                    } else {
+                        let state = self.event_state.clone();
+                        let wake = self.sentinel_wake.clone();
+                        tokio::spawn(async move {
+                            run_event_stream(ev_conn, state, wake).await;
+                        });
+                        tracing::info!("real-time RTNETLINK event stream active");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "event connection failed; events disabled"),
+            }
+        }
 
         // WireGuard genl handle (needs the wireguard module; full peer data needs
         // CAP_NET_ADMIN). Only opened when interfaces are configured.
@@ -243,6 +341,34 @@ impl Collector {
             }
             if collect.routes {
                 self.poll_routes(&route).await;
+            }
+            if collect.addresses {
+                self.poll_addresses(&route).await;
+            }
+            if collect.ethtool
+                && let Some(et) = &ethtool
+            {
+                self.poll_ethtool(&route, et).await;
+            }
+            if collect.tc {
+                self.poll_tc(&route).await;
+            }
+            if collect.xfrm
+                && let Some(x) = &xfrm
+            {
+                self.poll_xfrm(x).await;
+            }
+            if collect.nftables
+                && let Some(nft) = &nftables
+            {
+                self.poll_nftables(nft).await;
+            }
+            if collect.events {
+                // Publish the cumulative event counters each tick (the per-event
+                // reaction happens live in the event task, off this loop).
+                for point in self.event_state.counter_points(&self.host) {
+                    self.publish(&point).await;
+                }
             }
             if collect.diagnostics
                 && let Some(diag) = &diagnostics
@@ -394,8 +520,231 @@ impl Collector {
         Ok(())
     }
 
+    /// Poll the IP address inventory (#10): stream a low-cardinality summary
+    /// (per-family + global counts); per-address detail is served on demand via
+    /// `@/query/addresses`. Graceful on failure (logs, emits nothing).
+    async fn poll_addresses(&self, conn: &Connection<Route>) {
+        let addrs = match conn.get_addresses().await {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!(error = %e, "get_addresses failed");
+                return;
+            }
+        };
+        let entries: Vec<AddrEntry> = addrs
+            .iter()
+            .map(|a| AddrEntry {
+                family: a.family(),
+                global: a.scope() == Scope::Universe,
+            })
+            .collect();
+        let summary = aggregate_addresses(&entries);
+        for point in map::address_points(&self.host, &summary) {
+            self.publish(&point).await;
+        }
+    }
+
+    /// Poll ethtool per interface (#9): negotiated speed/duplex/autoneg, ring
+    /// sizes, pause/flow-control, and a curated offload-feature set. Each family
+    /// is best-effort — a NIC/driver that does not expose one leaves it absent
+    /// (no misleading zeros). lo and filtered-out interfaces are skipped.
+    async fn poll_ethtool(&self, route: &Connection<Route>, et: &Connection<Ethtool>) {
+        let links = match route.get_links().await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(error = %e, "ethtool: get_links failed");
+                return;
+            }
+        };
+        for link in links {
+            let name = link.name_or("?").to_string();
+            if name == "?" || name == "lo" || !self.config.interfaces.should_include(&name) {
+                continue;
+            }
+            let sample = self.ethtool_sample(et, &name).await;
+            for point in map::ethtool_points(&self.host, &sample) {
+                self.publish(&point).await;
+            }
+        }
+    }
+
+    /// Build an [`EthtoolSample`] for one interface, querying each ethtool family
+    /// independently so a driver that lacks one still yields the others.
+    async fn ethtool_sample(&self, et: &Connection<Ethtool>, iface: &str) -> EthtoolSample {
+        let mut s = EthtoolSample {
+            iface: iface.to_string(),
+            ..Default::default()
+        };
+        if let Ok(ls) = et.get_link_state(iface).await {
+            s.carrier = Some(ls.link);
+        }
+        if let Ok(m) = et.get_link_modes(iface).await {
+            s.speed_mbps = m.speed.filter(|&v| v != 0 && v != u32::MAX);
+            s.duplex = m.duplex.map(duplex_kind);
+            s.autoneg = Some(m.autoneg);
+        }
+        if let Ok(r) = et.get_rings(iface).await {
+            s.rx_ring = r.rx;
+            s.tx_ring = r.tx;
+            s.rx_ring_max = r.rx_max;
+            s.tx_ring_max = r.tx_max;
+        }
+        if let Ok(p) = et.get_pause(iface).await {
+            s.pause_rx = p.rx;
+            s.pause_tx = p.tx;
+            s.pause_autoneg = p.autoneg;
+            if let Some(stats) = p.stats {
+                s.pause_rx_frames = stats.rx_frames;
+                s.pause_tx_frames = stats.tx_frames;
+            }
+        }
+        if let Ok(f) = et.get_features(iface).await {
+            // Curated, bounded set of the offloads operators care about (P2).
+            for feat in CURATED_FEATURES {
+                if f.is_changeable(feat) || f.is_active(feat) {
+                    s.features.push((feat.to_string(), f.is_active(feat)));
+                }
+            }
+        }
+        s
+    }
+
+    /// Poll XFRM/IPsec SA + policy health (#13): a low-cardinality summary (SA
+    /// counts by mode/proto + policy total). Per-SA detail is served on demand via
+    /// `@/query/xfrm`. Graceful on failure / no-IPsec.
+    async fn poll_xfrm(&self, conn: &Connection<Xfrm>) {
+        let sas = match conn.get_security_associations().await {
+            Ok(s) => s,
+            Err(e) => {
+                // Warn-once: on hosts that gate the SA dump this fails every tick.
+                if !self
+                    .warned_xfrm
+                    .swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    tracing::warn!(error = %e, "get_security_associations failed; XFRM disabled (warn-once)");
+                }
+                return;
+            }
+        };
+        let policy_total = conn
+            .get_security_policies()
+            .await
+            .map(|p| p.len() as u64)
+            .unwrap_or(0);
+        if sas.is_empty() && policy_total == 0 {
+            // No IPsec configured — emit nothing (avoid misleading all-zero SA).
+            return;
+        }
+        let entries: Vec<XfrmSaEntry> = sas.iter().map(xfrm_sa_entry).collect();
+        let summary = aggregate_xfrm(&entries, policy_total);
+        for point in map::xfrm_points(&self.host, &summary) {
+            self.publish(&point).await;
+        }
+    }
+
+    /// Poll nftables (#14): per-table chain/rule counts + host totals — firewall
+    /// ruleset shape / policy-drift visibility. Full inventory served on demand
+    /// via `@/query/nft`. Graceful on failure / empty ruleset.
+    async fn poll_nftables(&self, conn: &Connection<Nftables>) {
+        let tables = match conn.list_tables().await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "nftables list_tables failed");
+                return;
+            }
+        };
+        if tables.is_empty() {
+            return;
+        }
+        let chains = conn.list_chains().await.unwrap_or_default();
+        let mut summary = NftSummary {
+            tables_total: tables.len() as u64,
+            ..Default::default()
+        };
+        for t in &tables {
+            let family = nft_family_label(t.family);
+            let chain_count = chains
+                .iter()
+                .filter(|c| c.table == t.name && c.family == t.family)
+                .count() as u64;
+            let rule_count = conn
+                .list_rules(&t.name, t.family)
+                .await
+                .map(|r| r.len() as u64)
+                .unwrap_or(0);
+            summary.chains_total += chain_count;
+            summary.rules_total += rule_count;
+            summary.tables.push(NftTableSample {
+                family: family.to_string(),
+                table: t.name.clone(),
+                chains: chain_count,
+                rules: rule_count,
+            });
+        }
+        for point in map::nft_points(&self.host, &summary) {
+            self.publish(&point).await;
+        }
+    }
+
+    /// Poll TC/QoS qdisc stats (#12): per-(iface,qdisc) drops/overlimits/backlog.
+    /// Bounded by the TC hierarchy (one series set per qdisc). Interfaces are
+    /// resolved to names via a single `get_links` map; filtered/`lo` are skipped.
+    /// Full tree is served on demand via `@/query/tc`.
+    async fn poll_tc(&self, conn: &Connection<Route>) {
+        let qdiscs = match conn.get_qdiscs().await {
+            Ok(q) => q,
+            Err(e) => {
+                tracing::warn!(error = %e, "get_qdiscs failed");
+                return;
+            }
+        };
+        if qdiscs.is_empty() {
+            return;
+        }
+        let names = self.ifindex_names(conn).await;
+        for q in &qdiscs {
+            let Some(iface) = names.get(&q.ifindex()) else {
+                continue;
+            };
+            if iface == "lo" || !self.config.interfaces.should_include(iface) {
+                continue;
+            }
+            let sample = tc_qdisc_sample(q, iface);
+            for point in map::tc_points(&self.host, &sample) {
+                self.publish(&point).await;
+            }
+        }
+    }
+
+    /// Build an `ifindex -> name` map from a single `get_links` dump.
+    async fn ifindex_names(
+        &self,
+        conn: &Connection<Route>,
+    ) -> std::collections::HashMap<u32, String> {
+        match conn.get_links().await {
+            Ok(links) => links
+                .into_iter()
+                .filter_map(|l| {
+                    let name = l.name_or("?").to_string();
+                    (name != "?").then_some((l.ifindex(), name))
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "tc: get_links (for ifindex map) failed");
+                std::collections::HashMap::new()
+            }
+        }
+    }
+
     async fn poll_sockets(&self, conn: &Connection<SockDiag>) -> Result<(), String> {
-        let filter = SocketFilter::tcp().all_states().with_tcp_info().build();
+        // Request mem + congestion extensions (#11) on top of tcp_info so the
+        // aggregate carries per-algorithm counts and buffer totals.
+        let filter = SocketFilter::tcp()
+            .all_states()
+            .with_tcp_info()
+            .with_mem_info()
+            .with_congestion()
+            .build();
         let socks = conn
             .query(&filter)
             .await
@@ -425,6 +774,10 @@ pub fn aggregate_sockets(socks: &[SocketInfo]) -> SocketCounts {
     let mut rtts: Vec<u64> = Vec::new();
     for s in socks {
         let SocketInfo::Inet(inet) = s else { continue };
+        let established = matches!(
+            inet.state,
+            SocketState::Tcp(TcpState::Established) | SocketState::Established
+        );
         match inet.state {
             SocketState::Tcp(TcpState::Established) | SocketState::Established => {
                 c.established += 1
@@ -441,6 +794,15 @@ pub fn aggregate_sockets(socks: &[SocketInfo]) -> SocketCounts {
             if ti.rtt > 0 {
                 rtts.push(ti.rtt as u64);
             }
+        }
+        // Congestion algorithm — count only established sockets (a listener has no
+        // negotiated algorithm) so the by_cong breakdown matches `established`.
+        if established && let Some(algo) = &inet.congestion {
+            *c.by_cong.entry(algo.clone()).or_insert(0) += 1;
+        }
+        if let Some(mem) = &inet.mem_info {
+            c.snd_buf_total += mem.sndbuf as u64;
+            c.rcv_buf_total += mem.rcvbuf as u64;
         }
     }
     c.rtt_p50_us = percentile(&mut rtts, 50);
@@ -516,6 +878,144 @@ pub fn aggregate_conntrack(entries: &[ConntrackEntry]) -> ConntrackSummary {
     c
 }
 
+/// Curated, bounded set of ethtool offload features streamed as booleans (#9).
+/// Cardinality discipline (P2): a fixed handful rather than every kernel flag.
+const CURATED_FEATURES: &[&str] = &[
+    "tx-checksumming",
+    "rx-checksumming",
+    "tcp-segmentation-offload",
+    "generic-segmentation-offload",
+    "generic-receive-offload",
+    "scatter-gather",
+];
+
+/// Map nlink's `Duplex` into the nlink-free [`DuplexKind`] used by `map.rs`.
+fn duplex_kind(d: Duplex) -> DuplexKind {
+    match d {
+        Duplex::Half => DuplexKind::Half,
+        Duplex::Full => DuplexKind::Full,
+        // `Duplex` is #[non_exhaustive] upstream; treat anything else as unknown.
+        _ => DuplexKind::Unknown,
+    }
+}
+
+/// Aggregate per-address entries into an [`AddressSummary`] (#10). Pure;
+/// unit-tested. `family` is the `AF_*` byte (`AF_INET`/`AF_INET6`).
+pub fn aggregate_addresses(entries: &[AddrEntry]) -> AddressSummary {
+    let mut a = AddressSummary::default();
+    for e in entries {
+        a.total += 1;
+        if e.family == AF_INET {
+            a.ipv4_count += 1;
+        } else if e.family == AF_INET6 {
+            a.ipv6_count += 1;
+        }
+        if e.global {
+            a.global_count += 1;
+        }
+    }
+    a
+}
+
+/// Stable lowercase label for an nftables address family (#14).
+fn nft_family_label(f: NftFamily) -> &'static str {
+    match f {
+        NftFamily::Ip => "ip",
+        NftFamily::Ip6 => "ip6",
+        NftFamily::Inet => "inet",
+        NftFamily::Arp => "arp",
+        NftFamily::Bridge => "bridge",
+        NftFamily::Netdev => "netdev",
+        // `Family` is #[non_exhaustive] upstream.
+        _ => "other",
+    }
+}
+
+/// Decode an XFRM [`SecurityAssociation`] into the pure [`XfrmSaEntry`] (#13).
+fn xfrm_sa_entry(sa: &SecurityAssociation) -> XfrmSaEntry {
+    let mode = match sa.mode {
+        XfrmMode::Transport => "transport",
+        XfrmMode::Tunnel => "tunnel",
+        XfrmMode::Beet => "beet",
+        // `XfrmMode` is #[non_exhaustive] upstream (also covers `Other`).
+        _ => "other",
+    };
+    XfrmSaEntry {
+        mode: mode.to_string(),
+        proto: ipsec_proto_label(&sa.protocol).to_string(),
+    }
+}
+
+/// Stable lowercase label for an IPsec protocol (`#[non_exhaustive]` upstream).
+fn ipsec_proto_label(p: &nlink::netlink::xfrm::IpsecProtocol) -> &'static str {
+    use nlink::netlink::xfrm::IpsecProtocol;
+    match p {
+        IpsecProtocol::Esp => "esp",
+        IpsecProtocol::Ah => "ah",
+        IpsecProtocol::Comp => "comp",
+        _ => "other",
+    }
+}
+
+/// Aggregate XFRM SA entries + a policy count into an [`XfrmSummary`] (#13).
+/// Pure; unit-tested. (The pinned nlink SA carries no liveness "state" field, so
+/// we group by mode/proto — the dimensions the typed SA actually exposes.)
+pub fn aggregate_xfrm(entries: &[XfrmSaEntry], policy_total: u64) -> XfrmSummary {
+    let mut x = XfrmSummary {
+        policy_total,
+        ..Default::default()
+    };
+    for e in entries {
+        x.sa_total += 1;
+        *x.sa_by_mode.entry(e.mode.clone()).or_insert(0) += 1;
+        *x.sa_by_proto.entry(e.proto.clone()).or_insert(0) += 1;
+    }
+    x
+}
+
+/// Decode a TC qdisc [`TcMessage`] into the pure [`TcQdiscSample`] (#12).
+/// `backlog()` is the byte backlog; `qlen()` is the queued-packet count.
+fn tc_qdisc_sample(q: &TcMessage, iface: &str) -> TcQdiscSample {
+    TcQdiscSample {
+        iface: iface.to_string(),
+        kind: q.kind().unwrap_or("unknown").to_string(),
+        handle: q.handle_str(),
+        bytes: q.bytes(),
+        packets: q.packets(),
+        drops: q.drops() as u64,
+        overlimits: q.overlimits() as u64,
+        requeues: q.requeues() as u64,
+        backlog_bytes: q.backlog() as u64,
+        backlog_pkts: q.qlen() as u64,
+    }
+}
+
+/// Consume the real-time RTNETLINK event stream (#8): fold each event into the
+/// shared [`EventState`] (counters + recent ring) and, for sentinel-relevant
+/// transitions, nudge `wake` so the sentinel re-evaluates instantly.
+///
+/// `events()` borrows the connection for the stream's lifetime and holds its
+/// request lock — hence the dedicated connection. If the socket errors the task
+/// logs and exits; the periodic poll loop keeps publishing counters meanwhile.
+async fn run_event_stream(conn: Connection<Route>, state: EventState, wake: Arc<Notify>) {
+    let mut events = conn.events().await;
+    while let Some(item) = events.next().await {
+        match item {
+            Ok(ev) => {
+                state.observe(&ev);
+                if crate::events::is_sentinel_relevant(&ev) {
+                    wake.notify_one();
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "event stream error; stopping event task");
+                break;
+            }
+        }
+    }
+    tracing::info!("RTNETLINK event stream ended");
+}
+
 /// Decompose an nlink [`WgPeer`] into the pure [`WgPeerView`] (computes the
 /// handshake age relative to now and a short, stable peer id from the pubkey).
 fn wg_peer_view(peer: &WgPeer) -> WgPeerView {
@@ -541,8 +1041,7 @@ fn wg_peer_view(peer: &WgPeer) -> WgPeerView {
 /// Minimal standard-base64 of a 32-byte key (no external dep), for a short peer
 /// id label.
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b = [
@@ -602,7 +1101,30 @@ pub fn aggregate_diagnostics(
 
 #[cfg(test)]
 mod tests {
-    use super::percentile;
+    use super::{aggregate_addresses, percentile};
+    use crate::map::AddrEntry;
+
+    const AF_INET: u8 = 2;
+    const AF_INET6: u8 = 10;
+
+    #[test]
+    fn aggregate_addresses_counts_family_and_global() {
+        let e = |family, global| AddrEntry { family, global };
+        let entries = [
+            e(AF_INET, true),   // global v4
+            e(AF_INET, false),  // non-global v4
+            e(AF_INET6, true),  // global v6
+            e(AF_INET6, false), // link-local v6
+            e(99, true),        // unknown family: counted in total only
+        ];
+        let a = aggregate_addresses(&entries);
+        assert_eq!(a.total, 5);
+        assert_eq!(a.ipv4_count, 2);
+        assert_eq!(a.ipv6_count, 2);
+        assert_eq!(a.global_count, 3);
+        // Empty input yields an all-zero summary.
+        assert_eq!(aggregate_addresses(&[]), super::AddressSummary::default());
+    }
 
     #[test]
     fn percentile_nearest_rank() {
