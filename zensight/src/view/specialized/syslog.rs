@@ -5,9 +5,7 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{
-    Row, column, container, pick_list, row, scrollable, table, text, text_input,
-};
+use iced::widget::{Row, column, container, pick_list, row, scrollable, table, text, text_input};
 use iced::{Alignment, Element, Length, Theme};
 use iced_anim::widget::button;
 
@@ -16,10 +14,10 @@ use zensight_common::TelemetryValue;
 use crate::message::Message;
 use crate::view::components::card;
 use crate::view::device::DeviceDetailState;
-use crate::view::tokens::space;
 use crate::view::formatting::format_timestamp;
 use crate::view::icons::{self, IconSize};
 use crate::view::theme;
+use crate::view::tokens::space;
 
 /// Syslog severity levels (RFC 5424).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

@@ -6,6 +6,7 @@ pub mod app;
 pub mod demo;
 pub mod message;
 pub mod mock;
+pub mod store;
 pub mod subscription;
 pub mod view;
 

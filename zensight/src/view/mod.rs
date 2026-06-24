@@ -16,6 +16,6 @@ pub mod settings;
 pub mod shell;
 pub mod specialized;
 pub mod theme;
-pub mod tokens;
 pub mod toast;
+pub mod tokens;
 pub mod topology;

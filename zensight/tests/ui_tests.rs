@@ -671,7 +671,11 @@ fn test_expectations_view() {
     let mut ui = simulator(expectations_view(&state));
     let _ = ui.click("Add & Push");
     let messages: Vec<Message> = ui.into_messages().collect();
-    assert!(messages.iter().any(|m| matches!(m, Message::AddExpectation)));
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::AddExpectation))
+    );
 }
 
 /// Every specialized device view is wrapped with the shared nav header, so a
@@ -724,15 +728,9 @@ fn test_netlink_specialized_view() {
         ("diagnostics/bottleneck_score", TelemetryValue::Gauge(0.0)),
         ("diagnostics/issues/total", TelemetryValue::Gauge(0.0)),
         ("neighbors/total", TelemetryValue::Gauge(4.0)),
-        (
-            "neighbors/by_state/reachable",
-            TelemetryValue::Gauge(2.0),
-        ),
+        ("neighbors/by_state/reachable", TelemetryValue::Gauge(2.0)),
         ("routes/ipv4_count", TelemetryValue::Gauge(5.0)),
-        (
-            "routes/default_v4_present",
-            TelemetryValue::Boolean(true),
-        ),
+        ("routes/default_v4_present", TelemetryValue::Boolean(true)),
     ] {
         state.update(TelemetryPoint::new(
             "router01",
@@ -748,17 +746,19 @@ fn test_netlink_specialized_view() {
         use zensight::view::specialized::netlink_detail::{NetlinkDetailData, NetlinkDetailTopic};
         state.netlink_detail.apply(
             NetlinkDetailTopic::Sockets,
-            Ok(NetlinkDetailData::Sockets(vec![zensight_common::SocketRecord {
-                local: "10.0.0.1:5555".into(),
-                remote: "1.1.1.1:443".into(),
-                state: "established".into(),
-                uid: 1000,
-                recv_q: 0,
-                send_q: 0,
-                rtt_us: 1234,
-                retrans: 0,
-                inode: 9999,
-            }])),
+            Ok(NetlinkDetailData::Sockets(vec![
+                zensight_common::SocketRecord {
+                    local: "10.0.0.1:5555".into(),
+                    remote: "1.1.1.1:443".into(),
+                    state: "established".into(),
+                    uid: 1000,
+                    recv_q: 0,
+                    send_q: 0,
+                    rtt_us: 1234,
+                    retrans: 0,
+                    inode: 9999,
+                },
+            ])),
         );
     }
 
@@ -806,15 +806,17 @@ fn test_netring_specialized_view() {
     }
 
     // Pre-populate on-demand flow detail (as if @/query/flows had replied).
-    state.netring_detail.apply(Ok(vec![zensight_common::FlowRecord {
-        src: "10.0.0.1:54321".into(),
-        dst: "10.0.0.2:80".into(),
-        proto: "tcp".into(),
-        bytes: 694,
-        packets: 10,
-        duration_ms: 100,
-        reason: "fin".into(),
-    }]));
+    state
+        .netring_detail
+        .apply(Ok(vec![zensight_common::FlowRecord {
+            src: "10.0.0.1:54321".into(),
+            dst: "10.0.0.2:80".into(),
+            proto: "tcp".into(),
+            bytes: 694,
+            packets: 10,
+            duration_ms: 100,
+            reason: "fin".into(),
+        }]));
 
     // Loading state: button reads "Fetching…" while a fetch is in flight; an
     // error renders inline. Use a fresh state so the main assertions below still
@@ -899,11 +901,21 @@ fn test_netlink_netring_overviews_render() {
     let mut nl = DeviceState::new(nl_id.clone());
     nl.metrics.insert(
         "iface/eth0/up".into(),
-        TelemetryPoint::new("router01", Protocol::Netlink, "iface/eth0/up", TelemetryValue::Boolean(true)),
+        TelemetryPoint::new(
+            "router01",
+            Protocol::Netlink,
+            "iface/eth0/up",
+            TelemetryValue::Boolean(true),
+        ),
     );
     nl.metrics.insert(
         "sockets/tcp/established".into(),
-        TelemetryPoint::new("router01", Protocol::Netlink, "sockets/tcp/established", TelemetryValue::Gauge(7.0)),
+        TelemetryPoint::new(
+            "router01",
+            Protocol::Netlink,
+            "sockets/tcp/established",
+            TelemetryValue::Gauge(7.0),
+        ),
     );
     let nl_map: HashMap<&DeviceId, &DeviceState> = std::iter::once((&nl_id, &nl)).collect();
     let mut ui = simulator(netlink_overview(&nl_map));
@@ -915,11 +927,21 @@ fn test_netlink_netring_overviews_render() {
     let mut nr = DeviceState::new(nr_id.clone());
     nr.metrics.insert(
         "flow/active".into(),
-        TelemetryPoint::new("wiretap1", Protocol::Netring, "flow/active", TelemetryValue::Gauge(3.0)),
+        TelemetryPoint::new(
+            "wiretap1",
+            Protocol::Netring,
+            "flow/active",
+            TelemetryValue::Gauge(3.0),
+        ),
     );
     nr.metrics.insert(
         "tcp/resets_total".into(),
-        TelemetryPoint::new("wiretap1", Protocol::Netring, "tcp/resets_total", TelemetryValue::Counter(5)),
+        TelemetryPoint::new(
+            "wiretap1",
+            Protocol::Netring,
+            "tcp/resets_total",
+            TelemetryValue::Counter(5),
+        ),
     );
     let nr_map: HashMap<&DeviceId, &DeviceState> = std::iter::once((&nr_id, &nr)).collect();
     let mut ui = simulator(netring_overview(&nr_map));
@@ -1002,7 +1024,12 @@ fn test_netlink_conntrack_wireguard_sections() {
     let mut state = DeviceDetailState::new(device_id);
 
     // Without conntrack/wireguard metrics: sections absent.
-    state.update(TelemetryPoint::new("gw01", Protocol::Netlink, "iface/eth0/up", TelemetryValue::Boolean(true)));
+    state.update(TelemetryPoint::new(
+        "gw01",
+        Protocol::Netlink,
+        "iface/eth0/up",
+        TelemetryValue::Boolean(true),
+    ));
     {
         let mut ui = simulator(netlink_host_view(&state));
         assert!(ui.find("Conntrack").is_err());
@@ -1015,7 +1042,10 @@ fn test_netlink_conntrack_wireguard_sections() {
         ("conntrack/by_proto/tcp", TelemetryValue::Gauge(1000.0)),
         ("conntrack/utilization", TelemetryValue::Gauge(0.75)),
         ("wireguard/wg0/peers", TelemetryValue::Gauge(1.0)),
-        ("wireguard/wg0/AbCd1234/rx_bytes", TelemetryValue::Counter(1000)),
+        (
+            "wireguard/wg0/AbCd1234/rx_bytes",
+            TelemetryValue::Counter(1000),
+        ),
         ("wireguard/wg0/AbCd1234/up", TelemetryValue::Boolean(true)),
     ] {
         state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));

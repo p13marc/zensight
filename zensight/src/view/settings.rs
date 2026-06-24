@@ -683,7 +683,8 @@ fn render_actions(state: &SettingsState) -> Element<'_, Message> {
     }
 
     // Buttons
-    let mut save_button = button(text("Save Settings").size(14)).style(iced::widget::button::primary);
+    let mut save_button =
+        button(text("Save Settings").size(14)).style(iced::widget::button::primary);
     if validation.is_ok() {
         save_button = save_button.on_press(Message::SaveSettings);
     }

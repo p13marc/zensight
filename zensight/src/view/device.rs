@@ -64,6 +64,10 @@ pub struct DeviceDetailState {
     pub metrics: HashMap<String, TelemetryPoint>,
     /// Metric history (for graphing).
     pub history: HashMap<String, VecDeque<TelemetryPoint>>,
+    /// Pre-restart history seeded from the local tiered store (#22), keyed by
+    /// metric name. Merged ahead of live `history` when a chart is opened so a
+    /// device view opens pre-populated with trends that survived restart.
+    pub seeded_history: HashMap<String, Vec<crate::store::Sample>>,
     /// Maximum history size per metric.
     pub max_history: usize,
     /// Currently selected metric for the chart (if any).
@@ -95,6 +99,7 @@ impl DeviceDetailState {
             device_id: device_id.clone(),
             metrics: HashMap::new(),
             history: HashMap::new(),
+            seeded_history: HashMap::new(),
             max_history,
             selected_metric: None,
             chart: ChartState::new(format!("{}", device_id)),
@@ -158,13 +163,54 @@ impl DeviceDetailState {
         self.selected_metric = Some(metric_name.clone());
         self.chart = ChartState::new(&metric_name);
 
-        // Populate chart with existing history
-        if let Some(history) = self.history.get(&metric_name) {
-            let data_points: Vec<DataPoint> = history
-                .iter()
-                .filter_map(|p| DataPoint::from_telemetry(p.timestamp, &p.value))
-                .collect();
+        // Populate chart with stored history (pre-restart) + live history.
+        let data_points = self.chart_points_for(&metric_name);
+        if !data_points.is_empty() {
             self.chart.set_data(data_points);
+        }
+    }
+
+    /// Build chart points for a metric, merging restart-survived store samples
+    /// (older) ahead of the in-memory live history (newer), deduplicated by
+    /// timestamp so the live point wins where they overlap. #22.
+    fn chart_points_for(&self, metric_name: &str) -> Vec<DataPoint> {
+        let mut points: Vec<DataPoint> = Vec::new();
+        // Earliest live timestamp — store samples at/after it are superseded by live.
+        let live_start = self
+            .history
+            .get(metric_name)
+            .and_then(|h| h.front())
+            .map(|p| p.timestamp);
+        if let Some(seeded) = self.seeded_history.get(metric_name) {
+            for s in seeded {
+                if live_start.is_none_or(|start| s.ts < start) {
+                    points.push(DataPoint::new(s.ts, s.value));
+                }
+            }
+        }
+        if let Some(history) = self.history.get(metric_name) {
+            points.extend(
+                history
+                    .iter()
+                    .filter_map(|p| DataPoint::from_telemetry(p.timestamp, &p.value)),
+            );
+        }
+        points
+    }
+
+    /// Seed restart-survived history loaded from the store (#22). Stored per
+    /// metric; merged into a chart when that metric is selected.
+    pub fn seed_history(&mut self, series: Vec<(String, Vec<crate::store::Sample>)>) {
+        for (metric, samples) in series {
+            if samples.is_empty() {
+                continue;
+            }
+            self.seeded_history.insert(metric.clone(), samples);
+            // If this metric's chart is already open, refresh it with the seed.
+            if self.selected_metric.as_deref() == Some(metric.as_str()) {
+                let points = self.chart_points_for(&metric);
+                self.chart.set_data(points);
+            }
         }
     }
 
@@ -1065,5 +1111,101 @@ mod tests {
         assert!(state.apply_pending_filter());
         assert_eq!(state.metric_filter, "cpu");
         assert_eq!(state.sorted_metrics().len(), 1);
+    }
+
+    fn point_at(metric: &str, value: f64, ts: i64) -> TelemetryPoint {
+        TelemetryPoint {
+            timestamp: ts,
+            source: "test".to_string(),
+            protocol: Protocol::Snmp,
+            metric: metric.to_string(),
+            value: TelemetryValue::Gauge(value),
+            labels: std::collections::HashMap::new(),
+        }
+    }
+
+    fn device() -> DeviceDetailState {
+        DeviceDetailState::new(DeviceId {
+            protocol: Protocol::Snmp,
+            source: "test".to_string(),
+        })
+    }
+
+    #[test]
+    fn seeded_history_prepended_to_chart() {
+        let mut state = device();
+        // Live history starts at ts=5000.
+        state.update(point_at("cpu", 50.0, 5_000));
+        state.update(point_at("cpu", 55.0, 6_000));
+        // Pre-restart samples from the store, older than live.
+        state.seed_history(vec![(
+            "cpu".to_string(),
+            vec![
+                crate::store::Sample {
+                    ts: 1_000,
+                    value: 10.0,
+                },
+                crate::store::Sample {
+                    ts: 2_000,
+                    value: 20.0,
+                },
+            ],
+        )]);
+        state.select_metric("cpu".to_string());
+        let pts = state.chart.data();
+        // 2 seeded + 2 live, oldest first.
+        assert_eq!(pts.len(), 4);
+        assert_eq!(pts[0].timestamp, 1_000);
+        assert_eq!(pts[0].value, 10.0);
+        assert_eq!(pts[3].timestamp, 6_000);
+    }
+
+    #[test]
+    fn seeded_history_overlap_excluded_by_live() {
+        let mut state = device();
+        state.update(point_at("cpu", 50.0, 2_000));
+        // Seed includes a sample at the same ts as live (2000) and one after — both
+        // are at/after the live start so the live point wins (no duplicate at 2000).
+        state.seed_history(vec![(
+            "cpu".to_string(),
+            vec![
+                crate::store::Sample {
+                    ts: 1_000,
+                    value: 10.0,
+                },
+                crate::store::Sample {
+                    ts: 2_000,
+                    value: 99.0,
+                },
+                crate::store::Sample {
+                    ts: 3_000,
+                    value: 99.0,
+                },
+            ],
+        )]);
+        state.select_metric("cpu".to_string());
+        let pts = state.chart.data();
+        // Only the seeded ts=1000 (before live start) + the single live point.
+        assert_eq!(pts.len(), 2);
+        assert_eq!(pts[0].timestamp, 1_000);
+        assert_eq!(pts[1].timestamp, 2_000);
+        assert_eq!(pts[1].value, 50.0);
+    }
+
+    #[test]
+    fn seed_history_refreshes_open_chart() {
+        let mut state = device();
+        state.update(point_at("cpu", 50.0, 5_000));
+        state.select_metric("cpu".to_string());
+        assert_eq!(state.chart.data().len(), 1);
+        // Seeding after the chart is open refreshes it in place.
+        state.seed_history(vec![(
+            "cpu".to_string(),
+            vec![crate::store::Sample {
+                ts: 1_000,
+                value: 10.0,
+            }],
+        )]);
+        assert_eq!(state.chart.data().len(), 2);
     }
 }

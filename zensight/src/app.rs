@@ -13,6 +13,9 @@ use zensight_common::{
     TelemetryValue, ZenohConfig,
 };
 
+/// Flush the metric store to redb every this many 1s ticks (#22).
+const STORE_FLUSH_EVERY_TICKS: u32 = 15;
+
 /// Text input ID for dashboard search.
 pub static DASHBOARD_SEARCH_ID: LazyLock<Id> = LazyLock::new(|| Id::new("dashboard-search"));
 
@@ -119,6 +122,11 @@ pub struct ZenSight {
     session: Option<std::sync::Arc<zenoh::Session>>,
     /// Expectations authoring view state (netlink sentinel, Plan 08).
     expectations: crate::view::expectations::ExpectationsState,
+    /// Local tiered time-series store (hot ring + redb), Plan v3-04 §A / #22.
+    /// Telemetry writes through it; charts read from it so trends survive restart.
+    store: crate::store::MetricStore,
+    /// Ticks counted toward the next periodic store flush (flush every N ticks).
+    ticks_since_flush: u32,
 }
 
 impl ZenSight {
@@ -222,6 +230,14 @@ impl ZenSight {
             toasts: ToastState::default(),
             session: None,
             expectations: crate::view::expectations::ExpectationsState::default(),
+            // In demo mode keep history in-memory only (no disk churn / restart survival
+            // for synthetic data); otherwise open the persistent tiered store.
+            store: if demo_mode {
+                crate::store::MetricStore::new(crate::store::DEFAULT_HOT_CAPACITY, None)
+            } else {
+                crate::store::MetricStore::with_default_persistence()
+            },
+            ticks_since_flush: 0,
         };
 
         (app, Task::none())
@@ -379,7 +395,7 @@ impl ZenSight {
             }
 
             Message::SelectDevice(device_id) => {
-                self.select_device(device_id);
+                return self.select_device(device_id);
             }
 
             Message::ClearSelection => {
@@ -509,6 +525,38 @@ impl ZenSight {
 
             Message::Tick => {
                 self.handle_tick();
+                // Periodically flush downsampled buckets to redb off the UI thread
+                // (every ~15 ticks ≈ 15s). Never block update()/view() on disk I/O.
+                self.ticks_since_flush += 1;
+                if self.ticks_since_flush >= STORE_FLUSH_EVERY_TICKS {
+                    self.ticks_since_flush = 0;
+                    if let Some((store, batch)) = self.store.take_flush_batch() {
+                        return Task::future(async move {
+                            // Map redb's large error to a String inside the blocking
+                            // closure so the future's payload stays small.
+                            let res = tokio::task::spawn_blocking(move || {
+                                store.write_batch(&batch).map_err(|e| e.to_string())
+                            })
+                            .await
+                            .map_err(|e| e.to_string())
+                            .and_then(|r| r);
+                            Message::StoreFlushed(res)
+                        });
+                    }
+                }
+            }
+
+            Message::StoreFlushed(res) => match res {
+                Ok(n) => tracing::debug!(buckets = n, "Flushed metric history to store"),
+                Err(e) => tracing::warn!(error = %e, "Metric store flush failed"),
+            },
+
+            Message::DeviceHistoryLoaded(device_id, series) => {
+                if let Some(ref mut selected) = self.selected_device
+                    && selected.device_id == device_id
+                {
+                    selected.seed_history(series);
+                }
             }
 
             // Settings messages
@@ -772,7 +820,7 @@ impl ZenSight {
             Message::TopologyViewDeviceDetail(node_id) => {
                 // Navigate to device detail view
                 if let Some(device_id) = self.topology.node_to_device_id(&node_id) {
-                    self.select_device(device_id);
+                    return self.select_device(device_id);
                 }
             }
 
@@ -1437,6 +1485,10 @@ impl ZenSight {
 
     /// Handle incoming telemetry.
     fn handle_telemetry(&mut self, point: TelemetryPoint) {
+        // Write through to the local tiered store (O(1) hot-ring append; numeric
+        // values only). Charts/trends read back from here so history survives restart.
+        self.store.record(&point);
+
         let device_id = DeviceId::from_telemetry(&point);
 
         // Update dashboard device state
@@ -1482,15 +1534,51 @@ impl ZenSight {
         }
     }
 
-    /// Select a device to view in detail.
-    fn select_device(&mut self, device_id: DeviceId) {
+    /// Select a device to view in detail. Returns a task that pre-loads this
+    /// device's restart-survived history from the local store off the UI thread
+    /// (#22), so the detail chart opens pre-populated with persisted trends.
+    fn select_device(&mut self, device_id: DeviceId) -> Task<Message> {
         tracing::info!(device = %device_id, "Selected device");
         // We don't have the full TelemetryPoints in the dashboard,
         // so the detail view will populate as new data arrives
         let max_history = self.settings.max_history_value();
-        let detail_state = DeviceDetailState::with_max_history(device_id, max_history);
+        let detail_state = DeviceDetailState::with_max_history(device_id.clone(), max_history);
         self.selected_device = Some(detail_state);
         self.set_view(CurrentView::Device);
+
+        // Resolve the persisted metric ids for this device, then query the warm
+        // (minute) tier off-thread. Last 24h of minute buckets is plenty to
+        // pre-populate a chart without blocking the UI.
+        let Some(store) = self.store.persistent() else {
+            return Task::none();
+        };
+        let protocol = device_id.protocol.to_string();
+        let metric_ids = self.store.device_metric_ids(&protocol, &device_id.source);
+        if metric_ids.is_empty() {
+            return Task::none();
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let from = now - 24 * 3_600_000; // 24h window
+        Task::future(async move {
+            let series = tokio::task::spawn_blocking(move || {
+                metric_ids
+                    .into_iter()
+                    .filter_map(|(name, id)| {
+                        store
+                            .query(id, crate::store::Tier::Minute, from, now)
+                            .ok()
+                            .filter(|s| !s.is_empty())
+                            .map(|samples| (name, samples))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .unwrap_or_default();
+            Message::DeviceHistoryLoaded(device_id, series)
+        })
     }
 
     /// Save settings.

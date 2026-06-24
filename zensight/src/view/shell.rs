@@ -76,17 +76,18 @@ fn nav_items(current: CurrentView) -> Vec<NavItem> {
 
 /// The left navigation rail.
 fn nav_rail(current: CurrentView) -> Element<'static, Message> {
-    let mut col = column![
-        text("ZenSight").size(font::EMPHASIS),
-    ]
-    .spacing(space::SM)
-    .padding(space::SM)
-    .width(Length::Fixed(168.0));
+    let mut col = column![text("ZenSight").size(font::EMPHASIS),]
+        .spacing(space::SM)
+        .padding(space::SM)
+        .width(Length::Fixed(168.0));
 
     for item in nav_items(current) {
-        let content = row![(item.icon)(IconSize::Medium), text(item.label).size(font::BODY)]
-            .spacing(space::SM)
-            .align_y(Alignment::Center);
+        let content = row![
+            (item.icon)(IconSize::Medium),
+            text(item.label).size(font::BODY)
+        ]
+        .spacing(space::SM)
+        .align_y(Alignment::Center);
         let btn = button(content)
             .on_press(item.message)
             .width(Length::Fill)
@@ -150,17 +151,15 @@ fn connection_status<'a>(connection: ConnectionState) -> Element<'a, Message> {
         ConnectionState::Connecting => (icons::disconnected(IconSize::Small), "Connecting…"),
         ConnectionState::Disconnected => (icons::disconnected(IconSize::Small), "Disconnected"),
     };
-    let label = text(label)
-        .size(font::CAPTION)
-        .style(move |theme: &Theme| {
-            let c = theme::colors(theme);
-            let color = match connection {
-                ConnectionState::Connected => c.status_connected(),
-                ConnectionState::Connecting => c.warning(),
-                ConnectionState::Disconnected => c.status_disconnected(),
-            };
-            text::Style { color: Some(color) }
-        });
+    let label = text(label).size(font::CAPTION).style(move |theme: &Theme| {
+        let c = theme::colors(theme);
+        let color = match connection {
+            ConnectionState::Connected => c.status_connected(),
+            ConnectionState::Connecting => c.warning(),
+            ConnectionState::Disconnected => c.status_disconnected(),
+        };
+        text::Style { color: Some(color) }
+    });
     row![icon, label]
         .spacing(space::XS)
         .align_y(Alignment::Center)
@@ -180,9 +179,12 @@ fn top_bar<'a>(
     if alert_count > 0 {
         right = right.push(
             button(
-                row![icons::alert(IconSize::Small), text(format!("{alert_count}")).size(font::CAPTION)]
-                    .spacing(space::XS)
-                    .align_y(Alignment::Center),
+                row![
+                    icons::alert(IconSize::Small),
+                    text(format!("{alert_count}")).size(font::CAPTION)
+                ]
+                .spacing(space::XS)
+                .align_y(Alignment::Center),
             )
             .on_press(Message::OpenAlerts)
             .padding([space::XS, space::SM])

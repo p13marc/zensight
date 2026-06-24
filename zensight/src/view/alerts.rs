@@ -965,7 +965,9 @@ fn render_incident<'a>(
     if incident.unacked > 0 {
         let spacer = container(text("")).width(Length::Fill);
         let ack = button(text("Ack").size(font::CAPTION))
-            .on_press(Message::AcknowledgeExternalSource(incident.source.to_string()))
+            .on_press(Message::AcknowledgeExternalSource(
+                incident.source.to_string(),
+            ))
             .padding([space::XS, space::SM])
             .style(iced::widget::button::secondary);
         header = header.push(spacer).push(ack);
@@ -1289,7 +1291,14 @@ mod tests {
     fn external_grouping_and_acknowledge() {
         use zensight_common::{AlertKind, AlertSeverity};
         let mk = |source: &str, rule: &str, sev| {
-            SensorAlert::new(source, Protocol::Netlink, AlertKind::Anomaly, rule, sev, "s")
+            SensorAlert::new(
+                source,
+                Protocol::Netlink,
+                AlertKind::Anomaly,
+                rule,
+                sev,
+                "s",
+            )
         };
         let mut state = AlertsState::new();
         state.ingest_external(mk("hostA", "r1", AlertSeverity::Warning));

@@ -13,6 +13,14 @@ pub enum Message {
     /// Telemetry received from Zenoh subscription.
     TelemetryReceived(TelemetryPoint),
 
+    /// A periodic off-thread store flush finished. Payload is the number of
+    /// downsampled buckets persisted (or `Err` with a message on failure). #22.
+    StoreFlushed(Result<usize, String>),
+
+    /// Off-thread history pre-load for a device finished (#22): metric name ->
+    /// merged (warm/cold) samples to seed the device detail chart on open.
+    DeviceHistoryLoaded(DeviceId, Vec<(String, Vec<crate::store::Sample>)>),
+
     /// Sensor health snapshot received.
     HealthSnapshotReceived(HealthSnapshot),
 
