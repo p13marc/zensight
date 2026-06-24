@@ -1,6 +1,6 @@
 use zensight_common::{
-    Alert, CorrelationEntry, DeviceLiveness, ErrorReport, HealthSnapshot, Protocol, SensorInfo,
-    TelemetryPoint,
+    Alert, CorrelationEntry, DeviceLiveness, DeviceStatus, ErrorReport, HealthSnapshot, Protocol,
+    SensorInfo, TelemetryPoint,
 };
 
 use crate::view::alerts::{ComparisonOp, Severity};
@@ -146,6 +146,10 @@ pub enum Message {
 
     /// User toggled protocol filter.
     ToggleProtocolFilter(Protocol),
+
+    /// Filter the dashboard to a single device status (None = all), driven by
+    /// the fleet summary chips (#34). Clicking the active chip clears it.
+    SetStatusFilter(Option<DeviceStatus>),
 
     /// User changed device search filter.
     SetDeviceSearchFilter(String),

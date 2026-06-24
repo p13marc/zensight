@@ -453,6 +453,10 @@ impl ZenSight {
                 self.dashboard.toggle_filter(protocol);
             }
 
+            Message::SetStatusFilter(status) => {
+                self.dashboard.set_status_filter(status);
+            }
+
             Message::SetDeviceSearchFilter(filter) => {
                 self.dashboard.set_search_filter(filter);
             }
