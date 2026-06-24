@@ -221,7 +221,9 @@ impl SystemCollector {
     async fn collect_fd_inode(&self, timestamp: i64) -> usize {
         let mut count = 0;
         if let Some(fd) = crate::linux::collect_fd() {
-            count += self.publish_metrics(crate::map::map_fd(&fd), timestamp).await;
+            count += self
+                .publish_metrics(crate::map::map_fd(&fd), timestamp)
+                .await;
         }
         // Build the filtered mount list from the (already-discovered) disks.
         let mounts: Vec<(String, String)> = self
@@ -280,12 +282,11 @@ impl SystemCollector {
         let domains = crate::linux::collect_rapl();
         let mut rapl_watts = Vec::with_capacity(domains.len());
         for d in &domains {
-            if let Some((prev_uj, _)) = self.prev_rapl.get(&d.zone) {
-                if let Some(w) =
+            if let Some((prev_uj, _)) = self.prev_rapl.get(&d.zone)
+                && let Some(w) =
                     crate::map::rapl_watts(*prev_uj, d.energy_uj, d.max_energy_uj, interval)
-                {
-                    rapl_watts.push((d.zone.clone(), d.name.clone(), w));
-                }
+            {
+                rapl_watts.push((d.zone.clone(), d.name.clone(), w));
             }
             self.prev_rapl
                 .insert(d.zone.clone(), (d.energy_uj, d.max_energy_uj));
@@ -700,6 +701,32 @@ impl SystemCollector {
     async fn collect_processes(&mut self, timestamp: i64) -> usize {
         self.system.refresh_all();
         let mut count = 0;
+
+        // Small bounded aggregates always stream (the per-pid firehose is served
+        // on demand via the @/query/processes channel, not streamed — §F / P2).
+        let total = self.system.processes().len() as u64;
+        let zombie = self
+            .system
+            .processes()
+            .values()
+            .filter(|p| matches!(p.status(), sysinfo::ProcessStatus::Zombie))
+            .count() as u64;
+        self.publish(
+            "system/processes_total",
+            TelemetryValue::Gauge(total as f64),
+            timestamp,
+            HashMap::new(),
+        )
+        .await;
+        count += 1;
+        self.publish(
+            "system/processes_zombie",
+            TelemetryValue::Gauge(zombie as f64),
+            timestamp,
+            HashMap::new(),
+        )
+        .await;
+        count += 1;
 
         let top_n = self.config.collect.top_processes;
 

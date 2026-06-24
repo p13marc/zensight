@@ -164,6 +164,13 @@ pub struct CollectConfig {
     /// higher cardinality). Missing hardware/files => skipped gracefully.
     #[serde(default)]
     pub power: bool,
+
+    /// Serve the on-demand per-process detail query channel
+    /// (`@/query/processes?sort=cpu|mem|io&top=N`). Default on. The per-pid
+    /// firehose is served only on query (P2); the small `system/processes_*`
+    /// aggregates still stream via the `processes` collector.
+    #[serde(default = "default_true")]
+    pub process_query: bool,
 }
 
 impl Default for CollectConfig {
@@ -187,6 +194,7 @@ impl Default for CollectConfig {
             cgroups: false,
             cgroup_paths: Vec::new(),
             power: false,
+            process_query: true,
         }
     }
 }

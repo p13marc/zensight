@@ -96,11 +96,7 @@ pub struct PsiSample {
 pub fn map_pressure(psi: &PsiSample) -> Vec<Metric> {
     let mut out = Vec::new();
     let mut emit = |res: &'static str, scope: &'static str, p: &PressureSample| {
-        for (suffix, avg) in [
-            ("avg10", p.avg10),
-            ("avg60", p.avg60),
-            ("avg300", p.avg300),
-        ] {
+        for (suffix, avg) in [("avg10", p.avg10), ("avg60", p.avg60), ("avg300", p.avg300)] {
             out.push(
                 Metric::gauge(format!("pressure/{res}/{scope}_{suffix}"), avg)
                     .label("resource", res)
@@ -453,10 +449,10 @@ pub fn parse_flat_kv(content: &str) -> std::collections::HashMap<String, u64> {
     let mut map = std::collections::HashMap::new();
     for line in content.lines() {
         let mut parts = line.split_whitespace();
-        if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
-            if let Ok(n) = v.parse::<u64>() {
-                map.insert(k.to_string(), n);
-            }
+        if let (Some(k), Some(v)) = (parts.next(), parts.next())
+            && let Ok(n) = v.parse::<u64>()
+        {
+            map.insert(k.to_string(), n);
         }
     }
     map
@@ -523,13 +519,13 @@ pub fn map_cgroup(c: &CgroupSample) -> Vec<Metric> {
         out.push(label(Metric::gauge("cgroup/memory/max", v as f64)));
     }
     // A used-percent against the limit is the actionable container signal.
-    if let (Some(cur), Some(max)) = (c.memory_current, c.memory_max) {
-        if max > 0 {
-            out.push(label(Metric::gauge(
-                "cgroup/memory/used_percent",
-                (cur as f64 / max as f64) * 100.0,
-            )));
-        }
+    if let (Some(cur), Some(max)) = (c.memory_current, c.memory_max)
+        && max > 0
+    {
+        out.push(label(Metric::gauge(
+            "cgroup/memory/used_percent",
+            (cur as f64 / max as f64) * 100.0,
+        )));
     }
     if let Some(v) = c.memory_oom_kills {
         out.push(label(Metric::counter("cgroup/memory/oom_kills_total", v)));
@@ -619,7 +615,12 @@ pub struct PowerSample {
 /// Derive watts from two RAPL energy readings taken `interval_secs` apart,
 /// handling the counter wrap at `max_energy_uj`. Returns `None` if the interval
 /// is non-positive or the reading is the first for this domain.
-pub fn rapl_watts(prev_uj: u64, cur_uj: u64, max_uj: Option<u64>, interval_secs: f64) -> Option<f64> {
+pub fn rapl_watts(
+    prev_uj: u64,
+    cur_uj: u64,
+    max_uj: Option<u64>,
+    interval_secs: f64,
+) -> Option<f64> {
     if interval_secs <= 0.0 {
         return None;
     }
@@ -683,6 +684,72 @@ pub fn map_power(s: &PowerSample) -> Vec<Metric> {
         out.push(Metric::gauge("system/entropy_avail", e as f64));
     }
     out
+}
+
+// ===========================================================================
+// F. Per-process detail query channel (selector parsing)
+// ===========================================================================
+
+/// How to rank processes for the `@/query/processes` reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProcessSort {
+    /// By CPU usage, descending (default).
+    #[default]
+    Cpu,
+    /// By resident memory, descending.
+    Mem,
+    /// By total disk I/O (read+write bytes), descending.
+    Io,
+}
+
+/// Parsed `@/query/processes?sort=cpu|mem|io&top=N` selector. Bounds `top` so a
+/// caller cannot request an unbounded firehose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessSelector {
+    pub sort: ProcessSort,
+    pub top: usize,
+}
+
+impl Default for ProcessSelector {
+    fn default() -> Self {
+        Self {
+            sort: ProcessSort::Cpu,
+            top: 20,
+        }
+    }
+}
+
+impl ProcessSelector {
+    /// Maximum rows a single query may request (cardinality discipline, P2).
+    pub const MAX_TOP: usize = 200;
+
+    /// Parse the Zenoh query parameter string (`sort=cpu&top=10`). Unknown keys
+    /// are ignored; bad values fall back to defaults; `top` is clamped to
+    /// `1..=MAX_TOP`.
+    pub fn parse(params: &str) -> Self {
+        let mut sel = Self::default();
+        for pair in params.split('&') {
+            let Some((k, v)) = pair.split_once('=') else {
+                continue;
+            };
+            match k.trim() {
+                "sort" => {
+                    sel.sort = match v.trim().to_ascii_lowercase().as_str() {
+                        "mem" | "memory" => ProcessSort::Mem,
+                        "io" => ProcessSort::Io,
+                        _ => ProcessSort::Cpu,
+                    }
+                }
+                "top" => {
+                    if let Ok(n) = v.trim().parse::<usize>() {
+                        sel.top = n.clamp(1, Self::MAX_TOP);
+                    }
+                }
+                _ => {}
+            }
+        }
+        sel
+    }
 }
 
 #[cfg(test)]
@@ -841,10 +908,7 @@ mod tests {
 
     #[test]
     fn test_map_fd_percent() {
-        let m = map_fd(&FdStat {
-            used: 50,
-            max: 200,
-        });
+        let m = map_fd(&FdStat { used: 50, max: 200 });
         let pct = m
             .iter()
             .find(|x| x.metric == "system/file_descriptors_used_percent")
@@ -1002,10 +1066,11 @@ mod tests {
                 .any(|x| x.metric == "cgroup/memory/pressure/full_total_us")
         );
         // cgroup label is attached.
-        assert!(m.iter().all(|x| x
-            .labels
-            .iter()
-            .any(|(k, v)| *k == "cgroup" && v == "/system.slice/app.service")));
+        assert!(m.iter().all(|x| {
+            x.labels
+                .iter()
+                .any(|(k, v)| *k == "cgroup" && v == "/system.slice/app.service")
+        }));
     }
 
     #[test]
@@ -1100,5 +1165,36 @@ mod tests {
                 .value,
             TelemetryValue::Gauge(3500.0)
         );
+    }
+
+    // --- F. process selector ---------------------------------------------
+
+    #[test]
+    fn test_process_selector_defaults() {
+        let s = ProcessSelector::parse("");
+        assert_eq!(s.sort, ProcessSort::Cpu);
+        assert_eq!(s.top, 20);
+    }
+
+    #[test]
+    fn test_process_selector_parse() {
+        let s = ProcessSelector::parse("sort=mem&top=5");
+        assert_eq!(s.sort, ProcessSort::Mem);
+        assert_eq!(s.top, 5);
+        assert_eq!(ProcessSelector::parse("sort=io").sort, ProcessSort::Io);
+        assert_eq!(ProcessSelector::parse("sort=memory").sort, ProcessSort::Mem);
+        // Unknown sort falls back to cpu.
+        assert_eq!(ProcessSelector::parse("sort=bogus").sort, ProcessSort::Cpu);
+    }
+
+    #[test]
+    fn test_process_selector_clamps_top() {
+        assert_eq!(ProcessSelector::parse("top=0").top, 1);
+        assert_eq!(
+            ProcessSelector::parse("top=99999").top,
+            ProcessSelector::MAX_TOP
+        );
+        // Bad value keeps the default.
+        assert_eq!(ProcessSelector::parse("top=abc").top, 20);
     }
 }
