@@ -122,6 +122,30 @@ pub struct CollectConfig {
     /// Number of top processes to report (default: 10).
     #[serde(default = "default_top_processes")]
     pub top_processes: usize,
+
+    /// Collect Pressure Stall Information (`/proc/pressure/{cpu,memory,io}`).
+    /// Only available on Linux 4.20+ with `CONFIG_PSI`. The #1 saturation
+    /// signal (USE method). Absent file => skipped gracefully.
+    #[serde(default = "default_true")]
+    pub pressure: bool,
+
+    /// Collect the vmstat saturation allowlist (`oom_kill`, `pgmajfault`,
+    /// `pswpin/out`, ...) plus `/proc/stat` derivatives (context switches,
+    /// forks, run-queue depth). Only available on Linux.
+    #[serde(default = "default_true")]
+    pub vmstat: bool,
+
+    /// Collect file-descriptor and inode saturation ceilings
+    /// (`/proc/sys/fs/file-nr` + per-mount `statvfs()`). Only available on
+    /// Linux. Cheap metrics that catch silent table-exhaustion outages.
+    #[serde(default = "default_true")]
+    pub fd_inode: bool,
+
+    /// Collect richer per-interface `/proc/net/dev` saturation counters
+    /// (rx/tx drops, fifo, frame, collisions) the `sysinfo` counters omit.
+    /// Only available on Linux.
+    #[serde(default = "default_true")]
+    pub net_dev_extended: bool,
 }
 
 impl Default for CollectConfig {
@@ -138,6 +162,10 @@ impl Default for CollectConfig {
             tcp_states: false,
             processes: false,
             top_processes: 10,
+            pressure: true,
+            vmstat: true,
+            fd_inode: true,
+            net_dev_extended: true,
         }
     }
 }

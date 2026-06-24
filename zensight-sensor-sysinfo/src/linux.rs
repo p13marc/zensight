@@ -6,7 +6,11 @@
 //! - Temperature sensors (via hwmon)
 //! - TCP connection state counts
 
-use procfs::CurrentSI;
+use crate::map::{
+    FdStat, InodeStat, KernelDerivatives, NetDevStat, PressureSample, PsiSample, VmStat,
+    parse_file_nr, parse_net_dev, parse_vmstat,
+};
+use procfs::{Current, CurrentSI};
 use std::collections::HashMap;
 use tracing::warn;
 
@@ -382,6 +386,124 @@ impl LinuxMetrics {
 impl Default for LinuxMetrics {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ===========================================================================
+// Wave 1 saturation/error collectors (stateless reads → pure map sample types)
+// ===========================================================================
+
+/// Convert a procfs `PressureRecord` into our plain owned sample.
+fn pressure_sample(r: &procfs::PressureRecord) -> PressureSample {
+    PressureSample {
+        avg10: r.avg10 as f64,
+        avg60: r.avg60 as f64,
+        avg300: r.avg300 as f64,
+        total_us: r.total,
+    }
+}
+
+/// Collect `/proc/pressure/{cpu,memory,io}` via the typed procfs PSI structs.
+///
+/// Returns `None` only if no resource could be read at all (e.g. kernel built
+/// without `CONFIG_PSI`); individual missing resources are left as `None` so
+/// the mapper skips them rather than emitting misleading zeros.
+pub fn collect_psi() -> Option<PsiSample> {
+    let cpu = procfs::CpuPressure::current().ok();
+    let mem = procfs::MemoryPressure::current().ok();
+    let io = procfs::IoPressure::current().ok();
+
+    if cpu.is_none() && mem.is_none() && io.is_none() {
+        return None;
+    }
+
+    Some(PsiSample {
+        cpu_some: cpu.map(|c| pressure_sample(&c.some)),
+        memory_some: mem.as_ref().map(|m| pressure_sample(&m.some)),
+        memory_full: mem.as_ref().map(|m| pressure_sample(&m.full)),
+        io_some: io.as_ref().map(|i| pressure_sample(&i.some)),
+        io_full: io.as_ref().map(|i| pressure_sample(&i.full)),
+    })
+}
+
+/// Read and parse `/proc/vmstat` into the allowlisted saturation subset.
+/// Returns `None` if the file is unreadable (skip the collector this tick).
+pub fn collect_vmstat() -> Option<VmStat> {
+    match std::fs::read_to_string("/proc/vmstat") {
+        Ok(content) => Some(parse_vmstat(&content)),
+        Err(e) => {
+            warn!(error = %e, "Failed to read /proc/vmstat");
+            None
+        }
+    }
+}
+
+/// Collect `/proc/stat` derivatives from the typed `procfs::KernelStats`.
+pub fn collect_kernel_derivatives() -> Option<KernelDerivatives> {
+    match procfs::KernelStats::current() {
+        Ok(stat) => Some(KernelDerivatives {
+            context_switches: stat.ctxt,
+            forks: stat.processes,
+            procs_running: stat.procs_running,
+            procs_blocked: stat.procs_blocked,
+        }),
+        Err(e) => {
+            warn!(error = %e, "Failed to read /proc/stat for kernel derivatives");
+            None
+        }
+    }
+}
+
+/// Read and parse `/proc/sys/fs/file-nr` into FD-table occupancy.
+pub fn collect_fd() -> Option<FdStat> {
+    match std::fs::read_to_string("/proc/sys/fs/file-nr") {
+        Ok(content) => parse_file_nr(&content),
+        Err(e) => {
+            warn!(error = %e, "Failed to read /proc/sys/fs/file-nr");
+            None
+        }
+    }
+}
+
+/// Collect per-mount inode occupancy via `statvfs()`. `mounts` is the already
+/// filtered `(mount_point, fs_type)` list (small, bounded — fine inline). A
+/// mount that fails `statvfs` (e.g. autofs not yet triggered) is skipped, and
+/// filesystems reporting zero total inodes (many pseudo/btrfs mounts) are
+/// omitted to avoid meaningless 0/0 series.
+pub fn collect_inodes(mounts: &[(String, String)]) -> Vec<InodeStat> {
+    let mut out = Vec::with_capacity(mounts.len());
+    for (mount, fs_type) in mounts {
+        match rustix::fs::statvfs(mount.as_str()) {
+            Ok(vfs) => {
+                if vfs.f_files == 0 {
+                    continue;
+                }
+                let total = vfs.f_files;
+                let free = vfs.f_ffree;
+                out.push(InodeStat {
+                    mount: mount.clone(),
+                    fs_type: fs_type.clone(),
+                    total,
+                    free,
+                    used: total.saturating_sub(free),
+                });
+            }
+            Err(e) => {
+                warn!(mount = %mount, error = %e, "statvfs failed; skipping inode stats");
+            }
+        }
+    }
+    out
+}
+
+/// Read and parse `/proc/net/dev` into per-interface drop/fifo/frame counters.
+pub fn collect_net_dev() -> Vec<NetDevStat> {
+    match std::fs::read_to_string("/proc/net/dev") {
+        Ok(content) => parse_net_dev(&content),
+        Err(e) => {
+            warn!(error = %e, "Failed to read /proc/net/dev");
+            Vec::new()
+        }
     }
 }
 

@@ -22,6 +22,7 @@
 
 pub mod collector;
 pub mod config;
+pub mod map;
 
 #[cfg(target_os = "linux")]
 pub mod linux;

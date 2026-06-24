@@ -16,6 +16,8 @@ sysinfo = "0.33"
 # Linux-specific metrics (CPU times, disk I/O, TCP states)
 [target.'cfg(target_os = "linux")'.dependencies]
 procfs = "0.17"
+# statvfs() for inode saturation ceilings (FD + inode plan §C)
+rustix = { version = "1", features = ["fs"] }
 
 # Async runtime
 tokio = { workspace = true, features = ["full", "sync", "time"] }
