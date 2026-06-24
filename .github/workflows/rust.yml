@@ -32,10 +32,12 @@ jobs:
           sudo docker image prune --all --force || true
           df -h /
 
-      - name: Install protoc
+      - name: Install build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+          # protobuf-compiler: gnmi sensor; libsystemd-dev: journald source in the
+          # syslog sensor (default-on `journald` feature links libsystemd).
+          sudo apt-get install -y protobuf-compiler libsystemd-dev
           protoc --version
 
       - name: Build
