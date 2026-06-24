@@ -38,6 +38,9 @@ rand = "0.9"
 # Platform utilities
 dirs.workspace = true
 
+# Local tiered time-series store (Plan v3-04 §A): pure-Rust, ACID, zero-copy.
+redb = "2"
+
 [features]
 default = []
 # Enable the tester developer tool (F12 to record/play tests)

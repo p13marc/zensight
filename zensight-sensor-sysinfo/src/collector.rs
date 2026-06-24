@@ -1,6 +1,7 @@
 //! System metrics collection using sysinfo.
 
 use crate::config::SysinfoConfig;
+use crate::map::sanitize_key;
 use std::collections::HashMap;
 use std::sync::Arc;
 use sysinfo::{Disks, Networks, System};
@@ -24,6 +25,10 @@ pub struct SystemCollector {
     format: Format,
     /// Previous network stats for calculating rates
     prev_network: HashMap<String, (u64, u64)>,
+    /// Previous RAPL energy readings (zone -> (energy_uj, max_energy_uj)) for
+    /// deriving instantaneous watts across ticks (Linux power depth, §G).
+    #[cfg(target_os = "linux")]
+    prev_rapl: HashMap<String, (u64, Option<u64>)>,
     /// Sensor health, updated each poll for the frontend's Sensors view.
     health: Arc<zensight_sensor_core::SensorHealth>,
     /// Linux-specific metrics collector
@@ -49,6 +54,8 @@ impl SystemCollector {
             session,
             format,
             prev_network: HashMap::new(),
+            #[cfg(target_os = "linux")]
+            prev_rapl: HashMap::new(),
             health: Arc::new(zensight_sensor_core::SensorHealth::new("sysinfo")),
             #[cfg(target_os = "linux")]
             linux_metrics: LinuxMetrics::new(),
@@ -137,7 +144,162 @@ impl SystemCollector {
             count += self.collect_processes(timestamp).await;
         }
 
+        // Linux-specific saturation/error collectors (Wave 1).
+        #[cfg(target_os = "linux")]
+        {
+            if self.config.collect.pressure {
+                count += self.collect_pressure(timestamp).await;
+            }
+            if self.config.collect.vmstat {
+                count += self.collect_vmstat(timestamp).await;
+            }
+            if self.config.collect.fd_inode {
+                count += self.collect_fd_inode(timestamp).await;
+            }
+            if self.config.collect.net_dev_extended {
+                count += self.collect_net_dev_extended(timestamp).await;
+            }
+            if self.config.collect.cgroups {
+                count += self.collect_cgroups(timestamp).await;
+            }
+            if self.config.collect.power {
+                count += self.collect_power(timestamp).await;
+            }
+        }
+
         debug!("Published {} metrics for '{}'", count, self.hostname);
+    }
+
+    /// Publish a batch of mapped metrics, lifting label pairs into the wire
+    /// `HashMap`. Returns the number of points published.
+    #[cfg(target_os = "linux")]
+    async fn publish_metrics(&self, metrics: Vec<crate::map::Metric>, timestamp: i64) -> usize {
+        let count = metrics.len();
+        for m in metrics {
+            let labels: HashMap<String, String> = m
+                .labels
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect();
+            self.publish(&m.metric, m.value, timestamp, labels).await;
+        }
+        count
+    }
+
+    /// Collect Pressure Stall Information (Linux-specific, Wave 1 §A).
+    #[cfg(target_os = "linux")]
+    async fn collect_pressure(&self, timestamp: i64) -> usize {
+        match crate::linux::collect_psi() {
+            Some(psi) => {
+                self.publish_metrics(crate::map::map_pressure(&psi), timestamp)
+                    .await
+            }
+            None => 0,
+        }
+    }
+
+    /// Collect the vmstat saturation allowlist + `/proc/stat` derivatives
+    /// (Linux-specific, Wave 1 §B).
+    #[cfg(target_os = "linux")]
+    async fn collect_vmstat(&self, timestamp: i64) -> usize {
+        let mut count = 0;
+        if let Some(vm) = crate::linux::collect_vmstat() {
+            count += self
+                .publish_metrics(crate::map::map_vmstat(&vm), timestamp)
+                .await;
+        }
+        if let Some(k) = crate::linux::collect_kernel_derivatives() {
+            count += self
+                .publish_metrics(crate::map::map_kernel_derivatives(&k), timestamp)
+                .await;
+        }
+        count
+    }
+
+    /// Collect FD + inode saturation ceilings (Linux-specific, Wave 1 §C).
+    #[cfg(target_os = "linux")]
+    async fn collect_fd_inode(&self, timestamp: i64) -> usize {
+        let mut count = 0;
+        if let Some(fd) = crate::linux::collect_fd() {
+            count += self
+                .publish_metrics(crate::map::map_fd(&fd), timestamp)
+                .await;
+        }
+        // Build the filtered mount list from the (already-discovered) disks.
+        let mounts: Vec<(String, String)> = self
+            .disks
+            .list()
+            .iter()
+            .map(|d| {
+                (
+                    d.mount_point().to_string_lossy().to_string(),
+                    d.file_system().to_string_lossy().to_string(),
+                )
+            })
+            .filter(|(mount, fs_type)| self.config.disk.should_include(mount, fs_type))
+            .collect();
+        let inodes = crate::linux::collect_inodes(&mounts);
+        count += self
+            .publish_metrics(crate::map::map_inodes(&inodes), timestamp)
+            .await;
+        count
+    }
+
+    /// Collect richer per-interface `/proc/net/dev` drop/fifo counters
+    /// (Linux-specific, Wave 1 §D).
+    #[cfg(target_os = "linux")]
+    async fn collect_net_dev_extended(&self, timestamp: i64) -> usize {
+        let stats: Vec<_> = crate::linux::collect_net_dev()
+            .into_iter()
+            .filter(|s| self.config.network.should_include(&s.iface))
+            .collect();
+        self.publish_metrics(crate::map::map_net_dev(&stats), timestamp)
+            .await
+    }
+
+    /// Collect cgroup-v2 container-saturation metrics (Linux-specific, §E).
+    #[cfg(target_os = "linux")]
+    async fn collect_cgroups(&self, timestamp: i64) -> usize {
+        let Some(samples) = crate::linux::collect_cgroups(&self.config.collect.cgroup_paths) else {
+            return 0;
+        };
+        let mut count = 0;
+        for s in &samples {
+            count += self
+                .publish_metrics(crate::map::map_cgroup(s), timestamp)
+                .await;
+        }
+        count
+    }
+
+    /// Collect thermal/power depth: RAPL watts (rate-derived), fan RPM, battery,
+    /// entropy (Linux-specific, §G).
+    #[cfg(target_os = "linux")]
+    async fn collect_power(&mut self, timestamp: i64) -> usize {
+        let interval = self.config.poll_interval_secs as f64;
+
+        // RAPL: derive watts from the energy counter delta vs the prev tick.
+        let domains = crate::linux::collect_rapl();
+        let mut rapl_watts = Vec::with_capacity(domains.len());
+        for d in &domains {
+            if let Some((prev_uj, _)) = self.prev_rapl.get(&d.zone)
+                && let Some(w) =
+                    crate::map::rapl_watts(*prev_uj, d.energy_uj, d.max_energy_uj, interval)
+            {
+                rapl_watts.push((d.zone.clone(), d.name.clone(), w));
+            }
+            self.prev_rapl
+                .insert(d.zone.clone(), (d.energy_uj, d.max_energy_uj));
+        }
+
+        let sample = crate::map::PowerSample {
+            rapl_watts,
+            fans: crate::linux::collect_fans(),
+            batteries: crate::linux::collect_batteries(),
+            entropy_avail: crate::linux::collect_entropy(),
+        };
+        self.publish_metrics(crate::map::map_power(&sample), timestamp)
+            .await
     }
 
     /// Collect system-wide metrics (uptime, load averages).
@@ -540,6 +702,32 @@ impl SystemCollector {
         self.system.refresh_all();
         let mut count = 0;
 
+        // Small bounded aggregates always stream (the per-pid firehose is served
+        // on demand via the @/query/processes channel, not streamed — §F / P2).
+        let total = self.system.processes().len() as u64;
+        let zombie = self
+            .system
+            .processes()
+            .values()
+            .filter(|p| matches!(p.status(), sysinfo::ProcessStatus::Zombie))
+            .count() as u64;
+        self.publish(
+            "system/processes_total",
+            TelemetryValue::Gauge(total as f64),
+            timestamp,
+            HashMap::new(),
+        )
+        .await;
+        count += 1;
+        self.publish(
+            "system/processes_zombie",
+            TelemetryValue::Gauge(zombie as f64),
+            timestamp,
+            HashMap::new(),
+        )
+        .await;
+        count += 1;
+
         let top_n = self.config.collect.top_processes;
 
         // Get processes sorted by CPU usage
@@ -924,24 +1112,6 @@ impl SystemCollector {
     }
 }
 
-/// Sanitize a string for use in key expressions.
-/// Replaces problematic characters with underscores.
-fn sanitize_key(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '/' | ' ' | '#' | '?' | '*' => {
-                if !result.ends_with('_') && !result.is_empty() {
-                    result.push('_');
-                }
-            }
-            _ => result.push(c),
-        }
-    }
-    // Remove leading/trailing underscores
-    result.trim_matches('_').to_string()
-}
-
 /// Build a key expression for a sysinfo metric.
 pub fn build_key_expr(prefix: &str, hostname: &str, metric: &str) -> String {
     format!("{}/{}/{}", prefix, hostname, metric)
@@ -951,15 +1121,6 @@ pub fn build_key_expr(prefix: &str, hostname: &str, metric: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::{DiskConfig, NetworkConfig};
-
-    #[test]
-    fn test_sanitize_key() {
-        assert_eq!(sanitize_key("/"), "");
-        assert_eq!(sanitize_key("/home"), "home");
-        assert_eq!(sanitize_key("/home/user"), "home_user");
-        assert_eq!(sanitize_key("eth0"), "eth0");
-        assert_eq!(sanitize_key("my interface"), "my_interface");
-    }
 
     #[test]
     fn test_build_key_expr() {

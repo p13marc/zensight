@@ -111,6 +111,32 @@ pub struct HttpHostRecord {
     pub errors: u64,
 }
 
+/// One process row (sysinfo), served on demand sorted/filtered by the caller
+/// (`@/query/processes?sort=cpu|mem|io&top=N`). The high-cardinality per-pid
+/// firehose behind the streamed `system/processes_{total,zombie}` aggregates —
+/// never streamed as per-pid metric series (principle P2).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProcessRecord {
+    pub pid: i32,
+    pub name: String,
+    /// CPU usage percent (single-core normalized, as sysinfo reports it).
+    pub cpu: f32,
+    /// Resident memory in bytes.
+    pub rss: u64,
+    /// Virtual memory in bytes.
+    pub vsz: u64,
+    /// Thread/task count, if available.
+    pub threads: Option<usize>,
+    /// Process state label (e.g. `Run`, `Sleep`, `Zombie`).
+    pub state: String,
+    /// Cumulative bytes read (disk), if available.
+    pub io_read: u64,
+    /// Cumulative bytes written (disk), if available.
+    pub io_write: u64,
+    /// Owning user id, if available.
+    pub uid: Option<u32>,
+}
+
 /// One TCP socket (served filterable by state/port).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SocketRecord {

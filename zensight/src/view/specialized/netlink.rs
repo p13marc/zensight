@@ -149,11 +149,7 @@ fn render_sockets(state: &DeviceDetailState) -> Element<'_, Message> {
 /// Diagnostics summary: bottleneck score + issue counts (from the nlink scan).
 fn render_diagnostics(state: &DeviceDetailState) -> Element<'_, Message> {
     let title = section_header("Diagnostics", None);
-    if !state
-        .metrics
-        .keys()
-        .any(|k| k.starts_with("diagnostics/"))
-    {
+    if !state.metrics.keys().any(|k| k.starts_with("diagnostics/")) {
         return column![title, empty_state("No diagnostics data", None)]
             .spacing(space::SM)
             .into();
@@ -186,7 +182,13 @@ fn render_diagnostics(state: &DeviceDetailState) -> Element<'_, Message> {
             .cloned()
             .unwrap_or_default();
         col = col
-            .push(row![cell("bottleneck", 180), cell(&format!("{kind} @ {loc}"), 360)].spacing(8))
+            .push(
+                row![
+                    cell("bottleneck", 180),
+                    cell(&format!("{kind} @ {loc}"), 360)
+                ]
+                .spacing(8),
+            )
             .push(row![cell("  recommendation", 180), cell(&rec, 360)].spacing(8));
     }
     col.into()
@@ -330,9 +332,9 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
     if let Some(err) = d.neighbors.error() {
         col = col.push(empty_state(format!("Neighbors fetch failed: {err}"), None));
     } else if let Some(neighbors) = d.neighbors.ready() {
-        let mut list = Column::new().spacing(3).push(
-            row![cell("ip", 200), cell("mac", 200), cell("state", 120)].spacing(8),
-        );
+        let mut list = Column::new()
+            .spacing(3)
+            .push(row![cell("ip", 200), cell("mac", 200), cell("state", 120)].spacing(8));
         for n in neighbors.iter().take(200) {
             list = list.push(
                 row![
@@ -370,9 +372,15 @@ fn render_conntrack(state: &DeviceDetailState) -> Element<'_, Message> {
     .spacing(4);
 
     // Utilization is a 0..1 ratio — render as a percentage (num() would floor it).
-    if let Some(TelemetryValue::Gauge(u)) = state.metrics.get("conntrack/utilization").map(|p| &p.value) {
+    if let Some(TelemetryValue::Gauge(u)) =
+        state.metrics.get("conntrack/utilization").map(|p| &p.value)
+    {
         col = col.push(
-            row![cell("utilization", 180), cell(&format!("{:.1}%", u * 100.0), 120)].spacing(8),
+            row![
+                cell("utilization", 180),
+                cell(&format!("{:.1}%", u * 100.0), 120)
+            ]
+            .spacing(8),
         );
     }
     col.into()
@@ -382,7 +390,10 @@ fn render_conntrack(state: &DeviceDetailState) -> Element<'_, Message> {
 fn render_wireguard(state: &DeviceDetailState) -> Element<'_, Message> {
     let mut col = column![section_header("WireGuard", None)].spacing(space::SM);
     for (iface, peers) in wireguard(state) {
-        let count = num(state.metrics.get(&format!("wireguard/{iface}/peers")).map(|p| &p.value));
+        let count = num(state
+            .metrics
+            .get(&format!("wireguard/{iface}/peers"))
+            .map(|p| &p.value));
         col = col.push(text(format!("{iface} — {count} peers")).size(font::EMPHASIS));
         let mut list = Column::new().spacing(3).push(
             row![
@@ -428,7 +439,10 @@ fn render_wireguard(state: &DeviceDetailState) -> Element<'_, Message> {
 }
 
 /// Group `wireguard/<iface>/<peer>/<stat>` metrics by interface then peer.
-type WgPeers<'a> = std::collections::BTreeMap<String, std::collections::BTreeMap<String, &'a zensight_common::TelemetryPoint>>;
+type WgPeers<'a> = std::collections::BTreeMap<
+    String,
+    std::collections::BTreeMap<String, &'a zensight_common::TelemetryPoint>,
+>;
 fn wireguard(state: &DeviceDetailState) -> std::collections::BTreeMap<String, WgPeers<'_>> {
     let mut map: std::collections::BTreeMap<String, WgPeers<'_>> = Default::default();
     for (metric, point) in &state.metrics {

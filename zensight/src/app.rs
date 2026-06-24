@@ -13,6 +13,9 @@ use zensight_common::{
     TelemetryValue, ZenohConfig,
 };
 
+/// Flush the metric store to redb every this many 1s ticks (#22).
+const STORE_FLUSH_EVERY_TICKS: u32 = 15;
+
 /// Text input ID for dashboard search.
 pub static DASHBOARD_SEARCH_ID: LazyLock<Id> = LazyLock::new(|| Id::new("dashboard-search"));
 
@@ -119,6 +122,17 @@ pub struct ZenSight {
     session: Option<std::sync::Arc<zenoh::Session>>,
     /// Expectations authoring view state (netlink sentinel, Plan 08).
     expectations: crate::view::expectations::ExpectationsState,
+    /// Local tiered time-series store (hot ring + redb), Plan v3-04 §A / #22.
+    /// Telemetry writes through it; charts read from it so trends survive restart.
+    store: crate::store::MetricStore,
+    /// Ticks counted toward the next periodic store flush (flush every N ticks).
+    ticks_since_flush: u32,
+    /// Timestamp (epoch ms) of the most recently received telemetry point, for
+    /// the global Live/Stale/Paused freshness indicator (#23). `None` until the
+    /// first point arrives.
+    last_telemetry_ms: Option<i64>,
+    /// Global cross-device metric search panel state (#27).
+    global_search: crate::view::search::GlobalSearchState,
 }
 
 impl ZenSight {
@@ -222,6 +236,17 @@ impl ZenSight {
             toasts: ToastState::default(),
             session: None,
             expectations: crate::view::expectations::ExpectationsState::default(),
+            // In demo mode keep history in-memory only (no disk churn / restart survival
+            // for synthetic data); otherwise open the persistent tiered store.
+            store: if demo_mode {
+                crate::store::MetricStore::new(crate::store::DEFAULT_HOT_CAPACITY, None)
+            } else {
+                crate::store::MetricStore::with_default_persistence()
+            },
+            ticks_since_flush: 0,
+            // Demo mode pre-loads mock points; treat the feed as fresh on boot.
+            last_telemetry_ms: if demo_mode { Some(now_ms()) } else { None },
+            global_search: crate::view::search::GlobalSearchState::default(),
         };
 
         (app, Task::none())
@@ -341,6 +366,9 @@ impl ZenSight {
                 self.dashboard.connection_state =
                     crate::view::dashboard::ConnectionState::Disconnected;
                 self.dashboard.last_error = Some(error);
+                // The feed is paused now; drop the freshness anchor so the
+                // indicator reads "Paused", not a stale "as of" from before.
+                self.last_telemetry_ms = None;
             }
 
             Message::SensorOnline(protocol) => {
@@ -379,7 +407,9 @@ impl ZenSight {
             }
 
             Message::SelectDevice(device_id) => {
-                self.select_device(device_id);
+                // Jumping to a device from a global-search result closes the panel.
+                self.global_search.close();
+                return self.select_device(device_id);
             }
 
             Message::ClearSelection => {
@@ -509,6 +539,38 @@ impl ZenSight {
 
             Message::Tick => {
                 self.handle_tick();
+                // Periodically flush downsampled buckets to redb off the UI thread
+                // (every ~15 ticks ≈ 15s). Never block update()/view() on disk I/O.
+                self.ticks_since_flush += 1;
+                if self.ticks_since_flush >= STORE_FLUSH_EVERY_TICKS {
+                    self.ticks_since_flush = 0;
+                    if let Some((store, batch)) = self.store.take_flush_batch() {
+                        return Task::future(async move {
+                            // Map redb's large error to a String inside the blocking
+                            // closure so the future's payload stays small.
+                            let res = tokio::task::spawn_blocking(move || {
+                                store.write_batch(&batch).map_err(|e| e.to_string())
+                            })
+                            .await
+                            .map_err(|e| e.to_string())
+                            .and_then(|r| r);
+                            Message::StoreFlushed(res)
+                        });
+                    }
+                }
+            }
+
+            Message::StoreFlushed(res) => match res {
+                Ok(n) => tracing::debug!(buckets = n, "Flushed metric history to store"),
+                Err(e) => tracing::warn!(error = %e, "Metric store flush failed"),
+            },
+
+            Message::DeviceHistoryLoaded(device_id, series) => {
+                if let Some(ref mut selected) = self.selected_device
+                    && selected.device_id == device_id
+                {
+                    selected.seed_history(series);
+                }
             }
 
             // Settings messages
@@ -653,6 +715,32 @@ impl ZenSight {
                 self.alerts.acknowledge_all_external();
             }
 
+            Message::SilenceSource(source, duration_ms) => {
+                self.alerts.silence_source(&source, now_ms(), duration_ms);
+                self.toasts.push(
+                    ToastSeverity::Info,
+                    format!("Silenced {source} for {}", fmt_duration_ms(duration_ms)),
+                );
+            }
+            Message::UnsilenceSource(source) => {
+                self.alerts.unsilence_source(&source);
+                self.toasts
+                    .push(ToastSeverity::Info, format!("Unsilenced {source}"));
+            }
+
+            Message::OpenGlobalSearch => {
+                self.global_search.open();
+                return iced::widget::operation::focus(
+                    crate::view::search::GLOBAL_SEARCH_ID.clone(),
+                );
+            }
+            Message::CloseGlobalSearch => {
+                self.global_search.close();
+            }
+            Message::SetGlobalSearch(q) => {
+                self.global_search.query = q;
+            }
+
             Message::ClearAlerts => {
                 self.alerts.clear_alerts();
             }
@@ -755,9 +843,24 @@ impl ZenSight {
                 // Update topology from current device data before showing
                 self.topology.update_from_devices(&self.dashboard.devices);
                 self.topology.apply_alerts(&self.alerts.external);
+                self.topology.apply_correlations(&self.correlations);
                 self.set_view(CurrentView::Topology);
                 self.save_current_view();
+                // Derive real edges from observed flows (#25): fetch the netring
+                // flow detail; edges are applied when the reply arrives.
+                return self.query_topology_flows();
             }
+
+            Message::TopologyFlowsReceived(result) => match result {
+                Ok(flows) => {
+                    let ip_to_node = self.topology_ip_to_node();
+                    self.topology
+                        .apply_flow_edges(&flows, &ip_to_node, now_ms());
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "No netring flows for topology edges");
+                }
+            },
 
             Message::CloseTopology => {
                 self.set_view(CurrentView::Dashboard);
@@ -772,7 +875,7 @@ impl ZenSight {
             Message::TopologyViewDeviceDetail(node_id) => {
                 // Navigate to device detail view
                 if let Some(device_id) = self.topology.node_to_device_id(&node_id) {
-                    self.select_device(device_id);
+                    return self.select_device(device_id);
                 }
             }
 
@@ -1227,6 +1330,44 @@ impl ZenSight {
         })
     }
 
+    /// Fetch netring flows for deriving real topology edges (#25). Routes to
+    /// `TopologyFlowsReceived` so the device flow panel is untouched.
+    fn query_topology_flows(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_flows;
+        let Some(session) = self.session.clone() else {
+            // Not connected (or demo): leave edges as-is, no error toast.
+            return Task::none();
+        };
+        Task::future(async move {
+            let result = fetch_flows(session)
+                .await
+                .ok_or_else(|| "No netring sensor responded".to_string());
+            Message::TopologyFlowsReceived(result)
+        })
+    }
+
+    /// Build a map from endpoint IP to topology node id (#25). A node's `source`
+    /// that is itself an IP maps directly; correlation entries map additional IPs
+    /// to a hostname that matches a node.
+    fn topology_ip_to_node(&self) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        // Direct: a node whose id looks like an IP maps that IP to itself.
+        for node_id in self.topology.nodes.keys() {
+            map.insert(node_id.clone(), node_id.clone());
+        }
+        // Indirect: correlation IP -> any of its hostnames that is a known node.
+        for entry in self.correlations.values() {
+            if let Some(node) = entry
+                .hostnames
+                .iter()
+                .find(|h| self.topology.nodes.contains_key(*h))
+            {
+                map.insert(entry.ip.clone(), node.clone());
+            }
+        }
+        map
+    }
+
     /// Fetch the on-demand netring TLS asset inventory.
     fn query_netring_tls(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_tls;
@@ -1246,6 +1387,11 @@ impl ZenSight {
 
     /// Handle Escape key - close dialogs or go back.
     fn handle_escape(&mut self) {
+        // The global search overlay takes priority: Escape closes it first (#27).
+        if self.global_search.open {
+            self.global_search.close();
+            return;
+        }
         match self.current_view {
             CurrentView::Settings => {
                 let target = if self.selected_device.is_some() {
@@ -1321,6 +1467,19 @@ impl ZenSight {
         // alerts (anomalies + expectation violations).
         let unack = self.alerts.unacknowledged_count + self.alerts.external_count();
 
+        // Precompute per-card sparkline + trend previews from the store's hot ring
+        // (cheap, in-memory) only when a dashboard grid will actually render (#24).
+        let on_dashboard = matches!(
+            self.current_view,
+            CurrentView::Dashboard | CurrentView::Device
+        ) && !(self.current_view == CurrentView::Device
+            && self.selected_device.is_some());
+        let sparks = if on_dashboard {
+            crate::view::trend::build_device_sparks(&self.store, self.dashboard.devices.keys(), 2)
+        } else {
+            crate::view::trend::DeviceSparks::new()
+        };
+
         let main_view: Element<'_, Message> = match self.current_view {
             CurrentView::Settings => settings_view(&self.settings),
             CurrentView::Alerts => alerts_view(&self.alerts),
@@ -1343,6 +1502,7 @@ impl ZenSight {
                         &self.groups,
                         &self.overview,
                         &self.sensor_health,
+                        sparks,
                     )
                 }
             }
@@ -1353,6 +1513,7 @@ impl ZenSight {
                 &self.groups,
                 &self.overview,
                 &self.sensor_health,
+                sparks,
             ),
         };
 
@@ -1368,6 +1529,8 @@ impl ZenSight {
             device_name,
             self.dashboard.connection_state,
             unack,
+            self.last_telemetry_ms,
+            now_ms(),
             main_view,
         );
 
@@ -1377,11 +1540,28 @@ impl ZenSight {
             .into();
 
         // Show groups panel as a sidebar if open
-        let base_view: Element<'_, Message> = if self.groups.panel_open {
+        let mut base_view: Element<'_, Message> = if self.groups.panel_open {
             row![view_container, groups_panel(&self.groups)].into()
         } else {
             view_container
         };
+
+        // Global metric search overlay (#27), centered over the current view.
+        if self.global_search.open {
+            let hits = crate::view::search::search(
+                self.dashboard.devices.values(),
+                &self.global_search.query,
+            );
+            let panel = container(crate::view::search::global_search_panel(
+                &self.global_search,
+                hits,
+            ))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill);
+            base_view = stack![base_view, panel].into();
+        }
 
         // Overlay toast notifications in the bottom-right corner
         if !self.toasts.is_empty() {
@@ -1437,6 +1617,16 @@ impl ZenSight {
 
     /// Handle incoming telemetry.
     fn handle_telemetry(&mut self, point: TelemetryPoint) {
+        // Write through to the local tiered store (O(1) hot-ring append; numeric
+        // values only). Charts/trends read back from here so history survives restart.
+        self.store.record(&point);
+
+        // Track the newest point for the global freshness verdict (#23).
+        self.last_telemetry_ms = Some(
+            self.last_telemetry_ms
+                .map_or(point.timestamp, |prev| prev.max(point.timestamp)),
+        );
+
         let device_id = DeviceId::from_telemetry(&point);
 
         // Update dashboard device state
@@ -1482,15 +1672,51 @@ impl ZenSight {
         }
     }
 
-    /// Select a device to view in detail.
-    fn select_device(&mut self, device_id: DeviceId) {
+    /// Select a device to view in detail. Returns a task that pre-loads this
+    /// device's restart-survived history from the local store off the UI thread
+    /// (#22), so the detail chart opens pre-populated with persisted trends.
+    fn select_device(&mut self, device_id: DeviceId) -> Task<Message> {
         tracing::info!(device = %device_id, "Selected device");
         // We don't have the full TelemetryPoints in the dashboard,
         // so the detail view will populate as new data arrives
         let max_history = self.settings.max_history_value();
-        let detail_state = DeviceDetailState::with_max_history(device_id, max_history);
+        let detail_state = DeviceDetailState::with_max_history(device_id.clone(), max_history);
         self.selected_device = Some(detail_state);
         self.set_view(CurrentView::Device);
+
+        // Resolve the persisted metric ids for this device, then query the warm
+        // (minute) tier off-thread. Last 24h of minute buckets is plenty to
+        // pre-populate a chart without blocking the UI.
+        let Some(store) = self.store.persistent() else {
+            return Task::none();
+        };
+        let protocol = device_id.protocol.to_string();
+        let metric_ids = self.store.device_metric_ids(&protocol, &device_id.source);
+        if metric_ids.is_empty() {
+            return Task::none();
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let from = now - 24 * 3_600_000; // 24h window
+        Task::future(async move {
+            let series = tokio::task::spawn_blocking(move || {
+                metric_ids
+                    .into_iter()
+                    .filter_map(|(name, id)| {
+                        store
+                            .query(id, crate::store::Tier::Minute, from, now)
+                            .ok()
+                            .filter(|s| !s.is_empty())
+                            .map(|samples| (name, samples))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .unwrap_or_default();
+            Message::DeviceHistoryLoaded(device_id, series)
+        })
     }
 
     /// Save settings.
@@ -1600,6 +1826,9 @@ impl ZenSight {
             device.update_health(now, self.stale_threshold_ms);
         }
 
+        // Expire alert silences whose window has passed (#26).
+        self.alerts.prune_silences(now);
+
         // Apply debounced search filter
         self.dashboard.apply_pending_search();
 
@@ -1619,6 +1848,24 @@ impl ZenSight {
                 self.topology.run_layout_step();
             }
         }
+    }
+}
+
+/// Current wall-clock time in epoch milliseconds.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Human duration for silence toasts: "1h" / "4h" / "24h" / "30m".
+fn fmt_duration_ms(ms: i64) -> String {
+    let mins = ms / 60_000;
+    if mins % 60 == 0 {
+        format!("{}h", mins / 60)
+    } else {
+        format!("{mins}m")
     }
 }
 

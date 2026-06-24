@@ -726,6 +726,7 @@ mod tests {
             is_healthy: true,
             pinned: false,
             alert: None,
+            sensor_count: None,
         }
     }
 

@@ -79,12 +79,17 @@ fn sensor_card<'a>(
         for report in errors.iter().rev().take(5) {
             let when = format_timestamp(report.timestamp);
             let dev = report.device.as_deref().unwrap_or("-");
-            let line = format!("{when}  [{:?}] {dev}: {}", report.error_type, report.message);
-            col = col.push(text(line).size(font::CAPTION).style(|theme: &Theme| {
-                text::Style {
-                    color: Some(theme::colors(theme).danger()),
-                }
-            }));
+            let line = format!(
+                "{when}  [{:?}] {dev}: {}",
+                report.error_type, report.message
+            );
+            col = col.push(
+                text(line)
+                    .size(font::CAPTION)
+                    .style(|theme: &Theme| text::Style {
+                        color: Some(theme::colors(theme).danger()),
+                    }),
+            );
         }
     }
 
@@ -126,9 +131,11 @@ fn health_badge<'a>(status: HealthStatus) -> Element<'a, Message> {
 
 fn stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
     column![
-        text(label).size(font::CAPTION).style(|theme: &Theme| text::Style {
-            color: Some(theme::colors(theme).text_muted()),
-        }),
+        text(label)
+            .size(font::CAPTION)
+            .style(|theme: &Theme| text::Style {
+                color: Some(theme::colors(theme).text_muted()),
+            }),
         text(value).size(font::EMPHASIS),
     ]
     .spacing(2)

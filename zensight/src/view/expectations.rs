@@ -164,8 +164,12 @@ fn render_form(state: &ExpectationsState) -> Element<'_, Message> {
                 .width(Length::Fixed(220.0)),
         );
         form = form.push(
-            pick_list(ComparisonOp::ALL, Some(state.new_op), Message::SetExpectationOp)
-                .width(Length::Fixed(70.0)),
+            pick_list(
+                ComparisonOp::ALL,
+                Some(state.new_op),
+                Message::SetExpectationOp,
+            )
+            .width(Length::Fixed(70.0)),
         );
         form = form.push(
             text_input("value", &state.new_value)

@@ -624,6 +624,11 @@ impl ChartState {
         self.cache.clear();
     }
 
+    /// All single-series data points (oldest-first).
+    pub fn data(&self) -> &[DataPoint] {
+        &self.data
+    }
+
     /// Update the current time (call on tick).
     pub fn update_time(&mut self) {
         let new_time = current_timestamp();
@@ -1146,7 +1151,8 @@ impl<'a> Chart<'a> {
                 let mut first = true;
 
                 for point in &visible_data {
-                    let x = padding + x_fraction(point.timestamp, time_start, time_range) * chart_width;
+                    let x =
+                        padding + x_fraction(point.timestamp, time_start, time_range) * chart_width;
                     let y = padding + chart_height
                         - y_fraction(point.value, value_min, value_range) * chart_height;
 

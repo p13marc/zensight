@@ -13,10 +13,10 @@ use zensight_common::TelemetryValue;
 
 use crate::message::Message;
 use crate::view::components::card;
-use crate::view::tokens::space;
 use crate::view::device::DeviceDetailState;
 use crate::view::icons::{self, IconSize};
 use crate::view::theme;
+use crate::view::tokens::space;
 
 /// Parsed flow record.
 #[derive(Debug, Clone)]
