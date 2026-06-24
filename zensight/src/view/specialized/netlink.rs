@@ -34,6 +34,9 @@ pub fn netlink_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
     if has_prefix(state, "wireguard/") {
         content = content.push(card(render_wireguard(state)));
     }
+    if has_prefix(state, "tc/") {
+        content = content.push(card(render_tc(state)));
+    }
     if has_prefix(state, "xfrm/") {
         content = content.push(card(render_xfrm(state)));
     }
@@ -218,6 +221,63 @@ fn render_xfrm(state: &DeviceDetailState) -> Element<'_, Message> {
         }
     }
     col.into()
+}
+
+/// TC / QoS qdisc panel (#46): per-qdisc drops/overlimits/requeues/backlog from
+/// streamed `tc/<iface>/<kind>/<stat>` metrics — the egress-congestion signal.
+/// Only present when the sensor has TC collection enabled.
+fn render_tc(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = section_header("TC / QoS qdiscs", None);
+
+    // Group tc/<iface>/<kind>/<stat> by (iface, kind).
+    let mut qdiscs: BTreeMap<(String, String), BTreeMap<String, &TelemetryValue>> = BTreeMap::new();
+    for (metric, point) in &state.metrics {
+        if let Some(rest) = metric.strip_prefix("tc/") {
+            let parts: Vec<&str> = rest.splitn(3, '/').collect();
+            if let [iface, kind, stat] = parts[..] {
+                qdiscs
+                    .entry((iface.to_string(), kind.to_string()))
+                    .or_default()
+                    .insert(stat.to_string(), &point.value);
+            }
+        }
+    }
+
+    if qdiscs.is_empty() {
+        return column![title, empty_state("No TC/qdisc data", None)]
+            .spacing(space::SM)
+            .into();
+    }
+
+    let mut list = Column::new().spacing(4).push(
+        row![
+            cell("interface", 120),
+            cell("qdisc", 110),
+            cell("drops", 90),
+            cell("overlimits", 100),
+            cell("requeues", 90),
+            cell("backlog pkts", 110),
+            cell("backlog bytes", 120),
+        ]
+        .spacing(8),
+    );
+    for ((iface, kind), stats) in &qdiscs {
+        let g = |s: &str| num(stats.get(s).copied());
+        list = list.push(
+            row![
+                cell(iface, 120),
+                cell(kind, 110),
+                cell(&g("drops"), 90),
+                cell(&g("overlimits"), 100),
+                cell(&g("requeues"), 90),
+                cell(&g("backlog_pkts"), 110),
+                cell(&g("backlog_bytes"), 120),
+            ]
+            .spacing(8),
+        );
+    }
+
+    column![title, list].spacing(8).into()
 }
 
 /// Diagnostics summary: bottleneck score + issue counts (from the nlink scan).

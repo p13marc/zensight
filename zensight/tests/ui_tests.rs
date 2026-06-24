@@ -385,6 +385,32 @@ fn test_sysinfo_depth_cards() {
     assert!(ui.find("System health").is_ok());
 }
 
+/// #46: netlink renders the TC/qdisc panel from streamed tc/* metrics.
+#[test]
+fn test_netlink_tc_panel() {
+    use zensight_common::TelemetryValue;
+
+    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let mut state = DeviceDetailState::new(device_id);
+    let mut put = |metric: &str, v: u64| {
+        state.update(zensight_common::TelemetryPoint {
+            timestamp: 0,
+            source: "gw01".to_string(),
+            protocol: Protocol::Netlink,
+            metric: metric.to_string(),
+            value: TelemetryValue::Counter(v),
+            labels: HashMap::new(),
+        });
+    };
+    put("tc/eth0/fq_codel/drops", 42);
+    put("tc/eth0/fq_codel/overlimits", 7);
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    assert!(ui.find("TC / QoS qdiscs").is_ok());
+    assert!(ui.find("fq_codel").is_ok());
+}
+
 /// #46: netlink renders the IPsec/xfrm card and RTT-percentile socket lines.
 #[test]
 fn test_netlink_depth_cards() {
