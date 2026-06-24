@@ -158,9 +158,18 @@ fn render_diagnostics(state: &DeviceDetailState) -> Element<'_, Message> {
     let line =
         |label: &str, metric: &str| row![cell(label, 180), cell(&get(metric), 120)].spacing(8);
 
+    // Bottleneck score gets a trend sparkline (#44) — it's the headline signal.
+    let bottleneck_line = row![
+        cell("bottleneck score", 180),
+        cell(&get("diagnostics/bottleneck_score"), 120),
+        super::metric_sparkline(state, "diagnostics/bottleneck_score"),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+
     let mut col = column![
         title,
-        line("bottleneck score", "diagnostics/bottleneck_score"),
+        bottleneck_line,
         line("issues (total)", "diagnostics/issues/total"),
         line("  critical", "diagnostics/issues/critical"),
         line("  error", "diagnostics/issues/error"),

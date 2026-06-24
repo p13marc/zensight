@@ -221,6 +221,15 @@ impl DeviceDetailState {
         points
     }
 
+    /// The last `max` numeric history values for `metric` (seeded + live,
+    /// oldest-first), for inline sparklines in specialized views (#44). Empty
+    /// when the metric has no numeric history.
+    pub fn history_values(&self, metric: &str, max: usize) -> Vec<f64> {
+        let points = self.chart_points_for(metric);
+        let start = points.len().saturating_sub(max);
+        points[start..].iter().map(|p| p.value).collect()
+    }
+
     /// Seed restart-survived history loaded from the store (#22). Stored per
     /// metric; merged into a chart when that metric is selected.
     pub fn seed_history(&mut self, series: Vec<(String, Vec<crate::store::Sample>)>) {
@@ -1166,6 +1175,25 @@ mod tests {
             value: TelemetryValue::Gauge(42.0),
             labels: std::collections::HashMap::new(),
         }
+    }
+
+    #[test]
+    fn test_history_values_returns_trailing_numeric_series() {
+        let device_id = DeviceId {
+            protocol: Protocol::Sysinfo,
+            source: "h".to_string(),
+        };
+        let mut state = DeviceDetailState::new(device_id);
+        for (ts, v) in [(1, 10.0), (2, 20.0), (3, 30.0), (4, 40.0)] {
+            let mut p = make_test_point("cpu/usage");
+            p.timestamp = ts;
+            p.value = TelemetryValue::Gauge(v);
+            state.update(p);
+        }
+        // Last 2 of 4 samples, oldest-first.
+        assert_eq!(state.history_values("cpu/usage", 2), vec![30.0, 40.0]);
+        // Unknown metric → empty.
+        assert!(state.history_values("nope", 10).is_empty());
     }
 
     #[test]

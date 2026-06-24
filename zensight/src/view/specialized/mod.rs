@@ -15,14 +15,32 @@ pub mod snmp;
 pub mod sysinfo;
 pub mod syslog;
 
-use iced::Element;
+use iced::{Element, Length};
 
 use zensight_common::Protocol;
 
 use crate::message::Message;
+use crate::view::components::Sparkline;
 use crate::view::device::DeviceDetailState;
 
 pub use syslog::SyslogFilterState;
+
+/// Number of trailing history samples to render in an inline sparkline (#44).
+const SPARKLINE_SAMPLES: usize = 60;
+
+/// An inline trend sparkline for `metric` from the device's history (#44), or a
+/// fixed-width spacer when there aren't enough points yet (keeps rows aligned).
+/// Reused by the netring/netlink/sysinfo specialized views.
+pub fn metric_sparkline<'a>(state: &DeviceDetailState, metric: &str) -> Element<'a, Message> {
+    let values = state.history_values(metric, SPARKLINE_SAMPLES);
+    if values.len() < 2 {
+        return iced::widget::container(iced::widget::text(""))
+            .width(Length::Fixed(80.0))
+            .height(Length::Fixed(20.0))
+            .into();
+    }
+    Sparkline::new(values).with_size(80.0, 20.0).view()
+}
 
 /// Select and render the appropriate specialized view based on protocol.
 ///

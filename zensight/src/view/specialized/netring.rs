@@ -302,11 +302,26 @@ fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
             .into();
     }
 
-    let mut list = Column::new()
-        .spacing(4)
-        .push(row![cell("application", 200), cell("bytes/sec", 140)].spacing(8));
+    let mut list = Column::new().spacing(4).push(
+        row![
+            cell("application", 200),
+            cell("bytes/sec", 140),
+            cell("trend", 80)
+        ]
+        .spacing(8),
+    );
     for (app, bps) in rows.iter().take(30) {
-        list = list.push(row![cell(app, 200), cell(&format!("{bps:.0}"), 140)].spacing(8));
+        // Per-talker bytes/sec trend sparkline (#44).
+        let metric = format!("bandwidth/{app}/bytes_per_sec");
+        list = list.push(
+            row![
+                cell(app, 200),
+                cell(&format!("{bps:.0}"), 140),
+                super::metric_sparkline(state, &metric),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        );
     }
     column![title, list].spacing(8).into()
 }

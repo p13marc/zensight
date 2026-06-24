@@ -176,10 +176,14 @@ fn render_cpu_section(state: &DeviceDetailState) -> Element<'_, Message> {
 
     let mut cpu_content = Column::new().spacing(10);
 
-    // Overall CPU usage
+    // Overall CPU usage, with a trend sparkline from history (#44).
     if let Some(cpu_usage) = get_metric_value(state, "cpu/usage") {
         let gauge = Gauge::percentage(cpu_usage, "Usage").with_width(200.0);
-        cpu_content = cpu_content.push(gauge.view());
+        cpu_content = cpu_content.push(
+            row![gauge.view(), super::metric_sparkline(state, "cpu/usage")]
+                .spacing(10)
+                .align_y(Alignment::Center),
+        );
     }
 
     // Count cores from available metrics
@@ -255,7 +259,14 @@ fn render_memory_section(state: &DeviceDetailState) -> Element<'_, Message> {
         let total_gb = total / 1_073_741_824.0;
 
         let progress = ProgressBar::new(used_gb, total_gb, "RAM", "GB");
-        mem_content = mem_content.push(progress.view());
+        mem_content = mem_content.push(
+            row![
+                progress.view(),
+                super::metric_sparkline(state, "memory/used")
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        );
     }
 
     // Swap usage
