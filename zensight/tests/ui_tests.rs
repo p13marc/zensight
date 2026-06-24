@@ -767,7 +767,7 @@ fn test_topology_search_input() {
 #[test]
 fn test_security_view() {
     use zensight::view::alerts::AlertsState;
-    use zensight::view::security::security_view;
+    use zensight::view::security::{SecurityState, security_view};
     use zensight_common::{Alert, AlertKind, AlertSeverity};
 
     let mut alerts = AlertsState::new();
@@ -792,12 +792,52 @@ fn test_security_view() {
         "sshd not listening",
     ));
 
-    let mut ui = simulator(security_view(&alerts));
+    let sec = SecurityState::default();
+    let mut ui = simulator(security_view(&alerts, &sec));
     assert!(ui.find("Security — Network Anomalies").is_ok());
     assert!(ui.find("PortScanTRW from 10.0.0.5").is_ok());
     assert!(ui.find("10.0.0.5").is_ok());
     // The expectation alert must NOT appear in the security lens.
     assert!(ui.find("sshd not listening").is_err());
+}
+
+/// #48: clicking an anomaly row expands its evidence drill-down (emits
+/// SelectAnomaly), and the "Hide info" toggle emits its message.
+#[test]
+fn test_security_drilldown_and_filter() {
+    use zensight::view::security::{SecurityState, security_view};
+    use zensight_common::{Alert, AlertKind, AlertSeverity};
+
+    let mut alerts = zensight::view::alerts::AlertsState::new();
+    let mut a = Alert::new(
+        "10.0.0.5",
+        Protocol::Netring,
+        AlertKind::Anomaly,
+        "PortScanTRW",
+        AlertSeverity::Warning,
+        "PortScanTRW from 10.0.0.5",
+    );
+    a.labels.insert("src".into(), "10.0.0.5".into());
+    a.labels.insert("n_observed".into(), "42".into());
+    alerts.ingest_external(a);
+
+    let sec = SecurityState::default();
+    let mut ui = simulator(security_view(&alerts, &sec));
+    let _ = ui.click("PortScanTRW from 10.0.0.5");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::SelectAnomaly(Some(_)))),
+        "row click should emit SelectAnomaly, got {msgs:?}"
+    );
+
+    // With the anomaly expanded, its evidence label is visible.
+    let sec2 = SecurityState {
+        selected: Some(alerts.active_external()[0].alert_key()),
+        hide_info: false,
+    };
+    let mut ui2 = simulator(security_view(&alerts, &sec2));
+    assert!(ui2.find("n_observed:").is_ok());
 }
 
 /// The expectations authoring view renders and "Add & Push" emits a message.

@@ -112,6 +112,10 @@ pub enum Message {
     OpenSecurity,
     /// Close the security view.
     CloseSecurity,
+    /// Toggle hiding Info-severity anomalies in the Security view (#48).
+    ToggleSecurityHideInfo,
+    /// Expand/collapse an anomaly's evidence drill-down by alert_key (#48).
+    SelectAnomaly(Option<String>),
 
     /// Sensor came online (liveliness token appeared).
     SensorOnline(String),
