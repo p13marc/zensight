@@ -322,6 +322,40 @@ fn test_alert_investigate_navigates_to_device_metric() {
     );
 }
 
+/// #50: a metric row's "alert" button emits PromoteMetricToAlert with the
+/// metric path and current value.
+#[test]
+fn test_metric_promote_to_alert() {
+    use zensight_common::TelemetryValue;
+
+    let device_id = DeviceId::new(Protocol::Sysinfo, "server01");
+    let mut state = DeviceDetailState::new(device_id);
+    let mut p = zensight_common::TelemetryPoint {
+        timestamp: 0,
+        source: "server01".to_string(),
+        protocol: Protocol::Sysinfo,
+        metric: "cpu/usage".to_string(),
+        value: TelemetryValue::Gauge(91.0),
+        labels: HashMap::new(),
+    };
+    state.update(p.clone());
+    p.metric = "memory/used".to_string();
+    state.update(p);
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    let _ = ui.click("alert");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter().any(|m| matches!(
+            m,
+            Message::PromoteMetricToAlert { metric, value, .. }
+                if !metric.is_empty() && *value > 0.0
+        )),
+        "alert button should emit PromoteMetricToAlert, got {msgs:?}"
+    );
+}
+
 /// Test settings view renders correctly.
 #[test]
 fn test_settings_view() {

@@ -489,6 +489,29 @@ impl ZenSight {
                 }
             }
 
+            Message::PromoteMetricToAlert {
+                device,
+                metric,
+                value,
+            } => {
+                // #50: netlink has a sentinel that evaluates metric thresholds,
+                // so promote into the expectations authoring form. Other sensors
+                // have no command channel, so seed the local rule engine instead.
+                if device.protocol == zensight_common::Protocol::Netlink {
+                    use crate::view::expectations::ExpKind;
+                    self.expectations.new_kind = ExpKind::MetricThreshold;
+                    self.expectations.new_metric = metric.clone();
+                    self.expectations.new_value = format!("{value}");
+                    self.expectations.new_name = format!("{} threshold", metric);
+                    self.set_view(CurrentView::Expectations);
+                } else {
+                    self.alerts.set_new_rule_name(format!("{metric} alert"));
+                    self.alerts.set_new_rule_metric(metric);
+                    self.alerts.set_new_rule_threshold(format!("{value}"));
+                    self.set_view(CurrentView::Alerts);
+                }
+            }
+
             Message::AddMetricToChart(metric_name) => {
                 if let Some(ref mut device) = self.selected_device {
                     device.add_metric_to_chart(metric_name);

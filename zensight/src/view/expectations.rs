@@ -294,12 +294,84 @@ pub fn parse_status(json: &str) -> Vec<ExpRow> {
             });
         }
     }
+    // Metric-threshold expectations (#50) — previously dropped, so a pushed
+    // threshold was invisible/unremovable in the Configured list.
+    if let Some(metrics) = v.get("metrics").and_then(|s| s.as_array()) {
+        for m in metrics {
+            let name = m.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+            let metric = m.get("metric").and_then(|x| x.as_str()).unwrap_or("?");
+            let op = m.get("op").and_then(|x| x.as_str()).unwrap_or("?");
+            let value = m.get("value").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            rows.push(ExpRow {
+                rule: format!("metric:{name}"),
+                detail: format!("{metric} {op} {value}"),
+                severity: m
+                    .get("severity")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("warning")
+                    .to_string(),
+            });
+        }
+    }
+    if let Some(neighbors) = v.get("neighbors").and_then(|s| s.as_array()) {
+        for n in neighbors {
+            let ip = n.get("ip").and_then(|x| x.as_str()).unwrap_or("?");
+            let reachable = n.get("reachable").and_then(|x| x.as_bool()).unwrap_or(true);
+            rows.push(ExpRow {
+                rule: format!("neighbor:{ip}"),
+                detail: if reachable {
+                    "must be reachable".into()
+                } else {
+                    "must be unreachable".into()
+                },
+                severity: n
+                    .get("severity")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("warning")
+                    .to_string(),
+            });
+        }
+    }
+    if let Some(routes) = v.get("routes").and_then(|s| s.as_array()) {
+        for r in routes {
+            let name = r.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+            let via = r.get("default_via").and_then(|x| x.as_str());
+            rows.push(ExpRow {
+                rule: format!("route:{name}"),
+                detail: match via {
+                    Some(gw) => format!("default via {gw}"),
+                    None => "default present".into(),
+                },
+                severity: r
+                    .get("severity")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("warning")
+                    .to_string(),
+            });
+        }
+    }
     rows
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_status_includes_metric_thresholds() {
+        // #50: pushed metric/neighbor/route rules must be visible in the list.
+        let rows = parse_status(
+            r#"{"sockets":[],"links":[],
+                "metrics":[{"name":"retx","metric":"sockets/tcp/retransmits_total","op":"GreaterThan","value":100.0,"severity":"critical"}],
+                "neighbors":[{"ip":"10.0.0.1","reachable":true,"severity":"warning"}],
+                "routes":[{"name":"default","default_present":true,"severity":"warning"}]}"#,
+        );
+        assert!(rows.iter().any(|r| r.rule == "metric:retx"
+            && r.detail.contains("sockets/tcp/retransmits_total")
+            && r.severity == "critical"));
+        assert!(rows.iter().any(|r| r.rule == "neighbor:10.0.0.1"));
+        assert!(rows.iter().any(|r| r.rule == "route:default"));
+    }
 
     #[test]
     fn parse_status_sockets_and_links() {

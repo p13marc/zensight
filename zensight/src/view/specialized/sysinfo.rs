@@ -180,9 +180,12 @@ fn render_cpu_section(state: &DeviceDetailState) -> Element<'_, Message> {
     if let Some(cpu_usage) = get_metric_value(state, "cpu/usage") {
         let gauge = Gauge::percentage(cpu_usage, "Usage").with_width(200.0);
         cpu_content = cpu_content.push(
-            row![gauge.view(), super::metric_sparkline(state, "cpu/usage")]
-                .spacing(10)
-                .align_y(Alignment::Center),
+            row![
+                gauge.view(),
+                super::metric_trend_and_alert(state, "cpu/usage")
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
         );
     }
 
@@ -262,7 +265,7 @@ fn render_memory_section(state: &DeviceDetailState) -> Element<'_, Message> {
         mem_content = mem_content.push(
             row![
                 progress.view(),
-                super::metric_sparkline(state, "memory/used")
+                super::metric_trend_and_alert(state, "memory/used")
             ]
             .spacing(10)
             .align_y(Alignment::Center),

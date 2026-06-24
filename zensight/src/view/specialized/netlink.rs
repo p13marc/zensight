@@ -162,7 +162,7 @@ fn render_diagnostics(state: &DeviceDetailState) -> Element<'_, Message> {
     let bottleneck_line = row![
         cell("bottleneck score", 180),
         cell(&get("diagnostics/bottleneck_score"), 120),
-        super::metric_sparkline(state, "diagnostics/bottleneck_score"),
+        super::metric_trend_and_alert(state, "diagnostics/bottleneck_score"),
     ]
     .spacing(8)
     .align_y(iced::Alignment::Center);
