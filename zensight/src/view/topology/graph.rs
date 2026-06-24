@@ -462,6 +462,15 @@ impl<'a> TopologyGraphProgram<'a> {
 
         let color = if is_selected {
             self.selection_ring_color()
+        } else if let Some(sev) = edge.alert {
+            // Per-link health overlay (#49): a link touching an alerting host is
+            // tinted by that severity.
+            use zensight_common::AlertSeverity;
+            match sev {
+                AlertSeverity::Critical => iced::Color::from_rgb(0.9, 0.2, 0.2),
+                AlertSeverity::Warning => iced::Color::from_rgb(1.0, 0.6, 0.0),
+                AlertSeverity::Info => iced::Color::from_rgb(0.3, 0.5, 0.9),
+            }
         } else {
             self.edge_default_color()
         };

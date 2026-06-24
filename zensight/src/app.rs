@@ -122,6 +122,8 @@ pub struct ZenSight {
     session: Option<std::sync::Arc<zenoh::Session>>,
     /// Expectations authoring view state (netlink sentinel, Plan 08).
     expectations: crate::view::expectations::ExpectationsState,
+    /// Security view state: severity filter + expanded anomaly (#48).
+    security: crate::view::security::SecurityState,
     /// Local tiered time-series store (hot ring + redb), Plan v3-04 §A / #22.
     /// Telemetry writes through it; charts read from it so trends survive restart.
     store: crate::store::MetricStore,
@@ -236,6 +238,7 @@ impl ZenSight {
             toasts: ToastState::default(),
             session: None,
             expectations: crate::view::expectations::ExpectationsState::default(),
+            security: crate::view::security::SecurityState::default(),
             // In demo mode keep history in-memory only (no disk churn / restart survival
             // for synthetic data); otherwise open the persistent tiered store.
             store: if demo_mode {
@@ -483,6 +486,29 @@ impl ZenSight {
             Message::ClearChartSelection => {
                 if let Some(ref mut device) = self.selected_device {
                     device.clear_chart_selection();
+                }
+            }
+
+            Message::PromoteMetricToAlert {
+                device,
+                metric,
+                value,
+            } => {
+                // #50: netlink has a sentinel that evaluates metric thresholds,
+                // so promote into the expectations authoring form. Other sensors
+                // have no command channel, so seed the local rule engine instead.
+                if device.protocol == zensight_common::Protocol::Netlink {
+                    use crate::view::expectations::ExpKind;
+                    self.expectations.new_kind = ExpKind::MetricThreshold;
+                    self.expectations.new_metric = metric.clone();
+                    self.expectations.new_value = format!("{value}");
+                    self.expectations.new_name = format!("{} threshold", metric);
+                    self.set_view(CurrentView::Expectations);
+                } else {
+                    self.alerts.set_new_rule_name(format!("{metric} alert"));
+                    self.alerts.set_new_rule_metric(metric);
+                    self.alerts.set_new_rule_threshold(format!("{value}"));
+                    self.set_view(CurrentView::Alerts);
                 }
             }
 
@@ -1178,6 +1204,12 @@ impl ZenSight {
             Message::CloseSecurity => {
                 self.set_view(CurrentView::Dashboard);
             }
+            Message::ToggleSecurityHideInfo => {
+                self.security.hide_info = !self.security.hide_info;
+            }
+            Message::SelectAnomaly(key) => {
+                self.security.selected = key;
+            }
 
             Message::ClearSyslogFilters => {
                 self.syslog_filter.clear();
@@ -1532,7 +1564,9 @@ impl ZenSight {
             CurrentView::Expectations => {
                 crate::view::expectations::expectations_view(&self.expectations)
             }
-            CurrentView::Security => crate::view::security::security_view(&self.alerts),
+            CurrentView::Security => {
+                crate::view::security::security_view(&self.alerts, &self.security)
+            }
             CurrentView::Sensors => {
                 crate::view::sensors::sensors_view(&self.sensor_health, &self.recent_errors)
             }

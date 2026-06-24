@@ -57,6 +57,17 @@ pub fn sysinfo_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
         content = content.push(card(render_processes_section(state)));
     }
 
+    // Saturation/pressure depth (#47) — only when the sensor publishes it.
+    if has_prefix(state, "pressure/") {
+        content = content.push(card(render_psi_section(state)));
+    }
+    if has_prefix(state, "cgroup/") {
+        content = content.push(card(render_cgroup_section(state)));
+    }
+    if has_system_health(state) {
+        content = content.push(card(render_system_health_section(state)));
+    }
+
     container(scrollable(content))
         .width(Length::Fill)
         .height(Length::Fill)
@@ -176,10 +187,17 @@ fn render_cpu_section(state: &DeviceDetailState) -> Element<'_, Message> {
 
     let mut cpu_content = Column::new().spacing(10);
 
-    // Overall CPU usage
+    // Overall CPU usage, with a trend sparkline from history (#44).
     if let Some(cpu_usage) = get_metric_value(state, "cpu/usage") {
         let gauge = Gauge::percentage(cpu_usage, "Usage").with_width(200.0);
-        cpu_content = cpu_content.push(gauge.view());
+        cpu_content = cpu_content.push(
+            row![
+                gauge.view(),
+                super::metric_trend_and_alert(state, "cpu/usage")
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        );
     }
 
     // Count cores from available metrics
@@ -255,7 +273,14 @@ fn render_memory_section(state: &DeviceDetailState) -> Element<'_, Message> {
         let total_gb = total / 1_073_741_824.0;
 
         let progress = ProgressBar::new(used_gb, total_gb, "RAM", "GB");
-        mem_content = mem_content.push(progress.view());
+        mem_content = mem_content.push(
+            row![
+                progress.view(),
+                super::metric_trend_and_alert(state, "memory/used")
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        );
     }
 
     // Swap usage
@@ -696,6 +721,159 @@ fn render_tcp_states_section(state: &DeviceDetailState) -> Element<'_, Message> 
 /// Check if process data is available.
 fn has_processes(state: &DeviceDetailState) -> bool {
     state.metrics.keys().any(|k| k.starts_with("process/"))
+}
+
+/// Whether any metric key starts with `prefix` (#47).
+fn has_prefix(state: &DeviceDetailState, prefix: &str) -> bool {
+    state.metrics.keys().any(|k| k.starts_with(prefix))
+}
+
+/// Whether the host publishes any of the system-health saturation counters (#47).
+fn has_system_health(state: &DeviceDetailState) -> bool {
+    const KEYS: &[&str] = &[
+        "system/procs_running",
+        "system/file_descriptors_used_percent",
+        "system/context_switches_total",
+        "system/processes_zombie",
+        "system/entropy_avail",
+    ];
+    KEYS.iter().any(|k| state.metrics.contains_key(*k))
+}
+
+/// A `label: value` row (#47), formatted to `prec` decimals with an optional
+/// unit suffix; renders "-" when the metric is absent.
+fn kv_row<'a>(
+    state: &DeviceDetailState,
+    label: &str,
+    metric: &str,
+    unit: &str,
+    prec: usize,
+) -> Element<'a, Message> {
+    let value = match get_metric_value(state, metric) {
+        Some(v) => format!("{v:.prec$}{unit}"),
+        None => "-".to_string(),
+    };
+    row![
+        text(label.to_string())
+            .size(12)
+            .width(Length::Fixed(220.0))
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            }),
+        text(value).size(12),
+    ]
+    .spacing(8)
+    .into()
+}
+
+/// PSI / pressure-stall card (#47): the canonical saturation signal.
+fn render_psi_section(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = row![text("Pressure (PSI)").size(16)].spacing(8);
+    let mut col = Column::new().spacing(4).push(title);
+    for (res, label) in [("cpu", "CPU"), ("io", "I/O"), ("memory", "Memory")] {
+        // some/avg10 is the headline; pair it with a trend sparkline.
+        let some10 = format!("pressure/{res}/some_avg10");
+        if get_metric_value(state, &some10).is_some() {
+            col = col.push(
+                row![
+                    text(format!("{label} some avg10"))
+                        .size(12)
+                        .width(Length::Fixed(220.0))
+                        .style(|t: &Theme| text::Style {
+                            color: Some(theme::colors(t).text_muted()),
+                        }),
+                    text(format!(
+                        "{:.1}%",
+                        get_metric_value(state, &some10).unwrap_or(0.0)
+                    ))
+                    .size(12),
+                    super::metric_sparkline(state, &some10),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
+        col = col
+            .push(kv_row(
+                state,
+                &format!("{label} some avg300"),
+                &format!("pressure/{res}/some_avg300"),
+                "%",
+                1,
+            ))
+            .push(kv_row(
+                state,
+                &format!("{label} full avg10"),
+                &format!("pressure/{res}/full_avg10"),
+                "%",
+                1,
+            ));
+    }
+    col.into()
+}
+
+/// cgroup-v2 throttling / OOM / memory card (#47).
+fn render_cgroup_section(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = row![text("cgroup").size(16)].spacing(8);
+    column![
+        title,
+        kv_row(
+            state,
+            "CPU throttled (count)",
+            "cgroup/cpu/nr_throttled",
+            "",
+            0
+        ),
+        kv_row(
+            state,
+            "CPU throttled (usec)",
+            "cgroup/cpu/throttled_usec",
+            "",
+            0
+        ),
+        kv_row(state, "memory current", "cgroup/memory/current", " B", 0),
+        kv_row(state, "memory max", "cgroup/memory/max", " B", 0),
+        kv_row(state, "memory used %", "cgroup/memory/used_percent", "%", 1),
+        kv_row(
+            state,
+            "OOM kills (total)",
+            "cgroup/memory/oom_kills_total",
+            "",
+            0
+        ),
+    ]
+    .spacing(4)
+    .into()
+}
+
+/// System-health / saturation-ceiling card (#47): FD exhaustion, runqueue, churn.
+fn render_system_health_section(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = row![text("System health").size(16)].spacing(8);
+    column![
+        title,
+        kv_row(
+            state,
+            "FD used %",
+            "system/file_descriptors_used_percent",
+            "%",
+            1
+        ),
+        kv_row(state, "FDs used", "system/file_descriptors_used", "", 0),
+        kv_row(state, "procs running", "system/procs_running", "", 0),
+        kv_row(state, "procs blocked", "system/procs_blocked", "", 0),
+        kv_row(state, "zombies", "system/processes_zombie", "", 0),
+        kv_row(
+            state,
+            "ctx switches (total)",
+            "system/context_switches_total",
+            "",
+            0
+        ),
+        kv_row(state, "forks (total)", "system/forks_total", "", 0),
+        kv_row(state, "entropy avail", "system/entropy_avail", "", 0),
+    ]
+    .spacing(4)
+    .into()
 }
 
 /// Render top processes section.

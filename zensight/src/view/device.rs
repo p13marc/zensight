@@ -45,6 +45,10 @@ struct MetricTableRow {
     trend: String,
     /// Whether this metric is stale (not updated recently).
     is_stale: bool,
+    /// The device this metric belongs to (for the promote-to-alert action, #50).
+    device_id: DeviceId,
+    /// Current numeric value, if the metric is numeric (#50).
+    numeric_value: Option<f64>,
 }
 
 /// Get the current timestamp in milliseconds.
@@ -219,6 +223,15 @@ impl DeviceDetailState {
             );
         }
         points
+    }
+
+    /// The last `max` numeric history values for `metric` (seeded + live,
+    /// oldest-first), for inline sparklines in specialized views (#44). Empty
+    /// when the metric has no numeric history.
+    pub fn history_values(&self, metric: &str, max: usize) -> Vec<f64> {
+        let points = self.chart_points_for(metric);
+        let start = points.len().saturating_sub(max);
+        points[start..].iter().map(|p| p.value).collect()
     }
 
     /// Seed restart-survived history loaded from the store (#22). Stored per
@@ -863,6 +876,12 @@ fn build_metric_table_rows(state: &DeviceDetailState) -> Vec<MetricTableRow> {
                 is_in_chart: state.is_metric_in_chart(name),
                 trend,
                 is_stale,
+                device_id: state.device_id.clone(),
+                numeric_value: match &point.value {
+                    TelemetryValue::Counter(v) => Some(*v as f64),
+                    TelemetryValue::Gauge(v) => Some(*v),
+                    _ => None,
+                },
             }
         })
         .collect()
@@ -1072,7 +1091,7 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
         |row: MetricTableRow| -> Element<'_, Message> {
             if row.is_chartable {
                 let metric_name = row.name.clone();
-                button(text(if row.is_in_chart { "−" } else { "+" }).size(11))
+                let chart_btn = button(text(if row.is_in_chart { "−" } else { "+" }).size(11))
                     .on_press(if row.is_in_chart {
                         Message::RemoveMetricFromChart(metric_name)
                     } else {
@@ -1083,14 +1102,26 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
                     } else {
                         iced::widget::button::secondary
                     })
-                    .padding([2, 8])
-                    .into()
+                    .padding([2, 8]);
+
+                // Promote this metric to an alert rule (#50): seeds the rule form
+                // with the metric path + current value and opens the authoring view.
+                let alert_btn = button(text("alert").size(10))
+                    .on_press(Message::PromoteMetricToAlert {
+                        device: row.device_id.clone(),
+                        metric: row.name.clone(),
+                        value: row.numeric_value.unwrap_or(0.0),
+                    })
+                    .style(iced::widget::button::secondary)
+                    .padding([2, 8]);
+
+                row![chart_btn, alert_btn].spacing(4).into()
             } else {
                 text("").into()
             }
         },
     )
-    .width(40);
+    .width(110);
 
     let metrics_table = table(
         [
@@ -1166,6 +1197,25 @@ mod tests {
             value: TelemetryValue::Gauge(42.0),
             labels: std::collections::HashMap::new(),
         }
+    }
+
+    #[test]
+    fn test_history_values_returns_trailing_numeric_series() {
+        let device_id = DeviceId {
+            protocol: Protocol::Sysinfo,
+            source: "h".to_string(),
+        };
+        let mut state = DeviceDetailState::new(device_id);
+        for (ts, v) in [(1, 10.0), (2, 20.0), (3, 30.0), (4, 40.0)] {
+            let mut p = make_test_point("cpu/usage");
+            p.timestamp = ts;
+            p.value = TelemetryValue::Gauge(v);
+            state.update(p);
+        }
+        // Last 2 of 4 samples, oldest-first.
+        assert_eq!(state.history_values("cpu/usage", 2), vec![30.0, 40.0]);
+        // Unknown metric → empty.
+        assert!(state.history_values("nope", 10).is_empty());
     }
 
     #[test]

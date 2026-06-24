@@ -112,6 +112,10 @@ pub enum Message {
     OpenSecurity,
     /// Close the security view.
     CloseSecurity,
+    /// Toggle hiding Info-severity anomalies in the Security view (#48).
+    ToggleSecurityHideInfo,
+    /// Expand/collapse an anomaly's evidence drill-down by alert_key (#48).
+    SelectAnomaly(Option<String>),
 
     /// Sensor came online (liveliness token appeared).
     SensorOnline(String),
@@ -169,6 +173,15 @@ pub enum Message {
 
     /// User cleared the chart selection.
     ClearChartSelection,
+
+    /// Promote a metric to an alert rule (#50): seed the rule/expectation form
+    /// with this metric + current value and open the authoring view. Netlink
+    /// routes to the sentinel expectations; other protocols to local rules.
+    PromoteMetricToAlert {
+        device: DeviceId,
+        metric: String,
+        value: f64,
+    },
 
     /// Add a metric to the comparison chart (multi-series mode).
     AddMetricToChart(String),

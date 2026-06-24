@@ -322,6 +322,124 @@ fn test_alert_investigate_navigates_to_device_metric() {
     );
 }
 
+/// #50: a metric row's "alert" button emits PromoteMetricToAlert with the
+/// metric path and current value.
+#[test]
+fn test_metric_promote_to_alert() {
+    use zensight_common::TelemetryValue;
+
+    let device_id = DeviceId::new(Protocol::Sysinfo, "server01");
+    let mut state = DeviceDetailState::new(device_id);
+    let mut p = zensight_common::TelemetryPoint {
+        timestamp: 0,
+        source: "server01".to_string(),
+        protocol: Protocol::Sysinfo,
+        metric: "cpu/usage".to_string(),
+        value: TelemetryValue::Gauge(91.0),
+        labels: HashMap::new(),
+    };
+    state.update(p.clone());
+    p.metric = "memory/used".to_string();
+    state.update(p);
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    let _ = ui.click("alert");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter().any(|m| matches!(
+            m,
+            Message::PromoteMetricToAlert { metric, value, .. }
+                if !metric.is_empty() && *value > 0.0
+        )),
+        "alert button should emit PromoteMetricToAlert, got {msgs:?}"
+    );
+}
+
+/// #47: sysinfo renders PSI, cgroup, and system-health cards when the host
+/// publishes those metric families.
+#[test]
+fn test_sysinfo_depth_cards() {
+    use zensight_common::TelemetryValue;
+
+    let device_id = DeviceId::new(Protocol::Sysinfo, "server01");
+    let mut state = DeviceDetailState::new(device_id);
+    let mut put = |metric: &str, v: f64| {
+        state.update(zensight_common::TelemetryPoint {
+            timestamp: 0,
+            source: "server01".to_string(),
+            protocol: Protocol::Sysinfo,
+            metric: metric.to_string(),
+            value: TelemetryValue::Gauge(v),
+            labels: HashMap::new(),
+        });
+    };
+    put("pressure/cpu/some_avg10", 12.5);
+    put("cgroup/memory/used_percent", 80.0);
+    put("system/file_descriptors_used_percent", 42.0);
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    assert!(ui.find("Pressure (PSI)").is_ok());
+    assert!(ui.find("cgroup").is_ok());
+    assert!(ui.find("System health").is_ok());
+}
+
+/// #46: netlink renders the IPsec/xfrm card and RTT-percentile socket lines.
+#[test]
+fn test_netlink_depth_cards() {
+    use zensight_common::TelemetryValue;
+
+    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let mut state = DeviceDetailState::new(device_id);
+    let mut put = |metric: &str, v: f64| {
+        state.update(zensight_common::TelemetryPoint {
+            timestamp: 0,
+            source: "gw01".to_string(),
+            protocol: Protocol::Netlink,
+            metric: metric.to_string(),
+            value: TelemetryValue::Gauge(v),
+            labels: HashMap::new(),
+        });
+    };
+    put("sockets/tcp/established", 10.0);
+    put("sockets/tcp/rtt_p95_us", 1234.0);
+    put("xfrm/sa/total", 4.0);
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    assert!(ui.find("IPsec / xfrm").is_ok());
+    assert!(ui.find("RTT p95 (us)").is_ok());
+}
+
+/// #45: netring renders DNS RED, HTTP RED, and per-L4 cards when present.
+#[test]
+fn test_netring_red_cards() {
+    use zensight_common::TelemetryValue;
+
+    let device_id = DeviceId::new(Protocol::Netring, "sensor01");
+    let mut state = DeviceDetailState::new(device_id);
+    let mut put = |metric: &str, v: f64| {
+        state.update(zensight_common::TelemetryPoint {
+            timestamp: 0,
+            source: "sensor01".to_string(),
+            protocol: Protocol::Netring,
+            metric: metric.to_string(),
+            value: TelemetryValue::Counter(v as u64),
+            labels: HashMap::new(),
+        });
+    };
+    put("dns/queries_total", 100.0);
+    put("http/requests_total", 50.0);
+    put("flow/by_l4/tcp/flows_total", 7.0);
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    assert!(ui.find("DNS (RED)").is_ok());
+    assert!(ui.find("HTTP (RED)").is_ok());
+    assert!(ui.find("Per-protocol (L4)").is_ok());
+}
+
 /// Test settings view renders correctly.
 #[test]
 fn test_settings_view() {
@@ -767,7 +885,7 @@ fn test_topology_search_input() {
 #[test]
 fn test_security_view() {
     use zensight::view::alerts::AlertsState;
-    use zensight::view::security::security_view;
+    use zensight::view::security::{SecurityState, security_view};
     use zensight_common::{Alert, AlertKind, AlertSeverity};
 
     let mut alerts = AlertsState::new();
@@ -792,12 +910,52 @@ fn test_security_view() {
         "sshd not listening",
     ));
 
-    let mut ui = simulator(security_view(&alerts));
+    let sec = SecurityState::default();
+    let mut ui = simulator(security_view(&alerts, &sec));
     assert!(ui.find("Security — Network Anomalies").is_ok());
     assert!(ui.find("PortScanTRW from 10.0.0.5").is_ok());
     assert!(ui.find("10.0.0.5").is_ok());
     // The expectation alert must NOT appear in the security lens.
     assert!(ui.find("sshd not listening").is_err());
+}
+
+/// #48: clicking an anomaly row expands its evidence drill-down (emits
+/// SelectAnomaly), and the "Hide info" toggle emits its message.
+#[test]
+fn test_security_drilldown_and_filter() {
+    use zensight::view::security::{SecurityState, security_view};
+    use zensight_common::{Alert, AlertKind, AlertSeverity};
+
+    let mut alerts = zensight::view::alerts::AlertsState::new();
+    let mut a = Alert::new(
+        "10.0.0.5",
+        Protocol::Netring,
+        AlertKind::Anomaly,
+        "PortScanTRW",
+        AlertSeverity::Warning,
+        "PortScanTRW from 10.0.0.5",
+    );
+    a.labels.insert("src".into(), "10.0.0.5".into());
+    a.labels.insert("n_observed".into(), "42".into());
+    alerts.ingest_external(a);
+
+    let sec = SecurityState::default();
+    let mut ui = simulator(security_view(&alerts, &sec));
+    let _ = ui.click("PortScanTRW from 10.0.0.5");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::SelectAnomaly(Some(_)))),
+        "row click should emit SelectAnomaly, got {msgs:?}"
+    );
+
+    // With the anomaly expanded, its evidence label is visible.
+    let sec2 = SecurityState {
+        selected: Some(alerts.active_external()[0].alert_key()),
+        hide_info: false,
+    };
+    let mut ui2 = simulator(security_view(&alerts, &sec2));
+    assert!(ui2.find("n_observed:").is_ok());
 }
 
 /// The expectations authoring view renders and "Add & Push" emits a message.

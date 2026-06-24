@@ -139,6 +139,8 @@ impl TopologyState {
                 });
             }
         }
+        // Per-link health (#49): tint each edge by the worst of its endpoints.
+        self.recompute_edge_health();
         self.cache.clear();
     }
 
@@ -177,7 +179,22 @@ impl TopologyState {
     ) {
         self.edges = edges_from_flows(flows, ip_to_node, now_ms);
         self.selected_edge = None;
+        self.recompute_edge_health();
         self.cache.clear();
+    }
+
+    /// Tint each edge by the worst alert severity of its two endpoint nodes
+    /// (#49). Idempotent; safe to call after either node alerts or edges change.
+    fn recompute_edge_health(&mut self) {
+        for edge in &mut self.edges {
+            let from = self.nodes.get(&edge.from).and_then(|n| n.alert);
+            let to = self.nodes.get(&edge.to).and_then(|n| n.alert);
+            edge.alert = match (from, to) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (Some(a), None) | (None, Some(a)) => Some(a),
+                (None, None) => None,
+            };
+        }
     }
 
     /// Select a node by ID.
@@ -395,6 +412,10 @@ pub struct Edge {
     pub protocol: Option<String>,
     /// Last seen timestamp.
     pub last_seen: i64,
+    /// Per-link health (#49): the max alert severity of the two endpoint nodes,
+    /// so a link to/from a host in trouble is visually flagged. Set by
+    /// [`TopologyState::apply_alerts`].
+    pub alert: Option<zensight_common::AlertSeverity>,
 }
 
 /// Extract the bare IP from an `ip:port` endpoint string. Handles IPv6 in
@@ -456,6 +477,7 @@ pub fn edges_from_flows(
             packets,
             protocol: Some(protocol),
             last_seen: now_ms,
+            alert: None,
         })
         .collect();
     // Stable order: heaviest edges first, then by endpoints.
@@ -956,5 +978,58 @@ mod tests {
         // Clearing resolves the overlay.
         state.apply_alerts(&HashMap::new());
         assert_eq!(state.nodes["host1"].alert, None);
+    }
+
+    #[test]
+    fn test_edge_health_overlay() {
+        use std::collections::HashMap;
+        use zensight_common::{Alert, AlertKind, AlertSeverity, Protocol};
+
+        let node = |id: &str| Node {
+            id: id.to_string(),
+            label: id.to_string(),
+            position: (0.0, 0.0),
+            velocity: (0.0, 0.0),
+            node_type: NodeType::Host,
+            cpu_usage: None,
+            memory_usage: None,
+            network_rx: None,
+            network_tx: None,
+            is_healthy: true,
+            pinned: false,
+            alert: None,
+            sensor_count: None,
+        };
+
+        let mut state = TopologyState::default();
+        state.nodes.insert("a".to_string(), node("a"));
+        state.nodes.insert("b".to_string(), node("b"));
+        state.edges.push(Edge {
+            from: "a".to_string(),
+            to: "b".to_string(),
+            bytes: 10,
+            packets: 1,
+            protocol: None,
+            last_seen: 0,
+            alert: None,
+        });
+
+        let mut external = HashMap::new();
+        let crit = Alert::new(
+            "a",
+            Protocol::Netlink,
+            AlertKind::Expectation,
+            "socket:sshd",
+            AlertSeverity::Critical,
+            "down",
+        );
+        external.insert(crit.alert_key(), crit);
+
+        state.apply_alerts(&external);
+        // The link to the alerting endpoint inherits its severity (#49).
+        assert_eq!(state.edges[0].alert, Some(AlertSeverity::Critical));
+
+        state.apply_alerts(&HashMap::new());
+        assert_eq!(state.edges[0].alert, None);
     }
 }

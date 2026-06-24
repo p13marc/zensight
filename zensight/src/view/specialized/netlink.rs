@@ -34,6 +34,9 @@ pub fn netlink_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
     if has_prefix(state, "wireguard/") {
         content = content.push(card(render_wireguard(state)));
     }
+    if has_prefix(state, "xfrm/") {
+        content = content.push(card(render_xfrm(state)));
+    }
 
     content = content.push(card(render_detail(state)));
 
@@ -80,16 +83,21 @@ fn render_interfaces(state: &DeviceDetailState) -> Element<'_, Message> {
             .into();
     }
 
-    // Header row.
+    // Header row. Now includes packets + errors columns (#46) — carrier-vs-admin
+    // state and error counters were previously dropped at render.
     let mut list = Column::new().spacing(4).push(
         row![
-            cell("interface", 140),
-            cell("state", 80),
-            cell("mtu", 70),
-            cell("rx bytes", 120),
-            cell("tx bytes", 120),
-            cell("rx drop", 90),
-            cell("tx drop", 90),
+            cell("interface", 130),
+            cell("state", 70),
+            cell("mtu", 60),
+            cell("rx bytes", 110),
+            cell("tx bytes", 110),
+            cell("rx pkts", 100),
+            cell("tx pkts", 100),
+            cell("rx drop", 80),
+            cell("tx drop", 80),
+            cell("rx err", 80),
+            cell("tx err", 80),
         ]
         .spacing(8),
     );
@@ -105,13 +113,17 @@ fn render_interfaces(state: &DeviceDetailState) -> Element<'_, Message> {
             });
         list = list.push(
             row![
-                cell(name, 140),
-                cell(&st, 80),
-                cell(&num(stats.get("mtu").copied()), 70),
-                cell(&num(stats.get("rx_bytes").copied()), 120),
-                cell(&num(stats.get("tx_bytes").copied()), 120),
-                cell(&num(stats.get("rx_dropped").copied()), 90),
-                cell(&num(stats.get("tx_dropped").copied()), 90),
+                cell(name, 130),
+                cell(&st, 70),
+                cell(&num(stats.get("mtu").copied()), 60),
+                cell(&num(stats.get("rx_bytes").copied()), 110),
+                cell(&num(stats.get("tx_bytes").copied()), 110),
+                cell(&num(stats.get("rx_packets").copied()), 100),
+                cell(&num(stats.get("tx_packets").copied()), 100),
+                cell(&num(stats.get("rx_dropped").copied()), 80),
+                cell(&num(stats.get("tx_dropped").copied()), 80),
+                cell(&num(stats.get("rx_errors").copied()), 80),
+                cell(&num(stats.get("tx_errors").copied()), 80),
             ]
             .spacing(8),
         );
@@ -132,7 +144,7 @@ fn render_sockets(state: &DeviceDetailState) -> Element<'_, Message> {
             .into();
     }
 
-    column![
+    let mut col = column![
         title,
         line("established", "sockets/tcp/established"),
         line("listen", "sockets/tcp/listen"),
@@ -140,10 +152,72 @@ fn render_sockets(state: &DeviceDetailState) -> Element<'_, Message> {
         line("syn_sent", "sockets/tcp/syn_sent"),
         line("close_wait", "sockets/tcp/close_wait"),
         line("retransmits (total)", "sockets/tcp/retransmits_total"),
+        // RTT percentiles, not just max (#46).
+        line("RTT p50 (us)", "sockets/tcp/rtt_p50_us"),
+        line("RTT p95 (us)", "sockets/tcp/rtt_p95_us"),
         line("max RTT (us)", "sockets/tcp/max_rtt_us"),
+        // Socket memory buffers (#46).
+        line("snd buf (total)", "sockets/tcp/mem/snd_buf_total"),
+        line("rcv buf (total)", "sockets/tcp/mem/rcv_buf_total"),
     ]
-    .spacing(4)
-    .into()
+    .spacing(4);
+
+    // Congestion-control algorithm distribution (#46): dynamic `by_cong/<algo>`.
+    let mut congs: Vec<(String, String)> = state
+        .metrics
+        .iter()
+        .filter_map(|(m, p)| {
+            let algo = m.strip_prefix("sockets/tcp/by_cong/")?;
+            Some((algo.to_string(), num(Some(&p.value))))
+        })
+        .collect();
+    congs.sort();
+    if !congs.is_empty() {
+        col = col.push(text("congestion algorithms").size(font::CAPTION).style(dim));
+        for (algo, count) in congs {
+            col = col.push(row![cell(&format!("  {algo}"), 180), cell(&count, 100)].spacing(8));
+        }
+    }
+
+    col.into()
+}
+
+/// IPsec / xfrm SA + policy summary (#46). Only present on hosts running IPsec.
+fn render_xfrm(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = section_header("IPsec / xfrm", None);
+    let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
+    let line =
+        |label: &str, metric: &str| row![cell(label, 180), cell(&get(metric), 100)].spacing(8);
+
+    let mut col = column![
+        title,
+        line("SAs (total)", "xfrm/sa/total"),
+        line("policies (total)", "xfrm/policy/total"),
+    ]
+    .spacing(4);
+
+    // Dynamic by_proto / by_mode breakdowns.
+    for (prefix, heading) in [
+        ("xfrm/sa/by_proto/", "by proto"),
+        ("xfrm/sa/by_mode/", "by mode"),
+    ] {
+        let mut items: Vec<(String, String)> = state
+            .metrics
+            .iter()
+            .filter_map(|(m, p)| {
+                let k = m.strip_prefix(prefix)?;
+                Some((k.to_string(), num(Some(&p.value))))
+            })
+            .collect();
+        items.sort();
+        if !items.is_empty() {
+            col = col.push(text(heading).size(font::CAPTION).style(dim));
+            for (k, v) in items {
+                col = col.push(row![cell(&format!("  {k}"), 180), cell(&v, 100)].spacing(8));
+            }
+        }
+    }
+    col.into()
 }
 
 /// Diagnostics summary: bottleneck score + issue counts (from the nlink scan).
@@ -158,9 +232,18 @@ fn render_diagnostics(state: &DeviceDetailState) -> Element<'_, Message> {
     let line =
         |label: &str, metric: &str| row![cell(label, 180), cell(&get(metric), 120)].spacing(8);
 
+    // Bottleneck score gets a trend sparkline (#44) — it's the headline signal.
+    let bottleneck_line = row![
+        cell("bottleneck score", 180),
+        cell(&get("diagnostics/bottleneck_score"), 120),
+        super::metric_trend_and_alert(state, "diagnostics/bottleneck_score"),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+
     let mut col = column![
         title,
-        line("bottleneck score", "diagnostics/bottleneck_score"),
+        bottleneck_line,
         line("issues (total)", "diagnostics/issues/total"),
         line("  critical", "diagnostics/issues/critical"),
         line("  error", "diagnostics/issues/error"),
