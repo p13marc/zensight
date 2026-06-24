@@ -291,6 +291,32 @@ fn test_device_back_button() {
     );
 }
 
+/// #35: clicking "View" on an alert row jumps to the offending device + metric.
+#[test]
+fn test_alert_investigate_navigates_to_device_metric() {
+    use zensight::view::alerts::{Alert, AlertRule, AlertsState, Severity, alerts_view};
+
+    let mut state = AlertsState::new();
+    let rule = AlertRule::new(1, "High CPU", "cpu/usage").with_severity(Severity::Critical);
+    let device = DeviceId::new(Protocol::Sysinfo, "server01");
+    state
+        .alerts
+        .push(Alert::new(1, &rule, device.clone(), "cpu/usage".into(), 95.0, 0));
+
+    let mut ui = simulator(alerts_view(&state));
+    let _ = ui.click("View");
+
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages.iter().any(|m| matches!(
+            m,
+            Message::InvestigateAlert { device: d, metric: Some(metric) }
+                if d.source == "server01" && metric == "cpu/usage"
+        )),
+        "expected InvestigateAlert for server01/cpu/usage, got {messages:?}"
+    );
+}
+
 /// Test settings view renders correctly.
 #[test]
 fn test_settings_view() {

@@ -1068,9 +1068,22 @@ fn render_incident<'a>(
     .spacing(space::SM)
     .align_y(Alignment::Center);
 
-    // Right-aligned action cluster: Ack (if unacked) + Mute 1h/4h/24h (#26).
+    // Right-aligned action cluster: View + Ack (if unacked) + Mute 1h/4h/24h.
     let spacer = container(text("")).width(Length::Fill);
     header = header.push(spacer);
+    // #35: jump to the source device that raised this incident.
+    if let Some(first) = incident.alerts.first() {
+        let device = DeviceId::new(first.protocol, incident.source.to_string());
+        header = header.push(
+            button(text("View").size(font::CAPTION))
+                .on_press(Message::InvestigateAlert {
+                    device,
+                    metric: None,
+                })
+                .padding([space::XS, space::SM])
+                .style(iced::widget::button::secondary),
+        );
+    }
     if incident.unacked > 0 {
         let ack = button(text("Ack").size(font::CAPTION))
             .on_press(Message::AcknowledgeExternalSource(
@@ -1265,11 +1278,21 @@ fn render_alert_row(alert: &Alert) -> Element<'_, Message> {
             color: Some(crate::view::theme::colors(theme).text_dimmed()),
         });
 
+    // #35: jump straight to the offending device + metric chart.
+    let investigate = button(text("View").size(10))
+        .on_press(Message::InvestigateAlert {
+            device: alert.device_id.clone(),
+            metric: Some(alert.metric.clone()),
+        })
+        .padding([space::XS, space::SM])
+        .style(iced::widget::button::secondary);
+
     let mut row_content: Row<'_, Message> = Row::new()
         .push(status)
         .push(severity_badge)
         .push(message)
         .push(time)
+        .push(investigate)
         .spacing(10);
 
     if !alert.acknowledged {

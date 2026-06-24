@@ -568,6 +568,17 @@ fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
     .on_press(Message::ClearSelection)
     .style(iced::widget::button::secondary);
 
+    // #35: step through the current filtered device set without returning to the
+    // dashboard between hops.
+    let prev_button = button(text("‹").size(16))
+        .on_press(Message::SelectAdjacentDevice { forward: false })
+        .padding([4, 10])
+        .style(iced::widget::button::secondary);
+    let next_button = button(text("›").size(16))
+        .on_press(Message::SelectAdjacentDevice { forward: true })
+        .padding([4, 10])
+        .style(iced::widget::button::secondary);
+
     let protocol_icon = icons::protocol_icon(state.device_id.protocol, IconSize::Large);
     let device_name = text(&state.device_id.source).size(24);
     let metric_count = text(format!("{} metrics", state.metrics.len())).size(14);
@@ -590,6 +601,8 @@ fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
 
     row![
         back_button,
+        prev_button,
+        next_button,
         protocol_icon,
         device_name,
         metric_count,

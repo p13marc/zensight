@@ -412,6 +412,38 @@ impl ZenSight {
                 return self.select_device(device_id);
             }
 
+            Message::InvestigateAlert { device, metric } => {
+                // #35: alert → device → metric → chart in one hop.
+                self.global_search.close();
+                let task = self.select_device(device);
+                if let Some(metric) = metric {
+                    if let Some(d) = self.selected_device.as_mut() {
+                        d.select_metric(metric);
+                    }
+                }
+                return task;
+            }
+
+            Message::SelectAdjacentDevice { forward } => {
+                // #35: cycle through the dashboard's current filtered set without
+                // bouncing back to the dashboard each time.
+                if let Some(current) = self.selected_device.as_ref().map(|d| d.device_id.clone()) {
+                    let ids = self.dashboard.ordered_device_ids();
+                    if let Some(pos) = ids.iter().position(|id| *id == current) {
+                        if !ids.is_empty() {
+                            let next = if forward {
+                                (pos + 1) % ids.len()
+                            } else {
+                                (pos + ids.len() - 1) % ids.len()
+                            };
+                            if ids[next] != current {
+                                return self.select_device(ids[next].clone());
+                            }
+                        }
+                    }
+                }
+            }
+
             Message::ClearSelection => {
                 self.selected_device = None;
                 self.set_view(CurrentView::Dashboard);

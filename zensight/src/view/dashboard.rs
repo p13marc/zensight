@@ -186,6 +186,15 @@ impl Default for DashboardState {
 }
 
 impl DashboardState {
+    /// Ordered list of device ids matching the current filters, in render order.
+    /// Used for device→device navigation on the detail view (#35).
+    pub fn ordered_device_ids(&self) -> Vec<DeviceId> {
+        self.filtered_devices()
+            .into_iter()
+            .map(|d| d.id.clone())
+            .collect()
+    }
+
     /// Get devices filtered by active protocol filters and search term.
     pub fn filtered_devices(&self) -> Vec<&DeviceState> {
         let search_lower = self.search_filter.to_lowercase();

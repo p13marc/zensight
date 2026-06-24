@@ -128,6 +128,19 @@ pub enum Message {
     /// User selected a device from the dashboard.
     SelectDevice(DeviceId),
 
+    /// Jump from an alert straight to the offending device, pre-selecting the
+    /// metric (if known) so its chart opens immediately (#35 triage loop).
+    InvestigateAlert {
+        device: DeviceId,
+        metric: Option<String>,
+    },
+
+    /// Navigate to the previous/next device within the current filtered set
+    /// (#35 cross-device navigation on the device detail view).
+    SelectAdjacentDevice {
+        forward: bool,
+    },
+
     /// User cleared device selection (back to dashboard).
     ClearSelection,
 
