@@ -14,6 +14,15 @@
       sockets: true,
       neighbors: true,   // ARP/NDP neighbor state summary
       routes: true,      // routing-table summary
+      diagnostics: true, // bottleneck score + issue counts
+      events: true,      // real-time RTNETLINK event stream (#8)
+      ethtool: true,     // link speed/duplex, ring sizes, drops (#9)
+      addresses: true,   // IP address inventory (#10)
+      tc: true,          // TC/QoS qdisc drops/overlimits/backlog (#12) — drives the TC panel
+      xfrm: true,        // IPsec/xfrm SA + policy health (#13); empty without IPsec
+      // The two below need CAP_NET_ADMIN — enable on a firewall / NAT gateway:
+      nftables: false,   // nftables table/chain/rule counters (#14)
+      conntrack: false,  // conntrack table summary
     },
     interfaces: {
       exclude_loopback: false,
