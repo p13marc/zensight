@@ -283,6 +283,11 @@ pub enum Message {
     /// Acknowledge all firing external alerts.
     AcknowledgeAllExternal,
 
+    /// Silence (mute) a source for the given duration in ms (#26).
+    SilenceSource(String, i64),
+    /// Lift a silence on a source (#26).
+    UnsilenceSource(String),
+
     /// Clear all alerts.
     ClearAlerts,
 

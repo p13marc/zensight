@@ -710,6 +710,19 @@ impl ZenSight {
                 self.alerts.acknowledge_all_external();
             }
 
+            Message::SilenceSource(source, duration_ms) => {
+                self.alerts.silence_source(&source, now_ms(), duration_ms);
+                self.toasts.push(
+                    ToastSeverity::Info,
+                    format!("Silenced {source} for {}", fmt_duration_ms(duration_ms)),
+                );
+            }
+            Message::UnsilenceSource(source) => {
+                self.alerts.unsilence_source(&source);
+                self.toasts
+                    .push(ToastSeverity::Info, format!("Unsilenced {source}"));
+            }
+
             Message::ClearAlerts => {
                 self.alerts.clear_alerts();
             }
@@ -1773,6 +1786,9 @@ impl ZenSight {
             device.update_health(now, self.stale_threshold_ms);
         }
 
+        // Expire alert silences whose window has passed (#26).
+        self.alerts.prune_silences(now);
+
         // Apply debounced search filter
         self.dashboard.apply_pending_search();
 
@@ -1801,6 +1817,16 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Human duration for silence toasts: "1h" / "4h" / "24h" / "30m".
+fn fmt_duration_ms(ms: i64) -> String {
+    let mins = ms / 60_000;
+    if mins % 60 == 0 {
+        format!("{}h", mins / 60)
+    } else {
+        format!("{mins}m")
+    }
 }
 
 /// Convert a telemetry value to f64 for alert checking.
