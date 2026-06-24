@@ -20,3 +20,4 @@ pub mod theme;
 pub mod toast;
 pub mod tokens;
 pub mod topology;
+pub mod trend;

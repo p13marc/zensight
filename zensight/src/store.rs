@@ -438,6 +438,21 @@ impl MetricStore {
             .unwrap_or_default()
     }
 
+    /// Hot (in-memory) samples for every metric of a device, oldest-first.
+    /// Returns `(metric_suffix, samples)` pairs. Reads only the in-memory ring
+    /// (no disk), so it's cheap to call per dashboard render (#24 sparklines).
+    pub fn device_hot_samples(&self, protocol: &str, source: &str) -> Vec<(String, Vec<Sample>)> {
+        let prefix = format!("{protocol}/{source}|");
+        self.interner
+            .with_prefix(&prefix)
+            .filter_map(|(id, path)| {
+                let metric = path.split_once('|').map(|(_, m)| m.to_string())?;
+                let samples = self.series.get(&id).map(|s| s.hot.to_vec())?;
+                Some((metric, samples))
+            })
+            .collect()
+    }
+
     /// Resolve the interned ids + paths for a device, for a history pre-load.
     /// Returns `(metric_suffix, metric_id)` pairs where `metric_suffix` is the
     /// metric name (the part after `|`).

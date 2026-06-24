@@ -34,6 +34,7 @@ fn test_dashboard_empty() {
         &groups,
         &overview,
         &sensor_health,
+        zensight::view::trend::DeviceSparks::new(),
     ));
 
     // Should show "Waiting for telemetry data..." message
@@ -67,6 +68,7 @@ fn test_dashboard_with_devices() {
         &groups,
         &overview,
         &sensor_health,
+        zensight::view::trend::DeviceSparks::new(),
     ));
 
     // Should show the device name
@@ -74,6 +76,62 @@ fn test_dashboard_with_devices() {
     // Should show metric count
     assert!(ui.find("5 metrics").is_ok());
     // (Connection status now lives in the app shell, not the dashboard view.)
+}
+
+/// A device card renders its trend-badge + sparkline strip when sparks are
+/// provided. The badge text ("+50.0%") is searchable in the simulator (#24).
+#[test]
+fn test_dashboard_card_shows_trend_badge() {
+    use zensight::store::Sample;
+    use zensight::view::trend::{self, DeviceSparks, MetricSpark};
+
+    let mut state = DashboardState::default();
+    state.connected = true;
+    let device_id = DeviceId {
+        protocol: Protocol::Sysinfo,
+        source: "server01".to_string(),
+    };
+    let mut device = DeviceState::new(device_id.clone());
+    device.metric_count = 1;
+    device.is_healthy = true;
+    state.devices.insert(device_id.clone(), device);
+
+    // A rising series: 100 -> 150 == +50%.
+    let samples = vec![
+        Sample {
+            ts: 0,
+            value: 100.0,
+        },
+        Sample {
+            ts: 1,
+            value: 150.0,
+        },
+    ];
+    let spark = MetricSpark {
+        metric: "cpu/usage".to_string(),
+        values: samples.iter().map(|s| s.value).collect(),
+        trend: trend::compute(&samples),
+    };
+    let mut sparks = DeviceSparks::new();
+    sparks.insert(device_id, vec![spark]);
+
+    let groups = GroupsState::default();
+    let overview = OverviewState::default();
+    let sensor_health = HashMap::new();
+    let mut ui = simulator(dashboard_view(
+        &state,
+        AppTheme::Dark,
+        0,
+        &groups,
+        &overview,
+        &sensor_health,
+        sparks,
+    ));
+
+    assert!(ui.find("server01").is_ok());
+    assert!(ui.find("cpu/usage").is_ok());
+    // Trend badge: up arrow + signed percent.
+    assert!(ui.find("\u{2191} +50.0%").is_ok());
 }
 
 /// Render the persistent app shell around a dummy page, for nav-rail tests.
@@ -457,6 +515,7 @@ fn test_overview_section_renders() {
         &groups,
         &overview,
         &sensor_health,
+        zensight::view::trend::DeviceSparks::new(),
     ));
 
     // Should show Protocol Overviews header
@@ -503,6 +562,7 @@ fn test_overview_protocol_tab_click() {
         &groups,
         &overview,
         &sensor_health,
+        zensight::view::trend::DeviceSparks::new(),
     ));
 
     // Click SNMP tab
@@ -553,6 +613,7 @@ fn test_overview_collapse_toggle() {
         &groups,
         &overview,
         &sensor_health,
+        zensight::view::trend::DeviceSparks::new(),
     ));
 
     // Click the Protocol Overviews header to toggle

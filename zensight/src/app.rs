@@ -1378,6 +1378,19 @@ impl ZenSight {
         // alerts (anomalies + expectation violations).
         let unack = self.alerts.unacknowledged_count + self.alerts.external_count();
 
+        // Precompute per-card sparkline + trend previews from the store's hot ring
+        // (cheap, in-memory) only when a dashboard grid will actually render (#24).
+        let on_dashboard = matches!(
+            self.current_view,
+            CurrentView::Dashboard | CurrentView::Device
+        ) && !(self.current_view == CurrentView::Device
+            && self.selected_device.is_some());
+        let sparks = if on_dashboard {
+            crate::view::trend::build_device_sparks(&self.store, self.dashboard.devices.keys(), 2)
+        } else {
+            crate::view::trend::DeviceSparks::new()
+        };
+
         let main_view: Element<'_, Message> = match self.current_view {
             CurrentView::Settings => settings_view(&self.settings),
             CurrentView::Alerts => alerts_view(&self.alerts),
@@ -1400,6 +1413,7 @@ impl ZenSight {
                         &self.groups,
                         &self.overview,
                         &self.sensor_health,
+                        sparks,
                     )
                 }
             }
@@ -1410,6 +1424,7 @@ impl ZenSight {
                 &self.groups,
                 &self.overview,
                 &self.sensor_health,
+                sparks,
             ),
         };
 
