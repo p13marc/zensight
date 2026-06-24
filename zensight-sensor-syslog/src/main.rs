@@ -7,6 +7,8 @@
 mod commands;
 mod config;
 mod filter;
+#[cfg(feature = "journald")]
+mod journald;
 mod parser;
 mod receiver;
 

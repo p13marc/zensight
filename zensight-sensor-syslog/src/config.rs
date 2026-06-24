@@ -48,6 +48,58 @@ pub struct SyslogConfig {
     /// Enable dynamic filter commands via Zenoh.
     #[serde(default)]
     pub enable_dynamic_filters: bool,
+
+    /// systemd-journald ingestion (#57). Reads the local journal directly via
+    /// libsystemd (no `journalctl` subprocess) and feeds the same pipeline as
+    /// the network listeners. `None` (the default) leaves journald disabled.
+    #[serde(default)]
+    pub journald: Option<JournaldConfig>,
+}
+
+/// systemd-journald source configuration.
+///
+/// Minimal by design: `{ "enabled": true }` tails the local system journal with
+/// sane defaults. Cursor resume (#58) and server-side matching (#59) extend this.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+// Fields beyond `enabled` are read only by the (feature-gated) journald reader.
+#[cfg_attr(not(feature = "journald"), allow(dead_code))]
+pub struct JournaldConfig {
+    /// Master switch. When false the reader is not started.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Which journal to open.
+    #[serde(default)]
+    pub scope: JournaldScope,
+
+    /// Open a specific journald log namespace instead of the default journal.
+    #[serde(default)]
+    pub namespace: Option<String>,
+
+    /// Extra raw journald field names (e.g. `_SELINUX_CONTEXT`) to copy verbatim
+    /// into labels, on top of the standard set (unit, pid, comm, boot_id, …).
+    #[serde(default)]
+    pub extra_fields: Vec<String>,
+
+    /// Include developer/code-location fields (CODE_FILE/CODE_LINE/CODE_FUNC,
+    /// ERRNO). Off by default to keep label cardinality bounded.
+    #[serde(default)]
+    pub include_dev_fields: bool,
+}
+
+/// Which systemd journal to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JournaldScope {
+    /// System services and the kernel (default; needs journal-read access).
+    #[default]
+    System,
+    /// The invoking user's journal (always readable unprivileged).
+    User,
+    /// Only local journal files (exclude remote/uploaded journals).
+    LocalOnly,
+    /// Only volatile runtime journals (`/run`), not persisted ones.
+    RuntimeOnly,
 }
 
 fn default_key_prefix() -> String {
@@ -136,8 +188,10 @@ impl SyslogSensorConfig {
 
     /// Validate the configuration.
     pub fn validate_config(&self) -> anyhow::Result<()> {
-        if self.syslog.listeners.is_empty() {
-            anyhow::bail!("At least one listener must be configured");
+        // A source is required: at least one network listener OR journald.
+        let journald_enabled = self.syslog.journald.as_ref().is_some_and(|j| j.enabled);
+        if self.syslog.listeners.is_empty() && !journald_enabled {
+            anyhow::bail!("No source configured: add at least one listener or enable journald");
         }
 
         for (i, listener) in self.syslog.listeners.iter().enumerate() {
@@ -202,6 +256,7 @@ impl Default for SyslogConfig {
             include_raw_message: false,
             filter: SyslogFilterConfig::default(),
             enable_dynamic_filters: false,
+            journald: None,
         }
     }
 }

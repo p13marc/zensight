@@ -31,6 +31,10 @@ pub enum MessageSource {
     Network(SocketAddr),
     /// Unix socket source.
     Unix,
+    /// systemd-journald (local journal, read via libsystemd).
+    /// Only constructed by the feature-gated journald reader.
+    #[cfg_attr(not(feature = "journald"), allow(dead_code))]
+    Journald,
 }
 
 impl std::fmt::Display for MessageSource {
@@ -38,6 +42,7 @@ impl std::fmt::Display for MessageSource {
         match self {
             MessageSource::Network(addr) => write!(f, "{}", addr),
             MessageSource::Unix => write!(f, "unix"),
+            MessageSource::Journald => write!(f, "journald"),
         }
     }
 }
@@ -75,6 +80,24 @@ pub async fn start_listeners(config: &SyslogConfig) -> Result<mpsc::Receiver<Rec
                 });
             }
         }
+    }
+
+    // systemd-journald source (#57): a dedicated OS thread feeds the same
+    // channel as the network listeners. `systemd::journal::Journal` is
+    // `!Send + !Sync`, so it cannot live on a tokio task.
+    if let Some(journald) = &config.journald
+        && journald.enabled
+    {
+        #[cfg(feature = "journald")]
+        {
+            crate::journald::spawn_reader(journald.clone(), tx.clone());
+            tracing::info!(scope = ?journald.scope, "journald source enabled");
+        }
+        #[cfg(not(feature = "journald"))]
+        tracing::warn!(
+            "journald.enabled is set but this binary was built without the \
+             `journald` feature; ignoring"
+        );
     }
 
     Ok(rx)
