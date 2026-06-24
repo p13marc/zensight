@@ -137,7 +137,7 @@ fn render_by_source<'a>(anomalies: &[&'a Alert]) -> Element<'a, Message> {
             .into();
     }
     let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
 
     let mut list = Column::new().spacing(4);
     for (src, n) in ranked.iter().take(20) {
@@ -173,7 +173,7 @@ fn render_by_detector<'a>(anomalies: &[&'a Alert], sec: &'a SecurityState) -> El
             None => groups.push((a.rule.clone(), vec![a])),
         }
     }
-    groups.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    groups.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
 
     let mut col = Column::new().spacing(12).push(title);
     for (rule_name, group) in groups {
