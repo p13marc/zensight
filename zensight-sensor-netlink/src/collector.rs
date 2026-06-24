@@ -10,7 +10,7 @@ use tokio_stream::StreamExt;
 use nlink::netlink::diagnostics::{Bottleneck, DiagnosticReport, Diagnostics, Severity};
 use nlink::netlink::genl::ethtool::Duplex;
 use nlink::netlink::{
-    Connection, Ethtool, Netfilter, Route, RtnetlinkGroup, SockDiag, Wireguard,
+    Connection, Ethtool, Netfilter, Route, RtnetlinkGroup, SockDiag, Wireguard, Xfrm,
     genl::wireguard::WgPeer,
     messages::NeighborMessage,
     messages::RouteMessage,
@@ -18,6 +18,7 @@ use nlink::netlink::{
     neigh::State as NeighborState,
     netfilter::{ConntrackEntry, IpProtocol},
     types::addr::Scope,
+    xfrm::{SecurityAssociation, XfrmMode},
 };
 
 use crate::events::EventState;
@@ -30,6 +31,7 @@ use crate::config::{CollectConfig, NetlinkConfig};
 use crate::map::{
     self, AddrEntry, AddressSummary, ConntrackSummary, DiagnosticsSummary, DuplexKind,
     EthtoolSample, IfaceSample, NeighborSummary, RouteSummary, SocketCounts, TcQdiscSample,
+    XfrmSaEntry, XfrmSummary,
 };
 
 const AF_INET: u8 = 2;
@@ -111,6 +113,8 @@ impl CollectHandle {
             "ethtool" => g.ethtool = enabled,
             "addresses" => g.addresses = enabled,
             "tc" => g.tc = enabled,
+            "xfrm" => g.xfrm = enabled,
+            "nftables" => g.nftables = enabled,
             "conntrack" => g.conntrack = enabled,
             _ => return false,
         }
@@ -243,6 +247,16 @@ impl Collector {
             }
         };
 
+        // XFRM/IPsec handle (#13). Read is unprivileged; absence (no xfrm) just
+        // disables it. Opened unconditionally so the toggle can flip at runtime.
+        let xfrm = match Connection::<Xfrm>::new() {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!(error = %e, "xfrm connection failed; IPsec telemetry disabled");
+                None
+            }
+        };
+
         // Real-time RTNETLINK events (#8): a *dedicated* Route connection holds the
         // events stream's request lock for its lifetime, so the poll loop's
         // connection stays free for dumps. Subscribe + consume in a background task
@@ -326,6 +340,11 @@ impl Collector {
             }
             if collect.tc {
                 self.poll_tc(&route).await;
+            }
+            if collect.xfrm
+                && let Some(x) = &xfrm
+            {
+                self.poll_xfrm(x).await;
             }
             if collect.events {
                 // Publish the cumulative event counters each tick (the per-event
@@ -573,6 +592,33 @@ impl Collector {
         s
     }
 
+    /// Poll XFRM/IPsec SA + policy health (#13): a low-cardinality summary (SA
+    /// counts by mode/proto + policy total). Per-SA detail is served on demand via
+    /// `@/query/xfrm`. Graceful on failure / no-IPsec.
+    async fn poll_xfrm(&self, conn: &Connection<Xfrm>) {
+        let sas = match conn.get_security_associations().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "get_security_associations failed");
+                return;
+            }
+        };
+        let policy_total = conn
+            .get_security_policies()
+            .await
+            .map(|p| p.len() as u64)
+            .unwrap_or(0);
+        if sas.is_empty() && policy_total == 0 {
+            // No IPsec configured — emit nothing (avoid misleading all-zero SA).
+            return;
+        }
+        let entries: Vec<XfrmSaEntry> = sas.iter().map(xfrm_sa_entry).collect();
+        let summary = aggregate_xfrm(&entries, policy_total);
+        for point in map::xfrm_points(&self.host, &summary) {
+            self.publish(&point).await;
+        }
+    }
+
     /// Poll TC/QoS qdisc stats (#12): per-(iface,qdisc) drops/overlimits/backlog.
     /// Bounded by the TC hierarchy (one series set per qdisc). Interfaces are
     /// resolved to names via a single `get_links` map; filtered/`lo` are skipped.
@@ -802,6 +848,48 @@ pub fn aggregate_addresses(entries: &[AddrEntry]) -> AddressSummary {
         }
     }
     a
+}
+
+/// Decode an XFRM [`SecurityAssociation`] into the pure [`XfrmSaEntry`] (#13).
+fn xfrm_sa_entry(sa: &SecurityAssociation) -> XfrmSaEntry {
+    let mode = match sa.mode {
+        XfrmMode::Transport => "transport",
+        XfrmMode::Tunnel => "tunnel",
+        XfrmMode::Beet => "beet",
+        // `XfrmMode` is #[non_exhaustive] upstream (also covers `Other`).
+        _ => "other",
+    };
+    XfrmSaEntry {
+        mode: mode.to_string(),
+        proto: ipsec_proto_label(&sa.protocol).to_string(),
+    }
+}
+
+/// Stable lowercase label for an IPsec protocol (`#[non_exhaustive]` upstream).
+fn ipsec_proto_label(p: &nlink::netlink::xfrm::IpsecProtocol) -> &'static str {
+    use nlink::netlink::xfrm::IpsecProtocol;
+    match p {
+        IpsecProtocol::Esp => "esp",
+        IpsecProtocol::Ah => "ah",
+        IpsecProtocol::Comp => "comp",
+        _ => "other",
+    }
+}
+
+/// Aggregate XFRM SA entries + a policy count into an [`XfrmSummary`] (#13).
+/// Pure; unit-tested. (The pinned nlink SA carries no liveness "state" field, so
+/// we group by mode/proto — the dimensions the typed SA actually exposes.)
+pub fn aggregate_xfrm(entries: &[XfrmSaEntry], policy_total: u64) -> XfrmSummary {
+    let mut x = XfrmSummary {
+        policy_total,
+        ..Default::default()
+    };
+    for e in entries {
+        x.sa_total += 1;
+        *x.sa_by_mode.entry(e.mode.clone()).or_insert(0) += 1;
+        *x.sa_by_proto.entry(e.proto.clone()).or_insert(0) += 1;
+    }
+    x
 }
 
 /// Decode a TC qdisc [`TcMessage`] into the pure [`TcQdiscSample`] (#12).

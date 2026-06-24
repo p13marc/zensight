@@ -793,6 +793,63 @@ pub struct TcRecord {
     pub backlog_pkts: u64,
 }
 
+// ---------------------------------------------------------------------------
+// XFRM / IPsec SA health (issue #13): low-cardinality summary streamed; per-SA
+// detail served via `@/query/xfrm`.
+// ---------------------------------------------------------------------------
+
+/// One decoded XFRM Security Association fact (nlink-free), the pure input to
+/// [`crate::collector::aggregate_xfrm`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XfrmSaEntry {
+    /// `tunnel`/`transport`/`beet`/`other`.
+    pub mode: String,
+    /// `esp`/`ah`/`comp`/`other`.
+    pub proto: String,
+}
+
+/// Host-level IPsec/XFRM summary (SA counts by mode/proto + policy total).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct XfrmSummary {
+    pub sa_total: u64,
+    /// SA counts keyed by mode (bounded: tunnel/transport/beet/other).
+    pub sa_by_mode: HashMap<String, u64>,
+    /// SA counts keyed by IPsec protocol (bounded: esp/ah/comp/other).
+    pub sa_by_proto: HashMap<String, u64>,
+    pub policy_total: u64,
+}
+
+/// Build telemetry points for the XFRM/IPsec summary (#13). Metric paths are
+/// `xfrm/sa/total`, `xfrm/sa/by_mode/<mode>`, `xfrm/sa/by_proto/<proto>`,
+/// `xfrm/policy/total`.
+pub fn xfrm_points(host: &str, x: &XfrmSummary) -> Vec<TelemetryPoint> {
+    let g = |metric: String, v: u64| point(host, metric, TelemetryValue::Gauge(v as f64));
+    let mut out = vec![
+        g("xfrm/sa/total".into(), x.sa_total),
+        g("xfrm/policy/total".into(), x.policy_total),
+    ];
+    for (mode, n) in &x.sa_by_mode {
+        out.push(g(format!("xfrm/sa/by_mode/{mode}"), *n));
+    }
+    for (proto, n) in &x.sa_by_proto {
+        out.push(g(format!("xfrm/sa/by_proto/{proto}"), *n));
+    }
+    out
+}
+
+/// One IPsec Security Association (served via `@/query/xfrm`). GUI mirrors shape.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct XfrmSaRecord {
+    pub src: Option<String>,
+    pub dst: Option<String>,
+    pub spi: u32,
+    pub proto: String,
+    pub mode: String,
+    pub reqid: u32,
+    pub bytes: u64,
+    pub packets: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1253,5 +1310,31 @@ mod tests {
         for p in &pts {
             assert_eq!(p.labels.get("handle").map(String::as_str), Some("8001:"));
         }
+    }
+
+    #[test]
+    fn xfrm_points_shape() {
+        let mut by_mode = HashMap::new();
+        by_mode.insert("tunnel".to_string(), 2u64);
+        let mut by_proto = HashMap::new();
+        by_proto.insert("esp".to_string(), 2u64);
+        let x = XfrmSummary {
+            sa_total: 2,
+            sa_by_mode: by_mode,
+            sa_by_proto: by_proto,
+            policy_total: 4,
+        };
+        let pts = xfrm_points("h", &x);
+        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        assert_eq!(find("xfrm/sa/total").value, TelemetryValue::Gauge(2.0));
+        assert_eq!(
+            find("xfrm/sa/by_mode/tunnel").value,
+            TelemetryValue::Gauge(2.0)
+        );
+        assert_eq!(
+            find("xfrm/sa/by_proto/esp").value,
+            TelemetryValue::Gauge(2.0)
+        );
+        assert_eq!(find("xfrm/policy/total").value, TelemetryValue::Gauge(4.0));
     }
 }

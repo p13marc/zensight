@@ -271,6 +271,8 @@ mod tests {
             ethtool: false,
             addresses: false,
             tc: false,
+            xfrm: false,
+            nftables: false,
             conntrack: false,
         };
         apply_collection(&handle, CollectionCommand::Set { collect: cfg }).await;

@@ -118,6 +118,14 @@ pub struct CollectConfig {
     /// unprivileged; absent where no qdiscs are configured.
     #[serde(default = "default_true")]
     pub tc: bool,
+    /// XFRM/IPsec SA + policy health (#13). Read is unprivileged; empty where no
+    /// IPsec is configured.
+    #[serde(default = "default_true")]
+    pub xfrm: bool,
+    /// nftables table/chain/rule counters (#14). Listing rules typically needs
+    /// CAP_NET_ADMIN, so OFF by default — enable on a firewall host.
+    #[serde(default)]
+    pub nftables: bool,
     /// Netfilter conntrack table summary (entries/proto/utilization). Requires
     /// CAP_NET_ADMIN, so OFF by default — enable on a NAT gateway / firewall.
     #[serde(default)]
@@ -136,6 +144,8 @@ impl Default for CollectConfig {
             ethtool: true,
             addresses: true,
             tc: true,
+            xfrm: true,
+            nftables: false,
             conntrack: false,
         }
     }

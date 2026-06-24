@@ -14,12 +14,17 @@
 
 use std::sync::Arc;
 
-use nlink::netlink::{Connection, Route, SockDiag, types::addr::Scope};
+use nlink::netlink::{
+    Connection, Route, SockDiag, Xfrm,
+    types::addr::Scope,
+    xfrm::{IpsecProtocol, SecurityAssociation, XfrmMode},
+};
 use nlink::sockdiag::{SocketFilter, SocketInfo, SocketState, TcpState};
 
 use crate::events::EventState;
 use crate::map::{
     AddressRecord, NeighborRecord, RouteRecord, SocketRecord, SocketSelector, TcRecord,
+    XfrmSaRecord,
 };
 
 const AF_INET: u8 = 2;
@@ -39,6 +44,7 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
         }
     };
     let sockdiag = Connection::<SockDiag>::new().ok();
+    let xfrm = Connection::<Xfrm>::new().ok();
 
     let routes_key = format!("{key_prefix}/@/query/routes");
     let neighbors_key = format!("{key_prefix}/@/query/neighbors");
@@ -46,6 +52,7 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
     let addresses_key = format!("{key_prefix}/@/query/addresses");
     let events_key = format!("{key_prefix}/@/query/events");
     let tc_key = format!("{key_prefix}/@/query/tc");
+    let xfrm_key = format!("{key_prefix}/@/query/xfrm");
 
     let routes_q = match session.declare_queryable(&routes_key).await {
         Ok(q) => q,
@@ -89,6 +96,13 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
             return;
         }
     };
+    let xfrm_q = match session.declare_queryable(&xfrm_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %xfrm_key, "query: declare xfrm failed");
+            return;
+        }
+    };
     tracing::info!(
         routes = %routes_key, neighbors = %neighbors_key, sockets = %sockets_key,
         addresses = %addresses_key, events = %events_key,
@@ -128,6 +142,14 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
             q = tc_q.recv_async() => {
                 let Ok(query) = q else { return };
                 let records = collect_tc(&route).await;
+                reply_json(&query, &records).await;
+            }
+            q = xfrm_q.recv_async() => {
+                let Ok(query) = q else { return };
+                let records = match &xfrm {
+                    Some(x) => collect_xfrm(x).await,
+                    None => Vec::new(),
+                };
                 reply_json(&query, &records).await;
             }
         }
@@ -197,6 +219,49 @@ async fn collect_neighbors(conn: &Connection<Route>) -> Vec<NeighborRecord> {
             is_router: nb.is_router(),
         })
         .collect()
+}
+
+/// Build the per-SA IPsec detail (#13). Each record carries src/dst/spi/proto/
+/// mode/reqid + processed bytes/packets.
+async fn collect_xfrm(conn: &Connection<Xfrm>) -> Vec<XfrmSaRecord> {
+    let sas = match conn.get_security_associations().await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "query: get_security_associations failed");
+            return Vec::new();
+        }
+    };
+    sas.iter()
+        .map(|sa: &SecurityAssociation| XfrmSaRecord {
+            src: sa.src_addr.map(|a| a.to_string()),
+            dst: sa.dst_addr.map(|a| a.to_string()),
+            spi: sa.spi,
+            proto: ipsec_proto_label(&sa.protocol).to_string(),
+            mode: xfrm_mode_label(&sa.mode).to_string(),
+            reqid: sa.reqid,
+            bytes: sa.bytes,
+            packets: sa.packets,
+        })
+        .collect()
+}
+
+fn ipsec_proto_label(p: &IpsecProtocol) -> &'static str {
+    match p {
+        IpsecProtocol::Esp => "esp",
+        IpsecProtocol::Ah => "ah",
+        IpsecProtocol::Comp => "comp",
+        _ => "other",
+    }
+}
+
+fn xfrm_mode_label(m: &XfrmMode) -> &'static str {
+    match m {
+        XfrmMode::Transport => "transport",
+        XfrmMode::Tunnel => "tunnel",
+        XfrmMode::Beet => "beet",
+        // `XfrmMode` is #[non_exhaustive] upstream (also covers `Other`).
+        _ => "other",
+    }
 }
 
 /// Build the full TC tree (#12): every qdisc + class on every interface, with
