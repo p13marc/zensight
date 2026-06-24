@@ -64,6 +64,53 @@ pub struct TlsRecord {
     pub count: u64,
 }
 
+/// One top-talker destination (netring), served on demand from a per-destination
+/// histogram updated as flows end. "Who are the major backends?" — bytes/packets/
+/// flows aggregated per remote endpoint, the operational view distinct from
+/// per-app bandwidth.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TalkerRecord {
+    /// Remote endpoint (`ip` or `ip:port`, depending on aggregation key).
+    pub dst: String,
+    pub bytes: u64,
+    pub packets: u64,
+    pub flows: u64,
+}
+
+/// One recent elephant (large) flow (netring), served on demand from a bounded
+/// ring of the biggest recently-ended flows. "What were the biggest transfers?"
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ElephantRecord {
+    pub src: String,
+    pub dst: String,
+    pub proto: String,
+    pub bytes: u64,
+    pub packets: u64,
+    pub duration_ms: u64,
+}
+
+/// One observed DNS second-level domain (netring), served on demand. Carries the
+/// query count and an NXDOMAIN tally — the high-cardinality detail behind the
+/// streamed DNS RED aggregates (top SLDs / top-NXDOMAIN).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DnsRecord {
+    /// Second-level domain (e.g. `example` for `example.com`), lowercased.
+    pub domain: String,
+    pub queries: u64,
+    /// Responses for this domain that returned NXDOMAIN.
+    pub nxdomain: u64,
+}
+
+/// One observed HTTP host (netring, cleartext), served on demand. Carries request
+/// count and an error tally — the detail behind the streamed HTTP RED aggregates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HttpHostRecord {
+    pub host: String,
+    pub requests: u64,
+    /// Responses for this host with a 4xx/5xx status.
+    pub errors: u64,
+}
+
 /// One TCP socket (served filterable by state/port).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SocketRecord {

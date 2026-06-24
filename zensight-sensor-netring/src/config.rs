@@ -65,6 +65,23 @@ pub struct CollectConfig {
     /// LIVE capture — the kernel ring has no drops to report under pcap replay.
     #[serde(default = "default_true")]
     pub capture_stats: bool,
+    /// ICMP error telemetry (unreachable/time-exceeded/PMTU). Synthesised from
+    /// the embedded inner packet — needs LIVE capture with real kernel ICMP to
+    /// correlate; a synthetic pcap rarely triggers it (issue #15). Degrades to
+    /// silent (zero counters) under replay. Default OFF (live-gated).
+    #[serde(default)]
+    pub icmp: bool,
+    /// L7 DNS RED analytics (queries/rcodes/RTT/unanswered + top SLDs). Cleartext
+    /// UDP/53 only. Default OFF (opt-in L7).
+    #[serde(default)]
+    pub dns: bool,
+    /// L7 HTTP RED analytics (requests/status/methods/latency + top hosts).
+    /// CLEARTEXT only (TCP/80,8080); TLS is opaque. Default OFF (opt-in L7).
+    #[serde(default)]
+    pub http: bool,
+    /// Top-talkers + elephant-flows on-demand query channels (issue #21).
+    #[serde(default = "default_true")]
+    pub talkers: bool,
 }
 
 impl Default for CollectConfig {
@@ -75,6 +92,10 @@ impl Default for CollectConfig {
             tcp_resets: true,
             tls: true,
             capture_stats: true,
+            icmp: false,
+            dns: false,
+            http: false,
+            talkers: true,
         }
     }
 }
@@ -85,6 +106,43 @@ pub struct AnomalyConfig {
     /// Port-scan detection (TRW).
     #[serde(default)]
     pub port_scan: bool,
+    /// RITA-style beaconing / C2 detection (issue #17). Flags periodic,
+    /// size-consistent TCP flows (`score >= beacon_threshold`).
+    #[serde(default)]
+    pub beaconing: bool,
+    /// Beaconing score threshold (0.0–1.0); higher = stricter. Default 0.8.
+    #[serde(default = "default_beacon_threshold")]
+    pub beacon_threshold: f64,
+    /// Connection-flood detection (issue #18): many TCP connections to one
+    /// (dst,port) in a short window — distinct from a port scan (many ports).
+    #[serde(default)]
+    pub connection_flood: bool,
+    /// Connection-flood threshold: connections to one (dst,port) per window.
+    #[serde(default = "default_flood_threshold")]
+    pub flood_threshold: u64,
+    /// DGA / DNS-tunneling scoring on each query SLD (issue #18). Requires
+    /// `collect.dns`. Flags queries whose bigram log-likelihood is below
+    /// `dga_threshold` (more negative = more random-looking).
+    #[serde(default)]
+    pub dga: bool,
+    /// DGA log-likelihood threshold (negative). Default -8.0 (moderately
+    /// aggressive — matches netring's `dga_query` example).
+    #[serde(default = "default_dga_threshold")]
+    pub dga_threshold: f64,
+    /// Hostnames/SLDs to never alert on (allowlist for the noisy detectors:
+    /// beaconing telemetry agents + DGA-scored CDN/randomised-but-benign SLDs).
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+}
+
+fn default_beacon_threshold() -> f64 {
+    0.8
+}
+fn default_flood_threshold() -> u64 {
+    100
+}
+fn default_dga_threshold() -> f64 {
+    -8.0
 }
 
 impl NetringConfig {

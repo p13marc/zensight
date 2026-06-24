@@ -44,8 +44,7 @@ async fn main() -> Result<()> {
     ));
 
     // Build the netring monitor + drain channels (+ telemetry-channel keepalive).
-    let (mon, channels, keepalive) =
-        monitor::build(&cfg).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let (mon, channels, keepalive) = monitor::build(&cfg).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let is_pcap = cfg.pcap.is_some();
     let flow_period = cfg.bandwidth_period_secs;
@@ -55,19 +54,47 @@ async fn main() -> Result<()> {
     // after an anomaly fired.
     runner.spawn(zensight_sensor_core::serve_alerts_query(reporter.clone()));
 
-    // On-demand query channels (P2): recent-flow ring + TLS asset inventory.
+    // On-demand query channels (P2): recent-flow ring, TLS asset inventory,
+    // top-talkers, elephant flows, top DNS domains, top HTTP hosts.
     {
-        let q_session = runner.session().clone();
-        let q_prefix = key_prefix.clone();
-        let flows = channels.flow_records.clone();
-        runner.spawn(zensight_sensor_netring::query::run(q_session, q_prefix, flows));
-
-        let t_session = runner.session().clone();
-        let t_prefix = key_prefix.clone();
-        let inventory = channels.tls_inventory.clone();
-        runner.spawn(zensight_sensor_netring::query::run_tls(
-            t_session, t_prefix, inventory,
+        use zensight_sensor_netring::query;
+        let s = runner.session().clone();
+        runner.spawn(query::run(
+            s.clone(),
+            key_prefix.clone(),
+            channels.flow_records.clone(),
         ));
+        runner.spawn(query::run_tls(
+            s.clone(),
+            key_prefix.clone(),
+            channels.tls_inventory.clone(),
+        ));
+        if cfg.collect.talkers {
+            runner.spawn(query::run_talkers(
+                s.clone(),
+                key_prefix.clone(),
+                channels.talkers.clone(),
+            ));
+            runner.spawn(query::run_elephants(
+                s.clone(),
+                key_prefix.clone(),
+                channels.elephants.clone(),
+            ));
+        }
+        if cfg.collect.dns {
+            runner.spawn(query::run_dns(
+                s.clone(),
+                key_prefix.clone(),
+                channels.dns.inventory.clone(),
+            ));
+        }
+        if cfg.collect.http {
+            runner.spawn(query::run_http(
+                s.clone(),
+                key_prefix.clone(),
+                channels.http.inventory.clone(),
+            ));
+        }
     }
 
     // Drain task (telemetry + anomalies + periodic flow aggregates).

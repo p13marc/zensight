@@ -36,7 +36,10 @@ pub use keyexpr::{
     all_correlation_wildcard, all_errors_wildcard, all_health_wildcard, all_liveness_wildcard,
     all_sensors_wildcard, all_telemetry_wildcard, parse_key_expr,
 };
-pub use query_detail::{FlowRecord, NeighborRecord, RouteRecord, SocketRecord, TlsRecord};
+pub use query_detail::{
+    DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord, NeighborRecord, RouteRecord,
+    SocketRecord, TalkerRecord, TlsRecord,
+};
 pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;
 pub use telemetry::{Protocol, TelemetryPoint, TelemetryValue, current_timestamp_millis};

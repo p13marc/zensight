@@ -18,7 +18,7 @@ zensight-common = { path = "../zensight-common" }
 zensight-sensor-core = { path = "../zensight-sensor-core" }
 
 # Wire-level packet/flow telemetry. Capture needs CAP_NET_RAW; pcap replay does not.
-netring = { git = "https://github.com/p13marc/netring", features = ["monitor", "pcap"] }
+netring = { git = "https://github.com/p13marc/netring", features = ["monitor", "pcap", "icmp"] }
 flowscope = "0.18"
 
 tokio = { workspace = true, features = ["full"] }
