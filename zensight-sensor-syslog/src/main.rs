@@ -6,6 +6,7 @@
 
 mod commands;
 mod config;
+mod events;
 mod filter;
 #[cfg(feature = "journald")]
 mod journald;
@@ -15,10 +16,12 @@ mod receiver;
 use anyhow::Result;
 use commands::{FilterCommand, FilterStatus};
 use config::SyslogSensorConfig;
+use events::EventDetector;
 use filter::FilterManager;
 use std::sync::Arc;
 use zensight_common::serialization::{Format, encode};
-use zensight_sensor_core::{SensorArgs, SensorRunner};
+use zensight_common::telemetry::Protocol;
+use zensight_sensor_core::{AlertReporter, SensorArgs, SensorRunner, serve_alerts_query};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -134,12 +137,43 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Known systemd-event detection → alerts (#61). Only when journald is the
+    // source and detection is enabled; the alert path is otherwise untouched.
+    let event_detector: Option<Arc<EventDetector>> = match &syslog_config.journald {
+        Some(j) if j.enabled && j.detect_events => {
+            let reporter = Arc::new(AlertReporter::new(
+                runner.publisher(),
+                Protocol::Syslog,
+                format,
+            ));
+            // Seed late-joining consumers (e.g. the GUI) with the firing set.
+            runner.spawn(serve_alerts_query(reporter.clone()));
+            let detector = Arc::new(EventDetector::new(
+                reporter,
+                j.event_dedup_secs,
+                &j.event_severity,
+            ));
+            // Auto-resolve fired events after their dedup window.
+            runner.spawn(detector.clone().run_reconcile_loop());
+            tracing::info!("journald known-event detection enabled");
+            Some(detector)
+        }
+        _ => None,
+    };
+
     // Spawn the message processing task
     let session_clone = session.clone();
     runner.spawn(async move {
         loop {
             tokio::select! {
                 Some(received) = rx.recv() => {
+                    // Known-event detection runs before filtering so a coredump
+                    // or unit failure still alerts even if it's filtered from the
+                    // telemetry stream.
+                    if let Some(detector) = &event_detector {
+                        detector.on_message(&received.message, &received.resolved_hostname).await;
+                    }
+
                     // Apply filter
                     if !filter_manager.matches(&received.message, &received.resolved_hostname).await {
                         tracing::trace!(

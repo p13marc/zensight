@@ -60,7 +60,7 @@ pub struct SyslogConfig {
 ///
 /// Minimal by design: `{ "enabled": true }` tails the local system journal with
 /// sane defaults. Cursor resume (#58) and server-side matching (#59) extend this.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 // Fields beyond `enabled` are read only by the (feature-gated) journald reader.
 #[cfg_attr(not(feature = "journald"), allow(dead_code))]
 pub struct JournaldConfig {
@@ -126,6 +126,48 @@ pub struct JournaldConfig {
     /// ERRNO). Off by default to keep label cardinality bounded.
     #[serde(default)]
     pub include_dev_fields: bool,
+
+    /// Detect well-known systemd events (coredump, unit-failed, OOM) by their
+    /// stable `MESSAGE_ID` and raise alerts on `@/alerts/*` (#61). On by default.
+    #[serde(default = "default_true")]
+    pub detect_events: bool,
+
+    /// Coalesce repeats of the same `(event, unit)` within this many seconds,
+    /// and auto-resolve a fired event alert after the window passes (#61).
+    #[serde(default = "default_event_dedup_secs")]
+    pub event_dedup_secs: u64,
+
+    /// Per-`MESSAGE_ID` severity overrides (`info` | `warning` | `critical`),
+    /// keyed by the 32-char hex id. Empty = use the built-in defaults.
+    #[serde(default)]
+    pub event_severity: std::collections::HashMap<String, String>,
+}
+
+fn default_event_dedup_secs() -> u64 {
+    30
+}
+
+impl Default for JournaldConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scope: JournaldScope::default(),
+            namespace: None,
+            start_from: StartFrom::default(),
+            since: None,
+            cursor_file: None,
+            on_missing_cursor: MissingCursor::default(),
+            units: Vec::new(),
+            min_priority: None,
+            transports: Vec::new(),
+            match_fields: std::collections::HashMap::new(),
+            extra_fields: Vec::new(),
+            include_dev_fields: false,
+            detect_events: true,
+            event_dedup_secs: default_event_dedup_secs(),
+            event_severity: std::collections::HashMap::new(),
+        }
+    }
 }
 
 /// Where the journald reader begins on startup (#58).

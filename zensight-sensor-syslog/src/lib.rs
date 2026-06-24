@@ -22,6 +22,7 @@
 
 pub mod commands;
 pub mod config;
+pub mod events;
 pub mod filter;
 #[cfg(feature = "journald")]
 pub mod journald;
