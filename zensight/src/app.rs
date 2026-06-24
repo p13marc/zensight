@@ -812,9 +812,24 @@ impl ZenSight {
                 // Update topology from current device data before showing
                 self.topology.update_from_devices(&self.dashboard.devices);
                 self.topology.apply_alerts(&self.alerts.external);
+                self.topology.apply_correlations(&self.correlations);
                 self.set_view(CurrentView::Topology);
                 self.save_current_view();
+                // Derive real edges from observed flows (#25): fetch the netring
+                // flow detail; edges are applied when the reply arrives.
+                return self.query_topology_flows();
             }
+
+            Message::TopologyFlowsReceived(result) => match result {
+                Ok(flows) => {
+                    let ip_to_node = self.topology_ip_to_node();
+                    self.topology
+                        .apply_flow_edges(&flows, &ip_to_node, now_ms());
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "No netring flows for topology edges");
+                }
+            },
 
             Message::CloseTopology => {
                 self.set_view(CurrentView::Dashboard);
@@ -1282,6 +1297,44 @@ impl ZenSight {
                 .ok_or_else(|| "No netring sensor responded".to_string());
             Message::NetringFlowsReceived(result)
         })
+    }
+
+    /// Fetch netring flows for deriving real topology edges (#25). Routes to
+    /// `TopologyFlowsReceived` so the device flow panel is untouched.
+    fn query_topology_flows(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_flows;
+        let Some(session) = self.session.clone() else {
+            // Not connected (or demo): leave edges as-is, no error toast.
+            return Task::none();
+        };
+        Task::future(async move {
+            let result = fetch_flows(session)
+                .await
+                .ok_or_else(|| "No netring sensor responded".to_string());
+            Message::TopologyFlowsReceived(result)
+        })
+    }
+
+    /// Build a map from endpoint IP to topology node id (#25). A node's `source`
+    /// that is itself an IP maps directly; correlation entries map additional IPs
+    /// to a hostname that matches a node.
+    fn topology_ip_to_node(&self) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        // Direct: a node whose id looks like an IP maps that IP to itself.
+        for node_id in self.topology.nodes.keys() {
+            map.insert(node_id.clone(), node_id.clone());
+        }
+        // Indirect: correlation IP -> any of its hostnames that is a known node.
+        for entry in self.correlations.values() {
+            if let Some(node) = entry
+                .hostnames
+                .iter()
+                .find(|h| self.topology.nodes.contains_key(*h))
+            {
+                map.insert(entry.ip.clone(), node.clone());
+            }
+        }
+        map
     }
 
     /// Fetch the on-demand netring TLS asset inventory.

@@ -100,6 +100,9 @@ pub enum Message {
     FetchNetringFlows,
     /// A netring flow-detail reply: the decoded flows, or an error message.
     NetringFlowsReceived(Result<Vec<zensight_common::FlowRecord>, String>),
+    /// Netring flows fetched for deriving real topology edges (#25). Distinct
+    /// from NetringFlowsReceived so it doesn't disturb the device flow panel.
+    TopologyFlowsReceived(Result<Vec<zensight_common::FlowRecord>, String>),
     /// Fetch the on-demand netring TLS asset inventory.
     FetchNetringTls,
     /// A netring TLS-inventory reply: the decoded records, or an error message.
