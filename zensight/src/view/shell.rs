@@ -42,6 +42,12 @@ fn nav_items(current: CurrentView) -> Vec<NavItem> {
             active: matches!(current, Topology),
         },
         NavItem {
+            label: "Logs",
+            message: Message::OpenLogs,
+            icon: icons::log,
+            active: matches!(current, Logs),
+        },
+        NavItem {
             label: "Alerts",
             message: Message::OpenAlerts,
             icon: icons::alert,
@@ -122,6 +128,7 @@ fn breadcrumb<'a>(current: CurrentView, device: Option<&'a str>) -> Element<'a, 
         CurrentView::Alerts => "Alerts",
         CurrentView::Security => "Security",
         CurrentView::Sensors => "Sensors",
+        CurrentView::Logs => "Logs",
         CurrentView::Expectations => "Expectations",
         CurrentView::Settings => "Settings",
     };

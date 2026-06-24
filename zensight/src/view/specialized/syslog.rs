@@ -9,7 +9,7 @@ use iced::widget::{Row, column, container, pick_list, row, scrollable, table, te
 use iced::{Alignment, Element, Length, Theme};
 use iced_anim::widget::button;
 
-use zensight_common::TelemetryValue;
+use zensight_common::{TelemetryPoint, TelemetryValue};
 
 use crate::message::Message;
 use crate::view::components::card;
@@ -98,13 +98,14 @@ impl SyslogSeverity {
     }
 }
 
-/// Parsed syslog message.
+/// Parsed syslog message. Built from a `TelemetryPoint` via
+/// [`syslog_message_from_point`]; the app keeps a rolling buffer of these for
+/// the top-level [`logs_view`].
 #[derive(Debug, Clone)]
-struct SyslogMessage {
+pub struct SyslogMessage {
     timestamp: i64,
     severity: SyslogSeverity,
     facility: String,
-    #[allow(dead_code)]
     hostname: String,
     app_name: String,
     message: String,
@@ -238,14 +239,70 @@ pub fn syslog_event_view<'a>(
     state: &'a DeviceDetailState,
     filter_state: &'a SyslogFilterState,
 ) -> Element<'a, Message> {
+    let messages = parse_syslog_messages(state);
     let mut content = column![render_header(state, filter_state)]
         .spacing(space::MD)
         .padding(space::LG);
     if filter_state.panel_open {
-        content = content.push(card(render_filter_panel(state, filter_state)));
+        content = content.push(card(render_filter_panel(&messages, filter_state)));
     }
-    content = content.push(card(render_severity_summary(state, filter_state)));
-    content = content.push(card(render_log_stream(state, filter_state)));
+    content = content.push(card(render_severity_summary(&messages, filter_state)));
+    content = content.push(card(render_log_stream(&messages, filter_state)));
+
+    container(content)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// Top-level **Logs** view: a unified, filterable feed of recent log lines from
+/// every syslog/journald source (fed by the app's rolling buffer), independent
+/// of any single device. This is the discoverable home for logs.
+pub fn logs_view<'a>(
+    messages: &[SyslogMessage],
+    filter_state: &'a SyslogFilterState,
+) -> Element<'a, Message> {
+    // Header: title + count + filter toggle (no per-device back button).
+    let has_filters = filter_state.has_active_filters();
+    let filter_button = button(
+        row![
+            icons::toggle(IconSize::Medium),
+            text(if has_filters {
+                "Filters (active)"
+            } else {
+                "Filters"
+            })
+            .size(14)
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    )
+    .on_press(Message::ToggleSyslogFilterPanel)
+    .style(if has_filters {
+        iced::widget::button::primary
+    } else {
+        iced::widget::button::secondary
+    });
+
+    let header = row![
+        icons::log(IconSize::Large),
+        text("Logs").size(24),
+        text(format!("{} buffered", messages.len()))
+            .size(13)
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            }),
+        filter_button,
+    ]
+    .spacing(15)
+    .align_y(Alignment::Center);
+
+    let mut content = column![header].spacing(space::MD).padding(space::LG);
+    if filter_state.panel_open {
+        content = content.push(card(render_filter_panel(messages, filter_state)));
+    }
+    content = content.push(card(render_severity_summary(messages, filter_state)));
+    content = content.push(card(render_log_stream(messages, filter_state)));
 
     container(content)
         .width(Length::Fill)
@@ -308,7 +365,7 @@ fn render_header<'a>(
 
 /// Render the filter panel.
 fn render_filter_panel<'a>(
-    state: &'a DeviceDetailState,
+    messages: &[SyslogMessage],
     filter_state: &'a SyslogFilterState,
 ) -> Element<'a, Message> {
     let title = row![
@@ -338,7 +395,6 @@ fn render_filter_panel<'a>(
     .align_y(Alignment::Center);
 
     // Facility checkboxes
-    let messages = parse_syslog_messages(state);
     let mut facilities: Vec<String> = messages
         .iter()
         .map(|m| m.facility.clone())
@@ -458,11 +514,10 @@ fn render_filter_panel<'a>(
 
 /// Render severity distribution summary.
 fn render_severity_summary<'a>(
-    state: &'a DeviceDetailState,
+    messages: &[SyslogMessage],
     filter_state: &'a SyslogFilterState,
 ) -> Element<'a, Message> {
-    let messages = parse_syslog_messages(state);
-    let filtered_messages = apply_local_filters(&messages, filter_state);
+    let filtered_messages = apply_local_filters(messages, filter_state);
 
     // Count by severity
     let mut counts: HashMap<u8, usize> = HashMap::new();
@@ -524,15 +579,14 @@ fn render_severity_summary<'a>(
 
 /// Render the log stream using Iced 0.14's table widget.
 fn render_log_stream<'a>(
-    state: &'a DeviceDetailState,
+    messages: &[SyslogMessage],
     filter_state: &'a SyslogFilterState,
 ) -> Element<'a, Message> {
     let title = row![icons::log(IconSize::Medium), text("Log Stream").size(16)]
         .spacing(8)
         .align_y(Alignment::Center);
 
-    let messages = parse_syslog_messages(state);
-    let filtered_messages = apply_local_filters(&messages, filter_state);
+    let filtered_messages = apply_local_filters(messages, filter_state);
 
     if filtered_messages.is_empty() {
         let empty_text = if messages.is_empty() {
@@ -594,6 +648,18 @@ fn render_log_stream<'a>(
         },
     );
 
+    let host_column = table::column(
+        text("Host").size(11),
+        |msg: SyslogMessage| -> Element<'_, Message> {
+            text(msg.hostname)
+                .size(10)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
+                })
+                .into()
+        },
+    );
+
     let app_column = table::column(
         text("App").size(11),
         |msg: SyslogMessage| -> Element<'_, Message> {
@@ -623,6 +689,7 @@ fn render_log_stream<'a>(
         [
             time_column,
             severity_column,
+            host_column,
             facility_column,
             app_column,
             message_column,
@@ -644,67 +711,72 @@ fn render_log_stream<'a>(
 
 /// Parse syslog messages from metrics.
 fn parse_syslog_messages(state: &DeviceDetailState) -> Vec<SyslogMessage> {
-    let mut messages = Vec::new();
+    state
+        .metrics
+        .values()
+        .map(|p| syslog_message_from_point(p, &state.device_id.source))
+        .collect()
+}
 
-    for point in state.metrics.values() {
-        // Parse severity from metric path (format: facility/severity)
-        let parts: Vec<&str> = point.metric.split('/').collect();
-        let (facility, severity) = if parts.len() >= 2 {
-            let fac = parts[0].to_string();
-            let sev = SyslogSeverity::from_str(parts[1]).unwrap_or(SyslogSeverity::Informational);
-            (fac, sev)
-        } else {
-            // Fallback: try labels
-            let fac = point
-                .labels
-                .get("facility")
-                .cloned()
-                .unwrap_or_else(|| "unknown".to_string());
-            let sev = point
-                .labels
-                .get("severity")
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(SyslogSeverity::from_value)
-                .or_else(|| {
-                    point
-                        .labels
-                        .get("severity")
-                        .and_then(|s| SyslogSeverity::from_str(s))
-                })
-                .unwrap_or(SyslogSeverity::Informational);
-            (fac, sev)
-        };
-
-        let hostname = point
+/// Build a [`SyslogMessage`] from a syslog `TelemetryPoint`. `source_fallback`
+/// is the host to use when the point carries no `hostname` label (the telemetry
+/// `source`). Used both by the device view and the app's rolling logs buffer.
+pub fn syslog_message_from_point(point: &TelemetryPoint, source_fallback: &str) -> SyslogMessage {
+    // Parse severity from metric path (format: facility/severity)
+    let parts: Vec<&str> = point.metric.split('/').collect();
+    let (facility, severity) = if parts.len() >= 2 {
+        let fac = parts[0].to_string();
+        let sev = SyslogSeverity::from_str(parts[1]).unwrap_or(SyslogSeverity::Informational);
+        (fac, sev)
+    } else {
+        // Fallback: try labels
+        let fac = point
             .labels
-            .get("hostname")
+            .get("facility")
             .cloned()
-            .unwrap_or_else(|| state.device_id.source.clone());
-
-        let app_name = point
+            .unwrap_or_else(|| "unknown".to_string());
+        let sev = point
             .labels
-            .get("app")
-            .or_else(|| point.labels.get("app_name"))
-            .or_else(|| point.labels.get("program"))
-            .cloned()
-            .unwrap_or_else(|| "-".to_string());
+            .get("severity")
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(SyslogSeverity::from_value)
+            .or_else(|| {
+                point
+                    .labels
+                    .get("severity")
+                    .and_then(|s| SyslogSeverity::from_str(s))
+            })
+            .unwrap_or(SyslogSeverity::Informational);
+        (fac, sev)
+    };
 
-        let message = match &point.value {
-            TelemetryValue::Text(s) => s.clone(),
-            _ => format!("{:?}", point.value),
-        };
+    let hostname = point
+        .labels
+        .get("hostname")
+        .cloned()
+        .unwrap_or_else(|| source_fallback.to_string());
 
-        messages.push(SyslogMessage {
-            timestamp: point.timestamp,
-            severity,
-            facility,
-            hostname,
-            app_name,
-            message,
-        });
+    let app_name = point
+        .labels
+        .get("app")
+        .or_else(|| point.labels.get("app_name"))
+        .or_else(|| point.labels.get("program"))
+        .cloned()
+        .unwrap_or_else(|| "-".to_string());
+
+    let message = match &point.value {
+        TelemetryValue::Text(s) => s.clone(),
+        _ => format!("{:?}", point.value),
+    };
+
+    SyslogMessage {
+        timestamp: point.timestamp,
+        severity,
+        facility,
+        hostname,
+        app_name,
+        message,
     }
-
-    messages
 }
 
 /// Apply local (UI-side) filters to messages.

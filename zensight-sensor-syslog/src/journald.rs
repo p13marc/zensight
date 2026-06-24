@@ -140,12 +140,20 @@ fn run(cfg: &JournaldConfig, tx: &mpsc::Sender<ReceivedMessage>) -> std::io::Res
 
     let mut last_persist = Instant::now();
     let mut pending_cursor: Option<String> = None;
+    // No-data diagnostic: a journal that yields nothing for a while usually means
+    // the process lacks journal-read access (common for `scope: "system"` when
+    // the user isn't in the `systemd-journal`/`adm` group). Warn once so the
+    // empty stream is explained rather than silent.
+    let started = Instant::now();
+    let mut total_read: u64 = 0;
+    let mut warned_no_data = false;
 
     loop {
         // Drain everything currently available.
         let mut advanced = false;
         while let Some(record) = journal.next_entry()? {
             advanced = true;
+            total_read += 1;
             let recv_usec = journal.timestamp_usec().ok();
             let message = map_record(&record, cfg, recv_usec);
             let resolved_hostname = message
@@ -184,6 +192,18 @@ fn run(cfg: &JournaldConfig, tx: &mpsc::Sender<ReceivedMessage>) -> std::io::Res
                 tracing::warn!(error = %e, "journald: cursor persist failed");
             }
             last_persist = Instant::now();
+        }
+
+        // One-time no-data diagnostic (~15s of nothing read).
+        if !warned_no_data && total_read == 0 && started.elapsed() >= Duration::from_secs(15) {
+            warned_no_data = true;
+            tracing::warn!(
+                scope = ?cfg.scope,
+                "journald: no entries read after 15s — the reader likely lacks \
+                 journal-read access. For scope=system, add this user to the \
+                 `systemd-journal` group (or run as a system service), or set \
+                 `scope: \"user\"` to read the per-user journal."
+            );
         }
 
         // Block for new entries (bounded so shutdown is observed promptly).

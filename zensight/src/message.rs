@@ -241,6 +241,9 @@ pub enum Message {
     /// Open the sensors (sensor health) view.
     OpenSensors,
 
+    /// Open the top-level logs view (unified syslog/journald feed).
+    OpenLogs,
+
     // Settings messages
     /// Open the settings view.
     OpenSettings,

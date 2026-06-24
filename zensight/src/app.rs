@@ -16,6 +16,9 @@ use zensight_common::{
 /// Flush the metric store to redb every this many 1s ticks (#22).
 const STORE_FLUSH_EVERY_TICKS: u32 = 15;
 
+/// Cap on the rolling log buffer feeding the top-level Logs view.
+const MAX_RECENT_LOGS: usize = 5000;
+
 /// Text input ID for dashboard search.
 pub static DASHBOARD_SEARCH_ID: LazyLock<Id> = LazyLock::new(|| Id::new("dashboard-search"));
 
@@ -51,6 +54,7 @@ pub enum CurrentView {
     Expectations,
     Security,
     Sensors,
+    Logs,
 }
 
 /// Application theme.
@@ -99,6 +103,9 @@ pub struct ZenSight {
     topology: TopologyState,
     /// Syslog filter state.
     syslog_filter: SyslogFilterState,
+    /// Rolling buffer of recent log lines (all syslog/journald sources) for the
+    /// top-level Logs view. Bounded to [`MAX_RECENT_LOGS`].
+    recent_logs: std::collections::VecDeque<crate::view::specialized::SyslogMessage>,
     /// Current view.
     current_view: CurrentView,
     /// Stale threshold in milliseconds (devices not updated within this time are marked unhealthy).
@@ -227,6 +234,7 @@ impl ZenSight {
             overview,
             topology,
             syslog_filter,
+            recent_logs: std::collections::VecDeque::new(),
             current_view,
             stale_threshold_ms,
             demo_mode,
@@ -652,6 +660,10 @@ impl ZenSight {
 
             Message::OpenSensors => {
                 self.set_view(CurrentView::Sensors);
+            }
+
+            Message::OpenLogs => {
+                self.set_view(CurrentView::Logs);
             }
 
             Message::OpenSettings => {
@@ -1505,7 +1517,10 @@ impl ZenSight {
                     }
                 }
             }
-            CurrentView::Expectations | CurrentView::Security | CurrentView::Sensors => {
+            CurrentView::Expectations
+            | CurrentView::Security
+            | CurrentView::Sensors
+            | CurrentView::Logs => {
                 self.set_view(CurrentView::Dashboard);
             }
             CurrentView::Dashboard => {
@@ -1569,6 +1584,10 @@ impl ZenSight {
             }
             CurrentView::Sensors => {
                 crate::view::sensors::sensors_view(&self.sensor_health, &self.recent_errors)
+            }
+            CurrentView::Logs => {
+                let logs: Vec<_> = self.recent_logs.iter().cloned().collect();
+                crate::view::specialized::logs_view(&logs, &self.syslog_filter)
             }
             CurrentView::Device => {
                 if let Some(ref device_state) = self.selected_device {
@@ -1705,6 +1724,20 @@ impl ZenSight {
             self.last_telemetry_ms
                 .map_or(point.timestamp, |prev| prev.max(point.timestamp)),
         );
+
+        // Syslog/journald lines feed the rolling buffer behind the Logs view.
+        // Unlike per-metric device state (which keeps only the latest point per
+        // facility/severity), this preserves the full recent stream.
+        if point.protocol == zensight_common::Protocol::Syslog {
+            self.recent_logs
+                .push_back(crate::view::specialized::syslog_message_from_point(
+                    &point,
+                    &point.source,
+                ));
+            while self.recent_logs.len() > MAX_RECENT_LOGS {
+                self.recent_logs.pop_front();
+            }
+        }
 
         let device_id = DeviceId::from_telemetry(&point);
 
