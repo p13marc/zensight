@@ -19,14 +19,17 @@
 //! server-side matching / namespaces beyond `scope` (#59) build on top of this.
 
 use std::collections::HashMap;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::{TimeZone, Utc};
+use systemd::id128::Id128;
 use systemd::journal::{Journal, JournalRecord, OpenOptions};
 use tokio::sync::mpsc;
 
-use crate::config::{JournaldConfig, JournaldScope};
+use crate::config::{JournaldConfig, JournaldScope, MissingCursor, StartFrom};
 use crate::parser::{Facility, Severity, SyslogMessage, SyslogVersion};
 use crate::receiver::{MessageSource, ReceivedMessage};
 
@@ -36,6 +39,13 @@ const WAIT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Hostname used only when an entry has no `_HOSTNAME` (practically never).
 const HOST_FALLBACK: &str = "localhost";
+
+/// Minimum interval between cursor-file writes (#58), to bound write rate under
+/// a log storm while keeping the persisted cursor reasonably fresh.
+const CURSOR_PERSIST_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Default `since` window when `start_from: "since"` is selected without one.
+const DEFAULT_SINCE: Duration = Duration::from_secs(900);
 
 /// Spawn the journald reader on a dedicated OS thread.
 ///
@@ -70,22 +80,27 @@ fn open(cfg: &JournaldConfig) -> std::io::Result<Journal> {
     }
 }
 
-/// Reader loop: open, seek to the tail (only new entries), then drain-and-wait.
+/// Reader loop: open, position per `start_from`, then drain-persist-wait.
 fn run(cfg: &JournaldConfig, tx: &mpsc::Sender<ReceivedMessage>) -> std::io::Result<()> {
     let mut journal = open(cfg)?;
-    // #57 tails only new entries; #58 will replace this with cursor resume.
-    // After seek_tail() the read pointer sits *after* the last entry in an
-    // indeterminate state — `sd_journal_wait` will not report appends until the
-    // cursor is anchored on a real entry. The documented recipe (see the
-    // sd_journal_wait(3) example) is to step back onto the last entry with
-    // previous(); subsequent next() calls then only yield genuinely new entries.
-    journal.seek_tail()?;
-    let _ = journal.previous();
-    tracing::info!(scope = ?cfg.scope, namespace = ?cfg.namespace, "journald tailing");
+    let cursor_path = resolve_cursor_path(cfg);
+    position(&mut journal, cfg, cursor_path.as_deref())?;
+    tracing::info!(
+        scope = ?cfg.scope,
+        namespace = ?cfg.namespace,
+        start_from = ?cfg.start_from,
+        cursor_file = ?cursor_path,
+        "journald reading"
+    );
+
+    let mut last_persist = Instant::now();
+    let mut pending_cursor: Option<String> = None;
 
     loop {
         // Drain everything currently available.
+        let mut advanced = false;
         while let Some(record) = journal.next_entry()? {
+            advanced = true;
             let recv_usec = journal.timestamp_usec().ok();
             let message = map_record(&record, cfg, recv_usec);
             let resolved_hostname = message
@@ -104,8 +119,26 @@ fn run(cfg: &JournaldConfig, tx: &mpsc::Sender<ReceivedMessage>) -> std::io::Res
             };
             if tx.blocking_send(received).is_err() {
                 tracing::info!("journald: telemetry channel closed, stopping reader");
+                // Flush the latest cursor on the way out for a clean resume.
+                if let (Some(path), Ok(cur)) = (&cursor_path, journal.cursor()) {
+                    let _ = write_cursor_atomic(path, &cur);
+                }
                 return Ok(());
             }
+        }
+
+        // After draining, the journal is positioned on the last entry read; grab
+        // its cursor once per batch (cheaper than per-entry) for persistence.
+        if advanced {
+            pending_cursor = journal.cursor().ok();
+        }
+        if let (Some(path), Some(cur)) = (&cursor_path, &pending_cursor)
+            && last_persist.elapsed() >= CURSOR_PERSIST_INTERVAL
+        {
+            if let Err(e) = write_cursor_atomic(path, cur) {
+                tracing::warn!(error = %e, "journald: cursor persist failed");
+            }
+            last_persist = Instant::now();
         }
 
         // Block for new entries (bounded so shutdown is observed promptly).
@@ -117,6 +150,139 @@ fn run(cfg: &JournaldConfig, tx: &mpsc::Sender<ReceivedMessage>) -> std::io::Res
             }
         }
     }
+}
+
+/// Position the journal read pointer according to `start_from` (#58).
+fn position(
+    journal: &mut Journal,
+    cfg: &JournaldConfig,
+    cursor_path: Option<&Path>,
+) -> std::io::Result<()> {
+    match cfg.start_from {
+        StartFrom::Head => {
+            journal.seek_head()?;
+        }
+        StartFrom::Tail => seek_tail_anchored(journal)?,
+        StartFrom::Since => seek_since(journal, cfg)?,
+        StartFrom::Boot => {
+            // Restrict to the current boot, then start at its first entry.
+            let boot = Id128::from_boot()?.to_string();
+            journal.match_add("_BOOT_ID", boot)?;
+            journal.seek_head()?;
+        }
+        StartFrom::Cursor => match cursor_path.and_then(read_cursor_file) {
+            Some(saved) => {
+                journal.seek_cursor(saved.as_str())?;
+                // Load the entry at/after the cursor so test_cursor is meaningful.
+                journal.next()?;
+                if journal.test_cursor(saved.as_str()).unwrap_or(false) {
+                    // Positioned on the already-processed entry; the drain loop's
+                    // first next() advances past it → resume with no duplicate.
+                    tracing::info!("journald: resumed from saved cursor");
+                } else {
+                    tracing::warn!(
+                        "journald: saved cursor not found (rotated out); applying on_missing_cursor"
+                    );
+                    apply_missing_cursor(journal, cfg)?;
+                }
+            }
+            None => {
+                // First run (no cursor yet): behave like tail.
+                seek_tail_anchored(journal)?;
+            }
+        },
+    }
+    Ok(())
+}
+
+/// `seek_tail()` leaves the pointer in an indeterminate post-tail state where
+/// `sd_journal_wait` will not report appends; anchor it on the last entry with
+/// `previous()` so subsequent `next()` calls only yield genuinely new entries.
+fn seek_tail_anchored(journal: &mut Journal) -> std::io::Result<()> {
+    journal.seek_tail()?;
+    let _ = journal.previous();
+    Ok(())
+}
+
+/// Seek to `now - since` (defaulting to [`DEFAULT_SINCE`]).
+fn seek_since(journal: &mut Journal, cfg: &JournaldConfig) -> std::io::Result<()> {
+    let window = cfg
+        .since
+        .as_deref()
+        .and_then(parse_duration)
+        .unwrap_or(DEFAULT_SINCE);
+    let now_us = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0);
+    journal.seek_realtime_usec(now_us.saturating_sub(window.as_micros() as u64))?;
+    Ok(())
+}
+
+/// Fallback positioning when a saved cursor can no longer be resolved.
+fn apply_missing_cursor(journal: &mut Journal, cfg: &JournaldConfig) -> std::io::Result<()> {
+    match cfg.on_missing_cursor {
+        MissingCursor::Tail => seek_tail_anchored(journal),
+        MissingCursor::Since => seek_since(journal, cfg),
+    }
+}
+
+/// Resolve the cursor-file path: explicit config, else a systemd `STATE_DIRECTORY`
+/// / XDG state location. `None` means "don't persist".
+fn resolve_cursor_path(cfg: &JournaldConfig) -> Option<PathBuf> {
+    if let Some(p) = &cfg.cursor_file {
+        return Some(p.clone());
+    }
+    if let Ok(state) = std::env::var("STATE_DIRECTORY") {
+        let first = state.split(':').next().unwrap_or(state.as_str());
+        if !first.is_empty() {
+            return Some(Path::new(first).join("journald.cursor"));
+        }
+    }
+    if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
+        return Some(Path::new(&xdg).join("zensight/journald.cursor"));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return Some(Path::new(&home).join(".local/state/zensight/journald.cursor"));
+    }
+    None
+}
+
+/// Read a persisted cursor, treating empty/whitespace as absent.
+fn read_cursor_file(path: &Path) -> Option<String> {
+    let s = std::fs::read_to_string(path).ok()?;
+    let s = s.trim();
+    (!s.is_empty()).then(|| s.to_string())
+}
+
+/// Atomically write the cursor (temp file + rename), creating parents as needed.
+fn write_cursor_atomic(path: &Path, cursor: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(cursor.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
+}
+
+/// Parse a human duration like `30s`, `15m`, `2h`, `1d`. `None` on bad input.
+fn parse_duration(s: &str) -> Option<Duration> {
+    let s = s.trim();
+    let split = s.find(|c: char| !c.is_ascii_digit())?;
+    let (num, unit) = s.split_at(split);
+    let n: u64 = num.trim().parse().ok()?;
+    let secs = match unit.trim() {
+        "s" | "sec" | "secs" => n,
+        "m" | "min" | "mins" => n * 60,
+        "h" | "hr" | "hrs" | "hour" | "hours" => n * 3600,
+        "d" | "day" | "days" => n * 86400,
+        _ => return None,
+    };
+    Some(Duration::from_secs(secs))
 }
 
 /// Standard journald field → label name mapping (single source of truth so the
@@ -375,5 +541,38 @@ mod tests {
         ]);
         let m = map_record(&r, &JournaldConfig::default(), Some(999));
         assert_eq!(m.timestamp.unwrap().timestamp(), 1_609_459_200);
+    }
+
+    #[test]
+    fn parse_duration_units() {
+        assert_eq!(parse_duration("30s"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_duration("15m"), Some(Duration::from_secs(900)));
+        assert_eq!(parse_duration("2h"), Some(Duration::from_secs(7200)));
+        assert_eq!(parse_duration("1d"), Some(Duration::from_secs(86400)));
+        assert_eq!(parse_duration(" 5 min "), Some(Duration::from_secs(300)));
+        assert_eq!(parse_duration("10"), None); // no unit
+        assert_eq!(parse_duration("abc"), None);
+        assert_eq!(parse_duration("5y"), None); // unsupported unit
+    }
+
+    #[test]
+    fn cursor_file_round_trip() {
+        let dir = std::env::temp_dir().join(format!("zs-jd-cursor-{}", std::process::id()));
+        let path = dir.join("nested/journald.cursor");
+        // Parent dirs are created on write.
+        write_cursor_atomic(&path, "s=abc123;i=1").unwrap();
+        assert_eq!(read_cursor_file(&path).as_deref(), Some("s=abc123;i=1"));
+        // Overwrite is atomic and replaces the previous value.
+        write_cursor_atomic(&path, "s=def456;i=2").unwrap();
+        assert_eq!(read_cursor_file(&path).as_deref(), Some("s=def456;i=2"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_cursor_file_treats_empty_as_absent() {
+        let path = std::env::temp_dir().join(format!("zs-jd-empty-{}.cursor", std::process::id()));
+        std::fs::write(&path, "   \n").unwrap();
+        assert_eq!(read_cursor_file(&path), None);
+        let _ = std::fs::remove_file(&path);
     }
 }

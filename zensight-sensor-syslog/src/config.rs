@@ -76,6 +76,25 @@ pub struct JournaldConfig {
     #[serde(default)]
     pub namespace: Option<String>,
 
+    /// Where to begin reading on startup (#58). Defaults to resuming from the
+    /// persisted cursor (first run behaves like `tail`).
+    #[serde(default)]
+    pub start_from: StartFrom,
+
+    /// Lookback window for `start_from: "since"`, e.g. `"15m"`, `"1h"`, `"2d"`.
+    #[serde(default)]
+    pub since: Option<String>,
+
+    /// Path of the cursor state file. `None` picks a sensible default
+    /// (`$STATE_DIRECTORY/journald.cursor` under systemd, else an XDG state dir).
+    #[serde(default)]
+    pub cursor_file: Option<std::path::PathBuf>,
+
+    /// What to do when `start_from: "cursor"` but the saved cursor is gone
+    /// (rotated out): start from the tail, or from `since`.
+    #[serde(default)]
+    pub on_missing_cursor: MissingCursor,
+
     /// Extra raw journald field names (e.g. `_SELINUX_CONTEXT`) to copy verbatim
     /// into labels, on top of the standard set (unit, pid, comm, boot_id, …).
     #[serde(default)]
@@ -85,6 +104,34 @@ pub struct JournaldConfig {
     /// ERRNO). Off by default to keep label cardinality bounded.
     #[serde(default)]
     pub include_dev_fields: bool,
+}
+
+/// Where the journald reader begins on startup (#58).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartFrom {
+    /// Resume from the persisted cursor; first run behaves like `tail`.
+    #[default]
+    Cursor,
+    /// Only entries newer than startup.
+    Tail,
+    /// Replay the entire journal from the beginning (can be large).
+    Head,
+    /// Only entries from the current boot.
+    Boot,
+    /// Entries within the `since` lookback window.
+    Since,
+}
+
+/// Fallback when a saved cursor can no longer be resolved (#58).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MissingCursor {
+    /// Start from the tail (only new entries).
+    #[default]
+    Tail,
+    /// Start from the `since` lookback window.
+    Since,
 }
 
 /// Which systemd journal to read.

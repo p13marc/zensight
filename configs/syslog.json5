@@ -52,6 +52,12 @@
     //   // namespace: "myns",      // a journald log namespace, if any
     //   // extra_fields: ["_SELINUX_CONTEXT"],  // copy extra raw fields to labels
     //   // include_dev_fields: false,           // CODE_FILE/LINE/FUNC, ERRNO
+    //
+    //   // Start position + no-loss resume (#58):
+    //   // start_from: "cursor",   // cursor | tail | head | boot | since
+    //   // since: "15m",           // lookback when start_from = "since"
+    //   // cursor_file: null,      // null = $STATE_DIRECTORY / XDG state default
+    //   // on_missing_cursor: "tail",  // tail | since (when saved cursor rotated out)
     // },
   },
 
