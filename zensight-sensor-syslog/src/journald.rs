@@ -80,9 +80,54 @@ fn open(cfg: &JournaldConfig) -> std::io::Result<Journal> {
     }
 }
 
+/// Compile the declarative server-side filters (#59) into journald match pairs.
+///
+/// Pure (no journal handle) so the priority OR-expansion is unit-testable.
+/// libsystemd ORs matches on the same field and ANDs across fields, so:
+/// `(unitA OR unitB) AND (PRIORITY 0..=min) AND (transportX OR …) AND raw…`
+/// falls out automatically — no explicit `match_or` needed.
+fn build_matches(cfg: &JournaldConfig) -> Vec<(String, String)> {
+    let mut matches = Vec::new();
+    for unit in &cfg.units {
+        matches.push(("_SYSTEMD_UNIT".to_string(), unit.clone()));
+    }
+    if let Some(min) = cfg.min_priority {
+        // libsystemd has no `<=`; enumerate PRIORITY=0..=min (same field → OR).
+        for p in 0..=min.min(7) {
+            matches.push(("PRIORITY".to_string(), p.to_string()));
+        }
+    }
+    for transport in &cfg.transports {
+        matches.push(("_TRANSPORT".to_string(), transport.clone()));
+    }
+    for (field, value) in &cfg.match_fields {
+        matches.push((field.clone(), value.clone()));
+    }
+    matches
+}
+
+/// Install the server-side filters on the journal handle.
+fn apply_matches(journal: &mut Journal, cfg: &JournaldConfig) -> std::io::Result<()> {
+    let matches = build_matches(cfg);
+    if matches.is_empty() {
+        return Ok(());
+    }
+    for (field, value) in &matches {
+        journal.match_add(field.as_str(), value.clone())?;
+    }
+    tracing::info!(
+        count = matches.len(),
+        "journald: server-side matches applied"
+    );
+    Ok(())
+}
+
 /// Reader loop: open, position per `start_from`, then drain-persist-wait.
 fn run(cfg: &JournaldConfig, tx: &mpsc::Sender<ReceivedMessage>) -> std::io::Result<()> {
     let mut journal = open(cfg)?;
+    // Server-side filters must be installed before seeking so they constrain
+    // iteration from the first entry (#59).
+    apply_matches(&mut journal, cfg)?;
     let cursor_path = resolve_cursor_path(cfg);
     position(&mut journal, cfg, cursor_path.as_deref())?;
     tracing::info!(
@@ -574,5 +619,63 @@ mod tests {
         std::fs::write(&path, "   \n").unwrap();
         assert_eq!(read_cursor_file(&path), None);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn build_matches_empty_by_default() {
+        assert!(build_matches(&JournaldConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn build_matches_units_and_transports() {
+        let cfg = JournaldConfig {
+            units: vec!["sshd.service".into(), "nginx.service".into()],
+            transports: vec!["kernel".into()],
+            ..Default::default()
+        };
+        let m = build_matches(&cfg);
+        assert!(m.contains(&("_SYSTEMD_UNIT".into(), "sshd.service".into())));
+        assert!(m.contains(&("_SYSTEMD_UNIT".into(), "nginx.service".into())));
+        assert!(m.contains(&("_TRANSPORT".into(), "kernel".into())));
+    }
+
+    #[test]
+    fn build_matches_min_priority_expands_to_or_group() {
+        let cfg = JournaldConfig {
+            min_priority: Some(3),
+            ..Default::default()
+        };
+        let m = build_matches(&cfg);
+        let prios: Vec<&str> = m
+            .iter()
+            .filter(|(f, _)| f == "PRIORITY")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(prios, ["0", "1", "2", "3"]); // 0..=min
+    }
+
+    #[test]
+    fn build_matches_min_priority_clamped_to_7() {
+        let cfg = JournaldConfig {
+            min_priority: Some(50),
+            ..Default::default()
+        };
+        let prio_count = build_matches(&cfg)
+            .iter()
+            .filter(|(f, _)| f == "PRIORITY")
+            .count();
+        assert_eq!(prio_count, 8); // 0..=7
+    }
+
+    #[test]
+    fn build_matches_raw_fields() {
+        let mut match_fields = std::collections::HashMap::new();
+        match_fields.insert("_SYSTEMD_UNIT".to_string(), "cron.service".to_string());
+        let cfg = JournaldConfig {
+            match_fields,
+            ..Default::default()
+        };
+        let m = build_matches(&cfg);
+        assert!(m.contains(&("_SYSTEMD_UNIT".into(), "cron.service".into())));
     }
 }

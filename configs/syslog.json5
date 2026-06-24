@@ -58,6 +58,12 @@
     //   // since: "15m",           // lookback when start_from = "since"
     //   // cursor_file: null,      // null = $STATE_DIRECTORY / XDG state default
     //   // on_missing_cursor: "tail",  // tail | since (when saved cursor rotated out)
+    //
+    //   // Server-side filters (#59) — applied in the journal, before transport:
+    //   // units: ["sshd.service", "nginx.service"],  // only these units ([]=all)
+    //   // min_priority: 4,        // 0..7; warning and worse (null=all)
+    //   // transports: ["kernel", "journal"],         // _TRANSPORT allowlist
+    //   // match: { "_SYSTEMD_UNIT": "cron.service" }, // raw FIELD=value matches
     // },
   },
 

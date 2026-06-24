@@ -95,6 +95,28 @@ pub struct JournaldConfig {
     #[serde(default)]
     pub on_missing_cursor: MissingCursor,
 
+    /// Server-side filter: only these systemd units (`_SYSTEMD_UNIT`), OR'd.
+    /// Empty = all units. Applied in the journal itself (#59), so filtered
+    /// entries are never decoded or transported.
+    #[serde(default)]
+    pub units: Vec<String>,
+
+    /// Server-side filter: minimum priority 0..=7 (3 = err). Expands to a
+    /// `PRIORITY=0..min` OR-group (libsystemd has no `<=` match). `None` = all.
+    #[serde(default)]
+    pub min_priority: Option<u8>,
+
+    /// Server-side filter: only these transports (`_TRANSPORT`, e.g. `kernel`,
+    /// `journal`, `stdout`, `syslog`), OR'd. Empty = all.
+    #[serde(default)]
+    pub transports: Vec<String>,
+
+    /// Server-side filter: raw `FIELD=value` matches, AND'd with the above
+    /// (same-field entries OR per libsystemd semantics). Escape hatch for
+    /// arbitrary journald fields.
+    #[serde(default, rename = "match")]
+    pub match_fields: std::collections::HashMap<String, String>,
+
     /// Extra raw journald field names (e.g. `_SELINUX_CONTEXT`) to copy verbatim
     /// into labels, on top of the standard set (unit, pid, comm, boot_id, …).
     #[serde(default)]
