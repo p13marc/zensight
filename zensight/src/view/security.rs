@@ -49,14 +49,26 @@ fn render_header<'a>(count: usize) -> Element<'a, Message> {
     .on_press(Message::CloseSecurity)
     .style(iced::widget::button::secondary);
 
-    row![
+    // Cross-link back to the operational Alerts surface (#39).
+    let all_alerts = button(text("← All alerts").size(13))
+        .on_press(Message::OpenAlerts)
+        .style(iced::widget::button::secondary);
+
+    let header_row = row![
         back,
         text("Security — Network Anomalies").size(22),
         text(format!("({count} active)")).size(13).style(dim),
+        all_alerts,
     ]
     .spacing(15)
-    .align_y(Alignment::Center)
-    .into()
+    .align_y(Alignment::Center);
+
+    // Scope subtitle so the Alerts/Security split is legible (#39).
+    let subtitle = text("Network security anomalies — port scans, beacons, DGA, floods")
+        .size(crate::view::tokens::font::CAPTION)
+        .style(dim);
+
+    column![header_row, subtitle].spacing(4).into()
 }
 
 /// Rank offending sources by anomaly count.

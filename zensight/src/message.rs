@@ -1,6 +1,6 @@
 use zensight_common::{
-    Alert, CorrelationEntry, DeviceLiveness, ErrorReport, HealthSnapshot, Protocol, SensorInfo,
-    TelemetryPoint,
+    Alert, CorrelationEntry, DeviceLiveness, DeviceStatus, ErrorReport, HealthSnapshot, Protocol,
+    SensorInfo, TelemetryPoint,
 };
 
 use crate::view::alerts::{ComparisonOp, Severity};
@@ -128,11 +128,26 @@ pub enum Message {
     /// User selected a device from the dashboard.
     SelectDevice(DeviceId),
 
+    /// Jump from an alert straight to the offending device, pre-selecting the
+    /// metric (if known) so its chart opens immediately (#35 triage loop).
+    InvestigateAlert {
+        device: DeviceId,
+        metric: Option<String>,
+    },
+
+    /// Navigate to the previous/next device within the current filtered set
+    /// (#35 cross-device navigation on the device detail view).
+    SelectAdjacentDevice { forward: bool },
+
     /// User cleared device selection (back to dashboard).
     ClearSelection,
 
     /// User toggled protocol filter.
     ToggleProtocolFilter(Protocol),
+
+    /// Filter the dashboard to a single device status (None = all), driven by
+    /// the fleet summary chips (#34). Clicking the active chip clears it.
+    SetStatusFilter(Option<DeviceStatus>),
 
     /// User changed device search filter.
     SetDeviceSearchFilter(String),
@@ -166,6 +181,12 @@ pub enum Message {
 
     /// User changed the chart time window.
     SetChartTimeWindow(TimeWindow),
+
+    /// User typed a custom relative window (minutes) for the chart (#36).
+    SetChartCustomMinutes(String),
+
+    /// Toggle the chart panel between default and expanded height (#36).
+    ToggleChartExpand,
 
     /// Zoom in on the chart.
     ChartZoomIn,

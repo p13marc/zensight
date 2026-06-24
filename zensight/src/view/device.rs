@@ -85,6 +85,10 @@ pub struct DeviceDetailState {
     pub netlink_detail: crate::view::specialized::netlink_detail::NetlinkDetailState,
     /// On-demand netring flow detail, fetched lazily from `@/query/flows`.
     pub netring_detail: crate::view::specialized::netring_detail::NetringDetailState,
+    /// Whether the chart panel is expanded to a taller height (#36).
+    pub chart_expanded: bool,
+    /// Text-input buffer for the custom relative window in minutes (#36).
+    pub chart_custom_input: String,
 }
 
 impl DeviceDetailState {
@@ -108,6 +112,23 @@ impl DeviceDetailState {
             pending_filter_time: 0,
             netlink_detail: Default::default(),
             netring_detail: Default::default(),
+            chart_expanded: false,
+            chart_custom_input: String::new(),
+        }
+    }
+
+    /// Toggle the chart panel between default and expanded height (#36).
+    pub fn toggle_chart_expand(&mut self) {
+        self.chart_expanded = !self.chart_expanded;
+    }
+
+    /// Apply a custom relative window from the text input (#36). Empty input or
+    /// an unparseable value clears the custom window.
+    pub fn set_chart_custom_minutes(&mut self, input: String) {
+        self.chart_custom_input = input;
+        match self.chart_custom_input.trim().parse::<f64>() {
+            Ok(minutes) => self.chart.set_custom_duration_minutes(minutes),
+            Err(_) => self.chart.set_custom_duration_minutes(0.0),
         }
     }
 
@@ -126,30 +147,32 @@ impl DeviceDetailState {
     pub fn update(&mut self, point: TelemetryPoint) {
         let metric_name = point.metric.clone();
 
-        // Update current value
+        // Derive the chart data point up front (cheap: timestamp + value) so we
+        // can move `point` into history below without re-deriving (#40).
+        let data_point = DataPoint::from_telemetry(point.timestamp, &point.value);
+
+        // Update current value (one clone — the snapshot map needs its own copy).
         self.metrics.insert(metric_name.clone(), point.clone());
 
-        // Update history
-        let history = self.history.entry(metric_name.clone()).or_default();
-        history.push_back(point.clone());
+        // Update the chart while we still hold `metric_name`.
+        if let Some(dp) = data_point {
+            // Single-series mode.
+            if self.selected_metric.as_deref() == Some(metric_name.as_str()) {
+                self.chart.push(dp.clone());
+            }
+            // Comparison mode (multi-series).
+            if self.chart.has_series(&metric_name) {
+                self.chart.push_to_series(&metric_name, dp);
+            }
+        }
 
-        // Trim history if needed
+        // Update history — move the original `point` in (its last use, no clone).
+        let history = self.history.entry(metric_name).or_default();
+        history.push_back(point);
+
+        // Trim history if needed.
         if history.len() > self.max_history {
             history.pop_front();
-        }
-
-        // Update chart if this metric is selected (single-series mode)
-        if self.selected_metric.as_ref() == Some(&metric_name)
-            && let Some(data_point) = DataPoint::from_telemetry(point.timestamp, &point.value)
-        {
-            self.chart.push(data_point);
-        }
-
-        // Update chart if this metric is in comparison mode (multi-series)
-        if self.chart.has_series(&metric_name)
-            && let Some(data_point) = DataPoint::from_telemetry(point.timestamp, &point.value)
-        {
-            self.chart.push_to_series(&metric_name, data_point);
         }
     }
 
@@ -458,6 +481,52 @@ impl DeviceDetailState {
 
         serde_json::to_string_pretty(&metrics).unwrap_or_else(|_| "[]".to_string())
     }
+
+    /// Export the full per-metric **time series** to CSV (#37) — every point the
+    /// view holds, not just the latest snapshot. One row per (metric, sample),
+    /// sorted by metric then timestamp, so the trend on screen is exportable.
+    pub fn export_history_to_csv(&self) -> String {
+        let mut csv = String::new();
+        csv.push_str("timestamp,protocol,source,metric,value,type\n");
+
+        let mut names: Vec<&String> = self.history.keys().collect();
+        names.sort();
+        for name in names {
+            let Some(history) = self.history.get(name) else {
+                continue;
+            };
+            for point in history.iter() {
+                let value_str = format_value_for_export(&point.value);
+                let type_str = value_type_name(&point.value);
+                csv.push_str(&format!(
+                    "{},{},{},{},{},{}\n",
+                    point.timestamp,
+                    point.protocol,
+                    escape_csv(&point.source),
+                    escape_csv(&point.metric),
+                    escape_csv(&value_str),
+                    type_str
+                ));
+            }
+        }
+        csv
+    }
+
+    /// Export the full per-metric time series to JSON (#37): a map of metric name
+    /// to its ordered list of telemetry points.
+    pub fn export_history_to_json(&self) -> String {
+        let mut ordered: std::collections::BTreeMap<&String, Vec<&TelemetryPoint>> =
+            std::collections::BTreeMap::new();
+        for (name, history) in &self.history {
+            ordered.insert(name, history.iter().collect());
+        }
+        serde_json::to_string_pretty(&ordered).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// Whether there is any time-series history to export (#37).
+    pub fn has_history(&self) -> bool {
+        self.history.values().any(|h| !h.is_empty())
+    }
 }
 
 /// Escape a string for CSV (handle commas and quotes).
@@ -568,6 +637,17 @@ fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
     .on_press(Message::ClearSelection)
     .style(iced::widget::button::secondary);
 
+    // #35: step through the current filtered device set without returning to the
+    // dashboard between hops.
+    let prev_button = button(text("‹").size(16))
+        .on_press(Message::SelectAdjacentDevice { forward: false })
+        .padding([4, 10])
+        .style(iced::widget::button::secondary);
+    let next_button = button(text("›").size(16))
+        .on_press(Message::SelectAdjacentDevice { forward: true })
+        .padding([4, 10])
+        .style(iced::widget::button::secondary);
+
     let protocol_icon = icons::protocol_icon(state.device_id.protocol, IconSize::Large);
     let device_name = text(&state.device_id.source).size(24);
     let metric_count = text(format!("{} metrics", state.metrics.len())).size(14);
@@ -590,6 +670,8 @@ fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
 
     row![
         back_button,
+        prev_button,
+        next_button,
         protocol_icon,
         device_name,
         metric_count,
@@ -644,12 +726,74 @@ fn render_chart_section<'a>(
     .spacing(5)
     .into();
 
-    let header = row![chart_title, time_buttons, close_button]
-        .spacing(15)
+    // Custom relative window input (#36): "last N minutes", overrides presets.
+    let custom_input = text_input("min", &state.chart_custom_input)
+        .on_input(Message::SetChartCustomMinutes)
+        .width(Length::Fixed(64.0))
+        .size(11);
+    let custom_window = row![text("Custom:").size(11), custom_input]
+        .spacing(4)
         .align_y(Alignment::Center);
 
-    // The chart canvas
-    let chart: Element<'_, Message> = chart_view(&state.chart);
+    // Expand/collapse the chart height (#36): no more fixed 200px sliver.
+    let expand_button = button(
+        text(if state.chart_expanded {
+            "Collapse"
+        } else {
+            "Expand"
+        })
+        .size(11),
+    )
+    .on_press(Message::ToggleChartExpand)
+    .style(iced::widget::button::secondary);
+
+    let header = row![
+        chart_title,
+        time_buttons,
+        custom_window,
+        expand_button,
+        close_button
+    ]
+    .spacing(15)
+    .align_y(Alignment::Center);
+
+    // Inline per-series legend with toggle/remove (#36) — manage a comparison
+    // without switching back to the metrics table.
+    let legend: Element<'_, Message> = if state.is_comparison_mode() {
+        let mut legend_row = Row::new().spacing(12).align_y(Alignment::Center);
+        for series in state.chart.series() {
+            let (r, g, b) = series.color;
+            let swatch_color = iced::Color::from_rgb(r, g, b);
+            let swatch = container(text(""))
+                .width(10)
+                .height(10)
+                .style(move |_t: &Theme| container::Style {
+                    background: Some(iced::Background::Color(swatch_color)),
+                    border: iced::Border::default().rounded(2.0),
+                    ..Default::default()
+                });
+            let name = series.name.clone();
+            let toggle = button(text(if series.visible { "shown" } else { "hidden" }).size(10))
+                .on_press(Message::ToggleMetricVisibility(name.clone()))
+                .style(iced::widget::button::text);
+            let remove = button(text("×").size(12))
+                .on_press(Message::RemoveMetricFromChart(name.clone()))
+                .style(iced::widget::button::text);
+            legend_row = legend_row.push(
+                row![swatch, text(name).size(11), toggle, remove]
+                    .spacing(4)
+                    .align_y(Alignment::Center),
+            );
+        }
+        legend_row.into()
+    } else {
+        column![].into()
+    };
+
+    // Default to a usable height; expand for detailed inspection. The custom
+    // window doesn't change height — only the visible time range.
+    let chart_height = if state.chart_expanded { 520.0 } else { 320.0 };
+    let chart: Element<'_, Message> = chart_view(&state.chart, chart_height);
 
     // Stats row
     let stats = state.chart.stats();
@@ -666,20 +810,24 @@ fn render_chart_section<'a>(
     ]
     .spacing(20);
 
-    let chart_container = container(column![header, chart, stats_row].spacing(10).padding(10))
-        .style(|theme: &Theme| {
-            let colors = crate::view::theme::colors(theme);
-            container::Style {
-                background: Some(iced::Background::Color(colors.card_background())),
-                border: iced::Border {
-                    color: colors.border(),
-                    width: 1.0,
-                    radius: 6.0.into(),
-                },
-                ..Default::default()
-            }
-        })
-        .width(Length::Fill);
+    let chart_container = container(
+        column![header, legend, chart, stats_row]
+            .spacing(10)
+            .padding(10),
+    )
+    .style(|theme: &Theme| {
+        let colors = crate::view::theme::colors(theme);
+        container::Style {
+            background: Some(iced::Background::Color(colors.card_background())),
+            border: iced::Border {
+                color: colors.border(),
+                width: 1.0,
+                radius: 6.0.into(),
+            },
+            ..Default::default()
+        }
+    })
+    .width(Length::Fill);
 
     column![chart_container, rule::horizontal(1)]
         .spacing(10)
@@ -1018,6 +1166,35 @@ mod tests {
             value: TelemetryValue::Gauge(42.0),
             labels: std::collections::HashMap::new(),
         }
+    }
+
+    #[test]
+    fn test_history_export_is_time_series_not_snapshot() {
+        let device_id = DeviceId {
+            protocol: Protocol::Snmp,
+            source: "test".to_string(),
+        };
+        let mut state = DeviceDetailState::new(device_id);
+
+        // Three samples of the same metric over time.
+        for (ts, v) in [(1000, 1.0), (2000, 2.0), (3000, 3.0)] {
+            let mut p = make_test_point("cpu/usage");
+            p.timestamp = ts;
+            p.value = TelemetryValue::Gauge(v);
+            state.update(p);
+        }
+
+        assert!(state.has_history());
+        let csv = state.export_history_to_csv();
+        // header + 3 data rows (the trend), not a single snapshot row.
+        let rows = csv.lines().count();
+        assert_eq!(rows, 4, "expected header + 3 samples, got:\n{csv}");
+        assert!(csv.contains("1000,"));
+        assert!(csv.contains("3000,"));
+
+        // The latest-snapshot export keeps only one row per metric.
+        let snapshot = state.export_to_csv();
+        assert_eq!(snapshot.lines().count(), 2);
     }
 
     #[test]

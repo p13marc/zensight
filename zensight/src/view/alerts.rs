@@ -817,7 +817,7 @@ fn render_header(state: &AlertsState) -> Element<'_, Message> {
         .on_press(Message::OpenSecurity)
         .style(iced::widget::button::secondary);
 
-    row![
+    let header_row = row![
         back_button,
         title,
         unack_badge,
@@ -825,8 +825,17 @@ fn render_header(state: &AlertsState) -> Element<'_, Message> {
         security_button
     ]
     .spacing(15)
-    .align_y(Alignment::Center)
-    .into()
+    .align_y(Alignment::Center);
+
+    // Scope subtitle so Alerts vs Security is legible (#39): this view owns
+    // operational, threshold-based alerts; Security owns network anomalies.
+    let subtitle = text("Operational threshold alerts — rule-based and sensor-pushed")
+        .size(font::CAPTION)
+        .style(|theme: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(theme).text_dimmed()),
+        });
+
+    column![header_row, subtitle].spacing(4).into()
 }
 
 /// Render the new rule form.
@@ -1068,9 +1077,22 @@ fn render_incident<'a>(
     .spacing(space::SM)
     .align_y(Alignment::Center);
 
-    // Right-aligned action cluster: Ack (if unacked) + Mute 1h/4h/24h (#26).
+    // Right-aligned action cluster: View + Ack (if unacked) + Mute 1h/4h/24h.
     let spacer = container(text("")).width(Length::Fill);
     header = header.push(spacer);
+    // #35: jump to the source device that raised this incident.
+    if let Some(first) = incident.alerts.first() {
+        let device = DeviceId::new(first.protocol, incident.source.to_string());
+        header = header.push(
+            button(text("View").size(font::CAPTION))
+                .on_press(Message::InvestigateAlert {
+                    device,
+                    metric: None,
+                })
+                .padding([space::XS, space::SM])
+                .style(iced::widget::button::secondary),
+        );
+    }
     if incident.unacked > 0 {
         let ack = button(text("Ack").size(font::CAPTION))
             .on_press(Message::AcknowledgeExternalSource(
@@ -1265,11 +1287,21 @@ fn render_alert_row(alert: &Alert) -> Element<'_, Message> {
             color: Some(crate::view::theme::colors(theme).text_dimmed()),
         });
 
+    // #35: jump straight to the offending device + metric chart.
+    let investigate = button(text("View").size(10))
+        .on_press(Message::InvestigateAlert {
+            device: alert.device_id.clone(),
+            metric: Some(alert.metric.clone()),
+        })
+        .padding([space::XS, space::SM])
+        .style(iced::widget::button::secondary);
+
     let mut row_content: Row<'_, Message> = Row::new()
         .push(status)
         .push(severity_badge)
         .push(message)
         .push(time)
+        .push(investigate)
         .spacing(10);
 
     if !alert.acknowledged {

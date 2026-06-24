@@ -412,6 +412,35 @@ impl ZenSight {
                 return self.select_device(device_id);
             }
 
+            Message::InvestigateAlert { device, metric } => {
+                // #35: alert → device → metric → chart in one hop.
+                self.global_search.close();
+                let task = self.select_device(device);
+                if let (Some(metric), Some(d)) = (metric, self.selected_device.as_mut()) {
+                    d.select_metric(metric);
+                }
+                return task;
+            }
+
+            Message::SelectAdjacentDevice { forward } => {
+                // #35: cycle through the dashboard's current filtered set without
+                // bouncing back to the dashboard each time.
+                if let Some(current) = self.selected_device.as_ref().map(|d| d.device_id.clone()) {
+                    let ids = self.dashboard.ordered_device_ids();
+                    // position() returning Some guarantees ids is non-empty.
+                    if let Some(pos) = ids.iter().position(|id| *id == current) {
+                        let next = if forward {
+                            (pos + 1) % ids.len()
+                        } else {
+                            (pos + ids.len() - 1) % ids.len()
+                        };
+                        if ids[next] != current {
+                            return self.select_device(ids[next].clone());
+                        }
+                    }
+                }
+            }
+
             Message::ClearSelection => {
                 self.selected_device = None;
                 self.set_view(CurrentView::Dashboard);
@@ -419,6 +448,10 @@ impl ZenSight {
 
             Message::ToggleProtocolFilter(protocol) => {
                 self.dashboard.toggle_filter(protocol);
+            }
+
+            Message::SetStatusFilter(status) => {
+                self.dashboard.set_status_filter(status);
             }
 
             Message::SetDeviceSearchFilter(filter) => {
@@ -474,6 +507,18 @@ impl ZenSight {
             Message::SetChartTimeWindow(window) => {
                 if let Some(ref mut device) = self.selected_device {
                     device.set_time_window(window);
+                }
+            }
+
+            Message::SetChartCustomMinutes(input) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.set_chart_custom_minutes(input);
+                }
+            }
+
+            Message::ToggleChartExpand => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.toggle_chart_expand();
                 }
             }
 
@@ -1738,10 +1783,31 @@ impl ZenSight {
             device.set_max_history(self.settings.max_history_value());
         }
 
-        // Update Zenoh config (will require restart to take effect)
-        self.zenoh_config.mode = self.settings.zenoh_mode.as_str().to_string();
-        self.zenoh_config.connect = self.settings.connect_endpoints();
-        self.zenoh_config.listen = self.settings.listen_endpoints();
+        // Update the Zenoh config. The live subscription is keyed on this config
+        // (`Subscription::run_with(zenoh_config, …)`), so changing it makes Iced
+        // tear down the current session and reconnect with the new settings — no
+        // restart needed. We surface that to the user instead of doing it
+        // silently (#38).
+        let new_mode = self.settings.zenoh_mode.as_str().to_string();
+        let new_connect = self.settings.connect_endpoints();
+        let new_listen = self.settings.listen_endpoints();
+        let connection_changed = self.zenoh_config.mode != new_mode
+            || self.zenoh_config.connect != new_connect
+            || self.zenoh_config.listen != new_listen;
+        self.zenoh_config.mode = new_mode;
+        self.zenoh_config.connect = new_connect;
+        self.zenoh_config.listen = new_listen;
+
+        if connection_changed && !self.demo_mode {
+            // Reflect the impending reconnect immediately; the restarted
+            // subscription will drive Connecting → Connected/Disconnected.
+            self.dashboard.connection_state = crate::view::dashboard::ConnectionState::Connecting;
+            self.dashboard.connected = false;
+            self.toasts.push(
+                ToastSeverity::Info,
+                "Reconnecting to Zenoh with new connection settings…",
+            );
+        }
 
         // Persist settings to disk (include all app state)
         let mut persistent = PersistentSettings::from_state(&self.settings);
@@ -1768,49 +1834,57 @@ impl ZenSight {
     /// Export current device metrics to CSV file.
     fn export_to_csv(&mut self) {
         if let Some(ref device) = self.selected_device {
-            let csv = device.export_to_csv();
+            // Prefer the full time series (the trend on screen, #37); fall back
+            // to the latest-value snapshot only when no history exists yet.
+            let csv = if device.has_history() {
+                device.export_history_to_csv()
+            } else {
+                device.export_to_csv()
+            };
             let filename = format!(
                 "zensight_{}_{}.csv",
                 device.device_id.source,
                 chrono_timestamp()
             );
-
-            match std::fs::write(&filename, csv) {
-                Ok(()) => {
-                    tracing::info!(filename = %filename, "Exported metrics to CSV");
-                    self.toasts
-                        .push(ToastSeverity::Success, format!("Exported to {}", filename));
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, filename = %filename, "Failed to export CSV");
-                    self.toasts
-                        .push(ToastSeverity::Error, format!("Export failed: {}", e));
-                }
-            }
+            self.write_export(&filename, csv);
         }
     }
 
-    /// Export current device metrics to JSON file.
+    /// Export current device time series to JSON file.
     fn export_to_json(&mut self) {
         if let Some(ref device) = self.selected_device {
-            let json = device.export_to_json();
+            let json = if device.has_history() {
+                device.export_history_to_json()
+            } else {
+                device.export_to_json()
+            };
             let filename = format!(
                 "zensight_{}_{}.json",
                 device.device_id.source,
                 chrono_timestamp()
             );
+            self.write_export(&filename, json);
+        }
+    }
 
-            match std::fs::write(&filename, json) {
-                Ok(()) => {
-                    tracing::info!(filename = %filename, "Exported metrics to JSON");
-                    self.toasts
-                        .push(ToastSeverity::Success, format!("Exported to {}", filename));
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, filename = %filename, "Failed to export JSON");
-                    self.toasts
-                        .push(ToastSeverity::Error, format!("Export failed: {}", e));
-                }
+    /// Write an export to a discoverable directory and toast the absolute path
+    /// (#37) — no more blind writes to the process CWD where files get lost.
+    fn write_export(&mut self, filename: &str, contents: String) {
+        let dir = dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let path = dir.join(filename);
+        match std::fs::write(&path, contents) {
+            Ok(()) => {
+                let shown = path.display().to_string();
+                tracing::info!(path = %shown, "Exported device data");
+                self.toasts
+                    .push(ToastSeverity::Success, format!("Exported to {shown}"));
+            }
+            Err(e) => {
+                tracing::error!(error = %e, path = %path.display(), "Export failed");
+                self.toasts
+                    .push(ToastSeverity::Error, format!("Export failed: {e}"));
             }
         }
     }
@@ -1824,6 +1898,15 @@ impl ZenSight {
 
         for device in self.dashboard.devices.values_mut() {
             device.update_health(now, self.stale_threshold_ms);
+        }
+
+        // Bound the device map over long sessions: reap devices gone for a day
+        // (#40). Logged so the drop is never silent.
+        let evicted = self
+            .dashboard
+            .evict_stale_devices(now, crate::view::dashboard::DEVICE_EVICTION_AGE_MS);
+        if evicted > 0 {
+            tracing::info!(evicted, "Evicted stale devices from dashboard");
         }
 
         // Expire alert silences whose window has passed (#26).

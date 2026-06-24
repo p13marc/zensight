@@ -278,6 +278,10 @@ pub struct ChartState {
     drag_start_offset: f64,
     /// Threshold/baseline lines to display on the chart.
     thresholds: Vec<ThresholdLine>,
+    /// Custom relative window duration in ms (#36). When set, it overrides the
+    /// `time_window` preset so an operator can scrub an arbitrary "last N
+    /// minutes/hours" range. Cleared when a preset button is chosen.
+    custom_duration_ms: Option<i64>,
 }
 
 impl ChartState {
@@ -301,6 +305,7 @@ impl ChartState {
             drag_start: None,
             drag_start_offset: 0.0,
             thresholds: Vec::new(),
+            custom_duration_ms: None,
         }
     }
 
@@ -597,10 +602,11 @@ impl ChartState {
         self.show_pan_feedback
     }
 
-    /// Set the time window.
+    /// Set the time window. Choosing a preset clears any custom range (#36).
     pub fn set_time_window(&mut self, window: TimeWindow) {
-        if self.time_window != window {
+        if self.time_window != window || self.custom_duration_ms.is_some() {
             self.time_window = window;
+            self.custom_duration_ms = None;
             self.cache.clear();
         }
     }
@@ -608,6 +614,23 @@ impl ChartState {
     /// Get the current time window.
     pub fn time_window(&self) -> TimeWindow {
         self.time_window
+    }
+
+    /// Set a custom relative window of `minutes` (#36). Values <= 0 clear it and
+    /// fall back to the preset. Capped at 30 days to keep the range sane.
+    pub fn set_custom_duration_minutes(&mut self, minutes: f64) {
+        if minutes.is_finite() && minutes > 0.0 {
+            let ms = (minutes * 60_000.0).round() as i64;
+            self.custom_duration_ms = Some(ms.clamp(1_000, 30 * 86_400_000));
+        } else {
+            self.custom_duration_ms = None;
+        }
+        self.cache.clear();
+    }
+
+    /// The active custom window in minutes, if any (#36).
+    pub fn custom_duration_minutes(&self) -> Option<f64> {
+        self.custom_duration_ms.map(|ms| ms as f64 / 60_000.0)
     }
 
     /// Add a data point.
@@ -638,9 +661,13 @@ impl ChartState {
         }
     }
 
-    /// Get the effective time window duration accounting for zoom.
+    /// Get the effective time window duration accounting for zoom. A custom
+    /// relative window (#36) takes precedence over the preset when set.
     fn effective_duration_ms(&self) -> i64 {
-        (self.time_window.duration_ms() as f64 / self.zoom_level as f64) as i64
+        let base = self
+            .custom_duration_ms
+            .unwrap_or_else(|| self.time_window.duration_ms());
+        (base as f64 / self.zoom_level as f64) as i64
     }
 
     /// Get the visible time range (start, end) accounting for zoom and pan.
@@ -1576,11 +1603,12 @@ impl<'a> Chart<'a> {
     }
 }
 
-/// Create a chart element.
-pub fn chart_view(state: &ChartState) -> Element<'_, crate::message::Message> {
+/// Create a chart element with the given pixel height (#36 — was a fixed 200px
+/// sliver; the device view now passes a default or expanded height).
+pub fn chart_view(state: &ChartState, height: f32) -> Element<'_, crate::message::Message> {
     Canvas::new(Chart::new(state))
         .width(Length::Fill)
-        .height(Length::Fixed(200.0))
+        .height(Length::Fixed(height))
         .into()
 }
 
@@ -1716,6 +1744,29 @@ mod tests {
         // At 4x zoom, effective duration = 1.25 minutes
         chart.set_zoom(4.0);
         assert_eq!(chart.effective_duration_ms(), 75_000);
+    }
+
+    #[test]
+    fn test_custom_duration_overrides_preset_and_clears() {
+        let mut chart = ChartState::new("test");
+        chart.set_time_window(TimeWindow::FiveMinutes);
+        assert_eq!(chart.effective_duration_ms(), 300_000);
+
+        // A custom 30-minute window overrides the 5-minute preset.
+        chart.set_custom_duration_minutes(30.0);
+        assert_eq!(chart.custom_duration_minutes(), Some(30.0));
+        assert_eq!(chart.effective_duration_ms(), 30 * 60_000);
+
+        // Choosing a preset clears the custom window.
+        chart.set_time_window(TimeWindow::OneHour);
+        assert_eq!(chart.custom_duration_minutes(), None);
+        assert_eq!(chart.effective_duration_ms(), 3_600_000);
+
+        // Zero/invalid clears it too.
+        chart.set_custom_duration_minutes(15.0);
+        assert!(chart.custom_duration_minutes().is_some());
+        chart.set_custom_duration_minutes(0.0);
+        assert_eq!(chart.custom_duration_minutes(), None);
     }
 
     #[test]

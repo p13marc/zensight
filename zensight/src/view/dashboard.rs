@@ -14,6 +14,8 @@ use zensight_common::{
     DeviceStatus, HealthSnapshot, HealthStatus, Protocol, TelemetryPoint, TelemetryValue,
 };
 
+use crate::view::components::badge;
+
 /// Dashboard view mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DashboardViewMode {
@@ -128,6 +130,11 @@ pub const DEFAULT_DEVICES_PER_PAGE: usize = 20;
 /// Debounce delay for search input in milliseconds.
 pub const SEARCH_DEBOUNCE_MS: i64 = 300;
 
+/// Age after which a device that has received no telemetry is evicted from the
+/// device map to bound memory over a long session (#40). 24h — generous enough
+/// that known-down devices remain visible; only long-gone ones are reaped.
+pub const DEVICE_EVICTION_AGE_MS: i64 = 24 * 60 * 60 * 1000;
+
 /// Connection state for Zenoh session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConnectionState {
@@ -165,6 +172,9 @@ pub struct DashboardState {
     pub devices_per_page: usize,
     /// Current view mode (grid or table).
     pub view_mode: DashboardViewMode,
+    /// Active status filter (None = show all). Driven by the fleet summary
+    /// chips so a click on "3 Offline" narrows the grid to the problems (#34).
+    pub status_filter: Option<DeviceStatus>,
 }
 
 impl Default for DashboardState {
@@ -181,11 +191,31 @@ impl Default for DashboardState {
             current_page: 0,
             devices_per_page: DEFAULT_DEVICES_PER_PAGE,
             view_mode: DashboardViewMode::default(),
+            status_filter: None,
         }
     }
 }
 
+/// Sort rank for device status — problems first (#34). Lower sorts earlier.
+fn status_rank(status: DeviceStatus) -> u8 {
+    match status {
+        DeviceStatus::Offline => 0,
+        DeviceStatus::Degraded => 1,
+        DeviceStatus::Unknown => 2,
+        DeviceStatus::Online => 3,
+    }
+}
+
 impl DashboardState {
+    /// Ordered list of device ids matching the current filters, in render order.
+    /// Used for device→device navigation on the detail view (#35).
+    pub fn ordered_device_ids(&self) -> Vec<DeviceId> {
+        self.filtered_devices()
+            .into_iter()
+            .map(|d| d.id.clone())
+            .collect()
+    }
+
     /// Get devices filtered by active protocol filters and search term.
     pub fn filtered_devices(&self) -> Vec<&DeviceState> {
         let search_lower = self.search_filter.to_lowercase();
@@ -202,17 +232,62 @@ impl DashboardState {
                 let search_match =
                     search_lower.is_empty() || d.id.source.to_lowercase().contains(&search_lower);
 
-                protocol_match && search_match
+                // Status filter (driven by the fleet summary chips, #34)
+                let status_match = self.status_filter.is_none_or(|s| d.effective_status() == s);
+
+                protocol_match && search_match && status_match
             })
             .collect();
 
-        // Sort by protocol, then by source name
-        devices.sort_by(|a, b| match a.id.protocol.cmp(&b.id.protocol) {
-            std::cmp::Ordering::Equal => a.id.source.cmp(&b.id.source),
-            other => other,
+        // Problem-first ordering (#34): worst status floats to the top so an
+        // operator sees what's wrong without hunting. Stable within a status
+        // group by protocol then source name.
+        devices.sort_by(|a, b| {
+            status_rank(a.effective_status())
+                .cmp(&status_rank(b.effective_status()))
+                .then_with(|| a.id.protocol.cmp(&b.id.protocol))
+                .then_with(|| a.id.source.cmp(&b.id.source))
         });
 
         devices
+    }
+
+    /// Drop devices not seen for longer than `max_age_ms` so a long-running
+    /// session can't grow the device map unbounded (#40). The threshold is
+    /// deliberately generous (see `DEVICE_EVICTION_AGE_MS`) so known-down
+    /// devices stay visible — only truly-gone ones are reaped. Returns the
+    /// number of devices removed.
+    pub fn evict_stale_devices(&mut self, now: i64, max_age_ms: i64) -> usize {
+        let before = self.devices.len();
+        self.devices
+            .retain(|_, d| now.saturating_sub(d.last_update) <= max_age_ms);
+        before - self.devices.len()
+    }
+
+    /// Set (or clear) the status filter, resetting pagination (#34).
+    pub fn set_status_filter(&mut self, status: Option<DeviceStatus>) {
+        // Toggle off if the same chip is clicked again.
+        self.status_filter = if self.status_filter == status {
+            None
+        } else {
+            status
+        };
+        self.current_page = 0;
+    }
+
+    /// Count devices by effective status, for the fleet summary bar (#34).
+    /// Returns (online, degraded, offline, unknown).
+    pub fn status_counts(&self) -> (usize, usize, usize, usize) {
+        let mut counts = (0, 0, 0, 0);
+        for d in self.devices.values() {
+            match d.effective_status() {
+                DeviceStatus::Online => counts.0 += 1,
+                DeviceStatus::Degraded => counts.1 += 1,
+                DeviceStatus::Offline => counts.2 += 1,
+                DeviceStatus::Unknown => counts.3 += 1,
+            }
+        }
+        counts
     }
 
     /// Toggle a protocol filter.
@@ -335,6 +410,7 @@ pub fn dashboard_view<'a>(
     let filtered = state.filtered_devices();
 
     let header = render_header(state, theme, unacknowledged_alerts);
+    let fleet_summary = render_fleet_summary(state, unacknowledged_alerts);
     let sensor_summary = render_sensor_health_summary(sensor_health);
     let filters = render_protocol_filters(state, &filtered);
     let group_filters = group_filter_bar(groups);
@@ -343,6 +419,7 @@ pub fn dashboard_view<'a>(
 
     let content = column![
         header,
+        fleet_summary,
         sensor_summary,
         filters,
         group_filters,
@@ -357,6 +434,85 @@ pub fn dashboard_view<'a>(
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+/// Render the fleet-health summary bar: a click-to-filter rollup of how many
+/// devices are offline / degraded / unknown / online, plus a firing-alert chip
+/// (#34). Answers "what's wrong right now?" at the top of the dashboard.
+fn render_fleet_summary(
+    state: &DashboardState,
+    unacknowledged_alerts: usize,
+) -> Element<'_, Message> {
+    let (online, degraded, offline, unknown) = state.status_counts();
+
+    // A click-to-filter chip for one status; highlighted when it's the active
+    // filter. Toggling the same chip clears the filter (see set_status_filter).
+    let chip = |status: DeviceStatus, count: usize, label: &'static str| -> Element<'_, Message> {
+        let active = state.status_filter == Some(status);
+        let content: Element<'_, Message> = badge(status_color(status), format!("{count} {label}"));
+        let mut b = button(content)
+            .on_press(Message::SetStatusFilter(Some(status)))
+            .padding([4, 10]);
+        b = if active {
+            b.style(iced::widget::button::primary)
+        } else {
+            b.style(iced::widget::button::text)
+        };
+        b.into()
+    };
+
+    if state.devices.is_empty() {
+        return row![].into();
+    }
+
+    let mut bar = row![text("Fleet:").size(14)]
+        .spacing(10)
+        .align_y(Alignment::Center);
+
+    // Problems first, then healthy. Only show a status chip when it's non-empty
+    // (Offline/Degraded always matter; Online/Unknown only when present).
+    if offline > 0 {
+        bar = bar.push(chip(DeviceStatus::Offline, offline, "Offline"));
+    }
+    if degraded > 0 {
+        bar = bar.push(chip(DeviceStatus::Degraded, degraded, "Degraded"));
+    }
+    if unknown > 0 {
+        bar = bar.push(chip(DeviceStatus::Unknown, unknown, "Unknown"));
+    }
+    bar = bar.push(chip(DeviceStatus::Online, online, "Online"));
+
+    // Firing-alert chip routes to the Alerts view (#34/#35).
+    if unacknowledged_alerts > 0 {
+        let firing = button(
+            text(format!("{unacknowledged_alerts} firing"))
+                .size(font_caption())
+                .style(|theme: &Theme| text::Style {
+                    color: Some(crate::view::theme::colors(theme).danger()),
+                }),
+        )
+        .on_press(Message::OpenAlerts)
+        .padding([4, 10])
+        .style(iced::widget::button::text);
+        bar = bar.push(firing);
+    }
+
+    // A "Show all" affordance when a status filter is active.
+    if state.status_filter.is_some() {
+        bar = bar.push(
+            button(text("Show all").size(font_caption()))
+                .on_press(Message::SetStatusFilter(None))
+                .padding([4, 10])
+                .style(iced::widget::button::text),
+        );
+    }
+
+    bar.into()
+}
+
+/// Caption font size as f32 (Iced 0.14 wants f32 for `.size()`).
+fn font_caption() -> f32 {
+    crate::view::tokens::font::CAPTION
 }
 
 /// Render the header with connection status.
@@ -992,9 +1148,13 @@ fn render_device_card<'a>(
     .spacing(10)
     .align_y(Alignment::Center);
 
-    // Show a few recent metrics as preview with tooltips for full values
+    // Show a few metrics as preview with tooltips for full values. Sort by name
+    // so the preview is deterministic across renders rather than depending on
+    // HashMap iteration order (#34).
     let mut preview = Column::new().spacing(2);
-    for (name, point) in device.metrics.iter().take(3) {
+    let mut preview_metrics: Vec<_> = device.metrics.iter().collect();
+    preview_metrics.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, point) in preview_metrics.into_iter().take(3) {
         let value = format_telemetry_value(&point.value);
         let display_value = if value.len() > MAX_VALUE_DISPLAY_LEN {
             format!("{}...", &value[..MAX_VALUE_DISPLAY_LEN])
@@ -1059,6 +1219,76 @@ mod tests {
             state.devices.insert(id.clone(), DeviceState::new(id));
         }
         state
+    }
+
+    fn device_with_status(source: &str, status: DeviceStatus) -> DeviceState {
+        let id = DeviceId::new(Protocol::Sysinfo, source);
+        let mut d = DeviceState::new(id);
+        d.sensor_status = status;
+        d
+    }
+
+    #[test]
+    fn test_status_counts_and_problem_first_sort() {
+        let mut state = DashboardState::default();
+        for (src, st) in [
+            ("a-online", DeviceStatus::Online),
+            ("b-offline", DeviceStatus::Offline),
+            ("c-degraded", DeviceStatus::Degraded),
+            ("d-online", DeviceStatus::Online),
+        ] {
+            let d = device_with_status(src, st);
+            state.devices.insert(d.id.clone(), d);
+        }
+
+        // (online, degraded, offline, unknown)
+        assert_eq!(state.status_counts(), (2, 1, 1, 0));
+
+        // Problem-first: offline, then degraded, then the two online.
+        let order: Vec<String> = state
+            .ordered_device_ids()
+            .into_iter()
+            .map(|id| id.source)
+            .collect();
+        assert_eq!(order[0], "b-offline");
+        assert_eq!(order[1], "c-degraded");
+    }
+
+    #[test]
+    fn test_evict_stale_devices() {
+        let mut state = DashboardState::default();
+        let mut fresh = device_with_status("fresh", DeviceStatus::Online);
+        fresh.last_update = 10_000;
+        let mut old = device_with_status("old", DeviceStatus::Offline);
+        old.last_update = 1_000;
+        state.devices.insert(fresh.id.clone(), fresh);
+        state.devices.insert(old.id.clone(), old);
+
+        // At now=60_000 with max_age=55_000: fresh age 50_000 (kept),
+        // old age 59_000 (reaped).
+        let removed = state.evict_stale_devices(60_000, 55_000);
+        assert_eq!(removed, 1);
+        assert_eq!(state.devices.len(), 1);
+        assert!(state.devices.keys().any(|id| id.source == "fresh"));
+    }
+
+    #[test]
+    fn test_status_filter_narrows_and_toggles() {
+        let mut state = DashboardState::default();
+        for (src, st) in [("a", DeviceStatus::Online), ("b", DeviceStatus::Offline)] {
+            let d = device_with_status(src, st);
+            state.devices.insert(d.id.clone(), d);
+        }
+
+        state.set_status_filter(Some(DeviceStatus::Offline));
+        let ids = state.ordered_device_ids();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].source, "b");
+
+        // Clicking the same chip again clears the filter.
+        state.set_status_filter(Some(DeviceStatus::Offline));
+        assert!(state.status_filter.is_none());
+        assert_eq!(state.ordered_device_ids().len(), 2);
     }
 
     #[test]
