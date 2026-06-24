@@ -131,6 +131,8 @@ pub struct ZenSight {
     /// the global Live/Stale/Paused freshness indicator (#23). `None` until the
     /// first point arrives.
     last_telemetry_ms: Option<i64>,
+    /// Global cross-device metric search panel state (#27).
+    global_search: crate::view::search::GlobalSearchState,
 }
 
 impl ZenSight {
@@ -244,6 +246,7 @@ impl ZenSight {
             ticks_since_flush: 0,
             // Demo mode pre-loads mock points; treat the feed as fresh on boot.
             last_telemetry_ms: if demo_mode { Some(now_ms()) } else { None },
+            global_search: crate::view::search::GlobalSearchState::default(),
         };
 
         (app, Task::none())
@@ -404,6 +407,8 @@ impl ZenSight {
             }
 
             Message::SelectDevice(device_id) => {
+                // Jumping to a device from a global-search result closes the panel.
+                self.global_search.close();
                 return self.select_device(device_id);
             }
 
@@ -721,6 +726,19 @@ impl ZenSight {
                 self.alerts.unsilence_source(&source);
                 self.toasts
                     .push(ToastSeverity::Info, format!("Unsilenced {source}"));
+            }
+
+            Message::OpenGlobalSearch => {
+                self.global_search.open();
+                return iced::widget::operation::focus(
+                    crate::view::search::GLOBAL_SEARCH_ID.clone(),
+                );
+            }
+            Message::CloseGlobalSearch => {
+                self.global_search.close();
+            }
+            Message::SetGlobalSearch(q) => {
+                self.global_search.query = q;
             }
 
             Message::ClearAlerts => {
@@ -1369,6 +1387,11 @@ impl ZenSight {
 
     /// Handle Escape key - close dialogs or go back.
     fn handle_escape(&mut self) {
+        // The global search overlay takes priority: Escape closes it first (#27).
+        if self.global_search.open {
+            self.global_search.close();
+            return;
+        }
         match self.current_view {
             CurrentView::Settings => {
                 let target = if self.selected_device.is_some() {
@@ -1517,11 +1540,28 @@ impl ZenSight {
             .into();
 
         // Show groups panel as a sidebar if open
-        let base_view: Element<'_, Message> = if self.groups.panel_open {
+        let mut base_view: Element<'_, Message> = if self.groups.panel_open {
             row![view_container, groups_panel(&self.groups)].into()
         } else {
             view_container
         };
+
+        // Global metric search overlay (#27), centered over the current view.
+        if self.global_search.open {
+            let hits = crate::view::search::search(
+                self.dashboard.devices.values(),
+                &self.global_search.query,
+            );
+            let panel = container(crate::view::search::global_search_panel(
+                &self.global_search,
+                hits,
+            ))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill);
+            base_view = stack![base_view, panel].into();
+        }
 
         // Overlay toast notifications in the bottom-right corner
         if !self.toasts.is_empty() {

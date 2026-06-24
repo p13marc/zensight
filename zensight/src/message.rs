@@ -288,6 +288,13 @@ pub enum Message {
     /// Lift a silence on a source (#26).
     UnsilenceSource(String),
 
+    /// Open the global cross-device metric search panel (#27).
+    OpenGlobalSearch,
+    /// Close the global search panel (#27).
+    CloseGlobalSearch,
+    /// Update the global search query (#27).
+    SetGlobalSearch(String),
+
     /// Clear all alerts.
     ClearAlerts,
 

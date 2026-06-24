@@ -134,6 +134,40 @@ fn test_dashboard_card_shows_trend_badge() {
     assert!(ui.find("\u{2191} +50.0%").is_ok());
 }
 
+/// The global search panel renders matching results and a Close button (#27).
+#[test]
+fn test_global_search_panel_results() {
+    use zensight::view::search::{self, GlobalSearchState, SearchHit};
+
+    let device_id = DeviceId {
+        protocol: Protocol::Snmp,
+        source: "router01".to_string(),
+    };
+    let mut device = DeviceState::new(device_id.clone());
+    device.metrics.insert(
+        "queue/depth".to_string(),
+        zensight_common::TelemetryPoint {
+            timestamp: 0,
+            source: "router01".to_string(),
+            protocol: Protocol::Snmp,
+            metric: "queue/depth".to_string(),
+            value: zensight_common::TelemetryValue::Gauge(7.0),
+            labels: HashMap::new(),
+        },
+    );
+
+    let mut state = GlobalSearchState::default();
+    state.open();
+    state.query = "queue".to_string();
+    let hits: Vec<SearchHit> = search::search([&device].into_iter(), &state.query);
+    assert_eq!(hits.len(), 1);
+
+    let mut ui = simulator(search::global_search_panel(&state, hits));
+    assert!(ui.find("Global Metric Search").is_ok());
+    assert!(ui.find("Close").is_ok());
+    assert!(ui.find("1 result(s)").is_ok());
+}
+
 /// Render the persistent app shell around a dummy page, for nav-rail tests.
 fn shell_ui() -> iced_test::Simulator<'static, Message> {
     let content = iced::widget::text("content").into();

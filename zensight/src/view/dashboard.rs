@@ -395,12 +395,30 @@ fn render_header(
     .on_press(Message::ToggleDashboardViewMode)
     .style(iced::widget::button::secondary);
 
+    // Global metric search trigger (Ctrl+K) — discoverable button (#27).
+    let search_button = button(
+        row![
+            icons::search(IconSize::Medium),
+            text("Search (Ctrl+K)").size(14)
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    )
+    .on_press(Message::OpenGlobalSearch)
+    .style(iced::widget::button::secondary);
+
     // Connection status + primary navigation (Alerts/Topology/Settings) now live
     // in the persistent app shell (view/shell.rs), so the dashboard header keeps
     // only its page-local controls.
-    let header_row = row![title, device_count, view_mode_button, theme_button]
-        .spacing(20)
-        .align_y(Alignment::Center);
+    let header_row = row![
+        title,
+        device_count,
+        search_button,
+        view_mode_button,
+        theme_button
+    ]
+    .spacing(20)
+    .align_y(Alignment::Center);
 
     let mut header_col = Column::new().push(header_row);
 

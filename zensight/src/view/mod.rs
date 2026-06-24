@@ -11,6 +11,7 @@ pub mod freshness;
 pub mod groups;
 pub mod icons;
 pub mod overview;
+pub mod search;
 pub mod security;
 pub mod sensors;
 pub mod settings;
