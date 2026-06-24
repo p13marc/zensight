@@ -10,11 +10,12 @@
 pub mod collector;
 pub mod command;
 pub mod config;
+pub mod events;
 pub mod map;
 pub mod query;
 pub mod sentinel;
 
 pub use collector::Collector;
-pub use config::{NetlinkConfig, NetlinkSensorConfig};
 pub use collector::MetricCache;
+pub use config::{NetlinkConfig, NetlinkSensorConfig};
 pub use sentinel::{Evaluator, ExpectationsConfig, MetricExpectation, SentinelHandle};

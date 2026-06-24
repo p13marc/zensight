@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use zensight_common::{Alert, AlertKind, AlertSeverity, ComparisonOp, Protocol};
 use zensight_sensor_core::AlertReporter;
 
@@ -452,6 +452,9 @@ pub struct Evaluator {
     /// Rules evaluated on the previous sweep — used to resolve alerts for rules
     /// that were removed (hot-swap) so they don't linger forever.
     seen_rules: std::sync::Mutex<HashSet<String>>,
+    /// Nudged by the real-time event task on a relevant transition (#8); the
+    /// sweep loop wakes immediately instead of waiting for the next tick.
+    wake: Option<Arc<Notify>>,
 }
 
 impl Evaluator {
@@ -467,7 +470,15 @@ impl Evaluator {
             reporter,
             metric_cache,
             seen_rules: std::sync::Mutex::new(HashSet::new()),
+            wake: None,
         }
+    }
+
+    /// Wire a real-time wake signal so a relevant RTNETLINK event (#8) triggers an
+    /// immediate sweep (~0s latency) on top of the periodic cadence.
+    pub fn with_wake(mut self, wake: Arc<Notify>) -> Self {
+        self.wake = Some(wake);
+        self
     }
 
     /// A cloneable handle to mutate the live expectation set (for the command
@@ -490,7 +501,19 @@ impl Evaluator {
 
         loop {
             let interval = self.expectations.read().await.eval_interval_secs.max(1);
-            tokio::time::sleep(Duration::from_secs(interval)).await;
+            // Sweep on the periodic tick OR immediately when an event nudges us.
+            // Without a wake signal this degrades to a plain interval sweep.
+            match &self.wake {
+                Some(wake) => {
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(interval)) => {}
+                        _ = wake.notified() => {
+                            tracing::debug!("sentinel: woken by RTNETLINK event");
+                        }
+                    }
+                }
+                None => tokio::time::sleep(Duration::from_secs(interval)).await,
+            }
             self.sweep(route.as_ref(), sockdiag.as_ref()).await;
         }
     }
@@ -814,9 +837,16 @@ mod tests {
         assert!(check_metric(&exp, None).is_empty());
         // The firing violation carries metric + actual labels.
         let v = &check_metric(&exp, Some(250.0))[0];
-        assert!(v.labels.iter().any(|(k, val)| k == "metric"
-            && val == "sockets/tcp/retransmits_total"));
-        assert!(v.labels.iter().any(|(k, val)| k == "actual" && val == "250"));
+        assert!(
+            v.labels
+                .iter()
+                .any(|(k, val)| k == "metric" && val == "sockets/tcp/retransmits_total")
+        );
+        assert!(
+            v.labels
+                .iter()
+                .any(|(k, val)| k == "actual" && val == "250")
+        );
     }
 
     #[test]

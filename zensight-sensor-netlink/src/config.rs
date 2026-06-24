@@ -37,6 +37,9 @@ pub struct NetlinkConfig {
     pub poll_interval_secs: u64,
     #[serde(default)]
     pub collect: CollectConfig,
+    /// Real-time RTNETLINK event stream tuning (recent-events ring size).
+    #[serde(default)]
+    pub events: EventsConfig,
     #[serde(default)]
     pub interfaces: IfaceFilter,
     /// WireGuard peer monitoring (handshake age, rx/tx, up/down). Needs the
@@ -64,6 +67,26 @@ fn default_wg_stale() -> u64 {
     180
 }
 
+/// Tuning for the real-time RTNETLINK event stream (issue #8).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventsConfig {
+    /// Capacity of the recent-events ring served via `@/query/events`.
+    #[serde(default = "default_event_ring")]
+    pub ring_capacity: usize,
+}
+
+fn default_event_ring() -> usize {
+    256
+}
+
+impl Default for EventsConfig {
+    fn default() -> Self {
+        Self {
+            ring_capacity: default_event_ring(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectConfig {
     /// Per-interface counters + state.
@@ -81,6 +104,16 @@ pub struct CollectConfig {
     /// nlink built-in diagnostics scan (bottleneck score + issue counts).
     #[serde(default = "default_true")]
     pub diagnostics: bool,
+    /// Real-time RTNETLINK event stream (link/addr/route/neighbor add/del):
+    /// event counters + recent-events ring + instant sentinel re-eval (#8).
+    #[serde(default = "default_true")]
+    pub events: bool,
+    /// ethtool link speed/duplex/autoneg, ring sizes, offloads, pause (#9).
+    #[serde(default = "default_true")]
+    pub ethtool: bool,
+    /// IP address inventory summary (per-family + global counts) (#10).
+    #[serde(default = "default_true")]
+    pub addresses: bool,
     /// Netfilter conntrack table summary (entries/proto/utilization). Requires
     /// CAP_NET_ADMIN, so OFF by default — enable on a NAT gateway / firewall.
     #[serde(default)]
@@ -95,6 +128,9 @@ impl Default for CollectConfig {
             neighbors: true,
             routes: true,
             diagnostics: true,
+            events: true,
+            ethtool: true,
+            addresses: true,
             conntrack: false,
         }
     }

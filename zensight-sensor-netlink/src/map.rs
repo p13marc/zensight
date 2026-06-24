@@ -90,7 +90,10 @@ pub fn wireguard_points(
         ));
         // Handshake age (large sentinel when never handshaked) + up/down.
         let age = p.handshake_age_s.unwrap_or(u64::MAX);
-        let up = p.handshake_age_s.map(|a| a <= stale_after_s).unwrap_or(false);
+        let up = p
+            .handshake_age_s
+            .map(|a| a <= stale_after_s)
+            .unwrap_or(false);
         if let Some(a) = p.handshake_age_s {
             out.push(point(
                 host,
@@ -376,7 +379,10 @@ pub fn diagnostics_points(host: &str, d: &DiagnosticsSummary) -> Vec<TelemetryPo
         if let Some(rec) = &d.bottleneck_recommendation {
             labels.insert("recommendation".to_string(), rec.clone());
         }
-        labels.insert("drop_rate".to_string(), format!("{}", d.bottleneck_drop_rate));
+        labels.insert(
+            "drop_rate".to_string(),
+            format!("{}", d.bottleneck_drop_rate),
+        );
         out.push(
             point(
                 host,
@@ -457,7 +463,11 @@ pub fn conntrack_points(host: &str, c: &ConntrackSummary) -> Vec<TelemetryPoint>
     if let Some(max) = c.max {
         out.push(g("conntrack/max", max));
         // Utilization in [0,1]; the classic outage predictor when near 1.
-        let util = if max > 0 { c.total as f64 / max as f64 } else { 0.0 };
+        let util = if max > 0 {
+            c.total as f64 / max as f64
+        } else {
+            0.0
+        };
         out.push(point(
             host,
             "conntrack/utilization",
@@ -465,6 +475,205 @@ pub fn conntrack_points(host: &str, c: &ConntrackSummary) -> Vec<TelemetryPoint>
         ));
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// ethtool (issue #9): link speed/duplex/autoneg, ring sizes, offloads, pause.
+// ---------------------------------------------------------------------------
+
+/// Negotiated duplex mode (mirrors nlink's `Duplex`, decoupled so `map.rs`
+/// carries no nlink dependency).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DuplexKind {
+    Half,
+    Full,
+    Unknown,
+}
+
+impl DuplexKind {
+    /// Lowercase wire label.
+    pub fn label(self) -> &'static str {
+        match self {
+            DuplexKind::Half => "half",
+            DuplexKind::Full => "full",
+            DuplexKind::Unknown => "unknown",
+        }
+    }
+}
+
+/// A snapshot of one interface's ethtool view (all fields optional: a NIC/driver
+/// that does not expose a family simply leaves it `None` — no misleading zeros).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EthtoolSample {
+    pub iface: String,
+    /// Physical carrier detected (link state).
+    pub carrier: Option<bool>,
+    /// Negotiated speed in Mb/s.
+    pub speed_mbps: Option<u32>,
+    pub duplex: Option<DuplexKind>,
+    pub autoneg: Option<bool>,
+    /// Current/maximum RX & TX ring sizes (undersized ring = drop risk).
+    pub rx_ring: Option<u32>,
+    pub tx_ring: Option<u32>,
+    pub rx_ring_max: Option<u32>,
+    pub tx_ring_max: Option<u32>,
+    /// Pause/flow-control settings + frame counters.
+    pub pause_rx: Option<bool>,
+    pub pause_tx: Option<bool>,
+    pub pause_autoneg: Option<bool>,
+    pub pause_rx_frames: Option<u64>,
+    pub pause_tx_frames: Option<u64>,
+    /// Curated offload features `(short_name, active)` (bounded cardinality).
+    pub features: Vec<(String, bool)>,
+}
+
+/// Build telemetry points for one interface's ethtool view. Metric paths are
+/// `ethtool/<iface>/...`. Absent fields are omitted (graceful degradation).
+pub fn ethtool_points(host: &str, s: &EthtoolSample) -> Vec<TelemetryPoint> {
+    let pfx = format!("ethtool/{}", s.iface);
+    let mut out = Vec::new();
+    if let Some(carrier) = s.carrier {
+        out.push(point(
+            host,
+            format!("{pfx}/carrier"),
+            TelemetryValue::Boolean(carrier),
+        ));
+    }
+    if let Some(speed) = s.speed_mbps {
+        out.push(point(
+            host,
+            format!("{pfx}/speed_mbps"),
+            TelemetryValue::Gauge(speed as f64),
+        ));
+    }
+    if let Some(duplex) = s.duplex {
+        out.push(point(
+            host,
+            format!("{pfx}/duplex"),
+            TelemetryValue::Text(duplex.label().to_string()),
+        ));
+        // A numeric/boolean companion so a generic metric-threshold expectation
+        // can flag half-duplex without parsing text.
+        out.push(point(
+            host,
+            format!("{pfx}/full_duplex"),
+            TelemetryValue::Boolean(duplex == DuplexKind::Full),
+        ));
+    }
+    if let Some(autoneg) = s.autoneg {
+        out.push(point(
+            host,
+            format!("{pfx}/autoneg"),
+            TelemetryValue::Boolean(autoneg),
+        ));
+    }
+    let gauge = |out: &mut Vec<TelemetryPoint>, name: &str, v: Option<u32>| {
+        if let Some(v) = v {
+            out.push(point(
+                host,
+                format!("{pfx}/{name}"),
+                TelemetryValue::Gauge(v as f64),
+            ));
+        }
+    };
+    gauge(&mut out, "rings/rx", s.rx_ring);
+    gauge(&mut out, "rings/tx", s.tx_ring);
+    gauge(&mut out, "rings/rx_max", s.rx_ring_max);
+    gauge(&mut out, "rings/tx_max", s.tx_ring_max);
+    if let Some(v) = s.pause_rx {
+        out.push(point(
+            host,
+            format!("{pfx}/pause/rx"),
+            TelemetryValue::Boolean(v),
+        ));
+    }
+    if let Some(v) = s.pause_tx {
+        out.push(point(
+            host,
+            format!("{pfx}/pause/tx"),
+            TelemetryValue::Boolean(v),
+        ));
+    }
+    if let Some(v) = s.pause_autoneg {
+        out.push(point(
+            host,
+            format!("{pfx}/pause/autoneg"),
+            TelemetryValue::Boolean(v),
+        ));
+    }
+    if let Some(v) = s.pause_rx_frames {
+        out.push(point(
+            host,
+            format!("{pfx}/pause/rx_frames"),
+            TelemetryValue::Counter(v),
+        ));
+    }
+    if let Some(v) = s.pause_tx_frames {
+        out.push(point(
+            host,
+            format!("{pfx}/pause/tx_frames"),
+            TelemetryValue::Counter(v),
+        ));
+    }
+    for (name, active) in &s.features {
+        out.push(point(
+            host,
+            format!("{pfx}/features/{name}"),
+            TelemetryValue::Boolean(*active),
+        ));
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Address inventory (issue #10): low-cardinality summary streamed; per-address
+// detail served via `@/query/addresses`.
+// ---------------------------------------------------------------------------
+
+/// One decoded address entry (nlink-free), the pure input to
+/// [`crate::collector::aggregate_addresses`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddrEntry {
+    /// `AF_*` family byte (`AF_INET` = 2, `AF_INET6` = 10).
+    pub family: u8,
+    /// Global (universe) scope — "actually reachable" beyond this host.
+    pub global: bool,
+}
+
+/// Host-level IP address inventory summary.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AddressSummary {
+    pub ipv4_count: u64,
+    pub ipv6_count: u64,
+    /// Addresses with global (universe) scope — "actually reachable".
+    pub global_count: u64,
+    pub total: u64,
+}
+
+/// Build telemetry points for the address inventory summary. Metric paths are
+/// `addresses/{ipv4_count,ipv6_count,global_count,total}`.
+pub fn address_points(host: &str, a: &AddressSummary) -> Vec<TelemetryPoint> {
+    let g = |metric: &str, v: u64| point(host, metric, TelemetryValue::Gauge(v as f64));
+    vec![
+        g("addresses/ipv4_count", a.ipv4_count),
+        g("addresses/ipv6_count", a.ipv6_count),
+        g("addresses/global_count", a.global_count),
+        g("addresses/total", a.total),
+    ]
+}
+
+/// One configured IP address (served via `@/query/addresses`). Defined locally
+/// (this sensor owns only its own crate); the GUI mirrors this JSON shape.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AddressRecord {
+    /// IP family: 4 or 6.
+    pub family: u8,
+    pub ip: Option<String>,
+    pub prefix_len: u8,
+    /// Scope label: `global`/`site`/`link`/`host`/`nowhere`.
+    pub scope: String,
+    pub label: Option<String>,
+    pub ifindex: u32,
 }
 
 #[cfg(test)]
@@ -536,12 +745,27 @@ mod tests {
         ];
         let pts = wireguard_points("h", "wg0", &peers, 180);
         let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
-        assert_eq!(find("wireguard/wg0/peers").value, TelemetryValue::Gauge(2.0));
-        assert_eq!(find("wireguard/wg0/AbCd1234/rx_bytes").value, TelemetryValue::Counter(1000));
-        assert_eq!(find("wireguard/wg0/AbCd1234/up").value, TelemetryValue::Boolean(true));
-        assert_eq!(find("wireguard/wg0/Zz99/up").value, TelemetryValue::Boolean(false));
+        assert_eq!(
+            find("wireguard/wg0/peers").value,
+            TelemetryValue::Gauge(2.0)
+        );
+        assert_eq!(
+            find("wireguard/wg0/AbCd1234/rx_bytes").value,
+            TelemetryValue::Counter(1000)
+        );
+        assert_eq!(
+            find("wireguard/wg0/AbCd1234/up").value,
+            TelemetryValue::Boolean(true)
+        );
+        assert_eq!(
+            find("wireguard/wg0/Zz99/up").value,
+            TelemetryValue::Boolean(false)
+        );
         // The never-handshaked peer has no age point.
-        assert!(pts.iter().all(|p| p.metric != "wireguard/wg0/Zz99/last_handshake_age_s"));
+        assert!(
+            pts.iter()
+                .all(|p| p.metric != "wireguard/wg0/Zz99/last_handshake_age_s")
+        );
     }
 
     #[test]
@@ -556,12 +780,25 @@ mod tests {
         };
         let pts = conntrack_points("h", &c);
         let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
-        assert_eq!(find("conntrack/entries").value, TelemetryValue::Gauge(1500.0));
-        assert_eq!(find("conntrack/by_proto/tcp").value, TelemetryValue::Gauge(1000.0));
+        assert_eq!(
+            find("conntrack/entries").value,
+            TelemetryValue::Gauge(1500.0)
+        );
+        assert_eq!(
+            find("conntrack/by_proto/tcp").value,
+            TelemetryValue::Gauge(1000.0)
+        );
         assert_eq!(find("conntrack/max").value, TelemetryValue::Gauge(2000.0));
-        assert_eq!(find("conntrack/utilization").value, TelemetryValue::Gauge(0.75));
+        assert_eq!(
+            find("conntrack/utilization").value,
+            TelemetryValue::Gauge(0.75)
+        );
         // No max → no max/utilization points.
-        let c2 = ConntrackSummary { total: 10, max: None, ..Default::default() };
+        let c2 = ConntrackSummary {
+            total: 10,
+            max: None,
+            ..Default::default()
+        };
         let pts2 = conntrack_points("h", &c2);
         assert!(pts2.iter().all(|p| p.metric != "conntrack/utilization"));
     }
@@ -738,5 +975,83 @@ mod tests {
         // Combined: state AND port must both hold.
         assert!(SocketSelector::parse("state=established&port=22").matches(&rec));
         assert!(!SocketSelector::parse("state=listen&port=22").matches(&rec));
+    }
+
+    #[test]
+    fn ethtool_points_present_and_absent() {
+        let s = EthtoolSample {
+            iface: "eth0".into(),
+            carrier: Some(true),
+            speed_mbps: Some(1000),
+            duplex: Some(DuplexKind::Full),
+            autoneg: Some(true),
+            rx_ring: Some(256),
+            tx_ring: Some(256),
+            rx_ring_max: Some(4096),
+            tx_ring_max: Some(4096),
+            pause_rx: Some(true),
+            pause_tx: None,
+            pause_autoneg: None,
+            pause_rx_frames: Some(7),
+            pause_tx_frames: None,
+            features: vec![("tso".into(), true), ("gro".into(), false)],
+        };
+        let pts = ethtool_points("h", &s);
+        let find = |m: &str| pts.iter().find(|p| p.metric == m);
+        assert_eq!(
+            find("ethtool/eth0/speed_mbps").unwrap().value,
+            TelemetryValue::Gauge(1000.0)
+        );
+        assert_eq!(
+            find("ethtool/eth0/duplex").unwrap().value,
+            TelemetryValue::Text("full".into())
+        );
+        assert_eq!(
+            find("ethtool/eth0/full_duplex").unwrap().value,
+            TelemetryValue::Boolean(true)
+        );
+        assert_eq!(
+            find("ethtool/eth0/rings/rx_max").unwrap().value,
+            TelemetryValue::Gauge(4096.0)
+        );
+        assert_eq!(
+            find("ethtool/eth0/pause/rx_frames").unwrap().value,
+            TelemetryValue::Counter(7)
+        );
+        assert_eq!(
+            find("ethtool/eth0/features/tso").unwrap().value,
+            TelemetryValue::Boolean(true)
+        );
+        // Absent optionals produce no point (no misleading zeros).
+        assert!(find("ethtool/eth0/pause/tx").is_none());
+        assert!(find("ethtool/eth0/pause/tx_frames").is_none());
+
+        // A NIC exposing nothing yields no points at all.
+        let empty = EthtoolSample {
+            iface: "lo".into(),
+            ..Default::default()
+        };
+        assert!(ethtool_points("h", &empty).is_empty());
+    }
+
+    #[test]
+    fn address_points_shape() {
+        let a = AddressSummary {
+            ipv4_count: 3,
+            ipv6_count: 2,
+            global_count: 4,
+            total: 5,
+        };
+        let pts = address_points("h", &a);
+        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        assert_eq!(
+            find("addresses/ipv4_count").value,
+            TelemetryValue::Gauge(3.0)
+        );
+        assert_eq!(
+            find("addresses/global_count").value,
+            TelemetryValue::Gauge(4.0)
+        );
+        assert_eq!(find("addresses/total").value, TelemetryValue::Gauge(5.0));
     }
 }

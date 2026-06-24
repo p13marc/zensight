@@ -46,17 +46,24 @@ async fn main() -> Result<()> {
     let collect_handle = collector.collect_handle();
     // Latest-metric cache shared with the sentinel's metric-threshold expectations.
     let metric_cache = collector.metric_cache();
+    // Real-time event ring (served on @/query/events) + the sentinel wake signal
+    // (instant re-eval on a relevant RTNETLINK event), grabbed before run() moves
+    // the collector (#8).
+    let event_state = collector.event_state();
+    let sentinel_wake = collector.sentinel_wake();
     runner.spawn(async move {
         collector.run().await;
     });
 
     // On-demand detail query channel (principle P2): serves full route/neighbor/
-    // socket tables to the GUI on demand, without streaming them onto the bus.
+    // socket/address tables + the recent-events ring to the GUI on demand,
+    // without streaming them onto the bus.
     {
         let query_session = runner.session().clone();
         let query_prefix = netlink_config.key_prefix.clone();
+        let query_events = event_state.clone();
         runner.spawn(async move {
-            zensight_sensor_netlink::query::run(query_session, query_prefix).await;
+            zensight_sensor_netlink::query::run(query_session, query_prefix, query_events).await;
         });
     }
 
@@ -65,8 +72,12 @@ async fn main() -> Result<()> {
         let cmd_session = runner.session().clone();
         let cmd_prefix = netlink_config.key_prefix.clone();
         runner.spawn(async move {
-            zensight_sensor_netlink::command::run_collection(cmd_session, cmd_prefix, collect_handle)
-                .await;
+            zensight_sensor_netlink::command::run_collection(
+                cmd_session,
+                cmd_prefix,
+                collect_handle,
+            )
+            .await;
         });
     }
 
@@ -90,7 +101,8 @@ async fn main() -> Result<()> {
             exp_cfg,
             reporter.clone(),
             metric_cache,
-        );
+        )
+        .with_wake(sentinel_wake);
         let handle = evaluator.handle();
         let cmd_session = runner.session().clone();
         let cmd_prefix = netlink_config.key_prefix.clone();

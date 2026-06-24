@@ -9,13 +9,16 @@
 //! - `zensight/netlink/@/query/routes`    → `Vec<RouteRecord>`
 //! - `zensight/netlink/@/query/neighbors` → `Vec<NeighborRecord>`
 //! - `zensight/netlink/@/query/sockets?state=&port=` → `Vec<SocketRecord>`
+//! - `zensight/netlink/@/query/addresses` → `Vec<AddressRecord>` (#10)
+//! - `zensight/netlink/@/query/events`    → `Vec<EventRecord>` (#8, recent ring)
 
 use std::sync::Arc;
 
-use nlink::netlink::{Connection, Route, SockDiag};
+use nlink::netlink::{Connection, Route, SockDiag, types::addr::Scope};
 use nlink::sockdiag::{SocketFilter, SocketInfo, SocketState, TcpState};
 
-use crate::map::{NeighborRecord, RouteRecord, SocketRecord, SocketSelector};
+use crate::events::EventState;
+use crate::map::{AddressRecord, NeighborRecord, RouteRecord, SocketRecord, SocketSelector};
 
 const AF_INET: u8 = 2;
 const AF_INET6: u8 = 10;
@@ -23,8 +26,9 @@ const AF_INET6: u8 = 10;
 /// Run the on-demand detail query channel until the session closes.
 ///
 /// `key_prefix` is the sensor's telemetry prefix (e.g. `zensight/netlink`); the
-/// queryables live under `<key_prefix>/@/query/<topic>`.
-pub async fn run(session: Arc<zenoh::Session>, key_prefix: String) {
+/// queryables live under `<key_prefix>/@/query/<topic>`. `events` is the shared
+/// real-time event ring (#8), served on `@/query/events`.
+pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: EventState) {
     let route = match Connection::<Route>::new() {
         Ok(c) => c,
         Err(e) => {
@@ -37,6 +41,8 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String) {
     let routes_key = format!("{key_prefix}/@/query/routes");
     let neighbors_key = format!("{key_prefix}/@/query/neighbors");
     let sockets_key = format!("{key_prefix}/@/query/sockets");
+    let addresses_key = format!("{key_prefix}/@/query/addresses");
+    let events_key = format!("{key_prefix}/@/query/events");
 
     let routes_q = match session.declare_queryable(&routes_key).await {
         Ok(q) => q,
@@ -59,8 +65,23 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String) {
             return;
         }
     };
+    let addresses_q = match session.declare_queryable(&addresses_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %addresses_key, "query: declare addresses failed");
+            return;
+        }
+    };
+    let events_q = match session.declare_queryable(&events_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %events_key, "query: declare events failed");
+            return;
+        }
+    };
     tracing::info!(
         routes = %routes_key, neighbors = %neighbors_key, sockets = %sockets_key,
+        addresses = %addresses_key, events = %events_key,
         "on-demand detail query channel ready"
     );
 
@@ -84,6 +105,15 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String) {
                     None => Vec::new(),
                 };
                 reply_json(&query, &records).await;
+            }
+            q = addresses_q.recv_async() => {
+                let Ok(query) = q else { return };
+                let records = collect_addresses(&route).await;
+                reply_json(&query, &records).await;
+            }
+            q = events_q.recv_async() => {
+                let Ok(query) = q else { return };
+                reply_json(&query, &events.recent()).await;
             }
         }
     }
@@ -152,6 +182,42 @@ async fn collect_neighbors(conn: &Connection<Route>) -> Vec<NeighborRecord> {
             is_router: nb.is_router(),
         })
         .collect()
+}
+
+/// Build the per-address detail (#10) from a live address dump. Each record
+/// carries family/ip/prefix/scope/label/ifindex — the GUI mirrors this shape.
+async fn collect_addresses(conn: &Connection<Route>) -> Vec<AddressRecord> {
+    let addrs = match conn.get_addresses().await {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(error = %e, "query: get_addresses failed");
+            return Vec::new();
+        }
+    };
+    addrs
+        .iter()
+        .map(|a| AddressRecord {
+            family: fam(a.family()),
+            ip: a.address().or_else(|| a.local()).map(|ip| ip.to_string()),
+            prefix_len: a.prefix_len(),
+            scope: scope_label(a.scope()).to_string(),
+            label: a.label().map(|s| s.to_string()),
+            ifindex: a.ifindex(),
+        })
+        .collect()
+}
+
+/// Lowercase label for an address scope (matches the iproute2 vocabulary).
+fn scope_label(scope: Scope) -> &'static str {
+    match scope {
+        Scope::Universe => "global",
+        Scope::Site => "site",
+        Scope::Link => "link",
+        Scope::Host => "host",
+        Scope::Nowhere => "nowhere",
+        // `Scope` is #[non_exhaustive] upstream.
+        _ => "other",
+    }
 }
 
 async fn collect_sockets(conn: &Connection<SockDiag>, sel: &SocketSelector) -> Vec<SocketRecord> {

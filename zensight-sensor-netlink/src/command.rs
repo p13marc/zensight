@@ -51,7 +51,11 @@ pub async fn apply_collection(handle: &CollectHandle, cmd: CollectionCommand) {
 
 /// Run the collection command subscriber + status queryable until session close.
 /// Commands: `<prefix>/@/commands/collection`; status: `<prefix>/@/status/collection`.
-pub async fn run_collection(session: Arc<zenoh::Session>, key_prefix: String, handle: CollectHandle) {
+pub async fn run_collection(
+    session: Arc<zenoh::Session>,
+    key_prefix: String,
+    handle: CollectHandle,
+) {
     let cmd_key = command_key(&key_prefix, COLLECTION_TOPIC);
     let stat_key = status_key(&key_prefix, COLLECTION_TOPIC);
 
@@ -263,6 +267,9 @@ mod tests {
             neighbors: false,
             routes: false,
             diagnostics: false,
+            events: false,
+            ethtool: false,
+            addresses: false,
             conntrack: false,
         };
         apply_collection(&handle, CollectionCommand::Set { collect: cfg }).await;
