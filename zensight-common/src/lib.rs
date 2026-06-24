@@ -37,7 +37,8 @@ pub use keyexpr::{
     all_sensors_wildcard, all_telemetry_wildcard, parse_key_expr,
 };
 pub use query_detail::{
-    FlowRecord, NeighborRecord, ProcessRecord, RouteRecord, SocketRecord, TlsRecord,
+    DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord, NeighborRecord, ProcessRecord,
+    RouteRecord, SocketRecord, TalkerRecord, TlsRecord,
 };
 pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;

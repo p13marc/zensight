@@ -8,7 +8,7 @@ use zensight_common::Format;
 use zensight_sensor_core::{AdvancedPublisherConfig, AdvancedPublisherRegistry, AlertReporter};
 
 use crate::map;
-use crate::monitor::{MonitorChannels, to_view};
+use crate::monitor::{MonitorChannels, dns_snapshot, to_view};
 
 /// Drain telemetry points and publish them. Also emits periodic flow aggregates
 /// from the shared counters.
@@ -36,10 +36,16 @@ pub async fn run_drains(
     let tcp_refused = channels.tcp_refused.clone();
     let tls_handshakes = channels.tls_handshakes.clone();
     let tls_inventory = channels.tls_inventory.clone();
+    let l4 = channels.l4.clone();
+    let icmp = channels.icmp.clone();
+    let dns = channels.dns.clone();
+    let http = channels.http.clone();
 
     // Take (and clear) the current window's flow durations for percentile points.
-    let drain_durations = |buf: &std::sync::Mutex<Vec<u64>>| -> Vec<u64> {
-        buf.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
+    let drain_window = |buf: &std::sync::Mutex<Vec<u64>>| -> Vec<u64> {
+        buf.lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default()
     };
 
     // Cached publishers so late-joining consumers get current values on connect.
@@ -52,6 +58,94 @@ pub async fn run_drains(
 
     let mut flow_tick = tokio::time::interval(Duration::from_secs(flow_period_secs.max(1)));
 
+    // Assemble the full set of periodic aggregate points from the shared state.
+    // `final_flush` controls whether duration/RTT/latency percentiles are taken
+    // (always true — at both tick and EOF we want the windowed distribution).
+    let build_aggregate = |sensor_id: &str| -> Vec<zensight_common::TelemetryPoint> {
+        let s = started.load(Ordering::Relaxed);
+        let e = ended.load(Ordering::Relaxed);
+        let active = s.saturating_sub(e);
+        let resets = tcp_resets.load(Ordering::Relaxed);
+        let refused = tcp_refused.load(Ordering::Relaxed);
+        let bytes = flow_bytes.load(Ordering::Relaxed);
+        let pkts = flow_packets.load(Ordering::Relaxed);
+        let retx = flow_retransmits.load(Ordering::Relaxed);
+        let mut durs = drain_window(&flow_durations);
+
+        let mut points: Vec<_> = map::flow_points(sensor_id, s, e, active)
+            .into_iter()
+            .chain(map::flow_volume_points(sensor_id, bytes, pkts, retx))
+            .chain(map::flow_latency_points(sensor_id, &mut durs))
+            .chain(map::tcp_reset_points(sensor_id, resets, refused))
+            // Per-L4 composition + connection-state breakdown (issue #16).
+            .chain(map::flow_by_l4_points(
+                sensor_id,
+                l4.tcp_bytes.load(Ordering::Relaxed),
+                l4.tcp_flows.load(Ordering::Relaxed),
+                l4.udp_bytes.load(Ordering::Relaxed),
+                l4.udp_flows.load(Ordering::Relaxed),
+                l4.icmp_bytes.load(Ordering::Relaxed),
+                l4.icmp_flows.load(Ordering::Relaxed),
+            ))
+            .chain(map::tcp_closed_points(
+                sensor_id,
+                l4.closed_fin.load(Ordering::Relaxed),
+                l4.closed_rst.load(Ordering::Relaxed),
+                l4.closed_idle.load(Ordering::Relaxed),
+            ))
+            .collect();
+
+        // TLS handshake aggregates (passive asset inventory size).
+        let tls_n = tls_handshakes.load(Ordering::Relaxed);
+        let tls_distinct = tls_inventory.lock().map(|i| i.len() as u64).unwrap_or(0);
+        points.extend(map::tls_points(sensor_id, tls_n, tls_distinct));
+
+        // ICMP error aggregates (issue #15).
+        let by_kind: Vec<(String, u64)> = icmp
+            .by_kind
+            .lock()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
+            .unwrap_or_default();
+        points.extend(map::icmp_points(
+            sensor_id,
+            icmp.unreachable.load(Ordering::Relaxed),
+            icmp.time_exceeded.load(Ordering::Relaxed),
+            icmp.mtu_signal.load(Ordering::Relaxed),
+            &by_kind,
+        ));
+
+        // DNS RED aggregates (issue #19).
+        let (dns_queries, by_rcode, dns_unanswered) = dns_snapshot(&dns);
+        let mut rtt = drain_window(&dns.rtt_ms);
+        points.extend(map::dns_points(
+            sensor_id,
+            dns_queries,
+            &by_rcode,
+            dns_unanswered,
+            &mut rtt,
+        ));
+
+        // HTTP RED aggregates (issue #20).
+        let by_method: Vec<(String, u64)> = http
+            .methods
+            .lock()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
+            .unwrap_or_default();
+        let mut lat = drain_window(&http.latency_ms);
+        points.extend(map::http_points(
+            sensor_id,
+            http.requests.load(Ordering::Relaxed),
+            http.status_2xx.load(Ordering::Relaxed),
+            http.status_3xx.load(Ordering::Relaxed),
+            http.status_4xx.load(Ordering::Relaxed),
+            http.status_5xx.load(Ordering::Relaxed),
+            &by_method,
+            &mut lat,
+        ));
+
+        points
+    };
+
     loop {
         tokio::select! {
             // Telemetry points from monitor callbacks.
@@ -62,23 +156,25 @@ pub async fn run_drains(
                         if let Err(e) = registry.publish(&suffix, &point).await { tracing::warn!(error=%e, "publish failed"); } }
                     None => {
                         // Monitor finished (e.g. pcap EOF / shutdown): flush a final
-                        // aggregate so short replays still emit flow + TCP counts.
-                        let s = started.load(Ordering::Relaxed);
-                        let e = ended.load(Ordering::Relaxed);
-                        let resets = tcp_resets.load(Ordering::Relaxed);
-                        let refused = tcp_refused.load(Ordering::Relaxed);
-                        let bytes = flow_bytes.load(Ordering::Relaxed);
-                        let pkts = flow_packets.load(Ordering::Relaxed);
-                        let retx = flow_retransmits.load(Ordering::Relaxed);
-                        let mut durs = drain_durations(&flow_durations);
-                        let points = map::flow_points(&sensor_id, s, e, s.saturating_sub(e))
-                            .into_iter()
-                            .chain(map::flow_volume_points(&sensor_id, bytes, pkts, retx))
-                            .chain(map::flow_latency_points(&sensor_id, &mut durs))
-                            .chain(map::tcp_reset_points(&sensor_id, resets, refused));
-                        for point in points {
+                        // aggregate so short replays still emit their counts.
+                        for point in build_aggregate(&sensor_id) {
                             let suffix = format!("{}/{}", point.source, point.metric);
                             let _ = registry.publish(&suffix, &point).await;
+                        }
+                        // Drain any detector anomalies / sensor alerts still queued so a
+                        // trailing alert isn't lost when the telemetry channel closes first
+                        // (fast pcap EOF, or a clean live shutdown).
+                        while let Ok(a) = channels.anomalies.try_recv() {
+                            let view = to_view(&a);
+                            let alert = map::anomaly_alert(&sensor_id, &view);
+                            if let Err(e) = reporter.observe(alert, Some(Duration::ZERO)).await {
+                                tracing::warn!(error = %e, "failed to publish anomaly alert");
+                            }
+                        }
+                        while let Ok(alert) = channels.alerts.try_recv() {
+                            if let Err(e) = reporter.observe(alert, Some(Duration::ZERO)).await {
+                                tracing::warn!(error = %e, "failed to publish sensor alert");
+                            }
                         }
                         // Give late subscribers a moment to pull from the cache.
                         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -86,7 +182,7 @@ pub async fn run_drains(
                     }
                 }
             }
-            // Anomalies → alerts.
+            // Detector anomalies → alerts.
             anomaly = channels.anomalies.recv() => {
                 if let Some(a) = anomaly {
                     let view = to_view(&a);
@@ -96,27 +192,16 @@ pub async fn run_drains(
                     }
                 }
             }
-            // Periodic flow + TCP-reset aggregates.
+            // Typed sensor alerts (ICMP flow-killed) → AlertReporter (never lossy).
+            alert = channels.alerts.recv() => {
+                if let Some(alert) = alert
+                    && let Err(e) = reporter.observe(alert, Some(Duration::ZERO)).await {
+                    tracing::warn!(error = %e, "failed to publish sensor alert");
+                }
+            }
+            // Periodic aggregates.
             _ = flow_tick.tick() => {
-                let s = started.load(Ordering::Relaxed);
-                let e = ended.load(Ordering::Relaxed);
-                let active = s.saturating_sub(e);
-                let resets = tcp_resets.load(Ordering::Relaxed);
-                let refused = tcp_refused.load(Ordering::Relaxed);
-                let bytes = flow_bytes.load(Ordering::Relaxed);
-                let pkts = flow_packets.load(Ordering::Relaxed);
-                let retx = flow_retransmits.load(Ordering::Relaxed);
-                let mut durs = drain_durations(&flow_durations);
-                let points = map::flow_points(&sensor_id, s, e, active)
-                    .into_iter()
-                    .chain(map::flow_volume_points(&sensor_id, bytes, pkts, retx))
-                    .chain(map::flow_latency_points(&sensor_id, &mut durs))
-                    .chain(map::tcp_reset_points(&sensor_id, resets, refused));
-                // TLS handshake aggregates (passive asset inventory size).
-                let tls_n = tls_handshakes.load(Ordering::Relaxed);
-                let tls_distinct = tls_inventory.lock().map(|i| i.len() as u64).unwrap_or(0);
-                let points = points.chain(map::tls_points(&sensor_id, tls_n, tls_distinct));
-                for point in points {
+                for point in build_aggregate(&sensor_id) {
                     health.record_metrics_published(1);
                     let suffix = format!("{}/{}", point.source, point.metric);
                     if let Err(e) = registry.publish(&suffix, &point).await { tracing::warn!(error=%e, "publish failed"); }

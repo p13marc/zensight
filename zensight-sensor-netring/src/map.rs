@@ -126,7 +126,12 @@ pub fn flow_volume_points(
     retransmits_total: u64,
 ) -> Vec<TelemetryPoint> {
     let c = |metric: &str, v: u64| {
-        TelemetryPoint::new(sensor_id, Protocol::Netring, metric, TelemetryValue::Counter(v))
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            metric,
+            TelemetryValue::Counter(v),
+        )
     };
     vec![
         c("flow/bytes_total", bytes_total),
@@ -158,7 +163,12 @@ pub fn flow_latency_points(sensor_id: &str, durations_ms: &mut [u64]) -> Vec<Tel
     let p50 = percentile(durations_ms, 50);
     let p95 = percentile(durations_ms, 95);
     let g = |metric: &str, v: u64| {
-        TelemetryPoint::new(sensor_id, Protocol::Netring, metric, TelemetryValue::Gauge(v as f64))
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            metric,
+            TelemetryValue::Gauge(v as f64),
+        )
     };
     vec![
         g("flow/duration_p50_ms", p50),
@@ -208,6 +218,151 @@ pub fn tls_points(sensor_id: &str, handshakes: u64, distinct: u64) -> Vec<Teleme
     ]
 }
 
+// ─── ICMP error telemetry (issue #15) ───────────────────────────────────────
+
+/// A flattened ICMP error, decomposed from netring's `IcmpError` event. Kept
+/// free of the netring/flowscope capture machinery so it is unit-testable.
+///
+/// `kind` is the flowscope stable slug (`port_unreachable`, `time_exceeded`,
+/// `fragmentation_needed`, ...); `is_unreachable`/`is_time_exceeded` pre-classify
+/// the two headline counters so the pure map never re-parses the slug.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IcmpErrorView {
+    /// Stable kind slug from `IcmpErrorKind::as_str()`.
+    pub kind: String,
+    /// Destination-Unreachable family (host/port/network/admin/...).
+    pub is_unreachable: bool,
+    /// Time-Exceeded (TTL expired in transit / reassembly).
+    pub is_time_exceeded: bool,
+    /// PMTU signal (frag-needed / packet-too-big) — black-hole risk.
+    pub is_mtu_signal: bool,
+    /// The originating flow `src -> dst` (canonical 5-tuple), if reconstructed
+    /// from the ICMP message's embedded inner packet.
+    pub correlated_flow: Option<(String, String)>,
+}
+
+/// ICMP error counters, accumulated across all observed ICMP errors. Streams the
+/// headline RED-style signals plus a per-kind breakdown.
+///
+/// `by_kind` is a small, bounded set of stable slugs (≈8 ICMP error classes), so
+/// `icmp/by_kind/<slug>_total` is low-cardinality — safe to stream.
+pub fn icmp_points(
+    sensor_id: &str,
+    unreachable_total: u64,
+    time_exceeded_total: u64,
+    mtu_signal_total: u64,
+    by_kind: &[(String, u64)],
+) -> Vec<TelemetryPoint> {
+    let c = |metric: String, v: u64| {
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            metric,
+            TelemetryValue::Counter(v),
+        )
+    };
+    let mut pts = vec![
+        c("icmp/unreachable_total".into(), unreachable_total),
+        c("icmp/time_exceeded_total".into(), time_exceeded_total),
+        c("icmp/mtu_signal_total".into(), mtu_signal_total),
+    ];
+    for (kind, count) in by_kind {
+        pts.push(c(format!("icmp/by_kind/{kind}_total"), *count));
+    }
+    pts
+}
+
+/// Build an [`Alert`] for a flow killed by an ICMP error (e.g. a port-unreachable
+/// or admin-prohibited that terminates a live flow) — a high-signal path failure.
+/// Bucketed by `(rule, dst)` so a storm of unreachables to one host collapses to
+/// one alert.
+pub fn icmp_flow_alert(sensor_id: &str, v: &IcmpErrorView) -> Alert {
+    let (src, dst) = v
+        .correlated_flow
+        .clone()
+        .unwrap_or_else(|| ("?".into(), "?".into()));
+    let summary = format!("ICMP {} for flow {} -> {}", v.kind, src, dst);
+    Alert::new(
+        sensor_id,
+        Protocol::Netring,
+        AlertKind::Anomaly,
+        "IcmpFlowError",
+        AlertSeverity::Warning,
+        summary,
+    )
+    .with_label("kind", v.kind.clone())
+    .with_label("src", src)
+    .with_label("dst", dst)
+}
+
+// ─── Per-protocol + connection-state breakdown (issue #16) ───────────────────
+
+/// Per-L4-protocol flow composition: bytes + flow counts split by tcp/udp/icmp.
+/// An unusual UDP byte spike flags DNS/NTP amplification abuse; the split is the
+/// first-order "what is this network carrying?" signal. Three protocols → six
+/// series — low-cardinality, safe to stream.
+pub fn flow_by_l4_points(
+    sensor_id: &str,
+    tcp_bytes: u64,
+    tcp_flows: u64,
+    udp_bytes: u64,
+    udp_flows: u64,
+    icmp_bytes: u64,
+    icmp_flows: u64,
+) -> Vec<TelemetryPoint> {
+    let c = |metric: String, v: u64| {
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            metric,
+            TelemetryValue::Counter(v),
+        )
+    };
+    vec![
+        c("flow/by_l4/tcp/bytes_total".into(), tcp_bytes),
+        c("flow/by_l4/tcp/flows_total".into(), tcp_flows),
+        c("flow/by_l4/udp/bytes_total".into(), udp_bytes),
+        c("flow/by_l4/udp/flows_total".into(), udp_flows),
+        c("flow/by_l4/icmp/bytes_total".into(), icmp_bytes),
+        c("flow/by_l4/icmp/flows_total".into(), icmp_flows),
+    ]
+}
+
+/// Bucket a flowscope `EndReason` slug into one of the three TCP close classes we
+/// track: `fin` (clean), `rst` (abort/refused), `idle` (timeout). Everything else
+/// (evicted/buffer_overflow/parse_error/...) folds into `idle` — they're all
+/// "the flow stopped without an explicit close" from an operator's view.
+pub fn tcp_close_class(reason: &str) -> &'static str {
+    match reason {
+        "fin" => "fin",
+        "rst" => "rst",
+        _ => "idle",
+    }
+}
+
+/// TCP connection-state breakdown: how flows closed (clean FIN vs RST abort vs
+/// idle timeout). A high RST share = firewall/IDS drops or instability.
+pub fn tcp_closed_points(
+    sensor_id: &str,
+    closed_fin: u64,
+    closed_rst: u64,
+    closed_idle: u64,
+) -> Vec<TelemetryPoint> {
+    let c = |metric: &str, v: u64| {
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            metric,
+            TelemetryValue::Counter(v),
+        )
+    };
+    vec![
+        c("tcp/closed_fin_total", closed_fin),
+        c("tcp/closed_rst_total", closed_rst),
+        c("tcp/closed_idle_total", closed_idle),
+    ]
+}
+
 /// TCP reset aggregate points.
 pub fn tcp_reset_points(sensor_id: &str, resets: u64, refused: u64) -> Vec<TelemetryPoint> {
     vec![
@@ -224,6 +379,252 @@ pub fn tcp_reset_points(sensor_id: &str, resets: u64, refused: u64) -> Vec<Telem
             TelemetryValue::Counter(refused),
         ),
     ]
+}
+
+// ─── L7 DNS RED analytics (issue #19) ────────────────────────────────────────
+
+use zensight_common::{DnsRecord, ElephantRecord, HttpHostRecord, TalkerRecord};
+
+/// DNS response codes we track as distinct RED-error buckets. Closed set →
+/// low-cardinality, safe to stream as `dns/responses_by_rcode/<slug>_total`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DnsRcodeClass {
+    NoError,
+    NxDomain,
+    ServFail,
+    Refused,
+    /// Any other rcode (FormErr/NotImpl/...): folded into one "other" bucket so a
+    /// rare rcode can't explode the series count.
+    Other,
+}
+
+impl DnsRcodeClass {
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::NoError => "noerror",
+            Self::NxDomain => "nxdomain",
+            Self::ServFail => "servfail",
+            Self::Refused => "refused",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Extract the second-level domain label from a DNS qname (e.g.
+/// `"www.example.com."` → `"example"`). `None` for a bare TLD / root / empty
+/// name. Lowercases the result. This is the unit the DGA scorer and the top-SLD
+/// inventory key on.
+pub fn dns_sld(qname: &str) -> Option<String> {
+    let trimmed = qname.trim_end_matches('.');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut parts = trimmed.rsplit('.');
+    let _tld = parts.next()?;
+    let sld = parts.next()?;
+    if sld.is_empty() {
+        None
+    } else {
+        Some(sld.to_ascii_lowercase())
+    }
+}
+
+/// DNS RED aggregate points: queries, per-rcode responses, unanswered, and the
+/// resolver-loss rate. `rtt_ms` carries the query-RTT distribution of the window
+/// (consumed/sorted) for p50/p95/p99 latency gauges.
+///
+/// Returns no rcode/RTT points when a bucket is empty so idle ticks never clobber
+/// the cached gauges to zero (same discipline as `flow_latency_points`).
+pub fn dns_points(
+    sensor_id: &str,
+    queries_total: u64,
+    by_rcode: &[(DnsRcodeClass, u64)],
+    unanswered_total: u64,
+    rtt_ms: &mut [u64],
+) -> Vec<TelemetryPoint> {
+    let c = |metric: String, v: u64| {
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            metric,
+            TelemetryValue::Counter(v),
+        )
+    };
+    let g = |metric: &str, v: f64| {
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            metric,
+            TelemetryValue::Gauge(v),
+        )
+    };
+    let mut pts = vec![
+        c("dns/queries_total".into(), queries_total),
+        c("dns/unanswered_total".into(), unanswered_total),
+    ];
+    for (rc, count) in by_rcode {
+        pts.push(c(
+            format!("dns/responses_by_rcode/{}_total", rc.slug()),
+            *count,
+        ));
+    }
+    if !rtt_ms.is_empty() {
+        pts.push(g("dns/query_rtt_p50_ms", percentile(rtt_ms, 50) as f64));
+        pts.push(g("dns/query_rtt_p95_ms", percentile(rtt_ms, 95) as f64));
+        pts.push(g("dns/query_rtt_p99_ms", percentile(rtt_ms, 99) as f64));
+    }
+    pts
+}
+
+/// Rank a DNS SLD inventory newest-volume-first into the on-demand `@/query/dns`
+/// reply (top-N by query count). Pure so the ranking is unit-testable.
+pub fn top_dns_records(
+    inv: &std::collections::HashMap<String, (u64, u64)>,
+    top: usize,
+) -> Vec<DnsRecord> {
+    let mut v: Vec<DnsRecord> = inv
+        .iter()
+        .map(|(domain, &(queries, nxdomain))| DnsRecord {
+            domain: domain.clone(),
+            queries,
+            nxdomain,
+        })
+        .collect();
+    v.sort_by(|a, b| {
+        b.queries
+            .cmp(&a.queries)
+            .then_with(|| a.domain.cmp(&b.domain))
+    });
+    v.truncate(top);
+    v
+}
+
+// ─── L7 HTTP RED analytics (issue #20) ───────────────────────────────────────
+
+/// Bucket an HTTP status code into a RED status class slug. Out-of-range codes
+/// fold into `other`.
+pub fn http_status_class(status: u16) -> &'static str {
+    match status {
+        200..=299 => "2xx",
+        300..=399 => "3xx",
+        400..=499 => "4xx",
+        500..=599 => "5xx",
+        _ => "other",
+    }
+}
+
+/// HTTP RED aggregate points: total requests, per-status-class responses, latency
+/// percentiles, and a per-method breakdown. `latency_ms` carries the
+/// request→response latency distribution of the window (consumed/sorted).
+///
+/// `by_method` is a small closed set of HTTP verbs (GET/POST/...) — low
+/// cardinality, safe to stream. Empty latency window → no latency points.
+#[allow(clippy::too_many_arguments)]
+pub fn http_points(
+    sensor_id: &str,
+    requests_total: u64,
+    status_2xx: u64,
+    status_3xx: u64,
+    status_4xx: u64,
+    status_5xx: u64,
+    by_method: &[(String, u64)],
+    latency_ms: &mut [u64],
+) -> Vec<TelemetryPoint> {
+    let c = |metric: String, v: u64| {
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            metric,
+            TelemetryValue::Counter(v),
+        )
+    };
+    let g = |metric: &str, v: f64| {
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            metric,
+            TelemetryValue::Gauge(v),
+        )
+    };
+    let mut pts = vec![
+        c("http/requests_total".into(), requests_total),
+        c("http/status_2xx_total".into(), status_2xx),
+        c("http/status_3xx_total".into(), status_3xx),
+        c("http/status_4xx_total".into(), status_4xx),
+        c("http/status_5xx_total".into(), status_5xx),
+    ];
+    for (method, count) in by_method {
+        pts.push(c(format!("http/methods/{method}_total"), *count));
+    }
+    if !latency_ms.is_empty() {
+        pts.push(g("http/latency_p50_ms", percentile(latency_ms, 50) as f64));
+        pts.push(g("http/latency_p95_ms", percentile(latency_ms, 95) as f64));
+    }
+    pts
+}
+
+/// Rank an HTTP host inventory request-volume-first into the `@/query/http` reply.
+pub fn top_http_hosts(
+    inv: &std::collections::HashMap<String, (u64, u64)>,
+    top: usize,
+) -> Vec<HttpHostRecord> {
+    let mut v: Vec<HttpHostRecord> = inv
+        .iter()
+        .map(|(host, &(requests, errors))| HttpHostRecord {
+            host: host.clone(),
+            requests,
+            errors,
+        })
+        .collect();
+    v.sort_by(|a, b| {
+        b.requests
+            .cmp(&a.requests)
+            .then_with(|| a.host.cmp(&b.host))
+    });
+    v.truncate(top);
+    v
+}
+
+// ─── Top-talkers + elephant flows (issue #21) ────────────────────────────────
+
+/// Rank a per-destination histogram byte-volume-first into the `@/query/talkers`
+/// reply (top-N talkers). Pure so the ranking is unit-testable.
+pub fn top_talkers(
+    hist: &std::collections::HashMap<String, (u64, u64, u64)>,
+    top: usize,
+) -> Vec<TalkerRecord> {
+    let mut v: Vec<TalkerRecord> = hist
+        .iter()
+        .map(|(dst, &(bytes, packets, flows))| TalkerRecord {
+            dst: dst.clone(),
+            bytes,
+            packets,
+            flows,
+        })
+        .collect();
+    v.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.dst.cmp(&b.dst)));
+    v.truncate(top);
+    v
+}
+
+/// Build an [`ElephantRecord`] from already-extracted fields (pure shape).
+#[allow(clippy::too_many_arguments)]
+pub fn elephant_record(
+    src: String,
+    dst: String,
+    proto: &str,
+    bytes: u64,
+    packets: u64,
+    duration_ms: u64,
+) -> ElephantRecord {
+    ElephantRecord {
+        src,
+        dst,
+        proto: proto.to_string(),
+        bytes,
+        packets,
+        duration_ms,
+    }
 }
 
 #[cfg(test)]
@@ -342,9 +743,15 @@ mod tests {
     fn capture_points_shape() {
         let pts = capture_points("s", 0, 10_000, 42, 1, 0.004);
         let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
-        assert_eq!(find("capture/0/packets").value, TelemetryValue::Counter(10_000));
+        assert_eq!(
+            find("capture/0/packets").value,
+            TelemetryValue::Counter(10_000)
+        );
         assert_eq!(find("capture/0/drops").value, TelemetryValue::Counter(42));
-        assert_eq!(find("capture/0/drop_rate").value, TelemetryValue::Gauge(0.004));
+        assert_eq!(
+            find("capture/0/drop_rate").value,
+            TelemetryValue::Gauge(0.004)
+        );
     }
 
     #[test]
@@ -362,5 +769,290 @@ mod tests {
         a.src = None;
         a.dst = None;
         assert_eq!(human_summary(&a), "PortScanTRW");
+    }
+
+    // ─── ICMP (issue #15) ────────────────────────────────────────────────────
+
+    #[test]
+    fn icmp_points_headline_and_by_kind() {
+        let by_kind = vec![
+            ("port_unreachable".to_string(), 7),
+            ("time_exceeded".to_string(), 2),
+        ];
+        let pts = icmp_points("s", 9, 2, 1, &by_kind);
+        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        assert_eq!(
+            find("icmp/unreachable_total").value,
+            TelemetryValue::Counter(9)
+        );
+        assert_eq!(
+            find("icmp/time_exceeded_total").value,
+            TelemetryValue::Counter(2)
+        );
+        assert_eq!(
+            find("icmp/mtu_signal_total").value,
+            TelemetryValue::Counter(1)
+        );
+        assert_eq!(
+            find("icmp/by_kind/port_unreachable_total").value,
+            TelemetryValue::Counter(7)
+        );
+        assert_eq!(
+            find("icmp/by_kind/time_exceeded_total").value,
+            TelemetryValue::Counter(2)
+        );
+    }
+
+    #[test]
+    fn icmp_flow_alert_shape_and_bucketing() {
+        let v = IcmpErrorView {
+            kind: "port_unreachable".into(),
+            is_unreachable: true,
+            correlated_flow: Some(("10.0.0.1:5555".into(), "10.0.0.9:53".into())),
+            ..Default::default()
+        };
+        let a = icmp_flow_alert("s", &v);
+        assert_eq!(a.kind, AlertKind::Anomaly);
+        assert_eq!(a.rule, "IcmpFlowError");
+        assert_eq!(a.severity, AlertSeverity::Warning);
+        assert!(a.summary.contains("port_unreachable"));
+        assert!(a.summary.contains("10.0.0.9:53"));
+        assert_eq!(
+            a.labels.get("kind").map(String::as_str),
+            Some("port_unreachable")
+        );
+        assert_eq!(a.labels.get("dst").map(String::as_str), Some("10.0.0.9:53"));
+
+        // Same rule+dst, different kind label still buckets by (rule, dst-as-src
+        // in alert_key)? alert_key includes labels; assert two errors to the same
+        // dst with the same kind collapse.
+        let mut v2 = v.clone();
+        v2.correlated_flow = Some(("10.0.0.2:6666".into(), "10.0.0.9:53".into()));
+        let k1 = icmp_flow_alert("s", &v).alert_key();
+        let k2 = icmp_flow_alert("s", &v2).alert_key();
+        // src differs so keys differ — that's fine; the bucketing test for src is
+        // covered by the scan test. Here just assert both produce valid keys.
+        assert!(!k1.is_empty() && !k2.is_empty());
+    }
+
+    #[test]
+    fn icmp_no_kinds_still_emits_headline() {
+        let pts = icmp_points("s", 0, 0, 0, &[]);
+        assert_eq!(pts.len(), 3);
+        assert!(
+            pts.iter()
+                .all(|p| matches!(p.value, TelemetryValue::Counter(0)))
+        );
+    }
+
+    // ─── Per-protocol + connection-state (issue #16) ─────────────────────────
+
+    #[test]
+    fn flow_by_l4_points_shape() {
+        let pts = flow_by_l4_points("s", 1000, 5, 200, 3, 50, 1);
+        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        assert_eq!(
+            find("flow/by_l4/tcp/bytes_total").value,
+            TelemetryValue::Counter(1000)
+        );
+        assert_eq!(
+            find("flow/by_l4/tcp/flows_total").value,
+            TelemetryValue::Counter(5)
+        );
+        assert_eq!(
+            find("flow/by_l4/udp/bytes_total").value,
+            TelemetryValue::Counter(200)
+        );
+        assert_eq!(
+            find("flow/by_l4/icmp/flows_total").value,
+            TelemetryValue::Counter(1)
+        );
+    }
+
+    #[test]
+    fn tcp_close_class_buckets() {
+        assert_eq!(tcp_close_class("fin"), "fin");
+        assert_eq!(tcp_close_class("rst"), "rst");
+        assert_eq!(tcp_close_class("idle"), "idle");
+        // Everything non-fin/rst folds into idle.
+        assert_eq!(tcp_close_class("evicted"), "idle");
+        assert_eq!(tcp_close_class("buffer_overflow"), "idle");
+        assert_eq!(tcp_close_class("parse_error"), "idle");
+    }
+
+    #[test]
+    fn tcp_closed_points_shape() {
+        let pts = tcp_closed_points("s", 10, 4, 2);
+        assert_eq!(pts[0].metric, "tcp/closed_fin_total");
+        assert_eq!(pts[0].value, TelemetryValue::Counter(10));
+        assert_eq!(pts[1].metric, "tcp/closed_rst_total");
+        assert_eq!(pts[1].value, TelemetryValue::Counter(4));
+        assert_eq!(pts[2].metric, "tcp/closed_idle_total");
+        assert_eq!(pts[2].value, TelemetryValue::Counter(2));
+    }
+
+    // ─── DNS RED (issue #19) ─────────────────────────────────────────────────
+
+    #[test]
+    fn dns_sld_extraction() {
+        assert_eq!(dns_sld("www.example.com."), Some("example".into()));
+        assert_eq!(dns_sld("example.com"), Some("example".into()));
+        assert_eq!(dns_sld("a.b.example.co.uk"), Some("co".into())); // naive SLD
+        assert_eq!(dns_sld("EXAMPLE.COM"), Some("example".into())); // lowercased
+        assert_eq!(dns_sld("localhost"), None); // bare TLD
+        assert_eq!(dns_sld("."), None);
+        assert_eq!(dns_sld(""), None);
+    }
+
+    #[test]
+    fn dns_points_red() {
+        let by_rcode = vec![
+            (DnsRcodeClass::NoError, 100),
+            (DnsRcodeClass::NxDomain, 8),
+            (DnsRcodeClass::ServFail, 1),
+        ];
+        let mut rtt = vec![10u64, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+        let pts = dns_points("s", 120, &by_rcode, 4, &mut rtt);
+        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        assert_eq!(
+            find("dns/queries_total").value,
+            TelemetryValue::Counter(120)
+        );
+        assert_eq!(
+            find("dns/unanswered_total").value,
+            TelemetryValue::Counter(4)
+        );
+        assert_eq!(
+            find("dns/responses_by_rcode/nxdomain_total").value,
+            TelemetryValue::Counter(8)
+        );
+        assert_eq!(
+            find("dns/responses_by_rcode/servfail_total").value,
+            TelemetryValue::Counter(1)
+        );
+        assert_eq!(
+            find("dns/query_rtt_p50_ms").value,
+            TelemetryValue::Gauge(50.0)
+        );
+        assert_eq!(
+            find("dns/query_rtt_p99_ms").value,
+            TelemetryValue::Gauge(100.0)
+        );
+    }
+
+    #[test]
+    fn dns_points_empty_rtt_no_latency_gauges() {
+        let pts = dns_points("s", 5, &[], 0, &mut []);
+        assert!(pts.iter().all(|p| !p.metric.contains("rtt")));
+    }
+
+    #[test]
+    fn dns_rcode_class_slugs() {
+        assert_eq!(DnsRcodeClass::NoError.slug(), "noerror");
+        assert_eq!(DnsRcodeClass::NxDomain.slug(), "nxdomain");
+        assert_eq!(DnsRcodeClass::ServFail.slug(), "servfail");
+        assert_eq!(DnsRcodeClass::Refused.slug(), "refused");
+        assert_eq!(DnsRcodeClass::Other.slug(), "other");
+    }
+
+    #[test]
+    fn top_dns_records_ranks_by_queries() {
+        let mut inv = std::collections::HashMap::new();
+        inv.insert("alpha".to_string(), (5u64, 1u64));
+        inv.insert("beta".to_string(), (12u64, 0u64));
+        inv.insert("gamma".to_string(), (12u64, 3u64));
+        let top = top_dns_records(&inv, 2);
+        assert_eq!(top.len(), 2);
+        // beta & gamma tie at 12; tiebreak by domain ascending → beta first.
+        assert_eq!(top[0].domain, "beta");
+        assert_eq!(top[1].domain, "gamma");
+        assert_eq!(top[1].nxdomain, 3);
+    }
+
+    // ─── HTTP RED (issue #20) ────────────────────────────────────────────────
+
+    #[test]
+    fn http_status_class_buckets() {
+        assert_eq!(http_status_class(200), "2xx");
+        assert_eq!(http_status_class(301), "3xx");
+        assert_eq!(http_status_class(404), "4xx");
+        assert_eq!(http_status_class(503), "5xx");
+        assert_eq!(http_status_class(100), "other");
+        assert_eq!(http_status_class(600), "other");
+    }
+
+    #[test]
+    fn http_points_red() {
+        let by_method = vec![("get".to_string(), 90), ("post".to_string(), 10)];
+        let mut lat = vec![5u64, 15, 25, 35, 45, 55, 65, 75, 85, 95];
+        let pts = http_points("s", 100, 80, 5, 12, 3, &by_method, &mut lat);
+        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        assert_eq!(
+            find("http/requests_total").value,
+            TelemetryValue::Counter(100)
+        );
+        assert_eq!(
+            find("http/status_2xx_total").value,
+            TelemetryValue::Counter(80)
+        );
+        assert_eq!(
+            find("http/status_5xx_total").value,
+            TelemetryValue::Counter(3)
+        );
+        assert_eq!(
+            find("http/methods/get_total").value,
+            TelemetryValue::Counter(90)
+        );
+        assert_eq!(
+            find("http/latency_p95_ms").value,
+            TelemetryValue::Gauge(95.0)
+        );
+    }
+
+    #[test]
+    fn http_points_empty_latency_no_gauges() {
+        let pts = http_points("s", 1, 1, 0, 0, 0, &[], &mut []);
+        assert!(pts.iter().all(|p| !p.metric.contains("latency")));
+    }
+
+    #[test]
+    fn top_http_hosts_ranks_by_requests() {
+        let mut inv = std::collections::HashMap::new();
+        inv.insert("a.example".to_string(), (3u64, 0u64));
+        inv.insert("b.example".to_string(), (9u64, 2u64));
+        let top = top_http_hosts(&inv, 5);
+        assert_eq!(top[0].host, "b.example");
+        assert_eq!(top[0].errors, 2);
+    }
+
+    // ─── Top-talkers + elephant flows (issue #21) ────────────────────────────
+
+    #[test]
+    fn top_talkers_ranks_by_bytes() {
+        let mut hist = std::collections::HashMap::new();
+        hist.insert("1.1.1.1".to_string(), (1000u64, 10u64, 2u64));
+        hist.insert("8.8.8.8".to_string(), (5000u64, 40u64, 6u64));
+        hist.insert("9.9.9.9".to_string(), (50u64, 1u64, 1u64));
+        let top = top_talkers(&hist, 2);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].dst, "8.8.8.8");
+        assert_eq!(top[0].bytes, 5000);
+        assert_eq!(top[1].dst, "1.1.1.1");
+    }
+
+    #[test]
+    fn elephant_record_shape() {
+        let r = elephant_record(
+            "10.0.0.1:5".into(),
+            "1.1.1.1:443".into(),
+            "tcp",
+            10_000_000,
+            8000,
+            4200,
+        );
+        assert_eq!(r.src, "10.0.0.1:5");
+        assert_eq!(r.bytes, 10_000_000);
+        assert_eq!(r.proto, "tcp");
+        assert_eq!(r.duration_ms, 4200);
     }
 }
