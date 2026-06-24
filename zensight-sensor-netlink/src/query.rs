@@ -221,7 +221,14 @@ fn scope_label(scope: Scope) -> &'static str {
 }
 
 async fn collect_sockets(conn: &Connection<SockDiag>, sel: &SocketSelector) -> Vec<SocketRecord> {
-    let filter = SocketFilter::tcp().all_states().with_tcp_info().build();
+    // Mirror the streamed aggregate's extensions (#11) so the drill-down shows
+    // congestion algorithm / window and per-socket buffer sizes.
+    let filter = SocketFilter::tcp()
+        .all_states()
+        .with_tcp_info()
+        .with_mem_info()
+        .with_congestion()
+        .build();
     let socks = match conn.query(&filter).await {
         Ok(s) => s,
         Err(e) => {
@@ -235,10 +242,15 @@ async fn collect_sockets(conn: &Connection<SockDiag>, sel: &SocketSelector) -> V
             let SocketInfo::Inet(inet) = s else {
                 return None;
             };
-            let (rtt_us, retrans) = inet
+            let (rtt_us, retrans, snd_cwnd) = inet
                 .tcp_info
                 .as_ref()
-                .map(|ti| (ti.rtt, ti.retrans))
+                .map(|ti| (ti.rtt, ti.retrans, ti.snd_cwnd))
+                .unwrap_or((0, 0, 0));
+            let (snd_buf, rcv_buf) = inet
+                .mem_info
+                .as_ref()
+                .map(|m| (m.sndbuf, m.rcvbuf))
                 .unwrap_or((0, 0));
             let rec = SocketRecord {
                 local: inet.local.to_string(),
@@ -250,6 +262,10 @@ async fn collect_sockets(conn: &Connection<SockDiag>, sel: &SocketSelector) -> V
                 rtt_us,
                 retrans,
                 inode: inet.inode,
+                congestion: inet.congestion.clone(),
+                snd_cwnd,
+                snd_buf,
+                rcv_buf,
             };
             sel.matches(&rec).then_some(rec)
         })

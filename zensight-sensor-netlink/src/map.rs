@@ -172,6 +172,13 @@ pub struct SocketCounts {
     /// RTT percentiles across established sockets (microseconds).
     pub rtt_p50_us: u64,
     pub rtt_p95_us: u64,
+    /// Established-socket count by TCP congestion-control algorithm (#11). Bounded
+    /// cardinality — there are only a handful of algorithms on any host.
+    pub by_cong: HashMap<String, u64>,
+    /// Sum of socket send/receive buffer bytes across sockets (#11):
+    /// bufferbloat / memory-pressure signal.
+    pub snd_buf_total: u64,
+    pub rcv_buf_total: u64,
 }
 
 fn point(host: &str, metric: impl Into<String>, value: TelemetryValue) -> TelemetryPoint {
@@ -249,9 +256,10 @@ pub fn iface_points(host: &str, s: &IfaceSample) -> Vec<TelemetryPoint> {
 }
 
 /// Build telemetry points for the TCP socket aggregates. Metric paths are
-/// `sockets/tcp/<stat>`.
+/// `sockets/tcp/<stat>`, plus `sockets/tcp/by_cong/<algo>` and
+/// `sockets/tcp/mem/{snd,rcv}_buf_total` when mem/congestion info is available.
 pub fn socket_points(host: &str, c: &SocketCounts) -> Vec<TelemetryPoint> {
-    vec![
+    let mut out = vec![
         point(
             host,
             "sockets/tcp/established",
@@ -297,7 +305,29 @@ pub fn socket_points(host: &str, c: &SocketCounts) -> Vec<TelemetryPoint> {
             "sockets/tcp/rtt_p95_us",
             TelemetryValue::Gauge(c.rtt_p95_us as f64),
         ),
-    ]
+    ];
+    // Buffer totals (only meaningful when mem info was requested; both 0 → omit).
+    if c.snd_buf_total > 0 || c.rcv_buf_total > 0 {
+        out.push(point(
+            host,
+            "sockets/tcp/mem/snd_buf_total",
+            TelemetryValue::Gauge(c.snd_buf_total as f64),
+        ));
+        out.push(point(
+            host,
+            "sockets/tcp/mem/rcv_buf_total",
+            TelemetryValue::Gauge(c.rcv_buf_total as f64),
+        ));
+    }
+    // Established-socket count per congestion-control algorithm (bounded set).
+    for (algo, n) in &c.by_cong {
+        out.push(point(
+            host,
+            format!("sockets/tcp/by_cong/{algo}"),
+            TelemetryValue::Gauge(*n as f64),
+        ));
+    }
+    out
 }
 
 /// Build telemetry points for the routing-table summary.
@@ -863,11 +893,17 @@ mod tests {
 
     #[test]
     fn socket_points_shape() {
+        let mut by_cong = HashMap::new();
+        by_cong.insert("cubic".to_string(), 4u64);
+        by_cong.insert("bbr".to_string(), 1u64);
         let c = SocketCounts {
             established: 5,
             listen: 3,
             retransmits_total: 12,
             max_rtt_us: 400,
+            by_cong,
+            snd_buf_total: 1_000_000,
+            rcv_buf_total: 2_000_000,
             ..Default::default()
         };
         let pts = socket_points("h", &c);
@@ -879,6 +915,41 @@ mod tests {
         assert_eq!(
             find("sockets/tcp/retransmits_total").value,
             TelemetryValue::Counter(12)
+        );
+        // #11: per-algorithm counts + buffer totals.
+        assert_eq!(
+            find("sockets/tcp/by_cong/cubic").value,
+            TelemetryValue::Gauge(4.0)
+        );
+        assert_eq!(
+            find("sockets/tcp/by_cong/bbr").value,
+            TelemetryValue::Gauge(1.0)
+        );
+        assert_eq!(
+            find("sockets/tcp/mem/snd_buf_total").value,
+            TelemetryValue::Gauge(1_000_000.0)
+        );
+        assert_eq!(
+            find("sockets/tcp/mem/rcv_buf_total").value,
+            TelemetryValue::Gauge(2_000_000.0)
+        );
+    }
+
+    #[test]
+    fn socket_points_omit_buffers_when_absent() {
+        // No mem info / no congestion → no by_cong or mem points (no zeros).
+        let c = SocketCounts {
+            established: 1,
+            ..Default::default()
+        };
+        let pts = socket_points("h", &c);
+        assert!(
+            pts.iter()
+                .all(|p| !p.metric.starts_with("sockets/tcp/mem/"))
+        );
+        assert!(
+            pts.iter()
+                .all(|p| !p.metric.starts_with("sockets/tcp/by_cong/"))
         );
     }
 
@@ -943,6 +1014,10 @@ mod tests {
             rtt_us: 0,
             retrans: 0,
             inode: 0,
+            congestion: None,
+            snd_cwnd: 0,
+            snd_buf: 0,
+            rcv_buf: 0,
         }
     }
 

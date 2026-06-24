@@ -65,6 +65,10 @@ pub struct TlsRecord {
 }
 
 /// One TCP socket (served filterable by state/port).
+///
+/// The richer fields (congestion control, congestion window, socket-memory
+/// buffers) are populated when the sensor requests the sockdiag mem/congestion
+/// extensions; they default to absent/zero for older producers (issue #11).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SocketRecord {
     pub local: String,
@@ -76,4 +80,16 @@ pub struct SocketRecord {
     pub rtt_us: u32,
     pub retrans: u32,
     pub inode: u32,
+    /// TCP congestion-control algorithm in use (e.g. "cubic", "bbr"), if known.
+    #[serde(default)]
+    pub congestion: Option<String>,
+    /// Sender congestion window (packets), if known.
+    #[serde(default)]
+    pub snd_cwnd: u32,
+    /// Send-buffer size in bytes (sndbuf), if mem info was requested.
+    #[serde(default)]
+    pub snd_buf: u32,
+    /// Receive-buffer size in bytes (rcvbuf), if mem info was requested.
+    #[serde(default)]
+    pub rcv_buf: u32,
 }

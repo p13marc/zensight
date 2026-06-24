@@ -569,7 +569,14 @@ impl Collector {
     }
 
     async fn poll_sockets(&self, conn: &Connection<SockDiag>) -> Result<(), String> {
-        let filter = SocketFilter::tcp().all_states().with_tcp_info().build();
+        // Request mem + congestion extensions (#11) on top of tcp_info so the
+        // aggregate carries per-algorithm counts and buffer totals.
+        let filter = SocketFilter::tcp()
+            .all_states()
+            .with_tcp_info()
+            .with_mem_info()
+            .with_congestion()
+            .build();
         let socks = conn
             .query(&filter)
             .await
@@ -599,6 +606,10 @@ pub fn aggregate_sockets(socks: &[SocketInfo]) -> SocketCounts {
     let mut rtts: Vec<u64> = Vec::new();
     for s in socks {
         let SocketInfo::Inet(inet) = s else { continue };
+        let established = matches!(
+            inet.state,
+            SocketState::Tcp(TcpState::Established) | SocketState::Established
+        );
         match inet.state {
             SocketState::Tcp(TcpState::Established) | SocketState::Established => {
                 c.established += 1
@@ -615,6 +626,15 @@ pub fn aggregate_sockets(socks: &[SocketInfo]) -> SocketCounts {
             if ti.rtt > 0 {
                 rtts.push(ti.rtt as u64);
             }
+        }
+        // Congestion algorithm — count only established sockets (a listener has no
+        // negotiated algorithm) so the by_cong breakdown matches `established`.
+        if established && let Some(algo) = &inet.congestion {
+            *c.by_cong.entry(algo.clone()).or_insert(0) += 1;
+        }
+        if let Some(mem) = &inet.mem_info {
+            c.snd_buf_total += mem.sndbuf as u64;
+            c.rcv_buf_total += mem.rcvbuf as u64;
         }
     }
     c.rtt_p50_us = percentile(&mut rtts, 50);
