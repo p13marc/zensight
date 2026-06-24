@@ -127,6 +127,10 @@ pub struct ZenSight {
     store: crate::store::MetricStore,
     /// Ticks counted toward the next periodic store flush (flush every N ticks).
     ticks_since_flush: u32,
+    /// Timestamp (epoch ms) of the most recently received telemetry point, for
+    /// the global Live/Stale/Paused freshness indicator (#23). `None` until the
+    /// first point arrives.
+    last_telemetry_ms: Option<i64>,
 }
 
 impl ZenSight {
@@ -238,6 +242,8 @@ impl ZenSight {
                 crate::store::MetricStore::with_default_persistence()
             },
             ticks_since_flush: 0,
+            // Demo mode pre-loads mock points; treat the feed as fresh on boot.
+            last_telemetry_ms: if demo_mode { Some(now_ms()) } else { None },
         };
 
         (app, Task::none())
@@ -357,6 +363,9 @@ impl ZenSight {
                 self.dashboard.connection_state =
                     crate::view::dashboard::ConnectionState::Disconnected;
                 self.dashboard.last_error = Some(error);
+                // The feed is paused now; drop the freshness anchor so the
+                // indicator reads "Paused", not a stale "as of" from before.
+                self.last_telemetry_ms = None;
             }
 
             Message::SensorOnline(protocol) => {
@@ -1416,6 +1425,8 @@ impl ZenSight {
             device_name,
             self.dashboard.connection_state,
             unack,
+            self.last_telemetry_ms,
+            now_ms(),
             main_view,
         );
 
@@ -1488,6 +1499,12 @@ impl ZenSight {
         // Write through to the local tiered store (O(1) hot-ring append; numeric
         // values only). Charts/trends read back from here so history survives restart.
         self.store.record(&point);
+
+        // Track the newest point for the global freshness verdict (#23).
+        self.last_telemetry_ms = Some(
+            self.last_telemetry_ms
+                .map_or(point.timestamp, |prev| prev.max(point.timestamp)),
+        );
 
         let device_id = DeviceId::from_telemetry(&point);
 
@@ -1708,6 +1725,14 @@ impl ZenSight {
             }
         }
     }
+}
+
+/// Current wall-clock time in epoch milliseconds.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Convert a telemetry value to f64 for alert checking.

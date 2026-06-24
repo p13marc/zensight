@@ -84,8 +84,42 @@ fn shell_ui() -> iced_test::Simulator<'static, Message> {
         None,
         ConnectionState::Connected,
         0,
+        Some(10_000),
+        12_000,
         content,
     ))
+}
+
+/// The shell top bar shows the global freshness verdict. Connected with a
+/// recent point reads "Live"; disconnected reads "Paused".
+#[test]
+fn test_shell_shows_freshness_live() {
+    let content = iced::widget::text("content").into();
+    let mut ui = simulator(zensight::view::shell::app_shell(
+        CurrentView::Dashboard,
+        None,
+        ConnectionState::Connected,
+        0,
+        Some(10_000),
+        12_000, // 2s after last point => Live
+        content,
+    ));
+    assert!(ui.find("Live").is_ok());
+}
+
+#[test]
+fn test_shell_shows_freshness_paused() {
+    let content = iced::widget::text("content").into();
+    let mut ui = simulator(zensight::view::shell::app_shell(
+        CurrentView::Dashboard,
+        None,
+        ConnectionState::Disconnected,
+        0,
+        None,
+        12_000,
+        content,
+    ));
+    assert!(ui.find("Paused").is_ok());
 }
 
 /// The nav rail's Settings button emits OpenSettings.

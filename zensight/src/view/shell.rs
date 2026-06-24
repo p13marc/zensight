@@ -166,12 +166,15 @@ fn connection_status<'a>(connection: ConnectionState) -> Element<'a, Message> {
         .into()
 }
 
-/// The top bar: breadcrumb (left) · alert badge + connection status (right).
+/// The top bar: breadcrumb (left) · alert badge + freshness + connection (right).
+#[allow(clippy::too_many_arguments)]
 fn top_bar<'a>(
     current: CurrentView,
     device: Option<&'a str>,
     connection: ConnectionState,
     alert_count: usize,
+    last_update_ms: Option<i64>,
+    now_ms: i64,
 ) -> Element<'a, Message> {
     let spacer = container(text("")).width(Length::Fill);
 
@@ -191,6 +194,13 @@ fn top_bar<'a>(
             .style(iced::widget::button::danger),
         );
     }
+    // Global data-freshness verdict (Live / Stale / Paused + "as of HH:MM:SS").
+    let connected = matches!(connection, ConnectionState::Connected);
+    right = right.push(crate::view::freshness::freshness_indicator(
+        connected,
+        last_update_ms,
+        now_ms,
+    ));
     right = right.push(connection_status(connection));
 
     container(
@@ -213,17 +223,27 @@ fn top_bar<'a>(
 }
 
 /// Wrap a page `content` in the persistent shell (nav rail + top bar).
+#[allow(clippy::too_many_arguments)]
 pub fn app_shell<'a>(
     current: CurrentView,
     device: Option<&'a str>,
     connection: ConnectionState,
     alert_count: usize,
+    last_update_ms: Option<i64>,
+    now_ms: i64,
     content: Element<'a, Message>,
 ) -> Element<'a, Message> {
     row![
         nav_rail(current),
         column![
-            top_bar(current, device, connection, alert_count),
+            top_bar(
+                current,
+                device,
+                connection,
+                alert_count,
+                last_update_ms,
+                now_ms
+            ),
             container(content).width(Length::Fill).height(Length::Fill),
         ]
         .width(Length::Fill)
