@@ -42,6 +42,17 @@ async fn main() -> Result<()> {
     // Spawn the collector task
     let mut runner = runner;
 
+    // Spawn the on-demand per-process detail query channel (P2): the per-pid
+    // firehose is served only on query, never streamed onto the telemetry bus.
+    if sysinfo_config.collect.process_query {
+        let q_session = session.clone();
+        let q_prefix = sysinfo_config.key_prefix.clone();
+        let q_host = hostname.clone();
+        runner.spawn(async move {
+            zensight_sensor_sysinfo::query::run(q_session, q_prefix, q_host).await;
+        });
+    }
+
     // Create and spawn the collector
     let collector = SystemCollector::new(hostname, sysinfo_config, session, Format::Json)
         .with_health(runner.health());

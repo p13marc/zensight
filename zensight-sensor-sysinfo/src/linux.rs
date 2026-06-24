@@ -6,7 +6,12 @@
 //! - Temperature sensors (via hwmon)
 //! - TCP connection state counts
 
-use procfs::CurrentSI;
+use crate::map::{
+    BatteryReading, CgroupSample, FanReading, FdStat, InodeStat, KernelDerivatives, NetDevStat,
+    PressureSample, PsiSample, RaplDomain, VmStat, parse_cgroup_scalar, parse_file_nr,
+    parse_flat_kv, parse_net_dev, parse_pressure_file, parse_vmstat,
+};
+use procfs::{Current, CurrentSI};
 use std::collections::HashMap;
 use tracing::warn;
 
@@ -383,6 +388,346 @@ impl Default for LinuxMetrics {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ===========================================================================
+// Wave 1 saturation/error collectors (stateless reads → pure map sample types)
+// ===========================================================================
+
+/// Convert a procfs `PressureRecord` into our plain owned sample.
+fn pressure_sample(r: &procfs::PressureRecord) -> PressureSample {
+    PressureSample {
+        avg10: r.avg10 as f64,
+        avg60: r.avg60 as f64,
+        avg300: r.avg300 as f64,
+        total_us: r.total,
+    }
+}
+
+/// Collect `/proc/pressure/{cpu,memory,io}` via the typed procfs PSI structs.
+///
+/// Returns `None` only if no resource could be read at all (e.g. kernel built
+/// without `CONFIG_PSI`); individual missing resources are left as `None` so
+/// the mapper skips them rather than emitting misleading zeros.
+pub fn collect_psi() -> Option<PsiSample> {
+    let cpu = procfs::CpuPressure::current().ok();
+    let mem = procfs::MemoryPressure::current().ok();
+    let io = procfs::IoPressure::current().ok();
+
+    if cpu.is_none() && mem.is_none() && io.is_none() {
+        return None;
+    }
+
+    Some(PsiSample {
+        cpu_some: cpu.map(|c| pressure_sample(&c.some)),
+        memory_some: mem.as_ref().map(|m| pressure_sample(&m.some)),
+        memory_full: mem.as_ref().map(|m| pressure_sample(&m.full)),
+        io_some: io.as_ref().map(|i| pressure_sample(&i.some)),
+        io_full: io.as_ref().map(|i| pressure_sample(&i.full)),
+    })
+}
+
+/// Read and parse `/proc/vmstat` into the allowlisted saturation subset.
+/// Returns `None` if the file is unreadable (skip the collector this tick).
+pub fn collect_vmstat() -> Option<VmStat> {
+    match std::fs::read_to_string("/proc/vmstat") {
+        Ok(content) => Some(parse_vmstat(&content)),
+        Err(e) => {
+            warn!(error = %e, "Failed to read /proc/vmstat");
+            None
+        }
+    }
+}
+
+/// Collect `/proc/stat` derivatives from the typed `procfs::KernelStats`.
+pub fn collect_kernel_derivatives() -> Option<KernelDerivatives> {
+    match procfs::KernelStats::current() {
+        Ok(stat) => Some(KernelDerivatives {
+            context_switches: stat.ctxt,
+            forks: stat.processes,
+            procs_running: stat.procs_running,
+            procs_blocked: stat.procs_blocked,
+        }),
+        Err(e) => {
+            warn!(error = %e, "Failed to read /proc/stat for kernel derivatives");
+            None
+        }
+    }
+}
+
+/// Read and parse `/proc/sys/fs/file-nr` into FD-table occupancy.
+pub fn collect_fd() -> Option<FdStat> {
+    match std::fs::read_to_string("/proc/sys/fs/file-nr") {
+        Ok(content) => parse_file_nr(&content),
+        Err(e) => {
+            warn!(error = %e, "Failed to read /proc/sys/fs/file-nr");
+            None
+        }
+    }
+}
+
+/// Collect per-mount inode occupancy via `statvfs()`. `mounts` is the already
+/// filtered `(mount_point, fs_type)` list (small, bounded — fine inline). A
+/// mount that fails `statvfs` (e.g. autofs not yet triggered) is skipped, and
+/// filesystems reporting zero total inodes (many pseudo/btrfs mounts) are
+/// omitted to avoid meaningless 0/0 series.
+pub fn collect_inodes(mounts: &[(String, String)]) -> Vec<InodeStat> {
+    let mut out = Vec::with_capacity(mounts.len());
+    for (mount, fs_type) in mounts {
+        match rustix::fs::statvfs(mount.as_str()) {
+            Ok(vfs) => {
+                if vfs.f_files == 0 {
+                    continue;
+                }
+                let total = vfs.f_files;
+                let free = vfs.f_ffree;
+                out.push(InodeStat {
+                    mount: mount.clone(),
+                    fs_type: fs_type.clone(),
+                    total,
+                    free,
+                    used: total.saturating_sub(free),
+                });
+            }
+            Err(e) => {
+                warn!(mount = %mount, error = %e, "statvfs failed; skipping inode stats");
+            }
+        }
+    }
+    out
+}
+
+/// Read and parse `/proc/net/dev` into per-interface drop/fifo/frame counters.
+pub fn collect_net_dev() -> Vec<NetDevStat> {
+    match std::fs::read_to_string("/proc/net/dev") {
+        Ok(content) => parse_net_dev(&content),
+        Err(e) => {
+            warn!(error = %e, "Failed to read /proc/net/dev");
+            Vec::new()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// E. cgroup-v2 (container saturation)
+// ---------------------------------------------------------------------------
+
+const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
+/// Resolve this process's own cgroup-v2 path from `/proc/self/cgroup`. The v2
+/// line is `0::<path>`; returns `<path>` (e.g. `/system.slice/foo.service`),
+/// or `None` if the host is not running unified cgroup-v2.
+fn own_cgroup_path() -> Option<String> {
+    let content = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    for line in content.lines() {
+        // Format: hierarchy-ID:controller-list:cgroup-path. v2 is `0::<path>`.
+        let mut parts = line.splitn(3, ':');
+        let hid = parts.next()?;
+        let controllers = parts.next()?;
+        let path = parts.next()?;
+        if hid == "0" && controllers.is_empty() {
+            return Some(path.to_string());
+        }
+    }
+    None
+}
+
+/// Read a single cgroup-v2 controller file relative to the cgroup dir, returning
+/// its trimmed contents (or `None` if absent / unreadable — a controller may not
+/// be enabled for this cgroup).
+fn read_cgroup_file(cgroup_path: &str, file: &str) -> Option<String> {
+    // cgroup_path is absolute-from-root (starts with `/`); join under the mount.
+    let full = format!("{CGROUP_ROOT}{cgroup_path}/{file}");
+    std::fs::read_to_string(full).ok()
+}
+
+/// Collect the cgroup-v2 saturation sample for a single cgroup path. Reads
+/// `cpu.stat`, `memory.{current,max,events}`, and the `{cpu,memory,io}.pressure`
+/// PSI files. Every missing file degrades to `None` for that field.
+pub fn collect_cgroup(cgroup_path: &str) -> CgroupSample {
+    let mut s = CgroupSample {
+        path: cgroup_path.to_string(),
+        ..Default::default()
+    };
+
+    if let Some(cpu_stat) = read_cgroup_file(cgroup_path, "cpu.stat") {
+        let kv = parse_flat_kv(&cpu_stat);
+        s.cpu_nr_throttled = kv.get("nr_throttled").copied();
+        s.cpu_throttled_usec = kv.get("throttled_usec").copied();
+    }
+    if let Some(cur) = read_cgroup_file(cgroup_path, "memory.current") {
+        s.memory_current = parse_cgroup_scalar(&cur);
+    }
+    if let Some(max) = read_cgroup_file(cgroup_path, "memory.max") {
+        s.memory_max = parse_cgroup_scalar(&max);
+    }
+    if let Some(events) = read_cgroup_file(cgroup_path, "memory.events") {
+        let kv = parse_flat_kv(&events);
+        s.memory_oom_kills = kv.get("oom_kill").copied();
+        s.memory_oom = kv.get("oom").copied();
+    }
+    if let Some(p) = read_cgroup_file(cgroup_path, "cpu.pressure") {
+        let (some, _full) = parse_pressure_file(&p);
+        s.cpu_pressure_some = some;
+    }
+    if let Some(p) = read_cgroup_file(cgroup_path, "memory.pressure") {
+        let (some, full) = parse_pressure_file(&p);
+        s.memory_pressure_some = some;
+        s.memory_pressure_full = full;
+    }
+    if let Some(p) = read_cgroup_file(cgroup_path, "io.pressure") {
+        let (some, full) = parse_pressure_file(&p);
+        s.io_pressure_some = some;
+        s.io_pressure_full = full;
+    }
+    s
+}
+
+/// Collect cgroup samples for the configured set of cgroups. If `extra` is empty
+/// only the sensor's own cgroup is read; otherwise each configured path is read
+/// too. Returns `None` only when cgroup-v2 is not present at all (no own cgroup
+/// and no `cpu.stat` under the root), so the collector skips cleanly on
+/// non-container / cgroup-v1 hosts.
+pub fn collect_cgroups(extra: &[String]) -> Option<Vec<CgroupSample>> {
+    // Cheap presence check: the unified hierarchy exposes cgroup.controllers.
+    if !std::path::Path::new(&format!("{CGROUP_ROOT}/cgroup.controllers")).exists() {
+        return None;
+    }
+    let mut out = Vec::new();
+    if let Some(own) = own_cgroup_path() {
+        out.push(collect_cgroup(&own));
+    }
+    for p in extra {
+        // Avoid duplicating the own cgroup if listed explicitly.
+        if out.iter().any(|s| &s.path == p) {
+            continue;
+        }
+        out.push(collect_cgroup(p));
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+// ---------------------------------------------------------------------------
+// G. Thermal / power depth (RAPL, fans, battery, entropy)
+// ---------------------------------------------------------------------------
+
+/// Read every RAPL energy zone under `/sys/class/powercap/`. Each `intel-rapl*`
+/// directory has `name`, `energy_uj`, and `max_energy_range_uj`. Skips zones
+/// without an energy counter. Empty on no-RAPL hardware / no permission.
+pub fn collect_rapl() -> Vec<RaplDomain> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/sys/class/powercap") else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        let zone = entry.file_name().to_string_lossy().to_string();
+        // Only energy zones expose energy_uj.
+        let Some(energy_uj) = std::fs::read_to_string(dir.join("energy_uj"))
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+        else {
+            continue;
+        };
+        let name = std::fs::read_to_string(dir.join("name"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| zone.clone());
+        let max_energy_uj = std::fs::read_to_string(dir.join("max_energy_range_uj"))
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        out.push(RaplDomain {
+            zone,
+            name,
+            energy_uj,
+            max_energy_uj,
+        });
+    }
+    out
+}
+
+/// Read all hwmon `fan*_input` (RPM) readings. Mirrors the temperature walk.
+pub fn collect_fans() -> Vec<FanReading> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/sys/class/hwmon") else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let hwmon = entry.path();
+        let chip = std::fs::read_to_string(hwmon.join("name"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+        let Ok(files) = std::fs::read_dir(&hwmon) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let fname = file.file_name().to_string_lossy().to_string();
+            if !fname.starts_with("fan") || !fname.ends_with("_input") {
+                continue;
+            }
+            let num = fname
+                .strip_prefix("fan")
+                .and_then(|s| s.strip_suffix("_input"))
+                .unwrap_or("0");
+            let Some(rpm) = std::fs::read_to_string(hwmon.join(&fname))
+                .ok()
+                .and_then(|s| s.trim().parse::<f64>().ok())
+            else {
+                continue;
+            };
+            // A zero reading is usually an unconnected header; skip the noise.
+            if rpm == 0.0 {
+                continue;
+            }
+            let label = std::fs::read_to_string(hwmon.join(format!("fan{num}_label")))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| format!("fan{num}"));
+            out.push(FanReading {
+                chip: chip.clone(),
+                label,
+                rpm,
+            });
+        }
+    }
+    out
+}
+
+/// Read battery / power-supply state from `/sys/class/power_supply/*` for
+/// supplies of type `Battery` (capacity + status). AC adapters are skipped.
+pub fn collect_batteries() -> Vec<BatteryReading> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/sys/class/power_supply") else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        let kind = std::fs::read_to_string(dir.join("type"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if kind != "Battery" {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let capacity = std::fs::read_to_string(dir.join("capacity"))
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok());
+        let status = std::fs::read_to_string(dir.join("status"))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        out.push(BatteryReading {
+            name,
+            capacity,
+            status,
+        });
+    }
+    out
+}
+
+/// Read the kernel entropy pool fill (`/proc/sys/kernel/random/entropy_avail`).
+pub fn collect_entropy() -> Option<u64> {
+    std::fs::read_to_string("/proc/sys/kernel/random/entropy_avail")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
 }
 
 #[cfg(test)]

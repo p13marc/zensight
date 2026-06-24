@@ -1,6 +1,6 @@
 //! Alerts view for threshold-based notifications.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use iced::widget::{
     Column, Row, column, container, pick_list, row, rule, scrollable, text, text_input, tooltip,
@@ -15,6 +15,14 @@ use crate::view::components::{badge, section_header};
 use crate::view::formatting::{format_timestamp, format_value};
 use crate::view::icons::{self, IconSize};
 use crate::view::tokens::{font, space};
+
+/// Current wall-clock time in epoch milliseconds.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 /// Alert rule definition.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -258,7 +266,26 @@ pub struct AlertsState {
     /// `alert_key`s of external alerts the user has acknowledged. Acknowledged
     /// alerts stay visible (dimmed) but drop out of the active count / badge.
     acknowledged_external: HashSet<String>,
+    /// Silenced sources (#26, Alertmanager model): `source` -> expiry epoch ms.
+    /// While silenced, that source's incidents are hidden and excluded from the
+    /// active count, with a muted-count chip surfaced instead.
+    silenced_sources: HashMap<String, i64>,
+    /// Per-`alert_key` incident timeline: firing→resolved transitions (#26).
+    /// Bounded to the most recent transitions so it never grows unbounded.
+    timelines: HashMap<String, VecDeque<TransitionEvent>>,
 }
+
+/// One firing/resolved transition in an incident's timeline (#26).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransitionEvent {
+    /// The state entered at this transition.
+    pub state: SensorAlertState,
+    /// When it happened (epoch ms).
+    pub at: i64,
+}
+
+/// Max transitions kept per incident timeline (bounded buffer).
+const MAX_TIMELINE_EVENTS: usize = 32;
 
 /// A group of firing external alerts from one source (an "incident"), for the
 /// grouped/acknowledge-able anomalies feed.
@@ -308,6 +335,8 @@ impl AlertsState {
             test_result: None,
             external: HashMap::new(),
             acknowledged_external: HashSet::new(),
+            silenced_sources: HashMap::new(),
+            timelines: HashMap::new(),
         }
     }
 
@@ -319,6 +348,7 @@ impl AlertsState {
         match alert.state {
             SensorAlertState::Resolved => {
                 if self.external.remove(&key).is_some() {
+                    self.record_transition(&key, SensorAlertState::Resolved, alert.timestamp);
                     ExternalAlertOutcome::Resolved
                 } else {
                     ExternalAlertOutcome::Unknown
@@ -328,12 +358,68 @@ impl AlertsState {
                 let outcome = if self.external.contains_key(&key) {
                     ExternalAlertOutcome::Updated
                 } else {
+                    // Only a fresh firing (not an update of an existing one) is a
+                    // new timeline transition.
+                    self.record_transition(&key, SensorAlertState::Firing, alert.timestamp);
                     ExternalAlertOutcome::New
                 };
                 self.external.insert(key, alert);
                 outcome
             }
         }
+    }
+
+    /// Append a transition to an incident's bounded timeline (#26).
+    fn record_transition(&mut self, key: &str, state: SensorAlertState, at: i64) {
+        let tl = self.timelines.entry(key.to_string()).or_default();
+        tl.push_back(TransitionEvent { state, at });
+        while tl.len() > MAX_TIMELINE_EVENTS {
+            tl.pop_front();
+        }
+    }
+
+    /// The recorded transition timeline for an incident, oldest-first (#26).
+    pub fn timeline(&self, alert_key: &str) -> Vec<TransitionEvent> {
+        self.timelines
+            .get(alert_key)
+            .map(|d| d.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Silence (mute) a source until `now + duration_ms` (#26). While silenced,
+    /// its incidents are hidden and excluded from the active count.
+    pub fn silence_source(&mut self, source: &str, now_ms: i64, duration_ms: i64) {
+        self.silenced_sources
+            .insert(source.to_string(), now_ms + duration_ms);
+    }
+
+    /// Lift a silence on a source immediately.
+    pub fn unsilence_source(&mut self, source: &str) {
+        self.silenced_sources.remove(source);
+    }
+
+    /// Whether `source` is currently silenced at `now_ms` (expired silences are
+    /// treated as lifted; callers may also prune via [`Self::prune_silences`]).
+    pub fn is_silenced(&self, source: &str, now_ms: i64) -> bool {
+        self.silenced_sources
+            .get(source)
+            .is_some_and(|&expiry| expiry > now_ms)
+    }
+
+    /// Drop expired silences. Call on tick. Returns how many were lifted.
+    pub fn prune_silences(&mut self, now_ms: i64) -> usize {
+        let before = self.silenced_sources.len();
+        self.silenced_sources
+            .retain(|_, &mut expiry| expiry > now_ms);
+        before - self.silenced_sources.len()
+    }
+
+    /// Count of currently-silenced sources at `now_ms` (for the muted chip).
+    pub fn silenced_count(&self, now_ms: i64) -> usize {
+        self.silenced_sources
+            .values()
+            .filter(|&&e| e > now_ms)
+            .count()
     }
 
     /// Clear an external alert by its key (resolve tombstone / Delete). Returns
@@ -374,12 +460,22 @@ impl AlertsState {
             .extend(self.external.keys().cloned());
     }
 
+    /// Firing external alerts grouped by source (current time). Silenced sources
+    /// are hidden. See [`Self::external_by_source_at`] for a clock-injected form.
+    pub fn external_by_source(&self) -> Vec<ExternalIncident<'_>> {
+        self.external_by_source_at(now_ms())
+    }
+
     /// Firing external alerts grouped by source, each group sorted by severity
     /// then recency, with its un-acknowledged count and highest severity. Groups
-    /// are ordered by (has-unacked, highest-severity, source).
-    pub fn external_by_source(&self) -> Vec<ExternalIncident<'_>> {
+    /// are ordered by (has-unacked, highest-severity, source). Sources silenced
+    /// at `now_ms` are excluded (#26). Pure given the clock.
+    pub fn external_by_source_at(&self, now_ms: i64) -> Vec<ExternalIncident<'_>> {
         let mut by_source: HashMap<&str, Vec<&SensorAlert>> = HashMap::new();
         for alert in self.external.values() {
+            if self.is_silenced(&alert.source, now_ms) {
+                continue;
+            }
             by_source.entry(&alert.source).or_default().push(alert);
         }
         let mut groups: Vec<ExternalIncident<'_>> = by_source
@@ -412,11 +508,15 @@ impl AlertsState {
         groups
     }
 
-    /// Count of *un-acknowledged* firing external alerts (for the sidebar badge).
+    /// Count of *un-acknowledged*, *non-silenced* firing external alerts (badge).
     pub fn external_count(&self) -> usize {
+        let now = now_ms();
         self.external
-            .keys()
-            .filter(|k| !self.acknowledged_external.contains(*k))
+            .values()
+            .filter(|a| {
+                !self.acknowledged_external.contains(&a.alert_key())
+                    && !self.is_silenced(&a.source, now)
+            })
             .count()
     }
 
@@ -909,7 +1009,13 @@ fn render_external_alerts_section(state: &AlertsState) -> Element<'_, Message> {
     } else {
         None
     };
-    let section_title = section_header(format!("Anomalies & Expectations ({total})"), actions);
+    let muted = state.silenced_count(now_ms());
+    let title = if muted > 0 {
+        format!("Anomalies & Expectations ({total}) · {muted} muted")
+    } else {
+        format!("Anomalies & Expectations ({total})")
+    };
+    let section_title = section_header(title, actions);
 
     if groups.is_empty() {
         return column![
@@ -962,21 +1068,62 @@ fn render_incident<'a>(
     .spacing(space::SM)
     .align_y(Alignment::Center);
 
+    // Right-aligned action cluster: Ack (if unacked) + Mute 1h/4h/24h (#26).
+    let spacer = container(text("")).width(Length::Fill);
+    header = header.push(spacer);
     if incident.unacked > 0 {
-        let spacer = container(text("")).width(Length::Fill);
         let ack = button(text("Ack").size(font::CAPTION))
-            .on_press(Message::AcknowledgeExternalSource(incident.source.to_string()))
+            .on_press(Message::AcknowledgeExternalSource(
+                incident.source.to_string(),
+            ))
             .padding([space::XS, space::SM])
             .style(iced::widget::button::secondary);
-        header = header.push(spacer).push(ack);
+        header = header.push(ack);
+    }
+    for (label, dur) in [
+        ("Mute 1h", 3_600_000i64),
+        ("4h", 14_400_000),
+        ("24h", 86_400_000),
+    ] {
+        header = header.push(
+            button(text(label).size(font::CAPTION))
+                .on_press(Message::SilenceSource(incident.source.to_string(), dur))
+                .padding([space::XS, space::SM])
+                .style(iced::widget::button::text),
+        );
     }
 
     let mut col = Column::new().spacing(2).push(header);
     for alert in &incident.alerts {
         let acked = state.is_external_acked(&alert.alert_key());
         col = col.push(render_external_alert_row(alert, acked));
+        // Incident timeline strip: firing→resolved transitions (#26).
+        let tl = state.timeline(&alert.alert_key());
+        if tl.len() > 1 {
+            col = col.push(render_timeline(&tl));
+        }
     }
     col.into()
+}
+
+/// Render an incident timeline strip: "Firing 10:42 → Resolved 10:45 → ..." (#26).
+fn render_timeline<'a>(events: &[TransitionEvent]) -> Element<'a, Message> {
+    let parts: Vec<String> = events
+        .iter()
+        .map(|e| {
+            let state = match e.state {
+                SensorAlertState::Firing => "Firing",
+                SensorAlertState::Resolved => "Resolved",
+            };
+            format!("{state} {}", format_timestamp(e.at))
+        })
+        .collect();
+    text(format!("  {}", parts.join(" → ")))
+        .size(font::CAPTION)
+        .style(|theme: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(theme).text_dimmed()),
+        })
+        .into()
 }
 
 /// Render a single sensor-pushed alert row (dimmed when acknowledged).
@@ -1274,6 +1421,67 @@ mod tests {
     }
 
     #[test]
+    fn silence_hides_source_and_expires() {
+        use zensight_common::AlertSeverity;
+        let mut state = AlertsState::new();
+        state.ingest_external(ext_alert("ssh", AlertSeverity::Critical));
+        assert_eq!(state.external_by_source_at(0).len(), 1);
+
+        // Silence host1 for 1h at t=0.
+        state.silence_source("host1", 0, 3_600_000);
+        assert!(state.is_silenced("host1", 1_000));
+        assert_eq!(state.silenced_count(1_000), 1);
+        // Hidden while silenced.
+        assert!(state.external_by_source_at(1_000).is_empty());
+        // Expired after the window: visible again, count 0.
+        assert!(!state.is_silenced("host1", 3_600_001));
+        assert_eq!(state.external_by_source_at(3_600_001).len(), 1);
+        // Prune drops the expired silence.
+        assert_eq!(state.prune_silences(3_600_001), 1);
+        assert_eq!(state.silenced_count(3_600_001), 0);
+    }
+
+    #[test]
+    fn unsilence_lifts_immediately() {
+        let mut state = AlertsState::new();
+        state.silence_source("h", 0, 3_600_000);
+        assert!(state.is_silenced("h", 10));
+        state.unsilence_source("h");
+        assert!(!state.is_silenced("h", 10));
+    }
+
+    #[test]
+    fn timeline_records_firing_resolved_transitions() {
+        use zensight_common::AlertSeverity;
+        let mut state = AlertsState::new();
+        let mut a = ext_alert("ssh", AlertSeverity::Warning);
+        a.timestamp = 1_000;
+        let key = a.alert_key();
+        state.ingest_external(a.clone());
+        // A repeat firing (update) does NOT add a transition.
+        let mut a2 = a.clone();
+        a2.timestamp = 1_500;
+        state.ingest_external(a2);
+        // Resolve adds a Resolved transition.
+        let mut r = a.resolved();
+        r.timestamp = 2_000;
+        state.ingest_external(r);
+        // Fires again.
+        let mut a3 = ext_alert("ssh", AlertSeverity::Warning);
+        a3.timestamp = 3_000;
+        state.ingest_external(a3);
+
+        let tl = state.timeline(&key);
+        assert_eq!(tl.len(), 3);
+        assert_eq!(tl[0].state, SensorAlertState::Firing);
+        assert_eq!(tl[0].at, 1_000);
+        assert_eq!(tl[1].state, SensorAlertState::Resolved);
+        assert_eq!(tl[1].at, 2_000);
+        assert_eq!(tl[2].state, SensorAlertState::Firing);
+        assert_eq!(tl[2].at, 3_000);
+    }
+
+    #[test]
     fn active_external_sorted_by_severity() {
         use zensight_common::AlertSeverity;
         let mut state = AlertsState::new();
@@ -1289,7 +1497,14 @@ mod tests {
     fn external_grouping_and_acknowledge() {
         use zensight_common::{AlertKind, AlertSeverity};
         let mk = |source: &str, rule: &str, sev| {
-            SensorAlert::new(source, Protocol::Netlink, AlertKind::Anomaly, rule, sev, "s")
+            SensorAlert::new(
+                source,
+                Protocol::Netlink,
+                AlertKind::Anomaly,
+                rule,
+                sev,
+                "s",
+            )
         };
         let mut state = AlertsState::new();
         state.ingest_external(mk("hostA", "r1", AlertSeverity::Warning));

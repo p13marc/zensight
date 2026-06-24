@@ -13,6 +13,14 @@ pub enum Message {
     /// Telemetry received from Zenoh subscription.
     TelemetryReceived(TelemetryPoint),
 
+    /// A periodic off-thread store flush finished. Payload is the number of
+    /// downsampled buckets persisted (or `Err` with a message on failure). #22.
+    StoreFlushed(Result<usize, String>),
+
+    /// Off-thread history pre-load for a device finished (#22): metric name ->
+    /// merged (warm/cold) samples to seed the device detail chart on open.
+    DeviceHistoryLoaded(DeviceId, Vec<(String, Vec<crate::store::Sample>)>),
+
     /// Sensor health snapshot received.
     HealthSnapshotReceived(HealthSnapshot),
 
@@ -92,6 +100,9 @@ pub enum Message {
     FetchNetringFlows,
     /// A netring flow-detail reply: the decoded flows, or an error message.
     NetringFlowsReceived(Result<Vec<zensight_common::FlowRecord>, String>),
+    /// Netring flows fetched for deriving real topology edges (#25). Distinct
+    /// from NetringFlowsReceived so it doesn't disturb the device flow panel.
+    TopologyFlowsReceived(Result<Vec<zensight_common::FlowRecord>, String>),
     /// Fetch the on-demand netring TLS asset inventory.
     FetchNetringTls,
     /// A netring TLS-inventory reply: the decoded records, or an error message.
@@ -271,6 +282,18 @@ pub enum Message {
     AcknowledgeExternalSource(String),
     /// Acknowledge all firing external alerts.
     AcknowledgeAllExternal,
+
+    /// Silence (mute) a source for the given duration in ms (#26).
+    SilenceSource(String, i64),
+    /// Lift a silence on a source (#26).
+    UnsilenceSource(String),
+
+    /// Open the global cross-device metric search panel (#27).
+    OpenGlobalSearch,
+    /// Close the global search panel (#27).
+    CloseGlobalSearch,
+    /// Update the global search query (#27).
+    SetGlobalSearch(String),
 
     /// Clear all alerts.
     ClearAlerts,

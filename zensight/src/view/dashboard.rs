@@ -321,6 +321,7 @@ impl DashboardState {
 }
 
 /// Render the dashboard view.
+#[allow(clippy::too_many_arguments)]
 pub fn dashboard_view<'a>(
     state: &'a DashboardState,
     theme: AppTheme,
@@ -328,6 +329,7 @@ pub fn dashboard_view<'a>(
     groups: &'a GroupsState,
     overview: &'a OverviewState,
     sensor_health: &'a HashMap<String, HealthSnapshot>,
+    mut sparks: crate::view::trend::DeviceSparks,
 ) -> Element<'a, Message> {
     // Compute filtered devices once and pass through to avoid redundant work
     let filtered = state.filtered_devices();
@@ -337,7 +339,7 @@ pub fn dashboard_view<'a>(
     let filters = render_protocol_filters(state, &filtered);
     let group_filters = group_filter_bar(groups);
     let overview_panel = overview_section(overview, &state.devices);
-    let devices = render_device_grid(state, groups, &filtered);
+    let devices = render_device_grid(state, groups, &filtered, &mut sparks);
 
     let content = column![
         header,
@@ -393,12 +395,30 @@ fn render_header(
     .on_press(Message::ToggleDashboardViewMode)
     .style(iced::widget::button::secondary);
 
+    // Global metric search trigger (Ctrl+K) — discoverable button (#27).
+    let search_button = button(
+        row![
+            icons::search(IconSize::Medium),
+            text("Search (Ctrl+K)").size(14)
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    )
+    .on_press(Message::OpenGlobalSearch)
+    .style(iced::widget::button::secondary);
+
     // Connection status + primary navigation (Alerts/Topology/Settings) now live
     // in the persistent app shell (view/shell.rs), so the dashboard header keeps
     // only its page-local controls.
-    let header_row = row![title, device_count, view_mode_button, theme_button]
-        .spacing(20)
-        .align_y(Alignment::Center);
+    let header_row = row![
+        title,
+        device_count,
+        search_button,
+        view_mode_button,
+        theme_button
+    ]
+    .spacing(20)
+    .align_y(Alignment::Center);
 
     let mut header_col = Column::new().push(header_row);
 
@@ -530,6 +550,7 @@ fn render_device_grid<'a>(
     state: &'a DashboardState,
     groups: &'a GroupsState,
     filtered: &[&'a DeviceState],
+    sparks: &mut crate::view::trend::DeviceSparks,
 ) -> Element<'a, Message> {
     // Apply group filter on top of pre-computed protocol/search filter
     let all_devices: Vec<_> = filtered
@@ -563,7 +584,7 @@ fn render_device_grid<'a>(
 
     // Render based on view mode
     let content: Element<'a, Message> = match state.view_mode {
-        DashboardViewMode::Grid => render_device_cards(&devices, groups),
+        DashboardViewMode::Grid => render_device_cards(&devices, groups, sparks),
         DashboardViewMode::Table => render_device_table(devices),
     };
 
@@ -600,10 +621,11 @@ const CARD_MIN_WIDTH: f32 = 350.0;
 fn render_device_cards<'a>(
     devices: &[&'a DeviceState],
     groups: &'a GroupsState,
+    sparks: &mut crate::view::trend::DeviceSparks,
 ) -> Element<'a, Message> {
     let cards: Vec<Element<'a, Message>> = devices
         .iter()
-        .map(|device| render_device_card(device, groups))
+        .map(|device| render_device_card(device, groups, sparks.remove(&device.id)))
         .collect();
 
     // Use fluid grid layout - automatically adjusts columns based on container width
@@ -903,6 +925,7 @@ fn animated_status_indicator<'a>(status: DeviceStatus, size: f32) -> Element<'a,
 fn render_device_card<'a>(
     device: &'a DeviceState,
     groups: &'a GroupsState,
+    sparks: Option<Vec<crate::view::trend::MetricSpark>>,
 ) -> Element<'a, Message> {
     // Use effective_status which combines sensor liveness with local staleness detection
     let status = device.effective_status();
@@ -1001,7 +1024,16 @@ fn render_device_card<'a>(
             preview.push(text(format!("  ... and {} more", device.metrics.len() - 3)).size(11));
     }
 
-    let card_content = column![header, preview].spacing(5);
+    // 24h sparkline + trend badge strip for this device's key metrics (#24).
+    let mut card_content = column![header, preview].spacing(5);
+    if let Some(sparks) = sparks.filter(|s| !s.is_empty()) {
+        let mut spark_col = Column::new().spacing(2);
+        for spark in sparks {
+            spark_col = spark_col.push(crate::view::trend::card_metric_spark::<Message>(spark));
+        }
+        card_content = card_content.push(spark_col);
+    }
+    let card_content = card_content;
 
     let card_button = button(card_content)
         .on_press(Message::SelectDevice(device.id.clone()))

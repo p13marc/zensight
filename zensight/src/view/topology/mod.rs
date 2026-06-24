@@ -101,6 +101,7 @@ impl TopologyState {
                         is_healthy: device_state.is_healthy,
                         pinned: false,
                         alert: None,
+                        sensor_count: None,
                     },
                 );
             }
@@ -119,10 +120,9 @@ impl TopologyState {
             self.cache.clear();
         }
 
-        // Regenerate edges to reflect current network activity
-        if self.nodes.len() >= 2 {
-            self.generate_edges();
-        }
+        // NB: edges are derived from *observed* flow/neighbor data via
+        // `apply_flow_edges` (#25), not fabricated here. We no longer synthesize a
+        // demo mesh between active nodes.
     }
 
     /// Overlay firing sensor alerts onto nodes: a node whose `source` matches a
@@ -142,46 +142,42 @@ impl TopologyState {
         self.cache.clear();
     }
 
-    /// Generate edges between nodes.
-    /// Since sysinfo doesn't provide flow data, we create edges between
-    /// nodes that have network activity (simulating a mesh network).
-    fn generate_edges(&mut self) {
-        // Clear existing edges
-        self.edges.clear();
-
-        // Get nodes with network activity
-        let active_nodes: Vec<_> = self
-            .nodes
-            .values()
-            .filter(|n| n.network_rx.is_some() || n.network_tx.is_some())
-            .map(|n| n.id.clone())
-            .collect();
-
-        // Create edges between active nodes (mesh topology for demo)
-        for (i, from) in active_nodes.iter().enumerate() {
-            for to in active_nodes.iter().skip(i + 1) {
-                // Calculate bandwidth as average of both nodes' network I/O
-                let from_node = &self.nodes[from];
-                let to_node = &self.nodes[to];
-
-                let from_bytes =
-                    from_node.network_rx.unwrap_or(0) + from_node.network_tx.unwrap_or(0);
-                let to_bytes = to_node.network_rx.unwrap_or(0) + to_node.network_tx.unwrap_or(0);
-                let avg_bytes = (from_bytes + to_bytes) / 2;
-
-                self.edges.push(Edge {
-                    from: from.clone(),
-                    to: to.clone(),
-                    bytes: avg_bytes,
-                    packets: 0,
-                    protocol: Some("tcp".to_string()),
-                    last_seen: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as i64)
-                        .unwrap_or(0),
-                });
+    /// Annotate nodes with how many sensors have correlated each host (#25),
+    /// from the cross-sensor correlation map. Matches a node by id appearing in a
+    /// correlation entry's hostnames; aggregates the max sensor count seen.
+    pub fn apply_correlations(
+        &mut self,
+        correlations: &HashMap<String, zensight_common::CorrelationEntry>,
+    ) {
+        for node in self.nodes.values_mut() {
+            node.sensor_count = None;
+        }
+        for entry in correlations.values() {
+            let count = entry.sensors.len();
+            for host in &entry.hostnames {
+                if let Some(node) = self.nodes.get_mut(host) {
+                    node.sensor_count = Some(node.sensor_count.map_or(count, |c| c.max(count)));
+                }
             }
         }
+        self.cache.clear();
+    }
+
+    /// Replace the edge set with edges derived from *observed* netring flow
+    /// records (#25). `ip_to_node` maps an endpoint IP to a topology node id
+    /// (built from correlations / node sources). Flows whose src and dst both
+    /// resolve to (distinct) known nodes are aggregated into one edge per
+    /// unordered node pair, summing bytes/packets. Pure given its inputs; this
+    /// is the Hubble model — topology from live flow data, not config.
+    pub fn apply_flow_edges(
+        &mut self,
+        flows: &[zensight_common::FlowRecord],
+        ip_to_node: &HashMap<String, NodeId>,
+        now_ms: i64,
+    ) {
+        self.edges = edges_from_flows(flows, ip_to_node, now_ms);
+        self.selected_edge = None;
+        self.cache.clear();
     }
 
     /// Select a node by ID.
@@ -327,6 +323,10 @@ pub struct Node {
     pub pinned: bool,
     /// Highest-severity firing sensor alert for this host, if any (overlay).
     pub alert: Option<zensight_common::AlertSeverity>,
+    /// Number of sensors that have correlated this host (#25). `None` until a
+    /// correlation entry references it; surfaces the otherwise-dead correlations
+    /// map as a "seen by N sensors" node label.
+    pub sensor_count: Option<usize>,
 }
 
 impl Node {
@@ -397,13 +397,83 @@ pub struct Edge {
     pub last_seen: i64,
 }
 
+/// Extract the bare IP from an `ip:port` endpoint string. Handles IPv6 in
+/// brackets (`[::1]:443`) and bare IPs (no port). Pure.
+pub fn endpoint_ip(endpoint: &str) -> &str {
+    if let Some(rest) = endpoint.strip_prefix('[') {
+        // `[v6]:port` -> the part before `]`.
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    // `v4:port` -> before the (single) colon; bare IPv6 has many colons, no port.
+    match endpoint.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') && port.chars().all(|c| c.is_ascii_digit()) => {
+            host
+        }
+        _ => endpoint,
+    }
+}
+
+/// Aggregate observed flows into topology edges (#25). One edge per unordered
+/// pair of *distinct* known nodes, summing bytes/packets; the protocol of the
+/// highest-volume contributing flow labels the edge. Flows touching an unknown
+/// IP or a self-loop are skipped. Pure — the unit of testing for edge derivation.
+pub fn edges_from_flows(
+    flows: &[zensight_common::FlowRecord],
+    ip_to_node: &HashMap<String, NodeId>,
+    now_ms: i64,
+) -> Vec<Edge> {
+    // Keyed by ordered node pair so (a,b) and (b,a) aggregate together.
+    let mut acc: HashMap<(NodeId, NodeId), (u64, u64, String, u64)> = HashMap::new();
+    for f in flows {
+        let src_node = ip_to_node.get(endpoint_ip(&f.src));
+        let dst_node = ip_to_node.get(endpoint_ip(&f.dst));
+        let (Some(a), Some(b)) = (src_node, dst_node) else {
+            continue;
+        };
+        if a == b {
+            continue; // self-loop: same host both ends
+        }
+        let key = if a <= b {
+            (a.clone(), b.clone())
+        } else {
+            (b.clone(), a.clone())
+        };
+        let entry = acc.entry(key).or_insert((0, 0, f.proto.clone(), 0));
+        entry.0 += f.bytes;
+        entry.1 += f.packets;
+        // Label the edge with the protocol of its largest single flow.
+        if f.bytes > entry.3 {
+            entry.2 = f.proto.clone();
+            entry.3 = f.bytes;
+        }
+    }
+    let mut edges: Vec<Edge> = acc
+        .into_iter()
+        .map(|((from, to), (bytes, packets, protocol, _))| Edge {
+            from,
+            to,
+            bytes,
+            packets,
+            protocol: Some(protocol),
+            last_seen: now_ms,
+        })
+        .collect();
+    // Stable order: heaviest edges first, then by endpoints.
+    edges.sort_by(|a, b| {
+        b.bytes
+            .cmp(&a.bytes)
+            .then_with(|| (a.from.clone(), a.to.clone()).cmp(&(b.from.clone(), b.to.clone())))
+    });
+    edges
+}
+
 /// Render the topology view.
 pub fn topology_view<'a>(state: &'a TopologyState, theme: AppTheme) -> Element<'a, Message> {
     let is_dark = matches!(theme, AppTheme::Dark);
     let header = render_header(state);
     let graph = TopologyGraph::view(state, is_dark);
 
-    // Show selection panel if a node is selected
+    // Show the node panel, or the edge detail panel (#25), beside the graph.
     let main_content: Element<'a, Message> = if let Some(ref node_id) = state.selected_node {
         if let Some(node) = state.nodes.get(node_id) {
             let panel = render_node_info_panel(node);
@@ -411,6 +481,9 @@ pub fn topology_view<'a>(state: &'a TopologyState, theme: AppTheme) -> Element<'
         } else {
             graph
         }
+    } else if let Some(edge) = state.selected_edge.and_then(|i| state.edges.get(i)) {
+        let panel = render_edge_info_panel(edge);
+        row![graph, panel].spacing(10).into()
     } else {
         graph
     };
@@ -464,6 +537,11 @@ fn render_node_info_panel(node: &Node) -> Element<'_, Message> {
     };
 
     let mut info_items = column![header, status, rule::horizontal(1)].spacing(8);
+
+    // Cross-sensor correlation: "seen by N sensors" (#25).
+    if let Some(n) = node.sensor_count {
+        info_items = info_items.push(text(format!("Seen by {n} sensor(s)")).size(11));
+    }
 
     // System resources section
     let has_system_metrics = node.cpu_usage.is_some() || node.memory_usage.is_some();
@@ -541,6 +619,47 @@ fn render_node_info_panel(node: &Node) -> Element<'_, Message> {
     container(info_items)
         .padding(15)
         .width(Length::Fixed(200.0))
+        .style(container::rounded_box)
+        .into()
+}
+
+/// Render the edge detail panel (#25): src→dst, protocol, observed bytes/packets,
+/// and when last seen. Shown when an edge is selected.
+fn render_edge_info_panel(edge: &Edge) -> Element<'_, Message> {
+    use crate::view::formatting::format_timestamp;
+    use crate::view::topology::graph::format_bytes;
+    use iced::widget::rule;
+
+    let header = row![
+        icons::network(IconSize::Large),
+        text(format!("{} → {}", edge.from, edge.to)).size(15),
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
+
+    let proto = edge.protocol.as_deref().unwrap_or("?");
+    let mut items = column![
+        header,
+        rule::horizontal(1),
+        text("Observed flow").size(12),
+        text(format!("Protocol: {proto}")).size(11),
+        text(format!("Bytes: {}", format_bytes(edge.bytes))).size(11),
+        text(format!("Packets: {}", edge.packets)).size(11),
+        text(format!("Last seen: {}", format_timestamp(edge.last_seen))).size(11),
+    ]
+    .spacing(8);
+
+    items = items.push(rule::horizontal(1));
+    items = items.push(
+        button(text("Clear Selection").size(11))
+            .on_press(Message::TopologyClearSelection)
+            .style(iced::widget::button::secondary)
+            .width(Length::Fill),
+    );
+
+    container(items)
+        .padding(15)
+        .width(Length::Fixed(220.0))
         .style(container::rounded_box)
         .into()
 }
@@ -653,6 +772,82 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
 mod tests {
     use super::*;
 
+    fn flow(
+        src: &str,
+        dst: &str,
+        bytes: u64,
+        packets: u64,
+        proto: &str,
+    ) -> zensight_common::FlowRecord {
+        zensight_common::FlowRecord {
+            src: src.to_string(),
+            dst: dst.to_string(),
+            proto: proto.to_string(),
+            bytes,
+            packets,
+            duration_ms: 0,
+            reason: "fin".to_string(),
+        }
+    }
+
+    #[test]
+    fn endpoint_ip_parses_v4_v6_bare() {
+        assert_eq!(endpoint_ip("10.0.0.1:443"), "10.0.0.1");
+        assert_eq!(endpoint_ip("[2001:db8::1]:80"), "2001:db8::1");
+        assert_eq!(endpoint_ip("10.0.0.2"), "10.0.0.2"); // no port
+        assert_eq!(endpoint_ip("::1"), "::1"); // bare v6, no port
+    }
+
+    #[test]
+    fn edges_from_flows_aggregates_known_pairs() {
+        let mut map = HashMap::new();
+        map.insert("10.0.0.1".to_string(), "hostA".to_string());
+        map.insert("10.0.0.2".to_string(), "hostB".to_string());
+        let flows = vec![
+            flow("10.0.0.1:5000", "10.0.0.2:443", 1000, 10, "tcp"),
+            // Reverse direction aggregates into the same unordered pair.
+            flow("10.0.0.2:443", "10.0.0.1:5000", 500, 5, "tcp"),
+            // Touches an unknown IP -> skipped.
+            flow("10.0.0.1:5001", "8.8.8.8:53", 999, 9, "udp"),
+        ];
+        let edges = edges_from_flows(&flows, &map, 42);
+        assert_eq!(edges.len(), 1);
+        let e = &edges[0];
+        assert_eq!((e.from.as_str(), e.to.as_str()), ("hostA", "hostB"));
+        assert_eq!(e.bytes, 1500);
+        assert_eq!(e.packets, 15);
+        assert_eq!(e.last_seen, 42);
+        assert_eq!(e.protocol.as_deref(), Some("tcp"));
+    }
+
+    #[test]
+    fn edges_from_flows_skips_self_loops_and_unknown() {
+        let mut map = HashMap::new();
+        map.insert("10.0.0.1".to_string(), "hostA".to_string());
+        let flows = vec![
+            // self-loop (same node both ends) -> skipped
+            flow("10.0.0.1:1", "10.0.0.1:2", 100, 1, "tcp"),
+            // both unknown -> skipped
+            flow("1.1.1.1:1", "2.2.2.2:2", 100, 1, "tcp"),
+        ];
+        assert!(edges_from_flows(&flows, &map, 0).is_empty());
+    }
+
+    #[test]
+    fn edges_sorted_heaviest_first() {
+        let mut map = HashMap::new();
+        map.insert("a".to_string(), "a".to_string());
+        map.insert("b".to_string(), "b".to_string());
+        map.insert("c".to_string(), "c".to_string());
+        let flows = vec![
+            flow("a:1", "b:2", 100, 1, "tcp"),
+            flow("a:1", "c:2", 5000, 1, "tcp"),
+        ];
+        let edges = edges_from_flows(&flows, &map, 0);
+        assert_eq!(edges[0].bytes, 5000);
+        assert_eq!(edges[1].bytes, 100);
+    }
+
     #[test]
     fn test_topology_state_default() {
         let state = TopologyState::default();
@@ -698,6 +893,7 @@ mod tests {
                 is_healthy: true,
                 pinned: false,
                 alert: None,
+                sensor_count: None,
             },
         );
 
@@ -729,6 +925,7 @@ mod tests {
                 is_healthy: true,
                 pinned: false,
                 alert: None,
+                sensor_count: None,
             },
         );
 

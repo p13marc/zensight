@@ -445,6 +445,9 @@ pub fn keyboard_subscription() -> Subscription<Message> {
                     // Ctrl+F: Focus search
                     Key::Character("f") if modifiers.control() => Some(Message::FocusSearch),
 
+                    // Ctrl+K: Open the global cross-device metric search (#27).
+                    Key::Character("k") if modifiers.control() => Some(Message::OpenGlobalSearch),
+
                     // Escape: Close/back
                     Key::Named(key::Named::Escape) => Some(Message::EscapePressed),
 

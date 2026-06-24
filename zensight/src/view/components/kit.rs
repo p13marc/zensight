@@ -55,7 +55,10 @@ pub fn section_header<'a, Message: 'a>(
 /// A status/severity badge: a colored dot **plus** a text label, so meaning is
 /// never carried by color alone (accessibility). `color` should come from a
 /// `theme::colors(..).status_*()` / `severity_*()` helper.
-pub fn badge<'a, Message: 'a>(color: Color, label: impl text::IntoFragment<'a>) -> Element<'a, Message> {
+pub fn badge<'a, Message: 'a>(
+    color: Color,
+    label: impl text::IntoFragment<'a>,
+) -> Element<'a, Message> {
     let dot = container(text(""))
         .width(8)
         .height(8)
