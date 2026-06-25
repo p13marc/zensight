@@ -909,6 +909,6 @@ mod tests {
         let device_id = DeviceId::new(Protocol::Syslog, "server01");
         let state = DeviceDetailState::new(device_id);
         let filter_state = SyslogFilterState::default();
-        let _view = syslog_event_view(&state, &filter_state);
+        let _view = syslog_event_view(&state, &filter_state, &[]);
     }
 }
