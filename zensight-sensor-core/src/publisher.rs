@@ -2,19 +2,31 @@
 
 use std::sync::Arc;
 
-use zensight_common::{Format, TelemetryPoint, encode};
+use zensight_common::{Format, TelemetryPoint};
 
+use crate::advanced_publisher::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
 use crate::error::{Result, SensorError};
 
 /// Publisher for sending telemetry to Zenoh.
 ///
 /// Wraps a Zenoh session and provides convenient methods for publishing
 /// [`TelemetryPoint`] values with automatic serialization.
+///
+/// **Telemetry** (`publish` / `publish_to_key` / `publish_batch`) goes out
+/// through [`AdvancedPublisherRegistry`] zenoh-ext **advanced** publishers
+/// (per-key cache + miss/publisher detection) so it always matches the GUI's
+/// `AdvancedSubscriber` on `zensight/**` — that pairing is required for reliable
+/// delivery + late-joiner history/recovery. **Control-plane** writes
+/// (`publish_raw` / `publish_json` / `delete`, for `@/…` keys the GUI reads with
+/// a plain subscriber) stay plain `put`/`delete`.
 #[derive(Clone, Debug)]
 pub struct Publisher {
     session: Arc<zenoh::Session>,
     key_prefix: String,
     format: Format,
+    /// Shared advanced-publisher registry backing the telemetry path. Shared
+    /// across clones so the per-key publisher cache persists.
+    registry: Arc<AdvancedPublisherRegistry>,
 }
 
 impl Publisher {
@@ -24,10 +36,18 @@ impl Publisher {
         key_prefix: impl Into<String>,
         format: Format,
     ) -> Self {
+        let key_prefix = key_prefix.into();
+        let registry = Arc::new(AdvancedPublisherRegistry::new(
+            session.clone(),
+            key_prefix.clone(),
+            format,
+            AdvancedPublisherConfig::default(),
+        ));
         Self {
             session,
-            key_prefix: key_prefix.into(),
+            key_prefix,
             format,
+            registry,
         }
     }
 
@@ -58,39 +78,18 @@ impl Publisher {
         }
     }
 
-    /// Publish a telemetry point.
+    /// Publish a telemetry point (advanced publisher — matches the GUI's
+    /// `AdvancedSubscriber`).
     ///
     /// The key is constructed by appending `key_suffix` to the publisher's prefix.
     pub async fn publish(&self, key_suffix: &str, point: &TelemetryPoint) -> Result<()> {
-        let key = self.build_key(key_suffix);
-        let payload =
-            encode(point, self.format).map_err(|e| SensorError::Serialization(e.to_string()))?;
-
-        self.session
-            .put(&key, payload)
-            .await
-            .map_err(|e| SensorError::Publish {
-                key: key.clone(),
-                message: e.to_string(),
-            })?;
-
-        Ok(())
+        self.registry.publish(key_suffix, point).await
     }
 
-    /// Publish a telemetry point with a full key (not using prefix).
+    /// Publish a telemetry point with a full key (not using prefix), via an
+    /// advanced publisher.
     pub async fn publish_to_key(&self, key: &str, point: &TelemetryPoint) -> Result<()> {
-        let payload =
-            encode(point, self.format).map_err(|e| SensorError::Serialization(e.to_string()))?;
-
-        self.session
-            .put(key, payload)
-            .await
-            .map_err(|e| SensorError::Publish {
-                key: key.to_string(),
-                message: e.to_string(),
-            })?;
-
-        Ok(())
+        self.registry.publish_to_key(key, point).await
     }
 
     /// Publish a batch of telemetry points.
