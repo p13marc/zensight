@@ -57,6 +57,10 @@ pub struct SysinfoConfig {
     /// Disk mount filters.
     #[serde(default)]
     pub disk: DiskConfig,
+
+    /// Threshold-based alerting (OOM / PSI / disk / FD / thermal / swap).
+    #[serde(default)]
+    pub alerts: crate::alerts::AlertsConfig,
 }
 
 fn default_key_prefix() -> String {
@@ -409,6 +413,39 @@ mod tests {
         assert!(config.sysinfo.collect.cpu);
         assert!(config.sysinfo.collect.memory);
         assert!(!config.sysinfo.collect.processes);
+        // Alerting defaults: on, with thermal opted out (needs temperatures).
+        assert!(config.sysinfo.alerts.enabled);
+        assert!(config.sysinfo.alerts.oom.enabled);
+        assert!(!config.sysinfo.alerts.thermal.enabled);
+        assert_eq!(config.sysinfo.alerts.disk.warn_percent, 90.0);
+        assert_eq!(config.sysinfo.alerts.fd.warn_percent, 80.0);
+    }
+
+    #[test]
+    fn test_parse_alerts_block() {
+        let json = r#"{
+            zenoh: { mode: "peer" },
+            sysinfo: {
+                alerts: {
+                    enabled: true,
+                    for_secs: 30,
+                    disk: { warn_percent: 80, critical_percent: 92 },
+                    thermal: { enabled: true, fraction: 0.85 },
+                    swap: { warn_pages_per_sec: 2000 },
+                }
+            }
+        }"#;
+        let config: SysinfoSensorConfig = json5::from_str(json).unwrap();
+        let a = &config.sysinfo.alerts;
+        assert_eq!(a.for_secs, 30);
+        assert_eq!(a.disk.warn_percent, 80.0);
+        assert_eq!(a.disk.critical_percent, 92.0);
+        assert!(a.thermal.enabled);
+        assert_eq!(a.thermal.fraction, 0.85);
+        assert_eq!(a.swap.warn_pages_per_sec, 2000.0);
+        // Unspecified rules keep their defaults.
+        assert!(a.pressure.enabled);
+        assert_eq!(a.pressure.cpu_warn, 40.0);
     }
 
     #[test]

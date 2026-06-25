@@ -31,6 +31,9 @@ pub struct SystemCollector {
     prev_rapl: HashMap<String, (u64, Option<u64>)>,
     /// Sensor health, updated each poll for the frontend's Sensors view.
     health: Arc<zensight_sensor_core::SensorHealth>,
+    /// Threshold-based alert evaluator (OOM/PSI/disk/FD/thermal/swap), driving an
+    /// `AlertReporter` → `@/alerts/*`. `None` when alerting is disabled.
+    alerts: Option<crate::alerts::AlertEvaluator>,
     /// Linux-specific metrics collector
     #[cfg(target_os = "linux")]
     linux_metrics: LinuxMetrics,
@@ -57,6 +60,7 @@ impl SystemCollector {
             #[cfg(target_os = "linux")]
             prev_rapl: HashMap::new(),
             health: Arc::new(zensight_sensor_core::SensorHealth::new("sysinfo")),
+            alerts: None,
             #[cfg(target_os = "linux")]
             linux_metrics: LinuxMetrics::new(),
         }
@@ -65,6 +69,12 @@ impl SystemCollector {
     /// Use the runner's shared health tracker (so updates reach `@/health`).
     pub fn with_health(mut self, health: Arc<zensight_sensor_core::SensorHealth>) -> Self {
         self.health = health;
+        self
+    }
+
+    /// Attach a threshold-alert evaluator driving the shared `AlertReporter`.
+    pub fn with_alerts(mut self, evaluator: crate::alerts::AlertEvaluator) -> Self {
+        self.alerts = Some(evaluator);
         self
     }
 
@@ -167,7 +177,107 @@ impl SystemCollector {
             }
         }
 
+        // Threshold alerting: evaluate the already-collected saturation data and
+        // drive the firing/resolved lifecycle. Additive — never touches the
+        // telemetry path above.
+        if self.alerts.is_some() {
+            let raw = self.gather_alert_inputs();
+            let interval = self.config.poll_interval_secs as f64;
+            if let Some(ev) = self.alerts.as_mut() {
+                ev.tick(raw, interval).await;
+            }
+        }
+
         debug!("Published {} metrics for '{}'", count, self.hostname);
+    }
+
+    /// Gather the per-tick alert inputs from the same `/proc`/`/sys` + sysinfo
+    /// sources the telemetry collectors read. Disk-space occupancy is computed
+    /// cross-platform from the (already-refreshed) `Disks` list; the saturation
+    /// counters (PSI, vmstat, FD, inodes, temperatures) are Linux-only and left
+    /// empty elsewhere.
+    fn gather_alert_inputs(&self) -> crate::alerts::RawInputs {
+        let mut raw = crate::alerts::RawInputs::default();
+
+        // Disk-space usage% per included mount (cross-platform via sysinfo).
+        for disk in self.disks.list() {
+            let mount = disk.mount_point().to_string_lossy().to_string();
+            let fs_type = disk.file_system().to_string_lossy().to_string();
+            if !self.config.disk.should_include(&mount, &fs_type) {
+                continue;
+            }
+            let total = disk.total_space();
+            let used = total.saturating_sub(disk.available_space());
+            let used_percent = if total > 0 {
+                (used as f64 / total as f64) * 100.0
+            } else {
+                0.0
+            };
+            raw.disks.push(crate::alerts::DiskUsageInput {
+                mount,
+                fs_type,
+                used_percent,
+            });
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(vm) = crate::linux::collect_vmstat() {
+                raw.oom_kill_total = vm.oom_kill;
+                raw.pswpin_total = vm.pswpin;
+                raw.pswpout_total = vm.pswpout;
+            }
+            if let Some(psi) = crate::linux::collect_psi() {
+                raw.psi_cpu_avg10 = psi.cpu_some.as_ref().map(|p| p.avg10);
+                raw.psi_memory_avg10 = psi.memory_some.as_ref().map(|p| p.avg10);
+                raw.psi_io_avg10 = psi.io_some.as_ref().map(|p| p.avg10);
+            }
+            if let Some(fd) = crate::linux::collect_fd() {
+                raw.fd_used_percent = Some(if fd.max > 0 {
+                    (fd.used as f64 / fd.max as f64) * 100.0
+                } else {
+                    0.0
+                });
+            }
+            // Inode occupancy per included mount (same mount list as fd_inode).
+            let mounts: Vec<(String, String)> = self
+                .disks
+                .list()
+                .iter()
+                .map(|d| {
+                    (
+                        d.mount_point().to_string_lossy().to_string(),
+                        d.file_system().to_string_lossy().to_string(),
+                    )
+                })
+                .filter(|(mount, fs_type)| self.config.disk.should_include(mount, fs_type))
+                .collect();
+            for s in crate::linux::collect_inodes(&mounts) {
+                let used_percent = if s.total > 0 {
+                    (s.used as f64 / s.total as f64) * 100.0
+                } else {
+                    0.0
+                };
+                raw.inodes.push(crate::alerts::DiskUsageInput {
+                    mount: s.mount,
+                    fs_type: s.fs_type,
+                    used_percent,
+                });
+            }
+            // Thermal trip points (only when temperature collection is enabled).
+            if self.config.collect.temperatures {
+                for t in LinuxMetrics::collect_temperatures() {
+                    raw.temps.push(crate::alerts::ThermalInput {
+                        chip: t.chip,
+                        label: t.label,
+                        temp_celsius: t.temp_celsius,
+                        critical_celsius: t.critical,
+                    });
+                }
+            }
+        }
+
+        raw
     }
 
     /// Publish a batch of mapped metrics, lifting label pairs into the wire

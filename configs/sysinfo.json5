@@ -67,6 +67,51 @@
       // Exclude pseudo filesystems (tmpfs, sysfs, proc, etc.)
       exclude_pseudo: true,
     },
+
+    // Threshold-based alerting. Each poll tick the already-collected saturation
+    // data is graded against these thresholds and firing/resolved alerts are
+    // published on zensight/sysinfo/@/alerts/* (same channel as the other
+    // sensors; the GUI picks them up with no extra wiring). All values below are
+    // the built-in defaults — the whole `alerts` block is optional.
+    alerts: {
+      // Master switch for all sysinfo alerting.
+      enabled: true,
+
+      // "Must be violated continuously for N seconds" debounce before a firing
+      // alert is published (0 = publish on first violation).
+      for_secs: 0,
+
+      // New OOM kills since the last poll (memory/oom_kills_total delta > 0).
+      // Always Critical.
+      oom: { enabled: true },
+
+      // PSI some/avg10 per resource: Warning at *_warn, Critical at *_critical.
+      // Needs collect.pressure (on by default). Memory is graded harder.
+      pressure: {
+        enabled: true,
+        cpu_warn: 40, cpu_critical: 70,
+        memory_warn: 10, memory_critical: 30,
+        io_warn: 40, io_critical: 70,
+      },
+
+      // Disk space hi-watermark per mount (Warning/Critical %). Needs collect.disk.
+      disk: { enabled: true, warn_percent: 90, critical_percent: 95 },
+
+      // Inode hi-watermark per mount. Needs collect.fd_inode (on by default).
+      inode: { enabled: true, warn_percent: 90, critical_percent: 95 },
+
+      // File-descriptor table occupancy (fs.file-nr / fs.file-max). Warning only.
+      fd: { enabled: true, warn_percent: 80 },
+
+      // Thermal: Critical when temp >= fraction * critical trip point.
+      // OFF by default — requires collect.temperatures: true (which provides the
+      // critical trip points). Enable both together.
+      thermal: { enabled: false, fraction: 0.9 },
+
+      // Swap thrash: Warning when (pswpin + pswpout) exceeds the page rate.
+      // Needs collect.vmstat (on by default). 1000 pages/s ~= 4 MiB/s.
+      swap: { enabled: true, warn_pages_per_sec: 1000 },
+    },
   },
 
   // Logging
