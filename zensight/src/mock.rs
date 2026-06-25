@@ -205,7 +205,9 @@ pub mod sysinfo {
 pub mod syslog {
     use super::*;
 
-    /// Generate mock syslog messages.
+    /// Generate mock syslog messages. The metric path is `<facility>/<severity>`
+    /// using the real RFC-5424 severity slugs (`err`, `warning`, ...), matching
+    /// the syslog sensor's contract.
     pub fn server(name: &str) -> Vec<TelemetryPoint> {
         vec![
             telemetry_point(
@@ -217,14 +219,174 @@ pub mod syslog {
             telemetry_point(
                 Protocol::Syslog,
                 name,
-                "kernel/warning",
+                "kern/warning",
                 TelemetryValue::Text("Low memory condition detected".to_string()),
             ),
             telemetry_point(
                 Protocol::Syslog,
                 name,
-                "daemon/error",
+                "daemon/err",
                 TelemetryValue::Text("Service nginx failed to start".to_string()),
+            ),
+        ]
+    }
+}
+
+/// Mock netlink (Linux kernel networking) data.
+pub mod netlink {
+    use super::*;
+
+    /// Generate mock netlink telemetry for a host.
+    pub fn host(name: &str) -> Vec<TelemetryPoint> {
+        let mut labels = HashMap::new();
+        labels.insert("ifindex".to_string(), "2".to_string());
+        vec![
+            telemetry_point_with_labels(
+                Protocol::Netlink,
+                name,
+                "iface/eth0/rx_bytes",
+                TelemetryValue::Counter(1_073_741_824),
+                labels.clone(),
+            ),
+            telemetry_point_with_labels(
+                Protocol::Netlink,
+                name,
+                "iface/eth0/tx_bytes",
+                TelemetryValue::Counter(536_870_912),
+                labels.clone(),
+            ),
+            telemetry_point_with_labels(
+                Protocol::Netlink,
+                name,
+                "iface/eth0/up",
+                TelemetryValue::Boolean(true),
+                labels,
+            ),
+            telemetry_point(
+                Protocol::Netlink,
+                name,
+                "sockets/tcp/established",
+                TelemetryValue::Gauge(120.0),
+            ),
+            telemetry_point(
+                Protocol::Netlink,
+                name,
+                "sockets/tcp/listen",
+                TelemetryValue::Gauge(12.0),
+            ),
+            telemetry_point(
+                Protocol::Netlink,
+                name,
+                "routes/total",
+                TelemetryValue::Gauge(20.0),
+            ),
+            telemetry_point(
+                Protocol::Netlink,
+                name,
+                "neighbors/total",
+                TelemetryValue::Gauge(18.0),
+            ),
+        ]
+    }
+}
+
+/// Mock netring (passive flow monitor) data.
+pub mod netring {
+    use super::*;
+
+    /// Generate mock netring telemetry for a probe.
+    pub fn probe(name: &str) -> Vec<TelemetryPoint> {
+        let mut bw_labels = HashMap::new();
+        bw_labels.insert("app".to_string(), "https".to_string());
+        vec![
+            telemetry_point(
+                Protocol::Netring,
+                name,
+                "flow/active",
+                TelemetryValue::Gauge(240.0),
+            ),
+            telemetry_point(
+                Protocol::Netring,
+                name,
+                "flow/bytes_total",
+                TelemetryValue::Counter(12_884_901_888),
+            ),
+            telemetry_point(
+                Protocol::Netring,
+                name,
+                "flow/by_l4/tcp/flows_total",
+                TelemetryValue::Counter(4_096),
+            ),
+            telemetry_point_with_labels(
+                Protocol::Netring,
+                name,
+                "bandwidth/https/bytes_per_sec",
+                TelemetryValue::Gauge(6_000_000.0),
+                bw_labels,
+            ),
+            telemetry_point(
+                Protocol::Netring,
+                name,
+                "dns/queries_total",
+                TelemetryValue::Counter(8_192),
+            ),
+            telemetry_point(
+                Protocol::Netring,
+                name,
+                "tls/handshakes_total",
+                TelemetryValue::Counter(2_048),
+            ),
+        ]
+    }
+}
+
+/// Mock netflow data.
+pub mod netflow {
+    use super::*;
+
+    /// Generate mock netflow telemetry for an exporter.
+    pub fn exporter(name: &str) -> Vec<TelemetryPoint> {
+        let mut labels = HashMap::new();
+        labels.insert("version".to_string(), "v9".to_string());
+        labels.insert("exporter_ip".to_string(), "10.0.0.1".to_string());
+        labels.insert("protocol".to_string(), "tcp".to_string());
+        vec![
+            telemetry_point_with_labels(
+                Protocol::Netflow,
+                name,
+                "10.0.0.50/93.184.216.34/tcp",
+                TelemetryValue::Counter(2_500_000),
+                labels.clone(),
+            ),
+            telemetry_point_with_labels(
+                Protocol::Netflow,
+                name,
+                "10.0.0.52/10.0.0.20/tcp",
+                TelemetryValue::Counter(1_200_000),
+                labels,
+            ),
+        ]
+    }
+}
+
+/// Mock gNMI data.
+pub mod gnmi {
+    use super::*;
+
+    /// Generate mock gNMI telemetry for a target.
+    pub fn target(name: &str) -> Vec<TelemetryPoint> {
+        vec![
+            telemetry_point(
+                Protocol::Gnmi,
+                name,
+                "interfaces/interface[name=eth0]/state/counters/in-octets",
+                TelemetryValue::Counter(1_073_741_824),
+            ),
+            telemetry_point(
+                Protocol::Gnmi,
+                name,
+                "interfaces/interface[name=eth0]/state/oper-status",
+                TelemetryValue::Text("UP".to_string()),
             ),
         ]
     }
@@ -285,6 +447,15 @@ pub fn mock_environment() -> Vec<TelemetryPoint> {
     points.extend(sysinfo::host("server02"));
     points.extend(syslog::server("server01"));
 
+    // Linux kernel networking (netlink runs on the hosts)
+    points.extend(netlink::host("server01"));
+    points.extend(netlink::host("server02"));
+
+    // Passive flow monitoring + flow export + streamed telemetry
+    points.extend(netring::probe("netprobe01"));
+    points.extend(netflow::exporter("edge-fw"));
+    points.extend(gnmi::target("router01"));
+
     // Industrial devices
     points.extend(modbus::plc("plc01"));
 
@@ -306,6 +477,10 @@ mod tests {
         assert!(protocols.contains(&Protocol::Sysinfo));
         assert!(protocols.contains(&Protocol::Syslog));
         assert!(protocols.contains(&Protocol::Modbus));
+        assert!(protocols.contains(&Protocol::Netlink));
+        assert!(protocols.contains(&Protocol::Netring));
+        assert!(protocols.contains(&Protocol::Netflow));
+        assert!(protocols.contains(&Protocol::Gnmi));
     }
 
     #[test]
