@@ -546,32 +546,39 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
             .push(list);
     }
 
-    // Recent control-plane events ring (#109)
+    // Control-plane change timeline (#111): the recent-events ring (#109)
+    // rendered most-recent-first with a relative timestamp — link up/down,
+    // address add/del, route changes, neighbor failures on one time axis.
     if let Some(err) = d.events.error() {
         col = col.push(empty_state(format!("Events fetch failed: {err}"), None));
     } else if let Some(events) = d.events.ready() {
+        let mut evs: Vec<&_> = events.iter().collect();
+        evs.sort_by(|a, b| b.ts_unix.cmp(&a.ts_unix));
         let mut list = Column::new().spacing(3).push(
             row![
-                cell("family", 90),
-                cell("action", 90),
+                cell("when", 90),
+                cell("family", 80),
+                cell("action", 80),
                 cell("ifindex", 70),
-                cell("detail", 260),
+                cell("detail", 240),
             ]
             .spacing(8),
         );
-        for e in events.iter().take(200) {
+        for e in evs.iter().take(200) {
+            let when = crate::view::formatting::format_timestamp(e.ts_unix as i64 * 1000);
             list = list.push(
                 row![
-                    cell(&e.family, 90),
-                    cell(&e.action, 90),
+                    cell(&when, 90),
+                    cell(&e.family, 80),
+                    cell(&e.action, 80),
                     cell(&e.ifindex.map(|i| i.to_string()).unwrap_or_default(), 70),
-                    cell(&e.detail, 260),
+                    cell(&e.detail, 240),
                 ]
                 .spacing(8),
             );
         }
         col = col
-            .push(text(format!("Recent events ({})", events.len())).size(font::EMPHASIS))
+            .push(text(format!("Control-plane timeline ({})", events.len())).size(font::EMPHASIS))
             .push(list);
     }
 
