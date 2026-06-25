@@ -63,12 +63,12 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
 
             tracing::info!("Advanced subscriber created with history and recovery");
 
-            // The AdvancedSubscriber only delivers AdvancedPublisher samples — it
-            // silently drops plain `session.put`s. The control plane (health,
-            // errors, alerts, liveness) is published with plain puts, so it needs
-            // a *plain* subscriber. Matches `zensight/<proto>/@/<...>` only (never
-            // telemetry, which has a source segment instead of `@`), so there's no
-            // double-delivery with the advanced telemetry subscriber.
+            // The telemetry subscriber's `zensight/**` does NOT match the
+            // control-plane keys: a key chunk starting with `@` is matched
+            // verbatim in Zenoh, so `**` never crosses into `zensight/<proto>/@/…`.
+            // Health, errors, alerts, and liveness therefore need their own plain
+            // subscriber on `zensight/*/@/**`. (It can't double-deliver telemetry,
+            // which has a `<source>` segment where this has `@`.)
             let control = session
                 .declare_subscriber("zensight/*/@/**")
                 .await

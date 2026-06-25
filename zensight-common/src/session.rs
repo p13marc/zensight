@@ -5,6 +5,9 @@ use crate::error::{Error, Result};
 
 /// Connect to Zenoh using the provided configuration.
 pub async fn connect(config: &ZenohConfig) -> Result<Session> {
+    // Honor ZENSIGHT_ZENOH_* env overrides (e.g. set by `just run` to pin a
+    // local rendezvous endpoint instead of relying on multicast discovery).
+    let config = &config.clone().with_env_overrides();
     let mut zenoh_config = zenoh::Config::default();
 
     // Set mode

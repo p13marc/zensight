@@ -34,6 +34,79 @@ impl Default for ZenohConfig {
     }
 }
 
+impl ZenohConfig {
+    /// Apply `ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN}` environment overrides.
+    ///
+    /// `CONNECT`/`LISTEN` are comma-separated endpoint lists. Unset variables
+    /// leave the field untouched. This lets a launcher (e.g. `just run`) pin
+    /// explicit local endpoints so the GUI and sensors connect reliably without
+    /// depending on multicast peer discovery (which is unreliable on hosts with
+    /// a VPN or multiple interfaces, e.g. tailscale/docker).
+    pub fn with_env_overrides(self) -> Self {
+        self.with_overrides_from(|k| std::env::var(k).ok())
+    }
+
+    /// Testable core of [`with_env_overrides`]: `get` resolves a variable name.
+    fn with_overrides_from(mut self, get: impl Fn(&str) -> Option<String>) -> Self {
+        if let Some(mode) = get("ZENSIGHT_ZENOH_MODE") {
+            self.mode = mode;
+        }
+        let parse = |v: String| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect::<Vec<_>>()
+        };
+        if let Some(c) = get("ZENSIGHT_ZENOH_CONNECT") {
+            self.connect = parse(c);
+        }
+        if let Some(l) = get("ZENSIGHT_ZENOH_LISTEN") {
+            self.listen = parse(l);
+        }
+        self
+    }
+}
+
+#[cfg(test)]
+mod zenoh_env_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn over(base: ZenohConfig, vars: &[(&str, &str)]) -> ZenohConfig {
+        let map: HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        base.with_overrides_from(|k| map.get(k).cloned())
+    }
+
+    #[test]
+    fn no_vars_leaves_config_unchanged() {
+        let base = ZenohConfig {
+            mode: "peer".into(),
+            connect: vec!["tcp/a:1".into()],
+            listen: vec![],
+        };
+        assert_eq!(over(base.clone(), &[]), base);
+    }
+
+    #[test]
+    fn connect_and_listen_override_parse_csv() {
+        let out = over(
+            ZenohConfig::default(),
+            &[
+                ("ZENSIGHT_ZENOH_CONNECT", "tcp/127.0.0.1:7447, tcp/h:2 ,"),
+                ("ZENSIGHT_ZENOH_LISTEN", "tcp/0.0.0.0:7448"),
+                ("ZENSIGHT_ZENOH_MODE", "client"),
+            ],
+        );
+        assert_eq!(out.mode, "client");
+        assert_eq!(out.connect, vec!["tcp/127.0.0.1:7447", "tcp/h:2"]); // trimmed, empties dropped
+        assert_eq!(out.listen, vec!["tcp/0.0.0.0:7448"]);
+    }
+}
+
 /// Log output format.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
