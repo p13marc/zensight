@@ -25,6 +25,7 @@ pub mod collector;
 pub mod config;
 pub mod map;
 pub mod query;
+pub mod saturation;
 
 #[cfg(target_os = "linux")]
 pub mod linux;

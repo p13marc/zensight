@@ -61,6 +61,11 @@ pub struct SysinfoConfig {
     /// Threshold-based alerting (OOM / PSI / disk / FD / thermal / swap).
     #[serde(default)]
     pub alerts: crate::alerts::AlertsConfig,
+
+    /// Derived host saturation-score blend + health-state bands (P6). Gated by
+    /// `collect.saturation_score`.
+    #[serde(default)]
+    pub saturation: crate::saturation::SaturationConfig,
 }
 
 fn default_key_prefix() -> String {
@@ -207,6 +212,12 @@ pub struct CollectConfig {
     /// Linux-only; no md arrays => emits nothing.
     #[serde(default = "default_true")]
     pub mdadm: bool,
+
+    /// Emit the derived host saturation score (`system/saturation_score`, 0..100)
+    /// and coarse health state (`system/health_state`: ok/warn/crit) each tick
+    /// (P6). Cheap — derived from already-collected USE saturation signals.
+    #[serde(default = "default_true")]
+    pub saturation_score: bool,
 }
 
 impl Default for CollectConfig {
@@ -237,6 +248,7 @@ impl Default for CollectConfig {
             conntrack: true,
             edac: true,
             mdadm: true,
+            saturation_score: true,
         }
     }
 }
