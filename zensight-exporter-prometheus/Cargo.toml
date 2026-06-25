@@ -37,11 +37,11 @@ anyhow.workspace = true
 clap.workspace = true
 
 # Prometheus
-prometheus-client = "0.22"
+prometheus-client = "0.25"
 
 # HTTP server
-axum = "0.7"
-tower-http = { version = "0.5", features = ["cors"] }
+axum = "0.8"
+tower-http = { version = "0.7", features = ["cors"] }
 
 # Utilities
 parking_lot = "0.12"

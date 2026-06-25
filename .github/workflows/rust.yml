@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: ["master"]
 
+# Cancel an in-progress run when a newer commit is pushed to the same ref, so we
+# don't burn a runner finishing a build that's already superseded.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   # Shrink the target dir so the large workspace (zenoh + iced + all sensors and
@@ -17,7 +23,7 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
 
     steps:
@@ -40,8 +46,13 @@ jobs:
           sudo apt-get install -y protobuf-compiler libsystemd-dev
           protoc --version
 
-      - name: Build
-        run: cargo build --verbose
+      # Cache the cargo registry/git + build artifacts keyed on Cargo.lock and
+      # the toolchain. The zenoh + iced dependency graph dominates compile time
+      # and changes rarely, so most runs restore it instead of rebuilding it.
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
 
-      - name: Run tests
-        run: cargo test --verbose
+      # `cargo test` compiles the whole workspace (libs, bins, and test
+      # targets), so it subsumes a separate `cargo build` — one compile pass.
+      - name: Build & test
+        run: cargo test --workspace --locked

@@ -28,7 +28,8 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use redb::{Database, TableDefinition};
+// redb 4 moved `begin_read` onto the `ReadableDatabase` trait.
+use redb::{Database, ReadableDatabase, TableDefinition};
 
 use zensight_common::{TelemetryPoint, TelemetryValue};
 
