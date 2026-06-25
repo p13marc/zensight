@@ -233,7 +233,10 @@ mod tests {
             NetlinkDetailTopic::Xfrm.key(),
             "zensight/netlink/@/query/xfrm"
         );
-        assert_eq!(NetlinkDetailTopic::Nft.key(), "zensight/netlink/@/query/nft");
+        assert_eq!(
+            NetlinkDetailTopic::Nft.key(),
+            "zensight/netlink/@/query/nft"
+        );
     }
 
     #[test]
