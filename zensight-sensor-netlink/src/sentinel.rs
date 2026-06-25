@@ -5,10 +5,10 @@
 //! logic is pure and unit-tested; the [`Evaluator`] wires it to live nlink
 //! connections + an [`AlertReporter`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, RwLock};
@@ -44,6 +44,15 @@ pub struct ExpectationsConfig {
     pub routes: Vec<RouteExpectation>,
     #[serde(default)]
     pub metrics: Vec<MetricExpectation>,
+    /// Rate-of-change expectations (#113): "metric must not increase by > N/min".
+    #[serde(default)]
+    pub rates: Vec<RateExpectation>,
+    /// Delivery-rate floor expectations (#113): per socket-group throughput floor.
+    #[serde(default)]
+    pub delivery: Vec<DeliveryFloorExpectation>,
+    /// Route-flap expectations (#113): default route changing too often in a window.
+    #[serde(default)]
+    pub route_flaps: Vec<RouteFlapExpectation>,
 }
 
 impl ExpectationsConfig {
@@ -53,6 +62,9 @@ impl ExpectationsConfig {
             && self.neighbors.is_empty()
             && self.routes.is_empty()
             && self.metrics.is_empty()
+            && self.rates.is_empty()
+            && self.delivery.is_empty()
+            && self.route_flaps.is_empty()
     }
 }
 
@@ -148,6 +160,96 @@ pub struct MetricExpectation {
     pub op: ComparisonOp,
     /// Right-hand side of the comparison.
     pub value: f64,
+    #[serde(default = "default_severity")]
+    pub severity: AlertSeverity,
+    #[serde(default)]
+    pub for_secs: Option<u64>,
+}
+
+fn default_delivery_metric() -> String {
+    "sockets/tcp/delivery_rate_p50".to_string()
+}
+
+fn default_flap_metric() -> String {
+    "events/route/removed_total".to_string()
+}
+
+fn default_flap_window() -> u64 {
+    60
+}
+
+/// A rate-of-change expectation (#113): "metric `<name>` must not *increase* by
+/// more than `max_increase_per_min` per minute".
+///
+/// This is the missing primitive: it needs two samples of the metric at known
+/// instants to compute a delta/interval rate. The previous sample is retained in
+/// the [`Evaluator`] (per-rule), *not* in the [`MetricCache`]: the rate is
+/// measured between consecutive sentinel sweeps (the natural evaluation cadence)
+/// and the cache stays a simple latest-value store.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateExpectation {
+    /// Label for the rule slug `rate:<name>`.
+    pub name: String,
+    /// Metric path to watch, e.g. `interfaces/eth0/rx_errors` or
+    /// `sockets/tcp/retransmits_total`.
+    pub metric: String,
+    /// Maximum permitted increase per minute before the rule fires.
+    pub max_increase_per_min: f64,
+    #[serde(default = "default_severity")]
+    pub severity: AlertSeverity,
+    #[serde(default)]
+    pub for_secs: Option<u64>,
+}
+
+/// A consecutive pair of samples for a rate-of-change check, plus the wall-clock
+/// interval between them. Built by the [`Evaluator`] from its retained previous
+/// sample; consumed by the pure [`check_rate`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RateSample {
+    /// Value observed on this sweep.
+    pub current: f64,
+    /// Value observed on the previous sweep.
+    pub previous: f64,
+    /// Seconds elapsed between the two samples.
+    pub interval_secs: f64,
+}
+
+/// A delivery-rate floor expectation (#113): alert when a socket-group's
+/// delivery-rate percentile (from the enriched tcp_info, #108) falls below a
+/// floor. Defaults to the `sockets/tcp/delivery_rate_p50` metric.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeliveryFloorExpectation {
+    /// Label for the rule slug `delivery:<name>`.
+    pub name: String,
+    /// Delivery-rate metric path to watch (default
+    /// `sockets/tcp/delivery_rate_p50`).
+    #[serde(default = "default_delivery_metric")]
+    pub metric: String,
+    /// Minimum delivery rate (bytes/sec) that must hold; fire strictly below it.
+    pub floor: f64,
+    #[serde(default = "default_severity")]
+    pub severity: AlertSeverity,
+    #[serde(default)]
+    pub for_secs: Option<u64>,
+}
+
+/// A route-flap expectation (#113): alert when the default route changes or
+/// withdraws more than `max_flaps` times within `window_secs`. Reads a cumulative
+/// route-event counter (default `events/route/removed_total`) and compares its
+/// increase over a sliding window — the windowing state lives in the
+/// [`Evaluator`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteFlapExpectation {
+    /// Label for the rule slug `route_flap:<name>`.
+    pub name: String,
+    /// Cumulative flap counter to watch (default `events/route/removed_total`).
+    #[serde(default = "default_flap_metric")]
+    pub metric: String,
+    /// Maximum flaps permitted within the window before the rule fires.
+    pub max_flaps: u64,
+    /// Sliding window length in seconds (default 60).
+    #[serde(default = "default_flap_window")]
+    pub window_secs: u64,
     #[serde(default = "default_severity")]
     pub severity: AlertSeverity,
     #[serde(default)]
@@ -369,6 +471,107 @@ pub fn check_metric(exp: &MetricExpectation, observed: Option<f64>) -> Vec<Viola
     }
 }
 
+/// Evaluate a rate-of-change expectation. `sample` is the current+previous
+/// values and the interval between them (`None` on the first sweep for a rule, or
+/// while the metric has never been seen). Only *positive* deltas count: a counter
+/// reset/wrap (negative delta) or a zero interval is treated as no violation.
+pub fn check_rate(exp: &RateExpectation, sample: Option<RateSample>) -> Vec<Violation> {
+    let Some(s) = sample else { return Vec::new() };
+    let delta = s.current - s.previous;
+    if delta <= 0.0 || s.interval_secs <= 0.0 {
+        return Vec::new();
+    }
+    let per_min = delta / (s.interval_secs / 60.0);
+    if per_min > exp.max_increase_per_min {
+        vec![Violation {
+            summary: format!(
+                "{}: {} increasing at {:.1}/min (limit {}/min)",
+                exp.name, exp.metric, per_min, exp.max_increase_per_min
+            ),
+            labels: vec![
+                (
+                    "expected".into(),
+                    format!("{} rate <= {}/min", exp.metric, exp.max_increase_per_min),
+                ),
+                ("metric".into(), exp.metric.clone()),
+                ("rate_per_min".into(), format!("{per_min:.1}")),
+            ],
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Evaluate a delivery-rate floor expectation. `observed` is the metric's latest
+/// value (`None` if not yet published). Fires strictly below the floor; absent →
+/// no violation (matches the metric-rule semantics: only fires on data seen).
+pub fn check_delivery_floor(
+    exp: &DeliveryFloorExpectation,
+    observed: Option<f64>,
+) -> Vec<Violation> {
+    match observed {
+        Some(v) if v < exp.floor => vec![Violation {
+            summary: format!(
+                "{}: {} is {} (below floor {})",
+                exp.name, exp.metric, v, exp.floor
+            ),
+            labels: vec![
+                (
+                    "expected".into(),
+                    format!("{} >= {}", exp.metric, exp.floor),
+                ),
+                ("metric".into(), exp.metric.clone()),
+                ("actual".into(), v.to_string()),
+            ],
+        }],
+        _ => Vec::new(),
+    }
+}
+
+/// Increase of a cumulative flap counter within the trailing `window_secs`:
+/// `current - counter-as-of-window-start`. `samples` are `(ts_secs, counter)`
+/// pairs, oldest first. The baseline is the newest sample at/just before the
+/// window cutoff (so flaps strictly inside the window are counted), falling back
+/// to the oldest retained sample. Pure; unit-tested.
+pub fn flaps_within(samples: &[(u64, u64)], now_secs: u64, window_secs: u64) -> u64 {
+    if samples.is_empty() {
+        return 0;
+    }
+    let cutoff = now_secs.saturating_sub(window_secs);
+    let baseline = samples
+        .iter()
+        .rev()
+        .find(|(t, _)| *t <= cutoff)
+        .or_else(|| samples.first())
+        .map(|(_, c)| *c)
+        .unwrap_or(0);
+    let current = samples.last().map(|(_, c)| *c).unwrap_or(baseline);
+    current.saturating_sub(baseline)
+}
+
+/// Evaluate a route-flap expectation against the flap count observed within the
+/// window. Fires when the count exceeds `max_flaps`.
+pub fn check_route_flap(exp: &RouteFlapExpectation, flaps_in_window: u64) -> Vec<Violation> {
+    if flaps_in_window > exp.max_flaps {
+        vec![Violation {
+            summary: format!(
+                "{}: default route flapped {} times in {}s (limit {})",
+                exp.name, flaps_in_window, exp.window_secs, exp.max_flaps
+            ),
+            labels: vec![
+                (
+                    "expected".into(),
+                    format!("flaps <= {} per {}s", exp.max_flaps, exp.window_secs),
+                ),
+                ("metric".into(), exp.metric.clone()),
+                ("actual".into(), flaps_in_window.to_string()),
+            ],
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
 // ---- Evaluator (live nlink + AlertReporter) ---------------------------------
 
 /// Shared, hot-swappable expectation set. Cloning is cheap (Arc).
@@ -420,8 +623,27 @@ impl SentinelHandle {
         c.metrics.retain(|e| e.name != exp.name);
         c.metrics.push(exp);
     }
+    /// Add (or replace by name) a rate-of-change expectation.
+    pub async fn add_rate(&self, exp: RateExpectation) {
+        let mut c = self.expectations.write().await;
+        c.rates.retain(|e| e.name != exp.name);
+        c.rates.push(exp);
+    }
+    /// Add (or replace by name) a delivery-rate floor expectation.
+    pub async fn add_delivery(&self, exp: DeliveryFloorExpectation) {
+        let mut c = self.expectations.write().await;
+        c.delivery.retain(|e| e.name != exp.name);
+        c.delivery.push(exp);
+    }
+    /// Add (or replace by name) a route-flap expectation.
+    pub async fn add_route_flap(&self, exp: RouteFlapExpectation) {
+        let mut c = self.expectations.write().await;
+        c.route_flaps.retain(|e| e.name != exp.name);
+        c.route_flaps.push(exp);
+    }
     /// Remove an expectation by rule slug (`socket:<name>` / `link:<iface>` /
-    /// `neighbor:<ip>`).
+    /// `neighbor:<ip>` / `route:<name>` / `metric:<name>` / `rate:<name>` /
+    /// `delivery:<name>` / `route_flap:<name>`).
     pub async fn remove(&self, rule: &str) {
         let mut c = self.expectations.write().await;
         if let Some(name) = rule.strip_prefix("socket:") {
@@ -430,10 +652,16 @@ impl SentinelHandle {
             c.links.retain(|e| e.iface != iface);
         } else if let Some(ip) = rule.strip_prefix("neighbor:") {
             c.neighbors.retain(|e| e.ip != ip);
+        } else if let Some(name) = rule.strip_prefix("route_flap:") {
+            c.route_flaps.retain(|e| e.name != name);
         } else if let Some(name) = rule.strip_prefix("route:") {
             c.routes.retain(|e| e.name != name);
         } else if let Some(name) = rule.strip_prefix("metric:") {
             c.metrics.retain(|e| e.name != name);
+        } else if let Some(name) = rule.strip_prefix("rate:") {
+            c.rates.retain(|e| e.name != name);
+        } else if let Some(name) = rule.strip_prefix("delivery:") {
+            c.delivery.retain(|e| e.name != name);
         }
     }
     /// Snapshot the current expectation set (for the status queryable).
@@ -452,6 +680,16 @@ pub struct Evaluator {
     /// Rules evaluated on the previous sweep — used to resolve alerts for rules
     /// that were removed (hot-swap) so they don't linger forever.
     seen_rules: std::sync::Mutex<HashSet<String>>,
+    /// Previous `(value, instant)` per rate-of-change rule (keyed by rule name).
+    /// The rate is computed between consecutive sweeps from this retained sample
+    /// (#113); kept here rather than in the [`MetricCache`] so the cache stays a
+    /// plain latest-value store and the rate reflects the sweep cadence.
+    rate_state: std::sync::Mutex<HashMap<String, (f64, Instant)>>,
+    /// Sliding window of `(ts_secs, counter)` samples per route-flap rule (keyed
+    /// by rule name), used to count flaps within the rule's window (#113).
+    flap_state: std::sync::Mutex<HashMap<String, Vec<(u64, u64)>>>,
+    /// Monotonic base for stamping flap samples in whole seconds.
+    flap_base: Instant,
     /// Nudged by the real-time event task on a relevant transition (#8); the
     /// sweep loop wakes immediately instead of waiting for the next tick.
     wake: Option<Arc<Notify>>,
@@ -470,6 +708,9 @@ impl Evaluator {
             reporter,
             metric_cache,
             seen_rules: std::sync::Mutex::new(HashSet::new()),
+            rate_state: std::sync::Mutex::new(HashMap::new()),
+            flap_state: std::sync::Mutex::new(HashMap::new()),
+            flap_base: Instant::now(),
             wake: None,
         }
     }
@@ -612,6 +853,87 @@ impl Evaluator {
             let violations = check_metric(exp, observed);
             self.report(&rule, exp.severity, exp.for_secs, violations)
                 .await;
+        }
+
+        // Rate-of-change expectations (#113). The previous sample is retained per
+        // rule in `rate_state`; the first sweep only records a baseline (no
+        // violation). The rate spans the wall-clock interval between sweeps.
+        for exp in &config.rates {
+            let rule = format!("rate:{}", exp.name);
+            current_rules.insert(rule.clone());
+            let sample = match self.metric_cache.get(&exp.metric).await {
+                Some(cur) => {
+                    let now = Instant::now();
+                    let prev = self
+                        .rate_state
+                        .lock()
+                        .unwrap()
+                        .insert(exp.name.clone(), (cur, now));
+                    prev.map(|(pv, pt)| RateSample {
+                        current: cur,
+                        previous: pv,
+                        interval_secs: now.duration_since(pt).as_secs_f64(),
+                    })
+                }
+                None => None,
+            };
+            let violations = check_rate(exp, sample);
+            self.report(&rule, exp.severity, exp.for_secs, violations)
+                .await;
+        }
+
+        // Delivery-rate floor expectations (#113): a typed threshold over the
+        // enriched tcp_info percentile metric (#108), read from the MetricCache.
+        for exp in &config.delivery {
+            let rule = format!("delivery:{}", exp.name);
+            current_rules.insert(rule.clone());
+            let observed = self.metric_cache.get(&exp.metric).await;
+            let violations = check_delivery_floor(exp, observed);
+            self.report(&rule, exp.severity, exp.for_secs, violations)
+                .await;
+        }
+
+        // Route-flap expectations (#113): windowed increase of a cumulative
+        // route-event counter, tracked per rule in `flap_state`.
+        for exp in &config.route_flaps {
+            let rule = format!("route_flap:{}", exp.name);
+            current_rules.insert(rule.clone());
+            let flaps = match self.metric_cache.get(&exp.metric).await {
+                Some(cur) => {
+                    let now_secs = self.flap_base.elapsed().as_secs();
+                    let mut state = self.flap_state.lock().unwrap();
+                    let samples = state.entry(exp.name.clone()).or_default();
+                    samples.push((now_secs, cur as u64));
+                    // Retain one sample at/before the cutoff (the baseline) plus
+                    // all samples within the window — bounds the Vec growth.
+                    let cutoff = now_secs.saturating_sub(exp.window_secs);
+                    while samples.len() >= 2 && samples[1].0 <= cutoff {
+                        samples.remove(0);
+                    }
+                    flaps_within(samples, now_secs, exp.window_secs)
+                }
+                None => 0,
+            };
+            let violations = check_route_flap(exp, flaps);
+            self.report(&rule, exp.severity, exp.for_secs, violations)
+                .await;
+        }
+
+        // Drop retained per-rule state for rate/flap rules no longer configured
+        // (hot-swap): keeps the state maps from leaking removed rules.
+        {
+            let names: HashSet<&str> = config.rates.iter().map(|e| e.name.as_str()).collect();
+            self.rate_state
+                .lock()
+                .unwrap()
+                .retain(|k, _| names.contains(k.as_str()));
+        }
+        {
+            let names: HashSet<&str> = config.route_flaps.iter().map(|e| e.name.as_str()).collect();
+            self.flap_state
+                .lock()
+                .unwrap()
+                .retain(|k, _| names.contains(k.as_str()));
         }
 
         // Resolve alerts for rules removed since the last sweep (hot-swap).
@@ -846,6 +1168,132 @@ mod tests {
             v.labels
                 .iter()
                 .any(|(k, val)| k == "actual" && val == "250")
+        );
+    }
+
+    #[test]
+    fn rate_expectations() {
+        // "rx_errors must not increase by > 60/min" (i.e. >1/sec).
+        let exp = RateExpectation {
+            name: "rx-err".into(),
+            metric: "interfaces/eth0/rx_errors".into(),
+            max_increase_per_min: 60.0,
+            severity: AlertSeverity::Warning,
+            for_secs: None,
+        };
+        // No previous sample yet → no violation (baseline-only first sweep).
+        assert!(check_rate(&exp, None).is_empty());
+        // 100 → 110 over 30s = 20/min ≤ 60 → ok.
+        assert!(
+            check_rate(
+                &exp,
+                Some(RateSample {
+                    current: 110.0,
+                    previous: 100.0,
+                    interval_secs: 30.0,
+                })
+            )
+            .is_empty()
+        );
+        // 100 → 200 over 30s = 200/min > 60 → fire.
+        let v = check_rate(
+            &exp,
+            Some(RateSample {
+                current: 200.0,
+                previous: 100.0,
+                interval_secs: 30.0,
+            }),
+        );
+        assert_eq!(v.len(), 1);
+        assert!(
+            v[0].labels
+                .iter()
+                .any(|(k, val)| k == "metric" && val == "interfaces/eth0/rx_errors")
+        );
+        assert!(v[0].labels.iter().any(|(k, _)| k == "rate_per_min"));
+        // A counter reset (negative delta) does not fire.
+        assert!(
+            check_rate(
+                &exp,
+                Some(RateSample {
+                    current: 5.0,
+                    previous: 100.0,
+                    interval_secs: 30.0,
+                })
+            )
+            .is_empty()
+        );
+        // A zero interval does not divide-by-zero / fire.
+        assert!(
+            check_rate(
+                &exp,
+                Some(RateSample {
+                    current: 200.0,
+                    previous: 100.0,
+                    interval_secs: 0.0,
+                })
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn delivery_floor_expectations() {
+        // "delivery_rate_p50 must stay >= 1_000_000 B/s".
+        let exp = DeliveryFloorExpectation {
+            name: "edge".into(),
+            metric: "sockets/tcp/delivery_rate_p50".into(),
+            floor: 1_000_000.0,
+            severity: AlertSeverity::Warning,
+            for_secs: None,
+        };
+        // Above floor → ok.
+        assert!(check_delivery_floor(&exp, Some(5_000_000.0)).is_empty());
+        // Below floor → fire.
+        let v = check_delivery_floor(&exp, Some(250_000.0));
+        assert_eq!(v.len(), 1);
+        assert!(
+            v[0].labels
+                .iter()
+                .any(|(k, val)| k == "actual" && val == "250000")
+        );
+        // Absent metric → no violation (only fires on data seen).
+        assert!(check_delivery_floor(&exp, None).is_empty());
+    }
+
+    #[test]
+    fn flaps_within_windowed_count() {
+        // No samples → 0.
+        assert_eq!(flaps_within(&[], 100, 60), 0);
+        // Samples: counter rises 10 → 15 across the last 60s; baseline is the
+        // sample at/just before cutoff (t=40, c=10), now=100, window=60 → cutoff=40.
+        let samples = [(30u64, 8u64), (40, 10), (70, 12), (100, 15)];
+        assert_eq!(flaps_within(&samples, 100, 60), 5); // 15 - 10
+        // Wider window catches the earlier flaps too (baseline t=30, c=8).
+        assert_eq!(flaps_within(&samples, 100, 80), 7); // 15 - 8
+        // No baseline before cutoff → falls back to oldest in-window sample.
+        assert_eq!(flaps_within(&[(95u64, 3u64), (100, 9)], 100, 60), 6); // 9 - 3
+    }
+
+    #[test]
+    fn route_flap_expectations() {
+        // "default route must not flap > 3 times per 60s".
+        let exp = RouteFlapExpectation {
+            name: "default".into(),
+            metric: "events/route/removed_total".into(),
+            max_flaps: 3,
+            window_secs: 60,
+            severity: AlertSeverity::Critical,
+            for_secs: None,
+        };
+        assert!(check_route_flap(&exp, 0).is_empty());
+        assert!(check_route_flap(&exp, 3).is_empty()); // at limit → ok
+        let v = check_route_flap(&exp, 7); // above limit → fire
+        assert_eq!(v.len(), 1);
+        assert!(
+            v[0].labels
+                .iter()
+                .any(|(k, val)| k == "actual" && val == "7")
         );
     }
 

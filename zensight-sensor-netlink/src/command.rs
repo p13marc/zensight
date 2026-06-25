@@ -12,8 +12,9 @@ use zensight_common::{command_key, status_key};
 use crate::collector::CollectHandle;
 use crate::config::CollectConfig;
 use crate::sentinel::{
-    ExpectationsConfig, LinkExpectation, MetricExpectation, NeighborExpectation, RouteExpectation,
-    SentinelHandle, SocketExpectation,
+    DeliveryFloorExpectation, ExpectationsConfig, LinkExpectation, MetricExpectation,
+    NeighborExpectation, RateExpectation, RouteExpectation, RouteFlapExpectation, SentinelHandle,
+    SocketExpectation,
 };
 
 /// Topic for the expectations control surface.
@@ -131,6 +132,12 @@ pub enum ExpectationCommand {
     AddRoute(RouteExpectation),
     /// Add (or replace by name) a metric-threshold expectation.
     AddMetric(MetricExpectation),
+    /// Add (or replace by name) a rate-of-change expectation.
+    AddRate(RateExpectation),
+    /// Add (or replace by name) a delivery-rate floor expectation.
+    AddDelivery(DeliveryFloorExpectation),
+    /// Add (or replace by name) a route-flap expectation.
+    AddRouteFlap(RouteFlapExpectation),
     /// Remove an expectation by rule slug.
     Remove { rule: String },
 }
@@ -161,6 +168,18 @@ pub async fn apply(handle: &SentinelHandle, cmd: ExpectationCommand) {
         ExpectationCommand::AddMetric(exp) => {
             tracing::info!(name = %exp.name, metric = %exp.metric, "sentinel: add metric expectation");
             handle.add_metric(exp).await;
+        }
+        ExpectationCommand::AddRate(exp) => {
+            tracing::info!(name = %exp.name, metric = %exp.metric, "sentinel: add rate expectation");
+            handle.add_rate(exp).await;
+        }
+        ExpectationCommand::AddDelivery(exp) => {
+            tracing::info!(name = %exp.name, metric = %exp.metric, "sentinel: add delivery-floor expectation");
+            handle.add_delivery(exp).await;
+        }
+        ExpectationCommand::AddRouteFlap(exp) => {
+            tracing::info!(name = %exp.name, metric = %exp.metric, "sentinel: add route-flap expectation");
+            handle.add_route_flap(exp).await;
         }
         ExpectationCommand::Remove { rule } => {
             tracing::info!(rule = %rule, "sentinel: remove expectation");
