@@ -139,29 +139,49 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Shared alert reporter for all sensor-emitted alerts: journald known-events
+    // (#61) and per-unit error budgets (#105). One reporter per protocol — the
+    // two alert families are namespaced by `rule` and reconcile independently —
+    // so `serve_alerts_query` is declared exactly once.
+    let journald_events_on =
+        matches!(&syslog_config.journald, Some(j) if j.enabled && j.detect_events);
+    let budget_alerts_on = syslog_config.derived && syslog_config.error_budget.enabled;
+    let alert_reporter: Option<Arc<AlertReporter>> = if journald_events_on || budget_alerts_on {
+        let reporter = Arc::new(AlertReporter::new(
+            runner.publisher(),
+            Protocol::Syslog,
+            format,
+        ));
+        // Seed late-joining consumers (e.g. the GUI) with the firing set.
+        runner.spawn(serve_alerts_query(reporter.clone()));
+        Some(reporter)
+    } else {
+        None
+    };
+    if syslog_config.error_budget.enabled && !syslog_config.derived {
+        tracing::warn!(
+            "error_budget enabled but derived telemetry is off; SLO alerting needs \
+             the derived aggregator — skipping budget alerts"
+        );
+    }
+
     // Known systemd-event detection → alerts (#61). Only when journald is the
     // source and detection is enabled; the alert path is otherwise untouched.
-    let event_detector: Option<Arc<EventDetector>> = match &syslog_config.journald {
-        Some(j) if j.enabled && j.detect_events => {
-            let reporter = Arc::new(AlertReporter::new(
-                runner.publisher(),
-                Protocol::Syslog,
-                format,
-            ));
-            // Seed late-joining consumers (e.g. the GUI) with the firing set.
-            runner.spawn(serve_alerts_query(reporter.clone()));
-            let detector = Arc::new(EventDetector::new(
-                reporter,
-                j.event_dedup_secs,
-                &j.event_severity,
-            ));
-            // Auto-resolve fired events after their dedup window.
-            runner.spawn(detector.clone().run_reconcile_loop());
-            tracing::info!("journald known-event detection enabled");
-            Some(detector)
-        }
-        _ => None,
-    };
+    let event_detector: Option<Arc<EventDetector>> =
+        match (&syslog_config.journald, &alert_reporter) {
+            (Some(j), Some(reporter)) if j.enabled && j.detect_events => {
+                let detector = Arc::new(EventDetector::new(
+                    reporter.clone(),
+                    j.event_dedup_secs,
+                    &j.event_severity,
+                ));
+                // Auto-resolve fired events after their dedup window.
+                runner.spawn(detector.clone().run_reconcile_loop());
+                tracing::info!("journald known-event detection enabled");
+                Some(detector)
+            }
+            _ => None,
+        };
 
     // journald robustness monitor (#62): periodically snapshot the reader's
     // read/published/dropped/sampled counters; on sustained loss raise an
@@ -221,14 +241,25 @@ async fn main() -> Result<()> {
     // / per-unit / error rollups, emitted on a tick alongside the per-message
     // points. The aggregator observes each published message; the tick task
     // snapshots it (+ journald throughput) to telemetry.
-    let aggregator = syslog_config
-        .derived
-        .then(|| Arc::new(derived::LogAggregator::new(syslog_config.top_units)));
+    let aggregator = syslog_config.derived.then(|| {
+        // Resolve the per-unit error-budget / SLO thresholds (#105). Alerting is
+        // gated on a reporter being present (events + budget share one).
+        let eb = &syslog_config.error_budget;
+        let budget = derived::BudgetParams {
+            enabled: budget_alerts_on,
+            target_ratio: eb.target_ratio,
+            burn_rate: eb.burn_rate,
+            burn_windows: eb.burn_windows,
+            min_messages: eb.min_messages,
+        };
+        Arc::new(derived::LogAggregator::new(syslog_config.top_units).with_budget(budget))
+    });
     if let Some(agg) = aggregator.clone() {
         let session_tick = session.clone();
         let key_prefix_tick = key_prefix.clone();
         let interval_secs = syslog_config.derived_interval_secs.max(1);
         let stats_tick = journald_stats.clone();
+        let budget_reporter = budget_alerts_on.then(|| alert_reporter.clone()).flatten();
         // Local host identifies this sensor's rollups (network syslog spans many
         // hosts; journald is local — a single sensor-wide source keeps the
         // derived series cardinality bounded).
@@ -242,7 +273,28 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
                 let snapshot = stats_tick.as_ref().map(|s| s.snapshot());
-                for point in agg.emit(&source, snapshot) {
+                let mut points = agg.emit(&source, snapshot);
+
+                // SLO / error-budget layer (#105): error_ratio + burn_rate gauges
+                // for the same bounded unit set, plus burn alerts when enabled.
+                let budget = agg.tick_budgets(&source);
+                points.extend(budget.points);
+                if let Some(reporter) = &budget_reporter {
+                    for alert in budget.firing {
+                        let key = alert.alert_key();
+                        if let Err(e) = reporter.observe(alert, Some(Duration::ZERO)).await {
+                            tracing::warn!(error = %e, alert = %key, "failed to publish budget alert");
+                        }
+                    }
+                    if let Err(e) = reporter
+                        .reconcile(derived::BUDGET_RULE, &budget.firing_keys)
+                        .await
+                    {
+                        tracing::warn!(error = %e, "budget alert reconcile failed");
+                    }
+                }
+
+                for point in points {
                     let key = format!("{}/{}/{}", key_prefix_tick, point.source, point.metric);
                     match encode(&point, format) {
                         Ok(payload) => {

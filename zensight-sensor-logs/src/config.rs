@@ -70,6 +70,14 @@ pub struct SyslogConfig {
     /// bucket (never an unbounded label space). Default 10.
     #[serde(default = "default_top_units")]
     pub top_units: usize,
+
+    /// Per-unit error-budget / SLO burn-rate alerting (#105). Layered on top of
+    /// the derived per-unit `messages_total`/`errors_total` rollups: emits
+    /// `error_ratio` + `burn_rate` gauges and, when enabled, raises a
+    /// `log-error-budget` alert on sustained multi-window burn. Disabled by
+    /// default so it never surprises existing deployments.
+    #[serde(default)]
+    pub error_budget: ErrorBudgetConfig,
 }
 
 fn default_derived_interval_secs() -> u64 {
@@ -77,6 +85,66 @@ fn default_derived_interval_secs() -> u64 {
 }
 fn default_top_units() -> usize {
     10
+}
+
+/// Per-unit error-budget / SLO configuration (#105).
+///
+/// SLO math (see also `derived::BudgetParams`): per derived window a unit's
+/// error ratio is `errors / messages`; it *burns budget* when that ratio
+/// exceeds `target_ratio * burn_rate` with at least `min_messages` of volume.
+/// An alert fires only after `burn_windows` consecutive burning windows and
+/// auto-resolves the first window the unit is back within budget.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ErrorBudgetConfig {
+    /// Master switch for *alerting*. When false the `error_ratio`/`burn_rate`
+    /// gauges are still emitted (cheap, bounded) but no alert is ever raised.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Tolerated per-window error fraction — the SLO target (0.0..=1.0).
+    /// Default 0.05 (5%).
+    #[serde(default = "default_target_ratio")]
+    pub target_ratio: f64,
+
+    /// Burn threshold multiplier: fire when the window error ratio exceeds
+    /// `target_ratio * burn_rate`. Default 2.0.
+    #[serde(default = "default_burn_rate")]
+    pub burn_rate: f64,
+
+    /// Consecutive over-budget windows required before an alert fires (the
+    /// multi-window anti-flap guard). Default 3.
+    #[serde(default = "default_burn_windows")]
+    pub burn_windows: u32,
+
+    /// Minimum messages in a window before the ratio is trusted, so a near-idle
+    /// unit can't trip a 100% ratio off a single line. Default 20.
+    #[serde(default = "default_min_messages")]
+    pub min_messages: u64,
+}
+
+fn default_target_ratio() -> f64 {
+    0.05
+}
+fn default_burn_rate() -> f64 {
+    2.0
+}
+fn default_burn_windows() -> u32 {
+    3
+}
+fn default_min_messages() -> u64 {
+    20
+}
+
+impl Default for ErrorBudgetConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            target_ratio: default_target_ratio(),
+            burn_rate: default_burn_rate(),
+            burn_windows: default_burn_windows(),
+            min_messages: default_min_messages(),
+        }
+    }
 }
 
 /// systemd-journald source configuration.
@@ -442,6 +510,7 @@ impl Default for SyslogConfig {
             derived: true,
             derived_interval_secs: default_derived_interval_secs(),
             top_units: default_top_units(),
+            error_budget: ErrorBudgetConfig::default(),
         }
     }
 }
@@ -580,6 +649,45 @@ mod tests {
 
         let config: SyslogSensorConfig = json5::from_str(json).unwrap();
         assert!(config.validate_config().is_err());
+    }
+
+    #[test]
+    fn test_error_budget_defaults_off() {
+        let json = r#"{
+            zenoh: { mode: "peer" },
+            syslog: { listeners: [ { protocol: "udp", bind: "0.0.0.0:514" } ] }
+        }"#;
+        let config: SyslogSensorConfig = json5::from_str(json).unwrap();
+        let eb = config.syslog.error_budget;
+        assert!(!eb.enabled);
+        assert_eq!(eb.target_ratio, 0.05);
+        assert_eq!(eb.burn_rate, 2.0);
+        assert_eq!(eb.burn_windows, 3);
+        assert_eq!(eb.min_messages, 20);
+    }
+
+    #[test]
+    fn test_error_budget_parsed() {
+        let json = r#"{
+            zenoh: { mode: "peer" },
+            syslog: {
+                listeners: [ { protocol: "udp", bind: "0.0.0.0:514" } ],
+                error_budget: {
+                    enabled: true,
+                    target_ratio: 0.02,
+                    burn_rate: 5.0,
+                    burn_windows: 4,
+                    min_messages: 50
+                }
+            }
+        }"#;
+        let config: SyslogSensorConfig = json5::from_str(json).unwrap();
+        let eb = config.syslog.error_budget;
+        assert!(eb.enabled);
+        assert_eq!(eb.target_ratio, 0.02);
+        assert_eq!(eb.burn_rate, 5.0);
+        assert_eq!(eb.burn_windows, 4);
+        assert_eq!(eb.min_messages, 50);
     }
 
     #[test]
