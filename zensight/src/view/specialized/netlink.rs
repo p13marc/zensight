@@ -406,10 +406,20 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
         fetch(NetlinkDetailTopic::Sockets, d.sockets.is_loading()),
         fetch(NetlinkDetailTopic::Routes, d.routes.is_loading()),
         fetch(NetlinkDetailTopic::Neighbors, d.neighbors.is_loading()),
+        fetch(NetlinkDetailTopic::Addresses, d.addresses.is_loading()),
+    ]
+    .spacing(space::SM);
+    // The remaining queryables (events ring, full TC tree, per-SA xfrm, nft
+    // inventory) — previously served but unreachable from the UI (#109).
+    let buttons2 = row![
+        fetch(NetlinkDetailTopic::Events, d.events.is_loading()),
+        fetch(NetlinkDetailTopic::Tc, d.tc.is_loading()),
+        fetch(NetlinkDetailTopic::Xfrm, d.xfrm.is_loading()),
+        fetch(NetlinkDetailTopic::Nft, d.nft.is_loading()),
     ]
     .spacing(space::SM);
 
-    let mut col = column![title, buttons].spacing(space::SM);
+    let mut col = column![title, buttons, buttons2].spacing(space::SM);
 
     // Sockets
     if let Some(err) = d.sockets.error() {
@@ -490,6 +500,163 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
         }
         col = col
             .push(text(format!("Neighbors ({})", neighbors.len())).size(font::EMPHASIS))
+            .push(list);
+    }
+
+    // Addresses (#109)
+    if let Some(err) = d.addresses.error() {
+        col = col.push(empty_state(format!("Addresses fetch failed: {err}"), None));
+    } else if let Some(addrs) = d.addresses.ready() {
+        let mut list = Column::new().spacing(3).push(
+            row![
+                cell("address", 240),
+                cell("scope", 90),
+                cell("label", 120),
+                cell("ifindex", 70),
+            ]
+            .spacing(8),
+        );
+        for a in addrs.iter().take(200) {
+            let addr = match &a.ip {
+                Some(ip) => format!("{ip}/{}", a.prefix_len),
+                None => "-".to_string(),
+            };
+            list = list.push(
+                row![
+                    cell(&addr, 240),
+                    cell(&a.scope, 90),
+                    cell(a.label.as_deref().unwrap_or("-"), 120),
+                    cell(&a.ifindex.to_string(), 70),
+                ]
+                .spacing(8),
+            );
+        }
+        col = col
+            .push(text(format!("Addresses ({})", addrs.len())).size(font::EMPHASIS))
+            .push(list);
+    }
+
+    // Recent control-plane events ring (#109)
+    if let Some(err) = d.events.error() {
+        col = col.push(empty_state(format!("Events fetch failed: {err}"), None));
+    } else if let Some(events) = d.events.ready() {
+        let mut list = Column::new().spacing(3).push(
+            row![
+                cell("family", 90),
+                cell("action", 90),
+                cell("ifindex", 70),
+                cell("detail", 260),
+            ]
+            .spacing(8),
+        );
+        for e in events.iter().take(200) {
+            list = list.push(
+                row![
+                    cell(&e.family, 90),
+                    cell(&e.action, 90),
+                    cell(&e.ifindex.map(|i| i.to_string()).unwrap_or_default(), 70),
+                    cell(&e.detail, 260),
+                ]
+                .spacing(8),
+            );
+        }
+        col = col
+            .push(text(format!("Recent events ({})", events.len())).size(font::EMPHASIS))
+            .push(list);
+    }
+
+    // TC qdisc/class tree (#109)
+    if let Some(err) = d.tc.error() {
+        col = col.push(empty_state(format!("TC fetch failed: {err}"), None));
+    } else if let Some(tc) = d.tc.ready() {
+        let mut list = Column::new().spacing(3).push(
+            row![
+                cell("iface", 90),
+                cell("node", 70),
+                cell("kind", 110),
+                cell("handle", 90),
+                cell("drops", 90),
+                cell("backlog_b", 100),
+            ]
+            .spacing(8),
+        );
+        for t in tc.iter().take(200) {
+            list = list.push(
+                row![
+                    cell(&t.iface, 90),
+                    cell(&t.node, 70),
+                    cell(t.kind.as_deref().unwrap_or("-"), 110),
+                    cell(&t.handle, 90),
+                    cell(&t.drops.to_string(), 90),
+                    cell(&t.backlog_bytes.to_string(), 100),
+                ]
+                .spacing(8),
+            );
+        }
+        col = col
+            .push(text(format!("TC ({})", tc.len())).size(font::EMPHASIS))
+            .push(list);
+    }
+
+    // XFRM / IPsec SAs (#109)
+    if let Some(err) = d.xfrm.error() {
+        col = col.push(empty_state(format!("XFRM fetch failed: {err}"), None));
+    } else if let Some(sas) = d.xfrm.ready() {
+        let mut list = Column::new().spacing(3).push(
+            row![
+                cell("src", 150),
+                cell("dst", 150),
+                cell("proto", 70),
+                cell("mode", 90),
+                cell("spi", 100),
+            ]
+            .spacing(8),
+        );
+        for s in sas.iter().take(200) {
+            list = list.push(
+                row![
+                    cell(s.src.as_deref().unwrap_or("-"), 150),
+                    cell(s.dst.as_deref().unwrap_or("-"), 150),
+                    cell(&s.proto, 70),
+                    cell(&s.mode, 90),
+                    cell(&format!("{:#x}", s.spi), 100),
+                ]
+                .spacing(8),
+            );
+        }
+        col = col
+            .push(text(format!("XFRM SAs ({})", sas.len())).size(font::EMPHASIS))
+            .push(list);
+    }
+
+    // nftables rule inventory (#109)
+    if let Some(err) = d.nft.error() {
+        col = col.push(empty_state(format!("NFT fetch failed: {err}"), None));
+    } else if let Some(rules) = d.nft.ready() {
+        let mut list = Column::new().spacing(3).push(
+            row![
+                cell("family", 80),
+                cell("table", 140),
+                cell("chain", 140),
+                cell("handle", 80),
+                cell("comment", 200),
+            ]
+            .spacing(8),
+        );
+        for r in rules.iter().take(200) {
+            list = list.push(
+                row![
+                    cell(&r.family, 80),
+                    cell(&r.table, 140),
+                    cell(&r.chain, 140),
+                    cell(&r.handle.to_string(), 80),
+                    cell(r.comment.as_deref().unwrap_or("-"), 200),
+                ]
+                .spacing(8),
+            );
+        }
+        col = col
+            .push(text(format!("NFT rules ({})", rules.len())).size(font::EMPHASIS))
             .push(list);
     }
 

@@ -1236,6 +1236,7 @@ fn test_netring_specialized_view() {
             packets: 10,
             duration_ms: 100,
             reason: "fin".into(),
+            community_id: None,
         }]));
 
     // Loading state: button reads "Fetching…" while a fetch is in flight; an

@@ -54,6 +54,10 @@ pub fn netring_sensor_view(state: &DeviceDetailState) -> Element<'_, Message> {
         content = content.push(card(render_capture(state)));
     }
     content = content.push(card(render_flow_detail(state)));
+    // On-demand top-talker histogram + elephant-flow ring (#45) — always
+    // available drill-downs (the sensor serves them whenever talkers are on).
+    content = content.push(card(render_talkers(state)));
+    content = content.push(card(render_elephants(state)));
 
     container(scrollable(content))
         .width(Length::Fill)
@@ -99,8 +103,9 @@ fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
         } else {
             let mut list = Column::new().spacing(3).push(
                 row![
-                    cell("sni", 240),
-                    cell("ja4", 240),
+                    cell("sni", 220),
+                    cell("ja4", 220),
+                    cell("ja3", 220),
                     cell("alpn", 90),
                     cell("count", 60)
                 ]
@@ -109,8 +114,10 @@ fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
             for r in records.iter().take(200) {
                 list = list.push(
                     row![
-                        cell(r.sni.as_deref().unwrap_or("-"), 240),
-                        cell(r.ja4.as_deref().unwrap_or("-"), 240),
+                        cell(r.sni.as_deref().unwrap_or("-"), 220),
+                        cell(r.ja4.as_deref().unwrap_or("-"), 220),
+                        // JA3 was fetched but never rendered before (#45).
+                        cell(r.ja3.as_deref().unwrap_or("-"), 220),
                         cell(r.alpn.as_deref().unwrap_or("-"), 90),
                         cell(&r.count.to_string(), 60),
                     ]
@@ -519,6 +526,51 @@ fn render_dns(state: &DeviceDetailState) -> Element<'_, Message> {
             col = col.push(row![cell(&format!("  {r}"), 200), cell(&v, 120)].spacing(8));
         }
     }
+
+    // On-demand top-SLD / top-NXDOMAIN drill-down via `@/query/dns` (#45).
+    let loading = state.netring_detail.dns.is_loading();
+    let mut fetch = button(
+        text(if loading {
+            "Fetching…"
+        } else {
+            "Fetch top domains"
+        })
+        .size(font::CAPTION),
+    )
+    .padding([4, 10]);
+    if !loading {
+        fetch = fetch.on_press(Message::FetchNetringDns);
+    }
+    col = col.push(fetch);
+    if let Some(err) = state.netring_detail.dns.error() {
+        col = col.push(empty_state(format!("Fetch failed: {err}"), None));
+    } else if let Some(records) = state.netring_detail.dns.ready() {
+        if records.is_empty() {
+            col = col.push(empty_state("No DNS detail", None));
+        } else {
+            let mut list = Column::new().spacing(3).push(
+                row![
+                    cell("domain", 240),
+                    cell("queries", 100),
+                    cell("nxdomain", 100),
+                ]
+                .spacing(8),
+            );
+            for r in records.iter().take(200) {
+                list = list.push(
+                    row![
+                        cell(&r.domain, 240),
+                        cell(&r.queries.to_string(), 100),
+                        cell(&r.nxdomain.to_string(), 100),
+                    ]
+                    .spacing(8),
+                );
+            }
+            col = col
+                .push(text(format!("{} domains", records.len())).size(font::EMPHASIS))
+                .push(list);
+        }
+    }
     col.into()
 }
 
@@ -553,6 +605,160 @@ fn render_http(state: &DeviceDetailState) -> Element<'_, Message> {
         col = col.push(text("by method").size(font::CAPTION).style(dim));
         for (meth, v) in methods {
             col = col.push(row![cell(&format!("  {meth}"), 200), cell(&v, 120)].spacing(8));
+        }
+    }
+
+    // On-demand top-hosts / error-hosts drill-down via `@/query/http` (#45).
+    let loading = state.netring_detail.http.is_loading();
+    let mut fetch = button(
+        text(if loading {
+            "Fetching…"
+        } else {
+            "Fetch top hosts"
+        })
+        .size(font::CAPTION),
+    )
+    .padding([4, 10]);
+    if !loading {
+        fetch = fetch.on_press(Message::FetchNetringHttp);
+    }
+    col = col.push(fetch);
+    if let Some(err) = state.netring_detail.http.error() {
+        col = col.push(empty_state(format!("Fetch failed: {err}"), None));
+    } else if let Some(records) = state.netring_detail.http.ready() {
+        if records.is_empty() {
+            col = col.push(empty_state("No HTTP detail", None));
+        } else {
+            let mut list = Column::new().spacing(3).push(
+                row![
+                    cell("host", 280),
+                    cell("requests", 100),
+                    cell("errors", 100),
+                ]
+                .spacing(8),
+            );
+            for r in records.iter().take(200) {
+                list = list.push(
+                    row![
+                        cell(&r.host, 280),
+                        cell(&r.requests.to_string(), 100),
+                        cell(&r.errors.to_string(), 100),
+                    ]
+                    .spacing(8),
+                );
+            }
+            col = col
+                .push(text(format!("{} hosts", records.len())).size(font::EMPHASIS))
+                .push(list);
+        }
+    }
+    col.into()
+}
+
+/// Top-talker drill-down (#45): the per-destination histogram the sensor serves
+/// on `@/query/talkers` — distinct from the per-app bandwidth card. "Who are the
+/// major backends?" by bytes/packets/flows.
+fn render_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
+    let loading = state.netring_detail.talkers.is_loading();
+    let title = section_header("Top Talkers (on demand)", None);
+    let mut fetch = button(
+        text(if loading {
+            "Fetching…"
+        } else {
+            "Fetch Talkers"
+        })
+        .size(font::CAPTION),
+    )
+    .padding([4, 10]);
+    if !loading {
+        fetch = fetch.on_press(Message::FetchNetringTalkers);
+    }
+    let mut col = column![title, fetch].spacing(space::SM);
+    if let Some(err) = state.netring_detail.talkers.error() {
+        col = col.push(empty_state(format!("Fetch failed: {err}"), None));
+    } else if let Some(records) = state.netring_detail.talkers.ready() {
+        if records.is_empty() {
+            col = col.push(empty_state("No talkers", None));
+        } else {
+            let mut list = Column::new().spacing(3).push(
+                row![
+                    cell("destination", 240),
+                    cell("bytes", 120),
+                    cell("packets", 100),
+                    cell("flows", 80),
+                ]
+                .spacing(8),
+            );
+            for r in records.iter().take(200) {
+                list = list.push(
+                    row![
+                        cell(&r.dst, 240),
+                        cell(&r.bytes.to_string(), 120),
+                        cell(&r.packets.to_string(), 100),
+                        cell(&r.flows.to_string(), 80),
+                    ]
+                    .spacing(8),
+                );
+            }
+            col = col
+                .push(text(format!("{} talkers", records.len())).size(font::EMPHASIS))
+                .push(list);
+        }
+    }
+    col.into()
+}
+
+/// Elephant-flow drill-down (#45): the biggest recently-ended flows, served on
+/// `@/query/elephant_flows`. "What were the biggest transfers?"
+fn render_elephants(state: &DeviceDetailState) -> Element<'_, Message> {
+    let loading = state.netring_detail.elephants.is_loading();
+    let title = section_header("Elephant Flows (on demand)", None);
+    let mut fetch = button(
+        text(if loading {
+            "Fetching…"
+        } else {
+            "Fetch Elephants"
+        })
+        .size(font::CAPTION),
+    )
+    .padding([4, 10]);
+    if !loading {
+        fetch = fetch.on_press(Message::FetchNetringElephants);
+    }
+    let mut col = column![title, fetch].spacing(space::SM);
+    if let Some(err) = state.netring_detail.elephants.error() {
+        col = col.push(empty_state(format!("Fetch failed: {err}"), None));
+    } else if let Some(records) = state.netring_detail.elephants.ready() {
+        if records.is_empty() {
+            col = col.push(empty_state("No elephant flows", None));
+        } else {
+            let mut list = Column::new().spacing(3).push(
+                row![
+                    cell("src", 180),
+                    cell("dst", 180),
+                    cell("proto", 60),
+                    cell("bytes", 110),
+                    cell("packets", 90),
+                    cell("dur_ms", 80),
+                ]
+                .spacing(8),
+            );
+            for r in records.iter().take(200) {
+                list = list.push(
+                    row![
+                        cell(&r.src, 180),
+                        cell(&r.dst, 180),
+                        cell(&r.proto, 60),
+                        cell(&r.bytes.to_string(), 110),
+                        cell(&r.packets.to_string(), 90),
+                        cell(&r.duration_ms.to_string(), 80),
+                    ]
+                    .spacing(8),
+                );
+            }
+            col = col
+                .push(text(format!("{} flows", records.len())).size(font::EMPHASIS))
+                .push(list);
         }
     }
     col.into()
@@ -609,6 +815,7 @@ fn render_flow_detail(state: &DeviceDetailState) -> Element<'_, Message> {
                     cell("dst", 190),
                     cell("proto", 60),
                     cell("bytes", 90),
+                    cell("packets", 80),
                     cell("dur_ms", 80),
                     cell("reason", 90),
                 ]
@@ -621,6 +828,7 @@ fn render_flow_detail(state: &DeviceDetailState) -> Element<'_, Message> {
                         cell(&f.dst, 190),
                         cell(&f.proto, 60),
                         cell(&f.bytes.to_string(), 90),
+                        cell(&f.packets.to_string(), 80),
                         cell(&f.duration_ms.to_string(), 80),
                         cell(&f.reason, 90),
                     ]
@@ -654,7 +862,9 @@ fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
         .collect();
     rows.sort_by(|a, b| b.1.total_cmp(&a.1));
 
-    let title = section_header(format!("Top Talkers ({})", rows.len()), None);
+    // This is per-application bandwidth, NOT the per-destination talker histogram
+    // (that's the on-demand `render_talkers` card, #45) — label it correctly.
+    let title = section_header(format!("Per-app bandwidth ({})", rows.len()), None);
     if rows.is_empty() {
         return column![title, empty_state("No bandwidth data", None)]
             .spacing(space::SM)

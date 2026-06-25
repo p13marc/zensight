@@ -119,6 +119,22 @@ pub enum Message {
     FetchNetringAssets,
     /// A netring asset-inventory reply: the decoded records, or an error message.
     NetringAssetsReceived(Result<Vec<zensight_common::AssetRecord>, String>),
+    /// Fetch the on-demand netring top-talker histogram (#45).
+    FetchNetringTalkers,
+    /// A netring top-talker reply: the decoded records, or an error message.
+    NetringTalkersReceived(Result<Vec<zensight_common::TalkerRecord>, String>),
+    /// Fetch the on-demand netring elephant-flow ring (#45).
+    FetchNetringElephants,
+    /// A netring elephant-flow reply: the decoded records, or an error message.
+    NetringElephantsReceived(Result<Vec<zensight_common::ElephantRecord>, String>),
+    /// Fetch the on-demand netring per-SLD DNS detail (#45).
+    FetchNetringDns,
+    /// A netring DNS-detail reply: the decoded records, or an error message.
+    NetringDnsReceived(Result<Vec<zensight_common::DnsRecord>, String>),
+    /// Fetch the on-demand netring per-host HTTP detail (#45).
+    FetchNetringHttp,
+    /// A netring HTTP-detail reply: the decoded records, or an error message.
+    NetringHttpReceived(Result<Vec<zensight_common::HttpHostRecord>, String>),
 
     /// Open the security (network anomalies) view.
     OpenSecurity,

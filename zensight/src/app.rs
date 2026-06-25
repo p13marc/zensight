@@ -1249,6 +1249,50 @@ impl ZenSight {
                     device.netring_detail.apply_assets(result);
                 }
             }
+            Message::FetchNetringTalkers => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_talkers();
+                }
+                return self.query_netring_talkers();
+            }
+            Message::NetringTalkersReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_talkers(result);
+                }
+            }
+            Message::FetchNetringElephants => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_elephants();
+                }
+                return self.query_netring_elephants();
+            }
+            Message::NetringElephantsReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_elephants(result);
+                }
+            }
+            Message::FetchNetringDns => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_dns();
+                }
+                return self.query_netring_dns();
+            }
+            Message::NetringDnsReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_dns(result);
+                }
+            }
+            Message::FetchNetringHttp => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_http();
+                }
+                return self.query_netring_http();
+            }
+            Message::NetringHttpReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_http(result);
+                }
+            }
             Message::OpenSecurity => {
                 self.set_view(CurrentView::Security);
             }
@@ -1434,6 +1478,21 @@ impl ZenSight {
                 NetlinkDetailTopic::Neighbors => fetch_records(session, key)
                     .await
                     .map(NetlinkDetailData::Neighbors),
+                NetlinkDetailTopic::Addresses => fetch_records(session, key)
+                    .await
+                    .map(NetlinkDetailData::Addresses),
+                NetlinkDetailTopic::Events => fetch_records(session, key)
+                    .await
+                    .map(NetlinkDetailData::Events),
+                NetlinkDetailTopic::Tc => {
+                    fetch_records(session, key).await.map(NetlinkDetailData::Tc)
+                }
+                NetlinkDetailTopic::Xfrm => fetch_records(session, key)
+                    .await
+                    .map(NetlinkDetailData::Xfrm),
+                NetlinkDetailTopic::Nft => fetch_records(session, key)
+                    .await
+                    .map(NetlinkDetailData::Nft),
             };
             let result =
                 data.ok_or_else(|| format!("No netlink sensor responded for {}", topic.label()));
@@ -1561,6 +1620,70 @@ impl ZenSight {
                 .await
                 .ok_or_else(|| "No netring sensor responded".to_string());
             Message::NetringAssetsReceived(result)
+        })
+    }
+
+    /// Fetch the on-demand netring top-talker histogram (#45).
+    fn query_netring_talkers(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_talkers;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::NetringTalkersReceived(Err(
+                "Not connected to Zenoh".to_string()
+            )));
+        };
+        Task::future(async move {
+            let result = fetch_talkers(session)
+                .await
+                .ok_or_else(|| "No netring sensor responded".to_string());
+            Message::NetringTalkersReceived(result)
+        })
+    }
+
+    /// Fetch the on-demand netring elephant-flow ring (#45).
+    fn query_netring_elephants(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_elephants;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::NetringElephantsReceived(Err(
+                "Not connected to Zenoh".to_string(),
+            )));
+        };
+        Task::future(async move {
+            let result = fetch_elephants(session)
+                .await
+                .ok_or_else(|| "No netring sensor responded".to_string());
+            Message::NetringElephantsReceived(result)
+        })
+    }
+
+    /// Fetch the on-demand netring per-SLD DNS detail (#45).
+    fn query_netring_dns(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_dns;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::NetringDnsReceived(Err(
+                "Not connected to Zenoh".to_string()
+            )));
+        };
+        Task::future(async move {
+            let result = fetch_dns(session)
+                .await
+                .ok_or_else(|| "No netring sensor responded".to_string());
+            Message::NetringDnsReceived(result)
+        })
+    }
+
+    /// Fetch the on-demand netring per-host HTTP detail (#45).
+    fn query_netring_http(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_http;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::NetringHttpReceived(Err(
+                "Not connected to Zenoh".to_string()
+            )));
+        };
+        Task::future(async move {
+            let result = fetch_http(session)
+                .await
+                .ok_or_else(|| "No netring sensor responded".to_string());
+            Message::NetringHttpReceived(result)
         })
     }
 
@@ -1787,16 +1910,11 @@ impl ZenSight {
         protocol_str: &str,
         liveness: zensight_common::DeviceLiveness,
     ) {
-        // Parse protocol from string
-        let protocol = match protocol_str {
-            "snmp" => Protocol::Snmp,
-            "syslog" => Protocol::Syslog,
-            "gnmi" => Protocol::Gnmi,
-            "netflow" => Protocol::Netflow,
-            "opcua" => Protocol::Opcua,
-            "modbus" => Protocol::Modbus,
-            "sysinfo" => Protocol::Sysinfo,
-            _ => return, // Unknown protocol, ignore
+        // Parse protocol from string. Use the canonical FromStr impl so newer
+        // sensors (netlink/netring) aren't silently dropped — the hand-rolled
+        // match here only covered the legacy protocols (#125).
+        let Ok(protocol) = protocol_str.parse::<Protocol>() else {
+            return; // Unknown protocol, ignore
         };
 
         let device_id = DeviceId::new(protocol, &liveness.device);
