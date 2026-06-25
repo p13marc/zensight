@@ -1,12 +1,12 @@
 [package]
-name = "zensight-sensor-syslog"
+name = "zensight-sensor-logs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Zenoh sensor for Syslog telemetry"
+description = "Zenoh sensor for logs telemetry (network syslog + systemd-journald)"
 
 [[bin]]
-name = "zensight-sensor-syslog"
+name = "zensight-sensor-logs"
 path = "src/main.rs"
 
 [dependencies]
@@ -55,13 +55,13 @@ tokio-test = "0.4"
 maintainer = "Marc Pardo <p13marc@gmail.com>"
 copyright = "2024, Marc Pardo"
 license-file = ["../LICENSE", "0"]
-extended-description = """Zenoh sensor for Syslog telemetry. Receives syslog messages via
-UDP, TCP, or Unix socket and publishes them to Zenoh for consumption
-by ZenSight or other Zenoh subscribers."""
+extended-description = """Zenoh sensor for logs telemetry. Ingests network syslog
+(UDP, TCP, Unix socket) and the local systemd-journald, publishing to Zenoh for
+consumption by ZenSight or other Zenoh subscribers."""
 section = "utils"
 priority = "optional"
 assets = [
-    ["target/release/zensight-sensor-syslog", "usr/bin/", "755"],
+    ["target/release/zensight-sensor-logs", "usr/bin/", "755"],
 ]
 depends = "$auto"
 
@@ -70,5 +70,5 @@ depends = "$auto"
 # =============================================================================
 [package.metadata.generate-rpm]
 assets = [
-    { source = "target/release/zensight-sensor-syslog", dest = "/usr/bin/zensight-sensor-syslog", mode = "755" },
+    { source = "target/release/zensight-sensor-logs", dest = "/usr/bin/zensight-sensor-logs", mode = "755" },
 ]

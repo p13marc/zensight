@@ -546,7 +546,7 @@ zensight/                            # Workspace root
 │       └── liveliness.rs            # Presence management
 │
 ├── zensight-sensor-snmp/               # SNMP sensor
-├── zensight-sensor-syslog/             # Syslog + journald (logs) sensor
+├── zensight-sensor-logs/             # Syslog + journald (logs) sensor
 ├── zensight-sensor-sysinfo/            # System metrics sensor
 ├── zensight-sensor-netflow/            # NetFlow sensor
 ├── zensight-sensor-modbus/             # Modbus sensor

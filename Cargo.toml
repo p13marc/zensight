@@ -7,7 +7,7 @@ members = [
     "zensight-exporter-prometheus",
     "zensight-exporter-otel",
     "zensight-sensor-snmp",
-    "zensight-sensor-syslog",
+    "zensight-sensor-logs",
     "zensight-sensor-netflow",
     "zensight-sensor-modbus",
     "zensight-sensor-sysinfo",

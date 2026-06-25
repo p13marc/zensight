@@ -1,7 +1,7 @@
 # Multi-stage Dockerfile for ZenSight sensors
-# Build with: docker build --build-arg SENSOR_PACKAGE=zensight-sensor-syslog -f docker/Dockerfile.sensor .
+# Build with: docker build --build-arg SENSOR_PACKAGE=zensight-sensor-logs -f docker/Dockerfile.sensor .
 
-ARG SENSOR_PACKAGE=zensight-sensor-syslog
+ARG SENSOR_PACKAGE=zensight-sensor-logs
 ARG SENSOR_NAME=syslog
 
 # =============================================================================
@@ -24,7 +24,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY zensight-common ./zensight-common
 COPY zensight-sensor-core ./zensight-sensor-core
-COPY zensight-sensor-syslog ./zensight-sensor-syslog
+COPY zensight-sensor-logs ./zensight-sensor-logs
 COPY zensight-sensor-sysinfo ./zensight-sensor-sysinfo
 COPY zensight-sensor-snmp ./zensight-sensor-snmp
 COPY zensight-sensor-netflow ./zensight-sensor-netflow

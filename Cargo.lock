@@ -9502,6 +9502,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "zensight-sensor-logs"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "json5",
+ "once_cell",
+ "regex",
+ "serde",
+ "serde_json",
+ "systemd",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zenoh",
+ "zensight-common",
+ "zensight-sensor-core",
+]
+
+[[package]]
 name = "zensight-sensor-modbus"
 version = "0.5.0"
 dependencies = [
@@ -9619,29 +9642,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "zenoh",
- "zensight-common",
- "zensight-sensor-core",
-]
-
-[[package]]
-name = "zensight-sensor-syslog"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "json5",
- "once_cell",
- "regex",
- "serde",
- "serde_json",
- "systemd",
- "tokio",
- "tokio-test",
- "tracing",
- "tracing-subscriber",
- "uuid",
  "zenoh",
  "zensight-common",
  "zensight-sensor-core",

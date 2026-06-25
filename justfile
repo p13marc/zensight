@@ -42,7 +42,7 @@ build:
         -p zensight-sensor-netring \
         -p zensight-sensor-netlink \
         -p zensight-sensor-sysinfo \
-        -p zensight-sensor-syslog
+        -p zensight-sensor-logs
 
 # ── Capabilities ─────────────────────────────────────────────────────────────
 
@@ -68,7 +68,7 @@ configure:
     # netlink + sysinfo + logs configs are machine-agnostic (hostname auto-detected).
     cp -f configs/netlink.json5 {{rundir}}/netlink.json5
     cp -f configs/sysinfo.json5 {{rundir}}/sysinfo.json5
-    cp -f configs/logs.json5 {{rundir}}/syslog.json5
+    cp -f configs/logs.json5 {{rundir}}/logs.json5
     echo "Configured: netring iface='{{iface}}', logs=journald  (configs in {{rundir}}/)"
 
 # ── Run (individual) ─────────────────────────────────────────────────────────
@@ -98,7 +98,7 @@ sysinfo: build configure
 
 # Run the logs sensor (systemd journal via journald + known-event alerts).
 logs: build configure
-    ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-sensor-syslog --config {{rundir}}/syslog.json5
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-sensor-logs --config {{rundir}}/logs.json5
 
 # ── Run (everything) ─────────────────────────────────────────────────────────
 
@@ -112,7 +112,7 @@ run: setup configure
     {{bindir}}/zensight-sensor-sysinfo --config {{rundir}}/sysinfo.json5 > {{rundir}}/sysinfo.log 2>&1 &
     {{bindir}}/zensight-sensor-netlink --config {{rundir}}/netlink.json5 > {{rundir}}/netlink.log 2>&1 &
     {{bindir}}/zensight-sensor-netring --config {{rundir}}/netring.json5 > {{rundir}}/netring.log 2>&1 &
-    {{bindir}}/zensight-sensor-syslog --config {{rundir}}/syslog.json5 > {{rundir}}/syslog.log 2>&1 &
+    {{bindir}}/zensight-sensor-logs --config {{rundir}}/logs.json5 > {{rundir}}/logs.log 2>&1 &
     # Stop all sensors when the GUI exits (or on Ctrl-C).
     trap 'echo; echo "Stopping sensors…"; kill 0' EXIT
     sleep 1

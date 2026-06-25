@@ -29,7 +29,7 @@ COPY zensight-exporter-otel ./zensight-exporter-otel
 # Copy other crates needed for workspace resolution (not built)
 COPY zensight ./zensight
 COPY zensight-sensor-core ./zensight-sensor-core
-COPY zensight-sensor-syslog ./zensight-sensor-syslog
+COPY zensight-sensor-logs ./zensight-sensor-logs
 COPY zensight-sensor-sysinfo ./zensight-sensor-sysinfo
 COPY zensight-sensor-snmp ./zensight-sensor-snmp
 COPY zensight-sensor-netflow ./zensight-sensor-netflow

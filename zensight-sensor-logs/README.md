@@ -1,4 +1,4 @@
-# zensight-sensor-syslog
+# zensight-sensor-logs
 
 Syslog sensor for the ZenSight observability platform. Receives syslog messages and publishes them to Zenoh.
 
@@ -17,17 +17,17 @@ Syslog sensor for the ZenSight observability platform. Receives syslog messages 
 ## Installation
 
 ```bash
-cargo build -p zensight-sensor-syslog --release
+cargo build -p zensight-sensor-logs --release
 ```
 
 ## Usage
 
 ```bash
 # Run with configuration file
-zensight-sensor-syslog --config configs/syslog.json5
+zensight-sensor-logs --config configs/syslog.json5
 
 # Run with custom config path
-zensight-sensor-syslog --config /etc/zensight/syslog.json5
+zensight-sensor-logs --config /etc/zensight/syslog.json5
 ```
 
 ## Configuration
@@ -281,7 +281,7 @@ Becomes:
 ## Architecture
 
 ```
-zensight-sensor-syslog/
+zensight-sensor-logs/
 ├── src/
 │   ├── main.rs      # Entry point, CLI, orchestration
 │   ├── config.rs    # Configuration structs
@@ -296,13 +296,13 @@ zensight-sensor-syslog/
 
 ```bash
 # Run all tests (52 total)
-cargo test -p zensight-sensor-syslog
+cargo test -p zensight-sensor-logs
 
 # Run parser tests only
-cargo test -p zensight-sensor-syslog parser
+cargo test -p zensight-sensor-logs parser
 
 # Run with verbose output
-cargo test -p zensight-sensor-syslog -- --nocapture
+cargo test -p zensight-sensor-logs -- --nocapture
 ```
 
 ### Test Categories

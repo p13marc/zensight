@@ -25,7 +25,7 @@ The single root is `zensight/`. Everything below it is either **telemetry**
 | Protocol | Sensor crate | Source identifier |
 |----------|--------------|-------------------|
 | `snmp`    | zensight-sensor-snmp    | device name |
-| `syslog`  | zensight-sensor-syslog  | hostname (network or journald) |
+| `syslog`  | zensight-sensor-logs  | hostname (network or journald) |
 | `netflow` | zensight-sensor-netflow | exporter name |
 | `modbus`  | zensight-sensor-modbus  | device name |
 | `sysinfo` | zensight-sensor-sysinfo | hostname |

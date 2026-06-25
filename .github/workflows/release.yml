@@ -96,13 +96,13 @@ jobs:
 
       - name: Build release binaries
         run: |
-          cargo build --release -p zensight-sensor-syslog
+          cargo build --release -p zensight-sensor-logs
           cargo build --release -p zensight-sensor-sysinfo
           cargo build --release -p zensight-sensor-snmp
 
       - name: Build .deb packages for sensors
         run: |
-          cargo deb -p zensight-sensor-syslog --no-build
+          cargo deb -p zensight-sensor-logs --no-build
           cargo deb -p zensight-sensor-sysinfo --no-build
           cargo deb -p zensight-sensor-snmp --no-build
 
@@ -202,7 +202,7 @@ jobs:
         run: |
           source $HOME/.cargo/env
           cargo build --release -p zensight
-          cargo build --release -p zensight-sensor-syslog
+          cargo build --release -p zensight-sensor-logs
           cargo build --release -p zensight-sensor-sysinfo
           cargo build --release -p zensight-sensor-snmp
           cargo build --release -p zensight-exporter-prometheus
@@ -212,7 +212,7 @@ jobs:
         run: |
           source $HOME/.cargo/env
           cargo generate-rpm -p zensight
-          cargo generate-rpm -p zensight-sensor-syslog
+          cargo generate-rpm -p zensight-sensor-logs
           cargo generate-rpm -p zensight-sensor-sysinfo
           cargo generate-rpm -p zensight-sensor-snmp
           cargo generate-rpm -p zensight-exporter-prometheus
@@ -271,7 +271,7 @@ jobs:
       matrix:
         sensor:
           - name: syslog
-            package: zensight-sensor-syslog
+            package: zensight-sensor-logs
           - name: sysinfo
             package: zensight-sensor-sysinfo
           - name: snmp

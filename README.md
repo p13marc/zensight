@@ -16,7 +16,7 @@ ZenSight provides a suite of protocol sensors that collect telemetry from variou
 | `zensight-exporter-prometheus` | Prometheus metrics exporter (HTTP /metrics endpoint) | Complete |
 | `zensight-exporter-otel` | OpenTelemetry exporter (OTLP gRPC/HTTP) | Complete |
 | `zensight-sensor-snmp` | SNMP sensor (v1/v2c/v3 polling + trap receiver, MIB loading) | Complete |
-| `zensight-sensor-syslog` | Logs sensor — network syslog (RFC 3164/5424, UDP/TCP/Unix, filtering) + systemd journald (known-event alerts) | Complete |
+| `zensight-sensor-logs` | Logs sensor — network syslog (RFC 3164/5424, UDP/TCP/Unix, filtering) + systemd journald (known-event alerts) | Complete |
 | `zensight-sensor-netflow` | NetFlow/IPFIX receiver (v5, v7, v9, IPFIX) | Complete |
 | `zensight-sensor-modbus` | Modbus sensor (TCP/RTU, all register types) | Complete |
 | `zensight-sensor-sysinfo` | System monitoring (CPU, memory, disk, network) | Complete |
@@ -108,7 +108,7 @@ lists), which override the config.
 ./target/release/zensight-sensor-snmp --config configs/snmp.json5
 
 # Logs sensor - network syslog, or systemd journald (see configs/logs.json5)
-./target/release/zensight-sensor-syslog --config configs/syslog.json5
+./target/release/zensight-sensor-logs --config configs/syslog.json5
 
 # NetFlow sensor - collect flow data
 ./target/release/zensight-sensor-netflow --config configs/netflow.json5
@@ -349,7 +349,7 @@ cargo test --workspace
 
 # Run specific crate tests
 cargo test -p zensight-sensor-snmp      # 22 tests
-cargo test -p zensight-sensor-syslog    # 106 tests
+cargo test -p zensight-sensor-logs    # 106 tests
 cargo test -p zensight-sensor-netflow   # 16 tests
 cargo test -p zensight-sensor-modbus    # 11 tests
 cargo test -p zensight-sensor-sysinfo   # 15 tests
@@ -431,7 +431,7 @@ let points = mock::mock_environment();
 | zensight-exporter-prometheus | 50 | Metric mapping, sanitization, collector, HTTP |
 | zensight-exporter-otel | 41 | OTEL metrics, logs, severity mapping |
 | zensight-sensor-snmp | 22 | Polling, traps, MIB loading |
-| zensight-sensor-syslog | 106 | Parser, receiver, filtering |
+| zensight-sensor-logs | 106 | Parser, receiver, filtering |
 | zensight-sensor-netflow | 16 | Flow parsing, templates |
 | zensight-sensor-modbus | 11 | Config, register decoding |
 | zensight-sensor-sysinfo | 15 | Config, collectors, metrics |

@@ -42,7 +42,7 @@ cargo test -p zensight              # 139 tests (unit + UI)
 cargo test -p zensight-common       # 47 tests
 cargo test -p zensight-sensor-core  # 23 tests
 cargo test -p zensight-sensor-snmp     # 22 tests
-cargo test -p zensight-sensor-syslog   # 106 tests (parser, receiver, filtering)
+cargo test -p zensight-sensor-logs   # 106 tests (parser, receiver, filtering)
 cargo test -p zensight-sensor-netflow  # 16 tests
 cargo test -p zensight-sensor-modbus   # 11 tests
 cargo test -p zensight-sensor-sysinfo  # 15 tests
@@ -113,7 +113,7 @@ zensight/                    # Workspace root
 │       ├── error.rs         # Sensor error categorization
 │       └── liveliness.rs    # Device liveness tracking
 ├── zensight-sensor-snmp/       # SNMP v1/v2c/v3 sensor
-├── zensight-sensor-syslog/     # RFC 3164/5424 sensor (UDP/TCP/Unix, filtering)
+├── zensight-sensor-logs/     # Logs sensor: RFC 3164/5424 (UDP/TCP/Unix) + systemd-journald
 ├── zensight-sensor-netflow/    # NetFlow/IPFIX sensor
 ├── zensight-sensor-modbus/     # Modbus TCP/RTU sensor
 ├── zensight-sensor-sysinfo/    # System metrics sensor

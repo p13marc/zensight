@@ -2,14 +2,14 @@
 # Usage: docker compose -f docker/docker-compose.yml up
 
 services:
-  # Syslog sensor - receives syslog messages and publishes to Zenoh
-  sensor-syslog:
-    image: ghcr.io/p13marc/zensight-sensor-syslog:latest
+  # Logs sensor - ingests network syslog + systemd-journald, publishes to Zenoh
+  sensor-logs:
+    image: ghcr.io/p13marc/zensight-sensor-logs:latest
     build:
       context: ..
       dockerfile: docker/Dockerfile.sensor
       args:
-        SENSOR_PACKAGE: zensight-sensor-syslog
+        SENSOR_PACKAGE: zensight-sensor-logs
         SENSOR_NAME: syslog
     ports:
       - "514:514/udp"   # Syslog UDP
