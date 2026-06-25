@@ -122,15 +122,26 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
 
 - **Telemetry:** `zensight/netring/<sensor>/<metric>` — flow RED (started/ended/
   bytes/packets/retransmits/duration percentiles), per-L4 + connection-state
-  composition, TCP resets, DNS RED, HTTP RED, TLS fingerprint counts, ICMP errors.
+  composition, TCP resets, DNS RED, HTTP RED, TLS fingerprint counts, ICMP errors,
+  capture health with the honest drop breakdown
+  (`capture/<src>/drops` + `freezes` / `xdp/<cause>`), and the passive asset
+  count (`assets/discovered`).
+- **Capture overload (netring 0.27):** the windowed drop-rate feeds a hysteresis
+  detector (enter 5%, recover 1% × 3 windows) that raises/clears a
+  `capture-overload` SensorHealth alert — the honest "the sensor is silently
+  losing your packets" signal. Tunable under `overload` in the config.
 - **On-demand detail** (`@/query/<topic>`): `flows`, `tls`, `talkers?top=N`,
-  `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`.
+  `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`, `assets`.
 - **L7 protocol inventories (netring 0.27, opt-in):** QUIC Initial SNI/ALPN/
   version (`collect.quic`, UDP/443 — passive, no decryption) and SSH banner +
   KEXINIT HASSH fingerprints (`collect.ssh`, TCP/22), each served on its
   `@/query/*` channel with a streamed distinct-count. Cleartext SNMP v1/v2c
   community strings can be flagged as `cleartext-snmp` anomalies with
   `collect.snmp_cleartext` (build with `--features snmp`).
+- **Passive asset inventory (netring 0.27):** with `collect.assets`, discovers
+  hosts on the wire from ARP / NDP / LLDP (+ CDP via `collect.asset_cdp`) into a
+  MAC-keyed inventory (MAC / IP / hostname / platform / capabilities / seen-via),
+  served on `@/query/assets`. Covers hosts that emit no telemetry of their own.
 - **Alerts:** `@/alerts/<alert_key>` from detectors and threat-intel —
   - Detectors: TRW port-scan, RITA beaconing, connection-flood, DGA/DNS-tunneling.
   - **Threat-intel (netring 0.27):** flow-risk scoring (obsolete TLS, cleartext

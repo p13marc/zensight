@@ -43,6 +43,12 @@ pub fn netring_sensor_view(state: &DeviceDetailState) -> Element<'_, Message> {
         content = content.push(card(render_ssh(state)));
     }
 
+    // Passive asset inventory (#70) — shown when the sensor publishes a
+    // discovered-count or after a fetch has been attempted.
+    if has_prefix(state, "assets/") || !matches!(state.netring_detail.assets, Fetch::Idle) {
+        content = content.push(card(render_assets(state)));
+    }
+
     // Capture self-health only exists under live capture (not pcap replay).
     if state.metrics.keys().any(|k| k.starts_with("capture/")) {
         content = content.push(card(render_capture(state)));
@@ -118,6 +124,11 @@ fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
     }
     col.into()
 }
+
+/// Drop-rate fraction at/above which the capture-health card flags an overload
+/// badge — mirrors the netring `OverloadDetector` default enter threshold (5%),
+/// so the GUI's local signal lines up with the `capture-overload` alert (#71).
+const OVERLOAD_DROP_RATE: f64 = 0.05;
 
 /// QUIC section (#72): streamed distinct-SNI count + an on-demand SNI/ALPN/version
 /// inventory fetched from `@/query/quic` — the QUIC analogue of the TLS card.
@@ -221,6 +232,73 @@ fn render_ssh(state: &DeviceDetailState) -> Element<'_, Message> {
     col.into()
 }
 
+/// Passive asset-inventory section (#70): a streamed discovered-count plus an
+/// on-demand table (MAC · IP · hostname · platform · capabilities · seen-via)
+/// fetched from `@/query/assets`. Surfaces hosts seen on the wire that emit no
+/// telemetry of their own — the discovery the topology/devices views lack.
+fn render_assets(state: &DeviceDetailState) -> Element<'_, Message> {
+    let loading = state.netring_detail.assets.is_loading();
+    let label = if loading {
+        "Fetching…"
+    } else {
+        "Fetch assets"
+    };
+    let mut fetch = button(text(label).size(font::CAPTION)).padding([4, 10]);
+    if !loading {
+        fetch = fetch.on_press(Message::FetchNetringAssets);
+    }
+
+    let discovered = num(state.metrics.get("assets/discovered").map(|p| &p.value));
+    let mut col = column![
+        section_header("Assets (passive discovery)", Some(fetch.into())),
+        row![cell("discovered", 180), cell(&discovered, 100)].spacing(8),
+    ]
+    .spacing(space::SM);
+
+    if let Some(err) = state.netring_detail.assets.error() {
+        col = col.push(empty_state(format!("Fetch failed: {err}"), None));
+    } else if let Some(records) = state.netring_detail.assets.ready() {
+        if records.is_empty() {
+            col = col.push(empty_state("No assets discovered yet", None));
+        } else {
+            let mut list = Column::new().spacing(3).push(
+                row![
+                    cell("mac", 150),
+                    cell("ip", 150),
+                    cell("hostname", 150),
+                    cell("platform", 160),
+                    cell("caps", 130),
+                    cell("seen via", 110),
+                ]
+                .spacing(8),
+            );
+            for r in records.iter().take(200) {
+                let ip = r
+                    .ipv4
+                    .first()
+                    .or_else(|| r.ipv6.first())
+                    .map(String::as_str)
+                    .unwrap_or("-");
+                list = list.push(
+                    row![
+                        cell(&r.mac, 150),
+                        cell(ip, 150),
+                        cell(r.hostname.as_deref().unwrap_or("-"), 150),
+                        cell(r.platform.as_deref().unwrap_or("-"), 160),
+                        cell(&join_or_dash(&r.capabilities), 130),
+                        cell(&join_or_dash(&r.seen_via), 110),
+                    ]
+                    .spacing(8),
+                );
+            }
+            col = col
+                .push(text(format!("{} assets", records.len())).size(font::EMPHASIS))
+                .push(list);
+        }
+    }
+    col.into()
+}
+
 /// Join a slug list with commas, or `"-"` when empty.
 fn join_or_dash(items: &[String]) -> String {
     if items.is_empty() {
@@ -230,10 +308,12 @@ fn join_or_dash(items: &[String]) -> String {
     }
 }
 
-/// Capture self-health section: packets/drops/drop_rate per capture source.
+/// Capture self-health section (#71): packets/drops/drop_rate per source, the
+/// honest drop breakdown (AF_PACKET freezes / AF_XDP ring + descriptor causes),
+/// and an "OVERLOAD" badge when a source is shedding ≥5% of packets — the trust
+/// signal that the sensor's *other* telemetry is currently incomplete.
 fn render_capture(state: &DeviceDetailState) -> Element<'_, Message> {
-    let mut col = column![section_header("Capture Health", None)].spacing(space::SM);
-    // Group capture/<src>/<stat>.
+    // Group capture/<src>/<stat>; `stat` may itself be `xdp/<cause>`.
     let mut sources: std::collections::BTreeMap<
         String,
         std::collections::BTreeMap<String, &TelemetryValue>,
@@ -248,16 +328,30 @@ fn render_capture(state: &DeviceDetailState) -> Element<'_, Message> {
                 .insert(stat.to_string(), &point.value);
         }
     }
+
+    // Overload if any source's windowed drop_rate is at/above the threshold.
+    let overloaded = sources.values().any(|stats| {
+        matches!(stats.get("drop_rate"), Some(TelemetryValue::Gauge(r)) if *r >= OVERLOAD_DROP_RATE)
+    });
+    let badge: Option<Element<'_, Message>> = overloaded.then(|| {
+        text("⚠ OVERLOAD — losing packets")
+            .size(font::CAPTION)
+            .style(danger)
+            .into()
+    });
+
+    let mut col = column![section_header("Capture Health", badge)].spacing(space::SM);
     let mut list = Column::new().spacing(3).push(
         row![
             cell("source", 90),
             cell("packets", 120),
             cell("drops", 100),
             cell("drop rate", 100),
+            cell("freezes", 90),
         ]
         .spacing(8),
     );
-    for (src, stats) in sources {
+    for (src, stats) in &sources {
         let g = |s: &str| num(stats.get(s).copied());
         let drop_rate = match stats.get("drop_rate") {
             Some(TelemetryValue::Gauge(r)) => format!("{:.2}%", r * 100.0),
@@ -265,13 +359,34 @@ fn render_capture(state: &DeviceDetailState) -> Element<'_, Message> {
         };
         list = list.push(
             row![
-                cell(&src, 90),
+                cell(src, 90),
                 cell(&g("packets"), 120),
                 cell(&g("drops"), 100),
                 cell(&drop_rate, 100),
+                cell(&g("freezes"), 90),
             ]
             .spacing(8),
         );
+        // AF_XDP per-cause breakdown (only present on XDP sources).
+        let xdp: Vec<(String, String)> = stats
+            .iter()
+            .filter_map(|(stat, v)| {
+                let cause = stat.strip_prefix("xdp/")?;
+                Some((cause.to_string(), num(Some(*v))))
+            })
+            .collect();
+        for (cause, v) in xdp {
+            // Indent via a spacer cell (not leading spaces) so the label text
+            // node stays exactly findable.
+            list = list.push(
+                row![
+                    cell("", 16),
+                    cell(&format!("xdp/{cause}"), 264),
+                    cell(&v, 120)
+                ]
+                .spacing(8),
+            );
+        }
     }
     col = col.push(list);
     col.into()
@@ -580,6 +695,12 @@ fn cell<'a>(s: &str, width: u16) -> Element<'a, Message> {
 fn dim(theme: &Theme) -> text::Style {
     text::Style {
         color: Some(theme::colors(theme).text_dimmed()),
+    }
+}
+
+fn danger(theme: &Theme) -> text::Style {
+    text::Style {
+        color: Some(theme::colors(theme).danger()),
     }
 }
 

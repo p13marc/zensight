@@ -145,6 +145,40 @@ pub struct HttpHostRecord {
     pub errors: u64,
 }
 
+/// One passively-discovered network asset (netring), served on demand from the
+/// MAC-keyed inventory netring builds off L2/L3 discovery traffic (ARP / NDP /
+/// LLDP / CDP). "Who is on my network, and what are they?" — surfaced without
+/// any active probing, so it covers hosts that emit no ZenSight telemetry of
+/// their own. The high-cardinality detail is pulled on demand (principle P2),
+/// never streamed; only an aggregate asset count rides the telemetry bus.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssetRecord {
+    /// L2 address (the inventory's primary key), e.g. `"aa:bb:cc:dd:ee:ff"`.
+    pub mac: String,
+    /// IPv4 addresses observed bound to this MAC (bounded, oldest-evicted).
+    #[serde(default)]
+    pub ipv4: Vec<String>,
+    /// IPv6 addresses observed bound to this MAC.
+    #[serde(default)]
+    pub ipv6: Vec<String>,
+    /// Hostname (DHCP option 12 / LLDP / CDP system name / mDNS).
+    pub hostname: Option<String>,
+    /// Vendor / OS banner (DHCP option 60, LLDP system-description, CDP
+    /// software-version, SSDP `SERVER`).
+    pub vendor: Option<String>,
+    /// Hardware platform (LLDP / CDP platform TLV), e.g. `"cisco WS-C2960X"`.
+    pub platform: Option<String>,
+    /// Decoded device capabilities (e.g. `["router", "bridge"]`).
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Which discovery parsers contributed (e.g. `["arp", "lldp"]`) — a
+    /// confidence/freshness signal per source.
+    #[serde(default)]
+    pub seen_via: Vec<String>,
+    /// Most-recent observation timestamp (Unix epoch milliseconds).
+    pub last_seen: i64,
+}
+
 /// One process row (sysinfo), served on demand sorted/filtered by the caller
 /// (`@/query/processes?sort=cpu|mem|io&top=N`). The high-cardinality per-pid
 /// firehose behind the streamed `system/processes_{total,zombie}` aggregates —

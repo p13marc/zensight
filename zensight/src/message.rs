@@ -115,6 +115,10 @@ pub enum Message {
     FetchNetringSsh,
     /// A netring SSH-inventory reply: the decoded records, or an error message.
     NetringSshReceived(Result<Vec<zensight_common::SshRecord>, String>),
+    /// Fetch the on-demand netring passive asset inventory (#70).
+    FetchNetringAssets,
+    /// A netring asset-inventory reply: the decoded records, or an error message.
+    NetringAssetsReceived(Result<Vec<zensight_common::AssetRecord>, String>),
 
     /// Open the security (network anomalies) view.
     OpenSecurity,

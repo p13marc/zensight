@@ -736,6 +736,7 @@ mod tests {
             pinned: false,
             alert: None,
             sensor_count: None,
+            ..Default::default()
         }
     }
 

@@ -49,6 +49,53 @@ pub struct NetringConfig {
     /// built-in detectors.
     #[serde(default)]
     pub threat: ThreatConfig,
+    /// Capture-overload detection (netring 0.27): watch the windowed capture
+    /// drop-rate and raise/clear a `capture-overload` SensorHealth alert on the
+    /// debounced Normal↔Emergency transition. Needs `collect.capture_stats`.
+    #[serde(default)]
+    pub overload: OverloadConfig,
+}
+
+/// Capture-overload detection config (netring 0.27). Drives an
+/// `OverloadDetector` off the windowed drop-rate with Suricata-style hysteresis
+/// (enter high, recover low after N calm windows) so it doesn't flap.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverloadConfig {
+    /// Enable overload detection (no-op without `collect.capture_stats`).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Enter Emergency when the windowed drop-rate reaches this fraction
+    /// (`0.0..=1.0`). Default 0.05 (5%).
+    #[serde(default = "default_enter_drop_rate")]
+    pub enter_drop_rate: f64,
+    /// Recover to Normal only after the drop-rate stays below this for
+    /// `recover_windows` samples. Default 0.01 (1%).
+    #[serde(default = "default_recover_drop_rate")]
+    pub recover_drop_rate: f64,
+    /// Consecutive calm windows required to recover. Default 3.
+    #[serde(default = "default_recover_windows")]
+    pub recover_windows: u32,
+}
+
+fn default_enter_drop_rate() -> f64 {
+    0.05
+}
+fn default_recover_drop_rate() -> f64 {
+    0.01
+}
+fn default_recover_windows() -> u32 {
+    3
+}
+
+impl Default for OverloadConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            enter_drop_rate: default_enter_drop_rate(),
+            recover_drop_rate: default_recover_drop_rate(),
+            recover_windows: default_recover_windows(),
+        }
+    }
 }
 
 /// Threat-intel detection config (netring 0.27).
@@ -147,6 +194,19 @@ pub struct CollectConfig {
     /// → alerts. No-op unless built with `--features snmp`. Default OFF (opt-in).
     #[serde(default)]
     pub snmp_cleartext: bool,
+    /// Passive asset inventory (netring 0.27): discover hosts on the wire from
+    /// L2/L3 discovery traffic (ARP / NDP / LLDP / CDP) into a MAC-keyed
+    /// inventory served on `@/query/assets`. Arming the discovery hooks narrows
+    /// the kernel prefilter accordingly; needs capture (CAP_NET_RAW). Default
+    /// OFF — opt-in, and CDP forces a capture-all prefilter (see `asset_cdp`).
+    #[serde(default)]
+    pub assets: bool,
+    /// Also feed the asset inventory from CDP (Cisco Discovery Protocol).
+    /// Separate flag because CDP rides 802.3 LLC/SNAP, which can't be expressed
+    /// in the kernel prefilter — arming it forces capture-all (fail-open), so
+    /// it's opt-in on top of `assets`. No effect unless `assets` is also set.
+    #[serde(default)]
+    pub asset_cdp: bool,
 }
 
 impl Default for CollectConfig {
@@ -164,6 +224,8 @@ impl Default for CollectConfig {
             quic: false,
             ssh: false,
             snmp_cleartext: false,
+            assets: false,
+            asset_cdp: false,
         }
     }
 }

@@ -42,6 +42,7 @@ pub async fn run_drains(
     let http = channels.http.clone();
     let quic = channels.quic.clone();
     let ssh = channels.ssh.clone();
+    let assets = channels.assets.clone();
 
     // Take (and clear) the current window's flow durations for percentile points.
     let drain_window = |buf: &std::sync::Mutex<Vec<u64>>| -> Vec<u64> {
@@ -112,6 +113,13 @@ pub async fn run_drains(
         let ssh_distinct = ssh.lock().map(|i| i.len() as u64).unwrap_or(0);
         if ssh_distinct > 0 {
             points.push(map::ssh_count_point(sensor_id, ssh_distinct));
+        }
+        // Passive asset inventory size (issue #70) — only when any asset has
+        // been discovered, so the cached gauge isn't clobbered to 0 on a build
+        // without the asset collector armed.
+        let asset_count = assets.lock().map(|a| a.len() as u64).unwrap_or(0);
+        if asset_count > 0 {
+            points.push(map::asset_count_point(sensor_id, asset_count));
         }
 
         // ICMP error aggregates (issue #15).
@@ -186,7 +194,7 @@ pub async fn run_drains(
                             }
                         }
                         while let Ok(alert) = channels.alerts.try_recv() {
-                            if let Err(e) = reporter.observe(alert, Some(Duration::ZERO)).await {
+                            if let Err(e) = drain_sensor_alert(&reporter, alert).await {
                                 tracing::warn!(error = %e, "failed to publish sensor alert");
                             }
                         }
@@ -206,10 +214,12 @@ pub async fn run_drains(
                     }
                 }
             }
-            // Typed sensor alerts (ICMP flow-killed) → AlertReporter (never lossy).
+            // Typed sensor alerts (ICMP flow-killed, capture-overload) →
+            // AlertReporter (never lossy). Firing alerts are observed; resolved
+            // alerts (capture recovered) reconcile the firing set away.
             alert = channels.alerts.recv() => {
                 if let Some(alert) = alert
-                    && let Err(e) = reporter.observe(alert, Some(Duration::ZERO)).await {
+                    && let Err(e) = drain_sensor_alert(&reporter, alert).await {
                     tracing::warn!(error = %e, "failed to publish sensor alert");
                 }
             }
@@ -224,5 +234,20 @@ pub async fn run_drains(
                 health.record_device_success(&sensor_id);
             }
         }
+    }
+}
+
+/// Route a capture-path sensor alert to the reporter: a firing alert is observed
+/// (published immediately — these are edge-triggered, not debounced), while a
+/// resolved alert (e.g. capture-overload recovery) reconciles its rule's firing
+/// set away so the GUI clears the badge.
+async fn drain_sensor_alert(
+    reporter: &AlertReporter,
+    alert: zensight_common::Alert,
+) -> zensight_sensor_core::Result<()> {
+    if alert.is_firing() {
+        reporter.observe(alert, Some(Duration::ZERO)).await
+    } else {
+        reporter.reconcile(&alert.rule, &[]).await
     }
 }

@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use zensight_common::{
-    Alert, ElephantRecord, FlowRecord, QuicRecord, SshRecord, TelemetryPoint, TlsRecord,
+    Alert, AssetRecord, ElephantRecord, FlowRecord, QuicRecord, SshRecord, TelemetryPoint,
+    TlsRecord,
 };
 
 /// Bounded ring of recent ended-flow records served via `@/query/flows`.
@@ -49,6 +50,8 @@ pub type TlsInventory = Arc<Mutex<HashMap<(String, String), TlsRecord>>>;
 pub type DnsInventory = Arc<Mutex<HashMap<String, (u64, u64)>>>;
 /// HTTP host inventory: `host -> (requests, errors)` for `@/query/http`.
 pub type HttpInventory = Arc<Mutex<HashMap<String, (u64, u64)>>>;
+/// Passive asset inventory: `mac -> AssetRecord` for `@/query/assets` (issue #70).
+pub type AssetInventory = Arc<Mutex<HashMap<String, AssetRecord>>>;
 /// Per-flow in-flight HTTP request state: `flow -> (request_start_ms, host)`,
 /// used to derive request→response latency and attribute response status.
 type HttpPending = Arc<Mutex<HashMap<FiveTupleKey, (u64, Option<String>)>>>;
@@ -66,6 +69,9 @@ const TLS_INVENTORY_CAP: usize = 4096;
 /// Cardinality guards for the QUIC (sni,version) and SSH (hassh) inventories.
 const QUIC_INVENTORY_CAP: usize = 4096;
 const SSH_INVENTORY_CAP: usize = 4096;
+/// LRU capacity of the passive asset inventory (MAC-keyed) — matches the bound
+/// on the served `@/query/assets` map (issue #70).
+const ASSET_INVENTORY_CAP: usize = 8192;
 
 /// DNS RED accumulators shared across the capture path and the drain.
 #[derive(Default)]
@@ -165,6 +171,8 @@ pub struct MonitorChannels {
     pub quic: QuicInventory,
     /// Passive SSH/HASSH inventory: served on `@/query/ssh` (issue #72).
     pub ssh: SshInventory,
+    /// Passive asset inventory keyed by MAC: served on `@/query/assets` (#70).
+    pub assets: AssetInventory,
 }
 
 /// Detector wrapper bridging `feed`→`verdict` for the TRW port-scan detector.
@@ -281,6 +289,95 @@ fn build_ioc_set(cfg: &IocConfig) -> IocSet {
     set
 }
 
+/// Decompose netring's `DropBreakdown` into the pure [`map::CaptureDrops`] view,
+/// keeping the netring capture type out of `map.rs` (issue #71).
+fn drop_breakdown_view(d: &netring::stats::DropBreakdown) -> map::CaptureDrops {
+    use netring::stats::DropBreakdown as D;
+    match *d {
+        D::AfPacket { freezes } => map::CaptureDrops::AfPacket { freezes },
+        D::Xdp {
+            rx_dropped,
+            rx_invalid_descs,
+            rx_ring_full,
+            rx_fill_ring_empty_descs,
+            tx_invalid_descs,
+            tx_ring_empty_descs,
+        } => map::CaptureDrops::Xdp {
+            rx_dropped,
+            rx_invalid_descs,
+            rx_ring_full,
+            rx_fill_ring_empty_descs,
+            tx_invalid_descs,
+            tx_ring_empty_descs,
+        },
+        // `DropBreakdown` is #[non_exhaustive]; map any future variant to an
+        // empty AF_PACKET breakdown so the flat drop counters still publish.
+        _ => map::CaptureDrops::AfPacket { freezes: 0 },
+    }
+}
+
+/// Decode the asset capability bitmask into stable lowercase slugs (only the
+/// set bits), for the on-demand `AssetRecord`. Order is deterministic.
+fn capability_names(caps: flowscope::AssetCapabilities) -> Vec<String> {
+    use flowscope::AssetCapabilities as C;
+    [
+        (C::BRIDGE, "bridge"),
+        (C::ROUTER, "router"),
+        (C::SWITCH, "switch"),
+        (C::WLAN_AP, "wlan_ap"),
+        (C::PHONE, "phone"),
+        (C::IGMP, "igmp"),
+        (C::REPEATER, "repeater"),
+        (C::DOCSIS_CABLE, "docsis_cable"),
+        (C::SOURCE_BRIDGE, "source_bridge"),
+        (C::HOST, "host"),
+        (C::REMOTELY_MANAGED, "remotely_managed"),
+        (C::UPNP, "upnp"),
+        (C::C_VLAN, "c_vlan"),
+        (C::S_VLAN, "s_vlan"),
+    ]
+    .iter()
+    .filter(|(bit, _)| caps.contains(*bit))
+    .map(|(_, name)| name.to_string())
+    .collect()
+}
+
+/// Decode the asset source bitmask into stable lowercase parser slugs.
+fn source_names(set: flowscope::AssetSourceSet) -> Vec<String> {
+    use flowscope::AssetSourceSet as S;
+    [
+        (S::ARP, "arp"),
+        (S::NDP, "ndp"),
+        (S::DHCP, "dhcp"),
+        (S::LLDP, "lldp"),
+        (S::CDP, "cdp"),
+        (S::SSDP, "ssdp"),
+        (S::MDNS, "mdns"),
+        (S::NBNS, "nbns"),
+    ]
+    .iter()
+    .filter(|(bit, _)| set.contains(*bit))
+    .map(|(_, name)| name.to_string())
+    .collect()
+}
+
+/// Flatten a `flowscope::Asset` into the transport-neutral [`AssetRecord`] DTO:
+/// stringify the MAC/IPs, decode the capability + source bitmasks to slugs, and
+/// carry the most-recent-observation timestamp as Unix epoch milliseconds.
+fn asset_to_record(a: &flowscope::Asset) -> AssetRecord {
+    AssetRecord {
+        mac: a.mac.to_string(),
+        ipv4: a.ipv4.iter().map(|ip| ip.to_string()).collect(),
+        ipv6: a.ipv6.iter().map(|ip| ip.to_string()).collect(),
+        hostname: a.hostname.clone(),
+        vendor: a.vendor_banner.clone(),
+        platform: a.platform.clone(),
+        capabilities: capability_names(a.capabilities),
+        seen_via: source_names(a.seen_via),
+        last_seen: (a.last_seen.to_unix_f64() * 1000.0) as i64,
+    }
+}
+
 /// Build a netring `Monitor` from config plus the channels it emits on.
 pub fn build(
     cfg: &NetringConfig,
@@ -314,6 +411,7 @@ pub fn build(
     let elephants: ElephantRing = Arc::new(Mutex::new(VecDeque::with_capacity(ELEPHANT_RING_CAP)));
     let quic: QuicInventory = Arc::new(Mutex::new(HashMap::new()));
     let ssh: SshInventory = Arc::new(Mutex::new(HashMap::new()));
+    let assets: AssetInventory = Arc::new(Mutex::new(HashMap::new()));
 
     let mut b = Monitor::builder();
     b = b.name(cfg.sensor_id.clone());
@@ -730,23 +828,55 @@ pub fn build(
         );
     }
 
-    // Capture self-health (live capture only).
+    // Capture self-health (live capture only): honest per-source drop breakdown
+    // + debounced overload detection (issue #71). Each sample's windowed
+    // drop-rate feeds a per-source OverloadDetector; on a Normal↔Emergency
+    // transition we ship a `capture-overload` SensorHealth alert on the alerts
+    // channel ("the sensor is silently losing your packets").
     if cfg.collect.capture_stats {
+        use netring::monitor::overload::{OverloadConfig, OverloadDetector, OverloadState};
         use netring::monitor::telemetry::CaptureTelemetry;
         let tx = tel_tx.clone();
         let sensor_id = cfg.sensor_id.clone();
+        let overload_cfg = cfg.overload.clone();
+        let alerts_h = alert_tx.clone();
+        // Per-source detectors, lazily created on first sight of a source. The
+        // capture-stats handler is FnMut, so this state persists across samples.
+        let mut detectors: HashMap<u8, OverloadDetector> = HashMap::new();
         b = b.on_capture_stats(
             Duration::from_secs(cfg.bandwidth_period_secs.max(1)),
             move |t: &CaptureTelemetry, _ctx: &mut Ctx<'_>| {
+                let source = t.source.0;
                 for p in crate::map::capture_points(
                     &sensor_id,
-                    t.source.0,
+                    source,
                     t.packets,
                     t.drops,
-                    t.freezes,
                     t.drop_rate,
+                    &drop_breakdown_view(&t.detail),
                 ) {
                     let _ = tx.send(p);
+                }
+                if overload_cfg.enabled {
+                    let det = detectors.entry(source).or_insert_with(|| {
+                        OverloadDetector::new(
+                            OverloadConfig::default()
+                                .enter_at(overload_cfg.enter_drop_rate)
+                                .recover_at(
+                                    overload_cfg.recover_drop_rate,
+                                    overload_cfg.recover_windows,
+                                ),
+                        )
+                    });
+                    if let Some(state) = det.observe(t.drop_rate) {
+                        let firing = matches!(state, OverloadState::Emergency);
+                        let _ = alerts_h.send(crate::map::overload_alert(
+                            &sensor_id,
+                            source,
+                            t.drop_rate,
+                            firing,
+                        ));
+                    }
                 }
                 Ok(())
             },
@@ -897,6 +1027,39 @@ pub fn build(
         tracing::warn!("netring: threat.sigma is enabled but built without the `sigma` feature");
     }
 
+    // Passive asset inventory (netring 0.27, issue #70). The discovery hooks
+    // (ARP / NDP / LLDP, plus CDP behind its own flag) feed netring's MAC-keyed
+    // inventory; `on_asset` fires on each inventory *event* (new or changed
+    // asset) and folds the flattened record into the served map. The capture
+    // path stays cheap — a single short-held lock + a struct build.
+    if cfg.collect.assets {
+        b = b.asset_inventory(ASSET_INVENTORY_CAP);
+        // The inventory is fed by netring's per-frame discovery re-parse, which
+        // is independent of these hooks — but the kernel prefilter only *admits*
+        // the discovery traffic when the corresponding interest is armed. So we
+        // arm ARP (EtherType 0x0806), NDP (ICMPv6), and LLDP (EtherType 0x88cc)
+        // to add their precise prefilter terms; the empty closures exist only to
+        // arm those interests. `arp_table()` arms ARP without an ARP handler.
+        b = b.arp_table();
+        b = b.on_ndp(|_m, _ctx| Ok(()));
+        b = b.on_lldp(|_m, _ctx| Ok(()));
+        if cfg.collect.asset_cdp {
+            // CDP can't be expressed as a prefilter term → forces capture-all.
+            b = b.on_cdp(|_m, _ctx| Ok(()));
+        }
+        let inv = assets.clone();
+        b = b.on_asset(move |asset: &flowscope::Asset, _ctx: &mut Ctx<'_>| {
+            let record = asset_to_record(asset);
+            if let Ok(mut map) = inv.lock()
+                && (map.contains_key(&record.mac) || map.len() < ASSET_INVENTORY_CAP)
+            {
+                map.insert(record.mac.clone(), record);
+            }
+            Ok(())
+        });
+        tracing::info!("netring: passive asset inventory enabled");
+    }
+
     // Anomaly sink → channel → drain → AlertReporter.
     b = b.sink(ChannelSink::new(anom_tx));
 
@@ -927,6 +1090,7 @@ pub fn build(
             elephants,
             quic,
             ssh,
+            assets,
         },
         keepalive,
     ))
@@ -1096,6 +1260,97 @@ mod tests {
             ..Default::default()
         };
         assert!(build_ioc_set(&cfg).is_empty());
+    }
+
+    #[test]
+    fn drop_breakdown_view_maps_both_backends() {
+        use netring::stats::DropBreakdown as D;
+        assert_eq!(
+            drop_breakdown_view(&D::AfPacket { freezes: 7 }),
+            map::CaptureDrops::AfPacket { freezes: 7 }
+        );
+        let xdp = D::Xdp {
+            rx_dropped: 1,
+            rx_invalid_descs: 2,
+            rx_ring_full: 3,
+            rx_fill_ring_empty_descs: 4,
+            tx_invalid_descs: 5,
+            tx_ring_empty_descs: 6,
+        };
+        assert_eq!(
+            drop_breakdown_view(&xdp),
+            map::CaptureDrops::Xdp {
+                rx_dropped: 1,
+                rx_invalid_descs: 2,
+                rx_ring_full: 3,
+                rx_fill_ring_empty_descs: 4,
+                tx_invalid_descs: 5,
+                tx_ring_empty_descs: 6,
+            }
+        );
+    }
+
+    #[test]
+    fn capability_and_source_names_decode_set_bits_only() {
+        use flowscope::{AssetCapabilities, AssetSourceSet};
+        let caps = AssetCapabilities::ROUTER | AssetCapabilities::BRIDGE;
+        let names = capability_names(caps);
+        assert_eq!(names, vec!["bridge".to_string(), "router".to_string()]);
+        assert!(capability_names(AssetCapabilities::empty()).is_empty());
+
+        let set = AssetSourceSet::ARP | AssetSourceSet::LLDP;
+        assert_eq!(
+            source_names(set),
+            vec!["arp".to_string(), "lldp".to_string()]
+        );
+    }
+
+    #[test]
+    fn overload_detector_from_config_fires_and_recovers() {
+        use netring::monitor::overload::{OverloadConfig, OverloadDetector, OverloadState};
+        // The sensor's config defaults (enter 5%, recover 1% for 3 windows)
+        // must wire through `enter_at`/`recover_at` to reproduce the hysteresis.
+        let cfg = crate::config::OverloadConfig::default();
+        let mut det = OverloadDetector::new(
+            OverloadConfig::default()
+                .enter_at(cfg.enter_drop_rate)
+                .recover_at(cfg.recover_drop_rate, cfg.recover_windows),
+        );
+        assert_eq!(det.observe(0.02), None, "below enter → stays Normal");
+        assert_eq!(
+            det.observe(0.06),
+            Some(OverloadState::Emergency),
+            "crosses 5%"
+        );
+        // Sustained calm required: 3 sub-1% windows before recovery.
+        assert_eq!(det.observe(0.005), None);
+        assert_eq!(det.observe(0.005), None);
+        assert_eq!(det.observe(0.005), Some(OverloadState::Normal));
+    }
+
+    #[test]
+    fn asset_to_record_flattens_a_discovery_asset() {
+        use flowscope::{Asset, AssetCapabilities, AssetSourceSet, MacAddr, Timestamp};
+        let mut a = Asset::new(MacAddr([0xaa, 0xbb, 0xcc, 0x11, 0x22, 0x33]));
+        a.ipv4.push("10.0.0.5".parse().unwrap());
+        a.hostname = Some("switch01".into());
+        a.platform = Some("cisco WS-C2960X".into());
+        a.capabilities |= AssetCapabilities::SWITCH | AssetCapabilities::BRIDGE;
+        a.seen_via |= AssetSourceSet::LLDP;
+        a.last_seen = Timestamp::new(1_700_000_000, 0);
+
+        let rec = asset_to_record(&a);
+        assert_eq!(rec.mac, "aa:bb:cc:11:22:33");
+        assert_eq!(rec.ipv4, vec!["10.0.0.5".to_string()]);
+        assert!(rec.ipv6.is_empty());
+        assert_eq!(rec.hostname.as_deref(), Some("switch01"));
+        assert_eq!(rec.platform.as_deref(), Some("cisco WS-C2960X"));
+        assert_eq!(
+            rec.capabilities,
+            vec!["bridge".to_string(), "switch".to_string()]
+        );
+        assert_eq!(rec.seen_via, vec!["lldp".to_string()]);
+        assert_eq!(rec.last_seen, 1_700_000_000_000);
     }
 
     #[test]

@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use crate::map;
 use crate::monitor::{
-    DnsInventory, ElephantRing, FlowRing, HttpInventory, QuicInventory, SshInventory, TalkerHist,
-    TlsInventory,
+    AssetInventory, DnsInventory, ElephantRing, FlowRing, HttpInventory, QuicInventory,
+    SshInventory, TalkerHist, TlsInventory,
 };
 
 /// Default top-N for the talker / domain / host channels when no `?top=` query
@@ -135,6 +135,34 @@ pub async fn run_ssh(session: Arc<zenoh::Session>, key_prefix: String, inventory
         };
         records.sort_by_key(|r| std::cmp::Reverse(r.count));
         reply(&query, &records, "ssh").await;
+    }
+}
+
+/// Run the passive asset-inventory query channel: `zensight/netring/@/query/assets`
+/// replies with the discovered assets (most-recently-seen first) as JSON
+/// `Vec<AssetRecord>` (issue #70).
+pub async fn run_assets(
+    session: Arc<zenoh::Session>,
+    key_prefix: String,
+    inventory: AssetInventory,
+) {
+    let key = zensight_common::command::query_key(&key_prefix, "assets");
+    let queryable = match session.declare_queryable(&key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %key, "query: declare assets failed");
+            return;
+        }
+    };
+    tracing::info!(key = %key, "on-demand asset inventory query channel ready");
+
+    while let Ok(query) = queryable.recv_async().await {
+        let mut records: Vec<_> = match inventory.lock() {
+            Ok(inv) => inv.values().cloned().collect(),
+            Err(_) => Vec::new(),
+        };
+        records.sort_by_key(|r| std::cmp::Reverse(r.last_seen));
+        reply(&query, &records, "assets").await;
     }
 }
 
