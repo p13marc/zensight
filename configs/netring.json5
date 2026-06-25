@@ -40,6 +40,16 @@
       // Sigma rule evaluation (build with `--features sigma`).
       sigma: { enabled: false, dir: null },
     },
+
+    // Capture-overload detection (netring 0.27). Watches the windowed capture
+    // drop-rate and raises/clears a `capture-overload` SensorHealth alert on the
+    // debounced Normal<->Emergency transition. Needs `collect.capture_stats`.
+    overload: {
+      enabled: true,
+      enter_drop_rate: 0.05,    // enter Emergency at 5% windowed drop rate
+      recover_drop_rate: 0.01,  // recover below 1% ...
+      recover_windows: 3,       // ... sustained for 3 calm windows (hysteresis)
+    },
   },
 
   logging: { level: "info" },

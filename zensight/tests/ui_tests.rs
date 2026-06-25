@@ -1439,6 +1439,32 @@ fn test_netring_tls_capture_sections() {
     assert!(ui.find("Capture Health").is_ok());
 }
 
+/// #71: capture health surfaces the honest drop breakdown (AF_PACKET freezes,
+/// AF_XDP ring causes) and raises an OVERLOAD badge once a source's windowed
+/// drop_rate crosses the threshold.
+#[test]
+fn test_netring_capture_overload_and_breakdown() {
+    use zensight::view::specialized::netring::netring_sensor_view;
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let mut state = DeviceDetailState::new(device_id);
+    for (m, v) in [
+        ("capture/0/packets", TelemetryValue::Counter(100000)),
+        ("capture/0/drops", TelemetryValue::Counter(9000)),
+        ("capture/0/drop_rate", TelemetryValue::Gauge(0.09)), // 9% → overload
+        ("capture/0/freezes", TelemetryValue::Counter(4)),
+        ("capture/0/xdp/rx_ring_full", TelemetryValue::Counter(120)),
+    ] {
+        state.update(TelemetryPoint::new("wiretap1", Protocol::Netring, m, v));
+    }
+
+    let mut ui = simulator(netring_sensor_view(&state));
+    assert!(ui.find("Capture Health").is_ok());
+    assert!(ui.find("⚠ OVERLOAD — losing packets").is_ok());
+    assert!(ui.find("xdp/rx_ring_full").is_ok());
+}
+
 /// The top-level Logs view renders buffered log lines (the message text and the
 /// originating host) — verifying the unified logs feed surfaces journald/syslog.
 #[test]

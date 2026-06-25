@@ -176,27 +176,108 @@ pub fn flow_latency_points(sensor_id: &str, durations_ms: &mut [u64]) -> Vec<Tel
     ]
 }
 
-/// Capture self-health points: packets/drops/freezes (Counter) + windowed
-/// drop_rate (Gauge) per capture source. Honesty signal — non-zero drops mean
-/// the sensor's *other* telemetry is incomplete.
+/// Per-source drop breakdown (netring 0.27 `DropBreakdown`), decomposed so the
+/// pure map stays free of the capture types. The flat `drops` says *how many*;
+/// this says *where* — honest accounting of the loss the sensor is admitting to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CaptureDrops {
+    /// AF_PACKET (TPACKET_V3): only the ring-freeze count is distinct.
+    AfPacket { freezes: u64 },
+    /// AF_XDP (`XDP_STATISTICS`): every drop cause kept distinct.
+    Xdp {
+        rx_dropped: u64,
+        rx_invalid_descs: u64,
+        rx_ring_full: u64,
+        rx_fill_ring_empty_descs: u64,
+        tx_invalid_descs: u64,
+        tx_ring_empty_descs: u64,
+    },
+}
+
+/// Capture self-health points: packets/drops (Counter) + windowed drop_rate
+/// (Gauge) per capture source, plus the honest [`CaptureDrops`] breakdown —
+/// AF_PACKET freezes, or each AF_XDP ring/descriptor drop cause. Honesty signal:
+/// non-zero drops mean the sensor's *other* telemetry is incomplete (issue #71).
 pub fn capture_points(
     sensor_id: &str,
     source: u8,
     packets: u64,
     drops: u64,
-    freezes: u64,
     drop_rate: f64,
+    detail: &CaptureDrops,
 ) -> Vec<TelemetryPoint> {
     let p = |metric: String, v: TelemetryValue| {
         TelemetryPoint::new(sensor_id, Protocol::Netring, metric, v)
     };
     let pfx = format!("capture/{source}");
-    vec![
+    let c = |pfx: &str, leaf: &str, v: u64| {
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            format!("{pfx}/{leaf}"),
+            TelemetryValue::Counter(v),
+        )
+    };
+    let mut points = vec![
         p(format!("{pfx}/packets"), TelemetryValue::Counter(packets)),
         p(format!("{pfx}/drops"), TelemetryValue::Counter(drops)),
-        p(format!("{pfx}/freezes"), TelemetryValue::Counter(freezes)),
         p(format!("{pfx}/drop_rate"), TelemetryValue::Gauge(drop_rate)),
-    ]
+    ];
+    match *detail {
+        CaptureDrops::AfPacket { freezes } => {
+            points.push(c(&pfx, "freezes", freezes));
+        }
+        CaptureDrops::Xdp {
+            rx_dropped,
+            rx_invalid_descs,
+            rx_ring_full,
+            rx_fill_ring_empty_descs,
+            tx_invalid_descs,
+            tx_ring_empty_descs,
+        } => {
+            let xpfx = format!("{pfx}/xdp");
+            points.push(c(&xpfx, "rx_dropped", rx_dropped));
+            points.push(c(&xpfx, "rx_invalid_descs", rx_invalid_descs));
+            points.push(c(&xpfx, "rx_ring_full", rx_ring_full));
+            points.push(c(
+                &xpfx,
+                "rx_fill_ring_empty_descs",
+                rx_fill_ring_empty_descs,
+            ));
+            points.push(c(&xpfx, "tx_invalid_descs", tx_invalid_descs));
+            points.push(c(&xpfx, "tx_ring_empty_descs", tx_ring_empty_descs));
+        }
+    }
+    points
+}
+
+/// Build the `capture-overload` SensorHealth alert (issue #71): raised
+/// (`firing = true`, Critical) on the debounced `Normal → Emergency` drop-rate
+/// transition — "the sensor is silently losing your packets" — and resolved
+/// (`firing = false`) on the `Emergency → Normal` recovery. Bucketed per source.
+pub fn overload_alert(sensor_id: &str, source: u8, drop_rate: f64, firing: bool) -> Alert {
+    let summary = if firing {
+        format!(
+            "capture overload on source {source}: dropping {:.1}% of packets",
+            drop_rate * 100.0
+        )
+    } else {
+        format!("capture recovered on source {source}")
+    };
+    let mut alert = Alert::new(
+        sensor_id,
+        Protocol::Netring,
+        AlertKind::SensorHealth,
+        "capture-overload",
+        AlertSeverity::Critical,
+        summary,
+    )
+    .with_label("source", source.to_string())
+    .with_label("drop_rate", format!("{drop_rate:.4}"));
+    if !firing {
+        alert = alert.resolved();
+    }
+    alert
 }
 
 /// TLS handshake aggregate: total ClientHellos fingerprinted + distinct
@@ -741,7 +822,14 @@ mod tests {
 
     #[test]
     fn capture_points_shape() {
-        let pts = capture_points("s", 0, 10_000, 42, 1, 0.004);
+        let pts = capture_points(
+            "s",
+            0,
+            10_000,
+            42,
+            0.004,
+            &CaptureDrops::AfPacket { freezes: 1 },
+        );
         let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
         assert_eq!(
             find("capture/0/packets").value,
@@ -752,6 +840,7 @@ mod tests {
             find("capture/0/drop_rate").value,
             TelemetryValue::Gauge(0.004)
         );
+        assert_eq!(find("capture/0/freezes").value, TelemetryValue::Counter(1));
     }
 
     #[test]
@@ -1054,5 +1143,68 @@ mod tests {
         assert_eq!(r.bytes, 10_000_000);
         assert_eq!(r.proto, "tcp");
         assert_eq!(r.duration_ms, 4200);
+    }
+
+    #[test]
+    fn capture_points_afpacket_emits_freezes() {
+        let pts = capture_points(
+            "s",
+            0,
+            1000,
+            5,
+            0.01,
+            &CaptureDrops::AfPacket { freezes: 3 },
+        );
+        let names: Vec<_> = pts.iter().map(|p| p.metric.as_str()).collect();
+        assert!(names.contains(&"capture/0/packets"));
+        assert!(names.contains(&"capture/0/drops"));
+        assert!(names.contains(&"capture/0/drop_rate"));
+        assert!(names.contains(&"capture/0/freezes"));
+        // No XDP sub-metrics for an AF_PACKET source.
+        assert!(!names.iter().any(|n| n.contains("/xdp/")));
+    }
+
+    #[test]
+    fn capture_points_xdp_breaks_out_each_drop_cause() {
+        let pts = capture_points(
+            "s",
+            1,
+            2000,
+            8,
+            0.004,
+            &CaptureDrops::Xdp {
+                rx_dropped: 1,
+                rx_invalid_descs: 2,
+                rx_ring_full: 3,
+                rx_fill_ring_empty_descs: 4,
+                tx_invalid_descs: 5,
+                tx_ring_empty_descs: 6,
+            },
+        );
+        let names: Vec<_> = pts.iter().map(|p| p.metric.as_str()).collect();
+        assert!(names.contains(&"capture/1/xdp/rx_ring_full"));
+        assert!(names.contains(&"capture/1/xdp/rx_invalid_descs"));
+        assert!(names.contains(&"capture/1/xdp/tx_ring_empty_descs"));
+        // The invalid-descs counter is kept distinct (not folded into drops).
+        let invalid = pts
+            .iter()
+            .find(|p| p.metric == "capture/1/xdp/rx_invalid_descs")
+            .unwrap();
+        assert_eq!(invalid.value, TelemetryValue::Counter(2));
+    }
+
+    #[test]
+    fn overload_alert_firing_then_resolved() {
+        let firing = overload_alert("s", 0, 0.12, true);
+        assert_eq!(firing.kind, AlertKind::SensorHealth);
+        assert_eq!(firing.rule, "capture-overload");
+        assert_eq!(firing.severity, AlertSeverity::Critical);
+        assert!(firing.is_firing());
+        assert_eq!(firing.labels.get("source").map(String::as_str), Some("0"));
+
+        let resolved = overload_alert("s", 0, 0.0, false);
+        assert!(!resolved.is_firing());
+        // Same rule + bucketing key so it resolves the firing alert.
+        assert_eq!(resolved.rule, "capture-overload");
     }
 }

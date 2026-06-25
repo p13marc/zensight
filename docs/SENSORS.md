@@ -122,7 +122,13 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
 
 - **Telemetry:** `zensight/netring/<sensor>/<metric>` — flow RED (started/ended/
   bytes/packets/retransmits/duration percentiles), per-L4 + connection-state
-  composition, TCP resets, DNS RED, HTTP RED, TLS fingerprint counts, ICMP errors.
+  composition, TCP resets, DNS RED, HTTP RED, TLS fingerprint counts, ICMP errors,
+  capture health with the honest drop breakdown
+  (`capture/<src>/drops` + `freezes` / `xdp/<cause>`).
+- **Capture overload (netring 0.27):** the windowed drop-rate feeds a hysteresis
+  detector (enter 5%, recover 1% × 3 windows) that raises/clears a
+  `capture-overload` SensorHealth alert — the honest "the sensor is silently
+  losing your packets" signal. Tunable under `overload` in the config.
 - **On-demand detail** (`@/query/<topic>`): `flows`, `tls`, `talkers?top=N`,
   `elephant_flows`, `dns?top=N`, `http?top=N`.
 - **Alerts:** `@/alerts/<alert_key>` from detectors and threat-intel —
