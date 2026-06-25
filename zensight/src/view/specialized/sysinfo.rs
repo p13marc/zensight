@@ -108,10 +108,26 @@ fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
 
     let metric_count = text(format!("{} metrics", state.metrics.len())).size(14);
 
-    row![back_button, protocol_icon, host_name, os_text, metric_count]
+    let mut header = row![back_button, protocol_icon, host_name, os_text, metric_count]
         .spacing(15)
-        .align_y(Alignment::Center)
-        .into()
+        .align_y(Alignment::Center);
+    // Host health score + state (#130) — the one number derived by the sensor
+    // (#97 system/saturation_score + system/health_state) for at-a-glance triage.
+    if let Some(score) = get_metric_value(state, "system/saturation_score") {
+        let st = get_metric_text(state, "system/health_state").unwrap_or_default();
+        let color = match st.as_str() {
+            "crit" => iced::Color::from_rgb(0.9, 0.3, 0.3),
+            "warn" => iced::Color::from_rgb(0.9, 0.7, 0.2),
+            _ => iced::Color::from_rgb(0.4, 0.75, 0.45),
+        };
+        let label = if st.is_empty() {
+            format!("health {score:.0}")
+        } else {
+            format!("health {score:.0} · {st}")
+        };
+        header = header.push(crate::view::components::badge(color, label));
+    }
+    header.into()
 }
 
 /// Render system overview with uptime and load.
