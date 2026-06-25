@@ -122,7 +122,7 @@ run: setup configure
 
 # Stop any running sensors started by `just run`.
 stop:
-    -pkill -f 'zensight-sensor-(netring|netlink|sysinfo|syslog)' || true
+    -pkill -f 'zensight-sensor-(netring|netlink|sysinfo|logs)' || true
 
 # Remove generated run configs and logs.
 clean-run:
