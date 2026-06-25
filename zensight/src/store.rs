@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 // redb 4 moved `begin_read` onto the `ReadableDatabase` trait.
-use redb::{Database, ReadableDatabase, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 use zensight_common::{TelemetryPoint, TelemetryValue};
 
@@ -85,6 +85,30 @@ impl Tier {
             Tier::Second => 0,
             Tier::Minute => 1,
             Tier::Hour => 2,
+        }
+    }
+
+    /// Decode a tier from its on-disk [`code`](Self::code). `None` for unknown
+    /// codes (forward-compat: a future tier in an old binary is skipped).
+    pub const fn from_code(code: u8) -> Option<Tier> {
+        match code {
+            0 => Some(Tier::Second),
+            1 => Some(Tier::Minute),
+            2 => Some(Tier::Hour),
+            _ => None,
+        }
+    }
+
+    /// How long this tier is retained on disk, in seconds (#131). Past this age a
+    /// tier's buckets are eligible for eviction so the redb file stops growing
+    /// unbounded. Coarser tiers are kept far longer (they cost far less per day):
+    /// per-second 2 days, per-minute 30 days, per-hour 1 year — a Netdata-style
+    /// progressive-retention curve.
+    pub const fn retention_secs(self) -> i64 {
+        match self {
+            Tier::Second => 2 * 86_400,
+            Tier::Minute => 30 * 86_400,
+            Tier::Hour => 365 * 86_400,
         }
     }
 }
@@ -317,6 +341,42 @@ impl PersistentStore {
             }
         }
         Ok(out)
+    }
+
+    /// Evict buckets older than each tier's [retention](Tier::retention_secs)
+    /// relative to `now_ms`, bounding on-disk growth (#131). Returns the number
+    /// of buckets removed. Blocking I/O — call from `spawn_blocking`.
+    ///
+    /// The packed key sorts by `metric_id` first, so a tier's aged-out buckets
+    /// are scattered rather than contiguous; this does one full scan to collect
+    /// expired keys, then removes them. Run it infrequently (not every flush) —
+    /// in steady state each pass only finds the handful of buckets that aged out
+    /// since the last run.
+    pub fn prune(&self, now_ms: i64) -> Result<usize, redb::Error> {
+        let now_secs = now_ms.div_euclid(1_000);
+        let txn = self.db.begin_write()?;
+        let mut removed = 0usize;
+        {
+            let mut table = txn.open_table(SAMPLES_TABLE)?;
+            let mut expired: Vec<u128> = Vec::new();
+            for entry in table.range(0u128..=u128::MAX)? {
+                let (key, _) = entry?;
+                let key = key.value();
+                let tier_code = ((key >> 64) & 0xFF) as u8;
+                let bucket_secs = (key & u64::MAX as u128) as u64 as i64;
+                if let Some(tier) = Tier::from_code(tier_code)
+                    && bucket_secs < now_secs - tier.retention_secs()
+                {
+                    expired.push(key);
+                }
+            }
+            for key in expired {
+                table.remove(key)?;
+                removed += 1;
+            }
+        }
+        txn.commit()?;
+        Ok(removed)
     }
 }
 
@@ -669,6 +729,74 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tier_code_roundtrip_and_retention_ordering() {
+        for tier in Tier::ALL {
+            assert_eq!(Tier::from_code(tier.code()), Some(tier));
+        }
+        assert_eq!(Tier::from_code(99), None);
+        // Coarser tiers retain strictly longer.
+        assert!(Tier::Second.retention_secs() < Tier::Minute.retention_secs());
+        assert!(Tier::Minute.retention_secs() < Tier::Hour.retention_secs());
+    }
+
+    #[test]
+    fn prune_evicts_only_aged_out_buckets_per_tier() {
+        let path = temp_db_path("prune");
+        let store = PersistentStore::open(&path).expect("open");
+        let m = MetricId(3);
+        let day = 86_400i64;
+        let now_secs = 400 * day; // far enough out that all retentions are exceeded by bucket 0
+        let now_ms = now_secs * 1_000;
+        // For each tier: one ancient bucket (older than retention -> evicted) and
+        // one fresh bucket (within retention -> kept).
+        let fresh_minute = now_secs - day; // < 30d old
+        let fresh_hour = now_secs - 100 * day; // < 365d old
+        let fresh_second = now_secs - day; // 1d < 2d retention -> kept
+        let batch = vec![
+            (m, Tier::Minute, 0, 1.0),            // ancient -> evicted
+            (m, Tier::Minute, fresh_minute, 2.0), // fresh -> kept
+            (m, Tier::Hour, 0, 3.0),              // ancient -> evicted
+            (m, Tier::Hour, fresh_hour, 4.0),     // fresh -> kept
+            (m, Tier::Second, 0, 5.0),            // ancient -> evicted
+            (m, Tier::Second, fresh_second, 6.0), // fresh -> kept
+        ];
+        store.write_batch(&batch).unwrap();
+
+        let removed = store.prune(now_ms).unwrap();
+        assert_eq!(removed, 3, "the three ancient buckets are evicted");
+
+        // The fresh buckets survive; the ancient ones are gone.
+        let minute = store.query(m, Tier::Minute, 0, now_ms).unwrap();
+        assert_eq!(
+            minute,
+            vec![Sample {
+                ts: fresh_minute * 1_000,
+                value: 2.0
+            }]
+        );
+        let hour = store.query(m, Tier::Hour, 0, now_ms).unwrap();
+        assert_eq!(
+            hour,
+            vec![Sample {
+                ts: fresh_hour * 1_000,
+                value: 4.0
+            }]
+        );
+        let second = store.query(m, Tier::Second, 0, now_ms).unwrap();
+        assert_eq!(
+            second,
+            vec![Sample {
+                ts: fresh_second * 1_000,
+                value: 6.0
+            }]
+        );
+
+        // Idempotent: a second prune with the same clock removes nothing.
+        assert_eq!(store.prune(now_ms).unwrap(), 0);
         let _ = std::fs::remove_file(&path);
     }
 

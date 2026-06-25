@@ -16,6 +16,10 @@ use zensight_common::{
 /// Flush the metric store to redb every this many 1s ticks (#22).
 const STORE_FLUSH_EVERY_TICKS: u32 = 15;
 
+/// Evict aged-out buckets every this many flushes (~10 min at 15s/flush, #131).
+/// Pruning scans the whole table, so it runs far less often than flushing.
+const STORE_PRUNE_EVERY_FLUSHES: u32 = 40;
+
 /// Cap on the rolling log buffer feeding the top-level Logs view.
 const MAX_RECENT_LOGS: usize = 5000;
 
@@ -136,6 +140,8 @@ pub struct ZenSight {
     store: crate::store::MetricStore,
     /// Ticks counted toward the next periodic store flush (flush every N ticks).
     ticks_since_flush: u32,
+    /// Flushes counted toward the next store prune (#131).
+    flushes_since_prune: u32,
     /// Timestamp (epoch ms) of the most recently received telemetry point, for
     /// the global Live/Stale/Paused freshness indicator (#23). `None` until the
     /// first point arrives.
@@ -258,6 +264,7 @@ impl ZenSight {
                 crate::store::MetricStore::with_default_persistence()
             },
             ticks_since_flush: 0,
+            flushes_since_prune: 0,
             // Demo mode pre-loads mock points; treat the feed as fresh on boot.
             last_telemetry_ms: if demo_mode { Some(now_ms()) } else { None },
             global_search: crate::view::search::GlobalSearchState::default(),
@@ -627,11 +634,27 @@ impl ZenSight {
                 if self.ticks_since_flush >= STORE_FLUSH_EVERY_TICKS {
                     self.ticks_since_flush = 0;
                     if let Some((store, batch)) = self.store.take_flush_batch() {
+                        // Prune aged-out buckets every Nth flush (#131) so the redb
+                        // file doesn't grow unbounded — bundled into the same
+                        // off-thread task as the write.
+                        self.flushes_since_prune += 1;
+                        let prune = self.flushes_since_prune >= STORE_PRUNE_EVERY_FLUSHES;
+                        if prune {
+                            self.flushes_since_prune = 0;
+                        }
+                        let now_ms = zensight_common::current_timestamp_millis();
                         return Task::future(async move {
                             // Map redb's large error to a String inside the blocking
                             // closure so the future's payload stays small.
                             let res = tokio::task::spawn_blocking(move || {
-                                store.write_batch(&batch).map_err(|e| e.to_string())
+                                let n = store.write_batch(&batch).map_err(|e| e.to_string())?;
+                                if prune {
+                                    let evicted = store.prune(now_ms).map_err(|e| e.to_string())?;
+                                    if evicted > 0 {
+                                        tracing::debug!(evicted, "Pruned aged-out store buckets");
+                                    }
+                                }
+                                Ok::<usize, String>(n)
                             })
                             .await
                             .map_err(|e| e.to_string())
@@ -1294,13 +1317,10 @@ impl ZenSight {
                 }
             }
             Message::FetchSysinfoProcesses(sort) => {
-                let host = self
-                    .selected_device
-                    .as_mut()
-                    .map(|device| {
-                        device.sysinfo_detail.loading(sort);
-                        device.device_id.source.clone()
-                    });
+                let host = self.selected_device.as_mut().map(|device| {
+                    device.sysinfo_detail.loading(sort);
+                    device.device_id.source.clone()
+                });
                 if let Some(host) = host {
                     return self.query_sysinfo_processes(host, sort);
                 }
@@ -1645,7 +1665,7 @@ impl ZenSight {
         use crate::view::specialized::netring_detail::fetch_talkers;
         let Some(session) = self.session.clone() else {
             return Task::done(Message::NetringTalkersReceived(Err(
-                "Not connected to Zenoh".to_string()
+                "Not connected to Zenoh".to_string(),
             )));
         };
         Task::future(async move {
