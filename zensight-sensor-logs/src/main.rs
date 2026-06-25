@@ -52,8 +52,9 @@ async fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("Failed to compile filter: {}", e))?,
     );
 
-    // Start syslog listeners
-    let mut rx = receiver::start_listeners(&syslog_config)
+    // Start syslog listeners (+ journald reader). `journald_stats` carries the
+    // reader's throughput/loss accounting when the journald source is enabled.
+    let (mut rx, journald_stats) = receiver::start_listeners(&syslog_config)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to start syslog listeners: {}", e))?;
 
@@ -161,8 +162,63 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
+    // journald robustness monitor (#62): periodically snapshot the reader's
+    // read/published/dropped/sampled counters; on sustained loss raise an
+    // ErrorReport so the Sensors view reflects "we are dropping your logs" —
+    // healthy ≠ "process up". Only runs when the journald source is enabled.
+    if let Some(stats) = journald_stats.clone() {
+        let health = runner.health();
+        let drop_alert_ratio = syslog_config
+            .journald
+            .as_ref()
+            .map(|j| j.drop_alert_ratio)
+            .unwrap_or(0.01);
+        runner.spawn(async move {
+            use std::time::Duration;
+            let mut tick = tokio::time::interval(Duration::from_secs(10));
+            let mut prev = stats.snapshot();
+            let mut alerting = false;
+            loop {
+                tick.tick().await;
+                let cur = stats.snapshot();
+                let loss = cur.loss_ratio_since(&prev);
+                let dropped = cur.dropped.saturating_sub(prev.dropped);
+                let sampled = cur.sampled_out.saturating_sub(prev.sampled_out);
+                if loss > drop_alert_ratio && (dropped + sampled) > 0 {
+                    // Edge-triggered: report once on entering the lossy state.
+                    if !alerting {
+                        alerting = true;
+                        let report = zensight_sensor_core::ErrorReport::new(
+                            zensight_sensor_core::ErrorType::Other,
+                            format!(
+                                "journald dropping logs: {:.1}% loss over last window \
+                                 ({dropped} dropped, {sampled} sampled-out). Raise the \
+                                 channel/rate budget or narrow server-side matches.",
+                                loss * 100.0
+                            ),
+                        );
+                        if let Err(e) = health.publish_error(&report).await {
+                            tracing::warn!(error = %e, "failed to publish journald drop ErrorReport");
+                        }
+                        tracing::warn!(
+                            loss_pct = loss * 100.0,
+                            dropped,
+                            sampled,
+                            "journald: sustained log loss"
+                        );
+                    }
+                } else if alerting {
+                    alerting = false;
+                    tracing::info!("journald: log loss recovered");
+                }
+                prev = cur;
+            }
+        });
+    }
+
     // Spawn the message processing task
     let session_clone = session.clone();
+    let publish_health = runner.health();
     runner.spawn(async move {
         loop {
             tokio::select! {
@@ -196,6 +252,9 @@ async fn main() -> Result<()> {
                             if let Err(e) = session_clone.put(&key, payload).await {
                                 tracing::error!("Failed to publish to {}: {}", key, e);
                             } else {
+                                // Count published telemetry so the Sensors view
+                                // reflects this sensor's throughput (#62).
+                                publish_health.record_metrics_published(1);
                                 tracing::debug!(
                                     "Published: {} from {} [{}]",
                                     key,

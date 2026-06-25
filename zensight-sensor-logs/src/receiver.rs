@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UdpSocket, UnixListener, UnixStream};
 use tokio::sync::mpsc;
@@ -47,8 +48,78 @@ impl std::fmt::Display for MessageSource {
     }
 }
 
-/// Start all configured listeners and return a channel for receiving messages.
-pub async fn start_listeners(config: &SyslogConfig) -> Result<mpsc::Receiver<ReceivedMessage>> {
+/// journald reader throughput + loss accounting (#62), shared between the reader
+/// thread and the async health/telemetry tasks. Plain relaxed atomics —
+/// monotonic counters read for periodic snapshots, no cross-counter invariant.
+/// Lives here (not in the feature-gated `journald` module) so the channel/health
+/// wiring can name it unconditionally.
+#[derive(Debug, Default)]
+pub struct JournaldStats {
+    /// Entries read from the journal (post server-side match).
+    pub read: AtomicU64,
+    /// Entries handed to the telemetry channel.
+    pub published: AtomicU64,
+    /// Entries dropped because the channel was full (`drop_newest`).
+    pub dropped: AtomicU64,
+    /// Entries shed by the rate limiter (over `max_eps`).
+    pub sampled_out: AtomicU64,
+    /// Entries we failed to read/decode (tolerated, not fatal).
+    pub decode_errors: AtomicU64,
+    /// `wait()` invalidations (journal rotation / files added-removed).
+    pub invalidations: AtomicU64,
+}
+
+impl JournaldStats {
+    /// Increment a counter (relaxed). Used by the feature-gated reader module.
+    #[cfg_attr(not(feature = "journald"), allow(dead_code))]
+    pub(crate) fn inc(field: &AtomicU64) {
+        field.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Snapshot the counters for a point-in-time read (health / telemetry).
+    pub fn snapshot(&self) -> JournaldStatsSnapshot {
+        JournaldStatsSnapshot {
+            read: self.read.load(Ordering::Relaxed),
+            published: self.published.load(Ordering::Relaxed),
+            dropped: self.dropped.load(Ordering::Relaxed),
+            sampled_out: self.sampled_out.load(Ordering::Relaxed),
+            decode_errors: self.decode_errors.load(Ordering::Relaxed),
+            invalidations: self.invalidations.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// A plain (non-atomic) copy of [`JournaldStats`] for a point-in-time read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JournaldStatsSnapshot {
+    pub read: u64,
+    pub published: u64,
+    pub dropped: u64,
+    pub sampled_out: u64,
+    pub decode_errors: u64,
+    pub invalidations: u64,
+}
+
+impl JournaldStatsSnapshot {
+    /// Fraction of read entries dropped or sampled-out over the delta since
+    /// `prev`. `0.0` when nothing was read in the window.
+    pub fn loss_ratio_since(&self, prev: &JournaldStatsSnapshot) -> f64 {
+        let read = self.read.saturating_sub(prev.read);
+        if read == 0 {
+            return 0.0;
+        }
+        let lost = self.dropped.saturating_sub(prev.dropped)
+            + self.sampled_out.saturating_sub(prev.sampled_out);
+        lost as f64 / read as f64
+    }
+}
+
+/// Start all configured listeners and return the message channel plus, when the
+/// journald source is enabled, its shared [`JournaldStats`] for health/telemetry
+/// (`None` otherwise). The stats are `Arc`-shared with the reader thread.
+pub async fn start_listeners(
+    config: &SyslogConfig,
+) -> Result<(mpsc::Receiver<ReceivedMessage>, Option<Arc<JournaldStats>>)> {
     let (tx, rx) = mpsc::channel(1000);
     let hostname_aliases = Arc::new(config.hostname_aliases.clone());
 
@@ -85,13 +156,22 @@ pub async fn start_listeners(config: &SyslogConfig) -> Result<mpsc::Receiver<Rec
     // systemd-journald source (#57): a dedicated OS thread feeds the same
     // channel as the network listeners. `systemd::journal::Journal` is
     // `!Send + !Sync`, so it cannot live on a tokio task.
+    // `mut` is used only when the journald feature is compiled in.
+    #[cfg_attr(not(feature = "journald"), allow(unused_mut))]
+    let mut journald_stats: Option<Arc<JournaldStats>> = None;
     if let Some(journald) = &config.journald
         && journald.enabled
     {
         #[cfg(feature = "journald")]
         {
-            crate::journald::spawn_reader(journald.clone(), tx.clone());
-            tracing::info!(scope = ?journald.scope, "journald source enabled");
+            let (_handle, stats) = crate::journald::spawn_reader(journald.clone(), tx.clone());
+            journald_stats = Some(stats);
+            tracing::info!(
+                scope = ?journald.scope,
+                overflow = ?journald.overflow,
+                max_eps = ?journald.max_eps,
+                "journald source enabled"
+            );
         }
         #[cfg(not(feature = "journald"))]
         tracing::warn!(
@@ -100,7 +180,7 @@ pub async fn start_listeners(config: &SyslogConfig) -> Result<mpsc::Receiver<Rec
         );
     }
 
-    Ok(rx)
+    Ok((rx, journald_stats))
 }
 
 /// Run a UDP syslog listener.
@@ -487,6 +567,27 @@ pub fn build_key_expr(prefix: &str, received: &ReceivedMessage) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loss_ratio_is_delta_over_window() {
+        let prev = JournaldStatsSnapshot {
+            read: 1000,
+            published: 990,
+            dropped: 10,
+            ..Default::default()
+        };
+        // Next window: +1000 read, +100 dropped, +50 sampled → 15% loss.
+        let cur = JournaldStatsSnapshot {
+            read: 2000,
+            published: 1840,
+            dropped: 110,
+            sampled_out: 50,
+            ..Default::default()
+        };
+        assert!((cur.loss_ratio_since(&prev) - 0.15).abs() < 1e-9);
+        // Idle window (no reads) → 0.0, not NaN.
+        assert_eq!(cur.loss_ratio_since(&cur), 0.0);
+    }
 
     #[test]
     fn test_resolve_hostname_network_alias() {

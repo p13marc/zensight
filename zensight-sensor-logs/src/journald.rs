@@ -21,17 +21,60 @@
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::{TimeZone, Utc};
 use systemd::id128::Id128;
-use systemd::journal::{Journal, JournalRecord, OpenOptions};
+use systemd::journal::{Journal, JournalRecord, JournalWaitResult, OpenOptions};
 use tokio::sync::mpsc;
 
-use crate::config::{JournaldConfig, JournaldScope, MissingCursor, StartFrom};
+use crate::config::{JournaldConfig, JournaldScope, MissingCursor, OverflowPolicy, StartFrom};
 use crate::parser::{Facility, Severity, SyslogMessage, SyslogVersion};
-use crate::receiver::{MessageSource, ReceivedMessage};
+use crate::receiver::{JournaldStats, MessageSource, ReceivedMessage};
+
+/// Global token-bucket rate limiter over a 1-second window (#62). Single-reader,
+/// so no synchronization is needed. Beyond `max_eps`, keeps 1-in-`sample_ratio`
+/// over-budget entries and reports the rest as sampled-out.
+struct RateLimiter {
+    max_eps: Option<u64>,
+    sample_ratio: u64,
+    window_start: Instant,
+    in_window: u64,
+    over_budget: u64,
+}
+
+impl RateLimiter {
+    fn new(cfg: &JournaldConfig, now: Instant) -> Self {
+        Self {
+            max_eps: cfg.max_eps,
+            sample_ratio: cfg.sample_ratio.max(1),
+            window_start: now,
+            in_window: 0,
+            over_budget: 0,
+        }
+    }
+
+    /// `true` to forward this entry, `false` to shed it (sampled-out).
+    fn allow(&mut self, now: Instant) -> bool {
+        let Some(max) = self.max_eps else {
+            return true;
+        };
+        if now.duration_since(self.window_start) >= Duration::from_secs(1) {
+            self.window_start = now;
+            self.in_window = 0;
+            self.over_budget = 0;
+        }
+        self.in_window += 1;
+        if self.in_window <= max {
+            return true;
+        }
+        // Over budget: keep 1-in-N, shed the rest.
+        self.over_budget += 1;
+        self.over_budget.is_multiple_of(self.sample_ratio)
+    }
+}
 
 /// How long the reader blocks in `wait()` before looping (lets it notice a
 /// closed channel / process shutdown promptly).
@@ -54,15 +97,18 @@ const DEFAULT_SINCE: Duration = Duration::from_secs(900);
 pub fn spawn_reader(
     cfg: JournaldConfig,
     tx: mpsc::Sender<ReceivedMessage>,
-) -> thread::JoinHandle<()> {
-    thread::Builder::new()
+) -> (thread::JoinHandle<()>, Arc<JournaldStats>) {
+    let stats = Arc::new(JournaldStats::default());
+    let stats_thread = stats.clone();
+    let handle = thread::Builder::new()
         .name("journald-reader".to_string())
         .spawn(move || {
-            if let Err(e) = run(&cfg, &tx) {
+            if let Err(e) = run(&cfg, &tx, &stats_thread) {
                 tracing::error!(error = %e, "journald reader exited with error");
             }
         })
-        .expect("failed to spawn journald reader thread")
+        .expect("failed to spawn journald reader thread");
+    (handle, stats)
 }
 
 /// Open the journal according to `scope` / `namespace`.
@@ -123,7 +169,11 @@ fn apply_matches(journal: &mut Journal, cfg: &JournaldConfig) -> std::io::Result
 }
 
 /// Reader loop: open, position per `start_from`, then drain-persist-wait.
-fn run(cfg: &JournaldConfig, tx: &mpsc::Sender<ReceivedMessage>) -> std::io::Result<()> {
+fn run(
+    cfg: &JournaldConfig,
+    tx: &mpsc::Sender<ReceivedMessage>,
+    stats: &JournaldStats,
+) -> std::io::Result<()> {
     let mut journal = open(cfg)?;
     // Server-side filters must be installed before seeking so they constrain
     // iteration from the first entry (#59).
@@ -147,13 +197,34 @@ fn run(cfg: &JournaldConfig, tx: &mpsc::Sender<ReceivedMessage>) -> std::io::Res
     let started = Instant::now();
     let mut total_read: u64 = 0;
     let mut warned_no_data = false;
+    let mut limiter = RateLimiter::new(cfg, started);
 
     loop {
         // Drain everything currently available.
         let mut advanced = false;
-        while let Some(record) = journal.next_entry()? {
+        loop {
+            // Tolerate a transient read/decode error: count it and stop draining
+            // this batch (go wait) rather than killing the reader.
+            let record = match journal.next_entry() {
+                Ok(Some(record)) => record,
+                Ok(None) => break,
+                Err(e) => {
+                    JournaldStats::inc(&stats.decode_errors);
+                    tracing::warn!(error = %e, "journald: entry read failed; skipping batch");
+                    break;
+                }
+            };
             advanced = true;
             total_read += 1;
+            JournaldStats::inc(&stats.read);
+
+            // Rate limit (#62): shed over-budget entries (sampled-out), keeping
+            // 1-in-N. Done before mapping so we don't pay decode cost on shed.
+            if !limiter.allow(Instant::now()) {
+                JournaldStats::inc(&stats.sampled_out);
+                continue;
+            }
+
             let recv_usec = journal.timestamp_usec().ok();
             let message = map_record(&record, cfg, recv_usec);
             let resolved_hostname = message
@@ -170,13 +241,18 @@ fn run(cfg: &JournaldConfig, tx: &mpsc::Sender<ReceivedMessage>) -> std::io::Res
                 source: MessageSource::Journald,
                 resolved_hostname,
             };
-            if tx.blocking_send(received).is_err() {
-                tracing::info!("journald: telemetry channel closed, stopping reader");
-                // Flush the latest cursor on the way out for a clean resume.
-                if let (Some(path), Ok(cur)) = (&cursor_path, journal.cursor()) {
-                    let _ = write_cursor_atomic(path, &cur);
+            // Overflow policy (#62): block (backpressure) vs drop_newest (shed +
+            // count). Either way a closed channel means shutdown.
+            match send_entry(tx, received, cfg.overflow, stats) {
+                SendOutcome::Sent => {}
+                SendOutcome::Dropped => {}
+                SendOutcome::Closed => {
+                    tracing::info!("journald: telemetry channel closed, stopping reader");
+                    if let (Some(path), Ok(cur)) = (&cursor_path, journal.cursor()) {
+                        let _ = write_cursor_atomic(path, &cur);
+                    }
+                    return Ok(());
                 }
-                return Ok(());
             }
         }
 
@@ -208,12 +284,56 @@ fn run(cfg: &JournaldConfig, tx: &mpsc::Sender<ReceivedMessage>) -> std::io::Res
 
         // Block for new entries (bounded so shutdown is observed promptly).
         match journal.wait(Some(WAIT_TIMEOUT)) {
+            // Rotation / files added or removed: libsystemd follows it
+            // transparently, so this is NOT EOF — count it and loop back to
+            // re-drain. (#62: `journalctl --rotate` must not stop the stream.)
+            Ok(JournalWaitResult::Invalidate) => {
+                JournaldStats::inc(&stats.invalidations);
+                tracing::debug!("journald: journal invalidated (rotation); continuing tail");
+            }
             Ok(result) => tracing::trace!(?result, "journald wait returned"),
             Err(e) => {
                 tracing::warn!(error = %e, "journald wait failed; backing off");
                 thread::sleep(WAIT_TIMEOUT);
             }
         }
+    }
+}
+
+/// Outcome of trying to forward one entry to the telemetry channel.
+enum SendOutcome {
+    Sent,
+    Dropped,
+    Closed,
+}
+
+/// Forward `received` per the overflow policy, updating `stats`. `block` applies
+/// backpressure (waits for room); `drop_newest` sheds + counts when full (#62).
+fn send_entry(
+    tx: &mpsc::Sender<ReceivedMessage>,
+    received: ReceivedMessage,
+    policy: OverflowPolicy,
+    stats: &JournaldStats,
+) -> SendOutcome {
+    match policy {
+        OverflowPolicy::Block => match tx.blocking_send(received) {
+            Ok(()) => {
+                JournaldStats::inc(&stats.published);
+                SendOutcome::Sent
+            }
+            Err(_) => SendOutcome::Closed,
+        },
+        OverflowPolicy::DropNewest => match tx.try_send(received) {
+            Ok(()) => {
+                JournaldStats::inc(&stats.published);
+                SendOutcome::Sent
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                JournaldStats::inc(&stats.dropped);
+                SendOutcome::Dropped
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => SendOutcome::Closed,
+        },
     }
 }
 
@@ -475,6 +595,78 @@ fn datetime_from_usec(usec: u64) -> Option<chrono::DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rate_limiter_unlimited_when_no_max() {
+        let cfg = JournaldConfig::default(); // max_eps = None
+        let now = Instant::now();
+        let mut rl = RateLimiter::new(&cfg, now);
+        for _ in 0..10_000 {
+            assert!(rl.allow(now));
+        }
+    }
+
+    #[test]
+    fn rate_limiter_samples_over_budget() {
+        let cfg = JournaldConfig {
+            max_eps: Some(2),
+            sample_ratio: 5,
+            ..Default::default()
+        };
+        let now = Instant::now();
+        let mut rl = RateLimiter::new(&cfg, now);
+        // First 2 in the window are within budget.
+        assert!(rl.allow(now));
+        assert!(rl.allow(now));
+        // The next over-budget entries: keep 1-in-5 (the 5th over-budget).
+        let kept: usize = (0..10).filter(|_| rl.allow(now)).count();
+        assert_eq!(kept, 2, "1-in-5 of 10 over-budget entries kept");
+        // A fresh 1s window resets the budget.
+        let later = now + Duration::from_secs(1);
+        assert!(rl.allow(later));
+    }
+
+    #[test]
+    fn send_entry_drop_newest_counts_when_full() {
+        let (tx, _rx) = mpsc::channel::<ReceivedMessage>(1);
+        let stats = JournaldStats::default();
+        let msg = |body: &str| ReceivedMessage {
+            message: crate::parser::parse(&format!("<14>{body}")).unwrap(),
+            source: MessageSource::Journald,
+            resolved_hostname: "h".into(),
+        };
+        // First send fills the capacity-1 channel.
+        assert!(matches!(
+            send_entry(&tx, msg("a"), OverflowPolicy::DropNewest, &stats),
+            SendOutcome::Sent
+        ));
+        // Second send finds it full → dropped + counted.
+        assert!(matches!(
+            send_entry(&tx, msg("b"), OverflowPolicy::DropNewest, &stats),
+            SendOutcome::Dropped
+        ));
+        assert_eq!(
+            stats.published.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(stats.dropped.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn send_entry_reports_closed_channel() {
+        let (tx, rx) = mpsc::channel::<ReceivedMessage>(1);
+        drop(rx);
+        let stats = JournaldStats::default();
+        let msg = ReceivedMessage {
+            message: crate::parser::parse("<14>x").unwrap(),
+            source: MessageSource::Journald,
+            resolved_hostname: "h".into(),
+        };
+        assert!(matches!(
+            send_entry(&tx, msg, OverflowPolicy::DropNewest, &stats),
+            SendOutcome::Closed
+        ));
+    }
 
     fn rec(pairs: &[(&str, &str)]) -> JournalRecord {
         pairs

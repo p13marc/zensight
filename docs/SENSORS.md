@@ -165,6 +165,15 @@ The logs sensor's journald source (`syslog.journald`):
 | `since` / `cursor_file` / `on_missing_cursor` | resume tuning |
 | `units` / `min_priority` / `transports` / `match` | **server-side** filters (applied in the journal) |
 | `detect_events` / `event_dedup_secs` / `event_severity` | known-event → alert tuning |
+| `overflow` | channel-full policy under storms: `drop_newest` (default, shed + count) \| `block` (backpressure) |
+| `max_eps` / `sample_ratio` | optional rate limit; beyond it keep 1-in-`sample_ratio`, count the rest as sampled-out |
+| `drop_alert_ratio` | raise an `ErrorReport` once windowed loss exceeds this fraction (default 0.01) |
+
+Under a log storm the reader sheds (or backpressures) per `overflow` and keeps
+honest accounting — entries read / published / dropped / sampled-out — so a
+sustained drop surfaces as an `ErrorReport` rather than silent loss. Journal
+rotation (`journalctl --rotate`) is followed transparently (the `wait()`
+*invalidate* is handled, not treated as EOF).
 
 Reading the **system** journal needs journal-read access — run as a system
 service or add the user to the `systemd-journal` group. The `user` scope is

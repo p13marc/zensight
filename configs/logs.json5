@@ -27,6 +27,18 @@
 
       // detect_events defaults to true: coredump / unit-failed / OOM journal
       // events (matched by MESSAGE_ID) are raised as alerts on @/alerts.
+
+      // Robustness under storms / rotation (#62). The reader feeds a bounded
+      // channel; pick what happens when it fills:
+      //   "drop_newest" (default) — shed + count incoming entries (bounded mem)
+      //   "block"                 — backpressure the journal read (no loss, may lag)
+      overflow: "drop_newest",
+      // Optional global rate limit (entries/sec). Beyond it, keep 1-in-N and
+      // count the rest as sampled-out so one screaming unit can't drown the bus.
+      // max_eps: 5000,
+      sample_ratio: 100,
+      // Raise an ErrorReport once loss exceeds this fraction over a window (1%).
+      drop_alert_ratio: 0.01,
     },
   },
 

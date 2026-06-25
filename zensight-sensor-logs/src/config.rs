@@ -141,10 +141,54 @@ pub struct JournaldConfig {
     /// keyed by the 32-char hex id. Empty = use the built-in defaults.
     #[serde(default)]
     pub event_severity: std::collections::HashMap<String, String>,
+
+    /// Behavior when the bounded telemetry channel is full under a log storm
+    /// (#62). `block` applies backpressure to the journal read (safe, may lag);
+    /// `drop_newest` keeps memory bounded and counts what it sheds. Default
+    /// `drop_newest`.
+    #[serde(default)]
+    pub overflow: OverflowPolicy,
+
+    /// Optional global rate limit (entries/sec, #62). Beyond the budget the
+    /// reader samples 1-in-`sample_ratio` and counts the rest as sampled-out,
+    /// so a single screaming unit can't drown the bus. `None` = unlimited.
+    #[serde(default)]
+    pub max_eps: Option<u64>,
+
+    /// When rate-limited, keep 1 of every N over-budget entries (the rest are
+    /// counted as sampled-out). Default 100; clamped to ≥1.
+    #[serde(default = "default_sample_ratio")]
+    pub sample_ratio: u64,
+
+    /// Emit an `ErrorReport` once the dropped+sampled fraction over a window
+    /// exceeds this (0.0..=1.0) — "not silently dropping your logs". Default
+    /// 0.01 (1%).
+    #[serde(default = "default_drop_alert_ratio")]
+    pub drop_alert_ratio: f64,
 }
 
 fn default_event_dedup_secs() -> u64 {
     30
+}
+fn default_sample_ratio() -> u64 {
+    100
+}
+fn default_drop_alert_ratio() -> f64 {
+    0.01
+}
+
+/// Telemetry-channel overflow policy under load (#62).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverflowPolicy {
+    /// Apply backpressure to the journal read — never lose an entry, but the
+    /// reader may lag behind a sustained storm.
+    Block,
+    /// Drop the incoming entry when the channel is full (bounded memory),
+    /// counting each drop. The default — a logs sensor should shed under a
+    /// storm rather than block or OOM.
+    #[default]
+    DropNewest,
 }
 
 impl Default for JournaldConfig {
@@ -166,6 +210,10 @@ impl Default for JournaldConfig {
             detect_events: true,
             event_dedup_secs: default_event_dedup_secs(),
             event_severity: std::collections::HashMap::new(),
+            overflow: OverflowPolicy::default(),
+            max_eps: None,
+            sample_ratio: default_sample_ratio(),
+            drop_alert_ratio: default_drop_alert_ratio(),
         }
     }
 }
