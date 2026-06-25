@@ -33,6 +33,52 @@ pub struct SecurityState {
 /// Labels shown elsewhere (summary/source), so we don't repeat them as evidence.
 const NON_EVIDENCE_LABELS: &[&str] = &["src", "dst", "proto"];
 
+/// Map a detector `rule` slug to a human title + one-line "what it means",
+/// so each detector reads as a first-class card rather than a raw slug. Covers
+/// the built-in detectors and the netring 0.27 threat-intel kinds (flow-risk /
+/// IOC / Sigma / cleartext SNMP, #69/#72); unknown slugs fall back to the slug
+/// itself with no description.
+fn detector_meta(rule: &str) -> (String, &'static str) {
+    match rule {
+        // Built-in flow/DNS detectors (Pillar A).
+        "PortScanTRW" => ("Port scan".into(), "Many ports probed on a host (TRW)"),
+        "BeaconCv" => (
+            "Beaconing / C2".into(),
+            "Periodic, size-consistent flows (RITA-style)",
+        ),
+        "ConnectionFlood" => (
+            "Connection flood".into(),
+            "Many connections to one (dst, port) in a window",
+        ),
+        "DgaScorer" => (
+            "DGA / DNS tunneling".into(),
+            "Random-looking DNS query names (low bigram likelihood)",
+        ),
+        // netring 0.27 threat-intel (#69): flow-risk scoring.
+        "obsolete_tls" => (
+            "Obsolete TLS".into(),
+            "Deprecated TLS version / cipher negotiated",
+        ),
+        "cleartext_http_credentials" => (
+            "Cleartext HTTP credentials".into(),
+            "Credentials sent over unencrypted HTTP",
+        ),
+        "flow_risk" => ("Flow risk".into(), "Passive nDPI-style flow-risk finding"),
+        // IOC / Sigma.
+        "ioc_match" => (
+            "IOC match".into(),
+            "Flow matched a known indicator of compromise",
+        ),
+        "sigma_match" => ("Sigma rule".into(), "Flow matched a Sigma detection rule"),
+        // Cleartext SNMP (#72).
+        "cleartext-snmp" => (
+            "Cleartext SNMP".into(),
+            "SNMP v1/v2c community string sent in cleartext",
+        ),
+        other => (other.to_string(), ""),
+    }
+}
+
 /// Render the security view.
 pub fn security_view<'a>(alerts: &'a AlertsState, sec: &'a SecurityState) -> Element<'a, Message> {
     let mut anomalies: Vec<&Alert> = alerts
@@ -112,7 +158,7 @@ fn render_header<'a>(count: usize, sec: &SecurityState) -> Element<'a, Message> 
     .spacing(15)
     .align_y(Alignment::Center);
 
-    let subtitle = text("Network security anomalies — port scans, beacons, DGA, floods")
+    let subtitle = text("Network security anomalies — scans, beacons, DGA, flow-risk, IOC, Sigma")
         .size(font::CAPTION)
         .style(dim);
 
@@ -182,8 +228,9 @@ fn render_by_detector<'a>(anomalies: &[&'a Alert], sec: &'a SecurityState) -> El
             .map(|a| a.severity)
             .max_by_key(|s| sev_rank(*s))
             .unwrap_or(AlertSeverity::Info);
+        let (title_text, description) = detector_meta(&rule_name);
         let header = row![
-            badge(Severity::from(top_sev).color(), rule_name.clone()),
+            badge(Severity::from(top_sev).color(), title_text),
             text(format!("{} detection(s)", group.len()))
                 .size(font::CAPTION)
                 .style(dim),
@@ -192,6 +239,10 @@ fn render_by_detector<'a>(anomalies: &[&'a Alert], sec: &'a SecurityState) -> El
         .align_y(Alignment::Center);
 
         let mut card_col = Column::new().spacing(4).push(header);
+        // First-class "what this detector means" line (empty for unknown slugs).
+        if !description.is_empty() {
+            card_col = card_col.push(text(description).size(font::CAPTION).style(dim));
+        }
         for a in group {
             card_col = card_col.push(render_anomaly_row(a, sec));
         }

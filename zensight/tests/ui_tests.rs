@@ -945,6 +945,71 @@ fn test_security_view() {
     assert!(ui.find("sshd not listening").is_err());
 }
 
+/// #73: the netring 0.27 threat-intel anomaly kinds (flow-risk / IOC / Sigma)
+/// render as first-class detector cards — friendly titles + a "what it means"
+/// description — with the per-detector evidence available in the drill-down.
+#[test]
+fn test_security_threat_intel_first_class() {
+    use zensight::view::security::{SecurityState, security_view};
+    use zensight_common::{Alert, AlertKind, AlertSeverity};
+
+    let mut alerts = zensight::view::alerts::AlertsState::new();
+    // An IOC match carrying the detector's evidence observations as labels.
+    alerts.ingest_external(
+        Alert::new(
+            "wiretap1",
+            Protocol::Netring,
+            AlertKind::Anomaly,
+            "ioc_match",
+            AlertSeverity::Critical,
+            "ioc_match 10.0.0.5 -> 203.0.113.6",
+        )
+        .with_label("src", "10.0.0.5")
+        .with_label("ioc_kind", "ip")
+        .with_label("indicator", "203.0.113.6"),
+    );
+    // A flow-risk obsolete-TLS finding.
+    alerts.ingest_external(Alert::new(
+        "wiretap1",
+        Protocol::Netring,
+        AlertKind::Anomaly,
+        "obsolete_tls",
+        AlertSeverity::Warning,
+        "obsolete_tls 10.0.0.7 -> 1.1.1.1",
+    ));
+
+    // Expand the IOC match so its evidence renders.
+    let sec = SecurityState {
+        selected: Some(
+            Alert::new(
+                "wiretap1",
+                Protocol::Netring,
+                AlertKind::Anomaly,
+                "ioc_match",
+                AlertSeverity::Critical,
+                "ioc_match 10.0.0.5 -> 203.0.113.6",
+            )
+            .with_label("src", "10.0.0.5")
+            .with_label("ioc_kind", "ip")
+            .with_label("indicator", "203.0.113.6")
+            .alert_key(),
+        ),
+        ..SecurityState::default()
+    };
+
+    let mut ui = simulator(security_view(&alerts, &sec));
+    // Friendly detector titles (not the raw slugs).
+    assert!(ui.find("IOC match").is_ok());
+    assert!(ui.find("Obsolete TLS").is_ok());
+    // "What it means" descriptions.
+    assert!(
+        ui.find("Flow matched a known indicator of compromise")
+            .is_ok()
+    );
+    // The detector's evidence observation is in the drill-down.
+    assert!(ui.find("203.0.113.6").is_ok());
+}
+
 /// #48: clicking an anomaly row expands its evidence drill-down (emits
 /// SelectAnomaly), and the "Hide info" toggle emits its message.
 #[test]
