@@ -39,7 +39,7 @@ rand = "0.9"
 dirs.workspace = true
 
 # Local tiered time-series store (Plan v3-04 §A): pure-Rust, ACID, zero-copy.
-redb = "2"
+redb = "4"
 
 [features]
 default = []
