@@ -456,12 +456,10 @@ impl SystemCollector {
         .await;
         count += 1;
 
-        // Memory usage percentage
-        let usage_pct = if total > 0 {
-            (used as f64 / total as f64) * 100.0
-        } else {
-            0.0
-        };
+        // Memory usage percentage. Derived from MemAvailable rather than `used`
+        // so reclaimable page cache is not counted as pressure (behavioral
+        // change vs. the previous `used/total` figure).
+        let usage_pct = crate::map::mem_usage_percent(total, available);
         self.publish(
             "memory/usage_percent",
             TelemetryValue::Gauge(usage_pct),
@@ -470,6 +468,30 @@ impl SystemCollector {
         )
         .await;
         count += 1;
+
+        // Memory composition (Linux /proc/meminfo): cached/buffers/slab/dirty/
+        // writeback bytes, to attribute usage to reclaimable cache vs. real use.
+        #[cfg(target_os = "linux")]
+        if let Some(mc) = crate::linux::collect_mem_composition() {
+            let mut clabels = HashMap::new();
+            clabels.insert("unit".to_string(), "bytes".to_string());
+            for (metric, value) in [
+                ("memory/cached", mc.cached),
+                ("memory/buffers", mc.buffers),
+                ("memory/slab", mc.slab),
+                ("memory/dirty", mc.dirty),
+                ("memory/writeback", mc.writeback),
+            ] {
+                self.publish(
+                    metric,
+                    TelemetryValue::Gauge(value as f64),
+                    timestamp,
+                    clabels.clone(),
+                )
+                .await;
+                count += 1;
+            }
+        }
 
         // Swap
         let swap_total = self.system.total_swap();
@@ -881,7 +903,7 @@ impl SystemCollector {
 
         let disk_io = self.linux_metrics.collect_disk_io(interval);
 
-        for (device, (stats, rates)) in disk_io {
+        for (device, (stats, rates, saturation)) in disk_io {
             let mut labels = HashMap::new();
             labels.insert("device".to_string(), device.clone());
 
@@ -933,6 +955,29 @@ impl SystemCollector {
             )
             .await;
             count += 1;
+
+            // Derived saturation gauges (need a previous sample to delta).
+            if let Some(sat) = saturation {
+                labels.insert("unit".to_string(), "percent".to_string());
+                self.publish(
+                    &format!("disk/{}/io/util_percent", device),
+                    TelemetryValue::Gauge(sat.util_percent),
+                    timestamp,
+                    labels.clone(),
+                )
+                .await;
+                count += 1;
+
+                labels.insert("unit".to_string(), "requests".to_string());
+                self.publish(
+                    &format!("disk/{}/io/queue_depth", device),
+                    TelemetryValue::Gauge(sat.queue_depth),
+                    timestamp,
+                    labels.clone(),
+                )
+                .await;
+                count += 1;
+            }
 
             // Rates (if available)
             if let Some(rates) = rates {

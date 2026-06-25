@@ -761,6 +761,68 @@ impl ProcessSelector {
     }
 }
 
+// ===========================================================================
+// G. Derived saturation gauges: disk %util / queue depth, memory pressure.
+// ===========================================================================
+
+/// Disk saturation gauges derived from a poll-to-poll `/proc/diskstats` delta.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct DiskSaturation {
+    /// Fraction of wall-clock time the device had I/O in flight, `0..=100`.
+    pub util_percent: f64,
+    /// Time-weighted average request-queue length (iostat `aqu-sz`).
+    pub queue_depth: f64,
+}
+
+/// `%util` = (io_time delta ms / interval ms) * 100, clamped to `0..=100`.
+///
+/// `io_time` is diskstats field 10 (`io_ticks`, ms the device had any I/O in
+/// flight). A non-positive interval (first tick / clock skew) yields 0.
+pub fn disk_util_percent(io_time_delta_ms: u64, interval_ms: f64) -> f64 {
+    if interval_ms <= 0.0 {
+        return 0.0;
+    }
+    ((io_time_delta_ms as f64 / interval_ms) * 100.0).clamp(0.0, 100.0)
+}
+
+/// Average queue depth = weighted_io_time delta / io_time delta (both ms).
+///
+/// `weighted_io_time` is diskstats field 11 (the time-weighted I/O queue
+/// length). Guards division by zero: an idle device (`io_time` delta == 0)
+/// reports 0 rather than `NaN`/`inf`.
+pub fn disk_queue_depth(weighted_delta_ms: u64, io_time_delta_ms: u64) -> f64 {
+    if io_time_delta_ms == 0 {
+        return 0.0;
+    }
+    weighted_delta_ms as f64 / io_time_delta_ms as f64
+}
+
+/// Both disk-saturation gauges from one diskstats delta + the poll interval.
+pub fn disk_saturation(
+    io_time_delta_ms: u64,
+    weighted_delta_ms: u64,
+    interval_ms: f64,
+) -> DiskSaturation {
+    DiskSaturation {
+        util_percent: disk_util_percent(io_time_delta_ms, interval_ms),
+        queue_depth: disk_queue_depth(weighted_delta_ms, io_time_delta_ms),
+    }
+}
+
+/// MemAvailable-based memory usage percent: `(total - available) / total * 100`,
+/// clamped to `0..=100`.
+///
+/// Unlike a `used`-based figure (which counts reclaimable page cache) this
+/// tracks real memory pressure: `available` is the kernel's `MemAvailable`
+/// estimate of memory obtainable without swapping. Zero `total` yields 0.
+pub fn mem_usage_percent(total: u64, available: u64) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+    let used = total.saturating_sub(available);
+    ((used as f64 / total as f64) * 100.0).clamp(0.0, 100.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1207,5 +1269,66 @@ mod tests {
         );
         // Bad value keeps the default.
         assert_eq!(ProcessSelector::parse("top=abc").top, 20);
+    }
+
+    #[test]
+    fn test_disk_util_percent() {
+        // 500 ms busy over a 1000 ms interval → 50 %.
+        assert_eq!(disk_util_percent(500, 1000.0), 50.0);
+        // Fully saturated.
+        assert_eq!(disk_util_percent(1000, 1000.0), 100.0);
+        // Idle device.
+        assert_eq!(disk_util_percent(0, 1000.0), 0.0);
+    }
+
+    #[test]
+    fn test_disk_util_percent_clamped() {
+        // io_time delta can exceed the interval (multiqueue / rounding); clamp.
+        assert_eq!(disk_util_percent(1500, 1000.0), 100.0);
+        // Non-positive interval (first tick / clock skew) → 0, never a divide.
+        assert_eq!(disk_util_percent(500, 0.0), 0.0);
+        assert_eq!(disk_util_percent(500, -10.0), 0.0);
+    }
+
+    #[test]
+    fn test_disk_queue_depth() {
+        // weighted 2000 ms over 1000 ms busy → average depth 2.0.
+        assert_eq!(disk_queue_depth(2000, 1000), 2.0);
+        // Sub-unit queue.
+        assert_eq!(disk_queue_depth(500, 1000), 0.5);
+    }
+
+    #[test]
+    fn test_disk_queue_depth_guards_div0() {
+        // Idle device: io_time delta 0 → 0, never NaN/inf.
+        assert_eq!(disk_queue_depth(0, 0), 0.0);
+        assert_eq!(disk_queue_depth(1234, 0), 0.0);
+        assert!(disk_queue_depth(1234, 0).is_finite());
+    }
+
+    #[test]
+    fn test_disk_saturation_combines_both() {
+        let s = disk_saturation(500, 1000, 1000.0);
+        assert_eq!(s.util_percent, 50.0);
+        assert_eq!(s.queue_depth, 2.0);
+    }
+
+    #[test]
+    fn test_mem_usage_percent_excludes_cache() {
+        // 16 GiB total, 12 GiB available → 25 % real pressure, regardless of
+        // how much of the in-use 4 GiB is reclaimable cache.
+        let total = 16 * 1024 * 1024 * 1024;
+        let available = 12 * 1024 * 1024 * 1024;
+        assert_eq!(mem_usage_percent(total, available), 25.0);
+    }
+
+    #[test]
+    fn test_mem_usage_percent_edges() {
+        // No memory → 0, never a divide by zero.
+        assert_eq!(mem_usage_percent(0, 0), 0.0);
+        // available > total (transient kernel estimate) clamps to 0.
+        assert_eq!(mem_usage_percent(1000, 2000), 0.0);
+        // Fully used.
+        assert_eq!(mem_usage_percent(1000, 0), 100.0);
     }
 }
