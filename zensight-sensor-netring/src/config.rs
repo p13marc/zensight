@@ -49,6 +49,53 @@ pub struct NetringConfig {
     /// built-in detectors.
     #[serde(default)]
     pub threat: ThreatConfig,
+    /// Capture-overload detection (netring 0.27): watch the windowed capture
+    /// drop-rate and raise/clear a `capture-overload` SensorHealth alert on the
+    /// debounced Normal↔Emergency transition. Needs `collect.capture_stats`.
+    #[serde(default)]
+    pub overload: OverloadConfig,
+}
+
+/// Capture-overload detection config (netring 0.27). Drives an
+/// `OverloadDetector` off the windowed drop-rate with Suricata-style hysteresis
+/// (enter high, recover low after N calm windows) so it doesn't flap.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverloadConfig {
+    /// Enable overload detection (no-op without `collect.capture_stats`).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Enter Emergency when the windowed drop-rate reaches this fraction
+    /// (`0.0..=1.0`). Default 0.05 (5%).
+    #[serde(default = "default_enter_drop_rate")]
+    pub enter_drop_rate: f64,
+    /// Recover to Normal only after the drop-rate stays below this for
+    /// `recover_windows` samples. Default 0.01 (1%).
+    #[serde(default = "default_recover_drop_rate")]
+    pub recover_drop_rate: f64,
+    /// Consecutive calm windows required to recover. Default 3.
+    #[serde(default = "default_recover_windows")]
+    pub recover_windows: u32,
+}
+
+fn default_enter_drop_rate() -> f64 {
+    0.05
+}
+fn default_recover_drop_rate() -> f64 {
+    0.01
+}
+fn default_recover_windows() -> u32 {
+    3
+}
+
+impl Default for OverloadConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            enter_drop_rate: default_enter_drop_rate(),
+            recover_drop_rate: default_recover_drop_rate(),
+            recover_windows: default_recover_windows(),
+        }
+    }
 }
 
 /// Threat-intel detection config (netring 0.27).

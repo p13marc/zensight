@@ -181,7 +181,7 @@ pub async fn run_drains(
                             }
                         }
                         while let Ok(alert) = channels.alerts.try_recv() {
-                            if let Err(e) = reporter.observe(alert, Some(Duration::ZERO)).await {
+                            if let Err(e) = drain_sensor_alert(&reporter, alert).await {
                                 tracing::warn!(error = %e, "failed to publish sensor alert");
                             }
                         }
@@ -201,10 +201,12 @@ pub async fn run_drains(
                     }
                 }
             }
-            // Typed sensor alerts (ICMP flow-killed) → AlertReporter (never lossy).
+            // Typed sensor alerts (ICMP flow-killed, capture-overload) →
+            // AlertReporter (never lossy). Firing alerts are observed; resolved
+            // alerts (capture recovered) reconcile the firing set away.
             alert = channels.alerts.recv() => {
                 if let Some(alert) = alert
-                    && let Err(e) = reporter.observe(alert, Some(Duration::ZERO)).await {
+                    && let Err(e) = drain_sensor_alert(&reporter, alert).await {
                     tracing::warn!(error = %e, "failed to publish sensor alert");
                 }
             }
@@ -219,5 +221,20 @@ pub async fn run_drains(
                 health.record_device_success(&sensor_id);
             }
         }
+    }
+}
+
+/// Route a capture-path sensor alert to the reporter: a firing alert is observed
+/// (published immediately — these are edge-triggered, not debounced), while a
+/// resolved alert (e.g. capture-overload recovery) reconciles its rule's firing
+/// set away so the GUI clears the badge.
+async fn drain_sensor_alert(
+    reporter: &AlertReporter,
+    alert: zensight_common::Alert,
+) -> zensight_sensor_core::Result<()> {
+    if alert.is_firing() {
+        reporter.observe(alert, Some(Duration::ZERO)).await
+    } else {
+        reporter.reconcile(&alert.rule, &[]).await
     }
 }

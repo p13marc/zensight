@@ -272,6 +272,33 @@ fn build_ioc_set(cfg: &IocConfig) -> IocSet {
     set
 }
 
+/// Decompose netring's `DropBreakdown` into the pure [`map::CaptureDrops`] view,
+/// keeping the netring capture type out of `map.rs` (issue #71).
+fn drop_breakdown_view(d: &netring::stats::DropBreakdown) -> map::CaptureDrops {
+    use netring::stats::DropBreakdown as D;
+    match *d {
+        D::AfPacket { freezes } => map::CaptureDrops::AfPacket { freezes },
+        D::Xdp {
+            rx_dropped,
+            rx_invalid_descs,
+            rx_ring_full,
+            rx_fill_ring_empty_descs,
+            tx_invalid_descs,
+            tx_ring_empty_descs,
+        } => map::CaptureDrops::Xdp {
+            rx_dropped,
+            rx_invalid_descs,
+            rx_ring_full,
+            rx_fill_ring_empty_descs,
+            tx_invalid_descs,
+            tx_ring_empty_descs,
+        },
+        // `DropBreakdown` is #[non_exhaustive]; map any future variant to an
+        // empty AF_PACKET breakdown so the flat drop counters still publish.
+        _ => map::CaptureDrops::AfPacket { freezes: 0 },
+    }
+}
+
 /// Decode the asset capability bitmask into stable lowercase slugs (only the
 /// set bits), for the on-demand `AssetRecord`. Order is deterministic.
 fn capability_names(caps: flowscope::AssetCapabilities) -> Vec<String> {
@@ -673,23 +700,55 @@ pub fn build(
         );
     }
 
-    // Capture self-health (live capture only).
+    // Capture self-health (live capture only): honest per-source drop breakdown
+    // + debounced overload detection (issue #71). Each sample's windowed
+    // drop-rate feeds a per-source OverloadDetector; on a Normal↔Emergency
+    // transition we ship a `capture-overload` SensorHealth alert on the alerts
+    // channel ("the sensor is silently losing your packets").
     if cfg.collect.capture_stats {
+        use netring::monitor::overload::{OverloadConfig, OverloadDetector, OverloadState};
         use netring::monitor::telemetry::CaptureTelemetry;
         let tx = tel_tx.clone();
         let sensor_id = cfg.sensor_id.clone();
+        let overload_cfg = cfg.overload.clone();
+        let alerts_h = alert_tx.clone();
+        // Per-source detectors, lazily created on first sight of a source. The
+        // capture-stats handler is FnMut, so this state persists across samples.
+        let mut detectors: HashMap<u8, OverloadDetector> = HashMap::new();
         b = b.on_capture_stats(
             Duration::from_secs(cfg.bandwidth_period_secs.max(1)),
             move |t: &CaptureTelemetry, _ctx: &mut Ctx<'_>| {
+                let source = t.source.0;
                 for p in crate::map::capture_points(
                     &sensor_id,
-                    t.source.0,
+                    source,
                     t.packets,
                     t.drops,
-                    t.freezes,
                     t.drop_rate,
+                    &drop_breakdown_view(&t.detail),
                 ) {
                     let _ = tx.send(p);
+                }
+                if overload_cfg.enabled {
+                    let det = detectors.entry(source).or_insert_with(|| {
+                        OverloadDetector::new(
+                            OverloadConfig::default()
+                                .enter_at(overload_cfg.enter_drop_rate)
+                                .recover_at(
+                                    overload_cfg.recover_drop_rate,
+                                    overload_cfg.recover_windows,
+                                ),
+                        )
+                    });
+                    if let Some(state) = det.observe(t.drop_rate) {
+                        let firing = matches!(state, OverloadState::Emergency);
+                        let _ = alerts_h.send(crate::map::overload_alert(
+                            &sensor_id,
+                            source,
+                            t.drop_rate,
+                            firing,
+                        ));
+                    }
                 }
                 Ok(())
             },
@@ -1074,6 +1133,34 @@ mod tests {
     }
 
     #[test]
+    fn drop_breakdown_view_maps_both_backends() {
+        use netring::stats::DropBreakdown as D;
+        assert_eq!(
+            drop_breakdown_view(&D::AfPacket { freezes: 7 }),
+            map::CaptureDrops::AfPacket { freezes: 7 }
+        );
+        let xdp = D::Xdp {
+            rx_dropped: 1,
+            rx_invalid_descs: 2,
+            rx_ring_full: 3,
+            rx_fill_ring_empty_descs: 4,
+            tx_invalid_descs: 5,
+            tx_ring_empty_descs: 6,
+        };
+        assert_eq!(
+            drop_breakdown_view(&xdp),
+            map::CaptureDrops::Xdp {
+                rx_dropped: 1,
+                rx_invalid_descs: 2,
+                rx_ring_full: 3,
+                rx_fill_ring_empty_descs: 4,
+                tx_invalid_descs: 5,
+                tx_ring_empty_descs: 6,
+            }
+        );
+    }
+
+    #[test]
     fn capability_and_source_names_decode_set_bits_only() {
         use flowscope::{AssetCapabilities, AssetSourceSet};
         let caps = AssetCapabilities::ROUTER | AssetCapabilities::BRIDGE;
@@ -1086,6 +1173,29 @@ mod tests {
             source_names(set),
             vec!["arp".to_string(), "lldp".to_string()]
         );
+    }
+
+    #[test]
+    fn overload_detector_from_config_fires_and_recovers() {
+        use netring::monitor::overload::{OverloadConfig, OverloadDetector, OverloadState};
+        // The sensor's config defaults (enter 5%, recover 1% for 3 windows)
+        // must wire through `enter_at`/`recover_at` to reproduce the hysteresis.
+        let cfg = crate::config::OverloadConfig::default();
+        let mut det = OverloadDetector::new(
+            OverloadConfig::default()
+                .enter_at(cfg.enter_drop_rate)
+                .recover_at(cfg.recover_drop_rate, cfg.recover_windows),
+        );
+        assert_eq!(det.observe(0.02), None, "below enter → stays Normal");
+        assert_eq!(
+            det.observe(0.06),
+            Some(OverloadState::Emergency),
+            "crosses 5%"
+        );
+        // Sustained calm required: 3 sub-1% windows before recovery.
+        assert_eq!(det.observe(0.005), None);
+        assert_eq!(det.observe(0.005), None);
+        assert_eq!(det.observe(0.005), Some(OverloadState::Normal));
     }
 
     #[test]

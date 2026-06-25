@@ -111,6 +111,11 @@ fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
     col.into()
 }
 
+/// Drop-rate fraction at/above which the capture-health card flags an overload
+/// badge — mirrors the netring `OverloadDetector` default enter threshold (5%),
+/// so the GUI's local signal lines up with the `capture-overload` alert (#71).
+const OVERLOAD_DROP_RATE: f64 = 0.05;
+
 /// Passive asset-inventory section (#70): a streamed discovered-count plus an
 /// on-demand table (MAC · IP · hostname · platform · capabilities · seen-via)
 /// fetched from `@/query/assets`. Surfaces hosts seen on the wire that emit no
@@ -187,10 +192,12 @@ fn join_or_dash(items: &[String]) -> String {
     }
 }
 
-/// Capture self-health section: packets/drops/drop_rate per capture source.
+/// Capture self-health section (#71): packets/drops/drop_rate per source, the
+/// honest drop breakdown (AF_PACKET freezes / AF_XDP ring + descriptor causes),
+/// and an "OVERLOAD" badge when a source is shedding ≥5% of packets — the trust
+/// signal that the sensor's *other* telemetry is currently incomplete.
 fn render_capture(state: &DeviceDetailState) -> Element<'_, Message> {
-    let mut col = column![section_header("Capture Health", None)].spacing(space::SM);
-    // Group capture/<src>/<stat>.
+    // Group capture/<src>/<stat>; `stat` may itself be `xdp/<cause>`.
     let mut sources: std::collections::BTreeMap<
         String,
         std::collections::BTreeMap<String, &TelemetryValue>,
@@ -205,16 +212,30 @@ fn render_capture(state: &DeviceDetailState) -> Element<'_, Message> {
                 .insert(stat.to_string(), &point.value);
         }
     }
+
+    // Overload if any source's windowed drop_rate is at/above the threshold.
+    let overloaded = sources.values().any(|stats| {
+        matches!(stats.get("drop_rate"), Some(TelemetryValue::Gauge(r)) if *r >= OVERLOAD_DROP_RATE)
+    });
+    let badge: Option<Element<'_, Message>> = overloaded.then(|| {
+        text("⚠ OVERLOAD — losing packets")
+            .size(font::CAPTION)
+            .style(danger)
+            .into()
+    });
+
+    let mut col = column![section_header("Capture Health", badge)].spacing(space::SM);
     let mut list = Column::new().spacing(3).push(
         row![
             cell("source", 90),
             cell("packets", 120),
             cell("drops", 100),
             cell("drop rate", 100),
+            cell("freezes", 90),
         ]
         .spacing(8),
     );
-    for (src, stats) in sources {
+    for (src, stats) in &sources {
         let g = |s: &str| num(stats.get(s).copied());
         let drop_rate = match stats.get("drop_rate") {
             Some(TelemetryValue::Gauge(r)) => format!("{:.2}%", r * 100.0),
@@ -222,13 +243,34 @@ fn render_capture(state: &DeviceDetailState) -> Element<'_, Message> {
         };
         list = list.push(
             row![
-                cell(&src, 90),
+                cell(src, 90),
                 cell(&g("packets"), 120),
                 cell(&g("drops"), 100),
                 cell(&drop_rate, 100),
+                cell(&g("freezes"), 90),
             ]
             .spacing(8),
         );
+        // AF_XDP per-cause breakdown (only present on XDP sources).
+        let xdp: Vec<(String, String)> = stats
+            .iter()
+            .filter_map(|(stat, v)| {
+                let cause = stat.strip_prefix("xdp/")?;
+                Some((cause.to_string(), num(Some(*v))))
+            })
+            .collect();
+        for (cause, v) in xdp {
+            // Indent via a spacer cell (not leading spaces) so the label text
+            // node stays exactly findable.
+            list = list.push(
+                row![
+                    cell("", 16),
+                    cell(&format!("xdp/{cause}"), 264),
+                    cell(&v, 120)
+                ]
+                .spacing(8),
+            );
+        }
     }
     col = col.push(list);
     col.into()
@@ -537,6 +579,12 @@ fn cell<'a>(s: &str, width: u16) -> Element<'a, Message> {
 fn dim(theme: &Theme) -> text::Style {
     text::Style {
         color: Some(theme::colors(theme).text_dimmed()),
+    }
+}
+
+fn danger(theme: &Theme) -> text::Style {
+    text::Style {
+        color: Some(theme::colors(theme).danger()),
     }
 }
 
