@@ -810,9 +810,82 @@ pub struct TcQdiscSample {
     pub backlog_pkts: u64,
 }
 
-/// Build telemetry points for one qdisc (#12). Metric paths are
+/// AQM classification of a qdisc `kind` (pure string match, #110). Reports whether
+/// the qdisc does *active queue management* (the bufferbloat-relevant question):
+///
+/// * `aqm`     — fq_codel / cake / fq_pie / codel / pie: actively bounds latency
+///   under load (AQM and/or fair-queueing). The healthy egress default.
+/// * `fifo`    — pfifo_fast / pfifo / bfifo: a dumb drop-tail FIFO, bufferbloat-prone.
+/// * `noqueue` — the kernel `noqueue` pseudo-qdisc (virtual / loopback-style links).
+/// * `none`    — any other kind (e.g. htb, tbf, mq, prio): no AQM of its own. A
+///   loaded link landing here is itself a finding (no AQM under load).
+pub fn aqm_class(kind: &str) -> &'static str {
+    match kind {
+        "fq_codel" | "cake" | "fq_pie" | "codel" | "pie" => "aqm",
+        "pfifo_fast" | "pfifo" | "bfifo" => "fifo",
+        "noqueue" => "noqueue",
+        _ => "none",
+    }
+}
+
+/// Bufferbloat / qdisc health score in `0.0..=1.0` (1 = healthy), from a single
+/// qdisc sample (#110).
+///
+/// The TC kernel stats are cumulative counters, and this pure `map` layer holds no
+/// cross-poll state (the collector caches no prior TC sample), so the score uses
+/// *instantaneous cumulative ratios* from one sample rather than per-poll rates.
+/// This is a deliberate, documented proxy: it keeps the function pure and unit
+/// testable, and the cumulative ratios are still defensible health signals (a qdisc
+/// that has dropped 5% of everything it ever saw is unhealthy regardless of when).
+/// It blends three penalties, each normalized to `0.0..=1.0` (0 = fine, 1 = worst):
+///
+/// * **drop penalty** (weight 0.5) — the dominant bufferbloat signal. Cumulative
+///   drop fraction `drops / (packets + drops)`; a `DROP_FULL` (5%) drop fraction
+///   saturates it. An idle qdisc (no packets, no drops) scores 0 here.
+/// * **backlog penalty** (weight 0.3) — sustained queue depth, the classic
+///   latency-under-load symptom. `backlog_pkts` normalized against
+///   `BACKLOG_FULL_PKTS` (1000 packets queued == worst).
+/// * **overlimit penalty** (weight 0.2) — shaping pressure. `overlimits / packets`
+///   normalized against `OVERLIMIT_FULL` (10%). Overlimits are expected for shapers,
+///   so this term is weighted lightest.
+///
+/// The weights sum to 1.0, so the blended penalty stays in `0.0..=1.0`;
+/// `health_score = (1 - penalty)`, clamped.
+pub fn tc_health_score(s: &TcQdiscSample) -> f64 {
+    // Saturation thresholds: a term reaching its threshold yields full penalty.
+    const DROP_FULL: f64 = 0.05; // 5% lifetime drop fraction == worst
+    const BACKLOG_FULL_PKTS: f64 = 1000.0; // packets queued == worst
+    const OVERLIMIT_FULL: f64 = 0.10; // 10% of packets over the shaper limit
+    // Weights (sum to 1.0 so the blended penalty stays in 0.0..=1.0).
+    const W_DROP: f64 = 0.5;
+    const W_BACKLOG: f64 = 0.3;
+    const W_OVERLIMIT: f64 = 0.2;
+
+    let packets = s.packets as f64;
+    let drops = s.drops as f64;
+    let seen = packets + drops;
+    let drop_frac = if seen > 0.0 { drops / seen } else { 0.0 };
+    let drop_penalty = (drop_frac / DROP_FULL).clamp(0.0, 1.0);
+
+    let backlog_penalty = (s.backlog_pkts as f64 / BACKLOG_FULL_PKTS).clamp(0.0, 1.0);
+
+    let overlimit_ratio = if packets > 0.0 {
+        s.overlimits as f64 / packets
+    } else {
+        0.0
+    };
+    let overlimit_penalty = (overlimit_ratio / OVERLIMIT_FULL).clamp(0.0, 1.0);
+
+    let penalty =
+        W_DROP * drop_penalty + W_BACKLOG * backlog_penalty + W_OVERLIMIT * overlimit_penalty;
+    (1.0 - penalty).clamp(0.0, 1.0)
+}
+
+/// Build telemetry points for one qdisc (#12, #110). Metric paths are
 /// `tc/<iface>/<kind>/<stat>`. Drops/overlimits/requeues are counters (monotonic
-/// kernel stats); backlog is an instantaneous gauge.
+/// kernel stats); backlog is an instantaneous gauge. Additionally emits the derived
+/// `tc/<iface>/<kind>/health_score` (Gauge 0..=1, 1 = healthy, see
+/// [`tc_health_score`]) and `tc/<iface>/aqm_class` (Text, see [`aqm_class`]).
 pub fn tc_points(host: &str, s: &TcQdiscSample) -> Vec<TelemetryPoint> {
     let pfx = format!("tc/{}/{}", s.iface, s.kind);
     let label = |p: TelemetryPoint| p.with_label("handle", s.handle.clone());
@@ -852,6 +925,20 @@ pub fn tc_points(host: &str, s: &TcQdiscSample) -> Vec<TelemetryPoint> {
             format!("{pfx}/backlog_pkts"),
             TelemetryValue::Gauge(s.backlog_pkts as f64),
         )),
+        // Derived bufferbloat health score (#110): 0..=1, 1 = healthy.
+        label(point(
+            host,
+            format!("{pfx}/health_score"),
+            TelemetryValue::Gauge(tc_health_score(s)),
+        )),
+        // AQM classification of the qdisc kind (#110). Path omits `<kind>` (per the
+        // issue); the `kind` label disambiguates multiple qdiscs on one iface.
+        label(point(
+            host,
+            format!("tc/{}/aqm_class", s.iface),
+            TelemetryValue::Text(aqm_class(&s.kind).to_string()),
+        ))
+        .with_label("kind", s.kind.clone()),
     ]
 }
 
@@ -1508,6 +1595,111 @@ mod tests {
         for p in &pts {
             assert_eq!(p.labels.get("handle").map(String::as_str), Some("8001:"));
         }
+        // #110: the derived health_score Gauge and aqm_class Text are emitted.
+        assert!(matches!(
+            find("tc/eth0/fq_codel/health_score").value,
+            TelemetryValue::Gauge(_)
+        ));
+        let aqm = find("tc/eth0/aqm_class");
+        assert_eq!(aqm.value, TelemetryValue::Text("aqm".into()));
+        assert_eq!(aqm.labels.get("kind").map(String::as_str), Some("fq_codel"));
+        // Raw counters preserved alongside the derived signals (additive).
+        assert_eq!(
+            find("tc/eth0/fq_codel/packets").value,
+            TelemetryValue::Counter(40)
+        );
+    }
+
+    #[test]
+    fn aqm_class_maps_kinds() {
+        // Active queue management.
+        for k in ["fq_codel", "cake", "fq_pie", "codel", "pie"] {
+            assert_eq!(aqm_class(k), "aqm", "{k} should be aqm");
+        }
+        // Dumb FIFOs.
+        for k in ["pfifo_fast", "pfifo", "bfifo"] {
+            assert_eq!(aqm_class(k), "fifo", "{k} should be fifo");
+        }
+        // The noqueue pseudo-qdisc.
+        assert_eq!(aqm_class("noqueue"), "noqueue");
+        // Everything else (shapers/classful) has no AQM of its own.
+        for k in ["htb", "tbf", "mq", "prio", "ingress", ""] {
+            assert_eq!(aqm_class(k), "none", "{k} should be none");
+        }
+    }
+
+    #[test]
+    fn tc_health_score_clean_fq_codel_scores_high() {
+        // Clean AQM under light load: tiny drop fraction, ~empty backlog, no
+        // overlimits => should be near 1.0.
+        let s = TcQdiscSample {
+            iface: "eth0".into(),
+            kind: "fq_codel".into(),
+            handle: "8001:".into(),
+            bytes: 10_000_000,
+            packets: 100_000,
+            drops: 5, // 0.005% drop fraction
+            overlimits: 0,
+            requeues: 0,
+            backlog_bytes: 1448,
+            backlog_pkts: 1,
+        };
+        let score = tc_health_score(&s);
+        assert!(
+            score > 0.99,
+            "clean fq_codel scored {score}, expected > 0.99"
+        );
+        assert!((0.0..=1.0).contains(&score));
+    }
+
+    #[test]
+    fn tc_health_score_idle_qdisc_is_healthy() {
+        // No traffic at all: no drops, no backlog => fully healthy (score 1.0),
+        // not a divide-by-zero NaN.
+        let s = TcQdiscSample {
+            iface: "eth0".into(),
+            kind: "pfifo_fast".into(),
+            ..Default::default()
+        };
+        assert_eq!(tc_health_score(&s), 1.0);
+    }
+
+    #[test]
+    fn tc_health_score_congested_fifo_scores_low() {
+        // A dumb FIFO that has dropped >10% of traffic, with a deep sustained
+        // backlog and heavy overlimits => penalties saturate => near 0.0.
+        let s = TcQdiscSample {
+            iface: "eth0".into(),
+            kind: "pfifo_fast".into(),
+            handle: "0:".into(),
+            bytes: 100_000_000,
+            packets: 100_000,
+            drops: 50_000,      // 33% drop fraction (>> 5% threshold)
+            overlimits: 50_000, // 50% overlimit ratio (>> 10% threshold)
+            requeues: 0,
+            backlog_bytes: 4_000_000,
+            backlog_pkts: 5_000, // >> 1000-pkt threshold
+        };
+        let score = tc_health_score(&s);
+        assert!(
+            score < 0.05,
+            "congested fifo scored {score}, expected < 0.05"
+        );
+        assert!((0.0..=1.0).contains(&score));
+    }
+
+    #[test]
+    fn tc_health_score_is_monotonic_in_drops() {
+        // More drops (all else equal) must not raise the score.
+        let base = TcQdiscSample {
+            iface: "eth0".into(),
+            kind: "fq_codel".into(),
+            packets: 100_000,
+            ..Default::default()
+        };
+        let mut worse = base.clone();
+        worse.drops = 2_000; // 2% drop fraction
+        assert!(tc_health_score(&worse) < tc_health_score(&base));
     }
 
     #[test]
