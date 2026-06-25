@@ -652,9 +652,13 @@ pub fn build(
                     }
                 }
                 SshMessage::KexInit(kex) => {
+                    // Consume the pending banner for this flow (remove, not get):
+                    // the entry is matched exactly once at KEXINIT, so leaving it
+                    // in the map would leak entries up to the 64k cap, after which
+                    // new flows' banners would be silently dropped.
                     let banner = ctx
                         .flow
-                        .and_then(|k| pending.lock().ok().and_then(|p| p.get(&k).cloned()));
+                        .and_then(|k| pending.lock().ok().and_then(|mut p| p.remove(&k)));
                     let role = if kex.from_client { "client" } else { "server" };
                     if let Ok(mut m) = inv.lock() {
                         if let Some(rec) = m.get_mut(&kex.hassh) {
