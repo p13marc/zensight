@@ -134,6 +134,19 @@ pub struct CollectConfig {
     /// Top-talkers + elephant-flows on-demand query channels (issue #21).
     #[serde(default = "default_true")]
     pub talkers: bool,
+    /// Passive asset inventory (netring 0.27): discover hosts on the wire from
+    /// L2/L3 discovery traffic (ARP / NDP / LLDP / CDP) into a MAC-keyed
+    /// inventory served on `@/query/assets`. Arming the discovery hooks narrows
+    /// the kernel prefilter accordingly; needs capture (CAP_NET_RAW). Default
+    /// OFF — opt-in, and CDP forces a capture-all prefilter (see `asset_cdp`).
+    #[serde(default)]
+    pub assets: bool,
+    /// Also feed the asset inventory from CDP (Cisco Discovery Protocol).
+    /// Separate flag because CDP rides 802.3 LLC/SNAP, which can't be expressed
+    /// in the kernel prefilter — arming it forces capture-all (fail-open), so
+    /// it's opt-in on top of `assets`. No effect unless `assets` is also set.
+    #[serde(default)]
+    pub asset_cdp: bool,
 }
 
 impl Default for CollectConfig {
@@ -148,6 +161,8 @@ impl Default for CollectConfig {
             dns: false,
             http: false,
             talkers: true,
+            assets: false,
+            asset_cdp: false,
         }
     }
 }

@@ -95,6 +95,13 @@ async fn main() -> Result<()> {
                 channels.http.inventory.clone(),
             ));
         }
+        if cfg.collect.assets {
+            runner.spawn(query::run_assets(
+                s.clone(),
+                key_prefix.clone(),
+                channels.assets.clone(),
+            ));
+        }
     }
 
     // Drain task (telemetry + anomalies + periodic flow aggregates).

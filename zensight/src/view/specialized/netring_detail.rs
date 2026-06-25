@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use zensight_common::{FlowRecord, TlsRecord};
+use zensight_common::{AssetRecord, FlowRecord, TlsRecord};
 
 use crate::view::specialized::fetch::Fetch;
 
@@ -21,11 +21,17 @@ pub fn tls_key() -> String {
     "zensight/netring/@/query/tls".to_string()
 }
 
+/// The passive asset-inventory queryable key.
+pub fn assets_key() -> String {
+    "zensight/netring/@/query/assets".to_string()
+}
+
 /// On-demand detail fetched for the selected netring host.
 #[derive(Debug, Clone, Default)]
 pub struct NetringDetailState {
     pub flows: Fetch<Vec<FlowRecord>>,
     pub tls: Fetch<Vec<TlsRecord>>,
+    pub assets: Fetch<Vec<AssetRecord>>,
 }
 
 impl NetringDetailState {
@@ -48,6 +54,16 @@ impl NetringDetailState {
     pub fn apply_tls(&mut self, result: Result<Vec<TlsRecord>, String>) {
         self.tls = Fetch::from_result(result);
     }
+
+    /// Mark an asset-inventory fetch as in flight.
+    pub fn loading_assets(&mut self) {
+        self.assets = Fetch::Loading;
+    }
+
+    /// Store the asset-inventory fetch outcome.
+    pub fn apply_assets(&mut self, result: Result<Vec<AssetRecord>, String>) {
+        self.assets = Fetch::from_result(result);
+    }
 }
 
 /// Fetch + decode the recent-flow ring. Thin wrapper over the shared helper.
@@ -60,6 +76,11 @@ pub async fn fetch_tls(session: Arc<zenoh::Session>) -> Option<Vec<TlsRecord>> {
     super::netlink_detail::fetch_records(session, tls_key()).await
 }
 
+/// Fetch + decode the passive asset inventory.
+pub async fn fetch_assets(session: Arc<zenoh::Session>) -> Option<Vec<AssetRecord>> {
+    super::netlink_detail::fetch_records(session, assets_key()).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,6 +88,30 @@ mod tests {
     #[test]
     fn key_matches_sensor() {
         assert_eq!(flows_key(), "zensight/netring/@/query/flows");
+        assert_eq!(tls_key(), "zensight/netring/@/query/tls");
+        assert_eq!(assets_key(), "zensight/netring/@/query/assets");
+    }
+
+    #[test]
+    fn apply_stores_assets() {
+        let mut s = NetringDetailState::default();
+        assert!(s.assets.ready().is_none());
+        s.loading_assets();
+        assert!(s.assets.is_loading());
+        s.apply_assets(Ok(vec![AssetRecord {
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            ipv4: vec!["10.0.0.5".into()],
+            ipv6: vec![],
+            hostname: Some("switch01".into()),
+            vendor: None,
+            platform: Some("cisco WS-C2960X".into()),
+            capabilities: vec!["switch".into()],
+            seen_via: vec!["lldp".into()],
+            last_seen: 1_700_000_000_000,
+        }]));
+        assert_eq!(s.assets.ready().map(|v| v.len()), Some(1));
+        s.apply_assets(Err("no sensor".into()));
+        assert_eq!(s.assets.error(), Some("no sensor"));
     }
 
     #[test]

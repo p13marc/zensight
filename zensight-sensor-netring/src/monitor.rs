@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use zensight_common::{Alert, ElephantRecord, FlowRecord, TelemetryPoint, TlsRecord};
+use zensight_common::{Alert, AssetRecord, ElephantRecord, FlowRecord, TelemetryPoint, TlsRecord};
 
 /// Bounded ring of recent ended-flow records served via `@/query/flows`.
 pub type FlowRing = Arc<Mutex<VecDeque<FlowRecord>>>;
@@ -47,12 +47,18 @@ pub type TlsInventory = Arc<Mutex<HashMap<(String, String), TlsRecord>>>;
 pub type DnsInventory = Arc<Mutex<HashMap<String, (u64, u64)>>>;
 /// HTTP host inventory: `host -> (requests, errors)` for `@/query/http`.
 pub type HttpInventory = Arc<Mutex<HashMap<String, (u64, u64)>>>;
+/// Passive asset inventory: `mac -> AssetRecord` for `@/query/assets` (issue #70).
+pub type AssetInventory = Arc<Mutex<HashMap<String, AssetRecord>>>;
 /// Per-flow in-flight HTTP request state: `flow -> (request_start_ms, host)`,
 /// used to derive request→response latency and attribute response status.
 type HttpPending = Arc<Mutex<HashMap<FiveTupleKey, (u64, Option<String>)>>>;
 
 /// Max distinct TLS fingerprints retained (cardinality guard).
 const TLS_INVENTORY_CAP: usize = 4096;
+
+/// LRU capacity of the passive asset inventory (MAC-keyed) — matches the bound
+/// on the served `@/query/assets` map (issue #70).
+const ASSET_INVENTORY_CAP: usize = 8192;
 
 /// DNS RED accumulators shared across the capture path and the drain.
 #[derive(Default)]
@@ -148,6 +154,8 @@ pub struct MonitorChannels {
     pub talkers: TalkerHist,
     /// Recent elephant (large) flows ring (issue #21).
     pub elephants: ElephantRing,
+    /// Passive asset inventory keyed by MAC: served on `@/query/assets` (#70).
+    pub assets: AssetInventory,
 }
 
 /// Detector wrapper bridging `feed`→`verdict` for the TRW port-scan detector.
@@ -264,6 +272,68 @@ fn build_ioc_set(cfg: &IocConfig) -> IocSet {
     set
 }
 
+/// Decode the asset capability bitmask into stable lowercase slugs (only the
+/// set bits), for the on-demand `AssetRecord`. Order is deterministic.
+fn capability_names(caps: flowscope::AssetCapabilities) -> Vec<String> {
+    use flowscope::AssetCapabilities as C;
+    [
+        (C::BRIDGE, "bridge"),
+        (C::ROUTER, "router"),
+        (C::SWITCH, "switch"),
+        (C::WLAN_AP, "wlan_ap"),
+        (C::PHONE, "phone"),
+        (C::IGMP, "igmp"),
+        (C::REPEATER, "repeater"),
+        (C::DOCSIS_CABLE, "docsis_cable"),
+        (C::SOURCE_BRIDGE, "source_bridge"),
+        (C::HOST, "host"),
+        (C::REMOTELY_MANAGED, "remotely_managed"),
+        (C::UPNP, "upnp"),
+        (C::C_VLAN, "c_vlan"),
+        (C::S_VLAN, "s_vlan"),
+    ]
+    .iter()
+    .filter(|(bit, _)| caps.contains(*bit))
+    .map(|(_, name)| name.to_string())
+    .collect()
+}
+
+/// Decode the asset source bitmask into stable lowercase parser slugs.
+fn source_names(set: flowscope::AssetSourceSet) -> Vec<String> {
+    use flowscope::AssetSourceSet as S;
+    [
+        (S::ARP, "arp"),
+        (S::NDP, "ndp"),
+        (S::DHCP, "dhcp"),
+        (S::LLDP, "lldp"),
+        (S::CDP, "cdp"),
+        (S::SSDP, "ssdp"),
+        (S::MDNS, "mdns"),
+        (S::NBNS, "nbns"),
+    ]
+    .iter()
+    .filter(|(bit, _)| set.contains(*bit))
+    .map(|(_, name)| name.to_string())
+    .collect()
+}
+
+/// Flatten a `flowscope::Asset` into the transport-neutral [`AssetRecord`] DTO:
+/// stringify the MAC/IPs, decode the capability + source bitmasks to slugs, and
+/// carry the most-recent-observation timestamp as Unix epoch milliseconds.
+fn asset_to_record(a: &flowscope::Asset) -> AssetRecord {
+    AssetRecord {
+        mac: a.mac.to_string(),
+        ipv4: a.ipv4.iter().map(|ip| ip.to_string()).collect(),
+        ipv6: a.ipv6.iter().map(|ip| ip.to_string()).collect(),
+        hostname: a.hostname.clone(),
+        vendor: a.vendor_banner.clone(),
+        platform: a.platform.clone(),
+        capabilities: capability_names(a.capabilities),
+        seen_via: source_names(a.seen_via),
+        last_seen: (a.last_seen.to_unix_f64() * 1000.0) as i64,
+    }
+}
+
 /// Build a netring `Monitor` from config plus the channels it emits on.
 pub fn build(
     cfg: &NetringConfig,
@@ -295,6 +365,7 @@ pub fn build(
     let http = Arc::new(HttpState::default());
     let talkers: TalkerHist = Arc::new(Mutex::new(HashMap::new()));
     let elephants: ElephantRing = Arc::new(Mutex::new(VecDeque::with_capacity(ELEPHANT_RING_CAP)));
+    let assets: AssetInventory = Arc::new(Mutex::new(HashMap::new()));
 
     let mut b = Monitor::builder();
     b = b.name(cfg.sensor_id.clone());
@@ -769,6 +840,39 @@ pub fn build(
         tracing::warn!("netring: threat.sigma is enabled but built without the `sigma` feature");
     }
 
+    // Passive asset inventory (netring 0.27, issue #70). The discovery hooks
+    // (ARP / NDP / LLDP, plus CDP behind its own flag) feed netring's MAC-keyed
+    // inventory; `on_asset` fires on each inventory *event* (new or changed
+    // asset) and folds the flattened record into the served map. The capture
+    // path stays cheap — a single short-held lock + a struct build.
+    if cfg.collect.assets {
+        b = b.asset_inventory(ASSET_INVENTORY_CAP);
+        // The inventory is fed by netring's per-frame discovery re-parse, which
+        // is independent of these hooks — but the kernel prefilter only *admits*
+        // the discovery traffic when the corresponding interest is armed. So we
+        // arm ARP (EtherType 0x0806), NDP (ICMPv6), and LLDP (EtherType 0x88cc)
+        // to add their precise prefilter terms; the empty closures exist only to
+        // arm those interests. `arp_table()` arms ARP without an ARP handler.
+        b = b.arp_table();
+        b = b.on_ndp(|_m, _ctx| Ok(()));
+        b = b.on_lldp(|_m, _ctx| Ok(()));
+        if cfg.collect.asset_cdp {
+            // CDP can't be expressed as a prefilter term → forces capture-all.
+            b = b.on_cdp(|_m, _ctx| Ok(()));
+        }
+        let inv = assets.clone();
+        b = b.on_asset(move |asset: &flowscope::Asset, _ctx: &mut Ctx<'_>| {
+            let record = asset_to_record(asset);
+            if let Ok(mut map) = inv.lock()
+                && (map.contains_key(&record.mac) || map.len() < ASSET_INVENTORY_CAP)
+            {
+                map.insert(record.mac.clone(), record);
+            }
+            Ok(())
+        });
+        tracing::info!("netring: passive asset inventory enabled");
+    }
+
     // Anomaly sink → channel → drain → AlertReporter.
     b = b.sink(ChannelSink::new(anom_tx));
 
@@ -797,6 +901,7 @@ pub fn build(
             http,
             talkers,
             elephants,
+            assets,
         },
         keepalive,
     ))
@@ -966,6 +1071,46 @@ mod tests {
             ..Default::default()
         };
         assert!(build_ioc_set(&cfg).is_empty());
+    }
+
+    #[test]
+    fn capability_and_source_names_decode_set_bits_only() {
+        use flowscope::{AssetCapabilities, AssetSourceSet};
+        let caps = AssetCapabilities::ROUTER | AssetCapabilities::BRIDGE;
+        let names = capability_names(caps);
+        assert_eq!(names, vec!["bridge".to_string(), "router".to_string()]);
+        assert!(capability_names(AssetCapabilities::empty()).is_empty());
+
+        let set = AssetSourceSet::ARP | AssetSourceSet::LLDP;
+        assert_eq!(
+            source_names(set),
+            vec!["arp".to_string(), "lldp".to_string()]
+        );
+    }
+
+    #[test]
+    fn asset_to_record_flattens_a_discovery_asset() {
+        use flowscope::{Asset, AssetCapabilities, AssetSourceSet, MacAddr, Timestamp};
+        let mut a = Asset::new(MacAddr([0xaa, 0xbb, 0xcc, 0x11, 0x22, 0x33]));
+        a.ipv4.push("10.0.0.5".parse().unwrap());
+        a.hostname = Some("switch01".into());
+        a.platform = Some("cisco WS-C2960X".into());
+        a.capabilities |= AssetCapabilities::SWITCH | AssetCapabilities::BRIDGE;
+        a.seen_via |= AssetSourceSet::LLDP;
+        a.last_seen = Timestamp::new(1_700_000_000, 0);
+
+        let rec = asset_to_record(&a);
+        assert_eq!(rec.mac, "aa:bb:cc:11:22:33");
+        assert_eq!(rec.ipv4, vec!["10.0.0.5".to_string()]);
+        assert!(rec.ipv6.is_empty());
+        assert_eq!(rec.hostname.as_deref(), Some("switch01"));
+        assert_eq!(rec.platform.as_deref(), Some("cisco WS-C2960X"));
+        assert_eq!(
+            rec.capabilities,
+            vec!["bridge".to_string(), "switch".to_string()]
+        );
+        assert_eq!(rec.seen_via, vec!["lldp".to_string()]);
+        assert_eq!(rec.last_seen, 1_700_000_000_000);
     }
 
     #[test]
