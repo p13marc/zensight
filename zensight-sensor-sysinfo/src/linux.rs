@@ -7,10 +7,12 @@
 //! - TCP connection state counts
 
 use crate::map::{
-    BatteryReading, CgroupSample, DiskSaturation, FanReading, FdStat, InodeStat, KernelDerivatives,
-    NetDevStat, PressureSample, PsiSample, RaplDomain, VmStat, disk_saturation,
-    parse_cgroup_scalar, parse_file_nr, parse_flat_kv, parse_net_dev, parse_pressure_file,
-    parse_vmstat,
+    BatteryReading, CgroupSample, ConntrackSample, DiskSaturation, EdacSample, FanReading, FdStat,
+    InodeStat, KernelDerivatives, MdArray, NetDevStat, NetstatSample, PressureSample, PsiSample,
+    RaplDomain, SchedstatSample, SockstatSample, SoftnetSample, VmStat, disk_saturation,
+    parse_cgroup_scalar, parse_conntrack, parse_file_nr, parse_flat_kv, parse_mdstat,
+    parse_net_dev, parse_netstat, parse_pressure_file, parse_schedstat, parse_sockstat,
+    parse_softnet, parse_vmstat,
 };
 use procfs::{Current, CurrentSI};
 use std::collections::HashMap;
@@ -525,6 +527,111 @@ pub fn collect_net_dev() -> Vec<NetDevStat> {
             warn!(error = %e, "Failed to read /proc/net/dev");
             Vec::new()
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// H. USE-completeness collectors (#98)
+// ---------------------------------------------------------------------------
+
+/// Read `/proc/net/snmp` + `/proc/net/netstat` into the TCP retransmit /
+/// listen-overflow saturation subset. `None` only if neither file is readable;
+/// a single missing file still yields the fields the other provides.
+pub fn collect_netstat() -> Option<NetstatSample> {
+    let snmp = std::fs::read_to_string("/proc/net/snmp").ok();
+    let netstat = std::fs::read_to_string("/proc/net/netstat").ok();
+    if snmp.is_none() && netstat.is_none() {
+        return None;
+    }
+    Some(parse_netstat(
+        snmp.as_deref().unwrap_or(""),
+        netstat.as_deref().unwrap_or(""),
+    ))
+}
+
+/// Read `/proc/net/sockstat` into socket-occupancy gauges. `None` if unreadable.
+pub fn collect_sockstat() -> Option<SockstatSample> {
+    match std::fs::read_to_string("/proc/net/sockstat") {
+        Ok(content) => Some(parse_sockstat(&content)),
+        Err(e) => {
+            warn!(error = %e, "Failed to read /proc/net/sockstat");
+            None
+        }
+    }
+}
+
+/// Read `/proc/net/softnet_stat` into summed processed/dropped/squeezed totals.
+pub fn collect_softnet() -> Option<SoftnetSample> {
+    match std::fs::read_to_string("/proc/net/softnet_stat") {
+        Ok(content) => parse_softnet(&content),
+        Err(e) => {
+            warn!(error = %e, "Failed to read /proc/net/softnet_stat");
+            None
+        }
+    }
+}
+
+/// Read `/proc/schedstat` into per-CPU + total scheduler run-delay.
+pub fn collect_schedstat() -> Option<SchedstatSample> {
+    match std::fs::read_to_string("/proc/schedstat") {
+        Ok(content) => parse_schedstat(&content),
+        Err(e) => {
+            warn!(error = %e, "Failed to read /proc/schedstat");
+            None
+        }
+    }
+}
+
+/// Read conntrack count (+ optional max) from `/proc/sys/net/netfilter/`.
+/// `None` if the count file is absent (conntrack module not loaded).
+pub fn collect_conntrack() -> Option<ConntrackSample> {
+    let count = std::fs::read_to_string("/proc/sys/net/netfilter/nf_conntrack_count").ok()?;
+    let max = std::fs::read_to_string("/proc/sys/net/netfilter/nf_conntrack_max").ok();
+    parse_conntrack(&count, max.as_deref())
+}
+
+/// Walk `/sys/devices/system/edac/mc/mc*/{ce_count,ue_count}` for per-controller
+/// ECC error counts. Empty on hosts without ECC/EDAC (no `mc<N>` dirs).
+pub fn collect_edac() -> Vec<EdacSample> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/sys/devices/system/edac/mc") else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        // Only memory-controller dirs: `mc` followed by digits (skip power/uevent).
+        let Some(num) = name.strip_prefix("mc") else {
+            continue;
+        };
+        if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let dir = entry.path();
+        let ce = std::fs::read_to_string(dir.join("ce_count"))
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        let ue = std::fs::read_to_string(dir.join("ue_count"))
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        // Skip a controller exposing neither counter (avoid fabricated zeros).
+        if ce.is_none() && ue.is_none() {
+            continue;
+        }
+        out.push(EdacSample {
+            controller: name,
+            ce: ce.unwrap_or(0),
+            ue: ue.unwrap_or(0),
+        });
+    }
+    out
+}
+
+/// Read and parse `/proc/mdstat` into per-array RAID state. Empty when the file
+/// is absent or lists no md arrays.
+pub fn collect_mdstat() -> Vec<MdArray> {
+    match std::fs::read_to_string("/proc/mdstat") {
+        Ok(content) => parse_mdstat(&content),
+        Err(_) => Vec::new(),
     }
 }
 

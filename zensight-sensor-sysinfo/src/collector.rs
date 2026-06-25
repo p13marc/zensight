@@ -175,6 +175,26 @@ impl SystemCollector {
             if self.config.collect.power {
                 count += self.collect_power(timestamp).await;
             }
+            // USE-completeness collectors (#98): network/CPU/memory/disk
+            // saturation+error holes. All cheap unprivileged /proc|/sys reads.
+            if self.config.collect.netstat {
+                count += self.collect_netstat(timestamp).await;
+            }
+            if self.config.collect.softnet {
+                count += self.collect_softnet(timestamp).await;
+            }
+            if self.config.collect.schedstat {
+                count += self.collect_schedstat(timestamp).await;
+            }
+            if self.config.collect.conntrack {
+                count += self.collect_conntrack(timestamp).await;
+            }
+            if self.config.collect.edac {
+                count += self.collect_edac(timestamp).await;
+            }
+            if self.config.collect.mdadm {
+                count += self.collect_mdadm(timestamp).await;
+            }
         }
 
         // Threshold alerting: evaluate the already-collected saturation data and
@@ -409,6 +429,76 @@ impl SystemCollector {
             entropy_avail: crate::linux::collect_entropy(),
         };
         self.publish_metrics(crate::map::map_power(&sample), timestamp)
+            .await
+    }
+
+    /// Collect TCP retransmit / listen-overflow errors + socket occupancy
+    /// (Linux-specific, USE-completeness #98).
+    #[cfg(target_os = "linux")]
+    async fn collect_netstat(&self, timestamp: i64) -> usize {
+        let mut count = 0;
+        if let Some(s) = crate::linux::collect_netstat() {
+            count += self
+                .publish_metrics(crate::map::map_netstat(&s), timestamp)
+                .await;
+        }
+        if let Some(s) = crate::linux::collect_sockstat() {
+            count += self
+                .publish_metrics(crate::map::map_sockstat(&s), timestamp)
+                .await;
+        }
+        count
+    }
+
+    /// Collect softnet backlog drops / time-squeezes (Linux-specific, #98).
+    #[cfg(target_os = "linux")]
+    async fn collect_softnet(&self, timestamp: i64) -> usize {
+        match crate::linux::collect_softnet() {
+            Some(s) => {
+                self.publish_metrics(crate::map::map_softnet(&s), timestamp)
+                    .await
+            }
+            None => 0,
+        }
+    }
+
+    /// Collect per-CPU scheduler run-delay (Linux-specific, #98).
+    #[cfg(target_os = "linux")]
+    async fn collect_schedstat(&self, timestamp: i64) -> usize {
+        match crate::linux::collect_schedstat() {
+            Some(s) => {
+                self.publish_metrics(crate::map::map_schedstat(&s), timestamp)
+                    .await
+            }
+            None => 0,
+        }
+    }
+
+    /// Collect conntrack table fill (Linux-specific, #98).
+    #[cfg(target_os = "linux")]
+    async fn collect_conntrack(&self, timestamp: i64) -> usize {
+        match crate::linux::collect_conntrack() {
+            Some(s) => {
+                self.publish_metrics(crate::map::map_conntrack(&s), timestamp)
+                    .await
+            }
+            None => 0,
+        }
+    }
+
+    /// Collect per-controller ECC memory errors (Linux-specific, #98).
+    #[cfg(target_os = "linux")]
+    async fn collect_edac(&self, timestamp: i64) -> usize {
+        let samples = crate::linux::collect_edac();
+        self.publish_metrics(crate::map::map_edac(&samples), timestamp)
+            .await
+    }
+
+    /// Collect software-RAID degraded/failed state (Linux-specific, #98).
+    #[cfg(target_os = "linux")]
+    async fn collect_mdadm(&self, timestamp: i64) -> usize {
+        let arrays = crate::linux::collect_mdstat();
+        self.publish_metrics(crate::map::map_mdstat(&arrays), timestamp)
             .await
     }
 

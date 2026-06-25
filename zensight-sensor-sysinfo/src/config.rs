@@ -175,6 +175,38 @@ pub struct CollectConfig {
     /// aggregates still stream via the `processes` collector.
     #[serde(default = "default_true")]
     pub process_query: bool,
+
+    /// Collect TCP retransmit / listen-overflow errors + socket occupancy from
+    /// `/proc/net/{snmp,netstat,sockstat}` (USE network errors, #98). Cheap,
+    /// unprivileged, Linux-only. Missing files => skipped gracefully.
+    #[serde(default = "default_true")]
+    pub netstat: bool,
+
+    /// Collect softnet backlog drops / time-squeezes from
+    /// `/proc/net/softnet_stat` (NIC→kernel backpressure, #98). Linux-only.
+    #[serde(default = "default_true")]
+    pub softnet: bool,
+
+    /// Collect per-CPU scheduler run-delay from `/proc/schedstat` (the canonical
+    /// CPU saturation signal, #98). Linux-only.
+    #[serde(default = "default_true")]
+    pub schedstat: bool,
+
+    /// Collect conntrack table fill from `/proc/sys/net/netfilter/
+    /// nf_conntrack_{count,max}` (#98). Linux-only; absent when the netfilter
+    /// conntrack module is not loaded => skipped gracefully.
+    #[serde(default = "default_true")]
+    pub conntrack: bool,
+
+    /// Collect ECC memory errors from `/sys/devices/system/edac/mc/mc*/
+    /// {ce_count,ue_count}` (#98). Linux-only; no ECC hardware => emits nothing.
+    #[serde(default = "default_true")]
+    pub edac: bool,
+
+    /// Collect software-RAID degraded/failed state from `/proc/mdstat` (#98).
+    /// Linux-only; no md arrays => emits nothing.
+    #[serde(default = "default_true")]
+    pub mdadm: bool,
 }
 
 impl Default for CollectConfig {
@@ -199,6 +231,12 @@ impl Default for CollectConfig {
             cgroup_paths: Vec::new(),
             power: false,
             process_query: true,
+            netstat: true,
+            softnet: true,
+            schedstat: true,
+            conntrack: true,
+            edac: true,
+            mdadm: true,
         }
     }
 }
