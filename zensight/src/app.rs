@@ -1594,7 +1594,17 @@ impl ZenSight {
             }
             CurrentView::Device => {
                 if let Some(ref device_state) = self.selected_device {
-                    device_view_with_syslog_filter(device_state, &self.syslog_filter)
+                    // For a syslog device, hand the view this host's recent log
+                    // stream from the rolling buffer (so it shows history, like
+                    // the Logs tab). Cheap: the buffer is bounded.
+                    let host = device_state.device_id.source.as_str();
+                    let host_logs: Vec<_> = self
+                        .recent_logs
+                        .iter()
+                        .filter(|m| m.host() == host)
+                        .cloned()
+                        .collect();
+                    device_view_with_syslog_filter(device_state, &self.syslog_filter, &host_logs)
                 } else {
                     dashboard_view(
                         &self.dashboard,

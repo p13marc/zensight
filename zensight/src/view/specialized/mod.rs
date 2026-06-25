@@ -93,12 +93,14 @@ pub fn specialized_view<'a>(state: &'a DeviceDetailState) -> Option<Element<'a, 
     }
 }
 
-/// Render the syslog specialized view with filter state.
+/// Render the syslog specialized view with filter state. `host_logs` is the
+/// app's rolling log buffer filtered to this device's host.
 pub fn syslog_view<'a>(
     state: &'a DeviceDetailState,
     filter_state: &'a SyslogFilterState,
+    host_logs: &[SyslogMessage],
 ) -> Element<'a, Message> {
-    syslog::syslog_event_view(state, filter_state)
+    syslog::syslog_event_view(state, filter_state, host_logs)
 }
 
 /// Check if a protocol has a specialized view available.
