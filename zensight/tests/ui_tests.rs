@@ -1438,3 +1438,58 @@ fn test_netring_tls_capture_sections() {
     assert!(ui.find("api.example.com").is_ok());
     assert!(ui.find("Capture Health").is_ok());
 }
+
+/// The top-level Logs view renders buffered log lines (the message text and the
+/// originating host) — verifying the unified logs feed surfaces journald/syslog.
+#[test]
+fn test_logs_view_renders_lines() {
+    use zensight::view::specialized::{logs_view, syslog_message_from_point};
+    use zensight_common::{TelemetryPoint, TelemetryValue};
+
+    let point = TelemetryPoint {
+        timestamp: 1_700_000_000_000,
+        source: "host01".to_string(),
+        protocol: Protocol::Syslog,
+        metric: "auth/crit".to_string(),
+        value: TelemetryValue::Text("INTRUDER ALERT from 10.0.0.9".to_string()),
+        labels: HashMap::new(),
+    };
+    let messages = vec![syslog_message_from_point(&point, &point.source)];
+    let filter = SyslogFilterState::default();
+
+    let mut ui = simulator(logs_view(&messages, &filter));
+    assert!(ui.find("Logs").is_ok());
+    assert!(ui.find("INTRUDER ALERT from 10.0.0.9").is_ok());
+    assert!(ui.find("host01").is_ok());
+}
+
+/// The Logs view shows an explicit empty state when no logs have arrived yet
+/// (so an empty feed reads as "waiting", not "broken").
+#[test]
+fn test_logs_view_empty_state() {
+    use zensight::view::specialized::logs_view;
+
+    let filter = SyslogFilterState::default();
+    let mut ui = simulator(logs_view(&[], &filter));
+    assert!(ui.find("No log messages received yet...").is_ok());
+}
+
+/// The nav rail's "Logs" entry drives Message::OpenLogs.
+#[test]
+fn test_nav_opens_logs() {
+    use zensight::view::shell::app_shell;
+
+    let inner = iced::widget::text("x");
+    let mut ui = simulator(app_shell(
+        CurrentView::Dashboard,
+        None,
+        ConnectionState::Connected,
+        0,
+        None,
+        0,
+        inner.into(),
+    ));
+    let _ = ui.click("Logs");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(msgs.iter().any(|m| matches!(m, Message::OpenLogs)));
+}
