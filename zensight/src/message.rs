@@ -107,6 +107,14 @@ pub enum Message {
     FetchNetringTls,
     /// A netring TLS-inventory reply: the decoded records, or an error message.
     NetringTlsReceived(Result<Vec<zensight_common::TlsRecord>, String>),
+    /// Fetch the on-demand netring QUIC SNI/ALPN inventory (#72).
+    FetchNetringQuic,
+    /// A netring QUIC-inventory reply: the decoded records, or an error message.
+    NetringQuicReceived(Result<Vec<zensight_common::QuicRecord>, String>),
+    /// Fetch the on-demand netring SSH/HASSH inventory (#72).
+    FetchNetringSsh,
+    /// A netring SSH-inventory reply: the decoded records, or an error message.
+    NetringSshReceived(Result<Vec<zensight_common::SshRecord>, String>),
 
     /// Open the security (network anomalies) view.
     OpenSecurity,

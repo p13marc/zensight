@@ -124,7 +124,13 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
   bytes/packets/retransmits/duration percentiles), per-L4 + connection-state
   composition, TCP resets, DNS RED, HTTP RED, TLS fingerprint counts, ICMP errors.
 - **On-demand detail** (`@/query/<topic>`): `flows`, `tls`, `talkers?top=N`,
-  `elephant_flows`, `dns?top=N`, `http?top=N`.
+  `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`.
+- **L7 protocol inventories (netring 0.27, opt-in):** QUIC Initial SNI/ALPN/
+  version (`collect.quic`, UDP/443 — passive, no decryption) and SSH banner +
+  KEXINIT HASSH fingerprints (`collect.ssh`, TCP/22), each served on its
+  `@/query/*` channel with a streamed distinct-count. Cleartext SNMP v1/v2c
+  community strings can be flagged as `cleartext-snmp` anomalies with
+  `collect.snmp_cleartext` (build with `--features snmp`).
 - **Alerts:** `@/alerts/<alert_key>` from detectors and threat-intel —
   - Detectors: TRW port-scan, RITA beaconing, connection-flood, DGA/DNS-tunneling.
   - **Threat-intel (netring 0.27):** flow-risk scoring (obsolete TLS, cleartext

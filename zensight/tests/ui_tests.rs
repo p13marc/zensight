@@ -1439,6 +1439,46 @@ fn test_netring_tls_capture_sections() {
     assert!(ui.find("Capture Health").is_ok());
 }
 
+/// #72: the netring view surfaces the QUIC SNI/ALPN and SSH/HASSH inventories —
+/// rendered when the sensor publishes their aggregate counts — with on-demand
+/// tables and fetch affordances wired to the right messages.
+#[test]
+fn test_netring_quic_ssh_sections() {
+    use zensight::view::specialized::netring::netring_sensor_view;
+    use zensight_common::{Protocol, QuicRecord, SshRecord, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let mut state = DeviceDetailState::new(device_id);
+    for (m, v) in [
+        ("quic/distinct_sni", TelemetryValue::Gauge(5.0)),
+        ("ssh/distinct_hassh", TelemetryValue::Gauge(3.0)),
+    ] {
+        state.update(TelemetryPoint::new("wiretap1", Protocol::Netring, m, v));
+    }
+    state.netring_detail.apply_quic(Ok(vec![QuicRecord {
+        sni: Some("cloudflare-quic.com".into()),
+        alpn: vec!["h3".into()],
+        version: "v1".into(),
+        count: 9,
+    }]));
+    state.netring_detail.apply_ssh(Ok(vec![SshRecord {
+        hassh: "06046964c022c6407d15a27b12a51c5b".into(),
+        role: "client".into(),
+        banner: Some("SSH-2.0-OpenSSH_9.6".into()),
+        count: 2,
+    }]));
+
+    let mut ui = simulator(netring_sensor_view(&state));
+    assert!(ui.find("QUIC (SNI / ALPN)").is_ok());
+    assert!(ui.find("cloudflare-quic.com").is_ok());
+    assert!(ui.find("SSH (HASSH)").is_ok());
+    assert!(ui.find("SSH-2.0-OpenSSH_9.6").is_ok());
+
+    let _ = ui.click("Fetch QUIC");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(msgs.iter().any(|m| matches!(m, Message::FetchNetringQuic)));
+}
+
 /// The top-level Logs view renders buffered log lines (the message text and the
 /// originating host) — verifying the unified logs feed surfaces journald/syslog.
 #[test]

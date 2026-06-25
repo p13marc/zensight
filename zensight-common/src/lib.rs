@@ -38,7 +38,7 @@ pub use keyexpr::{
 };
 pub use query_detail::{
     DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord, NeighborRecord, ProcessRecord,
-    RouteRecord, SocketRecord, TalkerRecord, TlsRecord,
+    QuicRecord, RouteRecord, SocketRecord, SshRecord, TalkerRecord, TlsRecord,
 };
 pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;

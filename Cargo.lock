@@ -1688,6 +1688,7 @@ dependencies = [
  "sha2",
  "simple-dns",
  "smallvec",
+ "snmp-parser",
  "tls-parser",
 ]
 
@@ -6299,6 +6300,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
+]
+
+[[package]]
+name = "snmp-parser"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0edee72a0990df1c39eb951d9495e3aa5f78569eea497767960d2450dafd7999"
+dependencies = [
+ "asn1-rs 0.7.2",
+ "nom 7.1.3",
+ "rusticata-macros",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

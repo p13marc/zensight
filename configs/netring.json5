@@ -16,6 +16,13 @@
       bandwidth: true,   // per-application bytes/sec
       flows: true,       // flow lifecycle aggregates
       tcp_resets: true,  // TCP reset + connection-refused counters
+      // L7 protocol visibility (netring 0.27, opt-in). Detail served on
+      // @/query/quic and @/query/ssh; aggregate counts stream.
+      quic: false,       // passive QUIC Initial SNI/ALPN/version (UDP/443)
+      ssh: false,        // SSH banner + KEXINIT HASSH fingerprints (TCP/22)
+      // Flag cleartext SNMP v1/v2c community strings as anomalies. Needs the
+      // sensor built with `--features snmp` (pulls the SNMP parser).
+      snmp_cleartext: false,
     },
     bandwidth_period_secs: 5,
 

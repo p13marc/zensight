@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use zensight_common::{Alert, ElephantRecord, FlowRecord, TelemetryPoint, TlsRecord};
+use zensight_common::{
+    Alert, ElephantRecord, FlowRecord, QuicRecord, SshRecord, TelemetryPoint, TlsRecord,
+};
 
 /// Bounded ring of recent ended-flow records served via `@/query/flows`.
 pub type FlowRing = Arc<Mutex<VecDeque<FlowRecord>>>;
@@ -50,9 +52,20 @@ pub type HttpInventory = Arc<Mutex<HashMap<String, (u64, u64)>>>;
 /// Per-flow in-flight HTTP request state: `flow -> (request_start_ms, host)`,
 /// used to derive request→response latency and attribute response status.
 type HttpPending = Arc<Mutex<HashMap<FiveTupleKey, (u64, Option<String>)>>>;
+/// Passive QUIC SNI/ALPN inventory: (sni, version) → record for `@/query/quic` (#72).
+pub type QuicInventory = Arc<Mutex<HashMap<(String, String), QuicRecord>>>;
+/// Passive SSH/HASSH inventory: hassh → record for `@/query/ssh` (#72).
+pub type SshInventory = Arc<Mutex<HashMap<String, SshRecord>>>;
+/// Per-flow SSH banner seen before the KEXINIT, to best-effort correlate a
+/// HASSH fingerprint with its version banner: `flow -> banner`.
+type SshPending = Arc<Mutex<HashMap<FiveTupleKey, String>>>;
 
 /// Max distinct TLS fingerprints retained (cardinality guard).
 const TLS_INVENTORY_CAP: usize = 4096;
+
+/// Cardinality guards for the QUIC (sni,version) and SSH (hassh) inventories.
+const QUIC_INVENTORY_CAP: usize = 4096;
+const SSH_INVENTORY_CAP: usize = 4096;
 
 /// DNS RED accumulators shared across the capture path and the drain.
 #[derive(Default)]
@@ -148,6 +161,10 @@ pub struct MonitorChannels {
     pub talkers: TalkerHist,
     /// Recent elephant (large) flows ring (issue #21).
     pub elephants: ElephantRing,
+    /// Passive QUIC SNI/ALPN inventory: served on `@/query/quic` (issue #72).
+    pub quic: QuicInventory,
+    /// Passive SSH/HASSH inventory: served on `@/query/ssh` (issue #72).
+    pub ssh: SshInventory,
 }
 
 /// Detector wrapper bridging `feed`→`verdict` for the TRW port-scan detector.
@@ -295,6 +312,8 @@ pub fn build(
     let http = Arc::new(HttpState::default());
     let talkers: TalkerHist = Arc::new(Mutex::new(HashMap::new()));
     let elephants: ElephantRing = Arc::new(Mutex::new(VecDeque::with_capacity(ELEPHANT_RING_CAP)));
+    let quic: QuicInventory = Arc::new(Mutex::new(HashMap::new()));
+    let ssh: SshInventory = Arc::new(Mutex::new(HashMap::new()));
 
     let mut b = Monitor::builder();
     b = b.name(cfg.sensor_id.clone());
@@ -587,6 +606,111 @@ pub fn build(
         });
     }
 
+    // L7 QUIC Initial visibility (issue #72) — passive SNI/ALPN/version from the
+    // unprotected ClientHello (UDP/443). The QUIC analogue of TLS fingerprinting.
+    if cfg.collect.quic {
+        use flowscope::QuicInitial;
+        b = b.protocol::<Quic>();
+        let inv = quic.clone();
+        b = b.on::<Quic>(move |q: &QuicInitial| {
+            let version = q.version.to_string();
+            let key = (q.sni.clone().unwrap_or_default(), version.clone());
+            if let Ok(mut m) = inv.lock() {
+                if let Some(rec) = m.get_mut(&key) {
+                    rec.count += 1;
+                } else if m.len() < QUIC_INVENTORY_CAP {
+                    m.insert(
+                        key,
+                        QuicRecord {
+                            sni: q.sni.clone(),
+                            alpn: q.alpn.clone(),
+                            version,
+                            count: 1,
+                        },
+                    );
+                }
+            }
+            Ok(())
+        });
+    }
+
+    // L7 SSH/HASSH visibility (issue #72) — banner + KEXINIT HASSH fingerprints
+    // (TCP/22). The banner precedes the KEXINIT on the same flow, so we stash it
+    // per-flow and attach it to the fingerprint when the KEXINIT lands.
+    if cfg.collect.ssh {
+        use flowscope::ssh::SshMessage;
+        b = b.protocol::<Ssh>();
+        let inv = ssh.clone();
+        let pending: SshPending = Arc::new(Mutex::new(HashMap::new()));
+        b = b.on_ctx::<Ssh>(move |msg: &SshMessage, ctx: &mut Ctx<'_>| {
+            match msg {
+                SshMessage::Banner { banner } => {
+                    if let (Some(k), Ok(mut p)) = (ctx.flow, pending.lock())
+                        && p.len() < 65_536
+                    {
+                        p.insert(k, banner.clone());
+                    }
+                }
+                SshMessage::KexInit(kex) => {
+                    let banner = ctx
+                        .flow
+                        .and_then(|k| pending.lock().ok().and_then(|p| p.get(&k).cloned()));
+                    let role = if kex.from_client { "client" } else { "server" };
+                    if let Ok(mut m) = inv.lock() {
+                        if let Some(rec) = m.get_mut(&kex.hassh) {
+                            rec.count += 1;
+                            if rec.banner.is_none() {
+                                rec.banner = banner;
+                            }
+                        } else if m.len() < SSH_INVENTORY_CAP {
+                            m.insert(
+                                kex.hassh.clone(),
+                                SshRecord {
+                                    hassh: kex.hassh.clone(),
+                                    role: role.to_string(),
+                                    banner,
+                                    count: 1,
+                                },
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        });
+    }
+
+    // Cleartext SNMP community detection (issue #72) — opt-in, behind the `snmp`
+    // build feature. v1/v2c carry the community string in cleartext: a classic
+    // credential-exposure + lateral-movement signal. Flagged as an anomaly →
+    // alert via the typed alerts channel.
+    #[cfg(feature = "snmp")]
+    if cfg.collect.snmp_cleartext {
+        use flowscope::snmp::{SnmpMessage, SnmpVersion};
+        b = b.protocol::<Snmp>();
+        let alerts_h = alert_tx.clone();
+        let sensor_id = cfg.sensor_id.clone();
+        b = b.on_ctx::<Snmp>(move |msg: &SnmpMessage, ctx: &mut Ctx<'_>| {
+            if matches!(msg.version, SnmpVersion::V1 | SnmpVersion::V2c) {
+                let version = match msg.version {
+                    SnmpVersion::V1 => "v1",
+                    SnmpVersion::V2c => "v2c",
+                    _ => "other",
+                };
+                let (src, dst) = ctx.flow.map(|k| (k.a.to_string(), k.b.to_string())).unzip();
+                let _ = alerts_h.send(crate::map::snmp_cleartext_alert(
+                    &sensor_id,
+                    version,
+                    &msg.community,
+                    src,
+                    dst,
+                ));
+            }
+            Ok(())
+        });
+    }
+
     // Per-application bandwidth (periodic report).
     if cfg.collect.bandwidth {
         let tx = tel_tx.clone();
@@ -797,6 +921,8 @@ pub fn build(
             http,
             talkers,
             elephants,
+            quic,
+            ssh,
         },
         keepalive,
     ))

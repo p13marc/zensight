@@ -95,6 +95,20 @@ async fn main() -> Result<()> {
                 channels.http.inventory.clone(),
             ));
         }
+        if cfg.collect.quic {
+            runner.spawn(query::run_quic(
+                s.clone(),
+                key_prefix.clone(),
+                channels.quic.clone(),
+            ));
+        }
+        if cfg.collect.ssh {
+            runner.spawn(query::run_ssh(
+                s.clone(),
+                key_prefix.clone(),
+                channels.ssh.clone(),
+            ));
+        }
     }
 
     // Drain task (telemetry + anomalies + periodic flow aggregates).

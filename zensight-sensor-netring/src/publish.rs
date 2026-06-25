@@ -40,6 +40,8 @@ pub async fn run_drains(
     let icmp = channels.icmp.clone();
     let dns = channels.dns.clone();
     let http = channels.http.clone();
+    let quic = channels.quic.clone();
+    let ssh = channels.ssh.clone();
 
     // Take (and clear) the current window's flow durations for percentile points.
     let drain_window = |buf: &std::sync::Mutex<Vec<u64>>| -> Vec<u64> {
@@ -99,6 +101,18 @@ pub async fn run_drains(
         let tls_n = tls_handshakes.load(Ordering::Relaxed);
         let tls_distinct = tls_inventory.lock().map(|i| i.len() as u64).unwrap_or(0);
         points.extend(map::tls_points(sensor_id, tls_n, tls_distinct));
+
+        // L7 QUIC / SSH inventory sizes (issue #72) — only published once the
+        // inventory is non-empty, so the cached gauge isn't clobbered to 0 on a
+        // build without the collector armed.
+        let quic_distinct = quic.lock().map(|i| i.len() as u64).unwrap_or(0);
+        if quic_distinct > 0 {
+            points.push(map::quic_count_point(sensor_id, quic_distinct));
+        }
+        let ssh_distinct = ssh.lock().map(|i| i.len() as u64).unwrap_or(0);
+        if ssh_distinct > 0 {
+            points.push(map::ssh_count_point(sensor_id, ssh_distinct));
+        }
 
         // ICMP error aggregates (issue #15).
         let by_kind: Vec<(String, u64)> = icmp

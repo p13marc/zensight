@@ -218,6 +218,60 @@ pub fn tls_points(sensor_id: &str, handshakes: u64, distinct: u64) -> Vec<Teleme
     ]
 }
 
+/// QUIC inventory aggregate (issue #72): distinct (sni, version) pairs seen.
+/// Low-cardinality count safe to stream; detail pulled from `@/query/quic`.
+pub fn quic_count_point(sensor_id: &str, distinct: u64) -> TelemetryPoint {
+    TelemetryPoint::new(
+        sensor_id,
+        Protocol::Netring,
+        "quic/distinct_sni",
+        TelemetryValue::Gauge(distinct as f64),
+    )
+}
+
+/// SSH/HASSH inventory aggregate (issue #72): distinct HASSH fingerprints seen.
+pub fn ssh_count_point(sensor_id: &str, distinct: u64) -> TelemetryPoint {
+    TelemetryPoint::new(
+        sensor_id,
+        Protocol::Netring,
+        "ssh/distinct_hassh",
+        TelemetryValue::Gauge(distinct as f64),
+    )
+}
+
+/// Build the `cleartext-snmp` anomaly alert (issue #72): SNMP v1/v2c send the
+/// community string in cleartext — a credential-exposure + lateral-movement
+/// signal. Bucketed by `(rule, src)`; the community + version ride as labels.
+pub fn snmp_cleartext_alert(
+    sensor_id: &str,
+    version: &str,
+    community: &str,
+    src: Option<String>,
+    dst: Option<String>,
+) -> Alert {
+    let summary = match &src {
+        Some(s) => format!("cleartext SNMP {version} community from {s}"),
+        None => format!("cleartext SNMP {version} community observed"),
+    };
+    let mut alert = Alert::new(
+        sensor_id,
+        Protocol::Netring,
+        AlertKind::Anomaly,
+        "cleartext-snmp",
+        AlertSeverity::Warning,
+        summary,
+    )
+    .with_label("version", version)
+    .with_label("community", community);
+    if let Some(src) = src {
+        alert = alert.with_label("src", src);
+    }
+    if let Some(dst) = dst {
+        alert = alert.with_label("dst", dst);
+    }
+    alert
+}
+
 // ─── ICMP error telemetry (issue #15) ───────────────────────────────────────
 
 /// A flattened ICMP error, decomposed from netring's `IcmpError` event. Kept
@@ -1054,5 +1108,38 @@ mod tests {
         assert_eq!(r.bytes, 10_000_000);
         assert_eq!(r.proto, "tcp");
         assert_eq!(r.duration_ms, 4200);
+    }
+
+    #[test]
+    fn quic_ssh_count_points_are_gauges() {
+        let q = quic_count_point("s", 5);
+        assert_eq!(q.metric, "quic/distinct_sni");
+        assert_eq!(q.value, TelemetryValue::Gauge(5.0));
+        let h = ssh_count_point("s", 3);
+        assert_eq!(h.metric, "ssh/distinct_hassh");
+        assert_eq!(h.value, TelemetryValue::Gauge(3.0));
+    }
+
+    #[test]
+    fn snmp_cleartext_alert_carries_community_and_endpoints() {
+        let a = snmp_cleartext_alert(
+            "s",
+            "v2c",
+            "public",
+            Some("10.0.0.9:51000".into()),
+            Some("10.0.0.1:161".into()),
+        );
+        assert_eq!(a.kind, AlertKind::Anomaly);
+        assert_eq!(a.rule, "cleartext-snmp");
+        assert_eq!(a.severity, AlertSeverity::Warning);
+        assert_eq!(
+            a.labels.get("community").map(String::as_str),
+            Some("public")
+        );
+        assert_eq!(a.labels.get("version").map(String::as_str), Some("v2c"));
+        assert_eq!(
+            a.labels.get("src").map(String::as_str),
+            Some("10.0.0.9:51000")
+        );
     }
 }

@@ -1212,6 +1212,28 @@ impl ZenSight {
                     device.netring_detail.apply_tls(result);
                 }
             }
+            Message::FetchNetringQuic => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_quic();
+                }
+                return self.query_netring_quic();
+            }
+            Message::NetringQuicReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_quic(result);
+                }
+            }
+            Message::FetchNetringSsh => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_ssh();
+                }
+                return self.query_netring_ssh();
+            }
+            Message::NetringSshReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_ssh(result);
+                }
+            }
 
             Message::OpenSecurity => {
                 self.set_view(CurrentView::Security);
@@ -1474,6 +1496,40 @@ impl ZenSight {
                 .await
                 .ok_or_else(|| "No netring sensor responded".to_string());
             Message::NetringTlsReceived(result)
+        })
+    }
+
+    /// Fetch the on-demand netring QUIC SNI/ALPN inventory (#72).
+    fn query_netring_quic(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_quic;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::CommandFeedback {
+                success: false,
+                message: "Not connected to Zenoh".to_string(),
+            });
+        };
+        Task::future(async move {
+            let result = fetch_quic(session)
+                .await
+                .ok_or_else(|| "No netring sensor responded".to_string());
+            Message::NetringQuicReceived(result)
+        })
+    }
+
+    /// Fetch the on-demand netring SSH/HASSH inventory (#72).
+    fn query_netring_ssh(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_ssh;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::CommandFeedback {
+                success: false,
+                message: "Not connected to Zenoh".to_string(),
+            });
+        };
+        Task::future(async move {
+            let result = fetch_ssh(session)
+                .await
+                .ok_or_else(|| "No netring sensor responded".to_string());
+            Message::NetringSshReceived(result)
         })
     }
 

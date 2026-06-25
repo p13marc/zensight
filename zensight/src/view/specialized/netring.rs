@@ -8,6 +8,7 @@ use zensight_common::TelemetryValue;
 use crate::message::Message;
 use crate::view::components::{card, empty_state, section_header};
 use crate::view::device::DeviceDetailState;
+use crate::view::specialized::fetch::Fetch;
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
@@ -32,6 +33,14 @@ pub fn netring_sensor_view(state: &DeviceDetailState) -> Element<'_, Message> {
     }
     if has_prefix(state, "flow/by_l4/") {
         content = content.push(card(render_per_l4(state)));
+    }
+    // L7 QUIC SNI/ALPN + SSH/HASSH inventories (#72) — shown when the sensor
+    // publishes their aggregate count or after a fetch has been attempted.
+    if has_prefix(state, "quic/") || !matches!(state.netring_detail.quic, Fetch::Idle) {
+        content = content.push(card(render_quic(state)));
+    }
+    if has_prefix(state, "ssh/") || !matches!(state.netring_detail.ssh, Fetch::Idle) {
+        content = content.push(card(render_ssh(state)));
     }
 
     // Capture self-health only exists under live capture (not pcap replay).
@@ -108,6 +117,117 @@ fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
         }
     }
     col.into()
+}
+
+/// QUIC section (#72): streamed distinct-SNI count + an on-demand SNI/ALPN/version
+/// inventory fetched from `@/query/quic` — the QUIC analogue of the TLS card.
+fn render_quic(state: &DeviceDetailState) -> Element<'_, Message> {
+    let loading = state.netring_detail.quic.is_loading();
+    let label = if loading { "Fetching…" } else { "Fetch QUIC" };
+    let mut fetch = button(text(label).size(font::CAPTION)).padding([4, 10]);
+    if !loading {
+        fetch = fetch.on_press(Message::FetchNetringQuic);
+    }
+
+    let count = num(state.metrics.get("quic/distinct_sni").map(|p| &p.value));
+    let mut col = column![
+        section_header("QUIC (SNI / ALPN)", Some(fetch.into())),
+        row![cell("distinct SNI", 180), cell(&count, 100)].spacing(8),
+    ]
+    .spacing(space::SM);
+
+    if let Some(err) = state.netring_detail.quic.error() {
+        col = col.push(empty_state(format!("Fetch failed: {err}"), None));
+    } else if let Some(records) = state.netring_detail.quic.ready() {
+        if records.is_empty() {
+            col = col.push(empty_state("No QUIC Initials observed", None));
+        } else {
+            let mut list = Column::new().spacing(3).push(
+                row![
+                    cell("sni", 280),
+                    cell("alpn", 120),
+                    cell("version", 90),
+                    cell("count", 60),
+                ]
+                .spacing(8),
+            );
+            for r in records.iter().take(200) {
+                list = list.push(
+                    row![
+                        cell(r.sni.as_deref().unwrap_or("-"), 280),
+                        cell(&join_or_dash(&r.alpn), 120),
+                        cell(&r.version, 90),
+                        cell(&r.count.to_string(), 60),
+                    ]
+                    .spacing(8),
+                );
+            }
+            col = col
+                .push(text(format!("{} SNI/version pairs", records.len())).size(font::EMPHASIS))
+                .push(list);
+        }
+    }
+    col.into()
+}
+
+/// SSH section (#72): streamed distinct-HASSH count + an on-demand HASSH
+/// inventory (fingerprint · role · banner) fetched from `@/query/ssh`.
+fn render_ssh(state: &DeviceDetailState) -> Element<'_, Message> {
+    let loading = state.netring_detail.ssh.is_loading();
+    let label = if loading { "Fetching…" } else { "Fetch SSH" };
+    let mut fetch = button(text(label).size(font::CAPTION)).padding([4, 10]);
+    if !loading {
+        fetch = fetch.on_press(Message::FetchNetringSsh);
+    }
+
+    let count = num(state.metrics.get("ssh/distinct_hassh").map(|p| &p.value));
+    let mut col = column![
+        section_header("SSH (HASSH)", Some(fetch.into())),
+        row![cell("distinct HASSH", 180), cell(&count, 100)].spacing(8),
+    ]
+    .spacing(space::SM);
+
+    if let Some(err) = state.netring_detail.ssh.error() {
+        col = col.push(empty_state(format!("Fetch failed: {err}"), None));
+    } else if let Some(records) = state.netring_detail.ssh.ready() {
+        if records.is_empty() {
+            col = col.push(empty_state("No SSH handshakes observed", None));
+        } else {
+            let mut list = Column::new().spacing(3).push(
+                row![
+                    cell("hassh", 260),
+                    cell("role", 70),
+                    cell("banner", 220),
+                    cell("count", 60),
+                ]
+                .spacing(8),
+            );
+            for r in records.iter().take(200) {
+                list = list.push(
+                    row![
+                        cell(&r.hassh, 260),
+                        cell(&r.role, 70),
+                        cell(r.banner.as_deref().unwrap_or("-"), 220),
+                        cell(&r.count.to_string(), 60),
+                    ]
+                    .spacing(8),
+                );
+            }
+            col = col
+                .push(text(format!("{} fingerprints", records.len())).size(font::EMPHASIS))
+                .push(list);
+        }
+    }
+    col.into()
+}
+
+/// Join a slug list with commas, or `"-"` when empty.
+fn join_or_dash(items: &[String]) -> String {
+    if items.is_empty() {
+        "-".to_string()
+    } else {
+        items.join(", ")
+    }
 }
 
 /// Capture self-health section: packets/drops/drop_rate per capture source.
