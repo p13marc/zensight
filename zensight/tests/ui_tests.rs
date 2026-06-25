@@ -1170,6 +1170,13 @@ fn test_netlink_specialized_view() {
                     snd_cwnd: 10,
                     snd_buf: 16384,
                     rcv_buf: 32768,
+                    delivery_rate: 0,
+                    pacing_rate: 0,
+                    bytes_retrans: 0,
+                    total_retrans: 0,
+                    rcv_rtt_us: 0,
+                    lost: 0,
+                    reord_seen: 0,
                 },
             ])),
         );

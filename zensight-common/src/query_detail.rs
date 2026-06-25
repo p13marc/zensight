@@ -238,4 +238,28 @@ pub struct SocketRecord {
     /// Receive-buffer size in bytes (rcvbuf), if mem info was requested.
     #[serde(default)]
     pub rcv_buf: u32,
+    /// Recent delivery rate in bytes/sec (kernel `tcp_info.delivery_rate`, #108) —
+    /// "is this flow actually moving data". 0 when unknown.
+    #[serde(default)]
+    pub delivery_rate: u64,
+    /// Pacing rate in bytes/sec (`tcp_info.pacing_rate`, #108); 0 when unknown,
+    /// `u64::MAX` (unpaced) is normalized to 0 by the producer.
+    #[serde(default)]
+    pub pacing_rate: u64,
+    /// Total bytes retransmitted on this socket (`tcp_info.bytes_retrans`, #108).
+    #[serde(default)]
+    pub bytes_retrans: u64,
+    /// Lifetime segment retransmits (`tcp_info.total_retrans`, #108) — distinct
+    /// from `retrans` (the current/outstanding count).
+    #[serde(default)]
+    pub total_retrans: u32,
+    /// Receiver-side RTT estimate in microseconds (`tcp_info.rcv_rtt`, #108).
+    #[serde(default)]
+    pub rcv_rtt_us: u32,
+    /// Currently lost (presumed-lost, unacked) segments (`tcp_info.lost`, #108).
+    #[serde(default)]
+    pub lost: u32,
+    /// Reordering events observed on this socket (`tcp_info.reord_seen`, #108).
+    #[serde(default)]
+    pub reord_seen: u32,
 }

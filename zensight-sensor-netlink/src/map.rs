@@ -172,6 +172,26 @@ pub struct SocketCounts {
     /// RTT percentiles across established sockets (microseconds).
     pub rtt_p50_us: u64,
     pub rtt_p95_us: u64,
+    /// Delivery-rate percentiles across established sockets (bytes/sec, #108) —
+    /// "are flows actually delivering" vs just "how many are established".
+    pub delivery_rate_p50: u64,
+    pub delivery_rate_p95: u64,
+    /// Pacing-rate percentiles across established sockets (bytes/sec, #108).
+    /// Sockets reporting the kernel's `~0` "unlimited" sentinel are excluded.
+    pub pacing_rate_p50: u64,
+    pub pacing_rate_p95: u64,
+    /// Receiver-side RTT estimate percentiles (microseconds, #108).
+    pub rcv_rtt_p50_us: u64,
+    pub rcv_rtt_p95_us: u64,
+    /// Sum of bytes retransmitted across sockets (#108, monotonic per-socket).
+    pub bytes_retrans_total: u64,
+    /// Sum of segment retransmits across sockets (#108) — distinct from the
+    /// legacy `retransmits_total` (current `retrans`), this is lifetime `total_retrans`.
+    pub total_retrans_total: u64,
+    /// Sum of reordering events observed across sockets (`reord_seen`, #108).
+    pub reordered_total: u64,
+    /// Sum of currently-lost (unacked, presumed-lost) segments across sockets (#108).
+    pub lost_total: u64,
     /// Established-socket count by TCP congestion-control algorithm (#11). Bounded
     /// cardinality — there are only a handful of algorithms on any host.
     pub by_cong: HashMap<String, u64>,
@@ -305,7 +325,67 @@ pub fn socket_points(host: &str, c: &SocketCounts) -> Vec<TelemetryPoint> {
             "sockets/tcp/rtt_p95_us",
             TelemetryValue::Gauge(c.rtt_p95_us as f64),
         ),
+        // Delivery-health counters (#108) — always emitted (monotonic-ish sums).
+        point(
+            host,
+            "sockets/tcp/bytes_retrans_total",
+            TelemetryValue::Counter(c.bytes_retrans_total),
+        ),
+        point(
+            host,
+            "sockets/tcp/total_retrans_total",
+            TelemetryValue::Counter(c.total_retrans_total),
+        ),
+        point(
+            host,
+            "sockets/tcp/reordered_total",
+            TelemetryValue::Counter(c.reordered_total),
+        ),
+        point(
+            host,
+            "sockets/tcp/lost_total",
+            TelemetryValue::Gauge(c.lost_total as f64),
+        ),
     ];
+    // Delivery/pacing/rcv-rtt percentiles (#108): only meaningful with established
+    // sockets carrying tcp_info — omit when 0 so a quiet host doesn't clobber the
+    // cached gauge with a misleading zero (mirrors the buffer-totals policy).
+    if c.delivery_rate_p50 > 0 || c.delivery_rate_p95 > 0 {
+        out.push(point(
+            host,
+            "sockets/tcp/delivery_rate_p50",
+            TelemetryValue::Gauge(c.delivery_rate_p50 as f64),
+        ));
+        out.push(point(
+            host,
+            "sockets/tcp/delivery_rate_p95",
+            TelemetryValue::Gauge(c.delivery_rate_p95 as f64),
+        ));
+    }
+    if c.pacing_rate_p50 > 0 || c.pacing_rate_p95 > 0 {
+        out.push(point(
+            host,
+            "sockets/tcp/pacing_rate_p50",
+            TelemetryValue::Gauge(c.pacing_rate_p50 as f64),
+        ));
+        out.push(point(
+            host,
+            "sockets/tcp/pacing_rate_p95",
+            TelemetryValue::Gauge(c.pacing_rate_p95 as f64),
+        ));
+    }
+    if c.rcv_rtt_p50_us > 0 || c.rcv_rtt_p95_us > 0 {
+        out.push(point(
+            host,
+            "sockets/tcp/rcv_rtt_p50_us",
+            TelemetryValue::Gauge(c.rcv_rtt_p50_us as f64),
+        ));
+        out.push(point(
+            host,
+            "sockets/tcp/rcv_rtt_p95_us",
+            TelemetryValue::Gauge(c.rcv_rtt_p95_us as f64),
+        ));
+    }
     // Buffer totals (only meaningful when mem info was requested; both 0 → omit).
     if c.snd_buf_total > 0 || c.rcv_buf_total > 0 {
         out.push(point(
@@ -1105,6 +1185,17 @@ mod tests {
             by_cong,
             snd_buf_total: 1_000_000,
             rcv_buf_total: 2_000_000,
+            // Enriched tcp_info (#108).
+            delivery_rate_p50: 5_000_000,
+            delivery_rate_p95: 40_000_000,
+            pacing_rate_p50: 12_000_000,
+            pacing_rate_p95: 60_000_000,
+            rcv_rtt_p50_us: 300,
+            rcv_rtt_p95_us: 900,
+            bytes_retrans_total: 4096,
+            total_retrans_total: 17,
+            reordered_total: 3,
+            lost_total: 2,
             ..Default::default()
         };
         let pts = socket_points("h", &c);
@@ -1116,6 +1207,35 @@ mod tests {
         assert_eq!(
             find("sockets/tcp/retransmits_total").value,
             TelemetryValue::Counter(12)
+        );
+        // #108: enriched delivery-health metrics.
+        assert_eq!(
+            find("sockets/tcp/delivery_rate_p50").value,
+            TelemetryValue::Gauge(5_000_000.0)
+        );
+        assert_eq!(
+            find("sockets/tcp/pacing_rate_p95").value,
+            TelemetryValue::Gauge(60_000_000.0)
+        );
+        assert_eq!(
+            find("sockets/tcp/rcv_rtt_p50_us").value,
+            TelemetryValue::Gauge(300.0)
+        );
+        assert_eq!(
+            find("sockets/tcp/bytes_retrans_total").value,
+            TelemetryValue::Counter(4096)
+        );
+        assert_eq!(
+            find("sockets/tcp/total_retrans_total").value,
+            TelemetryValue::Counter(17)
+        );
+        assert_eq!(
+            find("sockets/tcp/reordered_total").value,
+            TelemetryValue::Counter(3)
+        );
+        assert_eq!(
+            find("sockets/tcp/lost_total").value,
+            TelemetryValue::Gauge(2.0)
         );
         // #11: per-algorithm counts + buffer totals.
         assert_eq!(
@@ -1151,6 +1271,20 @@ mod tests {
         assert!(
             pts.iter()
                 .all(|p| !p.metric.starts_with("sockets/tcp/by_cong/"))
+        );
+        // #108: delivery/pacing/rcv-rtt percentiles omitted when 0 (no clobbering).
+        assert!(pts.iter().all(|p| {
+            !matches!(
+                p.metric.as_str(),
+                "sockets/tcp/delivery_rate_p50"
+                    | "sockets/tcp/pacing_rate_p50"
+                    | "sockets/tcp/rcv_rtt_p50_us"
+            )
+        }));
+        // But the always-on retrans/lost counters ARE present (even at 0).
+        assert!(
+            pts.iter()
+                .any(|p| p.metric == "sockets/tcp/bytes_retrans_total")
         );
     }
 
@@ -1219,6 +1353,13 @@ mod tests {
             snd_cwnd: 0,
             snd_buf: 0,
             rcv_buf: 0,
+            delivery_rate: 0,
+            pacing_rate: 0,
+            bytes_retrans: 0,
+            total_retrans: 0,
+            rcv_rtt_us: 0,
+            lost: 0,
+            reord_seen: 0,
         }
     }
 

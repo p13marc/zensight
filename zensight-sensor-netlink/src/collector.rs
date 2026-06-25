@@ -772,6 +772,10 @@ impl Collector {
 pub fn aggregate_sockets(socks: &[SocketInfo]) -> SocketCounts {
     let mut c = SocketCounts::default();
     let mut rtts: Vec<u64> = Vec::new();
+    // Delivery-health distributions over sockets carrying the data (#108).
+    let mut delivery_rates: Vec<u64> = Vec::new();
+    let mut pacing_rates: Vec<u64> = Vec::new();
+    let mut rcv_rtts: Vec<u64> = Vec::new();
     for s in socks {
         let SocketInfo::Inet(inet) = s else { continue };
         let established = matches!(
@@ -794,6 +798,22 @@ pub fn aggregate_sockets(socks: &[SocketInfo]) -> SocketCounts {
             if ti.rtt > 0 {
                 rtts.push(ti.rtt as u64);
             }
+            // Enriched tcp_info already in the dump but previously dropped (#108).
+            c.bytes_retrans_total += ti.bytes_retrans;
+            c.total_retrans_total += ti.total_retrans as u64;
+            c.reordered_total += ti.reord_seen as u64;
+            c.lost_total += ti.lost as u64;
+            if ti.delivery_rate > 0 {
+                delivery_rates.push(ti.delivery_rate);
+            }
+            // The kernel reports `~0` for an un-paced (unlimited) socket — exclude
+            // it so the percentile reflects real shaping, not the sentinel.
+            if ti.pacing_rate > 0 && ti.pacing_rate != u64::MAX {
+                pacing_rates.push(ti.pacing_rate);
+            }
+            if ti.rcv_rtt > 0 {
+                rcv_rtts.push(ti.rcv_rtt as u64);
+            }
         }
         // Congestion algorithm — count only established sockets (a listener has no
         // negotiated algorithm) so the by_cong breakdown matches `established`.
@@ -807,6 +827,12 @@ pub fn aggregate_sockets(socks: &[SocketInfo]) -> SocketCounts {
     }
     c.rtt_p50_us = percentile(&mut rtts, 50);
     c.rtt_p95_us = percentile(&mut rtts, 95);
+    c.delivery_rate_p50 = percentile(&mut delivery_rates, 50);
+    c.delivery_rate_p95 = percentile(&mut delivery_rates, 95);
+    c.pacing_rate_p50 = percentile(&mut pacing_rates, 50);
+    c.pacing_rate_p95 = percentile(&mut pacing_rates, 95);
+    c.rcv_rtt_p50_us = percentile(&mut rcv_rtts, 50);
+    c.rcv_rtt_p95_us = percentile(&mut rcv_rtts, 95);
     c
 }
 
