@@ -1044,9 +1044,12 @@ fn test_security_drilldown_and_filter() {
     let sec2 = SecurityState {
         selected: Some(alerts.active_external()[0].alert_key()),
         hide_info: false,
+        ..SecurityState::default()
     };
     let mut ui2 = simulator(security_view(&alerts, &sec2));
     assert!(ui2.find("n_observed:").is_ok());
+    // #119: an anomaly with a src exposes the flow-pivot action.
+    assert!(ui2.find("Show flows").is_ok());
 }
 
 /// The expectations authoring view renders and "Add & Push" emits a message.

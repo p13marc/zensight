@@ -140,6 +140,12 @@ pub enum Message {
     FetchSysinfoProcesses(crate::view::specialized::sysinfo_detail::ProcessSort),
     /// A sysinfo process-explorer reply: the decoded records, or an error.
     SysinfoProcessesReceived(Result<Vec<zensight_common::ProcessRecord>, String>),
+    /// Pivot from a Security anomaly to its netring flows (#119): fetch
+    /// `@/query/flows` and filter to the offending `src`. `key` is the anomaly's
+    /// `alert_key` so the result renders under the right row.
+    FetchAnomalyFlows { key: String, src: String },
+    /// A flow-pivot reply for anomaly `key`: the filtered flows, or an error.
+    AnomalyFlowsReceived(String, Result<Vec<zensight_common::FlowRecord>, String>),
 
     /// Open the security (network anomalies) view.
     OpenSecurity,

@@ -273,6 +273,7 @@ fn render_assets(state: &DeviceDetailState) -> Element<'_, Message> {
                     cell("mac", 150),
                     cell("ip", 150),
                     cell("hostname", 150),
+                    cell("vendor", 150),
                     cell("platform", 160),
                     cell("caps", 130),
                     cell("seen via", 110),
@@ -291,6 +292,9 @@ fn render_assets(state: &DeviceDetailState) -> Element<'_, Message> {
                         cell(&r.mac, 150),
                         cell(ip, 150),
                         cell(r.hostname.as_deref().unwrap_or("-"), 150),
+                        // vendor was collected (DHCP opt 60 / LLDP / SSDP) but never
+                        // rendered (#120).
+                        cell(r.vendor.as_deref().unwrap_or("-"), 150),
                         cell(r.platform.as_deref().unwrap_or("-"), 160),
                         cell(&join_or_dash(&r.capabilities), 130),
                         cell(&join_or_dash(&r.seen_via), 110),

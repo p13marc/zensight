@@ -12,10 +12,13 @@ use iced::{Alignment, Element, Length, Theme};
 use iced_anim::widget::button;
 use zensight_common::{Alert, AlertKind, AlertSeverity};
 
+use zensight_common::FlowRecord;
+
 use crate::message::Message;
 use crate::view::alerts::{AlertsState, Severity};
 use crate::view::components::badge;
 use crate::view::icons::{self, IconSize};
+use crate::view::specialized::fetch::Fetch;
 use crate::view::theme;
 use crate::view::tokens::font;
 
@@ -28,6 +31,12 @@ pub struct SecurityState {
     pub hide_info: bool,
     /// The anomaly whose evidence is expanded in the drill-down, if any.
     pub selected: Option<String>,
+    /// On-demand flows pivoted from an anomaly (#119): the netring `@/query/flows`
+    /// reply, filtered to the offending source.
+    pub flows: Fetch<Vec<FlowRecord>>,
+    /// Which anomaly (`alert_key`) the fetched `flows` belong to, so the pivot
+    /// table renders only under the anomaly it was requested from.
+    pub flows_for: Option<String>,
 }
 
 /// Labels shown elsewhere (summary/source), so we don't repeat them as evidence.
@@ -231,7 +240,9 @@ fn render_by_tactic<'a>(anomalies: &[&'a Alert]) -> Element<'a, Message> {
         };
         list = list.push(
             row![
-                text(tactic.to_string()).size(13).width(Length::Fixed(180.0)),
+                text(tactic.to_string())
+                    .size(13)
+                    .width(Length::Fixed(180.0)),
                 text(format!("{n} anomalies")).size(12).style(dim),
                 text(techs_line).size(11).style(dim),
             ]
@@ -360,7 +371,7 @@ fn render_anomaly_row<'a>(a: &'a Alert, sec: &SecurityState) -> Element<'a, Mess
         .on_press(Message::SelectAnomaly(if expanded {
             None
         } else {
-            Some(key)
+            Some(key.clone())
         }))
         .style(iced::widget::button::text)
         .padding(2);
@@ -391,9 +402,86 @@ fn render_anomaly_row<'a>(a: &'a Alert, sec: &SecurityState) -> Element<'a, Mess
         detail = detail.push(text("no evidence labels").size(font::CAPTION).style(dim));
     }
 
+    // Flow drill-down pivot (#119) — the central NDR workflow: from a detection,
+    // pull the netring flows for the offending source. Only detections that name
+    // a source can pivot.
+    if let Some(src) = a.labels.get("src") {
+        let loading = sec.flows_for.as_deref() == Some(key.as_str()) && sec.flows.is_loading();
+        let pivot = button(
+            text(if loading {
+                "Fetching flows…"
+            } else {
+                "Show flows"
+            })
+            .size(11),
+        )
+        .padding([3, 9])
+        .style(iced::widget::button::secondary)
+        .on_press(Message::FetchAnomalyFlows {
+            key: key.clone(),
+            src: src.clone(),
+        });
+        detail = detail.push(pivot);
+
+        if sec.flows_for.as_deref() == Some(key.as_str()) {
+            detail = detail.push(render_pivot_flows(&sec.flows));
+        }
+    }
+
     column![toggle, container(detail).padding([4, 20]),]
         .spacing(2)
         .into()
+}
+
+/// Render the flow-pivot result table for the expanded anomaly (#119).
+fn render_pivot_flows<'a>(flows: &Fetch<Vec<FlowRecord>>) -> Element<'a, Message> {
+    if let Some(err) = flows.error() {
+        return text(format!("flow fetch failed: {err}"))
+            .size(font::CAPTION)
+            .style(dim)
+            .into();
+    }
+    let Some(records) = flows.ready() else {
+        return Column::new().into();
+    };
+    if records.is_empty() {
+        return text("no matching recent flows")
+            .size(font::CAPTION)
+            .style(dim)
+            .into();
+    }
+    let mut list = Column::new().spacing(2).push(
+        row![
+            text("src").size(10).width(Length::Fixed(170.0)),
+            text("dst").size(10).width(Length::Fixed(170.0)),
+            text("proto").size(10).width(Length::Fixed(50.0)),
+            text("bytes").size(10).width(Length::Fixed(80.0)),
+            text("community_id").size(10).width(Length::Fixed(260.0)),
+        ]
+        .spacing(8),
+    );
+    for f in records.iter().take(100) {
+        list = list.push(
+            row![
+                text(f.src.clone()).size(11).width(Length::Fixed(170.0)),
+                text(f.dst.clone()).size(11).width(Length::Fixed(170.0)),
+                text(f.proto.clone()).size(11).width(Length::Fixed(50.0)),
+                text(f.bytes.to_string()).size(11).width(Length::Fixed(80.0)),
+                text(f.community_id.clone().unwrap_or_else(|| "-".into()))
+                    .size(11)
+                    .width(Length::Fixed(260.0)),
+            ]
+            .spacing(8),
+        );
+    }
+    column![
+        text(format!("{} flows for source", records.len()))
+            .size(font::CAPTION)
+            .style(dim),
+        list,
+    ]
+    .spacing(2)
+    .into()
 }
 
 fn evidence_line<'a>(k: &str, v: &str) -> Element<'a, Message> {

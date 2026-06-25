@@ -20,6 +20,21 @@ const STORE_FLUSH_EVERY_TICKS: u32 = 15;
 /// Pruning scans the whole table, so it runs far less often than flushing.
 const STORE_PRUNE_EVERY_FLUSHES: u32 = 40;
 
+/// Reduce an `ip:port` (or bracketed `[ipv6]:port`, or bare `ip`) endpoint to its
+/// bare IP, for matching a flow endpoint against an anomaly's source (#119).
+fn endpoint_ip(endpoint: &str) -> String {
+    if let Ok(sa) = endpoint.parse::<std::net::SocketAddr>() {
+        return sa.ip().to_string();
+    }
+    if let Ok(ip) = endpoint.parse::<std::net::IpAddr>() {
+        return ip.to_string();
+    }
+    match endpoint.rsplit_once(':') {
+        Some((host, _port)) => host.trim_matches(['[', ']']).to_string(),
+        None => endpoint.to_string(),
+    }
+}
+
 /// Cap on the rolling log buffer feeding the top-level Logs view.
 const MAX_RECENT_LOGS: usize = 5000;
 
@@ -1330,6 +1345,18 @@ impl ZenSight {
                     device.sysinfo_detail.apply(result);
                 }
             }
+            Message::FetchAnomalyFlows { key, src } => {
+                self.security.flows_for = Some(key.clone());
+                self.security.flows = crate::view::specialized::fetch::Fetch::Loading;
+                return self.query_anomaly_flows(key, src);
+            }
+            Message::AnomalyFlowsReceived(key, result) => {
+                // Ignore a stale reply if the user has since pivoted elsewhere.
+                if self.security.flows_for.as_deref() == Some(key.as_str()) {
+                    self.security.flows =
+                        crate::view::specialized::fetch::Fetch::from_result(result);
+                }
+            }
             Message::OpenSecurity => {
                 self.set_view(CurrentView::Security);
             }
@@ -1721,6 +1748,33 @@ impl ZenSight {
                 .await
                 .ok_or_else(|| "No netring sensor responded".to_string());
             Message::NetringHttpReceived(result)
+        })
+    }
+
+    /// Pivot from a Security anomaly to its netring flows (#119): fetch the
+    /// recent-flow ring and keep only flows whose src or dst IP matches the
+    /// anomaly's offending source. Client-side filtering keeps the sensor's
+    /// `@/query/flows` contract unchanged.
+    fn query_anomaly_flows(&self, key: String, src: String) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_flows;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::AnomalyFlowsReceived(
+                key,
+                Err("Not connected to Zenoh".to_string()),
+            ));
+        };
+        // The anomaly src is `ip:port` or `ip`; reduce it to the bare IP so it
+        // matches both directions of a flow's `ip:port` endpoints.
+        let want_ip = endpoint_ip(&src);
+        Task::future(async move {
+            let result = match fetch_flows(session).await {
+                Some(flows) => Ok(flows
+                    .into_iter()
+                    .filter(|f| endpoint_ip(&f.src) == want_ip || endpoint_ip(&f.dst) == want_ip)
+                    .collect()),
+                None => Err("No netring sensor responded".to_string()),
+            };
+            Message::AnomalyFlowsReceived(key, result)
         })
     }
 
