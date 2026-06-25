@@ -57,10 +57,21 @@ impl DataPoint {
     }
 
     /// Try to create a data point from a telemetry value.
+    ///
+    /// Booleans become a 0/1 step series (#126) so flap-prone signals like
+    /// `iface/*/up` or `carrier` get a trend, not just a snapshot. Text/binary
+    /// remain non-charted.
     pub fn from_telemetry(timestamp: i64, value: &TelemetryValue) -> Option<Self> {
         let numeric_value = match value {
             TelemetryValue::Counter(v) => *v as f64,
             TelemetryValue::Gauge(v) => *v,
+            TelemetryValue::Boolean(b) => {
+                if *b {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
             _ => return None,
         };
         Some(Self::new(timestamp, numeric_value))
@@ -1658,6 +1669,15 @@ mod tests {
         assert!(DataPoint::from_telemetry(1000, &counter).is_some());
         assert!(DataPoint::from_telemetry(1000, &gauge).is_some());
         assert!(DataPoint::from_telemetry(1000, &text).is_none());
+        // #126: booleans chart as a 0/1 step series.
+        assert_eq!(
+            DataPoint::from_telemetry(1000, &TelemetryValue::Boolean(true)).map(|d| d.value),
+            Some(1.0)
+        );
+        assert_eq!(
+            DataPoint::from_telemetry(1000, &TelemetryValue::Boolean(false)).map(|d| d.value),
+            Some(0.0)
+        );
     }
 
     #[test]

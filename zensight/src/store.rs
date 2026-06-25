@@ -120,8 +120,11 @@ pub fn telemetry_to_f64(value: &TelemetryValue) -> Option<f64> {
     match value {
         TelemetryValue::Counter(v) => Some(*v as f64),
         TelemetryValue::Gauge(v) => Some(*v),
-        // Booleans/text/binary are not numeric series — skip, don't fake a 0.
-        TelemetryValue::Boolean(_) | TelemetryValue::Text(_) | TelemetryValue::Binary(_) => None,
+        // Booleans become a 0/1 step series (#126) so flap-prone signals (iface
+        // up/carrier, route present, wg up) get history + trend, not a snapshot.
+        TelemetryValue::Boolean(b) => Some(if *b { 1.0 } else { 0.0 }),
+        // Text/binary aren't numeric series — skip, don't fake a 0.
+        TelemetryValue::Text(_) | TelemetryValue::Binary(_) => None,
     }
 }
 
