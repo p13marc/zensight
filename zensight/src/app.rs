@@ -1022,6 +1022,10 @@ impl ZenSight {
                 self.syslog_filter.toggle_facility(facility);
             }
 
+            Message::ToggleSyslogUnit(unit) => {
+                self.syslog_filter.toggle_unit(unit);
+            }
+
             Message::SetSyslogAppFilter(filter) => {
                 self.syslog_filter.set_app_filter(filter);
             }

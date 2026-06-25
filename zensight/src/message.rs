@@ -468,6 +468,9 @@ pub enum Message {
     /// Toggle inclusion of a facility in the filter.
     ToggleSyslogFacility(String),
 
+    /// Toggle inclusion of a systemd unit in the filter (journald lens, #64).
+    ToggleSyslogUnit(String),
+
     /// Set syslog app name filter pattern.
     SetSyslogAppFilter(String),
 

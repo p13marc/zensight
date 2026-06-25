@@ -109,12 +109,50 @@ pub struct SyslogMessage {
     hostname: String,
     app_name: String,
     message: String,
+    /// Ingestion provenance (#64): journald vs network vs unix socket.
+    source_kind: LogSource,
+    /// systemd unit (`_SYSTEMD_UNIT`), journald-only — the per-unit lens.
+    unit: Option<String>,
 }
 
 impl SyslogMessage {
     /// The originating host (used to filter the buffer per device).
     pub fn host(&self) -> &str {
         &self.hostname
+    }
+
+    /// The systemd unit, if this entry came from journald with one.
+    pub fn unit(&self) -> Option<&str> {
+        self.unit.as_deref()
+    }
+}
+
+/// Where a log entry was ingested from — drives the per-row provenance badge
+/// (#64). journald entries carry far richer structure than network syslog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogSource {
+    Journald,
+    Unix,
+    Network,
+}
+
+impl LogSource {
+    /// Short badge label.
+    pub fn label(self) -> &'static str {
+        match self {
+            LogSource::Journald => "journald",
+            LogSource::Unix => "unix",
+            LogSource::Network => "net",
+        }
+    }
+
+    /// Classify from the point's `source_type` label (journald / unix / addr).
+    fn from_source_type(s: &str) -> Self {
+        match s {
+            "journald" => LogSource::Journald,
+            "unix" => LogSource::Unix,
+            _ => LogSource::Network,
+        }
     }
 }
 
@@ -127,6 +165,8 @@ pub struct SyslogFilterState {
     pub min_severity: Option<u8>,
     /// Facilities to show (empty = all).
     pub selected_facilities: std::collections::HashSet<String>,
+    /// systemd units to show (empty = all) — the journald unit lens (#64).
+    pub selected_units: std::collections::HashSet<String>,
     /// App name filter pattern.
     pub app_filter: String,
     /// Message content filter pattern.
@@ -142,8 +182,19 @@ impl SyslogFilterState {
     pub fn has_active_filters(&self) -> bool {
         self.min_severity.is_some()
             || !self.selected_facilities.is_empty()
+            || !self.selected_units.is_empty()
             || !self.app_filter.is_empty()
             || !self.message_filter.is_empty()
+    }
+
+    /// Toggle a systemd unit in the unit filter (#64).
+    pub fn toggle_unit(&mut self, unit: String) {
+        if self.selected_units.contains(&unit) {
+            self.selected_units.remove(&unit);
+        } else {
+            self.selected_units.insert(unit);
+        }
+        self.modified = true;
     }
 
     /// Set minimum severity.
@@ -178,6 +229,7 @@ impl SyslogFilterState {
     pub fn clear(&mut self) {
         self.min_severity = None;
         self.selected_facilities.clear();
+        self.selected_units.clear();
         self.app_filter.clear();
         self.message_filter.clear();
         self.modified = true;
@@ -267,12 +319,91 @@ pub fn syslog_event_view<'a>(
         content = content.push(card(render_filter_panel(messages, filter_state)));
     }
     content = content.push(card(render_severity_summary(messages, filter_state)));
+    // Derived rollups (#63/#64): rendered when the logs sensor publishes them.
+    if state.metrics.keys().any(|k| k.starts_with("logs/")) {
+        content = content.push(card(render_logs_rollup(state)));
+    }
     content = content.push(card(render_log_stream(messages, filter_state)));
 
     container(content)
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+/// Derived log-rollup panel (#64): consumes the sensor's `logs/*` metrics (#63)
+/// — error/warning totals, units-in-failure, per-severity volume, the noisiest
+/// units, and journald throughput — mirroring the netring RED card pattern.
+fn render_logs_rollup(state: &DeviceDetailState) -> Element<'_, Message> {
+    let num = |m: &str| -> String {
+        match state.metrics.get(m).map(|p| &p.value) {
+            Some(TelemetryValue::Counter(c)) => c.to_string(),
+            Some(TelemetryValue::Gauge(g)) => format!("{g:.0}"),
+            _ => "-".into(),
+        }
+    };
+    let muted = |t: &Theme| text::Style {
+        color: Some(theme::colors(t).text_muted()),
+    };
+    let line = |label: &str, value: String| -> Element<'_, Message> {
+        row![
+            text(label.to_string()).size(12).width(Length::Fixed(220.0)),
+            text(value).size(12),
+        ]
+        .spacing(8)
+        .into()
+    };
+
+    let mut col = column![
+        row![icons::log(IconSize::Medium), text("Log Rollups").size(16)]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        line("errors (total)", num("logs/errors_total")),
+        line("warnings (total)", num("logs/warnings_total")),
+        line("units in failure", num("logs/units_in_failure")),
+    ]
+    .spacing(6);
+
+    // journald throughput, when present.
+    if state.metrics.contains_key("logs/journald/read_total") {
+        col = col
+            .push(text("journald throughput").size(12).style(muted))
+            .push(line("  read (total)", num("logs/journald/read_total")))
+            .push(line(
+                "  published (total)",
+                num("logs/journald/published_total"),
+            ))
+            .push(line(
+                "  dropped (total)",
+                num("logs/journald/dropped_total"),
+            ));
+    }
+
+    // Top noisiest units by message count (from the per-unit series).
+    let mut units: Vec<(String, u64)> = state
+        .metrics
+        .iter()
+        .filter_map(|(m, p)| {
+            let unit = m
+                .strip_prefix("logs/by_unit/")?
+                .strip_suffix("/messages_total")?;
+            let n = match &p.value {
+                TelemetryValue::Counter(c) => *c,
+                TelemetryValue::Gauge(g) => *g as u64,
+                _ => return None,
+            };
+            Some((unit.to_string(), n))
+        })
+        .collect();
+    if !units.is_empty() {
+        units.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        col = col.push(text("by unit (top)").size(12).style(muted));
+        for (unit, n) in units.into_iter().take(10) {
+            col = col.push(line(&format!("  {unit}"), n.to_string()));
+        }
+    }
+
+    col.into()
 }
 
 /// Top-level **Logs** view: a unified, filterable feed of recent log lines from
@@ -455,6 +586,39 @@ fn render_filter_panel<'a>(
         .spacing(10)
         .align_y(Alignment::Center);
 
+    // Unit chips (#64): the journald per-unit lens — built from observed units
+    // in the current buffer. Hidden entirely when no journald units are seen.
+    let mut units: Vec<String> = messages
+        .iter()
+        .filter_map(|m| m.unit.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    units.sort();
+    let unit_row: Element<'_, Message> = if units.is_empty() {
+        text("").into()
+    } else {
+        let mut chips: Vec<Element<'_, Message>> = vec![text("Units:").size(13).into()];
+        for unit in units.into_iter().take(50) {
+            let is_selected = filter_state.selected_units.contains(&unit);
+            let label = unit.clone();
+            chips.push(
+                button(text(label).size(12))
+                    .on_press(Message::ToggleSyslogUnit(unit))
+                    .style(if is_selected {
+                        iced::widget::button::primary
+                    } else {
+                        iced::widget::button::secondary
+                    })
+                    .into(),
+            );
+        }
+        Row::with_children(chips)
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into()
+    };
+
     // App filter input
     let app_filter_row = row![
         text("App Pattern:").size(13),
@@ -518,6 +682,7 @@ fn render_filter_panel<'a>(
         title,
         severity_picker,
         facility_row,
+        unit_row,
         app_filter_row,
         msg_filter_row,
         buttons_row,
@@ -692,6 +857,33 @@ fn render_log_stream<'a>(
         },
     );
 
+    // Provenance badge (#64): journald / unix / net, so operators see where a
+    // line came from at a glance.
+    let source_column = table::column(
+        text("Src").size(11),
+        |msg: SyslogMessage| -> Element<'_, Message> {
+            text(msg.source_kind.label())
+                .size(10)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
+                })
+                .into()
+        },
+    );
+
+    // systemd unit (#64): empty for non-journald lines.
+    let unit_column = table::column(
+        text("Unit").size(11),
+        |msg: SyslogMessage| -> Element<'_, Message> {
+            text(msg.unit.clone().unwrap_or_else(|| "-".to_string()))
+                .size(10)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
+                })
+                .into()
+        },
+    );
+
     let message_column = table::column(
         text("Message").size(11),
         |msg: SyslogMessage| -> Element<'_, Message> {
@@ -709,8 +901,10 @@ fn render_log_stream<'a>(
         [
             time_column,
             severity_column,
+            source_column,
             host_column,
             facility_column,
+            unit_column,
             app_column,
             message_column,
         ],
@@ -789,6 +983,18 @@ pub fn syslog_message_from_point(point: &TelemetryPoint, source_fallback: &str) 
         _ => format!("{:?}", point.value),
     };
 
+    // Provenance + journald unit (#64), from the labels the logs sensor sets.
+    let source_kind = point
+        .labels
+        .get("source_type")
+        .map(|s| LogSource::from_source_type(s))
+        .unwrap_or(LogSource::Network);
+    let unit = point
+        .labels
+        .get("sd.journald.unit")
+        .filter(|u| !u.is_empty())
+        .cloned();
+
     SyslogMessage {
         timestamp: point.timestamp,
         severity,
@@ -796,6 +1002,8 @@ pub fn syslog_message_from_point(point: &TelemetryPoint, source_fallback: &str) 
         hostname,
         app_name,
         message,
+        source_kind,
+        unit,
     }
 }
 
@@ -817,6 +1025,16 @@ fn apply_local_filters(
             // Facility filter (if any selected, only show those)
             if !filter_state.selected_facilities.is_empty()
                 && !filter_state.selected_facilities.contains(&msg.facility)
+            {
+                return false;
+            }
+
+            // Unit filter (#64): if any selected, only show those units.
+            if !filter_state.selected_units.is_empty()
+                && !msg
+                    .unit
+                    .as_ref()
+                    .is_some_and(|u| filter_state.selected_units.contains(u))
             {
                 return false;
             }
@@ -865,6 +1083,58 @@ mod tests {
     fn test_severity_ordering() {
         assert!(SyslogSeverity::Emergency < SyslogSeverity::Alert);
         assert!(SyslogSeverity::Error < SyslogSeverity::Warning);
+    }
+
+    /// #64: a journald point yields a `Journald` source and a unit; the unit
+    /// filter then narrows the stream to the selected unit.
+    #[test]
+    fn unit_and_source_extracted_and_filtered() {
+        use std::collections::HashMap;
+        use zensight_common::{TelemetryPoint, TelemetryValue};
+
+        let mk = |unit: &str, src: &str| {
+            let mut labels = HashMap::new();
+            labels.insert("source_type".to_string(), src.to_string());
+            labels.insert("sd.journald.unit".to_string(), unit.to_string());
+            let point = TelemetryPoint {
+                timestamp: 1,
+                source: "host01".into(),
+                protocol: Protocol::Syslog,
+                metric: "daemon/info".into(),
+                value: TelemetryValue::Text("hi".into()),
+                labels,
+            };
+            syslog_message_from_point(&point, "host01")
+        };
+
+        let nginx = mk("nginx.service", "journald");
+        assert_eq!(nginx.source_kind, LogSource::Journald);
+        assert_eq!(nginx.unit(), Some("nginx.service"));
+
+        let msgs = vec![nginx, mk("cron.service", "journald")];
+        let mut filter = SyslogFilterState::default();
+        filter.toggle_unit("nginx.service".into());
+        let shown = apply_local_filters(&msgs, &filter);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].unit(), Some("nginx.service"));
+        assert!(filter.has_active_filters());
+    }
+
+    #[test]
+    fn network_point_has_no_unit() {
+        use std::collections::HashMap;
+        use zensight_common::{TelemetryPoint, TelemetryValue};
+        let point = TelemetryPoint {
+            timestamp: 1,
+            source: "10.0.0.9".into(),
+            protocol: Protocol::Syslog,
+            metric: "daemon/info".into(),
+            value: TelemetryValue::Text("hi".into()),
+            labels: HashMap::new(),
+        };
+        let m = syslog_message_from_point(&point, "10.0.0.9");
+        assert_eq!(m.source_kind, LogSource::Network);
+        assert_eq!(m.unit(), None);
     }
 
     #[test]
