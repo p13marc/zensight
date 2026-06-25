@@ -107,6 +107,10 @@ pub enum Message {
     FetchNetringTls,
     /// A netring TLS-inventory reply: the decoded records, or an error message.
     NetringTlsReceived(Result<Vec<zensight_common::TlsRecord>, String>),
+    /// Fetch the on-demand netring passive asset inventory (#70).
+    FetchNetringAssets,
+    /// A netring asset-inventory reply: the decoded records, or an error message.
+    NetringAssetsReceived(Result<Vec<zensight_common::AssetRecord>, String>),
 
     /// Open the security (network anomalies) view.
     OpenSecurity,

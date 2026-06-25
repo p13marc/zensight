@@ -122,9 +122,14 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
 
 - **Telemetry:** `zensight/netring/<sensor>/<metric>` — flow RED (started/ended/
   bytes/packets/retransmits/duration percentiles), per-L4 + connection-state
-  composition, TCP resets, DNS RED, HTTP RED, TLS fingerprint counts, ICMP errors.
+  composition, TCP resets, DNS RED, HTTP RED, TLS fingerprint counts, ICMP errors,
+  passive asset count (`assets/discovered`).
 - **On-demand detail** (`@/query/<topic>`): `flows`, `tls`, `talkers?top=N`,
-  `elephant_flows`, `dns?top=N`, `http?top=N`.
+  `elephant_flows`, `dns?top=N`, `http?top=N`, `assets`.
+- **Passive asset inventory (netring 0.27):** with `collect.assets`, discovers
+  hosts on the wire from ARP / NDP / LLDP (+ CDP via `collect.asset_cdp`) into a
+  MAC-keyed inventory (MAC / IP / hostname / platform / capabilities / seen-via),
+  served on `@/query/assets`. Covers hosts that emit no telemetry of their own.
 - **Alerts:** `@/alerts/<alert_key>` from detectors and threat-intel —
   - Detectors: TRW port-scan, RITA beaconing, connection-flood, DGA/DNS-tunneling.
   - **Threat-intel (netring 0.27):** flow-risk scoring (obsolete TLS, cleartext
