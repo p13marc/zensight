@@ -150,12 +150,15 @@ impl ZenSight {
         // Load persistent settings from disk
         let persistent = PersistentSettings::load();
 
-        // Build Zenoh configuration from loaded settings
+        // Build Zenoh configuration from loaded settings, then apply
+        // `ZENSIGHT_ZENOH_*` env overrides so a launcher (e.g. `just run`) can
+        // pin explicit local endpoints instead of relying on multicast discovery.
         let zenoh_config = ZenohConfig {
             mode: persistent.zenoh_mode.clone(),
             connect: persistent.zenoh_connect.clone(),
             listen: persistent.zenoh_listen.clone(),
-        };
+        }
+        .with_env_overrides();
 
         let stale_threshold_ms = (persistent.stale_threshold_secs * 1000) as i64;
 

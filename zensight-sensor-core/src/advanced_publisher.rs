@@ -214,6 +214,25 @@ impl AdvancedPublisherRegistry {
         Ok(())
     }
 
+    /// Publish a telemetry point to a full key (bypassing the prefix), via an
+    /// advanced publisher created on first use for that key.
+    pub async fn publish_to_key(&self, key: &str, point: &TelemetryPoint) -> Result<()> {
+        self.get_or_create_publisher(key).await?;
+        let payload =
+            encode(point, self.format).map_err(|e| SensorError::Serialization(e.to_string()))?;
+        let publishers = self.publishers.read().await;
+        if let Some(publisher) = publishers.get(key) {
+            publisher
+                .put(payload)
+                .await
+                .map_err(|e| SensorError::Publish {
+                    key: key.to_string(),
+                    message: e.to_string(),
+                })?;
+        }
+        Ok(())
+    }
+
     /// Publish a batch of telemetry points.
     ///
     /// Returns statistics about the batch operation.

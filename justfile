@@ -23,6 +23,12 @@ relflag := if profile == "release" { "--release" } else { "" }
 # Run configs are generated here (gitignored), so committed examples stay clean.
 rundir := ".run"
 
+# Local Zenoh rendezvous: the GUI listens here and sensors connect to it, so the
+# pieces always find each other on loopback without relying on multicast peer
+# discovery (which is unreliable on hosts with a VPN or extra interfaces, e.g.
+# tailscale/docker). Honored via the ZENSIGHT_ZENOH_* env vars.
+hub := "tcp/127.0.0.1:7447"
+
 _default:
     @just --list
 
@@ -67,24 +73,25 @@ configure:
 # ── Run (individual) ─────────────────────────────────────────────────────────
 
 # Run the desktop GUI.
+# The GUI listens on the loopback hub so separately-run sensors can connect.
 gui: build
-    {{bindir}}/zensight
+    ZENSIGHT_ZENOH_LISTEN="{{hub}}" {{bindir}}/zensight
 
 # Run the netring sensor (wire flows + anomaly alerts).
 netring: caps configure
-    {{bindir}}/zensight-sensor-netring --config {{rundir}}/netring.json5
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-sensor-netring --config {{rundir}}/netring.json5
 
 # Run the netlink sensor (kernel interfaces/sockets + expectation alerts).
 netlink: build configure
-    {{bindir}}/zensight-sensor-netlink --config {{rundir}}/netlink.json5
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-sensor-netlink --config {{rundir}}/netlink.json5
 
 # Run the sysinfo sensor (CPU/memory/disk/network).
 sysinfo: build configure
-    {{bindir}}/zensight-sensor-sysinfo --config {{rundir}}/sysinfo.json5
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-sensor-sysinfo --config {{rundir}}/sysinfo.json5
 
 # Run the logs sensor (systemd journal via journald + known-event alerts).
 logs: build configure
-    {{bindir}}/zensight-sensor-syslog --config {{rundir}}/syslog.json5
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-sensor-syslog --config {{rundir}}/syslog.json5
 
 # ── Run (everything) ─────────────────────────────────────────────────────────
 
@@ -92,7 +99,9 @@ logs: build configure
 run: setup configure
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "Starting sensors (logs in {{rundir}}/)…"
+    # Sensors connect to the GUI's loopback rendezvous (no multicast needed).
+    export ZENSIGHT_ZENOH_CONNECT="{{hub}}"
+    echo "Starting sensors (logs in {{rundir}}/), connecting to {{hub}}…"
     {{bindir}}/zensight-sensor-sysinfo --config {{rundir}}/sysinfo.json5 > {{rundir}}/sysinfo.log 2>&1 &
     {{bindir}}/zensight-sensor-netlink --config {{rundir}}/netlink.json5 > {{rundir}}/netlink.log 2>&1 &
     {{bindir}}/zensight-sensor-netring --config {{rundir}}/netring.json5 > {{rundir}}/netring.log 2>&1 &
@@ -100,8 +109,9 @@ run: setup configure
     # Stop all sensors when the GUI exits (or on Ctrl-C).
     trap 'echo; echo "Stopping sensors…"; kill 0' EXIT
     sleep 1
-    echo "Launching GUI (close it to stop everything)…"
-    {{bindir}}/zensight
+    echo "Launching GUI (listening on {{hub}}; close it to stop everything)…"
+    unset ZENSIGHT_ZENOH_CONNECT
+    ZENSIGHT_ZENOH_LISTEN="{{hub}}" {{bindir}}/zensight
 
 # Stop any running sensors started by `just run`.
 stop:

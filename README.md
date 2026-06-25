@@ -87,6 +87,20 @@ just run                 # GUI + local sensors
 just <sensor>            # one sensor: netring | netlink | sysinfo | logs
 ```
 
+`just run` pins an explicit loopback rendezvous (the GUI listens on
+`tcp/127.0.0.1:7447`; sensors connect to it) so the pieces always find each
+other **without** relying on multicast peer discovery — which is unreliable on
+hosts with a VPN or extra interfaces (tailscale, docker, …). To point the GUI or
+a sensor at specific endpoints yourself, set `ZENSIGHT_ZENOH_CONNECT`,
+`ZENSIGHT_ZENOH_LISTEN`, or `ZENSIGHT_ZENOH_MODE` (comma-separated endpoint
+lists), which override the config.
+
+> **Seeing no metrics/logs in the GUI?** It's almost always discovery: the GUI
+> and sensors didn't form a Zenoh session. `just run` fixes this with the
+> loopback rendezvous; if you launch pieces by hand, give them matching
+> `connect`/`listen` endpoints (or the env vars above) instead of bare `peer`
+> mode.
+
 ### Run individual sensors
 
 ```bash
