@@ -135,6 +135,11 @@ pub enum Message {
     FetchNetringHttp,
     /// A netring HTTP-detail reply: the decoded records, or an error message.
     NetringHttpReceived(Result<Vec<zensight_common::HttpHostRecord>, String>),
+    /// Fetch the on-demand sysinfo process explorer for the selected host,
+    /// sorted as requested (#47).
+    FetchSysinfoProcesses(crate::view::specialized::sysinfo_detail::ProcessSort),
+    /// A sysinfo process-explorer reply: the decoded records, or an error.
+    SysinfoProcessesReceived(Result<Vec<zensight_common::ProcessRecord>, String>),
 
     /// Open the security (network anomalies) view.
     OpenSecurity,

@@ -2,17 +2,20 @@
 //!
 //! Displays system metrics with gauges for CPU, memory, and disk usage.
 
-use iced::widget::{Column, Row, column, container, row, scrollable, text};
+use iced::widget::{Column, Row, button, column, container, row, scrollable, text};
 use iced::{Alignment, Element, Length, Theme};
 
 use zensight_common::TelemetryValue;
 
 use crate::message::Message;
 use crate::view::components::card;
-use crate::view::components::{Gauge, ProgressBar, StatusLed, StatusLedState};
+use crate::view::components::{
+    Gauge, ProgressBar, StatusLed, StatusLedState, empty_state, section_header,
+};
 use crate::view::device::DeviceDetailState;
 use crate::view::formatting::format_timestamp;
 use crate::view::icons::{self, IconSize};
+use crate::view::specialized::sysinfo_detail::ProcessSort;
 use crate::view::theme;
 use crate::view::tokens::space;
 
@@ -56,6 +59,11 @@ pub fn sysinfo_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
     if has_processes(state) {
         content = content.push(card(render_processes_section(state)));
     }
+
+    // On-demand process explorer (#47) — the rich `@/query/processes` table
+    // (rss/vsz/threads/io/state/uid), always available for a sysinfo host since
+    // it's pulled lazily rather than streamed.
+    content = content.push(card(render_process_explorer(state)));
 
     // Saturation/pressure depth (#47) — only when the sensor publishes it.
     if has_prefix(state, "pressure/") {
@@ -925,6 +933,104 @@ fn render_processes_section(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     column![title, content].spacing(10).into()
+}
+
+/// On-demand process explorer (#47): a sort toggle (CPU / Memory / I/O) that
+/// fetches the rich `@/query/processes` table and renders it. Distinct from the
+/// streamed top-10 above — this carries rss/vsz/threads/io/state/uid and is
+/// pulled lazily (the per-pid firehose is never streamed, principle P2).
+fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
+    let detail = &state.sysinfo_detail;
+    let loading = detail.processes.is_loading();
+
+    // One button per sort; the active sort is highlighted, and all are disabled
+    // while a fetch is in flight.
+    let sort_button = |sort: ProcessSort| {
+        let active = detail.sort == sort;
+        let label = format!("By {}", sort.label());
+        let mut b = button(text(label).size(11)).padding([4, 10]);
+        if !loading {
+            b = b.on_press(Message::FetchSysinfoProcesses(sort));
+        }
+        if active {
+            b = b.style(iced::widget::button::primary);
+        } else {
+            b = b.style(iced::widget::button::secondary);
+        }
+        b
+    };
+    let controls = row![
+        sort_button(ProcessSort::Cpu),
+        sort_button(ProcessSort::Mem),
+        sort_button(ProcessSort::Io),
+        text(if loading { "Fetching…" } else { "" })
+            .size(11)
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            }),
+    ]
+    .spacing(space::SM)
+    .align_y(Alignment::Center);
+
+    let mut col = column![section_header("Process Explorer", None), controls].spacing(space::SM);
+
+    if let Some(err) = detail.processes.error() {
+        col = col.push(empty_state(format!("Fetch failed: {err}"), None));
+    } else if let Some(procs) = detail.processes.ready() {
+        if procs.is_empty() {
+            col = col.push(empty_state("No processes returned", None));
+        } else {
+            let mut list = Column::new().spacing(3).push(
+                row![
+                    text("pid").size(10).width(70),
+                    text("name").size(10).width(160),
+                    text("cpu%").size(10).width(60),
+                    text("rss").size(10).width(90),
+                    text("vsz").size(10).width(90),
+                    text("thr").size(10).width(50),
+                    text("state").size(10).width(70),
+                    text("io r/w").size(10).width(140),
+                ]
+                .spacing(8),
+            );
+            for p in procs.iter().take(200) {
+                list = list.push(
+                    row![
+                        text(p.pid.to_string()).size(11).width(70),
+                        text(p.name.clone()).size(11).width(160),
+                        text(format!("{:.1}", p.cpu)).size(11).width(60),
+                        text(format_bytes(p.rss as f64)).size(11).width(90),
+                        text(format_bytes(p.vsz as f64)).size(11).width(90),
+                        text(p.threads.map(|t| t.to_string()).unwrap_or_default())
+                            .size(11)
+                            .width(50),
+                        text(p.state.clone()).size(11).width(70),
+                        text(format!(
+                            "{} / {}",
+                            format_bytes(p.io_read as f64),
+                            format_bytes(p.io_write as f64)
+                        ))
+                        .size(11)
+                        .width(140),
+                    ]
+                    .spacing(8),
+                );
+            }
+            col = col
+                .push(text(format!("{} processes", procs.len())).size(12))
+                .push(list);
+        }
+    } else {
+        col = col.push(
+            text("Pick a sort to fetch the live process table.")
+                .size(11)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
+                }),
+        );
+    }
+
+    col.into()
 }
 
 // Helper functions

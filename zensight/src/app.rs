@@ -1293,6 +1293,23 @@ impl ZenSight {
                     device.netring_detail.apply_http(result);
                 }
             }
+            Message::FetchSysinfoProcesses(sort) => {
+                let host = self
+                    .selected_device
+                    .as_mut()
+                    .map(|device| {
+                        device.sysinfo_detail.loading(sort);
+                        device.device_id.source.clone()
+                    });
+                if let Some(host) = host {
+                    return self.query_sysinfo_processes(host, sort);
+                }
+            }
+            Message::SysinfoProcessesReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.sysinfo_detail.apply(result);
+                }
+            }
             Message::OpenSecurity => {
                 self.set_view(CurrentView::Security);
             }
@@ -1684,6 +1701,27 @@ impl ZenSight {
                 .await
                 .ok_or_else(|| "No netring sensor responded".to_string());
             Message::NetringHttpReceived(result)
+        })
+    }
+
+    /// Fetch the on-demand sysinfo process explorer for `host` (#47). The sysinfo
+    /// query channel is host-scoped, so the key carries the device source.
+    fn query_sysinfo_processes(
+        &self,
+        host: String,
+        sort: crate::view::specialized::sysinfo_detail::ProcessSort,
+    ) -> Task<Message> {
+        use crate::view::specialized::sysinfo_detail::fetch_processes;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::SysinfoProcessesReceived(Err(
+                "Not connected to Zenoh".to_string(),
+            )));
+        };
+        Task::future(async move {
+            let result = fetch_processes(session, host, sort)
+                .await
+                .ok_or_else(|| "No sysinfo sensor responded".to_string());
+            Message::SysinfoProcessesReceived(result)
         })
     }
 

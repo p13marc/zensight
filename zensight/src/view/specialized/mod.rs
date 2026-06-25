@@ -13,6 +13,7 @@ pub mod netring;
 pub mod netring_detail;
 pub mod snmp;
 pub mod sysinfo;
+pub mod sysinfo_detail;
 pub mod syslog;
 
 use iced::{Element, Length};

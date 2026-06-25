@@ -89,6 +89,9 @@ pub struct DeviceDetailState {
     pub netlink_detail: crate::view::specialized::netlink_detail::NetlinkDetailState,
     /// On-demand netring flow detail, fetched lazily from `@/query/flows`.
     pub netring_detail: crate::view::specialized::netring_detail::NetringDetailState,
+    /// On-demand sysinfo process explorer, fetched lazily from
+    /// `@/query/processes` (#47).
+    pub sysinfo_detail: crate::view::specialized::sysinfo_detail::SysinfoDetailState,
     /// Whether the chart panel is expanded to a taller height (#36).
     pub chart_expanded: bool,
     /// Text-input buffer for the custom relative window in minutes (#36).
@@ -116,6 +119,7 @@ impl DeviceDetailState {
             pending_filter_time: 0,
             netlink_detail: Default::default(),
             netring_detail: Default::default(),
+            sysinfo_detail: Default::default(),
             chart_expanded: false,
             chart_custom_input: String::new(),
         }
