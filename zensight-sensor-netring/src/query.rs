@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use crate::map;
 use crate::monitor::{
-    AssetInventory, DnsInventory, ElephantRing, FlowRing, HttpInventory, TalkerHist, TlsInventory,
+    AssetInventory, DnsInventory, ElephantRing, FlowRing, HttpInventory, QuicInventory,
+    SshInventory, TalkerHist, TlsInventory,
 };
 
 /// Default top-N for the talker / domain / host channels when no `?top=` query
@@ -86,6 +87,54 @@ pub async fn run_tls(session: Arc<zenoh::Session>, key_prefix: String, inventory
             }
             Err(e) => tracing::warn!(error = %e, "query: tls serialize failed"),
         }
+    }
+}
+
+/// Run the QUIC SNI/ALPN inventory query channel: `zensight/netring/@/query/quic`
+/// replies with the passive QUIC Initial inventory (most-seen first) as JSON
+/// `Vec<QuicRecord>` (issue #72).
+pub async fn run_quic(session: Arc<zenoh::Session>, key_prefix: String, inventory: QuicInventory) {
+    let key = zensight_common::command::query_key(&key_prefix, "quic");
+    let queryable = match session.declare_queryable(&key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %key, "query: declare quic failed");
+            return;
+        }
+    };
+    tracing::info!(key = %key, "on-demand QUIC inventory query channel ready");
+
+    while let Ok(query) = queryable.recv_async().await {
+        let mut records: Vec<_> = match inventory.lock() {
+            Ok(inv) => inv.values().cloned().collect(),
+            Err(_) => Vec::new(),
+        };
+        records.sort_by_key(|r| std::cmp::Reverse(r.count));
+        reply(&query, &records, "quic").await;
+    }
+}
+
+/// Run the SSH/HASSH inventory query channel: `zensight/netring/@/query/ssh`
+/// replies with the passive HASSH inventory (most-seen first) as JSON
+/// `Vec<SshRecord>` (issue #72).
+pub async fn run_ssh(session: Arc<zenoh::Session>, key_prefix: String, inventory: SshInventory) {
+    let key = zensight_common::command::query_key(&key_prefix, "ssh");
+    let queryable = match session.declare_queryable(&key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %key, "query: declare ssh failed");
+            return;
+        }
+    };
+    tracing::info!(key = %key, "on-demand SSH inventory query channel ready");
+
+    while let Ok(query) = queryable.recv_async().await {
+        let mut records: Vec<_> = match inventory.lock() {
+            Ok(inv) => inv.values().cloned().collect(),
+            Err(_) => Vec::new(),
+        };
+        records.sort_by_key(|r| std::cmp::Reverse(r.count));
+        reply(&query, &records, "ssh").await;
     }
 }
 

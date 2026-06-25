@@ -131,7 +131,13 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
   `capture-overload` SensorHealth alert — the honest "the sensor is silently
   losing your packets" signal. Tunable under `overload` in the config.
 - **On-demand detail** (`@/query/<topic>`): `flows`, `tls`, `talkers?top=N`,
-  `elephant_flows`, `dns?top=N`, `http?top=N`, `assets`.
+  `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`, `assets`.
+- **L7 protocol inventories (netring 0.27, opt-in):** QUIC Initial SNI/ALPN/
+  version (`collect.quic`, UDP/443 — passive, no decryption) and SSH banner +
+  KEXINIT HASSH fingerprints (`collect.ssh`, TCP/22), each served on its
+  `@/query/*` channel with a streamed distinct-count. Cleartext SNMP v1/v2c
+  community strings can be flagged as `cleartext-snmp` anomalies with
+  `collect.snmp_cleartext` (build with `--features snmp`).
 - **Passive asset inventory (netring 0.27):** with `collect.assets`, discovers
   hosts on the wire from ARP / NDP / LLDP (+ CDP via `collect.asset_cdp`) into a
   MAC-keyed inventory (MAC / IP / hostname / platform / capabilities / seen-via),

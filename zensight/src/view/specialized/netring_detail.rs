@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use zensight_common::{AssetRecord, FlowRecord, TlsRecord};
+use zensight_common::{AssetRecord, FlowRecord, QuicRecord, SshRecord, TlsRecord};
 
 use crate::view::specialized::fetch::Fetch;
 
@@ -21,6 +21,16 @@ pub fn tls_key() -> String {
     "zensight/netring/@/query/tls".to_string()
 }
 
+/// The QUIC SNI/ALPN inventory queryable key.
+pub fn quic_key() -> String {
+    "zensight/netring/@/query/quic".to_string()
+}
+
+/// The SSH/HASSH inventory queryable key.
+pub fn ssh_key() -> String {
+    "zensight/netring/@/query/ssh".to_string()
+}
+
 /// The passive asset-inventory queryable key.
 pub fn assets_key() -> String {
     "zensight/netring/@/query/assets".to_string()
@@ -31,6 +41,8 @@ pub fn assets_key() -> String {
 pub struct NetringDetailState {
     pub flows: Fetch<Vec<FlowRecord>>,
     pub tls: Fetch<Vec<TlsRecord>>,
+    pub quic: Fetch<Vec<QuicRecord>>,
+    pub ssh: Fetch<Vec<SshRecord>>,
     pub assets: Fetch<Vec<AssetRecord>>,
 }
 
@@ -55,6 +67,26 @@ impl NetringDetailState {
         self.tls = Fetch::from_result(result);
     }
 
+    /// Mark a QUIC-inventory fetch as in flight.
+    pub fn loading_quic(&mut self) {
+        self.quic = Fetch::Loading;
+    }
+
+    /// Store the QUIC-inventory fetch outcome.
+    pub fn apply_quic(&mut self, result: Result<Vec<QuicRecord>, String>) {
+        self.quic = Fetch::from_result(result);
+    }
+
+    /// Mark an SSH-inventory fetch as in flight.
+    pub fn loading_ssh(&mut self) {
+        self.ssh = Fetch::Loading;
+    }
+
+    /// Store the SSH-inventory fetch outcome.
+    pub fn apply_ssh(&mut self, result: Result<Vec<SshRecord>, String>) {
+        self.ssh = Fetch::from_result(result);
+    }
+
     /// Mark an asset-inventory fetch as in flight.
     pub fn loading_assets(&mut self) {
         self.assets = Fetch::Loading;
@@ -76,6 +108,16 @@ pub async fn fetch_tls(session: Arc<zenoh::Session>) -> Option<Vec<TlsRecord>> {
     super::netlink_detail::fetch_records(session, tls_key()).await
 }
 
+/// Fetch + decode the QUIC SNI/ALPN inventory.
+pub async fn fetch_quic(session: Arc<zenoh::Session>) -> Option<Vec<QuicRecord>> {
+    super::netlink_detail::fetch_records(session, quic_key()).await
+}
+
+/// Fetch + decode the SSH/HASSH inventory.
+pub async fn fetch_ssh(session: Arc<zenoh::Session>) -> Option<Vec<SshRecord>> {
+    super::netlink_detail::fetch_records(session, ssh_key()).await
+}
+
 /// Fetch + decode the passive asset inventory.
 pub async fn fetch_assets(session: Arc<zenoh::Session>) -> Option<Vec<AssetRecord>> {
     super::netlink_detail::fetch_records(session, assets_key()).await
@@ -88,8 +130,32 @@ mod tests {
     #[test]
     fn key_matches_sensor() {
         assert_eq!(flows_key(), "zensight/netring/@/query/flows");
+        assert_eq!(quic_key(), "zensight/netring/@/query/quic");
+        assert_eq!(ssh_key(), "zensight/netring/@/query/ssh");
         assert_eq!(tls_key(), "zensight/netring/@/query/tls");
         assert_eq!(assets_key(), "zensight/netring/@/query/assets");
+    }
+
+    #[test]
+    fn apply_stores_quic_and_ssh() {
+        let mut s = NetringDetailState::default();
+        s.loading_quic();
+        assert!(s.quic.is_loading());
+        s.apply_quic(Ok(vec![QuicRecord {
+            sni: Some("example.com".into()),
+            alpn: vec!["h3".into()],
+            version: "v1".into(),
+            count: 4,
+        }]));
+        assert_eq!(s.quic.ready().map(|v| v.len()), Some(1));
+
+        s.apply_ssh(Ok(vec![SshRecord {
+            hassh: "deadbeef".into(),
+            role: "client".into(),
+            banner: Some("SSH-2.0-OpenSSH_9.6".into()),
+            count: 2,
+        }]));
+        assert_eq!(s.ssh.ready().map(|v| v.len()), Some(1));
     }
 
     #[test]

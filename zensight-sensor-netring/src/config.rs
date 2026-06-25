@@ -181,6 +181,19 @@ pub struct CollectConfig {
     /// Top-talkers + elephant-flows on-demand query channels (issue #21).
     #[serde(default = "default_true")]
     pub talkers: bool,
+    /// L7 QUIC Initial visibility (netring 0.27): passive SNI/ALPN/version from
+    /// the unprotected ClientHello on UDP/443 — the QUIC analogue of TLS SNI.
+    /// Served on `@/query/quic`. Default OFF (opt-in L7).
+    #[serde(default)]
+    pub quic: bool,
+    /// L7 SSH/HASSH visibility (netring 0.27): banner + KEXINIT HASSH handshake
+    /// fingerprints on TCP/22, served on `@/query/ssh`. Default OFF (opt-in L7).
+    #[serde(default)]
+    pub ssh: bool,
+    /// Flag cleartext SNMP v1/v2c community strings (netring 0.27) as anomalies
+    /// → alerts. No-op unless built with `--features snmp`. Default OFF (opt-in).
+    #[serde(default)]
+    pub snmp_cleartext: bool,
     /// Passive asset inventory (netring 0.27): discover hosts on the wire from
     /// L2/L3 discovery traffic (ARP / NDP / LLDP / CDP) into a MAC-keyed
     /// inventory served on `@/query/assets`. Arming the discovery hooks narrows
@@ -208,6 +221,9 @@ impl Default for CollectConfig {
             dns: false,
             http: false,
             talkers: true,
+            quic: false,
+            ssh: false,
+            snmp_cleartext: false,
             assets: false,
             asset_cdp: false,
         }

@@ -17,6 +17,10 @@ path = "src/lib.rs"
 # Sigma rule evaluation (netring 0.27). Off by default — pulls the pure-Rust
 # `sigma-rust` parser via netring. Enable with `--features sigma`.
 sigma = ["netring/sigma"]
+# Cleartext-SNMP detection (netring 0.27, issue #72). Off by default — pulls the
+# SNMP parser via netring. Enable with `--features snmp`, then set
+# `collect.snmp_cleartext` to flag v1/v2c community strings as anomalies.
+snmp = ["netring/snmp"]
 
 [dependencies]
 zensight-common = { path = "../zensight-common" }

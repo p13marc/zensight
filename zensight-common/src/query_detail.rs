@@ -64,6 +64,40 @@ pub struct TlsRecord {
     pub count: u64,
 }
 
+/// One observed QUIC Initial (netring, passive). QUIC carries the destination
+/// hostname (SNI) and ALPN in the *unprotected* Initial ClientHello, so this is
+/// the QUIC analogue of TLS SNI visibility — for the growing share of HTTPS that
+/// has moved off TCP+TLS onto QUIC/h3. Served on demand from `@/query/quic`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuicRecord {
+    /// Server Name Indication from the ClientHello (the dialed hostname).
+    pub sni: Option<String>,
+    /// ALPN protocol identifiers (e.g. `["h3"]`).
+    #[serde(default)]
+    pub alpn: Vec<String>,
+    /// QUIC version label (e.g. `"v1"`, `"v2"`, `"draft-29"`).
+    pub version: String,
+    /// Number of Initials matching this (sni, version).
+    pub count: u64,
+}
+
+/// One observed SSH handshake fingerprint (netring, passive), keyed by HASSH.
+/// HASSH (client) / HASSHServer fingerprints the SSH implementation from its
+/// KEXINIT algorithm lists — fleet fingerprinting + rogue-client detection
+/// without touching the (encrypted) session. Served on demand from `@/query/ssh`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SshRecord {
+    /// HASSH / HASSHServer fingerprint (lowercase-hex MD5).
+    pub hassh: String,
+    /// `"client"` or `"server"` — which side this fingerprint is from.
+    pub role: String,
+    /// Version banner seen on the same flow (e.g. `"SSH-2.0-OpenSSH_9.6"`),
+    /// best-effort correlated; `None` if the banner wasn't observed.
+    pub banner: Option<String>,
+    /// Number of handshakes matching this fingerprint.
+    pub count: u64,
+}
+
 /// One top-talker destination (netring), served on demand from a per-destination
 /// histogram updated as flows end. "Who are the major backends?" — bytes/packets/
 /// flows aggregated per remote endpoint, the operational view distinct from
