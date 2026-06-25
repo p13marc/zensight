@@ -91,10 +91,40 @@ Polls Modbus TCP/RTU registers (coils, discrete inputs, holding/input registers)
 
 ## sysinfo
 
-Local host metrics (CPU, memory, disk, network, load, temperatures).
+Local host metrics (CPU, memory, disk, network, load) plus a Linux saturation /
+error surface (PSI, vmstat, cgroup-v2, thermal/power). All families are gated by
+`collect.*` flags; the families marked **default off** below are opt-in.
 
-- **Telemetry:** `zensight/sysinfo/<hostname>/<metric>` (e.g. `cpu/usage`,
-  `memory/used`, `net/<iface>/rx_bytes`).
+- **Telemetry:** `zensight/sysinfo/<hostname>/<metric>`. The metric families:
+
+  | Family | `collect` flag | Example keys |
+  |--------|----------------|--------------|
+  | system | `system` | `system/uptime`, `system/load` (label `period`), `system/boot_time` |
+  | cpu | `cpu` | `cpu/usage`, `cpu/<n>/usage`, `cpu/<n>/frequency` |
+  | cpu times (Linux) | `cpu_times` | `cpu/times/{user,nice,system,idle,iowait,irq,softirq,steal}`, `cpu<n>/times/*` |
+  | memory | `memory` | `memory/{total,used,available,usage_percent,swap_total,swap_used,swap_percent}` |
+  | memory composition (Linux) | `memory` | `memory/{cached,buffers,slab,dirty,writeback}` |
+  | disk | `disk` | `disk/<mount>/{total,used,available,usage_percent}` |
+  | disk I/O (Linux) | `disk_io` | `disk/<dev>/io/{read_bytes,write_bytes,read_ops,write_ops,time_ms,read_rate,write_rate,read_iops,write_iops}`, plus saturation `disk/<dev>/io/{util_percent,queue_depth}` |
+  | network | `network` | `network/<iface>/{rx_bytes,tx_bytes,rx_packets,tx_packets,rx_errors,tx_errors,rx_rate,tx_rate}` |
+  | network extended (Linux) | `net_dev_extended` | `network/<iface>/{rx_dropped,rx_fifo,rx_frame,multicast,tx_dropped,tx_fifo,tx_colls,tx_carrier}` |
+  | pressure / PSI (Linux) | `pressure` | `pressure/<cpu\|memory\|io>/<some\|full>_{avg10,avg60,avg300,total_us}` |
+  | vmstat (Linux) | `vmstat` | `memory/{oom_kills_total,page_faults_major_total,page_faults_total,paging_in_total,paging_out_total,pgpgin_total,pgpgout_total}` |
+  | kernel derivatives (Linux) | `vmstat` | `system/{context_switches_total,forks_total,procs_running,procs_blocked}` |
+  | fd / inode ceilings (Linux) | `fd_inode` | `system/file_descriptors_{used,max,used_percent}`, `disk/<mount>/{inodes_total,inodes_used,inodes_free,inode_used_percent}` |
+  | processes | `processes` **(default off)** | `system/{processes_total,processes_zombie}`, `process/<rank>/{cpu,memory}` |
+  | temperatures (Linux) | `temperatures` **(default off)** | `sensors/<chip>/<label>/{temp,critical,max}` |
+  | tcp states (Linux) | `tcp_states` **(default off)** | `tcp/<state>`, `tcp/total` |
+  | cgroup-v2 (Linux) | `cgroups` **(default off)** | `cgroup/cpu/{nr_throttled,throttled_usec}`, `cgroup/memory/{current,max,used_percent,oom_kills_total,oom_total}`, `cgroup/<res>/pressure/<scope>_{avg10,total_us}` |
+  | thermal / power (Linux) | `power` **(default off)** | `power/rapl/<zone>/watts`, `sensors/<chip>/<fan>/rpm`, `battery/<name>/{capacity,status}`, `system/entropy_avail` |
+
+  Linux-only families degrade gracefully (an absent `/proc`/`/sys` file is
+  skipped, never emitted as a zero). Per-mount/per-interface/per-device keys are
+  sanitized for the key expression (e.g. `/` → `_`, the root mount → `root`) and
+  carry the original name back in a label.
+- **On-demand detail** (`@/query/<topic>`): `processes?sort=cpu|mem|io&top=N`
+  (`collect.process_query`, default on) — the per-pid firehose, served on
+  request rather than streamed.
 
 ## gnmi
 

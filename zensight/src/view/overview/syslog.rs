@@ -25,17 +25,22 @@ enum Severity {
 }
 
 impl Severity {
-    fn from_value(val: u64) -> Self {
-        match val {
-            0 => Severity::Emergency,
-            1 => Severity::Alert,
-            2 => Severity::Critical,
-            3 => Severity::Error,
-            4 => Severity::Warning,
-            5 => Severity::Notice,
-            6 => Severity::Informational,
-            _ => Severity::Debug,
-        }
+    /// Parse the abbreviated/full severity name the logs sensor emits as the
+    /// second metric-path segment and the `severity` label (e.g. `crit`, `err`,
+    /// `warning`). This is the live contract — the old numeric-`severity` path
+    /// the overview used to read no longer exists (#101).
+    fn from_label(s: &str) -> Option<Self> {
+        Some(match s.to_ascii_lowercase().as_str() {
+            "emerg" | "emergency" => Severity::Emergency,
+            "alert" => Severity::Alert,
+            "crit" | "critical" => Severity::Critical,
+            "err" | "error" => Severity::Error,
+            "warning" | "warn" => Severity::Warning,
+            "notice" => Severity::Notice,
+            "info" | "informational" => Severity::Informational,
+            "debug" => Severity::Debug,
+            _ => return None,
+        })
     }
 
     fn label(&self) -> &'static str {
@@ -132,34 +137,46 @@ fn collect_messages(devices: &HashMap<&DeviceId, &DeviceState>) -> Vec<LogMessag
 
     for (device_id, state) in devices {
         for (key, point) in &state.metrics {
-            if !key.starts_with("message/") {
+            // The logs sensor publishes each line under `<facility>/<severity>`
+            // with the message as a Text value. Skip the derived `logs/*` rollup
+            // counters and any non-text metric (#101 — the old `message/*` +
+            // numeric-severity contract this read no longer exists).
+            if key.starts_with("logs/") {
                 continue;
             }
+            let TelemetryValue::Text(message) = &point.value else {
+                continue;
+            };
 
-            let severity = point
-                .labels
-                .get("severity")
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(Severity::from_value)
-                .unwrap_or(Severity::Informational);
+            // Severity from the metric path's 2nd segment, falling back to the
+            // `severity` label; entries that resolve to neither are skipped.
+            let parts: Vec<&str> = key.split('/').collect();
+            let severity = parts
+                .get(1)
+                .and_then(|s| Severity::from_label(s))
+                .or_else(|| {
+                    point
+                        .labels
+                        .get("severity")
+                        .and_then(|s| Severity::from_label(s))
+                });
+            let Some(severity) = severity else {
+                continue;
+            };
 
             let app_name = point
                 .labels
-                .get("app_name")
+                .get("app")
+                .or_else(|| point.labels.get("app_name"))
                 .or_else(|| point.labels.get("program"))
                 .cloned()
                 .unwrap_or_else(|| "-".to_string());
-
-            let message = match &point.value {
-                TelemetryValue::Text(s) => s.clone(),
-                _ => String::new(),
-            };
 
             messages.push(LogMessage {
                 source: device_id.source.clone(),
                 severity,
                 app_name,
-                message,
+                message: message.clone(),
                 timestamp: point.timestamp,
             });
         }
@@ -312,9 +329,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_severity_from_value() {
-        assert_eq!(Severity::from_value(0), Severity::Emergency);
-        assert_eq!(Severity::from_value(3), Severity::Error);
-        assert_eq!(Severity::from_value(99), Severity::Debug);
+    fn test_severity_from_label() {
+        // The live contract: abbreviated + full severity names (#101).
+        assert_eq!(Severity::from_label("emerg"), Some(Severity::Emergency));
+        assert_eq!(Severity::from_label("err"), Some(Severity::Error));
+        assert_eq!(Severity::from_label("error"), Some(Severity::Error));
+        assert_eq!(Severity::from_label("WARNING"), Some(Severity::Warning));
+        assert_eq!(Severity::from_label("debug"), Some(Severity::Debug));
+        // Numeric strings (the old, no-longer-emitted form) are not severities.
+        assert_eq!(Severity::from_label("3"), None);
+        assert_eq!(Severity::from_label("nonsense"), None);
+    }
+
+    #[test]
+    fn collect_messages_reads_live_facility_severity_contract() {
+        use std::collections::HashMap;
+
+        use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+        use crate::view::dashboard::DeviceState;
+
+        let id = DeviceId::new(Protocol::Syslog, "host1");
+        let mut state = DeviceState::new(id.clone());
+        // A live log line: key `<facility>/<severity>`, message as Text value.
+        state.metrics.insert(
+            "auth/err".to_string(),
+            TelemetryPoint::new(
+                "host1",
+                Protocol::Syslog,
+                "auth/err",
+                TelemetryValue::Text("authentication failure".into()),
+            )
+            .with_label("app", "sshd"),
+        );
+        // A derived rollup counter — must be ignored.
+        state.metrics.insert(
+            "logs/errors_total".to_string(),
+            TelemetryPoint::new(
+                "host1",
+                Protocol::Syslog,
+                "logs/errors_total",
+                TelemetryValue::Counter(5),
+            ),
+        );
+
+        let mut devices: HashMap<&DeviceId, &DeviceState> = HashMap::new();
+        devices.insert(&id, &state);
+        let messages = collect_messages(&devices);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].severity, Severity::Error);
+        assert_eq!(messages[0].app_name, "sshd");
+        assert_eq!(messages[0].message, "authentication failure");
     }
 }
