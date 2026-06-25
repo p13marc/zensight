@@ -603,12 +603,17 @@ fn with_device_nav<'a>(
 pub fn device_view_with_syslog_filter<'a>(
     state: &'a DeviceDetailState,
     syslog_filter: &'a specialized::SyslogFilterState,
+    host_logs: &[specialized::SyslogMessage],
 ) -> Element<'a, Message> {
     use zensight_common::Protocol;
 
-    // For syslog devices, use the specialized view with filter state
+    // For syslog devices, use the specialized view with filter state + the
+    // host's recent log stream (so drilling in shows history, not just latest).
     if state.device_id.protocol == Protocol::Syslog {
-        return with_device_nav(state, specialized::syslog_view(state, syslog_filter));
+        return with_device_nav(
+            state,
+            specialized::syslog_view(state, syslog_filter, host_logs),
+        );
     }
 
     // For other protocols, use the standard device view

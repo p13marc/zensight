@@ -256,7 +256,7 @@ fn test_device_detail_view() {
     }
 
     let syslog_filter = SyslogFilterState::default();
-    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
 
     // Should show the device name
     assert!(ui.find("server01").is_ok());
@@ -277,7 +277,7 @@ fn test_device_back_button() {
     let state = DeviceDetailState::new(device_id);
 
     let syslog_filter = SyslogFilterState::default();
-    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
 
     // Click Back button
     let _ = ui.click("Back");
@@ -343,7 +343,7 @@ fn test_metric_promote_to_alert() {
     state.update(p);
 
     let syslog_filter = SyslogFilterState::default();
-    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
     let _ = ui.click("alert");
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(
@@ -379,7 +379,7 @@ fn test_sysinfo_depth_cards() {
     put("system/file_descriptors_used_percent", 42.0);
 
     let syslog_filter = SyslogFilterState::default();
-    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
     assert!(ui.find("Pressure (PSI)").is_ok());
     assert!(ui.find("cgroup").is_ok());
     assert!(ui.find("System health").is_ok());
@@ -406,7 +406,7 @@ fn test_netlink_tc_panel() {
     put("tc/eth0/fq_codel/overlimits", 7);
 
     let syslog_filter = SyslogFilterState::default();
-    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
     assert!(ui.find("TC / QoS qdiscs").is_ok());
     assert!(ui.find("fq_codel").is_ok());
 }
@@ -433,7 +433,7 @@ fn test_netlink_depth_cards() {
     put("xfrm/sa/total", 4.0);
 
     let syslog_filter = SyslogFilterState::default();
-    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
     assert!(ui.find("IPsec / xfrm").is_ok());
     assert!(ui.find("RTT p95 (us)").is_ok());
 }
@@ -460,7 +460,7 @@ fn test_netring_red_cards() {
     put("flow/by_l4/tcp/flows_total", 7.0);
 
     let syslog_filter = SyslogFilterState::default();
-    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
     assert!(ui.find("DNS (RED)").is_ok());
     assert!(ui.find("HTTP (RED)").is_ok());
     assert!(ui.find("Per-protocol (L4)").is_ok());
@@ -536,7 +536,7 @@ fn test_snmp_specialized_view() {
     }
 
     let syslog_filter = SyslogFilterState::default();
-    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
 
     // Should show the device name
     assert!(ui.find("router01").is_ok());
@@ -572,7 +572,7 @@ fn test_syslog_specialized_view() {
     state.update(point);
 
     let syslog_filter = SyslogFilterState::default();
-    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
 
     // Should show the device name
     assert!(ui.find("server01").is_ok());
@@ -602,7 +602,7 @@ fn test_modbus_specialized_view() {
     state.update(point);
 
     let syslog_filter = SyslogFilterState::default();
-    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
 
     // Should show the device name
     assert!(ui.find("plc01").is_ok());
@@ -639,7 +639,7 @@ fn test_netflow_specialized_view() {
     state.update(point);
 
     let syslog_filter = SyslogFilterState::default();
-    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
 
     // Should show exporter name (NetFlow view shows "Exporter: <name>")
     assert!(ui.find("Exporter: router01").is_ok());
@@ -671,7 +671,7 @@ fn test_gnmi_specialized_view() {
     state.update(point);
 
     let syslog_filter = SyslogFilterState::default();
-    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter));
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
 
     // Should show the device name
     assert!(ui.find("spine01").is_ok());
@@ -1492,4 +1492,38 @@ fn test_nav_opens_logs() {
     let _ = ui.click("Logs");
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(msgs.iter().any(|m| matches!(m, Message::OpenLogs)));
+}
+
+/// Drilling into a syslog device shows the host's recent log *stream* from the
+/// buffer — not just the latest line per facility/severity. Two messages with
+/// the SAME metric must BOTH appear (the old metrics-map view kept only one).
+#[test]
+fn test_syslog_device_shows_host_history() {
+    use zensight::view::specialized::syslog_message_from_point;
+    use zensight_common::{TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId {
+        protocol: Protocol::Syslog,
+        source: "host9".to_string(),
+    };
+    let state = DeviceDetailState::new(device_id);
+
+    let mk = |msg: &str| {
+        let p = TelemetryPoint {
+            timestamp: 1,
+            source: "host9".to_string(),
+            protocol: Protocol::Syslog,
+            metric: "daemon/err".to_string(),
+            value: TelemetryValue::Text(msg.to_string()),
+            labels: HashMap::new(),
+        };
+        syslog_message_from_point(&p, "host9")
+    };
+    let host_logs = vec![mk("FIRST LINE alpha"), mk("SECOND LINE bravo")];
+
+    let filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &filter, &host_logs));
+    assert!(ui.find("host9").is_ok());
+    assert!(ui.find("FIRST LINE alpha").is_ok());
+    assert!(ui.find("SECOND LINE bravo").is_ok());
 }

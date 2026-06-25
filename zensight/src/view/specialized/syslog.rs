@@ -111,6 +111,13 @@ pub struct SyslogMessage {
     message: String,
 }
 
+impl SyslogMessage {
+    /// The originating host (used to filter the buffer per device).
+    pub fn host(&self) -> &str {
+        &self.hostname
+    }
+}
+
 /// Syslog filter state for the UI.
 #[derive(Debug, Clone, Default)]
 pub struct SyslogFilterState {
@@ -234,20 +241,33 @@ const SEVERITY_OPTIONS: [SeverityOption; 9] = [
     },
 ];
 
-/// Render the syslog event specialized view.
+/// Render the syslog event specialized view for one host.
+///
+/// `host_logs` is the app's rolling log buffer already filtered to this device's
+/// host — the full recent stream, so drilling into a syslog sensor shows its
+/// history (not just the latest line per facility/severity). Falls back to the
+/// latest-per-metric snapshot if the buffer has nothing for this host yet.
 pub fn syslog_event_view<'a>(
     state: &'a DeviceDetailState,
     filter_state: &'a SyslogFilterState,
+    host_logs: &[SyslogMessage],
 ) -> Element<'a, Message> {
-    let messages = parse_syslog_messages(state);
-    let mut content = column![render_header(state, filter_state)]
+    let fallback;
+    let messages: &[SyslogMessage] = if host_logs.is_empty() {
+        fallback = parse_syslog_messages(state);
+        &fallback
+    } else {
+        host_logs
+    };
+
+    let mut content = column![render_header(state, filter_state, messages.len())]
         .spacing(space::MD)
         .padding(space::LG);
     if filter_state.panel_open {
-        content = content.push(card(render_filter_panel(&messages, filter_state)));
+        content = content.push(card(render_filter_panel(messages, filter_state)));
     }
-    content = content.push(card(render_severity_summary(&messages, filter_state)));
-    content = content.push(card(render_log_stream(&messages, filter_state)));
+    content = content.push(card(render_severity_summary(messages, filter_state)));
+    content = content.push(card(render_log_stream(messages, filter_state)));
 
     container(content)
         .width(Length::Fill)
@@ -314,6 +334,7 @@ pub fn logs_view<'a>(
 fn render_header<'a>(
     state: &'a DeviceDetailState,
     filter_state: &'a SyslogFilterState,
+    message_count: usize,
 ) -> Element<'a, Message> {
     let back_button = button(
         row![icons::arrow_left(IconSize::Medium), text("Back").size(14)]
@@ -326,7 +347,6 @@ fn render_header<'a>(
     let protocol_icon = icons::protocol_icon(state.device_id.protocol, IconSize::Large);
     let host_name = text(&state.device_id.source).size(24);
 
-    let message_count = state.metrics.len();
     let count_text = text(format!("{} messages", message_count)).size(14);
 
     // Filter toggle button
