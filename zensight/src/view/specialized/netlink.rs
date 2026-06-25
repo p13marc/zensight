@@ -427,22 +427,32 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
     } else if let Some(socks) = d.sockets.ready() {
         let mut list = Column::new().spacing(3).push(
             row![
-                cell("local", 200),
-                cell("remote", 200),
-                cell("state", 110),
-                cell("rtt_us", 80),
-                cell("retx", 60),
+                cell("local", 190),
+                cell("remote", 190),
+                cell("state", 100),
+                cell("rtt_us", 70),
+                cell("rcv_rtt", 70),
+                cell("deliv_bps", 100),
+                cell("pacing_bps", 100),
+                cell("retx", 50),
+                cell("bret", 70),
             ]
             .spacing(8),
         );
         for s in socks.iter().take(200) {
+            // Surface the enriched tcp_info (#108): delivery/pacing rate and the
+            // receiver RTT turn "state counts" into "are flows delivering".
             list = list.push(
                 row![
-                    cell(&s.local, 200),
-                    cell(&s.remote, 200),
-                    cell(&s.state, 110),
-                    cell(&s.rtt_us.to_string(), 80),
-                    cell(&s.retrans.to_string(), 60),
+                    cell(&s.local, 190),
+                    cell(&s.remote, 190),
+                    cell(&s.state, 100),
+                    cell(&s.rtt_us.to_string(), 70),
+                    cell(&s.rcv_rtt_us.to_string(), 70),
+                    cell(&s.delivery_rate.to_string(), 100),
+                    cell(&s.pacing_rate.to_string(), 100),
+                    cell(&s.retrans.to_string(), 50),
+                    cell(&s.bytes_retrans.to_string(), 70),
                 ]
                 .spacing(8),
             );
