@@ -86,6 +86,14 @@ pub struct SyslogConfig {
     /// it's on by default.
     #[serde(default)]
     pub templating: TemplatingConfig,
+
+    /// Novelty / "what's new" detection (#103). Layered on top of the template
+    /// miner: after a warm-up window, a never-before-seen template shape raises a
+    /// `log-novelty` anomaly alert, and (optionally) a known template whose rate
+    /// jumps N× over its EWMA baseline raises a `log-rate-spike` alert. Requires
+    /// `templating.enabled`. Disabled by default (raises alerts → opt-in).
+    #[serde(default)]
+    pub novelty: NoveltyConfig,
 }
 
 fn default_derived_interval_secs() -> u64 {
@@ -218,6 +226,85 @@ impl Default for TemplatingConfig {
             max_children: default_max_children(),
             max_clusters: default_max_clusters(),
             top_templates: default_top_templates(),
+        }
+    }
+}
+
+/// Novelty / rate-spike detection configuration (#103).
+///
+/// Builds on the template miner: maintains a bounded seen-templates set and,
+/// after `warm_up_secs`, raises a `log-novelty` anomaly for a never-before-seen
+/// template shape and (when `rate_spike_multiplier > 1`) a `log-rate-spike`
+/// anomaly for a known template whose window rate jumps over its EWMA baseline.
+/// Disabled by default — it raises alerts, so it's strictly opt-in.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct NoveltyConfig {
+    /// Master switch. Off by default. Requires `templating.enabled`.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Startup warm-up: templates first seen within this window are folded into
+    /// the baseline (never flagged), so a cold start isn't all "novel".
+    /// Rate-spikes are likewise suppressed until it elapses. Default 300s.
+    #[serde(default = "default_warm_up_secs")]
+    pub warm_up_secs: u64,
+
+    /// How long a fired novelty point-event stays firing before auto-resolving
+    /// (it never re-fires; dedup is by `template_id`). Default 300s.
+    #[serde(default = "default_novelty_dedup_secs")]
+    pub novelty_dedup_secs: u64,
+
+    /// Rate-spike multiplier: a known template fires when its window rate exceeds
+    /// this many times its EWMA baseline. `<= 1.0` disables spike detection.
+    /// Default 5.0.
+    #[serde(default = "default_rate_spike_multiplier")]
+    pub rate_spike_multiplier: f64,
+
+    /// Absolute floor on a window's count before a spike can fire, so a jump from
+    /// a handful of lines can't alert. Default 10.
+    #[serde(default = "default_min_spike_count")]
+    pub min_spike_count: f64,
+
+    /// EWMA smoothing factor (0.0..=1.0) for the per-template baseline rate.
+    /// Default 0.3.
+    #[serde(default = "default_ewma_alpha")]
+    pub ewma_alpha: f64,
+
+    /// Hard cap on the seen-set size (bounds memory). Beyond the cap new shapes
+    /// are conservatively treated as known (no alert, not tracked). Default 2000.
+    #[serde(default = "default_max_novelty_templates")]
+    pub max_templates: usize,
+}
+
+fn default_warm_up_secs() -> u64 {
+    300
+}
+fn default_novelty_dedup_secs() -> u64 {
+    300
+}
+fn default_rate_spike_multiplier() -> f64 {
+    5.0
+}
+fn default_min_spike_count() -> f64 {
+    10.0
+}
+fn default_ewma_alpha() -> f64 {
+    0.3
+}
+fn default_max_novelty_templates() -> usize {
+    2000
+}
+
+impl Default for NoveltyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            warm_up_secs: default_warm_up_secs(),
+            novelty_dedup_secs: default_novelty_dedup_secs(),
+            rate_spike_multiplier: default_rate_spike_multiplier(),
+            min_spike_count: default_min_spike_count(),
+            ewma_alpha: default_ewma_alpha(),
+            max_templates: default_max_novelty_templates(),
         }
     }
 }
@@ -587,6 +674,7 @@ impl Default for SyslogConfig {
             top_units: default_top_units(),
             error_budget: ErrorBudgetConfig::default(),
             templating: TemplatingConfig::default(),
+            novelty: NoveltyConfig::default(),
         }
     }
 }
@@ -806,6 +894,51 @@ mod tests {
         assert_eq!(t.max_children, 50);
         assert_eq!(t.max_clusters, 200);
         assert_eq!(t.top_templates, 25);
+    }
+
+    #[test]
+    fn test_novelty_defaults_off() {
+        let json = r#"{
+            zenoh: { mode: "peer" },
+            syslog: { listeners: [ { protocol: "udp", bind: "0.0.0.0:514" } ] }
+        }"#;
+        let config: SyslogSensorConfig = json5::from_str(json).unwrap();
+        let n = config.syslog.novelty;
+        assert!(!n.enabled);
+        assert_eq!(n.warm_up_secs, 300);
+        assert_eq!(n.novelty_dedup_secs, 300);
+        assert_eq!(n.rate_spike_multiplier, 5.0);
+        assert_eq!(n.min_spike_count, 10.0);
+        assert_eq!(n.ewma_alpha, 0.3);
+        assert_eq!(n.max_templates, 2000);
+    }
+
+    #[test]
+    fn test_novelty_parsed() {
+        let json = r#"{
+            zenoh: { mode: "peer" },
+            syslog: {
+                listeners: [ { protocol: "udp", bind: "0.0.0.0:514" } ],
+                novelty: {
+                    enabled: true,
+                    warm_up_secs: 60,
+                    novelty_dedup_secs: 120,
+                    rate_spike_multiplier: 8.0,
+                    min_spike_count: 25.0,
+                    ewma_alpha: 0.5,
+                    max_templates: 500
+                }
+            }
+        }"#;
+        let config: SyslogSensorConfig = json5::from_str(json).unwrap();
+        let n = config.syslog.novelty;
+        assert!(n.enabled);
+        assert_eq!(n.warm_up_secs, 60);
+        assert_eq!(n.novelty_dedup_secs, 120);
+        assert_eq!(n.rate_spike_multiplier, 8.0);
+        assert_eq!(n.min_spike_count, 25.0);
+        assert_eq!(n.ewma_alpha, 0.5);
+        assert_eq!(n.max_templates, 500);
     }
 
     #[test]
