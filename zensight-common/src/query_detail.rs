@@ -50,6 +50,11 @@ pub struct FlowRecord {
     pub duration_ms: u64,
     /// How the flow ended: `fin` / `rst` / `idle_timeout` / `evicted` / ...
     pub reason: String,
+    /// Community ID v1 flow hash (`1:<base64-sha1>`) — the de-facto cross-tool
+    /// flow-correlation key (Zeek/Suricata/Wireshark/Security Onion). `None` when
+    /// the 5-tuple is incomplete. Additive (`#[serde(default)]` for old records).
+    #[serde(default)]
+    pub community_id: Option<String>,
 }
 
 /// One observed TLS client fingerprint (passive asset inventory from netring's

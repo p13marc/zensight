@@ -4,12 +4,19 @@
 //! without privileges. `monitor.rs` decomposes netring callbacks into these
 //! plain views; here we map them to [`TelemetryPoint`]s and [`Alert`]s.
 
+use std::net::{IpAddr, SocketAddr};
+
+use base64::Engine as _;
+use sha1::{Digest as _, Sha1};
 use zensight_common::{
     Alert, AlertKind, AlertSeverity, FlowRecord, Protocol, TelemetryPoint, TelemetryValue,
 };
 
 /// Build a [`FlowRecord`] (on-demand flow detail) from already-extracted fields.
 /// Kept pure so its shape is unit-testable without the netring capture machinery.
+///
+/// `community_id` is the precomputed Community ID v1 hash (see [`community_id_v1`]),
+/// `None` when the 5-tuple is incomplete.
 #[allow(clippy::too_many_arguments)]
 pub fn flow_record(
     src: String,
@@ -19,6 +26,7 @@ pub fn flow_record(
     packets: u64,
     duration_ms: u64,
     reason: &str,
+    community_id: Option<String>,
 ) -> FlowRecord {
     FlowRecord {
         src,
@@ -28,7 +36,91 @@ pub fn flow_record(
         packets,
         duration_ms,
         reason: reason.to_string(),
+        community_id,
     }
+}
+
+/// IANA protocol number for an L4 protocol label (`tcp`/`udp`/`icmp`/`icmpv6`).
+/// Returns `None` for labels without a well-known number — Community ID is only
+/// attached when the protocol is known.
+pub fn proto_number(name: &str) -> Option<u8> {
+    match name.to_ascii_lowercase().as_str() {
+        "tcp" => Some(6),
+        "udp" => Some(17),
+        "icmp" => Some(1),
+        "icmpv6" | "ipv6-icmp" => Some(58),
+        "sctp" => Some(132),
+        _ => None,
+    }
+}
+
+/// Compute the [Community ID v1](https://github.com/corelight/community-id-spec)
+/// flow hash: order the (addr, port) endpoints, concatenate
+/// `seed | saddr | daddr | proto | 0x00 | sport | dport`, SHA1 it, and base64 the
+/// digest behind the `"1:"` version prefix. This is the de-facto cross-tool flow
+/// correlation key emitted by Zeek, Suricata, Wireshark and Security Onion, so a
+/// ZenSight flow can be matched against any of their records by string compare.
+pub fn community_id_v1(a: SocketAddr, b: SocketAddr, proto: u8, seed: u16) -> String {
+    // Make the key directionless: sort the two endpoints by (ip, port).
+    let (sa, sp, da, dp) = if (a.ip(), a.port()) <= (b.ip(), b.port()) {
+        (a.ip(), a.port(), b.ip(), b.port())
+    } else {
+        (b.ip(), b.port(), a.ip(), a.port())
+    };
+
+    let mut buf = Vec::with_capacity(40);
+    buf.extend_from_slice(&seed.to_be_bytes());
+    push_ip(&mut buf, sa);
+    push_ip(&mut buf, da);
+    buf.push(proto);
+    buf.push(0u8); // padding byte (spec)
+    buf.extend_from_slice(&sp.to_be_bytes());
+    buf.extend_from_slice(&dp.to_be_bytes());
+
+    let digest = Sha1::digest(&buf);
+    format!(
+        "1:{}",
+        base64::engine::general_purpose::STANDARD.encode(digest)
+    )
+}
+
+fn push_ip(buf: &mut Vec<u8>, ip: IpAddr) {
+    match ip {
+        IpAddr::V4(v4) => buf.extend_from_slice(&v4.octets()),
+        IpAddr::V6(v6) => buf.extend_from_slice(&v6.octets()),
+    }
+}
+
+/// Best-effort Community ID for an anomaly from its (`src`, `dst`, `proto`) labels.
+/// Returns `None` unless all three are present and the endpoints parse as
+/// `ip:port` — detectors that only know a source (e.g. a port scan) carry no id.
+fn anomaly_community_id(a: &AnomalyView) -> Option<String> {
+    let src: SocketAddr = a.src.as_ref()?.parse().ok()?;
+    let dst: SocketAddr = a.dst.as_ref()?.parse().ok()?;
+    let proto = proto_number(a.proto.as_ref()?)?;
+    Some(community_id_v1(src, dst, proto, 0))
+}
+
+/// Map a detector slug to its primary [MITRE ATT&CK](https://attack.mitre.org)
+/// technique ID (#117). The lingua franca of every NDR console — every anomaly
+/// that maps cleanly gets a `technique` label the Security view renders as a
+/// badge and groups by tactic. Unmapped detectors carry no technique.
+pub fn attack_technique(kind: &str) -> Option<&'static str> {
+    let t = match kind {
+        "PortScanTRW" => "T1046", // Network Service Discovery
+        "BeaconCv" | "BeaconDetector" | "RitaBeacon" => "T1071", // Application Layer Protocol (C2)
+        "DgaScorer" => "T1568.002", // Dynamic Resolution: DGA
+        "DnsTunnel" => "T1071.004", // Application Layer Protocol: DNS
+        "NewlyObservedDomain" => "T1568", // Dynamic Resolution
+        "ConnectionFlood" => "T1499", // Endpoint Denial of Service
+        "LateralSmb" => "T1021.002", // SMB/Windows Admin Shares
+        "LateralRdp" => "T1021.001", // Remote Desktop Protocol
+        "cleartext_snmp" | "cleartext-snmp" => "T1040", // Network Sniffing
+        "cleartext_http_credentials" => "T1040", // Network Sniffing
+        "ioc_match" => "T1071",   // C2 over app-layer protocol
+        _ => return None,
+    };
+    Some(t)
 }
 
 /// A flattened anomaly, decomposed from `flowscope::OwnedAnomaly`.
@@ -76,6 +168,14 @@ pub fn anomaly_alert(sensor_id: &str, a: &AnomalyView) -> Alert {
     }
     for (k, v) in &a.metrics {
         alert = alert.with_label(k.clone(), format!("{v}"));
+    }
+    // MITRE ATT&CK technique (#117) — analyst-grade triage tagging.
+    if let Some(tech) = attack_technique(&a.kind) {
+        alert = alert.with_label("technique", tech);
+    }
+    // Community ID (#116) — cross-tool flow correlation when the 5-tuple is whole.
+    if let Some(cid) = anomaly_community_id(a) {
+        alert = alert.with_label("community_id", cid);
     }
     alert
 }
@@ -877,6 +977,7 @@ mod tests {
             10,
             100,
             "fin",
+            Some("1:abc".into()),
         );
         assert_eq!(r.src, "10.0.0.1:5555");
         assert_eq!(r.dst, "1.1.1.1:443");
@@ -884,6 +985,55 @@ mod tests {
         assert_eq!(r.bytes, 694);
         assert_eq!(r.duration_ms, 100);
         assert_eq!(r.reason, "fin");
+        assert_eq!(r.community_id.as_deref(), Some("1:abc"));
+    }
+
+    #[test]
+    fn community_id_matches_spec_vector() {
+        // Canonical vector from corelight/community-id-spec: tcp
+        // 128.232.110.120:34855 -> 66.35.250.204:80, seed 0.
+        let a: SocketAddr = "128.232.110.120:34855".parse().unwrap();
+        let b: SocketAddr = "66.35.250.204:80".parse().unwrap();
+        let id = community_id_v1(a, b, 6, 0);
+        assert_eq!(id, "1:LQU9qZlK+B5F3KDmev6m5PMibrg=");
+        // Directionless: swapping endpoints yields the same hash.
+        assert_eq!(community_id_v1(b, a, 6, 0), id);
+    }
+
+    #[test]
+    fn proto_number_known_and_unknown() {
+        assert_eq!(proto_number("tcp"), Some(6));
+        assert_eq!(proto_number("UDP"), Some(17));
+        assert_eq!(proto_number("icmp"), Some(1));
+        assert_eq!(proto_number("gre"), None);
+    }
+
+    #[test]
+    fn attack_technique_mapping() {
+        assert_eq!(attack_technique("PortScanTRW"), Some("T1046"));
+        assert_eq!(attack_technique("DgaScorer"), Some("T1568.002"));
+        assert_eq!(attack_technique("RitaBeacon"), Some("T1071"));
+        assert_eq!(attack_technique("UnknownDetector"), None);
+    }
+
+    #[test]
+    fn anomaly_alert_carries_technique_and_community_id() {
+        let mut a = scan_anomaly();
+        a.kind = "DgaScorer".into();
+        a.src = Some("10.0.0.5:44321".into());
+        a.dst = Some("203.0.113.7:53".into());
+        a.proto = Some("udp".into());
+        let alert = anomaly_alert("s", &a);
+        assert_eq!(
+            alert.labels.get("technique").map(String::as_str),
+            Some("T1568.002")
+        );
+        assert!(
+            alert
+                .labels
+                .get("community_id")
+                .is_some_and(|c| c.starts_with("1:"))
+        );
     }
 
     #[test]

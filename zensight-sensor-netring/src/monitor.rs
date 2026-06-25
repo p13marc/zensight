@@ -1157,6 +1157,9 @@ fn on_flow_ended(
 
     let proto = e.l4.map(|p| p.canonical_name()).unwrap_or("tcp");
     let reason = e.reason.as_str();
+    // Community ID v1 (#116) — directionless 5-tuple hash for cross-tool correlation.
+    let community_id =
+        map::proto_number(proto).map(|n| map::community_id_v1(e.key.a, e.key.b, n, 0));
     let rec = crate::map::flow_record(
         e.key.a.to_string(),
         e.key.b.to_string(),
@@ -1165,6 +1168,7 @@ fn on_flow_ended(
         total_packets,
         duration_ms,
         reason,
+        community_id,
     );
     if let Ok(mut r) = records.lock() {
         if r.len() == FLOW_RING_CAP {
