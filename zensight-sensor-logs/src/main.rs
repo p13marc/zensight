@@ -13,6 +13,7 @@ mod filter;
 mod journald;
 mod parser;
 mod receiver;
+mod template;
 
 use anyhow::Result;
 use commands::{FilterCommand, FilterStatus};
@@ -310,10 +311,54 @@ async fn main() -> Result<()> {
         tracing::info!(interval_secs, "derived rollup telemetry enabled");
     }
 
+    // Streaming log-template mining (#102): mask + cluster each line into a
+    // stable template, attach `template_id`/`template` labels to the per-line
+    // points, and emit bounded `logs/by_template/*` series on a tick. Additive
+    // and independent of the `derived` toggle.
+    let template_agg = syslog_config.templating.enabled.then(|| {
+        let t = &syslog_config.templating;
+        let params = template::DrainParams {
+            depth: t.depth,
+            sim_threshold: t.sim_threshold,
+            max_children: t.max_children,
+            max_clusters: t.max_clusters,
+        };
+        Arc::new(template::TemplateAggregator::new(params, t.top_templates))
+    });
+    if let Some(tagg) = template_agg.clone() {
+        let session_tick = session.clone();
+        let key_prefix_tick = key_prefix.clone();
+        let interval_secs = syslog_config.derived_interval_secs.max(1);
+        let source = hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_else(|| "localhost".to_string());
+        runner.spawn(async move {
+            use std::time::Duration;
+            let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
+            loop {
+                tick.tick().await;
+                for point in tagg.emit(&source) {
+                    let key = format!("{}/{}/{}", key_prefix_tick, point.source, point.metric);
+                    match encode(&point, format) {
+                        Ok(payload) => {
+                            if let Err(e) = session_tick.put(&key, payload).await {
+                                tracing::warn!(error = %e, key, "failed to publish template metric");
+                            }
+                        }
+                        Err(e) => tracing::warn!(error = %e, "failed to encode template metric"),
+                    }
+                }
+            }
+        });
+        tracing::info!("log-template mining enabled");
+    }
+
     // Spawn the message processing task
     let session_clone = session.clone();
     let publish_health = runner.health();
     let aggregator_loop = aggregator.clone();
+    let template_loop = template_agg.clone();
     runner.spawn(async move {
         loop {
             tokio::select! {
@@ -342,7 +387,18 @@ async fn main() -> Result<()> {
                     }
 
                     // Convert to telemetry point
-                    let point = receiver::to_telemetry_point(&received, include_raw);
+                    let mut point = receiver::to_telemetry_point(&received, include_raw);
+
+                    // Log-template mining (#102): mine the message text and
+                    // attach the stable template id + masked template as labels.
+                    if let Some(tagg) = &template_loop {
+                        let is_error = (received.message.severity as u8)
+                            <= (parser::Severity::Error as u8);
+                        if let Some(mined) = tagg.observe(&received.message.message, is_error) {
+                            point.labels.insert("template_id".to_string(), mined.id);
+                            point.labels.insert("template".to_string(), mined.template);
+                        }
+                    }
 
                     // Build key expression
                     let key = receiver::build_key_expr(&key_prefix, &received);

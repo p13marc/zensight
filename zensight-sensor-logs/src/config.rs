@@ -78,6 +78,14 @@ pub struct SyslogConfig {
     /// default so it never surprises existing deployments.
     #[serde(default)]
     pub error_budget: ErrorBudgetConfig,
+
+    /// Drain-style streaming log-template mining (#102). Masks variables and
+    /// clusters each line into a stable template; attaches `template_id` /
+    /// `template` labels to the per-line points and emits bounded
+    /// `logs/by_template/<id>/{count,errors}_total` series. Cheap + bounded, so
+    /// it's on by default.
+    #[serde(default)]
+    pub templating: TemplatingConfig,
 }
 
 fn default_derived_interval_secs() -> u64 {
@@ -143,6 +151,73 @@ impl Default for ErrorBudgetConfig {
             burn_rate: default_burn_rate(),
             burn_windows: default_burn_windows(),
             min_messages: default_min_messages(),
+        }
+    }
+}
+
+/// Drain-style log-template mining configuration (#102).
+///
+/// Defaults follow the logpai/Drain3 conventions (`depth=4`, `sim=0.4`) and are
+/// bounded so a noisy stream can't blow up cardinality or memory: at most
+/// `max_clusters` templates are mined, and only `top_templates` (+ an `other`
+/// bucket) are emitted as `logs/by_template/*` series.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct TemplatingConfig {
+    /// Master switch. On by default (cheap + bounded).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Fixed parse-tree depth: token layers descended below the length layer.
+    /// Default 4.
+    #[serde(default = "default_templating_depth")]
+    pub depth: usize,
+
+    /// Similarity threshold (fraction of matching non-wildcard tokens) to join
+    /// an existing cluster. Default 0.4.
+    #[serde(default = "default_sim_threshold")]
+    pub sim_threshold: f64,
+
+    /// Max distinct literal children per tree node before new tokens fold into
+    /// the wildcard branch. Default 100.
+    #[serde(default = "default_max_children")]
+    pub max_children: usize,
+
+    /// Hard cap on retained clusters (bounds memory). Default 1000.
+    #[serde(default = "default_max_clusters")]
+    pub max_clusters: usize,
+
+    /// Cardinality cap for the emitted per-template series: at most this many
+    /// distinct templates get their own series; the rest fold into `other`.
+    /// Default 50.
+    #[serde(default = "default_top_templates")]
+    pub top_templates: usize,
+}
+
+fn default_templating_depth() -> usize {
+    4
+}
+fn default_sim_threshold() -> f64 {
+    0.4
+}
+fn default_max_children() -> usize {
+    100
+}
+fn default_max_clusters() -> usize {
+    1000
+}
+fn default_top_templates() -> usize {
+    50
+}
+
+impl Default for TemplatingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            depth: default_templating_depth(),
+            sim_threshold: default_sim_threshold(),
+            max_children: default_max_children(),
+            max_clusters: default_max_clusters(),
+            top_templates: default_top_templates(),
         }
     }
 }
@@ -511,6 +586,7 @@ impl Default for SyslogConfig {
             derived_interval_secs: default_derived_interval_secs(),
             top_units: default_top_units(),
             error_budget: ErrorBudgetConfig::default(),
+            templating: TemplatingConfig::default(),
         }
     }
 }
@@ -688,6 +764,48 @@ mod tests {
         assert_eq!(eb.burn_rate, 5.0);
         assert_eq!(eb.burn_windows, 4);
         assert_eq!(eb.min_messages, 50);
+    }
+
+    #[test]
+    fn test_templating_defaults_on() {
+        let json = r#"{
+            zenoh: { mode: "peer" },
+            syslog: { listeners: [ { protocol: "udp", bind: "0.0.0.0:514" } ] }
+        }"#;
+        let config: SyslogSensorConfig = json5::from_str(json).unwrap();
+        let t = config.syslog.templating;
+        assert!(t.enabled);
+        assert_eq!(t.depth, 4);
+        assert_eq!(t.sim_threshold, 0.4);
+        assert_eq!(t.max_children, 100);
+        assert_eq!(t.max_clusters, 1000);
+        assert_eq!(t.top_templates, 50);
+    }
+
+    #[test]
+    fn test_templating_parsed() {
+        let json = r#"{
+            zenoh: { mode: "peer" },
+            syslog: {
+                listeners: [ { protocol: "udp", bind: "0.0.0.0:514" } ],
+                templating: {
+                    enabled: false,
+                    depth: 6,
+                    sim_threshold: 0.6,
+                    max_children: 50,
+                    max_clusters: 200,
+                    top_templates: 25
+                }
+            }
+        }"#;
+        let config: SyslogSensorConfig = json5::from_str(json).unwrap();
+        let t = config.syslog.templating;
+        assert!(!t.enabled);
+        assert_eq!(t.depth, 6);
+        assert_eq!(t.sim_threshold, 0.6);
+        assert_eq!(t.max_children, 50);
+        assert_eq!(t.max_clusters, 200);
+        assert_eq!(t.top_templates, 25);
     }
 
     #[test]
