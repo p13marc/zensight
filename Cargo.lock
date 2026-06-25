@@ -9508,6 +9508,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "hostname",
  "json5",
  "once_cell",
  "regex",

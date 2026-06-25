@@ -6,6 +6,7 @@
 
 mod commands;
 mod config;
+mod derived;
 mod events;
 mod filter;
 #[cfg(feature = "journald")]
@@ -216,9 +217,51 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Derived rollup telemetry (#63): aggregate the log stream into per-severity
+    // / per-unit / error rollups, emitted on a tick alongside the per-message
+    // points. The aggregator observes each published message; the tick task
+    // snapshots it (+ journald throughput) to telemetry.
+    let aggregator = syslog_config
+        .derived
+        .then(|| Arc::new(derived::LogAggregator::new(syslog_config.top_units)));
+    if let Some(agg) = aggregator.clone() {
+        let session_tick = session.clone();
+        let key_prefix_tick = key_prefix.clone();
+        let interval_secs = syslog_config.derived_interval_secs.max(1);
+        let stats_tick = journald_stats.clone();
+        // Local host identifies this sensor's rollups (network syslog spans many
+        // hosts; journald is local — a single sensor-wide source keeps the
+        // derived series cardinality bounded).
+        let source = hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_else(|| "localhost".to_string());
+        runner.spawn(async move {
+            use std::time::Duration;
+            let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
+            loop {
+                tick.tick().await;
+                let snapshot = stats_tick.as_ref().map(|s| s.snapshot());
+                for point in agg.emit(&source, snapshot) {
+                    let key = format!("{}/{}/{}", key_prefix_tick, point.source, point.metric);
+                    match encode(&point, format) {
+                        Ok(payload) => {
+                            if let Err(e) = session_tick.put(&key, payload).await {
+                                tracing::warn!(error = %e, key, "failed to publish derived metric");
+                            }
+                        }
+                        Err(e) => tracing::warn!(error = %e, "failed to encode derived metric"),
+                    }
+                }
+            }
+        });
+        tracing::info!(interval_secs, "derived rollup telemetry enabled");
+    }
+
     // Spawn the message processing task
     let session_clone = session.clone();
     let publish_health = runner.health();
+    let aggregator_loop = aggregator.clone();
     runner.spawn(async move {
         loop {
             tokio::select! {
@@ -238,6 +281,12 @@ async fn main() -> Result<()> {
                             received.message.severity.as_str()
                         );
                         continue;
+                    }
+
+                    // Feed derived rollups (#63) — counts what's actually
+                    // published (post-filter), alongside the per-message point.
+                    if let Some(agg) = &aggregator_loop {
+                        agg.observe(&received.message);
                     }
 
                     // Convert to telemetry point

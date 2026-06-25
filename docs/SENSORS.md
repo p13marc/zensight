@@ -55,6 +55,13 @@ Both feed the same model and keyspace.
 - **Telemetry:** `zensight/syslog/<hostname>/<facility>/<severity>`
   (payload value = the log message; structured fields land in labels —
   journald fields under `sd.journald.*`, `source_type` = `udp`/`tcp`/`unix`/`journald`).
+- **Derived rollups** (`derived`, default on): cheap aggregates emitted every
+  `derived_interval_secs` under `zensight/syslog/<host>/logs/*` — per-severity
+  counters (`logs/by_severity/<level>_total`), error/warning totals
+  (`logs/errors_total`, `logs/warnings_total`), top-N per-unit message/error
+  counters (`logs/by_unit/<unit>/...`, capped to `top_units` + an `other`
+  bucket), a `logs/units_in_failure` gauge, and journald throughput
+  (`logs/journald/{read,published,dropped,sampled_out}_total`).
 - **Sources:**
   - Network: UDP/TCP/Unix listeners (RFC 3164 + RFC 5424).
   - **journald** (`journald.enabled`): reads the local journal via libsystemd

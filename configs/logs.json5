@@ -40,6 +40,13 @@
       // Raise an ErrorReport once loss exceeds this fraction over a window (1%).
       drop_alert_ratio: 0.01,
     },
+
+    // Derived rollup telemetry (#63): per-severity + per-unit (top-N) log rates,
+    // error/warning rollups, units-in-failure, and journald throughput — emitted
+    // every `derived_interval_secs` under zensight/syslog/<host>/logs/*.
+    derived: true,
+    derived_interval_secs: 10,
+    top_units: 10, // distinct per-unit series; the rest fold into `other`
   },
 
   logging: { level: "info" },

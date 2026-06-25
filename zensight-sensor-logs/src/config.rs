@@ -54,6 +54,29 @@ pub struct SyslogConfig {
     /// the network listeners. `None` (the default) leaves journald disabled.
     #[serde(default)]
     pub journald: Option<JournaldConfig>,
+
+    /// Emit derived rollup telemetry (#63): per-severity + per-unit (top-N) log
+    /// rates, error/warning rollups, units-in-failure, and journald throughput —
+    /// cheap aggregates on a tick, alongside the per-message points. Default on.
+    #[serde(default = "default_true")]
+    pub derived: bool,
+
+    /// Interval (seconds) between derived-telemetry emissions. Default 10.
+    #[serde(default = "default_derived_interval_secs")]
+    pub derived_interval_secs: u64,
+
+    /// Cardinality cap for per-unit rollups: at most this many distinct units
+    /// are tracked as their own series; the rest aggregate into an `other`
+    /// bucket (never an unbounded label space). Default 10.
+    #[serde(default = "default_top_units")]
+    pub top_units: usize,
+}
+
+fn default_derived_interval_secs() -> u64 {
+    10
+}
+fn default_top_units() -> usize {
+    10
 }
 
 /// systemd-journald source configuration.
@@ -416,6 +439,9 @@ impl Default for SyslogConfig {
             filter: SyslogFilterConfig::default(),
             enable_dynamic_filters: false,
             journald: None,
+            derived: true,
+            derived_interval_secs: default_derived_interval_secs(),
+            top_units: default_top_units(),
         }
     }
 }

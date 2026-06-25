@@ -34,6 +34,9 @@ once_cell = "1"
 # UUID for filter IDs
 uuid = { version = "1", features = ["v4"] }
 
+# Local hostname for the derived-telemetry source (#63).
+hostname = "0.4"
+
 # systemd-journald ingestion (#57). Links libsystemd; reads the local journal
 # unprivileged (full system journal needs the systemd-journal/adm group).
 # systemd_v245 unlocks sd_journal_open_namespace (libsystemd ≥ 245, ubiquitous).
