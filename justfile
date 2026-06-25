@@ -1,6 +1,7 @@
 # ZenSight — build / configure / run the GUI + sensors (netring, netlink, sysinfo, logs)
 #
 #   just run            # build, grant caps, configure, then launch everything
+#   just demo           # run the GUI in demo mode (simulated data, no sensors)
 #   just setup          # build + grant capabilities only
 #   just gui            # run just the GUI
 #   just <sensor>       # run a single sensor (netring | netlink | sysinfo | logs)
@@ -76,6 +77,12 @@ configure:
 # The GUI listens on the loopback hub so separately-run sensors can connect.
 gui: build
     ZENSIGHT_ZENOH_LISTEN="{{hub}}" {{bindir}}/zensight
+
+# A built-in simulator feeds realistic telemetry, health, liveness and anomaly
+# alerts for every sensor type — no real sensors, capabilities or Zenoh hub.
+# Run the GUI in demo mode (great for a quick look at the UI).
+demo: build
+    {{bindir}}/zensight --demo
 
 # Run the netring sensor (wire flows + anomaly alerts).
 netring: caps configure
