@@ -94,6 +94,72 @@ pub struct SyslogConfig {
     /// `templating.enabled`. Disabled by default (raises alerts → opt-in).
     #[serde(default)]
     pub novelty: NoveltyConfig,
+
+    /// Network-ingest robustness (#106): rate-limit + drop/parse-failure
+    /// accounting for the UDP/TCP/Unix paths, bringing them to journald parity.
+    /// Safe defaults (rate limit off, generous channel) so normal traffic is
+    /// never dropped; emits `logs/ingest/*_total` counters and a sustained-loss
+    /// health alert.
+    #[serde(default)]
+    pub ingest: IngestConfig,
+}
+
+/// Network-ingest robustness configuration (#106).
+///
+/// Mirrors the journald loss-accounting controls for the network paths. By
+/// default the rate limiter is **off** (`max_eps: None`) so nothing is shed in
+/// normal use; under a configured budget or a full telemetry channel, drops are
+/// counted (`logs/ingest/dropped_total`) and a sustained-loss `ErrorReport` is
+/// raised rather than silently dropping logs.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct IngestConfig {
+    /// Optional global rate limit (parsed messages/sec across all network
+    /// listeners). Beyond the budget the limiter keeps 1-in-`sample_ratio` and
+    /// counts the rest as dropped. `None` (the default) = unlimited.
+    #[serde(default)]
+    pub max_eps: Option<u64>,
+
+    /// When rate-limited, keep 1 of every N over-budget messages. Default 100;
+    /// clamped to ≥1.
+    #[serde(default = "default_sample_ratio")]
+    pub sample_ratio: u64,
+
+    /// Behavior when the bounded telemetry channel is full. `drop_newest` (the
+    /// default) sheds the incoming message and counts it (bounded memory);
+    /// `block` applies backpressure to the listener instead.
+    #[serde(default)]
+    pub overflow: OverflowPolicy,
+
+    /// Emit an `ErrorReport` once the dropped fraction over a window exceeds this
+    /// (0.0..=1.0) — "not silently dropping your logs". Default 0.01 (1%).
+    #[serde(default = "default_drop_alert_ratio")]
+    pub drop_alert_ratio: f64,
+}
+
+impl Default for IngestConfig {
+    fn default() -> Self {
+        Self {
+            max_eps: None,
+            sample_ratio: default_sample_ratio(),
+            overflow: OverflowPolicy::default(),
+            drop_alert_ratio: default_drop_alert_ratio(),
+        }
+    }
+}
+
+/// TCP/Unix stream framing mode (RFC 6587, #106).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Framing {
+    /// Auto-detect per frame: a leading digit ⇒ octet-counting (`MSG-LEN SP
+    /// MSG`), otherwise LF-delimited. The safe default — handles both legacy
+    /// LF senders and RFC 6587 octet-counted senders on the same listener.
+    #[default]
+    Auto,
+    /// Always non-transparent (LF-delimited) framing.
+    Lf,
+    /// Always RFC 6587 octet-counted framing.
+    Octet,
 }
 
 fn default_derived_interval_secs() -> u64 {
@@ -548,6 +614,11 @@ pub struct ListenerConfig {
     /// Unix socket: remove existing socket file before binding.
     #[serde(default = "default_true")]
     pub remove_existing_socket: bool,
+
+    /// TCP/Unix: stream framing mode (RFC 6587, #106). Ignored for UDP (a
+    /// datagram is always exactly one frame). Default `auto`.
+    #[serde(default)]
+    pub framing: Framing,
 }
 
 fn default_max_message_size() -> usize {
@@ -663,6 +734,7 @@ impl Default for SyslogConfig {
                 connection_timeout_secs: default_connection_timeout_secs(),
                 socket_mode: default_socket_mode(),
                 remove_existing_socket: default_true(),
+                framing: Framing::default(),
             }],
             hostname_aliases: std::collections::HashMap::new(),
             include_raw_message: false,
@@ -675,6 +747,7 @@ impl Default for SyslogConfig {
             error_budget: ErrorBudgetConfig::default(),
             templating: TemplatingConfig::default(),
             novelty: NoveltyConfig::default(),
+            ingest: IngestConfig::default(),
         }
     }
 }
@@ -939,6 +1012,48 @@ mod tests {
         assert_eq!(n.min_spike_count, 25.0);
         assert_eq!(n.ewma_alpha, 0.5);
         assert_eq!(n.max_templates, 500);
+    }
+
+    #[test]
+    fn test_ingest_defaults_safe() {
+        let json = r#"{
+            zenoh: { mode: "peer" },
+            syslog: { listeners: [ { protocol: "udp", bind: "0.0.0.0:514" } ] }
+        }"#;
+        let config: SyslogSensorConfig = json5::from_str(json).unwrap();
+        let ing = config.syslog.ingest;
+        // Rate limit off by default → nothing shed in normal use.
+        assert_eq!(ing.max_eps, None);
+        assert_eq!(ing.sample_ratio, 100);
+        assert_eq!(ing.overflow, OverflowPolicy::DropNewest);
+        assert_eq!(ing.drop_alert_ratio, 0.01);
+        // Listener framing defaults to auto-detect.
+        assert_eq!(config.syslog.listeners[0].framing, Framing::Auto);
+    }
+
+    #[test]
+    fn test_ingest_and_framing_parsed() {
+        let json = r#"{
+            zenoh: { mode: "peer" },
+            syslog: {
+                listeners: [
+                    { protocol: "tcp", bind: "0.0.0.0:514", framing: "octet" }
+                ],
+                ingest: {
+                    max_eps: 5000,
+                    sample_ratio: 10,
+                    overflow: "block",
+                    drop_alert_ratio: 0.05
+                }
+            }
+        }"#;
+        let config: SyslogSensorConfig = json5::from_str(json).unwrap();
+        let ing = config.syslog.ingest;
+        assert_eq!(ing.max_eps, Some(5000));
+        assert_eq!(ing.sample_ratio, 10);
+        assert_eq!(ing.overflow, OverflowPolicy::Block);
+        assert_eq!(ing.drop_alert_ratio, 0.05);
+        assert_eq!(config.syslog.listeners[0].framing, Framing::Octet);
     }
 
     #[test]

@@ -9,6 +9,7 @@ mod config;
 mod derived;
 mod events;
 mod filter;
+mod ingest;
 #[cfg(feature = "journald")]
 mod journald;
 mod novelty;
@@ -56,8 +57,10 @@ async fn main() -> Result<()> {
     );
 
     // Start syslog listeners (+ journald reader). `journald_stats` carries the
-    // reader's throughput/loss accounting when the journald source is enabled.
-    let (mut rx, journald_stats) = receiver::start_listeners(&syslog_config)
+    // reader's throughput/loss accounting when the journald source is enabled;
+    // `ingest_stats` carries the network paths' received/parsed/dropped
+    // accounting (#106).
+    let (mut rx, journald_stats, ingest_stats) = receiver::start_listeners(&syslog_config)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to start syslog listeners: {}", e))?;
 
@@ -242,6 +245,79 @@ async fn main() -> Result<()> {
                 } else if alerting {
                     alerting = false;
                     tracing::info!("journald: log loss recovered");
+                }
+                prev = cur;
+            }
+        });
+    }
+
+    // Network-ingest robustness monitor + telemetry (#106): bring the UDP/TCP/
+    // Unix paths to journald parity. On a tick, publish the
+    // `logs/ingest/{received,parsed,parse_failed,dropped}_total` counters and,
+    // on sustained loss, raise an edge-triggered `ErrorReport` so the Sensors
+    // view reflects "we are dropping your logs" — UDP drops + parse failures are
+    // no longer silent. Only runs when at least one network listener exists
+    // (journald has its own monitor above).
+    if !syslog_config.listeners.is_empty() {
+        let stats = ingest_stats.clone();
+        let health = runner.health();
+        let session_tick = session.clone();
+        let key_prefix_tick = key_prefix.clone();
+        let interval_secs = syslog_config.derived_interval_secs.max(1);
+        let drop_alert_ratio = syslog_config.ingest.drop_alert_ratio;
+        let source = hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_else(|| "localhost".to_string());
+        runner.spawn(async move {
+            use std::time::Duration;
+            let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
+            let mut prev = stats.snapshot();
+            let mut alerting = false;
+            loop {
+                tick.tick().await;
+                let cur = stats.snapshot();
+
+                // Publish the ingest counters as telemetry.
+                for point in cur.to_points(&source) {
+                    let key = format!("{}/{}/{}", key_prefix_tick, point.source, point.metric);
+                    match encode(&point, format) {
+                        Ok(payload) => {
+                            if let Err(e) = session_tick.put(&key, payload).await {
+                                tracing::warn!(error = %e, key, "failed to publish ingest metric");
+                            }
+                        }
+                        Err(e) => tracing::warn!(error = %e, "failed to encode ingest metric"),
+                    }
+                }
+
+                // Sustained-loss health alert (edge-triggered, mirrors journald).
+                let loss = cur.loss_ratio_since(&prev);
+                let dropped = cur.dropped.saturating_sub(prev.dropped);
+                if loss > drop_alert_ratio && dropped > 0 {
+                    if !alerting {
+                        alerting = true;
+                        let report = zensight_sensor_core::ErrorReport::new(
+                            zensight_sensor_core::ErrorType::Other,
+                            format!(
+                                "network ingest dropping logs: {:.1}% loss over last window \
+                                 ({dropped} dropped). Raise the channel/rate budget or reduce \
+                                 the inbound rate.",
+                                loss * 100.0
+                            ),
+                        );
+                        if let Err(e) = health.publish_error(&report).await {
+                            tracing::warn!(error = %e, "failed to publish ingest drop ErrorReport");
+                        }
+                        tracing::warn!(
+                            loss_pct = loss * 100.0,
+                            dropped,
+                            "network ingest: sustained log loss"
+                        );
+                    }
+                } else if alerting {
+                    alerting = false;
+                    tracing::info!("network ingest: log loss recovered");
                 }
                 prev = cur;
             }
