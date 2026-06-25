@@ -205,6 +205,61 @@ zensight/
 which sensors use it, the wildcards, and the key-building helpers. Keep that
 document authoritative; this is only a sketch.
 
+## Zenoh Transport & Pub/Sub Model
+
+Every process (sensors, frontend, exporters) is an independent Zenoh app; how
+they connect and how they publish/subscribe both matter for telemetry to flow.
+
+### Connectivity — peers + an explicit local rendezvous
+
+All processes run in `mode: "peer"`. Peers can discover each other two ways:
+
+- **Multicast scouting** (Zenoh default) — works when every process shares a
+  multicast-capable interface. It is **unreliable** on hosts with a VPN or
+  several interfaces (tailscale, docker, …), where scouting may bind to the
+  wrong interface and the GUI then forms no session and shows nothing.
+- **Explicit endpoints** (`connect` / `listen`) — deterministic, no multicast.
+
+`just run` therefore pins an explicit **loopback rendezvous**: the GUI
+`listen`s on `tcp/127.0.0.1:7447` and every sensor `connect`s to it, so the
+pieces always meet regardless of the network. This is driven by environment
+overrides applied on top of the file/settings config:
+
+| Env var | Effect |
+|---------|--------|
+| `ZENSIGHT_ZENOH_MODE` | override `mode` |
+| `ZENSIGHT_ZENOH_CONNECT` | override `connect` endpoints (comma-separated) |
+| `ZENSIGHT_ZENOH_LISTEN` | override `listen` endpoints (comma-separated) |
+
+Implemented by `ZenohConfig::with_env_overrides()` (zensight-common), applied in
+both the sensor session (`session::connect`) and the GUI.
+
+### Publish/subscribe pairing — advanced telemetry, plain control-plane
+
+The two key subtrees use **different** pub/sub machinery, and the publisher must
+match the subscriber:
+
+| Subtree | Publisher | Subscriber (frontend) |
+|---------|-----------|-----------------------|
+| **Telemetry** `zensight/**` | zenoh-ext **`AdvancedPublisher`** (per-key cache + miss/publisher detection) | zenoh-ext **`AdvancedSubscriber`** (`history` + `recovery` + late-publisher detection) |
+| **Control-plane** `zensight/<proto>/@/…` | plain `put` / `delete` | plain subscriber on `zensight/*/@/**` |
+
+- **Telemetry** flows through the base `Publisher`, which routes
+  `publish`/`publish_to_key`/`publish_batch` through an
+  `AdvancedPublisherRegistry` (one advanced publisher per key, created on first
+  use, shared across `Publisher` clones). This matches the GUI's
+  `AdvancedSubscriber` so delivery and late-joiner **history/recovery** work for
+  **every** sensor — an advanced subscriber must be fed by an advanced publisher.
+- **Control-plane** (`health`, `errors`, `alerts`, `liveness`, `status`,
+  `commands`, `query`) is plain `put`/`delete`. The GUI reads it with a separate
+  **plain** subscriber on `zensight/*/@/**` — necessary because the telemetry
+  wildcard `zensight/**` does **not** match `@/` chunks (Zenoh treats a chunk
+  starting with `@` verbatim; `*`/`**` never cross into it).
+
+> **Symptom → cause:** "the GUI shows no metrics/logs" is almost always one of
+> these two — discovery (no session formed) or a plain-`put` telemetry publisher
+> that doesn't pair with the advanced subscriber. Both are addressed above.
+
 ## Frontend Architecture
 
 ```

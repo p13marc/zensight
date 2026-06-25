@@ -17,7 +17,11 @@ configure it, and the exact Zenoh keys it publishes/serves.
   `devices/<device>/{liveness,alive}` where per-device tracking applies).
 - Config: a JSON5 file under [`configs/`](../configs/); pass with `--config`.
   Every config has a `zenoh` block (`mode`, `connect`, `listen`) and a
-  `logging` block.
+  `logging` block. The `ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN}` env vars override
+  the `zenoh` block (used by `just run` to pin a loopback rendezvous).
+- Telemetry is published with zenoh-ext **advanced publishers** (so it pairs
+  with the GUI's advanced subscriber); control-plane (`@/…`) uses plain puts.
+  See [Architecture → Zenoh Transport & Pub/Sub Model](ARCHITECTURE.md#zenoh-transport--pubsub-model).
 
 | Sensor | Protocol | Source of truth | Default config | Privileges |
 |--------|----------|-----------------|----------------|------------|

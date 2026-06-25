@@ -54,6 +54,12 @@ zensight/netring/sensor01/flow/by_l4/tcp/bytes_total
 Payload: a serialized [`TelemetryPoint`] (JSON or CBOR per the sensor's
 `serialization` config). Built via [`KeyExprBuilder::build(source, metric)`].
 
+> **Published with a zenoh-ext `AdvancedPublisher`** (per-key cache + miss/
+> publisher detection), so it pairs with the GUI's `AdvancedSubscriber` on
+> `zensight/**` (history + recovery). The control-plane below uses plain
+> `put`/`delete` and a plain subscriber. See
+> [Architecture → Zenoh Transport & Pub/Sub Model](ARCHITECTURE.md#zenoh-transport--pubsub-model).
+
 ---
 
 ## 3. Control-plane — `zensight/<protocol>/@/…`
