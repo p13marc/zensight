@@ -159,6 +159,16 @@ impl Protocol {
             Protocol::Netring => "netring",
         }
     }
+
+    /// Human-facing display name for the GUI. Distinct from [`as_str`](Self::as_str)
+    /// (the wire/keyspace token): the syslog sensor now also ingests journald, so
+    /// it presents as "Logs" while the keyspace stays `syslog` (#64).
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Protocol::Syslog => "Logs",
+            _ => self.as_str(),
+        }
+    }
 }
 
 impl std::fmt::Display for Protocol {

@@ -1638,6 +1638,73 @@ fn test_logs_view_renders_lines() {
     assert!(ui.find("host01").is_ok());
 }
 
+/// #64: with the filter panel open, journald units surface as toggle chips, and
+/// clicking one emits ToggleSyslogUnit. The provenance badge ("journald") renders
+/// in the stream.
+#[test]
+fn test_logs_unit_filter_and_source_badge() {
+    use zensight::view::specialized::{logs_view, syslog_message_from_point};
+    use zensight_common::{TelemetryPoint, TelemetryValue};
+
+    let mut labels = HashMap::new();
+    labels.insert("source_type".to_string(), "journald".to_string());
+    labels.insert("sd.journald.unit".to_string(), "nginx.service".to_string());
+    let point = TelemetryPoint {
+        timestamp: 1_700_000_000_000,
+        source: "host01".to_string(),
+        protocol: Protocol::Syslog,
+        metric: "daemon/err".to_string(),
+        value: TelemetryValue::Text("upstream timed out".to_string()),
+        labels,
+    };
+    let messages = vec![syslog_message_from_point(&point, &point.source)];
+
+    let mut filter = SyslogFilterState::default();
+    filter.panel_open = true;
+
+    let mut ui = simulator(logs_view(&messages, &filter));
+    // Provenance badge + the unit chip render.
+    assert!(ui.find("journald").is_ok());
+    assert!(ui.find("nginx.service").is_ok());
+
+    // Clicking the unit chip toggles the unit filter.
+    let _ = ui.click("nginx.service");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::ToggleSyslogUnit(u) if u == "nginx.service"))
+    );
+}
+
+/// #64: the per-device logs view renders the derived rollup panel from the
+/// sensor's `logs/*` metrics (#63).
+#[test]
+fn test_logs_rollup_panel_renders() {
+    use zensight::view::device::DeviceDetailState;
+    use zensight::view::specialized::{SyslogFilterState, syslog_event_view};
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Syslog, "host01");
+    let mut state = DeviceDetailState::new(device_id);
+    for (m, v) in [
+        ("logs/errors_total", TelemetryValue::Counter(42)),
+        ("logs/warnings_total", TelemetryValue::Counter(7)),
+        ("logs/units_in_failure", TelemetryValue::Gauge(2.0)),
+        (
+            "logs/by_unit/nginx.service/messages_total",
+            TelemetryValue::Counter(900),
+        ),
+    ] {
+        state.update(TelemetryPoint::new("host01", Protocol::Syslog, m, v));
+    }
+
+    let filter = SyslogFilterState::default();
+    let mut ui = simulator(syslog_event_view(&state, &filter, &[]));
+    assert!(ui.find("Log Rollups").is_ok());
+    assert!(ui.find("errors (total)").is_ok());
+    assert!(ui.find("by unit (top)").is_ok());
+}
+
 /// The Logs view shows an explicit empty state when no logs have arrived yet
 /// (so an empty feed reads as "waiting", not "broken").
 #[test]

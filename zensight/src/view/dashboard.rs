@@ -840,7 +840,7 @@ fn render_device_table(devices: Vec<&DeviceState>) -> Element<'_, Message> {
         |device: &DeviceState| -> Element<'_, Message> {
             row![
                 icons::protocol_icon::<Message>(device.id.protocol, IconSize::Small),
-                text(format!("{:?}", device.id.protocol)).size(11)
+                text(device.id.protocol.display_name()).size(11)
             ]
             .spacing(4)
             .align_y(Alignment::Center)

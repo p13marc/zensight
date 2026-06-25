@@ -23,7 +23,9 @@ use crate::message::Message;
 use crate::view::components::Sparkline;
 use crate::view::device::DeviceDetailState;
 
-pub use syslog::{SyslogFilterState, SyslogMessage, logs_view, syslog_message_from_point};
+pub use syslog::{
+    SyslogFilterState, SyslogMessage, logs_view, syslog_event_view, syslog_message_from_point,
+};
 
 /// Number of trailing history samples to render in an inline sparkline (#44).
 const SPARKLINE_SAMPLES: usize = 60;
