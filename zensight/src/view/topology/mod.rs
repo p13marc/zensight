@@ -91,17 +91,8 @@ impl TopologyState {
                     Node {
                         id: node_id.clone(),
                         label: device_id.source.clone(),
-                        position: (0.0, 0.0),
-                        velocity: (0.0, 0.0),
-                        node_type: NodeType::Host,
-                        cpu_usage: None,
-                        memory_usage: None,
-                        network_rx: None,
-                        network_tx: None,
                         is_healthy: device_state.is_healthy,
-                        pinned: false,
-                        alert: None,
-                        sensor_count: None,
+                        ..Default::default()
                     },
                 );
             }
@@ -109,6 +100,7 @@ impl TopologyState {
             // Update node metrics from telemetry
             if let Some(node) = self.nodes.get_mut(&node_id) {
                 node.is_healthy = device_state.is_healthy;
+                node.protocols.insert(device_id.protocol);
                 node.update_from_metrics(&device_state.metrics);
             }
         }
@@ -130,6 +122,7 @@ impl TopologyState {
     pub fn apply_alerts(&mut self, external: &HashMap<String, zensight_common::Alert>) {
         for node in self.nodes.values_mut() {
             node.alert = None;
+            node.alerts.clear();
         }
         for alert in external.values() {
             if let Some(node) = self.nodes.get_mut(&alert.source) {
@@ -137,7 +130,18 @@ impl TopologyState {
                     Some(cur) => cur.max(alert.severity),
                     None => alert.severity,
                 });
+                // Keep the per-host alert list for the info panel (#83).
+                node.alerts.push(NodeAlert {
+                    severity: alert.severity,
+                    rule: alert.rule.clone(),
+                    summary: alert.summary.clone(),
+                });
             }
+        }
+        // Highest severity first, so the panel leads with the worst.
+        for node in self.nodes.values_mut() {
+            node.alerts
+                .sort_by(|a, b| b.severity.cmp(&a.severity).then(a.rule.cmp(&b.rule)));
         }
         // Per-link health (#49): tint each edge by the worst of its endpoints.
         self.recompute_edge_health();
@@ -304,17 +308,27 @@ impl TopologyState {
         center_layout(self);
     }
 
-    /// Get the DeviceId for a node (if it corresponds to a device).
+    /// Get the DeviceId for a node (if it corresponds to a device). Uses the
+    /// node's primary protocol so "View Device Details" lands on a real device
+    /// even for netlink-only hosts (#83).
     pub fn node_to_device_id(&self, node_id: &NodeId) -> Option<DeviceId> {
-        self.nodes.get(node_id).map(|_| DeviceId {
-            protocol: zensight_common::Protocol::Sysinfo,
+        self.nodes.get(node_id).map(|node| DeviceId {
+            protocol: primary_protocol(node),
             source: node_id.clone(),
         })
     }
 }
 
-/// A node in the topology graph.
+/// A firing sensor alert attached to a node, for the info panel (#83).
 #[derive(Debug, Clone)]
+pub struct NodeAlert {
+    pub severity: zensight_common::AlertSeverity,
+    pub rule: String,
+    pub summary: String,
+}
+
+/// A node in the topology graph.
+#[derive(Debug, Clone, Default)]
 pub struct Node {
     /// Unique node identifier.
     pub id: NodeId,
@@ -326,20 +340,34 @@ pub struct Node {
     pub velocity: (f32, f32),
     /// Type of node.
     pub node_type: NodeType,
-    /// CPU usage percentage (0-100).
+    /// Which protocols' devices map to this host (#83). Drives the header icon
+    /// and the "covered by" badges in the info panel.
+    pub protocols: std::collections::BTreeSet<zensight_common::Protocol>,
+    /// CPU usage percentage (0-100). From sysinfo.
     pub cpu_usage: Option<f64>,
-    /// Memory usage percentage (0-100).
+    /// Memory usage percentage (0-100). From sysinfo.
     pub memory_usage: Option<f64>,
-    /// Network RX bytes/sec.
+    /// Network RX bytes/sec. From sysinfo.
     pub network_rx: Option<u64>,
-    /// Network TX bytes/sec.
+    /// Network TX bytes/sec. From sysinfo.
     pub network_tx: Option<u64>,
+    /// Interfaces up / total, from netlink `iface/<n>/up` (#83).
+    pub iface_up: Option<u32>,
+    pub iface_total: Option<u32>,
+    /// TCP socket-state gauges, from netlink `sockets/tcp/*` (#83).
+    pub tcp_established: Option<f64>,
+    pub tcp_listen: Option<f64>,
+    /// Route / neighbor table sizes, from netlink (#83).
+    pub routes_total: Option<f64>,
+    pub neighbors_total: Option<f64>,
     /// Whether the node is healthy.
     pub is_healthy: bool,
     /// Whether the node position is pinned (not affected by layout).
     pub pinned: bool,
     /// Highest-severity firing sensor alert for this host, if any (overlay).
     pub alert: Option<zensight_common::AlertSeverity>,
+    /// Firing sensor alerts for this host, listed in the info panel (#83).
+    pub alerts: Vec<NodeAlert>,
     /// Number of sensors that have correlated this host (#25). `None` until a
     /// correlation entry references it; surfaces the otherwise-dead correlations
     /// map as a "seen by N sensors" node label.
@@ -354,8 +382,15 @@ impl Node {
     ) {
         use zensight_common::TelemetryValue;
 
+        // Netlink interface inventory: `iface/<name>/up` booleans. Counted in a
+        // single pass since they're spread across many keys.
+        let mut iface_up = 0u32;
+        let mut iface_total = 0u32;
+        let mut saw_iface = false;
+
         for (name, point) in metrics {
             match name.as_str() {
+                // ── sysinfo ──
                 "cpu/usage" => {
                     if let TelemetryValue::Gauge(v) = &point.value {
                         self.cpu_usage = Some(*v);
@@ -366,8 +401,29 @@ impl Node {
                         self.memory_usage = Some(*v);
                     }
                 }
+                // ── netlink (#83) ──
+                "sockets/tcp/established" => {
+                    if let TelemetryValue::Gauge(v) = &point.value {
+                        self.tcp_established = Some(*v);
+                    }
+                }
+                "sockets/tcp/listen" => {
+                    if let TelemetryValue::Gauge(v) = &point.value {
+                        self.tcp_listen = Some(*v);
+                    }
+                }
+                "routes/total" => {
+                    if let TelemetryValue::Gauge(v) = &point.value {
+                        self.routes_total = Some(*v);
+                    }
+                }
+                "neighbors/total" => {
+                    if let TelemetryValue::Gauge(v) = &point.value {
+                        self.neighbors_total = Some(*v);
+                    }
+                }
                 _ => {
-                    // Check for network metrics
+                    // sysinfo network counters
                     if name.starts_with("network/") && name.ends_with("/rx_bytes") {
                         if let TelemetryValue::Counter(v) = &point.value {
                             self.network_rx = Some(*v);
@@ -377,17 +433,30 @@ impl Node {
                         && let TelemetryValue::Counter(v) = &point.value
                     {
                         self.network_tx = Some(*v);
+                    } else if name.starts_with("iface/") && name.ends_with("/up") {
+                        // netlink per-interface up/down
+                        saw_iface = true;
+                        iface_total += 1;
+                        if let TelemetryValue::Boolean(true) = &point.value {
+                            iface_up += 1;
+                        }
                     }
                 }
             }
+        }
+
+        if saw_iface {
+            self.iface_up = Some(iface_up);
+            self.iface_total = Some(iface_total);
         }
     }
 }
 
 /// Type of topology node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NodeType {
     /// A host/VM.
+    #[default]
     Host,
     /// A network router.
     Router,
@@ -525,13 +594,30 @@ fn progress_bar(percentage: f64, width: usize) -> String {
     format!("[{}{}]", "=".repeat(filled), " ".repeat(empty))
 }
 
+/// Pick the icon protocol for a node: prefer sysinfo (the host identity), then
+/// netlink, otherwise the first protocol that covers the host (#83).
+fn primary_protocol(node: &Node) -> zensight_common::Protocol {
+    use zensight_common::Protocol;
+    if node.protocols.contains(&Protocol::Sysinfo) {
+        Protocol::Sysinfo
+    } else if node.protocols.contains(&Protocol::Netlink) {
+        Protocol::Netlink
+    } else {
+        node.protocols
+            .iter()
+            .next()
+            .copied()
+            .unwrap_or(Protocol::Sysinfo)
+    }
+}
+
 /// Render the node info panel (shown when a node is selected).
 fn render_node_info_panel(node: &Node) -> Element<'_, Message> {
     use iced::widget::rule;
 
-    // Header with icon and name
+    // Header with a protocol-aware icon and name (#83).
     let header = row![
-        icons::protocol_sysinfo(IconSize::Large),
+        icons::protocol_icon(primary_protocol(node), IconSize::Large),
         column![
             text(&node.label).size(16),
             text(format!("{:?}", node.node_type)).size(10),
@@ -563,6 +649,16 @@ fn render_node_info_panel(node: &Node) -> Element<'_, Message> {
     // Cross-sensor correlation: "seen by N sensors" (#25).
     if let Some(n) = node.sensor_count {
         info_items = info_items.push(text(format!("Seen by {n} sensor(s)")).size(11));
+    }
+
+    // Which protocols cover this host (#83).
+    if !node.protocols.is_empty() {
+        let names: Vec<String> = node
+            .protocols
+            .iter()
+            .map(|p| format!("{p:?}").to_lowercase())
+            .collect();
+        info_items = info_items.push(text(format!("Covered by: {}", names.join(" · "))).size(11));
     }
 
     // System resources section
@@ -600,6 +696,48 @@ fn render_node_info_panel(node: &Node) -> Element<'_, Message> {
         if total > 0 {
             info_items =
                 info_items.push(text(format!("  Total: {}", graph::format_bytes(total))).size(11));
+        }
+    }
+
+    // Netlink section: kernel networking summary (#83).
+    let has_netlink = node.iface_total.is_some()
+        || node.tcp_established.is_some()
+        || node.tcp_listen.is_some()
+        || node.routes_total.is_some()
+        || node.neighbors_total.is_some();
+    if has_netlink {
+        info_items = info_items.push(rule::horizontal(1));
+        info_items = info_items.push(text("Kernel Networking").size(12));
+
+        if let (Some(up), Some(total)) = (node.iface_up, node.iface_total) {
+            info_items = info_items.push(text(format!("  Interfaces: {up}/{total} up")).size(11));
+        }
+        if let (Some(est), Some(lis)) = (node.tcp_established, node.tcp_listen) {
+            info_items = info_items
+                .push(text(format!("  TCP: {est:.0} established, {lis:.0} listening")).size(11));
+        } else if let Some(est) = node.tcp_established {
+            info_items = info_items.push(text(format!("  TCP established: {est:.0}")).size(11));
+        }
+        if let Some(routes) = node.routes_total {
+            info_items = info_items.push(text(format!("  Routes: {routes:.0}")).size(11));
+        }
+        if let Some(nbrs) = node.neighbors_total {
+            info_items = info_items.push(text(format!("  Neighbors: {nbrs:.0}")).size(11));
+        }
+    }
+
+    // Firing alerts for this host (#83).
+    if !node.alerts.is_empty() {
+        use crate::view::alerts::Severity;
+        info_items = info_items.push(rule::horizontal(1));
+        info_items = info_items.push(text(format!("Alerts ({})", node.alerts.len())).size(12));
+        for a in &node.alerts {
+            let color = Severity::from(a.severity).color();
+            info_items = info_items.push(
+                text(format!("  ● [{}] {} — {}", a.severity, a.rule, a.summary))
+                    .size(11)
+                    .style(move |_: &iced::Theme| iced::widget::text::Style { color: Some(color) }),
+            );
         }
     }
 
@@ -916,6 +1054,7 @@ mod tests {
                 pinned: false,
                 alert: None,
                 sensor_count: None,
+                ..Default::default()
             },
         );
 
@@ -948,6 +1087,7 @@ mod tests {
                 pinned: false,
                 alert: None,
                 sensor_count: None,
+                ..Default::default()
             },
         );
 
@@ -999,6 +1139,7 @@ mod tests {
             pinned: false,
             alert: None,
             sensor_count: None,
+            ..Default::default()
         };
 
         let mut state = TopologyState::default();
@@ -1031,5 +1172,105 @@ mod tests {
 
         state.apply_alerts(&HashMap::new());
         assert_eq!(state.edges[0].alert, None);
+    }
+
+    #[test]
+    fn test_node_extracts_netlink_summary() {
+        use std::collections::HashMap;
+        use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+        let mk = |metric: &str, v: TelemetryValue| TelemetryPoint {
+            timestamp: 0,
+            source: "h".to_string(),
+            protocol: Protocol::Netlink,
+            metric: metric.to_string(),
+            value: v,
+            labels: HashMap::new(),
+        };
+        let mut m = HashMap::new();
+        for (k, v) in [
+            ("iface/eth0/up", TelemetryValue::Boolean(true)),
+            ("iface/lo/up", TelemetryValue::Boolean(true)),
+            ("iface/eth1/up", TelemetryValue::Boolean(false)),
+            ("sockets/tcp/established", TelemetryValue::Gauge(120.0)),
+            ("sockets/tcp/listen", TelemetryValue::Gauge(12.0)),
+            ("routes/total", TelemetryValue::Gauge(20.0)),
+            ("neighbors/total", TelemetryValue::Gauge(18.0)),
+        ] {
+            m.insert(k.to_string(), mk(k, v));
+        }
+
+        let mut node = Node {
+            id: "h".to_string(),
+            label: "h".to_string(),
+            ..Default::default()
+        };
+        node.update_from_metrics(&m);
+
+        assert_eq!(node.iface_up, Some(2));
+        assert_eq!(node.iface_total, Some(3));
+        assert_eq!(node.tcp_established, Some(120.0));
+        assert_eq!(node.tcp_listen, Some(12.0));
+        assert_eq!(node.routes_total, Some(20.0));
+        assert_eq!(node.neighbors_total, Some(18.0));
+    }
+
+    #[test]
+    fn test_primary_protocol_prefers_sysinfo_then_netlink() {
+        use zensight_common::Protocol;
+        let mut n = Node::default();
+        assert_eq!(primary_protocol(&n), Protocol::Sysinfo); // empty -> fallback
+        n.protocols.insert(Protocol::Netlink);
+        assert_eq!(primary_protocol(&n), Protocol::Netlink);
+        n.protocols.insert(Protocol::Sysinfo);
+        assert_eq!(primary_protocol(&n), Protocol::Sysinfo);
+    }
+
+    #[test]
+    fn test_apply_alerts_lists_node_alerts() {
+        use std::collections::HashMap;
+        use zensight_common::{Alert, AlertKind, AlertSeverity, Protocol};
+
+        let mut state = TopologyState::default();
+        state.nodes.insert(
+            "host1".to_string(),
+            Node {
+                id: "host1".to_string(),
+                label: "host1".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let mut external = HashMap::new();
+        let warn = Alert::new(
+            "host1",
+            Protocol::Netlink,
+            AlertKind::Expectation,
+            "socket:sshd",
+            AlertSeverity::Warning,
+            "sshd not listening",
+        );
+        let crit = Alert::new(
+            "host1",
+            Protocol::Netring,
+            AlertKind::Anomaly,
+            "PortScanTRW",
+            AlertSeverity::Critical,
+            "port scan",
+        );
+        external.insert(warn.alert_key(), warn);
+        external.insert(crit.alert_key(), crit);
+
+        state.apply_alerts(&external);
+        let n = &state.nodes["host1"];
+        assert_eq!(n.alert, Some(AlertSeverity::Critical));
+        assert_eq!(n.alerts.len(), 2);
+        // Highest severity first.
+        assert_eq!(n.alerts[0].severity, AlertSeverity::Critical);
+        assert_eq!(n.alerts[0].rule, "PortScanTRW");
+
+        // Clearing removes the per-node list.
+        state.apply_alerts(&HashMap::new());
+        assert!(state.nodes["host1"].alerts.is_empty());
     }
 }

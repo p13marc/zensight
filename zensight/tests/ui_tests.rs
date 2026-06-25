@@ -1465,6 +1465,50 @@ fn test_netring_capture_overload_and_breakdown() {
     assert!(ui.find("xdp/rx_ring_full").is_ok());
 }
 
+/// #70: the netring view shows the passive asset-inventory section — the
+/// streamed discovered-count and an on-demand table of MAC / hostname /
+/// platform / seen-via, plus a "Fetch assets" affordance and a click wiring it
+/// to the fetch message.
+#[test]
+fn test_netring_assets_section() {
+    use zensight::message::Message;
+    use zensight::view::specialized::netring::netring_sensor_view;
+    use zensight_common::{AssetRecord, Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let mut state = DeviceDetailState::new(device_id);
+    state.update(TelemetryPoint::new(
+        "wiretap1",
+        Protocol::Netring,
+        "assets/discovered",
+        TelemetryValue::Gauge(2.0),
+    ));
+    state.netring_detail.apply_assets(Ok(vec![AssetRecord {
+        mac: "aa:bb:cc:dd:ee:ff".into(),
+        ipv4: vec!["10.0.0.5".into()],
+        ipv6: vec![],
+        hostname: Some("switch01".into()),
+        vendor: None,
+        platform: Some("cisco WS-C2960X".into()),
+        capabilities: vec!["switch".into(), "bridge".into()],
+        seen_via: vec!["lldp".into()],
+        last_seen: 1_700_000_000_000,
+    }]));
+
+    let mut ui = simulator(netring_sensor_view(&state));
+    assert!(ui.find("Assets (passive discovery)").is_ok());
+    assert!(ui.find("switch01").is_ok());
+    assert!(ui.find("cisco WS-C2960X").is_ok());
+
+    // The fetch button is wired to the asset-fetch message.
+    let _ = ui.click("Fetch assets");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::FetchNetringAssets))
+    );
+}
+
 /// The top-level Logs view renders buffered log lines (the message text and the
 /// originating host) — verifying the unified logs feed surfaces journald/syslog.
 #[test]

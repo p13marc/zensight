@@ -40,6 +40,7 @@ pub async fn run_drains(
     let icmp = channels.icmp.clone();
     let dns = channels.dns.clone();
     let http = channels.http.clone();
+    let assets = channels.assets.clone();
 
     // Take (and clear) the current window's flow durations for percentile points.
     let drain_window = |buf: &std::sync::Mutex<Vec<u64>>| -> Vec<u64> {
@@ -99,6 +100,14 @@ pub async fn run_drains(
         let tls_n = tls_handshakes.load(Ordering::Relaxed);
         let tls_distinct = tls_inventory.lock().map(|i| i.len() as u64).unwrap_or(0);
         points.extend(map::tls_points(sensor_id, tls_n, tls_distinct));
+
+        // Passive asset inventory size (issue #70) — only when any asset has
+        // been discovered, so the cached gauge isn't clobbered to 0 on a build
+        // without the asset collector armed.
+        let asset_count = assets.lock().map(|a| a.len() as u64).unwrap_or(0);
+        if asset_count > 0 {
+            points.push(map::asset_count_point(sensor_id, asset_count));
+        }
 
         // ICMP error aggregates (issue #15).
         let by_kind: Vec<(String, u64)> = icmp

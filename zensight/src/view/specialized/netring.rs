@@ -19,6 +19,7 @@ pub fn netring_sensor_view(state: &DeviceDetailState) -> Element<'_, Message> {
         card(render_tcp_health(state)),
         card(render_bandwidth(state)),
         card(render_tls(state)),
+        card(render_assets(state)),
     ]
     .spacing(space::MD)
     .padding(space::LG);
@@ -114,6 +115,82 @@ fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
 /// badge — mirrors the netring `OverloadDetector` default enter threshold (5%),
 /// so the GUI's local signal lines up with the `capture-overload` alert (#71).
 const OVERLOAD_DROP_RATE: f64 = 0.05;
+
+/// Passive asset-inventory section (#70): a streamed discovered-count plus an
+/// on-demand table (MAC · IP · hostname · platform · capabilities · seen-via)
+/// fetched from `@/query/assets`. Surfaces hosts seen on the wire that emit no
+/// telemetry of their own — the discovery the topology/devices views lack.
+fn render_assets(state: &DeviceDetailState) -> Element<'_, Message> {
+    let loading = state.netring_detail.assets.is_loading();
+    let label = if loading {
+        "Fetching…"
+    } else {
+        "Fetch assets"
+    };
+    let mut fetch = button(text(label).size(font::CAPTION)).padding([4, 10]);
+    if !loading {
+        fetch = fetch.on_press(Message::FetchNetringAssets);
+    }
+
+    let discovered = num(state.metrics.get("assets/discovered").map(|p| &p.value));
+    let mut col = column![
+        section_header("Assets (passive discovery)", Some(fetch.into())),
+        row![cell("discovered", 180), cell(&discovered, 100)].spacing(8),
+    ]
+    .spacing(space::SM);
+
+    if let Some(err) = state.netring_detail.assets.error() {
+        col = col.push(empty_state(format!("Fetch failed: {err}"), None));
+    } else if let Some(records) = state.netring_detail.assets.ready() {
+        if records.is_empty() {
+            col = col.push(empty_state("No assets discovered yet", None));
+        } else {
+            let mut list = Column::new().spacing(3).push(
+                row![
+                    cell("mac", 150),
+                    cell("ip", 150),
+                    cell("hostname", 150),
+                    cell("platform", 160),
+                    cell("caps", 130),
+                    cell("seen via", 110),
+                ]
+                .spacing(8),
+            );
+            for r in records.iter().take(200) {
+                let ip = r
+                    .ipv4
+                    .first()
+                    .or_else(|| r.ipv6.first())
+                    .map(String::as_str)
+                    .unwrap_or("-");
+                list = list.push(
+                    row![
+                        cell(&r.mac, 150),
+                        cell(ip, 150),
+                        cell(r.hostname.as_deref().unwrap_or("-"), 150),
+                        cell(r.platform.as_deref().unwrap_or("-"), 160),
+                        cell(&join_or_dash(&r.capabilities), 130),
+                        cell(&join_or_dash(&r.seen_via), 110),
+                    ]
+                    .spacing(8),
+                );
+            }
+            col = col
+                .push(text(format!("{} assets", records.len())).size(font::EMPHASIS))
+                .push(list);
+        }
+    }
+    col.into()
+}
+
+/// Join a slug list with commas, or `"-"` when empty.
+fn join_or_dash(items: &[String]) -> String {
+    if items.is_empty() {
+        "-".to_string()
+    } else {
+        items.join(", ")
+    }
+}
 
 /// Capture self-health section (#71): packets/drops/drop_rate per source, the
 /// honest drop breakdown (AF_PACKET freezes / AF_XDP ring + descriptor causes),

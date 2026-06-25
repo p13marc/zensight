@@ -16,6 +16,14 @@
       bandwidth: true,   // per-application bytes/sec
       flows: true,       // flow lifecycle aggregates
       tcp_resets: true,  // TCP reset + connection-refused counters
+      // Passive asset inventory (netring 0.27): discover hosts on the wire from
+      // ARP / NDP / LLDP. Streams an `assets/discovered` count; the per-asset
+      // detail (MAC / IP / hostname / platform / seen-via) is served on demand
+      // via `@/query/assets`. Needs capture (CAP_NET_RAW).
+      assets: false,
+      // Also feed the inventory from CDP. Separate flag because CDP forces the
+      // kernel prefilter to capture-all (it can't be expressed as a BPF term).
+      asset_cdp: false,
     },
     bandwidth_period_secs: 5,
 

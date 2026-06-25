@@ -299,6 +299,18 @@ pub fn tls_points(sensor_id: &str, handshakes: u64, distinct: u64) -> Vec<Teleme
     ]
 }
 
+/// Passive asset-inventory aggregate: number of distinct assets (MACs) the
+/// inventory currently holds. Low-cardinality count safe to stream; the
+/// per-asset detail is pulled on demand from `@/query/assets` (principle P2).
+pub fn asset_count_point(sensor_id: &str, discovered: u64) -> TelemetryPoint {
+    TelemetryPoint::new(
+        sensor_id,
+        Protocol::Netring,
+        "assets/discovered",
+        TelemetryValue::Gauge(discovered as f64),
+    )
+}
+
 // ─── ICMP error telemetry (issue #15) ───────────────────────────────────────
 
 /// A flattened ICMP error, decomposed from netring's `IcmpError` event. Kept

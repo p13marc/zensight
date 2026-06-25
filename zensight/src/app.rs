@@ -1212,6 +1212,17 @@ impl ZenSight {
                     device.netring_detail.apply_tls(result);
                 }
             }
+            Message::FetchNetringAssets => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_assets();
+                }
+                return self.query_netring_assets();
+            }
+            Message::NetringAssetsReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_assets(result);
+                }
+            }
 
             Message::OpenSecurity => {
                 self.set_view(CurrentView::Security);
@@ -1474,6 +1485,23 @@ impl ZenSight {
                 .await
                 .ok_or_else(|| "No netring sensor responded".to_string());
             Message::NetringTlsReceived(result)
+        })
+    }
+
+    /// Fetch the on-demand netring passive asset inventory (#70).
+    fn query_netring_assets(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_assets;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::CommandFeedback {
+                success: false,
+                message: "Not connected to Zenoh".to_string(),
+            });
+        };
+        Task::future(async move {
+            let result = fetch_assets(session)
+                .await
+                .ok_or_else(|| "No netring sensor responded".to_string());
+            Message::NetringAssetsReceived(result)
         })
     }
 
