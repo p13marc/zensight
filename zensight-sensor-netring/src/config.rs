@@ -243,6 +243,35 @@ pub struct AnomalyConfig {
     /// Beaconing score threshold (0.0–1.0); higher = stricter. Default 0.8.
     #[serde(default = "default_beacon_threshold")]
     pub beacon_threshold: f64,
+    /// RITA-style ROBUST beaconing detector (issue #118): Bowley skewness + MAD,
+    /// bit-faithful to RITA — catches jittered C2 (e.g. Cobalt Strike jitter)
+    /// that the coarser CV `beaconing` detector misses. Flags TCP flows whose
+    /// composite RITA score `>= rita_beacon_threshold`. Independent of `beaconing`.
+    #[serde(default)]
+    pub rita_beacon: bool,
+    /// RITA beacon score threshold (0.0–1.0); higher = stricter. Default 0.9.
+    #[serde(default = "default_rita_beacon_threshold")]
+    pub rita_beacon_threshold: f64,
+    /// DNS tunneling detection (issue #118): flags a (src, SLD) whose distinct
+    /// subdomain-label cardinality over a sliding window crosses
+    /// `dns_tunnel_distinct`, or any single query name at/above
+    /// `dns_tunnel_qname_len` bytes (classic exfil-via-qname). Requires
+    /// `collect.dns`.
+    #[serde(default)]
+    pub dns_tunnel: bool,
+    /// Distinct subdomain labels per (src, SLD) over the window before flagging
+    /// a tunnel. Default 50.
+    #[serde(default = "default_dns_tunnel_distinct")]
+    pub dns_tunnel_distinct: usize,
+    /// Query-name length (bytes) at/above which a single query is flagged as
+    /// tunnel-shaped. Default 100.
+    #[serde(default = "default_dns_tunnel_qname_len")]
+    pub dns_tunnel_qname_len: usize,
+    /// Newly-Observed-Domain detection (issue #118): emit an Info anomaly on the
+    /// first sight of a second-level domain (allowlist-friendly). Bounded LRU
+    /// seen-set. Requires `collect.dns`.
+    #[serde(default)]
+    pub nod: bool,
     /// Connection-flood detection (issue #18): many TCP connections to one
     /// (dst,port) in a short window — distinct from a port scan (many ports).
     #[serde(default)]
@@ -267,6 +296,15 @@ pub struct AnomalyConfig {
 
 fn default_beacon_threshold() -> f64 {
     0.8
+}
+fn default_rita_beacon_threshold() -> f64 {
+    0.9
+}
+fn default_dns_tunnel_distinct() -> usize {
+    50
+}
+fn default_dns_tunnel_qname_len() -> usize {
+    100
 }
 fn default_flood_threshold() -> u64 {
     100
@@ -326,6 +364,23 @@ mod tests {
     fn validate_requires_source() {
         let cfg: NetringSensorConfig = json5::from_str(r#"{ netring: {} }"#).unwrap();
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn new_anomaly_detectors_off_by_default_with_thresholds() {
+        // `anomalies: {}` present → serde applies each field's documented
+        // default (omitting the table entirely would use the derived `Default`).
+        let cfg: NetringSensorConfig =
+            json5::from_str(r#"{ netring: { interfaces: ["eth0"], anomalies: {} } }"#).unwrap();
+        let a = &cfg.netring.anomalies;
+        // Issue #118 detectors are opt-in.
+        assert!(!a.rita_beacon);
+        assert!(!a.dns_tunnel);
+        assert!(!a.nod);
+        // Thresholds carry their documented defaults.
+        assert_eq!(a.rita_beacon_threshold, 0.9);
+        assert_eq!(a.dns_tunnel_distinct, 50);
+        assert_eq!(a.dns_tunnel_qname_len, 100);
     }
 
     #[test]

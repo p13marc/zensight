@@ -180,6 +180,108 @@ pub fn anomaly_alert(sensor_id: &str, a: &AnomalyView) -> Alert {
     alert
 }
 
+// ─── DNS anomaly detectors (issue #118) ──────────────────────────────────────
+
+/// Bounded first-sight set of second-level domains for the Newly-Observed-Domain
+/// detector (issue #118). Tracks which SLDs have been seen so [`Self::observe`]
+/// returns `true` exactly once per domain — its first sight — until the domain is
+/// evicted under the LRU (insertion-order) cap. Cheap on the steady-state
+/// (already-seen) path: a single hash lookup, no allocation.
+#[derive(Debug)]
+pub struct SeenDomains {
+    cap: usize,
+    seen: std::collections::HashSet<String>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl SeenDomains {
+    /// New seen-set bounded to `cap` distinct domains (min 1).
+    pub fn new(cap: usize) -> Self {
+        Self {
+            cap: cap.max(1),
+            seen: std::collections::HashSet::new(),
+            order: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Record a sighting of `sld`. Returns `true` if this is its FIRST sight
+    /// (newly observed); `false` if already in the set. Evicts the oldest entry
+    /// when the cap is exceeded (FIFO / insertion-order).
+    pub fn observe(&mut self, sld: &str) -> bool {
+        if self.seen.contains(sld) {
+            return false;
+        }
+        if self.order.len() >= self.cap
+            && let Some(old) = self.order.pop_front()
+        {
+            self.seen.remove(&old);
+        }
+        self.seen.insert(sld.to_string());
+        self.order.push_back(sld.to_string());
+        true
+    }
+
+    /// Distinct domains currently retained.
+    pub fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
+    }
+}
+
+/// `true` when a DNS query looks like tunneling: either the distinct-label
+/// cardinality per (src, SLD) over the window reaches `max_distinct`, or the
+/// query name is at/above `max_qname_len` bytes. Pure so the threshold logic is
+/// unit-testable without the capture machinery.
+pub fn dns_tunnel_fires(
+    distinct_labels: usize,
+    qname_len: usize,
+    max_distinct: usize,
+    max_qname_len: usize,
+) -> bool {
+    distinct_labels >= max_distinct || qname_len >= max_qname_len
+}
+
+/// Build the `DnsTunnel` [`AnomalyView`] (kind → ATT&CK T1071.004). Bucketed by
+/// `(rule, src)` (src is the querying host IP, no ephemeral port); the SLD rides
+/// as an observation, the trigger signal as metrics.
+pub fn dns_tunnel_view(
+    src: Option<String>,
+    sld: &str,
+    distinct_labels: usize,
+    qname_len: usize,
+) -> AnomalyView {
+    AnomalyView {
+        kind: "DnsTunnel".into(),
+        severity: AlertSeverity::Warning,
+        src,
+        dst: None,
+        proto: Some("udp".into()),
+        observations: vec![("sld".into(), sld.to_string())],
+        metrics: vec![
+            ("distinct_labels".into(), distinct_labels as f64),
+            ("qname_len".into(), qname_len as f64),
+        ],
+    }
+}
+
+/// Build the `NewlyObservedDomain` [`AnomalyView`] (kind → ATT&CK T1568). Info
+/// severity (allowlist-friendly): a second-level domain seen for the first time.
+/// Bucketed by `(rule, src, sld)`.
+pub fn nod_view(src: Option<String>, sld: &str) -> AnomalyView {
+    AnomalyView {
+        kind: "NewlyObservedDomain".into(),
+        severity: AlertSeverity::Info,
+        src,
+        dst: None,
+        proto: Some("udp".into()),
+        observations: vec![("sld".into(), sld.to_string())],
+        metrics: vec![],
+    }
+}
+
 fn human_summary(a: &AnomalyView) -> String {
     match (&a.src, &a.dst) {
         (Some(src), Some(dst)) => format!("{} {} -> {}", a.kind, src, dst),
@@ -1014,6 +1116,120 @@ mod tests {
         assert_eq!(attack_technique("DgaScorer"), Some("T1568.002"));
         assert_eq!(attack_technique("RitaBeacon"), Some("T1071"));
         assert_eq!(attack_technique("UnknownDetector"), None);
+    }
+
+    // ─── DNS anomaly detectors (issue #118) ──────────────────────────────────
+
+    #[test]
+    fn seen_domains_first_sight_then_repeat() {
+        let mut seen = SeenDomains::new(8);
+        assert!(seen.observe("evil"), "first sight is newly-observed");
+        assert!(!seen.observe("evil"), "repeat is not newly-observed");
+        assert!(seen.observe("good"));
+        assert_eq!(seen.len(), 2);
+    }
+
+    #[test]
+    fn seen_domains_evicts_oldest_at_cap() {
+        let mut seen = SeenDomains::new(2);
+        assert!(seen.observe("a"));
+        assert!(seen.observe("b"));
+        // Inserting a third evicts "a" (oldest).
+        assert!(seen.observe("c"));
+        assert_eq!(seen.len(), 2);
+        // "a" was evicted → seen as new again; "b"/"c" still known.
+        assert!(seen.observe("a"));
+        assert!(!seen.observe("c"));
+    }
+
+    #[test]
+    fn dns_tunnel_threshold_crossing() {
+        // Below both thresholds → no fire.
+        assert!(!dns_tunnel_fires(10, 40, 50, 100));
+        // Distinct-label cardinality crosses → fire.
+        assert!(dns_tunnel_fires(50, 40, 50, 100));
+        // Long qname crosses (even with few distinct labels) → fire.
+        assert!(dns_tunnel_fires(3, 120, 50, 100));
+        // Exact boundary is inclusive.
+        assert!(dns_tunnel_fires(0, 100, 50, 100));
+    }
+
+    #[test]
+    fn dns_tunnel_view_maps_to_alert_with_technique() {
+        let v = dns_tunnel_view(Some("10.0.0.5".into()), "exfil", 80, 110);
+        assert_eq!(v.kind, "DnsTunnel");
+        assert_eq!(v.severity, AlertSeverity::Warning);
+        let alert = anomaly_alert("s", &v);
+        assert_eq!(alert.kind, AlertKind::Anomaly);
+        assert_eq!(alert.rule, "DnsTunnel");
+        assert_eq!(alert.labels.get("sld").map(String::as_str), Some("exfil"));
+        assert_eq!(
+            alert.labels.get("src").map(String::as_str),
+            Some("10.0.0.5")
+        );
+        assert_eq!(
+            alert.labels.get("technique").map(String::as_str),
+            Some("T1071.004")
+        );
+        // Bare-IP src (no port) carries no community_id.
+        assert!(alert.labels.get("community_id").is_none());
+    }
+
+    #[test]
+    fn nod_view_is_info_with_technique() {
+        let v = nod_view(Some("10.0.0.5".into()), "newdomain");
+        assert_eq!(v.kind, "NewlyObservedDomain");
+        assert_eq!(v.severity, AlertSeverity::Info);
+        let alert = anomaly_alert("s", &v);
+        assert_eq!(alert.severity, AlertSeverity::Info);
+        assert_eq!(alert.rule, "NewlyObservedDomain");
+        assert_eq!(
+            alert.labels.get("sld").map(String::as_str),
+            Some("newdomain")
+        );
+        assert_eq!(
+            alert.labels.get("technique").map(String::as_str),
+            Some("T1568")
+        );
+    }
+
+    #[test]
+    fn nod_buckets_by_src_and_sld() {
+        // Same (src, sld) → same alert_key (one NOD alert per domain per host).
+        let a1 = anomaly_alert("s", &nod_view(Some("10.0.0.5".into()), "dom"));
+        let a2 = anomaly_alert("s", &nod_view(Some("10.0.0.5".into()), "dom"));
+        assert_eq!(a1.alert_key(), a2.alert_key());
+        // Different sld → different key.
+        let a3 = anomaly_alert("s", &nod_view(Some("10.0.0.5".into()), "other"));
+        assert_ne!(a1.alert_key(), a3.alert_key());
+    }
+
+    #[test]
+    fn rita_beacon_view_maps_kind_and_technique() {
+        // The RITA detector emits kind "RitaBeacon"; the mapping must carry it
+        // through to the alert with the C2 technique tag.
+        let v = AnomalyView {
+            kind: "RitaBeacon".into(),
+            severity: AlertSeverity::Warning,
+            src: Some("10.0.0.5:44321".into()),
+            dst: Some("203.0.113.7:443".into()),
+            proto: Some("tcp".into()),
+            observations: vec![],
+            metrics: vec![("score".into(), 0.94)],
+        };
+        let alert = anomaly_alert("s", &v);
+        assert_eq!(alert.rule, "RitaBeacon");
+        assert_eq!(
+            alert.labels.get("technique").map(String::as_str),
+            Some("T1071")
+        );
+        // Full 5-tuple → cross-tool community_id is attached.
+        assert!(
+            alert
+                .labels
+                .get("community_id")
+                .is_some_and(|c| c.starts_with("1:"))
+        );
     }
 
     #[test]
