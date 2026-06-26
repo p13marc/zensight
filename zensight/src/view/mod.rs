@@ -11,6 +11,7 @@ pub mod formatting;
 pub mod freshness;
 pub mod groups;
 pub mod icons;
+pub mod inventory;
 pub mod overview;
 pub mod search;
 pub mod security;

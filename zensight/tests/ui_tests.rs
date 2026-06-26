@@ -1750,6 +1750,72 @@ fn test_nav_opens_logs() {
     assert!(msgs.iter().any(|m| matches!(m, Message::OpenLogs)));
 }
 
+/// The nav rail's "Inventory" entry drives Message::OpenInventory (#120).
+#[test]
+fn test_nav_opens_inventory() {
+    use zensight::view::shell::app_shell;
+
+    let inner = iced::widget::text("x");
+    let mut ui = simulator(app_shell(
+        CurrentView::Dashboard,
+        None,
+        ConnectionState::Connected,
+        0,
+        None,
+        0,
+        inner.into(),
+    ));
+    let _ = ui.click("Inventory");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(msgs.iter().any(|m| matches!(m, Message::OpenInventory)));
+}
+
+/// The inventory view renders the asset table (with the previously-hidden vendor)
+/// and the unified fingerprint explorer; an SNI-bearing fingerprint exposes an
+/// allowlist action (#120).
+#[test]
+fn test_inventory_view_renders_assets_and_fingerprints() {
+    use zensight::view::inventory::{InventoryData, InventoryState, inventory_view};
+    use zensight_common::{AssetRecord, TlsRecord};
+
+    let mut state = InventoryState::default();
+    state.apply(Ok(InventoryData {
+        assets: vec![AssetRecord {
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            ipv4: vec!["10.0.0.5".into()],
+            ipv6: vec![],
+            hostname: Some("printer1".into()),
+            vendor: Some("AcmeCorp".into()),
+            platform: None,
+            capabilities: vec!["router".into()],
+            seen_via: vec!["lldp".into()],
+            last_seen: 1,
+        }],
+        tls: vec![TlsRecord {
+            sni: Some("login.example".into()),
+            alpn: Some("h2".into()),
+            ja3: None,
+            ja4: Some("t13d1516h2_abc_def".into()),
+            count: 3,
+        }],
+        quic: vec![],
+        ssh: vec![],
+    }));
+
+    let mut ui = simulator(inventory_view(&state));
+    assert!(ui.find("Inventory").is_ok());
+    assert!(ui.find("AcmeCorp").is_ok(), "vendor must be rendered");
+    assert!(ui.find("printer1").is_ok());
+    assert!(ui.find("t13d1516h2_abc_def").is_ok());
+    // The SNI-bearing JA4 row offers an allowlist action.
+    let _ = ui.click("allowlist");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::AddNetringAllowlistEntry(h) if h == "login.example"))
+    );
+}
+
 /// Drilling into a syslog device shows the host's recent log *stream* from the
 /// buffer — not just the latest line per facility/severity. Two messages with
 /// the SAME metric must BOTH appear (the old metrics-map view kept only one).

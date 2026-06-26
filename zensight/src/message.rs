@@ -107,6 +107,18 @@ pub enum Message {
     AddNetringAllowlist,
     /// Remove an allowlist entry from the netring allowlist.
     RemoveNetringAllowlist(String),
+    /// Add a specific host/SLD to the netring allowlist (#120) — used by the
+    /// inventory fingerprint explorer's per-row allowlist action.
+    AddNetringAllowlistEntry(String),
+
+    /// Open the first-class inventory view and (re)fetch assets + fingerprints (#120).
+    OpenInventory,
+    /// Combined inventory fetch outcome (assets + TLS/QUIC/SSH fingerprints).
+    InventoryLoaded(Result<crate::view::inventory::InventoryData, String>),
+    /// Set the inventory asset-table sort order.
+    SetInventoryAssetSort(crate::view::inventory::AssetSort),
+    /// Set the fingerprint-explorer kind filter (`None` = all kinds).
+    SetInventoryFpFilter(Option<crate::view::inventory::FpKind>),
 
     /// Fetch an on-demand netlink detail table (sockets/routes/neighbors).
     FetchNetlinkDetail(crate::view::specialized::netlink_detail::NetlinkDetailTopic),
