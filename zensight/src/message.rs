@@ -300,6 +300,9 @@ pub enum Message {
     /// Toggle visibility of a metric series in the chart.
     ToggleMetricVisibility(String),
 
+    /// Toggle a metric's favorite/pin state on the selected device (#27).
+    ToggleMetricFavorite(String),
+
     /// User changed the chart time window.
     SetChartTimeWindow(TimeWindow),
 

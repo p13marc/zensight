@@ -44,6 +44,9 @@ pub struct PersistentSettings {
     /// Alert rules.
     #[serde(default)]
     pub alert_rules: Vec<AlertRule>,
+    /// Favorited metrics (#27), keyed `protocol/source/metric`.
+    #[serde(default)]
+    pub favorite_metrics: Vec<String>,
     /// Selected overview protocol tab.
     #[serde(default)]
     pub overview_selected_protocol: Option<Protocol>,
@@ -84,6 +87,7 @@ impl Default for PersistentSettings {
             max_alerts: default_max_alerts(),
             groups: GroupsState::default(),
             alert_rules: Vec::new(),
+            favorite_metrics: Vec::new(),
             overview_selected_protocol: None,
             overview_expanded: default_overview_expanded(),
             current_view: CurrentView::default(),
@@ -185,6 +189,7 @@ impl PersistentSettings {
             max_alerts: state.max_alerts.parse().unwrap_or(default_max_alerts()),
             groups: GroupsState::default(),
             alert_rules: Vec::new(),
+            favorite_metrics: Vec::new(),
             overview_selected_protocol: None,
             overview_expanded: default_overview_expanded(),
             current_view: CurrentView::default(),
@@ -795,6 +800,7 @@ mod tests {
             max_alerts: 200,
             groups: GroupsState::default(),
             alert_rules: Vec::new(),
+            favorite_metrics: Vec::new(),
             overview_selected_protocol: None,
             overview_expanded: true,
             current_view: CurrentView::default(),
@@ -827,6 +833,7 @@ mod tests {
             max_alerts: 150,
             groups: GroupsState::default(),
             alert_rules: Vec::new(),
+            favorite_metrics: Vec::new(),
             overview_selected_protocol: None,
             overview_expanded: true,
             current_view: CurrentView::default(),

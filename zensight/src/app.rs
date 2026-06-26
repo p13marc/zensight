@@ -172,6 +172,9 @@ pub struct ZenSight {
     last_telemetry_ms: Option<i64>,
     /// Global cross-device metric search panel state (#27).
     global_search: crate::view::search::GlobalSearchState,
+    /// Favorited metrics (#27), keyed `protocol/source/metric`. Persisted; the
+    /// per-device projection is pushed into the device detail state on selection.
+    favorites: std::collections::HashSet<String>,
 }
 
 impl ZenSight {
@@ -295,6 +298,7 @@ impl ZenSight {
             // Demo mode pre-loads mock points; treat the feed as fresh on boot.
             last_telemetry_ms: if demo_mode { Some(now_ms()) } else { None },
             global_search: crate::view::search::GlobalSearchState::default(),
+            favorites: persistent.favorite_metrics.iter().cloned().collect(),
         };
 
         (app, Task::none())
@@ -326,6 +330,19 @@ impl ZenSight {
             Message::ClearChartSelection => {
                 if let Some(ref mut device) = self.selected_device {
                     device.clear_chart_selection();
+                }
+            }
+
+            Message::ToggleMetricFavorite(metric) => {
+                if let Some(ref mut device) = self.selected_device {
+                    let now_fav = device.toggle_favorite(&metric);
+                    let key = fav_key(&device.device_id, &metric);
+                    if now_fav {
+                        self.favorites.insert(key);
+                    } else {
+                        self.favorites.remove(&key);
+                    }
+                    self.save_favorites();
                 }
             }
 
@@ -1798,6 +1815,25 @@ impl ZenSight {
         }
     }
 
+    /// The favorited metric names for `device_id` (#27), projected out of the
+    /// global `protocol/source/metric` favorites set.
+    fn device_favorites(&self, device_id: &DeviceId) -> std::collections::HashSet<String> {
+        let prefix = fav_prefix(device_id);
+        self.favorites
+            .iter()
+            .filter_map(|k| k.strip_prefix(&prefix).map(str::to_string))
+            .collect()
+    }
+
+    /// Persist the favorited-metrics set (#27).
+    fn save_favorites(&self) {
+        let mut persistent = PersistentSettings::load();
+        persistent.favorite_metrics = self.favorites.iter().cloned().collect();
+        if let Err(e) = persistent.save() {
+            tracing::error!("Failed to save favorites: {}", e);
+        }
+    }
+
     /// Save current view to persistent settings.
     fn save_current_view(&self) {
         let mut persistent = PersistentSettings::load();
@@ -2608,7 +2644,9 @@ impl ZenSight {
         // We don't have the full TelemetryPoints in the dashboard,
         // so the detail view will populate as new data arrives
         let max_history = self.settings.max_history_value();
-        let detail_state = DeviceDetailState::with_max_history(device_id.clone(), max_history);
+        let mut detail_state = DeviceDetailState::with_max_history(device_id.clone(), max_history);
+        // Project this device's favorited metrics (#27) from the global set.
+        detail_state.set_favorites(self.device_favorites(&device_id));
         self.selected_device = Some(detail_state);
         self.set_view(CurrentView::Device);
 
@@ -2758,6 +2796,7 @@ impl ZenSight {
         let mut persistent = PersistentSettings::from_state(&self.settings);
         persistent.groups = self.groups.clone();
         persistent.alert_rules = self.alerts.rules.clone();
+        persistent.favorite_metrics = self.favorites.iter().cloned().collect();
         persistent.overview_selected_protocol = self.overview.selected_protocol;
         persistent.overview_expanded = self.overview.expanded;
         if let Err(error) = persistent.save() {
@@ -2934,6 +2973,17 @@ fn chrono_timestamp() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("{}", now)
+}
+
+/// The `protocol/source/` prefix under which a device's favorited metrics (#27)
+/// are keyed in the global favorites set.
+fn fav_prefix(device_id: &DeviceId) -> String {
+    format!("{}/{}/", device_id.protocol, device_id.source)
+}
+
+/// The global favorites key for `metric` on `device_id` (#27).
+fn fav_key(device_id: &DeviceId, metric: &str) -> String {
+    format!("{}{}", fav_prefix(device_id), metric)
 }
 
 /// Fire a best-effort desktop notification for a CRITICAL alert (#26). Runs on a
