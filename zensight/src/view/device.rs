@@ -8,7 +8,7 @@ use iced::widget::{
 use iced::{Alignment, Element, Length, Theme};
 use iced_anim::widget::button;
 
-use zensight_common::{TelemetryPoint, TelemetryValue};
+use zensight_common::{DeviceStatus, Protocol, TelemetryPoint, TelemetryValue};
 
 use crate::app::DEVICE_SEARCH_ID;
 use crate::message::{DeviceId, Message};
@@ -573,6 +573,92 @@ fn format_value_for_export(value: &TelemetryValue) -> String {
 /// This function first tries to render a protocol-specific specialized view.
 /// If no specialized view is available for the protocol, it falls back to
 /// the generic device view.
+/// One sensor facet of a physical host, for the host-detail facet tabs (#133).
+/// `DeviceId = (protocol, source)`, so a host running sysinfo+netlink+netring+logs
+/// is four facets that share a `source`; the tabs let the protocol be a *facet of a
+/// host* rather than a top-level navigation axis.
+#[derive(Debug, Clone)]
+pub struct FacetTab {
+    pub id: DeviceId,
+    pub protocol: Protocol,
+    pub status: DeviceStatus,
+    /// Whether this facet is the one currently open.
+    pub active: bool,
+}
+
+/// Triage tint for a facet's status dot (green / amber / red / gray).
+fn facet_status_color(status: DeviceStatus) -> iced::Color {
+    match status {
+        DeviceStatus::Online => iced::Color::from_rgb(0.40, 0.75, 0.45),
+        DeviceStatus::Degraded => iced::Color::from_rgb(0.90, 0.70, 0.20),
+        DeviceStatus::Offline => iced::Color::from_rgb(0.90, 0.30, 0.30),
+        DeviceStatus::Unknown => iced::Color::from_rgb(0.55, 0.55, 0.55),
+    }
+}
+
+/// The host-detail facet tab strip (#133): one tab per sensor present on the host,
+/// active tab highlighted, others click to switch facets. Returns `None` for a
+/// single-sensor host (nothing to switch between).
+fn facet_tab_strip(facets: &[FacetTab]) -> Option<Element<'static, Message>> {
+    if facets.len() < 2 {
+        return None;
+    }
+    let mut tabs = Row::new().spacing(8).align_y(Alignment::Center);
+    tabs = tabs.push(text("Facets").size(13));
+    for f in facets {
+        // Copy out the data the widgets need so the strip owns it (Element<'static>)
+        // and doesn't borrow `facets`.
+        let status = f.status;
+        let dot = container(text(""))
+            .width(8)
+            .height(8)
+            .style(move |_: &Theme| container::Style {
+                background: Some(iced::Background::Color(facet_status_color(status))),
+                border: iced::Border::default().rounded(4.0),
+                ..Default::default()
+            });
+        let label = row![
+            dot,
+            icons::protocol_icon::<Message>(f.protocol, IconSize::Small),
+            text(f.protocol.display_name()).size(13),
+        ]
+        .spacing(5)
+        .align_y(Alignment::Center);
+        let tab = if f.active {
+            button(label)
+                .padding([4, 10])
+                .style(iced::widget::button::primary)
+        } else {
+            button(label)
+                .padding([4, 10])
+                .on_press(Message::SelectDevice(f.id.clone()))
+                .style(iced::widget::button::secondary)
+        };
+        tabs = tabs.push(tab);
+    }
+    Some(container(tabs).padding([8, 20]).into())
+}
+
+/// Render the host-detail view (#133): the facet tab strip over the active facet's
+/// device detail. The protocol is a facet of the host, so switching tabs re-opens a
+/// sibling facet (`SelectDevice`). Falls back to the bare facet view for a host with
+/// a single sensor.
+pub fn host_detail_view<'a>(
+    state: &'a DeviceDetailState,
+    syslog_filter: &'a specialized::SyslogFilterState,
+    host_logs: &[specialized::SyslogMessage],
+    facets: &[FacetTab],
+) -> Element<'a, Message> {
+    let inner = device_view_with_syslog_filter(state, syslog_filter, host_logs);
+    match facet_tab_strip(facets) {
+        Some(strip) => column![strip, rule::horizontal(1), inner]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+        None => inner,
+    }
+}
+
 pub fn device_view(state: &DeviceDetailState) -> Element<'_, Message> {
     // Try to use a specialized view for this protocol
     if let Some(specialized_view) = specialized::specialized_view(state) {

@@ -10,7 +10,9 @@ use zensight::app::{AppTheme, CurrentView};
 use zensight::message::{DeviceId, Message};
 use zensight::mock;
 use zensight::view::dashboard::{ConnectionState, DashboardState, DeviceState, dashboard_view};
-use zensight::view::device::{DeviceDetailState, device_view_with_syslog_filter};
+use zensight::view::device::{
+    DeviceDetailState, FacetTab, device_view_with_syslog_filter, host_detail_view,
+};
 use zensight::view::groups::GroupsState;
 use zensight::view::overview::OverviewState;
 use zensight::view::settings::{SettingsState, settings_view};
@@ -280,7 +282,8 @@ fn test_shell_shows_connection_status() {
     let ui = shell_ui();
     let mut ui = ui;
     assert!(ui.find("Connected").is_ok());
-    assert!(ui.find("Dashboard").is_ok());
+    // #133: the dashboard nav entry is host-centric ("Hosts").
+    assert!(ui.find("Hosts").is_ok());
 }
 
 /// Test device detail view with mock data.
@@ -307,6 +310,87 @@ fn test_device_detail_view() {
     // Should show section headers (specialized view shows CPU, Memory, etc.)
     assert!(ui.find("CPU").is_ok());
     assert!(ui.find("Memory").is_ok());
+}
+
+/// #133: a multi-sensor host renders one facet tab per sensor, and clicking an
+/// inactive facet switches to it (`SelectDevice`). The protocol is a facet of the
+/// host, not a top-level axis.
+#[test]
+fn test_host_detail_facet_tabs() {
+    use zensight_common::DeviceStatus;
+
+    let active = DeviceId {
+        protocol: Protocol::Sysinfo,
+        source: "server01".to_string(),
+    };
+    let mut state = DeviceDetailState::new(active.clone());
+    for point in mock::sysinfo::host("server01") {
+        state.update(point);
+    }
+
+    let netlink_id = DeviceId {
+        protocol: Protocol::Netlink,
+        source: "server01".to_string(),
+    };
+    let facets = vec![
+        FacetTab {
+            id: active.clone(),
+            protocol: Protocol::Sysinfo,
+            status: DeviceStatus::Online,
+            active: true,
+        },
+        FacetTab {
+            id: netlink_id.clone(),
+            protocol: Protocol::Netlink,
+            status: DeviceStatus::Degraded,
+            active: false,
+        },
+    ];
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(host_detail_view(&state, &syslog_filter, &[], &facets));
+
+    // Both sensor facets are shown as tabs.
+    assert!(ui.find("Facets").is_ok());
+    assert!(ui.find("sysinfo").is_ok());
+    assert!(ui.find("netlink").is_ok());
+
+    // Clicking the inactive netlink facet switches to it.
+    let _ = ui.click("netlink");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::SelectDevice(id) if *id == netlink_id))
+    );
+}
+
+/// #133: a single-sensor host shows no facet strip (nothing to switch between).
+#[test]
+fn test_host_detail_single_facet_has_no_strip() {
+    use zensight_common::DeviceStatus;
+
+    let id = DeviceId {
+        protocol: Protocol::Sysinfo,
+        source: "server01".to_string(),
+    };
+    let mut state = DeviceDetailState::new(id.clone());
+    for point in mock::sysinfo::host("server01") {
+        state.update(point);
+    }
+    let facets = vec![FacetTab {
+        id,
+        protocol: Protocol::Sysinfo,
+        status: DeviceStatus::Online,
+        active: true,
+    }];
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(host_detail_view(&state, &syslog_filter, &[], &facets));
+
+    // No "Facets" strip for a lone sensor; the detail still renders.
+    assert!(ui.find("Facets").is_err());
+    assert!(ui.find("server01").is_ok());
 }
 
 /// Test clicking Back button in device view.
@@ -930,11 +1014,11 @@ fn test_topology_zoom_controls() {
     );
 }
 
-/// The nav rail's Topology button emits OpenTopology.
+/// The nav rail's Map button (promoted topology, #133) emits OpenTopology.
 #[test]
 fn test_shell_topology_button() {
     let mut ui = shell_ui();
-    let _ = ui.click("Topology");
+    let _ = ui.click("Map");
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(messages.iter().any(|m| matches!(m, Message::OpenTopology)));
 }
