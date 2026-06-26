@@ -732,7 +732,7 @@ pub fn tcp_reset_points(sensor_id: &str, resets: u64, refused: u64) -> Vec<Telem
 
 // ─── L7 DNS RED analytics (issue #19) ────────────────────────────────────────
 
-use zensight_common::{DnsRecord, ElephantRecord, HttpHostRecord, TalkerRecord};
+use zensight_common::{DnsRecord, ElephantRecord, HttpHostRecord, MatrixRecord, TalkerRecord};
 
 /// DNS response codes we track as distinct RED-error buckets. Closed set →
 /// low-cardinality, safe to stream as `dns/responses_by_rcode/<slug>_total`.
@@ -952,6 +952,33 @@ pub fn top_talkers(
         })
         .collect();
     v.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.dst.cmp(&b.dst)));
+    v.truncate(top);
+    v
+}
+
+/// Rank the `(src,dst)` traffic-matrix histogram byte-volume-first into the
+/// `@/query/matrix` reply (top-N pairs / service map). Pure so the ranking is
+/// unit-testable (#122).
+pub fn traffic_matrix(
+    hist: &std::collections::HashMap<(String, String), (u64, u64, u64)>,
+    top: usize,
+) -> Vec<MatrixRecord> {
+    let mut v: Vec<MatrixRecord> = hist
+        .iter()
+        .map(|((src, dst), &(bytes, packets, flows))| MatrixRecord {
+            src: src.clone(),
+            dst: dst.clone(),
+            bytes,
+            packets,
+            flows,
+        })
+        .collect();
+    v.sort_by(|a, b| {
+        b.bytes
+            .cmp(&a.bytes)
+            .then_with(|| a.src.cmp(&b.src))
+            .then_with(|| a.dst.cmp(&b.dst))
+    });
     v.truncate(top);
     v
 }
@@ -1559,6 +1586,36 @@ mod tests {
         assert_eq!(top[0].dst, "8.8.8.8");
         assert_eq!(top[0].bytes, 5000);
         assert_eq!(top[1].dst, "1.1.1.1");
+    }
+
+    #[test]
+    fn traffic_matrix_ranks_pairs_by_bytes() {
+        let mut hist = std::collections::HashMap::new();
+        hist.insert(
+            ("10.0.0.1".to_string(), "8.8.8.8".to_string()),
+            (5000u64, 40u64, 6u64),
+        );
+        hist.insert(
+            ("10.0.0.1".to_string(), "1.1.1.1".to_string()),
+            (1000u64, 10u64, 2u64),
+        );
+        hist.insert(
+            ("10.0.0.2".to_string(), "8.8.8.8".to_string()),
+            (50u64, 1u64, 1u64),
+        );
+        let top = traffic_matrix(&hist, 2);
+        assert_eq!(top.len(), 2);
+        // Heaviest src→dst pair leads; the matrix keeps both endpoints.
+        assert_eq!(
+            (top[0].src.as_str(), top[0].dst.as_str()),
+            ("10.0.0.1", "8.8.8.8")
+        );
+        assert_eq!(top[0].bytes, 5000);
+        assert_eq!(top[0].flows, 6);
+        assert_eq!(
+            (top[1].src.as_str(), top[1].dst.as_str()),
+            ("10.0.0.1", "1.1.1.1")
+        );
     }
 
     #[test]

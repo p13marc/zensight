@@ -17,6 +17,7 @@ pub mod error;
 pub mod health;
 pub mod keyexpr;
 pub mod query_detail;
+pub mod semconv;
 pub mod serialization;
 pub mod session;
 pub mod telemetry;
@@ -37,8 +38,9 @@ pub use keyexpr::{
     all_sensors_wildcard, all_telemetry_wildcard, parse_key_expr,
 };
 pub use query_detail::{
-    AssetRecord, DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord, NeighborRecord,
-    ProcessRecord, QuicRecord, RouteRecord, SocketRecord, SshRecord, TalkerRecord, TlsRecord,
+    AssetRecord, DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord, MatrixRecord,
+    NeighborRecord, ProcessRecord, QuicRecord, RouteRecord, SocketRecord, SshRecord, TalkerRecord,
+    TlsRecord,
 };
 pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;

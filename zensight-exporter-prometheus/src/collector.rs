@@ -39,6 +39,17 @@ impl SeriesKey {
         labels.push(("source".to_string(), point.source.clone()));
         labels.push(("protocol".to_string(), point.protocol.as_str().to_string()));
 
+        // OTel host-metrics semconv (#100): factored state/direction/device/cpu
+        // attributes become Prometheus labels via the shared table.
+        if let Some(sc) = zensight_common::semconv::metric_semconv(point.protocol, &point.metric) {
+            for (k, v) in sc.attributes {
+                let key = sanitize_label_name(k);
+                if key != "source" && key != "protocol" {
+                    labels.push((key, v));
+                }
+            }
+        }
+
         // Add telemetry labels (sanitized)
         for (k, v) in &point.labels {
             let key = sanitize_label_name(k);

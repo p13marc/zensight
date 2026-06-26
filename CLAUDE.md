@@ -53,7 +53,7 @@ cargo test -p zensight-sensor-modbus   # 11 tests
 cargo test -p zensight-sensor-sysinfo  # 88 tests (collectors, saturation, alerting)
 cargo test -p zensight-sensor-gnmi     # 8 tests    (needs protoc)
 cargo test -p zensight-sensor-netlink  # 52 tests (interfaces, sockets, sentinel rules, nft counters)
-cargo test -p zensight-sensor-netring  # 55 tests (flows, beaconing, DNS-tunnel, ATT&CK)
+cargo test -p zensight-sensor-netring  # 60 tests (flows, beaconing, DNS-tunnel, ATT&CK, traffic-matrix)
 cargo test -p zensight-exporter-prometheus  # 50 tests (mapping, collector, HTTP)
 cargo test -p zensight-exporter-otel        # 41 tests (metrics, logs, severity)
 

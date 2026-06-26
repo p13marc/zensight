@@ -104,6 +104,17 @@ pub fn sanitize_label_name(name: &str) -> String {
 ///
 /// Format: `{prefix}_{protocol}_{metric_path}`
 pub fn build_metric_name(prefix: &str, protocol: Protocol, metric: &str) -> String {
+    // OTel host-metrics semconv (#100): a mapped key exports under its `system.*`
+    // name (sanitized, no protocol segment); state/direction/device become labels.
+    if let Some(sc) = zensight_common::semconv::metric_semconv(protocol, metric) {
+        let name = sanitize_metric_name(sc.name);
+        return if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}_{name}")
+        };
+    }
+
     let sanitized_metric = sanitize_metric_name(metric);
     let protocol_str = protocol.as_str();
 
@@ -229,9 +240,19 @@ mod tests {
             build_metric_name("zensight", Protocol::Snmp, "sysUpTime"),
             "zensight_snmp_sysUpTime"
         );
+        // #100: mapped sysinfo keys export under the sanitized system.* name (no
+        // protocol segment); unmapped keys keep the protocol-qualified name.
         assert_eq!(
             build_metric_name("zensight", Protocol::Sysinfo, "cpu/usage"),
-            "zensight_sysinfo_cpu_usage"
+            "zensight_system_cpu_utilization"
+        );
+        assert_eq!(
+            build_metric_name("", Protocol::Sysinfo, "memory/used"),
+            "system_memory_usage"
+        );
+        assert_eq!(
+            build_metric_name("zensight", Protocol::Sysinfo, "network/conntrack/count"),
+            "zensight_sysinfo_network_conntrack_count"
         );
         assert_eq!(
             build_metric_name("", Protocol::Netflow, "bytes"),

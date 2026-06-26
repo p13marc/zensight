@@ -170,6 +170,10 @@ pub enum Message {
     FetchNetringTalkers,
     /// A netring top-talker reply: the decoded records, or an error message.
     NetringTalkersReceived(Result<Vec<zensight_common::TalkerRecord>, String>),
+    /// Fetch the on-demand netring `(src,dst)` traffic matrix / service map (#122).
+    FetchNetringMatrix,
+    /// A netring traffic-matrix reply: the decoded records, or an error message.
+    NetringMatrixReceived(Result<Vec<zensight_common::MatrixRecord>, String>),
     /// Fetch the on-demand netring elephant-flow ring (#45).
     FetchNetringElephants,
     /// A netring elephant-flow reply: the decoded records, or an error message.
