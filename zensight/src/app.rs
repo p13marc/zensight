@@ -6,6 +6,7 @@ use iced::{Element, Length, Subscription, Task, Theme};
 // Note: iced_anim is available but AnimationBuilder requires Fn closures,
 // which doesn't work well with view transitions. Consider using iced's
 // built-in animation support or widget-level animations instead.
+use std::ops::ControlFlow;
 use std::sync::LazyLock;
 
 use zensight_common::{
@@ -310,7 +311,572 @@ impl ZenSight {
     }
 
     /// Handle incoming messages.
+    /// #132: chart / metric-selection interactions, all scoped to the selected device.
+    ///
+    /// Returns `Err(message)` for anything it does not own so [`Self::update`]
+    /// can fall through to the next handler.
+    fn update_chart(&mut self, message: Message) -> ControlFlow<Task<Message>, Message> {
+        match message {
+            Message::SelectMetricForChart(metric_name) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.select_metric(metric_name);
+                }
+            }
+
+            Message::ClearChartSelection => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.clear_chart_selection();
+                }
+            }
+
+            Message::PromoteMetricToAlert {
+                device,
+                metric,
+                value,
+            } => {
+                // #50: netlink has a sentinel that evaluates metric thresholds,
+                // so promote into the expectations authoring form. Other sensors
+                // have no command channel, so seed the local rule engine instead.
+                if device.protocol == zensight_common::Protocol::Netlink {
+                    use crate::view::expectations::ExpKind;
+                    self.expectations.new_kind = ExpKind::MetricThreshold;
+                    self.expectations.new_metric = metric.clone();
+                    self.expectations.new_value = format!("{value}");
+                    self.expectations.new_name = format!("{} threshold", metric);
+                    self.set_view(CurrentView::Expectations);
+                } else {
+                    self.alerts.set_new_rule_name(format!("{metric} alert"));
+                    self.alerts.set_new_rule_metric(metric);
+                    self.alerts.set_new_rule_threshold(format!("{value}"));
+                    self.set_view(CurrentView::Alerts);
+                }
+            }
+
+            Message::AddMetricToChart(metric_name) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.add_metric_to_chart(metric_name);
+                }
+            }
+
+            Message::RemoveMetricFromChart(metric_name) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.remove_metric_from_chart(&metric_name);
+                }
+            }
+
+            Message::ToggleMetricVisibility(metric_name) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.toggle_metric_visibility(&metric_name);
+                }
+            }
+
+            Message::SetChartTimeWindow(window) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.set_time_window(window);
+                }
+            }
+
+            Message::SetChartCustomMinutes(input) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.set_chart_custom_minutes(input);
+                }
+            }
+
+            Message::ToggleChartExpand => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.toggle_chart_expand();
+                }
+            }
+
+            Message::ChartZoomIn => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.zoom_in();
+                }
+            }
+
+            Message::ChartZoomOut => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.zoom_out();
+                }
+            }
+
+            Message::ChartZoomReset => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.reset_zoom();
+                }
+            }
+
+            Message::ChartPanLeft => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.pan_left();
+                }
+            }
+
+            Message::ChartPanRight => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.pan_right();
+                }
+            }
+
+            Message::ChartPanReset => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.reset_pan();
+                }
+            }
+
+            Message::ChartDragStart(x) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.start_drag(x);
+                }
+            }
+
+            Message::ChartDragUpdate(x, width) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.update_drag(x, width);
+                }
+            }
+
+            Message::ChartDragEnd => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.end_drag();
+                }
+            }
+
+            Message::SetMetricFilter(filter) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.set_metric_filter(filter);
+                }
+            }
+            other => return ControlFlow::Continue(other),
+        }
+        ControlFlow::Break(Task::none())
+    }
+
+    /// #132: device-group management.
+    ///
+    /// Returns `Err(message)` for anything it does not own so [`Self::update`]
+    /// can fall through to the next handler.
+    fn update_groups(&mut self, message: Message) -> ControlFlow<Task<Message>, Message> {
+        match message {
+            // Group management messages
+            Message::OpenGroupsPanel => {
+                self.groups.open_panel();
+            }
+
+            Message::CloseGroupsPanel => {
+                self.groups.close_panel();
+            }
+
+            Message::SetGroupFilter(group_id) => {
+                self.groups.set_filter(group_id);
+            }
+
+            Message::SetNewGroupName(name) => {
+                self.groups.new_group_name = name;
+            }
+
+            Message::SetNewGroupColor(index) => {
+                self.groups.new_group_color = index;
+            }
+
+            Message::AddGroup => {
+                self.groups.add_group_from_form();
+                self.save_groups();
+            }
+
+            Message::EditGroup(group_id) => {
+                self.groups.start_editing(group_id);
+            }
+
+            Message::SetEditGroupName(name) => {
+                self.groups.edit_name = name;
+            }
+
+            Message::SetEditGroupColor(index) => {
+                self.groups.edit_color = index;
+            }
+
+            Message::SaveGroupEdit => {
+                self.groups.save_edit();
+                self.save_groups();
+            }
+
+            Message::CancelGroupEdit => {
+                self.groups.cancel_edit();
+            }
+
+            Message::DeleteGroup(group_id) => {
+                self.groups.delete_group(group_id);
+                self.save_groups();
+            }
+
+            Message::ToggleDeviceGroup(device_id, group_id) => {
+                self.groups.toggle_assignment(&device_id, group_id);
+                self.save_groups();
+            }
+            other => return ControlFlow::Continue(other),
+        }
+        ControlFlow::Break(Task::none())
+    }
+
+    /// #132: topology canvas interactions plus flow / neighbor edge replies.
+    ///
+    /// Returns `Err(message)` for anything it does not own so [`Self::update`]
+    /// can fall through to the next handler.
+    fn update_topology_msg(&mut self, message: Message) -> ControlFlow<Task<Message>, Message> {
+        match message {
+            Message::TopologyFlowsReceived(result) => match result {
+                Ok(flows) => {
+                    let ip_to_node = self.topology_ip_to_node();
+                    self.topology
+                        .apply_flow_edges(&flows, &ip_to_node, now_ms());
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "No netring flows for topology edges");
+                }
+            },
+
+            Message::TopologyNeighborsReceived(result) => match result {
+                Ok(neighbors) => {
+                    let ip_to_node = self.topology_ip_to_node();
+                    self.topology
+                        .apply_neighbor_edges(&neighbors, &ip_to_node, now_ms());
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "No netlink neighbors for topology edges");
+                }
+            },
+
+            Message::CloseTopology => {
+                self.set_view(CurrentView::Dashboard);
+                self.save_current_view();
+            }
+
+            Message::TopologySelectNode(node_id) => {
+                // Select the node to show its info panel (don't navigate away)
+                self.topology.select_node(node_id);
+            }
+
+            Message::TopologyViewDeviceDetail(node_id) => {
+                // Navigate to device detail view
+                if let Some(device_id) = self.topology.node_to_device_id(&node_id) {
+                    return ControlFlow::Break(self.select_device(device_id));
+                }
+            }
+
+            Message::TopologySelectEdge(edge_index) => {
+                self.topology.select_edge(edge_index);
+            }
+
+            Message::TopologyClearSelection => {
+                self.topology.clear_selection();
+            }
+
+            Message::TopologyDragNodeStart(node_id, _x, _y) => {
+                self.topology.start_node_drag(&node_id);
+            }
+
+            Message::TopologyDragNodeUpdate(node_id, x, y) => {
+                self.topology.update_node_drag(&node_id, x, y);
+            }
+
+            Message::TopologyDragNodeEnd(_node_id) => {
+                // Node stays pinned after drag
+            }
+
+            Message::TopologyPanUpdate(dx, dy) => {
+                self.topology.update_pan(dx, dy);
+            }
+
+            Message::TopologyZoomIn => {
+                self.topology.zoom_in();
+            }
+
+            Message::TopologyZoomOut => {
+                self.topology.zoom_out();
+            }
+
+            Message::TopologyZoomReset => {
+                self.topology.reset_zoom();
+            }
+
+            Message::TopologyToggleAutoLayout => {
+                self.topology.toggle_auto_layout();
+            }
+
+            Message::TopologySetSearch(query) => {
+                self.topology.set_search(query);
+            }
+            other => return ControlFlow::Continue(other),
+        }
+        ControlFlow::Break(Task::none())
+    }
+
+    /// #132: syslog/journald filter panel and its apply-to-sensor command.
+    ///
+    /// Returns `Err(message)` for anything it does not own so [`Self::update`]
+    /// can fall through to the next handler.
+    fn update_syslog(&mut self, message: Message) -> ControlFlow<Task<Message>, Message> {
+        match message {
+            // Syslog filter messages
+            Message::ToggleSyslogFilterPanel => {
+                self.syslog_filter.panel_open = !self.syslog_filter.panel_open;
+            }
+
+            Message::SetSyslogMinSeverity(severity) => {
+                self.syslog_filter.set_min_severity(severity);
+            }
+
+            Message::ToggleSyslogFacility(facility) => {
+                self.syslog_filter.toggle_facility(facility);
+            }
+
+            Message::ToggleSyslogUnit(unit) => {
+                self.syslog_filter.toggle_unit(unit);
+            }
+
+            Message::ToggleSyslogBoot(boot) => {
+                self.syslog_filter.toggle_boot(boot);
+            }
+
+            Message::ToggleLogRow(key) => {
+                self.syslog_filter.toggle_row(key);
+            }
+
+            Message::ToggleLogFollow => {
+                self.syslog_filter.toggle_follow(now_ms());
+            }
+
+            Message::LogsJumpToNow => {
+                self.syslog_filter.resume();
+            }
+
+            Message::SetSyslogAppFilter(filter) => {
+                self.syslog_filter.set_app_filter(filter);
+            }
+
+            Message::SetSyslogMessageFilter(filter) => {
+                self.syslog_filter.set_message_filter(filter);
+            }
+
+            Message::ApplySyslogFilters => {
+                // Build a syslog filter command and push it to the sensor's
+                // control channel. A stable filter id means re-applying replaces
+                // the same dynamic filter rather than stacking duplicates.
+                let f = &self.syslog_filter;
+                let mut filter = serde_json::Map::new();
+                if let Some(sev) = f.min_severity {
+                    filter.insert("min_severity".into(), serde_json::json!(sev));
+                }
+                if !f.selected_facilities.is_empty() {
+                    let facs: Vec<&String> = f.selected_facilities.iter().collect();
+                    filter.insert("include_facilities".into(), serde_json::json!(facs));
+                }
+                if !f.app_filter.is_empty() {
+                    filter.insert(
+                        "include_app_patterns".into(),
+                        serde_json::json!([{ "pattern": f.app_filter, "pattern_type": "glob" }]),
+                    );
+                }
+                if !f.message_filter.is_empty() {
+                    filter.insert(
+                        "include_message_patterns".into(),
+                        serde_json::json!([{ "pattern": f.message_filter, "pattern_type": "glob" }]),
+                    );
+                }
+                let command = serde_json::json!({
+                    "type": "add_filter",
+                    "id": "frontend-panel",
+                    "filter": serde_json::Value::Object(filter),
+                });
+                let key = zensight_common::command_key("zensight/syslog", "filter");
+                self.syslog_filter.mark_applied();
+                return ControlFlow::Break(self.send_command(
+                    key,
+                    &command,
+                    "Syslog filters applied".to_string(),
+                ));
+            }
+            other => return ControlFlow::Continue(other),
+        }
+        ControlFlow::Break(Task::none())
+    }
+
+    /// #132: per-device specialized detail fetch/apply (netlink / netring / sysinfo).
+    ///
+    /// Returns `Err(message)` for anything it does not own so [`Self::update`]
+    /// can fall through to the next handler.
+    fn update_detail(&mut self, message: Message) -> ControlFlow<Task<Message>, Message> {
+        match message {
+            Message::FetchNetlinkDetail(topic) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netlink_detail.loading(topic);
+                }
+                return ControlFlow::Break(self.query_netlink_detail(topic));
+            }
+            Message::NetlinkDetailReceived(topic, result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netlink_detail.apply(topic, result);
+                }
+            }
+
+            Message::SetNetlinkSocketStateFilter(state_filter) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netlink_detail.socket_state_filter = state_filter;
+                }
+            }
+            Message::SetNetlinkSocketPortFilter(port) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netlink_detail.socket_port_filter = port;
+                }
+            }
+            Message::SetNetlinkSocketSort(sort) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netlink_detail.socket_sort = sort;
+                }
+            }
+
+            Message::FetchNetringFlows => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading();
+                }
+                return ControlFlow::Break(self.query_netring_flows());
+            }
+            Message::NetringFlowsReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply(result);
+                }
+            }
+            Message::FetchNetringTls => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_tls();
+                }
+                return ControlFlow::Break(self.query_netring_tls());
+            }
+            Message::NetringTlsReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_tls(result);
+                }
+            }
+            Message::FetchNetringQuic => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_quic();
+                }
+                return ControlFlow::Break(self.query_netring_quic());
+            }
+            Message::NetringQuicReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_quic(result);
+                }
+            }
+            Message::FetchNetringSsh => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_ssh();
+                }
+                return ControlFlow::Break(self.query_netring_ssh());
+            }
+            Message::NetringSshReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_ssh(result);
+                }
+            }
+            Message::FetchNetringAssets => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_assets();
+                }
+                return ControlFlow::Break(self.query_netring_assets());
+            }
+            Message::NetringAssetsReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_assets(result);
+                }
+            }
+            Message::FetchNetringTalkers => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_talkers();
+                }
+                return ControlFlow::Break(self.query_netring_talkers());
+            }
+            Message::NetringTalkersReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_talkers(result);
+                }
+            }
+            Message::FetchNetringElephants => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_elephants();
+                }
+                return ControlFlow::Break(self.query_netring_elephants());
+            }
+            Message::NetringElephantsReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_elephants(result);
+                }
+            }
+            Message::FetchNetringDns => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_dns();
+                }
+                return ControlFlow::Break(self.query_netring_dns());
+            }
+            Message::NetringDnsReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_dns(result);
+                }
+            }
+            Message::FetchNetringHttp => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_http();
+                }
+                return ControlFlow::Break(self.query_netring_http());
+            }
+            Message::NetringHttpReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_http(result);
+                }
+            }
+            Message::FetchSysinfoProcesses(sort) => {
+                let host = self.selected_device.as_mut().map(|device| {
+                    device.sysinfo_detail.loading(sort);
+                    device.device_id.source.clone()
+                });
+                if let Some(host) = host {
+                    return ControlFlow::Break(self.query_sysinfo_processes(host, sort));
+                }
+            }
+            Message::SysinfoProcessesReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.sysinfo_detail.apply(result);
+                }
+            }
+            other => return ControlFlow::Continue(other),
+        }
+        ControlFlow::Break(Task::none())
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // #132: per-domain handlers — each consumes the message and returns a
+        // Task, or hands the message back (Err) for the next handler / the match.
+        let message = match self.update_chart(message) {
+            ControlFlow::Break(t) => return t,
+            ControlFlow::Continue(m) => m,
+        };
+        let message = match self.update_groups(message) {
+            ControlFlow::Break(t) => return t,
+            ControlFlow::Continue(m) => m,
+        };
+        let message = match self.update_topology_msg(message) {
+            ControlFlow::Break(t) => return t,
+            ControlFlow::Continue(m) => m,
+        };
+        let message = match self.update_syslog(message) {
+            ControlFlow::Break(t) => return t,
+            ControlFlow::Continue(m) => m,
+        };
+        let message = match self.update_detail(message) {
+            ControlFlow::Break(t) => return t,
+            ControlFlow::Continue(m) => m,
+        };
         match message {
             Message::TelemetryReceived(point) => {
                 self.handle_telemetry(point);
@@ -519,137 +1085,6 @@ impl ZenSight {
 
             Message::ToggleDashboardViewMode => {
                 self.dashboard.toggle_view_mode();
-            }
-
-            Message::SelectMetricForChart(metric_name) => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.select_metric(metric_name);
-                }
-            }
-
-            Message::ClearChartSelection => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.clear_chart_selection();
-                }
-            }
-
-            Message::PromoteMetricToAlert {
-                device,
-                metric,
-                value,
-            } => {
-                // #50: netlink has a sentinel that evaluates metric thresholds,
-                // so promote into the expectations authoring form. Other sensors
-                // have no command channel, so seed the local rule engine instead.
-                if device.protocol == zensight_common::Protocol::Netlink {
-                    use crate::view::expectations::ExpKind;
-                    self.expectations.new_kind = ExpKind::MetricThreshold;
-                    self.expectations.new_metric = metric.clone();
-                    self.expectations.new_value = format!("{value}");
-                    self.expectations.new_name = format!("{} threshold", metric);
-                    self.set_view(CurrentView::Expectations);
-                } else {
-                    self.alerts.set_new_rule_name(format!("{metric} alert"));
-                    self.alerts.set_new_rule_metric(metric);
-                    self.alerts.set_new_rule_threshold(format!("{value}"));
-                    self.set_view(CurrentView::Alerts);
-                }
-            }
-
-            Message::AddMetricToChart(metric_name) => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.add_metric_to_chart(metric_name);
-                }
-            }
-
-            Message::RemoveMetricFromChart(metric_name) => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.remove_metric_from_chart(&metric_name);
-                }
-            }
-
-            Message::ToggleMetricVisibility(metric_name) => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.toggle_metric_visibility(&metric_name);
-                }
-            }
-
-            Message::SetChartTimeWindow(window) => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.set_time_window(window);
-                }
-            }
-
-            Message::SetChartCustomMinutes(input) => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.set_chart_custom_minutes(input);
-                }
-            }
-
-            Message::ToggleChartExpand => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.toggle_chart_expand();
-                }
-            }
-
-            Message::ChartZoomIn => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.zoom_in();
-                }
-            }
-
-            Message::ChartZoomOut => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.zoom_out();
-                }
-            }
-
-            Message::ChartZoomReset => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.reset_zoom();
-                }
-            }
-
-            Message::ChartPanLeft => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.pan_left();
-                }
-            }
-
-            Message::ChartPanRight => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.pan_right();
-                }
-            }
-
-            Message::ChartPanReset => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.reset_pan();
-                }
-            }
-
-            Message::ChartDragStart(x) => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.start_drag(x);
-                }
-            }
-
-            Message::ChartDragUpdate(x, width) => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.update_drag(x, width);
-                }
-            }
-
-            Message::ChartDragEnd => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.end_drag();
-                }
-            }
-
-            Message::SetMetricFilter(filter) => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.set_metric_filter(filter);
-                }
             }
 
             Message::Tick => {
@@ -927,63 +1362,6 @@ impl ZenSight {
                 self.handle_escape();
             }
 
-            // Group management messages
-            Message::OpenGroupsPanel => {
-                self.groups.open_panel();
-            }
-
-            Message::CloseGroupsPanel => {
-                self.groups.close_panel();
-            }
-
-            Message::SetGroupFilter(group_id) => {
-                self.groups.set_filter(group_id);
-            }
-
-            Message::SetNewGroupName(name) => {
-                self.groups.new_group_name = name;
-            }
-
-            Message::SetNewGroupColor(index) => {
-                self.groups.new_group_color = index;
-            }
-
-            Message::AddGroup => {
-                self.groups.add_group_from_form();
-                self.save_groups();
-            }
-
-            Message::EditGroup(group_id) => {
-                self.groups.start_editing(group_id);
-            }
-
-            Message::SetEditGroupName(name) => {
-                self.groups.edit_name = name;
-            }
-
-            Message::SetEditGroupColor(index) => {
-                self.groups.edit_color = index;
-            }
-
-            Message::SaveGroupEdit => {
-                self.groups.save_edit();
-                self.save_groups();
-            }
-
-            Message::CancelGroupEdit => {
-                self.groups.cancel_edit();
-            }
-
-            Message::DeleteGroup(group_id) => {
-                self.groups.delete_group(group_id);
-                self.save_groups();
-            }
-
-            Message::ToggleDeviceGroup(device_id, group_id) => {
-                self.groups.toggle_assignment(&device_id, group_id);
-                self.save_groups();
-            }
-
             // Overview messages
             Message::SelectOverviewProtocol(protocol) => {
                 self.overview.select_protocol(protocol);
@@ -1006,165 +1384,6 @@ impl ZenSight {
                 // Derive real edges from observed flows (#25) and netlink
                 // neighbor adjacency (#49); edges are merged as replies arrive.
                 return Task::batch([self.query_topology_flows(), self.query_topology_neighbors()]);
-            }
-
-            Message::TopologyFlowsReceived(result) => match result {
-                Ok(flows) => {
-                    let ip_to_node = self.topology_ip_to_node();
-                    self.topology
-                        .apply_flow_edges(&flows, &ip_to_node, now_ms());
-                }
-                Err(e) => {
-                    tracing::debug!(error = %e, "No netring flows for topology edges");
-                }
-            },
-
-            Message::TopologyNeighborsReceived(result) => match result {
-                Ok(neighbors) => {
-                    let ip_to_node = self.topology_ip_to_node();
-                    self.topology
-                        .apply_neighbor_edges(&neighbors, &ip_to_node, now_ms());
-                }
-                Err(e) => {
-                    tracing::debug!(error = %e, "No netlink neighbors for topology edges");
-                }
-            },
-
-            Message::CloseTopology => {
-                self.set_view(CurrentView::Dashboard);
-                self.save_current_view();
-            }
-
-            Message::TopologySelectNode(node_id) => {
-                // Select the node to show its info panel (don't navigate away)
-                self.topology.select_node(node_id);
-            }
-
-            Message::TopologyViewDeviceDetail(node_id) => {
-                // Navigate to device detail view
-                if let Some(device_id) = self.topology.node_to_device_id(&node_id) {
-                    return self.select_device(device_id);
-                }
-            }
-
-            Message::TopologySelectEdge(edge_index) => {
-                self.topology.select_edge(edge_index);
-            }
-
-            Message::TopologyClearSelection => {
-                self.topology.clear_selection();
-            }
-
-            Message::TopologyDragNodeStart(node_id, _x, _y) => {
-                self.topology.start_node_drag(&node_id);
-            }
-
-            Message::TopologyDragNodeUpdate(node_id, x, y) => {
-                self.topology.update_node_drag(&node_id, x, y);
-            }
-
-            Message::TopologyDragNodeEnd(_node_id) => {
-                // Node stays pinned after drag
-            }
-
-            Message::TopologyPanUpdate(dx, dy) => {
-                self.topology.update_pan(dx, dy);
-            }
-
-            Message::TopologyZoomIn => {
-                self.topology.zoom_in();
-            }
-
-            Message::TopologyZoomOut => {
-                self.topology.zoom_out();
-            }
-
-            Message::TopologyZoomReset => {
-                self.topology.reset_zoom();
-            }
-
-            Message::TopologyToggleAutoLayout => {
-                self.topology.toggle_auto_layout();
-            }
-
-            Message::TopologySetSearch(query) => {
-                self.topology.set_search(query);
-            }
-
-            // Syslog filter messages
-            Message::ToggleSyslogFilterPanel => {
-                self.syslog_filter.panel_open = !self.syslog_filter.panel_open;
-            }
-
-            Message::SetSyslogMinSeverity(severity) => {
-                self.syslog_filter.set_min_severity(severity);
-            }
-
-            Message::ToggleSyslogFacility(facility) => {
-                self.syslog_filter.toggle_facility(facility);
-            }
-
-            Message::ToggleSyslogUnit(unit) => {
-                self.syslog_filter.toggle_unit(unit);
-            }
-
-            Message::ToggleSyslogBoot(boot) => {
-                self.syslog_filter.toggle_boot(boot);
-            }
-
-            Message::ToggleLogRow(key) => {
-                self.syslog_filter.toggle_row(key);
-            }
-
-            Message::ToggleLogFollow => {
-                self.syslog_filter.toggle_follow(now_ms());
-            }
-
-            Message::LogsJumpToNow => {
-                self.syslog_filter.resume();
-            }
-
-            Message::SetSyslogAppFilter(filter) => {
-                self.syslog_filter.set_app_filter(filter);
-            }
-
-            Message::SetSyslogMessageFilter(filter) => {
-                self.syslog_filter.set_message_filter(filter);
-            }
-
-            Message::ApplySyslogFilters => {
-                // Build a syslog filter command and push it to the sensor's
-                // control channel. A stable filter id means re-applying replaces
-                // the same dynamic filter rather than stacking duplicates.
-                let f = &self.syslog_filter;
-                let mut filter = serde_json::Map::new();
-                if let Some(sev) = f.min_severity {
-                    filter.insert("min_severity".into(), serde_json::json!(sev));
-                }
-                if !f.selected_facilities.is_empty() {
-                    let facs: Vec<&String> = f.selected_facilities.iter().collect();
-                    filter.insert("include_facilities".into(), serde_json::json!(facs));
-                }
-                if !f.app_filter.is_empty() {
-                    filter.insert(
-                        "include_app_patterns".into(),
-                        serde_json::json!([{ "pattern": f.app_filter, "pattern_type": "glob" }]),
-                    );
-                }
-                if !f.message_filter.is_empty() {
-                    filter.insert(
-                        "include_message_patterns".into(),
-                        serde_json::json!([{ "pattern": f.message_filter, "pattern_type": "glob" }]),
-                    );
-                }
-                let command = serde_json::json!({
-                    "type": "add_filter",
-                    "id": "frontend-panel",
-                    "filter": serde_json::Value::Object(filter),
-                });
-                let key = zensight_common::command_key("zensight/syslog", "filter");
-                self.syslog_filter.mark_applied();
-                return self.send_command(key, &command, "Syslog filters applied".to_string());
             }
 
             Message::CommandFeedback { success, message } => {
@@ -1365,147 +1584,6 @@ impl ZenSight {
                     .chain(self.query_detector_status());
             }
 
-            Message::FetchNetlinkDetail(topic) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netlink_detail.loading(topic);
-                }
-                return self.query_netlink_detail(topic);
-            }
-            Message::NetlinkDetailReceived(topic, result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netlink_detail.apply(topic, result);
-                }
-            }
-
-            Message::SetNetlinkSocketStateFilter(state_filter) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netlink_detail.socket_state_filter = state_filter;
-                }
-            }
-            Message::SetNetlinkSocketPortFilter(port) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netlink_detail.socket_port_filter = port;
-                }
-            }
-            Message::SetNetlinkSocketSort(sort) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netlink_detail.socket_sort = sort;
-                }
-            }
-
-            Message::FetchNetringFlows => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading();
-                }
-                return self.query_netring_flows();
-            }
-            Message::NetringFlowsReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply(result);
-                }
-            }
-            Message::FetchNetringTls => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_tls();
-                }
-                return self.query_netring_tls();
-            }
-            Message::NetringTlsReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply_tls(result);
-                }
-            }
-            Message::FetchNetringQuic => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_quic();
-                }
-                return self.query_netring_quic();
-            }
-            Message::NetringQuicReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply_quic(result);
-                }
-            }
-            Message::FetchNetringSsh => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_ssh();
-                }
-                return self.query_netring_ssh();
-            }
-            Message::NetringSshReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply_ssh(result);
-                }
-            }
-            Message::FetchNetringAssets => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_assets();
-                }
-                return self.query_netring_assets();
-            }
-            Message::NetringAssetsReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply_assets(result);
-                }
-            }
-            Message::FetchNetringTalkers => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_talkers();
-                }
-                return self.query_netring_talkers();
-            }
-            Message::NetringTalkersReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply_talkers(result);
-                }
-            }
-            Message::FetchNetringElephants => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_elephants();
-                }
-                return self.query_netring_elephants();
-            }
-            Message::NetringElephantsReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply_elephants(result);
-                }
-            }
-            Message::FetchNetringDns => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_dns();
-                }
-                return self.query_netring_dns();
-            }
-            Message::NetringDnsReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply_dns(result);
-                }
-            }
-            Message::FetchNetringHttp => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_http();
-                }
-                return self.query_netring_http();
-            }
-            Message::NetringHttpReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply_http(result);
-                }
-            }
-            Message::FetchSysinfoProcesses(sort) => {
-                let host = self.selected_device.as_mut().map(|device| {
-                    device.sysinfo_detail.loading(sort);
-                    device.device_id.source.clone()
-                });
-                if let Some(host) = host {
-                    return self.query_sysinfo_processes(host, sort);
-                }
-            }
-            Message::SysinfoProcessesReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.sysinfo_detail.apply(result);
-                }
-            }
             Message::FetchAnomalyFlows { key, src } => {
                 self.security.flows_for = Some(key.clone());
                 self.security.flows = crate::view::specialized::fetch::Fetch::Loading;
@@ -1543,6 +1621,14 @@ impl ZenSight {
 
             Message::DismissToast(id) => {
                 self.toasts.dismiss(id);
+            }
+
+            // #132: every variant claimed by an `update_*` handler returned above,
+            // so nothing else reaches here. Flag a stray (e.g. a new variant whose
+            // handler wiring was forgotten) loudly in debug rather than silently.
+            other => {
+                debug_assert!(false, "update(): unrouted message {other:?}");
+                tracing::warn!(message = ?other, "unrouted message in update()");
             }
         }
 
@@ -2654,5 +2740,68 @@ mod prefetch_tests {
         assert!(prefetch_channels(Protocol::Snmp).is_empty());
         assert!(prefetch_channels(Protocol::Syslog).is_empty());
         assert!(prefetch_channels(Protocol::Modbus).is_empty());
+    }
+}
+
+/// #132: the decomposed `update()` routes each message to exactly one per-domain
+/// `update_*` handler (claiming it → `Break`) or hands it back (`Continue`) so the
+/// chain — and ultimately the main `match` — can handle it. These tests pin that
+/// contract so a future handler can't silently swallow a foreign message.
+#[cfg(test)]
+mod update_routing_tests {
+    use super::*;
+
+    fn app() -> ZenSight {
+        // Demo mode boots without Zenoh or disk-backed history.
+        ZenSight::boot(true).0
+    }
+
+    #[test]
+    fn handler_claims_its_own_domain() {
+        let mut a = app();
+        // Chart interactions are owned by update_chart even with no device open.
+        assert!(matches!(
+            a.update_chart(Message::ChartZoomIn),
+            ControlFlow::Break(_)
+        ));
+        // Syslog panel toggle is owned by update_syslog.
+        assert!(matches!(
+            a.update_syslog(Message::ToggleSyslogFilterPanel),
+            ControlFlow::Break(_)
+        ));
+        // A detail filter is owned by update_detail.
+        assert!(matches!(
+            a.update_detail(Message::SetNetlinkSocketPortFilter("80".into())),
+            ControlFlow::Break(_)
+        ));
+    }
+
+    #[test]
+    fn handler_passes_back_foreign_messages() {
+        let mut a = app();
+        // None of these handlers own ToggleTheme — each must hand it back so a
+        // later stage (here, the main match) gets a chance.
+        assert!(matches!(
+            a.update_chart(Message::ToggleTheme),
+            ControlFlow::Continue(_)
+        ));
+        assert!(matches!(
+            a.update_detail(Message::ToggleTheme),
+            ControlFlow::Continue(_)
+        ));
+        assert!(matches!(
+            a.update_topology_msg(Message::ToggleTheme),
+            ControlFlow::Continue(_)
+        ));
+    }
+
+    #[test]
+    fn update_falls_through_to_main_match() {
+        let mut a = app();
+        // ToggleTheme is owned by the main match, past all five handlers; routing
+        // must reach it and flip the theme.
+        let was_dark = matches!(a.theme, AppTheme::Dark);
+        let _ = a.update(Message::ToggleTheme);
+        assert_ne!(was_dark, matches!(a.theme, AppTheme::Dark));
     }
 }
