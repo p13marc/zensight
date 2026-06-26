@@ -239,6 +239,16 @@ pub fn protocol_opcua<Message: 'static>(size: IconSize) -> Element<'static, Mess
     svg_icon(include_bytes!("protocol-opcua.svg"), size)
 }
 
+/// Netlink protocol icon (indigo linked nodes — kernel socket/link graph).
+pub fn protocol_netlink<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("protocol-netlink.svg"), size)
+}
+
+/// Netring protocol icon (rose capture radar — wire-level packet capture).
+pub fn protocol_netring<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("protocol-netring.svg"), size)
+}
+
 /// Generic protocol icon (gray info circle).
 pub fn protocol_generic<Message: 'static>(size: IconSize) -> Element<'static, Message> {
     svg_icon(include_bytes!("protocol-generic.svg"), size)
@@ -257,9 +267,8 @@ pub fn protocol_icon<Message: 'static>(
         zensight_common::Protocol::Sysinfo => protocol_sysinfo(size),
         zensight_common::Protocol::Gnmi => protocol_gnmi(size),
         zensight_common::Protocol::Opcua => protocol_opcua(size),
-        // TODO(Plan 09): dedicated netlink/netring icons.
-        zensight_common::Protocol::Netlink => protocol_generic(size),
-        zensight_common::Protocol::Netring => protocol_generic(size),
+        zensight_common::Protocol::Netlink => protocol_netlink(size),
+        zensight_common::Protocol::Netring => protocol_netring(size),
     }
 }
 
