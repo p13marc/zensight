@@ -12,6 +12,7 @@ mod filter;
 mod ingest;
 #[cfg(feature = "journald")]
 mod journald;
+mod multiline;
 mod novelty;
 mod parser;
 mod receiver;

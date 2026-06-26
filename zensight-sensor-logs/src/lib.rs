@@ -27,5 +27,6 @@ pub mod filter;
 pub mod ingest;
 #[cfg(feature = "journald")]
 pub mod journald;
+pub mod multiline;
 pub mod parser;
 pub mod receiver;

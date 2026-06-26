@@ -102,6 +102,61 @@ pub struct SyslogConfig {
     /// health alert.
     #[serde(default)]
     pub ingest: IngestConfig,
+
+    /// Multiline / stacktrace joining for the TCP/Unix stream paths (#107). On
+    /// by default so LF-split Java/Python/Go tracebacks are stitched back into
+    /// one record. journald is unaffected (already one record per entry).
+    #[serde(default)]
+    pub multiline: MultilineConfig,
+}
+
+/// Multiline / stacktrace joining configuration (#107, C6).
+///
+/// Applies to the stream (TCP/Unix) listeners only. Continuation lines (indented
+/// stack frames, `Caused by:`, `...`, `Traceback …`) are folded into the
+/// preceding record; the record is emitted when the next real syslog line
+/// (`<PRI>…`) arrives or `flush_timeout_ms` elapses with no new frame.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct MultilineConfig {
+    /// Master switch. On by default — this is the fix for shattered tracebacks.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Idle flush: emit a buffered record this many ms after the last frame when
+    /// no continuation/next-record has arrived. Bounds the added latency on the
+    /// final line of a burst. Default 200ms.
+    #[serde(default = "default_multiline_flush_ms")]
+    pub flush_timeout_ms: u64,
+
+    /// Hard cap on lines folded into one record (a runaway continuation stream
+    /// is flushed and restarted at the cap). Default 500.
+    #[serde(default = "default_multiline_max_lines")]
+    pub max_lines: usize,
+
+    /// Hard cap on bytes in one joined record. Default 65536.
+    #[serde(default = "default_multiline_max_bytes")]
+    pub max_bytes: usize,
+}
+
+fn default_multiline_flush_ms() -> u64 {
+    200
+}
+fn default_multiline_max_lines() -> usize {
+    500
+}
+fn default_multiline_max_bytes() -> usize {
+    65536
+}
+
+impl Default for MultilineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            flush_timeout_ms: default_multiline_flush_ms(),
+            max_lines: default_multiline_max_lines(),
+            max_bytes: default_multiline_max_bytes(),
+        }
+    }
 }
 
 /// Network-ingest robustness configuration (#106).
@@ -748,6 +803,7 @@ impl Default for SyslogConfig {
             templating: TemplatingConfig::default(),
             novelty: NoveltyConfig::default(),
             ingest: IngestConfig::default(),
+            multiline: MultilineConfig::default(),
         }
     }
 }

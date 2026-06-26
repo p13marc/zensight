@@ -1,7 +1,10 @@
 //! Syslog message receivers (UDP, TCP, and Unix socket).
 
-use crate::config::{ListenerConfig, ListenerProtocol, OverflowPolicy, SyslogConfig};
+use crate::config::{
+    ListenerConfig, ListenerProtocol, MultilineConfig, OverflowPolicy, SyslogConfig,
+};
 use crate::ingest::{FrameReader, IngestStats, SharedRateLimiter, forward_parsed};
+use crate::multiline::MultilineJoiner;
 use crate::parser::{self, SyslogMessage};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -122,6 +125,9 @@ struct IngestCtx {
     stats: Arc<IngestStats>,
     limiter: Arc<SharedRateLimiter>,
     overflow: OverflowPolicy,
+    /// Multiline-join settings for the stream paths (#107). Copied per
+    /// connection into a fresh [`MultilineJoiner`].
+    multiline: MultilineConfig,
 }
 
 /// Start all configured listeners and return the message channel, the shared
@@ -149,6 +155,7 @@ pub async fn start_listeners(
             Instant::now(),
         )),
         overflow: config.ingest.overflow,
+        multiline: config.multiline,
     };
 
     for listener_config in &config.listeners {
@@ -352,36 +359,78 @@ where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut stream = stream;
+    // Stacktrace joiner (#107): folds continuation lines into the head record.
+    // When a record is buffered, race the next frame against an idle flush so
+    // the last line of a burst isn't held past `flush_timeout_ms`.
+    let mut joiner = MultilineJoiner::new(&ctx.multiline);
+    let flush_after = Duration::from_millis(ctx.multiline.flush_timeout_ms.max(1));
     loop {
-        match reader.next_frame(&mut stream, connection_timeout).await {
-            Ok(Some(bytes)) => {
-                let text = String::from_utf8_lossy(&bytes);
-                IngestStats::inc(&ctx.stats.received);
-                if let Some(message) = parser::parse(&text) {
-                    IngestStats::inc(&ctx.stats.parsed);
-                    let resolved_hostname = match &source {
-                        MessageSource::Network(addr) => {
-                            resolve_hostname_network(addr, &message, aliases)
-                        }
-                        _ => resolve_hostname_unix(&message, aliases),
-                    };
-                    let received = ReceivedMessage {
-                        message,
-                        source: source.clone(),
-                        resolved_hostname,
-                    };
-                    if !forward_parsed(received, tx, &ctx.stats, &ctx.limiter, ctx.overflow).await {
-                        break;
-                    }
-                } else {
-                    IngestStats::inc(&ctx.stats.parse_failed);
+        let frame = if joiner.has_pending() {
+            tokio::select! {
+                r = reader.next_frame(&mut stream, connection_timeout) => Some(r),
+                _ = tokio::time::sleep(flush_after) => None,
+            }
+        } else {
+            Some(reader.next_frame(&mut stream, connection_timeout).await)
+        };
+        match frame {
+            // Idle flush: no new frame within the window → emit the buffer.
+            None => {
+                if let Some(raw) = joiner.flush()
+                    && !process_record(raw, &source, tx, aliases, ctx).await
+                {
+                    break;
                 }
             }
-            Ok(None) => break, // EOF
-            Err(e) => return Err(e.into()),
+            Some(Ok(Some(bytes))) => {
+                IngestStats::inc(&ctx.stats.received);
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                if let Some(raw) = joiner.push(text)
+                    && !process_record(raw, &source, tx, aliases, ctx).await
+                {
+                    break;
+                }
+            }
+            // EOF: flush any buffered record before stopping so a trailing
+            // stack trace isn't lost.
+            Some(Ok(None)) => {
+                if let Some(raw) = joiner.flush() {
+                    let _ = process_record(raw, &source, tx, aliases, ctx).await;
+                }
+                break;
+            }
+            Some(Err(e)) => return Err(e.into()),
         }
     }
     Ok(())
+}
+
+/// Parse one completed (possibly multi-line) raw record, account it, and forward
+/// it downstream. Returns `false` only when the telemetry channel has closed
+/// (the caller should stop the connection). Shared by the live-frame and
+/// flush/EOF paths of [`handle_stream_connection`].
+async fn process_record(
+    raw: String,
+    source: &MessageSource,
+    tx: &mpsc::Sender<ReceivedMessage>,
+    aliases: &HashMap<String, String>,
+    ctx: &IngestCtx,
+) -> bool {
+    let Some(message) = parser::parse(&raw) else {
+        IngestStats::inc(&ctx.stats.parse_failed);
+        return true;
+    };
+    IngestStats::inc(&ctx.stats.parsed);
+    let resolved_hostname = match source {
+        MessageSource::Network(addr) => resolve_hostname_network(addr, &message, aliases),
+        _ => resolve_hostname_unix(&message, aliases),
+    };
+    let received = ReceivedMessage {
+        message,
+        source: source.clone(),
+        resolved_hostname,
+    };
+    forward_parsed(received, tx, &ctx.stats, &ctx.limiter, ctx.overflow).await
 }
 
 /// Run a Unix socket syslog listener.
