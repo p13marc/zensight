@@ -172,6 +172,42 @@ pub fn score_device(d: &DeviceState) -> HealthScore {
     )
 }
 
+/// Worst-first rank of a band for host folding: Critical (0) is worst, Unknown
+/// (3) is "no data" and least informative.
+fn band_rank(b: HealthBand) -> u8 {
+    match b {
+        HealthBand::Critical => 0,
+        HealthBand::Degraded => 1,
+        HealthBand::Healthy => 2,
+        HealthBand::Unknown => 3,
+    }
+}
+
+/// Composite health for a physical host (#128): the worst of its per-protocol
+/// facet scores — the band that should drive triage. Among equal bands the lower
+/// numeric value wins; `Unknown` only survives when every facet is Unknown.
+pub fn score_host<'a>(facets: impl IntoIterator<Item = &'a DeviceState>) -> HealthScore {
+    let mut worst: Option<HealthScore> = None;
+    for f in facets {
+        let s = score_device(f);
+        worst = Some(match worst {
+            None => s,
+            Some(w) => {
+                let (wr, sr) = (band_rank(w.band), band_rank(s.band));
+                if sr < wr || (sr == wr && s.value < w.value) {
+                    s
+                } else {
+                    w
+                }
+            }
+        });
+    }
+    worst.unwrap_or(HealthScore {
+        value: 0,
+        band: HealthBand::Unknown,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,5 +262,28 @@ mod tests {
         let s = compute(DeviceStatus::Online, None, Some(80.0), None, None);
         assert_eq!(s.value, 60);
         assert_eq!(s.band, HealthBand::Degraded);
+    }
+
+    /// #128: a host's composite score is the worst of its facets; an empty host
+    /// or all-Unknown facets score Unknown.
+    #[test]
+    fn host_score_is_worst_facet() {
+        use crate::message::DeviceId;
+        use zensight_common::Protocol;
+
+        let facet = |proto: Protocol, status: DeviceStatus| {
+            let mut d = DeviceState::new(DeviceId::new(proto, "h"));
+            d.update_from_liveness(status, 0, None);
+            d
+        };
+        // A healthy sysinfo facet + an offline netlink facet → host is Critical.
+        let healthy = facet(Protocol::Sysinfo, DeviceStatus::Online);
+        let offline = facet(Protocol::Netlink, DeviceStatus::Offline);
+        let host = score_host([&healthy, &offline]);
+        assert_eq!(host.band, HealthBand::Critical);
+        assert_eq!(host.value, 0);
+
+        // No facets → Unknown.
+        assert_eq!(score_host([]).band, HealthBand::Unknown);
     }
 }
