@@ -111,6 +111,11 @@ pub enum Message {
     /// inventory fingerprint explorer's per-row allowlist action.
     AddNetringAllowlistEntry(String),
 
+    /// Open the unified Incidents triage view (#129).
+    OpenIncidents,
+    /// Expand/collapse an incident by id (`None` collapses) (#129).
+    SelectIncident(Option<String>),
+
     /// Open the first-class inventory view and (re)fetch assets + fingerprints (#120).
     OpenInventory,
     /// Combined inventory fetch outcome (assets + TLS/QUIC/SSH fingerprints).

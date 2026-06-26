@@ -75,6 +75,7 @@ pub enum CurrentView {
     Sensors,
     Logs,
     Inventory,
+    Incidents,
 }
 
 /// Application theme.
@@ -155,6 +156,8 @@ pub struct ZenSight {
     detection_tuning: crate::view::detection_tuning::DetectionTuningState,
     /// First-class passive inventory + fingerprint explorer state (#120).
     inventory: crate::view::inventory::InventoryState,
+    /// Incidents triage view state (#129): which incident is expanded.
+    incidents: crate::view::incident::IncidentsState,
     /// Local tiered time-series store (hot ring + redb), Plan v3-04 §A / #22.
     /// Telemetry writes through it; charts read from it so trends survive restart.
     store: crate::store::MetricStore,
@@ -278,6 +281,7 @@ impl ZenSight {
             security: crate::view::security::SecurityState::default(),
             detection_tuning: crate::view::detection_tuning::DetectionTuningState::default(),
             inventory: crate::view::inventory::InventoryState::default(),
+            incidents: crate::view::incident::IncidentsState::default(),
             // In demo mode keep history in-memory only (no disk churn / restart survival
             // for synthetic data); otherwise open the persistent tiered store.
             store: if demo_mode {
@@ -712,6 +716,13 @@ impl ZenSight {
 
             Message::OpenLogs => {
                 self.set_view(CurrentView::Logs);
+            }
+
+            Message::OpenIncidents => {
+                self.set_view(CurrentView::Incidents);
+            }
+            Message::SelectIncident(id) => {
+                self.incidents.selected = id;
             }
 
             Message::OpenInventory => {
@@ -2010,7 +2021,8 @@ impl ZenSight {
             | CurrentView::Security
             | CurrentView::Sensors
             | CurrentView::Logs
-            | CurrentView::Inventory => {
+            | CurrentView::Inventory
+            | CurrentView::Incidents => {
                 self.set_view(CurrentView::Dashboard);
             }
             CurrentView::Dashboard => {
@@ -2082,6 +2094,9 @@ impl ZenSight {
                 crate::view::specialized::logs_view(&logs, &self.syslog_filter)
             }
             CurrentView::Inventory => crate::view::inventory::inventory_view(&self.inventory),
+            CurrentView::Incidents => {
+                crate::view::incident::incidents_view(&self.alerts, &self.incidents)
+            }
             CurrentView::Device => {
                 if let Some(ref device_state) = self.selected_device {
                     // For a syslog device, hand the view this host's recent log

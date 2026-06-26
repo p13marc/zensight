@@ -460,6 +460,34 @@ impl AlertsState {
             .extend(self.external.keys().cloned());
     }
 
+    /// Group currently-firing alerts into unified [`Incident`]s (#129), excluding
+    /// silenced sources. The per-key transition history becomes each incident's
+    /// timeline. See [`crate::view::incident::group_incidents`].
+    ///
+    /// [`Incident`]: crate::view::incident::Incident
+    pub fn incidents(&self) -> Vec<crate::view::incident::Incident> {
+        self.incidents_at(now_ms())
+    }
+
+    /// Clock-injected form of [`Self::incidents`] (testable).
+    pub fn incidents_at(&self, now_ms: i64) -> Vec<crate::view::incident::Incident> {
+        let firing: Vec<&SensorAlert> = self
+            .active_external()
+            .into_iter()
+            .filter(|a| !self.is_silenced(&a.source, now_ms))
+            .collect();
+        crate::view::incident::group_incidents(
+            &firing,
+            |k| self.is_external_acked(k),
+            |k| {
+                self.timeline(k)
+                    .into_iter()
+                    .map(|t| (t.state, t.at))
+                    .collect()
+            },
+        )
+    }
+
     /// Firing external alerts grouped by source (current time). Silenced sources
     /// are hidden. See [`Self::external_by_source_at`] for a clock-injected form.
     pub fn external_by_source(&self) -> Vec<ExternalIncident<'_>> {
