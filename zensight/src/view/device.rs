@@ -1,6 +1,6 @@
 //! Device detail view showing all metrics for a selected device.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use iced::widget::{
     Row, column, container, row, rule, scrollable, table, text, text_input, tooltip,
@@ -41,6 +41,8 @@ struct MetricTableRow {
     is_chartable: bool,
     /// Whether this metric is currently in the chart.
     is_in_chart: bool,
+    /// Whether this metric is favorited/pinned on this device (#27).
+    is_favorite: bool,
     /// Trend indicator: "up", "down", "stable", or empty.
     trend: String,
     /// Whether this metric is stale (not updated recently).
@@ -100,6 +102,10 @@ pub struct DeviceDetailState {
     /// `YYYY-MM-DD HH:MM` (UTC). Applied together via [`Self::apply_chart_range`].
     pub chart_from_input: String,
     pub chart_to_input: String,
+    /// Favorited metric names for this device (#27). Projected from the app-level
+    /// persisted favorites on selection; pinned metrics sort to the top of the
+    /// table and show a filled star.
+    pub favorites: HashSet<String>,
 }
 
 impl DeviceDetailState {
@@ -128,6 +134,28 @@ impl DeviceDetailState {
             chart_custom_input: String::new(),
             chart_from_input: String::new(),
             chart_to_input: String::new(),
+            favorites: HashSet::new(),
+        }
+    }
+
+    /// Replace the favorited-metric set for this device (#27). Called on selection
+    /// with the projection of the app-level persisted favorites for this device.
+    pub fn set_favorites(&mut self, favorites: HashSet<String>) {
+        self.favorites = favorites;
+    }
+
+    /// Whether `metric` is favorited on this device (#27).
+    pub fn is_favorite(&self, metric: &str) -> bool {
+        self.favorites.contains(metric)
+    }
+
+    /// Toggle `metric`'s favorite state (#27); returns the new state.
+    pub fn toggle_favorite(&mut self, metric: &str) -> bool {
+        if self.favorites.remove(metric) {
+            false
+        } else {
+            self.favorites.insert(metric.to_string());
+            true
         }
     }
 
@@ -462,7 +490,11 @@ impl DeviceDetailState {
                 }
             })
             .collect();
-        metrics.sort_by(|a, b| a.0.cmp(b.0));
+        // Favorites pinned to the top (#27), then alphabetical within each group.
+        metrics.sort_by(|a, b| {
+            let (fa, fb) = (self.is_favorite(a.0), self.is_favorite(b.0));
+            fb.cmp(&fa).then_with(|| a.0.cmp(b.0))
+        });
         metrics
     }
 
@@ -1036,6 +1068,7 @@ fn build_metric_table_rows(state: &DeviceDetailState) -> Vec<MetricTableRow> {
                 timestamp: format_timestamp(point.timestamp),
                 is_chartable: state.is_metric_chartable(name),
                 is_in_chart: state.is_metric_in_chart(name),
+                is_favorite: state.is_favorite(name),
                 trend,
                 is_stale,
                 device_id: state.device_id.clone(),
@@ -1134,6 +1167,33 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
 
     // Build table columns
     // Note: closures consume MetricTableRow, so we clone strings for owned values
+
+    // Favorite/pin column (#27): a star toggles whether the metric is pinned to
+    // the top of the table; persisted per device across restarts.
+    let favorite_column = table::column(
+        text("").size(12),
+        |row: MetricTableRow| -> Element<'_, Message> {
+            let is_fav = row.is_favorite;
+            let glyph = if is_fav { "★" } else { "☆" };
+            button(
+                text(glyph)
+                    .size(14)
+                    .style(move |theme: &Theme| text::Style {
+                        color: Some(if is_fav {
+                            iced::Color::from_rgb(0.95, 0.75, 0.1)
+                        } else {
+                            crate::view::theme::colors(theme).text_dimmed()
+                        }),
+                    }),
+            )
+            .on_press(Message::ToggleMetricFavorite(row.name))
+            .style(iced::widget::button::text)
+            .padding(0)
+            .into()
+        },
+    )
+    .width(34);
+
     let name_column = table::column(
         text("Metric").size(12),
         |row: MetricTableRow| -> Element<'_, Message> {
@@ -1287,6 +1347,7 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
 
     let metrics_table = table(
         [
+            favorite_column,
             name_column,
             value_column,
             type_column,
@@ -1349,6 +1410,53 @@ fn value_type_name(value: &TelemetryValue) -> &'static str {
 mod tests {
     use super::*;
     use zensight_common::Protocol;
+
+    #[test]
+    fn favorites_toggle_and_pin_to_top_of_sorted_metrics() {
+        let mut state = DeviceDetailState::new(DeviceId {
+            protocol: Protocol::Snmp,
+            source: "test".to_string(),
+        });
+        for m in ["zzz", "aaa", "mmm"] {
+            state.update(make_test_point(m));
+        }
+        // Default order is alphabetical.
+        let order: Vec<&str> = state
+            .sorted_metrics()
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert_eq!(order, vec!["aaa", "mmm", "zzz"]);
+
+        // Favoriting "zzz" pins it to the top; the rest stay alphabetical.
+        assert!(state.toggle_favorite("zzz"));
+        assert!(state.is_favorite("zzz"));
+        let order: Vec<&str> = state
+            .sorted_metrics()
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert_eq!(order, vec!["zzz", "aaa", "mmm"]);
+
+        // Toggling again unpins it (back to alphabetical).
+        assert!(!state.toggle_favorite("zzz"));
+        assert!(!state.is_favorite("zzz"));
+        let order: Vec<&str> = state
+            .sorted_metrics()
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert_eq!(order, vec!["aaa", "mmm", "zzz"]);
+
+        // A projected favorites set is honoured.
+        state.set_favorites(["aaa".to_string()].into_iter().collect());
+        let order: Vec<&str> = state
+            .sorted_metrics()
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert_eq!(order, vec!["aaa", "mmm", "zzz"]);
+    }
 
     #[test]
     fn apply_chart_range_pins_window_and_returns_bounds() {
