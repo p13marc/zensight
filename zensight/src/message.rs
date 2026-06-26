@@ -115,6 +115,13 @@ pub enum Message {
         crate::view::specialized::netlink_detail::NetlinkDetailTopic,
         Result<crate::view::specialized::netlink_detail::NetlinkDetailData, String>,
     ),
+    /// Socket explorer (#112): set the TCP-state filter (`None` = all states).
+    SetNetlinkSocketStateFilter(Option<String>),
+    /// Socket explorer (#112): set the port substring filter.
+    SetNetlinkSocketPortFilter(String),
+    /// Socket explorer (#112): set the sort order.
+    SetNetlinkSocketSort(crate::view::specialized::netlink_detail::SocketSort),
+
     /// Fetch the on-demand netring flow detail (recent flows).
     FetchNetringFlows,
     /// A netring flow-detail reply: the decoded flows, or an error message.

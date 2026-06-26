@@ -2,14 +2,16 @@
 
 use std::collections::BTreeMap;
 
-use iced::widget::{Column, button, column, container, row, scrollable, text};
+use iced::widget::{Column, button, column, container, row, scrollable, text, text_input};
 use iced::{Element, Length, Theme};
-use zensight_common::TelemetryValue;
+use zensight_common::{SocketRecord, TelemetryValue};
 
 use crate::message::Message;
 use crate::view::components::{card, empty_state, section_header};
 use crate::view::device::DeviceDetailState;
-use crate::view::specialized::netlink_detail::NetlinkDetailTopic;
+use crate::view::specialized::netlink_detail::{
+    NetlinkDetailState, NetlinkDetailTopic, SocketSort, filter_sort_sockets,
+};
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
@@ -425,6 +427,14 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
     if let Some(err) = d.sockets.error() {
         col = col.push(empty_state(format!("Sockets fetch failed: {err}"), None));
     } else if let Some(socks) = d.sockets.ready() {
+        // Socket explorer (#112): filter by state/port and sort by RTT/retrans to
+        // surface the worst flows, driving the already-fetched record set.
+        let shown = filter_sort_sockets(
+            socks,
+            d.socket_state_filter.as_deref(),
+            &d.socket_port_filter,
+            d.socket_sort,
+        );
         let mut list = Column::new().spacing(3).push(
             row![
                 cell("local", 190),
@@ -439,7 +449,7 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
             ]
             .spacing(8),
         );
-        for s in socks.iter().take(200) {
+        for s in shown.iter().take(200) {
             // Surface the enriched tcp_info (#108): delivery/pacing rate and the
             // receiver RTT turn "state counts" into "are flows delivering".
             list = list.push(
@@ -458,7 +468,10 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
             );
         }
         col = col
-            .push(text(format!("Sockets ({})", socks.len())).size(font::EMPHASIS))
+            .push(
+                text(format!("Sockets ({} of {})", shown.len(), socks.len())).size(font::EMPHASIS),
+            )
+            .push(render_socket_controls(socks, d))
             .push(list);
     }
 
@@ -678,6 +691,74 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     col.into()
+}
+
+/// Socket-explorer filter/sort controls (#112): state chips (derived from the
+/// states present), a port substring input, and RTT/retrans sort toggles. Drives
+/// the already-fetched record set client-side via [`filter_sort_sockets`].
+fn render_socket_controls<'a>(
+    socks: &[SocketRecord],
+    d: &'a NetlinkDetailState,
+) -> Element<'a, Message> {
+    // Distinct states present, sorted for stable chip order.
+    let states: std::collections::BTreeSet<&str> = socks.iter().map(|s| s.state.as_str()).collect();
+
+    // State filter: "all" + one chip per observed state. Active chip uses the
+    // primary style; pressing a chip sets the filter, "all" clears it.
+    let chip = |label: &str, active: bool, msg: Message| {
+        let mut b = button(text(label.to_string()).size(font::CAPTION)).padding([2, 8]);
+        b = b.on_press(msg);
+        if active {
+            b = b.style(iced::widget::button::primary);
+        } else {
+            b = b.style(iced::widget::button::secondary);
+        }
+        b
+    };
+    let mut state_row = row![text("state:").size(font::CAPTION)].spacing(space::XS);
+    state_row = state_row.push(chip(
+        "all",
+        d.socket_state_filter.is_none(),
+        Message::SetNetlinkSocketStateFilter(None),
+    ));
+    for st in states {
+        let active = d.socket_state_filter.as_deref() == Some(st);
+        state_row = state_row.push(chip(
+            st,
+            active,
+            Message::SetNetlinkSocketStateFilter(Some(st.to_string())),
+        ));
+    }
+
+    let port_input = row![
+        text("port:").size(font::CAPTION),
+        text_input("any", &d.socket_port_filter)
+            .on_input(Message::SetNetlinkSocketPortFilter)
+            .size(font::CAPTION)
+            .width(Length::Fixed(90.0)),
+    ]
+    .spacing(space::XS)
+    .align_y(iced::Alignment::Center);
+
+    let sort_btn = |label: &str, which: SocketSort| {
+        chip(
+            label,
+            d.socket_sort == which,
+            Message::SetNetlinkSocketSort(which),
+        )
+    };
+    let sort_row = row![
+        text("sort:").size(font::CAPTION),
+        sort_btn("default", SocketSort::Default),
+        sort_btn("RTT ↓", SocketSort::Rtt),
+        sort_btn("retx ↓", SocketSort::Retrans),
+    ]
+    .spacing(space::XS)
+    .align_y(iced::Alignment::Center);
+
+    column![state_row, row![port_input, sort_row].spacing(space::MD)]
+        .spacing(space::XS)
+        .into()
 }
 
 /// Conntrack (NAT/flow-table health) section.

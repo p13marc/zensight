@@ -1336,6 +1336,22 @@ impl ZenSight {
                 }
             }
 
+            Message::SetNetlinkSocketStateFilter(state_filter) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netlink_detail.socket_state_filter = state_filter;
+                }
+            }
+            Message::SetNetlinkSocketPortFilter(port) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netlink_detail.socket_port_filter = port;
+                }
+            }
+            Message::SetNetlinkSocketSort(sort) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netlink_detail.socket_sort = sort;
+                }
+            }
+
             Message::FetchNetringFlows => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netring_detail.loading();
