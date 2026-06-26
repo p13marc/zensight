@@ -390,6 +390,11 @@ Sensors publish alerts on `zensight/<protocol>/@/alerts/<alert_key>` as a lifecy
 
 The frontend persists telemetry to a bounded local store (`zensight/src/store.rs`,
 redb-backed) with a hot in-memory ring plus retention/eviction to cap on-disk growth.
+Numeric series live in the downsampled tiers (`samples` table); per-line **log
+events** get a separate `logs` table keyed by uid with **template-aware sampling**
+(`LogRetention` — keep all errors + novel templates, sample repetitive info) so
+search-back/boot-selection survive restart without unbounded growth (#107). The
+Logs view seeds from the cold store on open (`Message::LogHistoryLoaded`).
 
 ### Observability Exporters
 

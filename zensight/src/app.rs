@@ -1105,25 +1105,44 @@ impl ZenSight {
                 self.ticks_since_flush += 1;
                 if self.ticks_since_flush >= STORE_FLUSH_EVERY_TICKS {
                     self.ticks_since_flush = 0;
-                    if let Some((store, batch)) = self.store.take_flush_batch() {
-                        // Prune aged-out buckets every Nth flush (#131) so the redb
-                        // file doesn't grow unbounded — bundled into the same
-                        // off-thread task as the write.
+                    let metric_batch = self.store.take_flush_batch();
+                    let log_batch = self.store.take_log_flush_batch();
+                    // Only schedule the off-thread write if there's something to do.
+                    if metric_batch.is_some() || log_batch.is_some() {
+                        // Prune aged-out buckets/log rows every Nth flush (#131,
+                        // #107) so the redb file doesn't grow unbounded — bundled
+                        // into the same off-thread task as the write.
                         self.flushes_since_prune += 1;
                         let prune = self.flushes_since_prune >= STORE_PRUNE_EVERY_FLUSHES;
                         if prune {
                             self.flushes_since_prune = 0;
                         }
+                        // Either batch carries a clone of the same redb handle.
+                        let store = metric_batch
+                            .as_ref()
+                            .map(|(s, _)| s.clone())
+                            .or_else(|| log_batch.as_ref().map(|(s, _)| s.clone()))
+                            .expect("at least one batch is Some");
+                        let batch = metric_batch.map(|(_, b)| b).unwrap_or_default();
+                        let logs = log_batch.map(|(_, l)| l).unwrap_or_default();
                         let now_ms = zensight_common::current_timestamp_millis();
                         return Task::future(async move {
                             // Map redb's large error to a String inside the blocking
                             // closure so the future's payload stays small.
                             let res = tokio::task::spawn_blocking(move || {
                                 let n = store.write_batch(&batch).map_err(|e| e.to_string())?;
+                                store.write_logs(&logs).map_err(|e| e.to_string())?;
                                 if prune {
                                     let evicted = store.prune(now_ms).map_err(|e| e.to_string())?;
-                                    if evicted > 0 {
-                                        tracing::debug!(evicted, "Pruned aged-out store buckets");
+                                    let log_evicted = store
+                                        .prune_logs(crate::store::LOG_STORE_MAX_ROWS)
+                                        .map_err(|e| e.to_string())?;
+                                    if evicted > 0 || log_evicted > 0 {
+                                        tracing::debug!(
+                                            evicted,
+                                            log_evicted,
+                                            "Pruned aged-out store rows"
+                                        );
                                     }
                                 }
                                 Ok::<usize, String>(n)
@@ -1162,6 +1181,27 @@ impl ZenSight {
 
             Message::OpenLogs => {
                 self.set_view(CurrentView::Logs);
+                // Search-back (#107, C9): pull persisted logs from the cold store
+                // off-thread so the Logs view opens with history that survived a
+                // restart, not just what's arrived this session.
+                if let Some(store) = self.store.persistent() {
+                    let now_ms = zensight_common::current_timestamp_millis();
+                    let from = now_ms - 24 * 3_600_000; // last 24h
+                    return Task::future(async move {
+                        let logs = tokio::task::spawn_blocking(move || {
+                            store
+                                .query_logs(from, now_ms, MAX_RECENT_LOGS)
+                                .unwrap_or_default()
+                        })
+                        .await
+                        .unwrap_or_default();
+                        Message::LogHistoryLoaded(logs)
+                    });
+                }
+            }
+
+            Message::LogHistoryLoaded(logs) => {
+                self.merge_log_history(logs);
             }
 
             Message::OpenIncidents => {
@@ -2358,6 +2398,38 @@ impl ZenSight {
         // They should be created when telemetry arrives
     }
 
+    /// Merge cold-store search-back results (#107, C9) into the rolling log
+    /// buffer: drop records already present (by time+message), then keep the
+    /// newest [`MAX_RECENT_LOGS`] across the union, time-ordered.
+    fn merge_log_history(&mut self, logs: Vec<crate::store::StoredLog>) {
+        if logs.is_empty() {
+            return;
+        }
+        use std::collections::HashSet;
+        let mut seen: HashSet<(i64, String)> = self
+            .recent_logs
+            .iter()
+            .map(|m| (m.timestamp(), m.message().to_string()))
+            .collect();
+        let mut merged: Vec<crate::view::specialized::SyslogMessage> = Vec::new();
+        for log in logs {
+            if seen.insert((log.ts, log.message.clone())) {
+                let point = log.to_point();
+                merged.push(crate::view::specialized::syslog_message_from_point(
+                    &point,
+                    &point.source,
+                ));
+            }
+        }
+        if merged.is_empty() {
+            return;
+        }
+        merged.extend(self.recent_logs.drain(..));
+        merged.sort_by_key(|m| m.timestamp());
+        let start = merged.len().saturating_sub(MAX_RECENT_LOGS);
+        self.recent_logs = merged.split_off(start).into();
+    }
+
     /// Handle incoming telemetry.
     fn handle_telemetry(&mut self, point: TelemetryPoint) {
         // Write through to the local tiered store (O(1) hot-ring append; numeric
@@ -2381,6 +2453,12 @@ impl ZenSight {
                 ));
             while self.recent_logs.len() > MAX_RECENT_LOGS {
                 self.recent_logs.pop_front();
+            }
+            // Persist to the cold store (#107, C9) — template-aware sampling
+            // decides what survives restart for search-back. Only per-line
+            // events carry a uid; rollup/derived points (no uid) are skipped.
+            if let Some(log) = crate::store::StoredLog::from_point(&point) {
+                self.store.record_log(log);
             }
         }
 
