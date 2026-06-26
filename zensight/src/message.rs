@@ -103,6 +103,10 @@ pub enum Message {
     /// Netring flows fetched for deriving real topology edges (#25). Distinct
     /// from NetringFlowsReceived so it doesn't disturb the device flow panel.
     TopologyFlowsReceived(Result<Vec<zensight_common::FlowRecord>, String>),
+    /// Netlink neighbor (ARP/NDP) table fetched for deriving adjacency edges
+    /// (#49). Merged with flow edges so directly-attached gateways/peers appear
+    /// even without observed traffic; `is_router` entries classify Router nodes.
+    TopologyNeighborsReceived(Result<Vec<zensight_common::NeighborRecord>, String>),
     /// Fetch the on-demand netring TLS asset inventory.
     FetchNetringTls,
     /// A netring TLS-inventory reply: the decoded records, or an error message.

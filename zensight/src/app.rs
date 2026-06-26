@@ -970,9 +970,9 @@ impl ZenSight {
                 self.topology.apply_correlations(&self.correlations);
                 self.set_view(CurrentView::Topology);
                 self.save_current_view();
-                // Derive real edges from observed flows (#25): fetch the netring
-                // flow detail; edges are applied when the reply arrives.
-                return self.query_topology_flows();
+                // Derive real edges from observed flows (#25) and netlink
+                // neighbor adjacency (#49); edges are merged as replies arrive.
+                return Task::batch([self.query_topology_flows(), self.query_topology_neighbors()]);
             }
 
             Message::TopologyFlowsReceived(result) => match result {
@@ -983,6 +983,17 @@ impl ZenSight {
                 }
                 Err(e) => {
                     tracing::debug!(error = %e, "No netring flows for topology edges");
+                }
+            },
+
+            Message::TopologyNeighborsReceived(result) => match result {
+                Ok(neighbors) => {
+                    let ip_to_node = self.topology_ip_to_node();
+                    self.topology
+                        .apply_neighbor_edges(&neighbors, &ip_to_node, now_ms());
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "No netlink neighbors for topology edges");
                 }
             },
 
@@ -1594,6 +1605,23 @@ impl ZenSight {
                 .await
                 .ok_or_else(|| "No netring sensor responded".to_string());
             Message::TopologyFlowsReceived(result)
+        })
+    }
+
+    /// Fetch the netlink neighbor (ARP/NDP) table for deriving topology
+    /// adjacency edges (#49). Routes to `TopologyNeighborsReceived`; leaves the
+    /// device netlink panel untouched. Silent when disconnected (or demo).
+    fn query_topology_neighbors(&self) -> Task<Message> {
+        use crate::view::specialized::netlink_detail::fetch_records;
+        let Some(session) = self.session.clone() else {
+            return Task::none();
+        };
+        let key = zensight_common::command::query_key("zensight/netlink", "neighbors");
+        Task::future(async move {
+            let result = fetch_records::<zensight_common::NeighborRecord>(session, key)
+                .await
+                .ok_or_else(|| "No netlink sensor responded".to_string());
+            Message::TopologyNeighborsReceived(result)
         })
     }
 

@@ -49,6 +49,12 @@ pub struct TopologyState {
     pub layout_config: LayoutConfig,
     /// Whether the layout is currently stable.
     pub layout_stable: bool,
+    /// Last netring flows fetched, kept so the edge set can be rebuilt when the
+    /// netlink neighbor table arrives separately (#49).
+    last_flows: Vec<zensight_common::FlowRecord>,
+    /// Last netlink neighbor (ARP/NDP) table fetched, merged into the edge set
+    /// as adjacency links (#49).
+    last_neighbors: Vec<zensight_common::NeighborRecord>,
 }
 
 impl Default for TopologyState {
@@ -65,6 +71,8 @@ impl Default for TopologyState {
             search_query: String::new(),
             layout_config: LayoutConfig::default(),
             layout_stable: true,
+            last_flows: Vec::new(),
+            last_neighbors: Vec::new(),
         }
     }
 }
@@ -181,7 +189,65 @@ impl TopologyState {
         ip_to_node: &HashMap<String, NodeId>,
         now_ms: i64,
     ) {
-        self.edges = edges_from_flows(flows, ip_to_node, now_ms);
+        self.last_flows = flows.to_vec();
+        self.rebuild_edges(ip_to_node, now_ms);
+    }
+
+    /// Merge the netlink neighbor (ARP/NDP) table into the topology (#49):
+    /// remembers it and rebuilds the edge set so direct L2/L3 adjacencies appear
+    /// as links even when netring sees no traffic, and `is_router` neighbors are
+    /// classified as [`NodeType::Router`].
+    pub fn apply_neighbor_edges(
+        &mut self,
+        neighbors: &[zensight_common::NeighborRecord],
+        ip_to_node: &HashMap<String, NodeId>,
+        now_ms: i64,
+    ) {
+        self.last_neighbors = neighbors.to_vec();
+        self.rebuild_edges(ip_to_node, now_ms);
+    }
+
+    /// Rebuild the edge set from the remembered flow + neighbor inputs (#25/#49).
+    /// Flow edges (with real bandwidth) take precedence; neighbor adjacencies add
+    /// zero-bandwidth links for node pairs no flow covered. Router classification
+    /// from `is_router` neighbors is reset and reapplied each pass so it tracks
+    /// the live table. Pure given its remembered inputs + `ip_to_node`.
+    fn rebuild_edges(&mut self, ip_to_node: &HashMap<String, NodeId>, now_ms: i64) {
+        use std::collections::BTreeSet;
+        use zensight_common::Protocol;
+
+        let mut edges = edges_from_flows(&self.last_flows, ip_to_node, now_ms);
+        let mut pairs: BTreeSet<(NodeId, NodeId)> =
+            edges.iter().map(|e| ordered_pair(&e.from, &e.to)).collect();
+
+        // Neighbor tables belong to the netlink host(s); the app treats the
+        // netlink detail queryable as the local sensor (a single global key),
+        // so attribute the table to every netlink node present.
+        let host_nodes: Vec<NodeId> = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.protocols.contains(&Protocol::Netlink))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let (neighbor_edges, routers) =
+            edges_from_neighbors(&host_nodes, &self.last_neighbors, ip_to_node, now_ms);
+        for edge in neighbor_edges {
+            if pairs.insert(ordered_pair(&edge.from, &edge.to)) {
+                edges.push(edge);
+            }
+        }
+
+        // Reset then reapply Router classification so it follows the live table.
+        for node in self.nodes.values_mut() {
+            node.node_type = NodeType::Host;
+        }
+        for id in &routers {
+            if let Some(node) = self.nodes.get_mut(id) {
+                node.node_type = NodeType::Router;
+            }
+        }
+
+        self.edges = edges;
         self.selected_edge = None;
         self.recompute_edge_health();
         self.cache.clear();
@@ -556,6 +622,66 @@ pub fn edges_from_flows(
             .then_with(|| (a.from.clone(), a.to.clone()).cmp(&(b.from.clone(), b.to.clone())))
     });
     edges
+}
+
+/// Order a node pair canonically so `(a,b)` and `(b,a)` compare equal. Pure.
+fn ordered_pair(a: &NodeId, b: &NodeId) -> (NodeId, NodeId) {
+    if a <= b {
+        (a.clone(), b.clone())
+    } else {
+        (b.clone(), a.clone())
+    }
+}
+
+/// Derive adjacency edges from a netlink host's neighbor (ARP/NDP) table (#49).
+/// Each neighbor whose IP resolves (via `ip_to_node`) to a *distinct* known node
+/// becomes a zero-bandwidth link from its owning `host_nodes` entry — so a host
+/// and its directly-attached gateway/peer connect even when netring observes no
+/// flow between them. Neighbors flagged `is_router` are returned as the set of
+/// node ids to classify [`NodeType::Router`]. Pure — the unit of testing.
+pub fn edges_from_neighbors(
+    host_nodes: &[NodeId],
+    neighbors: &[zensight_common::NeighborRecord],
+    ip_to_node: &HashMap<String, NodeId>,
+    now_ms: i64,
+) -> (Vec<Edge>, std::collections::BTreeSet<NodeId>) {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut pairs: BTreeSet<(NodeId, NodeId)> = BTreeSet::new();
+    let mut routers: BTreeSet<NodeId> = BTreeSet::new();
+    // Deterministic order: BTreeMap keyed by ordered pair.
+    let mut acc: BTreeMap<(NodeId, NodeId), ()> = BTreeMap::new();
+    for host in host_nodes {
+        for nb in neighbors {
+            let Some(ip) = nb.ip.as_deref() else { continue };
+            let Some(target) = ip_to_node.get(ip) else {
+                continue;
+            };
+            if target == host {
+                continue; // the host's own address
+            }
+            if nb.is_router {
+                routers.insert(target.clone());
+            }
+            let key = ordered_pair(host, target);
+            if pairs.insert(key.clone()) {
+                acc.insert(key, ());
+            }
+        }
+    }
+    let edges = acc
+        .into_keys()
+        .map(|(from, to)| Edge {
+            from,
+            to,
+            bytes: 0,
+            packets: 0,
+            protocol: None,
+            last_seen: now_ms,
+            alert: None,
+        })
+        .collect();
+    (edges, routers)
 }
 
 /// Render the topology view.
@@ -1007,6 +1133,87 @@ mod tests {
         let edges = edges_from_flows(&flows, &map, 0);
         assert_eq!(edges[0].bytes, 5000);
         assert_eq!(edges[1].bytes, 100);
+    }
+
+    fn neighbor(ip: &str, is_router: bool) -> zensight_common::NeighborRecord {
+        zensight_common::NeighborRecord {
+            family: 2,
+            ip: Some(ip.to_string()),
+            mac: Some("aa:bb:cc:dd:ee:ff".to_string()),
+            ifindex: 2,
+            state: "reachable".to_string(),
+            is_router,
+        }
+    }
+
+    #[test]
+    fn edges_from_neighbors_builds_adjacency_and_routers() {
+        let mut map = HashMap::new();
+        map.insert("10.0.0.1".to_string(), "hostA".to_string()); // the netlink host
+        map.insert("10.0.0.254".to_string(), "gw".to_string());
+        map.insert("10.0.0.2".to_string(), "hostB".to_string());
+        let hosts = vec!["hostA".to_string()];
+        let neighbors = vec![
+            neighbor("10.0.0.254", true), // gateway -> Router + edge
+            neighbor("10.0.0.2", false),  // peer -> edge
+            neighbor("10.0.0.1", false),  // host's own addr -> skipped
+            neighbor("8.8.8.8", true),    // unknown node -> skipped
+        ];
+        let (edges, routers) = edges_from_neighbors(&hosts, &neighbors, &map, 7);
+        assert_eq!(edges.len(), 2);
+        assert!(edges.iter().all(|e| e.bytes == 0 && e.last_seen == 7));
+        let pairs: std::collections::BTreeSet<_> =
+            edges.iter().map(|e| ordered_pair(&e.from, &e.to)).collect();
+        assert!(pairs.contains(&("gw".to_string(), "hostA".to_string())));
+        assert!(pairs.contains(&("hostA".to_string(), "hostB".to_string())));
+        assert_eq!(
+            routers,
+            std::collections::BTreeSet::from(["gw".to_string()])
+        );
+    }
+
+    #[test]
+    fn rebuild_edges_flow_precedence_and_router_classification() {
+        use zensight_common::Protocol;
+        let mut state = TopologyState::default();
+        for id in ["hostA", "gw", "hostB"] {
+            let mut node = Node {
+                id: id.to_string(),
+                ..Default::default()
+            };
+            if id == "hostA" {
+                node.protocols.insert(Protocol::Netlink);
+            }
+            state.nodes.insert(id.to_string(), node);
+        }
+        let mut map = HashMap::new();
+        for id in ["hostA", "gw", "hostB"] {
+            map.insert(id.to_string(), id.to_string());
+        }
+
+        // A flow already covers hostA<->hostB with real bandwidth.
+        state.apply_flow_edges(&[flow("hostA:1", "hostB:2", 1000, 10, "tcp")], &map, 1);
+        // Neighbors add the gateway adjacency and re-cover hostA<->hostB.
+        state.apply_neighbor_edges(&[neighbor("gw", true), neighbor("hostB", false)], &map, 2);
+
+        // hostA<->hostB keeps its flow bytes (not overwritten by the 0-byte
+        // neighbor edge); a new hostA<->gw adjacency edge is added.
+        assert_eq!(state.edges.len(), 2);
+        let ab = state
+            .edges
+            .iter()
+            .find(|e| ordered_pair(&e.from, &e.to) == ("hostA".to_string(), "hostB".to_string()))
+            .unwrap();
+        assert_eq!(ab.bytes, 1000);
+        assert!(
+            state
+                .edges
+                .iter()
+                .any(|e| ordered_pair(&e.from, &e.to) == ("gw".to_string(), "hostA".to_string()))
+        );
+        // The is_router gateway is classified Router; plain hosts stay Host.
+        assert_eq!(state.nodes["gw"].node_type, NodeType::Router);
+        assert_eq!(state.nodes["hostA"].node_type, NodeType::Host);
     }
 
     #[test]
