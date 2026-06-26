@@ -27,6 +27,7 @@ use crate::map::{
     AddressRecord, NeighborRecord, NftRuleRecord, RouteRecord, SocketRecord, SocketSelector,
     TcRecord, XfrmSaRecord,
 };
+use crate::route_history::RouteHistory;
 
 const AF_INET: u8 = 2;
 const AF_INET6: u8 = 10;
@@ -35,8 +36,14 @@ const AF_INET6: u8 = 10;
 ///
 /// `key_prefix` is the sensor's telemetry prefix (e.g. `zensight/netlink`); the
 /// queryables live under `<key_prefix>/@/query/<topic>`. `events` is the shared
-/// real-time event ring (#8), served on `@/query/events`.
-pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: EventState) {
+/// real-time event ring (#8), served on `@/query/events`; `route_history` is the
+/// default-route flap ring (#111), served on `@/query/route_changes`.
+pub async fn run(
+    session: Arc<zenoh::Session>,
+    key_prefix: String,
+    events: EventState,
+    route_history: RouteHistory,
+) {
     let route = match Connection::<Route>::new() {
         Ok(c) => c,
         Err(e) => {
@@ -53,6 +60,7 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
     let sockets_key = zensight_common::command::query_key(&key_prefix, "sockets");
     let addresses_key = zensight_common::command::query_key(&key_prefix, "addresses");
     let events_key = zensight_common::command::query_key(&key_prefix, "events");
+    let route_changes_key = zensight_common::command::query_key(&key_prefix, "route_changes");
     let tc_key = zensight_common::command::query_key(&key_prefix, "tc");
     let xfrm_key = zensight_common::command::query_key(&key_prefix, "xfrm");
     let nft_key = zensight_common::command::query_key(&key_prefix, "nft");
@@ -89,6 +97,13 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
         Ok(q) => q,
         Err(e) => {
             tracing::error!(error = %e, key = %events_key, "query: declare events failed");
+            return;
+        }
+    };
+    let route_changes_q = match session.declare_queryable(&route_changes_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %route_changes_key, "query: declare route_changes failed");
             return;
         }
     };
@@ -148,6 +163,10 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
             q = events_q.recv_async() => {
                 let Ok(query) = q else { return };
                 reply_json(&query, &events.recent()).await;
+            }
+            q = route_changes_q.recv_async() => {
+                let Ok(query) = q else { return };
+                reply_json(&query, &route_history.recent()).await;
             }
             q = tc_q.recv_async() => {
                 let Ok(query) = q else { return };

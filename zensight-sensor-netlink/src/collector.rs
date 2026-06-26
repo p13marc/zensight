@@ -24,6 +24,7 @@ use nlink::netlink::{
 
 use crate::events::EventState;
 use crate::map::WgPeerView;
+use crate::route_history::RouteHistory;
 use nlink::sockdiag::{SocketFilter, SocketInfo, SocketState, TcpState};
 use zensight_common::Format;
 use zensight_sensor_core::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
@@ -142,6 +143,9 @@ pub struct Collector {
     /// Real-time RTNETLINK event counters + recent-events ring (issue #8).
     /// Shared with the `@/query/events` channel.
     event_state: EventState,
+    /// Default-route flap history + counter (#111). Shared with the
+    /// `@/query/route_changes` channel; updated each route poll.
+    route_history: RouteHistory,
     /// Nudged whenever a sentinel-relevant event arrives so the sentinel
     /// re-evaluates instantly (~0s) instead of at its next sweep tick (#8).
     sentinel_wake: Arc<Notify>,
@@ -166,6 +170,7 @@ impl Collector {
         let collect = CollectHandle::new(config.collect.clone());
         let health = Arc::new(zensight_sensor_core::SensorHealth::new("netlink"));
         let event_state = EventState::new(config.events.ring_capacity);
+        let route_history = RouteHistory::new(config.events.ring_capacity);
         Self {
             host,
             config,
@@ -174,6 +179,7 @@ impl Collector {
             registry,
             health,
             event_state,
+            route_history,
             sentinel_wake: Arc::new(Notify::new()),
             warned_xfrm: std::sync::atomic::AtomicBool::new(false),
         }
@@ -183,6 +189,12 @@ impl Collector {
     /// for the `@/query/events` channel.
     pub fn event_state(&self) -> EventState {
         self.event_state.clone()
+    }
+
+    /// A clonable handle to the default-route flap history (#111), for the
+    /// `@/query/route_changes` channel.
+    pub fn route_history(&self) -> RouteHistory {
+        self.route_history.clone()
     }
 
     /// A clonable handle to the sentinel-wake signal: the event task nudges this
@@ -464,6 +476,13 @@ impl Collector {
             }
         };
         let summary = aggregate_routes(&routes);
+        // Track default-route flaps (#111): compare this poll's default-v4 to the
+        // last, historize any transition, and stream the flap counter.
+        self.route_history
+            .observe(summary.default_v4_present, summary.default_v4_gw.as_deref());
+        for point in self.route_history.flap_points(&self.host) {
+            self.publish(&point).await;
+        }
         for point in map::route_points(&self.host, &summary) {
             self.publish(&point).await;
         }

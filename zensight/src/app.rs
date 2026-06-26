@@ -1726,6 +1726,9 @@ impl ZenSight {
                 NetlinkDetailTopic::Events => fetch_records(session, key)
                     .await
                     .map(NetlinkDetailData::Events),
+                NetlinkDetailTopic::RouteChanges => fetch_records(session, key)
+                    .await
+                    .map(NetlinkDetailData::RouteChanges),
                 NetlinkDetailTopic::Tc => {
                     fetch_records(session, key).await.map(NetlinkDetailData::Tc)
                 }
@@ -2611,6 +2614,9 @@ fn prefetch_channels(protocol: zensight_common::Protocol) -> Vec<Message> {
             Message::FetchNetlinkDetail(NetlinkDetailTopic::Sockets),
             Message::FetchNetlinkDetail(NetlinkDetailTopic::Routes),
             Message::FetchNetlinkDetail(NetlinkDetailTopic::Neighbors),
+            // Pre-populate the default-route flap history (#111) so it's visible
+            // on open, not behind an extra click.
+            Message::FetchNetlinkDetail(NetlinkDetailTopic::RouteChanges),
         ],
         Protocol::Netring => vec![Message::FetchNetringFlows],
         Protocol::Sysinfo => vec![Message::FetchSysinfoProcesses(ProcessSort::default())],
@@ -2674,12 +2680,17 @@ mod prefetch_tests {
 
     #[test]
     fn prefetch_policy_by_protocol() {
-        // Netlink prefetches its primary host tables (sockets/routes/neighbors).
+        // Netlink prefetches its primary host tables (sockets/routes/neighbors)
+        // plus the default-route flap history (#111).
         let nl = prefetch_channels(Protocol::Netlink);
-        assert_eq!(nl.len(), 3);
+        assert_eq!(nl.len(), 4);
         assert!(matches!(
             nl[0],
             Message::FetchNetlinkDetail(NetlinkDetailTopic::Sockets)
+        ));
+        assert!(matches!(
+            nl[3],
+            Message::FetchNetlinkDetail(NetlinkDetailTopic::RouteChanges)
         ));
 
         // Netring prefetches flows; sysinfo prefetches the process explorer.

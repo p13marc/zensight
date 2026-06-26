@@ -13,6 +13,7 @@ pub mod config;
 pub mod events;
 pub mod map;
 pub mod query;
+pub mod route_history;
 pub mod sentinel;
 
 pub use collector::Collector;
