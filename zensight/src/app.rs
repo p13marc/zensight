@@ -74,6 +74,7 @@ pub enum CurrentView {
     Security,
     Sensors,
     Logs,
+    Inventory,
 }
 
 /// Application theme.
@@ -152,6 +153,8 @@ pub struct ZenSight {
     security: crate::view::security::SecurityState,
     /// Netring detection-tuning panel state (#121), shown in the Security view.
     detection_tuning: crate::view::detection_tuning::DetectionTuningState,
+    /// First-class passive inventory + fingerprint explorer state (#120).
+    inventory: crate::view::inventory::InventoryState,
     /// Local tiered time-series store (hot ring + redb), Plan v3-04 §A / #22.
     /// Telemetry writes through it; charts read from it so trends survive restart.
     store: crate::store::MetricStore,
@@ -274,6 +277,7 @@ impl ZenSight {
             expectations: crate::view::expectations::ExpectationsState::default(),
             security: crate::view::security::SecurityState::default(),
             detection_tuning: crate::view::detection_tuning::DetectionTuningState::default(),
+            inventory: crate::view::inventory::InventoryState::default(),
             // In demo mode keep history in-memory only (no disk churn / restart survival
             // for synthetic data); otherwise open the persistent tiered store.
             store: if demo_mode {
@@ -708,6 +712,21 @@ impl ZenSight {
 
             Message::OpenLogs => {
                 self.set_view(CurrentView::Logs);
+            }
+
+            Message::OpenInventory => {
+                self.set_view(CurrentView::Inventory);
+                self.inventory.loading();
+                return self.query_inventory();
+            }
+            Message::InventoryLoaded(result) => {
+                self.inventory.apply(result);
+            }
+            Message::SetInventoryAssetSort(sort) => {
+                self.inventory.asset_sort = sort;
+            }
+            Message::SetInventoryFpFilter(kind) => {
+                self.inventory.fp_filter = kind;
             }
 
             Message::OpenSettings => {
@@ -1316,6 +1335,17 @@ impl ZenSight {
                     .send_command(key, &command, format!("Allowlisted {entry}"))
                     .chain(self.query_detector_status());
             }
+            Message::AddNetringAllowlistEntry(entry) => {
+                let entry = entry.trim().to_string();
+                if entry.is_empty() {
+                    return Task::none();
+                }
+                let command = serde_json::json!({ "type": "add_allowlist", "entry": entry });
+                let key = zensight_common::command_key("zensight/netring", "detectors");
+                return self
+                    .send_command(key, &command, format!("Allowlisted {entry}"))
+                    .chain(self.query_detector_status());
+            }
             Message::RemoveNetringAllowlist(entry) => {
                 let command = serde_json::json!({ "type": "remove_allowlist", "entry": entry });
                 let key = zensight_common::command_key("zensight/netring", "detectors");
@@ -1852,6 +1882,40 @@ impl ZenSight {
         })
     }
 
+    /// Combined fetch for the first-class inventory view (#120): assets + the
+    /// TLS/QUIC/SSH fingerprint inventories, fetched concurrently from the global
+    /// netring `@/query/*` channels and folded into one [`InventoryData`].
+    fn query_inventory(&self) -> Task<Message> {
+        use crate::view::inventory::InventoryData;
+        use crate::view::specialized::netring_detail::{
+            fetch_assets, fetch_quic, fetch_ssh, fetch_tls,
+        };
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::InventoryLoaded(Err(
+                "Not connected to Zenoh".to_string()
+            )));
+        };
+        Task::future(async move {
+            // Fetch all four inventories concurrently; an empty/absent channel
+            // just yields an empty table rather than failing the whole view.
+            let (assets, tls, quic, ssh) = tokio::join!(
+                fetch_assets(session.clone()),
+                fetch_tls(session.clone()),
+                fetch_quic(session.clone()),
+                fetch_ssh(session.clone()),
+            );
+            if assets.is_none() && tls.is_none() && quic.is_none() && ssh.is_none() {
+                return Message::InventoryLoaded(Err("No netring sensor responded".to_string()));
+            }
+            Message::InventoryLoaded(Ok(InventoryData {
+                assets: assets.unwrap_or_default(),
+                tls: tls.unwrap_or_default(),
+                quic: quic.unwrap_or_default(),
+                ssh: ssh.unwrap_or_default(),
+            }))
+        })
+    }
+
     /// Fetch the on-demand netring top-talker histogram (#45).
     fn query_netring_talkers(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_talkers;
@@ -2010,7 +2074,8 @@ impl ZenSight {
             CurrentView::Expectations
             | CurrentView::Security
             | CurrentView::Sensors
-            | CurrentView::Logs => {
+            | CurrentView::Logs
+            | CurrentView::Inventory => {
                 self.set_view(CurrentView::Dashboard);
             }
             CurrentView::Dashboard => {
@@ -2081,6 +2146,7 @@ impl ZenSight {
                 let logs: Vec<_> = self.recent_logs.iter().cloned().collect();
                 crate::view::specialized::logs_view(&logs, &self.syslog_filter)
             }
+            CurrentView::Inventory => crate::view::inventory::inventory_view(&self.inventory),
             CurrentView::Device => {
                 if let Some(ref device_state) = self.selected_device {
                     // For a syslog device, hand the view this host's recent log
