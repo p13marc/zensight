@@ -91,15 +91,21 @@ fn detect_alert(
     .with_label("event", event.name)
     .with_label("message_id", id);
 
-    if let Some(unit) = msg
-        .structured_data
-        .get("journald")
-        .and_then(|m| m.get("unit"))
-    {
+    let journald = msg.structured_data.get("journald");
+    if let Some(unit) = journald.and_then(|m| m.get("unit")) {
         alert = alert.with_label("unit", unit.clone());
     }
     if let Some(app) = &msg.app_name {
         alert = alert.with_label("app", app.clone());
+    }
+    // Coredump structured fields (#107, C7): surface exe/signal/pid as labels so
+    // the alert says *what* crashed and *how*, not just a truncated message.
+    if event.name == "coredump" {
+        for field in ["coredump_exe", "coredump_signal", "coredump_pid"] {
+            if let Some(v) = journald.and_then(|m| m.get(field)) {
+                alert = alert.with_label(field, v.clone());
+            }
+        }
     }
     Some(alert)
 }
@@ -251,6 +257,44 @@ mod tests {
             Some("nginx.service")
         );
         assert!(a.summary.starts_with("coredump:"));
+    }
+
+    #[test]
+    fn detect_alert_coredump_surfaces_exe_signal_pid() {
+        // #107 C7: the coredump alert carries exe/signal/pid labels.
+        let mut jd = HashMap::new();
+        jd.insert("unit".to_string(), "nginx.service".to_string());
+        jd.insert("coredump_exe".to_string(), "/usr/sbin/nginx".to_string());
+        jd.insert("coredump_signal".to_string(), "11".to_string());
+        jd.insert("coredump_pid".to_string(), "4242".to_string());
+        let mut structured_data = HashMap::new();
+        structured_data.insert("journald".to_string(), jd);
+        let m = SyslogMessage {
+            facility: Facility::Daemon,
+            severity: Severity::Critical,
+            timestamp: None,
+            hostname: Some("host1".into()),
+            app_name: Some("systemd-coredump".into()),
+            proc_id: None,
+            msg_id: Some("fc2e22bc6ee647b6b90729ab34a250b1".into()),
+            structured_data,
+            message: "Process 4242 (nginx) dumped core".into(),
+            raw: String::new(),
+            version: SyslogVersion::Rfc5424,
+        };
+        let a = detect_alert(&m, "host1", &HashMap::new()).unwrap();
+        assert_eq!(
+            a.labels.get("coredump_exe").map(String::as_str),
+            Some("/usr/sbin/nginx")
+        );
+        assert_eq!(
+            a.labels.get("coredump_signal").map(String::as_str),
+            Some("11")
+        );
+        assert_eq!(
+            a.labels.get("coredump_pid").map(String::as_str),
+            Some("4242")
+        );
     }
 
     #[test]

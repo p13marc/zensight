@@ -67,13 +67,22 @@ Both feed the same model and keyspace.
   counters (`logs/by_unit/<unit>/...`, capped to `top_units` + an `other`
   bucket), a `logs/units_in_failure` gauge, and journald throughput
   (`logs/journald/{read,published,dropped,sampled_out}_total`).
+- **Multiline joining** (`multiline`, default on, #107): on the TCP/Unix stream
+  paths, continuation lines (indented stack frames, `Caused by:`, `...`,
+  `Traceback …`) are folded back into the preceding record so a Java/Python/Go
+  traceback stays one event (one uid) instead of one record per line. Bounded by
+  `max_lines`/`max_bytes`; the last line of a burst is emitted after
+  `flush_timeout_ms` (default 200ms). journald is unaffected (one record/entry).
 - **Sources:**
   - Network: UDP/TCP/Unix listeners (RFC 3164 + RFC 5424).
   - **journald** (`journald.enabled`): reads the local journal via libsystemd
     (no `journalctl` subprocess). Supports scope (system/user), server-side
     matching (`units`, `min_priority`, `transports`), cursor-based no-loss
     resume (`start_from`), and **known-event alerts** — coredump / unit-failed /
-    OOM are matched by `MESSAGE_ID` and raised on `@/alerts`.
+    OOM are matched by `MESSAGE_ID` and raised on `@/alerts`. Coredump entries
+    capture `COREDUMP_*` (exe/signal/pid) onto the record + alert; audit /
+    SELinux records (`_AUDIT_TYPE_NAME`, `_SELINUX_CONTEXT`) are tagged
+    `category=security` for the Security view (#107).
 - **Control:** `@/commands/filter` + `@/status/filter` — add/remove/clear
   dynamic message filters at runtime.
 - **Configs:** `configs/syslog.json5` (network listeners; journald block

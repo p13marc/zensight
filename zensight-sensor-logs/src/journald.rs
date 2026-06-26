@@ -493,6 +493,27 @@ const DEV_FIELDS: &[(&str, &str)] = &[
     ("ERRNO", "errno"),
 ];
 
+/// systemd-coredump structured fields (#107, C7). Present only on coredump
+/// entries; captured unconditionally (cheap — absent everywhere else) so the
+/// drill-down and the coredump alert get exe/signal/pid instead of a truncated
+/// message excerpt.
+const COREDUMP_FIELDS: &[(&str, &str)] = &[
+    ("COREDUMP_EXE", "coredump_exe"),
+    ("COREDUMP_COMM", "coredump_comm"),
+    ("COREDUMP_PID", "coredump_pid"),
+    ("COREDUMP_SIGNAL", "coredump_signal"),
+    ("COREDUMP_UNIT", "coredump_unit"),
+];
+
+/// Audit / SELinux fields (#107, C7). When any is present the record is tagged
+/// `category=security` so the Security view can lens kernel audit + AVC denials.
+const SECURITY_FIELDS: &[(&str, &str)] = &[
+    ("_AUDIT_TYPE_NAME", "audit_type"),
+    ("_AUDIT_TYPE", "audit_type_code"),
+    ("_AUDIT_SESSION", "audit_session"),
+    ("_SELINUX_CONTEXT", "selinux_context"),
+];
+
 /// Map a journald entry to a [`SyslogMessage`].
 ///
 /// Pure (no journal handle) so it is unit-testable from synthetic records.
@@ -557,6 +578,24 @@ pub fn map_record(
                 fields.insert((*label).to_string(), v.clone());
             }
         }
+    }
+    // Coredump structured fields (#107, C7) — exe/signal/pid for the drill-down
+    // and the coredump alert. Only present on coredump entries.
+    for (key, label) in COREDUMP_FIELDS {
+        if let Some(v) = record.get(*key) {
+            fields.insert((*label).to_string(), v.clone());
+        }
+    }
+    // Audit / SELinux fields (#107, C7). Their presence security-tags the record.
+    let mut security = false;
+    for (key, label) in SECURITY_FIELDS {
+        if let Some(v) = record.get(*key) {
+            fields.insert((*label).to_string(), v.clone());
+            security = true;
+        }
+    }
+    if security {
+        fields.insert("category".to_string(), "security".to_string());
     }
     for key in &cfg.extra_fields {
         if let Some(v) = record.get(key) {
@@ -786,6 +825,55 @@ mod tests {
             jd.get("_SELINUX_CONTEXT").map(String::as_str),
             Some("system_u")
         );
+    }
+
+    #[test]
+    fn coredump_fields_captured_unconditionally() {
+        // #107 C7: coredump exe/signal/pid land under journald without needing
+        // include_dev_fields or an allowlist entry.
+        let r = rec(&[
+            ("MESSAGE", "Process 4242 (nginx) dumped core"),
+            ("MESSAGE_ID", "fc2e22bc6ee647b6b90729ab34a250b1"),
+            ("COREDUMP_EXE", "/usr/sbin/nginx"),
+            ("COREDUMP_SIGNAL", "11"),
+            ("COREDUMP_PID", "4242"),
+        ]);
+        let m = map_record(&r, &JournaldConfig::default(), None);
+        let jd = m.structured_data.get("journald").unwrap();
+        assert_eq!(
+            jd.get("coredump_exe").map(String::as_str),
+            Some("/usr/sbin/nginx")
+        );
+        assert_eq!(jd.get("coredump_signal").map(String::as_str), Some("11"));
+        assert_eq!(jd.get("coredump_pid").map(String::as_str), Some("4242"));
+        // A pure crash is not security-tagged.
+        assert!(jd.get("category").is_none());
+    }
+
+    #[test]
+    fn audit_record_is_security_tagged() {
+        // #107 C7: an SELinux AVC denial / audit record tags category=security.
+        let r = rec(&[
+            ("MESSAGE", "avc:  denied  { read } for pid=1"),
+            ("_AUDIT_TYPE_NAME", "AVC"),
+            ("_SELINUX_CONTEXT", "system_u:system_r:httpd_t:s0"),
+        ]);
+        let m = map_record(&r, &JournaldConfig::default(), None);
+        let jd = m.structured_data.get("journald").unwrap();
+        assert_eq!(jd.get("audit_type").map(String::as_str), Some("AVC"));
+        assert_eq!(
+            jd.get("selinux_context").map(String::as_str),
+            Some("system_u:system_r:httpd_t:s0")
+        );
+        assert_eq!(jd.get("category").map(String::as_str), Some("security"));
+    }
+
+    #[test]
+    fn ordinary_record_not_security_tagged() {
+        let r = rec(&[("MESSAGE", "hello"), ("_SYSTEMD_UNIT", "cron.service")]);
+        let m = map_record(&r, &JournaldConfig::default(), None);
+        let jd = m.structured_data.get("journald").unwrap();
+        assert!(jd.get("category").is_none());
     }
 
     #[test]
