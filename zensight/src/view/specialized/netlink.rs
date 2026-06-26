@@ -380,6 +380,8 @@ fn render_routes(state: &DeviceDetailState) -> Element<'_, Message> {
         line("IPv6 routes", "routes/ipv6_count"),
         line("default route (v4)", "routes/default_v4_present"),
         line("default gateway (v4)", "routes/default_v4_gw"),
+        // Default-route flap counter (#111) — the #1 connectivity incident.
+        line("default route flaps (v4)", "routes/default_v4_flaps_total"),
     ]
     .spacing(4)
     .into()
@@ -415,6 +417,10 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
     // inventory) — previously served but unreachable from the UI (#109).
     let buttons2 = row![
         fetch(NetlinkDetailTopic::Events, d.events.is_loading()),
+        fetch(
+            NetlinkDetailTopic::RouteChanges,
+            d.route_changes.is_loading()
+        ),
         fetch(NetlinkDetailTopic::Tc, d.tc.is_loading()),
         fetch(NetlinkDetailTopic::Xfrm, d.xfrm.is_loading()),
         fetch(NetlinkDetailTopic::Nft, d.nft.is_loading()),
@@ -593,6 +599,52 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
         col = col
             .push(text(format!("Control-plane timeline ({})", events.len())).size(font::EMPHASIS))
             .push(list);
+    }
+
+    // Default-route flap history (#111): per-transition gateway/withdrawal ring,
+    // most-recent-first — the history behind the `default_v4_flaps_total` counter.
+    if let Some(err) = d.route_changes.error() {
+        col = col.push(empty_state(
+            format!("Route flaps fetch failed: {err}"),
+            None,
+        ));
+    } else if let Some(changes) = d.route_changes.ready() {
+        if changes.is_empty() {
+            col = col.push(
+                text("Default-route flaps: none observed")
+                    .size(font::CAPTION)
+                    .style(dim),
+            );
+        } else {
+            let mut chs: Vec<&_> = changes.iter().collect();
+            chs.sort_by_key(|c| std::cmp::Reverse(c.ts_unix));
+            let mut list = Column::new().spacing(3).push(
+                row![
+                    cell("when", 90),
+                    cell("family", 60),
+                    cell("action", 90),
+                    cell("gateway", 150),
+                    cell("was", 150),
+                ]
+                .spacing(8),
+            );
+            for c in chs.iter().take(200) {
+                let when = crate::view::formatting::format_timestamp(c.ts_unix as i64 * 1000);
+                list = list.push(
+                    row![
+                        cell(&when, 90),
+                        cell(&c.family, 60),
+                        cell(&c.action, 90),
+                        cell(c.gateway.as_deref().unwrap_or("-"), 150),
+                        cell(c.prev_gateway.as_deref().unwrap_or("-"), 150),
+                    ]
+                    .spacing(8),
+                );
+            }
+            col = col
+                .push(text(format!("Default-route flaps ({})", changes.len())).size(font::EMPHASIS))
+                .push(list);
+        }
     }
 
     // TC qdisc/class tree (#109)

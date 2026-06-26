@@ -50,6 +50,7 @@ async fn main() -> Result<()> {
     // (instant re-eval on a relevant RTNETLINK event), grabbed before run() moves
     // the collector (#8).
     let event_state = collector.event_state();
+    let route_history = collector.route_history();
     let sentinel_wake = collector.sentinel_wake();
     runner.spawn(async move {
         collector.run().await;
@@ -62,8 +63,15 @@ async fn main() -> Result<()> {
         let query_session = runner.session().clone();
         let query_prefix = netlink_config.key_prefix.clone();
         let query_events = event_state.clone();
+        let query_routes = route_history.clone();
         runner.spawn(async move {
-            zensight_sensor_netlink::query::run(query_session, query_prefix, query_events).await;
+            zensight_sensor_netlink::query::run(
+                query_session,
+                query_prefix,
+                query_events,
+                query_routes,
+            )
+            .await;
         });
     }
 

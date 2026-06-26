@@ -39,6 +39,18 @@ pub struct EventRecord {
     pub detail: String,
 }
 
+/// One default-route transition (`@/query/route_changes`, #111). Mirrors the
+/// sensor's `RouteChangeRecord` JSON shape.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RouteChangeRecord {
+    pub ts_unix: u64,
+    pub family: String,
+    /// `"added"` / `"changed"` / `"withdrawn"`.
+    pub action: String,
+    pub gateway: Option<String>,
+    pub prev_gateway: Option<String>,
+}
+
 /// One TC qdisc/class entry (`@/query/tc`). `node` is `qdisc` or `class`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct TcRecord {
@@ -87,6 +99,7 @@ pub enum NetlinkDetailTopic {
     Neighbors,
     Addresses,
     Events,
+    RouteChanges,
     Tc,
     Xfrm,
     Nft,
@@ -101,6 +114,7 @@ impl NetlinkDetailTopic {
             NetlinkDetailTopic::Neighbors => "neighbors",
             NetlinkDetailTopic::Addresses => "addresses",
             NetlinkDetailTopic::Events => "events",
+            NetlinkDetailTopic::RouteChanges => "route_changes",
             NetlinkDetailTopic::Tc => "tc",
             NetlinkDetailTopic::Xfrm => "xfrm",
             NetlinkDetailTopic::Nft => "nft",
@@ -115,6 +129,7 @@ impl NetlinkDetailTopic {
             NetlinkDetailTopic::Neighbors => "Neighbors",
             NetlinkDetailTopic::Addresses => "Addresses",
             NetlinkDetailTopic::Events => "Events",
+            NetlinkDetailTopic::RouteChanges => "Route flaps",
             NetlinkDetailTopic::Tc => "TC",
             NetlinkDetailTopic::Xfrm => "XFRM",
             NetlinkDetailTopic::Nft => "NFT",
@@ -130,6 +145,7 @@ pub enum NetlinkDetailData {
     Neighbors(Vec<NeighborRecord>),
     Addresses(Vec<AddressRecord>),
     Events(Vec<EventRecord>),
+    RouteChanges(Vec<RouteChangeRecord>),
     Tc(Vec<TcRecord>),
     Xfrm(Vec<XfrmSaRecord>),
     Nft(Vec<NftRuleRecord>),
@@ -156,6 +172,7 @@ pub struct NetlinkDetailState {
     pub neighbors: Fetch<Vec<NeighborRecord>>,
     pub addresses: Fetch<Vec<AddressRecord>>,
     pub events: Fetch<Vec<EventRecord>>,
+    pub route_changes: Fetch<Vec<RouteChangeRecord>>,
     pub tc: Fetch<Vec<TcRecord>>,
     pub xfrm: Fetch<Vec<XfrmSaRecord>>,
     pub nft: Fetch<Vec<NftRuleRecord>>,
@@ -208,6 +225,7 @@ impl NetlinkDetailState {
             NetlinkDetailTopic::Neighbors => self.neighbors = Fetch::Loading,
             NetlinkDetailTopic::Addresses => self.addresses = Fetch::Loading,
             NetlinkDetailTopic::Events => self.events = Fetch::Loading,
+            NetlinkDetailTopic::RouteChanges => self.route_changes = Fetch::Loading,
             NetlinkDetailTopic::Tc => self.tc = Fetch::Loading,
             NetlinkDetailTopic::Xfrm => self.xfrm = Fetch::Loading,
             NetlinkDetailTopic::Nft => self.nft = Fetch::Loading,
@@ -222,6 +240,7 @@ impl NetlinkDetailState {
             Ok(NetlinkDetailData::Neighbors(v)) => self.neighbors = Fetch::Ready(v),
             Ok(NetlinkDetailData::Addresses(v)) => self.addresses = Fetch::Ready(v),
             Ok(NetlinkDetailData::Events(v)) => self.events = Fetch::Ready(v),
+            Ok(NetlinkDetailData::RouteChanges(v)) => self.route_changes = Fetch::Ready(v),
             Ok(NetlinkDetailData::Tc(v)) => self.tc = Fetch::Ready(v),
             Ok(NetlinkDetailData::Xfrm(v)) => self.xfrm = Fetch::Ready(v),
             Ok(NetlinkDetailData::Nft(v)) => self.nft = Fetch::Ready(v),
@@ -231,6 +250,7 @@ impl NetlinkDetailState {
                 NetlinkDetailTopic::Neighbors => self.neighbors = Fetch::Error(e),
                 NetlinkDetailTopic::Addresses => self.addresses = Fetch::Error(e),
                 NetlinkDetailTopic::Events => self.events = Fetch::Error(e),
+                NetlinkDetailTopic::RouteChanges => self.route_changes = Fetch::Error(e),
                 NetlinkDetailTopic::Tc => self.tc = Fetch::Error(e),
                 NetlinkDetailTopic::Xfrm => self.xfrm = Fetch::Error(e),
                 NetlinkDetailTopic::Nft => self.nft = Fetch::Error(e),
@@ -277,6 +297,11 @@ mod tests {
         assert_eq!(
             NetlinkDetailTopic::Events.key(),
             "zensight/netlink/@/query/events"
+        );
+        // Default-route flap history (#111).
+        assert_eq!(
+            NetlinkDetailTopic::RouteChanges.key(),
+            "zensight/netlink/@/query/route_changes"
         );
         assert_eq!(NetlinkDetailTopic::Tc.key(), "zensight/netlink/@/query/tc");
         assert_eq!(

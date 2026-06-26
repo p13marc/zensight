@@ -144,7 +144,10 @@ expectations and alerts on deviation.
   routes, neighbors, sockets, plus ethtool/TC/xfrm depth metrics (gated by the
   `collect` config).
 - **On-demand detail** (`@/query/<topic>`): `routes`, `neighbors`,
-  `sockets?state=&port=`, `addresses`, `events`, `tc`, `xfrm`, `nft`.
+  `sockets?state=&port=`, `addresses`, `events`, `route_changes`, `tc`, `xfrm`, `nft`.
+- **Default-route flaps:** a streamed `routes/default_v4_flaps_total` counter plus
+  a per-transition history ring served on `@/query/route_changes` (gateway change /
+  withdrawal / re-appearance with timestamps) — the #1 connectivity incident.
 - **Alerts:** `@/alerts/<alert_key>` from sentinel expectation violations
   (sockets listen/established/forbid, links up, …).
 - **Control:** `@/commands/expectations` (+ `@/status/expectations`) to
