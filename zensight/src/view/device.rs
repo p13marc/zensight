@@ -443,12 +443,14 @@ impl DeviceDetailState {
         self.metrics.len()
     }
 
-    /// Check if a metric is numeric (can be charted).
+    /// Check if a metric is chartable. Counters/gauges chart directly; booleans
+    /// chart as a 0/1 step series (#126) so flap-prone signals (`iface/*/up`,
+    /// `carrier`) get a trend, not just a snapshot. Text/binary are not chartable.
     pub fn is_metric_chartable(&self, metric_name: &str) -> bool {
         if let Some(point) = self.metrics.get(metric_name) {
             matches!(
                 point.value,
-                TelemetryValue::Counter(_) | TelemetryValue::Gauge(_)
+                TelemetryValue::Counter(_) | TelemetryValue::Gauge(_) | TelemetryValue::Boolean(_)
             )
         } else {
             false
@@ -1206,6 +1208,32 @@ mod tests {
             value: TelemetryValue::Gauge(42.0),
             labels: std::collections::HashMap::new(),
         }
+    }
+
+    /// #126: counters, gauges and booleans are chartable (booleans as a 0/1 step
+    /// series); text/binary and unknown metrics are not.
+    #[test]
+    fn booleans_and_numbers_are_chartable() {
+        let device_id = DeviceId {
+            protocol: Protocol::Netlink,
+            source: "h".to_string(),
+        };
+        let mut state = DeviceDetailState::new(device_id);
+        let mk = |metric: &str, value: TelemetryValue| {
+            let mut p = make_test_point(metric);
+            p.value = value;
+            p
+        };
+        state.update(mk("iface/eth0/up", TelemetryValue::Boolean(true)));
+        state.update(mk("cpu/usage", TelemetryValue::Gauge(1.0)));
+        state.update(mk("rx/bytes", TelemetryValue::Counter(10)));
+        state.update(mk("daemon/info", TelemetryValue::Text("hi".into())));
+
+        assert!(state.is_metric_chartable("iface/eth0/up"));
+        assert!(state.is_metric_chartable("cpu/usage"));
+        assert!(state.is_metric_chartable("rx/bytes"));
+        assert!(!state.is_metric_chartable("daemon/info"));
+        assert!(!state.is_metric_chartable("unknown"));
     }
 
     #[test]

@@ -12,7 +12,7 @@ use iced_anim::widget::button;
 use zensight_common::{TelemetryPoint, TelemetryValue};
 
 use crate::message::Message;
-use crate::view::components::card;
+use crate::view::components::{Sparkline, card};
 use crate::view::device::DeviceDetailState;
 use crate::view::formatting::format_timestamp;
 use crate::view::icons::{self, IconSize};
@@ -820,6 +820,40 @@ fn render_filter_panel<'a>(
 }
 
 /// Render severity distribution summary.
+/// Number of buckets in the log-rate trend sparkline.
+const RATE_BUCKETS: usize = 30;
+/// Trend window for the log-rate sparkline (10 minutes).
+const RATE_WINDOW_MS: i64 = 10 * 60 * 1000;
+
+/// Derive a message-rate trend (#126): bucket `messages` by timestamp into
+/// `buckets` equal slices over the most-recent `window_ms` window (ending at the
+/// latest message), returning oldest-first per-bucket counts ready for a
+/// [`Sparkline`]. Gives logs a trend without entering the store — derived live
+/// from the in-memory buffer. Empty when there are no messages or `buckets == 0`.
+fn log_rate_series(messages: &[SyslogMessage], buckets: usize, window_ms: i64) -> Vec<f64> {
+    if buckets == 0 || window_ms <= 0 {
+        return Vec::new();
+    }
+    let Some(latest) = messages.iter().map(|m| m.timestamp).max() else {
+        return Vec::new();
+    };
+    let start = latest - window_ms;
+    let span = window_ms as f64 / buckets as f64;
+    let mut series = vec![0.0_f64; buckets];
+    for msg in messages {
+        if msg.timestamp <= start || msg.timestamp > latest {
+            continue;
+        }
+        // Offset within (start, latest]; clamp the last bucket so latest lands in
+        // bucket `buckets - 1` rather than overflowing.
+        let idx = (((msg.timestamp - start) as f64 / span).ceil() as usize)
+            .saturating_sub(1)
+            .min(buckets - 1);
+        series[idx] += 1.0;
+    }
+    series
+}
+
 fn render_severity_summary<'a>(
     messages: &[SyslogMessage],
     filter_state: &'a SyslogFilterState,
@@ -876,6 +910,24 @@ fn render_severity_summary<'a>(
             })
     };
     severity_items.push(count_label.into());
+
+    // Message-rate trend (#126): a sparkline of volume over the recent window,
+    // derived live from the filtered buffer so logs get a trend, not just counts.
+    let rate = log_rate_series(&filtered_messages, RATE_BUCKETS, RATE_WINDOW_MS);
+    let nonzero = rate.iter().filter(|&&v| v > 0.0).count();
+    if nonzero >= 2 {
+        let per_min: f64 = rate.iter().sum::<f64>() / (RATE_WINDOW_MS as f64 / 60_000.0);
+        let trend = row![
+            text("rate (10m)").size(12).style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            }),
+            Sparkline::new(rate).with_size(120.0, 20.0).view(),
+            text(format!("{per_min:.0}/min")).size(12),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        severity_items.push(trend.into());
+    }
 
     container(Row::with_children(severity_items).spacing(20))
         .padding(10)
@@ -1294,6 +1346,61 @@ mod tests {
     use super::*;
     use crate::message::DeviceId;
     use zensight_common::Protocol;
+
+    /// Build a bare [`SyslogMessage`] at `ts` (ms) for rate-series tests.
+    fn msg_at(ts: i64) -> SyslogMessage {
+        SyslogMessage {
+            timestamp: ts,
+            severity: SyslogSeverity::Informational,
+            facility: "daemon".into(),
+            hostname: "host01".into(),
+            app_name: "app".into(),
+            message: "m".into(),
+            source_kind: LogSource::Network,
+            unit: None,
+            pid: None,
+            msg_id: None,
+            boot_id: None,
+            structured: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// #126: empty input and degenerate params yield an empty series.
+    #[test]
+    fn log_rate_series_empty() {
+        assert!(log_rate_series(&[], 30, RATE_WINDOW_MS).is_empty());
+        assert!(log_rate_series(&[msg_at(1000)], 0, RATE_WINDOW_MS).is_empty());
+        assert!(log_rate_series(&[msg_at(1000)], 30, 0).is_empty());
+    }
+
+    /// #126: every message counted once, total preserved, latest lands in the
+    /// final bucket (window ends at the latest timestamp, inclusive).
+    #[test]
+    fn log_rate_series_buckets_and_total() {
+        // 4 messages on the bucket boundaries of a 4-bucket / 4000ms window
+        // ending at ts=4000 (buckets are (0,1000], (1000,2000], …, (3000,4000]).
+        let msgs = vec![msg_at(1000), msg_at(2000), msg_at(3000), msg_at(4000)];
+        let series = log_rate_series(&msgs, 4, 4000);
+        assert_eq!(series.len(), 4);
+        assert_eq!(series.iter().sum::<f64>(), 4.0);
+        // latest (ts=4000) is in the last bucket.
+        assert_eq!(series[3], 1.0);
+        // one message per slice → all buckets equal.
+        assert_eq!(series, vec![1.0, 1.0, 1.0, 1.0]);
+    }
+
+    /// #126: messages clustered near the latest land in the final bucket; older
+    /// messages outside the window (ts <= latest - window) are dropped.
+    #[test]
+    fn log_rate_series_clusters_and_trims() {
+        // window = 10_000ms ending at latest=10_000 → start=0; ts=-50 is dropped,
+        // the two recent points both fall in the final (10th) bucket.
+        let series = log_rate_series(&[msg_at(-50), msg_at(9_900), msg_at(10_000)], 10, 10_000);
+        assert_eq!(series.len(), 10);
+        assert_eq!(series.iter().sum::<f64>(), 2.0);
+        assert_eq!(series[9], 2.0);
+        assert_eq!(series[0], 0.0);
+    }
 
     #[test]
     fn test_severity_ordering() {
