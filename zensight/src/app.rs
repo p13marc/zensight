@@ -1746,20 +1746,36 @@ impl ZenSight {
     }
 
     /// Fetch the on-demand netring flow detail from the sensor's query channel.
-    fn query_netring_flows(&self) -> Task<Message> {
-        use crate::view::specialized::netring_detail::fetch_flows;
+    /// Generic on-demand sensor query (#127): fetch a `Vec<T>` from a channel and
+    /// wrap the outcome in a message. Collapses the ~near-identical
+    /// `query_netring_*` wrappers into one-liners. When disconnected the
+    /// "Not connected" error is routed into the *same* channel (so the panel shows
+    /// it, no toast); a non-responding sensor yields the channel's error state.
+    /// `prefetch_on_open` already no-ops while disconnected, so this branch only
+    /// fires on an explicit fetch.
+    fn query_channel<T, Fut>(
+        &self,
+        fetch: impl FnOnce(std::sync::Arc<zenoh::Session>) -> Fut + Send + 'static,
+        into_message: impl FnOnce(Result<Vec<T>, String>) -> Message + Send + 'static,
+    ) -> Task<Message>
+    where
+        Fut: std::future::Future<Output = Option<Vec<T>>> + Send + 'static,
+        T: Send + 'static,
+    {
         let Some(session) = self.session.clone() else {
-            return Task::done(Message::CommandFeedback {
-                success: false,
-                message: "Not connected to Zenoh".to_string(),
-            });
+            return Task::done(into_message(Err("Not connected to Zenoh".to_string())));
         };
         Task::future(async move {
-            let result = fetch_flows(session)
+            let result = fetch(session)
                 .await
                 .ok_or_else(|| "No netring sensor responded".to_string());
-            Message::NetringFlowsReceived(result)
+            into_message(result)
         })
+    }
+
+    fn query_netring_flows(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_flows;
+        self.query_channel(fetch_flows, Message::NetringFlowsReceived)
     }
 
     /// Fetch netring flows for deriving real topology edges (#25). Routes to
@@ -1820,69 +1836,25 @@ impl ZenSight {
     /// Fetch the on-demand netring TLS asset inventory.
     fn query_netring_tls(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_tls;
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::CommandFeedback {
-                success: false,
-                message: "Not connected to Zenoh".to_string(),
-            });
-        };
-        Task::future(async move {
-            let result = fetch_tls(session)
-                .await
-                .ok_or_else(|| "No netring sensor responded".to_string());
-            Message::NetringTlsReceived(result)
-        })
+        self.query_channel(fetch_tls, Message::NetringTlsReceived)
     }
 
     /// Fetch the on-demand netring QUIC SNI/ALPN inventory (#72).
     fn query_netring_quic(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_quic;
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::CommandFeedback {
-                success: false,
-                message: "Not connected to Zenoh".to_string(),
-            });
-        };
-        Task::future(async move {
-            let result = fetch_quic(session)
-                .await
-                .ok_or_else(|| "No netring sensor responded".to_string());
-            Message::NetringQuicReceived(result)
-        })
+        self.query_channel(fetch_quic, Message::NetringQuicReceived)
     }
 
     /// Fetch the on-demand netring SSH/HASSH inventory (#72).
     fn query_netring_ssh(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_ssh;
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::CommandFeedback {
-                success: false,
-                message: "Not connected to Zenoh".to_string(),
-            });
-        };
-        Task::future(async move {
-            let result = fetch_ssh(session)
-                .await
-                .ok_or_else(|| "No netring sensor responded".to_string());
-            Message::NetringSshReceived(result)
-        })
+        self.query_channel(fetch_ssh, Message::NetringSshReceived)
     }
 
     /// Fetch the on-demand netring passive asset inventory (#70).
     fn query_netring_assets(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_assets;
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::CommandFeedback {
-                success: false,
-                message: "Not connected to Zenoh".to_string(),
-            });
-        };
-        Task::future(async move {
-            let result = fetch_assets(session)
-                .await
-                .ok_or_else(|| "No netring sensor responded".to_string());
-            Message::NetringAssetsReceived(result)
-        })
+        self.query_channel(fetch_assets, Message::NetringAssetsReceived)
     }
 
     /// Combined fetch for the first-class inventory view (#120): assets + the
@@ -1922,65 +1894,25 @@ impl ZenSight {
     /// Fetch the on-demand netring top-talker histogram (#45).
     fn query_netring_talkers(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_talkers;
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::NetringTalkersReceived(Err(
-                "Not connected to Zenoh".to_string(),
-            )));
-        };
-        Task::future(async move {
-            let result = fetch_talkers(session)
-                .await
-                .ok_or_else(|| "No netring sensor responded".to_string());
-            Message::NetringTalkersReceived(result)
-        })
+        self.query_channel(fetch_talkers, Message::NetringTalkersReceived)
     }
 
     /// Fetch the on-demand netring elephant-flow ring (#45).
     fn query_netring_elephants(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_elephants;
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::NetringElephantsReceived(Err(
-                "Not connected to Zenoh".to_string(),
-            )));
-        };
-        Task::future(async move {
-            let result = fetch_elephants(session)
-                .await
-                .ok_or_else(|| "No netring sensor responded".to_string());
-            Message::NetringElephantsReceived(result)
-        })
+        self.query_channel(fetch_elephants, Message::NetringElephantsReceived)
     }
 
     /// Fetch the on-demand netring per-SLD DNS detail (#45).
     fn query_netring_dns(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_dns;
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::NetringDnsReceived(Err(
-                "Not connected to Zenoh".to_string()
-            )));
-        };
-        Task::future(async move {
-            let result = fetch_dns(session)
-                .await
-                .ok_or_else(|| "No netring sensor responded".to_string());
-            Message::NetringDnsReceived(result)
-        })
+        self.query_channel(fetch_dns, Message::NetringDnsReceived)
     }
 
     /// Fetch the on-demand netring per-host HTTP detail (#45).
     fn query_netring_http(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_http;
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::NetringHttpReceived(Err(
-                "Not connected to Zenoh".to_string()
-            )));
-        };
-        Task::future(async move {
-            let result = fetch_http(session)
-                .await
-                .ok_or_else(|| "No netring sensor responded".to_string());
-            Message::NetringHttpReceived(result)
-        })
+        self.query_channel(fetch_http, Message::NetringHttpReceived)
     }
 
     /// Pivot from a Security anomaly to its netring flows (#119): fetch the
