@@ -91,6 +91,8 @@ pub fn detector_names() -> &'static [(&'static str, bool)] {
         ("nod", false),
         ("connection_flood", true),
         ("dga", true),
+        ("lateral_movement", false),
+        ("data_exfil", true),
     ]
 }
 
@@ -106,6 +108,8 @@ pub fn apply_to(cfg: &mut AnomalyConfig, cmd: DetectorCommand) {
             "nod" => cfg.nod = enabled,
             "connection_flood" => cfg.connection_flood = enabled,
             "dga" => cfg.dga = enabled,
+            "lateral_movement" => cfg.lateral_movement = enabled,
+            "data_exfil" => cfg.data_exfil = enabled,
             other => tracing::warn!(detector = %other, "netring: unknown detector in SetEnabled"),
         },
         DetectorCommand::SetThreshold { detector, value } => match detector.as_str() {
@@ -113,6 +117,8 @@ pub fn apply_to(cfg: &mut AnomalyConfig, cmd: DetectorCommand) {
             "rita_beacon" => cfg.rita_beacon_threshold = value,
             "connection_flood" => cfg.flood_threshold = value.max(0.0) as u64,
             "dga" => cfg.dga_threshold = value,
+            // The exfil "threshold" is its sigma multiplier.
+            "data_exfil" => cfg.exfil_sigma = value,
             other => {
                 tracing::warn!(detector = %other, "netring: SetThreshold for detector without a threshold")
             }

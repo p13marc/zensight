@@ -10,6 +10,8 @@
 
 pub mod command;
 pub mod config;
+pub mod exfil;
+pub mod lateral;
 pub mod map;
 pub mod monitor;
 pub mod publish;

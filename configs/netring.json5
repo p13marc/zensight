@@ -37,6 +37,19 @@
     // Pillar A — network anomaly detectors.
     anomalies: {
       port_scan: true,   // TRW port-scan detection -> alerts
+
+      // Lateral movement (#123, ATT&CK T1021/T1558): SMB admin-share / IPC$
+      // service-pipe access, RDP connection requests, Kerberos kerberoast /
+      // weak-etype / brute-force. Build with `--features lateral` (pulls the
+      // SMB/RDP/Kerberos parsers); a no-op when built without it.
+      lateral_movement: false,
+
+      // Data exfiltration (#123, ATT&CK T1048): flags a flow whose outbound
+      // bytes exceed its per-source learned baseline by `exfil_sigma` stddevs
+      // (and the `exfil_min_bytes` floor). Needs `collect.flows`.
+      data_exfil: false,
+      exfil_sigma: 4.0,
+      exfil_min_bytes: 10485760, // 10 MiB outbound-byte floor
     },
 
     // Threat-intel detection (netring 0.27). Hits become alerts on @/alerts via

@@ -115,6 +115,8 @@ pub fn attack_technique(kind: &str) -> Option<&'static str> {
         "ConnectionFlood" => "T1499", // Endpoint Denial of Service
         "LateralSmb" => "T1021.002", // SMB/Windows Admin Shares
         "LateralRdp" => "T1021.001", // Remote Desktop Protocol
+        "LateralKerberos" => "T1558", // Steal or Forge Kerberos Tickets
+        "DataExfiltration" => "T1048", // Exfiltration Over Alternative Protocol
         "cleartext_snmp" | "cleartext-snmp" => "T1040", // Network Sniffing
         "cleartext_http_credentials" => "T1040", // Network Sniffing
         "ioc_match" => "T1071",   // C2 over app-layer protocol
@@ -279,6 +281,47 @@ pub fn nod_view(src: Option<String>, sld: &str) -> AnomalyView {
         proto: Some("udp".into()),
         observations: vec![("sld".into(), sld.to_string())],
         metrics: vec![],
+    }
+}
+
+/// Build a lateral-movement [`AnomalyView`] (#123) for a parsed SMB/RDP/Kerberos
+/// finding. `kind` is one of `LateralSmb` / `LateralRdp` / `LateralKerberos`
+/// (mapped to ATT&CK T1021/T1558 by [`attack_technique`]); `observations` carry
+/// the parser detail (share path, NTLM user, realm, etc.). Bucketed by
+/// `(rule, src, dst)` so repeated access from one peer-pair is one alert.
+pub fn lateral_view(
+    kind: &str,
+    src: Option<String>,
+    dst: Option<String>,
+    severity: AlertSeverity,
+    observations: Vec<(String, String)>,
+) -> AnomalyView {
+    AnomalyView {
+        kind: kind.to_string(),
+        severity,
+        src,
+        dst,
+        proto: Some("tcp".into()),
+        observations,
+        metrics: vec![],
+    }
+}
+
+/// Build the `DataExfiltration` [`AnomalyView`] (#123 → ATT&CK T1048). Warning
+/// severity: a single flow whose outbound volume from `src` exceeds its learned
+/// per-source baseline by `zscore` sigma. Bucketed by `(rule, src, dst)`.
+pub fn exfil_view(src: String, dst: String, bytes_out: u64, zscore: f64) -> AnomalyView {
+    AnomalyView {
+        kind: "DataExfiltration".into(),
+        severity: AlertSeverity::Warning,
+        src: Some(src),
+        dst: Some(dst),
+        proto: Some("tcp".into()),
+        observations: vec![],
+        metrics: vec![
+            ("bytes_out".into(), bytes_out as f64),
+            ("zscore".into(), zscore),
+        ],
     }
 }
 
