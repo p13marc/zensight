@@ -293,6 +293,11 @@ pub struct ChartState {
     /// `time_window` preset so an operator can scrub an arbitrary "last N
     /// minutes/hours" range. Cleared when a preset button is chosen.
     custom_duration_ms: Option<i64>,
+    /// Absolute `(from_ms, to_ms)` window (#36). When set it pins the visible
+    /// range to a fixed wall-clock window (e.g. "14:05–14:12 yesterday"),
+    /// ignoring `current_time`/pan/zoom, so the chart shows exactly that slice
+    /// loaded from the store. Cleared by choosing a preset or a custom duration.
+    absolute_range: Option<(i64, i64)>,
 }
 
 impl ChartState {
@@ -317,6 +322,7 @@ impl ChartState {
             drag_start_offset: 0.0,
             thresholds: Vec::new(),
             custom_duration_ms: None,
+            absolute_range: None,
         }
     }
 
@@ -613,11 +619,15 @@ impl ChartState {
         self.show_pan_feedback
     }
 
-    /// Set the time window. Choosing a preset clears any custom range (#36).
+    /// Set the time window. Choosing a preset clears any custom/absolute range (#36).
     pub fn set_time_window(&mut self, window: TimeWindow) {
-        if self.time_window != window || self.custom_duration_ms.is_some() {
+        if self.time_window != window
+            || self.custom_duration_ms.is_some()
+            || self.absolute_range.is_some()
+        {
             self.time_window = window;
             self.custom_duration_ms = None;
+            self.absolute_range = None;
             self.cache.clear();
         }
     }
@@ -633,6 +643,8 @@ impl ChartState {
         if minutes.is_finite() && minutes > 0.0 {
             let ms = (minutes * 60_000.0).round() as i64;
             self.custom_duration_ms = Some(ms.clamp(1_000, 30 * 86_400_000));
+            // A relative window and an absolute window are mutually exclusive.
+            self.absolute_range = None;
         } else {
             self.custom_duration_ms = None;
         }
@@ -642,6 +654,31 @@ impl ChartState {
     /// The active custom window in minutes, if any (#36).
     pub fn custom_duration_minutes(&self) -> Option<f64> {
         self.custom_duration_ms.map(|ms| ms as f64 / 60_000.0)
+    }
+
+    /// Pin the visible window to an absolute `[from_ms, to_ms]` range (#36),
+    /// ignoring `current_time`/pan/zoom. No-op unless `from < to`. Clears any
+    /// relative custom duration.
+    pub fn set_absolute_range(&mut self, from_ms: i64, to_ms: i64) {
+        if from_ms < to_ms {
+            self.absolute_range = Some((from_ms, to_ms));
+            self.custom_duration_ms = None;
+            self.recalculate_bounds();
+            self.cache.clear();
+        }
+    }
+
+    /// The active absolute `(from_ms, to_ms)` window, if any (#36).
+    pub fn absolute_range(&self) -> Option<(i64, i64)> {
+        self.absolute_range
+    }
+
+    /// Clear the absolute window, returning to the preset / custom duration (#36).
+    pub fn clear_absolute_range(&mut self) {
+        if self.absolute_range.take().is_some() {
+            self.recalculate_bounds();
+            self.cache.clear();
+        }
     }
 
     /// Add a data point.
@@ -681,8 +718,12 @@ impl ChartState {
         (base as f64 / self.zoom_level as f64) as i64
     }
 
-    /// Get the visible time range (start, end) accounting for zoom and pan.
+    /// Get the visible time range (start, end). An absolute window (#36) pins the
+    /// range directly; otherwise it's derived from `current_time` with zoom + pan.
     fn visible_time_range(&self) -> (i64, i64) {
+        if let Some(range) = self.absolute_range {
+            return range;
+        }
         let duration = self.effective_duration_ms();
         let end = self.current_time - (self.pan_offset * duration as f64) as i64;
         let start = end - duration;
@@ -1631,9 +1672,56 @@ fn current_timestamp() -> i64 {
         .unwrap_or(0)
 }
 
+/// Parse a wall-clock timestamp for the absolute range picker (#36), interpreted
+/// as **UTC**. Accepts `YYYY-MM-DD HH:MM` and `YYYY-MM-DD HH:MM:SS`. Returns the
+/// epoch-millisecond value, or `None` if the input doesn't parse. Pure + testable.
+pub fn parse_datetime_to_ms(input: &str) -> Option<i64> {
+    let s = input.trim();
+    let naive = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M"))
+        .ok()?;
+    Some(naive.and_utc().timestamp_millis())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_datetime_accepts_minute_and_second_precision_as_utc() {
+        // 2026-06-26 14:05:00 UTC = 1782482700000 ms.
+        let base = parse_datetime_to_ms("2026-06-26 14:05").unwrap();
+        assert_eq!(base, 1_782_482_700_000);
+        // Seconds precision parses too, and adds the seconds.
+        assert_eq!(
+            parse_datetime_to_ms("2026-06-26 14:05:30").unwrap(),
+            base + 30_000
+        );
+        // Surrounding whitespace is tolerated; garbage is rejected.
+        assert_eq!(parse_datetime_to_ms("  2026-06-26 14:05 ").unwrap(), base);
+        assert!(parse_datetime_to_ms("not a date").is_none());
+        assert!(parse_datetime_to_ms("2026-13-01 00:00").is_none());
+    }
+
+    #[test]
+    fn absolute_range_pins_visible_window_over_preset() {
+        let mut chart = ChartState::new("m");
+        chart.set_time_window(TimeWindow::FiveMinutes);
+        chart.set_absolute_range(1_000, 5_000);
+        assert_eq!(chart.absolute_range(), Some((1_000, 5_000)));
+        // The pinned window is returned verbatim, independent of now/zoom/pan.
+        assert_eq!(chart.visible_time_range(), (1_000, 5_000));
+        // An inverted range is rejected (no-op).
+        chart.set_absolute_range(9_000, 1_000);
+        assert_eq!(chart.absolute_range(), Some((1_000, 5_000)));
+        // Choosing a preset clears the absolute window.
+        chart.set_time_window(TimeWindow::OneHour);
+        assert_eq!(chart.absolute_range(), None);
+        // A relative custom duration also clears it.
+        chart.set_absolute_range(1_000, 5_000);
+        chart.set_custom_duration_minutes(10.0);
+        assert_eq!(chart.absolute_range(), None);
+    }
 
     #[test]
     fn axis_fractions_are_finite_and_guard_zero_range() {

@@ -9401,6 +9401,7 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "chrono",
  "dirs 5.0.1",
  "iced",
  "iced_anim",

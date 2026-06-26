@@ -45,7 +45,10 @@ pub enum Message {
     AlertReceived(Alert),
 
     /// A sensor alert key was deleted (resolve tombstone).
-    AlertCleared { protocol: String, alert_key: String },
+    AlertCleared {
+        protocol: String,
+        alert_key: String,
+    },
 
     /// Seed of currently-firing alerts fetched on connect from sensors'
     /// `@/query/alerts` queryables (late-joiner recovery — populates without
@@ -63,7 +66,10 @@ pub enum Message {
     Disconnected(String),
 
     /// Result of a command sent to a sensor (drives a feedback toast).
-    CommandFeedback { success: bool, message: String },
+    CommandFeedback {
+        success: bool,
+        message: String,
+    },
 
     // ── Expectations authoring (netlink sentinel, Plan 08) ──────────────────
     /// Open the expectations authoring view.
@@ -102,7 +108,10 @@ pub enum Message {
     /// Mute/unmute a netring detector by name (flips current state).
     ToggleNetringDetector(String),
     /// Edit a detector's threshold input field (not yet applied).
-    SetNetringThresholdInput { detector: String, value: String },
+    SetNetringThresholdInput {
+        detector: String,
+        value: String,
+    },
     /// Apply the edited threshold for a detector to the sensor.
     ApplyNetringThreshold(String),
     /// Edit the new-allowlist-entry input field.
@@ -198,7 +207,10 @@ pub enum Message {
     /// Pivot from a Security anomaly to its netring flows (#119): fetch
     /// `@/query/flows` and filter to the offending `src`. `key` is the anomaly's
     /// `alert_key` so the result renders under the right row.
-    FetchAnomalyFlows { key: String, src: String },
+    FetchAnomalyFlows {
+        key: String,
+        src: String,
+    },
     /// A flow-pivot reply for anomaly `key`: the filtered flows, or an error.
     AnomalyFlowsReceived(String, Result<Vec<zensight_common::FlowRecord>, String>),
 
@@ -235,7 +247,9 @@ pub enum Message {
 
     /// Navigate to the previous/next device within the current filtered set
     /// (#35 cross-device navigation on the device detail view).
-    SelectAdjacentDevice { forward: bool },
+    SelectAdjacentDevice {
+        forward: bool,
+    },
 
     /// User cleared device selection (back to dashboard).
     ClearSelection,
@@ -291,6 +305,17 @@ pub enum Message {
 
     /// User typed a custom relative window (minutes) for the chart (#36).
     SetChartCustomMinutes(String),
+
+    /// User edited the absolute-range `from`/`to` inputs (#36).
+    SetChartRangeFrom(String),
+    SetChartRangeTo(String),
+
+    /// Apply the absolute `from`/`to` range — pins the window + loads it from the
+    /// store (#36).
+    ApplyChartRange,
+
+    /// Clear the absolute range, returning to the preset / custom window (#36).
+    ClearChartRange,
 
     /// Toggle the chart panel between default and expanded height (#36).
     ToggleChartExpand,
