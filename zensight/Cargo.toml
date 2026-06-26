@@ -38,6 +38,8 @@ rand = "0.9"
 # Platform utilities
 dirs.workspace = true
 rfd.workspace = true
+# Date/time parsing for the absolute chart range picker (#36).
+chrono = "0.4"
 
 # Local tiered time-series store (Plan v3-04 §A): pure-Rust, ACID, zero-copy.
 redb = "4"

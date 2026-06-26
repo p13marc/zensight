@@ -96,6 +96,10 @@ pub struct DeviceDetailState {
     pub chart_expanded: bool,
     /// Text-input buffer for the custom relative window in minutes (#36).
     pub chart_custom_input: String,
+    /// Text-input buffers for the absolute `from`/`to` range picker (#36),
+    /// `YYYY-MM-DD HH:MM` (UTC). Applied together via [`Self::apply_chart_range`].
+    pub chart_from_input: String,
+    pub chart_to_input: String,
 }
 
 impl DeviceDetailState {
@@ -122,6 +126,8 @@ impl DeviceDetailState {
             sysinfo_detail: Default::default(),
             chart_expanded: false,
             chart_custom_input: String::new(),
+            chart_from_input: String::new(),
+            chart_to_input: String::new(),
         }
     }
 
@@ -138,6 +144,28 @@ impl DeviceDetailState {
             Ok(minutes) => self.chart.set_custom_duration_minutes(minutes),
             Err(_) => self.chart.set_custom_duration_minutes(0.0),
         }
+    }
+
+    /// Apply the absolute `from`/`to` range inputs (#36). Parses both as
+    /// `YYYY-MM-DD HH:MM` UTC; on success pins the chart's visible window and
+    /// returns `Some((from_ms, to_ms))` so the caller can range-query the store.
+    /// Returns `None` (and pins nothing) when either field is empty/unparseable
+    /// or `from >= to`.
+    pub fn apply_chart_range(&mut self) -> Option<(i64, i64)> {
+        let from = crate::view::chart::parse_datetime_to_ms(&self.chart_from_input)?;
+        let to = crate::view::chart::parse_datetime_to_ms(&self.chart_to_input)?;
+        if from >= to {
+            return None;
+        }
+        self.chart.set_absolute_range(from, to);
+        Some((from, to))
+    }
+
+    /// Clear the absolute range and return to the preset / custom window (#36).
+    pub fn clear_chart_range(&mut self) {
+        self.chart_from_input.clear();
+        self.chart_to_input.clear();
+        self.chart.clear_absolute_range();
     }
 
     /// Update the max history setting.
@@ -867,6 +895,43 @@ fn render_chart_section<'a>(
     .spacing(15)
     .align_y(Alignment::Center);
 
+    // Absolute from/to range picker (#36): load an exact past window from the
+    // store, e.g. "2026-06-26 14:05" → "2026-06-26 14:12" (UTC).
+    let range_active = state.chart.absolute_range().is_some();
+    let from_input = text_input("YYYY-MM-DD HH:MM", &state.chart_from_input)
+        .on_input(Message::SetChartRangeFrom)
+        .on_submit(Message::ApplyChartRange)
+        .width(Length::Fixed(150.0))
+        .size(11);
+    let to_input = text_input("YYYY-MM-DD HH:MM", &state.chart_to_input)
+        .on_input(Message::SetChartRangeTo)
+        .on_submit(Message::ApplyChartRange)
+        .width(Length::Fixed(150.0))
+        .size(11);
+    let apply_btn = button(text("Apply").size(11))
+        .on_press(Message::ApplyChartRange)
+        .style(if range_active {
+            iced::widget::button::primary
+        } else {
+            iced::widget::button::secondary
+        });
+    let mut range_row = row![
+        text("Range (UTC):").size(11),
+        from_input,
+        text("→").size(11),
+        to_input,
+        apply_btn,
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+    if range_active {
+        range_row = range_row.push(
+            button(text("Clear").size(11))
+                .on_press(Message::ClearChartRange)
+                .style(iced::widget::button::text),
+        );
+    }
+
     // Inline per-series legend with toggle/remove (#36) — manage a comparison
     // without switching back to the metrics table.
     let legend: Element<'_, Message> = if state.is_comparison_mode() {
@@ -921,7 +986,7 @@ fn render_chart_section<'a>(
     .spacing(20);
 
     let chart_container = container(
-        column![header, legend, chart, stats_row]
+        column![header, range_row, legend, chart, stats_row]
             .spacing(10)
             .padding(10),
     )
@@ -1284,6 +1349,35 @@ fn value_type_name(value: &TelemetryValue) -> &'static str {
 mod tests {
     use super::*;
     use zensight_common::Protocol;
+
+    #[test]
+    fn apply_chart_range_pins_window_and_returns_bounds() {
+        let mut state = DeviceDetailState::new(DeviceId {
+            protocol: Protocol::Snmp,
+            source: "test".to_string(),
+        });
+        // Valid from < to → pins the chart window and returns the bounds.
+        state.chart_from_input = "2026-06-26 14:05".to_string();
+        state.chart_to_input = "2026-06-26 14:12".to_string();
+        let range = state.apply_chart_range();
+        assert_eq!(range, Some((1_782_482_700_000, 1_782_483_120_000)));
+        assert_eq!(state.chart.absolute_range(), range);
+
+        // Inverted range → no-op (nothing returned, window unchanged).
+        state.chart_from_input = "2026-06-26 15:00".to_string();
+        state.chart_to_input = "2026-06-26 14:00".to_string();
+        assert_eq!(state.apply_chart_range(), None);
+        assert_eq!(state.chart.absolute_range(), range);
+
+        // Unparseable → no-op.
+        state.chart_from_input = "nope".to_string();
+        assert_eq!(state.apply_chart_range(), None);
+
+        // Clearing resets inputs + the pinned window.
+        state.clear_chart_range();
+        assert!(state.chart.absolute_range().is_none());
+        assert!(state.chart_from_input.is_empty());
+    }
 
     fn make_test_point(metric: &str) -> TelemetryPoint {
         TelemetryPoint {

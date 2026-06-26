@@ -388,6 +388,41 @@ impl ZenSight {
                 }
             }
 
+            Message::SetChartRangeFrom(input) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.chart_from_input = input;
+                }
+            }
+
+            Message::SetChartRangeTo(input) => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.chart_to_input = input;
+                }
+            }
+
+            Message::ApplyChartRange => {
+                // Pin the absolute window, then range-query the store so the chart
+                // shows that exact slice (not just whatever the hot ring holds).
+                if let Some((from, to)) = self
+                    .selected_device
+                    .as_mut()
+                    .and_then(|d| d.apply_chart_range())
+                {
+                    let device_id = self.selected_device.as_ref().unwrap().device_id.clone();
+                    return ControlFlow::Break(self.load_device_history_range(device_id, from, to));
+                }
+                self.toasts.push(
+                    ToastSeverity::Warning,
+                    "Enter a valid from/to range (YYYY-MM-DD HH:MM, from before to)".to_string(),
+                );
+            }
+
+            Message::ClearChartRange => {
+                if let Some(ref mut device) = self.selected_device {
+                    device.clear_chart_range();
+                }
+            }
+
             Message::ChartZoomIn => {
                 if let Some(ref mut device) = self.selected_device {
                     device.zoom_in();
@@ -2597,6 +2632,43 @@ impl ZenSight {
         };
 
         Task::batch([history, prefetch])
+    }
+
+    /// Range-query the store for an absolute `[from_ms, to_ms]` window (#36) and
+    /// seed the open chart with it, so an operator can pull up an exact past slice
+    /// (e.g. "14:05–14:12 yesterday") even when it's no longer in the hot ring.
+    /// Mirrors the on-open 24h load but with a caller-chosen window.
+    fn load_device_history_range(
+        &self,
+        device_id: DeviceId,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Task<Message> {
+        let Some(store) = self.store.persistent() else {
+            return Task::none();
+        };
+        let protocol = device_id.protocol.to_string();
+        let metric_ids = self.store.device_metric_ids(&protocol, &device_id.source);
+        if metric_ids.is_empty() {
+            return Task::none();
+        }
+        Task::future(async move {
+            let series = tokio::task::spawn_blocking(move || {
+                metric_ids
+                    .into_iter()
+                    .filter_map(|(name, id)| {
+                        store
+                            .query(id, crate::store::Tier::Minute, from_ms, to_ms)
+                            .ok()
+                            .filter(|s| !s.is_empty())
+                            .map(|samples| (name, samples))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .unwrap_or_default();
+            Message::DeviceHistoryLoaded(device_id, series)
+        })
     }
 
     /// Prefetch the primary on-demand detail channels for a device's protocol so
