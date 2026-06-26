@@ -61,6 +61,9 @@ use crate::map::{self, AnomalyView, DnsRcodeClass};
 
 /// Per-destination talker histogram: `dst -> (bytes, packets, flows)`.
 pub type TalkerHist = Arc<Mutex<HashMap<String, (u64, u64, u64)>>>;
+/// Traffic-matrix histogram (#122): `(src, dst) -> (bytes, packets, flows)` — the
+/// service-map data, "who talks to whom".
+pub type MatrixHist = Arc<Mutex<HashMap<(String, String), (u64, u64, u64)>>>;
 /// Bounded ring of recent elephant (large) flows.
 pub type ElephantRing = Arc<Mutex<VecDeque<ElephantRecord>>>;
 /// Passive TLS fingerprint inventory: (sni, ja4) → record with a hit count.
@@ -184,6 +187,8 @@ pub struct MonitorChannels {
     pub http: Arc<HttpState>,
     /// Per-destination talker histogram (issue #21).
     pub talkers: TalkerHist,
+    /// `(src,dst)` traffic-matrix histogram, served on `@/query/matrix` (#122).
+    pub matrix: MatrixHist,
     /// Recent elephant (large) flows ring (issue #21).
     pub elephants: ElephantRing,
     /// Passive QUIC SNI/ALPN inventory: served on `@/query/quic` (issue #72).
@@ -464,6 +469,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
     let dns = Arc::new(DnsState::default());
     let http = Arc::new(HttpState::default());
     let talkers: TalkerHist = Arc::new(Mutex::new(HashMap::new()));
+    let matrix: MatrixHist = Arc::new(Mutex::new(HashMap::new()));
     let elephants: ElephantRing = Arc::new(Mutex::new(VecDeque::with_capacity(ELEPHANT_RING_CAP)));
     let quic: QuicInventory = Arc::new(Mutex::new(HashMap::new()));
     let ssh: SshInventory = Arc::new(Mutex::new(HashMap::new()));
@@ -499,6 +505,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
         let records = flow_records.clone();
         let l4_h = l4.clone();
         let talkers_h = talkers.clone();
+        let matrix_h = matrix.clone();
         let elephants_h = elephants.clone();
         let collect_talkers = cfg.collect.talkers;
         b = b.on_ctx::<FlowEnded<Tcp>>(move |e: &FlowEnded<Tcp>, _ctx: &mut Ctx<'_>| {
@@ -512,15 +519,17 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
                 &records,
                 &l4_h,
                 &talkers_h,
+                &matrix_h,
                 &elephants_h,
                 collect_talkers,
             );
             Ok(())
         });
 
-        // UDP + ICMP flow ends feed only the per-L4 composition (and talkers).
+        // UDP + ICMP flow ends feed only the per-L4 composition (and talkers/matrix).
         let l4_udp = l4.clone();
         let talkers_udp = talkers.clone();
+        let matrix_udp = matrix.clone();
         let collect_talkers_udp = cfg.collect.talkers;
         b = b.protocol::<Udp>();
         b = b.on_ctx::<FlowEnded<Udp>>(move |e: &FlowEnded<Udp>, _ctx: &mut Ctx<'_>| {
@@ -530,6 +539,12 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
             l4_udp.udp_flows.fetch_add(1, Ordering::Relaxed);
             if collect_talkers_udp {
                 record_talker(&talkers_udp, &e.key.b.to_string(), &e.stats);
+                record_matrix(
+                    &matrix_udp,
+                    &e.key.a.to_string(),
+                    &e.key.b.to_string(),
+                    &e.stats,
+                );
             }
             Ok(())
         });
@@ -1269,6 +1284,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
             dns,
             http,
             talkers,
+            matrix,
             elephants,
             quic,
             ssh,
@@ -1312,6 +1328,7 @@ fn on_flow_ended(
     records: &FlowRing,
     l4: &L4State,
     talkers: &TalkerHist,
+    matrix: &MatrixHist,
     elephants: &ElephantRing,
     collect_talkers: bool,
 ) {
@@ -1362,6 +1379,7 @@ fn on_flow_ended(
 
     if collect_talkers {
         record_talker(talkers, &e.key.b.to_string(), &e.stats);
+        record_matrix(matrix, &e.key.a.to_string(), &e.key.b.to_string(), &e.stats);
         // Elephant ring: keep the largest recent flows (push, trim by size).
         if let Ok(mut ring) = elephants.lock() {
             let er = crate::map::elephant_record(
@@ -1395,6 +1413,27 @@ fn record_talker(talkers: &TalkerHist, dst: &str, stats: &flowscope::FlowStats) 
                 dst.to_string(),
                 (stats.total_bytes(), stats.total_packets(), 1),
             );
+        }
+    }
+}
+
+/// Update the `(src,dst)` traffic-matrix histogram (#122), bounded by `TALKER_CAP`
+/// like the talker map. Runs once per ended flow (not per packet), so building the
+/// owned `(src,dst)` key here is cheap; the lock is held only for the update.
+fn record_matrix(matrix: &MatrixHist, src: &str, dst: &str, stats: &flowscope::FlowStats) {
+    if let Ok(mut m) = matrix.lock() {
+        let key = (src.to_string(), dst.to_string());
+        match m.get_mut(&key) {
+            Some(e) => {
+                e.0 += stats.total_bytes();
+                e.1 += stats.total_packets();
+                e.2 += 1;
+            }
+            None => {
+                if m.len() < TALKER_CAP {
+                    m.insert(key, (stats.total_bytes(), stats.total_packets(), 1));
+                }
+            }
         }
     }
 }

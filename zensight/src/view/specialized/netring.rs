@@ -57,6 +57,7 @@ pub fn netring_sensor_view(state: &DeviceDetailState) -> Element<'_, Message> {
     // On-demand top-talker histogram + elephant-flow ring (#45) — always
     // available drill-downs (the sensor serves them whenever talkers are on).
     content = content.push(card(render_talkers(state)));
+    content = content.push(card(render_matrix(state)));
     content = content.push(card(render_elephants(state)));
 
     container(scrollable(content))
@@ -706,6 +707,61 @@ fn render_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
             }
             col = col
                 .push(text(format!("{} talkers", records.len())).size(font::EMPHASIS))
+                .push(list);
+        }
+    }
+    col.into()
+}
+
+/// Traffic-matrix / service-map drill-down (#122): the heaviest `src → dst` pairs
+/// by byte volume, served on `@/query/matrix`. "Who talks to whom?" — the service
+/// map behind the per-destination Top Talkers card.
+fn render_matrix(state: &DeviceDetailState) -> Element<'_, Message> {
+    let loading = state.netring_detail.matrix.is_loading();
+    let title = section_header("Service Map · Traffic Matrix (on demand)", None);
+    let mut fetch = button(
+        text(if loading {
+            "Fetching…"
+        } else {
+            "Fetch Matrix"
+        })
+        .size(font::CAPTION),
+    )
+    .padding([4, 10]);
+    if !loading {
+        fetch = fetch.on_press(Message::FetchNetringMatrix);
+    }
+    let mut col = column![title, fetch].spacing(space::SM);
+    if let Some(err) = state.netring_detail.matrix.error() {
+        col = col.push(empty_state(format!("Fetch failed: {err}"), None));
+    } else if let Some(records) = state.netring_detail.matrix.ready() {
+        if records.is_empty() {
+            col = col.push(empty_state("No traffic matrix yet", None));
+        } else {
+            let mut list = Column::new().spacing(3).push(
+                row![
+                    cell("source", 200),
+                    cell("destination", 200),
+                    cell("bytes", 120),
+                    cell("packets", 100),
+                    cell("flows", 80),
+                ]
+                .spacing(8),
+            );
+            for r in records.iter().take(200) {
+                list = list.push(
+                    row![
+                        cell(&r.src, 200),
+                        cell(&r.dst, 200),
+                        cell(&r.bytes.to_string(), 120),
+                        cell(&r.packets.to_string(), 100),
+                        cell(&r.flows.to_string(), 80),
+                    ]
+                    .spacing(8),
+                );
+            }
+            col = col
+                .push(text(format!("{} src→dst pairs", records.len())).size(font::EMPHASIS))
                 .push(list);
         }
     }

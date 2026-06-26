@@ -176,7 +176,10 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
   `capture-overload` SensorHealth alert — the honest "the sensor is silently
   losing your packets" signal. Tunable under `overload` in the config.
 - **On-demand detail** (`@/query/<topic>`): `flows`, `tls`, `talkers?top=N`,
-  `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`, `assets`.
+  `matrix?top=N`, `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`, `assets`.
+- **Traffic matrix / service map (#122):** alongside the per-destination talker
+  histogram, an `(src,dst)`-keyed byte/packet/flow matrix served on
+  `@/query/matrix?top=N` — "who talks to whom" for the service-map view.
 - **L7 protocol inventories (netring 0.27, opt-in):** QUIC Initial SNI/ALPN/
   version (`collect.quic`, UDP/443 — passive, no decryption) and SSH banner +
   KEXINIT HASSH fingerprints (`collect.ssh`, TCP/22), each served on its

@@ -90,6 +90,12 @@ async fn main() -> Result<()> {
                 key_prefix.clone(),
                 channels.elephants.clone(),
             ));
+            // Traffic matrix / service map shares the talkers gate (#122).
+            runner.spawn(query::run_matrix(
+                s.clone(),
+                key_prefix.clone(),
+                channels.matrix.clone(),
+            ));
         }
         if cfg.collect.dns {
             runner.spawn(query::run_dns(

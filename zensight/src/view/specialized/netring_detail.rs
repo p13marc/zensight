@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use zensight_common::{
-    AssetRecord, DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord, QuicRecord, SshRecord,
-    TalkerRecord, TlsRecord,
+    AssetRecord, DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord, MatrixRecord, QuicRecord,
+    SshRecord, TalkerRecord, TlsRecord,
 };
 
 use crate::view::specialized::fetch::Fetch;
@@ -52,6 +52,11 @@ pub fn elephant_key() -> String {
     "zensight/netring/@/query/elephant_flows".to_string()
 }
 
+/// The `(src,dst)` traffic-matrix / service-map key (`?top=N`) (#122).
+pub fn matrix_key() -> String {
+    format!("zensight/netring/@/query/matrix?top={TOP_N}")
+}
+
 /// The per-SLD DNS detail key (`?top=N`).
 pub fn dns_key() -> String {
     format!("zensight/netring/@/query/dns?top={TOP_N}")
@@ -71,6 +76,7 @@ pub struct NetringDetailState {
     pub ssh: Fetch<Vec<SshRecord>>,
     pub assets: Fetch<Vec<AssetRecord>>,
     pub talkers: Fetch<Vec<TalkerRecord>>,
+    pub matrix: Fetch<Vec<MatrixRecord>>,
     pub elephants: Fetch<Vec<ElephantRecord>>,
     pub dns: Fetch<Vec<DnsRecord>>,
     pub http: Fetch<Vec<HttpHostRecord>>,
@@ -135,6 +141,16 @@ impl NetringDetailState {
     /// Store the top-talker fetch outcome.
     pub fn apply_talkers(&mut self, result: Result<Vec<TalkerRecord>, String>) {
         self.talkers = Fetch::from_result(result);
+    }
+
+    /// Mark a traffic-matrix fetch as in flight (#122).
+    pub fn loading_matrix(&mut self) {
+        self.matrix = Fetch::Loading;
+    }
+
+    /// Store the traffic-matrix fetch outcome (#122).
+    pub fn apply_matrix(&mut self, result: Result<Vec<MatrixRecord>, String>) {
+        self.matrix = Fetch::from_result(result);
     }
 
     /// Mark an elephant-flow fetch as in flight.
@@ -203,6 +219,11 @@ pub async fn fetch_elephants(session: Arc<zenoh::Session>) -> Option<Vec<Elephan
     super::netlink_detail::fetch_records(session, elephant_key()).await
 }
 
+/// Fetch + decode the `(src,dst)` traffic matrix / service map (#122).
+pub async fn fetch_matrix(session: Arc<zenoh::Session>) -> Option<Vec<MatrixRecord>> {
+    super::netlink_detail::fetch_records(session, matrix_key()).await
+}
+
 /// Fetch + decode the per-SLD DNS detail (top SLDs / NXDOMAIN).
 pub async fn fetch_dns(session: Arc<zenoh::Session>) -> Option<Vec<DnsRecord>> {
     super::netlink_detail::fetch_records(session, dns_key()).await
@@ -229,6 +250,25 @@ mod tests {
         assert_eq!(elephant_key(), "zensight/netring/@/query/elephant_flows");
         assert_eq!(dns_key(), "zensight/netring/@/query/dns?top=50");
         assert_eq!(http_key(), "zensight/netring/@/query/http?top=50");
+        // Traffic-matrix / service-map channel (#122).
+        assert_eq!(matrix_key(), "zensight/netring/@/query/matrix?top=50");
+    }
+
+    #[test]
+    fn apply_stores_traffic_matrix() {
+        let mut s = NetringDetailState::default();
+        s.loading_matrix();
+        assert!(s.matrix.is_loading());
+        s.apply_matrix(Ok(vec![MatrixRecord {
+            src: "10.0.0.1".into(),
+            dst: "8.8.8.8".into(),
+            bytes: 5000,
+            packets: 40,
+            flows: 6,
+        }]));
+        assert_eq!(s.matrix.ready().map(|v| v.len()), Some(1));
+        s.apply_matrix(Err("no sensor".into()));
+        assert_eq!(s.matrix.error(), Some("no sensor"));
     }
 
     #[test]

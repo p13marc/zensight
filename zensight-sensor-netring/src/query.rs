@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::map;
 use crate::monitor::{
-    AssetInventory, DnsInventory, ElephantRing, FlowRing, HttpInventory, QuicInventory,
+    AssetInventory, DnsInventory, ElephantRing, FlowRing, HttpInventory, MatrixHist, QuicInventory,
     SshInventory, TalkerHist, TlsInventory,
 };
 
@@ -186,6 +186,30 @@ pub async fn run_talkers(session: Arc<zenoh::Session>, key_prefix: String, hist:
             Err(_) => Vec::new(),
         };
         reply(&query, &records, "talkers").await;
+    }
+}
+
+/// Run the traffic-matrix query channel (#122):
+/// `zensight/netring/@/query/matrix?top=N` replies with the top-N `(src,dst)` pairs
+/// by byte volume as JSON `Vec<MatrixRecord>` — the service-map data.
+pub async fn run_matrix(session: Arc<zenoh::Session>, key_prefix: String, hist: MatrixHist) {
+    let key = zensight_common::command::query_key(&key_prefix, "matrix");
+    let queryable = match session.declare_queryable(&key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %key, "query: declare matrix failed");
+            return;
+        }
+    };
+    tracing::info!(key = %key, "on-demand traffic-matrix query channel ready");
+
+    while let Ok(query) = queryable.recv_async().await {
+        let top = top_n(&query);
+        let records = match hist.lock() {
+            Ok(h) => map::traffic_matrix(&h, top),
+            Err(_) => Vec::new(),
+        };
+        reply(&query, &records, "matrix").await;
     }
 }
 

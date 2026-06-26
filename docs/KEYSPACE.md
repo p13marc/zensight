@@ -102,7 +102,7 @@ as Zenoh selector params (e.g. `?top=20`, `?state=&port=`).
 | Sensor | `@/query/<topic>` | Reply |
 |--------|---|---|
 | netlink | `routes`, `neighbors`, `sockets?state=&port=`, `addresses`, `events`, `route_changes`, `tc`, `xfrm`, `nft` | `Vec<…Record>` |
-| netring | `flows`, `tls`, `talkers?top=N`, `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`, `assets` | `Vec<…Record>` |
+| netring | `flows`, `tls`, `talkers?top=N`, `matrix?top=N`, `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`, `assets` | `Vec<…Record>` |
 
 ---
 

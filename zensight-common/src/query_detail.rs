@@ -116,6 +116,19 @@ pub struct TalkerRecord {
     pub flows: u64,
 }
 
+/// One cell of the netring traffic matrix (#122): a directed `src → dst` pair with
+/// aggregated byte/packet/flow volume, served on demand from an `(src,dst)`-keyed
+/// histogram updated as flows end. This is the service-map data — "who talks to
+/// whom, and how much" — distinct from the per-destination [`TalkerRecord`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MatrixRecord {
+    pub src: String,
+    pub dst: String,
+    pub bytes: u64,
+    pub packets: u64,
+    pub flows: u64,
+}
+
 /// One recent elephant (large) flow (netring), served on demand from a bounded
 /// ring of the biggest recently-ended flows. "What were the biggest transfers?"
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

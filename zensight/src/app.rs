@@ -802,6 +802,17 @@ impl ZenSight {
                     device.netring_detail.apply_talkers(result);
                 }
             }
+            Message::FetchNetringMatrix => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_matrix();
+                }
+                return ControlFlow::Break(self.query_netring_matrix());
+            }
+            Message::NetringMatrixReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_matrix(result);
+                }
+            }
             Message::FetchNetringElephants => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netring_detail.loading_elephants();
@@ -1992,6 +2003,12 @@ impl ZenSight {
     fn query_netring_talkers(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_talkers;
         self.query_channel(fetch_talkers, Message::NetringTalkersReceived)
+    }
+
+    /// Fetch the on-demand netring `(src,dst)` traffic matrix / service map (#122).
+    fn query_netring_matrix(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_matrix;
+        self.query_channel(fetch_matrix, Message::NetringMatrixReceived)
     }
 
     /// Fetch the on-demand netring elephant-flow ring (#45).
