@@ -967,7 +967,14 @@ impl ZenSight {
                 let severity = alert.severity;
                 match self.alerts.ingest_external(alert) {
                     ExternalAlertOutcome::New => {
-                        self.toasts.push(alert_toast_severity(severity), summary);
+                        self.toasts
+                            .push(alert_toast_severity(severity), summary.clone());
+                        // Opt-in desktop notification, CRITICAL firing only (#26).
+                        if self.settings.desktop_notifications
+                            && severity == zensight_common::AlertSeverity::Critical
+                        {
+                            notify_critical(summary);
+                        }
                     }
                     ExternalAlertOutcome::Resolved => {
                         self.toasts
@@ -1458,6 +1465,11 @@ impl ZenSight {
                 self.save_theme();
             }
 
+            Message::ToggleDesktopNotifications => {
+                self.settings.desktop_notifications = !self.settings.desktop_notifications;
+                self.save_notification_pref();
+            }
+
             // Keyboard shortcuts
             Message::FocusSearch => {
                 return self.focus_search();
@@ -1774,6 +1786,15 @@ impl ZenSight {
         persistent.dark_theme = matches!(self.theme, AppTheme::Dark);
         if let Err(e) = persistent.save() {
             tracing::error!("Failed to save theme: {}", e);
+        }
+    }
+
+    /// Persist the opt-in desktop-notifications preference (#26).
+    fn save_notification_pref(&self) {
+        let mut persistent = PersistentSettings::load();
+        persistent.desktop_notifications = self.settings.desktop_notifications;
+        if let Err(e) = persistent.save() {
+            tracing::error!("Failed to save notification preference: {}", e);
         }
     }
 
@@ -2913,6 +2934,19 @@ fn chrono_timestamp() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("{}", now)
+}
+
+/// Fire a best-effort desktop notification for a CRITICAL alert (#26). Runs on a
+/// detached thread because `notify-rust`'s `show()` does blocking D-Bus I/O;
+/// errors are swallowed — a missing notification daemon must never disturb the UI.
+fn notify_critical(summary: String) {
+    std::thread::spawn(move || {
+        let _ = notify_rust::Notification::new()
+            .summary("ZenSight — Critical alert")
+            .body(&summary)
+            .timeout(notify_rust::Timeout::Milliseconds(10_000))
+            .show();
+    });
 }
 
 /// Open a native "save as" dialog (#37) seeded with `default_name`, write

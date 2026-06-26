@@ -55,6 +55,9 @@ dirs = "5"
 # Native file dialogs (export save-as, #37). xdg-portal backend avoids a hard
 # GTK system-lib dependency (uses the desktop portal over D-Bus via ashpd).
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+# Desktop notifications for CRITICAL alert transitions (#26, opt-in). On Linux it
+# uses the freedesktop notification spec over D-Bus (zbus, already pulled by rfd).
+notify-rust = "4"
 
 # Internal crates
 zensight-common = { path = "zensight-common" }

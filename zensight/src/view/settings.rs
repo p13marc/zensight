@@ -28,6 +28,10 @@ pub struct PersistentSettings {
     /// Use dark theme (true) or light theme (false).
     #[serde(default = "default_dark_theme")]
     pub dark_theme: bool,
+    /// Show a desktop notification on CRITICAL alert firing transitions (#26).
+    /// Off by default (opt-in) to avoid alert fatigue.
+    #[serde(default)]
+    pub desktop_notifications: bool,
     /// Maximum number of metric history entries per device.
     #[serde(default = "default_max_history")]
     pub max_history: usize,
@@ -75,6 +79,7 @@ impl Default for PersistentSettings {
             zenoh_listen: vec![],
             stale_threshold_secs: 120,
             dark_theme: true,
+            desktop_notifications: false,
             max_history: default_max_history(),
             max_alerts: default_max_alerts(),
             groups: GroupsState::default(),
@@ -153,7 +158,7 @@ impl PersistentSettings {
 
     /// Convert to SettingsState for UI.
     pub fn to_state(&self) -> SettingsState {
-        SettingsState::from_config(
+        let mut state = SettingsState::from_config(
             &self.zenoh_mode,
             &self.zenoh_connect,
             &self.zenoh_listen,
@@ -161,7 +166,9 @@ impl PersistentSettings {
             self.dark_theme,
             self.max_history,
             self.max_alerts,
-        )
+        );
+        state.desktop_notifications = self.desktop_notifications;
+        state
     }
 
     /// Create from SettingsState.
@@ -173,6 +180,7 @@ impl PersistentSettings {
             zenoh_listen: state.listen_endpoints(),
             stale_threshold_secs: state.stale_threshold_secs.parse().unwrap_or(120),
             dark_theme: state.dark_theme,
+            desktop_notifications: state.desktop_notifications,
             max_history: state.max_history.parse().unwrap_or(default_max_history()),
             max_alerts: state.max_alerts.parse().unwrap_or(default_max_alerts()),
             groups: GroupsState::default(),
@@ -197,6 +205,8 @@ pub struct SettingsState {
     pub stale_threshold_secs: String,
     /// Use dark theme.
     pub dark_theme: bool,
+    /// Show a desktop notification on CRITICAL alert firing transitions (#26).
+    pub desktop_notifications: bool,
     /// Maximum metric history entries per device.
     pub max_history: String,
     /// Maximum alerts to keep.
@@ -217,6 +227,7 @@ impl Default for SettingsState {
             zenoh_listen: String::new(),
             stale_threshold_secs: "120".to_string(),
             dark_theme: true,
+            desktop_notifications: false,
             max_history: "500".to_string(),
             max_alerts: "100".to_string(),
             modified: false,
@@ -243,6 +254,7 @@ impl SettingsState {
             zenoh_listen: listen.join(", "),
             stale_threshold_secs: (stale_threshold_ms / 1000).to_string(),
             dark_theme,
+            desktop_notifications: false,
             max_history: max_history.to_string(),
             max_alerts: max_alerts.to_string(),
             modified: false,
@@ -635,6 +647,19 @@ fn render_display_section(state: &SettingsState) -> Element<'_, Message> {
         .spacing(10)
         .align_y(Alignment::Center);
 
+    // Desktop notifications (#26): opt-in, CRITICAL firing transitions only.
+    let notif_toggle = iced::widget::toggler(state.desktop_notifications)
+        .on_toggle(|_| Message::ToggleDesktopNotifications)
+        .size(18);
+    let notif_row = row![text("Desktop notifications:").size(14), notif_toggle,]
+        .spacing(10)
+        .align_y(Alignment::Center);
+    let notif_help = text("Show a desktop alert when a CRITICAL alert fires (opt-in)")
+        .size(11)
+        .style(|theme: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(theme).text_dimmed()),
+        });
+
     column![
         section_title,
         threshold_row,
@@ -643,6 +668,8 @@ fn render_display_section(state: &SettingsState) -> Element<'_, Message> {
         history_help,
         alerts_row,
         alerts_help,
+        notif_row,
+        notif_help,
     ]
     .spacing(8)
     .into()
@@ -763,6 +790,7 @@ mod tests {
             zenoh_listen: vec!["tcp/0.0.0.0:7448".to_string()],
             stale_threshold_secs: 60,
             dark_theme: true,
+            desktop_notifications: false,
             max_history: 1000,
             max_alerts: 200,
             groups: GroupsState::default(),
@@ -794,6 +822,7 @@ mod tests {
             zenoh_listen: vec![],
             stale_threshold_secs: 90,
             dark_theme: false,
+            desktop_notifications: true,
             max_history: 750,
             max_alerts: 150,
             groups: GroupsState::default(),
@@ -811,6 +840,8 @@ mod tests {
         assert_eq!(state.stale_threshold_secs, "90");
         assert_eq!(state.max_history, "750");
         assert_eq!(state.max_alerts, "150");
+        // The opt-in notification flag survives the persistent→state hop (#26).
+        assert!(state.desktop_notifications);
 
         // Convert back to persistent
         let restored = PersistentSettings::from_state(&state);
@@ -820,5 +851,6 @@ mod tests {
         assert_eq!(restored.stale_threshold_secs, 90);
         assert_eq!(restored.max_history, 750);
         assert_eq!(restored.max_alerts, 150);
+        assert!(restored.desktop_notifications);
     }
 }
