@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use zensight_common::{
-    AssetRecord, DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord, MatrixRecord, QuicRecord,
-    SshRecord, TalkerRecord, TlsRecord,
+    AssetRecord, DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord, Ja4hRecord, MatrixRecord,
+    QuicRecord, SshRecord, TalkerRecord, TlsRecord,
 };
 
 use crate::view::specialized::fetch::Fetch;
@@ -35,6 +35,11 @@ pub fn quic_key() -> String {
 /// The SSH/HASSH inventory queryable key.
 pub fn ssh_key() -> String {
     "zensight/netring/@/query/ssh".to_string()
+}
+
+/// The JA4H HTTP-fingerprint inventory queryable key (#124).
+pub fn ja4h_key() -> String {
+    "zensight/netring/@/query/ja4h".to_string()
 }
 
 /// The passive asset-inventory queryable key.
@@ -204,6 +209,11 @@ pub async fn fetch_ssh(session: Arc<zenoh::Session>) -> Option<Vec<SshRecord>> {
     super::netlink_detail::fetch_records(session, ssh_key()).await
 }
 
+/// Fetch + decode the JA4H HTTP-fingerprint inventory (#124).
+pub async fn fetch_ja4h(session: Arc<zenoh::Session>) -> Option<Vec<Ja4hRecord>> {
+    super::netlink_detail::fetch_records(session, ja4h_key()).await
+}
+
 /// Fetch + decode the passive asset inventory.
 pub async fn fetch_assets(session: Arc<zenoh::Session>) -> Option<Vec<AssetRecord>> {
     super::netlink_detail::fetch_records(session, assets_key()).await
@@ -243,6 +253,7 @@ mod tests {
         assert_eq!(flows_key(), "zensight/netring/@/query/flows");
         assert_eq!(quic_key(), "zensight/netring/@/query/quic");
         assert_eq!(ssh_key(), "zensight/netring/@/query/ssh");
+        assert_eq!(ja4h_key(), "zensight/netring/@/query/ja4h");
         assert_eq!(tls_key(), "zensight/netring/@/query/tls");
         assert_eq!(assets_key(), "zensight/netring/@/query/assets");
         // The 4 previously-orphaned channels now reachable (#45).

@@ -103,6 +103,28 @@ pub struct SshRecord {
     pub count: u64,
 }
 
+/// One observed JA4H HTTP-request fingerprint (netring, passive — issue #124),
+/// keyed by the JA4H string. JA4H fingerprints the HTTP client from its request
+/// method, version, header set and cookie/language shape (FoxIO `a_b_c_d` form) —
+/// cleartext HTTP only (TLS is opaque). Served on demand from `@/query/ja4h`.
+/// Only populated when the sensor is built with `--features ja4plus` (FoxIO
+/// License 1.1) and `collect.http_fp` is set. Note: JA4SSH is not yet available
+/// upstream (flowscope 0.19 / netring 0.27 fingerprint SSH via HASSH — see
+/// [`SshRecord`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Ja4hRecord {
+    /// JA4H fingerprint (`a_b_c_d` FoxIO format).
+    pub ja4h: String,
+    /// First `Host` header value seen for this fingerprint, if any.
+    pub host: Option<String>,
+    /// Request method (`GET`, `POST`, …), if it was valid ASCII.
+    pub method: Option<String>,
+    /// First `User-Agent` header value seen for this fingerprint, if any.
+    pub user_agent: Option<String>,
+    /// Number of requests matching this fingerprint.
+    pub count: u64,
+}
+
 /// One top-talker destination (netring), served on demand from a per-destination
 /// histogram updated as flows end. "Who are the major backends?" — bytes/packets/
 /// flows aggregated per remote endpoint, the operational view distinct from

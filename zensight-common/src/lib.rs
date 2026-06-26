@@ -38,7 +38,7 @@ pub use keyexpr::{
     all_sensors_wildcard, all_telemetry_wildcard, parse_key_expr,
 };
 pub use query_detail::{
-    AssetRecord, DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord, MatrixRecord,
+    AssetRecord, DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord, Ja4hRecord, MatrixRecord,
     NeighborRecord, ProcessRecord, QuicRecord, RouteRecord, SocketRecord, SshRecord, TalkerRecord,
     TlsRecord,
 };

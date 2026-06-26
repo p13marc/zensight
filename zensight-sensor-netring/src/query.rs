@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use crate::map;
 use crate::monitor::{
-    AssetInventory, DnsInventory, ElephantRing, FlowRing, HttpInventory, MatrixHist, QuicInventory,
-    SshInventory, TalkerHist, TlsInventory,
+    AssetInventory, DnsInventory, ElephantRing, FlowRing, HttpInventory, Ja4hInventory, MatrixHist,
+    QuicInventory, SshInventory, TalkerHist, TlsInventory,
 };
 
 /// Default top-N for the talker / domain / host channels when no `?top=` query
@@ -279,6 +279,31 @@ pub async fn run_http(session: Arc<zenoh::Session>, key_prefix: String, inventor
             Err(_) => Vec::new(),
         };
         reply(&query, &records, "http").await;
+    }
+}
+
+/// Run the JA4H fingerprint query channel: `zensight/netring/@/query/ja4h?top=N`
+/// replies with the top-N JA4H fingerprints by hit count as JSON `Vec<Ja4hRecord>`
+/// (#124). The inventory stays empty unless the sensor was built with
+/// `--features ja4plus` and `collect.http_fp` is set.
+pub async fn run_ja4h(session: Arc<zenoh::Session>, key_prefix: String, inventory: Ja4hInventory) {
+    let key = zensight_common::command::query_key(&key_prefix, "ja4h");
+    let queryable = match session.declare_queryable(&key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %key, "query: declare ja4h failed");
+            return;
+        }
+    };
+    tracing::info!(key = %key, "on-demand JA4H query channel ready");
+
+    while let Ok(query) = queryable.recv_async().await {
+        let top = top_n(&query);
+        let records = match inventory.lock() {
+            Ok(inv) => map::top_ja4h(&inv, top),
+            Err(_) => Vec::new(),
+        };
+        reply(&query, &records, "ja4h").await;
     }
 }
 

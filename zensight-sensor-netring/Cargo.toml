@@ -26,6 +26,11 @@ snmp = ["netring/snmp"]
 # then set `anomalies.lateral_movement` to flag admin-share / RDP / kerberoast
 # signals as anomalies (ATT&CK T1021 / T1558).
 lateral = ["netring/smb", "netring/rdp", "netring/kerberos"]
+# JA4H HTTP fingerprinting (#124). Off by default — pulls the JA4+ suite via
+# `netring/ja4plus`, which carries the FoxIO License 1.1 (NOT OSI). The default
+# build stays OSI-clean. Enable with `--features ja4plus`, then set
+# `collect.http_fp` to serve JA4H fingerprints on `@/query/ja4h`.
+ja4plus = ["netring/ja4plus"]
 
 [dependencies]
 zensight-common = { path = "../zensight-common" }

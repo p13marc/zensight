@@ -14,7 +14,7 @@
 use iced::widget::{Column, button, column, container, pick_list, row, scrollable, text};
 use iced::{Element, Length, Theme};
 
-use zensight_common::{AssetRecord, QuicRecord, SshRecord, TlsRecord};
+use zensight_common::{AssetRecord, Ja4hRecord, QuicRecord, SshRecord, TlsRecord};
 
 use crate::message::Message;
 use crate::view::components::{card, empty_state, section_header};
@@ -30,6 +30,9 @@ pub struct InventoryData {
     pub tls: Vec<TlsRecord>,
     pub quic: Vec<QuicRecord>,
     pub ssh: Vec<SshRecord>,
+    /// JA4H HTTP-request fingerprints (#124). Empty unless the netring sensor was
+    /// built with `--features ja4plus` and `collect.http_fp` is set.
+    pub ja4h: Vec<Ja4hRecord>,
 }
 
 /// Sort order for the asset table (#120).
@@ -67,16 +70,24 @@ impl std::fmt::Display for AssetSort {
 pub enum FpKind {
     Ja4,
     Ja3,
+    Ja4h,
     QuicSni,
     Hassh,
 }
 
 impl FpKind {
-    pub const ALL: [FpKind; 4] = [FpKind::Ja4, FpKind::Ja3, FpKind::QuicSni, FpKind::Hassh];
+    pub const ALL: [FpKind; 5] = [
+        FpKind::Ja4,
+        FpKind::Ja3,
+        FpKind::Ja4h,
+        FpKind::QuicSni,
+        FpKind::Hassh,
+    ];
     pub fn label(self) -> &'static str {
         match self {
             FpKind::Ja4 => "JA4",
             FpKind::Ja3 => "JA3",
+            FpKind::Ja4h => "JA4H",
             FpKind::QuicSni => "QUIC-SNI",
             FpKind::Hassh => "HASSH",
         }
@@ -122,7 +133,8 @@ impl InventoryState {
         self.loading = false;
         match result {
             Ok(data) => {
-                self.fingerprints = merge_fingerprints(&data.tls, &data.quic, &data.ssh);
+                self.fingerprints =
+                    merge_fingerprints(&data.tls, &data.quic, &data.ssh, &data.ja4h);
                 self.assets = data.assets;
                 self.error = None;
             }
@@ -173,11 +185,13 @@ fn blanks_last(a: Option<&str>, b: Option<&str>) -> std::cmp::Ordering {
 
 /// Merge the per-protocol fingerprint inventories into one group-by-fingerprint
 /// list, most-frequent first. Pure + testable (#120). TLS contributes both a JA4
-/// and a JA3 row when present; QUIC contributes an SNI row; SSH a HASSH row.
+/// and a JA3 row when present; QUIC contributes an SNI row; SSH a HASSH row;
+/// JA4H contributes one HTTP-client row (#124).
 pub fn merge_fingerprints(
     tls: &[TlsRecord],
     quic: &[QuicRecord],
     ssh: &[SshRecord],
+    ja4h: &[Ja4hRecord],
 ) -> Vec<Fingerprint> {
     let mut out: Vec<Fingerprint> = Vec::new();
     for t in tls {
@@ -235,6 +249,23 @@ pub fn merge_fingerprints(
             ),
             count: s.count,
             allowlist_host: None,
+        });
+    }
+    for h in ja4h {
+        // Detail: method + Host (the request shape behind the fingerprint).
+        let detail = match (h.method.as_deref(), h.host.as_deref()) {
+            (Some(m), Some(host)) => format!("{m} {host}"),
+            (Some(m), None) => m.to_string(),
+            (None, Some(host)) => host.to_string(),
+            (None, None) => "-".into(),
+        };
+        out.push(Fingerprint {
+            kind: FpKind::Ja4h,
+            value: h.ja4h.clone(),
+            detail,
+            count: h.count,
+            // JA4H rows carry the Host header so they're allow-listable like SNI.
+            allowlist_host: h.host.clone(),
         });
     }
     out.sort_by_key(|f| std::cmp::Reverse(f.count));
@@ -376,7 +407,7 @@ fn render_fingerprints(state: &InventoryState) -> Element<'_, Message> {
         let hint = if state.loading {
             "Loading fingerprints…"
         } else {
-            "No TLS/QUIC/SSH fingerprints observed"
+            "No TLS/QUIC/SSH/HTTP fingerprints observed"
         };
         return column![header, chips, empty_state(hint, None)]
             .spacing(space::SM)
@@ -507,15 +538,26 @@ mod tests {
             banner: Some("SSH-2.0-OpenSSH_9.6".into()),
             count: 1,
         }];
-        let fps = merge_fingerprints(&tls, &quic, &ssh);
-        // TLS yields a JA4 + JA3 row; plus QUIC + SSH = 4 rows.
-        assert_eq!(fps.len(), 4);
-        // Sorted by count desc → QUIC (9) first, SSH (1) last.
+        let ja4h = vec![Ja4hRecord {
+            ja4h: "ge11nn05enus_aaa".into(),
+            host: Some("api.example".into()),
+            method: Some("GET".into()),
+            user_agent: Some("curl/8".into()),
+            count: 7,
+        }];
+        let fps = merge_fingerprints(&tls, &quic, &ssh, &ja4h);
+        // TLS yields a JA4 + JA3 row; plus QUIC + SSH + JA4H = 5 rows.
+        assert_eq!(fps.len(), 5);
+        // Sorted by count desc → QUIC (9) first, JA4H (7) second, SSH (1) last.
         assert_eq!(fps[0].kind, FpKind::QuicSni);
         assert_eq!(fps[0].count, 9);
+        assert_eq!(fps[1].kind, FpKind::Ja4h);
+        assert_eq!(fps[1].count, 7);
+        assert_eq!(fps[1].detail, "GET api.example");
         assert_eq!(fps.last().unwrap().kind, FpKind::Hassh);
-        // SNI-bearing rows are allow-listable; HASSH is not.
+        // SNI/Host-bearing rows are allow-listable; HASSH is not.
         assert_eq!(fps[0].allowlist_host.as_deref(), Some("quic.example"));
+        assert_eq!(fps[1].allowlist_host.as_deref(), Some("api.example"));
         assert!(fps.last().unwrap().allowlist_host.is_none());
     }
 
@@ -533,6 +575,7 @@ mod tests {
             }],
             quic: vec![],
             ssh: vec![],
+            ja4h: vec![],
         }));
         assert_eq!(state.filtered_fingerprints().len(), 2);
         state.fp_filter = Some(FpKind::Ja4);

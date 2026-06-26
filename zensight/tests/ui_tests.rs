@@ -1982,7 +1982,7 @@ fn test_nav_opens_inventory() {
 #[test]
 fn test_inventory_view_renders_assets_and_fingerprints() {
     use zensight::view::inventory::{InventoryData, InventoryState, inventory_view};
-    use zensight_common::{AssetRecord, TlsRecord};
+    use zensight_common::{AssetRecord, Ja4hRecord, TlsRecord};
 
     let mut state = InventoryState::default();
     state.apply(Ok(InventoryData {
@@ -2006,6 +2006,15 @@ fn test_inventory_view_renders_assets_and_fingerprints() {
         }],
         quic: vec![],
         ssh: vec![],
+        // Count kept below the TLS row's so the JA4 row stays first (the
+        // allowlist-click assertion below targets the top fingerprint row).
+        ja4h: vec![Ja4hRecord {
+            ja4h: "ge11nn05enus_ff01_aa02".into(),
+            host: Some("api.example".into()),
+            method: Some("GET".into()),
+            user_agent: Some("curl/8.5".into()),
+            count: 2,
+        }],
     }));
 
     let mut ui = simulator(inventory_view(&state));
@@ -2013,6 +2022,10 @@ fn test_inventory_view_renders_assets_and_fingerprints() {
     assert!(ui.find("AcmeCorp").is_ok(), "vendor must be rendered");
     assert!(ui.find("printer1").is_ok());
     assert!(ui.find("t13d1516h2_abc_def").is_ok());
+    assert!(
+        ui.find("ge11nn05enus_ff01_aa02").is_ok(),
+        "JA4H fingerprint row must render"
+    );
     // The SNI-bearing JA4 row offers an allowlist action.
     let _ = ui.click("allowlist");
     let msgs: Vec<Message> = ui.into_messages().collect();
