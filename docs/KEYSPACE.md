@@ -136,6 +136,37 @@ control/metadata by filtering keys containing `/@/` or starting with
 
 ---
 
+## 6. Exporter semconv mapping — `zensight-common::semconv` (#100)
+
+Wire keys stay ZenSight-internal; the **exporters** map the core sysinfo host
+metrics to the OpenTelemetry host-metrics semantic conventions via **one shared
+table** (`zensight_common::semconv`), so exported metrics are dashboard-portable.
+State/direction/device/cpu are factored out of the name into attributes (OTel) /
+labels (Prometheus). Keys without a standard equivalent keep the raw
+`zensight.<protocol>.<metric>` (otel) / `<prefix>_<protocol>_<metric>` (prom) name.
+
+| Internal key | OTel metric | Attributes |
+|--------------|-------------|------------|
+| `cpu/usage`, `cpu/<n>/usage` | `system.cpu.utilization` | `cpu=<n>` |
+| `load/{1m,5m,15m}` | `system.cpu.load_average.{1m,5m,15m}` | — |
+| `memory/{used,cached,buffers,available}` | `system.memory.usage` | `state={used,cached,buffered,free}` |
+| `memory/total` | `system.memory.limit` | — |
+| `memory/usage_percent` | `system.memory.utilization` | — |
+| `memory/swap_used` | `system.paging.usage` | `state=used` |
+| `memory/paging_{in,out}_total` | `system.paging.operations` | `direction={in,out}` |
+| `memory/page_faults_major_total` | `system.paging.faults` | `type=major` |
+| `network/<if>/{rx,tx}_bytes` | `system.network.io` | `device=<if>`, `direction={receive,transmit}` |
+| `network/<if>/{rx,tx}_{packets,errors,dropped}` | `system.network.{packets,errors,dropped}` | `device`, `direction` |
+| `disk/<dev>/io/{read,write}_bytes` | `system.disk.io` | `device=<dev>`, `direction={read,write}` |
+| `disk/<dev>/io/{read,write}_ops` | `system.disk.operations` | `device`, `direction` |
+| `disk/<dev>/{used,available}` | `system.filesystem.usage` | `device`, `state={used,free}` |
+| `disk/<dev>/usage_percent` | `system.filesystem.utilization` | `device` |
+
+Values pass through unchanged (utilization stays the sensor's 0–100 percent, not a
+0–1 ratio) — the table maps metric *identity*, not units.
+
+---
+
 ## 6. Full tree at a glance
 
 ```

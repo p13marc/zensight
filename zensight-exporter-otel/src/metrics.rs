@@ -35,6 +35,14 @@ pub fn build_metric_attributes(point: &TelemetryPoint) -> Vec<KeyValue> {
         point.protocol.as_str().to_string(),
     ));
 
+    // OTel host-metrics semconv (#100): factor state/direction/device/cpu out of
+    // the metric name into attributes via the shared table.
+    if let Some(sc) = zensight_common::semconv::metric_semconv(point.protocol, &point.metric) {
+        for (k, v) in sc.attributes {
+            attrs.push(KeyValue::new(k, v));
+        }
+    }
+
     // Add telemetry labels
     for (k, v) in &point.labels {
         attrs.push(KeyValue::new(k.clone(), v.clone()));
@@ -45,8 +53,13 @@ pub fn build_metric_attributes(point: &TelemetryPoint) -> Vec<KeyValue> {
 
 /// Build a metric name from protocol and metric path.
 ///
-/// Format: `zensight.{protocol}.{metric_path}`
+/// OTel host-metrics semconv (#100): keys with a standard mapping export under
+/// their `system.*` name (e.g. `memory/used` → `system.memory.usage`); everything
+/// else falls back to `zensight.{protocol}.{metric_path}`.
 pub fn build_metric_name(protocol: Protocol, metric: &str) -> String {
+    if let Some(sc) = zensight_common::semconv::metric_semconv(protocol, metric) {
+        return sc.name.to_string();
+    }
     // Replace slashes with dots for OTEL convention
     let sanitized = metric.replace('/', ".");
 
@@ -144,14 +157,39 @@ mod tests {
             build_metric_name(Protocol::Snmp, "sysUpTime"),
             "zensight.snmp.sysUpTime"
         );
+        // #100: sysinfo keys with a semconv mapping export under their system.* name.
         assert_eq!(
             build_metric_name(Protocol::Sysinfo, "cpu/usage"),
-            "zensight.sysinfo.cpu.usage"
+            "system.cpu.utilization"
+        );
+        assert_eq!(
+            build_metric_name(Protocol::Sysinfo, "memory/used"),
+            "system.memory.usage"
+        );
+        // Unmapped sysinfo keys still fall back to the raw dotted name.
+        assert_eq!(
+            build_metric_name(Protocol::Sysinfo, "network/conntrack/count"),
+            "zensight.sysinfo.network.conntrack.count"
         );
         assert_eq!(
             build_metric_name(Protocol::Netflow, "bytes/in"),
             "zensight.netflow.bytes.in"
         );
+    }
+
+    #[test]
+    fn test_semconv_attributes_appended() {
+        let point = TelemetryPoint {
+            timestamp: 0,
+            source: "h".to_string(),
+            protocol: Protocol::Sysinfo,
+            metric: "network/eth0/rx_bytes".to_string(),
+            value: TelemetryValue::Counter(1),
+            labels: HashMap::new(),
+        };
+        let attrs = build_metric_attributes(&point);
+        assert!(attrs.iter().any(|kv| kv.key.as_str() == "direction"));
+        assert!(attrs.iter().any(|kv| kv.key.as_str() == "device"));
     }
 
     #[test]

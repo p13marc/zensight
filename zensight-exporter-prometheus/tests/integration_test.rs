@@ -93,14 +93,14 @@ async fn test_full_flow_gauge_metrics() {
     // Render metrics
     let output = collector.render();
 
-    // Verify output contains expected metrics
+    // Verify output contains expected metrics (#100: OTel semconv names).
     assert!(
-        output.contains("cpu_usage"),
-        "Should contain cpu_usage metric"
+        output.contains("system_cpu_utilization"),
+        "Should contain system.cpu.utilization metric"
     );
     assert!(
-        output.contains("memory_used"),
-        "Should contain memory_used metric"
+        output.contains("system_memory_usage"),
+        "Should contain system.memory.usage metric"
     );
     assert!(output.contains("75.5"), "Should contain server01 CPU value");
     assert!(output.contains("42"), "Should contain server02 CPU value");
@@ -252,7 +252,7 @@ async fn test_metric_updates_preserve_latest_value() {
     // Count occurrences of the metric line (should be 1)
     let metric_lines: Vec<&str> = output
         .lines()
-        .filter(|l| l.contains("cpu_usage") && !l.starts_with('#'))
+        .filter(|l| l.contains("system_cpu_utilization") && !l.starts_with('#'))
         .collect();
     assert_eq!(metric_lines.len(), 1, "Should have exactly one metric line");
 }

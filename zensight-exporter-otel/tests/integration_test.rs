@@ -134,9 +134,10 @@ fn test_metric_name_building() {
         build_metric_name(Protocol::Snmp, "sysUpTime"),
         "zensight.snmp.sysUpTime"
     );
+    // #100: sysinfo keys with a semconv mapping export under their system.* name.
     assert_eq!(
         build_metric_name(Protocol::Sysinfo, "cpu/usage"),
-        "zensight.sysinfo.cpu.usage"
+        "system.cpu.utilization"
     );
     assert_eq!(
         build_metric_name(Protocol::Modbus, "holding/temperature"),

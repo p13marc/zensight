@@ -17,6 +17,7 @@ pub mod error;
 pub mod health;
 pub mod keyexpr;
 pub mod query_detail;
+pub mod semconv;
 pub mod serialization;
 pub mod session;
 pub mod telemetry;
