@@ -29,8 +29,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 // redb 4 moved `begin_read` onto the `ReadableDatabase` trait.
-use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 
+use serde::{Deserialize, Serialize};
 use zensight_common::{TelemetryPoint, TelemetryValue};
 
 /// Default hot-ring capacity: one hour of per-second samples.
@@ -38,6 +39,23 @@ pub const DEFAULT_HOT_CAPACITY: usize = 3_600;
 
 /// redb table: packed `(metric_id, tier, bucket_ts)` key -> downsampled value.
 const SAMPLES_TABLE: TableDefinition<u128, f64> = TableDefinition::new("samples");
+
+/// redb table: log-event uid (time-sortable `<ts><seq>`) -> serialized
+/// [`StoredLog`] (#107, C9). Distinct from the numeric `samples` table — per-line
+/// log events are text and unbounded-cardinality, so they get their own keyed
+/// store with template-aware sampling rather than the downsampled tiers.
+const LOGS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("logs");
+
+/// OTel `severity_number` at/above which a log line is treated as an error and
+/// always persisted (17 = ERROR; FATAL is 21-24).
+pub const LOG_ERROR_SEVERITY: u8 = 17;
+
+/// Keep 1-in-N repetitive (known-template, non-error) info lines on disk.
+pub const LOG_SAMPLE_EVERY: u64 = 10;
+
+/// Cap on persisted log rows; the oldest beyond this are pruned so the redb file
+/// stops growing (the log analogue of [`Tier::retention_secs`]).
+pub const LOG_STORE_MAX_ROWS: usize = 200_000;
 
 /// A single downsampled bucket queued for persistence: `(metric, tier, bucket_ts, value)`.
 pub type FlushRow = (MetricId, Tier, i64, f64);
@@ -289,6 +307,8 @@ impl PersistentStore {
         let txn = db.begin_write()?;
         {
             let _ = txn.open_table(SAMPLES_TABLE)?;
+            // Ensure the logs table (#107, C9) exists too.
+            let _ = txn.open_table(LOGS_TABLE)?;
         }
         txn.commit()?;
         Ok(Self { db: Arc::new(db) })
@@ -381,6 +401,229 @@ impl PersistentStore {
         txn.commit()?;
         Ok(removed)
     }
+
+    // ---- log cold store (#107, C9) ------------------------------------------
+
+    /// Persist a batch of log records keyed by uid. Blocking I/O — call from
+    /// `spawn_blocking`. Records with an empty uid are skipped (no stable key).
+    pub fn write_logs(&self, logs: &[StoredLog]) -> Result<usize, redb::Error> {
+        if logs.is_empty() {
+            return Ok(0);
+        }
+        let txn = self.db.begin_write()?;
+        let mut written = 0usize;
+        {
+            let mut table = txn.open_table(LOGS_TABLE)?;
+            for log in logs {
+                if log.uid.is_empty() {
+                    continue;
+                }
+                // serde_json can't fail on this plain struct; skip on the off
+                // chance rather than abort the whole batch.
+                let Ok(bytes) = serde_json::to_vec(log) else {
+                    continue;
+                };
+                table.insert(log.uid.as_str(), bytes.as_slice())?;
+                written += 1;
+            }
+        }
+        txn.commit()?;
+        Ok(written)
+    }
+
+    /// Read persisted log records whose uid timestamp prefix falls in
+    /// `[from_ms, to_ms]`, newest-first, capped at `limit`. Because the uid is
+    /// `<13-digit ts_ms><12-digit seq>`, the table is time-sorted and the scan is
+    /// a bounded range walk. Blocking I/O.
+    pub fn query_logs(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredLog>, redb::Error> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(LOGS_TABLE)?;
+        let mut out = Vec::new();
+        // Walk newest-first and stop once we've filled `limit` or fallen out of
+        // the window (older than `from_ms`).
+        for entry in table.range::<&str>(..)?.rev() {
+            let (_key, value) = entry?;
+            let Ok(log) = serde_json::from_slice::<StoredLog>(value.value()) else {
+                continue;
+            };
+            if log.ts > to_ms {
+                continue;
+            }
+            if log.ts < from_ms {
+                break;
+            }
+            out.push(log);
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Evict the oldest log rows beyond `keep_max`, bounding on-disk growth.
+    /// Returns the number removed. Blocking I/O.
+    pub fn prune_logs(&self, keep_max: usize) -> Result<usize, redb::Error> {
+        let txn = self.db.begin_write()?;
+        let mut removed = 0usize;
+        {
+            let mut table = txn.open_table(LOGS_TABLE)?;
+            let total = table.len()? as usize;
+            if total > keep_max {
+                let to_remove = total - keep_max;
+                // The oldest rows are at the front of the key order.
+                let oldest: Vec<String> = table
+                    .range::<&str>(..)?
+                    .take(to_remove)
+                    .filter_map(|e| e.ok().map(|(k, _)| k.value().to_string()))
+                    .collect();
+                for key in oldest {
+                    table.remove(key.as_str())?;
+                    removed += 1;
+                }
+            }
+        }
+        txn.commit()?;
+        Ok(removed)
+    }
+}
+
+/// A persisted log line (#107, C9). The compact, restart-surviving form of a
+/// per-line log event — the fields the Logs view needs to render and filter a
+/// row. The richer journald drill-down structure isn't persisted (it stays in
+/// the live in-memory ring); search-back reconstructs a display row from these.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredLog {
+    /// Time-sortable event uid (`<ts_ms><seq>`) — the redb key.
+    pub uid: String,
+    /// Event time (Unix epoch ms).
+    pub ts: i64,
+    /// Originating host.
+    pub host: String,
+    /// OTel severity number (1-24).
+    pub severity_number: u8,
+    /// Syslog facility slug (e.g. `auth`).
+    pub facility: String,
+    /// Syslog severity slug (e.g. `err`).
+    pub severity: String,
+    /// Application / program name, if any.
+    pub app: Option<String>,
+    /// systemd unit, if any (journald).
+    pub unit: Option<String>,
+    /// Drain-style template id, if templating mined one (#102).
+    pub template_id: Option<String>,
+    /// The log message text.
+    pub message: String,
+}
+
+impl StoredLog {
+    /// Build a record from a per-line log-event [`TelemetryPoint`] (the
+    /// `events/<uid>` shape from #104). Returns `None` if the point isn't a Logs
+    /// text event. The label reads mirror `syslog_message_from_point`.
+    pub fn from_point(point: &TelemetryPoint) -> Option<StoredLog> {
+        if point.protocol != zensight_common::Protocol::Logs {
+            return None;
+        }
+        let TelemetryValue::Text(message) = &point.value else {
+            return None;
+        };
+        let label = |k: &str| point.labels.get(k).cloned();
+        let uid = label("log.record.uid").unwrap_or_else(|| point.metric.clone());
+        let severity_number = point
+            .labels
+            .get("severity_number")
+            .and_then(|s| s.parse::<u8>().ok())
+            .unwrap_or(9);
+        Some(StoredLog {
+            uid,
+            ts: point.timestamp,
+            host: point.source.clone(),
+            severity_number,
+            facility: label("facility").unwrap_or_else(|| "unknown".to_string()),
+            severity: label("severity").unwrap_or_else(|| "info".to_string()),
+            app: label("app"),
+            unit: label("sd.journald.unit").filter(|u| !u.is_empty()),
+            template_id: label("template_id").filter(|t| !t.is_empty()),
+            message: message.clone(),
+        })
+    }
+
+    /// Reconstruct a [`TelemetryPoint`] carrying this record's labels so the
+    /// existing `syslog_message_from_point` decoder can render a search-back row
+    /// without a parallel code path.
+    pub fn to_point(&self) -> TelemetryPoint {
+        let mut labels = HashMap::new();
+        labels.insert("facility".to_string(), self.facility.clone());
+        labels.insert("severity".to_string(), self.severity.clone());
+        labels.insert(
+            "severity_number".to_string(),
+            self.severity_number.to_string(),
+        );
+        labels.insert("log.record.uid".to_string(), self.uid.clone());
+        if let Some(app) = &self.app {
+            labels.insert("app".to_string(), app.clone());
+        }
+        if let Some(unit) = &self.unit {
+            labels.insert("sd.journald.unit".to_string(), unit.clone());
+        }
+        if let Some(tid) = &self.template_id {
+            labels.insert("template_id".to_string(), tid.clone());
+        }
+        TelemetryPoint {
+            timestamp: self.ts,
+            source: self.host.clone(),
+            protocol: zensight_common::Protocol::Logs,
+            metric: format!("events/{}", self.uid),
+            value: TelemetryValue::Text(self.message.clone()),
+            labels,
+        }
+    }
+}
+
+/// Template-aware retention sampler (#107, C9). Decides which log lines reach the
+/// cold store: **always keep errors and the first sighting of a template**
+/// (novelty); **sample repetitive** known-template info lines 1-in-N so a chatty
+/// service can't dominate the store. Pure + stateful (per-template counters), so
+/// the policy is unit-testable.
+#[derive(Debug)]
+pub struct LogRetention {
+    sample_every: u64,
+    /// Per-template occurrence counter; first insert == novel.
+    counters: HashMap<String, u64>,
+    /// Counter for lines with no mined template (sampled globally).
+    no_template: u64,
+}
+
+impl LogRetention {
+    pub fn new(sample_every: u64) -> Self {
+        Self {
+            sample_every: sample_every.max(1),
+            counters: HashMap::new(),
+            no_template: 0,
+        }
+    }
+
+    /// `true` to persist this line. Errors and novel templates always pass;
+    /// repetitive known-template info lines pass 1-in-`sample_every`.
+    pub fn keep(&mut self, severity_number: u8, template_id: Option<&str>) -> bool {
+        let is_error = severity_number >= LOG_ERROR_SEVERITY;
+        match template_id {
+            Some(tid) => {
+                let counter = self.counters.entry(tid.to_string()).or_insert(0);
+                let novel = *counter == 0;
+                *counter += 1;
+                is_error || novel || counter.is_multiple_of(self.sample_every)
+            }
+            None => {
+                self.no_template += 1;
+                is_error || self.no_template.is_multiple_of(self.sample_every)
+            }
+        }
+    }
 }
 
 /// Per-metric flush bookkeeping: pending (not-yet-persisted) samples buffered
@@ -399,6 +642,11 @@ pub struct MetricStore {
     series: HashMap<MetricId, MetricSeries>,
     hot_capacity: usize,
     persistent: Option<PersistentStore>,
+    /// Log records buffered for the next flush to the cold store (#107, C9),
+    /// post-sampling.
+    log_pending: Vec<StoredLog>,
+    /// Template-aware sampler gating what enters `log_pending`.
+    log_retention: LogRetention,
 }
 
 impl MetricStore {
@@ -410,6 +658,8 @@ impl MetricStore {
             series: HashMap::new(),
             hot_capacity: hot_capacity.max(1),
             persistent,
+            log_pending: Vec::new(),
+            log_retention: LogRetention::new(LOG_SAMPLE_EVERY),
         }
     }
 
@@ -491,6 +741,32 @@ impl MetricStore {
             return None;
         }
         Some((store, batch))
+    }
+
+    /// Offer a per-line log event to the cold store (#107, C9). Applies the
+    /// template-aware retention sampler; kept records buffer for the next flush.
+    /// No-op when there's no persistent store. O(1), safe inline on the UI thread.
+    pub fn record_log(&mut self, log: StoredLog) {
+        if self.persistent.is_none() {
+            return;
+        }
+        if self
+            .log_retention
+            .keep(log.severity_number, log.template_id.as_deref())
+        {
+            self.log_pending.push(log);
+        }
+    }
+
+    /// Drain buffered log records into a persist batch (#107, C9). Returns the
+    /// batch and a clone of the persistent handle for an off-thread
+    /// [`PersistentStore::write_logs`]. `None` if nothing is pending or no DB.
+    pub fn take_log_flush_batch(&mut self) -> Option<(PersistentStore, Vec<StoredLog>)> {
+        let store = self.persistent.clone()?;
+        if self.log_pending.is_empty() {
+            return None;
+        }
+        Some((store, std::mem::take(&mut self.log_pending)))
     }
 
     /// Hot (in-memory) samples for a metric path, oldest-first.
@@ -801,6 +1077,163 @@ mod tests {
         // Idempotent: a second prune with the same clock removes nothing.
         assert_eq!(store.prune(now_ms).unwrap(), 0);
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- log cold store (#107, C9) ------------------------------------------
+
+    fn stored_log(uid: &str, ts: i64, sev_num: u8, template: Option<&str>, msg: &str) -> StoredLog {
+        StoredLog {
+            uid: uid.to_string(),
+            ts,
+            host: "host01".to_string(),
+            severity_number: sev_num,
+            facility: "daemon".to_string(),
+            severity: if sev_num >= LOG_ERROR_SEVERITY {
+                "err".to_string()
+            } else {
+                "info".to_string()
+            },
+            app: Some("nginx".to_string()),
+            unit: None,
+            template_id: template.map(String::from),
+            message: msg.to_string(),
+        }
+    }
+
+    #[test]
+    fn log_retention_keeps_errors_and_novel_samples_rest() {
+        let mut r = LogRetention::new(10);
+        // Error always kept regardless of template repetition.
+        assert!(r.keep(LOG_ERROR_SEVERITY, Some("t-err")));
+        assert!(r.keep(LOG_ERROR_SEVERITY, Some("t-err")));
+        // First sighting of an info template is novel → kept; repeats sampled.
+        assert!(r.keep(9, Some("t-info"))); // novel
+        let kept = (0..20).filter(|_| r.keep(9, Some("t-info"))).count();
+        // After the novel one, counter runs 2..=21; multiples of 10 → 10, 20 = 2 kept.
+        assert_eq!(kept, 2);
+        // No-template info lines sample globally 1-in-10.
+        let kept_nt = (0..10).filter(|_| r.keep(9, None)).count();
+        assert_eq!(kept_nt, 1);
+    }
+
+    #[test]
+    fn stored_log_point_round_trip_preserves_fields() {
+        let log = stored_log(
+            "0001700000000000000000042",
+            1_700_000_000_000,
+            17,
+            Some("t9"),
+            "boom",
+        );
+        // StoredLog -> point -> StoredLog is lossless for the persisted fields.
+        let point = log.to_point();
+        let back = StoredLog::from_point(&point).unwrap();
+        assert_eq!(back, log);
+        assert_eq!(point.metric, "events/0001700000000000000000042");
+    }
+
+    #[test]
+    fn logs_write_query_newest_first_and_windowed() {
+        let path = temp_db_path("logs-rt");
+        let store = PersistentStore::open(&path).expect("open");
+        let logs = vec![
+            stored_log("0000000000100000000000001", 100, 9, Some("a"), "first"),
+            stored_log("0000000000200000000000002", 200, 17, Some("b"), "second"),
+            stored_log("0000000000300000000000003", 300, 9, Some("c"), "third"),
+        ];
+        assert_eq!(store.write_logs(&logs).unwrap(), 3);
+        // Newest-first, capped by limit.
+        let got = store.query_logs(0, 1_000, 10).unwrap();
+        assert_eq!(
+            got.iter().map(|l| l.message.as_str()).collect::<Vec<_>>(),
+            vec!["third", "second", "first"]
+        );
+        let limited = store.query_logs(0, 1_000, 2).unwrap();
+        assert_eq!(limited.len(), 2);
+        assert_eq!(limited[0].message, "third");
+        // Time window excludes out-of-range rows.
+        let windowed = store.query_logs(150, 250, 10).unwrap();
+        assert_eq!(
+            windowed
+                .iter()
+                .map(|l| l.message.as_str())
+                .collect::<Vec<_>>(),
+            vec!["second"]
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn prune_logs_evicts_oldest_beyond_cap() {
+        let path = temp_db_path("logs-prune");
+        let store = PersistentStore::open(&path).expect("open");
+        let logs: Vec<StoredLog> = (1..=5)
+            .map(|i| {
+                stored_log(
+                    &format!("{:013}{:012}", i * 100, i),
+                    i * 100,
+                    9,
+                    Some("t"),
+                    &format!("m{i}"),
+                )
+            })
+            .collect();
+        store.write_logs(&logs).unwrap();
+        // Keep newest 2 → evict the 3 oldest.
+        assert_eq!(store.prune_logs(2).unwrap(), 3);
+        let got = store.query_logs(0, 10_000, 10).unwrap();
+        assert_eq!(
+            got.iter().map(|l| l.message.as_str()).collect::<Vec<_>>(),
+            vec!["m5", "m4"]
+        );
+        // Idempotent under the cap.
+        assert_eq!(store.prune_logs(2).unwrap(), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn record_log_applies_retention_into_flush_batch() {
+        let path = temp_db_path("logs-flush");
+        let store = PersistentStore::open(&path).expect("open");
+        let mut ms = MetricStore::new(10, Some(store));
+        // 1 error + 1 novel info template are kept; the next repeats are sampled.
+        ms.record_log(stored_log(
+            "0000000000100000000000001",
+            100,
+            17,
+            Some("e"),
+            "err1",
+        ));
+        ms.record_log(stored_log(
+            "0000000000200000000000002",
+            200,
+            9,
+            Some("i"),
+            "info-novel",
+        ));
+        for i in 0..5 {
+            ms.record_log(stored_log(
+                &format!("{:013}{:012}", 300 + i, 10 + i),
+                300 + i,
+                9,
+                Some("i"),
+                "info-repeat",
+            ));
+        }
+        let (handle, batch) = ms.take_log_flush_batch().expect("a batch");
+        // error + novel kept; the 5 repeats (sample_every=10) all sampled out.
+        assert_eq!(batch.len(), 2);
+        assert_eq!(handle.write_logs(&batch).unwrap(), 2);
+        // Drained.
+        assert!(ms.take_log_flush_batch().is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn record_log_noop_without_persistence() {
+        let mut ms = MetricStore::new(10, None);
+        ms.record_log(stored_log("x", 1, 17, None, "e"));
+        assert!(ms.take_log_flush_batch().is_none());
     }
 
     #[test]

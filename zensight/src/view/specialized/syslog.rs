@@ -142,6 +142,17 @@ impl SyslogMessage {
         self.boot_id.as_deref()
     }
 
+    /// Event time (Unix epoch ms) — for ordering the merged buffer (#107, C9).
+    pub fn timestamp(&self) -> i64 {
+        self.timestamp
+    }
+
+    /// The message text — used to de-duplicate cold-store search-back against the
+    /// live buffer (#107, C9).
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
     /// A stable content key for this row, used to track the expanded drill-down
     /// across live-tail updates (#93). Not a security boundary — just identity.
     fn row_key(&self) -> String {

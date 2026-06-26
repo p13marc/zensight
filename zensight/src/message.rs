@@ -21,6 +21,10 @@ pub enum Message {
     /// merged (warm/cold) samples to seed the device detail chart on open.
     DeviceHistoryLoaded(DeviceId, Vec<(String, Vec<crate::store::Sample>)>),
 
+    /// Off-thread log cold-store search-back finished (#107, C9): persisted log
+    /// records (newest-first) to merge into the rolling buffer on Logs-view open.
+    LogHistoryLoaded(Vec<crate::store::StoredLog>),
+
     /// Sensor health snapshot received.
     HealthSnapshotReceived(HealthSnapshot),
 
