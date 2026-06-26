@@ -263,7 +263,7 @@ pub fn parse_key_expr(key: &str) -> Result<ParsedKeyExpr<'_>, ParseError> {
 
     let protocol = match parts[1] {
         "snmp" => Protocol::Snmp,
-        "syslog" => Protocol::Syslog,
+        "logs" => Protocol::Logs,
         "gnmi" => Protocol::Gnmi,
         "netflow" => Protocol::Netflow,
         "opcua" => Protocol::Opcua,

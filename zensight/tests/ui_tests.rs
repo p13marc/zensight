@@ -679,7 +679,7 @@ fn test_syslog_specialized_view() {
     use zensight_common::TelemetryValue;
 
     let device_id = DeviceId {
-        protocol: Protocol::Syslog,
+        protocol: Protocol::Logs,
         source: "server01".to_string(),
     };
     let mut state = DeviceDetailState::new(device_id);
@@ -687,7 +687,7 @@ fn test_syslog_specialized_view() {
     // Add a syslog message
     let mut point = TelemetryPoint::new(
         "server01",
-        Protocol::Syslog,
+        Protocol::Logs,
         "message/1",
         TelemetryValue::Text("Test log message".to_string()),
     );
@@ -1824,7 +1824,7 @@ fn test_logs_view_renders_lines() {
     let point = TelemetryPoint {
         timestamp: 1_700_000_000_000,
         source: "host01".to_string(),
-        protocol: Protocol::Syslog,
+        protocol: Protocol::Logs,
         metric: "auth/crit".to_string(),
         value: TelemetryValue::Text("INTRUDER ALERT from 10.0.0.9".to_string()),
         labels: HashMap::new(),
@@ -1852,7 +1852,7 @@ fn test_logs_unit_filter_and_source_badge() {
     let point = TelemetryPoint {
         timestamp: 1_700_000_000_000,
         source: "host01".to_string(),
-        protocol: Protocol::Syslog,
+        protocol: Protocol::Logs,
         metric: "daemon/err".to_string(),
         value: TelemetryValue::Text("upstream timed out".to_string()),
         labels,
@@ -1884,7 +1884,7 @@ fn test_logs_rollup_panel_renders() {
     use zensight::view::specialized::{SyslogFilterState, syslog_event_view};
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Syslog, "host01");
+    let device_id = DeviceId::new(Protocol::Logs, "host01");
     let mut state = DeviceDetailState::new(device_id);
     for (m, v) in [
         ("logs/errors_total", TelemetryValue::Counter(42)),
@@ -1895,7 +1895,7 @@ fn test_logs_rollup_panel_renders() {
             TelemetryValue::Counter(900),
         ),
     ] {
-        state.update(TelemetryPoint::new("host01", Protocol::Syslog, m, v));
+        state.update(TelemetryPoint::new("host01", Protocol::Logs, m, v));
     }
 
     let filter = SyslogFilterState::default();
@@ -2031,7 +2031,7 @@ fn test_syslog_device_shows_host_history() {
     use zensight_common::{TelemetryPoint, TelemetryValue};
 
     let device_id = DeviceId {
-        protocol: Protocol::Syslog,
+        protocol: Protocol::Logs,
         source: "host9".to_string(),
     };
     let state = DeviceDetailState::new(device_id);
@@ -2040,7 +2040,7 @@ fn test_syslog_device_shows_host_history() {
         let p = TelemetryPoint {
             timestamp: 1,
             source: "host9".to_string(),
-            protocol: Protocol::Syslog,
+            protocol: Protocol::Logs,
             metric: "daemon/err".to_string(),
             value: TelemetryValue::Text(msg.to_string()),
             labels: HashMap::new(),

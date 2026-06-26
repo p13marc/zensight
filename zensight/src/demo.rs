@@ -1193,7 +1193,7 @@ impl DemoSimulator {
             TelemetryPoint {
                 timestamp: ts,
                 source: server.to_string(),
-                protocol: Protocol::Syslog,
+                protocol: Protocol::Logs,
                 metric: format!("{facility}/{severity_name}"),
                 value: TelemetryValue::Text(msg.to_string()),
                 labels: [
@@ -2088,7 +2088,7 @@ impl DemoSimulator {
             ("sysinfo", 4u64), // 4 servers
             ("snmp", 2u64),    // router + switch
             ("modbus", 2u64),  // 2 PLCs
-            ("syslog", 4u64),  // Same servers that generate syslog
+            ("logs", 4u64),    // Same servers that generate logs
             ("netlink", 4u64), // Linux hosts (kernel networking)
             ("netring", 1u64), // 1 passive flow probe
             ("netflow", 1u64), // 1 flow exporter
@@ -2152,7 +2152,7 @@ impl DemoSimulator {
                     sensor == "snmp" && self.is_network_device(device)
                 }
                 AnomalyType::TemperatureHigh { plc, .. } => sensor == "modbus" && self.is_plc(plc),
-                AnomalyType::ErrorBurst { server } => sensor == "syslog" && self.is_server(server),
+                AnomalyType::ErrorBurst { server } => sensor == "logs" && self.is_server(server),
                 // Port scans / beacons are observed by the netring probe; a
                 // downed service is a netlink expectation violation.
                 AnomalyType::PortScan { .. } | AnomalyType::Beaconing { .. } => sensor == "netring",
@@ -2393,7 +2393,7 @@ mod tests {
             .map(|s| s.sensor)
             .collect();
         for sensor in [
-            "sysinfo", "snmp", "modbus", "syslog", "netlink", "netring", "netflow", "gnmi",
+            "sysinfo", "snmp", "modbus", "logs", "netlink", "netring", "netflow", "gnmi",
         ] {
             assert!(names.contains(sensor), "missing health for {sensor}");
         }
@@ -2466,7 +2466,7 @@ mod tests {
         let mut saw_syslog = false;
         for i in 0..200 {
             for p in sim.tick(1700000000000 + i * 600) {
-                if p.protocol == Protocol::Syslog {
+                if p.protocol == Protocol::Logs {
                     saw_syslog = true;
                     let parts: Vec<&str> = p.metric.split('/').collect();
                     assert_eq!(parts.len(), 2, "metric {} not facility/severity", p.metric);

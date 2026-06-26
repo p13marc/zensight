@@ -6,7 +6,7 @@
   },
 
   syslog: {
-    key_prefix: "zensight/syslog",
+    key_prefix: "zensight/logs",
 
     // No network listeners — this instance reads the local journal only.
     listeners: [],
@@ -43,7 +43,7 @@
 
     // Derived rollup telemetry (#63): per-severity + per-unit (top-N) log rates,
     // error/warning rollups, units-in-failure, and journald throughput — emitted
-    // every `derived_interval_secs` under zensight/syslog/<host>/logs/*.
+    // every `derived_interval_secs` under zensight/logs/<host>/logs/*.
     derived: true,
     derived_interval_secs: 10,
     top_units: 10, // distinct per-unit series; the rest fold into `other`

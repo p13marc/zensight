@@ -689,7 +689,7 @@ impl ZenSight {
                     "id": "frontend-panel",
                     "filter": serde_json::Value::Object(filter),
                 });
-                let key = zensight_common::command_key("zensight/syslog", "filter");
+                let key = zensight_common::command_key("zensight/logs", "filter");
                 self.syslog_filter.mark_applied();
                 return ControlFlow::Break(self.send_command(
                     key,
@@ -2373,7 +2373,7 @@ impl ZenSight {
         // Syslog/journald lines feed the rolling buffer behind the Logs view.
         // Unlike per-metric device state (which keeps only the latest point per
         // facility/severity), this preserves the full recent stream.
-        if point.protocol == zensight_common::Protocol::Syslog {
+        if point.protocol == zensight_common::Protocol::Logs {
             self.recent_logs
                 .push_back(crate::view::specialized::syslog_message_from_point(
                     &point,
@@ -2784,7 +2784,7 @@ mod prefetch_tests {
 
         // Protocols without queryable detail channels prefetch nothing.
         assert!(prefetch_channels(Protocol::Snmp).is_empty());
-        assert!(prefetch_channels(Protocol::Syslog).is_empty());
+        assert!(prefetch_channels(Protocol::Logs).is_empty());
         assert!(prefetch_channels(Protocol::Modbus).is_empty());
     }
 }

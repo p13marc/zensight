@@ -112,7 +112,7 @@ pub fn overview_section<'a>(
         match protocol {
             Protocol::Snmp => snmp::snmp_overview(&protocol_devices),
             Protocol::Sysinfo => sysinfo::sysinfo_overview(&protocol_devices),
-            Protocol::Syslog => syslog::syslog_overview(&protocol_devices),
+            Protocol::Logs => syslog::syslog_overview(&protocol_devices),
             Protocol::Netflow => netflow::netflow_overview(&protocol_devices),
             Protocol::Modbus => modbus::modbus_overview(&protocol_devices),
             Protocol::Gnmi => gnmi::gnmi_overview(&protocol_devices),
@@ -157,7 +157,7 @@ fn render_protocol_tabs<'a>(
     let protocols = [
         Protocol::Sysinfo,
         Protocol::Snmp,
-        Protocol::Syslog,
+        Protocol::Logs,
         Protocol::Netflow,
         Protocol::Modbus,
         Protocol::Gnmi,
@@ -253,7 +253,7 @@ fn protocol_short_name(protocol: Protocol) -> &'static str {
     match protocol {
         Protocol::Snmp => "SNMP",
         Protocol::Sysinfo => "Sysinfo",
-        Protocol::Syslog => "Syslog",
+        Protocol::Logs => "Logs",
         Protocol::Netflow => "NetFlow",
         Protocol::Modbus => "Modbus",
         Protocol::Gnmi => "gNMI",

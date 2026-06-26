@@ -47,7 +47,7 @@
     // include_protocols: ["snmp", "sysinfo"],
 
     // Exclude these protocols
-    // exclude_protocols: ["syslog"],
+    // exclude_protocols: ["logs"],
 
     // Glob patterns for metrics to include (empty = all)
     // include_metrics: ["cpu/**", "memory/**"],

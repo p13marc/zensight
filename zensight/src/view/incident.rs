@@ -310,7 +310,7 @@ fn render_evidence<'a>(inc: &Incident) -> Element<'a, Message> {
     // Host logs → syslog device (filtered to this host).
     row_items.push(pivot(
         "logs ↗",
-        DeviceId::new(Protocol::Syslog, host.clone()),
+        DeviceId::new(Protocol::Logs, host.clone()),
         None,
     ));
 

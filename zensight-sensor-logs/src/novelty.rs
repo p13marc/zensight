@@ -270,7 +270,7 @@ fn truncate(s: &str, max: usize) -> String {
 fn novelty_alert(source: &str, id: &str, template: &str) -> Alert {
     Alert::new(
         source.to_string(),
-        Protocol::Syslog,
+        Protocol::Logs,
         AlertKind::Anomaly,
         NOVELTY_RULE,
         AlertSeverity::Info,
@@ -284,7 +284,7 @@ fn novelty_alert(source: &str, id: &str, template: &str) -> Alert {
 fn spike_alert(source: &str, id: &str, template: &str, current: f64, baseline: f64) -> Alert {
     Alert::new(
         source.to_string(),
-        Protocol::Syslog,
+        Protocol::Logs,
         AlertKind::Anomaly,
         SPIKE_RULE,
         AlertSeverity::Warning,

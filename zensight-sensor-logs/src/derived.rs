@@ -210,17 +210,17 @@ impl LogAggregator {
     }
 
     /// Snapshot the accumulators into telemetry points published under
-    /// `zensight/syslog/<source>/logs/...`. Cumulative counters (per-severity,
+    /// `zensight/logs/<source>/logs/...`. Cumulative counters (per-severity,
     /// totals, per-unit) let the GUI/Prometheus derive rates; the
     /// units-in-failure gauge is windowed and reset here. `stats` adds journald
     /// throughput when the journald source is active.
     pub fn emit(&self, source: &str, stats: Option<JournaldStatsSnapshot>) -> Vec<TelemetryPoint> {
         let mut points = Vec::new();
         let counter = |metric: String, v: u64| {
-            TelemetryPoint::new(source, Protocol::Syslog, metric, TelemetryValue::Counter(v))
+            TelemetryPoint::new(source, Protocol::Logs, metric, TelemetryValue::Counter(v))
         };
         let gauge = |metric: String, v: f64| {
-            TelemetryPoint::new(source, Protocol::Syslog, metric, TelemetryValue::Gauge(v))
+            TelemetryPoint::new(source, Protocol::Logs, metric, TelemetryValue::Gauge(v))
         };
 
         let Ok(mut inner) = self.inner.lock() else {
@@ -283,7 +283,7 @@ impl LogAggregator {
     /// key set for reconcile; quiet/healthy units never fire.
     pub fn tick_budgets(&self, source: &str) -> BudgetTick {
         let gauge = |metric: String, v: f64| {
-            TelemetryPoint::new(source, Protocol::Syslog, metric, TelemetryValue::Gauge(v))
+            TelemetryPoint::new(source, Protocol::Logs, metric, TelemetryValue::Gauge(v))
         };
         let p = self.budget;
         let mut out = BudgetTick {
@@ -360,7 +360,7 @@ fn budget_alert(source: &str, unit: &str, ratio: f64, dm: u64, de: u64, p: &Budg
     };
     Alert::new(
         source.to_string(),
-        Protocol::Syslog,
+        Protocol::Logs,
         AlertKind::Anomaly,
         BUDGET_RULE,
         severity,

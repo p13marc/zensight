@@ -186,7 +186,7 @@ fn test_metric_attributes() {
 fn test_syslog_to_otel_log() {
     let point = make_point(
         "server01",
-        Protocol::Syslog,
+        Protocol::Logs,
         "daemon/warning",
         TelemetryValue::Text("Connection timeout".to_string()),
         [
@@ -335,7 +335,7 @@ fn test_filter_exclude_protocols() {
     use zensight_exporter_otel::exporter::TelemetryFilter;
 
     let config = FilterConfig {
-        exclude_protocols: vec!["syslog".to_string()],
+        exclude_protocols: vec!["logs".to_string()],
         ..Default::default()
     };
     let filter = TelemetryFilter::new(&config);
@@ -349,7 +349,7 @@ fn test_filter_exclude_protocols() {
     );
     let syslog_point = make_point(
         "server01",
-        Protocol::Syslog,
+        Protocol::Logs,
         "message",
         TelemetryValue::Text("log".to_string()),
         HashMap::new(),
@@ -492,7 +492,7 @@ fn test_filter_empty_allows_all() {
         ),
         make_point(
             "server01",
-            Protocol::Syslog,
+            Protocol::Logs,
             "message",
             TelemetryValue::Text("log".to_string()),
             HashMap::new(),
@@ -526,7 +526,7 @@ fn test_multiple_protocols_classification() {
         ),
         (Protocol::Sysinfo, TelemetryValue::Gauge(75.0), true, false),
         (
-            Protocol::Syslog,
+            Protocol::Logs,
             TelemetryValue::Text("log message".into()),
             false,
             true,
@@ -569,7 +569,7 @@ fn test_full_syslog_flow() {
 
     let point = make_point(
         "server01",
-        Protocol::Syslog,
+        Protocol::Logs,
         "auth/error",
         TelemetryValue::Text("Failed password for invalid user admin".to_string()),
         labels,

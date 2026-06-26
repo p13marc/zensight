@@ -557,7 +557,7 @@ pub fn to_telemetry_point(received: &ReceivedMessage, include_raw: bool) -> Tele
     TelemetryPoint {
         timestamp,
         source: received.resolved_hostname.clone(),
-        protocol: Protocol::Syslog,
+        protocol: Protocol::Logs,
         metric: format!("{}/{}", msg.facility.as_str(), msg.severity.as_str()),
         value: TelemetryValue::Text(msg.message.clone()),
         labels,
@@ -675,7 +675,7 @@ mod tests {
         let point = to_telemetry_point(&received, false);
 
         assert_eq!(point.source, "myhost");
-        assert_eq!(point.protocol, Protocol::Syslog);
+        assert_eq!(point.protocol, Protocol::Logs);
         assert_eq!(point.metric, "auth/crit");
         assert!(matches!(point.value, TelemetryValue::Text(_)));
         assert_eq!(point.labels.get("facility"), Some(&"auth".to_string()));
@@ -711,8 +711,8 @@ mod tests {
             resolved_hostname: "myhost".to_string(),
         };
 
-        let key = build_key_expr("zensight/syslog", &received);
-        assert_eq!(key, "zensight/syslog/myhost/auth/crit");
+        let key = build_key_expr("zensight/logs", &received);
+        assert_eq!(key, "zensight/logs/myhost/auth/crit");
     }
 
     #[test]

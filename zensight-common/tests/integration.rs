@@ -80,7 +80,7 @@ fn test_wildcard_key_expressions() {
 fn test_all_protocol_variants() {
     let protocols = [
         (Protocol::Snmp, "snmp"),
-        (Protocol::Syslog, "syslog"),
+        (Protocol::Logs, "logs"),
         (Protocol::Gnmi, "gnmi"),
         (Protocol::Netflow, "netflow"),
         (Protocol::Opcua, "opcua"),
@@ -156,7 +156,7 @@ fn test_protocol_ordering() {
         Protocol::Modbus,
         Protocol::Snmp,
         Protocol::Gnmi,
-        Protocol::Syslog,
+        Protocol::Logs,
     ];
     protocols.sort();
 

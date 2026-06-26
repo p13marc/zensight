@@ -52,7 +52,7 @@
   // Telemetry filtering (optional)
   filters: {
     // Only include these protocols (empty = all)
-    // include_protocols: ["snmp", "sysinfo", "syslog"],
+    // include_protocols: ["snmp", "sysinfo", "logs"],
 
     // Exclude these protocols
     // exclude_protocols: [],

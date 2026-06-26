@@ -251,7 +251,7 @@ pub fn protocol_icon<Message: 'static>(
 ) -> Element<'static, Message> {
     match protocol {
         zensight_common::Protocol::Snmp => protocol_snmp(size),
-        zensight_common::Protocol::Syslog => protocol_syslog(size),
+        zensight_common::Protocol::Logs => protocol_syslog(size),
         zensight_common::Protocol::Netflow => protocol_netflow(size),
         zensight_common::Protocol::Modbus => protocol_modbus(size),
         zensight_common::Protocol::Sysinfo => protocol_sysinfo(size),

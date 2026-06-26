@@ -378,14 +378,14 @@ impl TemplateAggregator {
     }
 
     /// Snapshot the per-template counters into telemetry points published under
-    /// `zensight/syslog/<source>/logs/by_template/<id>/{count,errors}_total`.
+    /// `zensight/logs/<source>/logs/by_template/<id>/{count,errors}_total`.
     pub fn emit(&self, source: &str) -> Vec<TelemetryPoint> {
         let mut points = Vec::new();
         let Ok(inner) = self.inner.lock() else {
             return points;
         };
         let counter = |metric: String, v: u64| {
-            TelemetryPoint::new(source, Protocol::Syslog, metric, TelemetryValue::Counter(v))
+            TelemetryPoint::new(source, Protocol::Logs, metric, TelemetryValue::Counter(v))
         };
         for (id, c) in &inner.counts {
             points.push(counter(

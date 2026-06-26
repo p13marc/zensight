@@ -349,14 +349,14 @@ mod tests {
 
         use crate::view::dashboard::DeviceState;
 
-        let id = DeviceId::new(Protocol::Syslog, "host1");
+        let id = DeviceId::new(Protocol::Logs, "host1");
         let mut state = DeviceState::new(id.clone());
         // A live log line: key `<facility>/<severity>`, message as Text value.
         state.metrics.insert(
             "auth/err".to_string(),
             TelemetryPoint::new(
                 "host1",
-                Protocol::Syslog,
+                Protocol::Logs,
                 "auth/err",
                 TelemetryValue::Text("authentication failure".into()),
             )
@@ -367,7 +367,7 @@ mod tests {
             "logs/errors_total".to_string(),
             TelemetryPoint::new(
                 "host1",
-                Protocol::Syslog,
+                Protocol::Logs,
                 "logs/errors_total",
                 TelemetryValue::Counter(5),
             ),

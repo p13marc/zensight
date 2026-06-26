@@ -60,17 +60,14 @@ mod tests {
     #[test]
     fn test_command_key() {
         assert_eq!(
-            command_key("zensight/syslog"),
-            "zensight/syslog/@/commands/filter"
+            command_key("zensight/logs"),
+            "zensight/logs/@/commands/filter"
         );
     }
 
     #[test]
     fn test_status_key() {
-        assert_eq!(
-            status_key("zensight/syslog"),
-            "zensight/syslog/@/status/filter"
-        );
+        assert_eq!(status_key("zensight/logs"), "zensight/logs/@/status/filter");
     }
 
     #[test]

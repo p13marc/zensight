@@ -231,7 +231,7 @@ impl LogRecord {
     /// Returns None if the point is not a syslog text message.
     pub fn from_telemetry(point: &TelemetryPoint) -> Option<Self> {
         // Only process syslog text messages
-        if point.protocol != Protocol::Syslog {
+        if point.protocol != Protocol::Logs {
             return None;
         }
 
@@ -338,7 +338,7 @@ mod tests {
         let point = TelemetryPoint {
             timestamp: 1234567890000,
             source: "server01".to_string(),
-            protocol: Protocol::Syslog,
+            protocol: Protocol::Logs,
             metric: "message".to_string(),
             value: TelemetryValue::Text("Connection refused".to_string()),
             labels,
@@ -373,7 +373,7 @@ mod tests {
         let point = TelemetryPoint {
             timestamp: 1234567890000,
             source: "server01".to_string(),
-            protocol: Protocol::Syslog,
+            protocol: Protocol::Logs,
             metric: "count".to_string(),
             value: TelemetryValue::Counter(100),
             labels: HashMap::new(),

@@ -16,8 +16,8 @@
 //!
 //! For example:
 //! ```text
-//! zensight/syslog/router01/auth/warning
-//! zensight/syslog/webserver/daemon/info
+//! zensight/logs/router01/auth/warning
+//! zensight/logs/webserver/daemon/info
 //! ```
 
 pub mod commands;
