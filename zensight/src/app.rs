@@ -52,7 +52,7 @@ use crate::subscription::{
 };
 use crate::view::alerts::{AlertsState, alerts_view};
 use crate::view::dashboard::{DashboardState, DeviceState, dashboard_view};
-use crate::view::device::{DeviceDetailState, device_view_with_syslog_filter};
+use crate::view::device::DeviceDetailState;
 use crate::view::groups::{GroupsState, groups_panel};
 use crate::view::overview::OverviewState;
 use crate::view::settings::{PersistentSettings, SettingsState, settings_view};
@@ -2195,7 +2195,36 @@ impl ZenSight {
                         .filter(|m| m.host() == host)
                         .cloned()
                         .collect();
-                    device_view_with_syslog_filter(device_state, &self.syslog_filter, &host_logs)
+                    // #133: gather this physical host's sensor facets (same source,
+                    // one per protocol) so the detail renders them as tabs — the
+                    // protocol is a facet of a host, not a top-level axis.
+                    let mut facet_states: Vec<&DeviceState> = self
+                        .dashboard
+                        .devices
+                        .values()
+                        .filter(|d| d.id.source == device_state.device_id.source)
+                        .collect();
+                    facet_states.sort_by_key(|d| {
+                        (
+                            crate::view::host::protocol_priority(d.id.protocol),
+                            d.id.protocol,
+                        )
+                    });
+                    let facets: Vec<crate::view::device::FacetTab> = facet_states
+                        .iter()
+                        .map(|d| crate::view::device::FacetTab {
+                            id: d.id.clone(),
+                            protocol: d.id.protocol,
+                            status: d.effective_status(),
+                            active: d.id == device_state.device_id,
+                        })
+                        .collect();
+                    crate::view::device::host_detail_view(
+                        device_state,
+                        &self.syslog_filter,
+                        &host_logs,
+                        &facets,
+                    )
                 } else {
                     dashboard_view(
                         &self.dashboard,

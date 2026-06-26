@@ -28,18 +28,33 @@ fn nav_items(current: CurrentView) -> Vec<NavItem> {
     use CurrentView::*;
     // Device is a drill-down of the dashboard, so it keeps Dashboard active.
     let dash_active = matches!(current, Dashboard | Device);
+    // #133: navigate by host/incident, not protocol. Hosts + Incidents lead;
+    // topology is promoted to "Map"; protocol-specific entries (Inventory,
+    // Expectations) demote below the host/incident-centric sections.
     vec![
         NavItem {
-            label: "Dashboard",
+            label: "Hosts",
             message: Message::OpenDashboard,
             icon: icons::chart,
             active: dash_active,
         },
         NavItem {
-            label: "Topology",
+            label: "Incidents",
+            message: Message::OpenIncidents,
+            icon: icons::alert,
+            active: matches!(current, Incidents),
+        },
+        NavItem {
+            label: "Map",
             message: Message::OpenTopology,
             icon: icons::network,
             active: matches!(current, Topology),
+        },
+        NavItem {
+            label: "Security",
+            message: Message::OpenSecurity,
+            icon: icons::info,
+            active: matches!(current, Security),
         },
         NavItem {
             label: "Logs",
@@ -54,28 +69,16 @@ fn nav_items(current: CurrentView) -> Vec<NavItem> {
             active: matches!(current, Alerts),
         },
         NavItem {
-            label: "Incidents",
-            message: Message::OpenIncidents,
-            icon: icons::alert,
-            active: matches!(current, Incidents),
-        },
-        NavItem {
-            label: "Security",
-            message: Message::OpenSecurity,
-            icon: icons::info,
-            active: matches!(current, Security),
+            label: "Sensors",
+            message: Message::OpenSensors,
+            icon: icons::subscription,
+            active: matches!(current, Sensors),
         },
         NavItem {
             label: "Inventory",
             message: Message::OpenInventory,
             icon: icons::network,
             active: matches!(current, Inventory),
-        },
-        NavItem {
-            label: "Sensors",
-            message: Message::OpenSensors,
-            icon: icons::subscription,
-            active: matches!(current, Sensors),
         },
         NavItem {
             label: "Expectations",
@@ -135,8 +138,9 @@ fn nav_rail(current: CurrentView) -> Element<'static, Message> {
 /// The breadcrumb (left side of the top bar): `Section` or `Dashboard › <device>`.
 fn breadcrumb<'a>(current: CurrentView, device: Option<&'a str>) -> Element<'a, Message> {
     let section = match current {
-        CurrentView::Dashboard | CurrentView::Device => "Dashboard",
-        CurrentView::Topology => "Topology",
+        // #133: host/incident-centric labels — "Hosts" and "Map".
+        CurrentView::Dashboard | CurrentView::Device => "Hosts",
+        CurrentView::Topology => "Map",
         CurrentView::Alerts => "Alerts",
         CurrentView::Security => "Security",
         CurrentView::Sensors => "Sensors",
@@ -148,8 +152,8 @@ fn breadcrumb<'a>(current: CurrentView, device: Option<&'a str>) -> Element<'a, 
     };
 
     if let (CurrentView::Device, Some(name)) = (current, device) {
-        // Dashboard segment is clickable; the device leaf is plain text.
-        let root = button(text("Dashboard").size(font::BODY))
+        // Hosts segment is clickable; the host leaf is plain text.
+        let root = button(text("Hosts").size(font::BODY))
             .on_press(Message::OpenDashboard)
             .padding(0)
             .style(iced::widget::button::text);
