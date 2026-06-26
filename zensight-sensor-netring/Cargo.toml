@@ -41,6 +41,11 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 anyhow.workspace = true
 hostname = "0.4"
 
+# Lock-free hot-swap of the live detector config (#121): detectors read the
+# current AnomalyConfig with a cheap atomic load; the command channel stores a
+# new Arc. No per-packet locking.
+arc-swap = "1"
+
 # Community ID v1 flow hashing (#116): sorted 5-tuple + seed -> SHA1 -> base64.
 # The de-facto cross-tool flow-correlation key (Zeek/Suricata/Wireshark/SecOnion).
 sha1 = "0.10"

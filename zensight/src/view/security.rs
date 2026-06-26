@@ -116,7 +116,11 @@ fn detector_meta(rule: &str) -> (String, &'static str) {
 }
 
 /// Render the security view.
-pub fn security_view<'a>(alerts: &'a AlertsState, sec: &'a SecurityState) -> Element<'a, Message> {
+pub fn security_view<'a>(
+    alerts: &'a AlertsState,
+    sec: &'a SecurityState,
+    tuning: &'a crate::view::detection_tuning::DetectionTuningState,
+) -> Element<'a, Message> {
     let mut anomalies: Vec<&Alert> = alerts
         .active_external()
         .into_iter()
@@ -132,6 +136,8 @@ pub fn security_view<'a>(alerts: &'a AlertsState, sec: &'a SecurityState) -> Ele
 
     let content = column![
         render_header(anomalies.len(), sec),
+        rule::horizontal(1),
+        crate::view::detection_tuning::detection_tuning_panel(tuning),
         rule::horizontal(1),
         render_by_tactic(&anomalies),
         rule::horizontal(1),
@@ -466,7 +472,9 @@ fn render_pivot_flows<'a>(flows: &Fetch<Vec<FlowRecord>>) -> Element<'a, Message
                 text(f.src.clone()).size(11).width(Length::Fixed(170.0)),
                 text(f.dst.clone()).size(11).width(Length::Fixed(170.0)),
                 text(f.proto.clone()).size(11).width(Length::Fixed(50.0)),
-                text(f.bytes.to_string()).size(11).width(Length::Fixed(80.0)),
+                text(f.bytes.to_string())
+                    .size(11)
+                    .width(Length::Fixed(80.0)),
                 text(f.community_id.clone().unwrap_or_else(|| "-".into()))
                     .size(11)
                     .width(Length::Fixed(260.0)),

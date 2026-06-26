@@ -89,6 +89,25 @@ pub enum Message {
     /// A sentinel status reply (ExpectationsConfig JSON).
     ExpectationStatusReceived(String),
 
+    // Netring detection-tuning (#121): runtime allowlist + per-detector mute /
+    // threshold, pushed to the netring sensor's command channel.
+    /// Fetch the netring detector config (status queryable).
+    RefreshDetectorConfig,
+    /// A netring detector-status reply (AnomalyConfig JSON), or an error.
+    DetectorConfigReceived(Result<String, String>),
+    /// Mute/unmute a netring detector by name (flips current state).
+    ToggleNetringDetector(String),
+    /// Edit a detector's threshold input field (not yet applied).
+    SetNetringThresholdInput { detector: String, value: String },
+    /// Apply the edited threshold for a detector to the sensor.
+    ApplyNetringThreshold(String),
+    /// Edit the new-allowlist-entry input field.
+    SetNetringAllowlistInput(String),
+    /// Add the typed allowlist entry to the netring allowlist.
+    AddNetringAllowlist,
+    /// Remove an allowlist entry from the netring allowlist.
+    RemoveNetringAllowlist(String),
+
     /// Fetch an on-demand netlink detail table (sockets/routes/neighbors).
     FetchNetlinkDetail(crate::view::specialized::netlink_detail::NetlinkDetailTopic),
     /// A netlink detail reply for a topic: the decoded table, or an error message.

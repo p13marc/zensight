@@ -7,11 +7,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use tokio::sync::mpsc;
 use zensight_common::{
     Alert, AssetRecord, ElephantRecord, FlowRecord, QuicRecord, SshRecord, TelemetryPoint,
     TlsRecord,
 };
+
+use crate::command::DetectorHandle;
+use crate::config::AnomalyConfig;
+
+/// Lock-free live view of the tunable [`AnomalyConfig`] (#121). Detectors hold a
+/// clone and `load()` the current config per scored candidate / DNS query, so a
+/// runtime tuning command (allowlist / threshold / mute) takes effect with no
+/// restart. The per-packet `feed` paths are left untouched.
+type LiveConfig = Arc<ArcSwap<AnomalyConfig>>;
 
 /// Bounded ring of recent ended-flow records served via `@/query/flows`.
 pub type FlowRing = Arc<Mutex<VecDeque<FlowRecord>>>;
@@ -187,14 +197,15 @@ pub struct MonitorChannels {
 /// Detector wrapper bridging `feed`→`verdict` for the TRW port-scan detector.
 struct PortScan {
     detector: PortScanDetector<FiveTupleKey>,
+    cfg: LiveConfig,
     last_score: Option<ScanScore<FiveTupleKey>>,
 }
 
-/// Detector wrapper for the RITA-style beaconing detector (issue #17).
+/// Detector wrapper for the RITA-style beaconing detector (issue #17). Reads its
+/// threshold + allowlist live from `cfg` so they hot-swap at runtime (#121).
 struct Beacon {
     detector: BeaconDetector<FiveTupleKey>,
-    threshold: f64,
-    allowlist: Vec<String>,
+    cfg: LiveConfig,
     last_score: Option<BeaconScore<FiveTupleKey>>,
 }
 
@@ -203,8 +214,7 @@ struct Beacon {
 /// detector misses. Fed the same `FlowPacket` (key, ts, len) stream as `Beacon`.
 struct RitaBeacon {
     detector: RitaBeaconDetector<FiveTupleKey>,
-    threshold: f64,
-    allowlist: Vec<String>,
+    cfg: LiveConfig,
     last_score: Option<RitaBeaconScore<FiveTupleKey>>,
 }
 
@@ -231,11 +241,11 @@ impl flowscope::DetectorScore for RitaBeaconHit {
     }
 }
 
-/// Detector wrapper for the DGA scorer over DNS query SLDs (issue #18).
+/// Detector wrapper for the DGA scorer over DNS query SLDs (issue #18). Reads
+/// its threshold + allowlist live from `cfg` (#121).
 struct Dga {
     scorer: DgaScorer,
-    threshold: f64,
-    allowlist: Vec<String>,
+    cfg: LiveConfig,
     last_score: Option<DgaScore>,
 }
 
@@ -244,7 +254,7 @@ struct Dga {
 /// (dst,port) crosses the threshold. Distinct from a port scan (many ports).
 struct Flood {
     counter: TimeBucketedCounter<String>,
-    threshold: u64,
+    cfg: LiveConfig,
     last_hit: Option<(String, u64)>,
 }
 
@@ -420,17 +430,21 @@ fn asset_to_record(a: &flowscope::Asset) -> AssetRecord {
     }
 }
 
+/// What [`build`] returns: the monitor, its emit channels, the telemetry-channel
+/// keepalive, and the runtime detection-tuning handle (#121).
+pub type BuiltMonitor = (
+    netring::monitor::Monitor,
+    MonitorChannels,
+    mpsc::UnboundedSender<TelemetryPoint>,
+    DetectorHandle,
+);
+
 /// Build a netring `Monitor` from config plus the channels it emits on.
-pub fn build(
-    cfg: &NetringConfig,
-) -> Result<
-    (
-        netring::monitor::Monitor,
-        MonitorChannels,
-        mpsc::UnboundedSender<TelemetryPoint>,
-    ),
-    Box<dyn std::error::Error>,
-> {
+pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Error>> {
+    // Live, hot-swappable anomaly config (#121). Detectors read `det_cfg`; the
+    // command channel mutates it through the returned handle.
+    let detector_handle = DetectorHandle::new(cfg.anomalies.clone());
+    let det_cfg: LiveConfig = detector_handle.shared();
     let (tel_tx, tel_rx) = mpsc::unbounded_channel::<TelemetryPoint>();
     let (anom_tx, anom_rx) = mpsc::unbounded_channel::<flowscope::OwnedAnomaly>();
     let (alert_tx, alert_rx) = mpsc::unbounded_channel::<Alert>();
@@ -930,19 +944,24 @@ pub fn build(
         let scan = netring::pattern_detector! {
             name: "PortScanTRW",
             event: FlowEnded<Tcp>,
-            detector: PortScan { detector: PortScanDetector::new(), last_score: None },
+            detector: PortScan { detector: PortScanDetector::new(), cfg: det_cfg.clone(), last_score: None },
             feed: |evt, w| {
                 let success = matches!(evt.reason, EndReason::Fin | EndReason::IdleTimeout);
                 w.last_score = Some(w.detector.observe(evt.key, success));
             },
             verdict: |_evt, w| {
-                w.last_score.as_ref().and_then(|s| {
-                    if matches!(s.verdict, ScanVerdict::Scanner) {
-                        Some(s.clone())
-                    } else {
-                        None
-                    }
-                })
+                // Muted at runtime? (#121)
+                if !w.cfg.load().port_scan {
+                    None
+                } else {
+                    w.last_score.as_ref().and_then(|s| {
+                        if matches!(s.verdict, ScanVerdict::Scanner) {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    })
+                }
             },
         };
         b = b.detect(scan);
@@ -955,8 +974,7 @@ pub fn build(
             event: FlowPacket,
             detector: Beacon {
                 detector: BeaconDetector::new(),
-                threshold: cfg.anomalies.beacon_threshold,
-                allowlist: cfg.anomalies.allowlist.clone(),
+                cfg: det_cfg.clone(),
                 last_score: None,
             },
             feed: |evt, w| {
@@ -965,14 +983,19 @@ pub fn build(
                 }
             },
             verdict: |_evt, w| {
-                w.last_score.as_ref().and_then(|s| {
-                    let dst = s.key.b.ip().to_string();
-                    if s.score >= w.threshold && !allowlisted(&dst, &w.allowlist) {
-                        Some(s.clone())
-                    } else {
-                        None
-                    }
-                })
+                let c = w.cfg.load();
+                if !c.beaconing {
+                    None // muted at runtime (#121)
+                } else {
+                    w.last_score.as_ref().and_then(|s| {
+                        let dst = s.key.b.ip().to_string();
+                        if s.score >= c.beacon_threshold && !allowlisted(&dst, &c.allowlist) {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    })
+                }
             },
         };
         b = b.detect(beacon);
@@ -987,8 +1010,7 @@ pub fn build(
             event: FlowPacket,
             detector: RitaBeacon {
                 detector: RitaBeaconDetector::new(),
-                threshold: cfg.anomalies.rita_beacon_threshold,
-                allowlist: cfg.anomalies.allowlist.clone(),
+                cfg: det_cfg.clone(),
                 last_score: None,
             },
             feed: |evt, w| {
@@ -997,14 +1019,19 @@ pub fn build(
                 }
             },
             verdict: |_evt, w| {
-                w.last_score.as_ref().and_then(|s| {
-                    let dst = s.key.b.ip().to_string();
-                    if s.score >= w.threshold && !allowlisted(&dst, &w.allowlist) {
-                        Some(RitaBeaconHit(s.clone()))
-                    } else {
-                        None
-                    }
-                })
+                let c = w.cfg.load();
+                if !c.rita_beacon {
+                    None // muted at runtime (#121)
+                } else {
+                    w.last_score.as_ref().and_then(|s| {
+                        let dst = s.key.b.ip().to_string();
+                        if s.score >= c.rita_beacon_threshold && !allowlisted(&dst, &c.allowlist) {
+                            Some(RitaBeaconHit(s.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                }
             },
         };
         b = b.detect(rita);
@@ -1018,7 +1045,7 @@ pub fn build(
             event: FlowStarted<Tcp>,
             detector: Flood {
                 counter: TimeBucketedCounter::new(Duration::from_secs(10), Duration::from_secs(1), 16_384),
-                threshold: cfg.anomalies.flood_threshold,
+                cfg: det_cfg.clone(),
                 last_hit: None,
             },
             feed: |evt, w| {
@@ -1029,13 +1056,18 @@ pub fn build(
                 w.last_hit = Some((key, count));
             },
             verdict: |_evt, w| {
-                w.last_hit.as_ref().and_then(|(dst, count)| {
-                    if *count >= w.threshold {
-                        Some(FloodScore { dst: dst.clone(), count: *count })
-                    } else {
-                        None
-                    }
-                })
+                let c = w.cfg.load();
+                if !c.connection_flood {
+                    None // muted at runtime (#121)
+                } else {
+                    w.last_hit.as_ref().and_then(|(dst, count)| {
+                        if *count >= c.flood_threshold {
+                            Some(FloodScore { dst: dst.clone(), count: *count })
+                        } else {
+                            None
+                        }
+                    })
+                }
             },
         };
         b = b.detect(flood);
@@ -1049,8 +1081,7 @@ pub fn build(
             event: Dns,
             detector: Dga {
                 scorer: DgaScorer::new(),
-                threshold: cfg.anomalies.dga_threshold,
-                allowlist: cfg.anomalies.allowlist.clone(),
+                cfg: det_cfg.clone(),
                 last_score: None,
             },
             feed: |msg, w| {
@@ -1058,17 +1089,22 @@ pub fn build(
                 if let DnsMessage::Query(q) = msg
                     && let Some(question) = q.questions.first()
                     && let Some(sld) = map::dns_sld(&question.name)
-                    && !allowlisted(&sld, &w.allowlist)
+                    && !allowlisted(&sld, &w.cfg.load().allowlist)
                 {
                     let sc = w.scorer.score(&sld);
                     w.last_score = Some(sc);
                 }
             },
             verdict: |_msg, w| {
-                w.last_score.as_ref().and_then(|s| {
-                    let fire = (s.log_likelihood as f64) < w.threshold;
-                    if fire { Some(*s) } else { None }
-                })
+                let c = w.cfg.load();
+                if !c.dga {
+                    None // muted at runtime (#121)
+                } else {
+                    w.last_score.as_ref().and_then(|s| {
+                        let fire = (s.log_likelihood as f64) < c.dga_threshold;
+                        if fire { Some(*s) } else { None }
+                    })
+                }
             },
         };
         b = b.detect(dga);
@@ -1085,11 +1121,9 @@ pub fn build(
         use flowscope::dns::DnsMessage;
         let alerts_h = alert_tx.clone();
         let sensor_id = cfg.sensor_id.clone();
-        let allowlist = cfg.anomalies.allowlist.clone();
-        let tunnel_on = cfg.anomalies.dns_tunnel;
-        let nod_on = cfg.anomalies.nod;
-        let tunnel_distinct = cfg.anomalies.dns_tunnel_distinct;
-        let tunnel_qlen = cfg.anomalies.dns_tunnel_qname_len;
+        // Read allowlist + per-detector enables/thresholds live so they hot-swap
+        // at runtime (#121).
+        let det = det_cfg.clone();
         let tunnel_set: Mutex<TimeBucketedSet<(String, String), String>> =
             Mutex::new(TimeBucketedSet::new(
                 Duration::from_secs(60),
@@ -1107,14 +1141,15 @@ pub fn build(
             let Some(sld) = map::dns_sld(&question.name) else {
                 return Ok(());
             };
-            if allowlisted(&sld, &allowlist) {
+            let c = det.load();
+            if allowlisted(&sld, &c.allowlist) {
                 return Ok(());
             }
             // Source HOST IP only (no ephemeral port) → stable (rule, src) bucket.
             let src = ctx.flow.map(|k| k.a.ip().to_string());
 
             // NOD: emit once on the first sight of this SLD on the wire.
-            if nod_on
+            if c.nod
                 && let Ok(mut seen) = nod_seen.lock()
                 && seen.observe(&sld)
             {
@@ -1123,7 +1158,7 @@ pub fn build(
             }
 
             // DNS tunnel: distinct subdomain labels per (src, SLD) + qname length.
-            if tunnel_on {
+            if c.dns_tunnel {
                 let qname = question.name.trim_end_matches('.').to_ascii_lowercase();
                 let key = (src.clone().unwrap_or_default(), sld.clone());
                 let distinct = if let Ok(mut set) = tunnel_set.lock() {
@@ -1132,7 +1167,12 @@ pub fn build(
                 } else {
                     0
                 };
-                if map::dns_tunnel_fires(distinct, qname.len(), tunnel_distinct, tunnel_qlen) {
+                if map::dns_tunnel_fires(
+                    distinct,
+                    qname.len(),
+                    c.dns_tunnel_distinct,
+                    c.dns_tunnel_qname_len,
+                ) {
                     let view = map::dns_tunnel_view(src, &sld, distinct, qname.len());
                     let _ = alerts_h.send(map::anomaly_alert(&sensor_id, &view));
                 }
@@ -1235,6 +1275,7 @@ pub fn build(
             assets,
         },
         keepalive,
+        detector_handle,
     ))
 }
 

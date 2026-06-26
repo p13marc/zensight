@@ -43,8 +43,10 @@ async fn main() -> Result<()> {
         Format::Json,
     ));
 
-    // Build the netring monitor + drain channels (+ telemetry-channel keepalive).
-    let (mon, channels, keepalive) = monitor::build(&cfg).map_err(|e| anyhow::anyhow!("{}", e))?;
+    // Build the netring monitor + drain channels (+ telemetry-channel keepalive
+    // + the runtime detection-tuning handle, #121).
+    let (mon, channels, keepalive, detector_handle) =
+        monitor::build(&cfg).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let is_pcap = cfg.pcap.is_some();
     let flow_period = cfg.bandwidth_period_secs;
@@ -53,6 +55,14 @@ async fn main() -> Result<()> {
     // Late-joiner seed: serve the current firing set to consumers that connect
     // after an anomaly fired.
     runner.spawn(zensight_sensor_core::serve_alerts_query(reporter.clone()));
+
+    // Runtime detection-tuning channel (#121): the GUI tunes allowlist /
+    // thresholds / per-detector mute without a restart.
+    runner.spawn(zensight_sensor_netring::command::run(
+        runner.session().clone(),
+        key_prefix.clone(),
+        detector_handle,
+    ));
 
     // On-demand query channels (P2): recent-flow ring, TLS asset inventory,
     // top-talkers, elephant flows, top DNS domains, top HTTP hosts.

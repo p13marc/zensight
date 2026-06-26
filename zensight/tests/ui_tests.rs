@@ -937,7 +937,8 @@ fn test_security_view() {
     ));
 
     let sec = SecurityState::default();
-    let mut ui = simulator(security_view(&alerts, &sec));
+    let tuning = zensight::view::detection_tuning::DetectionTuningState::default();
+    let mut ui = simulator(security_view(&alerts, &sec, &tuning));
     assert!(ui.find("Security — Network Anomalies").is_ok());
     assert!(ui.find("PortScanTRW from 10.0.0.5").is_ok());
     assert!(ui.find("10.0.0.5").is_ok());
@@ -997,7 +998,8 @@ fn test_security_threat_intel_first_class() {
         ..SecurityState::default()
     };
 
-    let mut ui = simulator(security_view(&alerts, &sec));
+    let tuning = zensight::view::detection_tuning::DetectionTuningState::default();
+    let mut ui = simulator(security_view(&alerts, &sec, &tuning));
     // Friendly detector titles (not the raw slugs).
     assert!(ui.find("IOC match").is_ok());
     assert!(ui.find("Obsolete TLS").is_ok());
@@ -1031,7 +1033,8 @@ fn test_security_drilldown_and_filter() {
     alerts.ingest_external(a);
 
     let sec = SecurityState::default();
-    let mut ui = simulator(security_view(&alerts, &sec));
+    let tuning = zensight::view::detection_tuning::DetectionTuningState::default();
+    let mut ui = simulator(security_view(&alerts, &sec, &tuning));
     let _ = ui.click("PortScanTRW from 10.0.0.5");
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(
@@ -1046,7 +1049,7 @@ fn test_security_drilldown_and_filter() {
         hide_info: false,
         ..SecurityState::default()
     };
-    let mut ui2 = simulator(security_view(&alerts, &sec2));
+    let mut ui2 = simulator(security_view(&alerts, &sec2, &tuning));
     assert!(ui2.find("n_observed:").is_ok());
     // #119: an anomaly with a src exposes the flow-pivot action.
     assert!(ui2.find("Show flows").is_ok());

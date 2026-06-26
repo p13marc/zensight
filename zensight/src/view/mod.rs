@@ -4,6 +4,7 @@ pub mod alerts;
 pub mod chart;
 pub mod components;
 pub mod dashboard;
+pub mod detection_tuning;
 pub mod device;
 pub mod expectations;
 pub mod formatting;

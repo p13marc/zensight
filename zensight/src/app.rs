@@ -150,6 +150,8 @@ pub struct ZenSight {
     expectations: crate::view::expectations::ExpectationsState,
     /// Security view state: severity filter + expanded anomaly (#48).
     security: crate::view::security::SecurityState,
+    /// Netring detection-tuning panel state (#121), shown in the Security view.
+    detection_tuning: crate::view::detection_tuning::DetectionTuningState,
     /// Local tiered time-series store (hot ring + redb), Plan v3-04 §A / #22.
     /// Telemetry writes through it; charts read from it so trends survive restart.
     store: crate::store::MetricStore,
@@ -271,6 +273,7 @@ impl ZenSight {
             session: None,
             expectations: crate::view::expectations::ExpectationsState::default(),
             security: crate::view::security::SecurityState::default(),
+            detection_tuning: crate::view::detection_tuning::DetectionTuningState::default(),
             // In demo mode keep history in-memory only (no disk churn / restart survival
             // for synthetic data); otherwise open the persistent tiered store.
             store: if demo_mode {
@@ -1247,6 +1250,80 @@ impl ZenSight {
                     Some(format!("{} configured", self.expectations.current.len()));
             }
 
+            // Netring detection-tuning (#121).
+            Message::RefreshDetectorConfig => {
+                return self.query_detector_status();
+            }
+            Message::DetectorConfigReceived(result) => match result {
+                Ok(json) => self.detection_tuning.apply_status(&json),
+                Err(e) => {
+                    self.detection_tuning.status_note = Some(e);
+                }
+            },
+            Message::ToggleNetringDetector(detector) => {
+                let enabled = !self.detection_tuning.is_enabled(&detector).unwrap_or(false);
+                let command = serde_json::json!({ "type": "set_enabled", "detector": detector, "enabled": enabled });
+                let key = zensight_common::command_key("zensight/netring", "detectors");
+                return self
+                    .send_command(
+                        key,
+                        &command,
+                        format!("{detector} {}", if enabled { "enabled" } else { "muted" }),
+                    )
+                    .chain(self.query_detector_status());
+            }
+            Message::SetNetringThresholdInput { detector, value } => {
+                if let Some(row) = self
+                    .detection_tuning
+                    .detectors
+                    .iter_mut()
+                    .find(|d| d.name == detector)
+                {
+                    row.threshold_input = value;
+                }
+            }
+            Message::ApplyNetringThreshold(detector) => {
+                let input = self
+                    .detection_tuning
+                    .detectors
+                    .iter()
+                    .find(|d| d.name == detector)
+                    .map(|d| d.threshold_input.clone())
+                    .unwrap_or_default();
+                let Ok(value) = input.trim().parse::<f64>() else {
+                    self.toasts
+                        .push(ToastSeverity::Error, "Threshold must be a number");
+                    return Task::none();
+                };
+                let command = serde_json::json!({ "type": "set_threshold", "detector": detector, "value": value });
+                let key = zensight_common::command_key("zensight/netring", "detectors");
+                return self
+                    .send_command(key, &command, format!("{detector} threshold = {value}"))
+                    .chain(self.query_detector_status());
+            }
+            Message::SetNetringAllowlistInput(value) => {
+                self.detection_tuning.new_entry = value;
+            }
+            Message::AddNetringAllowlist => {
+                let entry = self.detection_tuning.new_entry.trim().to_string();
+                if entry.is_empty() {
+                    return Task::none();
+                }
+                self.detection_tuning.new_entry.clear();
+                let command = serde_json::json!({ "type": "add_allowlist", "entry": entry });
+                let key = zensight_common::command_key("zensight/netring", "detectors");
+                return self
+                    .send_command(key, &command, format!("Allowlisted {entry}"))
+                    .chain(self.query_detector_status());
+            }
+            Message::RemoveNetringAllowlist(entry) => {
+                let command = serde_json::json!({ "type": "remove_allowlist", "entry": entry });
+                let key = zensight_common::command_key("zensight/netring", "detectors");
+                return self
+                    .send_command(key, &command, format!("Removed {entry}"))
+                    .chain(self.query_detector_status());
+            }
+
             Message::FetchNetlinkDetail(topic) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netlink_detail.loading(topic);
@@ -1386,6 +1463,8 @@ impl ZenSight {
             }
             Message::OpenSecurity => {
                 self.set_view(CurrentView::Security);
+                // Pull the netring detector config so the tuning panel is ready.
+                return self.query_detector_status();
             }
             Message::CloseSecurity => {
                 self.set_view(CurrentView::Dashboard);
@@ -1539,6 +1618,32 @@ impl ZenSight {
                     success: false,
                     message: format!("Status query failed: {e}"),
                 },
+            }
+        })
+    }
+
+    /// Query the netring sensor's current detector config (#121, status
+    /// queryable). Routes to `DetectorConfigReceived`.
+    fn query_detector_status(&self) -> Task<Message> {
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::DetectorConfigReceived(Err(
+                "Not connected to Zenoh".to_string(),
+            )));
+        };
+        let key = zensight_common::status_key("zensight/netring", "detectors");
+        Task::future(async move {
+            match session.get(&key).await {
+                Ok(replies) => {
+                    if let Ok(reply) = replies.recv_async().await
+                        && let Ok(sample) = reply.result()
+                    {
+                        let body =
+                            String::from_utf8_lossy(&sample.payload().to_bytes()).to_string();
+                        return Message::DetectorConfigReceived(Ok(body));
+                    }
+                    Message::DetectorConfigReceived(Err("No netring sensor responded".to_string()))
+                }
+                Err(e) => Message::DetectorConfigReceived(Err(format!("Status query failed: {e}"))),
             }
         })
     }
@@ -1948,9 +2053,11 @@ impl ZenSight {
             CurrentView::Expectations => {
                 crate::view::expectations::expectations_view(&self.expectations)
             }
-            CurrentView::Security => {
-                crate::view::security::security_view(&self.alerts, &self.security)
-            }
+            CurrentView::Security => crate::view::security::security_view(
+                &self.alerts,
+                &self.security,
+                &self.detection_tuning,
+            ),
             CurrentView::Sensors => {
                 crate::view::sensors::sensors_view(&self.sensor_health, &self.recent_errors)
             }
