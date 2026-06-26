@@ -33,6 +33,10 @@ pub struct InventoryData {
     /// JA4H HTTP-request fingerprints (#124). Empty unless the netring sensor was
     /// built with `--features ja4plus` and `collect.http_fp` is set.
     pub ja4h: Vec<Ja4hRecord>,
+    /// Whether a netring sensor actually answered the `@/query/assets` queryable.
+    /// `false` means asset collection is disabled on the sensor (`collect.assets`
+    /// is opt-in); distinct from answering with an empty list (nothing seen yet).
+    pub assets_responded: bool,
 }
 
 /// Sort order for the asset table (#120).
@@ -115,6 +119,8 @@ pub struct InventoryState {
     pub loading: bool,
     pub error: Option<String>,
     pub assets: Vec<AssetRecord>,
+    /// Whether the netring sensor answered the assets query (see `InventoryData`).
+    pub assets_responded: bool,
     pub fingerprints: Vec<Fingerprint>,
     pub asset_sort: AssetSort,
     /// Active fingerprint-kind filter (`None` = all kinds).
@@ -136,6 +142,7 @@ impl InventoryState {
                 self.fingerprints =
                     merge_fingerprints(&data.tls, &data.quic, &data.ssh, &data.ja4h);
                 self.assets = data.assets;
+                self.assets_responded = data.assets_responded;
                 self.error = None;
             }
             Err(e) => self.error = Some(e),
@@ -322,8 +329,14 @@ fn render_assets(state: &InventoryState) -> Element<'_, Message> {
     if state.assets.is_empty() {
         let hint = if state.loading {
             "Loading assets…"
+        } else if !state.assets_responded {
+            // A netring sensor may be running, but passive asset discovery is
+            // opt-in (`collect.assets`, default off) so the queryable is absent.
+            "Asset discovery is off on the netring sensor — set collect.assets = true in its config, then restart it"
         } else {
-            "No assets discovered (needs a netring sensor)"
+            // The sensor answered with an empty inventory: it's watching the wire
+            // but hasn't observed any host yet (ARP/NDP/LLDP are passive).
+            "No assets discovered yet — the netring sensor is listening for ARP/NDP/LLDP on the wire"
         };
         return column![header, empty_state(hint, None)]
             .spacing(space::SM)

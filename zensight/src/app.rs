@@ -2149,6 +2149,7 @@ impl ZenSight {
                 return Message::InventoryLoaded(Err("No netring sensor responded".to_string()));
             }
             Message::InventoryLoaded(Ok(InventoryData {
+                assets_responded: assets.is_some(),
                 assets: assets.unwrap_or_default(),
                 tls: tls.unwrap_or_default(),
                 quic: quic.unwrap_or_default(),
