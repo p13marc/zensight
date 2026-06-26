@@ -1018,23 +1018,117 @@ pub struct XfrmSaRecord {
 }
 
 // ---------------------------------------------------------------------------
-// nftables rule counters (issue #14): per-table chain/rule counts streamed;
-// full table/chain/rule inventory served via `@/query/nft`.
+// nftables rule counters (issues #14, #115): per-table chain/rule counts plus the
+// per-rule packet/byte counters that are the real value of nft telemetry (firewall
+// hit-rate). Full table/chain/rule inventory served via `@/query/nft`.
 //
-// NOTE: the pinned nlink `RuleInfo` exposes no *decoded* per-rule packet/byte
-// counters (only the raw expression bytes), so the streamed signal is ruleset
-// shape (counts) — firewall policy-drift / ruleset-size visibility — rather than
-// per-rule traffic. Per-rule traffic would require decoding the counter
-// expression from `expression_bytes`, deferred.
+// The kernel exposes per-rule counters only as a `counter` *expression* inside the
+// raw `NFTA_RULE_EXPRESSIONS` blob (nlink's `RuleInfo::expression_bytes`), so #115
+// decodes that blob — see [`decode_nft_counter`] — rather than reporting counts
+// only.
 // ---------------------------------------------------------------------------
 
-/// One nftables table's shape (nlink-free), pure input to [`nft_points`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+// netlink TLV / nftables UAPI constants used by the counter decoder (#115). These
+// are stable kernel ABI values; defined locally so the decode is self-contained.
+const NLA_TYPE_MASK: u16 = 0x3fff; // strip NLA_F_NESTED (0x8000) | NLA_F_NET_BYTEORDER (0x4000)
+const NFTA_LIST_ELEM: u16 = 1;
+const NFTA_EXPR_NAME: u16 = 1;
+const NFTA_EXPR_DATA: u16 = 2;
+const NFTA_COUNTER_BYTES: u16 = 1;
+const NFTA_COUNTER_PACKETS: u16 = 2;
+
+/// A decoded per-rule firewall counter (#115): cumulative packets/bytes matched.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NftCounter {
+    pub packets: u64,
+    pub bytes: u64,
+}
+
+/// Iterate netlink TLV attributes in `buf`, yielding `(type & NLA_TYPE_MASK,
+/// payload)`. Header is host byte order (the kernel emits native-endian nla_len /
+/// nla_type); the payload is unpadded and the cursor advances on the 4-byte
+/// `NLA_ALIGNTO` boundary. Stops on any malformed/truncated attribute.
+fn nl_attrs(buf: &[u8]) -> impl Iterator<Item = (u16, &[u8])> {
+    let mut rest = buf;
+    std::iter::from_fn(move || {
+        if rest.len() < 4 {
+            return None;
+        }
+        let len = u16::from_ne_bytes([rest[0], rest[1]]) as usize;
+        let typ = u16::from_ne_bytes([rest[2], rest[3]]);
+        if len < 4 || len > rest.len() {
+            return None;
+        }
+        let payload = &rest[4..len];
+        let advance = (len + 3) & !3; // align to NLA_ALIGNTO
+        rest = if advance >= rest.len() {
+            &[]
+        } else {
+            &rest[advance..]
+        };
+        Some((typ & NLA_TYPE_MASK, payload))
+    })
+}
+
+/// Read a NUL-terminated netlink string attribute payload.
+fn nl_attr_str(payload: &[u8]) -> &str {
+    let end = payload
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(payload.len());
+    std::str::from_utf8(&payload[..end]).unwrap_or("")
+}
+
+/// Decode the `counter` expression from a rule's raw `NFTA_RULE_EXPRESSIONS`
+/// payload (#115). `expression_bytes` is a list of `NFTA_LIST_ELEM` attributes,
+/// one per expression; a counter expression carries `NFTA_COUNTER_{BYTES,PACKETS}`
+/// as big-endian `u64`s inside its `NFTA_EXPR_DATA`. Returns the summed counter
+/// (rules normally have at most one), or `None` if the rule has no counter
+/// statement — distinguishing "no counter" from "counter reading zero".
+pub fn decode_nft_counter(expression_bytes: &[u8]) -> Option<NftCounter> {
+    let mut found = false;
+    let mut acc = NftCounter::default();
+    for (etype, elem) in nl_attrs(expression_bytes) {
+        if etype != NFTA_LIST_ELEM {
+            continue;
+        }
+        let mut name = "";
+        let mut data: &[u8] = &[];
+        for (atype, payload) in nl_attrs(elem) {
+            match atype {
+                NFTA_EXPR_NAME => name = nl_attr_str(payload),
+                NFTA_EXPR_DATA => data = payload,
+                _ => {}
+            }
+        }
+        if name == "counter" {
+            for (ctype, payload) in nl_attrs(data) {
+                if payload.len() >= 8 {
+                    let v = u64::from_be_bytes(payload[..8].try_into().unwrap());
+                    match ctype {
+                        NFTA_COUNTER_BYTES => acc.bytes = acc.bytes.saturating_add(v),
+                        NFTA_COUNTER_PACKETS => acc.packets = acc.packets.saturating_add(v),
+                        _ => {}
+                    }
+                }
+            }
+            found = true;
+        }
+    }
+    found.then_some(acc)
+}
+
+/// One nftables table's shape + traffic (nlink-free), pure input to [`nft_points`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NftTableSample {
     pub family: String,
     pub table: String,
     pub chains: u64,
     pub rules: u64,
+    /// Summed packets across this table's counter rules (#115).
+    pub packets: u64,
+    /// Summed bytes across this table's counter rules (#115).
+    pub bytes: u64,
 }
 
 /// Host-level nftables summary across all tables.
@@ -1044,22 +1138,32 @@ pub struct NftSummary {
     pub tables_total: u64,
     pub chains_total: u64,
     pub rules_total: u64,
+    /// Host-wide firewall hit counters across all counter rules (#115).
+    pub packets_total: u64,
+    pub bytes_total: u64,
 }
 
-/// Build telemetry points for the nftables summary (#14). Metric paths are
-/// `nft/{tables,chains,rules}_total` and per-table
-/// `nft/<family>/<table>/{chains,rules}`.
+/// Build telemetry points for the nftables summary (#14, #115). Counts are gauges
+/// (`nft/{tables,chains,rules}_total`, per-table `nft/<family>/<table>/{chains,
+/// rules}`); the decoded firewall traffic is monotonic counters
+/// (`nft/{packets,bytes}_total`, per-table `.../{packets,bytes}`) so exporters and
+/// charts derive a hit-rate.
 pub fn nft_points(host: &str, s: &NftSummary) -> Vec<TelemetryPoint> {
     let g = |metric: String, v: u64| point(host, metric, TelemetryValue::Gauge(v as f64));
+    let c = |metric: String, v: u64| point(host, metric, TelemetryValue::Counter(v));
     let mut out = vec![
         g("nft/tables_total".into(), s.tables_total),
         g("nft/chains_total".into(), s.chains_total),
         g("nft/rules_total".into(), s.rules_total),
+        c("nft/packets_total".into(), s.packets_total),
+        c("nft/bytes_total".into(), s.bytes_total),
     ];
     for t in &s.tables {
         let pfx = format!("nft/{}/{}", t.family, t.table);
         out.push(g(format!("{pfx}/chains"), t.chains));
         out.push(g(format!("{pfx}/rules"), t.rules));
+        out.push(c(format!("{pfx}/packets"), t.packets));
+        out.push(c(format!("{pfx}/bytes"), t.bytes));
     }
     out
 }
@@ -1072,6 +1176,12 @@ pub struct NftRuleRecord {
     pub chain: String,
     pub handle: u64,
     pub comment: Option<String>,
+    /// Per-rule firewall counter (#115); `0` when the rule has no `counter`
+    /// statement. `#[serde(default)]` keeps older sensors wire-compatible.
+    #[serde(default)]
+    pub packets: u64,
+    #[serde(default)]
+    pub bytes: u64,
 }
 
 #[cfg(test)]
@@ -1737,17 +1847,23 @@ mod tests {
                     table: "filter".into(),
                     chains: 3,
                     rules: 12,
+                    packets: 100,
+                    bytes: 6400,
                 },
                 NftTableSample {
                     family: "ip".into(),
                     table: "nat".into(),
                     chains: 2,
                     rules: 4,
+                    packets: 0,
+                    bytes: 0,
                 },
             ],
             tables_total: 2,
             chains_total: 5,
             rules_total: 16,
+            packets_total: 100,
+            bytes_total: 6400,
         };
         let pts = nft_points("h", &s);
         let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
@@ -1758,5 +1874,62 @@ mod tests {
             TelemetryValue::Gauge(12.0)
         );
         assert_eq!(find("nft/ip/nat/chains").value, TelemetryValue::Gauge(2.0));
+        // #115: decoded firewall hit counters are monotonic Counters.
+        assert_eq!(
+            find("nft/packets_total").value,
+            TelemetryValue::Counter(100)
+        );
+        assert_eq!(find("nft/bytes_total").value, TelemetryValue::Counter(6400));
+        assert_eq!(
+            find("nft/inet/filter/packets").value,
+            TelemetryValue::Counter(100)
+        );
+    }
+
+    /// #115: encode a synthetic `NFTA_RULE_EXPRESSIONS` blob the way the kernel
+    /// would — a `counter` expression carrying big-endian packets/bytes nested in
+    /// a list element — and confirm the decoder recovers it. Rules with no counter
+    /// statement decode to `None`.
+    #[test]
+    fn decode_nft_counter_roundtrip() {
+        // Build a netlink attribute: (len u16 ne)(type u16 ne)(payload, 4-aligned).
+        fn attr(typ: u16, payload: &[u8]) -> Vec<u8> {
+            let len = 4 + payload.len();
+            let mut v = Vec::new();
+            v.extend_from_slice(&(len as u16).to_ne_bytes());
+            v.extend_from_slice(&typ.to_ne_bytes());
+            v.extend_from_slice(payload);
+            while v.len() % 4 != 0 {
+                v.push(0);
+            }
+            v
+        }
+
+        // counter data: BYTES then PACKETS, big-endian u64 (NET_BYTEORDER flag set).
+        let mut counter_data = Vec::new();
+        counter_data.extend(attr(NFTA_COUNTER_BYTES | 0x4000, &6400u64.to_be_bytes()));
+        counter_data.extend(attr(NFTA_COUNTER_PACKETS | 0x4000, &100u64.to_be_bytes()));
+
+        // one expression element: NAME="counter" + nested DATA.
+        let mut elem = Vec::new();
+        elem.extend(attr(NFTA_EXPR_NAME, b"counter\0"));
+        elem.extend(attr(NFTA_EXPR_DATA | 0x8000, &counter_data));
+
+        // the rule's expression list: a single nested LIST_ELEM.
+        let expr_bytes = attr(NFTA_LIST_ELEM | 0x8000, &elem);
+
+        let ctr = decode_nft_counter(&expr_bytes).expect("counter present");
+        assert_eq!(ctr.packets, 100);
+        assert_eq!(ctr.bytes, 6400);
+
+        // A non-counter expression (e.g. "accept" verdict) → no counter.
+        let mut other = Vec::new();
+        other.extend(attr(NFTA_EXPR_NAME, b"immediate\0"));
+        let other_bytes = attr(NFTA_LIST_ELEM | 0x8000, &other);
+        assert_eq!(decode_nft_counter(&other_bytes), None);
+
+        // Garbage / truncated input never panics.
+        assert_eq!(decode_nft_counter(&[0xff, 0x00, 0x01]), None);
+        assert_eq!(decode_nft_counter(&[]), None);
     }
 }

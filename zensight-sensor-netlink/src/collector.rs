@@ -686,18 +686,29 @@ impl Collector {
                 .iter()
                 .filter(|c| c.table == t.name && c.family == t.family)
                 .count() as u64;
-            let rule_count = conn
-                .list_rules(&t.name, t.family)
-                .await
-                .map(|r| r.len() as u64)
-                .unwrap_or(0);
+            // Decode each rule's counter expression (#115) while we have the rules
+            // listed, summing the firewall hit packets/bytes per table.
+            let rules = conn.list_rules(&t.name, t.family).await.unwrap_or_default();
+            let rule_count = rules.len() as u64;
+            let mut packets = 0u64;
+            let mut bytes = 0u64;
+            for r in &rules {
+                if let Some(ctr) = map::decode_nft_counter(&r.expression_bytes) {
+                    packets = packets.saturating_add(ctr.packets);
+                    bytes = bytes.saturating_add(ctr.bytes);
+                }
+            }
             summary.chains_total += chain_count;
             summary.rules_total += rule_count;
+            summary.packets_total = summary.packets_total.saturating_add(packets);
+            summary.bytes_total = summary.bytes_total.saturating_add(bytes);
             summary.tables.push(NftTableSample {
                 family: family.to_string(),
                 table: t.name.clone(),
                 chains: chain_count,
                 rules: rule_count,
+                packets,
+                bytes,
             });
         }
         for point in map::nft_points(&self.host, &summary) {

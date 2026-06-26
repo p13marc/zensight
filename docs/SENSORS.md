@@ -148,6 +148,11 @@ expectations and alerts on deviation.
 - **Default-route flaps:** a streamed `routes/default_v4_flaps_total` counter plus
   a per-transition history ring served on `@/query/route_changes` (gateway change /
   withdrawal / re-appearance with timestamps) — the #1 connectivity incident.
+- **nftables firewall hit-rate (#115):** the per-rule `counter` expression is
+  decoded from the raw ruleset, so beyond ruleset shape (`nft/{tables,chains,rules}
+  _total`) the sensor streams monotonic `nft/{packets,bytes}_total` and per-table
+  `nft/<family>/<table>/{packets,bytes}` counters; `@/query/nft` carries per-rule
+  `packets`/`bytes`.
 - **Alerts:** `@/alerts/<alert_key>` from sentinel expectation violations
   (sockets listen/established/forbid, links up, …).
 - **Control:** `@/commands/expectations` (+ `@/status/expectations`) to

@@ -719,9 +719,12 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
             row![
                 cell("family", 80),
                 cell("table", 140),
-                cell("chain", 140),
-                cell("handle", 80),
-                cell("comment", 200),
+                cell("chain", 120),
+                cell("handle", 70),
+                // #115: decoded firewall hit counters (packets / bytes matched).
+                cell("packets", 90),
+                cell("bytes", 90),
+                cell("comment", 180),
             ]
             .spacing(8),
         );
@@ -730,9 +733,11 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
                 row![
                     cell(&r.family, 80),
                     cell(&r.table, 140),
-                    cell(&r.chain, 140),
-                    cell(&r.handle.to_string(), 80),
-                    cell(r.comment.as_deref().unwrap_or("-"), 200),
+                    cell(&r.chain, 120),
+                    cell(&r.handle.to_string(), 70),
+                    cell(&fmt_count(r.packets), 90),
+                    cell(&fmt_bytes(r.bytes), 90),
+                    cell(r.comment.as_deref().unwrap_or("-"), 180),
                 ]
                 .spacing(8),
             );
@@ -933,6 +938,30 @@ fn cell<'a>(s: &str, width: u16) -> Element<'a, Message> {
         .size(12)
         .width(Length::Fixed(width as f32))
         .into()
+}
+
+/// Compact count: `1234` → `1.2K`, `2_000_000` → `2.0M` (#115 nft hit counters).
+fn fmt_count(n: u64) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=999_999 => format!("{:.1}K", n as f64 / 1e3),
+        1_000_000..=999_999_999 => format!("{:.1}M", n as f64 / 1e6),
+        _ => format!("{:.1}G", n as f64 / 1e9),
+    }
+}
+
+/// Human byte size (#115 nft byte counters).
+fn fmt_bytes(n: u64) -> String {
+    let b = n as f64;
+    if b < 1024.0 {
+        format!("{n} B")
+    } else if b < 1024.0 * 1024.0 {
+        format!("{:.1} KB", b / 1024.0)
+    } else if b < 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1} MB", b / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GB", b / (1024.0 * 1024.0 * 1024.0))
+    }
 }
 
 fn dim(theme: &Theme) -> text::Style {

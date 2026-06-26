@@ -89,6 +89,12 @@ pub struct NftRuleRecord {
     pub chain: String,
     pub handle: u64,
     pub comment: Option<String>,
+    /// Decoded per-rule firewall counter (#115). `serde(default)` keeps older
+    /// sensors (no counter fields) decodable.
+    #[serde(default)]
+    pub packets: u64,
+    #[serde(default)]
+    pub bytes: u64,
 }
 
 /// Which detail table to fetch.
