@@ -80,13 +80,20 @@ impl Default for TopologyState {
 impl TopologyState {
     /// Update topology from dashboard device states.
     pub fn update_from_devices(&mut self, devices: &HashMap<DeviceId, DeviceState>) {
-        use zensight_common::Protocol;
         let initial_count = self.nodes.len();
 
-        // A node per host: sysinfo or netlink devices (a host running both is one
-        // node, merged by source).
+        // Recompute the per-host metric tally from scratch each pass (#83): nodes
+        // persist across calls and a host has one facet per protocol, so zero
+        // first, then accumulate below.
+        for node in self.nodes.values_mut() {
+            node.metric_count = 0;
+        }
+
+        // A node per physical host/device, merged by source. Widened beyond
+        // sysinfo/netlink (#83) so netflow exporters and gNMI/SNMP/Modbus gear
+        // also appear; syslog/netring are overlays (logs / flow edges), not nodes.
         for (device_id, device_state) in devices {
-            if !matches!(device_id.protocol, Protocol::Sysinfo | Protocol::Netlink) {
+            if !is_node_protocol(device_id.protocol) {
                 continue;
             }
 
@@ -109,6 +116,7 @@ impl TopologyState {
             if let Some(node) = self.nodes.get_mut(&node_id) {
                 node.is_healthy = device_state.is_healthy;
                 node.protocols.insert(device_id.protocol);
+                node.metric_count += device_state.metric_count;
                 node.update_from_metrics(&device_state.metrics);
             }
         }
@@ -438,6 +446,10 @@ pub struct Node {
     /// correlation entry references it; surfaces the otherwise-dead correlations
     /// map as a "seen by N sensors" node label.
     pub sensor_count: Option<usize>,
+    /// Total telemetry metrics tracked across this host's facets (#83). A
+    /// protocol-agnostic signal so nodes whose protocol has no dedicated panel
+    /// section (netflow / snmp / modbus / gnmi) still show something useful.
+    pub metric_count: usize,
 }
 
 impl Node {
@@ -722,6 +734,24 @@ fn progress_bar(percentage: f64, width: usize) -> String {
 
 /// Pick the icon protocol for a node: prefer sysinfo (the host identity), then
 /// netlink, otherwise the first protocol that covers the host (#83).
+/// Whether a protocol's `source` represents a physical host/device that should be
+/// a topology node (#83). sysinfo/netlink hosts, netflow exporters, and
+/// gNMI/SNMP/Modbus network gear are nodes; syslog (log overlay) and netring (flow
+/// overlay that supplies the *edges*) annotate existing nodes rather than adding
+/// their own.
+fn is_node_protocol(p: zensight_common::Protocol) -> bool {
+    use zensight_common::Protocol;
+    matches!(
+        p,
+        Protocol::Sysinfo
+            | Protocol::Netlink
+            | Protocol::Netflow
+            | Protocol::Gnmi
+            | Protocol::Snmp
+            | Protocol::Modbus
+    )
+}
+
 fn primary_protocol(node: &Node) -> zensight_common::Protocol {
     use zensight_common::Protocol;
     if node.protocols.contains(&Protocol::Sysinfo) {
@@ -785,6 +815,14 @@ fn render_node_info_panel(node: &Node) -> Element<'_, Message> {
             .map(|p| format!("{p:?}").to_lowercase())
             .collect();
         info_items = info_items.push(text(format!("Covered by: {}", names.join(" · "))).size(11));
+    }
+
+    // Protocol-agnostic signal (#83): how many metrics this host is tracked by.
+    // Keeps netflow/snmp/modbus/gnmi nodes — which have no dedicated section
+    // below — from showing a near-empty panel.
+    if node.metric_count > 0 {
+        info_items =
+            info_items.push(text(format!("Metrics tracked: {}", node.metric_count)).size(11));
     }
 
     // System resources section
@@ -1421,6 +1459,53 @@ mod tests {
         assert_eq!(node.tcp_listen, Some(12.0));
         assert_eq!(node.routes_total, Some(20.0));
         assert_eq!(node.neighbors_total, Some(18.0));
+    }
+
+    #[test]
+    fn test_node_sourcing_widened_excludes_overlays() {
+        use std::collections::HashMap;
+        use zensight_common::Protocol;
+
+        let mut devices: HashMap<DeviceId, DeviceState> = HashMap::new();
+        let mut add = |proto: Protocol, source: &str, metrics: usize| {
+            let id = DeviceId::new(proto, source);
+            let mut d = DeviceState::new(id.clone());
+            d.metric_count = metrics;
+            devices.insert(id, d);
+        };
+        // Host gear that should each become a node.
+        add(Protocol::Sysinfo, "server01", 10);
+        add(Protocol::Netlink, "server01", 5); // same host → merges, one node
+        add(Protocol::Netflow, "exporter01", 3);
+        add(Protocol::Snmp, "switch01", 7);
+        add(Protocol::Modbus, "plc01", 2);
+        add(Protocol::Gnmi, "router01", 4);
+        // Overlays that must NOT add their own nodes.
+        add(Protocol::Syslog, "logbox01", 99);
+        add(Protocol::Netring, "sensor01", 99);
+
+        let mut state = TopologyState::default();
+        state.update_from_devices(&devices);
+
+        // 5 distinct hosts (server01 merged), no syslog/netring nodes.
+        assert_eq!(state.nodes.len(), 5);
+        assert!(state.nodes.contains_key("exporter01"));
+        assert!(state.nodes.contains_key("switch01"));
+        assert!(state.nodes.contains_key("plc01"));
+        assert!(state.nodes.contains_key("router01"));
+        assert!(!state.nodes.contains_key("logbox01"));
+        assert!(!state.nodes.contains_key("sensor01"));
+
+        // Merged host carries both protocols and the summed metric tally.
+        let server = state.nodes.get("server01").unwrap();
+        assert!(server.protocols.contains(&Protocol::Sysinfo));
+        assert!(server.protocols.contains(&Protocol::Netlink));
+        assert_eq!(server.metric_count, 15);
+
+        // Re-running doesn't double-count the per-host metric tally.
+        state.update_from_devices(&devices);
+        assert_eq!(state.nodes.get("server01").unwrap().metric_count, 15);
+        assert_eq!(state.nodes.len(), 5);
     }
 
     #[test]
