@@ -141,6 +141,32 @@ impl Severity {
             Self::Debug => "debug",
         }
     }
+
+    /// OTel `severity_number` (1–24) for this syslog severity (#104), per the
+    /// OpenTelemetry logs data model's syslog mapping.
+    pub fn otel_severity_number(&self) -> u8 {
+        match self {
+            Self::Emergency => 24,    // FATAL4
+            Self::Alert => 23,        // FATAL3
+            Self::Critical => 22,     // FATAL2
+            Self::Error => 17,        // ERROR
+            Self::Warning => 13,      // WARN
+            Self::Notice => 10,       // INFO2
+            Self::Informational => 9, // INFO
+            Self::Debug => 5,         // DEBUG
+        }
+    }
+
+    /// OTel `severity_text` short level name (#104): the coarse OTel band.
+    pub fn otel_severity_text(&self) -> &'static str {
+        match self {
+            Self::Emergency | Self::Alert | Self::Critical => "FATAL",
+            Self::Error => "ERROR",
+            Self::Warning => "WARN",
+            Self::Notice | Self::Informational => "INFO",
+            Self::Debug => "DEBUG",
+        }
+    }
 }
 
 /// Parsed syslog message.

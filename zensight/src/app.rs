@@ -2394,11 +2394,19 @@ impl ZenSight {
             .or_insert_with(|| DeviceState::new(device_id.clone()));
 
         device_state.last_update = point.timestamp;
-        device_state.metric_count = device_state.metrics.len() + 1;
-        device_state
-            .metrics
-            .insert(point.metric.clone(), point.clone());
         device_state.is_healthy = true;
+        // Per-line log events (#104) use unique `events/<uid>` metrics — keeping
+        // the latest point per metric would grow the device map without bound (one
+        // entry per log line). They live in `recent_logs` instead; here we only
+        // refresh liveness. All other telemetry keeps last-value-per-metric.
+        let is_log_event = point.protocol == zensight_common::Protocol::Logs
+            && point.metric.starts_with("events/");
+        if !is_log_event {
+            device_state
+                .metrics
+                .insert(point.metric.clone(), point.clone());
+        }
+        device_state.metric_count = device_state.metrics.len();
 
         // Check alert rules for numeric values
         if let Some(numeric_value) = telemetry_to_f64(&point.value)
@@ -2416,9 +2424,11 @@ impl ZenSight {
             );
         }
 
-        // Update selected device if this telemetry is for it
+        // Update selected device if this telemetry is for it. Per-line log events
+        // are excluded for the same cardinality reason as above (#104).
         if let Some(ref mut selected) = self.selected_device
             && selected.device_id == device_id
+            && !is_log_event
         {
             selected.update(point);
         }

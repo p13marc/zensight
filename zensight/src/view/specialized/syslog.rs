@@ -1168,20 +1168,12 @@ fn parse_syslog_messages(state: &DeviceDetailState) -> Vec<SyslogMessage> {
 /// is the host to use when the point carries no `hostname` label (the telemetry
 /// `source`). Used both by the device view and the app's rolling logs buffer.
 pub fn syslog_message_from_point(point: &TelemetryPoint, source_fallback: &str) -> SyslogMessage {
-    // Parse severity from metric path (format: facility/severity)
-    let parts: Vec<&str> = point.metric.split('/').collect();
-    let (facility, severity) = if parts.len() >= 2 {
-        let fac = parts[0].to_string();
-        let sev = SyslogSeverity::from_str(parts[1]).unwrap_or(SyslogSeverity::Informational);
-        (fac, sev)
-    } else {
-        // Fallback: try labels
-        let fac = point
-            .labels
-            .get("facility")
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_string());
-        let sev = point
+    // Per-line event keys (#104) carry facility/severity in labels, not the metric
+    // (which is now `events/<uid>`). Prefer labels; fall back to the old
+    // `facility/severity` metric path for any legacy points still in the buffer.
+    let (facility, severity) = {
+        let fac_label = point.labels.get("facility").cloned();
+        let sev_label = point
             .labels
             .get("severity")
             .and_then(|s| s.parse::<u64>().ok())
@@ -1191,9 +1183,29 @@ pub fn syslog_message_from_point(point: &TelemetryPoint, source_fallback: &str) 
                     .labels
                     .get("severity")
                     .and_then(|s| SyslogSeverity::from_str(s))
-            })
-            .unwrap_or(SyslogSeverity::Informational);
-        (fac, sev)
+            });
+        match (fac_label, sev_label) {
+            (Some(fac), Some(sev)) => (fac, sev),
+            (fac_opt, sev_opt) => {
+                // Legacy fallback: parse from `facility/severity` metric path.
+                let parts: Vec<&str> = point.metric.split('/').collect();
+                let fac = fac_opt.unwrap_or_else(|| {
+                    if parts.len() >= 2 {
+                        parts[0].to_string()
+                    } else {
+                        "unknown".to_string()
+                    }
+                });
+                let sev = sev_opt
+                    .or_else(|| {
+                        (parts.len() >= 2)
+                            .then(|| SyslogSeverity::from_str(parts[1]))
+                            .flatten()
+                    })
+                    .unwrap_or(SyslogSeverity::Informational);
+                (fac, sev)
+            }
+        }
     };
 
     let hostname = point
@@ -1485,6 +1497,55 @@ mod tests {
         // The MESSAGE_ID resolves to its catalog explanation.
         assert!(message_catalog(m.msg_id.as_deref().unwrap()).is_some());
         assert!(message_catalog("deadbeef").is_none());
+    }
+
+    /// #104: per-line event points key as `events/<uid>` and carry facility/
+    /// severity in labels — `syslog_message_from_point` must read them from the
+    /// labels, not parse the (now non-semantic) `events/<uid>` metric path.
+    #[test]
+    fn per_line_event_reads_facility_severity_from_labels() {
+        use std::collections::HashMap;
+        use zensight_common::{TelemetryPoint, TelemetryValue};
+        let mut labels = HashMap::new();
+        labels.insert("facility".into(), "auth".to_string());
+        labels.insert("severity".into(), "err".to_string());
+        labels.insert("severity_number".into(), "17".to_string());
+        labels.insert("severity_text".into(), "ERROR".to_string());
+        labels.insert(
+            "log.record.uid".into(),
+            "0000000000009000000000042".to_string(),
+        );
+        let point = TelemetryPoint {
+            timestamp: 9,
+            source: "host01".into(),
+            protocol: Protocol::Logs,
+            metric: "events/0000000000009000000000042".into(),
+            value: TelemetryValue::Text("login failed".into()),
+            labels,
+        };
+        let m = syslog_message_from_point(&point, "host01");
+        assert_eq!(m.facility, "auth");
+        assert_eq!(m.severity, SyslogSeverity::Error);
+        assert_eq!(m.message, "login failed");
+    }
+
+    /// #104: legacy points still keyed `<facility>/<severity>` (no labels) keep
+    /// parsing from the metric path so in-flight buffers don't regress.
+    #[test]
+    fn legacy_facility_severity_metric_still_parses() {
+        use std::collections::HashMap;
+        use zensight_common::{TelemetryPoint, TelemetryValue};
+        let point = TelemetryPoint {
+            timestamp: 1,
+            source: "host01".into(),
+            protocol: Protocol::Logs,
+            metric: "kern/warning".into(),
+            value: TelemetryValue::Text("low mem".into()),
+            labels: HashMap::new(),
+        };
+        let m = syslog_message_from_point(&point, "host01");
+        assert_eq!(m.facility, "kern");
+        assert_eq!(m.severity, SyslogSeverity::Warning);
     }
 
     /// #93: the boot lens narrows the stream; the live-tail freeze hides lines

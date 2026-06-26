@@ -223,6 +223,10 @@ pub struct LogRecord {
     pub hostname: String,
     /// Timestamp in nanoseconds since epoch.
     pub timestamp_nanos: i64,
+    /// OTel `log.record.uid` — stable per-line id (#104), if the sensor set it.
+    pub uid: Option<String>,
+    /// OTel `log.record.original` — the verbatim raw line (#104), if present.
+    pub original: Option<String>,
 }
 
 impl LogRecord {
@@ -263,6 +267,8 @@ impl LogRecord {
             appname,
             hostname: point.source.clone(),
             timestamp_nanos: point.timestamp * 1_000_000, // ms to ns
+            uid: point.labels.get("log.record.uid").cloned(),
+            original: point.labels.get("log.record.original").cloned(),
         })
     }
 

@@ -42,7 +42,7 @@ have more than four chunks.
 
 ```
 zensight/snmp/router01/system/sysUpTime
-zensight/logs/web01/auth/crit                 # <facility>/<severity>
+zensight/logs/web01/events/0001700000000000000000042   # per-line event, metric=events/<uid>
 zensight/sysinfo/server01/cpu/usage
 zensight/netflow/exporter01/10.0.0.1/10.0.0.2
 zensight/modbus/plc01/holding/temperature
@@ -53,6 +53,18 @@ zensight/netring/sensor01/flow/by_l4/tcp/bytes_total
 
 Payload: a serialized [`TelemetryPoint`] (JSON or CBOR per the sensor's
 `serialization` config). Built via [`KeyExprBuilder::build(source, metric)`].
+
+> **Logs are per-line events** (#104). The logs sensor keys every line under a
+> unique `events/<uid>` metric — `<uid>` is `<timestamp_ms><seq>` (zero-padded,
+> time-sortable). This replaced the old `<facility>/<severity>` metric, where
+> every key was overwritten by the next line of the same severity (last-writer-
+> wins lost all history). Facility/severity and the OpenTelemetry logs data model
+> (`severity_number` 1–24, `severity_text`, `log.record.uid`, and
+> `log.record.original` when raw is kept) now travel in **labels**, not the key.
+> Because each line is unique text, these points feed the GUI's rolling log buffer
+> only — they are excluded from per-metric device state, the numeric local store,
+> and the Prometheus exporter (cardinality), while the OTel exporter maps them to
+> log records.
 
 > **Published with a zenoh-ext `AdvancedPublisher`** (per-key cache + miss/
 > publisher detection), so it pairs with the GUI's `AdvancedSubscriber` on

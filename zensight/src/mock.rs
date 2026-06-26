@@ -205,30 +205,52 @@ pub mod sysinfo {
 pub mod syslog {
     use super::*;
 
-    /// Generate mock syslog messages. The metric path is `<facility>/<severity>`
-    /// using the real RFC-5424 severity slugs (`err`, `warning`, ...), matching
-    /// the syslog sensor's contract.
+    /// Generate mock log lines. Each line is a per-line event (#104): the metric
+    /// is `events/<uid>` (unique, time-sortable) and the facility/severity travel
+    /// in labels with the OTel logs data model, matching the logs sensor's contract.
     pub fn server(name: &str) -> Vec<TelemetryPoint> {
-        vec![
-            telemetry_point(
-                Protocol::Logs,
-                name,
-                "auth/info",
-                TelemetryValue::Text("User admin logged in successfully".to_string()),
-            ),
-            telemetry_point(
-                Protocol::Logs,
-                name,
-                "kern/warning",
-                TelemetryValue::Text("Low memory condition detected".to_string()),
-            ),
-            telemetry_point(
-                Protocol::Logs,
-                name,
-                "daemon/err",
-                TelemetryValue::Text("Service nginx failed to start".to_string()),
-            ),
+        [
+            ("auth", "info", "User admin logged in successfully"),
+            ("kern", "warning", "Low memory condition detected"),
+            ("daemon", "err", "Service nginx failed to start"),
         ]
+        .into_iter()
+        .enumerate()
+        .map(|(seq, (facility, severity, msg))| {
+            let mut labels = HashMap::new();
+            labels.insert("facility".to_string(), facility.to_string());
+            labels.insert("severity".to_string(), severity.to_string());
+            let (num, text) = otel_severity(severity);
+            labels.insert("severity_number".to_string(), num.to_string());
+            labels.insert("severity_text".to_string(), text.to_string());
+            // Mirror the sensor's `<timestamp_ms><seq>` uid shape (#104).
+            let uid = format!("{:013}{:012}", 0, seq);
+            labels.insert("log.record.uid".to_string(), uid.clone());
+            telemetry_point_with_labels(
+                Protocol::Logs,
+                name,
+                &format!("events/{uid}"),
+                TelemetryValue::Text(msg.to_string()),
+                labels,
+            )
+        })
+        .collect()
+    }
+
+    /// Map an RFC-5424 severity slug to the OTel (`severity_number`, `severity_text`)
+    /// pair the logs sensor publishes — keep in sync with `parser::Severity`.
+    fn otel_severity(slug: &str) -> (u8, &'static str) {
+        match slug {
+            "emerg" => (24, "FATAL"),
+            "alert" => (23, "FATAL"),
+            "crit" => (22, "FATAL"),
+            "err" => (17, "ERROR"),
+            "warning" => (13, "WARN"),
+            "notice" => (10, "INFO"),
+            "info" => (9, "INFO"),
+            "debug" => (5, "DEBUG"),
+            _ => (9, "INFO"),
+        }
     }
 }
 

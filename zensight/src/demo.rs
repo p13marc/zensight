@@ -1170,10 +1170,11 @@ impl DemoSimulator {
     fn generate_syslog(&mut self, timestamp: i64) -> Vec<TelemetryPoint> {
         let mut points = Vec::new();
 
-        // Helper to create a syslog message matching the real sensor's contract:
-        // the metric path is `<facility>/<severity-name>` (which the frontend
-        // parses for facility + severity) and the value is the message text.
-        let make_syslog = |_id: u64,
+        // Helper to create a log line matching the real sensor's contract (#104):
+        // a per-line event keyed `events/<uid>` (unique, so every line survives
+        // instead of last-writer-wins), with facility/severity plus the OTel logs
+        // data model carried in labels and the message text as the value.
+        let make_syslog = |id: u64,
                            server: &str,
                            severity: u64,
                            facility: &str,
@@ -1190,16 +1191,31 @@ impl DemoSimulator {
                 6 => "info",
                 _ => "debug",
             };
+            let (sev_num, sev_text) = match severity {
+                0 => (24, "FATAL"),
+                1 => (23, "FATAL"),
+                2 => (22, "FATAL"),
+                3 => (17, "ERROR"),
+                4 => (13, "WARN"),
+                5 => (10, "INFO"),
+                6 => (9, "INFO"),
+                _ => (5, "DEBUG"),
+            };
+            // Mirror the sensor's `<timestamp_ms><seq>` uid shape (#104).
+            let uid = format!("{:013}{:012}", ts.max(0), id);
             TelemetryPoint {
                 timestamp: ts,
                 source: server.to_string(),
                 protocol: Protocol::Logs,
-                metric: format!("{facility}/{severity_name}"),
+                metric: format!("events/{uid}"),
                 value: TelemetryValue::Text(msg.to_string()),
                 labels: [
                     ("severity".to_string(), severity_name.to_string()),
                     ("facility".to_string(), facility.to_string()),
                     ("app".to_string(), app_name.to_string()),
+                    ("severity_number".to_string(), sev_num.to_string()),
+                    ("severity_text".to_string(), sev_text.to_string()),
+                    ("log.record.uid".to_string(), uid.clone()),
                 ]
                 .into_iter()
                 .collect(),
@@ -2460,19 +2476,26 @@ mod tests {
     }
 
     #[test]
-    fn test_demo_syslog_uses_facility_severity_path() {
+    fn test_demo_syslog_emits_per_line_events() {
         let mut sim = DemoSimulator::new();
-        // Syslog lines are probabilistic per tick; sample enough ticks.
+        // Log lines are probabilistic per tick; sample enough ticks.
         let mut saw_syslog = false;
         for i in 0..200 {
             for p in sim.tick(1700000000000 + i * 600) {
                 if p.protocol == Protocol::Logs {
                     saw_syslog = true;
-                    let parts: Vec<&str> = p.metric.split('/').collect();
-                    assert_eq!(parts.len(), 2, "metric {} not facility/severity", p.metric);
+                    // Per-line event key (#104): `events/<uid>`, value is text.
+                    assert!(
+                        p.metric.starts_with("events/"),
+                        "metric {} is not a per-line event",
+                        p.metric
+                    );
+                    assert!(matches!(p.value, TelemetryValue::Text(_)));
+                    // Facility/severity now travel in labels, with OTel fields.
+                    let sev = p.labels.get("severity").expect("severity label");
                     assert!(
                         matches!(
-                            parts[1],
+                            sev.as_str(),
                             "emerg"
                                 | "alert"
                                 | "crit"
@@ -2482,8 +2505,13 @@ mod tests {
                                 | "info"
                                 | "debug"
                         ),
-                        "unexpected severity slug in {}",
-                        p.metric
+                        "unexpected severity slug {sev}"
+                    );
+                    assert!(p.labels.contains_key("facility"));
+                    assert!(p.labels.contains_key("severity_number"));
+                    assert_eq!(
+                        p.labels.get("log.record.uid"),
+                        Some(&p.metric["events/".len()..].to_string())
                     );
                 }
             }

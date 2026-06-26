@@ -509,8 +509,26 @@ fn resolve_hostname_unix(message: &SyslogMessage, aliases: &HashMap<String, Stri
     "localhost".to_string()
 }
 
-/// Convert a syslog message to a TelemetryPoint.
-pub fn to_telemetry_point(received: &ReceivedMessage, include_raw: bool) -> TelemetryPoint {
+/// A unique, time-sortable id for one log line (#104). `<timestamp_ms><seq>`,
+/// fixed-width zero-padded so it sorts chronologically, with a per-sensor monotonic
+/// sequence guaranteeing uniqueness even within the same millisecond. This is the
+/// `log.record.uid` and the `events/<uid>` key suffix — a ULID-style identifier
+/// that kills the old last-writer-wins keying without needing a `rand` dependency.
+pub fn make_log_uid(timestamp_ms: i64, seq: u64) -> String {
+    format!("{:013}{:012}", timestamp_ms.max(0), seq)
+}
+
+/// Convert a syslog message to a per-line event TelemetryPoint (#104).
+///
+/// The metric is `events/<uid>` (unique per line — no last-writer-wins), the value
+/// is the message text, and the labels carry the OpenTelemetry logs data model
+/// (`severity_number` 1–24, `severity_text`, `log.record.uid`, and — when
+/// `include_raw` — `log.record.original`) alongside facility/severity/app/etc.
+pub fn to_telemetry_point(
+    received: &ReceivedMessage,
+    include_raw: bool,
+    uid: &str,
+) -> TelemetryPoint {
     let msg = &received.message;
 
     let mut labels = HashMap::new();
@@ -518,6 +536,17 @@ pub fn to_telemetry_point(received: &ReceivedMessage, include_raw: bool) -> Tele
     // Add facility and severity as labels
     labels.insert("facility".to_string(), msg.facility.as_str().to_string());
     labels.insert("severity".to_string(), msg.severity.as_str().to_string());
+
+    // OTel logs data model (#104): numeric severity + coarse text + record uid.
+    labels.insert(
+        "severity_number".to_string(),
+        msg.severity.otel_severity_number().to_string(),
+    );
+    labels.insert(
+        "severity_text".to_string(),
+        msg.severity.otel_severity_text().to_string(),
+    );
+    labels.insert("log.record.uid".to_string(), uid.to_string());
 
     // Add app name if available
     if let Some(ref app) = msg.app_name {
@@ -544,9 +573,10 @@ pub fn to_telemetry_point(received: &ReceivedMessage, include_raw: bool) -> Tele
     // Add source information
     labels.insert("source_type".to_string(), received.source.to_string());
 
-    // Add raw message if configured
+    // Add raw message if configured. This doubles as OTel `log.record.original`.
     if include_raw {
         labels.insert("raw".to_string(), msg.raw.clone());
+        labels.insert("log.record.original".to_string(), msg.raw.clone());
     }
 
     let timestamp = msg
@@ -558,22 +588,17 @@ pub fn to_telemetry_point(received: &ReceivedMessage, include_raw: bool) -> Tele
         timestamp,
         source: received.resolved_hostname.clone(),
         protocol: Protocol::Logs,
-        metric: format!("{}/{}", msg.facility.as_str(), msg.severity.as_str()),
+        // Per-line event key (#104): unique uid kills last-writer-wins so every
+        // line survives. Facility/severity now travel in labels, not the metric.
+        metric: format!("events/{uid}"),
         value: TelemetryValue::Text(msg.message.clone()),
         labels,
     }
 }
 
-/// Build the key expression for a syslog message.
-pub fn build_key_expr(prefix: &str, received: &ReceivedMessage) -> String {
-    let msg = &received.message;
-    format!(
-        "{}/{}/{}/{}",
-        prefix,
-        received.resolved_hostname,
-        msg.facility.as_str(),
-        msg.severity.as_str()
-    )
+/// Build the key expression for a per-line log event (#104): `<prefix>/<host>/events/<uid>`.
+pub fn build_key_expr(prefix: &str, received: &ReceivedMessage, uid: &str) -> String {
+    format!("{}/{}/events/{}", prefix, received.resolved_hostname, uid)
 }
 
 #[cfg(test)]
@@ -672,16 +697,33 @@ mod tests {
             resolved_hostname: "myhost".to_string(),
         };
 
-        let point = to_telemetry_point(&received, false);
+        let uid = make_log_uid(point_ts(&received), 7);
+        let point = to_telemetry_point(&received, false, &uid);
 
         assert_eq!(point.source, "myhost");
         assert_eq!(point.protocol, Protocol::Logs);
-        assert_eq!(point.metric, "auth/crit");
+        assert_eq!(point.metric, format!("events/{uid}"));
         assert!(matches!(point.value, TelemetryValue::Text(_)));
         assert_eq!(point.labels.get("facility"), Some(&"auth".to_string()));
         assert_eq!(point.labels.get("severity"), Some(&"crit".to_string()));
         assert_eq!(point.labels.get("app"), Some(&"sshd".to_string()));
         assert_eq!(point.labels.get("pid"), Some(&"1234".to_string()));
+        // OTel logs data model (#104).
+        assert_eq!(point.labels.get("severity_number"), Some(&"22".to_string()));
+        assert_eq!(
+            point.labels.get("severity_text"),
+            Some(&"FATAL".to_string())
+        );
+        assert_eq!(point.labels.get("log.record.uid"), Some(&uid));
+    }
+
+    // Mirror the timestamp logic in `to_telemetry_point` for deterministic uid tests.
+    fn point_ts(received: &ReceivedMessage) -> i64 {
+        received
+            .message
+            .timestamp
+            .map(|dt| dt.timestamp_millis())
+            .unwrap_or(0)
     }
 
     #[test]
@@ -694,7 +736,7 @@ mod tests {
             resolved_hostname: "localhost".to_string(),
         };
 
-        let point = to_telemetry_point(&received, false);
+        let point = to_telemetry_point(&received, false, "0000000000000000000000001");
 
         assert_eq!(point.source, "localhost");
         assert_eq!(point.labels.get("source_type"), Some(&"unix".to_string()));
@@ -711,8 +753,22 @@ mod tests {
             resolved_hostname: "myhost".to_string(),
         };
 
-        let key = build_key_expr("zensight/logs", &received);
-        assert_eq!(key, "zensight/logs/myhost/auth/crit");
+        let key = build_key_expr("zensight/logs", &received, "0000000000123000000000045");
+        assert_eq!(key, "zensight/logs/myhost/events/0000000000123000000000045");
+    }
+
+    #[test]
+    fn make_log_uid_is_sortable_and_unique() {
+        // Same ms, increasing seq → lexicographically increasing.
+        let a = make_log_uid(1000, 1);
+        let b = make_log_uid(1000, 2);
+        assert!(a < b);
+        // Later ms always sorts after earlier ms regardless of seq.
+        let c = make_log_uid(2000, 0);
+        assert!(b < c);
+        // Negative timestamps are clamped to 0 (never panics / no minus sign).
+        assert_eq!(make_log_uid(-5, 0), make_log_uid(0, 0));
+        assert!(!make_log_uid(-5, 0).contains('-'));
     }
 
     #[test]
