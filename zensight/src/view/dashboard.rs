@@ -10,9 +10,7 @@ use iced::{Alignment, Color, Element, Length, Theme};
 use iced_anim::widget::button;
 use iced_anim::{AnimationBuilder, Easing};
 
-use zensight_common::{
-    DeviceStatus, HealthSnapshot, HealthStatus, Protocol, TelemetryPoint, TelemetryValue,
-};
+use zensight_common::{DeviceStatus, HealthSnapshot, HealthStatus, Protocol, TelemetryPoint};
 
 use crate::view::components::badge;
 
@@ -197,7 +195,7 @@ impl Default for DashboardState {
 }
 
 /// Sort rank for device status — problems first (#34). Lower sorts earlier.
-fn status_rank(status: DeviceStatus) -> u8 {
+pub(crate) fn status_rank(status: DeviceStatus) -> u8 {
     match status {
         DeviceStatus::Offline => 0,
         DeviceStatus::Degraded => 1,
@@ -275,12 +273,14 @@ impl DashboardState {
         self.current_page = 0;
     }
 
-    /// Count devices by effective status, for the fleet summary bar (#34).
-    /// Returns (online, degraded, offline, unknown).
+    /// Count **hosts** by worst-facet status, for the fleet summary bar (#34/#128).
+    /// One physical host counts once even when it runs several sensors. Returns
+    /// (online, degraded, offline, unknown).
     pub fn status_counts(&self) -> (usize, usize, usize, usize) {
+        let all: Vec<&DeviceState> = self.devices.values().collect();
         let mut counts = (0, 0, 0, 0);
-        for d in self.devices.values() {
-            match d.effective_status() {
+        for host in crate::view::host::aggregate(&all) {
+            match host.effective_status() {
                 DeviceStatus::Online => counts.0 += 1,
                 DeviceStatus::Degraded => counts.1 += 1,
                 DeviceStatus::Offline => counts.2 += 1,
@@ -525,15 +525,17 @@ const HEALTH_OVERVIEW_LIMIT: usize = 8;
 /// click-to-open chips — the "what should I look at first" triage row. Collapses
 /// to a single reassuring line when nothing is unhealthy.
 fn render_health_overview(state: &DashboardState) -> Element<'_, Message> {
-    use crate::view::health::{HealthBand, score_device};
+    use crate::view::health::HealthBand;
 
-    // Score all devices; keep only the actionable (non-Healthy/Unknown) ones.
-    let mut scored: Vec<(&DeviceState, crate::view::health::HealthScore)> = state
-        .devices
-        .values()
-        .map(|d| (d, score_device(d)))
-        .filter(|(_, s)| matches!(s.band, HealthBand::Degraded | HealthBand::Critical))
-        .collect();
+    // Score by physical HOST (#128) so a multi-protocol host counts once, with
+    // the composite (worst-facet) score; keep only the actionable ones.
+    let all: Vec<&DeviceState> = state.devices.values().collect();
+    let mut scored: Vec<(&DeviceState, crate::view::health::HealthScore)> =
+        crate::view::host::aggregate(&all)
+            .into_iter()
+            .map(|h| (h.primary(), h.health()))
+            .filter(|(_, s)| matches!(s.band, HealthBand::Degraded | HealthBand::Critical))
+            .collect();
 
     if scored.is_empty() {
         // Don't draw an empty banner before any telemetry has arrived.
@@ -799,26 +801,41 @@ fn render_device_grid<'a>(
             .into();
     }
 
-    // Paginate the filtered devices
-    let start = state.current_page * state.devices_per_page;
-    let end = (start + state.devices_per_page).min(all_devices.len());
-    let devices: Vec<_> = if start < all_devices.len() {
-        all_devices[start..end].to_vec()
-    } else {
-        vec![]
-    };
-
-    // Render based on view mode
-    let content: Element<'a, Message> = match state.view_mode {
-        DashboardViewMode::Grid => render_device_cards(&devices, groups, sparks),
-        DashboardViewMode::Table => render_device_table(devices),
+    // Grid mode renders one card per physical HOST (#128) — facets merged by
+    // source; table mode stays per-facet (the detail view). Paginate over the
+    // unit each mode shows so the page count matches the cards/rows on screen.
+    let per_page = state.devices_per_page;
+    let (content, total_units): (Element<'a, Message>, usize) = match state.view_mode {
+        DashboardViewMode::Grid => {
+            let hosts = crate::view::host::aggregate(&all_devices);
+            let total = hosts.len();
+            let start = state.current_page * per_page;
+            let end = (start + per_page).min(total);
+            let page = if start < total {
+                &hosts[start..end]
+            } else {
+                &[]
+            };
+            (render_host_cards(page, groups, sparks), total)
+        }
+        DashboardViewMode::Table => {
+            let total = all_devices.len();
+            let start = state.current_page * per_page;
+            let end = (start + per_page).min(total);
+            let devices: Vec<_> = if start < total {
+                all_devices[start..end].to_vec()
+            } else {
+                vec![]
+            };
+            (render_device_table(devices), total)
+        }
     };
 
     // Add pagination controls if there are multiple pages
-    let total_pages = if all_devices.is_empty() {
+    let total_pages = if total_units == 0 {
         1
     } else {
-        all_devices.len().div_ceil(state.devices_per_page)
+        total_units.div_ceil(per_page)
     };
 
     let mut device_list = Column::new().spacing(10).push(content);
@@ -842,24 +859,152 @@ fn render_device_grid<'a>(
 /// Minimum card width for responsive grid layout.
 const CARD_MIN_WIDTH: f32 = 350.0;
 
-/// Render devices as cards (grid view).
-/// Uses a responsive grid layout that adjusts columns based on available width.
-fn render_device_cards<'a>(
-    devices: &[&'a DeviceState],
+/// Render physical hosts as cards (grid view) — the #128 keystone re-key. Each
+/// card merges a host's per-protocol facets: one card per `source`, with a
+/// composite health badge and a clickable badge per sensor facet.
+fn render_host_cards<'a>(
+    hosts: &[crate::view::host::Host<'a>],
     groups: &'a GroupsState,
     sparks: &mut crate::view::trend::DeviceSparks,
 ) -> Element<'a, Message> {
-    let cards: Vec<Element<'a, Message>> = devices
+    let cards: Vec<Element<'a, Message>> = hosts
         .iter()
-        .map(|device| render_device_card(device, groups, sparks.remove(&device.id)))
+        .map(|host| {
+            // Merge each facet's spark strip into one host-level strip.
+            let mut merged: Vec<crate::view::trend::MetricSpark> = Vec::new();
+            for facet in &host.facets {
+                if let Some(s) = sparks.remove(&facet.id) {
+                    merged.extend(s);
+                }
+            }
+            let merged = if merged.is_empty() {
+                None
+            } else {
+                Some(merged)
+            };
+            render_host_card(host, groups, merged)
+        })
         .collect();
 
-    // Use fluid grid layout - automatically adjusts columns based on container width
-    // Cards will be at least CARD_MIN_WIDTH pixels wide
     grid(cards)
         .fluid(CARD_MIN_WIDTH)
         .spacing(10)
         .height(Length::Shrink)
+        .into()
+}
+
+/// Render a single host card: merged identity + composite health + per-facet
+/// clickable badges. The card body opens the primary facet; each facet badge
+/// opens that specific facet's device view (#128).
+fn render_host_card<'a>(
+    host: &crate::view::host::Host<'a>,
+    groups: &'a GroupsState,
+    sparks: Option<Vec<crate::view::trend::MetricSpark>>,
+) -> Element<'a, Message> {
+    let primary = host.primary();
+    let status = host.effective_status();
+
+    let status_indicator_dot = animated_status_indicator(status, 12.0);
+    let status_tooltip_text = match status {
+        DeviceStatus::Online => "Online".to_string(),
+        DeviceStatus::Offline => "Offline".to_string(),
+        DeviceStatus::Degraded => "Degraded".to_string(),
+        DeviceStatus::Unknown => "Status unknown".to_string(),
+    };
+    let status_indicator = tooltip(
+        status_indicator_dot,
+        container(text(status_tooltip_text).size(11))
+            .padding(6)
+            .style(container::rounded_box),
+        tooltip::Position::Top,
+    );
+
+    let primary_icon = icons::protocol_icon(primary.id.protocol, IconSize::Medium);
+
+    // Host name with a tooltip listing the sensors present on it.
+    let protocols: Vec<String> = host
+        .facets
+        .iter()
+        .map(|f| f.id.protocol.display_name().to_string())
+        .collect();
+    let host_name = tooltip(
+        text(host.source).size(16),
+        container(text(format!("{} · {}", host.source, protocols.join(", "))).size(12))
+            .padding(6)
+            .style(container::rounded_box),
+        tooltip::Position::Top,
+    );
+
+    let metric_count = text(format!("{} metrics", host.metric_count())).size(12);
+
+    // Composite health across all facets (#128/#130): the worst facet wins.
+    let health = host.health();
+    let health_badge =
+        crate::view::components::badge::<Message>(health.band.color(), health.label());
+
+    // Group tags come from the primary facet's device id (group membership is
+    // keyed by DeviceId, which stays the facet key).
+    let device_groups: Vec<GroupTag> = groups
+        .device_groups(&primary.id)
+        .iter()
+        .map(|g| GroupTag::from_group(g))
+        .collect();
+    let group_tags = device_group_tags(device_groups);
+
+    let header = row![
+        status_indicator,
+        primary_icon,
+        host_name,
+        health_badge,
+        metric_count,
+        group_tags
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
+
+    // One clickable badge per facet — protocol icon + per-facet status dot —
+    // pivoting to that sensor's device view.
+    let mut facet_row = iced::widget::Row::new().spacing(6);
+    for facet in &host.facets {
+        let fstatus = facet.effective_status();
+        let chip = button(
+            row![
+                animated_status_indicator(fstatus, 8.0),
+                icons::protocol_icon::<Message>(facet.id.protocol, IconSize::Small),
+                text(facet.id.protocol.display_name()).size(11),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center),
+        )
+        .on_press(Message::SelectDevice(facet.id.clone()))
+        .padding([2, 6])
+        .style(iced::widget::button::secondary);
+        facet_row = facet_row.push(tooltip(
+            chip,
+            container(text(format!("{} metrics", facet.metric_count)).size(11))
+                .padding(6)
+                .style(container::rounded_box),
+            tooltip::Position::Bottom,
+        ));
+    }
+
+    let mut card_content = column![header, facet_row.wrap()].spacing(6);
+    if let Some(sparks) = sparks.filter(|s| !s.is_empty()) {
+        let mut spark_col = Column::new().spacing(2);
+        for spark in sparks {
+            spark_col = spark_col.push(crate::view::trend::card_metric_spark::<Message>(spark));
+        }
+        card_content = card_content.push(spark_col);
+    }
+
+    let card_button = button(card_content)
+        .on_press(Message::SelectDevice(primary.id.clone()))
+        .padding(10)
+        .width(Length::Fill)
+        .style(iced::widget::button::secondary);
+
+    mouse_area(card_button)
+        .on_double_click(Message::SelectDevice(primary.id.clone()))
         .into()
 }
 
@@ -1097,26 +1242,6 @@ fn calculate_visible_pages(current: usize, total: usize) -> Vec<usize> {
     }
 }
 
-/// Maximum length for displayed metric values before truncation.
-const MAX_VALUE_DISPLAY_LEN: usize = 30;
-
-/// Format a telemetry value for display.
-fn format_telemetry_value(value: &TelemetryValue) -> String {
-    match value {
-        TelemetryValue::Counter(v) => format!("{}", v),
-        TelemetryValue::Gauge(v) => {
-            if v.fract() == 0.0 {
-                format!("{:.0}", v)
-            } else {
-                format!("{:.2}", v)
-            }
-        }
-        TelemetryValue::Text(s) => s.clone(),
-        TelemetryValue::Boolean(b) => if *b { "true" } else { "false" }.to_string(),
-        TelemetryValue::Binary(data) => format!("<{} bytes>", data.len()),
-    }
-}
-
 /// Get the color for a device status.
 fn status_color(status: DeviceStatus) -> Color {
     match status {
@@ -1145,145 +1270,6 @@ fn animated_status_indicator<'a>(status: DeviceStatus, size: f32) -> Element<'a,
     })
     .animation(Easing::EASE_IN_OUT.quick())
     .into()
-}
-
-/// Render a single device card.
-fn render_device_card<'a>(
-    device: &'a DeviceState,
-    groups: &'a GroupsState,
-    sparks: Option<Vec<crate::view::trend::MetricSpark>>,
-) -> Element<'a, Message> {
-    // Use effective_status which combines sensor liveness with local staleness detection
-    let status = device.effective_status();
-
-    // Use animated status indicator instead of static SVG
-    let status_indicator_dot = animated_status_indicator(status, 12.0);
-
-    // Add tooltip to status indicator showing status details
-    let status_tooltip_text = match status {
-        DeviceStatus::Online => "Online".to_string(),
-        DeviceStatus::Offline => {
-            if let Some(ref error) = device.last_error {
-                format!("Offline: {}", error)
-            } else {
-                format!("Offline ({} failures)", device.consecutive_failures)
-            }
-        }
-        DeviceStatus::Degraded => {
-            if let Some(ref error) = device.last_error {
-                format!("Degraded: {}", error)
-            } else {
-                format!("Degraded ({} failures)", device.consecutive_failures)
-            }
-        }
-        DeviceStatus::Unknown => "Status unknown".to_string(),
-    };
-    let status_indicator = tooltip(
-        status_indicator_dot,
-        container(text(status_tooltip_text).size(11))
-            .padding(6)
-            .style(container::rounded_box),
-        tooltip::Position::Top,
-    );
-
-    let protocol_icon = icons::protocol_icon(device.id.protocol, IconSize::Medium);
-
-    // Device name with tooltip showing full ID
-    let device_name_text = text(&device.id.source).size(16);
-    let device_name = tooltip(
-        device_name_text,
-        container(text(format!("{}/{}", device.id.protocol, device.id.source)).size(12))
-            .padding(6)
-            .style(container::rounded_box),
-        tooltip::Position::Top,
-    );
-
-    let metric_count = text(format!("{} metrics", device.metric_count)).size(12);
-
-    // Composite health score (#130): the card's primary triage signal, folding
-    // liveness + sysinfo saturation + log failures + netring anomalies into one
-    // color-banded number.
-    let health = crate::view::health::score_device(device);
-    let health_badge =
-        crate::view::components::badge::<Message>(health.band.color(), health.label());
-
-    // Get device's group tags (convert to owned GroupTag to avoid lifetime issues)
-    let device_groups: Vec<GroupTag> = groups
-        .device_groups(&device.id)
-        .iter()
-        .map(|g| GroupTag::from_group(g))
-        .collect();
-    let group_tags = device_group_tags(device_groups);
-
-    let header = row![
-        status_indicator,
-        protocol_icon,
-        device_name,
-        health_badge,
-        metric_count,
-        group_tags
-    ]
-    .spacing(10)
-    .align_y(Alignment::Center);
-
-    // Show a few metrics as preview with tooltips for full values. Sort by name
-    // so the preview is deterministic across renders rather than depending on
-    // HashMap iteration order (#34).
-    let mut preview = Column::new().spacing(2);
-    let mut preview_metrics: Vec<_> = device.metrics.iter().collect();
-    preview_metrics.sort_by(|a, b| a.0.cmp(b.0));
-    for (name, point) in preview_metrics.into_iter().take(3) {
-        let value = format_telemetry_value(&point.value);
-        let display_value = if value.len() > MAX_VALUE_DISPLAY_LEN {
-            format!("{}...", &value[..MAX_VALUE_DISPLAY_LEN])
-        } else {
-            value.clone()
-        };
-
-        let metric_line = text(format!("  {} = {}", name, display_value)).size(11);
-
-        // Add tooltip only if value was truncated
-        if value.len() > MAX_VALUE_DISPLAY_LEN {
-            let metric_with_tooltip = tooltip(
-                metric_line,
-                container(column![text(name).size(11), text(value).size(11)].spacing(2))
-                    .padding(6)
-                    .style(container::rounded_box),
-                tooltip::Position::Right,
-            );
-            preview = preview.push(metric_with_tooltip);
-        } else {
-            preview = preview.push(metric_line);
-        }
-    }
-
-    if device.metrics.len() > 3 {
-        preview =
-            preview.push(text(format!("  ... and {} more", device.metrics.len() - 3)).size(11));
-    }
-
-    // 24h sparkline + trend badge strip for this device's key metrics (#24).
-    let mut card_content = column![header, preview].spacing(5);
-    if let Some(sparks) = sparks.filter(|s| !s.is_empty()) {
-        let mut spark_col = Column::new().spacing(2);
-        for spark in sparks {
-            spark_col = spark_col.push(crate::view::trend::card_metric_spark::<Message>(spark));
-        }
-        card_content = card_content.push(spark_col);
-    }
-    let card_content = card_content;
-
-    let card_button = button(card_content)
-        .on_press(Message::SelectDevice(device.id.clone()))
-        .padding(10)
-        .width(Length::Fill)
-        .style(iced::widget::button::secondary);
-
-    // Wrap in mouse_area for double-click support
-    // Double-click also opens the device (same as single click for now)
-    mouse_area(card_button)
-        .on_double_click(Message::SelectDevice(device.id.clone()))
-        .into()
 }
 
 #[cfg(test)]
@@ -1330,6 +1316,22 @@ mod tests {
             .collect();
         assert_eq!(order[0], "b-offline");
         assert_eq!(order[1], "c-degraded");
+    }
+
+    #[test]
+    fn test_status_counts_aggregates_by_host() {
+        // #128: a single physical host with two sensor facets must count ONCE,
+        // taking the worst facet's status — not once per protocol.
+        let mut state = DashboardState::default();
+        let mut sys = DeviceState::new(DeviceId::new(Protocol::Sysinfo, "host1"));
+        sys.sensor_status = DeviceStatus::Online;
+        let mut net = DeviceState::new(DeviceId::new(Protocol::Netlink, "host1"));
+        net.sensor_status = DeviceStatus::Offline;
+        state.devices.insert(sys.id.clone(), sys);
+        state.devices.insert(net.id.clone(), net);
+
+        // One host, worst facet Offline → (online, degraded, offline, unknown).
+        assert_eq!(state.status_counts(), (0, 0, 1, 0));
     }
 
     #[test]
