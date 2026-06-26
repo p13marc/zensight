@@ -1390,12 +1390,31 @@ impl ZenSight {
 
             // Export messages
             Message::ExportToCsv => {
-                self.export_to_csv();
+                if let Some(task) = self.export_to_csv() {
+                    return task;
+                }
             }
 
             Message::ExportToJson => {
-                self.export_to_json();
+                if let Some(task) = self.export_to_json() {
+                    return task;
+                }
             }
+
+            Message::ExportFinished(result) => match result {
+                Ok(Some(path)) => {
+                    tracing::info!(path = %path, "Exported device data");
+                    self.toasts
+                        .push(ToastSeverity::Success, format!("Exported to {path}"));
+                }
+                // User cancelled the save dialog — silent, no toast.
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "Export failed");
+                    self.toasts
+                        .push(ToastSeverity::Error, format!("Export failed: {e}"));
+                }
+            },
 
             Message::ToggleTheme => {
                 self.theme = self.theme.toggle();
@@ -2664,62 +2683,39 @@ impl ZenSight {
         self.settings.modified = true;
     }
 
-    /// Export current device metrics to CSV file.
-    fn export_to_csv(&mut self) {
-        if let Some(ref device) = self.selected_device {
-            // Prefer the full time series (the trend on screen, #37); fall back
-            // to the latest-value snapshot only when no history exists yet.
-            let csv = if device.has_history() {
-                device.export_history_to_csv()
-            } else {
-                device.export_to_csv()
-            };
-            let filename = format!(
-                "zensight_{}_{}.csv",
-                device.device_id.source,
-                chrono_timestamp()
-            );
-            self.write_export(&filename, csv);
-        }
+    /// Export the current device's CSV via a native save dialog (#37). Returns
+    /// `None` when no device is selected (nothing to export).
+    fn export_to_csv(&mut self) -> Option<Task<Message>> {
+        let device = self.selected_device.as_ref()?;
+        // Prefer the full time series (the trend on screen, #37); fall back to
+        // the latest-value snapshot only when no history exists yet.
+        let csv = if device.has_history() {
+            device.export_history_to_csv()
+        } else {
+            device.export_to_csv()
+        };
+        let filename = format!(
+            "zensight_{}_{}.csv",
+            device.device_id.source,
+            chrono_timestamp()
+        );
+        Some(export_dialog(filename, csv))
     }
 
-    /// Export current device time series to JSON file.
-    fn export_to_json(&mut self) {
-        if let Some(ref device) = self.selected_device {
-            let json = if device.has_history() {
-                device.export_history_to_json()
-            } else {
-                device.export_to_json()
-            };
-            let filename = format!(
-                "zensight_{}_{}.json",
-                device.device_id.source,
-                chrono_timestamp()
-            );
-            self.write_export(&filename, json);
-        }
-    }
-
-    /// Write an export to a discoverable directory and toast the absolute path
-    /// (#37) — no more blind writes to the process CWD where files get lost.
-    fn write_export(&mut self, filename: &str, contents: String) {
-        let dir = dirs::download_dir()
-            .or_else(dirs::home_dir)
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let path = dir.join(filename);
-        match std::fs::write(&path, contents) {
-            Ok(()) => {
-                let shown = path.display().to_string();
-                tracing::info!(path = %shown, "Exported device data");
-                self.toasts
-                    .push(ToastSeverity::Success, format!("Exported to {shown}"));
-            }
-            Err(e) => {
-                tracing::error!(error = %e, path = %path.display(), "Export failed");
-                self.toasts
-                    .push(ToastSeverity::Error, format!("Export failed: {e}"));
-            }
-        }
+    /// Export the current device's JSON via a native save dialog (#37).
+    fn export_to_json(&mut self) -> Option<Task<Message>> {
+        let device = self.selected_device.as_ref()?;
+        let json = if device.has_history() {
+            device.export_history_to_json()
+        } else {
+            device.export_to_json()
+        };
+        let filename = format!(
+            "zensight_{}_{}.json",
+            device.device_id.source,
+            chrono_timestamp()
+        );
+        Some(export_dialog(filename, json))
     }
 
     /// Handle periodic tick (update health status, etc.).
@@ -2845,6 +2841,27 @@ fn chrono_timestamp() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("{}", now)
+}
+
+/// Open a native "save as" dialog (#37) seeded with `default_name`, write
+/// `contents` to the chosen path, and resolve to an [`Message::ExportFinished`]
+/// outcome. Defaults to the user's Downloads directory so files land somewhere
+/// discoverable instead of the process CWD. Cancelling the dialog is a no-op.
+fn export_dialog(default_name: String, contents: String) -> Task<Message> {
+    Task::future(async move {
+        let mut dialog = rfd::AsyncFileDialog::new().set_file_name(&default_name);
+        if let Some(dir) = dirs::download_dir().or_else(dirs::home_dir) {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(handle) = dialog.save_file().await else {
+            return Message::ExportFinished(Ok(None));
+        };
+        let path = handle.path().to_path_buf();
+        match tokio::fs::write(&path, contents).await {
+            Ok(()) => Message::ExportFinished(Ok(Some(path.display().to_string()))),
+            Err(e) => Message::ExportFinished(Err(e.to_string())),
+        }
+    })
 }
 
 #[cfg(test)]
