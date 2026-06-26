@@ -273,12 +273,17 @@ async fn collect_nft(conn: &Connection<Nftables>) -> Vec<NftRuleRecord> {
         let family = nft_family_label(t.family);
         if let Ok(rules) = conn.list_rules(&t.name, t.family).await {
             for r in &rules {
+                // Decode the per-rule packet/byte counter (#115); absent counter
+                // statement → zeros.
+                let ctr = crate::map::decode_nft_counter(&r.expression_bytes).unwrap_or_default();
                 out.push(NftRuleRecord {
                     family: family.to_string(),
                     table: r.table.clone(),
                     chain: r.chain.clone(),
                     handle: r.handle,
                     comment: r.comment.clone(),
+                    packets: ctr.packets,
+                    bytes: ctr.bytes,
                 });
             }
         }
