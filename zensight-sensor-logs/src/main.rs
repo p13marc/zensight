@@ -27,6 +27,10 @@ use zensight_common::serialization::{Format, encode};
 use zensight_common::telemetry::Protocol;
 use zensight_sensor_core::{AlertReporter, SensorArgs, SensorRunner, serve_alerts_query};
 
+/// Process-wide monotonic sequence that disambiguates per-line log event uids
+/// (#104) when multiple lines share a millisecond timestamp.
+static LOG_EVENT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Parse CLI arguments
@@ -537,8 +541,19 @@ async fn main() -> Result<()> {
                         agg.observe(&received.message);
                     }
 
+                    // Per-line event uid (#104): timestamp-prefixed + monotonic
+                    // sequence, so each log line gets a unique, time-sortable key
+                    // (`events/<uid>`) instead of last-writer-wins facility/severity.
+                    let ts_ms = received
+                        .message
+                        .timestamp
+                        .map(|dt| dt.timestamp_millis())
+                        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+                    let seq = LOG_EVENT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let uid = receiver::make_log_uid(ts_ms, seq);
+
                     // Convert to telemetry point
-                    let mut point = receiver::to_telemetry_point(&received, include_raw);
+                    let mut point = receiver::to_telemetry_point(&received, include_raw, &uid);
 
                     // Log-template mining (#102): mine the message text and
                     // attach the stable template id + masked template as labels.
@@ -571,7 +586,7 @@ async fn main() -> Result<()> {
                     }
 
                     // Build key expression
-                    let key = receiver::build_key_expr(&key_prefix, &received);
+                    let key = receiver::build_key_expr(&key_prefix, &received, &uid);
 
                     // Serialize and publish
                     match encode(&point, format) {

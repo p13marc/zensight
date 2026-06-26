@@ -385,6 +385,14 @@ impl OtelExporter {
             log_record.add_attribute("syslog.appname", appname.clone());
         }
 
+        // OTel logs data model (#104): per-line record uid + verbatim original.
+        if let Some(uid) = &record.uid {
+            log_record.add_attribute("log.record.uid", uid.clone());
+        }
+        if let Some(original) = &record.original {
+            log_record.add_attribute("log.record.original", original.clone());
+        }
+
         // Emit the log
         logger.emit(log_record);
 

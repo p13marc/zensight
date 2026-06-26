@@ -52,9 +52,14 @@ Polls SNMP agents and receives traps. v3 auth/priv supported.
 Receives syslog over the network **and/or** ingests the local systemd journal.
 Both feed the same model and keyspace.
 
-- **Telemetry:** `zensight/logs/<hostname>/<facility>/<severity>`
-  (payload value = the log message; structured fields land in labels —
-  journald fields under `sd.journald.*`, `source_type` = `udp`/`tcp`/`unix`/`journald`).
+- **Telemetry:** `zensight/logs/<hostname>/events/<uid>` — one **per-line event**
+  per log line (#104). `<uid>` is `<timestamp_ms><seq>` (zero-padded, time-
+  sortable) so every line survives instead of being overwritten last-writer-wins.
+  Payload value = the log message; facility/severity and the OpenTelemetry logs
+  data model (`severity_number` 1–24, `severity_text`, `log.record.uid`, and
+  `log.record.original` when raw is kept) land in **labels**, alongside structured
+  fields — journald fields under `sd.journald.*`, `source_type` =
+  `udp`/`tcp`/`unix`/`journald`.
 - **Derived rollups** (`derived`, default on): cheap aggregates emitted every
   `derived_interval_secs` under `zensight/logs/<host>/logs/*` — per-severity
   counters (`logs/by_severity/<level>_total`), error/warning totals

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 use tracing::{debug, trace, warn};
-use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
+use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
 
 use crate::config::{AggregationConfig, FilterConfig, PrometheusConfig};
 use crate::mapping::{
@@ -114,6 +114,13 @@ impl StoredMetric {
         default_labels: &HashMap<String, String>,
     ) -> Option<Self> {
         if !is_exportable(&point.value) {
+            return None;
+        }
+
+        // Per-line log events (#104) carry a unique `events/<uid>` metric per line.
+        // Exporting each as an `info` series would explode Prometheus cardinality —
+        // logs belong in a logs pipeline (OTel), not on `/metrics`. Skip them.
+        if point.protocol == Protocol::Logs && point.metric.starts_with("events/") {
             return None;
         }
 
@@ -568,6 +575,27 @@ mod tests {
             value,
             labels: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn per_line_log_events_are_not_exported() {
+        // #104: `events/<uid>` log lines must not become Prometheus series.
+        let event = make_point(
+            "host01",
+            Protocol::Logs,
+            "events/0000000000009000000000042",
+            TelemetryValue::Text("login failed".into()),
+        );
+        assert!(StoredMetric::from_telemetry(&event, "zensight", &HashMap::new()).is_none());
+
+        // A non-event Logs metric (e.g. a derived rollup gauge) still exports.
+        let rollup = make_point(
+            "host01",
+            Protocol::Logs,
+            "rollup/err/rate",
+            TelemetryValue::Gauge(2.0),
+        );
+        assert!(StoredMetric::from_telemetry(&rollup, "zensight", &HashMap::new()).is_some());
     }
 
     #[test]
