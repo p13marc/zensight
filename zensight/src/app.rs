@@ -2170,39 +2170,64 @@ impl ZenSight {
         self.selected_device = Some(detail_state);
         self.set_view(CurrentView::Device);
 
+        // Prefetch this protocol's primary detail channels so the drill-in opens
+        // pre-populated rather than Idle-until-clicked (#127).
+        let prefetch = self.prefetch_on_open(&device_id);
+
         // Resolve the persisted metric ids for this device, then query the warm
         // (minute) tier off-thread. Last 24h of minute buckets is plenty to
         // pre-populate a chart without blocking the UI.
-        let Some(store) = self.store.persistent() else {
-            return Task::none();
+        let history = 'history: {
+            let Some(store) = self.store.persistent() else {
+                break 'history Task::none();
+            };
+            let protocol = device_id.protocol.to_string();
+            let metric_ids = self.store.device_metric_ids(&protocol, &device_id.source);
+            if metric_ids.is_empty() {
+                break 'history Task::none();
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let from = now - 24 * 3_600_000; // 24h window
+            Task::future(async move {
+                let series = tokio::task::spawn_blocking(move || {
+                    metric_ids
+                        .into_iter()
+                        .filter_map(|(name, id)| {
+                            store
+                                .query(id, crate::store::Tier::Minute, from, now)
+                                .ok()
+                                .filter(|s| !s.is_empty())
+                                .map(|samples| (name, samples))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await
+                .unwrap_or_default();
+                Message::DeviceHistoryLoaded(device_id, series)
+            })
         };
-        let protocol = device_id.protocol.to_string();
-        let metric_ids = self.store.device_metric_ids(&protocol, &device_id.source);
-        if metric_ids.is_empty() {
+
+        Task::batch([history, prefetch])
+    }
+
+    /// Prefetch the primary on-demand detail channels for a device's protocol so
+    /// the specialized view opens pre-populated (#127). Declarative policy keyed
+    /// by protocol; reuses the existing `Fetch*` message flow (which marks the
+    /// `Fetch<T>` slot `Loading` and issues the query), so there is no duplicated
+    /// fetch logic here. No-op when disconnected or for protocols without
+    /// queryable detail channels.
+    fn prefetch_on_open(&self, device_id: &DeviceId) -> Task<Message> {
+        if self.session.is_none() {
             return Task::none();
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        let from = now - 24 * 3_600_000; // 24h window
-        Task::future(async move {
-            let series = tokio::task::spawn_blocking(move || {
-                metric_ids
-                    .into_iter()
-                    .filter_map(|(name, id)| {
-                        store
-                            .query(id, crate::store::Tier::Minute, from, now)
-                            .ok()
-                            .filter(|s| !s.is_empty())
-                            .map(|samples| (name, samples))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .await
-            .unwrap_or_default();
-            Message::DeviceHistoryLoaded(device_id, series)
-        })
+        Task::batch(
+            prefetch_channels(device_id.protocol)
+                .into_iter()
+                .map(Task::done),
+        )
     }
 
     /// Save settings.
@@ -2383,6 +2408,27 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// The primary on-demand detail channels to prefetch when a device of this
+/// protocol is opened (#127), as the `Fetch*` messages that drive them. Pure
+/// (the unit of testing for the prefetch policy); empty for protocols whose
+/// detail is fully streamed (no queryable channels) or has no specialized view.
+fn prefetch_channels(protocol: zensight_common::Protocol) -> Vec<Message> {
+    use crate::view::specialized::netlink_detail::NetlinkDetailTopic;
+    use crate::view::specialized::sysinfo_detail::ProcessSort;
+    use zensight_common::Protocol;
+
+    match protocol {
+        Protocol::Netlink => vec![
+            Message::FetchNetlinkDetail(NetlinkDetailTopic::Sockets),
+            Message::FetchNetlinkDetail(NetlinkDetailTopic::Routes),
+            Message::FetchNetlinkDetail(NetlinkDetailTopic::Neighbors),
+        ],
+        Protocol::Netring => vec![Message::FetchNetringFlows],
+        Protocol::Sysinfo => vec![Message::FetchSysinfoProcesses(ProcessSort::default())],
+        _ => Vec::new(),
+    }
+}
+
 /// Human duration for silence toasts: "1h" / "4h" / "24h" / "30m".
 fn fmt_duration_ms(ms: i64) -> String {
     let mins = ms / 60_000;
@@ -2429,4 +2475,37 @@ fn chrono_timestamp() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("{}", now)
+}
+
+#[cfg(test)]
+mod prefetch_tests {
+    use super::*;
+    use crate::view::specialized::netlink_detail::NetlinkDetailTopic;
+    use zensight_common::Protocol;
+
+    #[test]
+    fn prefetch_policy_by_protocol() {
+        // Netlink prefetches its primary host tables (sockets/routes/neighbors).
+        let nl = prefetch_channels(Protocol::Netlink);
+        assert_eq!(nl.len(), 3);
+        assert!(matches!(
+            nl[0],
+            Message::FetchNetlinkDetail(NetlinkDetailTopic::Sockets)
+        ));
+
+        // Netring prefetches flows; sysinfo prefetches the process explorer.
+        assert!(matches!(
+            prefetch_channels(Protocol::Netring).as_slice(),
+            [Message::FetchNetringFlows]
+        ));
+        assert!(matches!(
+            prefetch_channels(Protocol::Sysinfo).as_slice(),
+            [Message::FetchSysinfoProcesses(_)]
+        ));
+
+        // Protocols without queryable detail channels prefetch nothing.
+        assert!(prefetch_channels(Protocol::Snmp).is_empty());
+        assert!(prefetch_channels(Protocol::Syslog).is_empty());
+        assert!(prefetch_channels(Protocol::Modbus).is_empty());
+    }
 }
