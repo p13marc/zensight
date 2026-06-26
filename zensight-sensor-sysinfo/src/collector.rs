@@ -31,6 +31,17 @@ pub struct SystemCollector {
     prev_rapl: HashMap<String, (u64, Option<u64>)>,
     /// Sensor health, updated each poll for the frontend's Sensors view.
     health: Arc<zensight_sensor_core::SensorHealth>,
+    /// Threshold-based alert evaluator (OOM/PSI/disk/FD/thermal/swap), driving an
+    /// `AlertReporter` → `@/alerts/*`. `None` when alerting is disabled.
+    alerts: Option<crate::alerts::AlertEvaluator>,
+    /// Busiest block device `%util` observed in the most recent `collect_disk_io`
+    /// pass, fed into the saturation score (avoids a second `/proc/diskstats`
+    /// read + delta). `None` until a disk-I/O sample with a previous tick exists.
+    last_disk_util_percent: Option<f64>,
+    /// Previous `pswpin` counter, kept to derive the swap-in rate for the
+    /// saturation score independently of the alert evaluator's own state.
+    #[cfg(target_os = "linux")]
+    prev_pswpin: Option<u64>,
     /// Linux-specific metrics collector
     #[cfg(target_os = "linux")]
     linux_metrics: LinuxMetrics,
@@ -57,6 +68,10 @@ impl SystemCollector {
             #[cfg(target_os = "linux")]
             prev_rapl: HashMap::new(),
             health: Arc::new(zensight_sensor_core::SensorHealth::new("sysinfo")),
+            alerts: None,
+            last_disk_util_percent: None,
+            #[cfg(target_os = "linux")]
+            prev_pswpin: None,
             #[cfg(target_os = "linux")]
             linux_metrics: LinuxMetrics::new(),
         }
@@ -65,6 +80,12 @@ impl SystemCollector {
     /// Use the runner's shared health tracker (so updates reach `@/health`).
     pub fn with_health(mut self, health: Arc<zensight_sensor_core::SensorHealth>) -> Self {
         self.health = health;
+        self
+    }
+
+    /// Attach a threshold-alert evaluator driving the shared `AlertReporter`.
+    pub fn with_alerts(mut self, evaluator: crate::alerts::AlertEvaluator) -> Self {
+        self.alerts = Some(evaluator);
         self
     }
 
@@ -165,9 +186,228 @@ impl SystemCollector {
             if self.config.collect.power {
                 count += self.collect_power(timestamp).await;
             }
+            // USE-completeness collectors (#98): network/CPU/memory/disk
+            // saturation+error holes. All cheap unprivileged /proc|/sys reads.
+            if self.config.collect.netstat {
+                count += self.collect_netstat(timestamp).await;
+            }
+            if self.config.collect.softnet {
+                count += self.collect_softnet(timestamp).await;
+            }
+            if self.config.collect.schedstat {
+                count += self.collect_schedstat(timestamp).await;
+            }
+            if self.config.collect.conntrack {
+                count += self.collect_conntrack(timestamp).await;
+            }
+            if self.config.collect.edac {
+                count += self.collect_edac(timestamp).await;
+            }
+            if self.config.collect.mdadm {
+                count += self.collect_mdadm(timestamp).await;
+            }
+        }
+
+        // Threshold alerting: evaluate the already-collected saturation data and
+        // drive the firing/resolved lifecycle. Additive — never touches the
+        // telemetry path above.
+        if self.alerts.is_some() {
+            let raw = self.gather_alert_inputs();
+            let interval = self.config.poll_interval_secs as f64;
+            if let Some(ev) = self.alerts.as_mut() {
+                ev.tick(raw, interval).await;
+            }
+        }
+
+        // Derived host saturation score + coarse health state (P6): one number the
+        // dashboard / topology tint / alerting can all key off, blended from the USE
+        // saturation signals already collected above. Additive and cheap.
+        if self.config.collect.saturation_score {
+            count += self.collect_saturation_score(timestamp).await;
         }
 
         debug!("Published {} metrics for '{}'", count, self.hostname);
+    }
+
+    /// Gather the per-tick alert inputs from the same `/proc`/`/sys` + sysinfo
+    /// sources the telemetry collectors read. Disk-space occupancy is computed
+    /// cross-platform from the (already-refreshed) `Disks` list; the saturation
+    /// counters (PSI, vmstat, FD, inodes, temperatures) are Linux-only and left
+    /// empty elsewhere.
+    fn gather_alert_inputs(&self) -> crate::alerts::RawInputs {
+        let mut raw = crate::alerts::RawInputs::default();
+
+        // Disk-space usage% per included mount (cross-platform via sysinfo).
+        for disk in self.disks.list() {
+            let mount = disk.mount_point().to_string_lossy().to_string();
+            let fs_type = disk.file_system().to_string_lossy().to_string();
+            if !self.config.disk.should_include(&mount, &fs_type) {
+                continue;
+            }
+            let total = disk.total_space();
+            let used = total.saturating_sub(disk.available_space());
+            let used_percent = if total > 0 {
+                (used as f64 / total as f64) * 100.0
+            } else {
+                0.0
+            };
+            raw.disks.push(crate::alerts::DiskUsageInput {
+                mount,
+                fs_type,
+                used_percent,
+            });
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(vm) = crate::linux::collect_vmstat() {
+                raw.oom_kill_total = vm.oom_kill;
+                raw.pswpin_total = vm.pswpin;
+                raw.pswpout_total = vm.pswpout;
+            }
+            if let Some(psi) = crate::linux::collect_psi() {
+                raw.psi_cpu_avg10 = psi.cpu_some.as_ref().map(|p| p.avg10);
+                raw.psi_memory_avg10 = psi.memory_some.as_ref().map(|p| p.avg10);
+                raw.psi_io_avg10 = psi.io_some.as_ref().map(|p| p.avg10);
+            }
+            if let Some(fd) = crate::linux::collect_fd() {
+                raw.fd_used_percent = Some(if fd.max > 0 {
+                    (fd.used as f64 / fd.max as f64) * 100.0
+                } else {
+                    0.0
+                });
+            }
+            // Inode occupancy per included mount (same mount list as fd_inode).
+            let mounts: Vec<(String, String)> = self
+                .disks
+                .list()
+                .iter()
+                .map(|d| {
+                    (
+                        d.mount_point().to_string_lossy().to_string(),
+                        d.file_system().to_string_lossy().to_string(),
+                    )
+                })
+                .filter(|(mount, fs_type)| self.config.disk.should_include(mount, fs_type))
+                .collect();
+            for s in crate::linux::collect_inodes(&mounts) {
+                let used_percent = if s.total > 0 {
+                    (s.used as f64 / s.total as f64) * 100.0
+                } else {
+                    0.0
+                };
+                raw.inodes.push(crate::alerts::DiskUsageInput {
+                    mount: s.mount,
+                    fs_type: s.fs_type,
+                    used_percent,
+                });
+            }
+            // Thermal trip points (only when temperature collection is enabled).
+            if self.config.collect.temperatures {
+                for t in LinuxMetrics::collect_temperatures() {
+                    raw.temps.push(crate::alerts::ThermalInput {
+                        chip: t.chip,
+                        label: t.label,
+                        temp_celsius: t.temp_celsius,
+                        critical_celsius: t.critical,
+                    });
+                }
+            }
+        }
+
+        raw
+    }
+
+    /// Gather the per-tick [`crate::saturation::SaturationInputs`] from the same
+    /// sources the saturation telemetry collectors read. The disk `%util` is reused
+    /// from the most recent `collect_disk_io` pass (`last_disk_util_percent`); the
+    /// PSI / FD / run-queue / swap-in signals come from cheap Linux `/proc` reads
+    /// (left empty elsewhere, where the score degrades gracefully to a low value).
+    #[allow(unused_mut)]
+    fn gather_saturation_inputs(&mut self) -> crate::saturation::SaturationInputs {
+        let mut s = crate::saturation::SaturationInputs {
+            disk_util_percent: self.last_disk_util_percent,
+            ..Default::default()
+        };
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(psi) = crate::linux::collect_psi() {
+                s.psi_cpu_avg10 = psi.cpu_some.as_ref().map(|p| p.avg10);
+                s.psi_memory_avg10 = psi.memory_some.as_ref().map(|p| p.avg10);
+                s.psi_io_avg10 = psi.io_some.as_ref().map(|p| p.avg10);
+            }
+            if let Some(fd) = crate::linux::collect_fd() {
+                s.fd_used_percent = Some(if fd.max > 0 {
+                    (fd.used as f64 / fd.max as f64) * 100.0
+                } else {
+                    0.0
+                });
+            }
+            // Run-queue depth relative to CPU count (procs_running / nCPU).
+            if let Some(k) = crate::linux::collect_kernel_derivatives()
+                && let Some(running) = k.procs_running
+            {
+                let ncpu = self.cpu_count();
+                if ncpu > 0 {
+                    s.run_queue_ratio = Some(running as f64 / ncpu as f64);
+                }
+            }
+            // Swap-in rate (pswpin pages/s) derived against the previous tick.
+            if let Some(vm) = crate::linux::collect_vmstat() {
+                let interval = self.config.poll_interval_secs as f64;
+                if let (Some(prev), Some(cur)) = (self.prev_pswpin, vm.pswpin)
+                    && cur >= prev
+                    && interval > 0.0
+                {
+                    s.swap_in_pages_per_sec = Some((cur - prev) as f64 / interval);
+                }
+                // Carry the latest counter forward (don't clobber with a miss).
+                self.prev_pswpin = vm.pswpin.or(self.prev_pswpin);
+            }
+        }
+
+        s
+    }
+
+    /// Number of logical CPUs (for run-queue normalization). Uses the already
+    /// refreshed `sysinfo` CPU list, falling back to `available_parallelism`.
+    #[cfg(target_os = "linux")]
+    fn cpu_count(&self) -> usize {
+        let n = self.system.cpus().len();
+        if n > 0 {
+            n
+        } else {
+            std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(1)
+        }
+    }
+
+    /// Compute and publish the derived host saturation score (`0..100`, Gauge) and
+    /// coarse health state (`ok`/`warn`/`crit`, Text). Returns the number of points
+    /// published (always 2 when enabled).
+    async fn collect_saturation_score(&mut self, timestamp: i64) -> usize {
+        let inputs = self.gather_saturation_inputs();
+        let cfg = &self.config.saturation;
+        let score = crate::saturation::saturation_score(&inputs, cfg);
+        let state = crate::saturation::health_state(score, cfg);
+
+        self.publish(
+            "system/saturation_score",
+            TelemetryValue::Gauge(score),
+            timestamp,
+            HashMap::new(),
+        )
+        .await;
+        self.publish(
+            "system/health_state",
+            TelemetryValue::Text(state.to_string()),
+            timestamp,
+            HashMap::new(),
+        )
+        .await;
+        2
     }
 
     /// Publish a batch of mapped metrics, lifting label pairs into the wire
@@ -299,6 +539,76 @@ impl SystemCollector {
             entropy_avail: crate::linux::collect_entropy(),
         };
         self.publish_metrics(crate::map::map_power(&sample), timestamp)
+            .await
+    }
+
+    /// Collect TCP retransmit / listen-overflow errors + socket occupancy
+    /// (Linux-specific, USE-completeness #98).
+    #[cfg(target_os = "linux")]
+    async fn collect_netstat(&self, timestamp: i64) -> usize {
+        let mut count = 0;
+        if let Some(s) = crate::linux::collect_netstat() {
+            count += self
+                .publish_metrics(crate::map::map_netstat(&s), timestamp)
+                .await;
+        }
+        if let Some(s) = crate::linux::collect_sockstat() {
+            count += self
+                .publish_metrics(crate::map::map_sockstat(&s), timestamp)
+                .await;
+        }
+        count
+    }
+
+    /// Collect softnet backlog drops / time-squeezes (Linux-specific, #98).
+    #[cfg(target_os = "linux")]
+    async fn collect_softnet(&self, timestamp: i64) -> usize {
+        match crate::linux::collect_softnet() {
+            Some(s) => {
+                self.publish_metrics(crate::map::map_softnet(&s), timestamp)
+                    .await
+            }
+            None => 0,
+        }
+    }
+
+    /// Collect per-CPU scheduler run-delay (Linux-specific, #98).
+    #[cfg(target_os = "linux")]
+    async fn collect_schedstat(&self, timestamp: i64) -> usize {
+        match crate::linux::collect_schedstat() {
+            Some(s) => {
+                self.publish_metrics(crate::map::map_schedstat(&s), timestamp)
+                    .await
+            }
+            None => 0,
+        }
+    }
+
+    /// Collect conntrack table fill (Linux-specific, #98).
+    #[cfg(target_os = "linux")]
+    async fn collect_conntrack(&self, timestamp: i64) -> usize {
+        match crate::linux::collect_conntrack() {
+            Some(s) => {
+                self.publish_metrics(crate::map::map_conntrack(&s), timestamp)
+                    .await
+            }
+            None => 0,
+        }
+    }
+
+    /// Collect per-controller ECC memory errors (Linux-specific, #98).
+    #[cfg(target_os = "linux")]
+    async fn collect_edac(&self, timestamp: i64) -> usize {
+        let samples = crate::linux::collect_edac();
+        self.publish_metrics(crate::map::map_edac(&samples), timestamp)
+            .await
+    }
+
+    /// Collect software-RAID degraded/failed state (Linux-specific, #98).
+    #[cfg(target_os = "linux")]
+    async fn collect_mdadm(&self, timestamp: i64) -> usize {
+        let arrays = crate::linux::collect_mdstat();
+        self.publish_metrics(crate::map::map_mdstat(&arrays), timestamp)
             .await
     }
 
@@ -456,12 +766,10 @@ impl SystemCollector {
         .await;
         count += 1;
 
-        // Memory usage percentage
-        let usage_pct = if total > 0 {
-            (used as f64 / total as f64) * 100.0
-        } else {
-            0.0
-        };
+        // Memory usage percentage. Derived from MemAvailable rather than `used`
+        // so reclaimable page cache is not counted as pressure (behavioral
+        // change vs. the previous `used/total` figure).
+        let usage_pct = crate::map::mem_usage_percent(total, available);
         self.publish(
             "memory/usage_percent",
             TelemetryValue::Gauge(usage_pct),
@@ -470,6 +778,30 @@ impl SystemCollector {
         )
         .await;
         count += 1;
+
+        // Memory composition (Linux /proc/meminfo): cached/buffers/slab/dirty/
+        // writeback bytes, to attribute usage to reclaimable cache vs. real use.
+        #[cfg(target_os = "linux")]
+        if let Some(mc) = crate::linux::collect_mem_composition() {
+            let mut clabels = HashMap::new();
+            clabels.insert("unit".to_string(), "bytes".to_string());
+            for (metric, value) in [
+                ("memory/cached", mc.cached),
+                ("memory/buffers", mc.buffers),
+                ("memory/slab", mc.slab),
+                ("memory/dirty", mc.dirty),
+                ("memory/writeback", mc.writeback),
+            ] {
+                self.publish(
+                    metric,
+                    TelemetryValue::Gauge(value as f64),
+                    timestamp,
+                    clabels.clone(),
+                )
+                .await;
+                count += 1;
+            }
+        }
 
         // Swap
         let swap_total = self.system.total_swap();
@@ -881,7 +1213,11 @@ impl SystemCollector {
 
         let disk_io = self.linux_metrics.collect_disk_io(interval);
 
-        for (device, (stats, rates)) in disk_io {
+        // Track the busiest device's %util this pass to feed the saturation score
+        // (so we don't re-read /proc/diskstats just for the score).
+        let mut max_util: Option<f64> = None;
+
+        for (device, (stats, rates, saturation)) in disk_io {
             let mut labels = HashMap::new();
             labels.insert("device".to_string(), device.clone());
 
@@ -934,6 +1270,30 @@ impl SystemCollector {
             .await;
             count += 1;
 
+            // Derived saturation gauges (need a previous sample to delta).
+            if let Some(sat) = saturation {
+                max_util = Some(max_util.map_or(sat.util_percent, |m| m.max(sat.util_percent)));
+                labels.insert("unit".to_string(), "percent".to_string());
+                self.publish(
+                    &format!("disk/{}/io/util_percent", device),
+                    TelemetryValue::Gauge(sat.util_percent),
+                    timestamp,
+                    labels.clone(),
+                )
+                .await;
+                count += 1;
+
+                labels.insert("unit".to_string(), "requests".to_string());
+                self.publish(
+                    &format!("disk/{}/io/queue_depth", device),
+                    TelemetryValue::Gauge(sat.queue_depth),
+                    timestamp,
+                    labels.clone(),
+                )
+                .await;
+                count += 1;
+            }
+
             // Rates (if available)
             if let Some(rates) = rates {
                 labels.insert("unit".to_string(), "bytes/s".to_string());
@@ -974,6 +1334,12 @@ impl SystemCollector {
                 .await;
                 count += 1;
             }
+        }
+
+        // Latch the busiest %util for this tick's saturation score (None on the
+        // first pass, when no device has a previous sample to delta against).
+        if max_util.is_some() {
+            self.last_disk_util_percent = max_util;
         }
 
         count

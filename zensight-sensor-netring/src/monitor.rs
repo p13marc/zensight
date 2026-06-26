@@ -27,9 +27,18 @@ const TALKER_CAP: usize = 8192;
 const DNS_INV_CAP: usize = 8192;
 const HTTP_INV_CAP: usize = 4096;
 
+/// LRU cap of the Newly-Observed-Domain seen-set (issue #118) — bounds the
+/// detector's memory to this many distinct second-level domains.
+const NOD_SEEN_CAP: usize = 131_072;
+
+/// Sliding-window parameters for the DNS-tunnel distinct-label set (issue #118):
+/// 60 s window, 5 s buckets, capped at this many tracked (src, SLD) keys.
+const DNS_TUNNEL_KEY_CAP: usize = 8192;
+
 use flowscope::EndReason;
 use flowscope::detect::patterns::{
-    BeaconDetector, BeaconScore, DgaScore, DgaScorer, PortScanDetector, ScanScore, ScanVerdict,
+    BeaconDetector, BeaconScore, DgaScore, DgaScorer, PortScanDetector, RitaBeaconDetector,
+    RitaBeaconScore, ScanScore, ScanVerdict,
 };
 use flowscope::extract::FiveTupleKey;
 use netring::anomaly::shipped_sinks::ChannelSink;
@@ -187,6 +196,39 @@ struct Beacon {
     threshold: f64,
     allowlist: Vec<String>,
     last_score: Option<BeaconScore<FiveTupleKey>>,
+}
+
+/// Detector wrapper for the RITA-style ROBUST beaconing detector (issue #118):
+/// Bowley skewness + MAD, bit-faithful to RITA, catches jittered C2 the CV
+/// detector misses. Fed the same `FlowPacket` (key, ts, len) stream as `Beacon`.
+struct RitaBeacon {
+    detector: RitaBeaconDetector<FiveTupleKey>,
+    threshold: f64,
+    allowlist: Vec<String>,
+    last_score: Option<RitaBeaconScore<FiveTupleKey>>,
+}
+
+/// Local detector-score wrapping a [`RitaBeaconScore`] so the published anomaly
+/// carries the ZenSight kind slug `"RitaBeacon"` (the built-in `DetectorScore`
+/// impl emits `"BeaconRita"`). `with_key` attaches the 5-tuple so the drain's
+/// `anomaly_alert` derives src/dst labels + the cross-tool Community ID.
+struct RitaBeaconHit(RitaBeaconScore<FiveTupleKey>);
+
+impl flowscope::DetectorScore for RitaBeaconHit {
+    fn name(&self) -> &'static str {
+        "RitaBeacon"
+    }
+    fn into_anomaly(self, ts: flowscope::Timestamp) -> flowscope::OwnedAnomaly {
+        let s = self.0;
+        flowscope::OwnedAnomaly::new("RitaBeacon", flowscope::event::Severity::Warning, ts)
+            .with_key(&s.key)
+            .with_metric("score", s.score)
+            .with_metric("ts_score", s.ts_score)
+            .with_metric("ds_score", s.ds_score)
+            .with_metric("dur_score", s.dur_score)
+            .with_metric("mean_interval_secs", s.mean_interval.as_secs_f64())
+            .with_metric("n", s.n as f64)
+    }
 }
 
 /// Detector wrapper for the DGA scorer over DNS query SLDs (issue #18).
@@ -936,6 +978,38 @@ pub fn build(
         b = b.detect(beacon);
     }
 
+    // RITA robust beaconing detector (issue #118) — wired alongside the CV
+    // beacon, fed the identical FlowPacket (key, ts, len) stream. Bowley-skew +
+    // MAD survive jitter, so this catches periodic C2 the CV detector misses.
+    if cfg.anomalies.rita_beacon {
+        let rita = netring::pattern_detector! {
+            name: "RitaBeacon",
+            event: FlowPacket,
+            detector: RitaBeacon {
+                detector: RitaBeaconDetector::new(),
+                threshold: cfg.anomalies.rita_beacon_threshold,
+                allowlist: cfg.anomalies.allowlist.clone(),
+                last_score: None,
+            },
+            feed: |evt, w| {
+                if matches!(evt.proto, L4Proto::Tcp) {
+                    w.last_score = w.detector.observe(evt.key, evt.ts, evt.len as u64);
+                }
+            },
+            verdict: |_evt, w| {
+                w.last_score.as_ref().and_then(|s| {
+                    let dst = s.key.b.ip().to_string();
+                    if s.score >= w.threshold && !allowlisted(&dst, &w.allowlist) {
+                        Some(RitaBeaconHit(s.clone()))
+                    } else {
+                        None
+                    }
+                })
+            },
+        };
+        b = b.detect(rita);
+    }
+
     // Connection-flood detector (issue #18).
     if cfg.anomalies.connection_flood {
         use netring::protocol::event_typed::FlowStarted;
@@ -998,6 +1072,74 @@ pub fn build(
             },
         };
         b = b.detect(dga);
+    }
+
+    // DNS tunneling + Newly-Observed-Domain detectors (issue #118) — both need
+    // DNS parsing (`collect.dns`) for the qname and the flow ctx for src/ts, so
+    // they ride a dedicated `on_ctx::<Dns>` handler (handlers append, so this
+    // coexists with the collect.dns RED handler and the DGA detector). Hits are
+    // emitted as anomaly alerts on the typed alerts channel via the shared
+    // `map::anomaly_alert` path (kind → ATT&CK technique, Community ID). Detector
+    // state lives behind a `Mutex` (on_ctx handlers are `Fn`), held briefly.
+    if (cfg.anomalies.dns_tunnel || cfg.anomalies.nod) && cfg.collect.dns {
+        use flowscope::dns::DnsMessage;
+        let alerts_h = alert_tx.clone();
+        let sensor_id = cfg.sensor_id.clone();
+        let allowlist = cfg.anomalies.allowlist.clone();
+        let tunnel_on = cfg.anomalies.dns_tunnel;
+        let nod_on = cfg.anomalies.nod;
+        let tunnel_distinct = cfg.anomalies.dns_tunnel_distinct;
+        let tunnel_qlen = cfg.anomalies.dns_tunnel_qname_len;
+        let tunnel_set: Mutex<TimeBucketedSet<(String, String), String>> =
+            Mutex::new(TimeBucketedSet::new(
+                Duration::from_secs(60),
+                Duration::from_secs(5),
+                DNS_TUNNEL_KEY_CAP,
+            ));
+        let nod_seen: Mutex<map::SeenDomains> = Mutex::new(map::SeenDomains::new(NOD_SEEN_CAP));
+        b = b.on_ctx::<Dns>(move |msg: &DnsMessage, ctx: &mut Ctx<'_>| {
+            let DnsMessage::Query(q) = msg else {
+                return Ok(());
+            };
+            let Some(question) = q.questions.first() else {
+                return Ok(());
+            };
+            let Some(sld) = map::dns_sld(&question.name) else {
+                return Ok(());
+            };
+            if allowlisted(&sld, &allowlist) {
+                return Ok(());
+            }
+            // Source HOST IP only (no ephemeral port) → stable (rule, src) bucket.
+            let src = ctx.flow.map(|k| k.a.ip().to_string());
+
+            // NOD: emit once on the first sight of this SLD on the wire.
+            if nod_on
+                && let Ok(mut seen) = nod_seen.lock()
+                && seen.observe(&sld)
+            {
+                let view = map::nod_view(src.clone(), &sld);
+                let _ = alerts_h.send(map::anomaly_alert(&sensor_id, &view));
+            }
+
+            // DNS tunnel: distinct subdomain labels per (src, SLD) + qname length.
+            if tunnel_on {
+                let qname = question.name.trim_end_matches('.').to_ascii_lowercase();
+                let key = (src.clone().unwrap_or_default(), sld.clone());
+                let distinct = if let Ok(mut set) = tunnel_set.lock() {
+                    set.insert(key.clone(), qname.clone(), ctx.ts);
+                    set.cardinality(&key, ctx.ts)
+                } else {
+                    0
+                };
+                if map::dns_tunnel_fires(distinct, qname.len(), tunnel_distinct, tunnel_qlen) {
+                    let view = map::dns_tunnel_view(src, &sld, distinct, qname.len());
+                    let _ = alerts_h.send(map::anomaly_alert(&sensor_id, &view));
+                }
+            }
+            Ok(())
+        });
+        tracing::info!("netring: DNS tunnel / newly-observed-domain detection enabled");
     }
 
     // Threat-intel detection (netring 0.27). flow-risk / IOC / Sigma hits are
@@ -1157,6 +1299,9 @@ fn on_flow_ended(
 
     let proto = e.l4.map(|p| p.canonical_name()).unwrap_or("tcp");
     let reason = e.reason.as_str();
+    // Community ID v1 (#116) — directionless 5-tuple hash for cross-tool correlation.
+    let community_id =
+        map::proto_number(proto).map(|n| map::community_id_v1(e.key.a, e.key.b, n, 0));
     let rec = crate::map::flow_record(
         e.key.a.to_string(),
         e.key.b.to_string(),
@@ -1165,6 +1310,7 @@ fn on_flow_ended(
         total_packets,
         duration_ms,
         reason,
+        community_id,
     );
     if let Ok(mut r) = records.lock() {
         if r.len() == FLOW_RING_CAP {

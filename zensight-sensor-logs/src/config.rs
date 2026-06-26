@@ -70,6 +70,96 @@ pub struct SyslogConfig {
     /// bucket (never an unbounded label space). Default 10.
     #[serde(default = "default_top_units")]
     pub top_units: usize,
+
+    /// Per-unit error-budget / SLO burn-rate alerting (#105). Layered on top of
+    /// the derived per-unit `messages_total`/`errors_total` rollups: emits
+    /// `error_ratio` + `burn_rate` gauges and, when enabled, raises a
+    /// `log-error-budget` alert on sustained multi-window burn. Disabled by
+    /// default so it never surprises existing deployments.
+    #[serde(default)]
+    pub error_budget: ErrorBudgetConfig,
+
+    /// Drain-style streaming log-template mining (#102). Masks variables and
+    /// clusters each line into a stable template; attaches `template_id` /
+    /// `template` labels to the per-line points and emits bounded
+    /// `logs/by_template/<id>/{count,errors}_total` series. Cheap + bounded, so
+    /// it's on by default.
+    #[serde(default)]
+    pub templating: TemplatingConfig,
+
+    /// Novelty / "what's new" detection (#103). Layered on top of the template
+    /// miner: after a warm-up window, a never-before-seen template shape raises a
+    /// `log-novelty` anomaly alert, and (optionally) a known template whose rate
+    /// jumps N× over its EWMA baseline raises a `log-rate-spike` alert. Requires
+    /// `templating.enabled`. Disabled by default (raises alerts → opt-in).
+    #[serde(default)]
+    pub novelty: NoveltyConfig,
+
+    /// Network-ingest robustness (#106): rate-limit + drop/parse-failure
+    /// accounting for the UDP/TCP/Unix paths, bringing them to journald parity.
+    /// Safe defaults (rate limit off, generous channel) so normal traffic is
+    /// never dropped; emits `logs/ingest/*_total` counters and a sustained-loss
+    /// health alert.
+    #[serde(default)]
+    pub ingest: IngestConfig,
+}
+
+/// Network-ingest robustness configuration (#106).
+///
+/// Mirrors the journald loss-accounting controls for the network paths. By
+/// default the rate limiter is **off** (`max_eps: None`) so nothing is shed in
+/// normal use; under a configured budget or a full telemetry channel, drops are
+/// counted (`logs/ingest/dropped_total`) and a sustained-loss `ErrorReport` is
+/// raised rather than silently dropping logs.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct IngestConfig {
+    /// Optional global rate limit (parsed messages/sec across all network
+    /// listeners). Beyond the budget the limiter keeps 1-in-`sample_ratio` and
+    /// counts the rest as dropped. `None` (the default) = unlimited.
+    #[serde(default)]
+    pub max_eps: Option<u64>,
+
+    /// When rate-limited, keep 1 of every N over-budget messages. Default 100;
+    /// clamped to ≥1.
+    #[serde(default = "default_sample_ratio")]
+    pub sample_ratio: u64,
+
+    /// Behavior when the bounded telemetry channel is full. `drop_newest` (the
+    /// default) sheds the incoming message and counts it (bounded memory);
+    /// `block` applies backpressure to the listener instead.
+    #[serde(default)]
+    pub overflow: OverflowPolicy,
+
+    /// Emit an `ErrorReport` once the dropped fraction over a window exceeds this
+    /// (0.0..=1.0) — "not silently dropping your logs". Default 0.01 (1%).
+    #[serde(default = "default_drop_alert_ratio")]
+    pub drop_alert_ratio: f64,
+}
+
+impl Default for IngestConfig {
+    fn default() -> Self {
+        Self {
+            max_eps: None,
+            sample_ratio: default_sample_ratio(),
+            overflow: OverflowPolicy::default(),
+            drop_alert_ratio: default_drop_alert_ratio(),
+        }
+    }
+}
+
+/// TCP/Unix stream framing mode (RFC 6587, #106).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Framing {
+    /// Auto-detect per frame: a leading digit ⇒ octet-counting (`MSG-LEN SP
+    /// MSG`), otherwise LF-delimited. The safe default — handles both legacy
+    /// LF senders and RFC 6587 octet-counted senders on the same listener.
+    #[default]
+    Auto,
+    /// Always non-transparent (LF-delimited) framing.
+    Lf,
+    /// Always RFC 6587 octet-counted framing.
+    Octet,
 }
 
 fn default_derived_interval_secs() -> u64 {
@@ -77,6 +167,212 @@ fn default_derived_interval_secs() -> u64 {
 }
 fn default_top_units() -> usize {
     10
+}
+
+/// Per-unit error-budget / SLO configuration (#105).
+///
+/// SLO math (see also `derived::BudgetParams`): per derived window a unit's
+/// error ratio is `errors / messages`; it *burns budget* when that ratio
+/// exceeds `target_ratio * burn_rate` with at least `min_messages` of volume.
+/// An alert fires only after `burn_windows` consecutive burning windows and
+/// auto-resolves the first window the unit is back within budget.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ErrorBudgetConfig {
+    /// Master switch for *alerting*. When false the `error_ratio`/`burn_rate`
+    /// gauges are still emitted (cheap, bounded) but no alert is ever raised.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Tolerated per-window error fraction — the SLO target (0.0..=1.0).
+    /// Default 0.05 (5%).
+    #[serde(default = "default_target_ratio")]
+    pub target_ratio: f64,
+
+    /// Burn threshold multiplier: fire when the window error ratio exceeds
+    /// `target_ratio * burn_rate`. Default 2.0.
+    #[serde(default = "default_burn_rate")]
+    pub burn_rate: f64,
+
+    /// Consecutive over-budget windows required before an alert fires (the
+    /// multi-window anti-flap guard). Default 3.
+    #[serde(default = "default_burn_windows")]
+    pub burn_windows: u32,
+
+    /// Minimum messages in a window before the ratio is trusted, so a near-idle
+    /// unit can't trip a 100% ratio off a single line. Default 20.
+    #[serde(default = "default_min_messages")]
+    pub min_messages: u64,
+}
+
+fn default_target_ratio() -> f64 {
+    0.05
+}
+fn default_burn_rate() -> f64 {
+    2.0
+}
+fn default_burn_windows() -> u32 {
+    3
+}
+fn default_min_messages() -> u64 {
+    20
+}
+
+impl Default for ErrorBudgetConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            target_ratio: default_target_ratio(),
+            burn_rate: default_burn_rate(),
+            burn_windows: default_burn_windows(),
+            min_messages: default_min_messages(),
+        }
+    }
+}
+
+/// Drain-style log-template mining configuration (#102).
+///
+/// Defaults follow the logpai/Drain3 conventions (`depth=4`, `sim=0.4`) and are
+/// bounded so a noisy stream can't blow up cardinality or memory: at most
+/// `max_clusters` templates are mined, and only `top_templates` (+ an `other`
+/// bucket) are emitted as `logs/by_template/*` series.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct TemplatingConfig {
+    /// Master switch. On by default (cheap + bounded).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Fixed parse-tree depth: token layers descended below the length layer.
+    /// Default 4.
+    #[serde(default = "default_templating_depth")]
+    pub depth: usize,
+
+    /// Similarity threshold (fraction of matching non-wildcard tokens) to join
+    /// an existing cluster. Default 0.4.
+    #[serde(default = "default_sim_threshold")]
+    pub sim_threshold: f64,
+
+    /// Max distinct literal children per tree node before new tokens fold into
+    /// the wildcard branch. Default 100.
+    #[serde(default = "default_max_children")]
+    pub max_children: usize,
+
+    /// Hard cap on retained clusters (bounds memory). Default 1000.
+    #[serde(default = "default_max_clusters")]
+    pub max_clusters: usize,
+
+    /// Cardinality cap for the emitted per-template series: at most this many
+    /// distinct templates get their own series; the rest fold into `other`.
+    /// Default 50.
+    #[serde(default = "default_top_templates")]
+    pub top_templates: usize,
+}
+
+fn default_templating_depth() -> usize {
+    4
+}
+fn default_sim_threshold() -> f64 {
+    0.4
+}
+fn default_max_children() -> usize {
+    100
+}
+fn default_max_clusters() -> usize {
+    1000
+}
+fn default_top_templates() -> usize {
+    50
+}
+
+impl Default for TemplatingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            depth: default_templating_depth(),
+            sim_threshold: default_sim_threshold(),
+            max_children: default_max_children(),
+            max_clusters: default_max_clusters(),
+            top_templates: default_top_templates(),
+        }
+    }
+}
+
+/// Novelty / rate-spike detection configuration (#103).
+///
+/// Builds on the template miner: maintains a bounded seen-templates set and,
+/// after `warm_up_secs`, raises a `log-novelty` anomaly for a never-before-seen
+/// template shape and (when `rate_spike_multiplier > 1`) a `log-rate-spike`
+/// anomaly for a known template whose window rate jumps over its EWMA baseline.
+/// Disabled by default — it raises alerts, so it's strictly opt-in.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct NoveltyConfig {
+    /// Master switch. Off by default. Requires `templating.enabled`.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Startup warm-up: templates first seen within this window are folded into
+    /// the baseline (never flagged), so a cold start isn't all "novel".
+    /// Rate-spikes are likewise suppressed until it elapses. Default 300s.
+    #[serde(default = "default_warm_up_secs")]
+    pub warm_up_secs: u64,
+
+    /// How long a fired novelty point-event stays firing before auto-resolving
+    /// (it never re-fires; dedup is by `template_id`). Default 300s.
+    #[serde(default = "default_novelty_dedup_secs")]
+    pub novelty_dedup_secs: u64,
+
+    /// Rate-spike multiplier: a known template fires when its window rate exceeds
+    /// this many times its EWMA baseline. `<= 1.0` disables spike detection.
+    /// Default 5.0.
+    #[serde(default = "default_rate_spike_multiplier")]
+    pub rate_spike_multiplier: f64,
+
+    /// Absolute floor on a window's count before a spike can fire, so a jump from
+    /// a handful of lines can't alert. Default 10.
+    #[serde(default = "default_min_spike_count")]
+    pub min_spike_count: f64,
+
+    /// EWMA smoothing factor (0.0..=1.0) for the per-template baseline rate.
+    /// Default 0.3.
+    #[serde(default = "default_ewma_alpha")]
+    pub ewma_alpha: f64,
+
+    /// Hard cap on the seen-set size (bounds memory). Beyond the cap new shapes
+    /// are conservatively treated as known (no alert, not tracked). Default 2000.
+    #[serde(default = "default_max_novelty_templates")]
+    pub max_templates: usize,
+}
+
+fn default_warm_up_secs() -> u64 {
+    300
+}
+fn default_novelty_dedup_secs() -> u64 {
+    300
+}
+fn default_rate_spike_multiplier() -> f64 {
+    5.0
+}
+fn default_min_spike_count() -> f64 {
+    10.0
+}
+fn default_ewma_alpha() -> f64 {
+    0.3
+}
+fn default_max_novelty_templates() -> usize {
+    2000
+}
+
+impl Default for NoveltyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            warm_up_secs: default_warm_up_secs(),
+            novelty_dedup_secs: default_novelty_dedup_secs(),
+            rate_spike_multiplier: default_rate_spike_multiplier(),
+            min_spike_count: default_min_spike_count(),
+            ewma_alpha: default_ewma_alpha(),
+            max_templates: default_max_novelty_templates(),
+        }
+    }
 }
 
 /// systemd-journald source configuration.
@@ -318,6 +614,11 @@ pub struct ListenerConfig {
     /// Unix socket: remove existing socket file before binding.
     #[serde(default = "default_true")]
     pub remove_existing_socket: bool,
+
+    /// TCP/Unix: stream framing mode (RFC 6587, #106). Ignored for UDP (a
+    /// datagram is always exactly one frame). Default `auto`.
+    #[serde(default)]
+    pub framing: Framing,
 }
 
 fn default_max_message_size() -> usize {
@@ -433,6 +734,7 @@ impl Default for SyslogConfig {
                 connection_timeout_secs: default_connection_timeout_secs(),
                 socket_mode: default_socket_mode(),
                 remove_existing_socket: default_true(),
+                framing: Framing::default(),
             }],
             hostname_aliases: std::collections::HashMap::new(),
             include_raw_message: false,
@@ -442,6 +744,10 @@ impl Default for SyslogConfig {
             derived: true,
             derived_interval_secs: default_derived_interval_secs(),
             top_units: default_top_units(),
+            error_budget: ErrorBudgetConfig::default(),
+            templating: TemplatingConfig::default(),
+            novelty: NoveltyConfig::default(),
+            ingest: IngestConfig::default(),
         }
     }
 }
@@ -580,6 +886,174 @@ mod tests {
 
         let config: SyslogSensorConfig = json5::from_str(json).unwrap();
         assert!(config.validate_config().is_err());
+    }
+
+    #[test]
+    fn test_error_budget_defaults_off() {
+        let json = r#"{
+            zenoh: { mode: "peer" },
+            syslog: { listeners: [ { protocol: "udp", bind: "0.0.0.0:514" } ] }
+        }"#;
+        let config: SyslogSensorConfig = json5::from_str(json).unwrap();
+        let eb = config.syslog.error_budget;
+        assert!(!eb.enabled);
+        assert_eq!(eb.target_ratio, 0.05);
+        assert_eq!(eb.burn_rate, 2.0);
+        assert_eq!(eb.burn_windows, 3);
+        assert_eq!(eb.min_messages, 20);
+    }
+
+    #[test]
+    fn test_error_budget_parsed() {
+        let json = r#"{
+            zenoh: { mode: "peer" },
+            syslog: {
+                listeners: [ { protocol: "udp", bind: "0.0.0.0:514" } ],
+                error_budget: {
+                    enabled: true,
+                    target_ratio: 0.02,
+                    burn_rate: 5.0,
+                    burn_windows: 4,
+                    min_messages: 50
+                }
+            }
+        }"#;
+        let config: SyslogSensorConfig = json5::from_str(json).unwrap();
+        let eb = config.syslog.error_budget;
+        assert!(eb.enabled);
+        assert_eq!(eb.target_ratio, 0.02);
+        assert_eq!(eb.burn_rate, 5.0);
+        assert_eq!(eb.burn_windows, 4);
+        assert_eq!(eb.min_messages, 50);
+    }
+
+    #[test]
+    fn test_templating_defaults_on() {
+        let json = r#"{
+            zenoh: { mode: "peer" },
+            syslog: { listeners: [ { protocol: "udp", bind: "0.0.0.0:514" } ] }
+        }"#;
+        let config: SyslogSensorConfig = json5::from_str(json).unwrap();
+        let t = config.syslog.templating;
+        assert!(t.enabled);
+        assert_eq!(t.depth, 4);
+        assert_eq!(t.sim_threshold, 0.4);
+        assert_eq!(t.max_children, 100);
+        assert_eq!(t.max_clusters, 1000);
+        assert_eq!(t.top_templates, 50);
+    }
+
+    #[test]
+    fn test_templating_parsed() {
+        let json = r#"{
+            zenoh: { mode: "peer" },
+            syslog: {
+                listeners: [ { protocol: "udp", bind: "0.0.0.0:514" } ],
+                templating: {
+                    enabled: false,
+                    depth: 6,
+                    sim_threshold: 0.6,
+                    max_children: 50,
+                    max_clusters: 200,
+                    top_templates: 25
+                }
+            }
+        }"#;
+        let config: SyslogSensorConfig = json5::from_str(json).unwrap();
+        let t = config.syslog.templating;
+        assert!(!t.enabled);
+        assert_eq!(t.depth, 6);
+        assert_eq!(t.sim_threshold, 0.6);
+        assert_eq!(t.max_children, 50);
+        assert_eq!(t.max_clusters, 200);
+        assert_eq!(t.top_templates, 25);
+    }
+
+    #[test]
+    fn test_novelty_defaults_off() {
+        let json = r#"{
+            zenoh: { mode: "peer" },
+            syslog: { listeners: [ { protocol: "udp", bind: "0.0.0.0:514" } ] }
+        }"#;
+        let config: SyslogSensorConfig = json5::from_str(json).unwrap();
+        let n = config.syslog.novelty;
+        assert!(!n.enabled);
+        assert_eq!(n.warm_up_secs, 300);
+        assert_eq!(n.novelty_dedup_secs, 300);
+        assert_eq!(n.rate_spike_multiplier, 5.0);
+        assert_eq!(n.min_spike_count, 10.0);
+        assert_eq!(n.ewma_alpha, 0.3);
+        assert_eq!(n.max_templates, 2000);
+    }
+
+    #[test]
+    fn test_novelty_parsed() {
+        let json = r#"{
+            zenoh: { mode: "peer" },
+            syslog: {
+                listeners: [ { protocol: "udp", bind: "0.0.0.0:514" } ],
+                novelty: {
+                    enabled: true,
+                    warm_up_secs: 60,
+                    novelty_dedup_secs: 120,
+                    rate_spike_multiplier: 8.0,
+                    min_spike_count: 25.0,
+                    ewma_alpha: 0.5,
+                    max_templates: 500
+                }
+            }
+        }"#;
+        let config: SyslogSensorConfig = json5::from_str(json).unwrap();
+        let n = config.syslog.novelty;
+        assert!(n.enabled);
+        assert_eq!(n.warm_up_secs, 60);
+        assert_eq!(n.novelty_dedup_secs, 120);
+        assert_eq!(n.rate_spike_multiplier, 8.0);
+        assert_eq!(n.min_spike_count, 25.0);
+        assert_eq!(n.ewma_alpha, 0.5);
+        assert_eq!(n.max_templates, 500);
+    }
+
+    #[test]
+    fn test_ingest_defaults_safe() {
+        let json = r#"{
+            zenoh: { mode: "peer" },
+            syslog: { listeners: [ { protocol: "udp", bind: "0.0.0.0:514" } ] }
+        }"#;
+        let config: SyslogSensorConfig = json5::from_str(json).unwrap();
+        let ing = config.syslog.ingest;
+        // Rate limit off by default → nothing shed in normal use.
+        assert_eq!(ing.max_eps, None);
+        assert_eq!(ing.sample_ratio, 100);
+        assert_eq!(ing.overflow, OverflowPolicy::DropNewest);
+        assert_eq!(ing.drop_alert_ratio, 0.01);
+        // Listener framing defaults to auto-detect.
+        assert_eq!(config.syslog.listeners[0].framing, Framing::Auto);
+    }
+
+    #[test]
+    fn test_ingest_and_framing_parsed() {
+        let json = r#"{
+            zenoh: { mode: "peer" },
+            syslog: {
+                listeners: [
+                    { protocol: "tcp", bind: "0.0.0.0:514", framing: "octet" }
+                ],
+                ingest: {
+                    max_eps: 5000,
+                    sample_ratio: 10,
+                    overflow: "block",
+                    drop_alert_ratio: 0.05
+                }
+            }
+        }"#;
+        let config: SyslogSensorConfig = json5::from_str(json).unwrap();
+        let ing = config.syslog.ingest;
+        assert_eq!(ing.max_eps, Some(5000));
+        assert_eq!(ing.sample_ratio, 10);
+        assert_eq!(ing.overflow, OverflowPolicy::Block);
+        assert_eq!(ing.drop_alert_ratio, 0.05);
+        assert_eq!(config.syslog.listeners[0].framing, Framing::Octet);
     }
 
     #[test]

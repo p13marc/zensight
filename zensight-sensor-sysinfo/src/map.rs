@@ -761,6 +761,489 @@ impl ProcessSelector {
     }
 }
 
+// ===========================================================================
+// G. Derived saturation gauges: disk %util / queue depth, memory pressure.
+// ===========================================================================
+
+/// Disk saturation gauges derived from a poll-to-poll `/proc/diskstats` delta.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct DiskSaturation {
+    /// Fraction of wall-clock time the device had I/O in flight, `0..=100`.
+    pub util_percent: f64,
+    /// Time-weighted average request-queue length (iostat `aqu-sz`).
+    pub queue_depth: f64,
+}
+
+/// `%util` = (io_time delta ms / interval ms) * 100, clamped to `0..=100`.
+///
+/// `io_time` is diskstats field 10 (`io_ticks`, ms the device had any I/O in
+/// flight). A non-positive interval (first tick / clock skew) yields 0.
+pub fn disk_util_percent(io_time_delta_ms: u64, interval_ms: f64) -> f64 {
+    if interval_ms <= 0.0 {
+        return 0.0;
+    }
+    ((io_time_delta_ms as f64 / interval_ms) * 100.0).clamp(0.0, 100.0)
+}
+
+/// Average queue depth = weighted_io_time delta / io_time delta (both ms).
+///
+/// `weighted_io_time` is diskstats field 11 (the time-weighted I/O queue
+/// length). Guards division by zero: an idle device (`io_time` delta == 0)
+/// reports 0 rather than `NaN`/`inf`.
+pub fn disk_queue_depth(weighted_delta_ms: u64, io_time_delta_ms: u64) -> f64 {
+    if io_time_delta_ms == 0 {
+        return 0.0;
+    }
+    weighted_delta_ms as f64 / io_time_delta_ms as f64
+}
+
+/// Both disk-saturation gauges from one diskstats delta + the poll interval.
+pub fn disk_saturation(
+    io_time_delta_ms: u64,
+    weighted_delta_ms: u64,
+    interval_ms: f64,
+) -> DiskSaturation {
+    DiskSaturation {
+        util_percent: disk_util_percent(io_time_delta_ms, interval_ms),
+        queue_depth: disk_queue_depth(weighted_delta_ms, io_time_delta_ms),
+    }
+}
+
+/// MemAvailable-based memory usage percent: `(total - available) / total * 100`,
+/// clamped to `0..=100`.
+///
+/// Unlike a `used`-based figure (which counts reclaimable page cache) this
+/// tracks real memory pressure: `available` is the kernel's `MemAvailable`
+/// estimate of memory obtainable without swapping. Zero `total` yields 0.
+pub fn mem_usage_percent(total: u64, available: u64) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+    let used = total.saturating_sub(available);
+    ((used as f64 / total as f64) * 100.0).clamp(0.0, 100.0)
+}
+
+// ===========================================================================
+// H. USE-completeness collectors (#98): netstat/sockstat, softnet, schedstat,
+//    conntrack, edac, mdadm. Pure parsers + map fns; the Linux reads live in
+//    `linux.rs`. Every field/array degrades to "skip" rather than fake zeros.
+// ===========================================================================
+
+/// Parse a `/proc/net/{snmp,netstat}`-style file. These store stats as
+/// alternating header/value line pairs sharing a leading `Prefix:` tag, e.g.
+/// ```text
+/// Tcp: RtoAlgorithm RtoMin ... RetransSegs InErrs OutRsts InCsumErrors
+/// Tcp: 1 200 ... 9905 107 2369 0
+/// ```
+/// Returns a map keyed `Prefix:Field` -> value. A line is treated as the value
+/// row when its first column parses as an integer (field names never do); value
+/// columns that are not non-negative integers (e.g. `MaxConn -1`) are dropped.
+pub fn parse_proc_net_stats(content: &str) -> std::collections::HashMap<String, u64> {
+    let mut out = std::collections::HashMap::new();
+    let mut headers: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for line in content.lines() {
+        let Some((prefix, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let prefix = prefix.trim();
+        let tokens: Vec<&str> = rest.split_whitespace().collect();
+        let is_value = tokens
+            .first()
+            .map(|t| t.parse::<i64>().is_ok())
+            .unwrap_or(false);
+        if is_value {
+            if let Some(names) = headers.get(prefix) {
+                for (name, val) in names.iter().zip(tokens.iter()) {
+                    if let Ok(v) = val.parse::<u64>() {
+                        out.insert(format!("{prefix}:{name}"), v);
+                    }
+                }
+            }
+        } else {
+            headers.insert(
+                prefix.to_string(),
+                tokens.iter().map(|s| s.to_string()).collect(),
+            );
+        }
+    }
+    out
+}
+
+/// TCP retransmit / listen-queue-overflow saturation+error counters from
+/// `/proc/net/snmp` (`Tcp:RetransSegs`) and `/proc/net/netstat`
+/// (`TcpExt:ListenOverflows`, `TcpExt:ListenDrops`). Every field is `Option`
+/// so a kernel that omits it is skipped rather than reported as zero.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NetstatSample {
+    pub tcp_retrans_segs: Option<u64>,
+    pub listen_overflows: Option<u64>,
+    pub listen_drops: Option<u64>,
+}
+
+/// Parse the `snmp` + `netstat` file contents into the saturation subset.
+pub fn parse_netstat(snmp: &str, netstat: &str) -> NetstatSample {
+    let s = parse_proc_net_stats(snmp);
+    let n = parse_proc_net_stats(netstat);
+    NetstatSample {
+        tcp_retrans_segs: s.get("Tcp:RetransSegs").copied(),
+        listen_overflows: n.get("TcpExt:ListenOverflows").copied(),
+        listen_drops: n.get("TcpExt:ListenDrops").copied(),
+    }
+}
+
+/// Map TCP retransmit / listen-overflow counters under `network/tcp/...`.
+pub fn map_netstat(s: &NetstatSample) -> Vec<Metric> {
+    let mut out = Vec::new();
+    if let Some(v) = s.tcp_retrans_segs {
+        out.push(Metric::counter("network/tcp/retrans_segs_total", v));
+    }
+    if let Some(v) = s.listen_overflows {
+        out.push(Metric::counter("network/tcp/listen_overflows_total", v));
+    }
+    if let Some(v) = s.listen_drops {
+        out.push(Metric::counter("network/tcp/listen_drops_total", v));
+    }
+    out
+}
+
+/// Sockets-in-use + TCP memory-pressure gauges from `/proc/net/sockstat`. These
+/// are instantaneous occupancy figures (gauges, not counters). `tcp_mem_pages`
+/// is the `TCP: ... mem` column in kernel pages.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SockstatSample {
+    pub sockets_used: Option<u64>,
+    pub tcp_inuse: Option<u64>,
+    pub tcp_mem_pages: Option<u64>,
+    pub udp_inuse: Option<u64>,
+}
+
+/// Parse `/proc/net/sockstat`. Lines are `Prefix: key val key val ...`, e.g.
+/// `sockets: used 1107` / `TCP: inuse 13 orphan 0 tw 2 alloc 17 mem 750`.
+pub fn parse_sockstat(content: &str) -> SockstatSample {
+    let mut sample = SockstatSample::default();
+    for line in content.lines() {
+        let Some((prefix, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let toks: Vec<&str> = rest.split_whitespace().collect();
+        let mut kv = std::collections::HashMap::new();
+        let mut i = 0;
+        while i + 1 < toks.len() {
+            if let Ok(v) = toks[i + 1].parse::<u64>() {
+                kv.insert(toks[i], v);
+            }
+            i += 2;
+        }
+        match prefix.trim() {
+            "sockets" => sample.sockets_used = kv.get("used").copied(),
+            "TCP" => {
+                sample.tcp_inuse = kv.get("inuse").copied();
+                sample.tcp_mem_pages = kv.get("mem").copied();
+            }
+            "UDP" => sample.udp_inuse = kv.get("inuse").copied(),
+            _ => {}
+        }
+    }
+    sample
+}
+
+/// Map sockstat occupancy under `network/sockets/...` (present fields only).
+pub fn map_sockstat(s: &SockstatSample) -> Vec<Metric> {
+    let mut out = Vec::new();
+    if let Some(v) = s.sockets_used {
+        out.push(Metric::gauge("network/sockets/used", v as f64));
+    }
+    if let Some(v) = s.tcp_inuse {
+        out.push(Metric::gauge("network/sockets/tcp_inuse", v as f64));
+    }
+    if let Some(v) = s.tcp_mem_pages {
+        out.push(Metric::gauge("network/sockets/tcp_mem_pages", v as f64));
+    }
+    if let Some(v) = s.udp_inuse {
+        out.push(Metric::gauge("network/sockets/udp_inuse", v as f64));
+    }
+    out
+}
+
+/// Softnet (NIC→kernel backpressure) totals from `/proc/net/softnet_stat`,
+/// summed across the per-CPU rows. Columns are **hex**: col0 = packets
+/// processed, col1 = packets dropped (backlog full), col2 = times the softirq
+/// ran out of budget/time (`time_squeeze`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SoftnetSample {
+    pub processed: u64,
+    pub dropped: u64,
+    pub squeezed: u64,
+}
+
+/// Parse `/proc/net/softnet_stat` (one hex-column row per CPU), summing the
+/// processed/dropped/squeezed columns. Returns `None` if no valid row is found.
+pub fn parse_softnet(content: &str) -> Option<SoftnetSample> {
+    let mut s = SoftnetSample::default();
+    let mut any = false;
+    for line in content.lines() {
+        let cols: Vec<u64> = line
+            .split_whitespace()
+            .map(|c| u64::from_str_radix(c, 16).unwrap_or(0))
+            .collect();
+        if cols.len() < 3 {
+            continue;
+        }
+        s.processed = s.processed.saturating_add(cols[0]);
+        s.dropped = s.dropped.saturating_add(cols[1]);
+        s.squeezed = s.squeezed.saturating_add(cols[2]);
+        any = true;
+    }
+    if any { Some(s) } else { None }
+}
+
+/// Map softnet totals under `network/softnet/...` as cumulative counters.
+pub fn map_softnet(s: &SoftnetSample) -> Vec<Metric> {
+    vec![
+        Metric::counter("network/softnet/processed_total", s.processed),
+        Metric::counter("network/softnet/dropped_total", s.dropped),
+        Metric::counter("network/softnet/squeezed_total", s.squeezed),
+    ]
+}
+
+/// Per-CPU scheduler run-delay (the canonical CPU saturation signal) from
+/// `/proc/schedstat`. `total_run_delay_ns` sums the per-CPU cumulative
+/// nanoseconds tasks spent waiting on a runqueue.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SchedstatSample {
+    /// `(cpu_index, run_delay_ns)` per CPU.
+    pub per_cpu: Vec<(u32, u64)>,
+    pub total_run_delay_ns: u64,
+}
+
+/// Parse `/proc/schedstat`. Only `cpu<N>` lines carry per-CPU stats; the
+/// scheduling-latency block is the last three of nine fields, and **run-delay
+/// is the 8th statistic** (0-based index 7 of the values after `cpu<N>`). This
+/// layout has been stable across schedstat versions 15-17. Returns `None` when
+/// no `cpu<N>` line is present.
+pub fn parse_schedstat(content: &str) -> Option<SchedstatSample> {
+    let mut per_cpu = Vec::new();
+    let mut total: u64 = 0;
+    for line in content.lines() {
+        let mut toks = line.split_whitespace();
+        let Some(name) = toks.next() else { continue };
+        let Some(num) = name.strip_prefix("cpu") else {
+            continue;
+        };
+        if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(idx) = num.parse::<u32>() else {
+            continue;
+        };
+        let vals: Vec<u64> = toks.map(|t| t.parse::<u64>().unwrap_or(0)).collect();
+        if vals.len() < 8 {
+            continue;
+        }
+        let run_delay = vals[7];
+        total = total.saturating_add(run_delay);
+        per_cpu.push((idx, run_delay));
+    }
+    if per_cpu.is_empty() {
+        None
+    } else {
+        Some(SchedstatSample {
+            per_cpu,
+            total_run_delay_ns: total,
+        })
+    }
+}
+
+/// Map run-delay under `cpu/schedstat/run_delay_ns_total` (host total) plus a
+/// per-CPU `cpu<N>/schedstat/run_delay_ns_total` counter carrying a `core`
+/// label. Cumulative ns counters — the consumer derives the ns/s rate.
+pub fn map_schedstat(s: &SchedstatSample) -> Vec<Metric> {
+    let mut out = vec![Metric::counter(
+        "cpu/schedstat/run_delay_ns_total",
+        s.total_run_delay_ns,
+    )];
+    for (cpu, ns) in &s.per_cpu {
+        out.push(
+            Metric::counter(format!("cpu{cpu}/schedstat/run_delay_ns_total"), *ns)
+                .label("core", cpu.to_string()),
+        );
+    }
+    out
+}
+
+/// Conntrack table fill from `nf_conntrack_count` (+ `nf_conntrack_max` when
+/// readable). A near-full table is a silent firewall outage.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConntrackSample {
+    pub count: u64,
+    pub max: Option<u64>,
+}
+
+/// Parse the conntrack count file (required) and the optional max file (each a
+/// single integer). Returns `None` if the count does not parse.
+pub fn parse_conntrack(count: &str, max: Option<&str>) -> Option<ConntrackSample> {
+    let count = count.trim().parse::<u64>().ok()?;
+    let max = max.and_then(|m| m.trim().parse::<u64>().ok());
+    Some(ConntrackSample { count, max })
+}
+
+/// Map conntrack under `network/conntrack/{count,max,utilization_percent}`.
+/// `max`/`utilization_percent` are emitted only when the max file was readable.
+pub fn map_conntrack(s: &ConntrackSample) -> Vec<Metric> {
+    let mut out = vec![Metric::gauge("network/conntrack/count", s.count as f64)];
+    if let Some(max) = s.max {
+        out.push(Metric::gauge("network/conntrack/max", max as f64));
+        if max > 0 {
+            out.push(Metric::gauge(
+                "network/conntrack/utilization_percent",
+                (s.count as f64 / max as f64) * 100.0,
+            ));
+        }
+    }
+    out
+}
+
+/// ECC error counts for one memory controller (`/sys/devices/system/edac/mc/
+/// mc<N>/{ce_count,ue_count}`). Correctable errors are a wear signal;
+/// uncorrectable errors are imminent data corruption.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EdacSample {
+    pub controller: String,
+    pub ce: u64,
+    pub ue: u64,
+}
+
+/// Map per-controller ECC counts under `memory/edac/<mc>/{correctable_total,
+/// uncorrectable_total}` with a `controller` label.
+pub fn map_edac(samples: &[EdacSample]) -> Vec<Metric> {
+    let mut out = Vec::new();
+    for s in samples {
+        let key = sanitize_key(&s.controller);
+        let label = |m: Metric| m.label("controller", s.controller.clone());
+        out.push(label(Metric::counter(
+            format!("memory/edac/{key}/correctable_total"),
+            s.ce,
+        )));
+        out.push(label(Metric::counter(
+            format!("memory/edac/{key}/uncorrectable_total"),
+            s.ue,
+        )));
+    }
+    out
+}
+
+/// One software-RAID array parsed from `/proc/mdstat`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MdArray {
+    /// Array name (e.g. `md0`).
+    pub name: String,
+    /// `true` for an `active` array, `false` for `inactive`.
+    pub active: bool,
+    /// Configured member count from the `[total/active]` status token.
+    pub total_disks: Option<u64>,
+    /// Working member count from the `[total/active]` status token.
+    pub active_disks: Option<u64>,
+    /// Members flagged failed (`(F)`) on the header line.
+    pub failed_disks: u64,
+    /// `true` if inactive, any member failed, or working < configured.
+    pub degraded: bool,
+}
+
+/// Parse the `[total/active]` status token (e.g. `[2/1]`). Non-ratio bracket
+/// tokens (e.g. `[UU]`) and unbracketed tokens return `None`.
+fn parse_md_ratio(tok: &str) -> Option<(u64, u64)> {
+    let inner = tok.strip_prefix('[')?.strip_suffix(']')?;
+    let (n, m) = inner.split_once('/')?;
+    Some((n.trim().parse().ok()?, m.trim().parse().ok()?))
+}
+
+/// Parse `/proc/mdstat`. Each array opens with a header line
+/// `md0 : active raid1 sdb1[1] sda1[0]` followed by a status line carrying the
+/// `[total/active]` ratio and `[UU_]` member map. Redundancy-free arrays
+/// (raid0/linear) have no ratio token, so `total/active_disks` stay `None`.
+pub fn parse_mdstat(content: &str) -> Vec<MdArray> {
+    let mut arrays: Vec<MdArray> = Vec::new();
+    let mut cur: Option<MdArray> = None;
+    for line in content.lines() {
+        // Header line: "<name> : <active|inactive> <personality> <member>[i]..."
+        if let Some((name_part, rest)) = line.split_once(" : ") {
+            let name = name_part.trim();
+            if name.starts_with("md") {
+                if let Some(a) = cur.take() {
+                    arrays.push(a);
+                }
+                let active = rest.split_whitespace().next() == Some("active");
+                let failed_disks = rest.matches("(F)").count() as u64;
+                cur = Some(MdArray {
+                    name: name.to_string(),
+                    active,
+                    failed_disks,
+                    ..Default::default()
+                });
+                continue;
+            }
+        }
+        // Continuation/status line: harvest the first [total/active] ratio.
+        if let Some(a) = cur.as_mut()
+            && a.total_disks.is_none()
+        {
+            for tok in line.split_whitespace() {
+                if let Some((n, m)) = parse_md_ratio(tok) {
+                    a.total_disks = Some(n);
+                    a.active_disks = Some(m);
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(a) = cur.take() {
+        arrays.push(a);
+    }
+    for a in &mut arrays {
+        let understaffed = matches!((a.total_disks, a.active_disks), (Some(t), Some(ac)) if ac < t);
+        a.degraded = !a.active || a.failed_disks > 0 || understaffed;
+    }
+    arrays
+}
+
+/// Map each RAID array under `disk/md/<array>/...`: a `state` Text plus
+/// `degraded`/`failed_disks` gauges and (when the array has redundancy info)
+/// `total_disks`/`active_disks` gauges. Every metric carries an `array` label.
+pub fn map_mdstat(arrays: &[MdArray]) -> Vec<Metric> {
+    let mut out = Vec::new();
+    for a in arrays {
+        let key = sanitize_key(&a.name);
+        let label = |m: Metric| m.label("array", a.name.clone());
+        out.push(label(Metric {
+            metric: format!("disk/md/{key}/state"),
+            value: TelemetryValue::Text(if a.active { "active" } else { "inactive" }.to_string()),
+            labels: Vec::new(),
+        }));
+        out.push(label(Metric::gauge(
+            format!("disk/md/{key}/degraded"),
+            if a.degraded { 1.0 } else { 0.0 },
+        )));
+        out.push(label(Metric::gauge(
+            format!("disk/md/{key}/failed_disks"),
+            a.failed_disks as f64,
+        )));
+        if let Some(t) = a.total_disks {
+            out.push(label(Metric::gauge(
+                format!("disk/md/{key}/total_disks"),
+                t as f64,
+            )));
+        }
+        if let Some(ac) = a.active_disks {
+            out.push(label(Metric::gauge(
+                format!("disk/md/{key}/active_disks"),
+                ac as f64,
+            )));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1207,5 +1690,381 @@ mod tests {
         );
         // Bad value keeps the default.
         assert_eq!(ProcessSelector::parse("top=abc").top, 20);
+    }
+
+    #[test]
+    fn test_disk_util_percent() {
+        // 500 ms busy over a 1000 ms interval → 50 %.
+        assert_eq!(disk_util_percent(500, 1000.0), 50.0);
+        // Fully saturated.
+        assert_eq!(disk_util_percent(1000, 1000.0), 100.0);
+        // Idle device.
+        assert_eq!(disk_util_percent(0, 1000.0), 0.0);
+    }
+
+    #[test]
+    fn test_disk_util_percent_clamped() {
+        // io_time delta can exceed the interval (multiqueue / rounding); clamp.
+        assert_eq!(disk_util_percent(1500, 1000.0), 100.0);
+        // Non-positive interval (first tick / clock skew) → 0, never a divide.
+        assert_eq!(disk_util_percent(500, 0.0), 0.0);
+        assert_eq!(disk_util_percent(500, -10.0), 0.0);
+    }
+
+    #[test]
+    fn test_disk_queue_depth() {
+        // weighted 2000 ms over 1000 ms busy → average depth 2.0.
+        assert_eq!(disk_queue_depth(2000, 1000), 2.0);
+        // Sub-unit queue.
+        assert_eq!(disk_queue_depth(500, 1000), 0.5);
+    }
+
+    #[test]
+    fn test_disk_queue_depth_guards_div0() {
+        // Idle device: io_time delta 0 → 0, never NaN/inf.
+        assert_eq!(disk_queue_depth(0, 0), 0.0);
+        assert_eq!(disk_queue_depth(1234, 0), 0.0);
+        assert!(disk_queue_depth(1234, 0).is_finite());
+    }
+
+    #[test]
+    fn test_disk_saturation_combines_both() {
+        let s = disk_saturation(500, 1000, 1000.0);
+        assert_eq!(s.util_percent, 50.0);
+        assert_eq!(s.queue_depth, 2.0);
+    }
+
+    #[test]
+    fn test_mem_usage_percent_excludes_cache() {
+        // 16 GiB total, 12 GiB available → 25 % real pressure, regardless of
+        // how much of the in-use 4 GiB is reclaimable cache.
+        let total = 16 * 1024 * 1024 * 1024;
+        let available = 12 * 1024 * 1024 * 1024;
+        assert_eq!(mem_usage_percent(total, available), 25.0);
+    }
+
+    #[test]
+    fn test_mem_usage_percent_edges() {
+        // No memory → 0, never a divide by zero.
+        assert_eq!(mem_usage_percent(0, 0), 0.0);
+        // available > total (transient kernel estimate) clamps to 0.
+        assert_eq!(mem_usage_percent(1000, 2000), 0.0);
+        // Fully used.
+        assert_eq!(mem_usage_percent(1000, 0), 100.0);
+    }
+
+    // --- H. USE-completeness collectors (#98) ----------------------------
+
+    #[test]
+    fn test_parse_proc_net_stats_pairs() {
+        // Real-shape /proc/net/snmp Tcp header+value (note MaxConn = -1).
+        let snmp = "Tcp: RtoAlgorithm RtoMin RtoMax MaxConn ActiveOpens PassiveOpens \
+                    AttemptFails EstabResets CurrEstab InSegs OutSegs RetransSegs InErrs \
+                    OutRsts InCsumErrors\n\
+                    Tcp: 1 200 120000 -1 2363 42 426 144 10 535447 517811 9905 107 2369 0\n";
+        let m = parse_proc_net_stats(snmp);
+        assert_eq!(m.get("Tcp:RetransSegs"), Some(&9905));
+        assert_eq!(m.get("Tcp:ActiveOpens"), Some(&2363));
+        // The signed -1 MaxConn column does not parse as u64 → dropped.
+        assert_eq!(m.get("Tcp:MaxConn"), None);
+    }
+
+    #[test]
+    fn test_parse_netstat_fixture() {
+        let snmp = "Tcp: RtoAlgorithm ActiveOpens RetransSegs\n\
+                    Tcp: 1 2363 9905\n";
+        let netstat = "TcpExt: PruneCalled ListenOverflows ListenDrops TCPHPHits\n\
+                       TcpExt: 37 4 7 15114\n";
+        let s = parse_netstat(snmp, netstat);
+        assert_eq!(s.tcp_retrans_segs, Some(9905));
+        assert_eq!(s.listen_overflows, Some(4));
+        assert_eq!(s.listen_drops, Some(7));
+        let m = map_netstat(&s);
+        assert_eq!(
+            m.iter()
+                .find(|x| x.metric == "network/tcp/retrans_segs_total")
+                .unwrap()
+                .value,
+            TelemetryValue::Counter(9905)
+        );
+        assert!(
+            m.iter()
+                .any(|x| x.metric == "network/tcp/listen_overflows_total")
+        );
+        assert!(
+            m.iter()
+                .any(|x| x.metric == "network/tcp/listen_drops_total")
+        );
+    }
+
+    #[test]
+    fn test_parse_netstat_missing_degrades() {
+        // Kernel exposing neither RetransSegs nor the TcpExt block.
+        let s = parse_netstat("", "");
+        assert_eq!(s, NetstatSample::default());
+        assert!(map_netstat(&s).is_empty());
+    }
+
+    #[test]
+    fn test_parse_sockstat_fixture() {
+        let fixture = "sockets: used 1107\n\
+                       TCP: inuse 13 orphan 0 tw 2 alloc 17 mem 750\n\
+                       UDP: inuse 9 mem 381\n\
+                       UDPLITE: inuse 0\n\
+                       RAW: inuse 0\n\
+                       FRAG: inuse 0 memory 0\n";
+        let s = parse_sockstat(fixture);
+        assert_eq!(s.sockets_used, Some(1107));
+        assert_eq!(s.tcp_inuse, Some(13));
+        assert_eq!(s.tcp_mem_pages, Some(750));
+        assert_eq!(s.udp_inuse, Some(9));
+        let m = map_sockstat(&s);
+        assert_eq!(
+            m.iter()
+                .find(|x| x.metric == "network/sockets/tcp_inuse")
+                .unwrap()
+                .value,
+            TelemetryValue::Gauge(13.0)
+        );
+        assert!(
+            m.iter()
+                .any(|x| x.metric == "network/sockets/tcp_mem_pages")
+        );
+        assert!(m.iter().any(|x| x.metric == "network/sockets/udp_inuse"));
+        assert!(m.iter().any(|x| x.metric == "network/sockets/used"));
+    }
+
+    #[test]
+    fn test_parse_softnet_sums_hex_columns() {
+        // Two CPUs. Columns are hex: col0 processed, col1 dropped, col2 squeezed.
+        // 0x0002a923 = 174371, 0x0001598c = 88460; col2 0x1 + 0x2 = 3.
+        let fixture = "0002a923 00000000 00000001 00000000 00000000\n\
+                       0001598c 00000005 00000002 00000000 00000000\n";
+        let s = parse_softnet(fixture).unwrap();
+        assert_eq!(s.processed, 174371 + 88460);
+        assert_eq!(s.dropped, 5);
+        assert_eq!(s.squeezed, 3);
+        let m = map_softnet(&s);
+        assert_eq!(
+            m.iter()
+                .find(|x| x.metric == "network/softnet/squeezed_total")
+                .unwrap()
+                .value,
+            TelemetryValue::Counter(3)
+        );
+        assert!(
+            m.iter()
+                .any(|x| x.metric == "network/softnet/processed_total")
+        );
+        assert!(
+            m.iter()
+                .any(|x| x.metric == "network/softnet/dropped_total")
+        );
+    }
+
+    #[test]
+    fn test_parse_softnet_empty_none() {
+        assert!(parse_softnet("").is_none());
+        // Short rows (< 3 columns) are ignored.
+        assert!(parse_softnet("01 02\n").is_none());
+    }
+
+    #[test]
+    fn test_parse_schedstat_run_delay() {
+        // Real-shape schedstat v17: version/timestamp header, then cpu/domain
+        // lines. run_delay is the 8th statistic (index 7) on each cpu<N> line.
+        let fixture = "version 17\n\
+                       timestamp 4304439726\n\
+                       cpu0 0 0 0 0 0 0 2069154225814 687605150808 8600376\n\
+                       domain0 SMT 11 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n\
+                       cpu1 0 0 0 0 0 0 2194202497845 560152514053 7754232\n\
+                       domain0 SMT 22 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n";
+        let s = parse_schedstat(fixture).unwrap();
+        assert_eq!(s.per_cpu.len(), 2);
+        assert_eq!(s.per_cpu[0], (0, 687605150808));
+        assert_eq!(s.per_cpu[1], (1, 560152514053));
+        assert_eq!(s.total_run_delay_ns, 687605150808 + 560152514053);
+        let m = map_schedstat(&s);
+        assert_eq!(
+            m.iter()
+                .find(|x| x.metric == "cpu/schedstat/run_delay_ns_total")
+                .unwrap()
+                .value,
+            TelemetryValue::Counter(687605150808 + 560152514053)
+        );
+        let c0 = m
+            .iter()
+            .find(|x| x.metric == "cpu0/schedstat/run_delay_ns_total")
+            .unwrap();
+        assert_eq!(c0.value, TelemetryValue::Counter(687605150808));
+        assert!(c0.labels.contains(&("core", "0".to_string())));
+    }
+
+    #[test]
+    fn test_parse_schedstat_no_cpu_lines_none() {
+        assert!(parse_schedstat("version 17\ntimestamp 123\n").is_none());
+    }
+
+    #[test]
+    fn test_parse_conntrack_and_map() {
+        let s = parse_conntrack("48\n", Some("262144\n")).unwrap();
+        assert_eq!(s.count, 48);
+        assert_eq!(s.max, Some(262144));
+        let m = map_conntrack(&s);
+        assert_eq!(
+            m.iter()
+                .find(|x| x.metric == "network/conntrack/count")
+                .unwrap()
+                .value,
+            TelemetryValue::Gauge(48.0)
+        );
+        let util = m
+            .iter()
+            .find(|x| x.metric == "network/conntrack/utilization_percent")
+            .unwrap();
+        if let TelemetryValue::Gauge(p) = util.value {
+            assert!((p - (48.0 / 262144.0 * 100.0)).abs() < 1e-9);
+        } else {
+            panic!("expected gauge");
+        }
+    }
+
+    #[test]
+    fn test_parse_conntrack_missing_max() {
+        // Max unreadable (e.g. no CAP_NET_ADMIN): count only, no util%.
+        let s = parse_conntrack("48", None).unwrap();
+        assert_eq!(s.max, None);
+        let m = map_conntrack(&s);
+        assert!(m.iter().any(|x| x.metric == "network/conntrack/count"));
+        assert!(!m.iter().any(|x| x.metric == "network/conntrack/max"));
+        assert!(
+            !m.iter()
+                .any(|x| x.metric == "network/conntrack/utilization_percent")
+        );
+        // Bad count => None entirely.
+        assert!(parse_conntrack("garbage", Some("1")).is_none());
+    }
+
+    #[test]
+    fn test_map_edac() {
+        let samples = vec![
+            EdacSample {
+                controller: "mc0".to_string(),
+                ce: 12,
+                ue: 0,
+            },
+            EdacSample {
+                controller: "mc1".to_string(),
+                ce: 0,
+                ue: 3,
+            },
+        ];
+        let m = map_edac(&samples);
+        assert_eq!(
+            m.iter()
+                .find(|x| x.metric == "memory/edac/mc0/correctable_total")
+                .unwrap()
+                .value,
+            TelemetryValue::Counter(12)
+        );
+        let ue = m
+            .iter()
+            .find(|x| x.metric == "memory/edac/mc1/uncorrectable_total")
+            .unwrap();
+        assert_eq!(ue.value, TelemetryValue::Counter(3));
+        assert!(ue.labels.contains(&("controller", "mc1".to_string())));
+        // Empty input emits nothing (graceful: no ECC hardware).
+        assert!(map_edac(&[]).is_empty());
+    }
+
+    #[test]
+    fn test_parse_mdstat_clean_array() {
+        let fixture = "Personalities : [raid1]\n\
+                       md0 : active raid1 sdb1[1] sda1[0]\n\
+                       \x20     976630336 blocks super 1.2 [2/2] [UU]\n\
+                       \n\
+                       unused devices: <none>\n";
+        let arrays = parse_mdstat(fixture);
+        assert_eq!(arrays.len(), 1);
+        let a = &arrays[0];
+        assert_eq!(a.name, "md0");
+        assert!(a.active);
+        assert_eq!(a.total_disks, Some(2));
+        assert_eq!(a.active_disks, Some(2));
+        assert_eq!(a.failed_disks, 0);
+        assert!(!a.degraded);
+    }
+
+    #[test]
+    fn test_parse_mdstat_degraded_and_failed() {
+        // Degraded raid1: one member failed, working < configured.
+        let fixture = "Personalities : [raid1]\n\
+                       md0 : active raid1 sdb1[1] sda1[0](F)\n\
+                       \x20     976630336 blocks super 1.2 [2/1] [_U]\n\
+                       \n";
+        let arrays = parse_mdstat(fixture);
+        assert_eq!(arrays.len(), 1);
+        let a = &arrays[0];
+        assert_eq!(a.total_disks, Some(2));
+        assert_eq!(a.active_disks, Some(1));
+        assert_eq!(a.failed_disks, 1);
+        assert!(a.degraded);
+        let m = map_mdstat(&arrays);
+        assert_eq!(
+            m.iter()
+                .find(|x| x.metric == "disk/md/md0/degraded")
+                .unwrap()
+                .value,
+            TelemetryValue::Gauge(1.0)
+        );
+        assert_eq!(
+            m.iter()
+                .find(|x| x.metric == "disk/md/md0/state")
+                .unwrap()
+                .value,
+            TelemetryValue::Text("active".to_string())
+        );
+        assert!(m.iter().any(|x| x.metric == "disk/md/md0/failed_disks"));
+        assert!(
+            m.iter()
+                .find(|x| x.metric == "disk/md/md0/total_disks")
+                .unwrap()
+                .labels
+                .contains(&("array", "md0".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_mdstat_raid0_no_ratio() {
+        // raid0 has no redundancy → no [N/M] token; disks stay None, not degraded.
+        let fixture = "md0 : active raid0 sda1[0] sdb1[1]\n\
+                       \x20     196608 blocks super 1.2 512k chunks\n";
+        let arrays = parse_mdstat(fixture);
+        assert_eq!(arrays.len(), 1);
+        let a = &arrays[0];
+        assert!(a.active);
+        assert_eq!(a.total_disks, None);
+        assert_eq!(a.active_disks, None);
+        assert!(!a.degraded);
+        let m = map_mdstat(&arrays);
+        // No total/active gauges when the ratio is absent.
+        assert!(!m.iter().any(|x| x.metric == "disk/md/md0/total_disks"));
+        assert!(m.iter().any(|x| x.metric == "disk/md/md0/state"));
+    }
+
+    #[test]
+    fn test_parse_mdstat_inactive_is_degraded() {
+        let fixture = "md0 : inactive sda1[0](S)\n\
+                       \x20     976630336 blocks super 1.2\n";
+        let arrays = parse_mdstat(fixture);
+        let a = &arrays[0];
+        assert!(!a.active);
+        assert!(a.degraded);
+    }
+
+    #[test]
+    fn test_parse_mdstat_empty() {
+        let fixture = "Personalities : \nunused devices: <none>\n";
+        assert!(parse_mdstat(fixture).is_empty());
     }
 }

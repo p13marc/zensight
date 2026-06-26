@@ -9,10 +9,13 @@ mod config;
 mod derived;
 mod events;
 mod filter;
+mod ingest;
 #[cfg(feature = "journald")]
 mod journald;
+mod novelty;
 mod parser;
 mod receiver;
+mod template;
 
 use anyhow::Result;
 use commands::{FilterCommand, FilterStatus};
@@ -54,8 +57,10 @@ async fn main() -> Result<()> {
     );
 
     // Start syslog listeners (+ journald reader). `journald_stats` carries the
-    // reader's throughput/loss accounting when the journald source is enabled.
-    let (mut rx, journald_stats) = receiver::start_listeners(&syslog_config)
+    // reader's throughput/loss accounting when the journald source is enabled;
+    // `ingest_stats` carries the network paths' received/parsed/dropped
+    // accounting (#106).
+    let (mut rx, journald_stats, ingest_stats) = receiver::start_listeners(&syslog_config)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to start syslog listeners: {}", e))?;
 
@@ -139,10 +144,17 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Known systemd-event detection → alerts (#61). Only when journald is the
-    // source and detection is enabled; the alert path is otherwise untouched.
-    let event_detector: Option<Arc<EventDetector>> = match &syslog_config.journald {
-        Some(j) if j.enabled && j.detect_events => {
+    // Shared alert reporter for all sensor-emitted alerts: journald known-events
+    // (#61) and per-unit error budgets (#105). One reporter per protocol — the
+    // two alert families are namespaced by `rule` and reconcile independently —
+    // so `serve_alerts_query` is declared exactly once.
+    let journald_events_on =
+        matches!(&syslog_config.journald, Some(j) if j.enabled && j.detect_events);
+    let budget_alerts_on = syslog_config.derived && syslog_config.error_budget.enabled;
+    // Novelty / rate-spike (#103) needs the template miner to feed it `template_id`s.
+    let novelty_alerts_on = syslog_config.templating.enabled && syslog_config.novelty.enabled;
+    let alert_reporter: Option<Arc<AlertReporter>> =
+        if journald_events_on || budget_alerts_on || novelty_alerts_on {
             let reporter = Arc::new(AlertReporter::new(
                 runner.publisher(),
                 Protocol::Syslog,
@@ -150,18 +162,40 @@ async fn main() -> Result<()> {
             ));
             // Seed late-joining consumers (e.g. the GUI) with the firing set.
             runner.spawn(serve_alerts_query(reporter.clone()));
-            let detector = Arc::new(EventDetector::new(
-                reporter,
-                j.event_dedup_secs,
-                &j.event_severity,
-            ));
-            // Auto-resolve fired events after their dedup window.
-            runner.spawn(detector.clone().run_reconcile_loop());
-            tracing::info!("journald known-event detection enabled");
-            Some(detector)
-        }
-        _ => None,
-    };
+            Some(reporter)
+        } else {
+            None
+        };
+    if syslog_config.error_budget.enabled && !syslog_config.derived {
+        tracing::warn!(
+            "error_budget enabled but derived telemetry is off; SLO alerting needs \
+             the derived aggregator — skipping budget alerts"
+        );
+    }
+    if syslog_config.novelty.enabled && !syslog_config.templating.enabled {
+        tracing::warn!(
+            "novelty enabled but templating is off; novelty/rate-spike detection needs \
+             the template miner — skipping novelty alerts"
+        );
+    }
+
+    // Known systemd-event detection → alerts (#61). Only when journald is the
+    // source and detection is enabled; the alert path is otherwise untouched.
+    let event_detector: Option<Arc<EventDetector>> =
+        match (&syslog_config.journald, &alert_reporter) {
+            (Some(j), Some(reporter)) if j.enabled && j.detect_events => {
+                let detector = Arc::new(EventDetector::new(
+                    reporter.clone(),
+                    j.event_dedup_secs,
+                    &j.event_severity,
+                ));
+                // Auto-resolve fired events after their dedup window.
+                runner.spawn(detector.clone().run_reconcile_loop());
+                tracing::info!("journald known-event detection enabled");
+                Some(detector)
+            }
+            _ => None,
+        };
 
     // journald robustness monitor (#62): periodically snapshot the reader's
     // read/published/dropped/sampled counters; on sustained loss raise an
@@ -217,18 +251,102 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Network-ingest robustness monitor + telemetry (#106): bring the UDP/TCP/
+    // Unix paths to journald parity. On a tick, publish the
+    // `logs/ingest/{received,parsed,parse_failed,dropped}_total` counters and,
+    // on sustained loss, raise an edge-triggered `ErrorReport` so the Sensors
+    // view reflects "we are dropping your logs" — UDP drops + parse failures are
+    // no longer silent. Only runs when at least one network listener exists
+    // (journald has its own monitor above).
+    if !syslog_config.listeners.is_empty() {
+        let stats = ingest_stats.clone();
+        let health = runner.health();
+        let session_tick = session.clone();
+        let key_prefix_tick = key_prefix.clone();
+        let interval_secs = syslog_config.derived_interval_secs.max(1);
+        let drop_alert_ratio = syslog_config.ingest.drop_alert_ratio;
+        let source = hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_else(|| "localhost".to_string());
+        runner.spawn(async move {
+            use std::time::Duration;
+            let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
+            let mut prev = stats.snapshot();
+            let mut alerting = false;
+            loop {
+                tick.tick().await;
+                let cur = stats.snapshot();
+
+                // Publish the ingest counters as telemetry.
+                for point in cur.to_points(&source) {
+                    let key = format!("{}/{}/{}", key_prefix_tick, point.source, point.metric);
+                    match encode(&point, format) {
+                        Ok(payload) => {
+                            if let Err(e) = session_tick.put(&key, payload).await {
+                                tracing::warn!(error = %e, key, "failed to publish ingest metric");
+                            }
+                        }
+                        Err(e) => tracing::warn!(error = %e, "failed to encode ingest metric"),
+                    }
+                }
+
+                // Sustained-loss health alert (edge-triggered, mirrors journald).
+                let loss = cur.loss_ratio_since(&prev);
+                let dropped = cur.dropped.saturating_sub(prev.dropped);
+                if loss > drop_alert_ratio && dropped > 0 {
+                    if !alerting {
+                        alerting = true;
+                        let report = zensight_sensor_core::ErrorReport::new(
+                            zensight_sensor_core::ErrorType::Other,
+                            format!(
+                                "network ingest dropping logs: {:.1}% loss over last window \
+                                 ({dropped} dropped). Raise the channel/rate budget or reduce \
+                                 the inbound rate.",
+                                loss * 100.0
+                            ),
+                        );
+                        if let Err(e) = health.publish_error(&report).await {
+                            tracing::warn!(error = %e, "failed to publish ingest drop ErrorReport");
+                        }
+                        tracing::warn!(
+                            loss_pct = loss * 100.0,
+                            dropped,
+                            "network ingest: sustained log loss"
+                        );
+                    }
+                } else if alerting {
+                    alerting = false;
+                    tracing::info!("network ingest: log loss recovered");
+                }
+                prev = cur;
+            }
+        });
+    }
+
     // Derived rollup telemetry (#63): aggregate the log stream into per-severity
     // / per-unit / error rollups, emitted on a tick alongside the per-message
     // points. The aggregator observes each published message; the tick task
     // snapshots it (+ journald throughput) to telemetry.
-    let aggregator = syslog_config
-        .derived
-        .then(|| Arc::new(derived::LogAggregator::new(syslog_config.top_units)));
+    let aggregator = syslog_config.derived.then(|| {
+        // Resolve the per-unit error-budget / SLO thresholds (#105). Alerting is
+        // gated on a reporter being present (events + budget share one).
+        let eb = &syslog_config.error_budget;
+        let budget = derived::BudgetParams {
+            enabled: budget_alerts_on,
+            target_ratio: eb.target_ratio,
+            burn_rate: eb.burn_rate,
+            burn_windows: eb.burn_windows,
+            min_messages: eb.min_messages,
+        };
+        Arc::new(derived::LogAggregator::new(syslog_config.top_units).with_budget(budget))
+    });
     if let Some(agg) = aggregator.clone() {
         let session_tick = session.clone();
         let key_prefix_tick = key_prefix.clone();
         let interval_secs = syslog_config.derived_interval_secs.max(1);
         let stats_tick = journald_stats.clone();
+        let budget_reporter = budget_alerts_on.then(|| alert_reporter.clone()).flatten();
         // Local host identifies this sensor's rollups (network syslog spans many
         // hosts; journald is local — a single sensor-wide source keeps the
         // derived series cardinality bounded).
@@ -242,7 +360,28 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
                 let snapshot = stats_tick.as_ref().map(|s| s.snapshot());
-                for point in agg.emit(&source, snapshot) {
+                let mut points = agg.emit(&source, snapshot);
+
+                // SLO / error-budget layer (#105): error_ratio + burn_rate gauges
+                // for the same bounded unit set, plus burn alerts when enabled.
+                let budget = agg.tick_budgets(&source);
+                points.extend(budget.points);
+                if let Some(reporter) = &budget_reporter {
+                    for alert in budget.firing {
+                        let key = alert.alert_key();
+                        if let Err(e) = reporter.observe(alert, Some(Duration::ZERO)).await {
+                            tracing::warn!(error = %e, alert = %key, "failed to publish budget alert");
+                        }
+                    }
+                    if let Err(e) = reporter
+                        .reconcile(derived::BUDGET_RULE, &budget.firing_keys)
+                        .await
+                    {
+                        tracing::warn!(error = %e, "budget alert reconcile failed");
+                    }
+                }
+
+                for point in points {
                     let key = format!("{}/{}/{}", key_prefix_tick, point.source, point.metric);
                     match encode(&point, format) {
                         Ok(payload) => {
@@ -258,10 +397,119 @@ async fn main() -> Result<()> {
         tracing::info!(interval_secs, "derived rollup telemetry enabled");
     }
 
+    // Streaming log-template mining (#102): mask + cluster each line into a
+    // stable template, attach `template_id`/`template` labels to the per-line
+    // points, and emit bounded `logs/by_template/*` series on a tick. Additive
+    // and independent of the `derived` toggle.
+    let template_agg = syslog_config.templating.enabled.then(|| {
+        let t = &syslog_config.templating;
+        let params = template::DrainParams {
+            depth: t.depth,
+            sim_threshold: t.sim_threshold,
+            max_children: t.max_children,
+            max_clusters: t.max_clusters,
+        };
+        Arc::new(template::TemplateAggregator::new(params, t.top_templates))
+    });
+    if let Some(tagg) = template_agg.clone() {
+        let session_tick = session.clone();
+        let key_prefix_tick = key_prefix.clone();
+        let interval_secs = syslog_config.derived_interval_secs.max(1);
+        let source = hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_else(|| "localhost".to_string());
+        runner.spawn(async move {
+            use std::time::Duration;
+            let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
+            loop {
+                tick.tick().await;
+                for point in tagg.emit(&source) {
+                    let key = format!("{}/{}/{}", key_prefix_tick, point.source, point.metric);
+                    match encode(&point, format) {
+                        Ok(payload) => {
+                            if let Err(e) = session_tick.put(&key, payload).await {
+                                tracing::warn!(error = %e, key, "failed to publish template metric");
+                            }
+                        }
+                        Err(e) => tracing::warn!(error = %e, "failed to encode template metric"),
+                    }
+                }
+            }
+        });
+        tracing::info!("log-template mining enabled");
+    }
+
+    // Novelty / "what's new" detection (#103): on top of the template miner,
+    // raise a `log-novelty` anomaly the first time a template shape is seen after
+    // warm-up, and a `log-rate-spike` anomaly when a known template's rate jumps
+    // N× over its EWMA baseline. Reuses the shared `AlertReporter` (namespaced by
+    // `rule`). Gated on templating being on (it needs the `template_id`s).
+    let novelty: Option<Arc<novelty::NoveltyTracker>> = match (&template_agg, &alert_reporter) {
+        (Some(_), Some(_)) if novelty_alerts_on => {
+            let n = &syslog_config.novelty;
+            use std::time::Duration;
+            let source = hostname::get()
+                .ok()
+                .and_then(|h| h.into_string().ok())
+                .unwrap_or_else(|| "localhost".to_string());
+            let params = novelty::NoveltyParams {
+                warm_up: Duration::from_secs(n.warm_up_secs),
+                dedup: Duration::from_secs(n.novelty_dedup_secs.max(1)),
+                rate_spike_multiplier: n.rate_spike_multiplier,
+                min_spike_count: n.min_spike_count,
+                ewma_alpha: n.ewma_alpha,
+                max_templates: n.max_templates,
+            };
+            Some(Arc::new(novelty::NoveltyTracker::new(
+                params,
+                source,
+                std::time::Instant::now(),
+            )))
+        }
+        _ => None,
+    };
+    if let (Some(tracker), Some(reporter)) = (novelty.clone(), alert_reporter.clone()) {
+        let interval_secs = syslog_config.derived_interval_secs.max(1);
+        runner.spawn(async move {
+            use std::time::Duration;
+            let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
+            loop {
+                tick.tick().await;
+                let out = tracker.tick(std::time::Instant::now());
+                // Rate-spikes fire/refresh here; novelty point-events fire in the
+                // publish loop. Both rules reconcile against their live key sets so
+                // anything no longer present auto-resolves.
+                for alert in out.firing {
+                    let key = alert.alert_key();
+                    if let Err(e) = reporter.observe(alert, Some(Duration::ZERO)).await {
+                        tracing::warn!(error = %e, alert = %key, "failed to publish rate-spike alert");
+                    }
+                }
+                if let Err(e) = reporter
+                    .reconcile(novelty::NOVELTY_RULE, &out.novelty_keys)
+                    .await
+                {
+                    tracing::warn!(error = %e, "novelty alert reconcile failed");
+                }
+                if let Err(e) = reporter
+                    .reconcile(novelty::SPIKE_RULE, &out.spike_keys)
+                    .await
+                {
+                    tracing::warn!(error = %e, "rate-spike alert reconcile failed");
+                }
+            }
+        });
+        tracing::info!("log novelty / rate-spike detection enabled");
+    }
+
     // Spawn the message processing task
     let session_clone = session.clone();
     let publish_health = runner.health();
     let aggregator_loop = aggregator.clone();
+    let template_loop = template_agg.clone();
+    let novelty_loop = novelty.clone();
+    let novelty_reporter = novelty.is_some().then(|| alert_reporter.clone()).flatten();
     runner.spawn(async move {
         loop {
             tokio::select! {
@@ -290,7 +538,37 @@ async fn main() -> Result<()> {
                     }
 
                     // Convert to telemetry point
-                    let point = receiver::to_telemetry_point(&received, include_raw);
+                    let mut point = receiver::to_telemetry_point(&received, include_raw);
+
+                    // Log-template mining (#102): mine the message text and
+                    // attach the stable template id + masked template as labels.
+                    if let Some(tagg) = &template_loop {
+                        let is_error = (received.message.severity as u8)
+                            <= (parser::Severity::Error as u8);
+                        if let Some(mined) = tagg.observe(&received.message.message, is_error) {
+                            // Novelty detection (#103): a never-before-seen shape
+                            // (after warm-up) fires a one-shot `log-novelty`
+                            // anomaly; the tick task ages it out / reconciles.
+                            if let (Some(tracker), Some(reporter)) =
+                                (&novelty_loop, &novelty_reporter)
+                                && let Some(alert) = tracker.observe(
+                                    &mined.id,
+                                    &mined.template,
+                                    std::time::Instant::now(),
+                                )
+                            {
+                                let key = alert.alert_key();
+                                if let Err(e) = reporter
+                                    .observe(alert, Some(std::time::Duration::ZERO))
+                                    .await
+                                {
+                                    tracing::warn!(error = %e, alert = %key, "failed to publish novelty alert");
+                                }
+                            }
+                            point.labels.insert("template_id".to_string(), mined.id);
+                            point.labels.insert("template".to_string(), mined.template);
+                        }
+                    }
 
                     // Build key expression
                     let key = receiver::build_key_expr(&key_prefix, &received);

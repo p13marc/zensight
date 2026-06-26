@@ -172,6 +172,26 @@ pub struct SocketCounts {
     /// RTT percentiles across established sockets (microseconds).
     pub rtt_p50_us: u64,
     pub rtt_p95_us: u64,
+    /// Delivery-rate percentiles across established sockets (bytes/sec, #108) —
+    /// "are flows actually delivering" vs just "how many are established".
+    pub delivery_rate_p50: u64,
+    pub delivery_rate_p95: u64,
+    /// Pacing-rate percentiles across established sockets (bytes/sec, #108).
+    /// Sockets reporting the kernel's `~0` "unlimited" sentinel are excluded.
+    pub pacing_rate_p50: u64,
+    pub pacing_rate_p95: u64,
+    /// Receiver-side RTT estimate percentiles (microseconds, #108).
+    pub rcv_rtt_p50_us: u64,
+    pub rcv_rtt_p95_us: u64,
+    /// Sum of bytes retransmitted across sockets (#108, monotonic per-socket).
+    pub bytes_retrans_total: u64,
+    /// Sum of segment retransmits across sockets (#108) — distinct from the
+    /// legacy `retransmits_total` (current `retrans`), this is lifetime `total_retrans`.
+    pub total_retrans_total: u64,
+    /// Sum of reordering events observed across sockets (`reord_seen`, #108).
+    pub reordered_total: u64,
+    /// Sum of currently-lost (unacked, presumed-lost) segments across sockets (#108).
+    pub lost_total: u64,
     /// Established-socket count by TCP congestion-control algorithm (#11). Bounded
     /// cardinality — there are only a handful of algorithms on any host.
     pub by_cong: HashMap<String, u64>,
@@ -305,7 +325,67 @@ pub fn socket_points(host: &str, c: &SocketCounts) -> Vec<TelemetryPoint> {
             "sockets/tcp/rtt_p95_us",
             TelemetryValue::Gauge(c.rtt_p95_us as f64),
         ),
+        // Delivery-health counters (#108) — always emitted (monotonic-ish sums).
+        point(
+            host,
+            "sockets/tcp/bytes_retrans_total",
+            TelemetryValue::Counter(c.bytes_retrans_total),
+        ),
+        point(
+            host,
+            "sockets/tcp/total_retrans_total",
+            TelemetryValue::Counter(c.total_retrans_total),
+        ),
+        point(
+            host,
+            "sockets/tcp/reordered_total",
+            TelemetryValue::Counter(c.reordered_total),
+        ),
+        point(
+            host,
+            "sockets/tcp/lost_total",
+            TelemetryValue::Gauge(c.lost_total as f64),
+        ),
     ];
+    // Delivery/pacing/rcv-rtt percentiles (#108): only meaningful with established
+    // sockets carrying tcp_info — omit when 0 so a quiet host doesn't clobber the
+    // cached gauge with a misleading zero (mirrors the buffer-totals policy).
+    if c.delivery_rate_p50 > 0 || c.delivery_rate_p95 > 0 {
+        out.push(point(
+            host,
+            "sockets/tcp/delivery_rate_p50",
+            TelemetryValue::Gauge(c.delivery_rate_p50 as f64),
+        ));
+        out.push(point(
+            host,
+            "sockets/tcp/delivery_rate_p95",
+            TelemetryValue::Gauge(c.delivery_rate_p95 as f64),
+        ));
+    }
+    if c.pacing_rate_p50 > 0 || c.pacing_rate_p95 > 0 {
+        out.push(point(
+            host,
+            "sockets/tcp/pacing_rate_p50",
+            TelemetryValue::Gauge(c.pacing_rate_p50 as f64),
+        ));
+        out.push(point(
+            host,
+            "sockets/tcp/pacing_rate_p95",
+            TelemetryValue::Gauge(c.pacing_rate_p95 as f64),
+        ));
+    }
+    if c.rcv_rtt_p50_us > 0 || c.rcv_rtt_p95_us > 0 {
+        out.push(point(
+            host,
+            "sockets/tcp/rcv_rtt_p50_us",
+            TelemetryValue::Gauge(c.rcv_rtt_p50_us as f64),
+        ));
+        out.push(point(
+            host,
+            "sockets/tcp/rcv_rtt_p95_us",
+            TelemetryValue::Gauge(c.rcv_rtt_p95_us as f64),
+        ));
+    }
     // Buffer totals (only meaningful when mem info was requested; both 0 → omit).
     if c.snd_buf_total > 0 || c.rcv_buf_total > 0 {
         out.push(point(
@@ -730,9 +810,82 @@ pub struct TcQdiscSample {
     pub backlog_pkts: u64,
 }
 
-/// Build telemetry points for one qdisc (#12). Metric paths are
+/// AQM classification of a qdisc `kind` (pure string match, #110). Reports whether
+/// the qdisc does *active queue management* (the bufferbloat-relevant question):
+///
+/// * `aqm`     — fq_codel / cake / fq_pie / codel / pie: actively bounds latency
+///   under load (AQM and/or fair-queueing). The healthy egress default.
+/// * `fifo`    — pfifo_fast / pfifo / bfifo: a dumb drop-tail FIFO, bufferbloat-prone.
+/// * `noqueue` — the kernel `noqueue` pseudo-qdisc (virtual / loopback-style links).
+/// * `none`    — any other kind (e.g. htb, tbf, mq, prio): no AQM of its own. A
+///   loaded link landing here is itself a finding (no AQM under load).
+pub fn aqm_class(kind: &str) -> &'static str {
+    match kind {
+        "fq_codel" | "cake" | "fq_pie" | "codel" | "pie" => "aqm",
+        "pfifo_fast" | "pfifo" | "bfifo" => "fifo",
+        "noqueue" => "noqueue",
+        _ => "none",
+    }
+}
+
+/// Bufferbloat / qdisc health score in `0.0..=1.0` (1 = healthy), from a single
+/// qdisc sample (#110).
+///
+/// The TC kernel stats are cumulative counters, and this pure `map` layer holds no
+/// cross-poll state (the collector caches no prior TC sample), so the score uses
+/// *instantaneous cumulative ratios* from one sample rather than per-poll rates.
+/// This is a deliberate, documented proxy: it keeps the function pure and unit
+/// testable, and the cumulative ratios are still defensible health signals (a qdisc
+/// that has dropped 5% of everything it ever saw is unhealthy regardless of when).
+/// It blends three penalties, each normalized to `0.0..=1.0` (0 = fine, 1 = worst):
+///
+/// * **drop penalty** (weight 0.5) — the dominant bufferbloat signal. Cumulative
+///   drop fraction `drops / (packets + drops)`; a `DROP_FULL` (5%) drop fraction
+///   saturates it. An idle qdisc (no packets, no drops) scores 0 here.
+/// * **backlog penalty** (weight 0.3) — sustained queue depth, the classic
+///   latency-under-load symptom. `backlog_pkts` normalized against
+///   `BACKLOG_FULL_PKTS` (1000 packets queued == worst).
+/// * **overlimit penalty** (weight 0.2) — shaping pressure. `overlimits / packets`
+///   normalized against `OVERLIMIT_FULL` (10%). Overlimits are expected for shapers,
+///   so this term is weighted lightest.
+///
+/// The weights sum to 1.0, so the blended penalty stays in `0.0..=1.0`;
+/// `health_score = (1 - penalty)`, clamped.
+pub fn tc_health_score(s: &TcQdiscSample) -> f64 {
+    // Saturation thresholds: a term reaching its threshold yields full penalty.
+    const DROP_FULL: f64 = 0.05; // 5% lifetime drop fraction == worst
+    const BACKLOG_FULL_PKTS: f64 = 1000.0; // packets queued == worst
+    const OVERLIMIT_FULL: f64 = 0.10; // 10% of packets over the shaper limit
+    // Weights (sum to 1.0 so the blended penalty stays in 0.0..=1.0).
+    const W_DROP: f64 = 0.5;
+    const W_BACKLOG: f64 = 0.3;
+    const W_OVERLIMIT: f64 = 0.2;
+
+    let packets = s.packets as f64;
+    let drops = s.drops as f64;
+    let seen = packets + drops;
+    let drop_frac = if seen > 0.0 { drops / seen } else { 0.0 };
+    let drop_penalty = (drop_frac / DROP_FULL).clamp(0.0, 1.0);
+
+    let backlog_penalty = (s.backlog_pkts as f64 / BACKLOG_FULL_PKTS).clamp(0.0, 1.0);
+
+    let overlimit_ratio = if packets > 0.0 {
+        s.overlimits as f64 / packets
+    } else {
+        0.0
+    };
+    let overlimit_penalty = (overlimit_ratio / OVERLIMIT_FULL).clamp(0.0, 1.0);
+
+    let penalty =
+        W_DROP * drop_penalty + W_BACKLOG * backlog_penalty + W_OVERLIMIT * overlimit_penalty;
+    (1.0 - penalty).clamp(0.0, 1.0)
+}
+
+/// Build telemetry points for one qdisc (#12, #110). Metric paths are
 /// `tc/<iface>/<kind>/<stat>`. Drops/overlimits/requeues are counters (monotonic
-/// kernel stats); backlog is an instantaneous gauge.
+/// kernel stats); backlog is an instantaneous gauge. Additionally emits the derived
+/// `tc/<iface>/<kind>/health_score` (Gauge 0..=1, 1 = healthy, see
+/// [`tc_health_score`]) and `tc/<iface>/aqm_class` (Text, see [`aqm_class`]).
 pub fn tc_points(host: &str, s: &TcQdiscSample) -> Vec<TelemetryPoint> {
     let pfx = format!("tc/{}/{}", s.iface, s.kind);
     let label = |p: TelemetryPoint| p.with_label("handle", s.handle.clone());
@@ -772,6 +925,20 @@ pub fn tc_points(host: &str, s: &TcQdiscSample) -> Vec<TelemetryPoint> {
             format!("{pfx}/backlog_pkts"),
             TelemetryValue::Gauge(s.backlog_pkts as f64),
         )),
+        // Derived bufferbloat health score (#110): 0..=1, 1 = healthy.
+        label(point(
+            host,
+            format!("{pfx}/health_score"),
+            TelemetryValue::Gauge(tc_health_score(s)),
+        )),
+        // AQM classification of the qdisc kind (#110). Path omits `<kind>` (per the
+        // issue); the `kind` label disambiguates multiple qdiscs on one iface.
+        label(point(
+            host,
+            format!("tc/{}/aqm_class", s.iface),
+            TelemetryValue::Text(aqm_class(&s.kind).to_string()),
+        ))
+        .with_label("kind", s.kind.clone()),
     ]
 }
 
@@ -1105,6 +1272,17 @@ mod tests {
             by_cong,
             snd_buf_total: 1_000_000,
             rcv_buf_total: 2_000_000,
+            // Enriched tcp_info (#108).
+            delivery_rate_p50: 5_000_000,
+            delivery_rate_p95: 40_000_000,
+            pacing_rate_p50: 12_000_000,
+            pacing_rate_p95: 60_000_000,
+            rcv_rtt_p50_us: 300,
+            rcv_rtt_p95_us: 900,
+            bytes_retrans_total: 4096,
+            total_retrans_total: 17,
+            reordered_total: 3,
+            lost_total: 2,
             ..Default::default()
         };
         let pts = socket_points("h", &c);
@@ -1116,6 +1294,35 @@ mod tests {
         assert_eq!(
             find("sockets/tcp/retransmits_total").value,
             TelemetryValue::Counter(12)
+        );
+        // #108: enriched delivery-health metrics.
+        assert_eq!(
+            find("sockets/tcp/delivery_rate_p50").value,
+            TelemetryValue::Gauge(5_000_000.0)
+        );
+        assert_eq!(
+            find("sockets/tcp/pacing_rate_p95").value,
+            TelemetryValue::Gauge(60_000_000.0)
+        );
+        assert_eq!(
+            find("sockets/tcp/rcv_rtt_p50_us").value,
+            TelemetryValue::Gauge(300.0)
+        );
+        assert_eq!(
+            find("sockets/tcp/bytes_retrans_total").value,
+            TelemetryValue::Counter(4096)
+        );
+        assert_eq!(
+            find("sockets/tcp/total_retrans_total").value,
+            TelemetryValue::Counter(17)
+        );
+        assert_eq!(
+            find("sockets/tcp/reordered_total").value,
+            TelemetryValue::Counter(3)
+        );
+        assert_eq!(
+            find("sockets/tcp/lost_total").value,
+            TelemetryValue::Gauge(2.0)
         );
         // #11: per-algorithm counts + buffer totals.
         assert_eq!(
@@ -1151,6 +1358,20 @@ mod tests {
         assert!(
             pts.iter()
                 .all(|p| !p.metric.starts_with("sockets/tcp/by_cong/"))
+        );
+        // #108: delivery/pacing/rcv-rtt percentiles omitted when 0 (no clobbering).
+        assert!(pts.iter().all(|p| {
+            !matches!(
+                p.metric.as_str(),
+                "sockets/tcp/delivery_rate_p50"
+                    | "sockets/tcp/pacing_rate_p50"
+                    | "sockets/tcp/rcv_rtt_p50_us"
+            )
+        }));
+        // But the always-on retrans/lost counters ARE present (even at 0).
+        assert!(
+            pts.iter()
+                .any(|p| p.metric == "sockets/tcp/bytes_retrans_total")
         );
     }
 
@@ -1219,6 +1440,13 @@ mod tests {
             snd_cwnd: 0,
             snd_buf: 0,
             rcv_buf: 0,
+            delivery_rate: 0,
+            pacing_rate: 0,
+            bytes_retrans: 0,
+            total_retrans: 0,
+            rcv_rtt_us: 0,
+            lost: 0,
+            reord_seen: 0,
         }
     }
 
@@ -1367,6 +1595,111 @@ mod tests {
         for p in &pts {
             assert_eq!(p.labels.get("handle").map(String::as_str), Some("8001:"));
         }
+        // #110: the derived health_score Gauge and aqm_class Text are emitted.
+        assert!(matches!(
+            find("tc/eth0/fq_codel/health_score").value,
+            TelemetryValue::Gauge(_)
+        ));
+        let aqm = find("tc/eth0/aqm_class");
+        assert_eq!(aqm.value, TelemetryValue::Text("aqm".into()));
+        assert_eq!(aqm.labels.get("kind").map(String::as_str), Some("fq_codel"));
+        // Raw counters preserved alongside the derived signals (additive).
+        assert_eq!(
+            find("tc/eth0/fq_codel/packets").value,
+            TelemetryValue::Counter(40)
+        );
+    }
+
+    #[test]
+    fn aqm_class_maps_kinds() {
+        // Active queue management.
+        for k in ["fq_codel", "cake", "fq_pie", "codel", "pie"] {
+            assert_eq!(aqm_class(k), "aqm", "{k} should be aqm");
+        }
+        // Dumb FIFOs.
+        for k in ["pfifo_fast", "pfifo", "bfifo"] {
+            assert_eq!(aqm_class(k), "fifo", "{k} should be fifo");
+        }
+        // The noqueue pseudo-qdisc.
+        assert_eq!(aqm_class("noqueue"), "noqueue");
+        // Everything else (shapers/classful) has no AQM of its own.
+        for k in ["htb", "tbf", "mq", "prio", "ingress", ""] {
+            assert_eq!(aqm_class(k), "none", "{k} should be none");
+        }
+    }
+
+    #[test]
+    fn tc_health_score_clean_fq_codel_scores_high() {
+        // Clean AQM under light load: tiny drop fraction, ~empty backlog, no
+        // overlimits => should be near 1.0.
+        let s = TcQdiscSample {
+            iface: "eth0".into(),
+            kind: "fq_codel".into(),
+            handle: "8001:".into(),
+            bytes: 10_000_000,
+            packets: 100_000,
+            drops: 5, // 0.005% drop fraction
+            overlimits: 0,
+            requeues: 0,
+            backlog_bytes: 1448,
+            backlog_pkts: 1,
+        };
+        let score = tc_health_score(&s);
+        assert!(
+            score > 0.99,
+            "clean fq_codel scored {score}, expected > 0.99"
+        );
+        assert!((0.0..=1.0).contains(&score));
+    }
+
+    #[test]
+    fn tc_health_score_idle_qdisc_is_healthy() {
+        // No traffic at all: no drops, no backlog => fully healthy (score 1.0),
+        // not a divide-by-zero NaN.
+        let s = TcQdiscSample {
+            iface: "eth0".into(),
+            kind: "pfifo_fast".into(),
+            ..Default::default()
+        };
+        assert_eq!(tc_health_score(&s), 1.0);
+    }
+
+    #[test]
+    fn tc_health_score_congested_fifo_scores_low() {
+        // A dumb FIFO that has dropped >10% of traffic, with a deep sustained
+        // backlog and heavy overlimits => penalties saturate => near 0.0.
+        let s = TcQdiscSample {
+            iface: "eth0".into(),
+            kind: "pfifo_fast".into(),
+            handle: "0:".into(),
+            bytes: 100_000_000,
+            packets: 100_000,
+            drops: 50_000,      // 33% drop fraction (>> 5% threshold)
+            overlimits: 50_000, // 50% overlimit ratio (>> 10% threshold)
+            requeues: 0,
+            backlog_bytes: 4_000_000,
+            backlog_pkts: 5_000, // >> 1000-pkt threshold
+        };
+        let score = tc_health_score(&s);
+        assert!(
+            score < 0.05,
+            "congested fifo scored {score}, expected < 0.05"
+        );
+        assert!((0.0..=1.0).contains(&score));
+    }
+
+    #[test]
+    fn tc_health_score_is_monotonic_in_drops() {
+        // More drops (all else equal) must not raise the score.
+        let base = TcQdiscSample {
+            iface: "eth0".into(),
+            kind: "fq_codel".into(),
+            packets: 100_000,
+            ..Default::default()
+        };
+        let mut worse = base.clone();
+        worse.drops = 2_000; // 2% drop fraction
+        assert!(tc_health_score(&worse) < tc_health_score(&base));
     }
 
     #[test]

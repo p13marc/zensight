@@ -16,6 +16,25 @@ use zensight_common::{
 /// Flush the metric store to redb every this many 1s ticks (#22).
 const STORE_FLUSH_EVERY_TICKS: u32 = 15;
 
+/// Evict aged-out buckets every this many flushes (~10 min at 15s/flush, #131).
+/// Pruning scans the whole table, so it runs far less often than flushing.
+const STORE_PRUNE_EVERY_FLUSHES: u32 = 40;
+
+/// Reduce an `ip:port` (or bracketed `[ipv6]:port`, or bare `ip`) endpoint to its
+/// bare IP, for matching a flow endpoint against an anomaly's source (#119).
+fn endpoint_ip(endpoint: &str) -> String {
+    if let Ok(sa) = endpoint.parse::<std::net::SocketAddr>() {
+        return sa.ip().to_string();
+    }
+    if let Ok(ip) = endpoint.parse::<std::net::IpAddr>() {
+        return ip.to_string();
+    }
+    match endpoint.rsplit_once(':') {
+        Some((host, _port)) => host.trim_matches(['[', ']']).to_string(),
+        None => endpoint.to_string(),
+    }
+}
+
 /// Cap on the rolling log buffer feeding the top-level Logs view.
 const MAX_RECENT_LOGS: usize = 5000;
 
@@ -136,6 +155,8 @@ pub struct ZenSight {
     store: crate::store::MetricStore,
     /// Ticks counted toward the next periodic store flush (flush every N ticks).
     ticks_since_flush: u32,
+    /// Flushes counted toward the next store prune (#131).
+    flushes_since_prune: u32,
     /// Timestamp (epoch ms) of the most recently received telemetry point, for
     /// the global Live/Stale/Paused freshness indicator (#23). `None` until the
     /// first point arrives.
@@ -258,6 +279,7 @@ impl ZenSight {
                 crate::store::MetricStore::with_default_persistence()
             },
             ticks_since_flush: 0,
+            flushes_since_prune: 0,
             // Demo mode pre-loads mock points; treat the feed as fresh on boot.
             last_telemetry_ms: if demo_mode { Some(now_ms()) } else { None },
             global_search: crate::view::search::GlobalSearchState::default(),
@@ -627,11 +649,27 @@ impl ZenSight {
                 if self.ticks_since_flush >= STORE_FLUSH_EVERY_TICKS {
                     self.ticks_since_flush = 0;
                     if let Some((store, batch)) = self.store.take_flush_batch() {
+                        // Prune aged-out buckets every Nth flush (#131) so the redb
+                        // file doesn't grow unbounded — bundled into the same
+                        // off-thread task as the write.
+                        self.flushes_since_prune += 1;
+                        let prune = self.flushes_since_prune >= STORE_PRUNE_EVERY_FLUSHES;
+                        if prune {
+                            self.flushes_since_prune = 0;
+                        }
+                        let now_ms = zensight_common::current_timestamp_millis();
                         return Task::future(async move {
                             // Map redb's large error to a String inside the blocking
                             // closure so the future's payload stays small.
                             let res = tokio::task::spawn_blocking(move || {
-                                store.write_batch(&batch).map_err(|e| e.to_string())
+                                let n = store.write_batch(&batch).map_err(|e| e.to_string())?;
+                                if prune {
+                                    let evicted = store.prune(now_ms).map_err(|e| e.to_string())?;
+                                    if evicted > 0 {
+                                        tracing::debug!(evicted, "Pruned aged-out store buckets");
+                                    }
+                                }
+                                Ok::<usize, String>(n)
                             })
                             .await
                             .map_err(|e| e.to_string())
@@ -1249,6 +1287,76 @@ impl ZenSight {
                     device.netring_detail.apply_assets(result);
                 }
             }
+            Message::FetchNetringTalkers => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_talkers();
+                }
+                return self.query_netring_talkers();
+            }
+            Message::NetringTalkersReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_talkers(result);
+                }
+            }
+            Message::FetchNetringElephants => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_elephants();
+                }
+                return self.query_netring_elephants();
+            }
+            Message::NetringElephantsReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_elephants(result);
+                }
+            }
+            Message::FetchNetringDns => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_dns();
+                }
+                return self.query_netring_dns();
+            }
+            Message::NetringDnsReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_dns(result);
+                }
+            }
+            Message::FetchNetringHttp => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_http();
+                }
+                return self.query_netring_http();
+            }
+            Message::NetringHttpReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_http(result);
+                }
+            }
+            Message::FetchSysinfoProcesses(sort) => {
+                let host = self.selected_device.as_mut().map(|device| {
+                    device.sysinfo_detail.loading(sort);
+                    device.device_id.source.clone()
+                });
+                if let Some(host) = host {
+                    return self.query_sysinfo_processes(host, sort);
+                }
+            }
+            Message::SysinfoProcessesReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.sysinfo_detail.apply(result);
+                }
+            }
+            Message::FetchAnomalyFlows { key, src } => {
+                self.security.flows_for = Some(key.clone());
+                self.security.flows = crate::view::specialized::fetch::Fetch::Loading;
+                return self.query_anomaly_flows(key, src);
+            }
+            Message::AnomalyFlowsReceived(key, result) => {
+                // Ignore a stale reply if the user has since pivoted elsewhere.
+                if self.security.flows_for.as_deref() == Some(key.as_str()) {
+                    self.security.flows =
+                        crate::view::specialized::fetch::Fetch::from_result(result);
+                }
+            }
             Message::OpenSecurity => {
                 self.set_view(CurrentView::Security);
             }
@@ -1434,6 +1542,21 @@ impl ZenSight {
                 NetlinkDetailTopic::Neighbors => fetch_records(session, key)
                     .await
                     .map(NetlinkDetailData::Neighbors),
+                NetlinkDetailTopic::Addresses => fetch_records(session, key)
+                    .await
+                    .map(NetlinkDetailData::Addresses),
+                NetlinkDetailTopic::Events => fetch_records(session, key)
+                    .await
+                    .map(NetlinkDetailData::Events),
+                NetlinkDetailTopic::Tc => {
+                    fetch_records(session, key).await.map(NetlinkDetailData::Tc)
+                }
+                NetlinkDetailTopic::Xfrm => fetch_records(session, key)
+                    .await
+                    .map(NetlinkDetailData::Xfrm),
+                NetlinkDetailTopic::Nft => fetch_records(session, key)
+                    .await
+                    .map(NetlinkDetailData::Nft),
             };
             let result =
                 data.ok_or_else(|| format!("No netlink sensor responded for {}", topic.label()));
@@ -1561,6 +1684,118 @@ impl ZenSight {
                 .await
                 .ok_or_else(|| "No netring sensor responded".to_string());
             Message::NetringAssetsReceived(result)
+        })
+    }
+
+    /// Fetch the on-demand netring top-talker histogram (#45).
+    fn query_netring_talkers(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_talkers;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::NetringTalkersReceived(Err(
+                "Not connected to Zenoh".to_string(),
+            )));
+        };
+        Task::future(async move {
+            let result = fetch_talkers(session)
+                .await
+                .ok_or_else(|| "No netring sensor responded".to_string());
+            Message::NetringTalkersReceived(result)
+        })
+    }
+
+    /// Fetch the on-demand netring elephant-flow ring (#45).
+    fn query_netring_elephants(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_elephants;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::NetringElephantsReceived(Err(
+                "Not connected to Zenoh".to_string(),
+            )));
+        };
+        Task::future(async move {
+            let result = fetch_elephants(session)
+                .await
+                .ok_or_else(|| "No netring sensor responded".to_string());
+            Message::NetringElephantsReceived(result)
+        })
+    }
+
+    /// Fetch the on-demand netring per-SLD DNS detail (#45).
+    fn query_netring_dns(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_dns;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::NetringDnsReceived(Err(
+                "Not connected to Zenoh".to_string()
+            )));
+        };
+        Task::future(async move {
+            let result = fetch_dns(session)
+                .await
+                .ok_or_else(|| "No netring sensor responded".to_string());
+            Message::NetringDnsReceived(result)
+        })
+    }
+
+    /// Fetch the on-demand netring per-host HTTP detail (#45).
+    fn query_netring_http(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_http;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::NetringHttpReceived(Err(
+                "Not connected to Zenoh".to_string()
+            )));
+        };
+        Task::future(async move {
+            let result = fetch_http(session)
+                .await
+                .ok_or_else(|| "No netring sensor responded".to_string());
+            Message::NetringHttpReceived(result)
+        })
+    }
+
+    /// Pivot from a Security anomaly to its netring flows (#119): fetch the
+    /// recent-flow ring and keep only flows whose src or dst IP matches the
+    /// anomaly's offending source. Client-side filtering keeps the sensor's
+    /// `@/query/flows` contract unchanged.
+    fn query_anomaly_flows(&self, key: String, src: String) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_flows;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::AnomalyFlowsReceived(
+                key,
+                Err("Not connected to Zenoh".to_string()),
+            ));
+        };
+        // The anomaly src is `ip:port` or `ip`; reduce it to the bare IP so it
+        // matches both directions of a flow's `ip:port` endpoints.
+        let want_ip = endpoint_ip(&src);
+        Task::future(async move {
+            let result = match fetch_flows(session).await {
+                Some(flows) => Ok(flows
+                    .into_iter()
+                    .filter(|f| endpoint_ip(&f.src) == want_ip || endpoint_ip(&f.dst) == want_ip)
+                    .collect()),
+                None => Err("No netring sensor responded".to_string()),
+            };
+            Message::AnomalyFlowsReceived(key, result)
+        })
+    }
+
+    /// Fetch the on-demand sysinfo process explorer for `host` (#47). The sysinfo
+    /// query channel is host-scoped, so the key carries the device source.
+    fn query_sysinfo_processes(
+        &self,
+        host: String,
+        sort: crate::view::specialized::sysinfo_detail::ProcessSort,
+    ) -> Task<Message> {
+        use crate::view::specialized::sysinfo_detail::fetch_processes;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::SysinfoProcessesReceived(Err(
+                "Not connected to Zenoh".to_string(),
+            )));
+        };
+        Task::future(async move {
+            let result = fetch_processes(session, host, sort)
+                .await
+                .ok_or_else(|| "No sysinfo sensor responded".to_string());
+            Message::SysinfoProcessesReceived(result)
         })
     }
 
@@ -1787,16 +2022,11 @@ impl ZenSight {
         protocol_str: &str,
         liveness: zensight_common::DeviceLiveness,
     ) {
-        // Parse protocol from string
-        let protocol = match protocol_str {
-            "snmp" => Protocol::Snmp,
-            "syslog" => Protocol::Syslog,
-            "gnmi" => Protocol::Gnmi,
-            "netflow" => Protocol::Netflow,
-            "opcua" => Protocol::Opcua,
-            "modbus" => Protocol::Modbus,
-            "sysinfo" => Protocol::Sysinfo,
-            _ => return, // Unknown protocol, ignore
+        // Parse protocol from string. Use the canonical FromStr impl so newer
+        // sensors (netlink/netring) aren't silently dropped — the hand-rolled
+        // match here only covered the legacy protocols (#125).
+        let Ok(protocol) = protocol_str.parse::<Protocol>() else {
+            return; // Unknown protocol, ignore
         };
 
         let device_id = DeviceId::new(protocol, &liveness.device);

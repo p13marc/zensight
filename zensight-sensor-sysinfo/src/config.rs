@@ -57,6 +57,15 @@ pub struct SysinfoConfig {
     /// Disk mount filters.
     #[serde(default)]
     pub disk: DiskConfig,
+
+    /// Threshold-based alerting (OOM / PSI / disk / FD / thermal / swap).
+    #[serde(default)]
+    pub alerts: crate::alerts::AlertsConfig,
+
+    /// Derived host saturation-score blend + health-state bands (P6). Gated by
+    /// `collect.saturation_score`.
+    #[serde(default)]
+    pub saturation: crate::saturation::SaturationConfig,
 }
 
 fn default_key_prefix() -> String {
@@ -171,6 +180,44 @@ pub struct CollectConfig {
     /// aggregates still stream via the `processes` collector.
     #[serde(default = "default_true")]
     pub process_query: bool,
+
+    /// Collect TCP retransmit / listen-overflow errors + socket occupancy from
+    /// `/proc/net/{snmp,netstat,sockstat}` (USE network errors, #98). Cheap,
+    /// unprivileged, Linux-only. Missing files => skipped gracefully.
+    #[serde(default = "default_true")]
+    pub netstat: bool,
+
+    /// Collect softnet backlog drops / time-squeezes from
+    /// `/proc/net/softnet_stat` (NIC→kernel backpressure, #98). Linux-only.
+    #[serde(default = "default_true")]
+    pub softnet: bool,
+
+    /// Collect per-CPU scheduler run-delay from `/proc/schedstat` (the canonical
+    /// CPU saturation signal, #98). Linux-only.
+    #[serde(default = "default_true")]
+    pub schedstat: bool,
+
+    /// Collect conntrack table fill from `/proc/sys/net/netfilter/
+    /// nf_conntrack_{count,max}` (#98). Linux-only; absent when the netfilter
+    /// conntrack module is not loaded => skipped gracefully.
+    #[serde(default = "default_true")]
+    pub conntrack: bool,
+
+    /// Collect ECC memory errors from `/sys/devices/system/edac/mc/mc*/
+    /// {ce_count,ue_count}` (#98). Linux-only; no ECC hardware => emits nothing.
+    #[serde(default = "default_true")]
+    pub edac: bool,
+
+    /// Collect software-RAID degraded/failed state from `/proc/mdstat` (#98).
+    /// Linux-only; no md arrays => emits nothing.
+    #[serde(default = "default_true")]
+    pub mdadm: bool,
+
+    /// Emit the derived host saturation score (`system/saturation_score`, 0..100)
+    /// and coarse health state (`system/health_state`: ok/warn/crit) each tick
+    /// (P6). Cheap — derived from already-collected USE saturation signals.
+    #[serde(default = "default_true")]
+    pub saturation_score: bool,
 }
 
 impl Default for CollectConfig {
@@ -195,6 +242,13 @@ impl Default for CollectConfig {
             cgroup_paths: Vec::new(),
             power: false,
             process_query: true,
+            netstat: true,
+            softnet: true,
+            schedstat: true,
+            conntrack: true,
+            edac: true,
+            mdadm: true,
+            saturation_score: true,
         }
     }
 }
@@ -409,6 +463,39 @@ mod tests {
         assert!(config.sysinfo.collect.cpu);
         assert!(config.sysinfo.collect.memory);
         assert!(!config.sysinfo.collect.processes);
+        // Alerting defaults: on, with thermal opted out (needs temperatures).
+        assert!(config.sysinfo.alerts.enabled);
+        assert!(config.sysinfo.alerts.oom.enabled);
+        assert!(!config.sysinfo.alerts.thermal.enabled);
+        assert_eq!(config.sysinfo.alerts.disk.warn_percent, 90.0);
+        assert_eq!(config.sysinfo.alerts.fd.warn_percent, 80.0);
+    }
+
+    #[test]
+    fn test_parse_alerts_block() {
+        let json = r#"{
+            zenoh: { mode: "peer" },
+            sysinfo: {
+                alerts: {
+                    enabled: true,
+                    for_secs: 30,
+                    disk: { warn_percent: 80, critical_percent: 92 },
+                    thermal: { enabled: true, fraction: 0.85 },
+                    swap: { warn_pages_per_sec: 2000 },
+                }
+            }
+        }"#;
+        let config: SysinfoSensorConfig = json5::from_str(json).unwrap();
+        let a = &config.sysinfo.alerts;
+        assert_eq!(a.for_secs, 30);
+        assert_eq!(a.disk.warn_percent, 80.0);
+        assert_eq!(a.disk.critical_percent, 92.0);
+        assert!(a.thermal.enabled);
+        assert_eq!(a.thermal.fraction, 0.85);
+        assert_eq!(a.swap.warn_pages_per_sec, 2000.0);
+        // Unspecified rules keep their defaults.
+        assert!(a.pressure.enabled);
+        assert_eq!(a.pressure.cpu_warn, 40.0);
     }
 
     #[test]

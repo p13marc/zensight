@@ -7,9 +7,12 @@
 //! - TCP connection state counts
 
 use crate::map::{
-    BatteryReading, CgroupSample, FanReading, FdStat, InodeStat, KernelDerivatives, NetDevStat,
-    PressureSample, PsiSample, RaplDomain, VmStat, parse_cgroup_scalar, parse_file_nr,
-    parse_flat_kv, parse_net_dev, parse_pressure_file, parse_vmstat,
+    BatteryReading, CgroupSample, ConntrackSample, DiskSaturation, EdacSample, FanReading, FdStat,
+    InodeStat, KernelDerivatives, MdArray, NetDevStat, NetstatSample, PressureSample, PsiSample,
+    RaplDomain, SchedstatSample, SockstatSample, SoftnetSample, VmStat, disk_saturation,
+    parse_cgroup_scalar, parse_conntrack, parse_file_nr, parse_flat_kv, parse_mdstat,
+    parse_net_dev, parse_netstat, parse_pressure_file, parse_schedstat, parse_sockstat,
+    parse_softnet, parse_vmstat,
 };
 use procfs::{Current, CurrentSI};
 use std::collections::HashMap;
@@ -49,16 +52,21 @@ pub struct DiskIoStats {
     pub write_bytes: u64,
     pub read_ios: u64,
     pub write_ios: u64,
+    /// `io_ticks` (diskstats field 10): ms the device had I/O in flight.
     pub io_time_ms: u64,
+    /// `weighted_io_ticks` (diskstats field 11): time-weighted queue length, ms.
+    pub weighted_io_time_ms: u64,
 }
 
-/// Previous disk I/O stats for calculating rates.
+/// Previous disk I/O stats for calculating rates and saturation deltas.
 #[derive(Debug, Clone, Default)]
 pub struct PrevDiskIo {
     pub read_bytes: u64,
     pub write_bytes: u64,
     pub read_ios: u64,
     pub write_ios: u64,
+    pub io_time_ms: u64,
+    pub weighted_io_time_ms: u64,
 }
 
 /// Temperature sensor reading.
@@ -190,7 +198,7 @@ impl LinuxMetrics {
     pub fn collect_disk_io(
         &mut self,
         interval_secs: f64,
-    ) -> HashMap<String, (DiskIoStats, Option<DiskIoStats>)> {
+    ) -> HashMap<String, (DiskIoStats, Option<DiskIoStats>, Option<DiskSaturation>)> {
         let mut result = HashMap::new();
 
         let Ok(diskstats) = procfs::diskstats() else {
@@ -212,35 +220,47 @@ impl LinuxMetrics {
             let sector_size: u64 = 512;
             let read_bytes = disk.sectors_read * sector_size;
             let write_bytes = disk.sectors_written * sector_size;
+            // diskstats field 10 (io_ticks) and field 11 (weighted io_ticks).
+            let io_time_ms = disk.time_in_progress;
+            let weighted_io_time_ms = disk.weighted_time_in_progress;
 
             let stats = DiskIoStats {
                 read_bytes,
                 write_bytes,
                 read_ios: disk.reads,
                 write_ios: disk.writes,
-                io_time_ms: disk.time_in_progress,
+                io_time_ms,
+                weighted_io_time_ms,
             };
 
+            // Snapshot the previous sample (copied out) so we can derive both
+            // rates and saturation gauges before overwriting it below.
+            let prev = self.prev_disk_io.get(name).cloned();
+
             // Calculate rates if we have previous data
-            let rates = if let Some(prev) = self.prev_disk_io.get(name) {
-                if interval_secs > 0.0 {
-                    Some(DiskIoStats {
-                        read_bytes: ((read_bytes.saturating_sub(prev.read_bytes)) as f64
-                            / interval_secs) as u64,
-                        write_bytes: ((write_bytes.saturating_sub(prev.write_bytes)) as f64
-                            / interval_secs) as u64,
-                        read_ios: ((disk.reads.saturating_sub(prev.read_ios)) as f64
-                            / interval_secs) as u64,
-                        write_ios: ((disk.writes.saturating_sub(prev.write_ios)) as f64
-                            / interval_secs) as u64,
-                        io_time_ms: 0, // Rate doesn't make sense for cumulative time
-                    })
-                } else {
-                    None
-                }
-            } else {
-                None
+            let rates = match (&prev, interval_secs > 0.0) {
+                (Some(prev), true) => Some(DiskIoStats {
+                    read_bytes: ((read_bytes.saturating_sub(prev.read_bytes)) as f64
+                        / interval_secs) as u64,
+                    write_bytes: ((write_bytes.saturating_sub(prev.write_bytes)) as f64
+                        / interval_secs) as u64,
+                    read_ios: ((disk.reads.saturating_sub(prev.read_ios)) as f64 / interval_secs)
+                        as u64,
+                    write_ios: ((disk.writes.saturating_sub(prev.write_ios)) as f64 / interval_secs)
+                        as u64,
+                    io_time_ms: 0, // Rate doesn't make sense for cumulative time
+                    weighted_io_time_ms: 0,
+                }),
+                _ => None,
             };
+
+            // Derived saturation gauges (%util, queue depth) from the raw
+            // io_time / weighted_io_time deltas across the poll interval.
+            let saturation = prev.as_ref().map(|prev| {
+                let io_delta = io_time_ms.saturating_sub(prev.io_time_ms);
+                let weighted_delta = weighted_io_time_ms.saturating_sub(prev.weighted_io_time_ms);
+                disk_saturation(io_delta, weighted_delta, interval_secs * 1000.0)
+            });
 
             // Store current values for next iteration
             self.prev_disk_io.insert(
@@ -250,10 +270,12 @@ impl LinuxMetrics {
                     write_bytes,
                     read_ios: disk.reads,
                     write_ios: disk.writes,
+                    io_time_ms,
+                    weighted_io_time_ms,
                 },
             );
 
-            result.insert(name.clone(), (stats, rates));
+            result.insert(name.clone(), (stats, rates, saturation));
         }
 
         result
@@ -509,6 +531,111 @@ pub fn collect_net_dev() -> Vec<NetDevStat> {
 }
 
 // ---------------------------------------------------------------------------
+// H. USE-completeness collectors (#98)
+// ---------------------------------------------------------------------------
+
+/// Read `/proc/net/snmp` + `/proc/net/netstat` into the TCP retransmit /
+/// listen-overflow saturation subset. `None` only if neither file is readable;
+/// a single missing file still yields the fields the other provides.
+pub fn collect_netstat() -> Option<NetstatSample> {
+    let snmp = std::fs::read_to_string("/proc/net/snmp").ok();
+    let netstat = std::fs::read_to_string("/proc/net/netstat").ok();
+    if snmp.is_none() && netstat.is_none() {
+        return None;
+    }
+    Some(parse_netstat(
+        snmp.as_deref().unwrap_or(""),
+        netstat.as_deref().unwrap_or(""),
+    ))
+}
+
+/// Read `/proc/net/sockstat` into socket-occupancy gauges. `None` if unreadable.
+pub fn collect_sockstat() -> Option<SockstatSample> {
+    match std::fs::read_to_string("/proc/net/sockstat") {
+        Ok(content) => Some(parse_sockstat(&content)),
+        Err(e) => {
+            warn!(error = %e, "Failed to read /proc/net/sockstat");
+            None
+        }
+    }
+}
+
+/// Read `/proc/net/softnet_stat` into summed processed/dropped/squeezed totals.
+pub fn collect_softnet() -> Option<SoftnetSample> {
+    match std::fs::read_to_string("/proc/net/softnet_stat") {
+        Ok(content) => parse_softnet(&content),
+        Err(e) => {
+            warn!(error = %e, "Failed to read /proc/net/softnet_stat");
+            None
+        }
+    }
+}
+
+/// Read `/proc/schedstat` into per-CPU + total scheduler run-delay.
+pub fn collect_schedstat() -> Option<SchedstatSample> {
+    match std::fs::read_to_string("/proc/schedstat") {
+        Ok(content) => parse_schedstat(&content),
+        Err(e) => {
+            warn!(error = %e, "Failed to read /proc/schedstat");
+            None
+        }
+    }
+}
+
+/// Read conntrack count (+ optional max) from `/proc/sys/net/netfilter/`.
+/// `None` if the count file is absent (conntrack module not loaded).
+pub fn collect_conntrack() -> Option<ConntrackSample> {
+    let count = std::fs::read_to_string("/proc/sys/net/netfilter/nf_conntrack_count").ok()?;
+    let max = std::fs::read_to_string("/proc/sys/net/netfilter/nf_conntrack_max").ok();
+    parse_conntrack(&count, max.as_deref())
+}
+
+/// Walk `/sys/devices/system/edac/mc/mc*/{ce_count,ue_count}` for per-controller
+/// ECC error counts. Empty on hosts without ECC/EDAC (no `mc<N>` dirs).
+pub fn collect_edac() -> Vec<EdacSample> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/sys/devices/system/edac/mc") else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        // Only memory-controller dirs: `mc` followed by digits (skip power/uevent).
+        let Some(num) = name.strip_prefix("mc") else {
+            continue;
+        };
+        if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let dir = entry.path();
+        let ce = std::fs::read_to_string(dir.join("ce_count"))
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        let ue = std::fs::read_to_string(dir.join("ue_count"))
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        // Skip a controller exposing neither counter (avoid fabricated zeros).
+        if ce.is_none() && ue.is_none() {
+            continue;
+        }
+        out.push(EdacSample {
+            controller: name,
+            ce: ce.unwrap_or(0),
+            ue: ue.unwrap_or(0),
+        });
+    }
+    out
+}
+
+/// Read and parse `/proc/mdstat` into per-array RAID state. Empty when the file
+/// is absent or lists no md arrays.
+pub fn collect_mdstat() -> Vec<MdArray> {
+    match std::fs::read_to_string("/proc/mdstat") {
+        Ok(content) => parse_mdstat(&content),
+        Err(_) => Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // E. cgroup-v2 (container saturation)
 // ---------------------------------------------------------------------------
 
@@ -730,6 +857,40 @@ pub fn collect_entropy() -> Option<u64> {
         .and_then(|s| s.trim().parse::<u64>().ok())
 }
 
+// ---------------------------------------------------------------------------
+// Memory composition (/proc/meminfo) for MemAvailable-based pressure.
+// ---------------------------------------------------------------------------
+
+/// Memory composition (bytes) from `/proc/meminfo`. These break down where the
+/// non-`MemAvailable` memory has gone (reclaimable cache vs. genuinely used),
+/// so a high `usage_percent` can be attributed to real pressure or just cache.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MemComposition {
+    pub cached: u64,
+    pub buffers: u64,
+    pub slab: u64,
+    pub dirty: u64,
+    pub writeback: u64,
+}
+
+/// Read `/proc/meminfo` via typed `procfs::Meminfo` (values already in bytes).
+/// Returns `None` if the file is unreadable (skip the gauges this tick).
+pub fn collect_mem_composition() -> Option<MemComposition> {
+    match procfs::Meminfo::current() {
+        Ok(mi) => Some(MemComposition {
+            cached: mi.cached,
+            buffers: mi.buffers,
+            slab: mi.slab,
+            dirty: mi.dirty,
+            writeback: mi.writeback,
+        }),
+        Err(e) => {
+            warn!(error = %e, "Failed to read /proc/meminfo for memory composition");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -800,7 +961,7 @@ mod tests {
         let disk_io = metrics.collect_disk_io(1.0);
         // Should have some disks (unless running in unusual environment)
         // Just verify it doesn't panic
-        for (name, (stats, _rates)) in disk_io {
+        for (name, (stats, _rates, _sat)) in disk_io {
             assert!(!name.is_empty());
             let _ = stats.read_bytes;
             let _ = stats.write_bytes;

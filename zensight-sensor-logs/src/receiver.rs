@@ -1,6 +1,7 @@
 //! Syslog message receivers (UDP, TCP, and Unix socket).
 
-use crate::config::{ListenerConfig, ListenerProtocol, SyslogConfig};
+use crate::config::{ListenerConfig, ListenerProtocol, OverflowPolicy, SyslogConfig};
+use crate::ingest::{FrameReader, IngestStats, SharedRateLimiter, forward_parsed};
 use crate::parser::{self, SyslogMessage};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -8,10 +9,10 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::net::{TcpListener, TcpStream, UdpSocket, UnixListener, UnixStream};
+use std::time::Instant;
+use tokio::net::{TcpListener, UdpSocket, UnixListener};
 use tokio::sync::mpsc;
-use tokio::time::{Duration, timeout};
+use tokio::time::Duration;
 use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
 
 /// Received syslog message with source information.
@@ -114,38 +115,66 @@ impl JournaldStatsSnapshot {
     }
 }
 
-/// Start all configured listeners and return the message channel plus, when the
-/// journald source is enabled, its shared [`JournaldStats`] for health/telemetry
-/// (`None` otherwise). The stats are `Arc`-shared with the reader thread.
+/// Per-listener shared ingest context (#106): drop/parse accounting, the global
+/// rate limiter, and the overflow policy, threaded into every network listener.
+#[derive(Clone)]
+struct IngestCtx {
+    stats: Arc<IngestStats>,
+    limiter: Arc<SharedRateLimiter>,
+    overflow: OverflowPolicy,
+}
+
+/// Start all configured listeners and return the message channel, the shared
+/// network [`IngestStats`] (#106), and — when the journald source is enabled —
+/// its [`JournaldStats`] for health/telemetry (`None` otherwise). Both stats
+/// handles are `Arc`-shared with their producers.
 pub async fn start_listeners(
     config: &SyslogConfig,
-) -> Result<(mpsc::Receiver<ReceivedMessage>, Option<Arc<JournaldStats>>)> {
+) -> Result<(
+    mpsc::Receiver<ReceivedMessage>,
+    Option<Arc<JournaldStats>>,
+    Arc<IngestStats>,
+)> {
     let (tx, rx) = mpsc::channel(1000);
     let hostname_aliases = Arc::new(config.hostname_aliases.clone());
+
+    // Shared network-ingest context: one stats block + one global rate limiter
+    // across all network listeners (the `logs/ingest/*` series is sensor-wide).
+    let ingest_stats = Arc::new(IngestStats::default());
+    let ctx = IngestCtx {
+        stats: ingest_stats.clone(),
+        limiter: Arc::new(SharedRateLimiter::new(
+            config.ingest.max_eps,
+            config.ingest.sample_ratio,
+            Instant::now(),
+        )),
+        overflow: config.ingest.overflow,
+    };
 
     for listener_config in &config.listeners {
         let tx = tx.clone();
         let aliases = hostname_aliases.clone();
         let config = listener_config.clone();
+        let ctx = ctx.clone();
 
         match config.protocol {
             ListenerProtocol::Udp => {
                 tokio::spawn(async move {
-                    if let Err(e) = run_udp_listener(&config, tx, aliases).await {
+                    if let Err(e) = run_udp_listener(&config, tx, aliases, ctx).await {
                         tracing::error!("UDP listener error: {}", e);
                     }
                 });
             }
             ListenerProtocol::Tcp => {
                 tokio::spawn(async move {
-                    if let Err(e) = run_tcp_listener(&config, tx, aliases).await {
+                    if let Err(e) = run_tcp_listener(&config, tx, aliases, ctx).await {
                         tracing::error!("TCP listener error: {}", e);
                     }
                 });
             }
             ListenerProtocol::Unix => {
                 tokio::spawn(async move {
-                    if let Err(e) = run_unix_listener(&config, tx, aliases).await {
+                    if let Err(e) = run_unix_listener(&config, tx, aliases, ctx).await {
                         tracing::error!("Unix listener error: {}", e);
                     }
                 });
@@ -180,14 +209,16 @@ pub async fn start_listeners(
         );
     }
 
-    Ok((rx, journald_stats))
+    Ok((rx, journald_stats, ingest_stats))
 }
 
-/// Run a UDP syslog listener.
+/// Run a UDP syslog listener. Each datagram is exactly one frame (no stream
+/// framing); ingest accounting + rate-limit + overflow mirror journald (#106).
 async fn run_udp_listener(
     config: &ListenerConfig,
     tx: mpsc::Sender<ReceivedMessage>,
     aliases: Arc<HashMap<String, String>>,
+    ctx: IngestCtx,
 ) -> Result<()> {
     let socket = UdpSocket::bind(&config.bind)
         .await
@@ -211,7 +242,9 @@ async fn run_udp_listener(
                     }
                 };
 
+                IngestStats::inc(&ctx.stats.received);
                 if let Some(message) = parser::parse(text) {
+                    IngestStats::inc(&ctx.stats.parsed);
                     let resolved_hostname = resolve_hostname_network(&addr, &message, &aliases);
 
                     let received = ReceivedMessage {
@@ -220,11 +253,13 @@ async fn run_udp_listener(
                         resolved_hostname,
                     };
 
-                    if tx.send(received).await.is_err() {
+                    if !forward_parsed(received, &tx, &ctx.stats, &ctx.limiter, ctx.overflow).await
+                    {
                         tracing::warn!("Receiver channel closed");
                         break;
                     }
                 } else {
+                    IngestStats::inc(&ctx.stats.parse_failed);
                     tracing::debug!("Failed to parse syslog message from {}: {:?}", addr, text);
                 }
             }
@@ -242,30 +277,46 @@ async fn run_tcp_listener(
     config: &ListenerConfig,
     tx: mpsc::Sender<ReceivedMessage>,
     aliases: Arc<HashMap<String, String>>,
+    ctx: IngestCtx,
 ) -> Result<()> {
     let listener = TcpListener::bind(&config.bind)
         .await
         .with_context(|| format!("Failed to bind TCP socket to {}", config.bind))?;
 
-    tracing::info!("TCP syslog listener started on {}", config.bind);
+    tracing::info!(
+        framing = ?config.framing,
+        "TCP syslog listener started on {}",
+        config.bind
+    );
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_connections));
     let connection_timeout = Duration::from_secs(config.connection_timeout_secs);
+    let framing = config.framing;
+    let max_frame_len = config.max_message_size;
 
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
                 let tx = tx.clone();
                 let aliases = aliases.clone();
+                let ctx = ctx.clone();
                 let permit = semaphore.clone().try_acquire_owned();
 
                 match permit {
                     Ok(permit) => {
                         tokio::spawn(async move {
                             let _permit = permit; // Hold permit until connection closes
-                            if let Err(e) =
-                                handle_tcp_connection(stream, addr, tx, aliases, connection_timeout)
-                                    .await
+                            let mut reader = FrameReader::new(framing, max_frame_len);
+                            if let Err(e) = handle_stream_connection(
+                                stream,
+                                &mut reader,
+                                connection_timeout,
+                                MessageSource::Network(addr),
+                                &tx,
+                                &aliases,
+                                &ctx,
+                            )
+                            .await
                             {
                                 tracing::debug!("TCP connection error from {}: {}", addr, e);
                             }
@@ -284,55 +335,52 @@ async fn run_tcp_listener(
     }
 }
 
-/// Handle a single TCP connection.
-async fn handle_tcp_connection(
-    stream: TcpStream,
-    addr: SocketAddr,
-    tx: mpsc::Sender<ReceivedMessage>,
-    aliases: Arc<HashMap<String, String>>,
+/// Handle a single stream (TCP or Unix) connection: pull RFC 6587 frames off the
+/// wire via [`FrameReader`], then parse + account + forward each (#106). Shared
+/// by the TCP and Unix listeners — only the [`MessageSource`] and hostname
+/// resolution differ (resolved from the per-frame `source`).
+async fn handle_stream_connection<R>(
+    stream: R,
+    reader: &mut FrameReader,
     connection_timeout: Duration,
-) -> Result<()> {
-    tracing::debug!("TCP connection from {}", addr);
-
-    let reader = BufReader::new(stream);
-    let mut lines = reader.lines();
-
+    source: MessageSource,
+    tx: &mpsc::Sender<ReceivedMessage>,
+    aliases: &HashMap<String, String>,
+    ctx: &IngestCtx,
+) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut stream = stream;
     loop {
-        // Apply timeout to each line read
-        let line_result = timeout(connection_timeout, lines.next_line()).await;
-
-        match line_result {
-            Ok(Ok(Some(line))) => {
-                if let Some(message) = parser::parse(&line) {
-                    let resolved_hostname = resolve_hostname_network(&addr, &message, &aliases);
-
+        match reader.next_frame(&mut stream, connection_timeout).await {
+            Ok(Some(bytes)) => {
+                let text = String::from_utf8_lossy(&bytes);
+                IngestStats::inc(&ctx.stats.received);
+                if let Some(message) = parser::parse(&text) {
+                    IngestStats::inc(&ctx.stats.parsed);
+                    let resolved_hostname = match &source {
+                        MessageSource::Network(addr) => {
+                            resolve_hostname_network(addr, &message, aliases)
+                        }
+                        _ => resolve_hostname_unix(&message, aliases),
+                    };
                     let received = ReceivedMessage {
                         message,
-                        source: MessageSource::Network(addr),
+                        source: source.clone(),
                         resolved_hostname,
                     };
-
-                    if tx.send(received).await.is_err() {
+                    if !forward_parsed(received, tx, &ctx.stats, &ctx.limiter, ctx.overflow).await {
                         break;
                     }
+                } else {
+                    IngestStats::inc(&ctx.stats.parse_failed);
                 }
             }
-            Ok(Ok(None)) => {
-                // Connection closed
-                break;
-            }
-            Ok(Err(e)) => {
-                return Err(e.into());
-            }
-            Err(_) => {
-                // Timeout
-                tracing::debug!("TCP connection timeout from {}", addr);
-                break;
-            }
+            Ok(None) => break, // EOF
+            Err(e) => return Err(e.into()),
         }
     }
-
-    tracing::debug!("TCP connection closed from {}", addr);
     Ok(())
 }
 
@@ -341,6 +389,7 @@ async fn run_unix_listener(
     config: &ListenerConfig,
     tx: mpsc::Sender<ReceivedMessage>,
     aliases: Arc<HashMap<String, String>>,
+    ctx: IngestCtx,
 ) -> Result<()> {
     let socket_path = Path::new(&config.bind);
 
@@ -374,21 +423,32 @@ async fn run_unix_listener(
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_connections));
     let connection_timeout = Duration::from_secs(config.connection_timeout_secs);
+    let framing = config.framing;
+    let max_frame_len = config.max_message_size;
 
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let tx = tx.clone();
                 let aliases = aliases.clone();
+                let ctx = ctx.clone();
                 let permit = semaphore.clone().try_acquire_owned();
 
                 match permit {
                     Ok(permit) => {
                         tokio::spawn(async move {
                             let _permit = permit;
-                            if let Err(e) =
-                                handle_unix_connection(stream, tx, aliases, connection_timeout)
-                                    .await
+                            let mut reader = FrameReader::new(framing, max_frame_len);
+                            if let Err(e) = handle_stream_connection(
+                                stream,
+                                &mut reader,
+                                connection_timeout,
+                                MessageSource::Unix,
+                                &tx,
+                                &aliases,
+                                &ctx,
+                            )
+                            .await
                             {
                                 tracing::debug!("Unix connection error: {}", e);
                             }
@@ -405,54 +465,6 @@ async fn run_unix_listener(
             }
         }
     }
-}
-
-/// Handle a single Unix socket connection.
-async fn handle_unix_connection(
-    stream: UnixStream,
-    tx: mpsc::Sender<ReceivedMessage>,
-    aliases: Arc<HashMap<String, String>>,
-    connection_timeout: Duration,
-) -> Result<()> {
-    tracing::debug!("Unix connection accepted");
-
-    let reader = BufReader::new(stream);
-    let mut lines = reader.lines();
-
-    loop {
-        let line_result = timeout(connection_timeout, lines.next_line()).await;
-
-        match line_result {
-            Ok(Ok(Some(line))) => {
-                if let Some(message) = parser::parse(&line) {
-                    let resolved_hostname = resolve_hostname_unix(&message, &aliases);
-
-                    let received = ReceivedMessage {
-                        message,
-                        source: MessageSource::Unix,
-                        resolved_hostname,
-                    };
-
-                    if tx.send(received).await.is_err() {
-                        break;
-                    }
-                }
-            }
-            Ok(Ok(None)) => {
-                break;
-            }
-            Ok(Err(e)) => {
-                return Err(e.into());
-            }
-            Err(_) => {
-                tracing::debug!("Unix connection timeout");
-                break;
-            }
-        }
-    }
-
-    tracing::debug!("Unix connection closed");
-    Ok(())
 }
 
 /// Resolve hostname from message, aliases, or source address (network).

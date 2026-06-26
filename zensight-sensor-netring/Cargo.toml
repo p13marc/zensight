@@ -40,3 +40,8 @@ tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 anyhow.workspace = true
 hostname = "0.4"
+
+# Community ID v1 flow hashing (#116): sorted 5-tuple + seed -> SHA1 -> base64.
+# The de-facto cross-tool flow-correlation key (Zeek/Suricata/Wireshark/SecOnion).
+sha1 = "0.10"
+base64 = "0.22"

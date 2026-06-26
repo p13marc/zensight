@@ -4,7 +4,7 @@
 //! and publishes them to Zenoh as telemetry.
 
 use anyhow::Result;
-use zensight_sensor_core::{Format, SensorArgs, SensorConfig, SensorRunner};
+use zensight_sensor_core::{Format, Protocol, SensorArgs, SensorConfig, SensorRunner};
 
 use zensight_sensor_sysinfo::collector::SystemCollector;
 use zensight_sensor_sysinfo::config::SysinfoSensorConfig;
@@ -53,9 +53,33 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Create and spawn the collector
-    let collector = SystemCollector::new(hostname, sysinfo_config, session, Format::Json)
-        .with_health(runner.health());
+    // Threshold-based alerting: drive an AlertReporter → zensight/sysinfo/@/alerts/*
+    // for OOM / PSI / disk / FD / thermal / swap saturation (mirrors the other
+    // sensors). Late-joining GUIs seed their firing set via serve_alerts_query.
+    let mut collector = SystemCollector::new(
+        hostname.clone(),
+        sysinfo_config.clone(),
+        session,
+        Format::Json,
+    )
+    .with_health(runner.health());
+    if sysinfo_config.alerts.enabled {
+        use std::sync::Arc;
+        use std::time::Duration;
+        use zensight_sensor_core::{AlertReporter, serve_alerts_query};
+        let reporter = Arc::new(
+            AlertReporter::new(runner.publisher(), Protocol::Sysinfo, Format::Json)
+                .with_debounce(Duration::from_secs(sysinfo_config.alerts.for_secs)),
+        );
+        runner.spawn(serve_alerts_query(reporter.clone()));
+        let evaluator = zensight_sensor_sysinfo::alerts::AlertEvaluator::new(
+            hostname.clone(),
+            sysinfo_config.alerts.clone(),
+            reporter,
+        );
+        collector = collector.with_alerts(evaluator);
+        tracing::info!("Sysinfo threshold alerting enabled");
+    }
     runner.spawn(async move {
         collector.run().await;
     });

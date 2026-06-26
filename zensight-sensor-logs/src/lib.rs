@@ -24,6 +24,7 @@ pub mod commands;
 pub mod config;
 pub mod events;
 pub mod filter;
+pub mod ingest;
 #[cfg(feature = "journald")]
 pub mod journald;
 pub mod parser;

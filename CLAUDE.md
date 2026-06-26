@@ -7,9 +7,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ZenSight is a unified observability platform that sensors legacy monitoring protocols into Zenoh's pub/sub infrastructure. It consists of:
 
 1. **zensight** - Iced 0.14 desktop frontend for visualizing telemetry
-2. **zensight-common** - Shared library (telemetry model, Zenoh helpers, config)
-3. **zenoh-sensor-*** - Protocol sensors publishing telemetry to Zenoh
-4. **zensight-exporter-*** - Exporters forwarding Zenoh telemetry to external systems
+2. **zensight-common** - Shared library (telemetry model, alert/command model, Zenoh helpers, config)
+3. **zensight-sensor-core** - Shared sensor framework (publisher, health, alert reporting, liveness)
+4. **zensight-sensor-*** - Protocol sensors publishing telemetry to Zenoh
+5. **zensight-exporter-*** - Exporters forwarding Zenoh telemetry to external systems
+
+See `docs/SENSORS.md` for the full per-sensor reference and `docs/KEYSPACE.md` for
+the key-expression contract. The sensor/frontend redesign is tracked in
+`docs/SENSOR-REDESIGN-ANALYSIS.md`.
 
 ## Build Commands
 
@@ -38,15 +43,17 @@ cargo run -p zensight-exporter-otel --release -- --config configs/otel.json5
 cargo test --workspace
 
 # Run specific crate tests
-cargo test -p zensight              # 139 tests (unit + UI)
-cargo test -p zensight-common       # 47 tests
-cargo test -p zensight-sensor-core  # 23 tests
-cargo test -p zensight-sensor-snmp     # 22 tests
-cargo test -p zensight-sensor-logs   # 106 tests (parser, receiver, filtering)
+cargo test -p zensight              # 258 tests (unit + UI)
+cargo test -p zensight-common       # 63 tests
+cargo test -p zensight-sensor-core  # 25 tests
+cargo test -p zensight-sensor-snmp     # 22 tests   (needs openssl-devel)
+cargo test -p zensight-sensor-logs   # 262 tests (parser, receiver, filtering, templating, SLOs)
 cargo test -p zensight-sensor-netflow  # 16 tests
 cargo test -p zensight-sensor-modbus   # 11 tests
-cargo test -p zensight-sensor-sysinfo  # 15 tests
-cargo test -p zensight-sensor-gnmi     # 8 tests
+cargo test -p zensight-sensor-sysinfo  # 88 tests (collectors, saturation, alerting)
+cargo test -p zensight-sensor-gnmi     # 8 tests    (needs protoc)
+cargo test -p zensight-sensor-netlink  # 46 tests (interfaces, sockets, sentinel rules)
+cargo test -p zensight-sensor-netring  # 55 tests (flows, beaconing, DNS-tunnel, ATT&CK)
 cargo test -p zensight-exporter-prometheus  # 50 tests (mapping, collector, HTTP)
 cargo test -p zensight-exporter-otel        # 41 tests (metrics, logs, severity)
 
@@ -84,14 +91,25 @@ zensight/                    # Workspace root
 │   │   └── view/            # UI components
 │   │       ├── dashboard.rs # Main dashboard
 │   │       ├── device.rs    # Device detail view
-│   │       ├── alerts.rs    # Alerts management
+│   │       ├── alerts.rs    # Alerts management (incl. external anomalies/expectations)
+│   │       ├── security.rs  # NDR/anomaly lens over alerts (ATT&CK tactic view)
+│   │       ├── expectations.rs # Sentinel expectations authoring UI
+│   │       ├── sensors.rs   # Sensor registry/health detail
 │   │       ├── settings.rs  # Settings page
+│   │       ├── freshness.rs # Data-freshness indicators
 │   │       ├── topology/    # Network topology visualization
 │   │       │   ├── mod.rs   # TopologyState, node info panel
 │   │       │   ├── graph.rs # Canvas-based graph rendering
 │   │       │   └── layout.rs# Force-directed layout algorithm
+│   │       ├── specialized/ # Per-protocol views + drill-down detail panels
+│   │       │   ├── netlink.rs / netlink_detail.rs  # interfaces, sockets, control-plane
+│   │       │   ├── netring.rs / netring_detail.rs  # flows, bandwidth, DNS/HTTP RED
+│   │       │   ├── sysinfo.rs / sysinfo_detail.rs  # host metrics, process explorer
+│   │       │   └── syslog.rs, snmp.rs, ...         # other protocol views
+│   │       ├── overview/    # Cross-protocol overview panels
+│   │       ├── components/  # Shared widgets, tokens, theme
 │   │       ├── toast.rs     # Toast notification system
-│   │       ├── chart.rs     # Time-series charts
+│   │       ├── chart.rs     # Time-series charts (booleans as 0/1 step series)
 │   │       ├── formatting.rs# Value formatting utilities
 │   │       └── icons/       # SVG icons
 │   └── tests/
@@ -100,6 +118,8 @@ zensight/                    # Workspace root
 │   └── src/
 │       ├── telemetry.rs     # TelemetryPoint, Protocol
 │       ├── health.rs        # DeviceStatus, HealthSnapshot, DeviceLiveness
+│       ├── alert.rs         # Alert{Kind,Severity,State}, alert_key
+│       ├── command.rs       # Sensor command/status channel (command_key/status_key)
 │       ├── config.rs        # JSON5 config loading
 │       ├── session.rs       # Zenoh session helpers
 │       ├── keyexpr.rs       # Key expression builders
@@ -116,8 +136,10 @@ zensight/                    # Workspace root
 ├── zensight-sensor-logs/     # Logs sensor: RFC 3164/5424 (UDP/TCP/Unix) + systemd-journald
 ├── zensight-sensor-netflow/    # NetFlow/IPFIX sensor
 ├── zensight-sensor-modbus/     # Modbus TCP/RTU sensor
-├── zensight-sensor-sysinfo/    # System metrics sensor
+├── zensight-sensor-sysinfo/    # System metrics sensor (USE collectors, saturation score)
 ├── zensight-sensor-gnmi/       # gNMI streaming sensor
+├── zensight-sensor-netlink/    # Linux kernel net telemetry (RTNETLINK/sock_diag) + embedded sentinel
+├── zensight-sensor-netring/    # Wire-level flow telemetry (AF_PACKET/AF_XDP/pcap) + NDR detectors
 ├── zensight-exporter-prometheus/  # Prometheus metrics exporter
 │   └── src/
 │       ├── config.rs        # Configuration parsing
@@ -142,7 +164,7 @@ All sensors emit a unified `TelemetryPoint`:
 pub struct TelemetryPoint {
     pub timestamp: i64,           // Unix epoch milliseconds
     pub source: String,           // Device/host identifier
-    pub protocol: Protocol,       // snmp, syslog, netflow, modbus, sysinfo, gnmi
+    pub protocol: Protocol,       // snmp, syslog, netflow, modbus, sysinfo, gnmi, netlink, netring
     pub metric: String,           // Metric name/path
     pub value: TelemetryValue,    // Counter, Gauge, Text, Boolean, Binary
     pub labels: HashMap<String, String>,
@@ -160,7 +182,11 @@ zensight/netflow/exporter01/10.0.0.1/10.0.0.2
 zensight/modbus/plc01/holding/temperature
 zensight/sysinfo/server01/cpu/usage
 zensight/gnmi/router01/interfaces/interface[name=eth0]/state/counters
+zensight/netlink/host01/iface/eth0/state
+zensight/netring/host01/flow/10.0.0.1/10.0.0.2
 ```
+
+See `docs/KEYSPACE.md` for the authoritative per-protocol key-expression layout.
 
 ### Health & Liveness Data
 
@@ -170,9 +196,17 @@ Sensors also publish health/liveness metadata:
 zensight/<protocol>/@/health              # Sensor health snapshots
 zensight/<protocol>/@/devices/*/liveness  # Per-device liveness status
 zensight/<protocol>/@/errors              # Error reports
+zensight/<protocol>/@/alerts/<alert_key>  # Alerts (firing → resolved → tombstone)
+zensight/<protocol>/@/query/alerts        # Queryable firing-set seed (late joiners)
+zensight/<protocol>/@/commands/*          # Runtime control commands (e.g. sentinel expectations)
+zensight/<protocol>/@/status              # Command status queryable
 zensight/_meta/sensors/*                  # Sensor registration info
 zensight/_meta/correlation/*              # Cross-sensor device correlation
 ```
+
+Note the explicit `@`: telemetry wildcards (`zensight/<protocol>/**`) do **not** match
+the `@/`-prefixed control plane. Exporters skip `@/` and `_meta/` keys (telemetry only).
+See `docs/KEYSPACE.md` for the full contract.
 
 ### Device Status Model
 
@@ -296,9 +330,13 @@ let protocol_icon = icons::protocol_icon::<Message>(Protocol::Snmp, IconSize::Sm
 Each view has its own state struct:
 - `DashboardState` - Device list, connection status, sensor health
 - `DeviceDetailState` - Selected device metrics, chart data
-- `AlertsState` - Alert rules, triggered alerts
+- `AlertsState` - Alert rules, triggered alerts, external anomalies/expectations
+- `SecurityState` - NDR/anomaly lens over alerts (ATT&CK tactic rollup)
 - `SettingsState` - Zenoh connection settings
 - `TopologyState` - Network topology graph, nodes, edges, layout
+
+`CurrentView` (`zensight/src/app.rs`) enumerates the routable views: Dashboard,
+Device, Settings, Alerts, Topology, Expectations, Security, Sensors, Logs.
 
 ### Sensor Health Summary
 
@@ -324,6 +362,34 @@ The topology view (`view/topology/`) displays host interconnections as an intera
 - Edges show network connections with bandwidth-based thickness
 - Click nodes to see info panel, "View Details" to navigate to device view
 - Supports zoom, pan, search, and manual node positioning
+
+### Alerting & Sentinel
+
+Sensors publish alerts on `zensight/<protocol>/@/alerts/<alert_key>` as a lifecycle
+(firing → resolved → tombstone). The model lives in `zensight-common/src/alert.rs`
+(`Alert{Kind,Severity,State}`, `alert_key` = FNV-1a over source+rule+labels) and
+`zensight-sensor-core` provides the `AlertReporter` (debounce, reconcile).
+
+- **sysinfo** ships a threshold `AlertReporter`; **logs** adds per-unit error-budget /
+  burn-rate alerts; **netlink** embeds a *sentinel* (expectations over sockets/links/routes
+  → alerts) hot-swappable at runtime via `@/commands` + `@/status`.
+- The frontend authors sentinel expectations in `view/expectations.rs` and surfaces
+  anomalies in `view/security.rs` (ATT&CK tactic lens) and the Alerts view.
+
+### NDR & Kernel Net Telemetry
+
+- **netlink sensor** — Linux kernel networking state via RTNETLINK/sock_diag (unprivileged
+  reads): interface counters, enriched `tcp_info` (delivery/pacing/retrans/reord), qdisc /
+  bufferbloat health score, and a control-plane change timeline. Embeds the sentinel.
+- **netring sensor** — wire-level flow telemetry via AF_PACKET/AF_XDP (needs `CAP_NET_RAW`)
+  or pcap replay. Emits flows/bandwidth plus NDR detectors: RITA-style beaconing,
+  DNS-tunnel / Newly-Observed-Domain, port-scan (TRW), Community ID v1, and MITRE ATT&CK
+  technique tags. Anomalies pivot to flow drill-downs in the Security view.
+
+### Local Store (redb)
+
+The frontend persists telemetry to a bounded local store (`zensight/src/store.rs`,
+redb-backed) with a hot in-memory ring plus retention/eviction to cap on-disk growth.
 
 ### Observability Exporters
 

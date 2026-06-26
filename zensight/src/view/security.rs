@@ -12,10 +12,13 @@ use iced::{Alignment, Element, Length, Theme};
 use iced_anim::widget::button;
 use zensight_common::{Alert, AlertKind, AlertSeverity};
 
+use zensight_common::FlowRecord;
+
 use crate::message::Message;
 use crate::view::alerts::{AlertsState, Severity};
 use crate::view::components::badge;
 use crate::view::icons::{self, IconSize};
+use crate::view::specialized::fetch::Fetch;
 use crate::view::theme;
 use crate::view::tokens::font;
 
@@ -28,10 +31,43 @@ pub struct SecurityState {
     pub hide_info: bool,
     /// The anomaly whose evidence is expanded in the drill-down, if any.
     pub selected: Option<String>,
+    /// On-demand flows pivoted from an anomaly (#119): the netring `@/query/flows`
+    /// reply, filtered to the offending source.
+    pub flows: Fetch<Vec<FlowRecord>>,
+    /// Which anomaly (`alert_key`) the fetched `flows` belong to, so the pivot
+    /// table renders only under the anomaly it was requested from.
+    pub flows_for: Option<String>,
 }
 
 /// Labels shown elsewhere (summary/source), so we don't repeat them as evidence.
-const NON_EVIDENCE_LABELS: &[&str] = &["src", "dst", "proto"];
+// `technique` is surfaced as a dedicated ATT&CK badge (#117), so it's excluded
+// from the generic evidence drill-down to avoid showing it twice.
+const NON_EVIDENCE_LABELS: &[&str] = &["src", "dst", "proto", "technique"];
+
+/// MITRE ATT&CK metadata for a technique ID the netring sensor tags on anomalies
+/// (#117): the human tactic it belongs to and a deep link to the ATT&CK page.
+/// Returns `None` for unknown IDs.
+fn attack_meta(technique: &str) -> Option<(&'static str, String)> {
+    let tactic = match technique {
+        "T1046" => "Discovery",
+        "T1071" | "T1071.004" | "T1568" | "T1568.002" => "Command & Control",
+        "T1021.001" | "T1021.002" => "Lateral Movement",
+        "T1499" => "Impact",
+        "T1040" => "Credential Access",
+        _ => return None,
+    };
+    // Sub-techniques deep-link as /Txxxx/00n/.
+    let url = match technique.split_once('.') {
+        Some((base, sub)) => format!("https://attack.mitre.org/techniques/{base}/{sub}/"),
+        None => format!("https://attack.mitre.org/techniques/{technique}/"),
+    };
+    Some((tactic, url))
+}
+
+/// The ATT&CK technique tagged on an anomaly, if any (#117).
+fn anomaly_technique(a: &Alert) -> Option<&str> {
+    a.labels.get("technique").map(String::as_str)
+}
 
 /// Map a detector `rule` slug to a human title + one-line "what it means",
 /// so each detector reads as a first-class card rather than a raw slug. Covers
@@ -96,6 +132,8 @@ pub fn security_view<'a>(alerts: &'a AlertsState, sec: &'a SecurityState) -> Ele
 
     let content = column![
         render_header(anomalies.len(), sec),
+        rule::horizontal(1),
+        render_by_tactic(&anomalies),
         rule::horizontal(1),
         render_by_source(&anomalies),
         rule::horizontal(1),
@@ -165,6 +203,55 @@ fn render_header<'a>(count: usize, sec: &SecurityState) -> Element<'a, Message> 
     column![header_row, subtitle].spacing(4).into()
 }
 
+/// Group anomalies by MITRE ATT&CK tactic (#117) — the analyst-grade lens every
+/// NDR console leads with. Anomalies whose detector carries no technique fall
+/// into an "Untagged" bucket so nothing is hidden.
+fn render_by_tactic<'a>(anomalies: &[&'a Alert]) -> Element<'a, Message> {
+    let title = text("By ATT&CK tactic").size(18);
+    // tactic -> (count, set of technique IDs seen)
+    let mut by_tactic: BTreeMap<&'static str, (usize, std::collections::BTreeSet<String>)> =
+        BTreeMap::new();
+    for a in anomalies {
+        let (tactic, tech) = match anomaly_technique(a) {
+            Some(t) => (attack_meta(t).map(|(ta, _)| ta).unwrap_or("Other"), Some(t)),
+            None => ("Untagged", None),
+        };
+        let entry = by_tactic.entry(tactic).or_default();
+        entry.0 += 1;
+        if let Some(t) = tech {
+            entry.1.insert(t.to_string());
+        }
+    }
+    if by_tactic.is_empty() {
+        return column![title, text("No anomalies").size(13).style(dim)]
+            .spacing(8)
+            .into();
+    }
+    let mut ranked: Vec<(&'static str, (usize, std::collections::BTreeSet<String>))> =
+        by_tactic.into_iter().collect();
+    ranked.sort_by_key(|(_, (n, _))| std::cmp::Reverse(*n));
+
+    let mut list = Column::new().spacing(4);
+    for (tactic, (n, techs)) in &ranked {
+        let techs_line = if techs.is_empty() {
+            String::new()
+        } else {
+            techs.iter().cloned().collect::<Vec<_>>().join(", ")
+        };
+        list = list.push(
+            row![
+                text(tactic.to_string())
+                    .size(13)
+                    .width(Length::Fixed(180.0)),
+                text(format!("{n} anomalies")).size(12).style(dim),
+                text(techs_line).size(11).style(dim),
+            ]
+            .spacing(10),
+        );
+    }
+    column![title, list].spacing(8).into()
+}
+
 /// Rank offending sources by anomaly count.
 fn render_by_source<'a>(anomalies: &[&'a Alert]) -> Element<'a, Message> {
     let title = text("Top offenders").size(18);
@@ -229,7 +316,7 @@ fn render_by_detector<'a>(anomalies: &[&'a Alert], sec: &'a SecurityState) -> El
             .max_by_key(|s| sev_rank(*s))
             .unwrap_or(AlertSeverity::Info);
         let (title_text, description) = detector_meta(&rule_name);
-        let header = row![
+        let mut header = row![
             badge(Severity::from(top_sev).color(), title_text),
             text(format!("{} detection(s)", group.len()))
                 .size(font::CAPTION)
@@ -237,6 +324,16 @@ fn render_by_detector<'a>(anomalies: &[&'a Alert], sec: &'a SecurityState) -> El
         ]
         .spacing(10)
         .align_y(Alignment::Center);
+        // ATT&CK technique badge (#117) — the lingua franca of every NDR console.
+        if let Some(tech) = group.first().and_then(|a| anomaly_technique(a)) {
+            let tactic = attack_meta(tech).map(|(t, _)| t).unwrap_or("");
+            let label = if tactic.is_empty() {
+                format!("ATT&CK {tech}")
+            } else {
+                format!("ATT&CK {tech} · {tactic}")
+            };
+            header = header.push(badge(iced::Color::from_rgb(0.55, 0.45, 0.85), label));
+        }
 
         let mut card_col = Column::new().spacing(4).push(header);
         // First-class "what this detector means" line (empty for unknown slugs).
@@ -274,7 +371,7 @@ fn render_anomaly_row<'a>(a: &'a Alert, sec: &SecurityState) -> Element<'a, Mess
         .on_press(Message::SelectAnomaly(if expanded {
             None
         } else {
-            Some(key)
+            Some(key.clone())
         }))
         .style(iced::widget::button::text)
         .padding(2);
@@ -305,9 +402,86 @@ fn render_anomaly_row<'a>(a: &'a Alert, sec: &SecurityState) -> Element<'a, Mess
         detail = detail.push(text("no evidence labels").size(font::CAPTION).style(dim));
     }
 
+    // Flow drill-down pivot (#119) — the central NDR workflow: from a detection,
+    // pull the netring flows for the offending source. Only detections that name
+    // a source can pivot.
+    if let Some(src) = a.labels.get("src") {
+        let loading = sec.flows_for.as_deref() == Some(key.as_str()) && sec.flows.is_loading();
+        let pivot = button(
+            text(if loading {
+                "Fetching flows…"
+            } else {
+                "Show flows"
+            })
+            .size(11),
+        )
+        .padding([3, 9])
+        .style(iced::widget::button::secondary)
+        .on_press(Message::FetchAnomalyFlows {
+            key: key.clone(),
+            src: src.clone(),
+        });
+        detail = detail.push(pivot);
+
+        if sec.flows_for.as_deref() == Some(key.as_str()) {
+            detail = detail.push(render_pivot_flows(&sec.flows));
+        }
+    }
+
     column![toggle, container(detail).padding([4, 20]),]
         .spacing(2)
         .into()
+}
+
+/// Render the flow-pivot result table for the expanded anomaly (#119).
+fn render_pivot_flows<'a>(flows: &Fetch<Vec<FlowRecord>>) -> Element<'a, Message> {
+    if let Some(err) = flows.error() {
+        return text(format!("flow fetch failed: {err}"))
+            .size(font::CAPTION)
+            .style(dim)
+            .into();
+    }
+    let Some(records) = flows.ready() else {
+        return Column::new().into();
+    };
+    if records.is_empty() {
+        return text("no matching recent flows")
+            .size(font::CAPTION)
+            .style(dim)
+            .into();
+    }
+    let mut list = Column::new().spacing(2).push(
+        row![
+            text("src").size(10).width(Length::Fixed(170.0)),
+            text("dst").size(10).width(Length::Fixed(170.0)),
+            text("proto").size(10).width(Length::Fixed(50.0)),
+            text("bytes").size(10).width(Length::Fixed(80.0)),
+            text("community_id").size(10).width(Length::Fixed(260.0)),
+        ]
+        .spacing(8),
+    );
+    for f in records.iter().take(100) {
+        list = list.push(
+            row![
+                text(f.src.clone()).size(11).width(Length::Fixed(170.0)),
+                text(f.dst.clone()).size(11).width(Length::Fixed(170.0)),
+                text(f.proto.clone()).size(11).width(Length::Fixed(50.0)),
+                text(f.bytes.to_string()).size(11).width(Length::Fixed(80.0)),
+                text(f.community_id.clone().unwrap_or_else(|| "-".into()))
+                    .size(11)
+                    .width(Length::Fixed(260.0)),
+            ]
+            .spacing(8),
+        );
+    }
+    column![
+        text(format!("{} flows for source", records.len()))
+            .size(font::CAPTION)
+            .style(dim),
+        list,
+    ]
+    .spacing(2)
+    .into()
 }
 
 fn evidence_line<'a>(k: &str, v: &str) -> Element<'a, Message> {

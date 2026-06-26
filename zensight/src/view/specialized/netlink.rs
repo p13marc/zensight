@@ -406,10 +406,20 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
         fetch(NetlinkDetailTopic::Sockets, d.sockets.is_loading()),
         fetch(NetlinkDetailTopic::Routes, d.routes.is_loading()),
         fetch(NetlinkDetailTopic::Neighbors, d.neighbors.is_loading()),
+        fetch(NetlinkDetailTopic::Addresses, d.addresses.is_loading()),
+    ]
+    .spacing(space::SM);
+    // The remaining queryables (events ring, full TC tree, per-SA xfrm, nft
+    // inventory) — previously served but unreachable from the UI (#109).
+    let buttons2 = row![
+        fetch(NetlinkDetailTopic::Events, d.events.is_loading()),
+        fetch(NetlinkDetailTopic::Tc, d.tc.is_loading()),
+        fetch(NetlinkDetailTopic::Xfrm, d.xfrm.is_loading()),
+        fetch(NetlinkDetailTopic::Nft, d.nft.is_loading()),
     ]
     .spacing(space::SM);
 
-    let mut col = column![title, buttons].spacing(space::SM);
+    let mut col = column![title, buttons, buttons2].spacing(space::SM);
 
     // Sockets
     if let Some(err) = d.sockets.error() {
@@ -417,22 +427,32 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
     } else if let Some(socks) = d.sockets.ready() {
         let mut list = Column::new().spacing(3).push(
             row![
-                cell("local", 200),
-                cell("remote", 200),
-                cell("state", 110),
-                cell("rtt_us", 80),
-                cell("retx", 60),
+                cell("local", 190),
+                cell("remote", 190),
+                cell("state", 100),
+                cell("rtt_us", 70),
+                cell("rcv_rtt", 70),
+                cell("deliv_bps", 100),
+                cell("pacing_bps", 100),
+                cell("retx", 50),
+                cell("bret", 70),
             ]
             .spacing(8),
         );
         for s in socks.iter().take(200) {
+            // Surface the enriched tcp_info (#108): delivery/pacing rate and the
+            // receiver RTT turn "state counts" into "are flows delivering".
             list = list.push(
                 row![
-                    cell(&s.local, 200),
-                    cell(&s.remote, 200),
-                    cell(&s.state, 110),
-                    cell(&s.rtt_us.to_string(), 80),
-                    cell(&s.retrans.to_string(), 60),
+                    cell(&s.local, 190),
+                    cell(&s.remote, 190),
+                    cell(&s.state, 100),
+                    cell(&s.rtt_us.to_string(), 70),
+                    cell(&s.rcv_rtt_us.to_string(), 70),
+                    cell(&s.delivery_rate.to_string(), 100),
+                    cell(&s.pacing_rate.to_string(), 100),
+                    cell(&s.retrans.to_string(), 50),
+                    cell(&s.bytes_retrans.to_string(), 70),
                 ]
                 .spacing(8),
             );
@@ -490,6 +510,170 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
         }
         col = col
             .push(text(format!("Neighbors ({})", neighbors.len())).size(font::EMPHASIS))
+            .push(list);
+    }
+
+    // Addresses (#109)
+    if let Some(err) = d.addresses.error() {
+        col = col.push(empty_state(format!("Addresses fetch failed: {err}"), None));
+    } else if let Some(addrs) = d.addresses.ready() {
+        let mut list = Column::new().spacing(3).push(
+            row![
+                cell("address", 240),
+                cell("scope", 90),
+                cell("label", 120),
+                cell("ifindex", 70),
+            ]
+            .spacing(8),
+        );
+        for a in addrs.iter().take(200) {
+            let addr = match &a.ip {
+                Some(ip) => format!("{ip}/{}", a.prefix_len),
+                None => "-".to_string(),
+            };
+            list = list.push(
+                row![
+                    cell(&addr, 240),
+                    cell(&a.scope, 90),
+                    cell(a.label.as_deref().unwrap_or("-"), 120),
+                    cell(&a.ifindex.to_string(), 70),
+                ]
+                .spacing(8),
+            );
+        }
+        col = col
+            .push(text(format!("Addresses ({})", addrs.len())).size(font::EMPHASIS))
+            .push(list);
+    }
+
+    // Control-plane change timeline (#111): the recent-events ring (#109)
+    // rendered most-recent-first with a relative timestamp — link up/down,
+    // address add/del, route changes, neighbor failures on one time axis.
+    if let Some(err) = d.events.error() {
+        col = col.push(empty_state(format!("Events fetch failed: {err}"), None));
+    } else if let Some(events) = d.events.ready() {
+        let mut evs: Vec<&_> = events.iter().collect();
+        evs.sort_by(|a, b| b.ts_unix.cmp(&a.ts_unix));
+        let mut list = Column::new().spacing(3).push(
+            row![
+                cell("when", 90),
+                cell("family", 80),
+                cell("action", 80),
+                cell("ifindex", 70),
+                cell("detail", 240),
+            ]
+            .spacing(8),
+        );
+        for e in evs.iter().take(200) {
+            let when = crate::view::formatting::format_timestamp(e.ts_unix as i64 * 1000);
+            list = list.push(
+                row![
+                    cell(&when, 90),
+                    cell(&e.family, 80),
+                    cell(&e.action, 80),
+                    cell(&e.ifindex.map(|i| i.to_string()).unwrap_or_default(), 70),
+                    cell(&e.detail, 240),
+                ]
+                .spacing(8),
+            );
+        }
+        col = col
+            .push(text(format!("Control-plane timeline ({})", events.len())).size(font::EMPHASIS))
+            .push(list);
+    }
+
+    // TC qdisc/class tree (#109)
+    if let Some(err) = d.tc.error() {
+        col = col.push(empty_state(format!("TC fetch failed: {err}"), None));
+    } else if let Some(tc) = d.tc.ready() {
+        let mut list = Column::new().spacing(3).push(
+            row![
+                cell("iface", 90),
+                cell("node", 70),
+                cell("kind", 110),
+                cell("handle", 90),
+                cell("drops", 90),
+                cell("backlog_b", 100),
+            ]
+            .spacing(8),
+        );
+        for t in tc.iter().take(200) {
+            list = list.push(
+                row![
+                    cell(&t.iface, 90),
+                    cell(&t.node, 70),
+                    cell(t.kind.as_deref().unwrap_or("-"), 110),
+                    cell(&t.handle, 90),
+                    cell(&t.drops.to_string(), 90),
+                    cell(&t.backlog_bytes.to_string(), 100),
+                ]
+                .spacing(8),
+            );
+        }
+        col = col
+            .push(text(format!("TC ({})", tc.len())).size(font::EMPHASIS))
+            .push(list);
+    }
+
+    // XFRM / IPsec SAs (#109)
+    if let Some(err) = d.xfrm.error() {
+        col = col.push(empty_state(format!("XFRM fetch failed: {err}"), None));
+    } else if let Some(sas) = d.xfrm.ready() {
+        let mut list = Column::new().spacing(3).push(
+            row![
+                cell("src", 150),
+                cell("dst", 150),
+                cell("proto", 70),
+                cell("mode", 90),
+                cell("spi", 100),
+            ]
+            .spacing(8),
+        );
+        for s in sas.iter().take(200) {
+            list = list.push(
+                row![
+                    cell(s.src.as_deref().unwrap_or("-"), 150),
+                    cell(s.dst.as_deref().unwrap_or("-"), 150),
+                    cell(&s.proto, 70),
+                    cell(&s.mode, 90),
+                    cell(&format!("{:#x}", s.spi), 100),
+                ]
+                .spacing(8),
+            );
+        }
+        col = col
+            .push(text(format!("XFRM SAs ({})", sas.len())).size(font::EMPHASIS))
+            .push(list);
+    }
+
+    // nftables rule inventory (#109)
+    if let Some(err) = d.nft.error() {
+        col = col.push(empty_state(format!("NFT fetch failed: {err}"), None));
+    } else if let Some(rules) = d.nft.ready() {
+        let mut list = Column::new().spacing(3).push(
+            row![
+                cell("family", 80),
+                cell("table", 140),
+                cell("chain", 140),
+                cell("handle", 80),
+                cell("comment", 200),
+            ]
+            .spacing(8),
+        );
+        for r in rules.iter().take(200) {
+            list = list.push(
+                row![
+                    cell(&r.family, 80),
+                    cell(&r.table, 140),
+                    cell(&r.chain, 140),
+                    cell(&r.handle.to_string(), 80),
+                    cell(r.comment.as_deref().unwrap_or("-"), 200),
+                ]
+                .spacing(8),
+            );
+        }
+        col = col
+            .push(text(format!("NFT rules ({})", rules.len())).size(font::EMPHASIS))
             .push(list);
     }
 

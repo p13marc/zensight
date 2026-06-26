@@ -433,6 +433,24 @@ async fn collect_sockets(conn: &Connection<SockDiag>, sel: &SocketSelector) -> V
                 .as_ref()
                 .map(|ti| (ti.rtt, ti.retrans, ti.snd_cwnd))
                 .unwrap_or((0, 0, 0));
+            // Enriched per-socket delivery health (#108). Normalize the kernel's
+            // `~0` "unpaced" pacing-rate sentinel to 0 so the GUI shows a clean value.
+            let ti = inet.tcp_info.as_ref();
+            let delivery_rate = ti.map(|t| t.delivery_rate).unwrap_or(0);
+            let pacing_rate = ti
+                .map(|t| {
+                    if t.pacing_rate == u64::MAX {
+                        0
+                    } else {
+                        t.pacing_rate
+                    }
+                })
+                .unwrap_or(0);
+            let bytes_retrans = ti.map(|t| t.bytes_retrans).unwrap_or(0);
+            let total_retrans = ti.map(|t| t.total_retrans).unwrap_or(0);
+            let rcv_rtt_us = ti.map(|t| t.rcv_rtt).unwrap_or(0);
+            let lost = ti.map(|t| t.lost).unwrap_or(0);
+            let reord_seen = ti.map(|t| t.reord_seen).unwrap_or(0);
             let (snd_buf, rcv_buf) = inet
                 .mem_info
                 .as_ref()
@@ -452,6 +470,13 @@ async fn collect_sockets(conn: &Connection<SockDiag>, sel: &SocketSelector) -> V
                 snd_cwnd,
                 snd_buf,
                 rcv_buf,
+                delivery_rate,
+                pacing_rate,
+                bytes_retrans,
+                total_retrans,
+                rcv_rtt_us,
+                lost,
+                reord_seen,
             };
             sel.matches(&rec).then_some(rec)
         })

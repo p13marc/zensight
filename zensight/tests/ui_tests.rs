@@ -1044,9 +1044,12 @@ fn test_security_drilldown_and_filter() {
     let sec2 = SecurityState {
         selected: Some(alerts.active_external()[0].alert_key()),
         hide_info: false,
+        ..SecurityState::default()
     };
     let mut ui2 = simulator(security_view(&alerts, &sec2));
     assert!(ui2.find("n_observed:").is_ok());
+    // #119: an anomaly with a src exposes the flow-pivot action.
+    assert!(ui2.find("Show flows").is_ok());
 }
 
 /// The expectations authoring view renders and "Add & Push" emits a message.
@@ -1170,6 +1173,13 @@ fn test_netlink_specialized_view() {
                     snd_cwnd: 10,
                     snd_buf: 16384,
                     rcv_buf: 32768,
+                    delivery_rate: 0,
+                    pacing_rate: 0,
+                    bytes_retrans: 0,
+                    total_retrans: 0,
+                    rcv_rtt_us: 0,
+                    lost: 0,
+                    reord_seen: 0,
                 },
             ])),
         );
@@ -1229,6 +1239,7 @@ fn test_netring_specialized_view() {
             packets: 10,
             duration_ms: 100,
             reason: "fin".into(),
+            community_id: None,
         }]));
 
     // Loading state: button reads "Fetching…" while a fetch is in flight; an
