@@ -436,6 +436,10 @@ pub enum Message {
     /// Export device metrics to JSON.
     ExportToJson,
 
+    /// Outcome of an export save dialog (#37): `Ok(Some(path))` wrote the file,
+    /// `Ok(None)` the user cancelled the dialog, `Err(msg)` the write failed.
+    ExportFinished(Result<Option<String>, String>),
+
     // Theme messages
     /// Toggle between light and dark theme.
     ToggleTheme,

@@ -52,6 +52,9 @@ clap = { version = "4", features = ["derive"] }
 
 # Platform utilities
 dirs = "5"
+# Native file dialogs (export save-as, #37). xdg-portal backend avoids a hard
+# GTK system-lib dependency (uses the desktop portal over D-Bus via ashpd).
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 
 # Internal crates
 zensight-common = { path = "zensight-common" }
