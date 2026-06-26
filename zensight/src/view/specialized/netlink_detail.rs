@@ -135,6 +135,18 @@ pub enum NetlinkDetailData {
     Nft(Vec<NftRuleRecord>),
 }
 
+/// Sort order for the socket explorer (#112). `Default` keeps the sensor's order;
+/// the others surface the worst flows first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SocketSort {
+    #[default]
+    Default,
+    /// Highest smoothed RTT first.
+    Rtt,
+    /// Highest retransmit count first.
+    Retrans,
+}
+
 /// Fetched detail tables for the selected host (each fetched on demand, each with
 /// its own loading/error state).
 #[derive(Debug, Clone, Default)]
@@ -147,6 +159,44 @@ pub struct NetlinkDetailState {
     pub tc: Fetch<Vec<TcRecord>>,
     pub xfrm: Fetch<Vec<XfrmSaRecord>>,
     pub nft: Fetch<Vec<NftRuleRecord>>,
+    /// Socket explorer (#112): active TCP-state filter (`None` = all states).
+    pub socket_state_filter: Option<String>,
+    /// Socket explorer: port substring filter (matches local or remote port).
+    pub socket_port_filter: String,
+    /// Socket explorer: active sort order.
+    pub socket_sort: SocketSort,
+}
+
+/// The port component of an `addr:port` endpoint (after the last colon), so IPv6
+/// literals like `[::1]:443` still yield `443`. Empty when there is no port.
+fn port_of(addr: &str) -> &str {
+    addr.rsplit_once(':').map(|(_, p)| p).unwrap_or("")
+}
+
+/// Apply the active state/port filter and sort order to a socket record slice
+/// (#112). Pure and borrow-returning so the explorer logic is testable without a
+/// live session. State matches case-insensitively; the port filter is a substring
+/// match against either endpoint's port.
+pub fn filter_sort_sockets<'a>(
+    socks: &'a [SocketRecord],
+    state_filter: Option<&str>,
+    port_filter: &str,
+    sort: SocketSort,
+) -> Vec<&'a SocketRecord> {
+    let port = port_filter.trim();
+    let mut out: Vec<&SocketRecord> = socks
+        .iter()
+        .filter(|s| state_filter.is_none_or(|st| s.state.eq_ignore_ascii_case(st)))
+        .filter(|s| {
+            port.is_empty() || port_of(&s.local).contains(port) || port_of(&s.remote).contains(port)
+        })
+        .collect();
+    match sort {
+        SocketSort::Default => {}
+        SocketSort::Rtt => out.sort_by_key(|s| std::cmp::Reverse(s.rtt_us)),
+        SocketSort::Retrans => out.sort_by_key(|s| std::cmp::Reverse(s.retrans)),
+    }
+    out
 }
 
 impl NetlinkDetailState {
@@ -341,5 +391,80 @@ mod tests {
         assert_eq!(got[0].rtt_us, 1234);
 
         session.close().await.unwrap();
+    }
+
+    /// A socket record with the given endpoints/state/rtt/retrans; other fields
+    /// defaulted — enough to exercise the explorer's filter/sort (#112).
+    fn sock(local: &str, remote: &str, state: &str, rtt_us: u32, retrans: u32) -> SocketRecord {
+        SocketRecord {
+            local: local.into(),
+            remote: remote.into(),
+            state: state.into(),
+            uid: 0,
+            recv_q: 0,
+            send_q: 0,
+            rtt_us,
+            retrans,
+            inode: 0,
+            congestion: None,
+            snd_cwnd: 0,
+            snd_buf: 0,
+            rcv_buf: 0,
+            delivery_rate: 0,
+            pacing_rate: 0,
+            bytes_retrans: 0,
+            total_retrans: 0,
+            rcv_rtt_us: 0,
+            lost: 0,
+            reord_seen: 0,
+        }
+    }
+
+    /// #112: the state filter is case-insensitive and the port filter matches
+    /// either endpoint's port; an empty/`None` filter passes everything through.
+    #[test]
+    fn socket_filter_by_state_and_port() {
+        let socks = vec![
+            sock("10.0.0.1:5555", "1.1.1.1:443", "established", 100, 0),
+            sock("10.0.0.1:22", "2.2.2.2:51000", "listen", 50, 0),
+            sock("10.0.0.1:8080", "3.3.3.3:443", "time_wait", 70, 0),
+        ];
+
+        // No filters → all rows, original order.
+        let all = filter_sort_sockets(&socks, None, "", SocketSort::Default);
+        assert_eq!(all.len(), 3);
+
+        // State filter (case-insensitive).
+        let est = filter_sort_sockets(&socks, Some("ESTABLISHED"), "", SocketSort::Default);
+        assert_eq!(est.len(), 1);
+        assert_eq!(est[0].local, "10.0.0.1:5555");
+
+        // Port filter matches remote :443 on two rows (not the IP octets).
+        let p443 = filter_sort_sockets(&socks, None, "443", SocketSort::Default);
+        assert_eq!(p443.len(), 2);
+
+        // Port filter on a local port.
+        let p22 = filter_sort_sockets(&socks, None, "22", SocketSort::Default);
+        assert_eq!(p22.len(), 1);
+        assert_eq!(p22[0].state, "listen");
+    }
+
+    /// #112: sorting surfaces the worst flows first (highest RTT / retrans),
+    /// leaving filtering composable with sort.
+    #[test]
+    fn socket_sort_worst_first() {
+        let socks = vec![
+            sock("a:1", "b:2", "established", 100, 3),
+            sock("c:1", "d:2", "established", 900, 0),
+            sock("e:1", "f:2", "established", 50, 9),
+        ];
+
+        let by_rtt = filter_sort_sockets(&socks, None, "", SocketSort::Rtt);
+        assert_eq!(by_rtt[0].rtt_us, 900);
+        assert_eq!(by_rtt[2].rtt_us, 50);
+
+        let by_retx = filter_sort_sockets(&socks, None, "", SocketSort::Retrans);
+        assert_eq!(by_retx[0].retrans, 9);
+        assert_eq!(by_retx[2].retrans, 0);
     }
 }
