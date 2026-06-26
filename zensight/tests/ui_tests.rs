@@ -988,6 +988,66 @@ fn test_security_view() {
     assert!(ui.find("sshd not listening").is_err());
 }
 
+/// #129: firing alerts dedup into per-host incidents; expanding one reveals its
+/// timeline + evidence pivots, and the metric pivot emits InvestigateAlert with
+/// the offending metric from the alert's `metric` label.
+#[test]
+fn test_incidents_group_and_pivot() {
+    use zensight::view::alerts::AlertsState;
+    use zensight::view::incident::{IncidentsState, incidents_view};
+    use zensight_common::{Alert, AlertKind, AlertSeverity};
+
+    let mut alerts = AlertsState::new();
+    // Two alerts on the same host coalesce into one incident; the netlink
+    // sentinel one carries a `metric` label (the metric-evidence anchor).
+    alerts.ingest_external(
+        Alert::new(
+            "router01",
+            Protocol::Netlink,
+            AlertKind::Expectation,
+            "retrans",
+            AlertSeverity::Warning,
+            "high retransmits",
+        )
+        .with_label("metric", "sockets/tcp/retransmits_total"),
+    );
+    alerts.ingest_external(Alert::new(
+        "router01",
+        Protocol::Netlink,
+        AlertKind::Expectation,
+        "socket:sshd",
+        AlertSeverity::Critical,
+        "sshd not listening",
+    ));
+
+    // One incident for the host, max severity (Critical), two alerts.
+    let incs = alerts.incidents();
+    assert_eq!(incs.len(), 1);
+    assert_eq!(incs[0].host, "router01");
+    assert_eq!(incs[0].alert_keys.len(), 2);
+
+    // Collapsed: the incident card shows; expand it.
+    let state = IncidentsState::default();
+    let mut ui = simulator(incidents_view(&alerts, &state));
+    assert!(ui.find("Incidents (1)").is_ok());
+    assert!(ui.find("router01").is_ok());
+
+    // Expanded: the evidence pivots render and "metric ↗" fires InvestigateAlert
+    // with the offending metric.
+    let expanded = IncidentsState {
+        selected: Some(incs[0].id.clone()),
+    };
+    let mut ui = simulator(incidents_view(&alerts, &expanded));
+    assert!(ui.find("Evidence:").is_ok());
+    let _ = ui.click("metric ↗");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(msgs.iter().any(|m| matches!(
+        m,
+        Message::InvestigateAlert { metric: Some(metric), .. }
+            if metric == "sockets/tcp/retransmits_total"
+    )));
+}
+
 /// #73: the netring 0.27 threat-intel anomaly kinds (flow-risk / IOC / Sigma)
 /// render as first-class detector cards — friendly titles + a "what it means"
 /// description — with the per-detector evidence available in the drill-down.
@@ -1790,6 +1850,26 @@ fn test_nav_opens_logs() {
     let _ = ui.click("Logs");
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(msgs.iter().any(|m| matches!(m, Message::OpenLogs)));
+}
+
+/// The nav rail's "Incidents" entry drives Message::OpenIncidents (#129).
+#[test]
+fn test_nav_opens_incidents() {
+    use zensight::view::shell::app_shell;
+
+    let inner = iced::widget::text("x");
+    let mut ui = simulator(app_shell(
+        CurrentView::Dashboard,
+        None,
+        ConnectionState::Connected,
+        0,
+        None,
+        0,
+        inner.into(),
+    ));
+    let _ = ui.click("Incidents");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(msgs.iter().any(|m| matches!(m, Message::OpenIncidents)));
 }
 
 /// The nav rail's "Inventory" entry drives Message::OpenInventory (#120).

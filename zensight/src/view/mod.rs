@@ -12,6 +12,7 @@ pub mod freshness;
 pub mod groups;
 pub mod health;
 pub mod icons;
+pub mod incident;
 pub mod inventory;
 pub mod overview;
 pub mod search;
