@@ -190,6 +190,11 @@ pub struct CollectConfig {
     /// fingerprints on TCP/22, served on `@/query/ssh`. Default OFF (opt-in L7).
     #[serde(default)]
     pub ssh: bool,
+    /// JA4H HTTP-request fingerprinting (issue #124). No-op unless built with
+    /// `--features ja4plus` (FoxIO License 1.1 — non-OSI; default build stays
+    /// OSI-clean). Cleartext HTTP only; served on `@/query/ja4h`. Default OFF.
+    #[serde(default)]
+    pub http_fp: bool,
     /// Flag cleartext SNMP v1/v2c community strings (netring 0.27) as anomalies
     /// → alerts. No-op unless built with `--features snmp`. Default OFF (opt-in).
     #[serde(default)]
@@ -223,6 +228,7 @@ impl Default for CollectConfig {
             talkers: true,
             quic: false,
             ssh: false,
+            http_fp: false,
             snmp_cleartext: false,
             assets: false,
             asset_cdp: false,

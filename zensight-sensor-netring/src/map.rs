@@ -775,7 +775,9 @@ pub fn tcp_reset_points(sensor_id: &str, resets: u64, refused: u64) -> Vec<Telem
 
 // ─── L7 DNS RED analytics (issue #19) ────────────────────────────────────────
 
-use zensight_common::{DnsRecord, ElephantRecord, HttpHostRecord, MatrixRecord, TalkerRecord};
+use zensight_common::{
+    DnsRecord, ElephantRecord, HttpHostRecord, Ja4hRecord, MatrixRecord, TalkerRecord,
+};
 
 /// DNS response codes we track as distinct RED-error buckets. Closed set →
 /// low-cardinality, safe to stream as `dns/responses_by_rcode/<slug>_total`.
@@ -973,6 +975,18 @@ pub fn top_http_hosts(
             .cmp(&a.requests)
             .then_with(|| a.host.cmp(&b.host))
     });
+    v.truncate(top);
+    v
+}
+
+/// Rank a JA4H fingerprint inventory hit-count-first into the `@/query/ja4h`
+/// reply (#124). Pure so the ranking is unit-testable.
+pub fn top_ja4h(
+    inv: &std::collections::HashMap<String, Ja4hRecord>,
+    top: usize,
+) -> Vec<Ja4hRecord> {
+    let mut v: Vec<Ja4hRecord> = inv.values().cloned().collect();
+    v.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.ja4h.cmp(&b.ja4h)));
     v.truncate(top);
     v
 }
@@ -1614,6 +1628,38 @@ mod tests {
         let top = top_http_hosts(&inv, 5);
         assert_eq!(top[0].host, "b.example");
         assert_eq!(top[0].errors, 2);
+    }
+
+    #[test]
+    fn top_ja4h_ranks_by_count_then_fingerprint() {
+        let mut inv = std::collections::HashMap::new();
+        inv.insert(
+            "ge11nn050000_aaa".to_string(),
+            Ja4hRecord {
+                ja4h: "ge11nn050000_aaa".to_string(),
+                host: Some("a.example".to_string()),
+                method: Some("GET".to_string()),
+                user_agent: None,
+                count: 3,
+            },
+        );
+        inv.insert(
+            "po20cn100000_bbb".to_string(),
+            Ja4hRecord {
+                ja4h: "po20cn100000_bbb".to_string(),
+                host: Some("b.example".to_string()),
+                method: Some("POST".to_string()),
+                user_agent: Some("curl/8".to_string()),
+                count: 9,
+            },
+        );
+        let top = top_ja4h(&inv, 5);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].ja4h, "po20cn100000_bbb");
+        assert_eq!(top[0].count, 9);
+        assert_eq!(top[0].user_agent.as_deref(), Some("curl/8"));
+        // top-N truncation keeps only the highest-count entry.
+        assert_eq!(top_ja4h(&inv, 1).len(), 1);
     }
 
     // ─── Top-talkers + elephant flows (issue #21) ────────────────────────────

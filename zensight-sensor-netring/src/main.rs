@@ -125,6 +125,14 @@ async fn main() -> Result<()> {
                 channels.ssh.clone(),
             ));
         }
+        #[cfg(feature = "ja4plus")]
+        if cfg.collect.http_fp {
+            runner.spawn(query::run_ja4h(
+                s.clone(),
+                key_prefix.clone(),
+                channels.ja4h_fp.clone(),
+            ));
+        }
         if cfg.collect.assets {
             runner.spawn(query::run_assets(
                 s.clone(),

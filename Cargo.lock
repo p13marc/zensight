@@ -1690,6 +1690,7 @@ dependencies = [
  "smallvec",
  "snmp-parser",
  "tls-parser",
+ "x509-parser",
 ]
 
 [[package]]

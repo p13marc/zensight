@@ -114,7 +114,12 @@ as Zenoh selector params (e.g. `?top=20`, `?state=&port=`).
 | Sensor | `@/query/<topic>` | Reply |
 |--------|---|---|
 | netlink | `routes`, `neighbors`, `sockets?state=&port=`, `addresses`, `events`, `route_changes`, `tc`, `xfrm`, `nft` | `Vec<…Record>` |
-| netring | `flows`, `tls`, `talkers?top=N`, `matrix?top=N`, `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`, `assets` | `Vec<…Record>` |
+| netring | `flows`, `tls`, `talkers?top=N`, `matrix?top=N`, `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`, `ja4h?top=N`¹, `assets` | `Vec<…Record>` |
+
+¹ `ja4h` (JA4H HTTP fingerprints, #124) is only served when the netring sensor is
+built with `--features ja4plus` (FoxIO License 1.1) and `collect.http_fp` is set;
+otherwise the channel is absent and the reply empty. JA4SSH is not yet available
+upstream — SSH is fingerprinted via HASSH on the `ssh` channel.
 
 ---
 

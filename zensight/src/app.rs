@@ -2011,7 +2011,7 @@ impl ZenSight {
     fn query_inventory(&self) -> Task<Message> {
         use crate::view::inventory::InventoryData;
         use crate::view::specialized::netring_detail::{
-            fetch_assets, fetch_quic, fetch_ssh, fetch_tls,
+            fetch_assets, fetch_ja4h, fetch_quic, fetch_ssh, fetch_tls,
         };
         let Some(session) = self.session.clone() else {
             return Task::done(Message::InventoryLoaded(Err(
@@ -2019,15 +2019,22 @@ impl ZenSight {
             )));
         };
         Task::future(async move {
-            // Fetch all four inventories concurrently; an empty/absent channel
-            // just yields an empty table rather than failing the whole view.
-            let (assets, tls, quic, ssh) = tokio::join!(
+            // Fetch all inventories concurrently; an empty/absent channel just
+            // yields an empty table rather than failing the whole view. JA4H is
+            // only populated when the sensor was built with `--features ja4plus`.
+            let (assets, tls, quic, ssh, ja4h) = tokio::join!(
                 fetch_assets(session.clone()),
                 fetch_tls(session.clone()),
                 fetch_quic(session.clone()),
                 fetch_ssh(session.clone()),
+                fetch_ja4h(session.clone()),
             );
-            if assets.is_none() && tls.is_none() && quic.is_none() && ssh.is_none() {
+            if assets.is_none()
+                && tls.is_none()
+                && quic.is_none()
+                && ssh.is_none()
+                && ja4h.is_none()
+            {
                 return Message::InventoryLoaded(Err("No netring sensor responded".to_string()));
             }
             Message::InventoryLoaded(Ok(InventoryData {
@@ -2035,6 +2042,7 @@ impl ZenSight {
                 tls: tls.unwrap_or_default(),
                 quic: quic.unwrap_or_default(),
                 ssh: ssh.unwrap_or_default(),
+                ja4h: ja4h.unwrap_or_default(),
             }))
         })
     }

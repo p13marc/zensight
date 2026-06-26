@@ -10,8 +10,8 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use tokio::sync::mpsc;
 use zensight_common::{
-    Alert, AssetRecord, ElephantRecord, FlowRecord, QuicRecord, SshRecord, TelemetryPoint,
-    TlsRecord,
+    Alert, AssetRecord, ElephantRecord, FlowRecord, Ja4hRecord, QuicRecord, SshRecord,
+    TelemetryPoint, TlsRecord,
 };
 
 use crate::command::DetectorHandle;
@@ -85,6 +85,9 @@ type HttpPending = Arc<Mutex<HashMap<FiveTupleKey, (u64, Option<String>)>>>;
 pub type QuicInventory = Arc<Mutex<HashMap<(String, String), QuicRecord>>>;
 /// Passive SSH/HASSH inventory: hassh → record for `@/query/ssh` (#72).
 pub type SshInventory = Arc<Mutex<HashMap<String, SshRecord>>>;
+/// Passive JA4H HTTP-fingerprint inventory: ja4h → record for `@/query/ja4h`
+/// (#124, only populated with `--features ja4plus`).
+pub type Ja4hInventory = Arc<Mutex<HashMap<String, Ja4hRecord>>>;
 /// Per-flow SSH banner seen before the KEXINIT, to best-effort correlate a
 /// HASSH fingerprint with its version banner: `flow -> banner`.
 type SshPending = Arc<Mutex<HashMap<FiveTupleKey, String>>>;
@@ -95,6 +98,10 @@ const TLS_INVENTORY_CAP: usize = 4096;
 /// Cardinality guards for the QUIC (sni,version) and SSH (hassh) inventories.
 const QUIC_INVENTORY_CAP: usize = 4096;
 const SSH_INVENTORY_CAP: usize = 4096;
+/// Cardinality guard for the JA4H HTTP-fingerprint inventory (#124). Only the
+/// `ja4plus`-gated capture path consults it; unused in the default build.
+#[cfg(feature = "ja4plus")]
+const JA4H_INVENTORY_CAP: usize = 4096;
 /// LRU capacity of the passive asset inventory (MAC-keyed) — matches the bound
 /// on the served `@/query/assets` map (issue #70).
 const ASSET_INVENTORY_CAP: usize = 8192;
@@ -199,6 +206,9 @@ pub struct MonitorChannels {
     pub quic: QuicInventory,
     /// Passive SSH/HASSH inventory: served on `@/query/ssh` (issue #72).
     pub ssh: SshInventory,
+    /// Passive JA4H HTTP-fingerprint inventory: served on `@/query/ja4h` (#124).
+    /// Stays empty unless built with `--features ja4plus` + `collect.http_fp`.
+    pub ja4h_fp: Ja4hInventory,
     /// Passive asset inventory keyed by MAC: served on `@/query/assets` (#70).
     pub assets: AssetInventory,
 }
@@ -477,6 +487,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
     let elephants: ElephantRing = Arc::new(Mutex::new(VecDeque::with_capacity(ELEPHANT_RING_CAP)));
     let quic: QuicInventory = Arc::new(Mutex::new(HashMap::new()));
     let ssh: SshInventory = Arc::new(Mutex::new(HashMap::new()));
+    let ja4h_fp: Ja4hInventory = Arc::new(Mutex::new(HashMap::new()));
     let assets: AssetInventory = Arc::new(Mutex::new(HashMap::new()));
 
     let mut b = Monitor::builder();
@@ -869,6 +880,43 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
                     }
                 }
                 _ => {}
+            }
+            Ok(())
+        });
+    }
+
+    // L7 JA4H HTTP-request fingerprinting (issue #124) — opt-in, behind the
+    // `ja4plus` build feature (FoxIO License 1.1). netring computes the JA4H
+    // fingerprint from the cleartext request; we accumulate a per-fingerprint
+    // inventory served on `@/query/ja4h`. The hook auto-registers `Http`, which
+    // netring de-dups against the `collect.http` RED handler's `.protocol::<Http>()`.
+    #[cfg(feature = "ja4plus")]
+    if cfg.collect.http_fp {
+        use netring::monitor::fingerprint::HttpFingerprint;
+        let inv = ja4h_fp.clone();
+        b = b.on_http_fingerprint(move |fp: &HttpFingerprint, _ctx: &mut Ctx<'_>| {
+            if let Ok(mut m) = inv.lock() {
+                if let Some(rec) = m.get_mut(&fp.ja4h) {
+                    rec.count += 1;
+                    // Backfill best-effort context the first record may have missed.
+                    if rec.host.is_none() {
+                        rec.host = fp.host.clone();
+                    }
+                    if rec.user_agent.is_none() {
+                        rec.user_agent = fp.user_agent.clone();
+                    }
+                } else if m.len() < JA4H_INVENTORY_CAP {
+                    m.insert(
+                        fp.ja4h.clone(),
+                        Ja4hRecord {
+                            ja4h: fp.ja4h.clone(),
+                            host: fp.host.clone(),
+                            method: fp.method.clone(),
+                            user_agent: fp.user_agent.clone(),
+                            count: 1,
+                        },
+                    );
+                }
             }
             Ok(())
         });
@@ -1385,6 +1433,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
             elephants,
             quic,
             ssh,
+            ja4h_fp,
             assets,
         },
         keepalive,

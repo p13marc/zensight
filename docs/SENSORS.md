@@ -190,7 +190,8 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
   `capture-overload` SensorHealth alert — the honest "the sensor is silently
   losing your packets" signal. Tunable under `overload` in the config.
 - **On-demand detail** (`@/query/<topic>`): `flows`, `tls`, `talkers?top=N`,
-  `matrix?top=N`, `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`, `assets`.
+  `matrix?top=N`, `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`,
+  `ja4h?top=N`, `assets`.
 - **Traffic matrix / service map (#122):** alongside the per-destination talker
   histogram, an `(src,dst)`-keyed byte/packet/flow matrix served on
   `@/query/matrix?top=N` — "who talks to whom" for the service-map view.
@@ -200,6 +201,14 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
   `@/query/*` channel with a streamed distinct-count. Cleartext SNMP v1/v2c
   community strings can be flagged as `cleartext-snmp` anomalies with
   `collect.snmp_cleartext` (build with `--features snmp`).
+- **JA4H HTTP fingerprints (#124, opt-in, license-gated):** with `collect.http_fp`
+  on a build that enables `--features ja4plus`, cleartext HTTP requests are
+  fingerprinted with JA4H (FoxIO `a_b_c_d` form) into a per-fingerprint inventory
+  served on `@/query/ja4h?top=N` — surfaced in the GUI fingerprint explorer
+  alongside JA4/JA3/QUIC-SNI/HASSH. The `ja4plus` feature pulls FoxIO-License-1.1
+  code (NOT OSI); the default build stays OSI-clean and the channel is absent.
+  **JA4SSH is not yet available upstream** (flowscope 0.19 / netring 0.27
+  fingerprint SSH via HASSH only), so the SSH side of #124 is deferred.
 - **Passive asset inventory (netring 0.27):** with `collect.assets`, discovers
   hosts on the wire from ARP / NDP / LLDP (+ CDP via `collect.asset_cdp`) into a
   MAC-keyed inventory (MAC / IP / hostname / platform / capabilities / seen-via),
