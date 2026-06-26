@@ -502,6 +502,18 @@ pub enum Message {
     /// Toggle inclusion of a systemd unit in the filter (journald lens, #64).
     ToggleSyslogUnit(String),
 
+    /// Toggle inclusion of a journald boot in the filter (boot lens, #93).
+    ToggleSyslogBoot(String),
+
+    /// Toggle the structured drill-down for a log row, keyed by content (#93).
+    ToggleLogRow(String),
+
+    /// Toggle live-tail follow/pause on the log stream (#93).
+    ToggleLogFollow,
+
+    /// Resume live tail — jump the log stream back to now (#93).
+    LogsJumpToNow,
+
     /// Set syslog app name filter pattern.
     SetSyslogAppFilter(String),
 

@@ -1075,6 +1075,22 @@ impl ZenSight {
                 self.syslog_filter.toggle_unit(unit);
             }
 
+            Message::ToggleSyslogBoot(boot) => {
+                self.syslog_filter.toggle_boot(boot);
+            }
+
+            Message::ToggleLogRow(key) => {
+                self.syslog_filter.toggle_row(key);
+            }
+
+            Message::ToggleLogFollow => {
+                self.syslog_filter.toggle_follow(now_ms());
+            }
+
+            Message::LogsJumpToNow => {
+                self.syslog_filter.resume();
+            }
+
             Message::SetSyslogAppFilter(filter) => {
                 self.syslog_filter.set_app_filter(filter);
             }
