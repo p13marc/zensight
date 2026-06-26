@@ -206,6 +206,14 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
   served on `@/query/assets`. Covers hosts that emit no telemetry of their own.
 - **Alerts:** `@/alerts/<alert_key>` from detectors and threat-intel —
   - Detectors: TRW port-scan, RITA beaconing, connection-flood, DGA/DNS-tunneling.
+  - **Lateral movement (#123, opt-in):** SMB admin-share / `IPC$` service-pipe
+    access (T1021.002), RDP connection requests (T1021.001), and Kerberos
+    kerberoast / weak-etype / brute-force signals (T1558). Build with
+    `--features lateral` (pulls the SMB/RDP/Kerberos parsers) and set
+    `anomalies.lateral_movement`.
+  - **Data exfiltration (#123, opt-in):** a per-source EWMA baseline of outbound
+    flow volume flags a flow exceeding it by `exfil_sigma` stddevs above the
+    `exfil_min_bytes` floor (T1048). Set `anomalies.data_exfil`.
   - **Threat-intel (netring 0.27):** flow-risk scoring (obsolete TLS, cleartext
     HTTP credentials), IOC matching (bad IPs/domains/JA3/JA4, from config lists
     or indicator files), Sigma rules (build with `--features sigma`).

@@ -288,6 +288,26 @@ pub struct AnomalyConfig {
     /// aggressive — matches netring's `dga_query` example).
     #[serde(default = "default_dga_threshold")]
     pub dga_threshold: f64,
+    /// Lateral-movement detection (#123): SMB admin-share / IPC$ service-pipe
+    /// access, RDP connection requests, and Kerberos kerberoast/weak-etype/
+    /// brute-force signals → alerts. Requires the `lateral` build feature (pulls
+    /// the SMB/RDP/Kerberos parsers); a no-op when built without it. Default off.
+    #[serde(default)]
+    pub lateral_movement: bool,
+    /// Data-exfiltration detection (#123): flags a flow whose outbound bytes
+    /// exceed its per-source learned baseline by `exfil_sigma` standard
+    /// deviations (and the `exfil_min_bytes` floor). Requires `collect.flows`.
+    /// Default off.
+    #[serde(default)]
+    pub data_exfil: bool,
+    /// Sigma multiplier a flow must exceed its source baseline by to flag exfil.
+    /// Default 4.0.
+    #[serde(default = "default_exfil_sigma")]
+    pub exfil_sigma: f64,
+    /// Absolute outbound-byte floor below which exfil never fires (so a quiet
+    /// host's first modest upload can't trip a near-zero baseline). Default 10MB.
+    #[serde(default = "default_exfil_min_bytes")]
+    pub exfil_min_bytes: u64,
     /// Hostnames/SLDs to never alert on (allowlist for the noisy detectors:
     /// beaconing telemetry agents + DGA-scored CDN/randomised-but-benign SLDs).
     #[serde(default)]
@@ -311,6 +331,12 @@ fn default_flood_threshold() -> u64 {
 }
 fn default_dga_threshold() -> f64 {
     -8.0
+}
+fn default_exfil_sigma() -> f64 {
+    4.0
+}
+fn default_exfil_min_bytes() -> u64 {
+    10 * 1024 * 1024
 }
 
 impl NetringConfig {

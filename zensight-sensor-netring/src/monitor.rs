@@ -45,6 +45,10 @@ const NOD_SEEN_CAP: usize = 131_072;
 /// 60 s window, 5 s buckets, capped at this many tracked (src, SLD) keys.
 const DNS_TUNNEL_KEY_CAP: usize = 8192;
 
+/// EWMA smoothing factor for the per-source data-exfil baseline (#123): ~10-flow
+/// effective window, so a host's normal volume adapts but a single burst stands out.
+const EXFIL_EWMA_ALPHA: f64 = 0.2;
+
 use flowscope::EndReason;
 use flowscope::detect::patterns::{
     BeaconDetector, BeaconScore, DgaScore, DgaScorer, PortScanDetector, RitaBeaconDetector,
@@ -508,6 +512,19 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
         let matrix_h = matrix.clone();
         let elephants_h = elephants.clone();
         let collect_talkers = cfg.collect.talkers;
+        // Data-exfiltration baseline (#123) — built only when enabled at startup
+        // (the #121 detectors follow the same rule). The closure feeds outbound
+        // bytes per source and ships a finding on the typed alerts channel; sigma
+        // / floor / mute / allowlist are read LIVE from the tunable config.
+        let exfil = cfg.anomalies.data_exfil.then(|| {
+            Arc::new(Mutex::new(crate::exfil::ExfilDetector::new(
+                EXFIL_EWMA_ALPHA,
+            )))
+        });
+        let exfil_h = exfil.clone();
+        let exfil_alert_tx = alert_tx.clone();
+        let exfil_cfg = det_cfg.clone();
+        let exfil_sensor_id = cfg.sensor_id.clone();
         b = b.on_ctx::<FlowEnded<Tcp>>(move |e: &FlowEnded<Tcp>, _ctx: &mut Ctx<'_>| {
             on_flow_ended(
                 e,
@@ -523,6 +540,9 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
                 &elephants_h,
                 collect_talkers,
             );
+            if let Some(exfil) = &exfil_h {
+                feed_exfil(exfil, e, &exfil_cfg, &exfil_alert_tx, &exfil_sensor_id);
+            }
             Ok(())
         });
 
@@ -1257,6 +1277,83 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
         tracing::info!("netring: passive asset inventory enabled");
     }
 
+    // Lateral-movement detection (#123): SMB admin-share / IPC$ service-pipe,
+    // RDP connection requests, Kerberos kerberoast/weak-etype/brute-force. The
+    // parsers are only compiled under the `lateral` feature; the per-message
+    // enable + allowlist are read live (#121). Built once at startup like the
+    // other detectors.
+    #[cfg(feature = "lateral")]
+    if cfg.anomalies.lateral_movement {
+        use flowscope::kerberos::KerberosMessage;
+        use flowscope::rdp::RdpMessage;
+        use flowscope::smb::SmbMessage;
+
+        // SMB → admin-share / service-pipe access.
+        b = b.protocol::<Smb>();
+        let (alerts, det, sid) = (alert_tx.clone(), det_cfg.clone(), cfg.sensor_id.clone());
+        b = b.on_ctx::<Smb>(move |m: &SmbMessage, ctx: &mut Ctx<'_>| {
+            if det.load().lateral_movement
+                && let Some(f) = crate::lateral::smb_finding(
+                    m.tree_connect_is_admin_share,
+                    m.create_is_admin_named_pipe,
+                    m.tree_connect_path.as_deref(),
+                    m.create_path.as_deref(),
+                    m.ntlm_auth.as_ref().and_then(|n| n.username.as_deref()),
+                )
+            {
+                emit_lateral(&alerts, &sid, ctx, f);
+            }
+            Ok(())
+        });
+
+        // RDP → connection request between peers.
+        b = b.protocol::<Rdp>();
+        let (alerts, det, sid) = (alert_tx.clone(), det_cfg.clone(), cfg.sensor_id.clone());
+        b = b.on_ctx::<Rdp>(move |m: &RdpMessage, ctx: &mut Ctx<'_>| {
+            if det.load().lateral_movement
+                && let RdpMessage::ConnectionRequest {
+                    cookie_username, ..
+                } = m
+                && let Some(f) = crate::lateral::rdp_finding(cookie_username.as_deref())
+            {
+                emit_lateral(&alerts, &sid, ctx, f);
+            }
+            Ok(())
+        });
+
+        // Kerberos → kerberoasting / weak-etype / brute-force signals.
+        b = b.protocol::<Kerberos>();
+        let (alerts, det, sid) = (alert_tx.clone(), det_cfg.clone(), cfg.sensor_id.clone());
+        b = b.on_ctx::<Kerberos>(move |m: &KerberosMessage, ctx: &mut Ctx<'_>| {
+            if det.load().lateral_movement {
+                let weak = m.etypes.iter().any(|e| e.is_weak());
+                let brute = m
+                    .error_code
+                    .as_ref()
+                    .is_some_and(|e| e.is_brute_force_signal());
+                let realm = (!m.realm.is_empty()).then_some(m.realm.as_str());
+                if let Some(f) = crate::lateral::kerberos_finding(
+                    m.kerberoast_suspect,
+                    brute,
+                    weak,
+                    realm,
+                    m.sname.as_deref(),
+                ) {
+                    emit_lateral(&alerts, &sid, ctx, f);
+                }
+            }
+            Ok(())
+        });
+
+        tracing::info!("netring: lateral-movement detection (SMB/RDP/Kerberos) enabled");
+    }
+    #[cfg(not(feature = "lateral"))]
+    if cfg.anomalies.lateral_movement {
+        tracing::warn!(
+            "netring: anomalies.lateral_movement is set but the sensor was built without the `lateral` feature"
+        );
+    }
+
     // Anomaly sink → channel → drain → AlertReporter.
     b = b.sink(ChannelSink::new(anom_tx));
 
@@ -1399,6 +1496,58 @@ fn on_flow_ended(
             }
         }
     }
+}
+
+/// Feed a finished TCP flow's outbound volume into the data-exfil baseline (#123)
+/// and ship a `DataExfiltration` alert when it stands out. Reads the live tunable
+/// config so mute / sigma / floor / allowlist hot-swap at runtime (#121); the
+/// outbound direction is the initiator (client → server) byte count.
+fn feed_exfil(
+    exfil: &Arc<Mutex<crate::exfil::ExfilDetector>>,
+    e: &FlowEnded<Tcp>,
+    det_cfg: &LiveConfig,
+    alert_tx: &mpsc::UnboundedSender<Alert>,
+    sensor_id: &str,
+) {
+    let c = det_cfg.load();
+    if !c.data_exfil {
+        return;
+    }
+    let src_ip = e.key.a.ip();
+    if allowlisted(&src_ip.to_string(), &c.allowlist) {
+        return;
+    }
+    let bytes_out = e.stats.bytes_for(flowscope::FlowSide::Initiator);
+    let finding = {
+        let Ok(mut d) = exfil.lock() else {
+            return;
+        };
+        d.observe(src_ip, bytes_out, c.exfil_sigma, c.exfil_min_bytes)
+    };
+    if let Some(f) = finding {
+        let view = map::exfil_view(
+            e.key.a.to_string(),
+            e.key.b.to_string(),
+            f.bytes_out,
+            f.zscore,
+        );
+        let _ = alert_tx.send(map::anomaly_alert(sensor_id, &view));
+    }
+}
+
+/// Ship a lateral-movement [`LateralFinding`](crate::lateral::LateralFinding) as
+/// a `zensight` alert (#123), attributing src/dst from the flow key in `ctx`.
+#[cfg(feature = "lateral")]
+fn emit_lateral(
+    alerts: &mpsc::UnboundedSender<Alert>,
+    sensor_id: &str,
+    ctx: &Ctx<'_>,
+    f: crate::lateral::LateralFinding,
+) {
+    let src = ctx.flow.map(|k| k.a.to_string());
+    let dst = ctx.flow.map(|k| k.b.to_string());
+    let view = map::lateral_view(f.kind, src, dst, f.severity, f.observations);
+    let _ = alerts.send(map::anomaly_alert(sensor_id, &view));
 }
 
 /// Update the per-destination talker histogram (bounded by `TALKER_CAP`).

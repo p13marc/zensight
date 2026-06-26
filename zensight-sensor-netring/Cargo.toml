@@ -21,6 +21,11 @@ sigma = ["netring/sigma"]
 # SNMP parser via netring. Enable with `--features snmp`, then set
 # `collect.snmp_cleartext` to flag v1/v2c community strings as anomalies.
 snmp = ["netring/snmp"]
+# Lateral-movement detection (#123). Off by default — pulls the SMB / RDP /
+# Kerberos L7 parsers via netring/flowscope. Enable with `--features lateral`,
+# then set `anomalies.lateral_movement` to flag admin-share / RDP / kerberoast
+# signals as anomalies (ATT&CK T1021 / T1558).
+lateral = ["netring/smb", "netring/rdp", "netring/kerberos"]
 
 [dependencies]
 zensight-common = { path = "../zensight-common" }
