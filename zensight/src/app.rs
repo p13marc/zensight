@@ -150,6 +150,8 @@ pub struct ZenSight {
     expectations: crate::view::expectations::ExpectationsState,
     /// Security view state: severity filter + expanded anomaly (#48).
     security: crate::view::security::SecurityState,
+    /// Netring detection-tuning panel state (#121), shown in the Security view.
+    detection_tuning: crate::view::detection_tuning::DetectionTuningState,
     /// Local tiered time-series store (hot ring + redb), Plan v3-04 §A / #22.
     /// Telemetry writes through it; charts read from it so trends survive restart.
     store: crate::store::MetricStore,
@@ -271,6 +273,7 @@ impl ZenSight {
             session: None,
             expectations: crate::view::expectations::ExpectationsState::default(),
             security: crate::view::security::SecurityState::default(),
+            detection_tuning: crate::view::detection_tuning::DetectionTuningState::default(),
             // In demo mode keep history in-memory only (no disk churn / restart survival
             // for synthetic data); otherwise open the persistent tiered store.
             store: if demo_mode {
@@ -970,9 +973,9 @@ impl ZenSight {
                 self.topology.apply_correlations(&self.correlations);
                 self.set_view(CurrentView::Topology);
                 self.save_current_view();
-                // Derive real edges from observed flows (#25): fetch the netring
-                // flow detail; edges are applied when the reply arrives.
-                return self.query_topology_flows();
+                // Derive real edges from observed flows (#25) and netlink
+                // neighbor adjacency (#49); edges are merged as replies arrive.
+                return Task::batch([self.query_topology_flows(), self.query_topology_neighbors()]);
             }
 
             Message::TopologyFlowsReceived(result) => match result {
@@ -983,6 +986,17 @@ impl ZenSight {
                 }
                 Err(e) => {
                     tracing::debug!(error = %e, "No netring flows for topology edges");
+                }
+            },
+
+            Message::TopologyNeighborsReceived(result) => match result {
+                Ok(neighbors) => {
+                    let ip_to_node = self.topology_ip_to_node();
+                    self.topology
+                        .apply_neighbor_edges(&neighbors, &ip_to_node, now_ms());
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "No netlink neighbors for topology edges");
                 }
             },
 
@@ -1062,6 +1076,22 @@ impl ZenSight {
 
             Message::ToggleSyslogUnit(unit) => {
                 self.syslog_filter.toggle_unit(unit);
+            }
+
+            Message::ToggleSyslogBoot(boot) => {
+                self.syslog_filter.toggle_boot(boot);
+            }
+
+            Message::ToggleLogRow(key) => {
+                self.syslog_filter.toggle_row(key);
+            }
+
+            Message::ToggleLogFollow => {
+                self.syslog_filter.toggle_follow(now_ms());
+            }
+
+            Message::LogsJumpToNow => {
+                self.syslog_filter.resume();
             }
 
             Message::SetSyslogAppFilter(filter) => {
@@ -1220,6 +1250,80 @@ impl ZenSight {
                     Some(format!("{} configured", self.expectations.current.len()));
             }
 
+            // Netring detection-tuning (#121).
+            Message::RefreshDetectorConfig => {
+                return self.query_detector_status();
+            }
+            Message::DetectorConfigReceived(result) => match result {
+                Ok(json) => self.detection_tuning.apply_status(&json),
+                Err(e) => {
+                    self.detection_tuning.status_note = Some(e);
+                }
+            },
+            Message::ToggleNetringDetector(detector) => {
+                let enabled = !self.detection_tuning.is_enabled(&detector).unwrap_or(false);
+                let command = serde_json::json!({ "type": "set_enabled", "detector": detector, "enabled": enabled });
+                let key = zensight_common::command_key("zensight/netring", "detectors");
+                return self
+                    .send_command(
+                        key,
+                        &command,
+                        format!("{detector} {}", if enabled { "enabled" } else { "muted" }),
+                    )
+                    .chain(self.query_detector_status());
+            }
+            Message::SetNetringThresholdInput { detector, value } => {
+                if let Some(row) = self
+                    .detection_tuning
+                    .detectors
+                    .iter_mut()
+                    .find(|d| d.name == detector)
+                {
+                    row.threshold_input = value;
+                }
+            }
+            Message::ApplyNetringThreshold(detector) => {
+                let input = self
+                    .detection_tuning
+                    .detectors
+                    .iter()
+                    .find(|d| d.name == detector)
+                    .map(|d| d.threshold_input.clone())
+                    .unwrap_or_default();
+                let Ok(value) = input.trim().parse::<f64>() else {
+                    self.toasts
+                        .push(ToastSeverity::Error, "Threshold must be a number");
+                    return Task::none();
+                };
+                let command = serde_json::json!({ "type": "set_threshold", "detector": detector, "value": value });
+                let key = zensight_common::command_key("zensight/netring", "detectors");
+                return self
+                    .send_command(key, &command, format!("{detector} threshold = {value}"))
+                    .chain(self.query_detector_status());
+            }
+            Message::SetNetringAllowlistInput(value) => {
+                self.detection_tuning.new_entry = value;
+            }
+            Message::AddNetringAllowlist => {
+                let entry = self.detection_tuning.new_entry.trim().to_string();
+                if entry.is_empty() {
+                    return Task::none();
+                }
+                self.detection_tuning.new_entry.clear();
+                let command = serde_json::json!({ "type": "add_allowlist", "entry": entry });
+                let key = zensight_common::command_key("zensight/netring", "detectors");
+                return self
+                    .send_command(key, &command, format!("Allowlisted {entry}"))
+                    .chain(self.query_detector_status());
+            }
+            Message::RemoveNetringAllowlist(entry) => {
+                let command = serde_json::json!({ "type": "remove_allowlist", "entry": entry });
+                let key = zensight_common::command_key("zensight/netring", "detectors");
+                return self
+                    .send_command(key, &command, format!("Removed {entry}"))
+                    .chain(self.query_detector_status());
+            }
+
             Message::FetchNetlinkDetail(topic) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netlink_detail.loading(topic);
@@ -1359,6 +1463,8 @@ impl ZenSight {
             }
             Message::OpenSecurity => {
                 self.set_view(CurrentView::Security);
+                // Pull the netring detector config so the tuning panel is ready.
+                return self.query_detector_status();
             }
             Message::CloseSecurity => {
                 self.set_view(CurrentView::Dashboard);
@@ -1516,6 +1622,32 @@ impl ZenSight {
         })
     }
 
+    /// Query the netring sensor's current detector config (#121, status
+    /// queryable). Routes to `DetectorConfigReceived`.
+    fn query_detector_status(&self) -> Task<Message> {
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::DetectorConfigReceived(Err(
+                "Not connected to Zenoh".to_string(),
+            )));
+        };
+        let key = zensight_common::status_key("zensight/netring", "detectors");
+        Task::future(async move {
+            match session.get(&key).await {
+                Ok(replies) => {
+                    if let Ok(reply) = replies.recv_async().await
+                        && let Ok(sample) = reply.result()
+                    {
+                        let body =
+                            String::from_utf8_lossy(&sample.payload().to_bytes()).to_string();
+                        return Message::DetectorConfigReceived(Ok(body));
+                    }
+                    Message::DetectorConfigReceived(Err("No netring sensor responded".to_string()))
+                }
+                Err(e) => Message::DetectorConfigReceived(Err(format!("Status query failed: {e}"))),
+            }
+        })
+    }
+
     /// Fetch an on-demand netlink detail table from the sensor's query channel.
     fn query_netlink_detail(
         &self,
@@ -1594,6 +1726,23 @@ impl ZenSight {
                 .await
                 .ok_or_else(|| "No netring sensor responded".to_string());
             Message::TopologyFlowsReceived(result)
+        })
+    }
+
+    /// Fetch the netlink neighbor (ARP/NDP) table for deriving topology
+    /// adjacency edges (#49). Routes to `TopologyNeighborsReceived`; leaves the
+    /// device netlink panel untouched. Silent when disconnected (or demo).
+    fn query_topology_neighbors(&self) -> Task<Message> {
+        use crate::view::specialized::netlink_detail::fetch_records;
+        let Some(session) = self.session.clone() else {
+            return Task::none();
+        };
+        let key = zensight_common::command::query_key("zensight/netlink", "neighbors");
+        Task::future(async move {
+            let result = fetch_records::<zensight_common::NeighborRecord>(session, key)
+                .await
+                .ok_or_else(|| "No netlink sensor responded".to_string());
+            Message::TopologyNeighborsReceived(result)
         })
     }
 
@@ -1904,9 +2053,11 @@ impl ZenSight {
             CurrentView::Expectations => {
                 crate::view::expectations::expectations_view(&self.expectations)
             }
-            CurrentView::Security => {
-                crate::view::security::security_view(&self.alerts, &self.security)
-            }
+            CurrentView::Security => crate::view::security::security_view(
+                &self.alerts,
+                &self.security,
+                &self.detection_tuning,
+            ),
             CurrentView::Sensors => {
                 crate::view::sensors::sensors_view(&self.sensor_health, &self.recent_errors)
             }
@@ -2126,39 +2277,64 @@ impl ZenSight {
         self.selected_device = Some(detail_state);
         self.set_view(CurrentView::Device);
 
+        // Prefetch this protocol's primary detail channels so the drill-in opens
+        // pre-populated rather than Idle-until-clicked (#127).
+        let prefetch = self.prefetch_on_open(&device_id);
+
         // Resolve the persisted metric ids for this device, then query the warm
         // (minute) tier off-thread. Last 24h of minute buckets is plenty to
         // pre-populate a chart without blocking the UI.
-        let Some(store) = self.store.persistent() else {
-            return Task::none();
+        let history = 'history: {
+            let Some(store) = self.store.persistent() else {
+                break 'history Task::none();
+            };
+            let protocol = device_id.protocol.to_string();
+            let metric_ids = self.store.device_metric_ids(&protocol, &device_id.source);
+            if metric_ids.is_empty() {
+                break 'history Task::none();
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let from = now - 24 * 3_600_000; // 24h window
+            Task::future(async move {
+                let series = tokio::task::spawn_blocking(move || {
+                    metric_ids
+                        .into_iter()
+                        .filter_map(|(name, id)| {
+                            store
+                                .query(id, crate::store::Tier::Minute, from, now)
+                                .ok()
+                                .filter(|s| !s.is_empty())
+                                .map(|samples| (name, samples))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await
+                .unwrap_or_default();
+                Message::DeviceHistoryLoaded(device_id, series)
+            })
         };
-        let protocol = device_id.protocol.to_string();
-        let metric_ids = self.store.device_metric_ids(&protocol, &device_id.source);
-        if metric_ids.is_empty() {
+
+        Task::batch([history, prefetch])
+    }
+
+    /// Prefetch the primary on-demand detail channels for a device's protocol so
+    /// the specialized view opens pre-populated (#127). Declarative policy keyed
+    /// by protocol; reuses the existing `Fetch*` message flow (which marks the
+    /// `Fetch<T>` slot `Loading` and issues the query), so there is no duplicated
+    /// fetch logic here. No-op when disconnected or for protocols without
+    /// queryable detail channels.
+    fn prefetch_on_open(&self, device_id: &DeviceId) -> Task<Message> {
+        if self.session.is_none() {
             return Task::none();
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        let from = now - 24 * 3_600_000; // 24h window
-        Task::future(async move {
-            let series = tokio::task::spawn_blocking(move || {
-                metric_ids
-                    .into_iter()
-                    .filter_map(|(name, id)| {
-                        store
-                            .query(id, crate::store::Tier::Minute, from, now)
-                            .ok()
-                            .filter(|s| !s.is_empty())
-                            .map(|samples| (name, samples))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .await
-            .unwrap_or_default();
-            Message::DeviceHistoryLoaded(device_id, series)
-        })
+        Task::batch(
+            prefetch_channels(device_id.protocol)
+                .into_iter()
+                .map(Task::done),
+        )
     }
 
     /// Save settings.
@@ -2339,6 +2515,27 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// The primary on-demand detail channels to prefetch when a device of this
+/// protocol is opened (#127), as the `Fetch*` messages that drive them. Pure
+/// (the unit of testing for the prefetch policy); empty for protocols whose
+/// detail is fully streamed (no queryable channels) or has no specialized view.
+fn prefetch_channels(protocol: zensight_common::Protocol) -> Vec<Message> {
+    use crate::view::specialized::netlink_detail::NetlinkDetailTopic;
+    use crate::view::specialized::sysinfo_detail::ProcessSort;
+    use zensight_common::Protocol;
+
+    match protocol {
+        Protocol::Netlink => vec![
+            Message::FetchNetlinkDetail(NetlinkDetailTopic::Sockets),
+            Message::FetchNetlinkDetail(NetlinkDetailTopic::Routes),
+            Message::FetchNetlinkDetail(NetlinkDetailTopic::Neighbors),
+        ],
+        Protocol::Netring => vec![Message::FetchNetringFlows],
+        Protocol::Sysinfo => vec![Message::FetchSysinfoProcesses(ProcessSort::default())],
+        _ => Vec::new(),
+    }
+}
+
 /// Human duration for silence toasts: "1h" / "4h" / "24h" / "30m".
 fn fmt_duration_ms(ms: i64) -> String {
     let mins = ms / 60_000;
@@ -2385,4 +2582,37 @@ fn chrono_timestamp() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("{}", now)
+}
+
+#[cfg(test)]
+mod prefetch_tests {
+    use super::*;
+    use crate::view::specialized::netlink_detail::NetlinkDetailTopic;
+    use zensight_common::Protocol;
+
+    #[test]
+    fn prefetch_policy_by_protocol() {
+        // Netlink prefetches its primary host tables (sockets/routes/neighbors).
+        let nl = prefetch_channels(Protocol::Netlink);
+        assert_eq!(nl.len(), 3);
+        assert!(matches!(
+            nl[0],
+            Message::FetchNetlinkDetail(NetlinkDetailTopic::Sockets)
+        ));
+
+        // Netring prefetches flows; sysinfo prefetches the process explorer.
+        assert!(matches!(
+            prefetch_channels(Protocol::Netring).as_slice(),
+            [Message::FetchNetringFlows]
+        ));
+        assert!(matches!(
+            prefetch_channels(Protocol::Sysinfo).as_slice(),
+            [Message::FetchSysinfoProcesses(_)]
+        ));
+
+        // Protocols without queryable detail channels prefetch nothing.
+        assert!(prefetch_channels(Protocol::Snmp).is_empty());
+        assert!(prefetch_channels(Protocol::Syslog).is_empty());
+        assert!(prefetch_channels(Protocol::Modbus).is_empty());
+    }
 }

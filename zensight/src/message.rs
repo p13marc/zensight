@@ -89,6 +89,25 @@ pub enum Message {
     /// A sentinel status reply (ExpectationsConfig JSON).
     ExpectationStatusReceived(String),
 
+    // Netring detection-tuning (#121): runtime allowlist + per-detector mute /
+    // threshold, pushed to the netring sensor's command channel.
+    /// Fetch the netring detector config (status queryable).
+    RefreshDetectorConfig,
+    /// A netring detector-status reply (AnomalyConfig JSON), or an error.
+    DetectorConfigReceived(Result<String, String>),
+    /// Mute/unmute a netring detector by name (flips current state).
+    ToggleNetringDetector(String),
+    /// Edit a detector's threshold input field (not yet applied).
+    SetNetringThresholdInput { detector: String, value: String },
+    /// Apply the edited threshold for a detector to the sensor.
+    ApplyNetringThreshold(String),
+    /// Edit the new-allowlist-entry input field.
+    SetNetringAllowlistInput(String),
+    /// Add the typed allowlist entry to the netring allowlist.
+    AddNetringAllowlist,
+    /// Remove an allowlist entry from the netring allowlist.
+    RemoveNetringAllowlist(String),
+
     /// Fetch an on-demand netlink detail table (sockets/routes/neighbors).
     FetchNetlinkDetail(crate::view::specialized::netlink_detail::NetlinkDetailTopic),
     /// A netlink detail reply for a topic: the decoded table, or an error message.
@@ -103,6 +122,10 @@ pub enum Message {
     /// Netring flows fetched for deriving real topology edges (#25). Distinct
     /// from NetringFlowsReceived so it doesn't disturb the device flow panel.
     TopologyFlowsReceived(Result<Vec<zensight_common::FlowRecord>, String>),
+    /// Netlink neighbor (ARP/NDP) table fetched for deriving adjacency edges
+    /// (#49). Merged with flow edges so directly-attached gateways/peers appear
+    /// even without observed traffic; `is_router` entries classify Router nodes.
+    TopologyNeighborsReceived(Result<Vec<zensight_common::NeighborRecord>, String>),
     /// Fetch the on-demand netring TLS asset inventory.
     FetchNetringTls,
     /// A netring TLS-inventory reply: the decoded records, or an error message.
@@ -497,6 +520,18 @@ pub enum Message {
 
     /// Toggle inclusion of a systemd unit in the filter (journald lens, #64).
     ToggleSyslogUnit(String),
+
+    /// Toggle inclusion of a journald boot in the filter (boot lens, #93).
+    ToggleSyslogBoot(String),
+
+    /// Toggle the structured drill-down for a log row, keyed by content (#93).
+    ToggleLogRow(String),
+
+    /// Toggle live-tail follow/pause on the log stream (#93).
+    ToggleLogFollow,
+
+    /// Resume live tail — jump the log stream back to now (#93).
+    LogsJumpToNow,
 
     /// Set syslog app name filter pattern.
     SetSyslogAppFilter(String),

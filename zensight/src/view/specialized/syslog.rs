@@ -1,11 +1,11 @@
 //! Syslog event specialized view.
 //!
-//! Displays log events with severity filtering, search, and real-time streaming.
-//! Uses Iced 0.14's table widget for structured log display.
+//! Displays log events with severity filtering, search, real-time streaming,
+//! and a per-entry structured drill-down (#93).
 
 use std::collections::HashMap;
 
-use iced::widget::{Row, column, container, pick_list, row, scrollable, table, text, text_input};
+use iced::widget::{Row, column, container, pick_list, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length, Theme};
 use iced_anim::widget::button;
 
@@ -113,6 +113,17 @@ pub struct SyslogMessage {
     source_kind: LogSource,
     /// systemd unit (`_SYSTEMD_UNIT`), journald-only — the per-unit lens.
     unit: Option<String>,
+    /// Process id (`pid` label, from `_PID`/`SYSLOG_PID`), when present (#93).
+    pid: Option<String>,
+    /// systemd MESSAGE_ID — a stable catalog id for this kind of event,
+    /// journald-only (#93).
+    msg_id: Option<String>,
+    /// journald boot id (`sd.journald.boot_id`) — the boot lens (#93).
+    boot_id: Option<String>,
+    /// Full journald structured fields (`sd.journald.*`), keyed by field suffix
+    /// (e.g. `comm`, `exe`, `uid`, `transport`); empty for network/unix lines.
+    /// Powers the per-entry structured drill-down (#93).
+    structured: std::collections::BTreeMap<String, String>,
 }
 
 impl SyslogMessage {
@@ -124,6 +135,35 @@ impl SyslogMessage {
     /// The systemd unit, if this entry came from journald with one.
     pub fn unit(&self) -> Option<&str> {
         self.unit.as_deref()
+    }
+
+    /// The journald boot id, if this entry came from journald (#93).
+    pub fn boot_id(&self) -> Option<&str> {
+        self.boot_id.as_deref()
+    }
+
+    /// A stable content key for this row, used to track the expanded drill-down
+    /// across live-tail updates (#93). Not a security boundary — just identity.
+    fn row_key(&self) -> String {
+        format!("{}|{}|{}", self.timestamp, self.app_name, self.message)
+    }
+}
+
+/// Short human explanation for the well-known systemd MESSAGE_IDs the logs
+/// sensor recognizes (#93), mirroring `zensight-sensor-logs`'s known-event
+/// catalog (ids verified against systemd's `catalog/systemd.catalog.in`).
+/// Returns `None` for any other id — the drill-down then shows the raw id only.
+pub fn message_catalog(msg_id: &str) -> Option<&'static str> {
+    match msg_id.trim().to_ascii_lowercase().as_str() {
+        "fc2e22bc6ee647b6b90729ab34a250b1" => {
+            Some("A process crashed and a coredump was captured.")
+        }
+        "d9b373ed55a64feb8242e02dbe79a49c" => Some("A systemd unit entered the failed state."),
+        "d989611b15e44c9dbf31e3c81256e4ed" => {
+            Some("systemd-oomd killed a cgroup under memory pressure.")
+        }
+        "fe6faa94e7774663a0da52717891d8ef" => Some("The kernel OOM killer terminated a process."),
+        _ => None,
     }
 }
 
@@ -167,6 +207,8 @@ pub struct SyslogFilterState {
     pub selected_facilities: std::collections::HashSet<String>,
     /// systemd units to show (empty = all) — the journald unit lens (#64).
     pub selected_units: std::collections::HashSet<String>,
+    /// journald boots to show (empty = all) — the boot lens (#93).
+    pub selected_boots: std::collections::HashSet<String>,
     /// App name filter pattern.
     pub app_filter: String,
     /// Message content filter pattern.
@@ -175,6 +217,13 @@ pub struct SyslogFilterState {
     pub modified: bool,
     /// Sensor filter stats.
     pub stats: Option<crate::message::SyslogFilterStatus>,
+    /// Live-tail paused (#93). When paused, lines newer than `frozen_at` are
+    /// hidden so the stream stays still while the operator reads.
+    pub paused: bool,
+    /// Upper timestamp bound captured when paused; `None` while following.
+    pub frozen_at: Option<i64>,
+    /// The expanded log row's content key, for the structured drill-down (#93).
+    pub expanded_row: Option<String>,
 }
 
 impl SyslogFilterState {
@@ -183,6 +232,7 @@ impl SyslogFilterState {
         self.min_severity.is_some()
             || !self.selected_facilities.is_empty()
             || !self.selected_units.is_empty()
+            || !self.selected_boots.is_empty()
             || !self.app_filter.is_empty()
             || !self.message_filter.is_empty()
     }
@@ -195,6 +245,42 @@ impl SyslogFilterState {
             self.selected_units.insert(unit);
         }
         self.modified = true;
+    }
+
+    /// Toggle a journald boot in the boot filter (#93).
+    pub fn toggle_boot(&mut self, boot: String) {
+        if self.selected_boots.contains(&boot) {
+            self.selected_boots.remove(&boot);
+        } else {
+            self.selected_boots.insert(boot);
+        }
+        self.modified = true;
+    }
+
+    /// Toggle live-tail follow/pause (#93). Pausing freezes the stream at `now`;
+    /// resuming clears the freeze so new lines flow again.
+    pub fn toggle_follow(&mut self, now: i64) {
+        if self.paused {
+            self.resume();
+        } else {
+            self.paused = true;
+            self.frozen_at = Some(now);
+        }
+    }
+
+    /// Resume live tail — "jump to now" (#93).
+    pub fn resume(&mut self) {
+        self.paused = false;
+        self.frozen_at = None;
+    }
+
+    /// Toggle the expanded structured drill-down for a log row (#93).
+    pub fn toggle_row(&mut self, key: String) {
+        if self.expanded_row.as_deref() == Some(key.as_str()) {
+            self.expanded_row = None;
+        } else {
+            self.expanded_row = Some(key);
+        }
     }
 
     /// Set minimum severity.
@@ -230,6 +316,7 @@ impl SyslogFilterState {
         self.min_severity = None;
         self.selected_facilities.clear();
         self.selected_units.clear();
+        self.selected_boots.clear();
         self.app_filter.clear();
         self.message_filter.clear();
         self.modified = true;
@@ -619,6 +706,40 @@ fn render_filter_panel<'a>(
             .into()
     };
 
+    // Boot chips (#93): the journald boot lens — built from observed boot ids in
+    // the current buffer. Hidden when no journald boots are seen. The id is long
+    // hex, so the chip shows a short prefix while filtering on the full id.
+    let mut boots: Vec<String> = messages
+        .iter()
+        .filter_map(|m| m.boot_id.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    boots.sort();
+    let boot_row: Element<'_, Message> = if boots.is_empty() {
+        text("").into()
+    } else {
+        let mut chips: Vec<Element<'_, Message>> = vec![text("Boots:").size(13).into()];
+        for boot in boots.into_iter().take(20) {
+            let is_selected = filter_state.selected_boots.contains(&boot);
+            let short: String = boot.chars().take(8).collect();
+            chips.push(
+                button(text(short).size(12))
+                    .on_press(Message::ToggleSyslogBoot(boot))
+                    .style(if is_selected {
+                        iced::widget::button::primary
+                    } else {
+                        iced::widget::button::secondary
+                    })
+                    .into(),
+            );
+        }
+        Row::with_children(chips)
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into()
+    };
+
     // App filter input
     let app_filter_row = row![
         text("App Pattern:").size(13),
@@ -683,6 +804,7 @@ fn render_filter_panel<'a>(
         severity_picker,
         facility_row,
         unit_row,
+        boot_row,
         app_filter_row,
         msg_filter_row,
         buttons_row,
@@ -763,13 +885,61 @@ fn render_severity_summary<'a>(
 }
 
 /// Render the log stream using Iced 0.14's table widget.
+// Stream column widths, shared by the header and each row so they line up (#93).
+const COL_TIME: f32 = 140.0;
+const COL_SEV: f32 = 72.0;
+const COL_SRC: f32 = 56.0;
+const COL_HOST: f32 = 110.0;
+const COL_FAC: f32 = 80.0;
+const COL_UNIT: f32 = 150.0;
+const COL_APP: f32 = 110.0;
+
+fn muted_cell(value: String, width: f32) -> Element<'static, Message> {
+    text(value)
+        .size(10)
+        .width(Length::Fixed(width))
+        .style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
+        })
+        .into()
+}
+
 fn render_log_stream<'a>(
     messages: &[SyslogMessage],
     filter_state: &'a SyslogFilterState,
 ) -> Element<'a, Message> {
+    // Header bar: title + live-tail follow/pause + jump-to-now (#93).
     let title = row![icons::log(IconSize::Medium), text("Log Stream").size(16)]
         .spacing(8)
         .align_y(Alignment::Center);
+    let follow_btn = button(
+        text(if filter_state.paused {
+            "⏸ Paused"
+        } else {
+            "● Live"
+        })
+        .size(12),
+    )
+    .on_press(Message::ToggleLogFollow)
+    .style(if filter_state.paused {
+        iced::widget::button::secondary
+    } else {
+        iced::widget::button::primary
+    });
+    let mut header_bar = row![
+        title,
+        iced::widget::Space::new().width(Length::Fill),
+        follow_btn
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    if filter_state.paused {
+        header_bar = header_bar.push(
+            button(text("Jump to now ⤓").size(12))
+                .on_press(Message::LogsJumpToNow)
+                .style(iced::widget::button::secondary),
+        );
+    }
 
     let filtered_messages = apply_local_filters(messages, filter_state);
 
@@ -780,7 +950,7 @@ fn render_log_stream<'a>(
             "No messages match the current filters"
         };
         return column![
-            title,
+            header_bar,
             text(empty_text).size(12).style(|t: &Theme| text::Style {
                 color: Some(theme::colors(t).text_muted()),
             })
@@ -789,138 +959,148 @@ fn render_log_stream<'a>(
         .into();
     }
 
-    // Sort by timestamp descending (newest first) and limit to 100
+    // Sort by timestamp descending (newest first) and limit to 100.
     let mut sorted_messages = filtered_messages;
     sorted_messages.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     sorted_messages.truncate(100);
 
-    // Define table columns with explicit Element type
-    let time_column = table::column(
-        text("Time").size(11),
-        |msg: SyslogMessage| -> Element<'_, Message> {
-            let time_text = format_timestamp(msg.timestamp);
-            text(time_text)
-                .size(10)
-                .style(|t: &Theme| text::Style {
-                    color: Some(theme::colors(t).text_muted()),
-                })
-                .into()
-        },
-    );
+    // Column header row, aligned to the per-row widths.
+    let head = |label: &'static str, w: f32| -> Element<'static, Message> {
+        text(label).size(11).width(Length::Fixed(w)).into()
+    };
+    let header_row = row![
+        head("Time", COL_TIME),
+        head("Severity", COL_SEV),
+        head("Src", COL_SRC),
+        head("Host", COL_HOST),
+        head("Facility", COL_FAC),
+        head("Unit", COL_UNIT),
+        head("App", COL_APP),
+        text("Message").size(11),
+    ]
+    .spacing(8)
+    .padding([0, 6]);
 
-    let severity_column = table::column(
-        text("Severity").size(11),
-        |msg: SyslogMessage| -> Element<'_, Message> {
-            let severity_color = msg.severity.color();
+    // One clickable row per entry; clicking toggles the structured drill-down.
+    let mut list = column![].spacing(1);
+    for msg in sorted_messages {
+        let key = msg.row_key();
+        let expanded = filter_state.expanded_row.as_deref() == Some(key.as_str());
+        let severity_color = msg.severity.color();
+        let message_text = if msg.message.chars().count() > 100 {
+            let head: String = msg.message.chars().take(97).collect();
+            format!("{head}...")
+        } else {
+            msg.message.clone()
+        };
+        let cells = row![
+            muted_cell(format_timestamp(msg.timestamp), COL_TIME),
             text(msg.severity.label())
                 .size(10)
-                .style(move |_theme: &Theme| text::Style {
+                .width(Length::Fixed(COL_SEV))
+                .style(move |_t: &Theme| text::Style {
                     color: Some(severity_color),
-                })
-                .into()
-        },
-    );
-
-    let facility_column = table::column(
-        text("Facility").size(11),
-        |msg: SyslogMessage| -> Element<'_, Message> {
-            text(msg.facility)
+                }),
+            muted_cell(msg.source_kind.label().to_string(), COL_SRC),
+            muted_cell(msg.hostname.clone(), COL_HOST),
+            muted_cell(msg.facility.clone(), COL_FAC),
+            muted_cell(
+                msg.unit.clone().unwrap_or_else(|| "-".to_string()),
+                COL_UNIT
+            ),
+            text(msg.app_name.clone())
                 .size(10)
-                .style(|t: &Theme| text::Style {
-                    color: Some(theme::colors(t).text_muted()),
-                })
-                .into()
-        },
-    );
-
-    let host_column = table::column(
-        text("Host").size(11),
-        |msg: SyslogMessage| -> Element<'_, Message> {
-            text(msg.hostname)
-                .size(10)
-                .style(|t: &Theme| text::Style {
-                    color: Some(theme::colors(t).text_muted()),
-                })
-                .into()
-        },
-    );
-
-    let app_column = table::column(
-        text("App").size(11),
-        |msg: SyslogMessage| -> Element<'_, Message> {
-            text(msg.app_name)
-                .size(10)
+                .width(Length::Fixed(COL_APP))
                 .style(|t: &Theme| text::Style {
                     color: Some(theme::colors(t).primary()),
-                })
-                .into()
-        },
-    );
+                }),
+            text(message_text).size(11),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
 
-    // Provenance badge (#64): journald / unix / net, so operators see where a
-    // line came from at a glance.
-    let source_column = table::column(
-        text("Src").size(11),
-        |msg: SyslogMessage| -> Element<'_, Message> {
-            text(msg.source_kind.label())
-                .size(10)
-                .style(|t: &Theme| text::Style {
-                    color: Some(theme::colors(t).text_muted()),
-                })
-                .into()
-        },
-    );
+        list = list.push(
+            button(cells)
+                .on_press(Message::ToggleLogRow(key))
+                .padding([3, 6])
+                .width(Length::Fill)
+                .style(iced::widget::button::text),
+        );
+        if expanded {
+            list = list.push(render_log_detail(&msg));
+        }
+    }
 
-    // systemd unit (#64): empty for non-journald lines.
-    let unit_column = table::column(
-        text("Unit").size(11),
-        |msg: SyslogMessage| -> Element<'_, Message> {
-            text(msg.unit.clone().unwrap_or_else(|| "-".to_string()))
-                .size(10)
-                .style(|t: &Theme| text::Style {
-                    color: Some(theme::colors(t).text_muted()),
-                })
-                .into()
-        },
-    );
+    let scroll = scrollable(list).width(Length::Fill).height(Length::Fill);
 
-    let message_column = table::column(
-        text("Message").size(11),
-        |msg: SyslogMessage| -> Element<'_, Message> {
-            let message_text = if msg.message.len() > 100 {
-                format!("{}...", &msg.message[..97])
-            } else {
-                msg.message
-            };
-            text(message_text).size(11).into()
-        },
-    );
-
-    // Build the table
-    let log_table = table(
-        [
-            time_column,
-            severity_column,
-            source_column,
-            host_column,
-            facility_column,
-            unit_column,
-            app_column,
-            message_column,
-        ],
-        sorted_messages,
-    )
-    .padding(6)
-    .padding_y(4);
-
-    let scroll = scrollable(log_table)
-        .width(Length::Fill)
-        .height(Length::Fill);
-
-    column![title, scroll]
-        .spacing(10)
+    column![header_bar, header_row, scroll]
+        .spacing(8)
         .height(Length::Fill)
         .into()
+}
+
+/// The expanded per-entry structured drill-down (#93): full message, parsed
+/// essentials (pid / unit / boot / MESSAGE_ID + catalog explanation), and every
+/// raw journald `sd.journald.*` field.
+fn render_log_detail(msg: &SyslogMessage) -> Element<'static, Message> {
+    let line = |label: String, value: String| -> Element<'static, Message> {
+        row![
+            text(label)
+                .size(11)
+                .width(Length::Fixed(150.0))
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
+                }),
+            text(value).size(11),
+        ]
+        .spacing(8)
+        .into()
+    };
+
+    let mut col = column![line("time".into(), format_timestamp(msg.timestamp))].spacing(3);
+    col = col.push(line("severity".into(), msg.severity.label().to_string()));
+    col = col.push(line("source".into(), msg.source_kind.label().to_string()));
+    col = col.push(line("host".into(), msg.hostname.clone()));
+    col = col.push(line("facility".into(), msg.facility.clone()));
+    col = col.push(line("app".into(), msg.app_name.clone()));
+    if let Some(pid) = &msg.pid {
+        col = col.push(line("pid".into(), pid.clone()));
+    }
+    if let Some(unit) = &msg.unit {
+        col = col.push(line("unit".into(), unit.clone()));
+    }
+    if let Some(boot) = &msg.boot_id {
+        col = col.push(line("boot".into(), boot.clone()));
+    }
+    if let Some(id) = &msg.msg_id {
+        col = col.push(line("MESSAGE_ID".into(), id.clone()));
+        if let Some(explanation) = message_catalog(id) {
+            col = col.push(text(explanation).size(11).style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).primary()),
+            }));
+        }
+    }
+
+    col = col
+        .push(text("message").size(11).style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
+        }))
+        .push(text(msg.message.clone()).size(12));
+
+    if !msg.structured.is_empty() {
+        col = col.push(
+            text("journald fields")
+                .size(11)
+                .style(|t: &Theme| text::Style {
+                    color: Some(theme::colors(t).text_muted()),
+                }),
+        );
+        for (k, v) in &msg.structured {
+            col = col.push(line(k.clone(), v.clone()));
+        }
+    }
+
+    container(card(col)).padding([2, 16]).into()
 }
 
 /// Parse syslog messages from metrics.
@@ -995,6 +1175,21 @@ pub fn syslog_message_from_point(point: &TelemetryPoint, source_fallback: &str) 
         .filter(|u| !u.is_empty())
         .cloned();
 
+    // Richer journald structure for the drill-down (#93): pid, MESSAGE_ID, the
+    // boot id, and every `sd.journald.*` field flattened by the logs sensor.
+    let nonempty = |k: &str| point.labels.get(k).filter(|v| !v.is_empty()).cloned();
+    let pid = nonempty("pid");
+    let msg_id = nonempty("msgid");
+    let boot_id = nonempty("sd.journald.boot_id");
+    let structured: std::collections::BTreeMap<String, String> = point
+        .labels
+        .iter()
+        .filter_map(|(k, v)| {
+            let field = k.strip_prefix("sd.journald.")?;
+            (!v.is_empty()).then(|| (field.to_string(), v.clone()))
+        })
+        .collect();
+
     SyslogMessage {
         timestamp: point.timestamp,
         severity,
@@ -1004,6 +1199,10 @@ pub fn syslog_message_from_point(point: &TelemetryPoint, source_fallback: &str) 
         message,
         source_kind,
         unit,
+        pid,
+        msg_id,
+        boot_id,
+        structured,
     }
 }
 
@@ -1035,6 +1234,23 @@ fn apply_local_filters(
                     .unit
                     .as_ref()
                     .is_some_and(|u| filter_state.selected_units.contains(u))
+            {
+                return false;
+            }
+
+            // Boot filter (#93): if any selected, only show those boots.
+            if !filter_state.selected_boots.is_empty()
+                && !msg
+                    .boot_id
+                    .as_ref()
+                    .is_some_and(|b| filter_state.selected_boots.contains(b))
+            {
+                return false;
+            }
+
+            // Live-tail pause (#93): hide lines newer than the freeze instant.
+            if let Some(ceiling) = filter_state.frozen_at
+                && msg.timestamp > ceiling
             {
                 return false;
             }
@@ -1118,6 +1334,103 @@ mod tests {
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].unit(), Some("nginx.service"));
         assert!(filter.has_active_filters());
+    }
+
+    /// #93: a journald point's richer structure (pid, MESSAGE_ID, boot id, all
+    /// `sd.journald.*` fields) is lifted onto the row for the drill-down.
+    #[test]
+    fn structured_fields_extracted_for_drilldown() {
+        use std::collections::HashMap;
+        use zensight_common::{TelemetryPoint, TelemetryValue};
+        let mut labels = HashMap::new();
+        labels.insert("source_type".into(), "journald".to_string());
+        labels.insert("pid".into(), "4242".to_string());
+        labels.insert(
+            "msgid".into(),
+            "fc2e22bc6ee647b6b90729ab34a250b1".to_string(),
+        );
+        labels.insert("sd.journald.boot_id".into(), "boot-abc".to_string());
+        labels.insert("sd.journald.unit".into(), "nginx.service".to_string());
+        labels.insert("sd.journald.comm".into(), "nginx".to_string());
+        labels.insert("sd.journald.empty".into(), String::new()); // dropped
+        let point = TelemetryPoint {
+            timestamp: 9,
+            source: "host01".into(),
+            protocol: Protocol::Syslog,
+            metric: "daemon/crit".into(),
+            value: TelemetryValue::Text("segfault".into()),
+            labels,
+        };
+        let m = syslog_message_from_point(&point, "host01");
+        assert_eq!(m.pid.as_deref(), Some("4242"));
+        assert_eq!(m.boot_id(), Some("boot-abc"));
+        assert_eq!(
+            m.msg_id.as_deref(),
+            Some("fc2e22bc6ee647b6b90729ab34a250b1")
+        );
+        // Structured map carries every non-empty sd.journald.* field by suffix.
+        assert_eq!(m.structured.get("comm").map(String::as_str), Some("nginx"));
+        assert_eq!(
+            m.structured.get("boot_id").map(String::as_str),
+            Some("boot-abc")
+        );
+        assert!(!m.structured.contains_key("empty"));
+        // The MESSAGE_ID resolves to its catalog explanation.
+        assert!(message_catalog(m.msg_id.as_deref().unwrap()).is_some());
+        assert!(message_catalog("deadbeef").is_none());
+    }
+
+    /// #93: the boot lens narrows the stream; the live-tail freeze hides lines
+    /// newer than the pause instant; resume clears the freeze.
+    #[test]
+    fn boot_filter_and_live_tail_pause() {
+        use std::collections::HashMap;
+        use zensight_common::{TelemetryPoint, TelemetryValue};
+        let mk = |ts: i64, boot: &str| {
+            let mut labels = HashMap::new();
+            labels.insert("source_type".into(), "journald".to_string());
+            labels.insert("sd.journald.boot_id".into(), boot.to_string());
+            let point = TelemetryPoint {
+                timestamp: ts,
+                source: "h".into(),
+                protocol: Protocol::Syslog,
+                metric: "daemon/info".into(),
+                value: TelemetryValue::Text("x".into()),
+                labels,
+            };
+            syslog_message_from_point(&point, "h")
+        };
+        let msgs = vec![mk(10, "bootA"), mk(20, "bootB"), mk(30, "bootA")];
+
+        let mut filter = SyslogFilterState::default();
+        filter.toggle_boot("bootA".into());
+        assert_eq!(apply_local_filters(&msgs, &filter).len(), 2);
+        assert!(filter.has_active_filters());
+
+        // Pause at t=15: only the bootA line at t=10 survives (t=30 is newer).
+        filter.resume();
+        filter.selected_boots.clear();
+        filter.toggle_follow(15);
+        assert!(filter.paused);
+        let shown = apply_local_filters(&msgs, &filter);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].timestamp, 10);
+
+        // Resume ("jump to now") un-freezes the stream.
+        filter.resume();
+        assert!(!filter.paused);
+        assert_eq!(apply_local_filters(&msgs, &filter).len(), 3);
+    }
+
+    #[test]
+    fn toggle_row_expands_and_collapses() {
+        let mut filter = SyslogFilterState::default();
+        filter.toggle_row("k1".into());
+        assert_eq!(filter.expanded_row.as_deref(), Some("k1"));
+        filter.toggle_row("k2".into());
+        assert_eq!(filter.expanded_row.as_deref(), Some("k2"));
+        filter.toggle_row("k2".into());
+        assert!(filter.expanded_row.is_none());
     }
 
     #[test]

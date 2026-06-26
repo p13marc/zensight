@@ -184,6 +184,12 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
   - **Threat-intel (netring 0.27):** flow-risk scoring (obsolete TLS, cleartext
     HTTP credentials), IOC matching (bad IPs/domains/JA3/JA4, from config lists
     or indicator files), Sigma rules (build with `--features sigma`).
+- **Runtime detection tuning (#121):** the `@/commands/detectors` channel (status
+  on `@/status/detectors`) hot-swaps the allowlist and each detector's
+  enable/threshold without a restart — surfaced in the GUI Security view's
+  *Detection Tuning* panel. A detector that was off at startup isn't built into
+  the pipeline, so enabling it still needs a restart; tuning and mute/unmute of
+  built detectors are immediate.
 - **Config:** `configs/netring.json5` (`collect.*`, `anomalies.*`, `threat.*`,
   `pcap` for replay).
 

@@ -231,7 +231,7 @@ impl Default for CollectConfig {
 }
 
 /// Anomaly detectors to run (Pillar A).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AnomalyConfig {
     /// Port-scan detection (TRW).
     #[serde(default)]

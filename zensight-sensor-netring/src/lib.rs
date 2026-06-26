@@ -8,6 +8,7 @@
 //! Live capture needs `CAP_NET_RAW` (+`CAP_IPC_LOCK` for AF_XDP); offline pcap
 //! replay (`netring.pcap`) needs no privileges. Linux only.
 
+pub mod command;
 pub mod config;
 pub mod map;
 pub mod monitor;

@@ -91,6 +91,7 @@ Per-sensor operational channels. All are derived from the sensor's `key_prefix`.
 | syslog | `filter` | add/remove/clear dynamic message filters |
 | netlink | `expectations` | hot-swap sentinel expectations |
 | netlink | `collection` | toggle collectors at runtime |
+| netring | `detectors` | runtime detection tuning: allowlist + per-detector mute/threshold |
 
 ### 3.2 On-demand detail queries — `@/query/<topic>`
 
