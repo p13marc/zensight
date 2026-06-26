@@ -32,7 +32,7 @@ pub fn protocol_priority(p: Protocol) -> u8 {
         Protocol::Sysinfo => 0,
         Protocol::Netlink => 1,
         Protocol::Netring => 2,
-        Protocol::Syslog => 3,
+        Protocol::Logs => 3,
         _ => 4,
     }
 }
@@ -109,7 +109,7 @@ mod tests {
     fn groups_facets_by_source_primary_first() {
         let a = facet(Protocol::Netlink, "host1", DeviceStatus::Online);
         let b = facet(Protocol::Sysinfo, "host1", DeviceStatus::Online);
-        let c = facet(Protocol::Syslog, "host2", DeviceStatus::Online);
+        let c = facet(Protocol::Logs, "host2", DeviceStatus::Online);
         let devices = vec![&a, &b, &c];
 
         let hosts = aggregate(&devices);

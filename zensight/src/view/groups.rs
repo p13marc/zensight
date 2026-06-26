@@ -752,7 +752,7 @@ mod tests {
     fn test_toggle_assignment() {
         let mut state = GroupsState::new();
         let group_id = state.create_group("Test");
-        let device = DeviceId::new(Protocol::Syslog, "host1");
+        let device = DeviceId::new(Protocol::Logs, "host1");
 
         assert!(!state.device_in_group(&device, group_id));
 

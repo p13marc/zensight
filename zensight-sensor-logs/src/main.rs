@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
     let config = SyslogSensorConfig::load_from_file(&args.config)?;
 
     // Create the sensor runner
-    let runner = SensorRunner::new_with_args("syslog", config, Some(&args))
+    let runner = SensorRunner::new_with_args("logs", config, Some(&args))
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -157,7 +157,7 @@ async fn main() -> Result<()> {
         if journald_events_on || budget_alerts_on || novelty_alerts_on {
             let reporter = Arc::new(AlertReporter::new(
                 runner.publisher(),
-                Protocol::Syslog,
+                Protocol::Logs,
                 format,
             ));
             // Seed late-joining consumers (e.g. the GUI) with the firing set.

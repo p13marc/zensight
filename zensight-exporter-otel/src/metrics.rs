@@ -109,7 +109,7 @@ pub fn is_metric_exportable(value: &TelemetryValue) -> bool {
 /// Check if a TelemetryValue can be exported as an OTEL log.
 pub fn is_log_exportable(value: &TelemetryValue, protocol: Protocol) -> bool {
     // Only syslog text messages are exported as logs
-    matches!(protocol, Protocol::Syslog) && matches!(value, TelemetryValue::Text(_))
+    matches!(protocol, Protocol::Logs) && matches!(value, TelemetryValue::Text(_))
 }
 
 #[cfg(test)]
@@ -240,8 +240,8 @@ mod tests {
         let gauge = TelemetryValue::Gauge(1.0);
 
         // Only syslog text is exportable as log
-        assert!(is_log_exportable(&text, Protocol::Syslog));
+        assert!(is_log_exportable(&text, Protocol::Logs));
         assert!(!is_log_exportable(&text, Protocol::Snmp));
-        assert!(!is_log_exportable(&gauge, Protocol::Syslog));
+        assert!(!is_log_exportable(&gauge, Protocol::Logs));
     }
 }

@@ -25,7 +25,7 @@ The single root is `zensight/`. Everything below it is either **telemetry**
 | Protocol | Sensor crate | Source identifier |
 |----------|--------------|-------------------|
 | `snmp`    | zensight-sensor-snmp    | device name |
-| `syslog`  | zensight-sensor-logs  | hostname (network or journald) |
+| `logs`  | zensight-sensor-logs  | hostname (network or journald) |
 | `netflow` | zensight-sensor-netflow | exporter name |
 | `modbus`  | zensight-sensor-modbus  | device name |
 | `sysinfo` | zensight-sensor-sysinfo | hostname |
@@ -42,7 +42,7 @@ have more than four chunks.
 
 ```
 zensight/snmp/router01/system/sysUpTime
-zensight/syslog/web01/auth/crit                 # <facility>/<severity>
+zensight/logs/web01/auth/crit                 # <facility>/<severity>
 zensight/sysinfo/server01/cpu/usage
 zensight/netflow/exporter01/10.0.0.1/10.0.0.2
 zensight/modbus/plc01/holding/temperature
@@ -74,7 +74,7 @@ Per-sensor operational channels. All are derived from the sensor's `key_prefix`.
 | `@/alive` | liveliness token | — | every sensor (`LivelinessManager`) |
 | `@/devices/<device>/liveness` | put | `DeviceLiveness` | sensors with per-device tracking |
 | `@/devices/<device>/alive` | liveliness token | — | sensors with per-device tracking |
-| `@/alerts/<alert_key>` | put / delete | `Alert` (firing → resolved → tombstone) | snmp, syslog, netlink, netring |
+| `@/alerts/<alert_key>` | put / delete | `Alert` (firing → resolved → tombstone) | snmp, logs, netlink, netring |
 | `@/query/alerts` | queryable | `Vec<Alert>` (current firing set) | sensors with alerts (late-joiner seed) |
 | `@/commands/<topic>` | subscribe | topic command | sensors with runtime control |
 | `@/status/<topic>` | queryable | topic status | sensors with runtime control |
@@ -88,7 +88,7 @@ Per-sensor operational channels. All are derived from the sensor's `key_prefix`.
 
 | Sensor | `@/commands/<topic>` · `@/status/<topic>` | Purpose |
 |--------|---|---|
-| syslog | `filter` | add/remove/clear dynamic message filters |
+| logs | `filter` | add/remove/clear dynamic message filters |
 | netlink | `expectations` | hot-swap sentinel expectations |
 | netlink | `collection` | toggle collectors at runtime |
 | netring | `detectors` | runtime detection tuning: allowlist + per-detector mute/threshold |

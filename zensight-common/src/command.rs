@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 /// # Example
 /// ```
 /// use zensight_common::command::command_key;
-/// assert_eq!(command_key("zensight/syslog", "filter"), "zensight/syslog/@/commands/filter");
+/// assert_eq!(command_key("zensight/logs", "filter"), "zensight/logs/@/commands/filter");
 /// ```
 pub fn command_key(prefix: &str, topic: &str) -> String {
     format!("{}/@/commands/{}", prefix, topic)
@@ -28,7 +28,7 @@ pub fn command_key(prefix: &str, topic: &str) -> String {
 /// # Example
 /// ```
 /// use zensight_common::command::status_key;
-/// assert_eq!(status_key("zensight/syslog", "filter"), "zensight/syslog/@/status/filter");
+/// assert_eq!(status_key("zensight/logs", "filter"), "zensight/logs/@/status/filter");
 /// ```
 pub fn status_key(prefix: &str, topic: &str) -> String {
     format!("{}/@/status/{}", prefix, topic)

@@ -26,7 +26,7 @@ configure it, and the exact Zenoh keys it publishes/serves.
 | Sensor | Protocol | Source of truth | Default config | Privileges |
 |--------|----------|-----------------|----------------|------------|
 | [snmp](#snmp) | `snmp` | SNMP v1/v2c/v3 polling + traps | `configs/snmp.json5` | none |
-| [syslog / logs](#syslog--logs) | `syslog` | RFC 3164/5424 + systemd journald | `configs/syslog.json5`, `configs/logs.json5` | journal-read for system journal |
+| [syslog / logs](#syslog--logs) | `logs` | RFC 3164/5424 + systemd journald | `configs/syslog.json5`, `configs/logs.json5` | journal-read for system journal |
 | [netflow](#netflow) | `netflow` | NetFlow v5/v9 / IPFIX | `configs/netflow.json5` | none |
 | [modbus](#modbus) | `modbus` | Modbus TCP/RTU | `configs/modbus.json5` | none |
 | [sysinfo](#sysinfo) | `sysinfo` | local host metrics | `configs/sysinfo.json5` | none |
@@ -52,11 +52,11 @@ Polls SNMP agents and receives traps. v3 auth/priv supported.
 Receives syslog over the network **and/or** ingests the local systemd journal.
 Both feed the same model and keyspace.
 
-- **Telemetry:** `zensight/syslog/<hostname>/<facility>/<severity>`
+- **Telemetry:** `zensight/logs/<hostname>/<facility>/<severity>`
   (payload value = the log message; structured fields land in labels —
   journald fields under `sd.journald.*`, `source_type` = `udp`/`tcp`/`unix`/`journald`).
 - **Derived rollups** (`derived`, default on): cheap aggregates emitted every
-  `derived_interval_secs` under `zensight/syslog/<host>/logs/*` — per-severity
+  `derived_interval_secs` under `zensight/logs/<host>/logs/*` — per-severity
   counters (`logs/by_severity/<level>_total`), error/warning totals
   (`logs/errors_total`, `logs/warnings_total`), top-N per-unit message/error
   counters (`logs/by_unit/<unit>/...`, capped to `top_units` + an `other`

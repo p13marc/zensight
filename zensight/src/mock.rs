@@ -211,19 +211,19 @@ pub mod syslog {
     pub fn server(name: &str) -> Vec<TelemetryPoint> {
         vec![
             telemetry_point(
-                Protocol::Syslog,
+                Protocol::Logs,
                 name,
                 "auth/info",
                 TelemetryValue::Text("User admin logged in successfully".to_string()),
             ),
             telemetry_point(
-                Protocol::Syslog,
+                Protocol::Logs,
                 name,
                 "kern/warning",
                 TelemetryValue::Text("Low memory condition detected".to_string()),
             ),
             telemetry_point(
-                Protocol::Syslog,
+                Protocol::Logs,
                 name,
                 "daemon/err",
                 TelemetryValue::Text("Service nginx failed to start".to_string()),
@@ -475,7 +475,7 @@ mod tests {
         let protocols: std::collections::HashSet<_> = points.iter().map(|p| p.protocol).collect();
         assert!(protocols.contains(&Protocol::Snmp));
         assert!(protocols.contains(&Protocol::Sysinfo));
-        assert!(protocols.contains(&Protocol::Syslog));
+        assert!(protocols.contains(&Protocol::Logs));
         assert!(protocols.contains(&Protocol::Modbus));
         assert!(protocols.contains(&Protocol::Netlink));
         assert!(protocols.contains(&Protocol::Netring));

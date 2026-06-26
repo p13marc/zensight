@@ -3,7 +3,7 @@
 //! systemd journal entries for well-known events carry a stable `MESSAGE_ID`
 //! (catalog UUID). This module recognizes the highest-signal ones (coredump,
 //! unit failure, OOM) and raises structured alerts on
-//! `zensight/syslog/@/alerts/*` via the shared [`AlertReporter`].
+//! `zensight/logs/@/alerts/*` via the shared [`AlertReporter`].
 //!
 //! These are *point* events, not ongoing conditions: each is fired once
 //! (immediately) and auto-resolved after `event_dedup_secs` so it shows up as a
@@ -82,7 +82,7 @@ fn detect_alert(
 
     let mut alert = Alert::new(
         source.to_string(),
-        Protocol::Syslog,
+        Protocol::Logs,
         AlertKind::Anomaly,
         RULE,
         severity,

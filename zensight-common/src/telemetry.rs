@@ -132,7 +132,9 @@ impl From<Vec<u8>> for TelemetryValue {
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     Snmp,
-    Syslog,
+    /// Unified logs (syslog RFC 3164/5424 + systemd-journald). Wire token `logs`
+    /// (keyspace v2 / #104; was `syslog`).
+    Logs,
     Gnmi,
     Netflow,
     Opcua,
@@ -149,7 +151,7 @@ impl Protocol {
     pub fn as_str(&self) -> &'static str {
         match self {
             Protocol::Snmp => "snmp",
-            Protocol::Syslog => "syslog",
+            Protocol::Logs => "logs",
             Protocol::Gnmi => "gnmi",
             Protocol::Netflow => "netflow",
             Protocol::Opcua => "opcua",
@@ -161,11 +163,10 @@ impl Protocol {
     }
 
     /// Human-facing display name for the GUI. Distinct from [`as_str`](Self::as_str)
-    /// (the wire/keyspace token): the syslog sensor now also ingests journald, so
-    /// it presents as "Logs" while the keyspace stays `syslog` (#64).
+    /// (the wire/keyspace token `logs`): title-cased for the UI.
     pub fn display_name(&self) -> &'static str {
         match self {
-            Protocol::Syslog => "Logs",
+            Protocol::Logs => "Logs",
             _ => self.as_str(),
         }
     }
@@ -183,7 +184,7 @@ impl std::str::FromStr for Protocol {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "snmp" => Ok(Protocol::Snmp),
-            "syslog" => Ok(Protocol::Syslog),
+            "logs" => Ok(Protocol::Logs),
             "gnmi" => Ok(Protocol::Gnmi),
             "netflow" => Ok(Protocol::Netflow),
             "opcua" => Ok(Protocol::Opcua),
@@ -233,13 +234,13 @@ mod tests {
     #[test]
     fn test_protocol_display() {
         assert_eq!(Protocol::Snmp.as_str(), "snmp");
-        assert_eq!(Protocol::Syslog.as_str(), "syslog");
+        assert_eq!(Protocol::Logs.as_str(), "logs");
     }
 
     #[test]
     fn test_protocol_from_str() {
         assert_eq!("snmp".parse::<Protocol>(), Ok(Protocol::Snmp));
-        assert_eq!("syslog".parse::<Protocol>(), Ok(Protocol::Syslog));
+        assert_eq!("logs".parse::<Protocol>(), Ok(Protocol::Logs));
         assert_eq!("gnmi".parse::<Protocol>(), Ok(Protocol::Gnmi));
         assert_eq!("netflow".parse::<Protocol>(), Ok(Protocol::Netflow));
         assert_eq!("opcua".parse::<Protocol>(), Ok(Protocol::Opcua));

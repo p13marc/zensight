@@ -89,7 +89,7 @@ pub fn specialized_view<'a>(state: &'a DeviceDetailState) -> Option<Element<'a, 
     match state.device_id.protocol {
         Protocol::Snmp => Some(snmp::snmp_device_view(state)),
         Protocol::Sysinfo => Some(sysinfo::sysinfo_host_view(state)),
-        Protocol::Syslog => None, // Syslog needs filter state, handled separately
+        Protocol::Logs => None, // Syslog needs filter state, handled separately
         Protocol::Modbus => Some(modbus::modbus_plc_view(state)),
         Protocol::Netflow => Some(netflow::netflow_traffic_view(state)),
         Protocol::Gnmi => Some(gnmi::gnmi_streaming_view(state)),

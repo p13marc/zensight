@@ -10,7 +10,7 @@
   // Syslog sensor settings
   syslog: {
     // Key expression prefix for publishing
-    key_prefix: "zensight/syslog",
+    key_prefix: "zensight/logs",
 
     // Listener configurations
     listeners: [

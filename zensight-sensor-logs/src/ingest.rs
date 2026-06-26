@@ -95,7 +95,7 @@ impl IngestStatsSnapshot {
     /// The four `logs/ingest/*_total` counters as telemetry points.
     pub fn to_points(self, source: &str) -> Vec<TelemetryPoint> {
         let counter = |metric: &str, v: u64| {
-            TelemetryPoint::new(source, Protocol::Syslog, metric, TelemetryValue::Counter(v))
+            TelemetryPoint::new(source, Protocol::Logs, metric, TelemetryValue::Counter(v))
         };
         vec![
             counter("logs/ingest/received_total", self.received),

@@ -506,7 +506,7 @@ pub fn demo_subscription() -> Subscription<Message> {
                         zensight_common::Protocol::Sysinfo => sysinfo_count += 1,
                         zensight_common::Protocol::Snmp => snmp_count += 1,
                         zensight_common::Protocol::Modbus => modbus_count += 1,
-                        zensight_common::Protocol::Syslog => syslog_count += 1,
+                        zensight_common::Protocol::Logs => syslog_count += 1,
                         zensight_common::Protocol::Netlink => netlink_count += 1,
                         zensight_common::Protocol::Netring => netring_count += 1,
                         zensight_common::Protocol::Netflow => netflow_count += 1,
@@ -520,7 +520,7 @@ pub fn demo_subscription() -> Subscription<Message> {
                 simulator.record_metrics("sysinfo", sysinfo_count);
                 simulator.record_metrics("snmp", snmp_count);
                 simulator.record_metrics("modbus", modbus_count);
-                simulator.record_metrics("syslog", syslog_count);
+                simulator.record_metrics("logs", syslog_count);
                 simulator.record_metrics("netlink", netlink_count);
                 simulator.record_metrics("netring", netring_count);
                 simulator.record_metrics("netflow", netflow_count);

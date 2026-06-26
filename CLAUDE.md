@@ -177,7 +177,7 @@ All sensors publish to `zensight/<protocol>/<source>/<metric>`:
 
 ```
 zensight/snmp/router01/system/sysUpTime
-zensight/syslog/server01/daemon/warning
+zensight/logs/server01/daemon/warning
 zensight/netflow/exporter01/10.0.0.1/10.0.0.2
 zensight/modbus/plc01/holding/temperature
 zensight/sysinfo/server01/cpu/usage
@@ -304,8 +304,8 @@ The syslog sensor supports message filtering at multiple levels:
 - `include/exclude_message_patterns`: Filter by message content
 
 **Dynamic Filters** (via Zenoh commands at runtime):
-- Command key: `zensight/syslog/@/commands/filter`
-- Status queryable: `zensight/syslog/@/status`
+- Command key: `zensight/logs/@/commands/filter`
+- Status queryable: `zensight/logs/@/status`
 - Commands: `add_filter`, `remove_filter`, `clear_filters`
 
 **Frontend Integration**:

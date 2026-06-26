@@ -1422,7 +1422,7 @@ mod tests {
             let point = TelemetryPoint {
                 timestamp: 1,
                 source: "host01".into(),
-                protocol: Protocol::Syslog,
+                protocol: Protocol::Logs,
                 metric: "daemon/info".into(),
                 value: TelemetryValue::Text("hi".into()),
                 labels,
@@ -1463,7 +1463,7 @@ mod tests {
         let point = TelemetryPoint {
             timestamp: 9,
             source: "host01".into(),
-            protocol: Protocol::Syslog,
+            protocol: Protocol::Logs,
             metric: "daemon/crit".into(),
             value: TelemetryValue::Text("segfault".into()),
             labels,
@@ -1500,7 +1500,7 @@ mod tests {
             let point = TelemetryPoint {
                 timestamp: ts,
                 source: "h".into(),
-                protocol: Protocol::Syslog,
+                protocol: Protocol::Logs,
                 metric: "daemon/info".into(),
                 value: TelemetryValue::Text("x".into()),
                 labels,
@@ -1547,7 +1547,7 @@ mod tests {
         let point = TelemetryPoint {
             timestamp: 1,
             source: "10.0.0.9".into(),
-            protocol: Protocol::Syslog,
+            protocol: Protocol::Logs,
             metric: "daemon/info".into(),
             value: TelemetryValue::Text("hi".into()),
             labels: HashMap::new(),
@@ -1596,7 +1596,7 @@ mod tests {
 
     #[test]
     fn test_syslog_view_renders() {
-        let device_id = DeviceId::new(Protocol::Syslog, "server01");
+        let device_id = DeviceId::new(Protocol::Logs, "server01");
         let state = DeviceDetailState::new(device_id);
         let filter_state = SyslogFilterState::default();
         let _view = syslog_event_view(&state, &filter_state, &[]);

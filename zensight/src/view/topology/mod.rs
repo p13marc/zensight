@@ -1481,7 +1481,7 @@ mod tests {
         add(Protocol::Modbus, "plc01", 2);
         add(Protocol::Gnmi, "router01", 4);
         // Overlays that must NOT add their own nodes.
-        add(Protocol::Syslog, "logbox01", 99);
+        add(Protocol::Logs, "logbox01", 99);
         add(Protocol::Netring, "sensor01", 99);
 
         let mut state = TopologyState::default();

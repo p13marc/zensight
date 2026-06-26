@@ -581,7 +581,7 @@ pub enum JournaldScope {
 }
 
 fn default_key_prefix() -> String {
-    "zensight/syslog".to_string()
+    "zensight/logs".to_string()
 }
 
 /// Individual listener configuration.
@@ -768,7 +768,7 @@ mod tests {
         }"#;
 
         let config: SyslogSensorConfig = json5::from_str(json).unwrap();
-        assert_eq!(config.syslog.key_prefix, "zensight/syslog");
+        assert_eq!(config.syslog.key_prefix, "zensight/logs");
         assert_eq!(config.syslog.listeners.len(), 1);
         assert_eq!(config.syslog.listeners[0].protocol, ListenerProtocol::Udp);
     }
