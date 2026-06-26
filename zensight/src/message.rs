@@ -441,6 +441,9 @@ pub enum Message {
 
     /// Silence (mute) a source for the given duration in ms (#26).
     SilenceSource(String, i64),
+
+    /// Toggle the opt-in desktop-notifications setting (#26) and persist it.
+    ToggleDesktopNotifications,
     /// Lift a silence on a source (#26).
     UnsilenceSource(String),
 

@@ -38,6 +38,7 @@ rand = "0.9"
 # Platform utilities
 dirs.workspace = true
 rfd.workspace = true
+notify-rust.workspace = true
 # Date/time parsing for the absolute chart range picker (#36).
 chrono = "0.4"
 
