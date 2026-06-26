@@ -45,12 +45,15 @@ pub fn metric_sparkline<'a>(state: &DeviceDetailState, metric: &str) -> Element<
     Sparkline::new(values).with_size(80.0, 20.0).view()
 }
 
-/// The current numeric value of `metric`, if numeric.
+/// The current numeric value of `metric`, if it projects to a number. Booleans
+/// project to a 0/1 step value (#126) so flap-prone signals are chartable and
+/// promotable alongside counters/gauges.
 fn numeric_metric(state: &DeviceDetailState, metric: &str) -> Option<f64> {
     use zensight_common::TelemetryValue;
     match state.metrics.get(metric).map(|p| &p.value) {
         Some(TelemetryValue::Counter(v)) => Some(*v as f64),
         Some(TelemetryValue::Gauge(v)) => Some(*v),
+        Some(TelemetryValue::Boolean(b)) => Some(if *b { 1.0 } else { 0.0 }),
         _ => None,
     }
 }
