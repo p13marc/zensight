@@ -411,6 +411,7 @@ pub fn dashboard_view<'a>(
 
     let header = render_header(state, theme, unacknowledged_alerts);
     let fleet_summary = render_fleet_summary(state, unacknowledged_alerts);
+    let health_overview = render_health_overview(state);
     let sensor_summary = render_sensor_health_summary(sensor_health);
     let filters = render_protocol_filters(state, &filtered);
     let group_filters = group_filter_bar(groups);
@@ -420,6 +421,7 @@ pub fn dashboard_view<'a>(
     let content = column![
         header,
         fleet_summary,
+        health_overview,
         sensor_summary,
         filters,
         group_filters,
@@ -513,6 +515,74 @@ fn render_fleet_summary(
 /// Caption font size as f32 (Iced 0.14 wants f32 for `.size()`).
 fn font_caption() -> f32 {
     crate::view::tokens::font::CAPTION
+}
+
+/// Number of worst hosts surfaced in the health overview banner (#130).
+const HEALTH_OVERVIEW_LIMIT: usize = 8;
+
+/// Worst-first fleet health overview (#130): scores every device, then bands and
+/// surfaces the lowest-scoring (Degraded/Critical) hosts worst-first as
+/// click-to-open chips — the "what should I look at first" triage row. Collapses
+/// to a single reassuring line when nothing is unhealthy.
+fn render_health_overview(state: &DashboardState) -> Element<'_, Message> {
+    use crate::view::health::{HealthBand, score_device};
+
+    // Score all devices; keep only the actionable (non-Healthy/Unknown) ones.
+    let mut scored: Vec<(&DeviceState, crate::view::health::HealthScore)> = state
+        .devices
+        .values()
+        .map(|d| (d, score_device(d)))
+        .filter(|(_, s)| matches!(s.band, HealthBand::Degraded | HealthBand::Critical))
+        .collect();
+
+    if scored.is_empty() {
+        // Don't draw an empty banner before any telemetry has arrived.
+        if state.devices.is_empty() {
+            return column![].into();
+        }
+        return container(
+            text("Fleet health: all hosts healthy")
+                .size(font_caption())
+                .style(|t: &Theme| text::Style {
+                    color: Some(crate::view::theme::colors(t).text_muted()),
+                }),
+        )
+        .padding([6, 10])
+        .into();
+    }
+
+    // Worst first (lowest score), then take the top offenders.
+    scored.sort_by_key(|(_, s)| s.value);
+    let total_unhealthy = scored.len();
+
+    let mut items: Vec<Element<'_, Message>> = vec![
+        text(format!("Worst hosts ({total_unhealthy})"))
+            .size(font_caption())
+            .style(|t: &Theme| text::Style {
+                color: Some(crate::view::theme::colors(t).text_muted()),
+            })
+            .into(),
+    ];
+    for (device, score) in scored.into_iter().take(HEALTH_OVERVIEW_LIMIT) {
+        let chip = button(badge::<Message>(
+            score.band.color(),
+            format!("{} · {}", device.id.source, score.value),
+        ))
+        .on_press(Message::SelectDevice(device.id.clone()))
+        .padding([2, 6])
+        .style(iced::widget::button::text);
+        items.push(chip.into());
+    }
+
+    container(
+        iced::widget::Row::with_children(items)
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .wrap(),
+    )
+    .padding([6, 10])
+    .width(Length::Fill)
+    .into()
 }
 
 /// Render the header with connection status.
@@ -1130,6 +1200,13 @@ fn render_device_card<'a>(
 
     let metric_count = text(format!("{} metrics", device.metric_count)).size(12);
 
+    // Composite health score (#130): the card's primary triage signal, folding
+    // liveness + sysinfo saturation + log failures + netring anomalies into one
+    // color-banded number.
+    let health = crate::view::health::score_device(device);
+    let health_badge =
+        crate::view::components::badge::<Message>(health.band.color(), health.label());
+
     // Get device's group tags (convert to owned GroupTag to avoid lifetime issues)
     let device_groups: Vec<GroupTag> = groups
         .device_groups(&device.id)
@@ -1142,6 +1219,7 @@ fn render_device_card<'a>(
         status_indicator,
         protocol_icon,
         device_name,
+        health_badge,
         metric_count,
         group_tags
     ]

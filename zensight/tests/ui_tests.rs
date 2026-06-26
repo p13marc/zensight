@@ -78,6 +78,48 @@ fn test_dashboard_with_devices() {
     // (Connection status now lives in the app shell, not the dashboard view.)
 }
 
+/// #130: a Degraded host surfaces in the worst-first health overview, and the
+/// overview chip selects that device. Also covers the per-card health badge.
+#[test]
+fn test_dashboard_health_overview_surfaces_worst_host() {
+    use zensight_common::DeviceStatus;
+
+    let mut state = DashboardState::default();
+    state.connected = true;
+    state.connection_state = ConnectionState::Connected;
+
+    let degraded_id = DeviceId {
+        protocol: Protocol::Sysinfo,
+        source: "host-sad".to_string(),
+    };
+    let mut degraded = DeviceState::new(degraded_id.clone());
+    degraded.update_from_liveness(DeviceStatus::Degraded, 2, Some("flapping".into()));
+    state.devices.insert(degraded_id.clone(), degraded);
+
+    let groups = GroupsState::default();
+    let overview = OverviewState::default();
+    let sensor_health = HashMap::new();
+    let mut ui = simulator(dashboard_view(
+        &state,
+        AppTheme::Dark,
+        0,
+        &groups,
+        &overview,
+        &sensor_health,
+        zensight::view::trend::DeviceSparks::new(),
+    ));
+
+    // The worst-first overview banner appears with the unhealthy host.
+    assert!(ui.find("Worst hosts (1)").is_ok());
+    // Clicking the overview chip (host name · score) selects the device.
+    let _ = ui.click("host-sad · 60");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::SelectDevice(id) if id.source == "host-sad"))
+    );
+}
+
 /// A device card renders its trend-badge + sparkline strip when sparks are
 /// provided. The badge text ("+50.0%") is searchable in the simulator (#24).
 #[test]

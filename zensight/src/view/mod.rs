@@ -10,6 +10,7 @@ pub mod expectations;
 pub mod formatting;
 pub mod freshness;
 pub mod groups;
+pub mod health;
 pub mod icons;
 pub mod overview;
 pub mod search;
