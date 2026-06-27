@@ -2,8 +2,15 @@
 //!
 //! "Find all `*queue*`" across every device → a flat, ranked result list the
 //! user can click to jump to the owning device. The matcher is a pure function
-//! (case-insensitive substring over `protocol/source/metric`), unit-tested
-//! independently of the UI; the view renders results into a panel.
+//! over the `protocol/source/metric` path, unit-tested independently of the UI;
+//! the view renders results into a panel.
+//!
+//! Matching is two-tier and case-insensitive: a **substring** hit always
+//! outranks a **fuzzy** (order-preserving subsequence) hit, so typing a literal
+//! fragment behaves exactly as before while typos / abbreviations
+//! (`cpuse` → `cpu/usage`) still surface lower down. Results are ranked by score
+//! (word-boundary and contiguity bonuses), then `protocol/source/metric` for a
+//! stable display.
 
 use std::sync::LazyLock;
 
@@ -67,44 +74,121 @@ pub struct SearchHit {
     pub value: String,
 }
 
-/// Search all devices' metrics for `query` (case-insensitive substring over the
-/// `protocol/source/metric` path). Returns up to [`MAX_RESULTS`] hits, sorted by
-/// device then metric for stable display. Empty/whitespace query ⇒ no results.
-/// Pure — the unit of testing for search.
+/// Characters that delimit a "word" in a metric path; a match right after one
+/// (or at the very start) earns a word-boundary bonus.
+const SEPARATORS: &[char] = &['/', '_', '-', '.', ' ', ':'];
+
+/// Floor for any substring score, so every substring hit outranks every fuzzy
+/// (subsequence) hit regardless of their per-character bonuses.
+const SUBSTRING_BASE: i32 = 1000;
+
+/// Score `needle` against `haystack` (both already lowercased). Returns `None`
+/// when there is no match. A substring match scores in the [`SUBSTRING_BASE`]+
+/// tier (earlier position + word boundary preferred); otherwise an
+/// order-preserving subsequence ("fuzzy") match scores below that tier. Internal
+/// whitespace in `needle` is ignored so multi-word queries match across
+/// separators.
+fn match_score(haystack: &str, needle: &str) -> Option<i32> {
+    let compact: String = needle.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.is_empty() {
+        return None;
+    }
+
+    // Tier 1: substring — preserves the original behavior and always wins.
+    if let Some(pos) = haystack.find(&compact) {
+        let mut score = SUBSTRING_BASE - (pos.min(500) as i32);
+        let at_boundary = pos == 0
+            || haystack[..pos]
+                .chars()
+                .next_back()
+                .is_some_and(is_separator);
+        if at_boundary {
+            score += 50;
+        }
+        return Some(score);
+    }
+
+    // Tier 2: fuzzy subsequence.
+    fuzzy_score(haystack, &compact)
+}
+
+fn is_separator(c: char) -> bool {
+    SEPARATORS.contains(&c)
+}
+
+/// Greedy order-preserving subsequence score. `None` if `needle` is not a
+/// subsequence of `haystack`. Higher is better: word-boundary starts and
+/// contiguous runs are rewarded, gaps are penalized. Both inputs lowercased.
+fn fuzzy_score(haystack: &str, needle: &str) -> Option<i32> {
+    let h: Vec<char> = haystack.chars().collect();
+    let mut score = 0i32;
+    let mut h_idx = 0usize;
+    let mut prev: Option<usize> = None;
+    for nc in needle.chars() {
+        // Advance to the next occurrence of `nc`.
+        while h_idx < h.len() && h[h_idx] != nc {
+            h_idx += 1;
+        }
+        if h_idx >= h.len() {
+            return None;
+        }
+        let idx = h_idx;
+        let mut bonus = 0i32;
+        if idx == 0 || is_separator(h[idx - 1]) {
+            bonus += 10; // start of a path segment / word
+        }
+        match prev {
+            Some(p) if idx == p + 1 => bonus += 8, // contiguous run
+            Some(p) => bonus -= ((idx - p - 1) as i32).min(10), // gap penalty
+            None => bonus -= (idx as i32).min(10), // leading gap
+        }
+        score += 10 + bonus;
+        prev = Some(idx);
+        h_idx += 1;
+    }
+    Some(score)
+}
+
+/// Search all devices' metrics for `query` over the `protocol/source/metric`
+/// path (see [`match_score`] for the two-tier substring/fuzzy ranking). Returns
+/// up to [`MAX_RESULTS`] hits, ranked by score then `protocol/source/metric` for
+/// a stable display. Empty/whitespace query ⇒ no results. Pure — the unit of
+/// testing for search.
 pub fn search<'a>(devices: impl Iterator<Item = &'a DeviceState>, query: &str) -> Vec<SearchHit> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
         return Vec::new();
     }
-    let mut hits: Vec<SearchHit> = Vec::new();
+    let mut scored: Vec<(i32, SearchHit)> = Vec::new();
     for device in devices {
         let proto = device.id.protocol.to_string().to_lowercase();
         let source = device.id.source.to_lowercase();
         for (metric, point) in &device.metrics {
             let path = format!("{proto}/{source}/{}", metric.to_lowercase());
-            if path.contains(&q) {
-                hits.push(SearchHit {
-                    device: device.id.clone(),
-                    metric: metric.clone(),
-                    value: value_label(&point.value),
-                });
-                if hits.len() >= MAX_RESULTS {
-                    break;
-                }
+            if let Some(score) = match_score(&path, &q) {
+                scored.push((
+                    score,
+                    SearchHit {
+                        device: device.id.clone(),
+                        metric: metric.clone(),
+                        value: value_label(&point.value),
+                    },
+                ));
             }
         }
-        if hits.len() >= MAX_RESULTS {
-            break;
-        }
     }
-    hits.sort_by(|a, b| {
-        (a.device.protocol, &a.device.source, &a.metric).cmp(&(
-            b.device.protocol,
-            &b.device.source,
-            &b.metric,
-        ))
+    // Rank by score (desc), then by path for a stable, deterministic order.
+    scored.sort_by(|(sa, a), (sb, b)| {
+        sb.cmp(sa).then_with(|| {
+            (a.device.protocol, &a.device.source, &a.metric).cmp(&(
+                b.device.protocol,
+                &b.device.source,
+                &b.metric,
+            ))
+        })
     });
-    hits
+    scored.truncate(MAX_RESULTS);
+    scored.into_iter().map(|(_, hit)| hit).collect()
 }
 
 /// Render the global search panel: an input + a results list. Clicking a result
@@ -114,7 +198,7 @@ pub fn global_search_panel<'a>(
     state: &'a GlobalSearchState,
     hits: Vec<SearchHit>,
 ) -> Element<'a, Message> {
-    let input = text_input("Search metrics across all devices…", &state.query)
+    let input = text_input("Search metrics across all devices (fuzzy)…", &state.query)
         .id(GLOBAL_SEARCH_ID.clone())
         .on_input(Message::SetGlobalSearch)
         .on_submit(Message::SetGlobalSearch(state.query.clone()))
@@ -254,5 +338,57 @@ mod tests {
             );
         }
         assert_eq!(search([&d].into_iter(), "queue").len(), MAX_RESULTS);
+    }
+
+    #[test]
+    fn fuzzy_subsequence_matches_non_substring() {
+        let d = dev("server01", Protocol::Sysinfo, &[("cpu/usage", 42.0)]);
+        // "cpuse" is not a substring of "sysinfo/server01/cpu/usage" but is an
+        // order-preserving subsequence.
+        let hits = search([&d].into_iter(), "cpuse");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].metric, "cpu/usage");
+    }
+
+    #[test]
+    fn non_subsequence_does_not_match() {
+        let d = dev("server01", Protocol::Sysinfo, &[("cpu/usage", 42.0)]);
+        // Wrong order — not a subsequence.
+        assert!(search([&d].into_iter(), "egasu").is_empty());
+    }
+
+    #[test]
+    fn substring_outranks_fuzzy() {
+        // "mem" is a substring of mem/used; only a fuzzy subsequence of
+        // "m...e...m" inside modem/eth. The substring hit must come first.
+        let d = dev(
+            "host",
+            Protocol::Sysinfo,
+            &[("modem/realm", 1.0), ("mem/used", 2.0)],
+        );
+        let hits = search([&d].into_iter(), "mem");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].metric, "mem/used");
+    }
+
+    #[test]
+    fn whitespace_in_query_is_ignored() {
+        let d = dev("host", Protocol::Sysinfo, &[("cpu/usage", 1.0)]);
+        // Internal spaces are stripped to "cpuusage", which matches the path
+        // "…/cpu/usage" as a fuzzy subsequence (the '/' blocks a substring).
+        assert_eq!(search([&d].into_iter(), "cpu usage").len(), 1);
+    }
+
+    #[test]
+    fn word_boundary_match_ranks_above_mid_word() {
+        // Query "load" — boundary hit (load/avg) should outrank a mid-segment
+        // fuzzy/substring hit (payload).
+        let d = dev(
+            "host",
+            Protocol::Sysinfo,
+            &[("payload/bytes", 1.0), ("load/avg", 2.0)],
+        );
+        let hits = search([&d].into_iter(), "load");
+        assert_eq!(hits[0].metric, "load/avg");
     }
 }
