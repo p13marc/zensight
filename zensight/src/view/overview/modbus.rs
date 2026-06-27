@@ -8,7 +8,7 @@ use iced::{Alignment, Element, Length, Theme};
 use zensight_common::TelemetryValue;
 
 use crate::message::{DeviceId, Message};
-use crate::view::components::{StatusLed, StatusLedState};
+use crate::view::components::{StatusLed, StatusLedState, empty_state};
 use crate::view::dashboard::DeviceState;
 use crate::view::theme;
 
@@ -24,12 +24,7 @@ struct RegisterCounts {
 /// Render the Modbus overview.
 pub fn modbus_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Element<'a, Message> {
     if devices.is_empty() {
-        return text("No Modbus devices available")
-            .size(12)
-            .style(|t: &Theme| text::Style {
-                color: Some(theme::colors(t).text_muted()),
-            })
-            .into();
+        return empty_state("No Modbus devices available", None);
     }
 
     // Count healthy/unhealthy devices

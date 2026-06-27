@@ -26,12 +26,7 @@ struct InterfaceSummary {
 /// Render the SNMP network overview.
 pub fn snmp_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Element<'a, Message> {
     if devices.is_empty() {
-        return text("No SNMP devices available")
-            .size(12)
-            .style(|t: &Theme| text::Style {
-                color: Some(theme::colors(t).text_muted()),
-            })
-            .into();
+        return empty_state("No SNMP devices available", None);
     }
 
     // Collect all interfaces across all devices

@@ -6,19 +6,14 @@ use iced::widget::{column, row, text};
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::message::{DeviceId, Message};
-use crate::view::components::{StatusLed, StatusLedState};
+use crate::view::components::{StatusLed, StatusLedState, empty_state};
 use crate::view::dashboard::DeviceState;
 use crate::view::theme;
 
 /// Render the gNMI overview.
 pub fn gnmi_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Element<'a, Message> {
     if devices.is_empty() {
-        return text("No gNMI targets available")
-            .size(12)
-            .style(|t: &Theme| text::Style {
-                color: Some(theme::colors(t).text_muted()),
-            })
-            .into();
+        return empty_state("No gNMI targets available", None);
     }
 
     // Count healthy/unhealthy

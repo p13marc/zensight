@@ -37,12 +37,7 @@ impl FlowRecord {
 /// Render the NetFlow traffic overview.
 pub fn netflow_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Element<'a, Message> {
     if devices.is_empty() {
-        return text("No NetFlow exporters available")
-            .size(12)
-            .style(|t: &Theme| text::Style {
-                color: Some(theme::colors(t).text_muted()),
-            })
-            .into();
+        return empty_state("No NetFlow exporters available", None);
     }
 
     // Collect all flows
