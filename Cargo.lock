@@ -9544,7 +9544,7 @@ dependencies = [
 
 [[package]]
 name = "zensight"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -9570,7 +9570,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-common"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ciborium",
  "json5",
@@ -9585,7 +9585,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-exporter-otel"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "ciborium",
@@ -9608,7 +9608,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-exporter-prometheus"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -9634,7 +9634,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9654,7 +9654,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-gnmi"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9681,7 +9681,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-logs"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9705,7 +9705,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-modbus"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9726,7 +9726,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-netflow"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -9745,7 +9745,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-netlink"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -9765,7 +9765,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-netring"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -9788,7 +9788,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-snmp"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -9808,7 +9808,7 @@ dependencies = [
 
 [[package]]
 name = "zensight-sensor-sysinfo"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "chrono",
