@@ -2015,6 +2015,7 @@ fn test_inventory_view_renders_assets_and_fingerprints() {
             user_agent: Some("curl/8.5".into()),
             count: 2,
         }],
+        assets_responded: true,
     }));
 
     let mut ui = simulator(inventory_view(&state));
