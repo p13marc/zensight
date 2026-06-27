@@ -172,6 +172,8 @@ pub struct ZenSight {
     last_telemetry_ms: Option<i64>,
     /// Global cross-device metric search panel state (#27).
     global_search: crate::view::search::GlobalSearchState,
+    /// Whether the keyboard-shortcuts help overlay is open (#28).
+    help_open: bool,
     /// Favorited metrics (#27), keyed `protocol/source/metric`. Persisted; the
     /// per-device projection is pushed into the device detail state on selection.
     favorites: std::collections::HashSet<String>,
@@ -298,6 +300,7 @@ impl ZenSight {
             // Demo mode pre-loads mock points; treat the feed as fresh on boot.
             last_telemetry_ms: if demo_mode { Some(now_ms()) } else { None },
             global_search: crate::view::search::GlobalSearchState::default(),
+            help_open: false,
             favorites: persistent.favorite_metrics.iter().cloned().collect(),
         };
 
@@ -1437,6 +1440,10 @@ impl ZenSight {
                 self.alerts.external_source_filter = source;
             }
 
+            Message::ToggleHelp => {
+                self.help_open = !self.help_open;
+            }
+
             Message::OpenGlobalSearch => {
                 self.global_search.open();
                 return iced::widget::operation::focus(
@@ -2246,6 +2253,11 @@ impl ZenSight {
 
     /// Handle Escape key - close dialogs or go back.
     fn handle_escape(&mut self) {
+        // Transient overlays close first, before any view navigation.
+        if self.help_open {
+            self.help_open = false;
+            return;
+        }
         // The global search overlay takes priority: Escape closes it first (#27).
         if self.global_search.open {
             self.global_search.close();
@@ -2475,6 +2487,16 @@ impl ZenSight {
             .height(Length::Fill)
             .center_x(Length::Fill)
             .center_y(Length::Fill);
+            base_view = stack![base_view, panel].into();
+        }
+
+        // Keyboard-shortcuts help overlay (#28), centered over the current view.
+        if self.help_open {
+            let panel = container(crate::view::help::help_overlay())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill);
             base_view = stack![base_view, panel].into();
         }
 

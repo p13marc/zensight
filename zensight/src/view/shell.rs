@@ -226,6 +226,13 @@ fn top_bar<'a>(
         last_update_ms,
         now_ms,
     ));
+    // Keyboard-shortcuts help (#28); also bound to "?".
+    right = right.push(
+        button(text("?").size(font::BODY))
+            .on_press(Message::ToggleHelp)
+            .padding([space::XS, space::SM])
+            .style(iced::widget::button::secondary),
+    );
     right = right.push(connection_status(connection));
 
     container(

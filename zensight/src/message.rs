@@ -455,6 +455,9 @@ pub enum Message {
     /// Filter the external-alerts feed by source (`None` = all) (#27).
     SetAlertSourceFilter(Option<String>),
 
+    /// Toggle the keyboard-shortcuts help overlay (#28).
+    ToggleHelp,
+
     /// Open the global cross-device metric search panel (#27).
     OpenGlobalSearch,
     /// Close the global search panel (#27).

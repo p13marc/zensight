@@ -448,6 +448,10 @@ pub fn keyboard_subscription() -> Subscription<Message> {
                     // Ctrl+K: Open the global cross-device metric search (#27).
                     Key::Character("k") if modifiers.control() => Some(Message::OpenGlobalSearch),
 
+                    // "?": Toggle the keyboard-shortcuts help overlay (#28).
+                    // No modifier check — "?" is itself Shift+/ on most layouts.
+                    Key::Character("?") if !modifiers.control() => Some(Message::ToggleHelp),
+
                     // Escape: Close/back
                     Key::Named(key::Named::Escape) => Some(Message::EscapePressed),
 
