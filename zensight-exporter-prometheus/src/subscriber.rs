@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::watch;
 use tracing::{info, trace, warn};
-use zenoh::sample::SampleKind;
+use zenoh::sample::{Sample, SampleKind};
+use zensight_common::alert::Alert;
 use zensight_common::config::ZenohConfig;
 use zensight_common::telemetry::TelemetryPoint;
 
@@ -17,6 +18,11 @@ pub const DEFAULT_KEY_EXPR: &str = "zensight/**";
 /// (`.../@/...` health/liveness/errors/alerts and `zensight/_meta/...`) do not.
 pub(crate) fn is_telemetry_key(key: &str) -> bool {
     !key.contains("/@/") && !key.starts_with("zensight/_meta/")
+}
+
+/// Whether a key carries a sensor [`Alert`] (`zensight/<protocol>/@/alerts/<key>`).
+pub(crate) fn is_alert_key(key: &str) -> bool {
+    key.contains("/@/alerts/")
 }
 
 /// Statistics for the subscriber.
@@ -128,6 +134,16 @@ impl TelemetrySubscriber {
                 sample = subscriber.recv_async() => {
                     match sample {
                         Ok(sample) => {
+                            // Sensor alerts live on the `@/alerts/*` control
+                            // channel; mirror them into the alert gauge (a
+                            // Delete tombstone clears the firing alert).
+                            if self.collector.export_alerts()
+                                && is_alert_key(sample.key_expr().as_str())
+                            {
+                                self.handle_alert_sample(&sample);
+                                continue;
+                            }
+
                             if sample.kind() == SampleKind::Delete {
                                 trace!(key = %sample.key_expr(), "Ignoring delete sample");
                                 continue;
@@ -192,6 +208,34 @@ impl TelemetrySubscriber {
 
         info!("Subscriber stopped");
         Ok(())
+    }
+
+    /// Decode an alert sample and feed it to the collector. A `Delete` tombstone
+    /// clears the firing alert keyed by the final key-expression segment.
+    fn handle_alert_sample(&self, sample: &Sample) {
+        let key = sample.key_expr().as_str();
+        if sample.kind() == SampleKind::Delete {
+            if let Some(alert_key) = key.rsplit('/').next() {
+                trace!(key = %key, "Alert tombstone");
+                self.collector.remove_alert(alert_key);
+            }
+            return;
+        }
+
+        let payload = sample.payload().to_bytes();
+        let alert: Option<Alert> = serde_json::from_slice(&payload)
+            .ok()
+            .or_else(|| ciborium::from_reader(&payload[..]).ok());
+
+        match alert {
+            Some(alert) => {
+                trace!(source = %alert.source, rule = %alert.rule, "Received alert");
+                self.collector.record_alert(alert);
+            }
+            None => {
+                warn!(key = %key, payload_len = payload.len(), "Failed to decode alert");
+            }
+        }
     }
 }
 

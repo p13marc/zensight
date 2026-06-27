@@ -24,6 +24,7 @@
 //!
 //! See [`config::ExporterConfig`] for configuration options.
 
+pub mod alerts;
 pub mod collector;
 pub mod config;
 pub mod http;

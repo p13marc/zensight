@@ -59,6 +59,15 @@ pub struct PrometheusConfig {
     /// Metric name prefix (default: "zensight").
     #[serde(default = "default_prefix")]
     pub prefix: String,
+
+    /// Export sensor alerts as a `<prefix>_alert` gauge (default: true).
+    ///
+    /// When enabled the exporter also subscribes to the `@/alerts/*` control
+    /// channel and surfaces each firing alert as a gauge with value 1; the
+    /// series disappears once the alert resolves (Alertmanager treats absence
+    /// as resolved). Set to false to expose telemetry metrics only.
+    #[serde(default = "default_export_alerts")]
+    pub export_alerts: bool,
 }
 
 fn default_listen() -> String {
@@ -73,6 +82,10 @@ fn default_prefix() -> String {
     "zensight".to_string()
 }
 
+fn default_export_alerts() -> bool {
+    true
+}
+
 impl Default for PrometheusConfig {
     fn default() -> Self {
         Self {
@@ -80,6 +93,7 @@ impl Default for PrometheusConfig {
             path: default_path(),
             default_labels: HashMap::new(),
             prefix: default_prefix(),
+            export_alerts: default_export_alerts(),
         }
     }
 }

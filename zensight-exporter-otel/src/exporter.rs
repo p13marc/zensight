@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use opentelemetry::logs::{LogRecord as _, Logger, LoggerProvider as _};
+use opentelemetry::logs::{LogRecord as _, Logger, LoggerProvider as _, Severity};
 use opentelemetry::metrics::{Meter, MeterProvider as _};
 use opentelemetry_otlp::{LogExporter, MetricExporter, WithExportConfig};
 use opentelemetry_sdk::Resource;
@@ -12,6 +12,7 @@ use opentelemetry_sdk::logs::{SdkLogger, SdkLoggerProvider};
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use parking_lot::RwLock;
 use tracing::{error, info, trace, warn};
+use zensight_common::alert::{Alert, AlertSeverity, AlertState};
 use zensight_common::telemetry::TelemetryPoint;
 
 use crate::config::{FilterConfig, OtelConfig, OtlpProtocol};
@@ -82,6 +83,7 @@ pub struct ExporterStats {
     pub metrics_exported: u64,
     pub metrics_failed: u64,
     pub logs_exported: u64,
+    pub alerts_exported: u64,
     pub export_errors: u64,
 }
 
@@ -95,6 +97,15 @@ fn build_gauge_key(metric_name: &str, attributes: &[opentelemetry::KeyValue]) ->
         .collect();
     sorted_attrs.sort();
     format!("{}\x00{}", metric_name, sorted_attrs.join("\x00"))
+}
+
+/// Map a ZenSight alert severity onto an OTel log severity.
+fn alert_severity_to_otel(severity: AlertSeverity) -> Severity {
+    match severity {
+        AlertSeverity::Info => Severity::Info,
+        AlertSeverity::Warning => Severity::Warn,
+        AlertSeverity::Critical => Severity::Error,
+    }
 }
 
 /// A stored gauge value with staleness tracking.
@@ -115,10 +126,14 @@ pub struct OtelExporter {
     logger_provider: Option<SdkLoggerProvider>,
     /// Cached logger instance (avoids re-creating on every log).
     logger: Option<SdkLogger>,
+    /// Cached logger for sensor alerts (scope `zensight.alerts`).
+    alert_logger: Option<SdkLogger>,
     /// Whether metrics export is enabled.
     export_metrics: bool,
     /// Whether logs export is enabled.
     export_logs: bool,
+    /// Whether alert export is enabled.
+    export_alerts: bool,
     /// Telemetry filter.
     filter: TelemetryFilter,
     /// Export statistics.
@@ -157,24 +172,39 @@ impl OtelExporter {
         };
 
         // Initialize logger provider if logs enabled
-        let logger_provider = if otel_config.export_logs {
+        // The logger pipeline backs both syslog logs and alert events, so
+        // initialize it if either is enabled.
+        let logger_provider = if otel_config.export_logs || otel_config.export_alerts {
             Some(Self::init_logger_provider(otel_config, resource).await?)
         } else {
             None
         };
 
         let meter = meter_provider.as_ref().map(|mp| mp.meter("zensight"));
-        let logger = logger_provider
-            .as_ref()
-            .map(|lp| lp.logger("zensight.syslog"));
+        let logger = if otel_config.export_logs {
+            logger_provider
+                .as_ref()
+                .map(|lp| lp.logger("zensight.syslog"))
+        } else {
+            None
+        };
+        let alert_logger = if otel_config.export_alerts {
+            logger_provider
+                .as_ref()
+                .map(|lp| lp.logger("zensight.alerts"))
+        } else {
+            None
+        };
 
         Ok(Self {
             meter_provider,
             meter,
             logger_provider,
             logger,
+            alert_logger,
             export_metrics: otel_config.export_metrics,
             export_logs: otel_config.export_logs,
+            export_alerts: otel_config.export_alerts,
             filter: TelemetryFilter::new(filter_config),
             stats: RwLock::new(ExporterStats::default()),
             gauges: RwLock::new(HashMap::new()),
@@ -406,6 +436,53 @@ impl OtelExporter {
         stats.logs_exported += 1;
     }
 
+    /// Whether alert export is enabled (drives whether the subscriber decodes
+    /// the `@/alerts/*` channel).
+    pub fn export_alerts(&self) -> bool {
+        self.export_alerts
+    }
+
+    /// Emit a sensor alert as an OTLP log record on the `zensight.alerts` scope.
+    ///
+    /// Each alert transition (firing/resolved) is one event — OTel logs are an
+    /// append-only stream, so unlike the Prometheus gauge there is no per-alert
+    /// state to clear; the `alert.state` attribute carries firing vs resolved.
+    pub fn record_alert(&self, alert: &Alert) {
+        let Some(logger) = &self.alert_logger else {
+            return;
+        };
+
+        let mut rec = logger.create_log_record();
+        rec.set_event_name("zensight.alert");
+        rec.set_body(alert.summary.clone().into());
+        rec.set_severity_number(alert_severity_to_otel(alert.severity));
+        rec.set_severity_text(alert.severity.as_str());
+
+        rec.add_attribute("alert.key", alert.alert_key());
+        rec.add_attribute(
+            "alert.state",
+            match alert.state {
+                AlertState::Firing => "firing",
+                AlertState::Resolved => "resolved",
+            },
+        );
+        rec.add_attribute("alert.source", alert.source.clone());
+        rec.add_attribute("alert.protocol", alert.protocol.to_string());
+        rec.add_attribute("alert.rule", alert.rule.clone());
+        rec.add_attribute("alert.kind", alert.kind.as_str());
+        rec.add_attribute("alert.severity", alert.severity.as_str());
+        for (k, v) in &alert.labels {
+            rec.add_attribute(format!("alert.label.{k}"), v.clone());
+        }
+
+        logger.emit(rec);
+
+        trace!(source = %alert.source, rule = %alert.rule, state = ?alert.state, "Recorded alert");
+
+        let mut stats = self.stats.write();
+        stats.alerts_exported += 1;
+    }
+
     /// Remove stale gauge entries that haven't been updated within the given duration.
     pub fn cleanup_stale_gauges(&self, max_age: Duration) -> usize {
         let mut gauges = self.gauges.write();
@@ -456,6 +533,23 @@ pub type SharedExporter = Arc<OtelExporter>;
 mod tests {
     use super::*;
     use zensight_common::telemetry::{Protocol, TelemetryValue};
+
+    #[test]
+    fn alert_severity_maps_to_otel() {
+        // Info/Warning/Critical -> Info/Warn/Error, distinct and ordered.
+        assert!(matches!(
+            alert_severity_to_otel(AlertSeverity::Info),
+            Severity::Info
+        ));
+        assert!(matches!(
+            alert_severity_to_otel(AlertSeverity::Warning),
+            Severity::Warn
+        ));
+        assert!(matches!(
+            alert_severity_to_otel(AlertSeverity::Critical),
+            Severity::Error
+        ));
+    }
 
     #[test]
     fn test_telemetry_filter_include_protocols() {

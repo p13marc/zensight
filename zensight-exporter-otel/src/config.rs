@@ -69,6 +69,15 @@ pub struct OtelConfig {
     #[serde(default = "default_true")]
     pub export_logs: bool,
 
+    /// Whether to export sensor alerts (`@/alerts/*`) as OTLP log records.
+    ///
+    /// Each alert transition (firing/resolved) is emitted as a log record on the
+    /// `zensight.alerts` scope with severity mapped from the alert severity and
+    /// `alert.*` attributes. Needs the logger pipeline, which is initialized
+    /// whenever logs or alerts are enabled.
+    #[serde(default = "default_true")]
+    pub export_alerts: bool,
+
     /// Resource attributes to add to all telemetry.
     #[serde(default)]
     pub resource: HashMap<String, String>,
@@ -116,6 +125,7 @@ impl Default for OtelConfig {
             timeout_secs: default_timeout(),
             export_metrics: true,
             export_logs: true,
+            export_alerts: true,
             resource: HashMap::new(),
             service_name: default_service_name(),
             service_version: None,
@@ -236,9 +246,13 @@ impl ExporterConfig {
             ));
         }
 
-        if !self.opentelemetry.export_metrics && !self.opentelemetry.export_logs {
+        if !self.opentelemetry.export_metrics
+            && !self.opentelemetry.export_logs
+            && !self.opentelemetry.export_alerts
+        {
             return Err(ConfigError::Validation(
-                "At least one of export_metrics or export_logs must be enabled".to_string(),
+                "At least one of export_metrics, export_logs or export_alerts must be enabled"
+                    .to_string(),
             ));
         }
 
@@ -341,13 +355,30 @@ mod tests {
         let json = r#"{
             opentelemetry: {
                 export_metrics: false,
-                export_logs: false
+                export_logs: false,
+                export_alerts: false
             }
         }"#;
 
         let result = ExporterConfig::parse(json);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("At least one of"));
+    }
+
+    #[test]
+    fn test_validate_alerts_only_is_valid() {
+        // Alerts are a first-class signal: enabling only alerts is a valid config.
+        let json = r#"{
+            opentelemetry: {
+                export_metrics: false,
+                export_logs: false,
+                export_alerts: true
+            }
+        }"#;
+
+        let result = ExporterConfig::parse(json);
+        assert!(result.is_ok(), "alerts-only config should validate");
+        assert!(result.unwrap().opentelemetry.export_alerts);
     }
 
     #[test]

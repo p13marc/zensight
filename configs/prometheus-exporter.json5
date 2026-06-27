@@ -22,6 +22,11 @@
     // Metric name prefix (metrics will be named {prefix}_{protocol}_{metric})
     prefix: "zensight",
 
+    // Export sensor alerts as a {prefix}_alert gauge (1 = firing; the series
+    // disappears once the alert resolves, which Alertmanager treats as
+    // resolved). Set false to expose telemetry metrics only.
+    export_alerts: true,
+
     // Default labels to add to all metrics
     default_labels: {
       // environment: "production",
