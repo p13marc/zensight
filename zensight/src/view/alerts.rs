@@ -145,12 +145,13 @@ impl Severity {
         }
     }
 
-    /// Get the color for this severity (RGB).
+    /// Get the color for this severity (RGB). Sourced from the shared severity
+    /// palette (D2 single source of truth).
     pub fn color(&self) -> iced::Color {
         match self {
-            Severity::Info => iced::Color::from_rgb(0.3, 0.6, 1.0), // Blue
-            Severity::Warning => iced::Color::from_rgb(1.0, 0.7, 0.0), // Orange
-            Severity::Critical => iced::Color::from_rgb(1.0, 0.2, 0.2), // Red
+            Severity::Info => crate::view::theme::SEVERITY_INFO,
+            Severity::Warning => crate::view::theme::SEVERITY_WARNING,
+            Severity::Critical => crate::view::theme::SEVERITY_CRITICAL,
         }
     }
 }

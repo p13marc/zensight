@@ -116,9 +116,9 @@ fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
     if let Some(score) = get_metric_value(state, "system/saturation_score") {
         let st = get_metric_text(state, "system/health_state").unwrap_or_default();
         let color = match st.as_str() {
-            "crit" => iced::Color::from_rgb(0.9, 0.3, 0.3),
-            "warn" => iced::Color::from_rgb(0.9, 0.7, 0.2),
-            _ => iced::Color::from_rgb(0.4, 0.75, 0.45),
+            "crit" => theme::SEVERITY_CRITICAL,
+            "warn" => theme::SEVERITY_WARNING,
+            _ => theme::STATUS_ONLINE,
         };
         let label = if st.is_empty() {
             format!("health {score:.0}")

@@ -252,11 +252,11 @@ fn render_mini_bar<'a>(value: Option<f64>, _label: &str) -> Element<'a, Message>
     let filled = width * (pct as f32) / 100.0;
 
     let color = if pct > 90.0 {
-        iced::Color::from_rgb(0.9, 0.2, 0.2)
+        theme::SEVERITY_CRITICAL
     } else if pct > 80.0 {
-        iced::Color::from_rgb(0.9, 0.7, 0.2)
+        theme::SEVERITY_WARNING
     } else {
-        iced::Color::from_rgb(0.3, 0.7, 0.4)
+        theme::STATUS_ONLINE
     };
 
     let filled_bar = container(text(""))

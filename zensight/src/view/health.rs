@@ -36,13 +36,13 @@ impl HealthBand {
         }
     }
 
-    /// Triage color: green / amber / red / gray.
+    /// Triage color: green / amber / red / gray (shared status palette, D2).
     pub fn color(self) -> Color {
         match self {
-            HealthBand::Healthy => Color::from_rgb(0.40, 0.75, 0.45),
-            HealthBand::Degraded => Color::from_rgb(0.90, 0.70, 0.20),
-            HealthBand::Critical => Color::from_rgb(0.90, 0.30, 0.30),
-            HealthBand::Unknown => Color::from_rgb(0.55, 0.55, 0.55),
+            HealthBand::Healthy => crate::view::theme::STATUS_ONLINE,
+            HealthBand::Degraded => crate::view::theme::STATUS_DEGRADED,
+            HealthBand::Critical => crate::view::theme::STATUS_OFFLINE,
+            HealthBand::Unknown => crate::view::theme::STATUS_UNKNOWN,
         }
     }
 }

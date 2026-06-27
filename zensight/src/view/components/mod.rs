@@ -10,7 +10,7 @@ pub mod sparkline;
 pub mod status_led;
 
 pub use gauge::{Gauge, GaugeStyle};
-pub use kit::{badge, card, empty_state, section_header};
+pub use kit::{badge, card, empty_state, rgb, rgba, section_header};
 pub use progress_bar::{ProgressBar, ProgressBarStyle};
 pub use sparkline::Sparkline;
 pub use status_led::{StatusLed, StatusLedState};

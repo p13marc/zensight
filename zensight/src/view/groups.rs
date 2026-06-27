@@ -306,8 +306,8 @@ pub fn color_indicator(color: (f32, f32, f32), size: f32) -> Element<'static, Me
         .style(move |theme: &Theme| {
             let colors = crate::view::theme::colors(theme);
             container::Style {
-                background: Some(iced::Background::Color(iced::Color::from_rgb(
-                    color.0, color.1, color.2,
+                background: Some(iced::Background::Color(crate::view::components::kit::rgb(
+                    color,
                 ))),
                 border: iced::Border {
                     color: colors.border(),
@@ -353,15 +353,15 @@ pub fn device_group_tags(groups: Vec<GroupTag>) -> Element<'static, Message> {
             container(text(group.name).size(9))
                 .padding([2, 6])
                 .style(move |_theme: &Theme| container::Style {
-                    background: Some(iced::Background::Color(iced::Color::from_rgba(
-                        color.0, color.1, color.2, 0.3,
+                    background: Some(iced::Background::Color(crate::view::components::kit::rgba(
+                        color, 0.3,
                     ))),
                     border: iced::Border {
-                        color: iced::Color::from_rgb(color.0, color.1, color.2),
+                        color: crate::view::components::kit::rgb(color),
                         width: 1.0,
                         radius: 3.0.into(),
                     },
-                    text_color: Some(iced::Color::from_rgb(color.0, color.1, color.2)),
+                    text_color: Some(crate::view::components::kit::rgb(color)),
                     ..Default::default()
                 });
         tag_row = tag_row.push(tag);
