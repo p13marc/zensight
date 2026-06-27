@@ -380,7 +380,15 @@ fn build_v3_security(config: &SnmpV3Security) -> Result<v3::Security> {
                 .ok_or_else(|| anyhow!("Privacy password required for privacy protocol"))?;
 
             let cipher = match priv_proto {
-                PrivProtocol::None => unreachable!(),
+                // The (Some(auth), PrivProtocol::None) case is already handled
+                // by the authNoPriv arm above, so this is logically unreachable.
+                // Return an error rather than panic in case the match arms are
+                // ever reordered — a malformed config must never crash the poller.
+                PrivProtocol::None => {
+                    return Err(anyhow!(
+                        "privacy protocol None is not valid in authPriv mode"
+                    ));
+                }
                 PrivProtocol::Des => v3::Cipher::Des,
                 PrivProtocol::Aes128 => v3::Cipher::Aes128,
                 PrivProtocol::Aes192 => v3::Cipher::Aes192,
