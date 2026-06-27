@@ -306,7 +306,7 @@ mod tests {
     #[test]
     fn test_format_value() {
         assert_eq!(format_value(&TelemetryValue::Counter(42)), "42");
-        assert_eq!(format_value(&TelemetryValue::Gauge(3.14)), "3.14");
+        assert_eq!(format_value(&TelemetryValue::Gauge(2.5)), "2.50");
         assert_eq!(format_value(&TelemetryValue::Gauge(100.0)), "100");
         assert_eq!(
             format_value(&TelemetryValue::Text("hello".to_string())),

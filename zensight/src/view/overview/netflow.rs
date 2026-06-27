@@ -163,7 +163,7 @@ fn render_top_talkers<'a>(flows: &[FlowRecord]) -> Element<'a, Message> {
     }
 
     let mut sorted: Vec<_> = talkers.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     let rows: Vec<Element<'a, Message>> = sorted
         .into_iter()
@@ -227,7 +227,7 @@ fn render_protocol_distribution<'a>(flows: &[FlowRecord]) -> Element<'a, Message
     let total: u64 = by_protocol.values().sum();
 
     let mut sorted: Vec<_> = by_protocol.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     let colors = [
         iced::Color::from_rgb(0.3, 0.6, 0.9), // Blue - TCP

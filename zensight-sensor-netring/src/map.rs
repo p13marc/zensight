@@ -1256,7 +1256,7 @@ mod tests {
             Some("T1071.004")
         );
         // Bare-IP src (no port) carries no community_id.
-        assert!(alert.labels.get("community_id").is_none());
+        assert!(!alert.labels.contains_key("community_id"));
     }
 
     #[test]

@@ -805,7 +805,7 @@ mod tests {
     #[test]
     fn test_format_value() {
         assert_eq!(format_value(42.0), "42");
-        assert_eq!(format_value(3.14), "3.14");
+        assert_eq!(format_value(2.5), "2.5");
         assert_eq!(format_value(f64::NAN), "NaN");
         assert_eq!(format_value(f64::INFINITY), "+Inf");
         assert_eq!(format_value(f64::NEG_INFINITY), "-Inf");

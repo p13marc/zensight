@@ -137,7 +137,7 @@ pub fn detection_tuning_panel(state: &DetectionTuningState) -> Element<'_, Messa
             .status_note
             .clone()
             .unwrap_or_else(|| "Open with a live netring sensor, then Refresh.".to_string());
-        return card(column![header, text(note).size(12).style(muted)].spacing(8)).into();
+        return card(column![header, text(note).size(12).style(muted)].spacing(8));
     }
 
     // Per-detector rows: mute/unmute + optional threshold edit.

@@ -143,7 +143,7 @@ fn render_top_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     let mut sorted_talkers: Vec<_> = talkers.into_iter().collect();
-    sorted_talkers.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted_talkers.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     let is_empty = sorted_talkers.is_empty();
     let mut rows = Column::new().spacing(4);
@@ -218,7 +218,7 @@ fn render_protocol_distribution(state: &DeviceDetailState) -> Element<'_, Messag
     let total: u64 = by_protocol.values().sum();
 
     let mut sorted_protocols: Vec<_> = by_protocol.into_iter().collect();
-    sorted_protocols.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted_protocols.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     let mut bars: Vec<Element<'_, Message>> = Vec::new();
 
@@ -311,7 +311,7 @@ fn render_flow_table(state: &DeviceDetailState) -> Element<'_, Message> {
 
     // Sort by timestamp descending
     let mut sorted_flows = flows;
-    sorted_flows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    sorted_flows.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
 
     let is_empty = sorted_flows.is_empty();
     let mut table_rows = Column::new().spacing(2);

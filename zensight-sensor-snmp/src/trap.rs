@@ -619,10 +619,10 @@ mod tests {
         ];
 
         let pdu = v2::Pdu {
-            request_id: 1.into(),
-            error_status: 0u32.into(),
-            error_index: 0u32.into(),
-            variable_bindings: varbinds.into(),
+            request_id: 1,
+            error_status: 0u32,
+            error_index: 0u32,
+            variable_bindings: varbinds,
         };
 
         let msg = v2c::Message {

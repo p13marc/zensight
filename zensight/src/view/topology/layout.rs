@@ -343,8 +343,10 @@ mod tests {
 
     #[test]
     fn test_layout_disabled_when_auto_layout_off() {
-        let mut state = TopologyState::default();
-        state.auto_layout = false;
+        let mut state = TopologyState {
+            auto_layout: false,
+            ..Default::default()
+        };
 
         state
             .nodes

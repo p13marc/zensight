@@ -125,7 +125,7 @@ impl MibResolver {
 
         // Sort prefix mappings by length (longest first) for best match
         self.prefix_mappings
-            .sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+            .sort_by_key(|b| std::cmp::Reverse(b.0.len()));
     }
 
     /// Add custom OID mappings from configuration.
@@ -149,7 +149,7 @@ impl MibResolver {
 
         // Re-sort prefix mappings
         self.prefix_mappings
-            .sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+            .sort_by_key(|b| std::cmp::Reverse(b.0.len()));
     }
 
     /// Resolve an OID to a human-readable name.

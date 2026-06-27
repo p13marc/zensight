@@ -267,7 +267,7 @@ mod tests {
             PrometheusType::Counter
         );
         assert_eq!(
-            PrometheusType::from_value(&TelemetryValue::Gauge(3.14)),
+            PrometheusType::from_value(&TelemetryValue::Gauge(2.5)),
             PrometheusType::Gauge
         );
         assert_eq!(
@@ -291,8 +291,8 @@ mod tests {
             Some(100.0)
         );
         assert_eq!(
-            extract_numeric_value(&TelemetryValue::Gauge(3.14)),
-            Some(3.14)
+            extract_numeric_value(&TelemetryValue::Gauge(2.5)),
+            Some(2.5)
         );
         assert_eq!(
             extract_numeric_value(&TelemetryValue::Boolean(true)),
@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn test_is_exportable() {
         assert!(is_exportable(&TelemetryValue::Counter(100)));
-        assert!(is_exportable(&TelemetryValue::Gauge(3.14)));
+        assert!(is_exportable(&TelemetryValue::Gauge(2.5)));
         assert!(is_exportable(&TelemetryValue::Boolean(true)));
         assert!(is_exportable(&TelemetryValue::Text("hello".into())));
         assert!(!is_exportable(&TelemetryValue::Binary(vec![1, 2, 3])));

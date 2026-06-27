@@ -572,7 +572,7 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
         col = col.push(empty_state(format!("Events fetch failed: {err}"), None));
     } else if let Some(events) = d.events.ready() {
         let mut evs: Vec<&_> = events.iter().collect();
-        evs.sort_by(|a, b| b.ts_unix.cmp(&a.ts_unix));
+        evs.sort_by_key(|b| std::cmp::Reverse(b.ts_unix));
         let mut list = Column::new().spacing(3).push(
             row![
                 cell("when", 90),

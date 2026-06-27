@@ -3,6 +3,10 @@
 //! These tests verify the UI behavior without needing actual Zenoh connections
 //! or hardware sensors.
 
+// Test fixtures build state stepwise (`let mut s = State::default(); s.field = ..`),
+// which reads more clearly here than a single large struct literal.
+#![allow(clippy::field_reassign_with_default)]
+
 use iced_test::simulator;
 
 // Re-export view components for testing
@@ -20,7 +24,7 @@ use zensight::view::specialized::SyslogFilterState;
 use zensight::view::topology::{TopologyState, topology_view};
 
 use std::collections::HashMap;
-use zensight_common::{HealthSnapshot, Protocol};
+use zensight_common::Protocol;
 
 /// Test that the dashboard view renders correctly with no devices.
 #[test]
@@ -2015,6 +2019,7 @@ fn test_inventory_view_renders_assets_and_fingerprints() {
             user_agent: Some("curl/8.5".into()),
             count: 2,
         }],
+        assets_responded: true,
     }));
 
     let mut ui = simulator(inventory_view(&state));

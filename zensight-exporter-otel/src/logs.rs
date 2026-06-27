@@ -357,7 +357,7 @@ mod tests {
         assert_eq!(record.facility, Some(SyslogFacility::Daemon));
         assert_eq!(record.appname, Some("nginx".to_string()));
         assert_eq!(record.hostname, "server01");
-        assert_eq!(record.timestamp_nanos, 1234567890000_000_000);
+        assert_eq!(record.timestamp_nanos, 1_234_567_890_000_000_000);
     }
 
     #[test]

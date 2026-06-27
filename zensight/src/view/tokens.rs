@@ -41,6 +41,11 @@ pub mod space {
 
 #[cfg(test)]
 mod tests {
+    // These guard the ordering of compile-time design-token constants; the
+    // assertions are deliberately constant-valued (they fail the build if the
+    // scale is ever reordered).
+    #![allow(clippy::assertions_on_constants)]
+
     use super::*;
 
     #[test]

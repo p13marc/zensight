@@ -199,7 +199,7 @@ mod tests {
             OtelMetricType::Counter
         );
         assert_eq!(
-            OtelMetricType::from_value(&TelemetryValue::Gauge(3.14)),
+            OtelMetricType::from_value(&TelemetryValue::Gauge(2.5)),
             OtelMetricType::Gauge
         );
         assert_eq!(
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn test_extract_value() {
         assert_eq!(extract_value(&TelemetryValue::Counter(100)), Some(100.0));
-        assert_eq!(extract_value(&TelemetryValue::Gauge(3.14)), Some(3.14));
+        assert_eq!(extract_value(&TelemetryValue::Gauge(2.5)), Some(2.5));
         assert_eq!(extract_value(&TelemetryValue::Boolean(true)), Some(1.0));
         assert_eq!(extract_value(&TelemetryValue::Boolean(false)), Some(0.0));
         assert_eq!(extract_value(&TelemetryValue::Text("hello".into())), None);
@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn test_is_metric_exportable() {
         assert!(is_metric_exportable(&TelemetryValue::Counter(100)));
-        assert!(is_metric_exportable(&TelemetryValue::Gauge(3.14)));
+        assert!(is_metric_exportable(&TelemetryValue::Gauge(2.5)));
         assert!(is_metric_exportable(&TelemetryValue::Boolean(true)));
         assert!(!is_metric_exportable(&TelemetryValue::Text("hello".into())));
         assert!(!is_metric_exportable(&TelemetryValue::Binary(vec![1])));

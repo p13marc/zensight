@@ -188,6 +188,67 @@ pub async fn apply(handle: &SentinelHandle, cmd: ExpectationCommand) {
     }
 }
 
+/// Run the command subscriber + status queryable until the session closes.
+pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, handle: SentinelHandle) {
+    let cmd_key = command_key(&key_prefix, EXPECTATIONS_TOPIC);
+    let stat_key = status_key(&key_prefix, EXPECTATIONS_TOPIC);
+
+    let subscriber = match session.declare_subscriber(&cmd_key).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, key = %cmd_key, "sentinel: failed to subscribe to commands");
+            return;
+        }
+    };
+    let queryable = match session.declare_queryable(&stat_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %stat_key, "sentinel: failed to declare status queryable");
+            return;
+        }
+    };
+    tracing::info!(commands = %cmd_key, status = %stat_key, "sentinel: control channel ready");
+
+    loop {
+        tokio::select! {
+            sample = subscriber.recv_async() => {
+                match sample {
+                    Ok(sample) => {
+                        let payload = sample.payload().to_bytes();
+                        match serde_json::from_slice::<ExpectationCommand>(&payload) {
+                            Ok(cmd) => apply(&handle, cmd).await,
+                            Err(e) => tracing::warn!(error = %e, "sentinel: bad expectation command"),
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "sentinel: command subscriber ended");
+                        return;
+                    }
+                }
+            }
+            query = queryable.recv_async() => {
+                match query {
+                    Ok(query) => {
+                        let snapshot = handle.snapshot().await;
+                        match serde_json::to_vec(&snapshot) {
+                            Ok(payload) => {
+                                if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                                    tracing::warn!(error = %e, "sentinel: failed to reply to status query");
+                                }
+                            }
+                            Err(e) => tracing::warn!(error = %e, "sentinel: failed to serialize status"),
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "sentinel: status queryable ended");
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,66 +370,5 @@ mod tests {
         assert!(json.contains("toggle") && json.contains("diagnostics"));
         let back: CollectionCommand = serde_json::from_str(&json).unwrap();
         matches!(back, CollectionCommand::Toggle { .. });
-    }
-}
-
-/// Run the command subscriber + status queryable until the session closes.
-pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, handle: SentinelHandle) {
-    let cmd_key = command_key(&key_prefix, EXPECTATIONS_TOPIC);
-    let stat_key = status_key(&key_prefix, EXPECTATIONS_TOPIC);
-
-    let subscriber = match session.declare_subscriber(&cmd_key).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error = %e, key = %cmd_key, "sentinel: failed to subscribe to commands");
-            return;
-        }
-    };
-    let queryable = match session.declare_queryable(&stat_key).await {
-        Ok(q) => q,
-        Err(e) => {
-            tracing::error!(error = %e, key = %stat_key, "sentinel: failed to declare status queryable");
-            return;
-        }
-    };
-    tracing::info!(commands = %cmd_key, status = %stat_key, "sentinel: control channel ready");
-
-    loop {
-        tokio::select! {
-            sample = subscriber.recv_async() => {
-                match sample {
-                    Ok(sample) => {
-                        let payload = sample.payload().to_bytes();
-                        match serde_json::from_slice::<ExpectationCommand>(&payload) {
-                            Ok(cmd) => apply(&handle, cmd).await,
-                            Err(e) => tracing::warn!(error = %e, "sentinel: bad expectation command"),
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "sentinel: command subscriber ended");
-                        return;
-                    }
-                }
-            }
-            query = queryable.recv_async() => {
-                match query {
-                    Ok(query) => {
-                        let snapshot = handle.snapshot().await;
-                        match serde_json::to_vec(&snapshot) {
-                            Ok(payload) => {
-                                if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
-                                    tracing::warn!(error = %e, "sentinel: failed to reply to status query");
-                                }
-                            }
-                            Err(e) => tracing::warn!(error = %e, "sentinel: failed to serialize status"),
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "sentinel: status queryable ended");
-                        return;
-                    }
-                }
-            }
-        }
     }
 }

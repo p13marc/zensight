@@ -259,7 +259,7 @@ mod tests {
     #[test]
     fn test_value_conversions() {
         assert_eq!(TelemetryValue::from(42u64), TelemetryValue::Counter(42));
-        assert_eq!(TelemetryValue::from(3.14), TelemetryValue::Gauge(3.14));
+        assert_eq!(TelemetryValue::from(2.5), TelemetryValue::Gauge(2.5));
         assert_eq!(
             TelemetryValue::from("test"),
             TelemetryValue::Text("test".to_string())
