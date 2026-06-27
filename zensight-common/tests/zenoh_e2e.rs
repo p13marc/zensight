@@ -99,7 +99,7 @@ async fn test_zenoh_cbor_encoding() {
         "cbor-device",
         Protocol::Snmp,
         "cbor/metric",
-        TelemetryValue::Gauge(3.14159),
+        TelemetryValue::Gauge(2.5),
     );
 
     let publish_key = format!("{}/snmp/cbor-device/cbor/metric", prefix);
@@ -121,7 +121,7 @@ async fn test_zenoh_cbor_encoding() {
     assert_eq!(decoded.source, "cbor-device");
     assert_eq!(decoded.metric, "cbor/metric");
     if let TelemetryValue::Gauge(v) = decoded.value {
-        assert!((v - 3.14159).abs() < 0.0001);
+        assert!((v - 2.5).abs() < 0.0001);
     } else {
         panic!("Expected Gauge value");
     }

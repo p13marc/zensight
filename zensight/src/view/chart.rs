@@ -1751,7 +1751,7 @@ mod tests {
     #[test]
     fn test_data_point_from_telemetry() {
         let counter = TelemetryValue::Counter(42);
-        let gauge = TelemetryValue::Gauge(3.14);
+        let gauge = TelemetryValue::Gauge(2.5);
         let text = TelemetryValue::Text("hello".to_string());
 
         assert!(DataPoint::from_telemetry(1000, &counter).is_some());
@@ -1801,7 +1801,7 @@ mod tests {
     fn test_format_value() {
         assert_eq!(format_value(0.0), "0");
         assert_eq!(format_value(42.0), "42");
-        assert_eq!(format_value(3.14159), "3.14");
+        assert_eq!(format_value(1.23456), "1.23");
         assert_eq!(format_value(1500.0), "1.5K");
         assert_eq!(format_value(2500000.0), "2.5M");
     }

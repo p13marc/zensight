@@ -239,18 +239,16 @@ impl<'a> TopologyGraphProgram<'a> {
                 }
                 interaction.panning = false;
             }
-            mouse::Event::WheelScrolled { delta } => {
-                if cursor.is_over(bounds) {
-                    let scroll = match delta {
-                        mouse::ScrollDelta::Lines { y, .. } => *y,
-                        mouse::ScrollDelta::Pixels { y, .. } => *y / 50.0,
-                    };
+            mouse::Event::WheelScrolled { delta } if cursor.is_over(bounds) => {
+                let scroll = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => *y,
+                    mouse::ScrollDelta::Pixels { y, .. } => *y / 50.0,
+                };
 
-                    if scroll > 0.0 {
-                        return Some(canvas::Action::publish(Message::TopologyZoomIn));
-                    } else if scroll < 0.0 {
-                        return Some(canvas::Action::publish(Message::TopologyZoomOut));
-                    }
+                if scroll > 0.0 {
+                    return Some(canvas::Action::publish(Message::TopologyZoomIn));
+                } else if scroll < 0.0 {
+                    return Some(canvas::Action::publish(Message::TopologyZoomOut));
                 }
             }
             _ => {}

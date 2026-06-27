@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn test_decode_with_scale_offset() {
-        let raw = 1000u16 as f64;
+        let raw = 1000.0_f64;
         let scale = 0.1;
         let offset = -50.0;
         let result = raw * scale + offset;

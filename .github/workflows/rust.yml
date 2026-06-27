@@ -56,3 +56,36 @@ jobs:
       # targets), so it subsumes a separate `cargo build` — one compile pass.
       - name: Build & test
         run: cargo test --workspace --locked
+
+  # Format + lint gate. Kept in its own job so a lint failure is reported
+  # independently of (and in parallel with) the build/test job.
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android
+          sudo docker image prune --all --force || true
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          # Same native deps as the test job so clippy can compile every crate:
+          # protobuf-compiler (gnmi), libsystemd-dev (logs/journald),
+          # libssl-dev (snmp via openssl).
+          sudo apt-get install -y protobuf-compiler libsystemd-dev libssl-dev
+
+      - name: Install clippy + rustfmt
+        run: rustup component add clippy rustfmt
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings

@@ -101,7 +101,7 @@ fn test_all_protocol_variants() {
 fn test_all_telemetry_value_types() {
     let values = [
         (TelemetryValue::Counter(42), "counter"),
-        (TelemetryValue::Gauge(3.14159), "gauge"),
+        (TelemetryValue::Gauge(2.5), "gauge"),
         (TelemetryValue::Text("hello".to_string()), "text"),
         (TelemetryValue::Boolean(true), "boolean"),
         (TelemetryValue::Binary(vec![0x01, 0x02, 0x03]), "binary"),
@@ -152,7 +152,7 @@ fn test_telemetry_with_many_labels() {
 #[test]
 fn test_protocol_ordering() {
     // Protocol should be Ord for sorting
-    let mut protocols = vec![
+    let mut protocols = [
         Protocol::Modbus,
         Protocol::Snmp,
         Protocol::Gnmi,

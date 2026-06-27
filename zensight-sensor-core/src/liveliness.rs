@@ -161,8 +161,6 @@ impl LivelinessManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // Note: These tests require a Zenoh session which we can't easily mock.
     // Integration tests should cover liveliness functionality.
 

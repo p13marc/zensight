@@ -279,7 +279,7 @@ fn render_critical_messages<'a>(messages: Vec<LogMessage>) -> Element<'a, Messag
     }
 
     // Sort by timestamp descending
-    critical.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    critical.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
 
     let count = critical.len();
     let title = text(format!("Recent Critical Messages ({})", count))

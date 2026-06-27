@@ -1024,7 +1024,7 @@ fn render_log_stream<'a>(
 
     // Sort by timestamp descending (newest first) and limit to 100.
     let mut sorted_messages = filtered_messages;
-    sorted_messages.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    sorted_messages.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
     sorted_messages.truncate(100);
 
     // Column header row, aligned to the per-row widths.

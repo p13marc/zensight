@@ -589,6 +589,7 @@ mod tests {
             quic: vec![],
             ssh: vec![],
             ja4h: vec![],
+            assets_responded: false,
         }));
         assert_eq!(state.filtered_fingerprints().len(), 2);
         state.fp_filter = Some(FpKind::Ja4);
