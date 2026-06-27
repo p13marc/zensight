@@ -450,6 +450,11 @@ pub enum Message {
     /// Lift a silence on a source (#26).
     UnsilenceSource(String),
 
+    /// Filter the external-alerts feed by severity (`None` = all) (#27).
+    SetAlertSeverityFilter(Option<zensight_common::AlertSeverity>),
+    /// Filter the external-alerts feed by source (`None` = all) (#27).
+    SetAlertSourceFilter(Option<String>),
+
     /// Open the global cross-device metric search panel (#27).
     OpenGlobalSearch,
     /// Close the global search panel (#27).

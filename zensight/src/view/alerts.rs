@@ -273,6 +273,12 @@ pub struct AlertsState {
     /// Per-`alert_key` incident timeline: firing→resolved transitions (#26).
     /// Bounded to the most recent transitions so it never grows unbounded.
     timelines: HashMap<String, VecDeque<TransitionEvent>>,
+    /// Severity filter for the external-alerts feed (#27). `None` = show all;
+    /// otherwise only alerts of exactly this severity are shown.
+    pub external_severity_filter: Option<zensight_common::AlertSeverity>,
+    /// Source filter for the external-alerts feed (#27). `None` = all sources;
+    /// otherwise only alerts from this source are shown.
+    pub external_source_filter: Option<String>,
 }
 
 /// One firing/resolved transition in an incident's timeline (#26).
@@ -337,6 +343,8 @@ impl AlertsState {
             acknowledged_external: HashSet::new(),
             silenced_sources: HashMap::new(),
             timelines: HashMap::new(),
+            external_severity_filter: None,
+            external_source_filter: None,
         }
     }
 
@@ -504,6 +512,9 @@ impl AlertsState {
             if self.is_silenced(&alert.source, now_ms) {
                 continue;
             }
+            if !self.passes_external_filters(alert) {
+                continue;
+            }
             by_source.entry(&alert.source).or_default().push(alert);
         }
         let mut groups: Vec<ExternalIncident<'_>> = by_source
@@ -534,6 +545,36 @@ impl AlertsState {
                 .then(a.source.cmp(b.source))
         });
         groups
+    }
+
+    /// Whether an external alert passes the active severity + source filters (#27).
+    fn passes_external_filters(&self, alert: &SensorAlert) -> bool {
+        if let Some(sev) = self.external_severity_filter
+            && alert.severity != sev
+        {
+            return false;
+        }
+        if let Some(src) = &self.external_source_filter
+            && &alert.source != src
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Distinct sources among currently-firing, non-silenced external alerts,
+    /// sorted — drives the source filter pills (#27). Ignores the active source
+    /// filter so the pills stay stable as you switch between them.
+    pub fn external_sources(&self, now_ms: i64) -> Vec<&str> {
+        let mut sources: Vec<&str> = self
+            .external
+            .values()
+            .filter(|a| !self.is_silenced(&a.source, now_ms))
+            .map(|a| a.source.as_str())
+            .collect();
+        sources.sort_unstable();
+        sources.dedup();
+        sources
     }
 
     /// Count of *un-acknowledged*, *non-silenced* firing external alerts (badge).
@@ -1054,7 +1095,12 @@ fn render_external_alerts_section(state: &AlertsState) -> Element<'_, Message> {
     };
     let section_title = section_header(title, actions);
 
-    if groups.is_empty() {
+    let sources = state.external_sources(now_ms());
+    let filtering =
+        state.external_severity_filter.is_some() || state.external_source_filter.is_some();
+
+    // Nothing firing and no filter to clear: the plain empty state.
+    if sources.is_empty() && !filtering {
         return column![
             section_title,
             text("No active sensor alerts")
@@ -1069,12 +1115,117 @@ fn render_external_alerts_section(state: &AlertsState) -> Element<'_, Message> {
         .into();
     }
 
-    let mut list = Column::new().spacing(space::SM);
-    for group in &groups {
-        list = list.push(render_incident(state, group));
+    let pills = render_alert_filter_pills(state, &sources);
+
+    let body: Element<'_, Message> = if groups.is_empty() {
+        // A filter is active and hides everything — keep the pills visible so it
+        // can be cleared.
+        text("No alerts match the current filter")
+            .size(font::BODY)
+            .style(|theme: &Theme| text::Style {
+                color: Some(crate::view::theme::colors(theme).text_dimmed()),
+            })
+            .into()
+    } else {
+        let mut list = Column::new().spacing(space::SM);
+        for group in &groups {
+            list = list.push(render_incident(state, group));
+        }
+        list.into()
+    };
+
+    column![section_title, pills, body]
+        .spacing(space::SM)
+        .into()
+}
+
+/// Severity + source filter pills for the external-alerts feed (#27). Each row is
+/// a single-select set where the active pill uses the primary button style.
+fn render_alert_filter_pills<'a>(
+    state: &'a AlertsState,
+    sources: &[&'a str],
+) -> Element<'a, Message> {
+    use zensight_common::AlertSeverity;
+
+    let pill = |label: String, selected: bool, msg: Message| -> Element<'a, Message> {
+        button(text(label).size(font::CAPTION))
+            .on_press(msg)
+            .padding([space::XS, space::SM])
+            .style(if selected {
+                iced::widget::button::primary
+            } else {
+                iced::widget::button::secondary
+            })
+            .into()
+    };
+
+    // Severity row: All · Critical · Warning · Info.
+    let sev = state.external_severity_filter;
+    let mut sev_row = row![
+        text("Severity").size(font::CAPTION).style(|theme: &Theme| {
+            text::Style {
+                color: Some(crate::view::theme::colors(theme).text_dimmed()),
+            }
+        }),
+        pill(
+            "All".into(),
+            sev.is_none(),
+            Message::SetAlertSeverityFilter(None)
+        ),
+    ]
+    .spacing(space::XS)
+    .align_y(Alignment::Center);
+    for s in [
+        AlertSeverity::Critical,
+        AlertSeverity::Warning,
+        AlertSeverity::Info,
+    ] {
+        let label = {
+            let n = s.as_str();
+            let mut c = n.chars();
+            c.next()
+                .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                .unwrap_or_default()
+        };
+        sev_row = sev_row.push(pill(
+            label,
+            sev == Some(s),
+            Message::SetAlertSeverityFilter(Some(s)),
+        ));
     }
 
-    column![section_title, list].spacing(space::SM).into()
+    let mut col = Column::new().spacing(space::XS).push(sev_row);
+
+    // Source row only when more than one source is firing (a single source needs
+    // no filter). Always offers "All" to reset.
+    if sources.len() > 1 {
+        let active = state.external_source_filter.as_deref();
+        let mut src_row = row![
+            text("Source").size(font::CAPTION).style(|theme: &Theme| {
+                text::Style {
+                    color: Some(crate::view::theme::colors(theme).text_dimmed()),
+                }
+            }),
+            pill(
+                "All".into(),
+                active.is_none(),
+                Message::SetAlertSourceFilter(None)
+            ),
+        ]
+        .spacing(space::XS)
+        .align_y(Alignment::Center);
+        for &s in sources {
+            src_row = src_row.push(pill(
+                s.to_string(),
+                active == Some(s),
+                Message::SetAlertSourceFilter(Some(s.to_string())),
+            ));
+        }
+        // Many sources can overflow the width, so let the source pills wrap.
+        col = col.push(src_row.wrap());
+    }
+
+    col.into()
 }
 
 /// Render one source-grouped incident: a header (source · count · severity ·
@@ -1508,6 +1659,66 @@ mod tests {
         assert!(state.is_silenced("h", 10));
         state.unsilence_source("h");
         assert!(!state.is_silenced("h", 10));
+    }
+
+    fn ext_alert_from(
+        source: &str,
+        rule: &str,
+        sev: zensight_common::AlertSeverity,
+    ) -> SensorAlert {
+        SensorAlert::new(
+            source,
+            Protocol::Netlink,
+            zensight_common::AlertKind::Expectation,
+            rule,
+            sev,
+            "summary",
+        )
+    }
+
+    #[test]
+    fn severity_filter_limits_external_feed() {
+        use zensight_common::AlertSeverity;
+        let mut state = AlertsState::new();
+        // Two alerts on one source, distinct rules (so distinct keys).
+        state.ingest_external(ext_alert("crit-rule", AlertSeverity::Critical));
+        state.ingest_external(ext_alert("warn-rule", AlertSeverity::Warning));
+
+        // No filter: one group, both alerts.
+        let groups = state.external_by_source_at(0);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].alerts.len(), 2);
+
+        // Critical only.
+        state.external_severity_filter = Some(AlertSeverity::Critical);
+        let groups = state.external_by_source_at(0);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].alerts.len(), 1);
+        assert_eq!(groups[0].alerts[0].severity, AlertSeverity::Critical);
+
+        // Info: nothing matches -> no groups.
+        state.external_severity_filter = Some(AlertSeverity::Info);
+        assert!(state.external_by_source_at(0).is_empty());
+    }
+
+    #[test]
+    fn source_filter_limits_external_feed() {
+        use zensight_common::AlertSeverity;
+        let mut state = AlertsState::new();
+        state.ingest_external(ext_alert_from("host1", "r", AlertSeverity::Warning));
+        state.ingest_external(ext_alert_from("host2", "r", AlertSeverity::Warning));
+
+        // Sources pill list is distinct + sorted.
+        assert_eq!(state.external_sources(0), vec!["host1", "host2"]);
+        assert_eq!(state.external_by_source_at(0).len(), 2);
+
+        // Filter to host2.
+        state.external_source_filter = Some("host2".to_string());
+        let groups = state.external_by_source_at(0);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].source, "host2");
+        // Pills stay stable regardless of the active source filter.
+        assert_eq!(state.external_sources(0), vec!["host1", "host2"]);
     }
 
     #[test]

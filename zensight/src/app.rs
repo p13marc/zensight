@@ -1430,6 +1430,13 @@ impl ZenSight {
                     .push(ToastSeverity::Info, format!("Unsilenced {source}"));
             }
 
+            Message::SetAlertSeverityFilter(sev) => {
+                self.alerts.external_severity_filter = sev;
+            }
+            Message::SetAlertSourceFilter(source) => {
+                self.alerts.external_source_filter = source;
+            }
+
             Message::OpenGlobalSearch => {
                 self.global_search.open();
                 return iced::widget::operation::focus(

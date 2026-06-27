@@ -1245,6 +1245,59 @@ fn test_security_drilldown_and_filter() {
     assert!(ui2.find("Show flows").is_ok());
 }
 
+/// #27: the external-alerts feed shows severity + source filter pills; clicking
+/// one emits the corresponding filter message.
+#[test]
+fn test_alert_filter_pills() {
+    use zensight::view::alerts::{AlertsState, alerts_view};
+    use zensight_common::{Alert, AlertKind, AlertSeverity};
+
+    let mut alerts = AlertsState::new();
+    alerts.ingest_external(Alert::new(
+        "host1",
+        Protocol::Netlink,
+        AlertKind::Expectation,
+        "ssh-listening",
+        AlertSeverity::Critical,
+        "sshd down on host1",
+    ));
+    alerts.ingest_external(Alert::new(
+        "host2",
+        Protocol::Netlink,
+        AlertKind::Expectation,
+        "ntp-listening",
+        AlertSeverity::Warning,
+        "ntp down on host2",
+    ));
+
+    // Pills render (severity row + source row since there are two sources).
+    let mut ui = simulator(alerts_view(&alerts));
+    assert!(ui.find("Severity").is_ok());
+    assert!(ui.find("Source").is_ok());
+
+    // Click the "Critical" severity pill.
+    let _ = ui.click("Critical");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter().any(|m| matches!(
+            m,
+            Message::SetAlertSeverityFilter(Some(AlertSeverity::Critical))
+        )),
+        "Critical pill should emit SetAlertSeverityFilter(Critical), got {msgs:?}"
+    );
+
+    // Click a source pill.
+    let mut ui2 = simulator(alerts_view(&alerts));
+    let _ = ui2.click("host2");
+    let msgs2: Vec<Message> = ui2.into_messages().collect();
+    assert!(
+        msgs2
+            .iter()
+            .any(|m| matches!(m, Message::SetAlertSourceFilter(Some(s)) if s == "host2")),
+        "host2 pill should emit SetAlertSourceFilter(host2), got {msgs2:?}"
+    );
+}
+
 /// The expectations authoring view renders and "Add & Push" emits a message.
 #[test]
 fn test_expectations_view() {
