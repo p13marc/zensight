@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-06-27
+
+### Fixed
+
+- **Packaging**: build the legacy sensor Docker images (syslog/sysinfo/snmp).
+  `Dockerfile.sensor` gained `libsystemd` (build + runtime) for the logs sensor's
+  journald support and `libssl3` at runtime for snmp; the Docker matrices no
+  longer `fail-fast`. Completes the container-image set (deb/rpm/flatpak and the
+  exporter images were already published for 0.6.1). No shipped binary changed.
+
 ## [0.6.1] - 2026-06-27
 
 ### Fixed
