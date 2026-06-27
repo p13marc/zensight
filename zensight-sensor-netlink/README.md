@@ -7,6 +7,17 @@ Unlike SNMP, this needs no agent or daemon on the observed host — it reads the
 kernel directly via netlink, and the reads are **unprivileged** (no
 `CAP_NET_ADMIN`).
 
+It also embeds a **sentinel** that asserts declared expectations (sockets/links/
+routes, rate-of-change, delivery floors) and raises alerts on deviation,
+hot-swappable at runtime via `@/commands/expectations`.
+
+> The tables below are a representative subset. See
+> [`docs/SENSORS.md`](../docs/SENSORS.md) and
+> [`docs/KEYSPACE.md`](../docs/KEYSPACE.md) for the authoritative telemetry /
+> control-plane / `@/query` reference (enriched `tcp_info`, qdisc/bufferbloat
+> health, conntrack, WireGuard, nftables hit-rate, route-flap history,
+> control-plane change timeline, …).
+
 ## Telemetry
 
 Published under `zensight/netlink/<host>/...`:
@@ -50,8 +61,9 @@ cargo run -p zensight-sensor-netlink --release -- --config configs/netlink.json5
 }
 ```
 
-## Status
+## Reference
 
-Implements the telemetry collector (Plan 03). The expectation/alert engine
-(Plan 04 — "socket must be listening", "interface must be up", ...) is built on
-top of this sensor's netlink access.
+The example config above is a minimal subset — the real `configs/netlink.json5`
+has many more `collect.*` toggles and the `expectations` block. See
+[`docs/SENSORS.md#netlink`](../docs/SENSORS.md#netlink) for the full per-sensor
+reference.

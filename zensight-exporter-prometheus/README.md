@@ -7,6 +7,7 @@ Prometheus metrics exporter for ZenSight telemetry. Subscribes to telemetry over
 - **Prometheus-native**: Standard `/metrics` endpoint compatible with Prometheus scrapers
 - **Type mapping**: Counter, Gauge, Boolean values exported as Prometheus metrics
 - **Info metrics**: Text values exported as Prometheus info metrics
+- **Alert export**: sensor alerts mirrored to a `zensight_alert` gauge (Alertmanager-compatible)
 - **Filtering**: Filter by protocol, source, or metric patterns (glob)
 - **Staleness handling**: Automatic expiry of stale metrics
 - **Memory protection**: Configurable max series limit
@@ -48,6 +49,7 @@ Create a JSON5 configuration file:
     listen: "0.0.0.0:9090",   // HTTP listen address
     path: "/metrics",          // Metrics endpoint path
     prefix: "zensight",        // Metric name prefix
+    export_alerts: true,       // Mirror sensor alerts to a `<prefix>_alert` gauge
     default_labels: {          // Labels added to all metrics
       environment: "production",
     },
@@ -86,6 +88,24 @@ Metrics are named as `{prefix}_{protocol}_{metric_path}`:
 | `Boolean(bool)` | Gauge (0/1) |
 | `Text(String)` | Info metric |
 | `Binary(Vec<u8>)` | Not exported |
+
+## Alert Export
+
+Sensors publish alerts on the `zensight/<protocol>/@/alerts/<key>` control
+channel (a firing → resolved → tombstone lifecycle). With `export_alerts` on
+(the default), the exporter declares a dedicated subscriber on that channel —
+the telemetry wildcard `zensight/**` deliberately does **not** match `@/` keys —
+and renders each **firing** alert as one series:
+
+```
+# HELP zensight_alert ZenSight sensor alert (1 = firing; series absent once resolved).
+# TYPE zensight_alert gauge
+zensight_alert{source="host01",rule="socket-missing",severity="critical",…} 1
+```
+
+The series disappears when the alert resolves (or its sensor tombstones it), so
+Alertmanager treats absence as resolved. Labels carry the alert's source, rule,
+severity, and its own labels (reserved names are not overridden).
 
 ## Endpoints
 

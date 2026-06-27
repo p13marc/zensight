@@ -1,18 +1,26 @@
 # zensight-sensor-logs
 
-Syslog sensor for the ZenSight observability platform. Receives syslog messages and publishes them to Zenoh.
+Unified logs sensor for the ZenSight observability platform. Ingests network
+syslog **and/or** the local systemd journal, emits one telemetry event per log
+line, and publishes derived rollups and per-unit SLO alerts to Zenoh.
 
 ## Features
 
-- **RFC 3164** - BSD syslog format support
-- **RFC 5424** - Modern syslog format with structured data
-- **UDP/TCP/Unix** - Multiple transport protocols supported
-- **Unix Socket** - Local syslog integration (`/dev/log`, `/var/run/syslog.sock`)
-- **Message Filtering** - Filter by severity, facility, app name, hostname, message content
-- **Pattern Matching** - Glob and regex patterns for flexible filtering
-- **Dynamic Filters** - Update filters at runtime via Zenoh commands
-- **Structured Data** - Parse SD-ELEMENT fields from RFC 5424
-- **Auto-detection** - Automatically detect message format
+- **RFC 3164 / RFC 5424** - BSD and modern syslog, structured data, RFC 6587 framing
+- **UDP/TCP/Unix** - Multiple transports (`/dev/log`, `/var/run/syslog.sock`)
+- **journald** - read the local journal via libsystemd: scope/namespace,
+  server-side matching, cursor-based gap-free resume, known-event alerts
+  (coredump / unit-failed / OOM), backpressure + drop accounting
+- **Per-line events** - one `events/<uid>` per line with the OpenTelemetry logs
+  data model in labels (no last-writer-wins loss)
+- **Multiline joining** - fold stack traces into a single event
+- **Template mining** - Drain3-style streaming miner + novelty / rate-spike detection
+- **Derived rollups & SLOs** - per-unit log-rate / error rollups, error budgets, burn-rate alerts
+- **Message Filtering** - by severity/facility/app/hostname/message (glob+regex),
+  updatable at runtime via Zenoh commands
+
+> See [`docs/SENSORS.md#syslog--logs`](../docs/SENSORS.md#syslog--logs) for the
+> authoritative reference.
 
 ## Installation
 
@@ -23,11 +31,11 @@ cargo build -p zensight-sensor-logs --release
 ## Usage
 
 ```bash
-# Run with configuration file
+# Network syslog listeners (journald block commented out)
 zensight-sensor-logs --config configs/syslog.json5
 
-# Run with custom config path
-zensight-sensor-logs --config /etc/zensight/syslog.json5
+# journald-only (used by `just run`)
+zensight-sensor-logs --config configs/logs.json5
 ```
 
 ## Configuration

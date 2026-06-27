@@ -144,12 +144,16 @@ Cross-sensor, protocol-independent registries.
 | `zensight/*/@/devices/*/alive` | frontend | device liveliness tokens |
 | `zensight/*/@/query/alerts` | frontend (GET at startup) | firing-set seed for late joiners |
 | `zensight/<protocol>/@/alerts/**` | any alert consumer | one sensor's alerts (note explicit `@`) |
+| `zensight/*/@/alerts/*` | exporters (`export_alerts`) | all sensors' alerts, mirrored to Prometheus/OTel |
 | `zensight/_meta/sensors/*` | frontend | sensor registrations |
 | `zensight/_meta/correlation/*` | frontend | device correlations |
 
 Exporters (`prometheus`, `otel`) subscribe to `zensight/**` and **skip**
 control/metadata by filtering keys containing `/@/` or starting with
-`zensight/_meta/` — only true telemetry is exported.
+`zensight/_meta/` — only true telemetry is exported. With `export_alerts` on
+(the default) each exporter **additionally** declares a second subscriber on
+`zensight/*/@/alerts/*` (`all_alerts_wildcard()`) to mirror firing alerts —
+necessary precisely because `zensight/**` does not cross the `@` chunk.
 
 ---
 

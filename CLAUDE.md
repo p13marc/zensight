@@ -43,19 +43,19 @@ cargo run -p zensight-exporter-otel --release -- --config configs/otel.json5
 cargo test --workspace
 
 # Run specific crate tests
-cargo test -p zensight              # 258 tests (unit + UI)
-cargo test -p zensight-common       # 63 tests
+cargo test -p zensight              # 330 tests (unit + UI)
+cargo test -p zensight-common       # 55 tests
 cargo test -p zensight-sensor-core  # 25 tests
 cargo test -p zensight-sensor-snmp     # 22 tests   (needs openssl-devel)
-cargo test -p zensight-sensor-logs   # 262 tests (parser, receiver, filtering, templating, SLOs)
-cargo test -p zensight-sensor-netflow  # 16 tests
-cargo test -p zensight-sensor-modbus   # 11 tests
+cargo test -p zensight-sensor-logs   # 286 tests (parser, receiver, filtering, templating, SLOs)
+cargo test -p zensight-sensor-netflow  # 26 tests
+cargo test -p zensight-sensor-modbus   # 16 tests
 cargo test -p zensight-sensor-sysinfo  # 88 tests (collectors, saturation, alerting)
-cargo test -p zensight-sensor-gnmi     # 8 tests    (needs protoc)
+cargo test -p zensight-sensor-gnmi     # 15 tests   (needs protoc)
 cargo test -p zensight-sensor-netlink  # 52 tests (interfaces, sockets, sentinel rules, nft counters)
 cargo test -p zensight-sensor-netring  # 71 tests (flows, beaconing, DNS-tunnel, ATT&CK, traffic-matrix, lateral/exfil, JA4H)
-cargo test -p zensight-exporter-prometheus  # 50 tests (mapping, collector, HTTP)
-cargo test -p zensight-exporter-otel        # 41 tests (metrics, logs, severity)
+cargo test -p zensight-exporter-prometheus  # 60 tests (mapping, collector, alerts, HTTP)
+cargo test -p zensight-exporter-otel        # 46 tests (metrics, logs, alerts, severity)
 
 # Run a single test
 cargo test -p zensight test_dashboard_empty
@@ -74,6 +74,12 @@ cargo clippy --workspace
 cargo check --workspace
 ```
 
+CI (`.github/workflows/rust.yml`) enforces, as a merge gate: `cargo test
+--workspace --locked`, `cargo fmt --check`, `cargo clippy -D warnings`, and a
+**design-system color guard** (grep for ad-hoc `Color::from_rgb` outside
+`view/theme.rs`, `view/tokens.rs`, and `view/components/`). Keep colors in the
+design system (see *Design System* below) or the guard fails the build.
+
 ## Architecture
 
 ### Crate Organization
@@ -89,13 +95,22 @@ zensight/                    # Workspace root
 │   │   ├── subscription.rs  # Zenoh subscription sensor
 │   │   ├── mock.rs          # Mock telemetry generators
 │   │   └── view/            # UI components
-│   │       ├── dashboard.rs # Main dashboard
+│   │       ├── shell.rs     # Persistent app shell (left nav rail + top bar)
+│   │       ├── dashboard.rs # Main dashboard (host cards / fleet overview)
+│   │       ├── host.rs      # Per-host aggregate view
 │   │       ├── device.rs    # Device detail view
 │   │       ├── alerts.rs    # Alerts management (incl. external anomalies/expectations)
+│   │       ├── incident.rs / groups.rs  # Unified Incident object + alert grouping
 │   │       ├── security.rs  # NDR/anomaly lens over alerts (ATT&CK tactic view)
+│   │       ├── detection_tuning.rs # Runtime detector allowlist/threshold panel
 │   │       ├── expectations.rs # Sentinel expectations authoring UI
+│   │       ├── inventory.rs # Passive asset inventory + fingerprint explorer
 │   │       ├── sensors.rs   # Sensor registry/health detail
 │   │       ├── settings.rs  # Settings page
+│   │       ├── palette.rs   # Command palette (Ctrl+P)
+│   │       ├── search.rs    # Fuzzy global metric search (Ctrl+K)
+│   │       ├── help.rs      # Keyboard-shortcuts help overlay (?)
+│   │       ├── trend.rs     # Universal trend layer (booleans/log-rate series)
 │   │       ├── freshness.rs # Data-freshness indicators
 │   │       ├── topology/    # Network topology visualization
 │   │       │   ├── mod.rs   # TopologyState, node info panel
@@ -325,6 +340,26 @@ let icon = icons::settings::<Message>(IconSize::Medium);
 let protocol_icon = icons::protocol_icon::<Message>(Protocol::Snmp, IconSize::Small);
 ```
 
+### Design System (D2)
+
+All colors must come from the design system — enforced by a CI grep guard
+(see *Linting and Formatting*):
+
+- `view/theme.rs` — theme-aware `ThemeColors` accessors **and** theme-independent
+  `pub const` palettes (status, severity, syslog levels, toast, accents).
+- `view/tokens.rs` — font/spacing tokens only (no colors, by design).
+- `view/components/` — shared widget kit; data colors via `kit::rgb` / `kit::rgba`.
+
+Never write `Color::from_rgb(...)` outside those three locations.
+
+### Command Palette, Search & Help
+
+- **Command palette** (`view/palette.rs`, Ctrl+P) — navigation + actions, filtered
+  with the shared fuzzy matcher in `view/search.rs`.
+- **Global metric search** (`view/search.rs`, Ctrl+K) — two-tier fuzzy match
+  (substring tier then subsequence tier) across all devices/metrics.
+- **Help overlay** (`view/help.rs`, `?`) — keyboard-shortcut reference.
+
 ### View State Pattern
 
 Each view has its own state struct:
@@ -336,7 +371,10 @@ Each view has its own state struct:
 - `TopologyState` - Network topology graph, nodes, edges, layout
 
 `CurrentView` (`zensight/src/app.rs`) enumerates the routable views: Dashboard,
-Device, Settings, Alerts, Topology, Expectations, Security, Sensors, Logs.
+Device, Settings, Alerts, Topology, Expectations, Security, Sensors, Logs,
+Inventory, Incidents. A persistent app shell (`view/shell.rs`) wraps them with a
+left nav rail + top bar; the command palette, fuzzy search, and help overlay are
+overlays rendered on top of the current view, not routable views.
 
 ### Sensor Health Summary
 
@@ -413,6 +451,14 @@ ZenSight includes exporters that forward Zenoh telemetry to external observabili
 - Syslog messages converted to OTEL logs with severity mapping
 - Resource attributes for service identification
 - Same filtering capabilities as Prometheus exporter
+
+**Alert export** (both exporters, `export_alerts`, default on): because the
+telemetry wildcard `zensight/**` does **not** match `@/`-prefixed chunks, each
+exporter declares a **second** subscriber on `all_alerts_wildcard()`
+(`zensight/*/@/alerts/*`). Firing alerts become a Prometheus `<prefix>_alert`
+gauge (Alertmanager-compatible; series absent once resolved) and OTLP log records
+on the `zensight.alerts` scope. A regression test pins that `zensight/**` must not
+match `@/alerts/*` so this can't silently re-break.
 
 Key files:
 - `zensight-exporter-prometheus/src/mapping.rs` - Metric type conversion and name sanitization

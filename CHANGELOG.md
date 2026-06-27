@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A large release: two new kernel/wire-level sensors, a unified logs sensor with
+journald, a full host/incident-centric frontend redesign with NDR, alert export
+to Prometheus/OTel, and OS packaging. See `docs/SENSORS.md`, `docs/KEYSPACE.md`,
+and `docs/ARCHITECTURE.md` for the authoritative references.
+
+### Added
+
+#### New sensors
+
+- **`zensight-sensor-netlink`** — Linux kernel networking telemetry over
+  RTNETLINK + `sock_diag`, read **unprivileged**: interface/address/route/
+  neighbor state, enriched `tcp_info` (delivery/pacing/retrans/reordering),
+  qdisc/bufferbloat health score with AQM classification, conntrack and
+  WireGuard (root-gated), nftables per-rule hit-rate, a default-route flap
+  history, and a control-plane change timeline. Embeds a **sentinel** that
+  asserts declared expectations (sockets/links/routes, rate-of-change, delivery
+  floors) and raises alerts on deviation, hot-swappable at runtime.
+- **`zensight-sensor-netring`** — wire-level flow / L7 / NDR telemetry via
+  AF_PACKET/AF_XDP (needs `CAP_NET_RAW`) or offline pcap replay: flow RED,
+  bandwidth, TCP resets, DNS/HTTP RED, TLS fingerprints, ICMP errors, a
+  `(src,dst)` traffic matrix, and capture self-health with honest drop
+  accounting + overload detection. Detectors: TRW port-scan, RITA beaconing,
+  DNS-tunnel / Newly-Observed-Domain, connection-flood, Community ID v1, and
+  MITRE ATT&CK technique tags. Opt-in: lateral-movement (SMB/RDP/Kerberos) and
+  data-exfil heuristics, threat-intel (flow-risk/IOC/Sigma), passive asset
+  inventory (ARP/NDP/LLDP/CDP), QUIC/SSH inventories, and JA4H fingerprints.
+
+#### Logs sensor (formerly `syslog`)
+
+- **journald ingestion** via libsystemd — scope/namespace, server-side matching,
+  cursor-based gap-free resume, and known-event alerts (coredump / unit-failed /
+  OOM by `MESSAGE_ID`); audit/SELinux records tagged `category=security`.
+- **Per-line log events** (`events/<uid>`) with the OpenTelemetry logs data
+  model in labels, replacing the last-writer-wins `<facility>/<severity>` key.
+- Multiline stack-trace joining, a Drain3-style streaming **template miner** with
+  novelty / rate-spike detection, derived per-unit log-rate and error rollups,
+  per-unit **error budgets / SLOs with burn-rate alerts**, journald backpressure
+  / rate-limit / drop accounting, and RFC 6587 framing on the network path.
+
+#### Alerting & detection
+
+- Common **alert model** (`Alert{Kind,Severity,State}`, stable `alert_key`) and
+  an `AlertReporter` (debounce, reconcile) in `zensight-sensor-core`. Alerts flow
+  on `@/alerts/<key>` as a firing → resolved → tombstone lifecycle, with a
+  `@/query/alerts` firing-set queryable for late-joiner recovery.
+
+#### Frontend
+
+- **Redesign**: persistent app shell (left nav rail + top bar), host/
+  incident-centric information architecture with facet tabs, a unified
+  **Incident** object (grouped alerts + timeline + evidence pivots), and a
+  composite host-health / worst-first fleet overview.
+- New views: **Security** (NDR anomaly + ATT&CK by-tactic lens, detection
+  tuning), **Expectations** (sentinel authoring), **Sensors** (health/failure
+  tracking), top-level **Logs** (structured drill-down, MESSAGE_ID catalog,
+  follow/pause, boot lens), **Inventory** + unified **fingerprint explorer**, and
+  specialized netlink/netring device views with on-demand detail drill-downs.
+- Productivity: **command palette** (Ctrl+P), **fuzzy** global metric search,
+  **keyboard-shortcuts help overlay**, saved **alert-filter presets**, alert
+  severity/source filter pills, per-device **metric favorites**, "alert on this
+  metric" promotion, desktop notifications for CRITICAL alerts, native save
+  dialog for export, and an absolute from/to chart time-range picker.
+- Topology enrichment (netlink host nodes + neighbor-adjacency edges, alert
+  overlay, router classification), a universal trend layer (booleans as 0/1 step
+  series, log-rate series), and a **local store** (redb hot ring + tiered
+  retention/eviction, template-aware log sampling) so history survives restart.
+
+#### Exporters
+
+- **Export sensor alerts** to Prometheus (a `<prefix>_alert` gauge, Alertmanager-
+  compatible) and OTel (OTLP log records on the `zensight.alerts` scope).
+- OpenTelemetry **host-metrics semantic-convention** mapping for sysinfo via a
+  shared `zensight_common::semconv` table, so exported metrics are
+  dashboard-portable.
+
+#### Packaging & operations
+
+- **systemd units** for every sensor and exporter (hardened: `DynamicUser`,
+  `ProtectSystem=strict`, minimal ambient caps) plus **deb/rpm packaging parity**
+  for all sensors and exporters, installing a unit and an example config.
+- **SIGTERM** is handled for graceful shutdown (publish offline status, tombstone
+  firing alerts) under systemd/Docker stop, not just Ctrl-C.
+
+#### Project
+
+- `justfile` to build / grant caps / configure / run the GUI with local sensors,
+  pinning an explicit loopback rendezvous so discovery works without multicast.
+- CI **clippy (`-D warnings`) + rustfmt gate** and a design-system color guard.
+
 ### Changed
 
 - **BREAKING**: Renamed the "bridge" crate family to "sensor". `zenoh-bridge-*`
@@ -20,6 +109,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SensorInfo`, and `CorrelationEntry` to `sensor`/`sensors`. All sensors and the
   frontend cut over together; the `zensight/<protocol>/<source>/<metric>`
   telemetry prefix is unchanged.
+- **Keyspace v2**: a formalized control-plane under `zensight/<protocol>/@/…`
+  (`health`, `errors`, `status`, `alive`, `alerts`, `commands`, `query`) that
+  telemetry wildcards deliberately don't match, plus on-demand `@/query/<topic>`
+  detail channels (high-cardinality data served on request, never streamed). The
+  `syslog` protocol is now `logs`. Documented in `docs/KEYSPACE.md`.
+- Telemetry is published with zenoh-ext **AdvancedPublisher** (per-key cache +
+  late-joiner recovery), paired with the GUI's AdvancedSubscriber.
+- Frontend **design system**: type/spacing tokens, a theme-aware color layer, and
+  a shared component kit; all ad-hoc colors centralized (CI-guarded).
+
+### Fixed
+
+- **Discovery**: the GUI and sensors form a session via an explicit loopback
+  rendezvous instead of relying on multicast (broke under VPN/extra interfaces).
+- Harden the SNMP authPriv path so a malformed v3 config returns an error instead
+  of panicking; correct gNMI path-segment handling.
+- Device-liveness regression and several dead/un-wired query channels in the GUI.
 
 ## [0.5.0] - 2026-02-21
 
