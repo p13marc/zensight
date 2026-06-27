@@ -198,30 +198,31 @@ impl ModbusPoller {
                 Ok(result.into_iter().map(TelemetryValue::Boolean).collect())
             }
             RegisterType::Input => {
-                let count = self.registers_needed(register);
+                let count = Self::registers_needed(register);
                 let result = ctx
                     .read_input_registers(register.address, count)
                     .await
                     .map_err(|e| PollerError::Read(e.to_string()))?
                     .map_err(|e| PollerError::Read(format!("Exception: {:?}", e)))?;
 
-                self.decode_registers(&result, register)
+                Self::decode_registers(&result, register)
             }
             RegisterType::Holding => {
-                let count = self.registers_needed(register);
+                let count = Self::registers_needed(register);
                 let result = ctx
                     .read_holding_registers(register.address, count)
                     .await
                     .map_err(|e| PollerError::Read(e.to_string()))?
                     .map_err(|e| PollerError::Read(format!("Exception: {:?}", e)))?;
 
-                self.decode_registers(&result, register)
+                Self::decode_registers(&result, register)
             }
         }
     }
 
     /// Calculate how many 16-bit registers are needed for the configured data type.
-    fn registers_needed(&self, register: &RegisterConfig) -> u16 {
+    /// Number of Modbus registers a configured value spans (pure; no `self`).
+    fn registers_needed(register: &RegisterConfig) -> u16 {
         let regs_per_value = match register.data_type {
             DataType::U16 | DataType::I16 => 1,
             DataType::U32 | DataType::I32 | DataType::F32 => 2,
@@ -230,9 +231,8 @@ impl ModbusPoller {
         register.count * regs_per_value
     }
 
-    /// Decode raw register values based on data type configuration.
+    /// Decode raw register values based on data type configuration (pure; no `self`).
     fn decode_registers(
-        &self,
         data: &[u16],
         register: &RegisterConfig,
     ) -> Result<Vec<TelemetryValue>, PollerError> {
@@ -389,53 +389,115 @@ mod tests {
         assert_eq!(RegisterType::Holding.as_str(), "holding");
     }
 
-    #[test]
-    fn test_decode_u16() {
-        let register = RegisterConfig {
+    fn reg(data_type: DataType, count: u16, scale: f64, offset: f64) -> RegisterConfig {
+        RegisterConfig {
             register_type: RegisterType::Holding,
             address: 0,
-            count: 2,
+            count,
             name: None,
-            data_type: DataType::U16,
-            scale: 1.0,
-            offset: 0.0,
+            data_type,
+            scale,
+            offset,
             unit: None,
-        };
-
-        // Create a temporary poller just for testing decode
-        // We can test the decode logic directly
-        let data = [100u16, 200u16];
-        let regs_per_value = 1;
-        let mut values = Vec::new();
-
-        for chunk in data.chunks(regs_per_value) {
-            let raw = chunk[0] as f64;
-            let scaled = raw * register.scale + register.offset;
-            values.push(scaled);
         }
+    }
 
-        assert_eq!(values, vec![100.0, 200.0]);
+    /// Extract the f64 out of each decoded `Gauge`.
+    fn gauges(data: &[u16], register: &RegisterConfig) -> Vec<f64> {
+        ModbusPoller::decode_registers(data, register)
+            .unwrap()
+            .into_iter()
+            .map(|v| match v {
+                TelemetryValue::Gauge(f) => f,
+                other => panic!("expected Gauge, got {other:?}"),
+            })
+            .collect()
     }
 
     #[test]
-    fn test_decode_f32_big_endian() {
-        // Test big-endian F32 decoding
-        // Value: 123.456 in IEEE 754 = 0x42F6E979
-        let data = [0x42F6u16, 0xE979u16];
-        let bits = ((data[0] as u32) << 16) | (data[1] as u32);
-        let value = f32::from_bits(bits);
-
-        assert!((value - 123.456).abs() < 0.001);
+    fn decode_u16_multi() {
+        let r = reg(DataType::U16, 2, 1.0, 0.0);
+        assert_eq!(gauges(&[100, 200], &r), vec![100.0, 200.0]);
     }
 
     #[test]
-    fn test_decode_with_scale_offset() {
-        let raw = 1000.0_f64;
-        let scale = 0.1;
-        let offset = -50.0;
-        let result = raw * scale + offset;
+    fn decode_i16_negative() {
+        // 0xFFFF as i16 = -1.
+        let r = reg(DataType::I16, 1, 1.0, 0.0);
+        assert_eq!(gauges(&[0xFFFF], &r), vec![-1.0]);
+    }
 
-        // 1000 * 0.1 - 50 = 50
-        assert_eq!(result, 50.0);
+    #[test]
+    fn decode_u32_big_and_little_endian() {
+        // 0x0001_0000 = 65536; LE swaps the two words.
+        assert_eq!(
+            gauges(&[0x0001, 0x0000], &reg(DataType::U32, 1, 1.0, 0.0)),
+            vec![65536.0]
+        );
+        assert_eq!(
+            gauges(&[0x0000, 0x0001], &reg(DataType::U32Le, 1, 1.0, 0.0)),
+            vec![65536.0]
+        );
+    }
+
+    #[test]
+    fn decode_i32_negative_both_word_orders() {
+        // 0xFFFF_FFFF = -1 in i32.
+        assert_eq!(
+            gauges(&[0xFFFF, 0xFFFF], &reg(DataType::I32, 1, 1.0, 0.0)),
+            vec![-1.0]
+        );
+        assert_eq!(
+            gauges(&[0xFFFF, 0xFFFF], &reg(DataType::I32Le, 1, 1.0, 0.0)),
+            vec![-1.0]
+        );
+    }
+
+    #[test]
+    fn decode_f32_big_and_little_endian() {
+        // 123.456f32 = 0x42F6_E979.
+        let be = gauges(&[0x42F6, 0xE979], &reg(DataType::F32, 1, 1.0, 0.0));
+        assert!((be[0] - 123.456).abs() < 0.001, "BE got {}", be[0]);
+        // F32Le swaps the words.
+        let le = gauges(&[0xE979, 0x42F6], &reg(DataType::F32Le, 1, 1.0, 0.0));
+        assert!((le[0] - 123.456).abs() < 0.001, "LE got {}", le[0]);
+    }
+
+    #[test]
+    fn decode_applies_scale_and_offset() {
+        // 1000 * 0.1 - 50 = 50.
+        let r = reg(DataType::U16, 1, 0.1, -50.0);
+        assert_eq!(gauges(&[1000], &r), vec![50.0]);
+    }
+
+    #[test]
+    fn decode_skips_trailing_partial_chunk() {
+        // A 32-bit type with an odd register count: the dangling word is skipped.
+        let r = reg(DataType::U32, 2, 1.0, 0.0);
+        // Two full values + one trailing word that can't form a u32.
+        assert_eq!(
+            gauges(&[0x0001, 0x0000, 0x0002, 0x0000, 0x0003], &r),
+            vec![65536.0, 131072.0]
+        );
+    }
+
+    #[test]
+    fn registers_needed_per_type() {
+        assert_eq!(
+            ModbusPoller::registers_needed(&reg(DataType::U16, 3, 1.0, 0.0)),
+            3
+        );
+        assert_eq!(
+            ModbusPoller::registers_needed(&reg(DataType::I16, 2, 1.0, 0.0)),
+            2
+        );
+        assert_eq!(
+            ModbusPoller::registers_needed(&reg(DataType::U32, 2, 1.0, 0.0)),
+            4
+        );
+        assert_eq!(
+            ModbusPoller::registers_needed(&reg(DataType::F32Le, 1, 1.0, 0.0)),
+            2
+        );
     }
 }

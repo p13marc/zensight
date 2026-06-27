@@ -675,4 +675,163 @@ mod tests {
         let metric = build_flow_metric(&record);
         assert_eq!(metric, "192.168.1.1/10.0.0.1/tcp");
     }
+
+    #[test]
+    fn test_flow_field_value_all_variants() {
+        assert!(matches!(
+            FlowFieldValue::Float(1.5).to_telemetry_value(),
+            TelemetryValue::Gauge(_)
+        ));
+        assert!(matches!(
+            FlowFieldValue::MacAddr("aa:bb".into()).to_telemetry_value(),
+            TelemetryValue::Text(_)
+        ));
+        assert!(matches!(
+            FlowFieldValue::String("x".into()).to_telemetry_value(),
+            TelemetryValue::Text(_)
+        ));
+        assert!(matches!(
+            FlowFieldValue::Bytes(vec![1, 2]).to_telemetry_value(),
+            TelemetryValue::Binary(_)
+        ));
+    }
+
+    /// A FlowRecord uses `bytes` as the primary metric value, falls back to
+    /// `packets`, and projects fields onto labels + protocol = Netflow.
+    #[test]
+    fn test_to_telemetry_point() {
+        let mut fields = HashMap::new();
+        fields.insert(
+            "src_addr".to_string(),
+            FlowFieldValue::IpAddr("192.168.1.1".to_string()),
+        );
+        fields.insert(
+            "dst_addr".to_string(),
+            FlowFieldValue::IpAddr("10.0.0.1".to_string()),
+        );
+        fields.insert("protocol".to_string(), FlowFieldValue::Uint(6));
+        fields.insert("packets".to_string(), FlowFieldValue::Uint(10));
+        fields.insert("bytes".to_string(), FlowFieldValue::Uint(1500));
+
+        let record = FlowRecord {
+            exporter_ip: "172.16.0.1".to_string(),
+            exporter_name: "router01".to_string(),
+            version: 5,
+            fields,
+            timestamp: 42,
+        };
+
+        let tp = to_telemetry_point(&record);
+        assert_eq!(tp.protocol, Protocol::Netflow);
+        assert_eq!(tp.source, "router01");
+        assert_eq!(tp.metric, "192.168.1.1/10.0.0.1/tcp");
+        assert_eq!(tp.timestamp, 42);
+        // `bytes` is preferred over `packets` as the series value.
+        assert!(matches!(tp.value, TelemetryValue::Counter(1500)));
+        assert_eq!(tp.labels.get("version").map(String::as_str), Some("v5"));
+        assert_eq!(
+            tp.labels.get("exporter_ip").map(String::as_str),
+            Some("172.16.0.1")
+        );
+        assert_eq!(tp.labels.get("bytes").map(String::as_str), Some("1500"));
+    }
+
+    /// `packets` is used as the value when no `bytes` field is present.
+    #[test]
+    fn test_to_telemetry_point_packets_fallback() {
+        let mut fields = HashMap::new();
+        fields.insert("packets".to_string(), FlowFieldValue::Uint(7));
+        let record = FlowRecord {
+            exporter_ip: "e".to_string(),
+            exporter_name: "e".to_string(),
+            version: 9,
+            fields,
+            timestamp: 0,
+        };
+        assert!(matches!(
+            to_telemetry_point(&record).value,
+            TelemetryValue::Counter(7)
+        ));
+    }
+
+    /// Build a minimal NetFlow v5 packet (24-byte header + one 48-byte record)
+    /// and run it through the real parser + `parse_v5_flow`, asserting the wire
+    /// fields decode and map onto the FlowRecord correctly.
+    #[test]
+    fn test_parse_v5_packet_roundtrip() {
+        let mut pkt: Vec<u8> = Vec::new();
+        // ── Header (24 bytes) ──
+        pkt.extend_from_slice(&5u16.to_be_bytes()); // version
+        pkt.extend_from_slice(&1u16.to_be_bytes()); // count
+        pkt.extend_from_slice(&1000u32.to_be_bytes()); // sys_uptime
+        pkt.extend_from_slice(&1_700_000_000u32.to_be_bytes()); // unix_secs
+        pkt.extend_from_slice(&0u32.to_be_bytes()); // unix_nsecs
+        pkt.extend_from_slice(&0u32.to_be_bytes()); // flow_sequence
+        pkt.push(0); // engine_type
+        pkt.push(0); // engine_id
+        pkt.extend_from_slice(&0u16.to_be_bytes()); // sampling_interval
+        // ── Record (48 bytes) ──
+        pkt.extend_from_slice(&0xC0A8_0101u32.to_be_bytes()); // src 192.168.1.1
+        pkt.extend_from_slice(&0x0A00_0001u32.to_be_bytes()); // dst 10.0.0.1
+        pkt.extend_from_slice(&0u32.to_be_bytes()); // next_hop
+        pkt.extend_from_slice(&1u16.to_be_bytes()); // input
+        pkt.extend_from_slice(&2u16.to_be_bytes()); // output
+        pkt.extend_from_slice(&10u32.to_be_bytes()); // d_pkts
+        pkt.extend_from_slice(&1500u32.to_be_bytes()); // d_octets
+        pkt.extend_from_slice(&100u32.to_be_bytes()); // first
+        pkt.extend_from_slice(&200u32.to_be_bytes()); // last
+        pkt.extend_from_slice(&12345u16.to_be_bytes()); // src_port
+        pkt.extend_from_slice(&80u16.to_be_bytes()); // dst_port
+        pkt.push(0); // pad1
+        pkt.push(0x10); // tcp_flags
+        pkt.push(6); // protocol (TCP)
+        pkt.push(0); // tos
+        pkt.extend_from_slice(&0u16.to_be_bytes()); // src_as
+        pkt.extend_from_slice(&0u16.to_be_bytes()); // dst_as
+        pkt.push(24); // src_mask
+        pkt.push(16); // dst_mask
+        pkt.extend_from_slice(&0u16.to_be_bytes()); // pad2
+        assert_eq!(pkt.len(), 72);
+
+        let mut parser = NetflowParser::default();
+        let packets = parser.parse_bytes(&pkt);
+
+        let uint = |f: &FlowFieldValue| match f {
+            FlowFieldValue::Uint(v) => *v,
+            other => panic!("expected Uint, got {other:?}"),
+        };
+        let ip = |f: &FlowFieldValue| match f {
+            FlowFieldValue::IpAddr(s) => s.clone(),
+            other => panic!("expected IpAddr, got {other:?}"),
+        };
+
+        let mut saw_flow = false;
+        for packet in packets {
+            if let NetflowPacket::V5(v5) = packet {
+                for flow in &v5.flowsets {
+                    let r = parse_v5_flow("1.2.3.4", "exp", flow, 7);
+                    assert_eq!(r.version, 5);
+                    assert_eq!(r.timestamp, 7);
+                    assert_eq!(ip(&r.fields["src_addr"]), "192.168.1.1");
+                    assert_eq!(ip(&r.fields["dst_addr"]), "10.0.0.1");
+                    assert_eq!(uint(&r.fields["packets"]), 10);
+                    assert_eq!(uint(&r.fields["bytes"]), 1500);
+                    assert_eq!(uint(&r.fields["src_port"]), 12345);
+                    assert_eq!(uint(&r.fields["dst_port"]), 80);
+                    assert_eq!(uint(&r.fields["protocol"]), 6);
+                    assert_eq!(uint(&r.fields["tcp_flags"]), 16);
+                    saw_flow = true;
+                }
+            }
+        }
+        assert!(saw_flow, "parser did not yield a V5 flow record");
+    }
+
+    /// Garbage / truncated input must not panic the parser path.
+    #[test]
+    fn test_parse_garbage_does_not_panic() {
+        let mut parser = NetflowParser::default();
+        let _ = parser.parse_bytes(&[0xff, 0x00, 0x01]);
+        let _ = parser.parse_bytes(&[]);
+    }
 }
