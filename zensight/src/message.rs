@@ -464,6 +464,15 @@ pub enum Message {
     /// Toggle the keyboard-shortcuts help overlay (#28).
     ToggleHelp,
 
+    /// Open the command palette (#28).
+    OpenCommandPalette,
+    /// Close the command palette (#28).
+    CloseCommandPalette,
+    /// Update the command-palette query (#28).
+    SetCommandPaletteQuery(String),
+    /// Run the command at the given index into the current filtered list (#28).
+    RunPaletteCommand(usize),
+
     /// Open the global cross-device metric search panel (#27).
     OpenGlobalSearch,
     /// Close the global search panel (#27).

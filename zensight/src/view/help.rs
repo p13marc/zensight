@@ -15,6 +15,7 @@ use crate::view::tokens::{font, space};
 /// the bindings themselves are in `subscription::keyboard_subscription`.
 const SHORTCUTS: &[(&str, &str)] = &[
     ("?", "Toggle this help"),
+    ("Ctrl + P", "Open the command palette"),
     ("Ctrl + K", "Search metrics across all devices"),
     ("Ctrl + F", "Focus the device search"),
     ("Esc", "Close dialog / go back"),

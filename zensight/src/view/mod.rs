@@ -17,6 +17,7 @@ pub mod icons;
 pub mod incident;
 pub mod inventory;
 pub mod overview;
+pub mod palette;
 pub mod search;
 pub mod security;
 pub mod sensors;
