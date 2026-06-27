@@ -11,6 +11,7 @@ pub mod formatting;
 pub mod freshness;
 pub mod groups;
 pub mod health;
+pub mod help;
 pub mod host;
 pub mod icons;
 pub mod incident;

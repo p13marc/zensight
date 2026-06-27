@@ -262,6 +262,26 @@ fn test_shell_shows_freshness_paused() {
     assert!(ui.find("Paused").is_ok());
 }
 
+/// The shell top bar's "?" button toggles the keyboard-shortcuts help (#28).
+#[test]
+fn test_shell_help_button() {
+    let mut ui = shell_ui();
+    let _ = ui.click("?");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(messages.iter().any(|m| matches!(m, Message::ToggleHelp)));
+}
+
+/// The help overlay lists shortcuts and offers a Close action (#28).
+#[test]
+fn test_help_overlay_lists_shortcuts() {
+    let mut ui = simulator(zensight::view::help::help_overlay());
+    assert!(ui.find("Keyboard Shortcuts").is_ok());
+    assert!(ui.find("Search metrics across all devices").is_ok());
+    let _ = ui.click("Close");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(messages.iter().any(|m| matches!(m, Message::ToggleHelp)));
+}
+
 /// The nav rail's Settings button emits OpenSettings.
 #[test]
 fn test_shell_settings_button() {
