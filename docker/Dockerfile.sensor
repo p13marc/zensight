@@ -12,10 +12,12 @@ FROM rust:1.92-bookworm AS builder
 ARG SENSOR_PACKAGE
 
 # Install build dependencies
+# libsystemd-dev: the logs sensor's journald support (default-on feature)
 RUN apt-get update && apt-get install -y \
     protobuf-compiler \
     pkg-config \
     libssl-dev \
+    libsystemd-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -50,8 +52,11 @@ ARG SENSOR_PACKAGE
 ARG SENSOR_NAME
 
 # Install runtime dependencies
+# libsystemd0: logs sensor (journald); libssl3: snmp sensor (openssl)
 RUN apt-get update && apt-get install -y \
     ca-certificates \
+    libsystemd0 \
+    libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for running the sensor
