@@ -462,4 +462,140 @@ mod tests {
         assert_eq!(name, "state");
         assert!(keys.is_empty());
     }
+
+    fn test_subscriber() -> GnmiSubscriber {
+        let target = GnmiTarget {
+            name: "test".to_string(),
+            address: "localhost:9339".to_string(),
+            credentials: None,
+            tls: Default::default(),
+            subscriptions: vec![],
+            encoding: GnmiEncoding::Json,
+        };
+        GnmiSubscriber::new(
+            target,
+            "zensight/gnmi".to_string(),
+            SerializationFormat::Json,
+        )
+    }
+
+    fn typed(value: gnmi::typed_value::Value) -> gnmi::TypedValue {
+        gnmi::TypedValue { value: Some(value) }
+    }
+
+    #[test]
+    fn test_parse_path_segment_multiple_keys() {
+        let (name, keys) =
+            GnmiSubscriber::parse_path_segment("interface[name=eth0][index=0]").unwrap();
+        assert_eq!(name, "interface");
+        assert_eq!(keys.get("name"), Some(&"eth0".to_string()));
+        assert_eq!(keys.get("index"), Some(&"0".to_string()));
+    }
+
+    #[test]
+    fn test_parse_path_segment_empty() {
+        assert!(GnmiSubscriber::parse_path_segment("").is_none());
+    }
+
+    #[test]
+    fn test_typed_value_to_telemetry_scalars() {
+        use gnmi::typed_value::Value;
+        let sub = test_subscriber();
+
+        assert_eq!(
+            sub.typed_value_to_telemetry(&typed(Value::StringVal("hi".to_string()))),
+            TelemetryValue::Text("hi".to_string())
+        );
+        assert_eq!(
+            sub.typed_value_to_telemetry(&typed(Value::IntVal(-5))),
+            TelemetryValue::Gauge(-5.0)
+        );
+        assert_eq!(
+            sub.typed_value_to_telemetry(&typed(Value::UintVal(42))),
+            TelemetryValue::Counter(42)
+        );
+        assert_eq!(
+            sub.typed_value_to_telemetry(&typed(Value::BoolVal(true))),
+            TelemetryValue::Boolean(true)
+        );
+        assert_eq!(
+            sub.typed_value_to_telemetry(&typed(Value::DoubleVal(1.5))),
+            TelemetryValue::Gauge(1.5)
+        );
+        assert_eq!(
+            sub.typed_value_to_telemetry(&typed(Value::BytesVal(vec![1, 2, 3]))),
+            TelemetryValue::Binary(vec![1, 2, 3])
+        );
+    }
+
+    #[test]
+    fn test_typed_value_to_telemetry_json_and_leaflist() {
+        use gnmi::typed_value::Value;
+        let sub = test_subscriber();
+
+        assert_eq!(
+            sub.typed_value_to_telemetry(&typed(Value::JsonVal(b"{\"a\":1}".to_vec()))),
+            TelemetryValue::Text("{\"a\":1}".to_string())
+        );
+
+        let ll = gnmi::ScalarArray {
+            element: vec![
+                typed(Value::IntVal(1)),
+                typed(Value::StringVal("x".to_string())),
+            ],
+        };
+        assert_eq!(
+            sub.typed_value_to_telemetry(&typed(Value::LeaflistVal(ll))),
+            TelemetryValue::Text("[1,\"x\"]".to_string())
+        );
+    }
+
+    #[test]
+    fn test_typed_value_to_telemetry_none_is_empty_text() {
+        let sub = test_subscriber();
+        assert_eq!(
+            sub.typed_value_to_telemetry(&gnmi::TypedValue { value: None }),
+            TelemetryValue::Text(String::new())
+        );
+    }
+
+    #[test]
+    fn test_typed_value_to_string_quoting() {
+        use gnmi::typed_value::Value;
+        let sub = test_subscriber();
+
+        assert_eq!(
+            sub.typed_value_to_string(&typed(Value::StringVal("s".to_string()))),
+            "\"s\""
+        );
+        assert_eq!(sub.typed_value_to_string(&typed(Value::IntVal(7))), "7");
+        assert_eq!(
+            sub.typed_value_to_string(&typed(Value::BoolVal(false))),
+            "false"
+        );
+        // Unhandled variants fall through to "null".
+        assert_eq!(
+            sub.typed_value_to_string(&typed(Value::BytesVal(vec![0]))),
+            "null"
+        );
+    }
+
+    #[test]
+    fn test_extract_value_prefers_val_over_deprecated() {
+        use gnmi::typed_value::Value;
+        let sub = test_subscriber();
+
+        let update = gnmi::Update {
+            val: Some(typed(Value::UintVal(99))),
+            ..Default::default()
+        };
+        assert_eq!(sub.extract_value(&update), TelemetryValue::Counter(99));
+
+        // No value at all -> empty text.
+        let empty = gnmi::Update::default();
+        assert_eq!(
+            sub.extract_value(&empty),
+            TelemetryValue::Text(String::new())
+        );
+    }
 }
