@@ -16,6 +16,12 @@
       bandwidth: true,   // per-application bytes/sec
       flows: true,       // flow lifecycle aggregates
       tcp_resets: true,  // TCP reset + connection-refused counters
+      // L7 RED analytics (cleartext only). Enabled here so the GUI's DNS/HTTP
+      // detail tabs (@/query/dns, @/query/http) work out of the box; without
+      // these the sensor declares no DNS/HTTP queryable and a fetch returns
+      // "No netring sensor responded".
+      dns: true,         // DNS queries/rcodes/RTT + top SLDs (UDP/53)
+      http: true,        // HTTP requests/status/latency + top hosts (TCP/80,8080)
       // L7 protocol visibility (netring 0.27, opt-in). Detail served on
       // @/query/quic and @/query/ssh; aggregate counts stream.
       quic: false,       // passive QUIC Initial SNI/ALPN/version (UDP/443)

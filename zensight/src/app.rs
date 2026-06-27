@@ -2075,6 +2075,7 @@ impl ZenSight {
         &self,
         fetch: impl FnOnce(std::sync::Arc<zenoh::Session>) -> Fut + Send + 'static,
         into_message: impl FnOnce(Result<Vec<T>, String>) -> Message + Send + 'static,
+        not_responding: &'static str,
     ) -> Task<Message>
     where
         Fut: std::future::Future<Output = Option<Vec<T>>> + Send + 'static,
@@ -2086,14 +2087,18 @@ impl ZenSight {
         Task::future(async move {
             let result = fetch(session)
                 .await
-                .ok_or_else(|| "No netring sensor responded".to_string());
+                .ok_or_else(|| not_responding.to_string());
             into_message(result)
         })
     }
 
     fn query_netring_flows(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_flows;
-        self.query_channel(fetch_flows, Message::NetringFlowsReceived)
+        self.query_channel(
+            fetch_flows,
+            Message::NetringFlowsReceived,
+            "No netring sensor responded",
+        )
     }
 
     /// Fetch netring flows for deriving real topology edges (#25). Routes to
@@ -2154,25 +2159,41 @@ impl ZenSight {
     /// Fetch the on-demand netring TLS asset inventory.
     fn query_netring_tls(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_tls;
-        self.query_channel(fetch_tls, Message::NetringTlsReceived)
+        self.query_channel(
+            fetch_tls,
+            Message::NetringTlsReceived,
+            "No netring sensor responded",
+        )
     }
 
     /// Fetch the on-demand netring QUIC SNI/ALPN inventory (#72).
     fn query_netring_quic(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_quic;
-        self.query_channel(fetch_quic, Message::NetringQuicReceived)
+        self.query_channel(
+            fetch_quic,
+            Message::NetringQuicReceived,
+            "No QUIC data — is the netring sensor running with collect.quic enabled?",
+        )
     }
 
     /// Fetch the on-demand netring SSH/HASSH inventory (#72).
     fn query_netring_ssh(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_ssh;
-        self.query_channel(fetch_ssh, Message::NetringSshReceived)
+        self.query_channel(
+            fetch_ssh,
+            Message::NetringSshReceived,
+            "No SSH data — is the netring sensor running with collect.ssh enabled?",
+        )
     }
 
     /// Fetch the on-demand netring passive asset inventory (#70).
     fn query_netring_assets(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_assets;
-        self.query_channel(fetch_assets, Message::NetringAssetsReceived)
+        self.query_channel(
+            fetch_assets,
+            Message::NetringAssetsReceived,
+            "No netring sensor responded",
+        )
     }
 
     /// Combined fetch for the first-class inventory view (#120): assets + the
@@ -2221,31 +2242,51 @@ impl ZenSight {
     /// Fetch the on-demand netring top-talker histogram (#45).
     fn query_netring_talkers(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_talkers;
-        self.query_channel(fetch_talkers, Message::NetringTalkersReceived)
+        self.query_channel(
+            fetch_talkers,
+            Message::NetringTalkersReceived,
+            "No netring sensor responded",
+        )
     }
 
     /// Fetch the on-demand netring `(src,dst)` traffic matrix / service map (#122).
     fn query_netring_matrix(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_matrix;
-        self.query_channel(fetch_matrix, Message::NetringMatrixReceived)
+        self.query_channel(
+            fetch_matrix,
+            Message::NetringMatrixReceived,
+            "No netring sensor responded",
+        )
     }
 
     /// Fetch the on-demand netring elephant-flow ring (#45).
     fn query_netring_elephants(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_elephants;
-        self.query_channel(fetch_elephants, Message::NetringElephantsReceived)
+        self.query_channel(
+            fetch_elephants,
+            Message::NetringElephantsReceived,
+            "No netring sensor responded",
+        )
     }
 
     /// Fetch the on-demand netring per-SLD DNS detail (#45).
     fn query_netring_dns(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_dns;
-        self.query_channel(fetch_dns, Message::NetringDnsReceived)
+        self.query_channel(
+            fetch_dns,
+            Message::NetringDnsReceived,
+            "No DNS data — is the netring sensor running with collect.dns enabled?",
+        )
     }
 
     /// Fetch the on-demand netring per-host HTTP detail (#45).
     fn query_netring_http(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_http;
-        self.query_channel(fetch_http, Message::NetringHttpReceived)
+        self.query_channel(
+            fetch_http,
+            Message::NetringHttpReceived,
+            "No HTTP data — is the netring sensor running with collect.http enabled?",
+        )
     }
 
     /// Pivot from a Security anomaly to its netring flows (#119): fetch the
