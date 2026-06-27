@@ -172,6 +172,8 @@ pub struct ZenSight {
     last_telemetry_ms: Option<i64>,
     /// Global cross-device metric search panel state (#27).
     global_search: crate::view::search::GlobalSearchState,
+    /// Command palette overlay state (#28).
+    command_palette: crate::view::palette::CommandPaletteState,
     /// Whether the keyboard-shortcuts help overlay is open (#28).
     help_open: bool,
     /// Favorited metrics (#27), keyed `protocol/source/metric`. Persisted; the
@@ -302,6 +304,7 @@ impl ZenSight {
             // Demo mode pre-loads mock points; treat the feed as fresh on boot.
             last_telemetry_ms: if demo_mode { Some(now_ms()) } else { None },
             global_search: crate::view::search::GlobalSearchState::default(),
+            command_palette: crate::view::palette::CommandPaletteState::default(),
             help_open: false,
             favorites: persistent.favorite_metrics.iter().cloned().collect(),
         };
@@ -1471,6 +1474,25 @@ impl ZenSight {
                 self.global_search.query = q;
             }
 
+            Message::OpenCommandPalette => {
+                self.command_palette.open();
+                return focus(crate::view::palette::COMMAND_PALETTE_ID.clone());
+            }
+            Message::CloseCommandPalette => {
+                self.command_palette.close();
+            }
+            Message::SetCommandPaletteQuery(q) => {
+                self.command_palette.query = q;
+            }
+            Message::RunPaletteCommand(index) => {
+                let filtered = crate::view::palette::filter(&self.command_palette.query);
+                if let Some(cmd) = filtered.get(index) {
+                    let msg = cmd.message.clone();
+                    self.command_palette.close();
+                    return Task::done(msg);
+                }
+            }
+
             Message::ClearAlerts => {
                 self.alerts.clear_alerts();
             }
@@ -2277,6 +2299,10 @@ impl ZenSight {
     /// Handle Escape key - close dialogs or go back.
     fn handle_escape(&mut self) {
         // Transient overlays close first, before any view navigation.
+        if self.command_palette.open {
+            self.command_palette.close();
+            return;
+        }
         if self.help_open {
             self.help_open = false;
             return;
@@ -2505,6 +2531,20 @@ impl ZenSight {
             let panel = container(crate::view::search::global_search_panel(
                 &self.global_search,
                 hits,
+            ))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill);
+            base_view = stack![base_view, panel].into();
+        }
+
+        // Command palette overlay (#28), centered over the current view.
+        if self.command_palette.open {
+            let filtered = crate::view::palette::filter(&self.command_palette.query);
+            let panel = container(crate::view::palette::command_palette_panel(
+                &self.command_palette,
+                &filtered,
             ))
             .width(Length::Fill)
             .height(Length::Fill)

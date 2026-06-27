@@ -87,8 +87,8 @@ const SUBSTRING_BASE: i32 = 1000;
 /// tier (earlier position + word boundary preferred); otherwise an
 /// order-preserving subsequence ("fuzzy") match scores below that tier. Internal
 /// whitespace in `needle` is ignored so multi-word queries match across
-/// separators.
-fn match_score(haystack: &str, needle: &str) -> Option<i32> {
+/// separators. Shared with the command palette (#28) so both rank identically.
+pub(crate) fn match_score(haystack: &str, needle: &str) -> Option<i32> {
     let compact: String = needle.chars().filter(|c| !c.is_whitespace()).collect();
     if compact.is_empty() {
         return None;

@@ -282,6 +282,29 @@ fn test_help_overlay_lists_shortcuts() {
     assert!(messages.iter().any(|m| matches!(m, Message::ToggleHelp)));
 }
 
+/// The command palette renders its commands and dispatches the chosen one (#28).
+#[test]
+fn test_command_palette_runs_command() {
+    use zensight::view::palette::{self, CommandPaletteState};
+
+    let mut state = CommandPaletteState::default();
+    state.open();
+    let filtered = palette::filter(&state.query);
+    let mut ui = simulator(palette::command_palette_panel(&state, &filtered));
+
+    assert!(ui.find("Command Palette").is_ok());
+    assert!(ui.find("Go to Alerts").is_ok());
+
+    // Clicking a command dispatches RunPaletteCommand with its filtered index.
+    let _ = ui.click("Go to Alerts");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::RunPaletteCommand(_)))
+    );
+}
+
 /// The nav rail's Settings button emits OpenSettings.
 #[test]
 fn test_shell_settings_button() {
