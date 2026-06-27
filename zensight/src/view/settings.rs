@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::CurrentView;
 use crate::message::Message;
-use crate::view::alerts::AlertRule;
+use crate::view::alerts::{AlertFilterPreset, AlertRule};
 use crate::view::groups::GroupsState;
 use crate::view::icons::{self, IconSize};
 use zensight_common::Protocol;
@@ -44,6 +44,9 @@ pub struct PersistentSettings {
     /// Alert rules.
     #[serde(default)]
     pub alert_rules: Vec<AlertRule>,
+    /// Saved alert-filter presets (#27).
+    #[serde(default)]
+    pub alert_filter_presets: Vec<AlertFilterPreset>,
     /// Favorited metrics (#27), keyed `protocol/source/metric`.
     #[serde(default)]
     pub favorite_metrics: Vec<String>,
@@ -87,6 +90,7 @@ impl Default for PersistentSettings {
             max_alerts: default_max_alerts(),
             groups: GroupsState::default(),
             alert_rules: Vec::new(),
+            alert_filter_presets: Vec::new(),
             favorite_metrics: Vec::new(),
             overview_selected_protocol: None,
             overview_expanded: default_overview_expanded(),
@@ -189,6 +193,7 @@ impl PersistentSettings {
             max_alerts: state.max_alerts.parse().unwrap_or(default_max_alerts()),
             groups: GroupsState::default(),
             alert_rules: Vec::new(),
+            alert_filter_presets: Vec::new(),
             favorite_metrics: Vec::new(),
             overview_selected_protocol: None,
             overview_expanded: default_overview_expanded(),
@@ -800,6 +805,7 @@ mod tests {
             max_alerts: 200,
             groups: GroupsState::default(),
             alert_rules: Vec::new(),
+            alert_filter_presets: Vec::new(),
             favorite_metrics: Vec::new(),
             overview_selected_protocol: None,
             overview_expanded: true,
@@ -833,6 +839,7 @@ mod tests {
             max_alerts: 150,
             groups: GroupsState::default(),
             alert_rules: Vec::new(),
+            alert_filter_presets: Vec::new(),
             favorite_metrics: Vec::new(),
             overview_selected_protocol: None,
             overview_expanded: true,

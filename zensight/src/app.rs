@@ -232,6 +232,8 @@ impl ZenSight {
         let mut alerts = AlertsState::with_max_alerts(persistent.max_alerts);
         // Load saved alert rules
         alerts.rules = persistent.alert_rules.clone();
+        // Load saved alert-filter presets (#27)
+        alerts.alert_filter_presets = persistent.alert_filter_presets.clone();
         if demo_mode {
             use crate::demo::demo_alert_rules;
             // Add demo rules if none are saved
@@ -1439,6 +1441,18 @@ impl ZenSight {
             Message::SetAlertSourceFilter(source) => {
                 self.alerts.external_source_filter = source;
             }
+            Message::SaveAlertFilterPreset => {
+                if self.alerts.save_current_filter_preset() {
+                    self.save_alert_filter_presets();
+                }
+            }
+            Message::ApplyAlertFilterPreset(index) => {
+                self.alerts.apply_filter_preset(index);
+            }
+            Message::DeleteAlertFilterPreset(index) => {
+                self.alerts.delete_filter_preset(index);
+                self.save_alert_filter_presets();
+            }
 
             Message::ToggleHelp => {
                 self.help_open = !self.help_open;
@@ -1798,6 +1812,15 @@ impl ZenSight {
         persistent.alert_rules = self.alerts.rules.clone();
         if let Err(e) = persistent.save() {
             tracing::error!("Failed to save alert rules: {}", e);
+        }
+    }
+
+    /// Persist the saved alert-filter presets (#27).
+    fn save_alert_filter_presets(&self) {
+        let mut persistent = PersistentSettings::load();
+        persistent.alert_filter_presets = self.alerts.alert_filter_presets.clone();
+        if let Err(e) = persistent.save() {
+            tracing::error!("Failed to save alert filter presets: {}", e);
         }
     }
 
@@ -2826,6 +2849,7 @@ impl ZenSight {
         let mut persistent = PersistentSettings::from_state(&self.settings);
         persistent.groups = self.groups.clone();
         persistent.alert_rules = self.alerts.rules.clone();
+        persistent.alert_filter_presets = self.alerts.alert_filter_presets.clone();
         persistent.favorite_metrics = self.favorites.iter().cloned().collect();
         persistent.overview_selected_protocol = self.overview.selected_protocol;
         persistent.overview_expanded = self.overview.expanded;

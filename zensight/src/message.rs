@@ -454,6 +454,12 @@ pub enum Message {
     SetAlertSeverityFilter(Option<zensight_common::AlertSeverity>),
     /// Filter the external-alerts feed by source (`None` = all) (#27).
     SetAlertSourceFilter(Option<String>),
+    /// Save the current external-alert filter combination as a preset (#27).
+    SaveAlertFilterPreset,
+    /// Apply a saved external-alert filter preset by index (#27).
+    ApplyAlertFilterPreset(usize),
+    /// Delete a saved external-alert filter preset by index (#27).
+    DeleteAlertFilterPreset(usize),
 
     /// Toggle the keyboard-shortcuts help overlay (#28).
     ToggleHelp,
