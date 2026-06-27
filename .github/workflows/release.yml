@@ -286,6 +286,7 @@ jobs:
       contents: read
       packages: write
     strategy:
+      fail-fast: false
       matrix:
         sensor:
           - name: syslog
@@ -346,6 +347,7 @@ jobs:
       contents: read
       packages: write
     strategy:
+      fail-fast: false
       matrix:
         exporter:
           - name: prometheus
