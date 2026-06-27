@@ -194,7 +194,8 @@ jobs:
       - name: Install dependencies
         run: |
           dnf install -y gcc pkg-config protobuf-compiler \
-            libxkbcommon-devel wayland-devel openssl-devel perl-FindBin
+            libxkbcommon-devel wayland-devel openssl-devel perl-FindBin \
+            systemd-devel libpcap-devel
 
       - name: Install Rust
         run: |
@@ -210,9 +211,15 @@ jobs:
         run: |
           source $HOME/.cargo/env
           cargo build --release -p zensight
-          cargo build --release -p zensight-sensor-logs
-          cargo build --release -p zensight-sensor-sysinfo
-          cargo build --release -p zensight-sensor-snmp
+          cargo build --release \
+            -p zensight-sensor-logs \
+            -p zensight-sensor-sysinfo \
+            -p zensight-sensor-snmp \
+            -p zensight-sensor-gnmi \
+            -p zensight-sensor-modbus \
+            -p zensight-sensor-netflow \
+            -p zensight-sensor-netlink \
+            -p zensight-sensor-netring
           cargo build --release -p zensight-exporter-prometheus
           cargo build --release -p zensight-exporter-otel
 
@@ -220,9 +227,9 @@ jobs:
         run: |
           source $HOME/.cargo/env
           cargo generate-rpm -p zensight
-          cargo generate-rpm -p zensight-sensor-logs
-          cargo generate-rpm -p zensight-sensor-sysinfo
-          cargo generate-rpm -p zensight-sensor-snmp
+          for s in logs sysinfo snmp gnmi modbus netflow netlink netring; do
+            cargo generate-rpm -p "zensight-sensor-$s"
+          done
           cargo generate-rpm -p zensight-exporter-prometheus
           cargo generate-rpm -p zensight-exporter-otel
 
