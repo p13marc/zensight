@@ -94,19 +94,10 @@ fn render_status_stat<'a>(
 /// Render top subscriptions by path count.
 fn render_top_subscriptions<'a>(subscriptions: &HashMap<String, usize>) -> Element<'a, Message> {
     if subscriptions.is_empty() {
-        return text("No subscription data")
-            .size(11)
-            .style(|t: &Theme| text::Style {
-                color: Some(theme::colors(t).text_muted()),
-            })
-            .into();
+        return empty_state("No subscription data", None);
     }
 
-    let title = text("Top Subscriptions")
-        .size(12)
-        .style(|t: &Theme| text::Style {
-            color: Some(theme::colors(t).text_muted()),
-        });
+    let title = empty_state("Top Subscriptions", None);
 
     let mut sorted: Vec<_> = subscriptions.iter().collect();
     sorted.sort_by(|a, b| b.1.cmp(a.1));

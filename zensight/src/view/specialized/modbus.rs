@@ -10,8 +10,8 @@ use iced_anim::widget::button;
 use zensight_common::TelemetryValue;
 
 use crate::message::Message;
-use crate::view::components::card;
 use crate::view::components::{StatusLed, StatusLedState};
+use crate::view::components::{card, empty_state};
 use crate::view::device::DeviceDetailState;
 use crate::view::icons::{self, IconSize};
 use crate::view::theme;
@@ -132,14 +132,7 @@ fn render_connection_info(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     if info_items.is_empty() {
-        info_items.push(
-            text("Modbus Device")
-                .size(12)
-                .style(|t: &Theme| text::Style {
-                    color: Some(theme::colors(t).text_muted()),
-                })
-                .into(),
-        );
+        info_items.push(empty_state("Modbus Device", None));
     }
 
     container(Row::with_children(info_items).spacing(30))
@@ -189,13 +182,7 @@ fn render_register_sections(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     if is_empty {
-        sections = sections.push(
-            text("No register data available")
-                .size(12)
-                .style(|t: &Theme| text::Style {
-                    color: Some(theme::colors(t).text_muted()),
-                }),
-        );
+        sections = sections.push(empty_state("No register data available", None));
     }
 
     sections.into()

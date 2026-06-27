@@ -641,7 +641,7 @@ pub fn device_group_menu<'a>(
     let groups = state.sorted_groups();
 
     if groups.is_empty() {
-        return text("No groups").size(11).into();
+        return empty_state("No groups", None);
     }
 
     let device_id_owned = device_id.clone();

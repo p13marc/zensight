@@ -12,7 +12,7 @@ use iced_anim::widget::button;
 use zensight_common::TelemetryValue;
 
 use crate::message::Message;
-use crate::view::components::{Gauge, StatusLed, StatusLedState, card};
+use crate::view::components::{Gauge, StatusLed, StatusLedState, card, empty_state};
 use crate::view::device::DeviceDetailState;
 use crate::view::icons::{self, IconSize};
 use crate::view::theme;
@@ -188,14 +188,7 @@ fn render_system_info(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     if info_items.is_empty() {
-        info_items.push(
-            text("Waiting for system information...")
-                .size(12)
-                .style(|t: &Theme| text::Style {
-                    color: Some(theme::colors(t).text_muted()),
-                })
-                .into(),
-        );
+        info_items.push(empty_state("Waiting for system information...", None));
     }
 
     container(Column::with_children(info_items).spacing(8))
@@ -217,16 +210,9 @@ fn render_interface_table(state: &DeviceDetailState) -> Element<'_, Message> {
     let interfaces = parse_interfaces(state);
 
     if interfaces.is_empty() {
-        return column![
-            title,
-            text("No interface data available")
-                .size(12)
-                .style(|t: &Theme| text::Style {
-                    color: Some(theme::colors(t).text_muted()),
-                })
-        ]
-        .spacing(10)
-        .into();
+        return column![title, empty_state("No interface data available", None)]
+            .spacing(10)
+            .into();
     }
 
     // Table header
@@ -374,11 +360,7 @@ fn render_system_metrics(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     if !has_metrics {
-        metrics_content = metrics_content.push(text("No system metrics available").size(12).style(
-            |t: &Theme| text::Style {
-                color: Some(theme::colors(t).text_muted()),
-            },
-        ));
+        metrics_content = metrics_content.push(empty_state("No system metrics available", None));
     }
 
     column![title, metrics_content].spacing(10).into()

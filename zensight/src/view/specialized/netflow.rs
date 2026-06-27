@@ -12,7 +12,7 @@ use iced_anim::widget::button;
 use zensight_common::TelemetryValue;
 
 use crate::message::Message;
-use crate::view::components::card;
+use crate::view::components::{card, empty_state};
 use crate::view::device::DeviceDetailState;
 use crate::view::icons::{self, IconSize};
 use crate::view::theme;
@@ -155,9 +155,7 @@ fn render_top_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
 
         let src_text = text(src).size(11).width(Length::Fixed(120.0));
 
-        let arrow = text("→").size(11).style(|t: &Theme| text::Style {
-            color: Some(theme::colors(t).text_muted()),
-        });
+        let arrow = empty_state("→", None);
 
         let dst_text = text(dst).size(11).width(Length::Fixed(120.0));
 
@@ -186,13 +184,7 @@ fn render_top_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     if is_empty {
-        rows = rows.push(
-            text("No flow data available")
-                .size(12)
-                .style(|t: &Theme| text::Style {
-                    color: Some(theme::colors(t).text_muted()),
-                }),
-        );
+        rows = rows.push(empty_state("No flow data available", None));
     }
 
     column![title, rows].spacing(10).into()
@@ -259,14 +251,7 @@ fn render_protocol_distribution(state: &DeviceDetailState) -> Element<'_, Messag
     }
 
     if bars.is_empty() {
-        bars.push(
-            text("No protocol data")
-                .size(12)
-                .style(|t: &Theme| text::Style {
-                    color: Some(theme::colors(t).text_muted()),
-                })
-                .into(),
-        );
+        bars.push(empty_state("No protocol data", None));
     }
 
     column![title, Column::with_children(bars).spacing(6)]
@@ -352,14 +337,7 @@ fn render_flow_table(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     if is_empty {
-        table_rows =
-            table_rows.push(
-                text("No flow records")
-                    .size(12)
-                    .style(|t: &Theme| text::Style {
-                        color: Some(theme::colors(t).text_muted()),
-                    }),
-            );
+        table_rows = table_rows.push(empty_state("No flow records", None));
     }
 
     column![title, header, table_rows].spacing(10).into()
