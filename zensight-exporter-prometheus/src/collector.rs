@@ -244,6 +244,8 @@ pub struct MetricCollector {
     aggregation_config: AggregationConfig,
     /// Metric filter.
     filter: MetricFilter,
+    /// Currently-firing sensor alerts (rendered as a `<prefix>_alert` gauge).
+    alerts: crate::alerts::AlertStore,
     /// Statistics.
     stats: RwLock<CollectorStats>,
 }
@@ -279,8 +281,36 @@ impl MetricCollector {
             prometheus_config,
             aggregation_config,
             filter: MetricFilter::new(&filter_config),
+            alerts: crate::alerts::AlertStore::new(),
             stats: RwLock::new(CollectorStats::default()),
         }
+    }
+
+    /// Record a sensor alert (from the `@/alerts/*` control channel). Firing
+    /// alerts are stored; resolved alerts clear their series. No-op unless
+    /// alert export is enabled.
+    pub fn record_alert(&self, alert: zensight_common::alert::Alert) {
+        if self.prometheus_config.export_alerts {
+            self.alerts.apply(alert);
+        }
+    }
+
+    /// Clear a firing alert by its `alert_key` (a Zenoh `Delete` tombstone).
+    pub fn remove_alert(&self, alert_key: &str) {
+        if self.prometheus_config.export_alerts {
+            self.alerts.remove(alert_key);
+        }
+    }
+
+    /// Whether alert export is enabled (drives whether the subscriber bothers
+    /// decoding the `@/alerts/*` channel).
+    pub fn export_alerts(&self) -> bool {
+        self.prometheus_config.export_alerts
+    }
+
+    /// Number of currently-firing alerts.
+    pub fn alert_count(&self) -> usize {
+        self.alerts.len()
     }
 
     /// Record a telemetry point.
@@ -363,6 +393,13 @@ impl MetricCollector {
             );
             let mut stats = self.stats.write();
             stats.stale_metrics_removed += removed as u64;
+        }
+        drop(metrics);
+
+        // Evict alerts from sensors that went away without tombstoning them.
+        let alerts_removed = self.alerts.cleanup_stale(timeout);
+        if alerts_removed > 0 {
+            debug!(removed = alerts_removed, "Cleaned up stale alerts");
         }
 
         removed
@@ -503,6 +540,13 @@ impl MetricCollector {
             stats.render_errors += render_errors;
         }
 
+        // Append firing sensor alerts as a `<prefix>_alert` gauge.
+        if self.prometheus_config.export_alerts {
+            let _ = writeln!(output);
+            self.alerts
+                .render(&self.prometheus_config.prefix, &mut output);
+        }
+
         String::from_utf8(output).unwrap_or_default()
     }
 }
@@ -511,7 +555,7 @@ impl MetricCollector {
 pub type SharedCollector = Arc<MetricCollector>;
 
 /// Escape special characters in label values.
-fn escape_label_value(value: &str) -> String {
+pub(crate) fn escape_label_value(value: &str) -> String {
     let mut result = String::with_capacity(value.len());
     for c in value.chars() {
         match c {

@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::watch;
 use tracing::{info, trace, warn};
-use zenoh::sample::SampleKind;
+use zenoh::sample::{Sample, SampleKind};
+use zensight_common::alert::Alert;
 use zensight_common::config::ZenohConfig;
 use zensight_common::telemetry::TelemetryPoint;
 
@@ -17,6 +18,11 @@ pub const DEFAULT_KEY_EXPR: &str = "zensight/**";
 /// (`.../@/...` and `zensight/_meta/...`) do not.
 pub(crate) fn is_telemetry_key(key: &str) -> bool {
     !key.contains("/@/") && !key.starts_with("zensight/_meta/")
+}
+
+/// Whether a key carries a sensor [`Alert`] (`zensight/<protocol>/@/alerts/<key>`).
+pub(crate) fn is_alert_key(key: &str) -> bool {
+    key.contains("/@/alerts/")
 }
 
 /// Statistics for the subscriber.
@@ -125,6 +131,19 @@ impl TelemetrySubscriber {
                 sample = subscriber.recv_async() => {
                     match sample {
                         Ok(sample) => {
+                            // Sensor alerts (`@/alerts/*`) are exported as OTLP
+                            // log events. A Delete tombstone carries no payload
+                            // (the prior Resolved Put already emitted the
+                            // resolved event), so it's ignored.
+                            if self.exporter.export_alerts()
+                                && is_alert_key(sample.key_expr().as_str())
+                            {
+                                if sample.kind() != SampleKind::Delete {
+                                    self.handle_alert_sample(&sample);
+                                }
+                                continue;
+                            }
+
                             if sample.kind() == SampleKind::Delete {
                                 trace!(key = %sample.key_expr(), "Ignoring delete sample");
                                 continue;
@@ -187,6 +206,24 @@ impl TelemetrySubscriber {
 
         info!("Subscriber stopped");
         Ok(())
+    }
+
+    /// Decode an alert sample (a firing/resolved Put) and emit it as an OTLP
+    /// log event.
+    fn handle_alert_sample(&self, sample: &Sample) {
+        let payload = sample.payload().to_bytes();
+        let alert: Option<Alert> = serde_json::from_slice(&payload)
+            .ok()
+            .or_else(|| ciborium::from_reader(&payload[..]).ok());
+
+        match alert {
+            Some(alert) => self.exporter.record_alert(&alert),
+            None => warn!(
+                key = %sample.key_expr(),
+                payload_len = payload.len(),
+                "Failed to decode alert"
+            ),
+        }
     }
 }
 

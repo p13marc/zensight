@@ -16,6 +16,8 @@
 //!
 //! - **Metrics**: Counter and Gauge telemetry values are exported as OTEL metrics
 //! - **Logs**: Syslog text messages are exported as OTEL log records
+//! - **Alerts**: sensor alerts (`@/alerts/*`) are exported as OTEL log events on
+//!   the `zensight.alerts` scope (severity-mapped, with `alert.*` attributes)
 //!
 //! # Usage
 //!
