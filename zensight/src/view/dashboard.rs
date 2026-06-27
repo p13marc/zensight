@@ -12,7 +12,7 @@ use iced_anim::{AnimationBuilder, Easing};
 
 use zensight_common::{DeviceStatus, HealthSnapshot, HealthStatus, Protocol, TelemetryPoint};
 
-use crate::view::components::badge;
+use crate::view::components::{badge, empty_state};
 
 /// Dashboard view mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -723,7 +723,7 @@ fn render_protocol_filters<'a>(
     let protocols = state.active_protocols();
 
     if protocols.is_empty() {
-        return text("No devices yet...").size(12).into();
+        return empty_state("No devices yet — waiting for sensors…", None);
     }
 
     // Protocol filter buttons

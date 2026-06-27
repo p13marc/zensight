@@ -8,7 +8,7 @@ use iced::{Alignment, Element, Length, Theme};
 use zensight_common::TelemetryValue;
 
 use crate::message::{DeviceId, Message};
-use crate::view::components::{StatusLed, StatusLedState};
+use crate::view::components::{StatusLed, StatusLedState, empty_state};
 use crate::view::dashboard::DeviceState;
 use crate::view::theme;
 
@@ -211,7 +211,7 @@ fn render_top_interfaces<'a>(interfaces: &[InterfaceSummary]) -> Element<'a, Mes
         .collect();
 
     if rows.is_empty() {
-        return column![title, text("No interface data").size(11)]
+        return column![title, empty_state("No interface data", None)]
             .spacing(4)
             .into();
     }

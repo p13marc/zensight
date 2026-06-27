@@ -16,7 +16,7 @@ use zensight_common::FlowRecord;
 
 use crate::message::Message;
 use crate::view::alerts::{AlertsState, Severity};
-use crate::view::components::badge;
+use crate::view::components::{badge, empty_state};
 use crate::view::icons::{self, IconSize};
 use crate::view::specialized::fetch::Fetch;
 use crate::view::theme;
@@ -229,7 +229,7 @@ fn render_by_tactic<'a>(anomalies: &[&'a Alert]) -> Element<'a, Message> {
         }
     }
     if by_tactic.is_empty() {
-        return column![title, text("No anomalies").size(13).style(dim)]
+        return column![title, empty_state("No anomalies", None)]
             .spacing(8)
             .into();
     }
@@ -271,7 +271,7 @@ fn render_by_source<'a>(anomalies: &[&'a Alert]) -> Element<'a, Message> {
         *counts.entry(src).or_default() += 1;
     }
     if counts.is_empty() {
-        return column![title, text("No anomalies").size(13).style(dim)]
+        return column![title, empty_state("No anomalies", None)]
             .spacing(8)
             .into();
     }
