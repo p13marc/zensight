@@ -37,6 +37,31 @@ ZenSight provides a suite of protocol sensors that collect telemetry from variou
 | **netlink** | Linux kernel networking | `zensight/netlink/<host>/<metric>` |
 | **netring** | Wire-level flow/L7/NDR | `zensight/netring/<sensor>/<metric>` |
 
+## Frontend
+
+The desktop frontend (Iced 0.14) is host- and incident-centric:
+
+- **Dashboard / hosts** — one card per host, composite health score, worst-first
+  fleet overview, responsive grid/table.
+- **Device detail** — metrics table, time-series charts (booleans as 0/1 step
+  series, log-rate trends), absolute from/to time-range picker, metric favorites,
+  and "alert on this metric" promotion.
+- **Alerts** — sensor + external alerts grouped into **Incidents** (timeline +
+  evidence pivots), severity/source filter pills, and saved filter presets.
+- **Security** — NDR anomaly lens with a MITRE ATT&CK by-tactic rollup and
+  runtime detection tuning; pivots to flow drill-downs.
+- **Expectations** — author sentinel expectations pushed to the netlink sensor.
+- **Topology** — force-directed graph of sysinfo/netlink hosts with
+  neighbor-adjacency edges and an alert overlay.
+- **Logs** — structured drill-down, MESSAGE_ID catalog, follow/pause, boot lens,
+  seeded from a local cold store.
+- **Inventory & fingerprint explorer** — passively discovered assets and a
+  unified JA3/JA4/JA4H/QUIC-SNI/HASSH view.
+- **Productivity** — command palette (Ctrl+P), fuzzy global metric search
+  (Ctrl+K), keyboard-shortcuts help overlay (`?`), light/dark theme, desktop
+  notifications for CRITICAL alerts, and a redb-backed local store so history
+  survives restart.
+
 ## Documentation
 
 Detailed documentation lives in [`docs/`](docs/):
@@ -75,6 +100,23 @@ zensight/gnmi/router01/interfaces/interface[name=eth0]/state/counters
 ```bash
 cargo build --release --workspace
 ```
+
+### Install from packages (sensors & exporters)
+
+Each sensor and exporter ships a `.deb` / `.rpm` (built by the release workflow)
+that installs the binary, a hardened **systemd unit**, and an example config to
+`/etc/zensight/<name>.json5` (a conf-file, so your edits survive upgrades). Units
+are not enabled automatically:
+
+```bash
+sudo dpkg -i zensight-sensor-sysinfo_*.deb          # or: rpm -i …
+sudoedit /etc/zensight/sysinfo.json5                 # point it at your Zenoh router
+sudo systemctl enable --now zensight-sensor-sysinfo
+journalctl -u zensight-sensor-sysinfo -f
+```
+
+See [`packaging/systemd/README.md`](packaging/systemd/README.md) for the per-unit
+privileges (most run unprivileged under a transient `DynamicUser`).
 
 ### Run everything (recommended)
 
@@ -264,7 +306,10 @@ All sensors use JSON5 configuration files. See the `configs/` directory for exam
 
 ## Exporters
 
-ZenSight includes exporters that subscribe to Zenoh telemetry and forward it to external observability systems.
+ZenSight includes exporters that subscribe to Zenoh telemetry and forward it to
+external observability systems. Both also export **sensor alerts** (enabled by
+default): firing alerts become a Prometheus `zensight_alert` gauge
+(Alertmanager-compatible) and OTLP log records on the `zensight.alerts` scope.
 
 ### Prometheus Exporter
 
@@ -334,7 +379,7 @@ All sensors emit a common `TelemetryPoint` structure:
 pub struct TelemetryPoint {
     pub timestamp: i64,           // Unix epoch milliseconds
     pub source: String,           // Device/host identifier
-    pub protocol: Protocol,       // snmp, syslog, netflow, modbus, sysinfo, gnmi
+    pub protocol: Protocol,       // snmp, logs, netflow, modbus, sysinfo, gnmi, netlink, netring
     pub metric: String,           // Metric name/path
     pub value: TelemetryValue,    // Counter, Gauge, Text, Boolean, Binary
     pub labels: HashMap<String, String>,  // Additional context
@@ -348,20 +393,22 @@ pub struct TelemetryPoint {
 cargo test --workspace
 
 # Run specific crate tests
-cargo test -p zensight-sensor-snmp      # 22 tests
-cargo test -p zensight-sensor-logs    # 106 tests
-cargo test -p zensight-sensor-netflow   # 16 tests
-cargo test -p zensight-sensor-modbus    # 11 tests
-cargo test -p zensight-sensor-sysinfo   # 15 tests
-cargo test -p zensight-sensor-gnmi      # 8 tests
+cargo test -p zensight-sensor-snmp      # 22 tests   (needs openssl-devel)
+cargo test -p zensight-sensor-logs      # 286 tests
+cargo test -p zensight-sensor-netflow   # 26 tests
+cargo test -p zensight-sensor-modbus    # 16 tests
+cargo test -p zensight-sensor-sysinfo   # 88 tests
+cargo test -p zensight-sensor-gnmi      # 15 tests   (needs protoc)
+cargo test -p zensight-sensor-netlink   # 52 tests
+cargo test -p zensight-sensor-netring   # 71 tests   (needs libpcap)
 
 # Run frontend tests (includes UI tests with Simulator)
-cargo test -p zensight               # 139 tests
+cargo test -p zensight                  # 330 tests
 
 # Check all crates
 cargo check --workspace
 
-# Format code
+# Format code (CI enforces rustfmt + clippy -D warnings)
 cargo fmt --all
 
 # Lint
@@ -425,18 +472,20 @@ let points = mock::mock_environment();
 
 | Crate | Tests | Description |
 |-------|-------|-------------|
-| zensight (frontend) | 139 | Unit + UI tests (Simulator) |
-| zensight-common | 47 | Telemetry, config, key expressions |
-| zensight-sensor-core | 23 | Publisher, health, correlation |
-| zensight-exporter-prometheus | 50 | Metric mapping, sanitization, collector, HTTP |
-| zensight-exporter-otel | 41 | OTEL metrics, logs, severity mapping |
+| zensight (frontend) | 330 | Unit + UI tests (Simulator) |
+| zensight-common | 55 | Telemetry, config, key expressions, alert/command model |
+| zensight-sensor-core | 25 | Publisher, health, correlation, alert reporter |
+| zensight-exporter-prometheus | 60 | Metric mapping, sanitization, collector, alerts, HTTP |
+| zensight-exporter-otel | 46 | OTEL metrics, logs, alerts, severity mapping |
 | zensight-sensor-snmp | 22 | Polling, traps, MIB loading |
-| zensight-sensor-logs | 106 | Parser, receiver, filtering |
-| zensight-sensor-netflow | 16 | Flow parsing, templates |
-| zensight-sensor-modbus | 11 | Config, register decoding |
-| zensight-sensor-sysinfo | 15 | Config, collectors, metrics |
-| zensight-sensor-gnmi | 8 | Config, path parsing, subscriber |
-| **Total** | **478** | All tests passing |
+| zensight-sensor-logs | 286 | Parser, receiver, filtering, journald, templates, SLOs |
+| zensight-sensor-netflow | 26 | Flow parsing, templates |
+| zensight-sensor-modbus | 16 | Config, register decoding |
+| zensight-sensor-sysinfo | 88 | Collectors, saturation, alerting |
+| zensight-sensor-gnmi | 15 | Config, path parsing, value conversion |
+| zensight-sensor-netlink | 52 | Interfaces, sockets, sentinel rules, nft counters |
+| zensight-sensor-netring | 71 | Flows, NDR detectors, ATT&CK, traffic-matrix, JA4H |
+| **Total** | **~1090** | All tests passing |
 
 ## License
 

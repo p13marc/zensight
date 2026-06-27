@@ -1,14 +1,25 @@
 # zensight
 
-Desktop frontend application for the ZenSight observability platform. Built with [Iced 0.14](https://iced.rs/), it provides real-time visualization of telemetry from all ZenSight bridges.
+Desktop frontend application for the ZenSight observability platform. Built with [Iced 0.14](https://iced.rs/), it provides real-time visualization of telemetry from all ZenSight sensors.
 
 ## Features
 
-- **Dashboard** - Overview of all monitored devices grouped by protocol
-- **Device Details** - Detailed metrics view with time-series charts
-- **Alerts** - Threshold-based alerting with rule management
-- **Settings** - Zenoh connection configuration with persistence
-- **SVG Icons** - Clean, scalable UI icons for all elements
+- **Host/incident-centric UI** - persistent app shell (nav rail + top bar), host
+  cards with composite health, and a unified Incident object (grouped alerts +
+  timeline + evidence pivots)
+- **Device details** - metrics table, time-series charts (booleans as 0/1 step
+  series, log-rate trends), metric favorites, "alert on this metric"
+- **Alerts** - threshold rules plus sensor/external alerts, severity/source
+  filter pills, and saved filter presets
+- **Security (NDR)** - anomaly lens with a MITRE ATT&CK by-tactic rollup and
+  runtime detection tuning
+- **Expectations** - author sentinel expectations pushed to the netlink sensor
+- **Topology** - force-directed graph of sysinfo/netlink hosts with an alert overlay
+- **Logs** - structured drill-down, MESSAGE_ID catalog, follow/pause, boot lens
+- **Inventory & fingerprint explorer** - passive assets + JA3/JA4/JA4H/SNI/HASSH
+- **Productivity** - command palette (Ctrl+P), fuzzy global search (Ctrl+K),
+  keyboard help overlay (`?`), light/dark theme, desktop notifications
+- **Local store** - redb-backed history that survives restart
 
 ## Installation
 
@@ -28,10 +39,10 @@ cargo build -p zensight --release
 # Run with default settings (peer mode, local discovery)
 zensight
 
-# The frontend auto-discovers bridges via Zenoh subscription
+# The frontend auto-discovers sensors via Zenoh subscription
 ```
 
-### Demo Mode (No Bridges Required)
+### Demo Mode (No Sensors Required)
 
 ```bash
 # Run with mock data - no Zenoh connection needed
@@ -42,13 +53,13 @@ zensight -d
 ```
 
 Demo mode is perfect for:
-- Testing the UI without hardware or bridges
+- Testing the UI without hardware or sensors
 - Demonstrating features to users
 - Development and debugging
 - Learning how ZenSight works
 
 In demo mode:
-- Mock telemetry is generated for SNMP routers/switches, sysinfo hosts, syslog, and Modbus PLCs
+- Mock telemetry is generated for all sensors (SNMP, sysinfo, logs, Modbus, netflow, gnmi, netlink, netring)
 - Data updates every 0.5-1.5 seconds with realistic variations
 - All UI features work normally (alerts, charts, settings, export)
 
@@ -86,19 +97,25 @@ zensight/
 │   ├── message.rs        # Message enum for Iced updates
 │   ├── subscription.rs   # Zenoh → Iced subscription bridge
 │   ├── mock.rs           # Mock telemetry generators
+│   ├── store.rs         # redb-backed local store (hot ring + tiered retention)
 │   └── view/
-│       ├── mod.rs
-│       ├── dashboard.rs  # Main dashboard view
+│       ├── shell.rs      # Persistent app shell (nav rail + top bar)
+│       ├── dashboard.rs  # Host cards / fleet overview
 │       ├── device.rs     # Device detail view
-│       ├── alerts.rs     # Alerts management
-│       ├── settings.rs   # Settings page
-│       ├── chart.rs      # Time-series charts
-│       ├── formatting.rs # Value formatting utilities
-│       └── icons/        # 24 SVG icon files
+│       ├── alerts.rs / incident.rs  # Alerts + unified Incident object
+│       ├── security.rs   # NDR anomaly + ATT&CK lens
+│       ├── expectations.rs / inventory.rs / sensors.rs / settings.rs
+│       ├── palette.rs / search.rs / help.rs  # Command palette, search, help
+│       ├── topology/ specialized/ overview/ components/
+│       ├── chart.rs / trend.rs / theme.rs / tokens.rs
+│       └── icons/        # 44 SVG icon files
 ├── tests/
 │   └── ui_tests.rs       # Simulator-based UI tests
 └── Cargo.toml
 ```
+
+See the repository root `README.md` (Frontend section) and `CLAUDE.md` for the
+full view/feature map.
 
 ## Configuration
 
@@ -152,10 +169,18 @@ Settings are persisted to `~/.config/zensight/settings.json5`:
 - Stale threshold (when to mark devices as unhealthy)
 - Save/load persistent settings
 
+### Additional views
+
+- **Security** - NDR anomaly lens, ATT&CK by-tactic rollup, detection tuning
+- **Expectations** - author sentinel expectations for the netlink sensor
+- **Topology** - force-directed host graph with an alert overlay
+- **Logs** - structured log drill-down with MESSAGE_ID catalog and boot lens
+- **Inventory / Incidents** - passive assets + fingerprints, grouped incidents
+
 ## Testing
 
 ```bash
-# Run all tests (32 total)
+# Run all tests (~330 total: unit + Simulator UI tests)
 cargo test -p zensight
 
 # Run UI tests only
@@ -165,14 +190,9 @@ cargo test -p zensight --test ui_tests
 cargo test -p zensight --lib
 ```
 
-### Test Categories
-
-| Category | Tests | Description |
-|----------|-------|-------------|
-| Dashboard | 4 | Empty state, device display, navigation |
-| Device | 3 | Metrics, navigation, filtering |
-| Settings | 2 | Form rendering, save functionality |
-| Unit tests | 23 | Views, alerts, charts, formatting |
+Tests cover the dashboard, device, alerts/incidents, security, topology, logs,
+and settings views, plus charts, search, the command palette, formatting, and the
+local store. UI tests use Iced's `Simulator` (see [`docs/UI_TESTING.md`](../docs/UI_TESTING.md)).
 
 ### Mock Data
 
@@ -210,15 +230,16 @@ let points = mock::mock_environment();
 
 ## Icons
 
-24 SVG icons in `src/view/icons/`:
+44 SVG icons in `src/view/icons/`:
 
 | Category | Icons |
 |----------|-------|
-| Navigation | arrow-left, arrow-up, arrow-down |
-| Status | status-healthy, status-warning, status-error |
-| Actions | settings, alert, chart, export, close, check, trash |
-| Connection | connected, disconnected |
-| Protocols | protocol-snmp, protocol-syslog, protocol-netflow, protocol-modbus, protocol-sysinfo, protocol-gnmi, protocol-opcua, protocol-generic |
+| Navigation | arrow-left/right/up/down, arrow-stable, tree, table, toggle |
+| Status | status-healthy, status-warning, status-degraded, status-error, status-unknown |
+| Actions | settings, alert, chart, export, edit, close, check, trash, search |
+| Theme / connection | sun, moon, connected, disconnected, subscription |
+| Resources | cpu, memory, disk, network, log, info |
+| Protocols | protocol-snmp, protocol-syslog, protocol-netflow, protocol-modbus, protocol-sysinfo, protocol-gnmi, protocol-netlink, protocol-netring, protocol-opcua, protocol-generic |
 
 Usage:
 ```rust

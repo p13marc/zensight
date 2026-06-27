@@ -494,6 +494,17 @@ match the subscriber:
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
+Both exporters subscribe to telemetry on `zensight/**` (which, by Zenoh's
+verbatim-`@` rule, excludes the control plane). With `export_alerts` enabled (the
+default) each exporter **also** declares a dedicated subscriber on
+`zensight/*/@/alerts/*` and mirrors firing sensor alerts out: Prometheus renders a
+`<prefix>_alert` gauge (`1` while firing, series absent once resolved —
+Alertmanager-compatible), and the OTel exporter emits OTLP log records on the
+`zensight.alerts` scope. Everything else under `@/…` and `zensight/_meta/…` is
+skipped. The sysinfo host metrics are additionally mapped to OpenTelemetry
+host-metrics semantic conventions via `zensight_common::semconv` (see
+[Keyspace §6](KEYSPACE.md#6-exporter-semconv-mapping--zensight_commonsemconv-100)).
+
 ## Directory Structure
 
 ```

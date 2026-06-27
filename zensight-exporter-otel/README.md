@@ -6,8 +6,9 @@ OpenTelemetry OTLP exporter for ZenSight telemetry. Subscribes to telemetry over
 
 - **OTLP export**: gRPC (port 4317) or HTTP (port 4318) protocols
 - **Metrics**: Counter, Gauge, Boolean values exported as OTEL metrics
-- **Logs**: Syslog text messages exported as OTEL log records
-- **Severity mapping**: Syslog severity properly mapped to OTEL severity levels
+- **Logs**: log text messages exported as OTEL log records
+- **Alerts**: sensor alerts exported as OTLP log records on the `zensight.alerts` scope
+- **Severity mapping**: log severity properly mapped to OTEL severity levels
 - **Resource attributes**: Configurable service name, version, and custom attributes
 - **Filtering**: Filter by protocol or source
 - **Periodic export**: Configurable export interval with batching
@@ -65,7 +66,8 @@ Create a JSON5 configuration file:
     timeout_secs: 30,                    // Export timeout
     
     export_metrics: true,   // Export Counter/Gauge/Boolean as metrics
-    export_logs: true,      // Export Syslog as log records
+    export_logs: true,      // Export log messages as log records
+    export_alerts: true,    // Export sensor alerts as OTLP log records
     
     service_name: "zensight",
     service_version: "1.0.0",
@@ -121,6 +123,15 @@ Log attributes include:
 - `syslog.severity` - Original syslog severity
 - `syslog.facility` - Syslog facility (if present)
 - `syslog.appname` - Application name (if present)
+
+### Alerts
+
+With `export_alerts` on (the default), sensor alerts from the
+`zensight/<protocol>/@/alerts/*` control channel are exported as OTLP log records
+on the `zensight.alerts` scope (event name `zensight.alert`). Severity is mapped
+from the alert severity and `alert.*` attributes carry source, rule, and state.
+Because the telemetry wildcard `zensight/**` does not match `@/` keys, the
+exporter declares a dedicated subscriber for this channel.
 
 ## OpenTelemetry Collector Configuration
 

@@ -1,13 +1,14 @@
 # zensight-common
 
-Shared library for the ZenSight observability platform. Provides the common data model, Zenoh helpers, and configuration utilities used by all bridges and the frontend.
+Shared library for the ZenSight observability platform. Provides the common data model, Zenoh helpers, and configuration utilities used by all sensors, exporters, and the frontend.
 
 ## Features
 
 - **Telemetry Model** - Unified `TelemetryPoint` structure for all protocols
-- **Health Model** - Device status, liveness, and bridge health types
+- **Health Model** - Device status, liveness, and sensor health types
+- **Alert & Command Model** - `Alert{Kind,Severity,State}` + the sensor command/status channel
 - **Zenoh Integration** - Session management and connection helpers
-- **Key Expressions** - Builder utilities for consistent key expression format
+- **Key Expressions** - Builder utilities for consistent key expression format (see [`docs/KEYSPACE.md`](../docs/KEYSPACE.md))
 - **Serialization** - JSON and CBOR encoding/decoding
 - **Configuration** - JSON5 configuration loading
 
@@ -66,11 +67,13 @@ use zensight_common::Protocol;
 
 let protocols = [
     Protocol::Snmp,
-    Protocol::Syslog,
+    Protocol::Logs,
     Protocol::Netflow,
     Protocol::Modbus,
     Protocol::Sysinfo,
     Protocol::Gnmi,
+    Protocol::Netlink,
+    Protocol::Netring,
     Protocol::Opcua,
 ];
 ```
@@ -151,7 +154,7 @@ let config: MyConfig = load_config("config.json5")?;
 ### Health & Liveness
 
 ```rust
-use zensight_common::{DeviceStatus, HealthSnapshot, DeviceLiveness};
+use zensight_common::{DeviceStatus, HealthSnapshot, HealthStatus, DeviceLiveness};
 
 // Device status (4-color model)
 let status = DeviceStatus::Online;    // Green - responding normally
@@ -159,10 +162,10 @@ let status = DeviceStatus::Degraded;  // Orange - responding with issues
 let status = DeviceStatus::Offline;   // Red - not responding
 let status = DeviceStatus::Unknown;   // Gray - no data yet
 
-// Bridge health snapshot
+// Sensor health snapshot
 let health = HealthSnapshot {
-    bridge: "snmp-bridge".to_string(),
-    status: "healthy".to_string(),
+    sensor: "snmp".to_string(),
+    status: HealthStatus::Healthy,
     uptime_secs: 3600,
     devices_total: 10,
     devices_responding: 9,
@@ -189,11 +192,12 @@ use zensight_common::{
     all_health_wildcard,
     all_liveness_wildcard,
     all_errors_wildcard,
-    all_bridges_wildcard,
+    all_sensors_wildcard,
+    all_alerts_wildcard,
     all_correlation_wildcard,
 };
 
-// Subscribe to all bridge health snapshots
+// Subscribe to all sensor health snapshots
 let health_key = all_health_wildcard();
 // Result: "zensight/*/@/health"
 
@@ -229,19 +233,21 @@ zensight/<protocol>/<source>/<metric>
 
 Examples:
 - `zensight/snmp/router01/system/sysUpTime`
-- `zensight/syslog/server01/daemon/warning`
+- `zensight/logs/server01/events/0001700000000000000000042`
 - `zensight/sysinfo/host01/cpu/usage`
 
-### Health Key Expression Format
+### Control-plane & Metadata Key Expressions
 
-Health and metadata use special key patterns:
+The control-plane and metadata use special key patterns (the full contract,
+including alerts/commands/query channels, is in [`docs/KEYSPACE.md`](../docs/KEYSPACE.md)):
 
 ```
-zensight/<protocol>/@/health              # Bridge health snapshots
+zensight/<protocol>/@/health              # Sensor health snapshots
 zensight/<protocol>/@/devices/*/liveness  # Per-device liveness
 zensight/<protocol>/@/errors              # Error reports
-zensight/_meta/bridges/*                  # Bridge registration
-zensight/_meta/correlation/*              # Cross-bridge correlation
+zensight/<protocol>/@/alerts/<key>        # Alerts (firing → resolved → tombstone)
+zensight/_meta/sensors/*                  # Sensor registration
+zensight/_meta/correlation/*              # Cross-sensor correlation
 ```
 
 ### DeviceStatus
@@ -257,9 +263,9 @@ zensight/_meta/correlation/*              # Cross-bridge correlation
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `bridge` | `String` | Bridge identifier |
-| `status` | `String` | "healthy", "degraded", or "unhealthy" |
-| `uptime_secs` | `u64` | Bridge uptime in seconds |
+| `sensor` | `String` | Sensor identifier |
+| `status` | `HealthStatus` | `Healthy`, `Degraded`, or `Unhealthy` |
+| `uptime_secs` | `u64` | Sensor uptime in seconds |
 | `devices_total` | `u64` | Total configured devices |
 | `devices_responding` | `u64` | Devices responding |
 | `devices_failed` | `u64` | Devices not responding |
@@ -283,9 +289,10 @@ zensight/_meta/correlation/*              # Cross-bridge correlation
 cargo test -p zensight-common
 ```
 
-33 tests covering:
+55 tests covering:
 - Telemetry model serialization
 - Key expression building
+- Alert / command model
 - Configuration parsing
 - Zenoh integration
 
