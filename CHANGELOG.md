@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-27
+
 A large release: two new kernel/wire-level sensors, a unified logs sensor with
 journald, a full host/incident-centric frontend redesign with NDR, alert export
 to Prometheus/OTel, and OS packaging. See `docs/SENSORS.md`, `docs/KEYSPACE.md`,
