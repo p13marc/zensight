@@ -47,6 +47,20 @@ pub struct AlertRule {
     pub enabled: bool,
 }
 
+/// A saved external-alert filter combination (#27). Applying it sets both the
+/// severity and source filters at once; persisted in `PersistentSettings`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AlertFilterPreset {
+    /// Display name (auto-derived from the filters at save time).
+    pub name: String,
+    /// Severity filter (`None` = any severity).
+    #[serde(default)]
+    pub severity: Option<zensight_common::AlertSeverity>,
+    /// Source filter (`None` = any source).
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
 impl AlertRule {
     /// Create a new alert rule.
     pub fn new(id: u32, name: impl Into<String>, metric_pattern: impl Into<String>) -> Self {
@@ -279,6 +293,9 @@ pub struct AlertsState {
     /// Source filter for the external-alerts feed (#27). `None` = all sources;
     /// otherwise only alerts from this source are shown.
     pub external_source_filter: Option<String>,
+    /// Saved filter presets (#27): named severity+source combinations the user
+    /// can re-apply in one click. Persisted in `PersistentSettings`.
+    pub alert_filter_presets: Vec<AlertFilterPreset>,
 }
 
 /// One firing/resolved transition in an incident's timeline (#26).
@@ -345,6 +362,7 @@ impl AlertsState {
             timelines: HashMap::new(),
             external_severity_filter: None,
             external_source_filter: None,
+            alert_filter_presets: Vec::new(),
         }
     }
 
@@ -560,6 +578,68 @@ impl AlertsState {
             return false;
         }
         true
+    }
+
+    /// Derive a preset display name from a severity+source combination (#27).
+    fn preset_name(
+        severity: Option<zensight_common::AlertSeverity>,
+        source: Option<&str>,
+    ) -> String {
+        let sev = severity.map(|s| {
+            let n = s.as_str();
+            let mut c = n.chars();
+            c.next()
+                .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                .unwrap_or_default()
+        });
+        match (sev, source) {
+            (Some(s), Some(src)) => format!("{s} · {src}"),
+            (Some(s), None) => s,
+            (None, Some(src)) => src.to_string(),
+            (None, None) => "All".to_string(),
+        }
+    }
+
+    /// Whether a preset matching the current filter combination already exists.
+    pub fn current_filter_is_saved(&self) -> bool {
+        self.alert_filter_presets.iter().any(|p| {
+            p.severity == self.external_severity_filter && p.source == self.external_source_filter
+        })
+    }
+
+    /// Save the current external-filter combination as a preset (#27). No-op
+    /// (returns `false`) when no filter is active or an identical preset exists.
+    pub fn save_current_filter_preset(&mut self) -> bool {
+        let severity = self.external_severity_filter;
+        let source = self.external_source_filter.clone();
+        if severity.is_none() && source.is_none() {
+            return false; // nothing to save
+        }
+        if self.current_filter_is_saved() {
+            return false; // already saved
+        }
+        let name = Self::preset_name(severity, source.as_deref());
+        self.alert_filter_presets.push(AlertFilterPreset {
+            name,
+            severity,
+            source,
+        });
+        true
+    }
+
+    /// Apply a saved preset by index, setting both filters (#27).
+    pub fn apply_filter_preset(&mut self, index: usize) {
+        if let Some(preset) = self.alert_filter_presets.get(index) {
+            self.external_severity_filter = preset.severity;
+            self.external_source_filter = preset.source.clone();
+        }
+    }
+
+    /// Delete a saved preset by index (#27).
+    pub fn delete_filter_preset(&mut self, index: usize) {
+        if index < self.alert_filter_presets.len() {
+            self.alert_filter_presets.remove(index);
+        }
     }
 
     /// Distinct sources among currently-firing, non-silenced external alerts,
@@ -1221,6 +1301,57 @@ fn render_alert_filter_pills<'a>(
         col = col.push(src_row.wrap());
     }
 
+    // Presets row (#27): saved severity+source combinations. Each chip applies
+    // the preset; the trailing ✕ deletes it. A "Save" affordance appears when a
+    // filter is active and not already saved.
+    let filtering = sev.is_some() || state.external_source_filter.is_some();
+    let can_save = filtering && !state.current_filter_is_saved();
+    if !state.alert_filter_presets.is_empty() || can_save {
+        let mut presets_row =
+            row![
+                text("Presets")
+                    .size(font::CAPTION)
+                    .style(|theme: &Theme| text::Style {
+                        color: Some(crate::view::theme::colors(theme).text_dimmed()),
+                    }),
+            ]
+            .spacing(space::XS)
+            .align_y(Alignment::Center);
+
+        for (i, preset) in state.alert_filter_presets.iter().enumerate() {
+            let active = state.external_severity_filter == preset.severity
+                && state.external_source_filter == preset.source;
+            let chip = row![
+                button(text(preset.name.clone()).size(font::CAPTION))
+                    .on_press(Message::ApplyAlertFilterPreset(i))
+                    .padding([space::XS, space::SM])
+                    .style(if active {
+                        iced::widget::button::primary
+                    } else {
+                        iced::widget::button::secondary
+                    }),
+                button(text("✕").size(font::CAPTION))
+                    .on_press(Message::DeleteAlertFilterPreset(i))
+                    .padding([space::XS, space::XS])
+                    .style(iced::widget::button::text),
+            ]
+            .spacing(2)
+            .align_y(Alignment::Center);
+            presets_row = presets_row.push(chip);
+        }
+
+        if can_save {
+            presets_row = presets_row.push(
+                button(text("+ Save filter").size(font::CAPTION))
+                    .on_press(Message::SaveAlertFilterPreset)
+                    .padding([space::XS, space::SM])
+                    .style(iced::widget::button::secondary),
+            );
+        }
+
+        col = col.push(presets_row.wrap());
+    }
+
     col.into()
 }
 
@@ -1706,6 +1837,53 @@ mod tests {
         assert_eq!(groups[0].source, "host2");
         // Pills stay stable regardless of the active source filter.
         assert_eq!(state.external_sources(0), vec!["host1", "host2"]);
+    }
+
+    #[test]
+    fn save_filter_preset_captures_current_filters() {
+        use zensight_common::AlertSeverity;
+        let mut state = AlertsState::new();
+
+        // Nothing to save when no filter is active.
+        assert!(!state.save_current_filter_preset());
+        assert!(state.alert_filter_presets.is_empty());
+
+        // Set a severity+source filter and save it.
+        state.external_severity_filter = Some(AlertSeverity::Critical);
+        state.external_source_filter = Some("host2".to_string());
+        assert!(state.save_current_filter_preset());
+        assert_eq!(state.alert_filter_presets.len(), 1);
+        let preset = &state.alert_filter_presets[0];
+        assert_eq!(preset.severity, Some(AlertSeverity::Critical));
+        assert_eq!(preset.source.as_deref(), Some("host2"));
+        assert_eq!(preset.name, "Critical · host2");
+
+        // Saving the same combination again is a no-op (deduped).
+        assert!(state.current_filter_is_saved());
+        assert!(!state.save_current_filter_preset());
+        assert_eq!(state.alert_filter_presets.len(), 1);
+    }
+
+    #[test]
+    fn apply_and_delete_filter_preset() {
+        use zensight_common::AlertSeverity;
+        let mut state = AlertsState::new();
+        state.external_severity_filter = Some(AlertSeverity::Warning);
+        state.save_current_filter_preset();
+        assert_eq!(state.alert_filter_presets[0].name, "Warning");
+
+        // Clear the live filters, then re-apply the preset.
+        state.external_severity_filter = None;
+        state.apply_filter_preset(0);
+        assert_eq!(state.external_severity_filter, Some(AlertSeverity::Warning));
+        assert_eq!(state.external_source_filter, None);
+
+        // Out-of-range indices are ignored, valid ones remove.
+        state.apply_filter_preset(99); // no panic, no change
+        state.delete_filter_preset(99); // no panic
+        assert_eq!(state.alert_filter_presets.len(), 1);
+        state.delete_filter_preset(0);
+        assert!(state.alert_filter_presets.is_empty());
     }
 
     #[test]
