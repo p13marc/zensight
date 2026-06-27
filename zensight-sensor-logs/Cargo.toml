@@ -65,7 +65,10 @@ section = "utils"
 priority = "optional"
 assets = [
     ["target/release/zensight-sensor-logs", "usr/bin/", "755"],
+    ["../packaging/systemd/zensight-sensor-logs.service", "lib/systemd/system/", "644"],
+    ["../configs/logs.json5", "etc/zensight/logs.json5", "644"],
 ]
+conf-files = ["/etc/zensight/logs.json5"]
 depends = "$auto"
 
 # =============================================================================
@@ -74,4 +77,6 @@ depends = "$auto"
 [package.metadata.generate-rpm]
 assets = [
     { source = "target/release/zensight-sensor-logs", dest = "/usr/bin/zensight-sensor-logs", mode = "755" },
+    { source = "../packaging/systemd/zensight-sensor-logs.service", dest = "/lib/systemd/system/zensight-sensor-logs.service", mode = "644" },
+    { source = "../configs/logs.json5", dest = "/etc/zensight/logs.json5", mode = "644", config = true },
 ]

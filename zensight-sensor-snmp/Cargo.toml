@@ -43,7 +43,10 @@ section = "utils"
 priority = "optional"
 assets = [
     ["target/release/zensight-sensor-snmp", "usr/bin/", "755"],
+    ["../packaging/systemd/zensight-sensor-snmp.service", "lib/systemd/system/", "644"],
+    ["../configs/snmp.json5", "etc/zensight/snmp.json5", "644"],
 ]
+conf-files = ["/etc/zensight/snmp.json5"]
 depends = "$auto"
 
 # =============================================================================
@@ -52,4 +55,6 @@ depends = "$auto"
 [package.metadata.generate-rpm]
 assets = [
     { source = "target/release/zensight-sensor-snmp", dest = "/usr/bin/zensight-sensor-snmp", mode = "755" },
+    { source = "../packaging/systemd/zensight-sensor-snmp.service", dest = "/lib/systemd/system/zensight-sensor-snmp.service", mode = "644" },
+    { source = "../configs/snmp.json5", dest = "/etc/zensight/snmp.json5", mode = "644", config = true },
 ]

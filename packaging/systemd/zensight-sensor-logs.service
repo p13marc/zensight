@@ -1,0 +1,27 @@
+[Unit]
+Description=ZenSight logs — syslog (RFC 3164/5424) + journald ingestion
+Documentation=https://github.com/p13marc/zensight
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/zensight-sensor-logs --config /etc/zensight/logs.json5
+Restart=on-failure
+RestartSec=5s
+# Graceful stop (#161): SIGTERM lets the process publish its offline status and
+# tombstone any firing alerts before exit.
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+# Run unprivileged under a transient system user, with a minimal sandbox.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/etc/zensight
+# Bind the privileged syslog port (514) without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

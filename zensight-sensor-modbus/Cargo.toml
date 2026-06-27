@@ -45,3 +45,33 @@ path = "src/main.rs"
 
 [lib]
 path = "src/lib.rs"
+
+# =============================================================================
+# Package metadata for cargo-deb
+# =============================================================================
+[package.metadata.deb]
+maintainer = "Marc Pardo <p13marc@gmail.com>"
+copyright = "2024, Marc Pardo"
+license-file = ["../LICENSE", "0"]
+extended-description = """Zenoh sensor for Modbus telemetry. Polls Modbus TCP/RTU devices
+and publishes register values to Zenoh for consumption by ZenSight or other
+Zenoh subscribers."""
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/zensight-sensor-modbus", "usr/bin/", "755"],
+    ["../packaging/systemd/zensight-sensor-modbus.service", "lib/systemd/system/", "644"],
+    ["../configs/modbus.json5", "etc/zensight/modbus.json5", "644"],
+]
+conf-files = ["/etc/zensight/modbus.json5"]
+depends = "$auto"
+
+# =============================================================================
+# Package metadata for cargo-generate-rpm
+# =============================================================================
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/zensight-sensor-modbus", dest = "/usr/bin/zensight-sensor-modbus", mode = "755" },
+    { source = "../packaging/systemd/zensight-sensor-modbus.service", dest = "/lib/systemd/system/zensight-sensor-modbus.service", mode = "644" },
+    { source = "../configs/modbus.json5", dest = "/etc/zensight/modbus.json5", mode = "644", config = true },
+]

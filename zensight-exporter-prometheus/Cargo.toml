@@ -66,7 +66,10 @@ section = "utils"
 priority = "optional"
 assets = [
     ["target/release/zensight-exporter-prometheus", "usr/bin/", "755"],
+    ["../packaging/systemd/zensight-exporter-prometheus.service", "lib/systemd/system/", "644"],
+    ["../configs/prometheus-exporter.json5", "etc/zensight/prometheus-exporter.json5", "644"],
 ]
+conf-files = ["/etc/zensight/prometheus-exporter.json5"]
 depends = "$auto"
 
 # =============================================================================
@@ -75,4 +78,6 @@ depends = "$auto"
 [package.metadata.generate-rpm]
 assets = [
     { source = "target/release/zensight-exporter-prometheus", dest = "/usr/bin/zensight-exporter-prometheus", mode = "755" },
+    { source = "../packaging/systemd/zensight-exporter-prometheus.service", dest = "/lib/systemd/system/zensight-exporter-prometheus.service", mode = "644" },
+    { source = "../configs/prometheus-exporter.json5", dest = "/etc/zensight/prometheus-exporter.json5", mode = "644", config = true },
 ]

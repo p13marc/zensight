@@ -1,0 +1,24 @@
+[Unit]
+Description=ZenSight netflow — NetFlow / IPFIX collection
+Documentation=https://github.com/p13marc/zensight
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/zensight-sensor-netflow --config /etc/zensight/netflow.json5
+Restart=on-failure
+RestartSec=5s
+# Graceful stop (#161): SIGTERM lets the process publish its offline status and
+# tombstone any firing alerts before exit.
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+# Run unprivileged under a transient system user, with a minimal sandbox.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/etc/zensight
+
+[Install]
+WantedBy=multi-user.target

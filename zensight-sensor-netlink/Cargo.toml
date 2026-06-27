@@ -31,3 +31,33 @@ tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 anyhow.workspace = true
 hostname = "0.4"
+
+# =============================================================================
+# Package metadata for cargo-deb
+# =============================================================================
+[package.metadata.deb]
+maintainer = "Marc Pardo <p13marc@gmail.com>"
+copyright = "2024, Marc Pardo"
+license-file = ["../LICENSE", "0"]
+extended-description = """Zenoh sensor for Linux kernel network telemetry via
+RTNETLINK/sock_diag (unprivileged reads), with an embedded sentinel. Publishes
+interface, socket and control-plane telemetry to Zenoh."""
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/zensight-sensor-netlink", "usr/bin/", "755"],
+    ["../packaging/systemd/zensight-sensor-netlink.service", "lib/systemd/system/", "644"],
+    ["../configs/netlink.json5", "etc/zensight/netlink.json5", "644"],
+]
+conf-files = ["/etc/zensight/netlink.json5"]
+depends = "$auto"
+
+# =============================================================================
+# Package metadata for cargo-generate-rpm
+# =============================================================================
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/zensight-sensor-netlink", dest = "/usr/bin/zensight-sensor-netlink", mode = "755" },
+    { source = "../packaging/systemd/zensight-sensor-netlink.service", dest = "/lib/systemd/system/zensight-sensor-netlink.service", mode = "644" },
+    { source = "../configs/netlink.json5", dest = "/etc/zensight/netlink.json5", mode = "644", config = true },
+]
