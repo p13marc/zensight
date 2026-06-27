@@ -1026,12 +1026,8 @@ fn render_rule_row(rule: &AlertRule) -> Element<'_, Message> {
     let name = text(rule.name.clone()).size(14);
 
     // Severity badge with color
-    let severity_color = rule.severity.color();
-    let severity_badge = text(rule.severity.name())
-        .size(11)
-        .style(move |_theme: &Theme| text::Style {
-            color: Some(severity_color),
-        });
+    // Severity as a color+label badge (#28 L5): never color alone.
+    let severity_badge = badge(rule.severity.color(), rule.severity.name());
 
     let condition = text(format!(
         "{} {} {}",
@@ -1336,12 +1332,8 @@ fn render_external_alert_row<'a>(alert: &'a SensorAlert, acked: bool) -> Element
         Severity::Info => icons::info(IconSize::Small),
     };
 
-    let severity_color = severity.color();
-    let severity_badge = text(severity.name())
-        .size(10)
-        .style(move |_theme: &Theme| text::Style {
-            color: Some(severity_color),
-        });
+    // Severity as a color+label badge (#28 L5): never color alone.
+    let severity_badge = badge(severity.color(), severity.name());
 
     let kind = text(if acked { "ack'd" } else { alert.kind.as_str() })
         .size(10)
@@ -1436,13 +1428,8 @@ fn render_alert_row(alert: &Alert) -> Element<'_, Message> {
         }
     };
 
-    // Severity badge with color
-    let severity_color = alert.severity.color();
-    let severity_badge = text(alert.severity.name())
-        .size(10)
-        .style(move |_theme: &Theme| text::Style {
-            color: Some(severity_color),
-        });
+    // Severity as a color+label badge (#28 L5): never color alone.
+    let severity_badge = badge(alert.severity.color(), alert.severity.name());
 
     let full_message = alert.message();
     let message: Element<'_, Message> = if full_message.len() > MAX_ALERT_MESSAGE_LEN {

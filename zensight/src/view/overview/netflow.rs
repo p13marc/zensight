@@ -8,6 +8,7 @@ use iced::{Alignment, Element, Length, Theme};
 use zensight_common::TelemetryValue;
 
 use crate::message::{DeviceId, Message};
+use crate::view::components::empty_state;
 use crate::view::dashboard::DeviceState;
 use crate::view::theme;
 
@@ -173,7 +174,7 @@ fn render_top_talkers<'a>(flows: &[FlowRecord]) -> Element<'a, Message> {
         .collect();
 
     if rows.is_empty() {
-        return column![title, text("No flow data").size(11)]
+        return column![title, empty_state("No flow data", None)]
             .spacing(4)
             .into();
     }
@@ -251,7 +252,7 @@ fn render_protocol_distribution<'a>(flows: &[FlowRecord]) -> Element<'a, Message
         .collect();
 
     if bars.is_empty() {
-        return column![title, text("No protocol data").size(11)]
+        return column![title, empty_state("No protocol data", None)]
             .spacing(4)
             .into();
     }

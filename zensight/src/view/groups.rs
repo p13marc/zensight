@@ -9,6 +9,7 @@ use iced_anim::widget::button;
 use serde::{Deserialize, Serialize};
 
 use crate::message::{DeviceId, Message};
+use crate::view::components::empty_state;
 use crate::view::icons::{self, IconSize};
 
 /// Predefined colors for groups (RGB 0.0-1.0).
@@ -512,9 +513,7 @@ fn render_groups_list(state: &GroupsState) -> Element<'_, Message> {
     let counts = state.group_device_counts();
 
     if groups.is_empty() {
-        return container(text("No groups defined yet").size(12))
-            .padding(20)
-            .into();
+        return empty_state("No groups defined yet", None);
     }
 
     let mut list = Column::new().spacing(8);

@@ -13,6 +13,7 @@ use zensight_common::{DeviceStatus, Protocol, TelemetryPoint, TelemetryValue};
 use crate::app::DEVICE_SEARCH_ID;
 use crate::message::{DeviceId, Message};
 use crate::view::chart::{ChartState, DataPoint, TimeWindow, chart_view};
+use crate::view::components::empty_state;
 use crate::view::formatting::{format_timestamp, format_value};
 use crate::view::icons::{self, IconSize};
 use crate::view::specialized;
@@ -1140,29 +1141,15 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
         .align_y(Alignment::Center);
 
     if total_count == 0 {
-        return column![
-            search_row,
-            container(text("No metrics received yet...").size(16))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill)
-        ]
-        .spacing(10)
-        .into();
+        return column![search_row, empty_state("No metrics received yet…", None)]
+            .spacing(10)
+            .into();
     }
 
     if table_rows.is_empty() {
-        return column![
-            search_row,
-            container(text("No metrics match the filter").size(16))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill)
-        ]
-        .spacing(10)
-        .into();
+        return column![search_row, empty_state("No metrics match the filter", None)]
+            .spacing(10)
+            .into();
     }
 
     // Build table columns
