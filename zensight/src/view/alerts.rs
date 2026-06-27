@@ -11,7 +11,7 @@ use iced_anim::widget::button;
 use zensight_common::{Alert as SensorAlert, AlertState as SensorAlertState, Protocol};
 
 use crate::message::{DeviceId, Message};
-use crate::view::components::{badge, section_header};
+use crate::view::components::{badge, empty_state, section_header};
 use crate::view::formatting::{format_timestamp, format_value};
 use crate::view::icons::{self, IconSize};
 use crate::view::tokens::{font, space};
@@ -1082,7 +1082,7 @@ fn render_rules_section(state: &AlertsState) -> Element<'_, Message> {
     let section_title = text(format!("Rules ({})", state.rules.len())).size(18);
 
     if state.rules.is_empty() {
-        return column![section_title, text("No alert rules defined").size(14)]
+        return column![section_title, empty_state("No alert rules defined", None)]
             .spacing(10)
             .into();
     }
@@ -1178,18 +1178,9 @@ fn render_external_alerts_section(state: &AlertsState) -> Element<'_, Message> {
 
     // Nothing firing and no filter to clear: the plain empty state.
     if sources.is_empty() && !filtering {
-        return column![
-            section_title,
-            text("No active sensor alerts")
-                .size(font::BODY)
-                .style(|theme: &Theme| {
-                    text::Style {
-                        color: Some(crate::view::theme::colors(theme).text_dimmed()),
-                    }
-                })
-        ]
-        .spacing(space::SM)
-        .into();
+        return column![section_title, empty_state("No active sensor alerts", None)]
+            .spacing(space::SM)
+            .into();
     }
 
     let pills = render_alert_filter_pills(state, &sources);
@@ -1197,12 +1188,7 @@ fn render_external_alerts_section(state: &AlertsState) -> Element<'_, Message> {
     let body: Element<'_, Message> = if groups.is_empty() {
         // A filter is active and hides everything — keep the pills visible so it
         // can be cleared.
-        text("No alerts match the current filter")
-            .size(font::BODY)
-            .style(|theme: &Theme| text::Style {
-                color: Some(crate::view::theme::colors(theme).text_dimmed()),
-            })
-            .into()
+        empty_state("No alerts match the current filter", None)
     } else {
         let mut list = Column::new().spacing(space::SM);
         for group in &groups {
@@ -1530,7 +1516,7 @@ fn render_alerts_section(state: &AlertsState) -> Element<'_, Message> {
         .align_y(Alignment::Center);
 
     if state.alerts.is_empty() {
-        return column![header, text("No alerts triggered").size(14)]
+        return column![header, empty_state("No alerts triggered", None)]
             .spacing(10)
             .into();
     }

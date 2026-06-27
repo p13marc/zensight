@@ -186,14 +186,7 @@ fn render_system_overview(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     if info_items.is_empty() {
-        info_items.push(
-            text("Waiting for system metrics...")
-                .size(12)
-                .style(|t: &Theme| text::Style {
-                    color: Some(theme::colors(t).text_muted()),
-                })
-                .into(),
-        );
+        info_items.push(empty_state("Waiting for system metrics...", None));
     }
 
     container(Row::with_children(info_items).spacing(30))
@@ -382,11 +375,7 @@ fn render_disk_section(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     if disk_count == 0 {
-        disk_content = disk_content.push(text("No disk metrics available").size(12).style(
-            |t: &Theme| text::Style {
-                color: Some(theme::colors(t).text_muted()),
-            },
-        ));
+        disk_content = disk_content.push(empty_state("No disk metrics available", None));
     }
 
     column![title, disk_content].spacing(10).into()
@@ -472,11 +461,7 @@ fn render_network_section(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     if iface_count == 0 {
-        net_content = net_content.push(text("No network metrics available").size(12).style(
-            |t: &Theme| text::Style {
-                color: Some(theme::colors(t).text_muted()),
-            },
-        ));
+        net_content = net_content.push(empty_state("No network metrics available", None));
     }
 
     column![title, net_content].spacing(10).into()
@@ -524,11 +509,7 @@ fn render_cpu_times_section(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     if bars.is_empty() {
-        content = content.push(text("Waiting for CPU time metrics...").size(12).style(
-            |t: &Theme| text::Style {
-                color: Some(theme::colors(t).text_muted()),
-            },
-        ));
+        content = content.push(empty_state("Waiting for CPU time metrics...", None));
     } else {
         for bar in bars {
             content = content.push(bar);
@@ -665,13 +646,7 @@ fn render_temperatures_section(state: &DeviceDetailState) -> Element<'_, Message
     }
 
     if sensors.is_empty() {
-        content = content.push(
-            text("No temperature sensors found")
-                .size(12)
-                .style(|t: &Theme| text::Style {
-                    color: Some(theme::colors(t).text_muted()),
-                }),
-        );
+        content = content.push(empty_state("No temperature sensors found", None));
     }
 
     column![title, content].spacing(10).into()
@@ -1037,13 +1012,10 @@ fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
                 .push(list);
         }
     } else {
-        col = col.push(
-            text("Pick a sort to fetch the live process table.")
-                .size(11)
-                .style(|t: &Theme| text::Style {
-                    color: Some(theme::colors(t).text_muted()),
-                }),
-        );
+        col = col.push(empty_state(
+            "Pick a sort to fetch the live process table.",
+            None,
+        ));
     }
 
     col.into()
