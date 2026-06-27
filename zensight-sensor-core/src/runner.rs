@@ -255,11 +255,11 @@ impl<C: SensorConfig> SensorRunner<C> {
         self.tasks.push(handle);
     }
 
-    /// Run the sensor until Ctrl+C is received.
+    /// Run the sensor until a shutdown signal (Ctrl+C / SIGINT or SIGTERM) is received.
     ///
     /// This will:
     /// 1. Publish "running" status (if enabled)
-    /// 2. Wait for Ctrl+C signal
+    /// 2. Wait for a shutdown signal (Ctrl+C / SIGINT or, on Unix, SIGTERM)
     /// 3. Abort all spawned tasks
     /// 4. Publish "offline" status (if enabled)
     /// 5. Close the Zenoh session
@@ -296,13 +296,14 @@ impl<C: SensorConfig> SensorRunner<C> {
         tracing::info!(
             sensor = %self.name,
             tasks = self.tasks.len(),
-            "Sensor running. Press Ctrl+C to stop."
+            "Sensor running. Press Ctrl+C or send SIGTERM to stop."
         );
 
-        // Wait for shutdown signal
-        if let Err(e) = signal::ctrl_c().await {
-            tracing::error!(error = %e, "Failed to listen for Ctrl+C");
-        }
+        // Wait for a shutdown signal. Catch both Ctrl+C (SIGINT) and SIGTERM:
+        // systemd `stop` and `docker stop` send SIGTERM, and if we only awaited
+        // Ctrl+C we'd be SIGKILLed after the stop timeout — never reaching the
+        // graceful path below (offline status + alert tombstones).
+        wait_for_shutdown().await;
 
         tracing::info!(sensor = %self.name, "Received shutdown signal");
 
@@ -329,6 +330,43 @@ impl<C: SensorConfig> SensorRunner<C> {
         tracing::info!(sensor = %self.name, "Goodbye!");
 
         Ok(())
+    }
+}
+
+/// Wait for an OS shutdown signal: Ctrl+C (SIGINT) or, on Unix, SIGTERM.
+///
+/// systemd and Docker stop a process with SIGTERM, so handling only Ctrl+C
+/// would let the orchestrator SIGKILL the sensor after its stop timeout,
+/// skipping the graceful shutdown (offline status + alert tombstones).
+async fn wait_for_shutdown() {
+    #[cfg(unix)]
+    {
+        let mut sigterm = match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                // Fall back to Ctrl+C-only if SIGTERM can't be registered.
+                tracing::error!(error = %e, "Failed to install SIGTERM handler");
+                if let Err(e) = signal::ctrl_c().await {
+                    tracing::error!(error = %e, "Failed to listen for Ctrl+C");
+                }
+                return;
+            }
+        };
+        tokio::select! {
+            r = signal::ctrl_c() => {
+                if let Err(e) = r {
+                    tracing::error!(error = %e, "Failed to listen for Ctrl+C");
+                }
+            }
+            _ = sigterm.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        if let Err(e) = signal::ctrl_c().await {
+            tracing::error!(error = %e, "Failed to listen for Ctrl+C");
+        }
     }
 }
 
