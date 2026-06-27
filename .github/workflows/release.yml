@@ -193,7 +193,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          dnf install -y gcc pkg-config protobuf-compiler \
+          # protobuf-devel provides the well-known-type includes
+          # (google/protobuf/*.proto) that gnmi's build needs — Fedora's
+          # protobuf-compiler ships protoc but not those includes.
+          dnf install -y gcc pkg-config protobuf-compiler protobuf-devel \
             libxkbcommon-devel wayland-devel openssl-devel perl-FindBin \
             systemd-devel libpcap-devel
 

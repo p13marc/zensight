@@ -35,6 +35,8 @@ COPY zensight-sensor-snmp ./zensight-sensor-snmp
 COPY zensight-sensor-netflow ./zensight-sensor-netflow
 COPY zensight-sensor-modbus ./zensight-sensor-modbus
 COPY zensight-sensor-gnmi ./zensight-sensor-gnmi
+COPY zensight-sensor-netlink ./zensight-sensor-netlink
+COPY zensight-sensor-netring ./zensight-sensor-netring
 
 # Build the specified exporter in release mode
 RUN cargo build --release -p ${EXPORTER_PACKAGE}
