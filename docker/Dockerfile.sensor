@@ -33,6 +33,8 @@ COPY zensight-sensor-gnmi ./zensight-sensor-gnmi
 
 # Copy remaining crates (needed for workspace resolution, not built)
 COPY zensight ./zensight
+COPY zensight-sensor-netlink ./zensight-sensor-netlink
+COPY zensight-sensor-netring ./zensight-sensor-netring
 COPY zensight-exporter-prometheus ./zensight-exporter-prometheus
 COPY zensight-exporter-otel ./zensight-exporter-otel
 
