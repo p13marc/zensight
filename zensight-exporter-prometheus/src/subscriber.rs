@@ -7,6 +7,7 @@ use tracing::{info, trace, warn};
 use zenoh::sample::{Sample, SampleKind};
 use zensight_common::alert::Alert;
 use zensight_common::config::ZenohConfig;
+use zensight_common::keyexpr::all_alerts_wildcard;
 use zensight_common::telemetry::TelemetryPoint;
 
 use crate::collector::SharedCollector;
@@ -18,11 +19,6 @@ pub const DEFAULT_KEY_EXPR: &str = "zensight/**";
 /// (`.../@/...` health/liveness/errors/alerts and `zensight/_meta/...`) do not.
 pub(crate) fn is_telemetry_key(key: &str) -> bool {
     !key.contains("/@/") && !key.starts_with("zensight/_meta/")
-}
-
-/// Whether a key carries a sensor [`Alert`] (`zensight/<protocol>/@/alerts/<key>`).
-pub(crate) fn is_alert_key(key: &str) -> bool {
-    key.contains("/@/alerts/")
 }
 
 /// Statistics for the subscriber.
@@ -118,6 +114,23 @@ impl TelemetrySubscriber {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create subscriber: {}", e))?;
 
+        // Sensor alerts live on the `@/alerts/*` control channel. The telemetry
+        // wildcard `zensight/**` does NOT match `@/`-prefixed chunks (Zenoh
+        // treats a chunk starting with `@` as verbatim), so firing alerts need
+        // their own subscriber on `zensight/*/@/alerts/*`.
+        let alert_subscriber = if self.collector.export_alerts() {
+            let alerts_key = all_alerts_wildcard();
+            info!(key_expr = %alerts_key, "Subscribing to sensor alerts");
+            Some(
+                session
+                    .declare_subscriber(&alerts_key)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to create alert subscriber: {}", e))?,
+            )
+        } else {
+            None
+        };
+
         info!("Subscriber started, waiting for telemetry...");
 
         loop {
@@ -130,20 +143,20 @@ impl TelemetrySubscriber {
                     }
                 }
 
+                // Receive sensor alerts (only polled when export_alerts is on).
+                sample = async { alert_subscriber.as_ref().unwrap().recv_async().await },
+                    if alert_subscriber.is_some() =>
+                {
+                    match sample {
+                        Ok(sample) => self.handle_alert_sample(&sample),
+                        Err(e) => warn!("Error receiving alert sample: {}", e),
+                    }
+                }
+
                 // Receive samples
                 sample = subscriber.recv_async() => {
                     match sample {
                         Ok(sample) => {
-                            // Sensor alerts live on the `@/alerts/*` control
-                            // channel; mirror them into the alert gauge (a
-                            // Delete tombstone clears the firing alert).
-                            if self.collector.export_alerts()
-                                && is_alert_key(sample.key_expr().as_str())
-                            {
-                                self.handle_alert_sample(&sample);
-                                continue;
-                            }
-
                             if sample.kind() == SampleKind::Delete {
                                 trace!(key = %sample.key_expr(), "Ignoring delete sample");
                                 continue;
@@ -201,6 +214,12 @@ impl TelemetrySubscriber {
             .undeclare()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to undeclare subscriber: {}", e))?;
+        if let Some(alert_subscriber) = alert_subscriber {
+            alert_subscriber
+                .undeclare()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to undeclare alert subscriber: {}", e))?;
+        }
         session
             .close()
             .await
@@ -279,5 +298,27 @@ mod tests {
         assert!(!is_telemetry_key("zensight/netlink/@/alerts/foo-00"));
         assert!(!is_telemetry_key("zensight/snmp/@/health"));
         assert!(!is_telemetry_key("zensight/_meta/sensors/snmp"));
+    }
+
+    /// The telemetry wildcard `zensight/**` must NOT match `@/alerts/*` (Zenoh
+    /// treats an `@`-prefixed chunk as verbatim), which is exactly why alert
+    /// export needs its own subscriber on `all_alerts_wildcard()`. Lock that in:
+    /// a regression here means alerts silently stop reaching the exporter.
+    #[test]
+    fn alerts_need_their_own_subscription() {
+        use zenoh::key_expr::KeyExpr;
+
+        let alert = KeyExpr::new("zensight/netlink/@/alerts/foo-00").unwrap();
+        let telemetry = KeyExpr::new(DEFAULT_KEY_EXPR).unwrap();
+        let alerts_sub = KeyExpr::new(all_alerts_wildcard()).unwrap();
+
+        assert!(
+            !telemetry.intersects(&alert),
+            "zensight/** must not match @/alerts/* — a single telemetry subscriber cannot see alerts"
+        );
+        assert!(
+            alerts_sub.intersects(&alert),
+            "the alerts wildcard must match @/alerts/* so the dedicated subscriber receives them"
+        );
     }
 }
