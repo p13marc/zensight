@@ -485,8 +485,9 @@ mod tests {
 
     #[test]
     fn test_parse_path_segment_multiple_keys() {
+        // Multiple keys are comma-separated inside a single bracket group.
         let (name, keys) =
-            GnmiSubscriber::parse_path_segment("interface[name=eth0][index=0]").unwrap();
+            GnmiSubscriber::parse_path_segment("interface[name=eth0,index=0]").unwrap();
         assert_eq!(name, "interface");
         assert_eq!(keys.get("name"), Some(&"eth0".to_string()));
         assert_eq!(keys.get("index"), Some(&"0".to_string()));
@@ -494,7 +495,11 @@ mod tests {
 
     #[test]
     fn test_parse_path_segment_empty() {
-        assert!(GnmiSubscriber::parse_path_segment("").is_none());
+        // An empty segment has no '[', so it parses to an empty-named, key-less
+        // segment (not None).
+        let (name, keys) = GnmiSubscriber::parse_path_segment("").unwrap();
+        assert_eq!(name, "");
+        assert!(keys.is_empty());
     }
 
     #[test]
