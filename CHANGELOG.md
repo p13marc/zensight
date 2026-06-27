@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-06-27
+
+### Fixed
+
+- **Packaging**: restore the RPM and Docker artifacts in the release workflow.
+  The Fedora RPM build now installs `protobuf-devel` (the well-known-type
+  includes gNMI's build needs), and both Docker build contexts
+  (`Dockerfile.sensor` / `Dockerfile.exporter`) now copy the
+  `zensight-sensor-netlink` / `zensight-sensor-netring` crates needed for
+  workspace resolution. No shipped binary changed from 0.6.0; this only completes
+  the artifact set (deb + flatpak were already published for 0.6.0).
+
 ## [0.6.0] - 2026-06-27
 
 A large release: two new kernel/wire-level sensors, a unified logs sensor with
