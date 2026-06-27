@@ -1242,13 +1242,13 @@ fn calculate_visible_pages(current: usize, total: usize) -> Vec<usize> {
     }
 }
 
-/// Get the color for a device status.
+/// Get the color for a device status (shared status palette, D2).
 fn status_color(status: DeviceStatus) -> Color {
     match status {
-        DeviceStatus::Online => Color::from_rgb(0.2, 0.8, 0.2), // Green
-        DeviceStatus::Degraded => Color::from_rgb(1.0, 0.6, 0.0), // Orange
-        DeviceStatus::Offline => Color::from_rgb(0.9, 0.2, 0.2), // Red
-        DeviceStatus::Unknown => Color::from_rgb(0.5, 0.5, 0.5), // Gray
+        DeviceStatus::Online => crate::view::theme::STATUS_ONLINE,
+        DeviceStatus::Degraded => crate::view::theme::STATUS_DEGRADED,
+        DeviceStatus::Offline => crate::view::theme::STATUS_OFFLINE,
+        DeviceStatus::Unknown => crate::view::theme::STATUS_UNKNOWN,
     }
 }
 

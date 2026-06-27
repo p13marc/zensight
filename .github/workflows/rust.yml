@@ -89,3 +89,17 @@ jobs:
 
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # D2 (#28): all colors must come from the design-system modules
+      # (view/theme.rs, view/tokens.rs, view/components/). No ad-hoc
+      # Color::from_rgb[a] anywhere else — use a theme accessor / constant or
+      # kit::rgb() for data colors.
+      - name: no ad-hoc colors (D2 guard)
+        run: |
+          hits=$(grep -rn "Color::from_rgb" zensight/src --include='*.rs' \
+            | grep -vE "view/theme\.rs|view/tokens\.rs|view/components/" || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Ad-hoc Color::from_rgb outside the design-system modules:"
+            echo "$hits"
+            exit 1
+          fi

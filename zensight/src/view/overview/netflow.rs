@@ -225,12 +225,8 @@ fn render_protocol_distribution<'a>(flows: &[FlowRecord]) -> Element<'a, Message
     let mut sorted: Vec<_> = by_protocol.into_iter().collect();
     sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
 
-    let colors = [
-        iced::Color::from_rgb(0.3, 0.6, 0.9), // Blue - TCP
-        iced::Color::from_rgb(0.4, 0.8, 0.4), // Green - UDP
-        iced::Color::from_rgb(0.9, 0.5, 0.3), // Orange - ICMP
-        iced::Color::from_rgb(0.7, 0.4, 0.8), // Purple - Other
-    ];
+    // Categorical protocol palette (shared, D2).
+    let colors = theme::PROTOCOL_CATEGORY;
 
     let bars: Vec<Element<'a, Message>> = sorted
         .iter()

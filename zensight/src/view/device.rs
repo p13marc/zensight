@@ -647,13 +647,14 @@ pub struct FacetTab {
     pub active: bool,
 }
 
-/// Triage tint for a facet's status dot (green / amber / red / gray).
+/// Triage tint for a facet's status dot (green / amber / red / gray) — shared
+/// status palette (D2).
 fn facet_status_color(status: DeviceStatus) -> iced::Color {
     match status {
-        DeviceStatus::Online => iced::Color::from_rgb(0.40, 0.75, 0.45),
-        DeviceStatus::Degraded => iced::Color::from_rgb(0.90, 0.70, 0.20),
-        DeviceStatus::Offline => iced::Color::from_rgb(0.90, 0.30, 0.30),
-        DeviceStatus::Unknown => iced::Color::from_rgb(0.55, 0.55, 0.55),
+        DeviceStatus::Online => crate::view::theme::STATUS_ONLINE,
+        DeviceStatus::Degraded => crate::view::theme::STATUS_DEGRADED,
+        DeviceStatus::Offline => crate::view::theme::STATUS_OFFLINE,
+        DeviceStatus::Unknown => crate::view::theme::STATUS_UNKNOWN,
     }
 }
 
@@ -970,8 +971,7 @@ fn render_chart_section<'a>(
     let legend: Element<'_, Message> = if state.is_comparison_mode() {
         let mut legend_row = Row::new().spacing(12).align_y(Alignment::Center);
         for series in state.chart.series() {
-            let (r, g, b) = series.color;
-            let swatch_color = iced::Color::from_rgb(r, g, b);
+            let swatch_color = crate::view::components::kit::rgb(series.color);
             let swatch = container(text(""))
                 .width(10)
                 .height(10)
@@ -1167,7 +1167,7 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
                     .size(14)
                     .style(move |theme: &Theme| text::Style {
                         color: Some(if is_fav {
-                            iced::Color::from_rgb(0.95, 0.75, 0.1)
+                            crate::view::theme::ACCENT_GOLD
                         } else {
                             crate::view::theme::colors(theme).text_dimmed()
                         }),
@@ -1254,9 +1254,9 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
         |row: MetricTableRow| -> Element<'_, Message> {
             let trend = row.trend;
             let color = match trend.as_str() {
-                "↑" => iced::Color::from_rgb(0.2, 0.8, 0.2),
-                "↓" => iced::Color::from_rgb(0.9, 0.2, 0.2),
-                _ => iced::Color::from_rgb(0.5, 0.5, 0.5),
+                "↑" => crate::view::theme::STATUS_ONLINE,
+                "↓" => crate::view::theme::STATUS_OFFLINE,
+                _ => crate::view::theme::STATUS_UNKNOWN,
             };
             text(trend)
                 .size(14)
@@ -1277,7 +1277,7 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
                         color: Some(crate::view::theme::colors(theme).text_dimmed()),
                     }),
                     text("stale").size(9).style(|_theme: &Theme| text::Style {
-                        color: Some(iced::Color::from_rgb(0.7, 0.4, 0.1)),
+                        color: Some(crate::view::theme::ACCENT_STALE),
                     })
                 ]
                 .spacing(4)

@@ -9,7 +9,9 @@ use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use zensight_common::TelemetryValue;
 
+use super::components::kit;
 use super::formatting::{format_time_offset, format_value};
+use super::theme;
 
 /// Map a timestamp to a horizontal fraction `[0,1]` of the plot area, centering
 /// the point when the time range is zero (single sample / all-same timestamp).
@@ -1001,101 +1003,62 @@ impl<'a> canvas::Program<crate::message::Message> for Chart<'a> {
 }
 
 impl<'a> Chart<'a> {
-    // Theme-aware color helpers
-    fn background_color(&self) -> Color {
+    // Theme-aware color helpers — all sourced from `theme::colors()` so the
+    // chart shares the single color source of truth (D2, #28).
+    fn theme(&self) -> Theme {
         if self.is_dark {
-            Color::from_rgb(0.1, 0.1, 0.12)
+            Theme::Dark
         } else {
-            Color::from_rgb(0.95, 0.95, 0.96)
+            Theme::Light
         }
+    }
+
+    fn background_color(&self) -> Color {
+        theme::colors(&self.theme()).chart_outer_background()
     }
 
     fn chart_background_color(&self) -> Color {
-        if self.is_dark {
-            Color::from_rgb(0.08, 0.08, 0.1)
-        } else {
-            Color::from_rgb(0.98, 0.98, 0.99)
-        }
+        theme::colors(&self.theme()).chart_background()
     }
 
     fn text_color(&self) -> Color {
-        if self.is_dark {
-            Color::WHITE
-        } else {
-            Color::from_rgb(0.1, 0.1, 0.1)
-        }
+        theme::colors(&self.theme()).text()
     }
 
     fn muted_text_color(&self) -> Color {
-        if self.is_dark {
-            Color::from_rgb(0.6, 0.6, 0.6)
-        } else {
-            Color::from_rgb(0.4, 0.4, 0.4)
-        }
+        theme::colors(&self.theme()).text_muted()
     }
 
     fn grid_color(&self) -> Color {
-        if self.is_dark {
-            Color::from_rgb(0.2, 0.2, 0.25)
-        } else {
-            Color::from_rgb(0.85, 0.85, 0.88)
-        }
+        theme::colors(&self.theme()).chart_grid()
     }
 
     fn label_color(&self) -> Color {
-        if self.is_dark {
-            Color::from_rgb(0.5, 0.5, 0.5)
-        } else {
-            Color::from_rgb(0.4, 0.4, 0.4)
-        }
+        theme::colors(&self.theme()).chart_label()
     }
 
     fn tooltip_background(&self) -> Color {
-        if self.is_dark {
-            Color::from_rgba(0.0, 0.0, 0.0, 0.85)
-        } else {
-            Color::from_rgba(1.0, 1.0, 1.0, 0.95)
-        }
+        theme::colors(&self.theme()).chart_tooltip_background()
     }
 
     fn highlight_color(&self) -> Color {
-        if self.is_dark {
-            Color::from_rgb(0.3, 0.8, 1.0)
-        } else {
-            Color::from_rgb(0.1, 0.5, 0.8)
-        }
+        theme::colors(&self.theme()).chart_highlight()
     }
 
     fn dimmed_series_color(&self) -> Color {
-        if self.is_dark {
-            Color::from_rgb(0.4, 0.4, 0.4)
-        } else {
-            Color::from_rgb(0.7, 0.7, 0.7)
-        }
+        theme::colors(&self.theme()).text_dimmed()
     }
 
     fn legend_text_color(&self) -> Color {
-        if self.is_dark {
-            Color::from_rgb(0.8, 0.8, 0.8)
-        } else {
-            Color::from_rgb(0.2, 0.2, 0.2)
-        }
+        theme::colors(&self.theme()).text_muted()
     }
 
     fn legend_text_hidden_color(&self) -> Color {
-        if self.is_dark {
-            Color::from_rgb(0.5, 0.5, 0.5)
-        } else {
-            Color::from_rgb(0.6, 0.6, 0.6)
-        }
+        theme::colors(&self.theme()).text_dimmed()
     }
 
     fn stats_text_color(&self) -> Color {
-        if self.is_dark {
-            Color::from_rgb(0.7, 0.7, 0.7)
-        } else {
-            Color::from_rgb(0.3, 0.3, 0.3)
-        }
+        theme::colors(&self.theme()).text_muted()
     }
 
     /// Draw the chart onto the frame.
@@ -1442,7 +1405,7 @@ impl<'a> Chart<'a> {
             Size::new(badge_width, badge_height),
         );
         // Warning badge color stays the same (amber/orange for visibility)
-        frame.fill(&bg, Color::from_rgba(1.0, 0.6, 0.0, 0.8));
+        frame.fill(&bg, theme::colors(&self.theme()).chart_feedback());
 
         let text = Text {
             content: "PAUSED - Viewing Past".to_string(),
@@ -1489,7 +1452,7 @@ impl<'a> Chart<'a> {
             let y = padding + chart_height
                 - ((threshold.value - value_min) / value_range) as f32 * chart_height;
 
-            let color = Color::from_rgb(threshold.color.0, threshold.color.1, threshold.color.2);
+            let color = kit::rgb(threshold.color);
 
             // Draw the line
             let line = Path::line(Point::new(padding, y), Point::new(padding + chart_width, y));
@@ -1559,7 +1522,7 @@ impl<'a> Chart<'a> {
             }
 
             let path = path_builder.build();
-            let color = Color::from_rgb(series.color.0, series.color.1, series.color.2);
+            let color = kit::rgb(series.color);
             frame.stroke(&path, Stroke::default().with_color(color).with_width(2.0));
 
             // Draw data points
@@ -1569,11 +1532,11 @@ impl<'a> Chart<'a> {
                     - y_fraction(point.value, value_min, value_range) * chart_height;
 
                 // Slightly brighter color for points
-                let point_color = Color::from_rgb(
+                let point_color = kit::rgb((
                     (series.color.0 + 0.1).min(1.0),
                     (series.color.1 + 0.1).min(1.0),
                     (series.color.2 + 0.1).min(1.0),
-                );
+                ));
                 let dot = Path::circle(Point::new(x, y), 3.0);
                 frame.fill(&dot, point_color);
             }
@@ -1595,7 +1558,7 @@ impl<'a> Chart<'a> {
 
             // Color indicator box
             let color = if series.visible {
-                Color::from_rgb(series.color.0, series.color.1, series.color.2)
+                kit::rgb(series.color)
             } else {
                 self.dimmed_series_color()
             };

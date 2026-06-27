@@ -20,10 +20,10 @@ pub enum ToastSeverity {
 impl ToastSeverity {
     fn color(&self) -> Color {
         match self {
-            ToastSeverity::Info => Color::from_rgb(0.3, 0.5, 0.9),
-            ToastSeverity::Success => Color::from_rgb(0.2, 0.7, 0.3),
-            ToastSeverity::Warning => Color::from_rgb(0.9, 0.7, 0.0),
-            ToastSeverity::Error => Color::from_rgb(0.9, 0.2, 0.2),
+            ToastSeverity::Info => crate::view::theme::TOAST_INFO,
+            ToastSeverity::Success => crate::view::theme::TOAST_SUCCESS,
+            ToastSeverity::Warning => crate::view::theme::TOAST_WARNING,
+            ToastSeverity::Error => crate::view::theme::TOAST_ERROR,
         }
     }
 
@@ -142,10 +142,7 @@ pub fn toast_overlay<'a>(state: &'a ToastState) -> Element<'a, Message> {
                 .padding(10)
                 .width(Length::Fill)
                 .style(move |theme: &Theme| {
-                    let bg = match theme {
-                        Theme::Dark => Color::from_rgb(0.15, 0.15, 0.18),
-                        _ => Color::from_rgb(0.97, 0.97, 0.97),
-                    };
+                    let bg = crate::view::theme::colors(theme).card_hover_background();
                     container::Style {
                         background: Some(iced::Background::Color(bg)),
                         border: iced::Border {

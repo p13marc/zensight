@@ -11,6 +11,18 @@ use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
+/// Convert a stored `(r, g, b)` triple (0.0–1.0) into an [`iced::Color`]. Use
+/// for *data* colors (chart series, threshold lines, group tags) so views never
+/// call `Color::from_rgb` directly — keeping the D2 "no ad-hoc colors" guard clean.
+pub fn rgb((r, g, b): (f32, f32, f32)) -> Color {
+    Color::from_rgb(r, g, b)
+}
+
+/// Like [`rgb`] but with an explicit alpha (for translucent data fills).
+pub fn rgba((r, g, b): (f32, f32, f32), alpha: f32) -> Color {
+    Color::from_rgba(r, g, b, alpha)
+}
+
 /// A card surface: a padded container with a subtle border and raised background.
 /// Use to group a logical section instead of a bare `column!` of rows.
 pub fn card<'a, Message: 'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {

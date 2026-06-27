@@ -6,6 +6,7 @@ use iced::{Color, Element, Length, Point, Rectangle, Renderer, Theme};
 
 use super::{NodeType, TopologyState};
 use crate::message::Message;
+use crate::view::theme;
 
 /// Interactive topology graph widget.
 pub struct TopologyGraph;
@@ -95,85 +96,70 @@ impl<'a> canvas::Program<Message> for TopologyGraphProgram<'a> {
 }
 
 impl<'a> TopologyGraphProgram<'a> {
-    // Theme-aware color helpers
-    fn background_color(&self) -> Color {
+    // Theme-aware color helpers — sourced from `theme::colors()` so the canvas
+    // shares the single color source of truth (D2, #28).
+    fn theme(&self) -> Theme {
         if self.is_dark {
-            Color::from_rgb(0.08, 0.08, 0.1)
+            Theme::Dark
         } else {
-            Color::from_rgb(0.95, 0.95, 0.96)
+            Theme::Light
         }
+    }
+
+    fn background_color(&self) -> Color {
+        theme::colors(&self.theme()).topology_background()
     }
 
     fn empty_state_text_color(&self) -> Color {
-        if self.is_dark {
-            Color::from_rgb(0.5, 0.5, 0.5)
-        } else {
-            Color::from_rgb(0.4, 0.4, 0.4)
-        }
+        theme::colors(&self.theme()).text_dimmed()
     }
 
     fn zoom_indicator_color(&self) -> Color {
-        if self.is_dark {
-            Color::from_rgb(0.4, 0.4, 0.4)
-        } else {
-            Color::from_rgb(0.5, 0.5, 0.5)
-        }
+        theme::colors(&self.theme()).text_dimmed()
     }
 
     fn node_host_healthy_color(&self) -> Color {
-        Color::from_rgb(0.3, 0.6, 0.9)
+        theme::colors(&self.theme()).topology_node_healthy()
     }
 
     fn node_host_unhealthy_color(&self) -> Color {
-        Color::from_rgb(0.9, 0.3, 0.3)
+        theme::colors(&self.theme()).topology_node_unhealthy()
     }
 
     fn node_router_color(&self) -> Color {
-        Color::from_rgb(0.4, 0.8, 0.4)
+        theme::colors(&self.theme()).topology_node_router()
     }
 
     fn node_switch_color(&self) -> Color {
-        Color::from_rgb(0.8, 0.6, 0.3)
+        theme::colors(&self.theme()).topology_node_switch()
     }
 
     fn node_unknown_color(&self) -> Color {
-        Color::from_rgb(0.5, 0.5, 0.5)
+        theme::colors(&self.theme()).topology_node_unknown()
     }
 
     fn selection_ring_color(&self) -> Color {
-        Color::from_rgb(1.0, 0.8, 0.2)
+        theme::colors(&self.theme()).topology_selection_ring()
     }
 
     fn highlight_ring_color(&self) -> Color {
-        Color::from_rgb(0.9, 0.5, 0.9)
+        theme::colors(&self.theme()).topology_highlight_ring()
     }
 
     fn pinned_indicator_color(&self) -> Color {
-        Color::from_rgb(1.0, 0.5, 0.2)
+        theme::colors(&self.theme()).topology_pinned()
     }
 
     fn node_label_color(&self) -> Color {
-        if self.is_dark {
-            Color::WHITE
-        } else {
-            Color::from_rgb(0.1, 0.1, 0.1)
-        }
+        theme::colors(&self.theme()).text()
     }
 
     fn edge_default_color(&self) -> Color {
-        if self.is_dark {
-            Color::from_rgb(0.4, 0.5, 0.6)
-        } else {
-            Color::from_rgb(0.5, 0.6, 0.7)
-        }
+        theme::colors(&self.theme()).topology_edge()
     }
 
     fn edge_label_color(&self) -> Color {
-        if self.is_dark {
-            Color::from_rgb(0.7, 0.7, 0.7)
-        } else {
-            Color::from_rgb(0.3, 0.3, 0.3)
-        }
+        theme::colors(&self.theme()).text_muted()
     }
 
     /// Handle mouse events.
@@ -335,9 +321,7 @@ impl<'a> TopologyGraphProgram<'a> {
 
         // Node color based on type and health, overridden by a firing alert.
         let base_color = match node.alert {
-            Some(zensight_common::AlertSeverity::Critical) => Color::from_rgb(0.95, 0.2, 0.2),
-            Some(zensight_common::AlertSeverity::Warning) => Color::from_rgb(0.95, 0.6, 0.1),
-            Some(zensight_common::AlertSeverity::Info) => Color::from_rgb(0.3, 0.6, 1.0),
+            Some(sev) => theme::colors(&self.theme()).alert_severity(sev),
             None => match node.node_type {
                 NodeType::Host => {
                     if node.is_healthy {
@@ -463,12 +447,7 @@ impl<'a> TopologyGraphProgram<'a> {
         } else if let Some(sev) = edge.alert {
             // Per-link health overlay (#49): a link touching an alerting host is
             // tinted by that severity.
-            use zensight_common::AlertSeverity;
-            match sev {
-                AlertSeverity::Critical => iced::Color::from_rgb(0.9, 0.2, 0.2),
-                AlertSeverity::Warning => iced::Color::from_rgb(1.0, 0.6, 0.0),
-                AlertSeverity::Info => iced::Color::from_rgb(0.3, 0.5, 0.9),
-            }
+            theme::colors(&self.theme()).alert_severity(sev)
         } else {
             self.edge_default_color()
         };

@@ -222,12 +222,8 @@ fn render_protocol_distribution(state: &DeviceDetailState) -> Element<'_, Messag
 
     let mut bars: Vec<Element<'_, Message>> = Vec::new();
 
-    let colors = [
-        iced::Color::from_rgb(0.3, 0.6, 0.9), // Blue - TCP
-        iced::Color::from_rgb(0.4, 0.8, 0.4), // Green - UDP
-        iced::Color::from_rgb(0.9, 0.5, 0.3), // Orange - ICMP
-        iced::Color::from_rgb(0.7, 0.4, 0.8), // Purple - Other
-    ];
+    // Categorical protocol palette (shared, D2).
+    let colors = theme::PROTOCOL_CATEGORY;
 
     for (i, (proto, bytes)) in sorted_protocols.iter().take(4).enumerate() {
         let pct = if total > 0 {

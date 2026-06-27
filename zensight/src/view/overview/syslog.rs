@@ -59,12 +59,12 @@ impl Severity {
 
     fn color(&self) -> iced::Color {
         match self {
-            Severity::Emergency | Severity::Alert => iced::Color::from_rgb(0.95, 0.2, 0.2),
-            Severity::Critical | Severity::Error => iced::Color::from_rgb(0.9, 0.4, 0.3),
-            Severity::Warning => iced::Color::from_rgb(0.9, 0.7, 0.2),
-            Severity::Notice => iced::Color::from_rgb(0.4, 0.7, 0.9),
-            Severity::Informational => iced::Color::from_rgb(0.5, 0.8, 0.5),
-            Severity::Debug => iced::Color::from_rgb(0.6, 0.6, 0.6),
+            Severity::Emergency | Severity::Alert => theme::SYSLOG_EMERGENCY,
+            Severity::Critical | Severity::Error => theme::SYSLOG_ERROR,
+            Severity::Warning => theme::SYSLOG_WARNING,
+            Severity::Notice => theme::SYSLOG_NOTICE,
+            Severity::Informational => theme::SYSLOG_INFO,
+            Severity::Debug => theme::SYSLOG_DEBUG,
         }
     }
 

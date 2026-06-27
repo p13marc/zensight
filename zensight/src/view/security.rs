@@ -338,7 +338,7 @@ fn render_by_detector<'a>(anomalies: &[&'a Alert], sec: &'a SecurityState) -> El
             } else {
                 format!("ATT&CK {tech} · {tactic}")
             };
-            header = header.push(badge(iced::Color::from_rgb(0.55, 0.45, 0.85), label));
+            header = header.push(badge(theme::ACCENT_ANOMALY, label));
         }
 
         let mut card_col = Column::new().spacing(4).push(header);

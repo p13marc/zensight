@@ -76,24 +76,12 @@ impl SyslogSeverity {
 
     fn color(&self) -> iced::Color {
         match self {
-            SyslogSeverity::Emergency | SyslogSeverity::Alert => {
-                iced::Color::from_rgb(0.95, 0.2, 0.2) // Bright red
-            }
-            SyslogSeverity::Critical | SyslogSeverity::Error => {
-                iced::Color::from_rgb(0.9, 0.4, 0.3) // Red-orange
-            }
-            SyslogSeverity::Warning => {
-                iced::Color::from_rgb(0.9, 0.7, 0.2) // Amber
-            }
-            SyslogSeverity::Notice => {
-                iced::Color::from_rgb(0.4, 0.7, 0.9) // Blue
-            }
-            SyslogSeverity::Informational => {
-                iced::Color::from_rgb(0.5, 0.8, 0.5) // Green
-            }
-            SyslogSeverity::Debug => {
-                iced::Color::from_rgb(0.6, 0.6, 0.6) // Gray
-            }
+            SyslogSeverity::Emergency | SyslogSeverity::Alert => theme::SYSLOG_EMERGENCY,
+            SyslogSeverity::Critical | SyslogSeverity::Error => theme::SYSLOG_ERROR,
+            SyslogSeverity::Warning => theme::SYSLOG_WARNING,
+            SyslogSeverity::Notice => theme::SYSLOG_NOTICE,
+            SyslogSeverity::Informational => theme::SYSLOG_INFO,
+            SyslogSeverity::Debug => theme::SYSLOG_DEBUG,
         }
     }
 }

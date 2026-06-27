@@ -203,6 +203,86 @@ impl<'a> ThemeColors<'a> {
         }
     }
 
+    /// Chart "paused / viewing past" feedback badge — amber, intentionally
+    /// theme-independent for visibility in both light and dark.
+    pub fn chart_feedback(&self) -> Color {
+        Color::from_rgba(1.0, 0.6, 0.0, 0.8)
+    }
+
+    // ========================================================================
+    // Topology Graph Colors (canvas — categorical node/ring palette + chrome)
+    // ========================================================================
+
+    /// Topology canvas background.
+    pub fn topology_background(&self) -> Color {
+        if self.is_dark() {
+            Color::from_rgb(0.08, 0.08, 0.1)
+        } else {
+            Color::from_rgb(0.95, 0.95, 0.96)
+        }
+    }
+
+    /// Healthy host node.
+    pub fn topology_node_healthy(&self) -> Color {
+        Color::from_rgb(0.3, 0.6, 0.9)
+    }
+
+    /// Unhealthy host node.
+    pub fn topology_node_unhealthy(&self) -> Color {
+        Color::from_rgb(0.9, 0.3, 0.3)
+    }
+
+    /// Router node.
+    pub fn topology_node_router(&self) -> Color {
+        Color::from_rgb(0.4, 0.8, 0.4)
+    }
+
+    /// Switch node.
+    pub fn topology_node_switch(&self) -> Color {
+        Color::from_rgb(0.8, 0.6, 0.3)
+    }
+
+    /// Unknown-type node.
+    pub fn topology_node_unknown(&self) -> Color {
+        Color::from_rgb(0.5, 0.5, 0.5)
+    }
+
+    /// Selected-node ring.
+    pub fn topology_selection_ring(&self) -> Color {
+        Color::from_rgb(1.0, 0.8, 0.2)
+    }
+
+    /// Search/highlight ring.
+    pub fn topology_highlight_ring(&self) -> Color {
+        Color::from_rgb(0.9, 0.5, 0.9)
+    }
+
+    /// Pinned-node indicator.
+    pub fn topology_pinned(&self) -> Color {
+        Color::from_rgb(1.0, 0.5, 0.2)
+    }
+
+    /// Default (no-alert) edge.
+    pub fn topology_edge(&self) -> Color {
+        if self.is_dark() {
+            Color::from_rgb(0.4, 0.5, 0.6)
+        } else {
+            Color::from_rgb(0.5, 0.6, 0.7)
+        }
+    }
+
+    /// Vivid alert-severity tint for graph overlays (node/edge), theme-
+    /// independent so severity reads the same in both light and dark. Shared so
+    /// every severity→color mapping resolves identically (see [`SEVERITY_INFO`]).
+    pub fn alert_severity(&self, sev: zensight_common::AlertSeverity) -> Color {
+        use zensight_common::AlertSeverity;
+        match sev {
+            AlertSeverity::Critical => SEVERITY_CRITICAL,
+            AlertSeverity::Warning => SEVERITY_WARNING,
+            AlertSeverity::Info => SEVERITY_INFO,
+        }
+    }
+
     // ========================================================================
     // Card/Container Colors
     // ========================================================================
@@ -457,6 +537,68 @@ impl<'a> ThemeColors<'a> {
 pub fn colors(theme: &Theme) -> ThemeColors<'_> {
     ThemeColors::new(theme)
 }
+
+// ============================================================================
+// Categorical palettes (theme-independent, D2 single source of truth, #28)
+//
+// These are intentionally the *same* in light and dark: status/severity colors
+// are recognition cues, not adaptive chrome. Views reference these constants
+// instead of hand-rolling `Color::from_rgb` so there is one definition each.
+// ============================================================================
+
+/// Device / health status palette (Online / Degraded / Offline / Unknown).
+pub const STATUS_ONLINE: Color = Color::from_rgb(0.40, 0.75, 0.45);
+/// See [`STATUS_ONLINE`].
+pub const STATUS_DEGRADED: Color = Color::from_rgb(0.90, 0.70, 0.20);
+/// See [`STATUS_ONLINE`].
+pub const STATUS_OFFLINE: Color = Color::from_rgb(0.90, 0.30, 0.30);
+/// See [`STATUS_ONLINE`].
+pub const STATUS_UNKNOWN: Color = Color::from_rgb(0.55, 0.55, 0.55);
+
+/// Alert-severity palette (Info / Warning / Critical), shared with
+/// [`ThemeColors::alert_severity`].
+pub const SEVERITY_INFO: Color = Color::from_rgb(0.3, 0.6, 1.0);
+/// See [`SEVERITY_INFO`].
+pub const SEVERITY_WARNING: Color = Color::from_rgb(0.95, 0.6, 0.1);
+/// See [`SEVERITY_INFO`].
+pub const SEVERITY_CRITICAL: Color = Color::from_rgb(0.9, 0.2, 0.2);
+
+/// Syslog-severity row palette (RFC 5424 levels collapsed to 6 tints).
+pub const SYSLOG_EMERGENCY: Color = Color::from_rgb(0.95, 0.2, 0.2);
+/// See [`SYSLOG_EMERGENCY`].
+pub const SYSLOG_ERROR: Color = Color::from_rgb(0.9, 0.4, 0.3);
+/// See [`SYSLOG_EMERGENCY`].
+pub const SYSLOG_WARNING: Color = Color::from_rgb(0.9, 0.7, 0.2);
+/// See [`SYSLOG_EMERGENCY`].
+pub const SYSLOG_NOTICE: Color = Color::from_rgb(0.4, 0.7, 0.9);
+/// See [`SYSLOG_EMERGENCY`].
+pub const SYSLOG_INFO: Color = Color::from_rgb(0.5, 0.8, 0.5);
+/// See [`SYSLOG_EMERGENCY`].
+pub const SYSLOG_DEBUG: Color = Color::from_rgb(0.6, 0.6, 0.6);
+
+/// Categorical protocol palette for distribution bars (TCP / UDP / ICMP / Other).
+pub const PROTOCOL_CATEGORY: [Color; 4] = [
+    Color::from_rgb(0.3, 0.6, 0.9), // TCP — blue
+    Color::from_rgb(0.4, 0.8, 0.4), // UDP — green
+    Color::from_rgb(0.9, 0.5, 0.3), // ICMP — orange
+    Color::from_rgb(0.7, 0.4, 0.8), // Other — purple
+];
+
+/// Toast-notification severity palette (Info / Success / Warning / Error).
+pub const TOAST_INFO: Color = Color::from_rgb(0.3, 0.5, 0.9);
+/// See [`TOAST_INFO`].
+pub const TOAST_SUCCESS: Color = Color::from_rgb(0.2, 0.7, 0.3);
+/// See [`TOAST_INFO`].
+pub const TOAST_WARNING: Color = Color::from_rgb(0.9, 0.7, 0.0);
+/// See [`TOAST_INFO`].
+pub const TOAST_ERROR: Color = Color::from_rgb(0.9, 0.2, 0.2);
+
+/// Gold accent for a pinned/favorite indicator (★).
+pub const ACCENT_GOLD: Color = Color::from_rgb(0.95, 0.75, 0.1);
+/// Amber accent for a "stale data" marker.
+pub const ACCENT_STALE: Color = Color::from_rgb(0.7, 0.4, 0.1);
+/// Violet accent for the security/anomaly lens.
+pub const ACCENT_ANOMALY: Color = Color::from_rgb(0.55, 0.45, 0.85);
 
 /// WCAG 2.1 relative luminance of an sRGB color (alpha ignored). Pure.
 pub fn relative_luminance(c: Color) -> f32 {
