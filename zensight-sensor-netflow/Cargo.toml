@@ -27,3 +27,33 @@ netflow_parser = "0.6"
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+# =============================================================================
+# Package metadata for cargo-deb
+# =============================================================================
+[package.metadata.deb]
+maintainer = "Marc Pardo <p13marc@gmail.com>"
+copyright = "2024, Marc Pardo"
+license-file = ["../LICENSE", "0"]
+extended-description = """Zenoh sensor for NetFlow/IPFIX flow telemetry. Receives flow
+records from exporters and publishes them to Zenoh for consumption by ZenSight
+or other Zenoh subscribers."""
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/zensight-sensor-netflow", "usr/bin/", "755"],
+    ["../packaging/systemd/zensight-sensor-netflow.service", "lib/systemd/system/", "644"],
+    ["../configs/netflow.json5", "etc/zensight/netflow.json5", "644"],
+]
+conf-files = ["/etc/zensight/netflow.json5"]
+depends = "$auto"
+
+# =============================================================================
+# Package metadata for cargo-generate-rpm
+# =============================================================================
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/zensight-sensor-netflow", dest = "/usr/bin/zensight-sensor-netflow", mode = "755" },
+    { source = "../packaging/systemd/zensight-sensor-netflow.service", dest = "/lib/systemd/system/zensight-sensor-netflow.service", mode = "644" },
+    { source = "../configs/netflow.json5", dest = "/etc/zensight/netflow.json5", mode = "644", config = true },
+]

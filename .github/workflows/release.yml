@@ -84,7 +84,9 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler libsystemd-dev
+          # protobuf-compiler: gnmi · libsystemd-dev: logs (journald)
+          # libpcap-dev: netring (AF_PACKET/pcap) · libssl-dev: snmp
+          sudo apt-get install -y protobuf-compiler libsystemd-dev libpcap-dev libssl-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -96,15 +98,21 @@ jobs:
 
       - name: Build release binaries
         run: |
-          cargo build --release -p zensight-sensor-logs
-          cargo build --release -p zensight-sensor-sysinfo
-          cargo build --release -p zensight-sensor-snmp
+          cargo build --release \
+            -p zensight-sensor-logs \
+            -p zensight-sensor-sysinfo \
+            -p zensight-sensor-snmp \
+            -p zensight-sensor-gnmi \
+            -p zensight-sensor-modbus \
+            -p zensight-sensor-netflow \
+            -p zensight-sensor-netlink \
+            -p zensight-sensor-netring
 
       - name: Build .deb packages for sensors
         run: |
-          cargo deb -p zensight-sensor-logs --no-build
-          cargo deb -p zensight-sensor-sysinfo --no-build
-          cargo deb -p zensight-sensor-snmp --no-build
+          for s in logs sysinfo snmp gnmi modbus netflow netlink netring; do
+            cargo deb -p "zensight-sensor-$s" --no-build
+          done
 
       - name: Rename packages with distro suffix
         run: |
