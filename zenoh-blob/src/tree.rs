@@ -13,10 +13,12 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::cancel::CancelToken;
 use crate::chunk::Chunker;
 use crate::error::{BlobError, Result};
 use crate::format::{Format, decode, encode};
 use crate::hash::{Digest, Hash, Sha256Digest};
+use crate::progress::{Progress, ProgressSink};
 use crate::store::ContentStore;
 use crate::{store_key, tree_key};
 
@@ -98,6 +100,25 @@ impl TreeIndex {
             }
         }
         out
+    }
+
+    /// Total size in bytes of all file entries (the reconstructed tree's payload).
+    pub fn total_size(&self) -> u64 {
+        self.entries
+            .iter()
+            .map(|e| match e {
+                Entry::File { size, .. } => *size,
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// Number of file entries in the snapshot.
+    pub fn file_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| matches!(e, Entry::File { .. }))
+            .count()
     }
 
     /// Recompute the root digest over `entries` and compare to `root_hash`.
@@ -263,6 +284,12 @@ impl TreeServer {
         self.index.write().await.insert(index.id.clone(), index);
     }
 
+    /// Drop a previously-registered snapshot index by id (e.g. on TTL expiry). The
+    /// chunks themselves are owned by the [`ContentStore`] and freed separately.
+    pub async fn unregister(&self, id: &str) {
+        self.index.write().await.remove(id);
+    }
+
     /// Declare both queryables and serve until the session closes.
     pub async fn run(self) -> Result<()> {
         let store_q = self
@@ -346,11 +373,31 @@ impl TreeClient {
 
     /// Download snapshot `id` into `dest_root`: fetch only the chunks missing from
     /// `store` (re-hashing each), reconstruct the tree, and verify the root hash.
+    ///
+    /// A thin wrapper over [`download_tree_cancellable`](Self::download_tree_cancellable)
+    /// with no progress reporting and an un-cancellable token.
     pub async fn download_tree(
         &self,
         id: &str,
         dest_root: &Path,
         store: &dyn ContentStore,
+    ) -> Result<()> {
+        self.download_tree_cancellable(id, dest_root, store, &(), &CancelToken::new())
+            .await
+    }
+
+    /// Like [`download_tree`](Self::download_tree) but reports [`Progress`] per
+    /// chunk and stops early (returning [`BlobError::Cancelled`]) when `cancel`
+    /// is signalled. Because progress *is* "which hashes are on disk", a cancelled
+    /// transfer leaves `store` populated with whatever it fetched, so calling again
+    /// resumes — across reconnect and process restart — for free.
+    pub async fn download_tree_cancellable(
+        &self,
+        id: &str,
+        dest_root: &Path,
+        store: &dyn ContentStore,
+        sink: &dyn ProgressSink,
+        cancel: &CancelToken,
     ) -> Result<()> {
         let index = self.fetch_index(id).await?;
         if index.algo != Sha256Digest::name() {
@@ -360,22 +407,41 @@ impl TreeClient {
             )));
         }
 
-        // Fetch the missing chunks (progress = which hashes are on disk).
-        for hash in index.needed_chunks() {
-            if store.has(&hash) {
-                continue;
+        let needed = index.needed_chunks();
+        let total = needed.len() as u32;
+        sink.emit(Progress::ManifestReceived {
+            total_len: index.total_size(),
+            chunk_count: total,
+        });
+
+        // Fetch the missing chunks (progress = which hashes are on disk). `received`
+        // counts hashes *resolved*, including ones already present, so a resume
+        // reports its real starting point immediately.
+        let mut received: u32 = 0;
+        for hash in needed {
+            if cancel.is_cancelled() {
+                return Err(BlobError::Cancelled { received, total });
             }
-            let bytes = self.fetch_chunk(&hash).await?;
-            // Verify by re-hashing on receipt → corruption is impossible.
-            let mut d = Sha256Digest::default();
-            d.update(&bytes);
-            if d.finalize() != hash {
-                return Err(BlobError::HashMismatch);
+            if !store.has(&hash) {
+                let bytes = self.fetch_chunk(&hash).await?;
+                // Verify by re-hashing on receipt → corruption is impossible.
+                let mut d = Sha256Digest::default();
+                d.update(&bytes);
+                if d.finalize() != hash {
+                    return Err(BlobError::HashMismatch);
+                }
+                store.put(&hash, &bytes)?;
             }
-            store.put(&hash, &bytes)?;
+            received += 1;
+            sink.emit(Progress::Chunk {
+                index: received - 1,
+                received,
+                total,
+            });
         }
 
         // Reconstruct the tree.
+        sink.emit(Progress::Verifying);
         tokio::fs::create_dir_all(dest_root).await?;
         for entry in &index.entries {
             reconstruct(dest_root, entry, store).await?;
@@ -385,6 +451,9 @@ impl TreeClient {
         if !index.verify_root::<Sha256Digest>() {
             return Err(BlobError::HashMismatch);
         }
+        sink.emit(Progress::Completed {
+            path: dest_root.to_path_buf(),
+        });
         Ok(())
     }
 

@@ -38,6 +38,10 @@ async fn main() -> Result<()> {
     ));
     let runner = runner.with_report(report_source);
 
+    // Tier-2 directory snapshots (`@/snapshot`): package an allowlisted directory
+    // for download. No-op unless `snapshot.enabled` is set in the config.
+    let runner = runner.with_snapshot(hostname.clone());
+
     // Get the config and publisher for the collector
     let sysinfo_config = runner.config().sysinfo.clone();
     let session = runner.session().clone();

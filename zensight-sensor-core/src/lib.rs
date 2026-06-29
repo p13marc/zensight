@@ -42,6 +42,7 @@ mod liveliness;
 mod publisher;
 pub mod report;
 mod runner;
+pub mod snapshot;
 mod status;
 
 pub use advanced_publisher::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
@@ -57,10 +58,11 @@ pub use liveliness::LivelinessManager;
 pub use publisher::Publisher;
 pub use report::{DebugBundleSource, ReportChannel, SimpleBundleSource, redact};
 pub use runner::SensorRunner;
+pub use snapshot::SnapshotChannel;
 pub use status::SensorStatus;
 
 // Re-export commonly used types from zensight-common
 pub use zensight_common::{
     Alert, AlertKind, AlertSeverity, AlertState, Format, LogFormat, LoggingConfig, Protocol,
-    ReportLimits, TelemetryPoint, TelemetryValue, ZenohConfig,
+    ReportLimits, SnapshotDir, SnapshotLimits, TelemetryPoint, TelemetryValue, ZenohConfig,
 };

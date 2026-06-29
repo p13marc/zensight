@@ -212,6 +212,88 @@ impl Default for ReportLimits {
     }
 }
 
+/// One allowlisted directory a sensor will package into a Tier-2 snapshot.
+///
+/// The operator requests a snapshot by `name` (never an arbitrary path), so this
+/// list is the authorization boundary for directory transfer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotDir {
+    /// Logical name the operator picks (e.g. `"etc"`, `"pcaps"`).
+    pub name: String,
+    /// Absolute path on the sensor host this name resolves to.
+    pub path: String,
+}
+
+/// Limits and policy for on-demand Tier-2 directory snapshots (`@/snapshot` +
+/// `@/store` + `@/tree`).
+///
+/// Disabled by default — a sensor opts in by setting `enabled: true`, listing the
+/// directories it will serve, and overriding `SensorConfig::snapshot_limits`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotLimits {
+    /// Whether the sensor serves directory-snapshot requests at all.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The allowlist of named directories that may be snapshotted.
+    #[serde(default)]
+    pub dirs: Vec<SnapshotDir>,
+    /// Hard cap on the total (uncompressed) snapshot size; build fails past this.
+    #[serde(default = "default_snapshot_max_bytes")]
+    pub max_bytes: u64,
+    /// Hard cap on the number of files in a snapshot; build fails past this.
+    #[serde(default = "default_snapshot_max_files")]
+    pub max_files: u64,
+    /// Minimum gap between successive snapshot builds, seconds (rate-limit).
+    #[serde(default = "default_report_cooldown")]
+    pub cooldown_secs: u64,
+    /// How long a built snapshot (its chunk store + index) stays available.
+    #[serde(default = "default_report_ttl")]
+    pub ttl_secs: u64,
+    /// Average chunk size for the content-defined (FastCDC) chunker, in bytes.
+    #[serde(default = "default_snapshot_chunk_size")]
+    pub chunk_size: u32,
+}
+
+fn default_snapshot_max_bytes() -> u64 {
+    256 * 1024 * 1024
+}
+fn default_snapshot_max_files() -> u64 {
+    50_000
+}
+fn default_snapshot_chunk_size() -> u32 {
+    256 * 1024
+}
+
+impl Default for SnapshotLimits {
+    fn default() -> Self {
+        SnapshotLimits {
+            enabled: false,
+            dirs: Vec::new(),
+            max_bytes: default_snapshot_max_bytes(),
+            max_files: default_snapshot_max_files(),
+            cooldown_secs: default_report_cooldown(),
+            ttl_secs: default_report_ttl(),
+            chunk_size: default_snapshot_chunk_size(),
+        }
+    }
+}
+
+impl SnapshotLimits {
+    /// Resolve a requested logical `name` to its configured absolute path, if the
+    /// name is allowlisted.
+    pub fn resolve(&self, name: &str) -> Option<&str> {
+        self.dirs
+            .iter()
+            .find(|d| d.name == name)
+            .map(|d| d.path.as_str())
+    }
+
+    /// The logical names of every allowlisted directory.
+    pub fn dir_names(&self) -> Vec<String> {
+        self.dirs.iter().map(|d| d.name.clone()).collect()
+    }
+}
+
 /// Load a configuration file in JSON5 format.
 pub fn load_config<T: for<'de> Deserialize<'de>>(path: impl AsRef<Path>) -> Result<T> {
     let path = path.as_ref();

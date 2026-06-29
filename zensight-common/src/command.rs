@@ -79,6 +79,42 @@ pub fn report_blob_prefix(prefix: &str) -> String {
     format!("{prefix}/@/report/blob")
 }
 
+/// Build the snapshot-request (subscriber) key: PUT a `SnapshotRequest` here to
+/// ask a sensor to package an allowlisted directory (Tier-2).
+///
+/// # Example
+/// ```
+/// use zensight_common::command::snapshot_request_key;
+/// assert_eq!(snapshot_request_key("zensight/sysinfo"), "zensight/sysinfo/@/snapshot/request");
+/// ```
+pub fn snapshot_request_key(prefix: &str) -> String {
+    format!("{prefix}/@/snapshot/request")
+}
+
+/// Build the snapshot-status (queryable) key: GET a `SnapshotStatus` to track a
+/// snapshot's lifecycle and learn the advertised directories.
+pub fn snapshot_status_key(prefix: &str) -> String {
+    format!("{prefix}/@/snapshot/status")
+}
+
+/// Build the snapshot-cancel (subscriber) key: PUT a snapshot id (ULID string) to
+/// free the sensor's temp chunk store early.
+pub fn snapshot_cancel_key(prefix: &str) -> String {
+    format!("{prefix}/@/snapshot/cancel")
+}
+
+/// Build the key prefix of the content-addressed chunk queryable (Tier-2). Chunks
+/// live at `<prefix>/@/store/<algo>/<hash>` — immutable, so cacheable fleet-wide.
+pub fn snapshot_store_prefix(prefix: &str) -> String {
+    format!("{prefix}/@/store")
+}
+
+/// Build the key prefix of the tree-index queryable (Tier-2). An index lives at
+/// `<prefix>/@/tree/<id>`.
+pub fn snapshot_tree_prefix(prefix: &str) -> String {
+    format!("{prefix}/@/tree")
+}
+
 /// Optional envelope carrying a correlation id alongside a command body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Command<T> {
@@ -127,6 +163,25 @@ mod tests {
         // status/request channels.
         assert!(report_status_key(p).starts_with(&format!("{p}/@/report/")));
         assert!(!report_status_key(p).starts_with(&report_blob_prefix(p)));
+    }
+
+    #[test]
+    fn snapshot_key_builders() {
+        let p = "zensight/sysinfo";
+        assert_eq!(
+            snapshot_request_key(p),
+            "zensight/sysinfo/@/snapshot/request"
+        );
+        assert_eq!(snapshot_status_key(p), "zensight/sysinfo/@/snapshot/status");
+        assert_eq!(snapshot_cancel_key(p), "zensight/sysinfo/@/snapshot/cancel");
+        assert_eq!(snapshot_store_prefix(p), "zensight/sysinfo/@/store");
+        assert_eq!(snapshot_tree_prefix(p), "zensight/sysinfo/@/tree");
+        // The store/tree queryables (declared on `…/**`) must not swallow the
+        // request/status/cancel control channels.
+        assert!(!snapshot_request_key(p).starts_with(&snapshot_store_prefix(p)));
+        assert!(!snapshot_request_key(p).starts_with(&snapshot_tree_prefix(p)));
+        // …nor collide with the Tier-1 report surface.
+        assert_ne!(snapshot_store_prefix(p), report_blob_prefix(p));
     }
 
     #[test]

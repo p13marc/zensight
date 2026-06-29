@@ -16,6 +16,25 @@
     chunk_size: 524288,    // 512 KiB transfer chunk (clamped 256 KiB–1 MiB)
   },
 
+  // Tier-2 directory snapshots (@/snapshot + @/store + @/tree) — opt-in. When
+  // enabled, an operator can download a whole allowlisted directory tree from the
+  // GUI (content-addressed + dedup'd + restart-resumable). The operator picks a
+  // directory by its logical `name`, never an arbitrary path — `dirs` is the
+  // authorization boundary. A netring sensor would point one of these at its pcap
+  // capture output dir; here it ships disabled with no directories.
+  snapshot: {
+    enabled: false,        // set true to allow directory downloads from this sensor
+    dirs: [
+      // { name: "etc", path: "/etc" },              // example: a /etc snapshot
+      // { name: "pcaps", path: "/var/lib/netring" }, // example: captured pcaps
+    ],
+    max_bytes: 268435456,  // 256 MiB cap on the (uncompressed) snapshot
+    max_files: 50000,      // cap on the number of files in a snapshot
+    cooldown_secs: 30,     // min gap between builds
+    ttl_secs: 600,         // how long a built snapshot stays downloadable
+    chunk_size: 262144,    // 256 KiB average (FastCDC content-defined chunking)
+  },
+
   // System information collection settings
   sysinfo: {
     // Key expression prefix
