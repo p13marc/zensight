@@ -1,9 +1,9 @@
 //! The blob client: issues a download query, writes chunks to a partial file,
-//! and verifies the whole-blob hash.
+//! verifies the whole-blob hash, and resumes interrupted transfers.
 //!
-//! This module currently implements the happy-path download (start-to-finish,
-//! verify, rename). On-disk resume state (the `.part` sidecar), `?from=K` range
-//! resume, and resume-binding are layered on in the Tier-1 protocol change.
+//! Resume state is a `.part` + a small JSON sidecar (see [`crate::resume`]); a
+//! dropped connection or a process restart re-`download`s and continues from the
+//! first missing chunk via the `?from=K` selector.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,6 +15,7 @@ use crate::format::{Format, decode};
 use crate::hash::{Digest, Sha256Digest};
 use crate::manifest::Manifest;
 use crate::progress::{Progress, ProgressSink};
+use crate::resume::ResumeState;
 use crate::{chunk::Chunker, chunk::FixedSizeChunker, download_selector};
 
 /// Downloads blobs served by a [`crate::BlobServer`] under the same key prefix.
@@ -82,48 +83,72 @@ impl BlobClient {
         });
 
         let chunker = FixedSizeChunker::new(manifest.chunk_size);
-        let mut file = tokio::fs::File::create(&part).await?;
-        file.set_len(manifest.total_len).await?;
-        let mut present = vec![false; manifest.chunk_count as usize];
-        let mut received: u32 = 0;
 
-        // Phase 2 — stream the chunks (any order); place each by its offset.
-        let selector = download_selector(&self.prefix, id, 0);
-        let replies = self
-            .session
-            .get(&selector)
-            .await
-            .map_err(BlobError::zenoh)?;
-        while let Ok(reply) = replies.recv_async().await {
-            let Ok(sample) = reply.result() else { continue };
-            let key = sample.key_expr().as_str();
-            let Some(index) = parse_chunk_index(key) else {
-                continue; // the manifest reply also arrives here; ignore it.
-            };
-            if index >= manifest.chunk_count {
-                continue;
+        // Resume probe: reuse a matching partial, else start fresh. A sidecar that
+        // doesn't match (different id/hash/chunking → a regenerated source) is
+        // discarded rather than spliced.
+        let mut state = match ResumeState::load(&part).await {
+            Some(s) if s.matches(&manifest) && tokio::fs::try_exists(&part).await? => s,
+            _ => {
+                let file = tokio::fs::File::create(&part).await?;
+                file.set_len(manifest.total_len).await?;
+                let fresh = ResumeState::fresh(&manifest);
+                fresh.save(&part).await?;
+                fresh
             }
-            let bytes = sample.payload().to_bytes();
-            let expected = chunker.chunk_len(index, manifest.total_len);
-            if bytes.len() as u32 != expected {
-                return Err(BlobError::ChunkLen { index });
-            }
-            file.seek(SeekFrom::Start(chunker.offset(index))).await?;
-            file.write_all(&bytes).await?;
-            if let Some(slot) = present.get_mut(index as usize)
-                && !*slot
-            {
-                *slot = true;
-                received += 1;
-                sink.emit(Progress::Chunk {
-                    index,
-                    received,
-                    total: manifest.chunk_count,
-                });
+        };
+        let mut received = state.received();
+        let from = state.first_missing();
+
+        // Open the partial for writing without truncating (we may be resuming).
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&part)
+            .await?;
+
+        // Phase 2 — stream the missing chunks (any order); place each by offset.
+        if from < manifest.chunk_count {
+            let selector = download_selector(&self.prefix, id, from);
+            let replies = self
+                .session
+                .get(&selector)
+                .await
+                .map_err(BlobError::zenoh)?;
+            while let Ok(reply) = replies.recv_async().await {
+                let Ok(sample) = reply.result() else { continue };
+                let key = sample.key_expr().as_str();
+                let Some(index) = parse_chunk_index(key) else {
+                    continue; // the manifest reply also arrives here; ignore it.
+                };
+                if index >= manifest.chunk_count {
+                    continue;
+                }
+                let bytes = sample.payload().to_bytes();
+                let expected = chunker.chunk_len(index, manifest.total_len);
+                if bytes.len() as u32 != expected {
+                    return Err(BlobError::ChunkLen { index });
+                }
+                file.seek(SeekFrom::Start(chunker.offset(index))).await?;
+                file.write_all(&bytes).await?;
+                if let Some(slot) = state.present.get_mut(index as usize)
+                    && !*slot
+                {
+                    *slot = true;
+                    received += 1;
+                    state.save(&part).await?;
+                    sink.emit(Progress::Chunk {
+                        index,
+                        received,
+                        total: manifest.chunk_count,
+                    });
+                }
             }
         }
 
         if received < manifest.chunk_count {
+            // Persist progress so the next call resumes from where we stopped.
+            file.flush().await?;
+            state.save(&part).await?;
             return Err(BlobError::Incomplete {
                 received,
                 total: manifest.chunk_count,
@@ -137,11 +162,13 @@ impl BlobClient {
         let actual = hash_file::<Sha256Digest>(&part).await?;
         if actual != manifest.hash {
             let _ = tokio::fs::remove_file(&part).await;
+            ResumeState::remove(&part).await;
             return Err(BlobError::HashMismatch);
         }
 
         let final_path = dest_dir.join(&manifest.filename);
         tokio::fs::rename(&part, &final_path).await?;
+        ResumeState::remove(&part).await;
         sink.emit(Progress::Completed {
             path: final_path.clone(),
         });

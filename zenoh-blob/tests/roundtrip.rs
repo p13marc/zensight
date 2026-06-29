@@ -111,3 +111,11 @@ async fn roundtrip_multi_mb() {
     assert_eq!(sha256(&got).await, sha256(&data).await);
     assert_eq!(got_path.file_name().unwrap(), "source.bin");
 }
+
+/// Placeholder for a multi-router topology test (memo §7 "routed vs peer"). The
+/// in-process tests above only exercise single-session loopback; a real router
+/// hop adds per-hop reliability/retransmit points. Wiring two sessions + a router
+/// in one test process is deferred — tracked as a follow-up.
+#[tokio::test]
+#[ignore = "needs a multi-session/router harness; see memo §7"]
+async fn roundtrip_via_router() {}

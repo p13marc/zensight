@@ -50,6 +50,7 @@ mod format;
 mod hash;
 mod manifest;
 mod progress;
+mod resume;
 mod server;
 
 pub use chunk::{
@@ -61,7 +62,7 @@ pub use format::{Format, decode, encode};
 pub use hash::{Digest, Hash, Sha256Digest};
 pub use manifest::Manifest;
 pub use progress::{Progress, ProgressSink};
-pub use server::{BlobServer, BlobSource, FileBlobSource};
+pub use server::{AsyncReadSeek, BlobServer, BlobSource, FileBlobSource, OpenFuture};
 
 /// Key of the manifest reply for blob `id` under `prefix`.
 pub fn manifest_key(prefix: &str, id: &str) -> String {
