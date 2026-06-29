@@ -24,6 +24,10 @@ pub struct SyslogSensorConfig {
     /// On-demand debug-report (`@/report`) limits. Disabled by default.
     #[serde(default)]
     pub report: zensight_sensor_core::ReportLimits,
+
+    /// Tier-2 directory-snapshot (`@/snapshot`) limits. Disabled by default.
+    #[serde(default)]
+    pub snapshot: zensight_sensor_core::SnapshotLimits,
 }
 
 /// Syslog receiver configuration.
@@ -777,6 +781,10 @@ impl zensight_sensor_core::SensorConfig for SyslogSensorConfig {
 
     fn report_limits(&self) -> zensight_sensor_core::ReportLimits {
         self.report.clone()
+    }
+
+    fn snapshot_limits(&self) -> zensight_sensor_core::SnapshotLimits {
+        self.snapshot.clone()
     }
 
     fn validate(&self) -> zensight_sensor_core::Result<()> {

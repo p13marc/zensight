@@ -32,7 +32,10 @@ async fn main() -> Result<()> {
         runner.config().clone(),
         runner.health(),
     ));
-    let runner = runner.with_report(report_source);
+    // Tier-2 directory snapshots (`@/snapshot`). No-op unless `snapshot.enabled`.
+    let runner = runner
+        .with_report(report_source)
+        .with_snapshot(hostname.clone());
 
     let netlink_config = runner.config().netlink.clone();
     let session = runner.session().clone();

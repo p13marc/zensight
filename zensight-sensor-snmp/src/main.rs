@@ -43,11 +43,12 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| "unknown".to_string());
     let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
         "snmp",
-        report_host,
+        report_host.clone(),
         runner.config().clone(),
         runner.health(),
     ));
-    let mut runner = runner.with_report(report_source);
+    // Tier-2 directory snapshots (`@/snapshot`). No-op unless `snapshot.enabled`.
+    let mut runner = runner.with_report(report_source).with_snapshot(report_host);
 
     // Get session for setting up pollers
     let session = runner.session().clone();
