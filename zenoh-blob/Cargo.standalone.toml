@@ -8,6 +8,10 @@
 #
 # Keep the dependency versions here in sync with the root Cargo.toml when bumping.
 
+# Empty workspace table so this is unambiguously its own workspace root after
+# extraction (never captured by a parent directory's workspace).
+[workspace]
+
 [package]
 name = "zenoh-blob"
 version = "0.1.0"

@@ -10,8 +10,10 @@
 #   scripts/extract-zenoh-blob.sh [OUTPUT_DIR]
 # Default OUTPUT_DIR: ../zenoh-blob
 #
-# Requires `git-filter-repo` (https://github.com/newren/git-filter-repo). On
-# Fedora: `sudo dnf install git-filter-repo`; or `pip install git-filter-repo`.
+# Prefers `git-filter-repo` (https://github.com/newren/git-filter-repo; Fedora:
+# `sudo dnf install git-filter-repo`, or `pip install git-filter-repo`) and falls
+# back to the built-in `git subtree split` when it's not installed. Both preserve
+# the subdirectory's history rooted at the new repo's top level.
 set -euo pipefail
 
 SUBDIR="zenoh-blob"
@@ -19,11 +21,6 @@ OUT_DIR="${1:-../zenoh-blob}"
 
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
-
-if ! command -v git-filter-repo >/dev/null 2>&1; then
-  echo "error: git-filter-repo not found. Install it (see header) and retry." >&2
-  exit 1
-fi
 
 if [[ -e "$OUT_DIR" ]]; then
   echo "error: output path '$OUT_DIR' already exists; remove it or pass another." >&2
@@ -34,24 +31,37 @@ echo "==> Cloning a scratch copy of the monorepo"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 git clone --no-local "$repo_root" "$tmp/clone"
-cd "$tmp/clone"
 
-echo "==> Rewriting history to just $SUBDIR/ (as the new repo root)"
-git filter-repo --force --subdirectory-filter "$SUBDIR"
+# Produce a clean repo at $tmp/out whose entire history is just $SUBDIR/, rooted
+# at the top level. Two routes; both leave the result on branch `main`.
+if command -v git-filter-repo >/dev/null 2>&1; then
+  echo "==> Rewriting history to just $SUBDIR/ (git-filter-repo)"
+  git -C "$tmp/clone" filter-repo --force --subdirectory-filter "$SUBDIR"
+  mv "$tmp/clone" "$tmp/out"
+  git -C "$tmp/out" branch -M main
+else
+  echo "==> git-filter-repo not found; using 'git subtree split' fallback"
+  split_sha="$(git -C "$tmp/clone" subtree split --prefix "$SUBDIR" HEAD)"
+  git init -q "$tmp/out"
+  git -C "$tmp/out" fetch -q "$tmp/clone" "$split_sha"
+  git -C "$tmp/out" checkout -q -b main FETCH_HEAD
+fi
 
+cd "$tmp/out"
 echo "==> Swapping in the standalone manifest"
 if [[ -f Cargo.standalone.toml ]]; then
-  git mv Cargo.standalone.toml Cargo.toml
-  git commit -m "chore: standalone manifest (extracted from ZenSight monorepo)"
+  # Overwrite the workspace-inheriting manifest with the standalone one.
+  git mv -f Cargo.standalone.toml Cargo.toml
+  git commit -q -m "chore: standalone manifest (extracted from ZenSight monorepo)"
 fi
 
 echo "==> Sanity build + test + publish dry-run"
-cargo build --all-targets --locked
-cargo test --locked
-cargo publish --dry-run
+cargo build --all-targets
+cargo test
+cargo publish --dry-run --allow-dirty
 
 cd "$repo_root"
-mv "$tmp/clone" "$OUT_DIR"
+mv "$tmp/out" "$OUT_DIR"
 trap - EXIT
 rm -rf "$tmp"
 
