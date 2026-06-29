@@ -149,6 +149,10 @@ pub struct ZenSight {
     /// Live Zenoh session handle (set on connect) for sending commands to
     /// sensors. `None` while disconnected or in demo mode.
     session: Option<std::sync::Arc<zenoh::Session>>,
+    /// In-flight debug-report download state (#197).
+    blob_fetch: crate::view::blob_fetch::BlobFetch,
+    /// The in-flight download's identity (key prefix, id, blob prefix, filename).
+    blob_job: Option<crate::view::blob_fetch::BlobJob>,
     /// Expectations authoring view state (netlink sentinel, Plan 08).
     expectations: crate::view::expectations::ExpectationsState,
     /// Security view state: severity filter + expanded anomaly (#48).
@@ -287,6 +291,8 @@ impl ZenSight {
             correlations: std::collections::HashMap::new(),
             toasts: ToastState::default(),
             session: None,
+            blob_fetch: crate::view::blob_fetch::BlobFetch::default(),
+            blob_job: None,
             expectations: crate::view::expectations::ExpectationsState::default(),
             security: crate::view::security::SecurityState::default(),
             detection_tuning: crate::view::detection_tuning::DetectionTuningState::default(),
@@ -1525,6 +1531,59 @@ impl ZenSight {
                 }
             },
 
+            // Debug-report download (#197)
+            Message::DownloadDebugReport(key_prefix) => {
+                if let Some(task) = self.start_report_download(key_prefix) {
+                    return task;
+                }
+            }
+
+            Message::ReportRequested(result) => {
+                if let Some(task) = self.on_report_requested(result) {
+                    return task;
+                }
+            }
+
+            Message::ReportProgress { got, total } => {
+                // Ignore stale progress from a cancelled job.
+                if self.blob_fetch.is_active() {
+                    self.blob_fetch =
+                        crate::view::blob_fetch::BlobFetch::Downloading { got, total };
+                }
+            }
+
+            Message::ReportDownloaded(result) => {
+                if let Some(task) = self.on_report_downloaded(result) {
+                    return task;
+                }
+            }
+
+            Message::ReportSaved(result) => match result {
+                Ok(Some(path)) => {
+                    self.blob_fetch = crate::view::blob_fetch::BlobFetch::Saved(path.clone());
+                    self.toasts
+                        .push(ToastSeverity::Success, format!("Report saved to {path}"));
+                }
+                Ok(None) => {
+                    // User cancelled the save dialog — discard, back to idle.
+                    self.blob_fetch = crate::view::blob_fetch::BlobFetch::Idle;
+                    self.blob_job = None;
+                }
+                Err(e) => {
+                    self.blob_fetch = crate::view::blob_fetch::BlobFetch::Failed(e.clone());
+                    self.toasts
+                        .push(ToastSeverity::Error, format!("Save failed: {e}"));
+                }
+            },
+
+            Message::CancelDownload => {
+                // PR4: reset client state (the in-flight stream's late messages are
+                // ignored because the job is cleared). A cooperative cancel hint to
+                // the sensor lands with the pause/cancel work (#198).
+                self.blob_fetch = crate::view::blob_fetch::BlobFetch::Idle;
+                self.blob_job = None;
+            }
+
             Message::ToggleTheme => {
                 self.theme = self.theme.toggle();
                 // Persist the theme preference
@@ -1955,6 +2014,91 @@ impl ZenSight {
                 },
             }
         })
+    }
+
+    /// Begin a debug-report download from the sensor at `key_prefix`: PUT the
+    /// request, then poll its status to `Ready`.
+    fn start_report_download(&mut self, key_prefix: String) -> Option<Task<Message>> {
+        let Some(session) = self.session.clone() else {
+            self.toasts
+                .push(ToastSeverity::Error, "Not connected to Zenoh".to_string());
+            return None;
+        };
+        let job = crate::view::blob_fetch::BlobJob::new(key_prefix.clone());
+        let id = job.id;
+        self.blob_job = Some(job);
+        self.blob_fetch = crate::view::blob_fetch::BlobFetch::Requesting;
+        Some(Task::future(async move {
+            let result =
+                crate::view::blob_fetch::request_and_await_ready(session, key_prefix, id).await;
+            Message::ReportRequested(result)
+        }))
+    }
+
+    /// Handle the `Ready`/error outcome of a report request and, on `Ready`, kick
+    /// off the streaming download.
+    fn on_report_requested(
+        &mut self,
+        result: Result<zensight_common::report::ReportState, String>,
+    ) -> Option<Task<Message>> {
+        use zensight_common::report::ReportState;
+        let job = self.blob_job.as_mut()?;
+        match result {
+            Ok(ReportState::Ready {
+                manifest,
+                blob_prefix,
+                ..
+            }) => {
+                job.blob_prefix = Some(blob_prefix.clone());
+                job.filename = Some(manifest.filename.clone());
+                let id = job.id.to_string();
+                self.blob_fetch = crate::view::blob_fetch::BlobFetch::Downloading {
+                    got: 0,
+                    total: manifest.chunk_count as u64,
+                };
+                let session = self.session.clone()?;
+                let dir = std::env::temp_dir().join("zensight-downloads");
+                Some(Task::stream(crate::view::blob_fetch::download_stream(
+                    session,
+                    blob_prefix,
+                    id,
+                    dir,
+                )))
+            }
+            Ok(_) => None, // request helper only returns Ready on success
+            Err(e) => {
+                self.blob_fetch = crate::view::blob_fetch::BlobFetch::Failed(e.clone());
+                self.toasts
+                    .push(ToastSeverity::Error, format!("Report failed: {e}"));
+                None
+            }
+        }
+    }
+
+    /// Handle a finished download: open a "Save as…" dialog (move/stream the
+    /// verified temp file), or surface the error.
+    fn on_report_downloaded(
+        &mut self,
+        result: Result<std::path::PathBuf, String>,
+    ) -> Option<Task<Message>> {
+        // Ignore if the user cancelled (job cleared).
+        let job = self.blob_job.as_ref()?;
+        match result {
+            Ok(temp_path) => {
+                self.blob_fetch = crate::view::blob_fetch::BlobFetch::Verifying;
+                let default_name = job
+                    .filename
+                    .clone()
+                    .unwrap_or_else(|| "zensight-debug-report.tar.zst".to_string());
+                Some(save_blob_dialog(default_name, temp_path))
+            }
+            Err(e) => {
+                self.blob_fetch = crate::view::blob_fetch::BlobFetch::Failed(e.clone());
+                self.toasts
+                    .push(ToastSeverity::Error, format!("Download failed: {e}"));
+                None
+            }
+        }
     }
 
     /// Query the netlink sentinel's current expectation set (status queryable).
@@ -2458,9 +2602,12 @@ impl ZenSight {
                 &self.security,
                 &self.detection_tuning,
             ),
-            CurrentView::Sensors => {
-                crate::view::sensors::sensors_view(&self.sensor_health, &self.recent_errors)
-            }
+            CurrentView::Sensors => crate::view::sensors::sensors_view(
+                &self.sensor_health,
+                &self.recent_errors,
+                &self.blob_fetch,
+                self.blob_job.as_ref().map(|j| j.key_prefix.as_str()),
+            ),
             CurrentView::Logs => {
                 let logs: Vec<_> = self.recent_logs.iter().cloned().collect();
                 crate::view::specialized::logs_view(&logs, &self.syslog_filter)
@@ -3152,6 +3299,37 @@ fn export_dialog(default_name: String, contents: String) -> Task<Message> {
             Ok(()) => Message::ExportFinished(Ok(Some(path.display().to_string()))),
             Err(e) => Message::ExportFinished(Err(e.to_string())),
         }
+    })
+}
+
+/// Native "Save as…" for a downloaded debug report. Unlike [`export_dialog`],
+/// this **moves** an already-verified temp file to the chosen path (falling back
+/// to a streamed copy across filesystems), so a large blob is never read into
+/// RAM (memo R2). Cancelling the dialog discards the temp file.
+fn save_blob_dialog(default_name: String, src: std::path::PathBuf) -> Task<Message> {
+    Task::future(async move {
+        let mut dialog = rfd::AsyncFileDialog::new().set_file_name(&default_name);
+        if let Some(dir) = dirs::download_dir().or_else(dirs::home_dir) {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(handle) = dialog.save_file().await else {
+            // Cancelled: discard the temp artifact.
+            let _ = tokio::fs::remove_file(&src).await;
+            return Message::ReportSaved(Ok(None));
+        };
+        let dst = handle.path().to_path_buf();
+        // Rename first (same filesystem); fall back to a streamed copy on EXDEV.
+        let result = match tokio::fs::rename(&src, &dst).await {
+            Ok(()) => Ok(dst.display().to_string()),
+            Err(_) => match tokio::fs::copy(&src, &dst).await {
+                Ok(_) => {
+                    let _ = tokio::fs::remove_file(&src).await;
+                    Ok(dst.display().to_string())
+                }
+                Err(e) => Err(e.to_string()),
+            },
+        };
+        Message::ReportSaved(result.map(Some))
     })
 }
 

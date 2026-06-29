@@ -494,6 +494,26 @@ pub enum Message {
     /// `Ok(None)` the user cancelled the dialog, `Err(msg)` the write failed.
     ExportFinished(Result<Option<String>, String>),
 
+    // Debug-report download messages (#197)
+    /// Request + download a debug report from the sensor at this key prefix
+    /// (e.g. `zensight/netlink`).
+    DownloadDebugReport(String),
+    /// The report request resolved: a `Ready` state to download, or an error.
+    ReportRequested(Result<zensight_common::report::ReportState, String>),
+    /// Streaming download progress (chunks received / total).
+    ReportProgress {
+        /// Chunks received so far.
+        got: u64,
+        /// Total chunks.
+        total: u64,
+    },
+    /// The bundle finished downloading + verifying to a temp path, or failed.
+    ReportDownloaded(Result<std::path::PathBuf, String>),
+    /// Outcome of the "Save as…" dialog for a downloaded report.
+    ReportSaved(Result<Option<String>, String>),
+    /// Cancel the in-flight report download.
+    CancelDownload,
+
     // Theme messages
     /// Toggle between light and dark theme.
     ToggleTheme,

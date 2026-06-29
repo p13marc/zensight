@@ -9619,7 +9619,9 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "ulid",
  "zenoh",
+ "zenoh-blob",
  "zenoh-ext",
  "zensight-common",
 ]
