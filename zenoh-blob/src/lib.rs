@@ -53,6 +53,8 @@ mod manifest;
 mod progress;
 mod resume;
 mod server;
+mod store;
+mod tree;
 
 pub use cancel::CancelToken;
 pub use chunk::{
@@ -65,6 +67,8 @@ pub use hash::{Digest, Hash, Sha256Digest};
 pub use manifest::Manifest;
 pub use progress::{Progress, ProgressSink};
 pub use server::{AsyncReadSeek, BlobServer, BlobSource, FileBlobSource, OpenFuture};
+pub use store::{ContentStore, DirStore, MemoryStore};
+pub use tree::{ChunkRef, Entry, TreeClient, TreeIndex, TreeServer, build_tree};
 
 /// Key of the manifest reply for blob `id` under `prefix`.
 pub fn manifest_key(prefix: &str, id: &str) -> String {
@@ -94,6 +98,17 @@ pub fn parse_id(prefix: &str, key_expr: &str) -> Option<String> {
     } else {
         Some(id.to_string())
     }
+}
+
+/// Key of a content-addressed chunk (Tier 2): `<prefix>/<algo>/<hex>`. Immutable,
+/// so it is safe to cache fleet-wide.
+pub fn store_key(prefix: &str, algo: &str, hash: &Hash) -> String {
+    format!("{prefix}/{algo}/{hash}")
+}
+
+/// Key of a tree snapshot index (Tier 2): `<prefix>/<id>`.
+pub fn tree_key(prefix: &str, id: &str) -> String {
+    format!("{prefix}/{id}")
 }
 
 /// Parse the `from=<K>` selector parameter (defaults to 0 if absent/malformed).
