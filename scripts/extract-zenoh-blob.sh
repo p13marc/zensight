@@ -39,12 +39,18 @@ if command -v git-filter-repo >/dev/null 2>&1; then
   git -C "$tmp/clone" filter-repo --force --subdirectory-filter "$SUBDIR"
   mv "$tmp/clone" "$tmp/out"
   git -C "$tmp/out" branch -M main
-else
+elif git subtree -h >/dev/null 2>&1; then
   echo "==> git-filter-repo not found; using 'git subtree split' fallback"
   split_sha="$(git -C "$tmp/clone" subtree split --prefix "$SUBDIR" HEAD)"
   git init -q "$tmp/out"
   git -C "$tmp/out" fetch -q "$tmp/clone" "$split_sha"
   git -C "$tmp/out" checkout -q -b main FETCH_HEAD
+else
+  echo "error: need 'git-filter-repo' or 'git subtree' to rewrite history; neither found." >&2
+  echo "  install one of:" >&2
+  echo "    git-filter-repo : pip install git-filter-repo   (or: sudo dnf install git-filter-repo)" >&2
+  echo "    git subtree     : ships in git contrib          (Fedora: sudo dnf install git-subtree)" >&2
+  exit 1
 fi
 
 cd "$tmp/out"

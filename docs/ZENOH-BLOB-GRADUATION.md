@@ -35,12 +35,14 @@ scripts/extract-zenoh-blob.sh ../zenoh-blob
 ```
 
 This clones a scratch copy, rewrites history to just the `zenoh-blob/` subtree
-(via `git-filter-repo`), swaps the standalone manifest in, and runs
-build + test + `cargo publish --dry-run` to confirm the result is publishable. The
-output repo lands at `../zenoh-blob`.
+(preferring `git-filter-repo`, falling back to `git subtree split`), swaps the
+standalone manifest in, and runs build + test + `cargo publish --dry-run` to
+confirm the result is publishable. The output repo lands at `../zenoh-blob`.
 
-> Requires `git-filter-repo`. Fedora: `sudo dnf install git-filter-repo`;
-> otherwise `pip install git-filter-repo`.
+> Needs **either** `git-filter-repo` (Fedora: `sudo dnf install git-filter-repo`,
+> or `pip install git-filter-repo`) **or** `git subtree` (ships in git's contrib;
+> Fedora: `sudo dnf install git-subtree`). The script picks whichever is present
+> and errors with install hints if neither is.
 
 ## 2. Create the GitHub repo and push  *(you)*
 
