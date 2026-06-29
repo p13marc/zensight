@@ -52,6 +52,16 @@ pub enum BlobError {
         total: u32,
     },
 
+    /// The caller cancelled (paused) the download. State is persisted to the
+    /// `.part` + sidecar, so a later `download` resumes from where it stopped.
+    #[error("cancelled")]
+    Cancelled {
+        /// Chunks received before cancellation.
+        received: u32,
+        /// Total chunks expected.
+        total: u32,
+    },
+
     /// A generic protocol violation (malformed key, bad selector, …).
     #[error("protocol: {0}")]
     Protocol(String),

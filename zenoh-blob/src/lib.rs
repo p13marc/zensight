@@ -43,6 +43,7 @@
 //!    the `chunk/<i>` replies to be accepted. A bare-`<id>` GET would silently
 //!    reject every chunk. [`download_selector`] enforces the wildcard.
 
+mod cancel;
 mod chunk;
 mod client;
 mod error;
@@ -53,6 +54,7 @@ mod progress;
 mod resume;
 mod server;
 
+pub use cancel::CancelToken;
 pub use chunk::{
     ChunkSize, Chunker, DEFAULT_CHUNK_SIZE, FixedSizeChunker, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE,
 };

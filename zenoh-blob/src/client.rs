@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 
+use crate::cancel::CancelToken;
 use crate::error::{BlobError, Result};
 use crate::format::{Format, decode};
 use crate::hash::{Digest, Sha256Digest};
@@ -48,7 +49,21 @@ impl BlobClient {
         dest_dir: &Path,
         sink: &dyn ProgressSink,
     ) -> Result<PathBuf> {
-        let result = self.download_inner(id, dest_dir, sink).await;
+        self.download_cancellable(id, dest_dir, sink, &CancelToken::new())
+            .await
+    }
+
+    /// Like [`Self::download`], but stops cooperatively when `cancel` is set —
+    /// the partial + sidecar are persisted, so a later call resumes (this is how
+    /// pause/cancel are built). Returns [`BlobError::Cancelled`] if stopped.
+    pub async fn download_cancellable(
+        &self,
+        id: &str,
+        dest_dir: &Path,
+        sink: &dyn ProgressSink,
+        cancel: &CancelToken,
+    ) -> Result<PathBuf> {
+        let result = self.download_inner(id, dest_dir, sink, cancel).await;
         if let Err(e) = &result {
             sink.emit(Progress::Failed {
                 error: e.to_string(),
@@ -57,11 +72,19 @@ impl BlobClient {
         result
     }
 
+    /// Delete any partial download + sidecar for blob `id` in `dest_dir` (cancel).
+    pub async fn delete_partial(&self, id: &str, dest_dir: &Path) {
+        let part = dest_dir.join(format!("{id}.part"));
+        let _ = tokio::fs::remove_file(&part).await;
+        ResumeState::remove(&part).await;
+    }
+
     async fn download_inner(
         &self,
         id: &str,
         dest_dir: &Path,
         sink: &dyn ProgressSink,
+        cancel: &CancelToken,
     ) -> Result<PathBuf> {
         tokio::fs::create_dir_all(dest_dir).await?;
         let part = dest_dir.join(format!("{id}.part"));
@@ -115,6 +138,14 @@ impl BlobClient {
                 .await
                 .map_err(BlobError::zenoh)?;
             while let Ok(reply) = replies.recv_async().await {
+                if cancel.is_cancelled() {
+                    file.flush().await?;
+                    state.save(&part).await?;
+                    return Err(BlobError::Cancelled {
+                        received,
+                        total: manifest.chunk_count,
+                    });
+                }
                 let Ok(sample) = reply.result() else { continue };
                 let key = sample.key_expr().as_str();
                 let Some(index) = parse_chunk_index(key) else {

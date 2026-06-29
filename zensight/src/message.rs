@@ -511,7 +511,11 @@ pub enum Message {
     ReportDownloaded(Result<std::path::PathBuf, String>),
     /// Outcome of the "Save as…" dialog for a downloaded report.
     ReportSaved(Result<Option<String>, String>),
-    /// Cancel the in-flight report download.
+    /// Pause the in-flight report download (keeps the partial; resumable).
+    PauseDownload,
+    /// Resume a paused report download.
+    ResumeDownload,
+    /// Cancel the in-flight report download (discards the partial).
     CancelDownload,
 
     // Theme messages

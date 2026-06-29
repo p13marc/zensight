@@ -13,7 +13,7 @@ use iced::widget::{button, row, text};
 use iced::{Alignment, Element};
 use ulid::Ulid;
 use zenoh::Session;
-use zenoh_blob::{BlobClient, Progress, ProgressSink};
+use zenoh_blob::{BlobClient, CancelToken, Progress, ProgressSink};
 use zensight_common::report::{ReportKind, ReportRequest, ReportState, ReportStatus};
 use zensight_common::{report_request_key, report_status_key};
 
@@ -37,6 +37,13 @@ pub enum BlobFetch {
         /// Total chunks.
         total: u64,
     },
+    /// Paused by the operator; the partial is kept and can be resumed.
+    Paused {
+        /// Chunks received so far.
+        got: u64,
+        /// Total chunks.
+        total: u64,
+    },
     /// Verifying the whole-blob hash (done inside `zenoh-blob`) / saving.
     Verifying,
     /// Saved to `path`.
@@ -46,7 +53,8 @@ pub enum BlobFetch {
 }
 
 impl BlobFetch {
-    /// Whether a download is in progress (so the button is disabled).
+    /// Whether a download is actively running (so the (re)download button is
+    /// hidden). `Paused` is *not* active — it offers Resume.
     pub fn is_active(&self) -> bool {
         matches!(
             self,
@@ -57,10 +65,18 @@ impl BlobFetch {
         )
     }
 
+    /// Whether this state occupies the sensor card (active or paused) — used to
+    /// decide whether to show the job controls vs the start button.
+    pub fn is_busy(&self) -> bool {
+        self.is_active() || matches!(self, BlobFetch::Paused { .. })
+    }
+
     /// Download fraction `[0,1]`, if known.
     pub fn progress_frac(&self) -> Option<f32> {
         match self {
-            BlobFetch::Downloading { got, total } if *total > 0 => {
+            BlobFetch::Downloading { got, total } | BlobFetch::Paused { got, total }
+                if *total > 0 =>
+            {
                 Some(*got as f32 / *total as f32)
             }
             _ => None,
@@ -80,6 +96,7 @@ impl BlobFetch {
                     .unwrap_or(0);
                 format!("Downloading {got}/{total} ({pct}%)")
             }
+            BlobFetch::Paused { got, total } => format!("Paused {got}/{total}"),
             BlobFetch::Verifying => "Verifying…".into(),
             BlobFetch::Saved(p) => format!("Saved to {p}"),
             BlobFetch::Failed(e) => format!("Failed: {e}"),
@@ -87,8 +104,8 @@ impl BlobFetch {
     }
 }
 
-/// The in-flight download's identity, carried between message handlers.
-#[derive(Debug, Clone)]
+/// The in-flight download's identity + controls, carried between handlers.
+#[derive(Clone)]
 pub struct BlobJob {
     /// Sensor key prefix, e.g. `zensight/netlink`.
     pub key_prefix: String,
@@ -98,17 +115,29 @@ pub struct BlobJob {
     pub blob_prefix: Option<String>,
     /// Suggested save filename (set once `Ready`).
     pub filename: Option<String>,
+    /// Cancellation flag for the in-flight stream (pause/cancel).
+    pub cancel: CancelToken,
+    /// Where the `.part` + sidecar live.
+    pub dest_dir: PathBuf,
 }
 
 impl BlobJob {
-    /// Start a job for `key_prefix` with a fresh report id.
+    /// Start a job for `key_prefix` with a fresh report id + cancel token.
     pub fn new(key_prefix: String) -> Self {
         BlobJob {
             key_prefix,
             id: Ulid::new(),
             blob_prefix: None,
             filename: None,
+            cancel: CancelToken::new(),
+            dest_dir: std::env::temp_dir().join("zensight-downloads"),
         }
+    }
+
+    /// Replace the cancel token with a fresh one (on resume).
+    pub fn reset_cancel(&mut self) -> CancelToken {
+        self.cancel = CancelToken::new();
+        self.cancel.clone()
     }
 }
 
@@ -162,6 +191,7 @@ pub fn download_stream(
     blob_prefix: String,
     id: String,
     dest_dir: PathBuf,
+    cancel: CancelToken,
 ) -> impl Stream<Item = Message> {
     async_stream::stream! {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
@@ -174,7 +204,7 @@ pub fn download_stream(
                 }
             }
             let sink = Sink(tx);
-            client.download(&id, &dest_dir, &sink).await
+            client.download_cancellable(&id, &dest_dir, &sink, &cancel).await
         });
         while let Some(p) = rx.recv().await {
             if let Progress::Chunk { received, total, .. } = p {
@@ -198,21 +228,33 @@ pub fn download_section<'a>(
 ) -> Element<'a, Message> {
     let is_this = active_prefix == Some(this_prefix);
 
-    if is_this && blob_fetch.is_active() {
-        return row![
-            text(blob_fetch.label()).size(font::CAPTION),
-            button(text("Cancel").size(font::CAPTION)).on_press(Message::CancelDownload),
-        ]
-        .spacing(space::MD)
-        .align_y(Alignment::Center)
-        .into();
+    if is_this && blob_fetch.is_busy() {
+        let mut controls = row![text(blob_fetch.label()).size(font::CAPTION)]
+            .spacing(space::MD)
+            .align_y(Alignment::Center);
+        match blob_fetch {
+            BlobFetch::Downloading { .. } => {
+                controls = controls.push(
+                    button(text("Pause").size(font::CAPTION)).on_press(Message::PauseDownload),
+                );
+            }
+            BlobFetch::Paused { .. } => {
+                controls = controls.push(
+                    button(text("Resume").size(font::CAPTION)).on_press(Message::ResumeDownload),
+                );
+            }
+            _ => {}
+        }
+        controls = controls
+            .push(button(text("Cancel").size(font::CAPTION)).on_press(Message::CancelDownload));
+        return controls.into();
     }
 
     // Idle / finished: offer a (re)download button, disabled while another card's
     // download is in flight.
-    let other_active = blob_fetch.is_active() && !is_this;
+    let other_busy = blob_fetch.is_busy() && !is_this;
     let mut btn = button(text("Download debug report").size(font::CAPTION));
-    if !other_active {
+    if !other_busy {
         btn = btn.on_press(Message::DownloadDebugReport(this_prefix.to_string()));
     }
 
@@ -234,6 +276,11 @@ mod tests {
         assert!(BlobFetch::Downloading { got: 1, total: 4 }.is_active());
         assert!(!BlobFetch::Saved("x".into()).is_active());
         assert!(!BlobFetch::Failed("x".into()).is_active());
+        // Paused is not "active" (it offers Resume) but is "busy" (occupies card).
+        let paused = BlobFetch::Paused { got: 1, total: 4 };
+        assert!(!paused.is_active());
+        assert!(paused.is_busy());
+        assert!(BlobFetch::Downloading { got: 1, total: 4 }.is_busy());
     }
 
     #[test]
@@ -241,6 +288,10 @@ mod tests {
         assert_eq!(
             BlobFetch::Downloading { got: 2, total: 4 }.progress_frac(),
             Some(0.5)
+        );
+        assert_eq!(
+            BlobFetch::Paused { got: 1, total: 4 }.progress_frac(),
+            Some(0.25)
         );
         assert_eq!(
             BlobFetch::Downloading { got: 0, total: 0 }.progress_frac(),
