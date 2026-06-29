@@ -165,13 +165,23 @@ as Zenoh selector params (e.g. `?top=20`, `?state=&port=`).
 
 | Sensor | `@/query/<topic>` | Reply |
 |--------|---|---|
+| sysinfo | `processes?sort=cpu\|mem\|io&top=N`, `latency`² | `Vec<ProcessRecord>` / `LatencyReport` |
 | netlink | `routes`, `neighbors`, `sockets?state=&port=`, `addresses`, `events`, `route_changes`, `tc`, `xfrm`, `nft` | `Vec<…Record>` |
 | netring | `flows`, `tls`, `talkers?top=N`, `matrix?top=N`, `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`, `ja4h?top=N`¹, `assets` | `Vec<…Record>` |
+
+Note: sysinfo's `@/query/*` keys carry the `<hostname>` segment
+(`zensight/sysinfo/<host>/@/query/<topic>`), unlike netlink/netring which use the
+host-less `command::query_key` form.
 
 ¹ `ja4h` (JA4H HTTP fingerprints, #124) is only served when the netring sensor is
 built with `--features ja4plus` (FoxIO License 1.1) and `collect.http_fp` is set;
 otherwise the channel is absent and the reply empty. JA4SSH is not yet available
 upstream — SSH is fingerprinted via HASSH on the `ssh` channel.
+
+² `latency` (eBPF runqlat + biolatency saturation histograms, #99) is only served
+when the sysinfo sensor is built with `--features ebpf` and `collect.ebpf` is set,
+and the process holds CAP_BPF/CAP_PERFMON; otherwise the reply is a
+`LatencyReport` with `available: false`.
 
 ---
 

@@ -142,6 +142,24 @@ error surface (PSI, vmstat, cgroup-v2, thermal/power). All families are gated by
 - **On-demand detail** (`@/query/<topic>`): `processes?sort=cpu|mem|io&top=N`
   (`collect.process_query`, default on) — the per-pid firehose, served on
   request rather than streamed.
+- **eBPF saturation histograms** (`collect.ebpf`, **default off**, opt-in build
+  — issue #99): scheduler run-queue latency (`runqlat`) and block-I/O latency
+  (`biolatency`) as log2 histograms with derived p50/p95/p99 + max, served only
+  on `@/query/latency` (never streamed). These are the saturation *tails* that
+  `/proc` 5s averages cannot see. The reply is a `LatencyReport` JSON:
+  `{ available, window_secs, runqlat: {unit, buckets:[{le_us,count}], total,
+  p50_us, p95_us, p99_us, max_us}, biolatency: {...} }`.
+  - **Build:** needs a binary built with `--features ebpf`, which requires a
+    nightly toolchain + `rust-src` + `bpf-linker` (`rustup toolchain install
+    nightly && rustup component add rust-src --toolchain nightly && cargo install
+    bpf-linker`), then `cargo build -p zensight-sensor-sysinfo --release
+    --features ebpf`. The feature is intentionally **out of** the default
+    `cargo build --workspace` / stable CI (the eBPF program crate is a member
+    that compiles to an empty host stub off the `bpf` target).
+  - **Runtime:** needs `CAP_BPF` + `CAP_PERFMON` (kernel ≥ 5.8). Off / missing
+    caps / unsupported kernel → one warning, `available:false`, and the
+    unprivileged baseline is unchanged. See the commented `AmbientCapabilities`
+    block in `packaging/systemd/zensight-sensor-sysinfo.service`.
 
 ## gnmi
 

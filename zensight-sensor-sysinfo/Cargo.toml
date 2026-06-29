@@ -6,9 +6,26 @@ authors.workspace = true
 description = "Zenoh sensor for system monitoring (CPU, memory, disk, network)"
 license = "Apache-2.0"
 
+[features]
+# Opt-in eBPF saturation histograms (runqlat + biolatency), issue #99. OFF by
+# default. Requires nightly + rust-src + bpf-linker to BUILD, and CAP_BPF/
+# CAP_PERFMON to RUN. Keeps the unprivileged default intact and keeps the
+# feature out of `cargo build --workspace` on stable CI.
+ebpf = ["dep:aya", "dep:aya-log", "dep:aya-build", "dep:libc"]
+
 [dependencies]
 zensight-common = { path = "../zensight-common" }
 zensight-sensor-core = { path = "../zensight-sensor-core" }
+
+# Shared kernel<->user eBPF types (MAX_SLOTS, log2_bucket). Plain no_std lib —
+# always present so map.rs can size histograms without a feature gate.
+zensight-sensor-sysinfo-ebpf-common = { path = "../zensight-sensor-sysinfo-ebpf-common" }
+
+# eBPF userspace (opt-in, `ebpf` feature only).
+aya = { workspace = true, optional = true }
+aya-log = { workspace = true, optional = true }
+# EPERM/capability messaging + optional RLIMIT_MEMLOCK bump on old kernels.
+libc = { version = "0.2", optional = true }
 
 # System information
 sysinfo = "0.33"
@@ -46,6 +63,12 @@ chrono = "0.4"
 
 # Hostname detection
 hostname = "0.4"
+
+# Compiles the excluded eBPF program crate to bytecode. Only pulled in (and only
+# used by build.rs) when the `ebpf` feature is enabled — stable builds never
+# touch bpf-linker. See build.rs.
+[build-dependencies]
+aya-build = { workspace = true, optional = true }
 
 [[bin]]
 name = "zensight-sensor-sysinfo"
