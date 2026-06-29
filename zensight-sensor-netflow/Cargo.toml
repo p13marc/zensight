@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 zensight-common.workspace = true
 zensight-sensor-core.workspace = true
+hostname = "0.4"
 zenoh.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -28,6 +28,10 @@ pub struct SysinfoSensorConfig {
     /// Logging configuration.
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    /// On-demand debug-report (`@/report`) limits. Disabled by default.
+    #[serde(default)]
+    pub report: zensight_sensor_core::ReportLimits,
 }
 
 /// System information collection configuration.
@@ -363,6 +367,10 @@ impl SensorConfig for SysinfoSensorConfig {
 
     fn key_prefix(&self) -> &str {
         &self.sysinfo.key_prefix
+    }
+
+    fn report_limits(&self) -> zensight_sensor_core::ReportLimits {
+        self.report.clone()
     }
 
     fn validate(&self) -> zensight_sensor_core::Result<()> {

@@ -9732,6 +9732,7 @@ dependencies = [
  "chrono",
  "ciborium",
  "clap",
+ "hostname",
  "json5",
  "prost 0.13.5",
  "prost-types 0.13.5",
@@ -9782,6 +9783,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "hostname",
  "json5",
  "serde",
  "serde_json",
@@ -9802,6 +9804,7 @@ version = "0.6.2"
 dependencies = [
  "anyhow",
  "clap",
+ "hostname",
  "json5",
  "netflow_parser",
  "serde",
@@ -9864,6 +9867,7 @@ version = "0.6.2"
 dependencies = [
  "anyhow",
  "clap",
+ "hostname",
  "json5",
  "rasn",
  "rasn-smi",

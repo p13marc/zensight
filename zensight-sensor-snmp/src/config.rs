@@ -24,6 +24,10 @@ pub struct SnmpSensorConfig {
 
     /// SNMP-specific settings.
     pub snmp: SnmpConfig,
+
+    /// On-demand debug-report (`@/report`) limits. Disabled by default.
+    #[serde(default)]
+    pub report: zensight_sensor_core::ReportLimits,
 }
 
 /// SNMP-specific configuration.
@@ -307,6 +311,10 @@ impl zensight_sensor_core::SensorConfig for SnmpSensorConfig {
             }
         }
         Ok(())
+    }
+
+    fn report_limits(&self) -> zensight_sensor_core::ReportLimits {
+        self.report.clone()
     }
 }
 

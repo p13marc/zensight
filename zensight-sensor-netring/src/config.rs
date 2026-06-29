@@ -23,6 +23,9 @@ pub struct NetringSensorConfig {
     #[serde(default)]
     pub logging: LoggingConfig,
     pub netring: NetringConfig,
+    /// On-demand debug-report (`@/report`) limits. Disabled by default.
+    #[serde(default)]
+    pub report: zensight_sensor_core::ReportLimits,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -367,6 +370,9 @@ impl SensorConfig for NetringSensorConfig {
     }
     fn key_prefix(&self) -> &str {
         &self.netring.key_prefix
+    }
+    fn report_limits(&self) -> zensight_sensor_core::ReportLimits {
+        self.report.clone()
     }
     fn validate(&self) -> zensight_sensor_core::Result<()> {
         if self.netring.pcap.is_none() && self.netring.interfaces.is_empty() {

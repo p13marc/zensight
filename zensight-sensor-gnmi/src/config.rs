@@ -18,6 +18,12 @@ pub struct GnmiConfig {
     /// Logging configuration
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    /// On-demand debug-report (`@/report`) limits. Disabled by default.
+    /// `#[serde(default)]` is required: GnmiConfig's other fields are not
+    /// defaulted, so existing config files omit `report`.
+    #[serde(default)]
+    pub report: zensight_sensor_core::ReportLimits,
 }
 
 /// gNMI-specific settings
@@ -209,6 +215,10 @@ impl zensight_sensor_core::SensorConfig for GnmiConfig {
             }
         }
         Ok(())
+    }
+
+    fn report_limits(&self) -> zensight_sensor_core::ReportLimits {
+        self.report.clone()
     }
 }
 

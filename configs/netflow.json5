@@ -6,6 +6,17 @@
     // listen: ["tcp/0.0.0.0:7448"],    // Listen endpoints (if peer/router)
   },
 
+  // On-demand debug reports (@/report) — opt-in. When enabled, an operator can
+  // download a redacted tar.zst bundle (config + health + counters) from the
+  // GUI. Generation is bounded and rate-limited; secrets are redacted.
+  report: {
+    enabled: false,        // set true to allow report downloads from this sensor
+    max_bytes: 67108864,   // 64 MiB cap on the (uncompressed) bundle
+    cooldown_secs: 30,     // min gap between generations
+    ttl_secs: 600,         // how long a generated bundle stays downloadable
+    chunk_size: 524288,    // 512 KiB transfer chunk (clamped 256 KiB–1 MiB)
+  },
+
   // NetFlow/IPFIX sensor settings
   netflow: {
     // Key expression prefix for publishing
