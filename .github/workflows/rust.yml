@@ -103,3 +103,17 @@ jobs:
             echo "$hits"
             exit 1
           fi
+
+      # zenoh-blob is a generic crate meant to graduate to its own repo +
+      # crates.io (#202). It must stay free of ZenSight types and path deps so
+      # the switch to the published crate is a one-line change. Guard the
+      # [dependencies] / [dev-dependencies] section of its Cargo.toml.
+      - name: zenoh-blob boundary guard
+        run: |
+          deps=$(awk '/^\[(dev-)?dependencies\]/{f=1;next} /^\[/{f=0} f' zenoh-blob/Cargo.toml)
+          hits=$(echo "$deps" | grep -nE 'zensight|path *=' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::zenoh-blob must not depend on ZenSight crates or path deps (it graduates to crates.io):"
+            echo "$hits"
+            exit 1
+          fi

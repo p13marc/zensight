@@ -1,0 +1,38 @@
+# Standalone manifest for the extracted zenoh-blob repository.
+#
+# While zenoh-blob is incubated in the ZenSight monorepo, `Cargo.toml` inherits
+# version/edition/license/repository from the workspace and uses `dep.workspace =
+# true`. After extraction there is no workspace, so the extraction script
+# (scripts/extract-zenoh-blob.sh) renames THIS file to `Cargo.toml`. It pins the
+# same dependency versions the workspace used, as a self-contained workspace root.
+#
+# Keep the dependency versions here in sync with the root Cargo.toml when bumping.
+
+# Empty workspace table so this is unambiguously its own workspace root after
+# extraction (never captured by a parent directory's workspace).
+[workspace]
+
+[package]
+name = "zenoh-blob"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "Generic resumable chunked blob & directory transfer over Zenoh (progress, SHA-256, resume)"
+repository = "https://github.com/p13marc/zenoh-blob"
+readme = "README.md"
+keywords = ["zenoh", "transfer", "chunked", "resume", "content-addressed"]
+categories = ["network-programming", "filesystem"]
+
+[dependencies]
+zenoh = { version = "1.9", features = ["unstable"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ciborium = "0.2"
+thiserror = "2"
+sha2 = "0.10"
+fastcdc = "4"
+
+[dev-dependencies]
+tempfile = "3"

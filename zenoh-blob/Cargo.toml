@@ -4,7 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Generic resumable chunked blob transfer over Zenoh (Tier-1 single blob)"
+description = "Generic resumable chunked blob & directory transfer over Zenoh (progress, SHA-256, resume)"
+# Publish-ready metadata (see docs/ZENOH-BLOB-GRADUATION.md). `readme` and these
+# keys also apply while the crate is incubated in the ZenSight workspace.
+readme = "README.md"
+keywords = ["zenoh", "transfer", "chunked", "resume", "content-addressed"]
+categories = ["network-programming", "filesystem"]
+rust-version = "1.85"
 
 [dependencies]
 zenoh.workspace = true
