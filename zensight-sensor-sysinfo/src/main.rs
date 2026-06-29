@@ -28,6 +28,16 @@ async fn main() -> Result<()> {
     // Enable status publishing and set format
     let runner = runner.with_status_publishing().with_format(Format::Json);
 
+    // On-demand debug-report (`@/report`): bundle redacted config + health +
+    // counters. No-op unless `report.enabled` is set in the config.
+    let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
+        "sysinfo",
+        hostname.clone(),
+        runner.config().clone(),
+        runner.health(),
+    ));
+    let runner = runner.with_report(report_source);
+
     // Get the config and publisher for the collector
     let sysinfo_config = runner.config().sysinfo.clone();
     let session = runner.session().clone();
