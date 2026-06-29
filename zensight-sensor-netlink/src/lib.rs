@@ -16,6 +16,11 @@ pub mod query;
 pub mod route_history;
 pub mod sentinel;
 
+/// Opt-in eBPF module (#114). Compiled only with `--features ebpf`; the rest of
+/// the crate stays aya-free.
+#[cfg(feature = "ebpf")]
+pub mod ebpf;
+
 pub use collector::Collector;
 pub use collector::MetricCache;
 pub use config::{NetlinkConfig, NetlinkSensorConfig};

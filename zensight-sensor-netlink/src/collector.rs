@@ -118,6 +118,7 @@ impl CollectHandle {
             "xfrm" => g.xfrm = enabled,
             "nftables" => g.nftables = enabled,
             "conntrack" => g.conntrack = enabled,
+            "ebpf" => g.ebpf = enabled,
             _ => return false,
         }
         true
@@ -152,6 +153,10 @@ pub struct Collector {
     /// Warn-once latch for the XFRM SA dump (EPERM where the host gates it):
     /// avoids a WARN every poll tick for an expected recurring failure (P05 §4).
     warned_xfrm: std::sync::atomic::AtomicBool,
+    /// Opt-in eBPF state (#114): connect-latency histogram + retransmit/conn
+    /// readers. `None` unless the feature is built and load+attach succeeded.
+    #[cfg(feature = "ebpf")]
+    ebpf: Option<crate::ebpf::EbpfState>,
 }
 
 impl Collector {
@@ -182,7 +187,17 @@ impl Collector {
             route_history,
             sentinel_wake: Arc::new(Notify::new()),
             warned_xfrm: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "ebpf")]
+            ebpf: None,
         }
+    }
+
+    /// Attach the opt-in eBPF state (#114) so the poll loop publishes
+    /// connect-latency gauges through the normal path (→ MetricCache → sentinel).
+    #[cfg(feature = "ebpf")]
+    pub fn with_ebpf(mut self, ebpf: Option<crate::ebpf::EbpfState>) -> Self {
+        self.ebpf = ebpf;
+        self
     }
 
     /// A clonable handle to the real-time event state (counters + recent ring),
@@ -379,6 +394,18 @@ impl Collector {
                 // Publish the cumulative event counters each tick (the per-event
                 // reaction happens live in the event task, off this loop).
                 for point in self.event_state.counter_points(&self.host) {
+                    self.publish(&point).await;
+                }
+            }
+            // Opt-in eBPF connect-latency gauges (#114): published through the
+            // normal path so MetricCache + the sentinel see them. Retransmit /
+            // connection detail is served on demand via the query channel.
+            #[cfg(feature = "ebpf")]
+            if collect.ebpf
+                && let Some(state) = &self.ebpf
+            {
+                let (p50, p95) = state.read_connlat();
+                for point in map::connlat_points(&self.host, p50, p95) {
                     self.publish(&point).await;
                 }
             }

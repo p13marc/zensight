@@ -35,6 +35,16 @@
       // The two below need CAP_NET_ADMIN — enable on a firewall / NAT gateway:
       nftables: false,   // nftables table/chain/rule counters (#14)
       conntrack: false,  // conntrack table summary
+      // Opt-in eBPF module (#114) — connect-latency gauges + retransmit
+      // attribution (@/query/retransmits) + tcplife records (@/query/connections).
+      // Needs a binary built with `--features ebpf` (nightly + bpf-linker) AND
+      // CAP_BPF/CAP_NET_ADMIN. No-op otherwise. Off by default.
+      ebpf: false,
+    },
+    // Opt-in eBPF module tuning (#114). Only used when collect.ebpf is set.
+    ebpf: {
+      conn_ring_capacity: 256, // recent-connections ring (@/query/connections)
+      retransmit_top_k: 20,    // top peers returned by @/query/retransmits
     },
     interfaces: {
       exclude_loopback: false,

@@ -10040,9 +10040,13 @@ name = "zensight-sensor-netlink"
 version = "0.6.2"
 dependencies = [
  "anyhow",
+ "aya",
+ "aya-build",
+ "aya-log",
  "clap",
  "hostname",
  "json5",
+ "libc",
  "nlink",
  "serde",
  "serde_json",
@@ -10053,6 +10057,23 @@ dependencies = [
  "zenoh",
  "zensight-common",
  "zensight-sensor-core",
+ "zensight-sensor-netlink-ebpf-common",
+]
+
+[[package]]
+name = "zensight-sensor-netlink-ebpf"
+version = "0.6.2"
+dependencies = [
+ "aya-ebpf",
+ "aya-log-ebpf",
+ "zensight-sensor-netlink-ebpf-common",
+]
+
+[[package]]
+name = "zensight-sensor-netlink-ebpf-common"
+version = "0.6.2"
+dependencies = [
+ "aya",
 ]
 
 [[package]]

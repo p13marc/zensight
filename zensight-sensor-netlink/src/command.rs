@@ -354,10 +354,22 @@ mod tests {
             xfrm: false,
             nftables: false,
             conntrack: false,
+            ebpf: false,
         };
         apply_collection(&handle, CollectionCommand::Set { collect: cfg }).await;
         let snap = handle.snapshot().await;
         assert!(!snap.interfaces && !snap.diagnostics);
+
+        // The opt-in eBPF collector (#114) participates in the toggle surface.
+        apply_collection(
+            &handle,
+            CollectionCommand::Toggle {
+                name: "ebpf".into(),
+                enabled: true,
+            },
+        )
+        .await;
+        assert!(handle.snapshot().await.ebpf);
     }
 
     #[test]

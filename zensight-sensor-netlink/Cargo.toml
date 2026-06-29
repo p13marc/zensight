@@ -13,12 +13,36 @@ path = "src/main.rs"
 [lib]
 path = "src/lib.rs"
 
+[features]
+# Opt-in eBPF module (connlat + retransmit attribution + tcplife), issue #114.
+# OFF by default. Requires nightly + rust-src + bpf-linker to BUILD, and
+# CAP_BPF/CAP_NET_ADMIN to RUN. Keeps the unprivileged baseline intact and out
+# of `cargo build --workspace` on stable CI. (The `/user` feature adds the
+# aya::Pod impls on the shared records for ring-buffer/map reads.)
+ebpf = [
+    "dep:aya",
+    "dep:aya-log",
+    "dep:aya-build",
+    "dep:libc",
+    "zensight-sensor-netlink-ebpf-common/user",
+]
+
 [dependencies]
 zensight-common = { path = "../zensight-common" }
 zensight-sensor-core = { path = "../zensight-sensor-core" }
 
 # Netlink (Linux kernel networking) — reads are unprivileged.
 nlink = { git = "https://github.com/p13marc/nlink", features = ["sockdiag"] }
+
+# Shared kernel<->user eBPF types (CONNLAT_BUCKETS, RetransKey, ConnRecord).
+# Plain no_std lib — always present (no aya) so map.rs pure code/tests build on
+# stable; the `user` feature (aya::Pod) is pulled only by `ebpf` above.
+zensight-sensor-netlink-ebpf-common = { path = "../zensight-sensor-netlink-ebpf-common" }
+
+# eBPF userspace (opt-in, `ebpf` feature only).
+aya = { workspace = true, optional = true }
+aya-log = { workspace = true, optional = true }
+libc = { version = "0.2", optional = true }
 
 tokio = { workspace = true, features = ["full"] }
 tokio-stream = "0.1"
@@ -31,6 +55,11 @@ tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 anyhow.workspace = true
 hostname = "0.4"
+
+# Compiles the eBPF program crate to bytecode. Only pulled in (and only used by
+# build.rs) under `--features ebpf`; stable builds never touch bpf-linker.
+[build-dependencies]
+aya-build = { workspace = true, optional = true }
 
 # =============================================================================
 # Package metadata for cargo-deb

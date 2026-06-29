@@ -1,0 +1,30 @@
+# eBPF kernel programs for the netlink connlat / retransmit / tcplife module
+# (#114).
+#
+# A workspace member so `aya-build` can resolve it by `--package`, but the real
+# programs only compile for the bpf target (aya-ebpf is target-gated below) — a
+# host `cargo build --workspace` produces a trivial empty binary. The bpf object
+# is built by `zensight-sensor-netlink/build.rs` via `aya-build` under
+# `--features ebpf` (nightly + rust-src + bpf-linker). aya-build uses `--release`,
+# so the workspace release profile (default opt-level 3) satisfies the verifier;
+# per-package profiles are ignored for non-root members, so none are set here.
+[package]
+name = "zensight-sensor-netlink-ebpf"
+version = "0.6.2"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+# Plain no_std lib — builds for the host too, so the crate's host stub compiles.
+zensight-sensor-netlink-ebpf-common = { path = "../zensight-sensor-netlink-ebpf-common" }
+
+# aya-ebpf only compiles for the bpf target. Target-gating it keeps a host build
+# of this member a trivial empty binary. VERIFY-LATEST on crates.io.
+[target.'cfg(target_arch = "bpf")'.dependencies]
+aya-ebpf = "0.1"
+aya-log-ebpf = "0.1"
+
+[[bin]]
+name = "zensight-sensor-netlink-ebpf"
+path = "src/main.rs"

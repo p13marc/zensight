@@ -1,0 +1,21 @@
+# Types/constants shared between the netlink eBPF kernel programs (no_std,
+# bpfel-unknown-none) and the userspace loader. Plain no_std lib — builds on
+# stable for the host target, so it is a normal workspace member.
+[package]
+name = "zensight-sensor-netlink-ebpf-common"
+version.workspace = true
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+# Userspace pulls the `user` feature to get `unsafe impl aya::Pod` on the shared
+# records so RingBuf/HashMap typed reads work. The kernel side uses the bare
+# structs (default features, no aya).
+aya = { workspace = true, optional = true }
+
+[features]
+default = []
+user = ["dep:aya"]
+
+[lib]
+path = "src/lib.rs"
