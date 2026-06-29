@@ -1,6 +1,7 @@
 //! View components for the ZenSight application.
 
 pub mod alerts;
+pub mod blob_fetch;
 pub mod chart;
 pub mod components;
 pub mod dashboard;

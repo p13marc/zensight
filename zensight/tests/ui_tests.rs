@@ -1666,13 +1666,16 @@ fn test_netlink_netring_overviews_render() {
 #[test]
 fn test_sensors_view() {
     use std::collections::{HashMap, VecDeque};
+    use zensight::view::blob_fetch::BlobFetch;
     use zensight::view::sensors::sensors_view;
     use zensight_common::{ErrorReport, ErrorType, HealthSnapshot, HealthStatus};
+
+    let idle = BlobFetch::default();
 
     // Empty state.
     let empty: HashMap<String, HealthSnapshot> = HashMap::new();
     let no_errors: HashMap<String, VecDeque<ErrorReport>> = HashMap::new();
-    let mut ui = simulator(sensors_view(&empty, &no_errors));
+    let mut ui = simulator(sensors_view(&empty, &no_errors, &idle, None));
     assert!(ui.find("Sensors").is_ok());
     assert!(ui.find("No sensor health received yet.").is_ok());
 
@@ -1704,11 +1707,24 @@ fn test_sensors_view() {
     });
     errors.insert("snmp".to_string(), ring);
 
-    let mut ui = simulator(sensors_view(&health, &errors));
+    let mut ui = simulator(sensors_view(&health, &errors, &idle, None));
     assert!(ui.find("snmp").is_ok());
     assert!(ui.find("Degraded").is_ok());
     assert!(ui.find("Responding").is_ok());
     assert!(ui.find("Recent errors (1)").is_ok());
+    // The per-sensor debug-report download control is present (#197).
+    assert!(ui.find("Download debug report").is_ok());
+
+    // While a download is active for this sensor, the card shows progress + Cancel.
+    let active = BlobFetch::Downloading { got: 1, total: 4 };
+    let mut ui = simulator(sensors_view(
+        &health,
+        &errors,
+        &active,
+        Some("zensight/snmp"),
+    ));
+    assert!(ui.find("Cancel").is_ok());
+    assert!(ui.find("Downloading 1/4 (25%)").is_ok());
 }
 
 /// Settings shows an inline validation warning and disables Save on bad input.
