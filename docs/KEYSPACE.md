@@ -142,7 +142,9 @@ which, and the client never re-chunks (it fetches by hash), so producer and
 consumer needn't agree on a policy. This is library-level today
 (`TreeServer`/`TreeClient`); the
 `<store>`/`<tree>` prefixes are not yet bound to a ZenSight sensor or GUI view.
-See `docs/LARGE-DATA-TRANSFER.md` (Tier 2).
+The chunks/index can also be PUT into a **router-hosted Zenoh storage** so a
+producer publishes and exits and chunks dedup fleet-wide — see
+`docs/BLOB-ROUTER-STORAGE.md`. See also `docs/LARGE-DATA-TRANSFER.md` (Tier 2).
 
 ### 3.2 On-demand detail queries — `@/query/<topic>`
 

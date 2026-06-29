@@ -1,0 +1,52 @@
+// zenohd (router) configuration that turns a Zenoh router into the fleet-wide
+// Tier-2 content store for zenoh-blob (#201). With this running, sensors can PUT
+// content-addressed chunks + tree indexes into the router and then exit; GUIs GET
+// them by hash. Chunks are deduplicated across all producers and survive any one
+// sensor restarting, because the bytes live on the router, not the sensor.
+//
+//   zenohd -c configs/router-blob-storage.json5
+//
+// Requires the storage-manager + filesystem-backend plugins (shipped with a
+// standard zenohd build):  zenoh-plugin-storage-manager, zenoh-backend-fs.
+//
+// The two key ranges below MUST match the `store_prefix` / `tree_prefix` a
+// producer passes to `zenoh_blob::publish_snapshot` and a `TreeClient` reads
+// from. The example uses a `zensight/_blob/...` keyspace; change it to taste.
+{
+  mode: "router",
+
+  // Listen for sensors + GUIs. Adjust to your network.
+  listen: {
+    endpoints: ["tcp/0.0.0.0:7447"],
+  },
+
+  plugins_loading: { enabled: true },
+
+  plugins: {
+    storage_manager: {
+      volumes: {
+        // Persist chunks to disk so they survive a router restart. Point `dir`
+        // at a durable, roomy path; size it for your retention needs.
+        fs: {
+          // backend: "fs" is implied by the volume name; ZENOH_BACKEND_FS_ROOT
+          // (env) sets the base directory the relative `dir`s below hang under.
+        },
+      },
+      storages: {
+        // Content-addressed chunks: <prefix>/<algo>/<hash> -> raw bytes.
+        // Immutable keys (a hash maps to exactly one byte string), so the
+        // default last-writer-wins reconciliation is a no-op and re-PUTs are
+        // idempotent — no timestamping concerns.
+        "zensight-blob-chunks": {
+          key_expr: "zensight/_blob/store/**",
+          volume: { id: "fs", dir: "zensight-blob-chunks" },
+        },
+        // Tree indexes: <prefix>/<id> -> encoded TreeIndex.
+        "zensight-blob-trees": {
+          key_expr: "zensight/_blob/tree/**",
+          volume: { id: "fs", dir: "zensight-blob-trees" },
+        },
+      },
+    },
+  },
+}
