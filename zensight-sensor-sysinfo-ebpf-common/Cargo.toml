@@ -1,0 +1,13 @@
+# Types/constants shared between the sysinfo eBPF kernel programs (no_std,
+# bpfel-unknown-none) and the userspace loader. Plain no_std lib — builds on
+# stable for the host target, so it is a normal workspace member.
+[package]
+name = "zensight-sensor-sysinfo-ebpf-common"
+version.workspace = true
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+
+[lib]
+path = "src/lib.rs"

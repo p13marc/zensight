@@ -1,0 +1,6 @@
+# eBPF programs must be compiled with a nightly toolchain (build-std + the
+# bpfel-unknown-none target) and require `rust-src`. Pinned per-crate so the rest
+# of the workspace stays on stable.
+[toolchain]
+channel = "nightly"
+components = ["rust-src"]

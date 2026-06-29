@@ -226,6 +226,13 @@ pub struct CollectConfig {
     /// (P6). Cheap — derived from already-collected USE saturation signals.
     #[serde(default = "default_true")]
     pub saturation_score: bool,
+
+    /// Serve opt-in eBPF saturation histograms (runqlat scheduler run-queue
+    /// latency + biolatency block-I/O latency) on `@/query/latency` (#99).
+    /// Default OFF. NO-OP unless the binary was built with `--features ebpf`
+    /// AND the process holds CAP_BPF/CAP_PERFMON. Never streamed onto the bus.
+    #[serde(default)]
+    pub ebpf: bool,
 }
 
 impl Default for CollectConfig {
@@ -257,6 +264,7 @@ impl Default for CollectConfig {
             edac: true,
             mdadm: true,
             saturation_score: true,
+            ebpf: false,
         }
     }
 }
@@ -479,6 +487,8 @@ mod tests {
         assert!(config.sysinfo.collect.cpu);
         assert!(config.sysinfo.collect.memory);
         assert!(!config.sysinfo.collect.processes);
+        // eBPF saturation histograms are opt-in (#99).
+        assert!(!config.sysinfo.collect.ebpf);
         // Alerting defaults: on, with thermal opted out (needs temperatures).
         assert!(config.sysinfo.alerts.enabled);
         assert!(config.sysinfo.alerts.oom.enabled);

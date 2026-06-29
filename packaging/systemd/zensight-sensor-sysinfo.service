@@ -20,5 +20,13 @@ ProtectSystem=strict
 ProtectHome=yes
 ReadOnlyPaths=/etc/zensight
 
+# eBPF saturation histograms (issue #99) need CAP_BPF + CAP_PERFMON and a
+# binary built with `--features ebpf`. Uncomment ONLY for that build; leave
+# commented for the default unprivileged build. MemoryDenyWriteExecute would
+# break the BPF JIT, so it must stay off (it is, here).
+# AmbientCapabilities=CAP_BPF CAP_PERFMON
+# CapabilityBoundingSet=CAP_BPF CAP_PERFMON
+# ProtectKernelTunables=no
+
 [Install]
 WantedBy=multi-user.target

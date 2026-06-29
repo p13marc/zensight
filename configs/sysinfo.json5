@@ -69,6 +69,15 @@
 
       // Number of top processes to report (if processes: true)
       top_processes: 10,
+
+      // eBPF saturation histograms (issue #99) — OFF by default.
+      // Requires a binary built with `--features ebpf` (nightly + rust-src +
+      // bpf-linker) AND CAP_BPF/CAP_PERFMON at runtime. Serves runqlat
+      // (scheduler run-queue latency) and biolatency (block-I/O latency) log2
+      // histograms on zensight/sysinfo/<host>/@/query/latency — never streamed.
+      // Ignored (graceful, baseline unaffected) if either prerequisite is
+      // missing.
+      ebpf: false,
     },
 
     // Network interface filtering

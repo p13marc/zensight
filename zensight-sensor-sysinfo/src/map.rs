@@ -1244,6 +1244,121 @@ pub fn map_mdstat(arrays: &[MdArray]) -> Vec<Metric> {
     out
 }
 
+// =============================================================================
+// eBPF saturation histograms (#99) — pure histogram → percentile math.
+//
+// These types and functions are platform-agnostic and feature-independent so
+// they unit-test on stable with no kernel: the eBPF poller (behind the `ebpf`
+// feature) reads per-CPU BPF arrays, computes a windowed delta, and feeds the
+// counts here to build the `LatencyReport` that `@/query/latency` replies with.
+// =============================================================================
+
+use serde::{Deserialize, Serialize};
+use zensight_sensor_sysinfo_ebpf_common::MAX_SLOTS;
+
+/// One log2 histogram bucket: count of samples with latency `< le_us` µs that
+/// did not fall in a lower bucket.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HistBucket {
+    /// Upper bound of this bucket, in microseconds.
+    pub le_us: u64,
+    /// Number of samples in this bucket over the window.
+    pub count: u64,
+}
+
+/// A latency histogram with derived percentiles (all µs).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Histogram {
+    pub unit: String,
+    pub buckets: Vec<HistBucket>,
+    pub total: u64,
+    pub p50_us: u64,
+    pub p95_us: u64,
+    pub p99_us: u64,
+    pub max_us: u64,
+}
+
+/// The `@/query/latency` reply: both saturation histograms over the last window.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LatencyReport {
+    /// False when the eBPF collector could not load (no caps / unsupported
+    /// kernel / not built with `--features ebpf`). The histograms are empty.
+    pub available: bool,
+    /// Window the bucket counts cover, in seconds.
+    pub window_secs: u64,
+    /// Scheduler run-queue latency (runqlat).
+    pub runqlat: Histogram,
+    /// Block-I/O latency (biolatency).
+    pub biolatency: Histogram,
+}
+
+/// Upper bound (µs) of log2 bucket `i`: bucket 0 → 1, bucket `i` → `2^i`.
+pub fn bucket_upper_us(i: usize) -> u64 {
+    if i == 0 { 1 } else { 1u64 << i }
+}
+
+/// Per-bucket delta of two cumulative snapshots. Saturating, so a counter reset
+/// or wrap (cur < prev) clamps that bucket to 0 rather than underflowing.
+pub fn windowed_delta(cur: &[u64; MAX_SLOTS], prev: &[u64; MAX_SLOTS]) -> [u64; MAX_SLOTS] {
+    let mut out = [0u64; MAX_SLOTS];
+    for i in 0..MAX_SLOTS {
+        out[i] = cur[i].saturating_sub(prev[i]);
+    }
+    out
+}
+
+/// Approximate percentile as the upper bound (µs) of the bucket the q-th sample
+/// falls in (nearest-rank over the log2 counts). `q` in `[0.0, 1.0]`. Returns 0
+/// for an empty histogram.
+pub fn percentile_us(counts: &[u64; MAX_SLOTS], q: f64) -> u64 {
+    let total: u64 = counts.iter().sum();
+    if total == 0 {
+        return 0;
+    }
+    // Rank of the target sample (1-based), clamped into [1, total].
+    let rank = ((q.clamp(0.0, 1.0) * total as f64).ceil() as u64).clamp(1, total);
+    let mut cum = 0u64;
+    for (i, &c) in counts.iter().enumerate() {
+        cum += c;
+        if cum >= rank {
+            return bucket_upper_us(i);
+        }
+    }
+    // Unreachable (cum reaches total ≥ rank), but be safe.
+    bucket_upper_us(MAX_SLOTS - 1)
+}
+
+/// Build a `Histogram` (non-empty buckets + total + p50/p95/p99 + max) from
+/// windowed log2 counts.
+pub fn build_histogram(counts: &[u64; MAX_SLOTS], unit: &str) -> Histogram {
+    let total: u64 = counts.iter().sum();
+    let buckets = counts
+        .iter()
+        .enumerate()
+        .filter(|&(_, &c)| c > 0)
+        .map(|(i, &c)| HistBucket {
+            le_us: bucket_upper_us(i),
+            count: c,
+        })
+        .collect();
+    let max_us = counts
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|&(_, &c)| c > 0)
+        .map(|(i, _)| bucket_upper_us(i))
+        .unwrap_or(0);
+    Histogram {
+        unit: unit.to_string(),
+        buckets,
+        total,
+        p50_us: percentile_us(counts, 0.50),
+        p95_us: percentile_us(counts, 0.95),
+        p99_us: percentile_us(counts, 0.99),
+        max_us,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2066,5 +2181,92 @@ mod tests {
     fn test_parse_mdstat_empty() {
         let fixture = "Personalities : \nunused devices: <none>\n";
         assert!(parse_mdstat(fixture).is_empty());
+    }
+
+    // ---- eBPF latency histogram math (#99) --------------------------------
+
+    #[test]
+    fn test_bucket_upper_us() {
+        assert_eq!(bucket_upper_us(0), 1);
+        assert_eq!(bucket_upper_us(1), 2);
+        assert_eq!(bucket_upper_us(10), 1024);
+        assert_eq!(bucket_upper_us(MAX_SLOTS - 1), 1u64 << (MAX_SLOTS - 1));
+    }
+
+    #[test]
+    fn test_windowed_delta_normal_and_reset() {
+        let mut cur = [0u64; MAX_SLOTS];
+        let mut prev = [0u64; MAX_SLOTS];
+        cur[3] = 10;
+        prev[3] = 4;
+        cur[5] = 2;
+        prev[5] = 7; // counter reset/wrap → clamps to 0
+        let d = windowed_delta(&cur, &prev);
+        assert_eq!(d[3], 6);
+        assert_eq!(d[5], 0);
+        assert_eq!(d[0], 0);
+    }
+
+    #[test]
+    fn test_percentile_empty_is_zero() {
+        let counts = [0u64; MAX_SLOTS];
+        assert_eq!(percentile_us(&counts, 0.5), 0);
+        assert_eq!(percentile_us(&counts, 0.99), 0);
+    }
+
+    #[test]
+    fn test_percentile_single_bucket() {
+        let mut counts = [0u64; MAX_SLOTS];
+        counts[7] = 100;
+        // All mass in one bucket → every percentile is that bucket's bound.
+        assert_eq!(percentile_us(&counts, 0.0), bucket_upper_us(7));
+        assert_eq!(percentile_us(&counts, 0.5), bucket_upper_us(7));
+        assert_eq!(percentile_us(&counts, 1.0), bucket_upper_us(7));
+    }
+
+    #[test]
+    fn test_percentile_bimodal() {
+        let mut counts = [0u64; MAX_SLOTS];
+        counts[2] = 90; // fast
+        counts[20] = 10; // slow tail
+        // p50 lands in the fast bucket, p95/p99 in the slow tail.
+        assert_eq!(percentile_us(&counts, 0.50), bucket_upper_us(2));
+        assert_eq!(percentile_us(&counts, 0.95), bucket_upper_us(20));
+        assert_eq!(percentile_us(&counts, 0.99), bucket_upper_us(20));
+    }
+
+    #[test]
+    fn test_build_histogram_shape() {
+        let mut counts = [0u64; MAX_SLOTS];
+        counts[2] = 3;
+        counts[9] = 1;
+        let h = build_histogram(&counts, "microseconds");
+        assert_eq!(h.unit, "microseconds");
+        assert_eq!(h.total, 4);
+        assert_eq!(h.max_us, bucket_upper_us(9));
+        // Only non-empty buckets are emitted, in ascending order.
+        assert_eq!(h.buckets.len(), 2);
+        assert_eq!(h.buckets[0].le_us, bucket_upper_us(2));
+        assert_eq!(h.buckets[0].count, 3);
+        assert_eq!(h.buckets[1].le_us, bucket_upper_us(9));
+    }
+
+    #[test]
+    fn test_latency_report_json_roundtrip() {
+        let mut counts = [0u64; MAX_SLOTS];
+        counts[4] = 5;
+        let report = LatencyReport {
+            available: true,
+            window_secs: 5,
+            runqlat: build_histogram(&counts, "microseconds"),
+            biolatency: Histogram::default(),
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let back: LatencyReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(report, back);
+        // Default report serializes as unavailable with empty histograms.
+        let def = LatencyReport::default();
+        assert!(!def.available);
+        assert_eq!(def.runqlat.total, 0);
     }
 }

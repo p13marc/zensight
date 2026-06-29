@@ -49,6 +49,35 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, hostname: Str
     }
 }
 
+/// Serve the opt-in eBPF saturation histograms on
+/// `<key_prefix>/<hostname>/@/query/latency` (issue #99).
+///
+/// Reads the shared snapshot the eBPF poller maintains (runqlat + biolatency,
+/// never streamed) and replies it as JSON. Always declared when the feature is
+/// on so the GUI gets a clean reply even when the histograms are
+/// `available: false` (no caps / unsupported kernel).
+pub async fn run_latency(
+    session: Arc<zenoh::Session>,
+    key_prefix: String,
+    hostname: String,
+    report: Arc<std::sync::Mutex<crate::map::LatencyReport>>,
+) {
+    let key = format!("{key_prefix}/{hostname}/@/query/latency");
+    let queryable = match session.declare_queryable(&key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %key, "query: declare latency failed");
+            return;
+        }
+    };
+    tracing::info!(key = %key, "eBPF latency query channel ready");
+
+    while let Ok(query) = queryable.recv_async().await {
+        let snapshot = report.lock().map(|r| r.clone()).unwrap_or_default();
+        reply_json(&query, &snapshot).await;
+    }
+}
+
 /// Serialize `records` as JSON and reply on the query's own key.
 async fn reply_json<T: serde::Serialize>(query: &zenoh::query::Query, records: &T) {
     match serde_json::to_vec(records) {
