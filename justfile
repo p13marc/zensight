@@ -65,11 +65,17 @@ configure:
     # netring: point capture at the chosen interface.
     sed -E 's#interfaces: \[[^]]*\]#interfaces: ["{{iface}}"]#' \
         configs/netring.json5 > {{rundir}}/netring.json5
-    # netlink + sysinfo + logs configs are machine-agnostic (hostname auto-detected).
+    # netlink + logs configs are machine-agnostic (hostname auto-detected).
     cp -f configs/netlink.json5 {{rundir}}/netlink.json5
-    cp -f configs/sysinfo.json5 {{rundir}}/sysinfo.json5
     cp -f configs/logs.json5 {{rundir}}/logs.json5
-    echo "Configured: netring iface='{{iface}}', logs=journald  (configs in {{rundir}}/)"
+    # sysinfo: enable a Tier-2 directory snapshot of the repo's docs/ so the
+    # feature is demoable from the GUI (Sensors → "Download docs"). Scoped sed
+    # over the snapshot block only (leaves the report block's enabled flag alone).
+    sed -E '/snapshot: \{/,/dirs: \[/ {
+        s/enabled: false/enabled: true/
+        s#dirs: \[#dirs: [ { name: "docs", path: "{{justfile_directory()}}/docs" },#
+    }' configs/sysinfo.json5 > {{rundir}}/sysinfo.json5
+    echo "Configured: netring iface='{{iface}}', logs=journald, sysinfo snapshot='docs/'  (configs in {{rundir}}/)"
 
 # ── Run (individual) ─────────────────────────────────────────────────────────
 
