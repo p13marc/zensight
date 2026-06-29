@@ -1667,15 +1667,20 @@ fn test_netlink_netring_overviews_render() {
 fn test_sensors_view() {
     use std::collections::{HashMap, VecDeque};
     use zensight::view::blob_fetch::BlobFetch;
+    use zensight::view::dir_fetch::DirFetch;
     use zensight::view::sensors::sensors_view;
     use zensight_common::{ErrorReport, ErrorType, HealthSnapshot, HealthStatus};
 
     let idle = BlobFetch::default();
+    let dir_idle = DirFetch::default();
+    let no_dirs: HashMap<String, Vec<String>> = HashMap::new();
 
     // Empty state.
     let empty: HashMap<String, HealthSnapshot> = HashMap::new();
     let no_errors: HashMap<String, VecDeque<ErrorReport>> = HashMap::new();
-    let mut ui = simulator(sensors_view(&empty, &no_errors, &idle, None));
+    let mut ui = simulator(sensors_view(
+        &empty, &no_errors, &idle, None, &dir_idle, &no_dirs, None,
+    ));
     assert!(ui.find("Sensors").is_ok());
     assert!(ui.find("No sensor health received yet.").is_ok());
 
@@ -1707,7 +1712,9 @@ fn test_sensors_view() {
     });
     errors.insert("snmp".to_string(), ring);
 
-    let mut ui = simulator(sensors_view(&health, &errors, &idle, None));
+    let mut ui = simulator(sensors_view(
+        &health, &errors, &idle, None, &dir_idle, &no_dirs, None,
+    ));
     assert!(ui.find("snmp").is_ok());
     assert!(ui.find("Degraded").is_ok());
     assert!(ui.find("Responding").is_ok());
@@ -1722,9 +1729,87 @@ fn test_sensors_view() {
         &errors,
         &active,
         Some("zensight/snmp"),
+        &dir_idle,
+        &no_dirs,
+        None,
     ));
     assert!(ui.find("Cancel").is_ok());
     assert!(ui.find("Downloading 1/4 (25%)").is_ok());
+}
+
+/// The Sensors view surfaces Tier-2 directory-snapshot download controls (#199):
+/// a button per advertised directory, and progress + Cancel while a job runs.
+#[test]
+fn test_sensors_snapshot_dirs() {
+    use std::collections::{HashMap, VecDeque};
+    use zensight::message::Message;
+    use zensight::view::blob_fetch::BlobFetch;
+    use zensight::view::dir_fetch::DirFetch;
+    use zensight::view::sensors::sensors_view;
+    use zensight_common::{ErrorReport, HealthSnapshot, HealthStatus};
+
+    let idle = BlobFetch::default();
+    let no_errors: HashMap<String, VecDeque<ErrorReport>> = HashMap::new();
+
+    let mut health = HashMap::new();
+    health.insert(
+        "sysinfo".to_string(),
+        HealthSnapshot {
+            sensor: "sysinfo".into(),
+            status: HealthStatus::Healthy,
+            uptime_secs: 60,
+            devices_total: 1,
+            devices_responding: 1,
+            devices_failed: 0,
+            last_poll_duration_ms: 5,
+            errors_last_hour: 0,
+            metrics_published: 10,
+        },
+    );
+
+    // sysinfo advertises two snapshot directories.
+    let mut snapshot_dirs: HashMap<String, Vec<String>> = HashMap::new();
+    snapshot_dirs.insert(
+        "zensight/sysinfo".to_string(),
+        vec!["etc".to_string(), "pcaps".to_string()],
+    );
+
+    // Idle: a "Download <name>" button per directory, and clicking one emits
+    // DownloadSnapshot for that directory.
+    let dir_idle = DirFetch::default();
+    let mut ui = simulator(sensors_view(
+        &health,
+        &no_errors,
+        &idle,
+        None,
+        &dir_idle,
+        &snapshot_dirs,
+        None,
+    ));
+    assert!(ui.find("Directory snapshots").is_ok());
+    assert!(ui.find("Download etc").is_ok());
+    assert!(ui.find("Download pcaps").is_ok());
+    let _ = ui.click("Download etc");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(msgs.iter().any(|m| matches!(
+        m,
+        Message::DownloadSnapshot { key_prefix, dir }
+            if key_prefix == "zensight/sysinfo" && dir == "etc"
+    )));
+
+    // Fetching: the card shows chunk progress + a Cancel button.
+    let fetching = DirFetch::Fetching { got: 2, total: 5 };
+    let mut ui = simulator(sensors_view(
+        &health,
+        &no_errors,
+        &idle,
+        None,
+        &fetching,
+        &snapshot_dirs,
+        Some("zensight/sysinfo"),
+    ));
+    assert!(ui.find("Downloading 2/5 chunks (40%)").is_ok());
+    assert!(ui.find("Cancel").is_ok());
 }
 
 /// Settings shows an inline validation warning and disables Save on bad input.

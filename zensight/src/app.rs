@@ -153,6 +153,12 @@ pub struct ZenSight {
     blob_fetch: crate::view::blob_fetch::BlobFetch,
     /// The in-flight download's identity (key prefix, id, blob prefix, filename).
     blob_job: Option<crate::view::blob_fetch::BlobJob>,
+    /// In-flight Tier-2 directory-snapshot download state (#199 follow-up).
+    dir_fetch: crate::view::dir_fetch::DirFetch,
+    /// The in-flight directory download's identity.
+    dir_job: Option<crate::view::dir_fetch::DirJob>,
+    /// Per-sensor advertised snapshot directories (`key_prefix` → dir names).
+    snapshot_dirs: std::collections::HashMap<String, Vec<String>>,
     /// Expectations authoring view state (netlink sentinel, Plan 08).
     expectations: crate::view::expectations::ExpectationsState,
     /// Security view state: severity filter + expanded anomaly (#48).
@@ -293,6 +299,9 @@ impl ZenSight {
             session: None,
             blob_fetch: crate::view::blob_fetch::BlobFetch::default(),
             blob_job: None,
+            dir_fetch: crate::view::dir_fetch::DirFetch::default(),
+            dir_job: None,
+            snapshot_dirs: std::collections::HashMap::new(),
             expectations: crate::view::expectations::ExpectationsState::default(),
             security: crate::view::security::SecurityState::default(),
             detection_tuning: crate::view::detection_tuning::DetectionTuningState::default(),
@@ -1250,6 +1259,10 @@ impl ZenSight {
 
             Message::OpenSensors => {
                 self.set_view(CurrentView::Sensors);
+                // Discover each sensor's advertised snapshot directories.
+                if let Some(task) = self.load_snapshot_dirs() {
+                    return task;
+                }
             }
 
             Message::OpenLogs => {
@@ -1605,6 +1618,84 @@ impl ZenSight {
                 if let Some(task) = task {
                     return task;
                 }
+            }
+
+            // Tier-2 directory-snapshot download (#199 follow-up)
+            Message::LoadSnapshotDirs => {
+                if let Some(task) = self.load_snapshot_dirs() {
+                    return task;
+                }
+            }
+
+            Message::SnapshotDirsLoaded { key_prefix, dirs } => {
+                self.snapshot_dirs.insert(key_prefix, dirs);
+            }
+
+            Message::DownloadSnapshot { key_prefix, dir } => {
+                // Pick a destination folder first, then start the download.
+                return Task::future(async move {
+                    let dest = rfd::AsyncFileDialog::new()
+                        .pick_folder()
+                        .await
+                        .map(|h| h.path().to_path_buf());
+                    Message::SnapshotDestChosen {
+                        key_prefix,
+                        dir,
+                        dest,
+                    }
+                });
+            }
+
+            Message::SnapshotDestChosen {
+                key_prefix,
+                dir,
+                dest,
+            } => {
+                if let Some(dest) = dest
+                    && let Some(task) = self.start_snapshot_download(key_prefix, dir, dest)
+                {
+                    return task;
+                }
+            }
+
+            Message::SnapshotRequested(result) => {
+                if let Some(task) = self.on_snapshot_requested(result) {
+                    return task;
+                }
+            }
+
+            Message::SnapshotProgress { got, total } => {
+                if matches!(
+                    self.dir_fetch,
+                    crate::view::dir_fetch::DirFetch::Fetching { .. }
+                ) {
+                    self.dir_fetch = crate::view::dir_fetch::DirFetch::Fetching { got, total };
+                }
+            }
+
+            Message::SnapshotDownloaded(result) => self.on_snapshot_downloaded(result),
+
+            Message::PauseSnapshot => {
+                if let crate::view::dir_fetch::DirFetch::Fetching { got, total } = self.dir_fetch {
+                    if let Some(job) = &self.dir_job {
+                        job.cancel.cancel();
+                    }
+                    self.dir_fetch = crate::view::dir_fetch::DirFetch::Paused { got, total };
+                }
+            }
+
+            Message::ResumeSnapshot => {
+                if let Some(task) = self.resume_snapshot_download() {
+                    return task;
+                }
+            }
+
+            Message::CancelSnapshot => {
+                if let Some(job) = &self.dir_job {
+                    job.cancel.cancel();
+                }
+                self.dir_fetch = crate::view::dir_fetch::DirFetch::Idle;
+                self.dir_job = None;
             }
 
             Message::ToggleTheme => {
@@ -2183,6 +2274,156 @@ impl ZenSight {
         }))
     }
 
+    /// The local content store backing Tier-2 downloads (the redb `chunks` table,
+    /// so chunks dedup across snapshots and survive restart). Falls back to an
+    /// in-memory store when there is no persistent store (e.g. demo mode).
+    fn content_store(&self) -> std::sync::Arc<dyn zenoh_blob::ContentStore> {
+        match self.store.persistent() {
+            Some(p) => std::sync::Arc::new(crate::store::RedbContentStore::new(p)),
+            None => std::sync::Arc::new(zenoh_blob::MemoryStore::new()),
+        }
+    }
+
+    /// Query every connected sensor's `@/snapshot/status` to learn which
+    /// directories it advertises for download.
+    fn load_snapshot_dirs(&self) -> Option<Task<Message>> {
+        let session = self.session.clone()?;
+        let prefixes: Vec<String> = self
+            .sensor_health
+            .keys()
+            .map(|s| format!("zensight/{s}"))
+            .collect();
+        if prefixes.is_empty() {
+            return None;
+        }
+        let tasks = prefixes.into_iter().map(|key_prefix| {
+            let session = session.clone();
+            Task::future(async move {
+                let dirs =
+                    crate::view::dir_fetch::load_snapshot_dirs(session, key_prefix.clone()).await;
+                Message::SnapshotDirsLoaded { key_prefix, dirs }
+            })
+        });
+        Some(Task::batch(tasks))
+    }
+
+    /// Begin a directory download: PUT the request, then poll its status to `Ready`.
+    fn start_snapshot_download(
+        &mut self,
+        key_prefix: String,
+        dir: String,
+        dest: std::path::PathBuf,
+    ) -> Option<Task<Message>> {
+        let session = self.session.clone()?;
+        // Reconstruct into a clearly-named subfolder of the chosen destination.
+        let sensor = key_prefix.rsplit('/').next().unwrap_or("sensor");
+        let dest_root = dest.join(format!("{sensor}-{dir}-snapshot"));
+        let job = crate::view::dir_fetch::DirJob::new(key_prefix.clone(), dir.clone(), dest_root);
+        let id = job.id;
+        self.dir_job = Some(job);
+        self.dir_fetch = crate::view::dir_fetch::DirFetch::Requesting;
+        Some(Task::future(async move {
+            let result =
+                crate::view::dir_fetch::request_and_await_ready(session, key_prefix, dir, id).await;
+            Message::SnapshotRequested(result)
+        }))
+    }
+
+    /// On `Ready`, record the prefixes + tree id and start the chunk stream.
+    fn on_snapshot_requested(
+        &mut self,
+        result: Result<zensight_common::snapshot::SnapshotState, String>,
+    ) -> Option<Task<Message>> {
+        use zensight_common::snapshot::SnapshotState;
+        let job = self.dir_job.as_mut()?;
+        match result {
+            Ok(SnapshotState::Ready {
+                tree_id,
+                store_prefix,
+                tree_prefix,
+                summary,
+                ..
+            }) => {
+                job.tree_id = Some(tree_id.clone());
+                job.store_prefix = Some(store_prefix.clone());
+                job.tree_prefix = Some(tree_prefix.clone());
+                let dest_root = job.dest_root.clone();
+                let cancel = job.cancel.clone();
+                self.dir_fetch = crate::view::dir_fetch::DirFetch::Fetching {
+                    got: 0,
+                    total: summary.file_count.max(1),
+                };
+                let session = self.session.clone()?;
+                let store = self.content_store();
+                Some(Task::stream(crate::view::dir_fetch::download_stream(
+                    session,
+                    store_prefix,
+                    tree_prefix,
+                    tree_id,
+                    dest_root,
+                    store,
+                    cancel,
+                )))
+            }
+            Ok(_) => None, // request helper only returns Ready on success
+            Err(e) => {
+                self.dir_fetch = crate::view::dir_fetch::DirFetch::Failed(e.clone());
+                self.toasts
+                    .push(ToastSeverity::Error, format!("Snapshot failed: {e}"));
+                None
+            }
+        }
+    }
+
+    /// Handle a finished directory download.
+    fn on_snapshot_downloaded(&mut self, result: Result<std::path::PathBuf, String>) {
+        match result {
+            Ok(path) => {
+                let shown = path.display().to_string();
+                self.dir_fetch = crate::view::dir_fetch::DirFetch::Saved(shown.clone());
+                self.toasts
+                    .push(ToastSeverity::Success, format!("Snapshot saved to {shown}"));
+            }
+            // A paused download reports Cancelled — keep the Paused state.
+            Err(_)
+                if matches!(
+                    self.dir_fetch,
+                    crate::view::dir_fetch::DirFetch::Paused { .. }
+                ) => {}
+            Err(e) => {
+                self.dir_fetch = crate::view::dir_fetch::DirFetch::Failed(e.clone());
+                self.toasts
+                    .push(ToastSeverity::Error, format!("Download failed: {e}"));
+            }
+        }
+    }
+
+    /// Resume a paused directory download (a fresh stream + token; the local store
+    /// already holds the chunks fetched so far, so it picks up where it stopped).
+    fn resume_snapshot_download(&mut self) -> Option<Task<Message>> {
+        let crate::view::dir_fetch::DirFetch::Paused { got, total } = self.dir_fetch else {
+            return None;
+        };
+        let session = self.session.clone()?;
+        let store = self.content_store();
+        let job = self.dir_job.as_mut()?;
+        let store_prefix = job.store_prefix.clone()?;
+        let tree_prefix = job.tree_prefix.clone()?;
+        let tree_id = job.tree_id.clone()?;
+        let dest_root = job.dest_root.clone();
+        let cancel = job.reset_cancel();
+        self.dir_fetch = crate::view::dir_fetch::DirFetch::Fetching { got, total };
+        Some(Task::stream(crate::view::dir_fetch::download_stream(
+            session,
+            store_prefix,
+            tree_prefix,
+            tree_id,
+            dest_root,
+            store,
+            cancel,
+        )))
+    }
+
     /// Query the netlink sentinel's current expectation set (status queryable).
     fn query_expectations(&self) -> Task<Message> {
         let Some(session) = self.session.clone() else {
@@ -2689,6 +2930,9 @@ impl ZenSight {
                 &self.recent_errors,
                 &self.blob_fetch,
                 self.blob_job.as_ref().map(|j| j.key_prefix.as_str()),
+                &self.dir_fetch,
+                &self.snapshot_dirs,
+                self.dir_job.as_ref().map(|j| j.key_prefix.as_str()),
             ),
             CurrentView::Logs => {
                 let logs: Vec<_> = self.recent_logs.iter().cloned().collect();

@@ -518,6 +518,52 @@ pub enum Message {
     /// Cancel the in-flight report download (discards the partial).
     CancelDownload,
 
+    // Tier-2 directory-snapshot download messages (#199 follow-up)
+    /// Discover the directories each connected sensor advertises for snapshot
+    /// download (queries every sensor's `@/snapshot/status`).
+    LoadSnapshotDirs,
+    /// The advertised snapshot directories for one sensor key prefix.
+    SnapshotDirsLoaded {
+        /// Sensor key prefix, e.g. `zensight/sysinfo`.
+        key_prefix: String,
+        /// Advertised directory names.
+        dirs: Vec<String>,
+    },
+    /// Download the named directory from the sensor at this key prefix (opens a
+    /// destination-folder picker first).
+    DownloadSnapshot {
+        /// Sensor key prefix, e.g. `zensight/sysinfo`.
+        key_prefix: String,
+        /// Logical directory name to download.
+        dir: String,
+    },
+    /// The destination-folder picker resolved (`None` = the user cancelled).
+    SnapshotDestChosen {
+        /// Sensor key prefix.
+        key_prefix: String,
+        /// Logical directory name.
+        dir: String,
+        /// Chosen destination folder, or `None` if cancelled.
+        dest: Option<std::path::PathBuf>,
+    },
+    /// The snapshot request resolved: a `Ready` state to download, or an error.
+    SnapshotRequested(Result<zensight_common::snapshot::SnapshotState, String>),
+    /// Streaming download progress (chunks resolved / total).
+    SnapshotProgress {
+        /// Chunks resolved so far.
+        got: u64,
+        /// Total distinct chunks.
+        total: u64,
+    },
+    /// The tree finished reconstructing into a folder, or failed.
+    SnapshotDownloaded(Result<std::path::PathBuf, String>),
+    /// Pause the in-flight directory download (chunks kept; resumable).
+    PauseSnapshot,
+    /// Resume a paused directory download.
+    ResumeSnapshot,
+    /// Cancel the in-flight directory download.
+    CancelSnapshot,
+
     // Theme messages
     /// Toggle between light and dark theme.
     ToggleTheme,
