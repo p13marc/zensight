@@ -121,6 +121,25 @@ under its own `blob/` segment so its `…/blob/**` queryable never collides with
 the `…/report/status` or `…/report/request` channels. See
 `docs/LARGE-DATA-TRANSFER.md`.
 
+### 3.1b Tier-2 directory sync — content store + tree index
+
+For whole-**directory** transfer (resumable, dedup'd), `zenoh-blob` provides a
+second model on top of a content-addressed chunk store (the casync approach):
+
+| Key | Type | Payload |
+|-----|------|---------|
+| `<store>/<algo>/<hash>` | queryable | raw chunk bytes (immutable ⇒ cacheable fleet-wide) |
+| `<tree>/<id>` | queryable | a `TreeIndex` (depth-first `Entry` list; files reference chunks by hash) |
+
+A client GETs the index, computes `missing = needed − have` against its local
+[`ContentStore`] (ZenSight backs this with a redb `chunks` table — `RedbContentStore`
+in `zensight/src/store.rs`), fetches only the missing chunks (re-hashing each on
+receipt), reconstructs the tree (mode/symlinks), and verifies the root hash.
+Resume *is* "which hashes are already on disk", so it survives reconnect **and**
+restart for free. This is library-level today (`TreeServer`/`TreeClient`); the
+`<store>`/`<tree>` prefixes are not yet bound to a ZenSight sensor or GUI view.
+See `docs/LARGE-DATA-TRANSFER.md` (Tier 2).
+
 ### 3.2 On-demand detail queries — `@/query/<topic>`
 
 High-cardinality detail is **served on request, never streamed** onto the

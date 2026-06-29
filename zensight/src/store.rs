@@ -46,6 +46,12 @@ const SAMPLES_TABLE: TableDefinition<u128, f64> = TableDefinition::new("samples"
 /// store with template-aware sampling rather than the downsampled tiers.
 const LOGS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("logs");
 
+/// redb table: content-addressed chunk store (#199, Tier-2). Key is `<algo>/<hex>`
+/// (the chunk's content hash); value is the raw chunk bytes. Immutable + idempotent
+/// — a chunk is written once and read by hash, so this doubles as the directory-sync
+/// dedup + resume substrate (resume = "which hashes are already on disk").
+const CHUNKS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("chunks");
+
 /// OTel `severity_number` at/above which a log line is treated as an error and
 /// always persisted (17 = ERROR; FATAL is 21-24).
 pub const LOG_ERROR_SEVERITY: u8 = 17;
@@ -309,6 +315,8 @@ impl PersistentStore {
             let _ = txn.open_table(SAMPLES_TABLE)?;
             // Ensure the logs table (#107, C9) exists too.
             let _ = txn.open_table(LOGS_TABLE)?;
+            // Ensure the Tier-2 chunk store (#199) exists too.
+            let _ = txn.open_table(CHUNKS_TABLE)?;
         }
         txn.commit()?;
         Ok(Self { db: Arc::new(db) })
@@ -489,6 +497,71 @@ impl PersistentStore {
         }
         txn.commit()?;
         Ok(removed)
+    }
+
+    // ---- Tier-2 content-addressed chunk store (#199) ------------------------
+
+    /// Whether chunk `key` (`<algo>/<hex>`) is on disk. Blocking I/O.
+    pub fn has_chunk(&self, key: &str) -> Result<bool, redb::Error> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(CHUNKS_TABLE)?;
+        Ok(table.get(key)?.is_some())
+    }
+
+    /// Read chunk `key` (`<algo>/<hex>`), if present. Blocking I/O.
+    pub fn read_chunk(&self, key: &str) -> Result<Option<Vec<u8>>, redb::Error> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(CHUNKS_TABLE)?;
+        Ok(table.get(key)?.map(|v| v.value().to_vec()))
+    }
+
+    /// Store chunk `key` (`<algo>/<hex>`) → `bytes` (idempotent; content-addressed
+    /// so an existing key already holds identical bytes). Blocking I/O.
+    pub fn write_chunk(&self, key: &str, bytes: &[u8]) -> Result<(), redb::Error> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(CHUNKS_TABLE)?;
+            table.insert(key, bytes)?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+}
+
+/// A redb-backed [`zenoh_blob::ContentStore`] (#199): the durable, dedup-and-resume
+/// substrate for Tier-2 directory sync. Wraps a [`PersistentStore`] so chunks share
+/// the one metrics/logs database. The trait is sync; each call is a short blocking
+/// redb transaction, so drive `TreeClient::download_tree` off the UI thread.
+#[derive(Clone)]
+pub struct RedbContentStore {
+    store: PersistentStore,
+}
+
+impl RedbContentStore {
+    /// Wrap a [`PersistentStore`] as a content store.
+    pub fn new(store: PersistentStore) -> Self {
+        RedbContentStore { store }
+    }
+}
+
+impl zenoh_blob::ContentStore for RedbContentStore {
+    fn has(&self, hash: &zenoh_blob::Hash) -> bool {
+        self.store
+            .has_chunk(&format!("sha256/{hash}"))
+            .unwrap_or(false)
+    }
+
+    fn get(&self, hash: &zenoh_blob::Hash) -> Option<Vec<u8>> {
+        self.store
+            .read_chunk(&format!("sha256/{hash}"))
+            .ok()
+            .flatten()
+    }
+
+    fn put(&self, hash: &zenoh_blob::Hash, bytes: &[u8]) -> std::io::Result<()> {
+        self.store
+            .write_chunk(&format!("sha256/{hash}"), bytes)
+            .map_err(|e| std::io::Error::other(e.to_string()))
     }
 }
 
@@ -1263,6 +1336,40 @@ mod tests {
                 value: 43.0
             }]
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn chunk_store_round_trip_and_persists() {
+        use zenoh_blob::{ContentStore, Digest, Sha256Digest};
+
+        let path = temp_db_path("chunks");
+        let persistent = PersistentStore::open(&path).expect("open");
+        let cs = RedbContentStore::new(persistent.clone());
+
+        let bytes = b"tier-2 chunk bytes";
+        let mut d = Sha256Digest::default();
+        d.update(bytes);
+        let hash = d.finalize();
+
+        // Missing → put → present → readable.
+        assert!(!cs.has(&hash));
+        assert!(cs.get(&hash).is_none());
+        cs.put(&hash, bytes).unwrap();
+        assert!(cs.has(&hash));
+        assert_eq!(cs.get(&hash).unwrap(), bytes);
+        // Idempotent re-put.
+        cs.put(&hash, bytes).unwrap();
+        assert_eq!(cs.get(&hash).unwrap(), bytes);
+
+        // Reopening the database sees the persisted chunk (restart-proof resume).
+        drop(cs);
+        drop(persistent);
+        let reopened = PersistentStore::open(&path).expect("reopen");
+        let cs2 = RedbContentStore::new(reopened);
+        assert!(cs2.has(&hash));
+        assert_eq!(cs2.get(&hash).unwrap(), bytes);
+
         let _ = std::fs::remove_file(&path);
     }
 }
