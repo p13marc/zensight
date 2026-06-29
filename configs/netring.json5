@@ -13,6 +13,22 @@
     chunk_size: 524288,    // 512 KiB transfer chunk (clamped 256 KiB–1 MiB)
   },
 
+  // Tier-2 directory snapshots (@/snapshot + @/store + @/tree) — opt-in. The
+  // natural fit for netring: expose a captured-pcap directory for forensic pull
+  // (content-addressed, dedup'd, restart-resumable). The operator picks a dir by
+  // its logical `name`, never a raw path — `dirs` is the authorization boundary.
+  snapshot: {
+    enabled: false,        // set true to allow directory downloads from this sensor
+    dirs: [
+      // { name: "pcaps", path: "/var/lib/netring/pcaps" },  // captured pcap set
+    ],
+    max_bytes: 268435456,  // 256 MiB cap on the (uncompressed) snapshot
+    max_files: 50000,      // cap on the number of files in a snapshot
+    cooldown_secs: 30,     // min gap between builds
+    ttl_secs: 600,         // how long a built snapshot stays downloadable
+    chunk_size: 262144,    // 256 KiB average (FastCDC content-defined chunking)
+  },
+
   // Netring sensor settings
   netring: {
     key_prefix: "zensight/netring",

@@ -33,7 +33,11 @@ async fn main() -> Result<()> {
         runner.config().clone(),
         runner.health(),
     ));
-    let runner = runner.with_report(report_source);
+    // Tier-2 directory snapshots (`@/snapshot`). No-op unless `snapshot.enabled`.
+    // A natural use is pointing a snapshot dir at netring's pcap output directory.
+    let runner = runner
+        .with_report(report_source)
+        .with_snapshot(sensor_id.clone());
 
     let mut cfg = runner.config().netring.clone();
     cfg.sensor_id = sensor_id.clone();

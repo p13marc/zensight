@@ -26,6 +26,9 @@ pub struct NetringSensorConfig {
     /// On-demand debug-report (`@/report`) limits. Disabled by default.
     #[serde(default)]
     pub report: zensight_sensor_core::ReportLimits,
+    /// Tier-2 directory-snapshot (`@/snapshot`) limits. Disabled by default.
+    #[serde(default)]
+    pub snapshot: zensight_sensor_core::SnapshotLimits,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -373,6 +376,10 @@ impl SensorConfig for NetringSensorConfig {
     }
     fn report_limits(&self) -> zensight_sensor_core::ReportLimits {
         self.report.clone()
+    }
+
+    fn snapshot_limits(&self) -> zensight_sensor_core::SnapshotLimits {
+        self.snapshot.clone()
     }
     fn validate(&self) -> zensight_sensor_core::Result<()> {
         if self.netring.pcap.is_none() && self.netring.interfaces.is_empty() {
