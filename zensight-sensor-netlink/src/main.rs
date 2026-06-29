@@ -24,6 +24,16 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{}", e))?;
     let runner = runner.with_status_publishing().with_format(Format::Json);
 
+    // On-demand debug-report (`@/report`): bundle redacted config + health +
+    // counters. No-op unless `report.enabled` is set in the config.
+    let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
+        "netlink",
+        hostname.clone(),
+        runner.config().clone(),
+        runner.health(),
+    ));
+    let runner = runner.with_report(report_source);
+
     let netlink_config = runner.config().netlink.clone();
     let session = runner.session().clone();
 

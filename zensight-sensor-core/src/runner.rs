@@ -171,6 +171,28 @@ impl<C: SensorConfig> SensorRunner<C> {
         Ok(self)
     }
 
+    /// Enable the on-demand debug-report channel (`@/report`).
+    ///
+    /// No-op unless the sensor's config opts in
+    /// ([`SensorConfig::report_limits`] returns `enabled: true`). When enabled,
+    /// spawns the [`crate::report::ReportChannel`] as a tracked worker, so every
+    /// opting-in sensor gets report-download for free. `source` supplies the
+    /// bundle contents (config + health + counters).
+    pub fn with_report(mut self, source: Arc<dyn crate::report::DebugBundleSource>) -> Self {
+        let limits = self.config.report_limits();
+        if limits.enabled {
+            let channel = crate::report::ReportChannel::new(
+                self.session.clone(),
+                self.config.key_prefix().to_string(),
+                limits,
+                source,
+            );
+            self.spawn(channel.run());
+            tracing::info!("debug-report channel enabled");
+        }
+        self
+    }
+
     /// Set a custom serialization format for the publisher.
     pub fn with_format(mut self, format: Format) -> Self {
         self.publisher = Publisher::new(self.session.clone(), self.config.key_prefix(), format);

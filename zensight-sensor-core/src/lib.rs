@@ -40,6 +40,7 @@ mod error;
 mod health;
 mod liveliness;
 mod publisher;
+pub mod report;
 mod runner;
 mod status;
 
@@ -54,11 +55,12 @@ pub use health::{
 };
 pub use liveliness::LivelinessManager;
 pub use publisher::Publisher;
+pub use report::{DebugBundleSource, ReportChannel, SimpleBundleSource, redact};
 pub use runner::SensorRunner;
 pub use status::SensorStatus;
 
 // Re-export commonly used types from zensight-common
 pub use zensight_common::{
     Alert, AlertKind, AlertSeverity, AlertState, Format, LogFormat, LoggingConfig, Protocol,
-    TelemetryPoint, TelemetryValue, ZenohConfig,
+    ReportLimits, TelemetryPoint, TelemetryValue, ZenohConfig,
 };

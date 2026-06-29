@@ -40,6 +40,12 @@ ciborium = "0.2"
 # Hashing (blob integrity — promoted from a transitive pin)
 sha2 = "0.10"
 
+# Debug-report bundling + ids (zenoh-blob adapter, #196)
+ulid = { version = "1", features = ["serde"] }
+tar = "0.4"
+zstd = "0.13"
+tempfile = "3"
+
 # Configuration
 json5 = "0.4"
 

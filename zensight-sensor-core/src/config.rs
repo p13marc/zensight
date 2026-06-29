@@ -6,6 +6,7 @@ use serde::de::DeserializeOwned;
 
 use crate::error::{Result, SensorError};
 use crate::{LoggingConfig, ZenohConfig};
+use zensight_common::ReportLimits;
 
 /// Trait for sensor configuration types.
 ///
@@ -55,6 +56,13 @@ pub trait SensorConfig: Sized + DeserializeOwned {
 
     /// Get the key expression prefix for this sensor.
     fn key_prefix(&self) -> &str;
+
+    /// Debug-report limits/policy. Defaults to disabled; a sensor opts in by
+    /// overriding this to return its configured [`ReportLimits`] (and enabling
+    /// `with_report` in `main`).
+    fn report_limits(&self) -> ReportLimits {
+        ReportLimits::default()
+    }
 
     /// Validate the configuration.
     ///

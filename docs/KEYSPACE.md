@@ -91,6 +91,10 @@ Per-sensor operational channels. All are derived from the sensor's `key_prefix`.
 | `@/commands/<topic>` | subscribe | topic command | sensors with runtime control |
 | `@/status/<topic>` | queryable | topic status | sensors with runtime control |
 | `@/query/<topic>` | queryable | topic detail (`Vec<Record>`) | netlink, netring |
+| `@/report/request` | subscribe | `ReportRequest` (operator-initiated) | sensors with report support |
+| `@/report/status` | queryable | `ReportStatus` (lifecycle) | sensors with report support |
+| `@/report/blob/<id>/**` | queryable | `Manifest` + chunk bytes (`zenoh-blob`) | sensors with report support |
+| `@/report/cancel` | subscribe | report id (ULID) — free the artifact early | sensors with report support |
 
 `<alert_key>` is a stable hash of `source + rule + sorted-labels`
 ([`Alert::alert_key`]) so the same logical alert always maps to the same key
@@ -104,6 +108,18 @@ Per-sensor operational channels. All are derived from the sensor's `key_prefix`.
 | netlink | `expectations` | hot-swap sentinel expectations |
 | netlink | `collection` | toggle collectors at runtime |
 | netring | `detectors` | runtime detection tuning: allowlist + per-detector mute/threshold |
+
+### 3.1a Debug reports — `@/report/*`
+
+Provided framework-wide by `zensight-sensor-core` (like `@/health`), opt-in per
+sensor via `report.enabled` in config. An operator PUTs a `ReportRequest` to
+`@/report/request`; the sensor generates a redacted `tar.zst` bundle off-thread,
+exposes its lifecycle on the `@/report/status` queryable, and serves the bytes
+via a [`zenoh-blob`](../zenoh-blob) server under `@/report/blob/` (manifest +
+chunk replies, with progress / SHA-256 integrity / range-resume). The blob lives
+under its own `blob/` segment so its `…/blob/**` queryable never collides with
+the `…/report/status` or `…/report/request` channels. See
+`docs/LARGE-DATA-TRANSFER.md`.
 
 ### 3.2 On-demand detail queries — `@/query/<topic>`
 
@@ -205,7 +221,12 @@ zensight/
 │       ├── query/alerts                # firing-set seed (queryable)
 │       ├── query/<topic>               # on-demand detail (queryable)
 │       ├── commands/<topic>            # runtime control (sub)
-│       └── status/<topic>              # control status (queryable)
+│       ├── status/<topic>              # control status (queryable)
+│       └── report/                     # on-demand debug reports (opt-in)
+│           ├── request                 # ReportRequest (sub)
+│           ├── status                  # ReportStatus (queryable)
+│           ├── cancel                  # free artifact early (sub)
+│           └── blob/<id>/**            # Manifest + chunks (zenoh-blob queryable)
 └── _meta/
     ├── sensors/<name>                  # SensorInfo
     └── correlation/<ip>                # CorrelationEntry
@@ -226,12 +247,16 @@ enforced and a single change propagates everywhere.
 | `command::command_key(prefix, topic)` | `zensight-common/src/command.rs` | `…/@/commands/<topic>` |
 | `command::status_key(prefix, topic)` | `zensight-common/src/command.rs` | `…/@/status/<topic>` |
 | `command::query_key(prefix, topic)` | `zensight-common/src/command.rs` | `…/@/query/<topic>` |
+| `command::report_request_key(prefix)` | `zensight-common/src/command.rs` | `…/@/report/request` |
+| `command::report_status_key(prefix)` | `zensight-common/src/command.rs` | `…/@/report/status` |
+| `command::report_cancel_key(prefix)` | `zensight-common/src/command.rs` | `…/@/report/cancel` |
+| `command::report_blob_prefix(prefix)` | `zensight-common/src/command.rs` | `…/@/report/blob` (zenoh-blob server prefix) |
 | `all_*_wildcard()` | `zensight-common/src/keyexpr.rs` | the wildcards in §5 |
 
-The control-plane keys for `health`, `errors`, `alive`, `devices/*`, and
-`alerts/*` are produced inside `zensight-sensor-core` (`health.rs`,
-`liveliness.rs`, `alert.rs`) so every sensor inherits them identically by using
-the framework — sensors never build these by hand.
+The control-plane keys for `health`, `errors`, `alive`, `devices/*`, `alerts/*`,
+and `report/*` are produced inside `zensight-sensor-core` (`health.rs`,
+`liveliness.rs`, `alert.rs`, `report.rs`) so every sensor inherits them
+identically by using the framework — sensors never build these by hand.
 
 [`TelemetryPoint`]: ../zensight-common/src/telemetry.rs
 [`KeyExprBuilder::build(source, metric)`]: ../zensight-common/src/keyexpr.rs

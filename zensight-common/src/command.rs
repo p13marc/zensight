@@ -47,6 +47,38 @@ pub fn query_key(prefix: &str, topic: &str) -> String {
     format!("{}/@/query/{}", prefix, topic)
 }
 
+/// Build the report-request (subscriber) key: PUT a `ReportRequest` here to ask a
+/// sensor to generate a debug report.
+///
+/// # Example
+/// ```
+/// use zensight_common::command::report_request_key;
+/// assert_eq!(report_request_key("zensight/netlink"), "zensight/netlink/@/report/request");
+/// ```
+pub fn report_request_key(prefix: &str) -> String {
+    format!("{prefix}/@/report/request")
+}
+
+/// Build the report-status (queryable) key: GET a `ReportStatus` to track a
+/// report's lifecycle.
+pub fn report_status_key(prefix: &str) -> String {
+    format!("{prefix}/@/report/status")
+}
+
+/// Build the report-cancel (subscriber) key: PUT a report id (ULID string) to
+/// free the sensor's temp artifact early.
+pub fn report_cancel_key(prefix: &str) -> String {
+    format!("{prefix}/@/report/cancel")
+}
+
+/// Build the key prefix of the `zenoh-blob` server that serves report bytes.
+/// The blob lives under `<prefix>/@/report/blob/<id>/…` (kept under its own
+/// `blob/` segment so the blob queryable on `…/blob/**` cannot collide with the
+/// `…/report/status` or `…/report/request` channels).
+pub fn report_blob_prefix(prefix: &str) -> String {
+    format!("{prefix}/@/report/blob")
+}
+
 /// Optional envelope carrying a correlation id alongside a command body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Command<T> {
@@ -82,6 +114,19 @@ mod tests {
             status_key("zensight/netring", "detectors"),
             "zensight/netring/@/status/detectors"
         );
+    }
+
+    #[test]
+    fn report_key_builders() {
+        let p = "zensight/netlink";
+        assert_eq!(report_request_key(p), "zensight/netlink/@/report/request");
+        assert_eq!(report_status_key(p), "zensight/netlink/@/report/status");
+        assert_eq!(report_cancel_key(p), "zensight/netlink/@/report/cancel");
+        assert_eq!(report_blob_prefix(p), "zensight/netlink/@/report/blob");
+        // The blob server (queryable on `…/blob/**`) must not collide with the
+        // status/request channels.
+        assert!(report_status_key(p).starts_with(&format!("{p}/@/report/")));
+        assert!(!report_status_key(p).starts_with(&report_blob_prefix(p)));
     }
 
     #[test]
