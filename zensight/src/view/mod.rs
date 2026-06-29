@@ -7,6 +7,7 @@ pub mod components;
 pub mod dashboard;
 pub mod detection_tuning;
 pub mod device;
+pub mod dir_fetch;
 pub mod expectations;
 pub mod formatting;
 pub mod freshness;

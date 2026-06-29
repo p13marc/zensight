@@ -14,17 +14,23 @@ use zensight_common::{ErrorReport, HealthSnapshot, HealthStatus};
 use crate::message::Message;
 use crate::view::blob_fetch::{BlobFetch, download_section};
 use crate::view::components::{card, empty_state, section_header};
+use crate::view::dir_fetch::{DirFetch, dir_section};
 use crate::view::formatting::format_timestamp;
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
 /// Render the sensors view. `blob_fetch`/`active_prefix` drive the per-sensor
-/// debug-report download control (#197).
+/// debug-report download control (#197); `dir_fetch`/`snapshot_dirs`/`dir_prefix`
+/// drive the Tier-2 directory-snapshot download control (#199 follow-up).
+#[allow(clippy::too_many_arguments)]
 pub fn sensors_view<'a>(
     sensor_health: &'a HashMap<String, HealthSnapshot>,
     recent_errors: &'a HashMap<String, VecDeque<ErrorReport>>,
     blob_fetch: &'a BlobFetch,
     active_prefix: Option<&'a str>,
+    dir_fetch: &'a DirFetch,
+    snapshot_dirs: &'a HashMap<String, Vec<String>>,
+    dir_prefix: Option<&'a str>,
 ) -> Element<'a, Message> {
     let title = text("Sensors").size(font::TITLE);
 
@@ -42,7 +48,15 @@ pub fn sensors_view<'a>(
     let mut list = column![title].spacing(space::MD).padding(space::LG);
     for snap in sensors {
         let errors = recent_errors.get(&snap.sensor);
-        list = list.push(card(sensor_card(snap, errors, blob_fetch, active_prefix)));
+        list = list.push(card(sensor_card(
+            snap,
+            errors,
+            blob_fetch,
+            active_prefix,
+            dir_fetch,
+            snapshot_dirs,
+            dir_prefix,
+        )));
     }
 
     container(scrollable(list))
@@ -51,11 +65,15 @@ pub fn sensors_view<'a>(
         .into()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sensor_card<'a>(
     snap: &'a HealthSnapshot,
     errors: Option<&'a VecDeque<ErrorReport>>,
     blob_fetch: &'a BlobFetch,
     active_prefix: Option<&'a str>,
+    dir_fetch: &'a DirFetch,
+    snapshot_dirs: &'a HashMap<String, Vec<String>>,
+    dir_prefix: Option<&'a str>,
 ) -> Element<'a, Message> {
     let header = section_header(snap.sensor.clone(), Some(health_badge(snap.status)));
 
@@ -76,6 +94,12 @@ fn sensor_card<'a>(
     // Debug-report download control (#197). The key prefix is `zensight/<sensor>`.
     let key_prefix = format!("zensight/{}", snap.sensor);
     col = col.push(download_section(blob_fetch, &key_prefix, active_prefix));
+
+    // Tier-2 directory-snapshot download control (#199 follow-up), if this sensor
+    // advertises any directories.
+    if let Some(dirs) = snapshot_dirs.get(&key_prefix) {
+        col = col.push(dir_section(dir_fetch, &key_prefix, dirs, dir_prefix));
+    }
 
     // Recent errors (newest first), if any have arrived for this sensor.
     if let Some(errors) = errors.filter(|e| !e.is_empty()) {
