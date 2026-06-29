@@ -1545,8 +1545,12 @@ impl ZenSight {
             }
 
             Message::ReportProgress { got, total } => {
-                // Ignore stale progress from a cancelled job.
-                if self.blob_fetch.is_active() {
+                // Only update while actively downloading (ignore stale progress
+                // from a paused/cancelled job).
+                if matches!(
+                    self.blob_fetch,
+                    crate::view::blob_fetch::BlobFetch::Downloading { .. }
+                ) {
                     self.blob_fetch =
                         crate::view::blob_fetch::BlobFetch::Downloading { got, total };
                 }
@@ -1554,6 +1558,24 @@ impl ZenSight {
 
             Message::ReportDownloaded(result) => {
                 if let Some(task) = self.on_report_downloaded(result) {
+                    return task;
+                }
+            }
+
+            Message::PauseDownload => {
+                if let crate::view::blob_fetch::BlobFetch::Downloading { got, total } =
+                    self.blob_fetch
+                {
+                    // Signal the in-flight stream to stop; the partial persists.
+                    if let Some(job) = &self.blob_job {
+                        job.cancel.cancel();
+                    }
+                    self.blob_fetch = crate::view::blob_fetch::BlobFetch::Paused { got, total };
+                }
+            }
+
+            Message::ResumeDownload => {
+                if let Some(task) = self.resume_report_download() {
                     return task;
                 }
             }
@@ -1577,11 +1599,12 @@ impl ZenSight {
             },
 
             Message::CancelDownload => {
-                // PR4: reset client state (the in-flight stream's late messages are
-                // ignored because the job is cleared). A cooperative cancel hint to
-                // the sensor lands with the pause/cancel work (#198).
+                let task = self.cancel_report_download();
                 self.blob_fetch = crate::view::blob_fetch::BlobFetch::Idle;
                 self.blob_job = None;
+                if let Some(task) = task {
+                    return task;
+                }
             }
 
             Message::ToggleTheme => {
@@ -2052,17 +2075,19 @@ impl ZenSight {
                 job.blob_prefix = Some(blob_prefix.clone());
                 job.filename = Some(manifest.filename.clone());
                 let id = job.id.to_string();
+                let dir = job.dest_dir.clone();
+                let cancel = job.cancel.clone();
                 self.blob_fetch = crate::view::blob_fetch::BlobFetch::Downloading {
                     got: 0,
                     total: manifest.chunk_count as u64,
                 };
                 let session = self.session.clone()?;
-                let dir = std::env::temp_dir().join("zensight-downloads");
                 Some(Task::stream(crate::view::blob_fetch::download_stream(
                     session,
                     blob_prefix,
                     id,
                     dir,
+                    cancel,
                 )))
             }
             Ok(_) => None, // request helper only returns Ready on success
@@ -2092,6 +2117,15 @@ impl ZenSight {
                     .unwrap_or_else(|| "zensight-debug-report.tar.zst".to_string());
                 Some(save_blob_dialog(default_name, temp_path))
             }
+            // A paused download reports Cancelled — that's expected, keep Paused.
+            Err(_)
+                if matches!(
+                    self.blob_fetch,
+                    crate::view::blob_fetch::BlobFetch::Paused { .. }
+                ) =>
+            {
+                None
+            }
             Err(e) => {
                 self.blob_fetch = crate::view::blob_fetch::BlobFetch::Failed(e.clone());
                 self.toasts
@@ -2099,6 +2133,54 @@ impl ZenSight {
                 None
             }
         }
+    }
+
+    /// Resume a paused download from its on-disk partial (a fresh stream + token).
+    fn resume_report_download(&mut self) -> Option<Task<Message>> {
+        let crate::view::blob_fetch::BlobFetch::Paused { got, total } = self.blob_fetch else {
+            return None;
+        };
+        let session = self.session.clone()?;
+        let job = self.blob_job.as_mut()?;
+        let blob_prefix = job.blob_prefix.clone()?;
+        let id = job.id.to_string();
+        let dir = job.dest_dir.clone();
+        let cancel = job.reset_cancel();
+        self.blob_fetch = crate::view::blob_fetch::BlobFetch::Downloading { got, total };
+        Some(Task::stream(crate::view::blob_fetch::download_stream(
+            session,
+            blob_prefix,
+            id,
+            dir,
+            cancel,
+        )))
+    }
+
+    /// Cancel the in-flight download: stop the stream, delete the partial, and
+    /// hint the sensor to free its temp artifact early.
+    fn cancel_report_download(&mut self) -> Option<Task<Message>> {
+        let job = self.blob_job.as_ref()?;
+        job.cancel.cancel();
+        let session = self.session.clone()?;
+        let blob_prefix = job.blob_prefix.clone();
+        let id = job.id.to_string();
+        let key_prefix = job.key_prefix.clone();
+        let dir = job.dest_dir.clone();
+        Some(Task::future(async move {
+            if let Some(bp) = blob_prefix {
+                let client =
+                    zenoh_blob::BlobClient::new(session.clone(), bp, zenoh_blob::Format::Json);
+                client.delete_partial(&id, &dir).await;
+            }
+            // Best-effort hint to the sensor (free the TTL'd temp file now).
+            let _ = session
+                .put(
+                    zensight_common::report_cancel_key(&key_prefix),
+                    id.into_bytes(),
+                )
+                .await;
+            Message::ReportSaved(Ok(None))
+        }))
     }
 
     /// Query the netlink sentinel's current expectation set (status queryable).
