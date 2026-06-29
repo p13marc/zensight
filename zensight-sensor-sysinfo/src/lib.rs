@@ -29,3 +29,8 @@ pub mod saturation;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+
+/// Opt-in eBPF saturation histograms (#99). Compiled only with `--features
+/// ebpf` on Linux; the rest of the crate stays aya-free.
+#[cfg(all(target_os = "linux", feature = "ebpf"))]
+pub mod ebpf;

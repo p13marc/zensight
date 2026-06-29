@@ -15,10 +15,15 @@ members = [
     "zensight-sensor-netlink",
     "zensight-sensor-netring",
     "zenoh-blob",
-    # no_std types shared between the opt-in netlink eBPF kernel programs and
-    # userspace. Plain lib — builds on stable; harmless in `cargo build
-    # --workspace`. The eBPF *program* crate is also a member but compiles to an
-    # empty host stub off the `bpf` target (aya-ebpf target-gated) — see #114.
+    # no_std types shared between the opt-in eBPF kernel programs and userspace.
+    # Plain libs — build fine on stable; harmless in `cargo build --workspace`.
+    # The eBPF *program* crates are also members so `aya-build` can resolve them
+    # by `--package`, but they compile to empty host stubs off the `bpf` target
+    # (aya-ebpf is target-gated) — `cargo build --workspace` on stable stays
+    # green; the real programs are built only by the parent's build.rs via
+    # aya-build under `--features ebpf` (#99/#114).
+    "zensight-sensor-sysinfo-ebpf-common",
+    "zensight-sensor-sysinfo-ebpf",
     "zensight-sensor-netlink-ebpf-common",
     "zensight-sensor-netlink-ebpf",
 ]
