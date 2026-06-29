@@ -193,6 +193,29 @@ impl<C: SensorConfig> SensorRunner<C> {
         self
     }
 
+    /// Enable Tier-2 directory snapshots (`@/snapshot` + `@/store` + `@/tree`).
+    ///
+    /// No-op unless the sensor's config opts in
+    /// ([`SensorConfig::snapshot_limits`] returns `enabled: true`). When enabled,
+    /// spawns the [`crate::snapshot::SnapshotChannel`] as a tracked worker.
+    /// `source_id` is this host's id (the same value passed to a
+    /// [`SimpleBundleSource`](crate::SimpleBundleSource)) so a request's
+    /// `target_source` filter can pick the right host.
+    pub fn with_snapshot(mut self, source_id: impl Into<String>) -> Self {
+        let limits = self.config.snapshot_limits();
+        if limits.enabled {
+            let channel = crate::snapshot::SnapshotChannel::new(
+                self.session.clone(),
+                self.config.key_prefix().to_string(),
+                source_id,
+                limits,
+            );
+            self.spawn(channel.run());
+            tracing::info!("directory-snapshot channel enabled");
+        }
+        self
+    }
+
     /// Set a custom serialization format for the publisher.
     pub fn with_format(mut self, format: Format) -> Self {
         self.publisher = Publisher::new(self.session.clone(), self.config.key_prefix(), format);

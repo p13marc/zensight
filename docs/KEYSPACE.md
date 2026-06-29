@@ -95,6 +95,11 @@ Per-sensor operational channels. All are derived from the sensor's `key_prefix`.
 | `@/report/status` | queryable | `ReportStatus` (lifecycle) | sensors with report support |
 | `@/report/blob/<id>/**` | queryable | `Manifest` + chunk bytes (`zenoh-blob`) | sensors with report support |
 | `@/report/cancel` | subscribe | report id (ULID) — free the artifact early | sensors with report support |
+| `@/snapshot/request` | subscribe | `SnapshotRequest` (operator-initiated, Tier-2) | sensors with snapshot support |
+| `@/snapshot/status` | queryable | `SnapshotStatus` (lifecycle + advertised dirs) | sensors with snapshot support |
+| `@/snapshot/cancel` | subscribe | snapshot id (ULID) — free the chunk store early | sensors with snapshot support |
+| `@/store/<algo>/<hash>` | queryable | content-addressed chunk bytes (`zenoh-blob` Tier-2) | sensors with snapshot support |
+| `@/tree/<id>` | queryable | a `TreeIndex` (depth-first entries) | sensors with snapshot support |
 
 `<alert_key>` is a stable hash of `source + rule + sorted-labels`
 ([`Alert::alert_key`]) so the same logical alert always maps to the same key
@@ -124,14 +129,20 @@ the `…/report/status` or `…/report/request` channels. See
 ### 3.1b Tier-2 directory sync — content store + tree index
 
 For whole-**directory** transfer (resumable, dedup'd), `zenoh-blob` provides a
-second model on top of a content-addressed chunk store (the casync approach):
+second model on top of a content-addressed chunk store (the casync approach).
+A sensor opts in (`snapshot.enabled`, with an allowlist of named directories) and
+serves, under its `@/` control plane:
 
 | Key | Type | Payload |
 |-----|------|---------|
-| `<store>/<algo>/<hash>` | queryable | raw chunk bytes (immutable ⇒ cacheable fleet-wide) |
-| `<tree>/<id>` | queryable | a `TreeIndex` (depth-first `Entry` list; files reference chunks by hash) |
+| `@/snapshot/request` | sub | a `SnapshotRequest{ id, dir, opts }` — `dir` names an **allowlisted** directory (never a raw path; this is the authz boundary) |
+| `@/snapshot/status` | queryable | a `SnapshotStatus{ current, busy, dirs, … }` — lifecycle + advertised directory names |
+| `@/snapshot/cancel` | sub | a snapshot id (ULID) — free the temp chunk store early |
+| `@/store/<algo>/<hash>` | queryable | raw chunk bytes (immutable ⇒ cacheable fleet-wide) |
+| `@/tree/<id>` | queryable | a `TreeIndex` (depth-first `Entry` list; files reference chunks by hash) |
 
-A client GETs the index, computes `missing = needed − have` against its local
+A client requests a snapshot of a named directory, polls `@/snapshot/status` until
+`Ready`, then GETs the index, computes `missing = needed − have` against its local
 [`ContentStore`] (ZenSight backs this with a redb `chunks` table — `RedbContentStore`
 in `zensight/src/store.rs`), fetches only the missing chunks (re-hashing each on
 receipt), reconstructs the tree (mode/symlinks), and verifies the root hash.
@@ -139,10 +150,10 @@ Resume *is* "which hashes are already on disk", so it survives reconnect **and**
 restart for free. The chunk boundaries can be fixed-size or content-defined
 (FastCDC, for cross-version dedup) — the `TreeIndex.chunk_policy` tag records
 which, and the client never re-chunks (it fetches by hash), so producer and
-consumer needn't agree on a policy. This is library-level today
-(`TreeServer`/`TreeClient`); the
-`<store>`/`<tree>` prefixes are not yet bound to a ZenSight sensor or GUI view.
-The chunks/index can also be PUT into a **router-hosted Zenoh storage** so a
+consumer needn't agree on a policy. The producer is framework-level
+(`zensight-sensor-core`'s `SnapshotChannel`, opt-in per sensor — `sysinfo` is the
+reference); the GUI offers each advertised directory for download in the Sensors
+view. The chunks/index can also be PUT into a **router-hosted Zenoh storage** so a
 producer publishes and exits and chunks dedup fleet-wide — see
 `docs/BLOB-ROUTER-STORAGE.md`. See also `docs/LARGE-DATA-TRANSFER.md` (Tier 2).
 
@@ -247,11 +258,17 @@ zensight/
 │       ├── query/<topic>               # on-demand detail (queryable)
 │       ├── commands/<topic>            # runtime control (sub)
 │       ├── status/<topic>              # control status (queryable)
-│       └── report/                     # on-demand debug reports (opt-in)
-│           ├── request                 # ReportRequest (sub)
-│           ├── status                  # ReportStatus (queryable)
-│           ├── cancel                  # free artifact early (sub)
-│           └── blob/<id>/**            # Manifest + chunks (zenoh-blob queryable)
+│       ├── report/                     # on-demand debug reports (opt-in)
+│       │   ├── request                 # ReportRequest (sub)
+│       │   ├── status                  # ReportStatus (queryable)
+│       │   ├── cancel                  # free artifact early (sub)
+│       │   └── blob/<id>/**            # Manifest + chunks (zenoh-blob queryable)
+│       ├── snapshot/                   # Tier-2 directory snapshots (opt-in)
+│       │   ├── request                 # SnapshotRequest (sub)
+│       │   ├── status                  # SnapshotStatus (queryable)
+│       │   └── cancel                  # free chunk store early (sub)
+│       ├── store/<algo>/<hash>         # content-addressed chunks (queryable)
+│       └── tree/<id>                   # TreeIndex (queryable)
 └── _meta/
     ├── sensors/<name>                  # SensorInfo
     └── correlation/<ip>                # CorrelationEntry
@@ -276,12 +293,18 @@ enforced and a single change propagates everywhere.
 | `command::report_status_key(prefix)` | `zensight-common/src/command.rs` | `…/@/report/status` |
 | `command::report_cancel_key(prefix)` | `zensight-common/src/command.rs` | `…/@/report/cancel` |
 | `command::report_blob_prefix(prefix)` | `zensight-common/src/command.rs` | `…/@/report/blob` (zenoh-blob server prefix) |
+| `command::snapshot_request_key(prefix)` | `zensight-common/src/command.rs` | `…/@/snapshot/request` |
+| `command::snapshot_status_key(prefix)` | `zensight-common/src/command.rs` | `…/@/snapshot/status` |
+| `command::snapshot_cancel_key(prefix)` | `zensight-common/src/command.rs` | `…/@/snapshot/cancel` |
+| `command::snapshot_store_prefix(prefix)` | `zensight-common/src/command.rs` | `…/@/store` (Tier-2 chunk queryable prefix) |
+| `command::snapshot_tree_prefix(prefix)` | `zensight-common/src/command.rs` | `…/@/tree` (Tier-2 index queryable prefix) |
 | `all_*_wildcard()` | `zensight-common/src/keyexpr.rs` | the wildcards in §5 |
 
 The control-plane keys for `health`, `errors`, `alive`, `devices/*`, `alerts/*`,
-and `report/*` are produced inside `zensight-sensor-core` (`health.rs`,
-`liveliness.rs`, `alert.rs`, `report.rs`) so every sensor inherits them
-identically by using the framework — sensors never build these by hand.
+`report/*`, and `snapshot/*` + `store/*` + `tree/*` are produced inside
+`zensight-sensor-core` (`health.rs`, `liveliness.rs`, `alert.rs`, `report.rs`,
+`snapshot.rs`) so every sensor inherits them identically by using the framework —
+sensors never build these by hand.
 
 [`TelemetryPoint`]: ../zensight-common/src/telemetry.rs
 [`KeyExprBuilder::build(source, metric)`]: ../zensight-common/src/keyexpr.rs

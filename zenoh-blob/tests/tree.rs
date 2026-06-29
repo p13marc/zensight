@@ -8,9 +8,12 @@ mod common;
 use std::sync::Arc;
 
 use common::{isolated_config, unique_prefix};
+use std::sync::Mutex;
+
 use zenoh_blob::{
-    ContentStore, DirStore, Entry, FastCdcChunker, FixedSizeChunker, Format, MIN_CHUNK_SIZE,
-    MemoryStore, TreeClient, TreeServer, build_tree,
+    BlobError, CancelToken, ContentStore, DirStore, Entry, FastCdcChunker, FixedSizeChunker,
+    Format, MIN_CHUNK_SIZE, MemoryStore, Progress, ProgressSink, TreeClient, TreeServer,
+    build_tree,
 };
 
 /// Populate a temp directory tree: a nested dir, two files (one large enough to
@@ -324,6 +327,129 @@ async fn resume_from_prepopulated_store() {
 
     assert_dirs_equal(src.path(), client_dir.path());
     assert_eq!(on_disk(), total);
+
+    handle.abort();
+    session.close().await.unwrap();
+}
+
+/// A progress sink that records every event for assertions.
+#[derive(Default)]
+struct RecordingSink(Mutex<Vec<Progress>>);
+impl ProgressSink for RecordingSink {
+    fn emit(&self, p: Progress) {
+        self.0.lock().unwrap().push(p);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancellable_reports_progress_and_resumes() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.unwrap());
+    let p = unique_prefix();
+    let store_prefix = format!("{p}/store");
+    let tree_prefix = format!("{p}/tree");
+    let chunker = FixedSizeChunker::new(MIN_CHUNK_SIZE);
+
+    let src = tempfile::tempdir().unwrap();
+    make_tree(src.path());
+    let (index, chunks) = build_tree(src.path(), "snap1", &chunker).unwrap();
+    let server_store = Arc::new(MemoryStore::new());
+    for (h, bytes) in &chunks {
+        server_store.put(h, bytes).unwrap();
+    }
+    let total = index.needed_chunks().len();
+    assert!(
+        total >= 4,
+        "need several chunks to test a mid-stream cancel"
+    );
+
+    let handle = serve(
+        session.clone(),
+        store_prefix.clone(),
+        tree_prefix.clone(),
+        server_store,
+        index,
+    )
+    .await;
+
+    let client = TreeClient::new(
+        session.clone(),
+        store_prefix.clone(),
+        tree_prefix.clone(),
+        Format::Json,
+    );
+
+    // 1) Cancel after the first chunk: the call returns Cancelled and the store is
+    //    left with whatever it fetched, so a resume can finish.
+    let store_dir = tempfile::tempdir().unwrap();
+    let client_store = DirStore::open(store_dir.path()).unwrap();
+    let cancel = CancelToken::new();
+    {
+        // A sink that trips the cancel flag once one chunk has been received.
+        struct CancelAfterOne {
+            cancel: CancelToken,
+        }
+        impl ProgressSink for CancelAfterOne {
+            fn emit(&self, p: Progress) {
+                if let Progress::Chunk { received, .. } = p
+                    && received >= 1
+                {
+                    self.cancel.cancel();
+                }
+            }
+        }
+        let sink = CancelAfterOne {
+            cancel: cancel.clone(),
+        };
+        let dest = tempfile::tempdir().unwrap();
+        let err = client
+            .download_tree_cancellable("snap1", dest.path(), &client_store, &sink, &cancel)
+            .await
+            .expect_err("cancelled mid-stream");
+        match err {
+            BlobError::Cancelled { received, total: t } => {
+                assert!(received >= 1 && (received as usize) < total);
+                assert_eq!(t as usize, total);
+            }
+            other => panic!("expected Cancelled, got {other:?}"),
+        }
+    }
+    let after_cancel = std::fs::read_dir(store_dir.path()).unwrap().count();
+    assert!(after_cancel >= 1 && after_cancel < total, "partial on disk");
+
+    // 2) Resume with a fresh token + recording sink: it completes, progress is
+    //    monotonic up to `total`, and ends with Completed.
+    let sink = RecordingSink::default();
+    let dest = tempfile::tempdir().unwrap();
+    client
+        .download_tree_cancellable(
+            "snap1",
+            dest.path(),
+            &client_store,
+            &sink,
+            &CancelToken::new(),
+        )
+        .await
+        .expect("resume completes");
+    assert_dirs_equal(src.path(), dest.path());
+
+    let events: Vec<Progress> = sink.0.lock().unwrap().clone();
+    let mut last = 0u32;
+    let mut saw_complete = false;
+    for ev in &events {
+        match ev {
+            Progress::Chunk {
+                received, total: t, ..
+            } => {
+                assert!(*received >= last, "progress must be monotonic");
+                last = *received;
+                assert_eq!(*t as usize, total);
+            }
+            Progress::Completed { .. } => saw_complete = true,
+            _ => {}
+        }
+    }
+    assert_eq!(last as usize, total, "progress reaches total");
+    assert!(saw_complete, "emits Completed");
 
     handle.abort();
     session.close().await.unwrap();

@@ -303,6 +303,13 @@ Total ≈ a focused **M**. No new runtime dependency, no daemon, no storage volu
 
 ### 5.7 Tier 2 — directories + interruptible/resumable sync (content-addressed, casync-style)
 
+> **Status: implemented.** The library (`zenoh-blob`: `TreeServer`/`TreeClient`/`build_tree` +
+> `ContentStore`), the producer (`zensight-sensor-core`'s `SnapshotChannel`, opt-in per sensor via
+> `snapshot.enabled` + a directory allowlist; `sysinfo` is the reference sensor), and the GUI
+> (`zensight/src/view/dir_fetch.rs`, surfaced per-directory in the Sensors view) are all in place.
+> The keyspace below is bound at `@/snapshot/{request,status,cancel}` + `@/store` + `@/tree`
+> (see `docs/KEYSPACE.md` §3.1b). FastCDC content-defined chunking is the default for cross-version dedup.
+
 For the **rsync-like** ask (R9–R11: pull a whole **directory tree**; survive connection loss *and* restart;
 dedup), generalize Tier 1 from "ordered chunks of one blob" to a **content-addressed chunk store + a tree
 index** — the [casync](https://github.com/systemd/casync) model (chunk store named by content hash + a chunk

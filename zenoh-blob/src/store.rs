@@ -39,6 +39,13 @@ impl MemoryStore {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Drop every stored chunk. Used by a producer that keeps only one live
+    /// snapshot at a time: replacing or expiring it frees the prior bytes without
+    /// swapping the `Arc<dyn ContentStore>` a [`crate::TreeServer`] holds.
+    pub fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
 }
 
 impl ContentStore for MemoryStore {
