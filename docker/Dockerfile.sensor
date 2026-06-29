@@ -24,24 +24,11 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /build
 
-# Copy workspace files first for better layer caching
-COPY Cargo.toml Cargo.lock ./
-COPY zensight-common ./zensight-common
-COPY zensight-sensor-core ./zensight-sensor-core
-COPY zensight-sensor-logs ./zensight-sensor-logs
-COPY zensight-sensor-sysinfo ./zensight-sensor-sysinfo
-COPY zensight-sensor-snmp ./zensight-sensor-snmp
-COPY zensight-sensor-netflow ./zensight-sensor-netflow
-COPY zensight-sensor-modbus ./zensight-sensor-modbus
-COPY zensight-sensor-gnmi ./zensight-sensor-gnmi
-
-# netlink + netring are buildable sensor targets too (see release.yml matrix);
-# the rest are copied only for workspace resolution.
-COPY zensight-sensor-netlink ./zensight-sensor-netlink
-COPY zensight-sensor-netring ./zensight-sensor-netring
-COPY zensight ./zensight
-COPY zensight-exporter-prometheus ./zensight-exporter-prometheus
-COPY zensight-exporter-otel ./zensight-exporter-otel
+# Copy the whole workspace. cargo needs every member's manifest to resolve the
+# workspace (e.g. zenoh-blob and the opt-in eBPF member crates), so enumerating
+# crates here is fragile — a missing member fails `cargo build`. `.dockerignore`
+# at the repo root keeps the context small (target/, .git/, …).
+COPY . .
 
 # Build the specified sensor in release mode
 RUN cargo build --release -p ${SENSOR_PACKAGE}

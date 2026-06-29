@@ -20,23 +20,11 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /build
 
-# Copy workspace files first for better layer caching
-COPY Cargo.toml Cargo.lock ./
-COPY zensight-common ./zensight-common
-COPY zensight-exporter-prometheus ./zensight-exporter-prometheus
-COPY zensight-exporter-otel ./zensight-exporter-otel
-
-# Copy other crates needed for workspace resolution (not built)
-COPY zensight ./zensight
-COPY zensight-sensor-core ./zensight-sensor-core
-COPY zensight-sensor-logs ./zensight-sensor-logs
-COPY zensight-sensor-sysinfo ./zensight-sensor-sysinfo
-COPY zensight-sensor-snmp ./zensight-sensor-snmp
-COPY zensight-sensor-netflow ./zensight-sensor-netflow
-COPY zensight-sensor-modbus ./zensight-sensor-modbus
-COPY zensight-sensor-gnmi ./zensight-sensor-gnmi
-COPY zensight-sensor-netlink ./zensight-sensor-netlink
-COPY zensight-sensor-netring ./zensight-sensor-netring
+# Copy the whole workspace. cargo needs every member's manifest to resolve the
+# workspace (e.g. zenoh-blob and the opt-in eBPF member crates), so enumerating
+# crates here is fragile. `.dockerignore` at the repo root keeps the context
+# small (target/, .git/, …).
+COPY . .
 
 # Build the specified exporter in release mode
 RUN cargo build --release -p ${EXPORTER_PACKAGE}
