@@ -2,8 +2,8 @@
 
 ZenSight sensors translate a legacy or host-level monitoring source into the
 unified [`TelemetryPoint`] model and publish it to Zenoh. Every sensor inherits
-the same control-plane (`@/health`, `@/errors`, `@/alive`, `@/status`) and
-key conventions from `zensight-sensor-core` — see the
+the same control-plane (`@/health`, `@/errors`, `@/alive`, `@/status`, and the
+opt-in `@/report`) and key conventions from `zensight-sensor-core` — see the
 [Keyspace Reference](KEYSPACE.md) for the full key tree and
 [Architecture](ARCHITECTURE.md) for the runtime model.
 
@@ -15,6 +15,9 @@ configure it, and the exact Zenoh keys it publishes/serves.
 - Telemetry: `zensight/<protocol>/<source>/<metric>` (payload: `TelemetryPoint`).
 - Control-plane: `zensight/<protocol>/@/{health,errors,status,alive}` (+
   `devices/<device>/{liveness,alive}` where per-device tracking applies).
+- Debug reports: every sensor can serve an on-demand redacted `tar.zst` bundle
+  (config + health + counters) over `@/report/*` — **opt-in** per sensor via
+  `report.enabled` in its config (disabled by default). See KEYSPACE.md §3.1a.
 - Config: a JSON5 file under [`configs/`](../configs/); pass with `--config`.
   Every config has a `zenoh` block (`mode`, `connect`, `listen`) and a
   `logging` block. The `ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN}` env vars override
