@@ -14,6 +14,7 @@ members = [
     "zensight-sensor-gnmi",
     "zensight-sensor-netlink",
     "zensight-sensor-netring",
+    "zenoh-blob",
 ]
 
 [workspace.package]
@@ -35,6 +36,9 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ciborium = "0.2"
+
+# Hashing (blob integrity — promoted from a transitive pin)
+sha2 = "0.10"
 
 # Configuration
 json5 = "0.4"
@@ -62,3 +66,6 @@ notify-rust = "4"
 # Internal crates
 zensight-common = { path = "zensight-common" }
 zensight-sensor-core = { path = "zensight-sensor-core" }
+# Generic resumable chunked blob transfer over Zenoh (zero ZenSight types;
+# incubated in-tree, to graduate to its own repo + crates.io — epic #193).
+zenoh-blob = { path = "zenoh-blob" }
