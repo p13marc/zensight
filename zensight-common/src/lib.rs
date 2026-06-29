@@ -17,6 +17,7 @@ pub mod error;
 pub mod health;
 pub mod keyexpr;
 pub mod query_detail;
+pub mod report;
 pub mod semconv;
 pub mod serialization;
 pub mod session;
@@ -24,9 +25,14 @@ pub mod telemetry;
 
 // Re-export commonly used types at the crate root
 pub use alert::{Alert, AlertKind, AlertSeverity, AlertState};
-pub use command::{Command, command_key, status_key};
+pub use command::{
+    Command, command_key, report_blob_prefix, report_cancel_key, report_request_key,
+    report_status_key, status_key,
+};
 pub use comparison::ComparisonOp;
-pub use config::{BaseConfig, LogFormat, LoggingConfig, ZenohConfig, load_config, parse_config};
+pub use config::{
+    BaseConfig, LogFormat, LoggingConfig, ReportLimits, ZenohConfig, load_config, parse_config,
+};
 pub use error::{Error, Result};
 pub use health::{
     CorrelationEntry, DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot,
@@ -42,6 +48,7 @@ pub use query_detail::{
     NeighborRecord, ProcessRecord, QuicRecord, RouteRecord, SocketRecord, SshRecord, TalkerRecord,
     TlsRecord,
 };
+pub use report::{Manifest, ReportKind, ReportOptions, ReportRequest, ReportState, ReportStatus};
 pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;
 pub use telemetry::{Protocol, TelemetryPoint, TelemetryValue, current_timestamp_millis};

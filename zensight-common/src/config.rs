@@ -159,6 +159,59 @@ pub struct BaseConfig {
     pub logging: LoggingConfig,
 }
 
+/// Limits and policy for on-demand debug-report generation (`@/report`).
+///
+/// Disabled by default — a sensor opts in by setting `enabled: true` in its
+/// config and overriding `SensorConfig::report_limits`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportLimits {
+    /// Whether the sensor serves debug-report requests at all.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Hard cap on the generated bundle size; generation fails past this (R7).
+    #[serde(default = "default_report_max_bytes")]
+    pub max_bytes: u64,
+    /// Minimum gap between successive generations, seconds (rate-limit, R7).
+    #[serde(default = "default_report_cooldown")]
+    pub cooldown_secs: u64,
+    /// How long a generated bundle (and its resume window) stays available.
+    #[serde(default = "default_report_ttl")]
+    pub ttl_secs: u64,
+    /// Chunk size used by the blob transfer (clamped to 256 KiB–1 MiB).
+    #[serde(default = "default_report_chunk_size")]
+    pub chunk_size: u32,
+    /// Extra config field-name patterns to redact, on top of the built-in
+    /// denylist (case-insensitive substring match).
+    #[serde(default)]
+    pub redact_extra: Vec<String>,
+}
+
+fn default_report_max_bytes() -> u64 {
+    64 * 1024 * 1024
+}
+fn default_report_cooldown() -> u64 {
+    30
+}
+fn default_report_ttl() -> u64 {
+    600
+}
+fn default_report_chunk_size() -> u32 {
+    512 * 1024
+}
+
+impl Default for ReportLimits {
+    fn default() -> Self {
+        ReportLimits {
+            enabled: false,
+            max_bytes: default_report_max_bytes(),
+            cooldown_secs: default_report_cooldown(),
+            ttl_secs: default_report_ttl(),
+            chunk_size: default_report_chunk_size(),
+            redact_extra: Vec::new(),
+        }
+    }
+}
+
 /// Load a configuration file in JSON5 format.
 pub fn load_config<T: for<'de> Deserialize<'de>>(path: impl AsRef<Path>) -> Result<T> {
     let path = path.as_ref();

@@ -23,6 +23,9 @@ pub struct NetlinkSensorConfig {
     pub zenoh: ZenohConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// On-demand debug-report (`@/report`) limits. Disabled by default.
+    #[serde(default)]
+    pub report: zensight_sensor_core::ReportLimits,
     pub netlink: NetlinkConfig,
 }
 
@@ -215,6 +218,9 @@ impl SensorConfig for NetlinkSensorConfig {
     }
     fn key_prefix(&self) -> &str {
         &self.netlink.key_prefix
+    }
+    fn report_limits(&self) -> zensight_sensor_core::ReportLimits {
+        self.report.clone()
     }
 }
 

@@ -24,5 +24,12 @@ json5 = { workspace = true }
 # Time
 chrono = "0.4"
 
+# Debug-report transfer + bundling (#196)
+zenoh-blob = { workspace = true }
+ulid = { workspace = true }
+tar = { workspace = true }
+zstd = { workspace = true }
+tempfile = { workspace = true }
+
 [dev-dependencies]
 tokio-test = "0.4"

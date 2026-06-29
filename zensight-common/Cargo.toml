@@ -15,3 +15,5 @@ json5.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
+ulid = { workspace = true }
+zenoh-blob = { workspace = true }
