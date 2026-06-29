@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use common::{isolated_config, unique_prefix};
 use zenoh_blob::{
-    ContentStore, DirStore, Entry, FixedSizeChunker, Format, MIN_CHUNK_SIZE, MemoryStore,
-    TreeClient, TreeServer, build_tree,
+    ContentStore, DirStore, Entry, FastCdcChunker, FixedSizeChunker, Format, MIN_CHUNK_SIZE,
+    MemoryStore, TreeClient, TreeServer, build_tree,
 };
 
 /// Populate a temp directory tree: a nested dir, two files (one large enough to
@@ -118,6 +118,69 @@ async fn tree_roundtrip() {
     assert_dirs_equal(src.path(), client_dir.path());
     // Every needed chunk was fetched exactly into the client store.
     assert_eq!(client_store.len(), n_chunks);
+
+    handle.abort();
+    session.close().await.unwrap();
+}
+
+/// The whole tree pipeline (build → serve → download → reconstruct → verify root)
+/// works with a content-defined chunker too: chunks are variable-length, so this
+/// exercises the index's per-chunk `len` on the reconstruction path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tree_roundtrip_fastcdc() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.unwrap());
+    let p = unique_prefix();
+    let store_prefix = format!("{p}/store");
+    let tree_prefix = format!("{p}/tree");
+
+    let src = tempfile::tempdir().unwrap();
+    make_tree(src.path());
+
+    let chunker = FastCdcChunker::new(8192);
+    let (index, chunks) = build_tree(src.path(), "snap1", &chunker).unwrap();
+    assert!(index.chunk_policy.starts_with("fastcdc-"));
+    // The big file spans several variable-length chunks.
+    let big_chunks = index
+        .entries
+        .iter()
+        .find_map(|e| match e {
+            Entry::File { path, chunks, .. } if path == "big.bin" => Some(chunks.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(big_chunks.len() > 1);
+    assert!(
+        big_chunks
+            .iter()
+            .map(|c| c.len)
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            > 1,
+        "FastCDC should produce variable-length chunks"
+    );
+
+    let server_store = Arc::new(MemoryStore::new());
+    for (h, bytes) in &chunks {
+        server_store.put(h, bytes).unwrap();
+    }
+    let handle = serve(
+        session.clone(),
+        store_prefix.clone(),
+        tree_prefix.clone(),
+        server_store,
+        index,
+    )
+    .await;
+
+    let client_dir = tempfile::tempdir().unwrap();
+    let client = TreeClient::new(session.clone(), store_prefix, tree_prefix, Format::Json);
+    let client_store = MemoryStore::new();
+    client
+        .download_tree("snap1", client_dir.path(), &client_store)
+        .await
+        .expect("download fastcdc tree");
+
+    assert_dirs_equal(src.path(), client_dir.path());
 
     handle.abort();
     session.close().await.unwrap();

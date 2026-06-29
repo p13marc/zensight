@@ -40,6 +40,9 @@ ciborium = "0.2"
 # Hashing (blob integrity — promoted from a transitive pin)
 sha2 = "0.10"
 
+# Content-defined chunking (zenoh-blob Tier-2 cross-version dedup, #200)
+fastcdc = "4"
+
 # Debug-report bundling + ids (zenoh-blob adapter, #196)
 ulid = { version = "1", features = ["serde"] }
 tar = "0.4"
