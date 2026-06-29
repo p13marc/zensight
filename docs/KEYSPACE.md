@@ -136,7 +136,11 @@ A client GETs the index, computes `missing = needed − have` against its local
 in `zensight/src/store.rs`), fetches only the missing chunks (re-hashing each on
 receipt), reconstructs the tree (mode/symlinks), and verifies the root hash.
 Resume *is* "which hashes are already on disk", so it survives reconnect **and**
-restart for free. This is library-level today (`TreeServer`/`TreeClient`); the
+restart for free. The chunk boundaries can be fixed-size or content-defined
+(FastCDC, for cross-version dedup) — the `TreeIndex.chunk_policy` tag records
+which, and the client never re-chunks (it fetches by hash), so producer and
+consumer needn't agree on a policy. This is library-level today
+(`TreeServer`/`TreeClient`); the
 `<store>`/`<tree>` prefixes are not yet bound to a ZenSight sensor or GUI view.
 See `docs/LARGE-DATA-TRANSFER.md` (Tier 2).
 

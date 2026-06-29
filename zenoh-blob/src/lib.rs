@@ -58,7 +58,8 @@ mod tree;
 
 pub use cancel::CancelToken;
 pub use chunk::{
-    ChunkSize, Chunker, DEFAULT_CHUNK_SIZE, FixedSizeChunker, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE,
+    ChunkSize, Chunker, DEFAULT_CHUNK_SIZE, FastCdcChunker, FixedSizeChunker, MAX_CHUNK_SIZE,
+    MIN_CHUNK_SIZE,
 };
 pub use client::BlobClient;
 pub use error::{BlobError, Result};

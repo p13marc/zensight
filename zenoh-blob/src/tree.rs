@@ -71,8 +71,12 @@ pub struct TreeIndex {
     pub id: String,
     /// Hash algorithm name (e.g. `"sha256"`).
     pub algo: String,
-    /// Chunk size used to split files.
+    /// Chunk size used to split files (nominal/average — see `chunk_policy`).
     pub chunk_size: u32,
+    /// Self-describing chunking policy tag (e.g. `"fixed-524288"`,
+    /// `"fastcdc-262144"`). Informational: a Tier-2 client fetches chunks by hash
+    /// and never re-chunks, so it needn't share the producer's policy.
+    pub chunk_policy: String,
     /// Depth-first entries.
     pub entries: Vec<Entry>,
     /// Digest over the canonical serialization of `entries` (integrity root).
@@ -136,6 +140,7 @@ pub fn build_tree(
             id: id.into(),
             algo: Sha256Digest::name().to_string(),
             chunk_size: chunker.chunk_size(),
+            chunk_policy: chunker.policy_tag(),
             entries,
             root_hash,
         },
@@ -194,11 +199,9 @@ fn walk(
             walk(root, &path, chunker, entries, chunks, seen)?;
         } else if meta.is_file() {
             let data = std::fs::read(&path)?;
-            let count = chunker.count(data.len() as u64);
-            let mut refs = Vec::with_capacity(count as usize);
-            for index in 0..count {
-                let start = chunker.offset(index) as usize;
-                let len = chunker.chunk_len(index, data.len() as u64) as usize;
+            let cuts = chunker.split(&data);
+            let mut refs = Vec::with_capacity(cuts.len());
+            for (start, len) in cuts {
                 let slice = &data[start..start + len];
                 let mut d = Sha256Digest::default();
                 d.update(slice);
