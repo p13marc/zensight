@@ -4,6 +4,14 @@ on:
   push:
     tags:
       - "[0-9]+.[0-9]+.[0-9]+"
+  # Build-only validation when packaging-related files change. No registry push
+  # (Docker login/push is guarded with `if: github.event_name != 'pull_request'`)
+  # and no GitHub Release (the `release` job is gated on `refs/tags`).
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "docker/**"
+      - "packaging/**"
   workflow_dispatch:
     inputs:
       version:
