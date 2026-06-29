@@ -162,6 +162,19 @@ expectations and alerts on deviation.
   `collect` config).
 - **On-demand detail** (`@/query/<topic>`): `routes`, `neighbors`,
   `sockets?state=&port=`, `addresses`, `events`, `route_changes`, `tc`, `xfrm`, `nft`.
+- **eBPF module** (`collect.ebpf`, **default off**, opt-in build — issue #114):
+  what `sock_diag` snapshots cannot see — connection *lifecycle* and *attribution*.
+  Streams connect-latency gauges `sockets/tcp/connlat_us_{p50,p95}` (through the
+  normal publish path, so sentinel `metric-threshold` expectations can watch them)
+  and serves two queryables: `@/query/retransmits` (top-K per-peer retransmit
+  counts) and `@/query/connections` (recent tcplife records: pid/comm/peer/
+  duration). **Build:** `--features ebpf` (nightly + `rust-src` + `bpf-linker`),
+  then `cargo build -p zensight-sensor-netlink --release --features ebpf`. The
+  feature is out of the default `cargo build --workspace` / stable CI (the eBPF
+  program crate is a member that compiles to an empty host stub off the `bpf`
+  target). **Runtime:** needs `CAP_BPF` + `CAP_NET_ADMIN`; off / missing caps /
+  unsupported kernel → one warning and the unprivileged baseline is unchanged.
+  See the commented `AmbientCapabilities` block in the systemd unit.
 - **Default-route flaps:** a streamed `routes/default_v4_flaps_total` counter plus
   a per-transition history ring served on `@/query/route_changes` (gateway change /
   withdrawal / re-appearance with timestamps) — the #1 connectivity incident.

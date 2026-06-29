@@ -15,6 +15,12 @@ members = [
     "zensight-sensor-netlink",
     "zensight-sensor-netring",
     "zenoh-blob",
+    # no_std types shared between the opt-in netlink eBPF kernel programs and
+    # userspace. Plain lib — builds on stable; harmless in `cargo build
+    # --workspace`. The eBPF *program* crate is also a member but compiles to an
+    # empty host stub off the `bpf` target (aya-ebpf target-gated) — see #114.
+    "zensight-sensor-netlink-ebpf-common",
+    "zensight-sensor-netlink-ebpf",
 ]
 
 [workspace.package]
@@ -71,6 +77,13 @@ rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "t
 # Desktop notifications for CRITICAL alert transitions (#26, opt-in). On Linux it
 # uses the freedesktop notification spec over D-Bus (zbus, already pulled by rfd).
 notify-rust = "4"
+
+# eBPF (opt-in `ebpf` feature on sysinfo/netlink sensors only — #99/#114).
+# Userspace side; the kernel side pulls aya-ebpf/aya-log-ebpf from the program
+# crates. VERIFY-LATEST on crates.io before merging.
+aya = "0.13"
+aya-log = "0.2"
+aya-build = "0.1"
 
 # Internal crates
 zensight-common = { path = "zensight-common" }

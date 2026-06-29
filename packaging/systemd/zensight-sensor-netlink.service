@@ -20,5 +20,13 @@ ProtectSystem=strict
 ProtectHome=yes
 ReadOnlyPaths=/etc/zensight
 
+# The opt-in eBPF module (#114) needs CAP_BPF + CAP_NET_ADMIN (and CAP_PERFMON
+# for perf-based attach on some kernels) and a binary built with `--features
+# ebpf`. Uncomment ONLY for that build; leave commented for the default
+# unprivileged build. MemoryDenyWriteExecute would break the BPF JIT (off here).
+# AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
+# CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
+# ProtectKernelTunables=no
+
 [Install]
 WantedBy=multi-user.target

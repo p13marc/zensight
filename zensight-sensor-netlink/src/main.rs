@@ -47,6 +47,43 @@ async fn main() -> Result<()> {
         hostname
     );
 
+    let mut runner = runner;
+
+    // Opt-in eBPF module (#114): load BEFORE building the collector so the
+    // connect-latency gauges flow through its publish path (→ MetricCache →
+    // sentinel). Load/attach failure → one warning, unprivileged baseline
+    // unchanged. The loaded `Ebpf` is leaked (mem::forget) so the programs stay
+    // attached for the process lifetime; the kernel detaches them on exit.
+    #[cfg(feature = "ebpf")]
+    let mut ebpf_state: Option<zensight_sensor_netlink::ebpf::EbpfState> = None;
+    #[cfg(feature = "ebpf")]
+    if netlink_config.collect.ebpf {
+        match zensight_sensor_netlink::ebpf::load(netlink_config.ebpf.conn_ring_capacity) {
+            Ok((bpf, state, ring)) => {
+                tracing::info!("eBPF module loaded (connlat + retransmits + tcplife)");
+                let drain_state = state.clone();
+                runner.spawn(async move {
+                    zensight_sensor_netlink::ebpf::drain_ring(ring, drain_state).await;
+                });
+                let q_session = runner.session().clone();
+                let q_prefix = netlink_config.key_prefix.clone();
+                let q_state = state.clone();
+                let top_k = netlink_config.ebpf.retransmit_top_k;
+                runner.spawn(async move {
+                    zensight_sensor_netlink::query::run_ebpf_queries(
+                        q_session, q_prefix, q_state, top_k,
+                    )
+                    .await;
+                });
+                std::mem::forget(bpf);
+                ebpf_state = Some(state);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "eBPF load failed (needs CAP_BPF/CAP_NET_ADMIN); baseline unchanged");
+            }
+        }
+    }
+
     let collector = Collector::new(
         hostname.clone(),
         netlink_config.clone(),
@@ -54,7 +91,8 @@ async fn main() -> Result<()> {
         Format::Json,
     )
     .with_health(runner.health());
-    let mut runner = runner;
+    #[cfg(feature = "ebpf")]
+    let collector = collector.with_ebpf(ebpf_state);
     // Hot-swappable collector toggles, driven by the `collection` command channel.
     let collect_handle = collector.collect_handle();
     // Latest-metric cache shared with the sentinel's metric-threshold expectations.
@@ -142,6 +180,7 @@ async fn main() -> Result<()> {
         "collect": {
             "interfaces": netlink_config.collect.interfaces,
             "sockets": netlink_config.collect.sockets,
+            "ebpf": netlink_config.collect.ebpf,
         },
         "poll_interval_secs": netlink_config.poll_interval_secs,
     });

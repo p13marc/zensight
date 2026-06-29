@@ -1184,6 +1184,153 @@ pub struct NftRuleRecord {
     pub bytes: u64,
 }
 
+// =============================================================================
+// eBPF module (#114) — pure mapping for connlat / retransmits / tcplife.
+//
+// Feature-independent so the percentile/top-K/record math unit-tests on stable
+// with no kernel. The `ebpf` userspace (ebpf.rs) reads the BPF maps/ring buffer
+// and calls these to build telemetry + query replies.
+// =============================================================================
+
+use std::net::{Ipv4Addr, Ipv6Addr};
+
+use zensight_sensor_netlink_ebpf_common::{ConnRecord, RetransKey};
+
+/// AF_INET6 raw family byte (matches the kernel-side constant).
+const AF_INET6: u8 = 10;
+
+/// Format raw address bytes by family into an IP string (`family` is the raw
+/// `AF_*` byte: 10 = IPv6, anything else treated as IPv4 over the first 4 bytes).
+fn fmt_addr(family: u8, addr: &[u8; 16]) -> String {
+    if family == AF_INET6 {
+        Ipv6Addr::from(*addr).to_string()
+    } else {
+        Ipv4Addr::new(addr[0], addr[1], addr[2], addr[3]).to_string()
+    }
+}
+
+/// Friendly `4`/`6` from a raw `AF_*` family byte (0 if neither).
+fn fam_digit(family: u8) -> u8 {
+    match family {
+        2 => 4,
+        10 => 6,
+        _ => 0,
+    }
+}
+
+/// Decode a null-padded `comm[16]` into a `String`.
+fn comm_str(comm: &[u8; 16]) -> String {
+    let end = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
+    String::from_utf8_lossy(&comm[..end]).into_owned()
+}
+
+/// Nearest-rank p50/p95 (µs) over a log2 connect-latency histogram. Returns the
+/// representative bucket upper bound; `(0, 0)` for an empty histogram.
+pub fn connlat_percentiles(hist: &[u64]) -> (u64, u64) {
+    let total: u64 = hist.iter().sum();
+    if total == 0 {
+        return (0, 0);
+    }
+    let pct = |q: f64| -> u64 {
+        let rank = ((q * total as f64).ceil() as u64).clamp(1, total);
+        let mut cum = 0u64;
+        for (i, &c) in hist.iter().enumerate() {
+            cum += c;
+            if cum >= rank {
+                return if i == 0 { 1 } else { 1u64 << i };
+            }
+        }
+        if hist.is_empty() {
+            0
+        } else {
+            1u64 << (hist.len() - 1)
+        }
+    };
+    (pct(0.50), pct(0.95))
+}
+
+/// Connect-latency gauges, routed through the normal publish path so the
+/// sentinel's metric-threshold expectations can watch them. Both are omitted
+/// when zero (matching the rtt/delivery-rate "omit-on-zero" policy).
+pub fn connlat_points(host: &str, p50_us: u64, p95_us: u64) -> Vec<TelemetryPoint> {
+    let mut out = Vec::new();
+    if p50_us > 0 || p95_us > 0 {
+        out.push(point(
+            host,
+            "sockets/tcp/connlat_us_p50",
+            TelemetryValue::Gauge(p50_us as f64),
+        ));
+        out.push(point(
+            host,
+            "sockets/tcp/connlat_us_p95",
+            TelemetryValue::Gauge(p95_us as f64),
+        ));
+    }
+    out
+}
+
+/// A per-peer retransmit count (`@/query/retransmits`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RetransRecord {
+    pub peer: String,
+    pub family: u8,
+    pub count: u64,
+}
+
+/// Bounded top-K peers by retransmit count (count desc, stable peer tiebreak).
+pub fn top_k_retransmits(snapshot: &[(RetransKey, u64)], k: usize) -> Vec<RetransRecord> {
+    let mut recs: Vec<RetransRecord> = snapshot
+        .iter()
+        .map(|(key, count)| RetransRecord {
+            peer: fmt_addr(key.family, &key.addr),
+            family: fam_digit(key.family),
+            count: *count,
+        })
+        .collect();
+    recs.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.peer.cmp(&b.peer)));
+    recs.truncate(k);
+    recs
+}
+
+/// A completed-connection record (tcplife, `@/query/connections`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConnView {
+    pub pid: u32,
+    pub comm: String,
+    pub family: u8,
+    pub local: String,
+    pub lport: u16,
+    pub remote: String,
+    pub rport: u16,
+    pub duration_ms: u64,
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
+    pub segs_out: u32,
+    pub segs_in: u32,
+    pub retrans: u32,
+}
+
+impl ConnView {
+    /// Build a wire record from a kernel `ConnRecord` (pure, testable).
+    pub fn from_record(r: &ConnRecord) -> Self {
+        Self {
+            pid: r.pid,
+            comm: comm_str(&r.comm),
+            family: fam_digit(r.family),
+            local: fmt_addr(r.family, &r.saddr),
+            lport: r.sport,
+            remote: fmt_addr(r.family, &r.daddr),
+            rport: r.dport,
+            duration_ms: r.duration_ns / 1_000_000,
+            tx_bytes: r.tx_bytes,
+            rx_bytes: r.rx_bytes,
+            segs_out: r.segs_out,
+            segs_in: r.segs_in,
+            retrans: r.retrans,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1931,5 +2078,97 @@ mod tests {
         // Garbage / truncated input never panics.
         assert_eq!(decode_nft_counter(&[0xff, 0x00, 0x01]), None);
         assert_eq!(decode_nft_counter(&[]), None);
+    }
+
+    // ---- eBPF module (#114) -----------------------------------------------
+
+    #[test]
+    fn test_connlat_percentiles_empty_and_single() {
+        assert_eq!(connlat_percentiles(&[0u64; 27]), (0, 0));
+        let mut h = [0u64; 27];
+        h[8] = 50;
+        assert_eq!(connlat_percentiles(&h), (1 << 8, 1 << 8));
+    }
+
+    #[test]
+    fn test_connlat_percentiles_bimodal() {
+        let mut h = [0u64; 27];
+        h[3] = 90; // fast
+        h[18] = 10; // slow tail
+        let (p50, p95) = connlat_percentiles(&h);
+        assert_eq!(p50, 1 << 3);
+        assert_eq!(p95, 1 << 18);
+    }
+
+    #[test]
+    fn test_connlat_points_omit_on_zero() {
+        assert!(connlat_points("h", 0, 0).is_empty());
+        let pts = connlat_points("h", 100, 250);
+        assert_eq!(pts.len(), 2);
+        assert_eq!(pts[0].metric, "sockets/tcp/connlat_us_p50");
+        assert_eq!(pts[1].metric, "sockets/tcp/connlat_us_p95");
+    }
+
+    #[test]
+    fn test_top_k_retransmits_orders_and_bounds() {
+        let mk = |b: u8, c: u64| {
+            let mut addr = [0u8; 16];
+            addr[0] = 10;
+            addr[3] = b;
+            (
+                RetransKey {
+                    family: 2,
+                    _pad: [0; 3],
+                    addr,
+                },
+                c,
+            )
+        };
+        let snap = vec![mk(1, 5), mk(2, 50), mk(3, 20)];
+        let top = top_k_retransmits(&snap, 2);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].count, 50);
+        assert_eq!(top[0].peer, "10.0.0.2");
+        assert_eq!(top[0].family, 4);
+        assert_eq!(top[1].count, 20);
+    }
+
+    #[test]
+    fn test_conn_view_from_record() {
+        let mut comm = [0u8; 16];
+        comm[..4].copy_from_slice(b"curl");
+        let mut saddr = [0u8; 16];
+        saddr[..4].copy_from_slice(&[10, 0, 0, 5]);
+        let mut daddr = [0u8; 16];
+        daddr[..4].copy_from_slice(&[93, 184, 216, 34]);
+        let rec = ConnRecord {
+            ts_ns: 0,
+            pid: 4821,
+            comm,
+            family: 2,
+            _pad: [0; 3],
+            saddr,
+            daddr,
+            sport: 51234,
+            dport: 443,
+            duration_ns: 318_000_000,
+            tx_bytes: 742,
+            rx_bytes: 56012,
+            segs_out: 12,
+            segs_in: 41,
+            retrans: 0,
+            _pad2: 0,
+        };
+        let v = ConnView::from_record(&rec);
+        assert_eq!(v.comm, "curl");
+        assert_eq!(v.family, 4);
+        assert_eq!(v.local, "10.0.0.5");
+        assert_eq!(v.remote, "93.184.216.34");
+        assert_eq!(v.rport, 443);
+        assert_eq!(v.duration_ms, 318);
+        // serde round-trip
+        let json = serde_json::to_string(&v).unwrap();
+        let back: ConnView = serde_json::from_str(&json).unwrap();
+        assert_eq!(v, back);
     }
 }

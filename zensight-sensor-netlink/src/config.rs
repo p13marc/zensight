@@ -56,6 +56,37 @@ pub struct NetlinkConfig {
     /// the sensor evaluates them and emits alerts on deviation.
     #[serde(default)]
     pub expectations: Option<crate::sentinel::ExpectationsConfig>,
+    /// Opt-in eBPF module tuning (#114). Only used when `collect.ebpf` is set on
+    /// a binary built with `--features ebpf`.
+    #[serde(default)]
+    pub ebpf: EbpfConfig,
+}
+
+/// Tuning for the opt-in eBPF module (issue #114).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EbpfConfig {
+    /// Capacity of the recent-connections ring served via `@/query/connections`.
+    #[serde(default = "default_conn_ring")]
+    pub conn_ring_capacity: usize,
+    /// Number of top retransmit peers returned by `@/query/retransmits`.
+    #[serde(default = "default_top_k")]
+    pub retransmit_top_k: usize,
+}
+
+fn default_conn_ring() -> usize {
+    256
+}
+fn default_top_k() -> usize {
+    20
+}
+
+impl Default for EbpfConfig {
+    fn default() -> Self {
+        Self {
+            conn_ring_capacity: default_conn_ring(),
+            retransmit_top_k: default_top_k(),
+        }
+    }
 }
 
 /// WireGuard monitoring config. Lists the WG interfaces to poll (empty = off).
@@ -136,6 +167,12 @@ pub struct CollectConfig {
     /// CAP_NET_ADMIN, so OFF by default — enable on a NAT gateway / firewall.
     #[serde(default)]
     pub conntrack: bool,
+    /// Opt-in eBPF module (#114): connect-latency gauges + per-peer retransmit
+    /// attribution (`@/query/retransmits`) + tcplife connection records
+    /// (`@/query/connections`). OFF by default. NO-OP unless the binary was
+    /// built with `--features ebpf` AND holds CAP_BPF/CAP_NET_ADMIN.
+    #[serde(default)]
+    pub ebpf: bool,
 }
 
 impl Default for CollectConfig {
@@ -153,6 +190,7 @@ impl Default for CollectConfig {
             xfrm: true,
             nftables: false,
             conntrack: false,
+            ebpf: false,
         }
     }
 }

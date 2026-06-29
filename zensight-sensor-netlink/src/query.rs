@@ -193,6 +193,51 @@ pub async fn run(
     }
 }
 
+/// Serve the opt-in eBPF detail queryables (#114) until the session closes:
+/// `@/query/retransmits` (top-K retransmit peers) and `@/query/connections`
+/// (recent tcplife records). Spawned only when the `ebpf` feature is built and
+/// the module loaded; reads the shared [`EbpfState`](crate::ebpf::EbpfState).
+#[cfg(feature = "ebpf")]
+pub async fn run_ebpf_queries(
+    session: Arc<zenoh::Session>,
+    key_prefix: String,
+    ebpf: crate::ebpf::EbpfState,
+    top_k: usize,
+) {
+    let retransmits_key = zensight_common::command::query_key(&key_prefix, "retransmits");
+    let connections_key = zensight_common::command::query_key(&key_prefix, "connections");
+    let retransmits_q = match session.declare_queryable(&retransmits_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %retransmits_key, "query: declare retransmits failed");
+            return;
+        }
+    };
+    let connections_q = match session.declare_queryable(&connections_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %connections_key, "query: declare connections failed");
+            return;
+        }
+    };
+    tracing::info!(
+        retransmits = %retransmits_key, connections = %connections_key,
+        "eBPF detail query channel ready"
+    );
+    loop {
+        tokio::select! {
+            q = retransmits_q.recv_async() => {
+                let Ok(query) = q else { return };
+                reply_json(&query, &ebpf.top_retransmits(top_k)).await;
+            }
+            q = connections_q.recv_async() => {
+                let Ok(query) = q else { return };
+                reply_json(&query, &ebpf.recent_connections()).await;
+            }
+        }
+    }
+}
+
 /// Serialize `records` as JSON and reply on the query's own key.
 async fn reply_json<T: serde::Serialize>(query: &zenoh::query::Query, records: &T) {
     match serde_json::to_vec(records) {
