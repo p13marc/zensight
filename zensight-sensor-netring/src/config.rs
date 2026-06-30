@@ -271,6 +271,14 @@ pub struct CollectConfig {
     /// it's opt-in on top of `assets`. No effect unless `assets` is also set.
     #[serde(default)]
     pub asset_cdp: bool,
+    /// Canonical IPFIX flow export (netring 0.28, issue #223). No-op unless
+    /// built with `--features ipfix`. When set, serves IANA-IE-keyed flow
+    /// records (`FlowRecord::to_ipfix_record`) on `@/query/ipfix` — per-direction
+    /// deltas, both-direction totals, precise `flowEndReason`, Community ID — so
+    /// a SIEM / flow collector consumes standard fields without re-deriving them.
+    /// Default OFF (opt-in, standards export).
+    #[serde(default)]
+    pub ipfix: bool,
     /// TCP initiator inference (netring 0.28, issue #122). When on, the tracker
     /// uses SYN / SYN+ACK analysis to recover the true flow initiator even when
     /// the capture starts mid-handshake or the SYN+ACK races ahead — so flow
@@ -299,6 +307,7 @@ impl Default for CollectConfig {
             snmp_cleartext: false,
             assets: false,
             asset_cdp: false,
+            ipfix: false,
             infer_initiator: true,
         }
     }

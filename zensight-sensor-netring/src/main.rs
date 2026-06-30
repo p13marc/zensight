@@ -154,6 +154,14 @@ async fn main() -> Result<()> {
                 channels.assets.clone(),
             ));
         }
+        #[cfg(feature = "ipfix")]
+        if cfg.collect.ipfix {
+            runner.spawn(query::run_ipfix(
+                s.clone(),
+                key_prefix.clone(),
+                channels.ipfix_records.clone(),
+            ));
+        }
     }
 
     // Drain task (telemetry + anomalies + periodic flow aggregates).

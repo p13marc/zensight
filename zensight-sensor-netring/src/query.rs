@@ -307,6 +307,38 @@ pub async fn run_ja4h(session: Arc<zenoh::Session>, key_prefix: String, inventor
     }
 }
 
+/// Run the canonical IPFIX query channel (#223): `zensight/netring/@/query/ipfix`
+/// replies with the recent ended flows as IANA-IE-keyed records
+/// (`FlowRecord::to_ipfix_record`) — per-direction deltas (IE 1/2), totals
+/// (IE 85/86), `flowEndReason` (IE 136) + the un-collapsed shadow, and the
+/// Community ID — as JSON. Only spawned when built with `--features ipfix` and
+/// `collect.ipfix`.
+#[cfg(feature = "ipfix")]
+pub async fn run_ipfix(
+    session: Arc<zenoh::Session>,
+    key_prefix: String,
+    records: crate::monitor::IpfixRing,
+) {
+    let key = zensight_common::command::query_key(&key_prefix, "ipfix");
+    let queryable = match session.declare_queryable(&key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %key, "query: declare ipfix failed");
+            return;
+        }
+    };
+    tracing::info!(key = %key, "on-demand IPFIX query channel ready");
+
+    while let Ok(query) = queryable.recv_async().await {
+        // Snapshot newest-first, then map each to the canonical IANA-IE record.
+        let ie: Vec<_> = match records.lock() {
+            Ok(r) => r.iter().rev().map(|rec| rec.to_ipfix_record()).collect(),
+            Err(_) => Vec::new(),
+        };
+        reply(&query, &ie, "ipfix").await;
+    }
+}
+
 /// Serialize `records` to JSON and reply; logs (does not panic) on failure.
 async fn reply<T: serde::Serialize>(query: &zenoh::query::Query, records: &T, label: &str) {
     match serde_json::to_vec(records) {

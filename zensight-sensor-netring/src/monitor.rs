@@ -26,6 +26,11 @@ type LiveConfig = Arc<ArcSwap<AnomalyConfig>>;
 /// Bounded ring of recent ended-flow records served via `@/query/flows`.
 pub type FlowRing = Arc<Mutex<VecDeque<FlowRecord>>>;
 
+/// Bounded ring of netring's canonical flow records served (mapped to IANA-IE
+/// shape via `to_ipfix_record`) on `@/query/ipfix` (#223, feature `ipfix`).
+#[cfg(feature = "ipfix")]
+pub type IpfixRing = Arc<Mutex<VecDeque<netring::export::FlowRecord>>>;
+
 /// Max recent flows retained for the on-demand `@/query/flows` channel.
 const FLOW_RING_CAP: usize = 512;
 
@@ -211,6 +216,32 @@ pub struct MonitorChannels {
     pub ja4h_fp: Ja4hInventory,
     /// Passive asset inventory keyed by MAC: served on `@/query/assets` (#70).
     pub assets: AssetInventory,
+    /// Bounded ring of netring flow records for the canonical IPFIX query
+    /// channel `@/query/ipfix` (#223). Populated only when built with
+    /// `--features ipfix` and `collect.ipfix` is set; empty otherwise.
+    #[cfg(feature = "ipfix")]
+    pub ipfix_records: IpfixRing,
+}
+
+/// Flow exporter that captures netring's canonical `FlowRecord` into a bounded
+/// ring for the `@/query/ipfix` channel (#223). netring builds the record (with
+/// per-direction counters + Community ID); we map it to the IANA-IE shape via
+/// `to_ipfix_record()` only on demand, in the query handler.
+#[cfg(feature = "ipfix")]
+struct IpfixSink {
+    ring: IpfixRing,
+}
+
+#[cfg(feature = "ipfix")]
+impl netring::export::FlowExporter for IpfixSink {
+    fn export(&mut self, record: &netring::export::FlowRecord) {
+        if let Ok(mut r) = self.ring.lock() {
+            if r.len() == FLOW_RING_CAP {
+                r.pop_front();
+            }
+            r.push_back(record.clone());
+        }
+    }
 }
 
 /// Detector wrapper bridging `feed`→`verdict` for the TRW port-scan detector.
@@ -474,6 +505,8 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
     let flow_retransmits = Arc::new(AtomicU64::new(0));
     let flow_durations_ms = Arc::new(Mutex::new(Vec::<u64>::new()));
     let flow_records: FlowRing = Arc::new(Mutex::new(VecDeque::with_capacity(FLOW_RING_CAP)));
+    #[cfg(feature = "ipfix")]
+    let ipfix_records: IpfixRing = Arc::new(Mutex::new(VecDeque::with_capacity(FLOW_RING_CAP)));
     let tcp_resets = Arc::new(AtomicU64::new(0));
     let tcp_refused = Arc::new(AtomicU64::new(0));
     let tls_handshakes = Arc::new(AtomicU64::new(0));
@@ -609,6 +642,17 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
                 record_matrix(&matrix_udp, &ini.to_string(), &resp.to_string(), &e.stats);
             }
             Ok(())
+        });
+    }
+
+    // Canonical IPFIX export (#223): register a flow exporter that captures
+    // netring's own `FlowRecord` (per-direction counters, precise EndReason,
+    // Community ID) into a ring, mapped to IANA-IE shape on `@/query/ipfix`.
+    // Independent of `collect.flows` — netring drives it from the same tracker.
+    #[cfg(feature = "ipfix")]
+    if cfg.collect.ipfix {
+        b = b.export_flows(IpfixSink {
+            ring: ipfix_records.clone(),
         });
     }
 
@@ -1501,6 +1545,8 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
             ssh,
             ja4h_fp,
             assets,
+            #[cfg(feature = "ipfix")]
+            ipfix_records,
         },
         keepalive,
         detector_handle,
@@ -1578,6 +1624,14 @@ fn on_flow_ended(
     // handshake-aware, so the record is authoritatively `directed`.
     let (ini, resp) = map::initiator_responder(e.key.a, e.key.b, e.stats.initiator_orientation);
     let (ini_s, resp_s) = (ini.to_string(), resp.to_string());
+    // Per-direction split (#223). flowscope's per-side fields are already keyed
+    // to the flow initiator (FlowSide::Initiator), matching our resolved `ini`.
+    let dir_counts = crate::map::DirCounts {
+        bytes_initiator: e.stats.bytes_initiator,
+        bytes_responder: e.stats.bytes_responder,
+        packets_initiator: e.stats.packets_initiator,
+        packets_responder: e.stats.packets_responder,
+    };
     let rec = crate::map::flow_record(
         ini_s.clone(),
         resp_s.clone(),
@@ -1588,6 +1642,7 @@ fn on_flow_ended(
         reason,
         community_id,
         true,
+        dir_counts,
     );
     if let Ok(mut r) = records.lock() {
         if r.len() == FLOW_RING_CAP {
