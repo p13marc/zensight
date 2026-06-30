@@ -334,11 +334,38 @@ fn render_capture(state: &DeviceDetailState) -> Element<'_, Message> {
     for (metric, point) in &state.metrics {
         if let Some(rest) = metric.strip_prefix("capture/")
             && let Some((src, stat)) = rest.split_once('/')
+            // `capture/focus/*` is the reloadable-filter counter, not a NIC leg —
+            // surfaced separately below, so keep it out of the per-source table.
+            && src != "focus"
         {
             sources
                 .entry(src.to_string())
                 .or_default()
                 .insert(stat.to_string(), &point.value);
+        }
+    }
+
+    // Resolved capture backend (#227): af_packet / af_xdp / pcap-replay.
+    let backend = match state.metrics.get("capture/backend") {
+        Some(p) => match &p.value {
+            TelemetryValue::Text(s) => Some(s.clone()),
+            _ => None,
+        },
+        None => None,
+    };
+
+    // Deliberate load-shedding (#224): a source is sampling when its `shed/active`
+    // gauge is set. Sum the cumulative shed counters across shedding sources.
+    let mut shed_dropped: u64 = 0;
+    let mut shedding = false;
+    for stats in sources.values() {
+        if matches!(stats.get("shed/active"), Some(TelemetryValue::Gauge(g)) if *g >= 1.0) {
+            shedding = true;
+            for leaf in ["shed/new_flows_total", "shed/sampled_total"] {
+                if let Some(TelemetryValue::Counter(c)) = stats.get(leaf) {
+                    shed_dropped += *c;
+                }
+            }
         }
     }
 
@@ -354,6 +381,32 @@ fn render_capture(state: &DeviceDetailState) -> Element<'_, Message> {
     });
 
     let mut col = column![section_header("Capture Health", badge)].spacing(space::SM);
+
+    // Resolved-backend badge — what's actually live (AF_PACKET / AF_XDP / replay).
+    if let Some(b) = &backend {
+        col = col.push(text(format!("backend: {b}")).size(font::CAPTION).style(dim));
+    }
+
+    // Unmistakable shedding banner: the sensor is *deliberately* dropping new
+    // flows, so the rest of the telemetry is a sample — say so plainly (#224).
+    if shedding {
+        col = col.push(
+            row![
+                text("⚠ SHEDDING — data is sampled")
+                    .size(font::EMPHASIS)
+                    .style(warn),
+                text(format!(
+                    "({} flows deliberately dropped)",
+                    format_count(shed_dropped)
+                ))
+                .size(font::CAPTION)
+                .style(dim),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        );
+    }
+
     let mut list = Column::new().spacing(3).push(
         row![
             cell("source", 90),
@@ -778,8 +831,9 @@ fn render_matrix(state: &DeviceDetailState) -> Element<'_, Message> {
         } else {
             let mut list = Column::new().spacing(3).push(
                 row![
-                    cell("source", 200),
-                    cell("destination", 200),
+                    cell("source", 190),
+                    cell("", 22),
+                    cell("destination", 190),
                     cell("bytes", 120),
                     cell("packets", 100),
                     cell("flows", 80),
@@ -787,10 +841,13 @@ fn render_matrix(state: &DeviceDetailState) -> Element<'_, Message> {
                 .spacing(8),
             );
             for r in records.iter().take(200) {
+                // Matrix rows are authoritative initiator→responder pairs (#122),
+                // so the edge is directional — render the arrowhead.
                 list = list.push(
                     row![
-                        cell(&r.src, 200),
-                        cell(&r.dst, 200),
+                        cell(&r.src, 190),
+                        cell_styled("→", 22, dim),
+                        cell(&r.dst, 190),
                         cell(&format_bytes(r.bytes as f64), 120),
                         cell(&format_count(r.packets), 100),
                         cell(&r.flows.to_string(), 80),
@@ -907,26 +964,36 @@ fn render_flow_detail(state: &DeviceDetailState) -> Element<'_, Message> {
         } else {
             let mut list = Column::new().spacing(3).push(
                 row![
-                    cell("src", 190),
-                    cell("dst", 190),
-                    cell("proto", 60),
-                    cell("bytes", 90),
-                    cell("packets", 80),
-                    cell("dur_ms", 80),
-                    cell("reason", 90),
+                    cell("initiator", 175),
+                    cell("dir", 26),
+                    cell("responder", 175),
+                    cell("proto", 55),
+                    cell("bytes", 85),
+                    cell("out↑ / in↓", 150),
+                    cell("dur_ms", 70),
+                    cell("reason", 80),
                 ]
                 .spacing(8),
             );
             for f in flows.iter().take(200) {
+                // Authoritative initiator→responder (TCP, SYN-resolved) renders a
+                // directed arrow; UDP / handshake-less flows are a best-effort
+                // first-packet guess, shown undirected (↔).
+                let dir = cell_styled(
+                    dir_glyph(f.directed),
+                    26,
+                    if f.directed { dim } else { warn },
+                );
                 list = list.push(
                     row![
-                        cell(&f.src, 190),
-                        cell(&f.dst, 190),
-                        cell(&f.proto, 60),
-                        cell(&format_bytes(f.bytes as f64), 90),
-                        cell(&format_count(f.packets), 80),
-                        cell(&f.duration_ms.to_string(), 80),
-                        cell(&f.reason, 90),
+                        cell(&f.src, 175),
+                        dir,
+                        cell(&f.dst, 175),
+                        cell(&f.proto, 55),
+                        cell(&format_bytes(f.bytes as f64), 85),
+                        cell(&dir_split(f.bytes_initiator, f.bytes_responder), 150),
+                        cell(&f.duration_ms.to_string(), 70),
+                        cell(&f.reason, 80),
                     ]
                     .spacing(8),
                 );
@@ -989,6 +1056,26 @@ fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
         );
     }
     column![title, list].spacing(8).into()
+}
+
+/// Flow-direction glyph: a directed initiator→responder arrow when orientation
+/// is authoritative (TCP), an undirected `↔` otherwise (UDP / handshake-less).
+fn dir_glyph(directed: bool) -> &'static str {
+    if directed { "→" } else { "↔" }
+}
+
+/// Compact per-direction byte split for a flow: `out↑` = initiator→responder
+/// (request), `in↓` = the reply. `-` when neither side has a count (old records).
+fn dir_split(bytes_initiator: u64, bytes_responder: u64) -> String {
+    if bytes_initiator == 0 && bytes_responder == 0 {
+        "-".to_string()
+    } else {
+        format!(
+            "{} ↑ / {} ↓",
+            format_bytes(bytes_initiator as f64),
+            format_bytes(bytes_responder as f64)
+        )
+    }
 }
 
 fn cell<'a>(s: &str, width: u16) -> Element<'a, Message> {

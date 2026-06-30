@@ -1858,7 +1858,9 @@ impl ZenSight {
 
             // Netring detection-tuning (#121).
             Message::RefreshDetectorConfig => {
-                return self.query_detector_status();
+                return self
+                    .query_detector_status()
+                    .chain(self.query_capture_filter_status());
             }
             Message::DetectorConfigReceived(result) => match result {
                 Ok(json) => self.detection_tuning.apply_status(&json),
@@ -1940,6 +1942,52 @@ impl ZenSight {
                     .send_command(key, &command, format!("Removed {entry}"))
                     .chain(self.query_detector_status());
             }
+
+            // Netring capture-focus (#225/#228): hot-swap the reloadable packet
+            // filter. Validation happens sensor-side — a bad expr comes back as a
+            // `last_error` on `@/status/capture_filter`, surfaced inline.
+            Message::SetPacketFilterInput(value) => {
+                self.detection_tuning.packet_filter_input = value;
+            }
+            Message::ApplyPacketFilter => {
+                let expr = self.detection_tuning.packet_filter_input.trim().to_string();
+                if expr.is_empty() {
+                    self.toasts
+                        .push(ToastSeverity::Error, "Capture filter cannot be empty");
+                    return Task::none();
+                }
+                let command = serde_json::json!({ "type": "set_packet_filter", "expr": expr });
+                let key = zensight_common::command_key("zensight/netring", "capture_filter");
+                return self
+                    .send_command(key, &command, format!("Capture filter → {expr}"))
+                    .chain(self.query_capture_filter_status());
+            }
+            Message::ClearPacketFilter => {
+                let command = serde_json::json!({ "type": "clear_packet_filter" });
+                let key = zensight_common::command_key("zensight/netring", "capture_filter");
+                return self
+                    .send_command(key, &command, "Capture filter cleared".to_string())
+                    .chain(self.query_capture_filter_status());
+            }
+            Message::CaptureFilterStatusReceived(result) => match result {
+                Ok(json) => {
+                    self.detection_tuning.apply_capture_filter_status(&json);
+                    // Surface a sensor-side validation rejection as a toast too,
+                    // so it's not missed if the panel isn't on screen.
+                    if let Some(err) = self
+                        .detection_tuning
+                        .capture_filter
+                        .as_ref()
+                        .and_then(|c| c.last_error.clone())
+                    {
+                        self.toasts
+                            .push(ToastSeverity::Error, format!("Filter rejected: {err}"));
+                    }
+                }
+                Err(_) => {
+                    self.detection_tuning.capture_filter = None;
+                }
+            },
 
             Message::FetchAnomalyFlows { key, src } => {
                 self.security.flows_for = Some(key.clone());
@@ -2475,6 +2523,36 @@ impl ZenSight {
                     Message::DetectorConfigReceived(Err("No netring sensor responded".to_string()))
                 }
                 Err(e) => Message::DetectorConfigReceived(Err(format!("Status query failed: {e}"))),
+            }
+        })
+    }
+
+    /// Query the netring sensor's live capture-focus filter (`@/status/
+    /// capture_filter`). Routes to `CaptureFilterStatusReceived`.
+    fn query_capture_filter_status(&self) -> Task<Message> {
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::CaptureFilterStatusReceived(Err(
+                "Not connected to Zenoh".to_string(),
+            )));
+        };
+        let key = zensight_common::status_key("zensight/netring", "capture_filter");
+        Task::future(async move {
+            match session.get(&key).await {
+                Ok(replies) => {
+                    if let Ok(reply) = replies.recv_async().await
+                        && let Ok(sample) = reply.result()
+                    {
+                        let body =
+                            String::from_utf8_lossy(&sample.payload().to_bytes()).to_string();
+                        return Message::CaptureFilterStatusReceived(Ok(body));
+                    }
+                    Message::CaptureFilterStatusReceived(Err(
+                        "No netring sensor responded".to_string()
+                    ))
+                }
+                Err(e) => {
+                    Message::CaptureFilterStatusReceived(Err(format!("Status query failed: {e}")))
+                }
             }
         })
     }
