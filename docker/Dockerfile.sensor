@@ -7,38 +7,28 @@ ARG SENSOR_NAME=syslog
 # =============================================================================
 # Stage 1: Build the sensor binary
 # =============================================================================
-FROM rust:1.92-bookworm AS builder
+FROM rust:1.95-bookworm AS builder
 
 ARG SENSOR_PACKAGE
 
 # Install build dependencies
-# libsystemd-dev: the logs sensor's journald support (default-on feature)
+# protobuf-compiler: gnmi · libssl-dev: snmp · libsystemd-dev: logs (journald)
+# libpcap-dev: netring (AF_PACKET/pcap capture)
 RUN apt-get update && apt-get install -y \
     protobuf-compiler \
     pkg-config \
     libssl-dev \
     libsystemd-dev \
+    libpcap-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
-# Copy workspace files first for better layer caching
-COPY Cargo.toml Cargo.lock ./
-COPY zensight-common ./zensight-common
-COPY zensight-sensor-core ./zensight-sensor-core
-COPY zensight-sensor-logs ./zensight-sensor-logs
-COPY zensight-sensor-sysinfo ./zensight-sensor-sysinfo
-COPY zensight-sensor-snmp ./zensight-sensor-snmp
-COPY zensight-sensor-netflow ./zensight-sensor-netflow
-COPY zensight-sensor-modbus ./zensight-sensor-modbus
-COPY zensight-sensor-gnmi ./zensight-sensor-gnmi
-
-# Copy remaining crates (needed for workspace resolution, not built)
-COPY zensight ./zensight
-COPY zensight-sensor-netlink ./zensight-sensor-netlink
-COPY zensight-sensor-netring ./zensight-sensor-netring
-COPY zensight-exporter-prometheus ./zensight-exporter-prometheus
-COPY zensight-exporter-otel ./zensight-exporter-otel
+# Copy the whole workspace. cargo needs every member's manifest to resolve the
+# workspace (e.g. zenoh-blob and the opt-in eBPF member crates), so enumerating
+# crates here is fragile — a missing member fails `cargo build`. `.dockerignore`
+# at the repo root keeps the context small (target/, .git/, …).
+COPY . .
 
 # Build the specified sensor in release mode
 RUN cargo build --release -p ${SENSOR_PACKAGE}
@@ -53,10 +43,12 @@ ARG SENSOR_NAME
 
 # Install runtime dependencies
 # libsystemd0: logs sensor (journald); libssl3: snmp sensor (openssl)
+# libpcap0.8: netring sensor (AF_PACKET/pcap capture)
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libsystemd0 \
     libssl3 \
+    libpcap0.8 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for running the sensor

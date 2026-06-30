@@ -1,0 +1,21 @@
+# Build context root for docker/Dockerfile.{sensor,exporter} (context: . in
+# release.yml). The Dockerfiles `COPY . .` the whole workspace so every crate
+# (incl. zenoh-blob and the opt-in eBPF member crates) is present for cargo's
+# workspace resolution; this list keeps the context small.
+target/
+**/*.rs.bk
+
+.git/
+.gitignore
+
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Flatpak build artifacts
+flatpak/.flatpak-builder/
+flatpak/build-dir/
+
+# GitHub workflows
+.github/

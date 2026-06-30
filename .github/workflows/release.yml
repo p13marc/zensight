@@ -4,6 +4,14 @@ on:
   push:
     tags:
       - "[0-9]+.[0-9]+.[0-9]+"
+  # Build-only validation when packaging-related files change. No registry push
+  # (Docker login/push is guarded with `if: github.event_name != 'pull_request'`)
+  # and no GitHub Release (the `release` job is gated on `refs/tags`).
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "docker/**"
+      - "packaging/**"
   workflow_dispatch:
     inputs:
       version:
@@ -22,12 +30,17 @@ jobs:
   # =============================================================================
   build-deb:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-22.04
             name: ubuntu22.04
           - os: ubuntu-24.04
             name: ubuntu24.04
+          - os: ubuntu-22.04-arm
+            name: ubuntu22.04-arm64
+          - os: ubuntu-24.04-arm
+            name: ubuntu24.04-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -71,12 +84,17 @@ jobs:
   # =============================================================================
   build-deb-sensors:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-22.04
             name: ubuntu22.04
           - os: ubuntu-24.04
             name: ubuntu24.04
+          - os: ubuntu-22.04-arm
+            name: ubuntu22.04-arm64
+          - os: ubuntu-24.04-arm
+            name: ubuntu24.04-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -134,12 +152,17 @@ jobs:
   # =============================================================================
   build-deb-exporters:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-22.04
             name: ubuntu22.04
           - os: ubuntu-24.04
             name: ubuntu24.04
+          - os: ubuntu-22.04-arm
+            name: ubuntu22.04-arm64
+          - os: ubuntu-24.04-arm
+            name: ubuntu24.04-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -186,7 +209,15 @@ jobs:
   # Build RPM packages using Fedora container
   # =============================================================================
   build-rpm-fedora:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
     container: fedora:41
     steps:
       - uses: actions/checkout@v4
@@ -247,7 +278,10 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: rpm-fedora41
+          # cargo-generate-rpm already embeds the arch (x86_64 / aarch64) in the
+          # filename, so the merged release dir won't collide; the artifact name
+          # is still split per-arch to keep the two matrix legs distinct.
+          name: rpm-fedora41-${{ matrix.arch }}
           path: target/generate-rpm/*.rpm
           if-no-files-found: error
 
@@ -295,10 +329,23 @@ jobs:
             package: zensight-sensor-sysinfo
           - name: snmp
             package: zensight-sensor-snmp
+          - name: gnmi
+            package: zensight-sensor-gnmi
+          - name: modbus
+            package: zensight-sensor-modbus
+          - name: netflow
+            package: zensight-sensor-netflow
+          - name: netlink
+            package: zensight-sensor-netlink
+          - name: netring
+            package: zensight-sensor-netring
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -336,7 +383,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
 
   # =============================================================================
   # Build Docker images for exporters
@@ -358,6 +405,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -395,7 +445,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
 
   # =============================================================================
   # Create GitHub Release with all artifacts
