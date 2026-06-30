@@ -801,6 +801,9 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
                         }
                     }
                 }
+                // `HttpMessage` is `#[non_exhaustive]` as of flowscope 0.20 — we
+                // only track requests/responses; ignore any future variants.
+                _ => {}
             }
             Ok(())
         });
