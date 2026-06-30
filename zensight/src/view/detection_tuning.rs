@@ -49,6 +49,22 @@ pub struct DetectorRow {
     pub threshold_input: String,
 }
 
+/// The netring sensor's live capture-focus filter state (#225/#228), parsed from
+/// `zensight/netring/@/status/capture_filter`.
+#[derive(Debug, Clone, Default)]
+pub struct CaptureFilterView {
+    /// Whether the reloadable packet-tier subscription is wired up.
+    pub enabled: bool,
+    /// How many reloadable filters the sensor registered (0 ⇒ not reloadable).
+    pub reloadable: u64,
+    /// The currently-applied filter expression.
+    pub current: String,
+    /// The configured base filter, restored by `clear`.
+    pub base: String,
+    /// The last validation error, if the most recent set was rejected.
+    pub last_error: Option<String>,
+}
+
 /// Frontend state for the detection-tuning panel.
 #[derive(Debug, Default, Clone)]
 pub struct DetectionTuningState {
@@ -59,6 +75,10 @@ pub struct DetectionTuningState {
     /// The new-allowlist-entry input.
     pub new_entry: String,
     pub status_note: Option<String>,
+    /// Capture-focus BPF expression input (not yet applied) (#225/#228).
+    pub packet_filter_input: String,
+    /// The sensor's live capture-filter status, once fetched.
+    pub capture_filter: Option<CaptureFilterView>,
 }
 
 impl DetectionTuningState {
@@ -104,6 +124,37 @@ impl DetectionTuningState {
         self.loaded = true;
         self.status_note = None;
     }
+
+    /// Parse the sensor's `CaptureFilterStatus` JSON into the capture-focus view.
+    /// Leaves the input field alone (the operator may be mid-edit).
+    pub fn apply_capture_filter_status(&mut self, json: &str) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+            return;
+        };
+        let str_field = |k: &str| {
+            value
+                .get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        self.capture_filter = Some(CaptureFilterView {
+            enabled: value
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            reloadable: value
+                .get("reloadable")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            current: str_field("current"),
+            base: str_field("base"),
+            last_error: value
+                .get("last_error")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        });
+    }
 }
 
 /// Format a threshold without trailing noise (e.g. `0.8`, `100`).
@@ -137,7 +188,12 @@ pub fn detection_tuning_panel(state: &DetectionTuningState) -> Element<'_, Messa
             .status_note
             .clone()
             .unwrap_or_else(|| "Open with a live netring sensor, then Refresh.".to_string());
-        return card(column![header, text(note).size(12).style(muted)].spacing(8));
+        return column![
+            card(column![header, text(note).size(12).style(muted)].spacing(8)),
+            capture_focus_card(state),
+        ]
+        .spacing(12)
+        .into();
     }
 
     // Per-detector rows: mute/unmute + optional threshold edit.
@@ -209,19 +265,94 @@ pub fn detection_tuning_panel(state: &DetectionTuningState) -> Element<'_, Messa
     .spacing(8)
     .align_y(Alignment::Center);
 
-    container(
-        column![
-            header,
-            detectors,
-            allowlist_row,
-            add_row,
-            text("Tuning applies without a sensor restart. Enabling a detector that was off at startup needs a restart.")
-                .size(10)
-                .style(muted),
-        ]
-        .spacing(10),
-    )
+    column![
+        container(
+            column![
+                header,
+                detectors,
+                allowlist_row,
+                add_row,
+                text("Tuning applies without a sensor restart. Enabling a detector that was off at startup needs a restart.")
+                    .size(10)
+                    .style(muted),
+            ]
+            .spacing(10),
+        ),
+        capture_focus_card(state),
+    ]
+    .spacing(12)
     .into()
+}
+
+/// Capture-focus card (#225/#228): a live BPF box that hot-swaps the netring
+/// sensor's reloadable packet-tier filter via `@/commands/capture_filter`, with a
+/// readout of the currently-applied filter (and any validation error) from
+/// `@/status/capture_filter`. Narrows capture attention during an incident
+/// without restarting capture.
+fn capture_focus_card(state: &DetectionTuningState) -> Element<'_, Message> {
+    let muted = |t: &Theme| text::Style {
+        color: Some(theme::colors(t).text_muted()),
+    };
+    let danger = |t: &Theme| text::Style {
+        color: Some(theme::colors(t).danger()),
+    };
+
+    let header = text("Capture Focus (netring)").size(16);
+    let input_row = row![
+        text_input(
+            "BPF expr, e.g. host 10.0.0.5 and port 443",
+            &state.packet_filter_input
+        )
+        .on_input(Message::SetPacketFilterInput)
+        .on_submit(Message::ApplyPacketFilter)
+        .size(12)
+        .padding(5)
+        .width(Length::Fixed(320.0)),
+        button(text("Apply").size(12))
+            .on_press(Message::ApplyPacketFilter)
+            .style(iced::widget::button::primary),
+        button(text("Clear").size(12))
+            .on_press(Message::ClearPacketFilter)
+            .style(iced::widget::button::secondary),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    let mut body = column![
+        header,
+        input_row,
+        text("Grammar: tcp|udp|icmp, [src|dst] port N, [src|dst] host IP, [src|dst] net CIDR, combined with and/or/!/parens.")
+            .size(10)
+            .style(muted),
+    ]
+    .spacing(8);
+
+    match &state.capture_filter {
+        None => {
+            body = body.push(
+                text("Refresh to load the live capture filter.")
+                    .size(12)
+                    .style(muted),
+            );
+        }
+        Some(cf) if !cf.enabled || cf.reloadable == 0 => {
+            body = body.push(
+                text("Capture-focus is disabled on this sensor (set capture_focus.enabled). Live capture only.")
+                    .size(12)
+                    .style(muted),
+            );
+        }
+        Some(cf) => {
+            body = body
+                .push(text(format!("current: {}", cf.current)).size(12))
+                .push(text(format!("base: {}", cf.base)).size(11).style(muted));
+            if let Some(err) = &cf.last_error {
+                body = body.push(text(format!("✕ rejected: {err}")).size(12).style(danger));
+            }
+        }
+    }
+
+    card(body)
 }
 
 #[cfg(test)]
@@ -270,5 +401,35 @@ mod tests {
         state.apply_status("not json");
         assert!(!state.loaded);
         assert!(state.status_note.is_some());
+    }
+
+    #[test]
+    fn parses_capture_filter_status() {
+        let mut state = DetectionTuningState::default();
+        state.apply_capture_filter_status(
+            r#"{"enabled":true,"reloadable":1,"current":"host 10.0.0.5","base":"tcp or udp or icmp","last_error":"unexpected token foo"}"#,
+        );
+        let cf = state.capture_filter.expect("parsed");
+        assert!(cf.enabled);
+        assert_eq!(cf.reloadable, 1);
+        assert_eq!(cf.current, "host 10.0.0.5");
+        assert_eq!(cf.base, "tcp or udp or icmp");
+        assert_eq!(cf.last_error.as_deref(), Some("unexpected token foo"));
+    }
+
+    #[test]
+    fn capture_filter_status_no_error_is_none() {
+        let mut state = DetectionTuningState::default();
+        state.apply_capture_filter_status(
+            r#"{"enabled":true,"reloadable":1,"current":"tcp","base":"tcp"}"#,
+        );
+        assert!(state.capture_filter.unwrap().last_error.is_none());
+    }
+
+    #[test]
+    fn bad_capture_filter_json_leaves_state() {
+        let mut state = DetectionTuningState::default();
+        state.apply_capture_filter_status("not json");
+        assert!(state.capture_filter.is_none());
     }
 }

@@ -1563,6 +1563,12 @@ fn test_netring_specialized_view() {
     assert!(ui.find("Recent Flows (on demand)").is_ok());
     assert!(ui.find("Fetch Flows").is_ok());
     assert!(ui.find("10.0.0.1:54321").is_ok());
+    // #228 orientation: directed flows show initiator→responder columns + the
+    // directed arrow + a per-direction byte split.
+    assert!(ui.find("initiator").is_ok());
+    assert!(ui.find("responder").is_ok());
+    assert!(ui.find("out↑ / in↓").is_ok());
+    assert!(ui.find("→").is_ok());
 }
 
 /// Sensor-pushed alerts render in the alerts view's "Anomalies & Expectations"
@@ -1974,6 +1980,82 @@ fn test_netring_capture_overload_and_breakdown() {
     assert!(ui.find("Capture Health").is_ok());
     assert!(ui.find("⚠ OVERLOAD — losing packets").is_ok());
     assert!(ui.find("xdp/rx_ring_full").is_ok());
+}
+
+/// #228/#224: the capture panel shows the resolved-backend badge and, when the
+/// sensor is deliberately load-shedding, an unmistakable "data is sampled"
+/// banner so the operator knows the rest of the telemetry is a sample.
+#[test]
+fn test_netring_capture_backend_and_shedding() {
+    use zensight::view::specialized::netring::netring_sensor_view;
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let mut state = DeviceDetailState::new(device_id);
+    for (m, v) in [
+        (
+            "capture/backend",
+            TelemetryValue::Text("af_xdp".to_string()),
+        ),
+        ("capture/0/packets", TelemetryValue::Counter(500_000)),
+        ("capture/0/drops", TelemetryValue::Counter(10)),
+        ("capture/0/shed/active", TelemetryValue::Gauge(1.0)),
+        (
+            "capture/0/shed/new_flows_total",
+            TelemetryValue::Counter(321),
+        ),
+        // capture/focus must not appear as a per-source row.
+        ("capture/focus/packets", TelemetryValue::Counter(42)),
+    ] {
+        state.update(TelemetryPoint::new("wiretap1", Protocol::Netring, m, v));
+    }
+
+    let mut ui = simulator(netring_sensor_view(&state));
+    assert!(ui.find("Capture Health").is_ok());
+    assert!(ui.find("backend: af_xdp").is_ok());
+    assert!(ui.find("⚠ SHEDDING — data is sampled").is_ok());
+    // The reloadable-filter counter is not mistaken for a NIC source row.
+    assert!(ui.find("focus").is_err());
+}
+
+/// #228/#225: the capture-focus box in the detection-tuning panel sends a
+/// `set_packet_filter` command (ApplyPacketFilter) and surfaces the live filter
+/// + any sensor-side validation error inline.
+#[test]
+fn test_capture_focus_panel() {
+    use zensight::view::detection_tuning::{
+        CaptureFilterView, DetectionTuningState, detection_tuning_panel,
+    };
+
+    let mut state = DetectionTuningState {
+        packet_filter_input: "host 10.0.0.5".to_string(),
+        capture_filter: Some(CaptureFilterView {
+            enabled: true,
+            reloadable: 1,
+            current: "host 10.0.0.5".to_string(),
+            base: "tcp or udp or icmp".to_string(),
+            last_error: Some("unexpected token foo".to_string()),
+        }),
+        ..Default::default()
+    };
+    state.loaded = false; // even unloaded, the focus card renders.
+
+    {
+        let mut ui = simulator(detection_tuning_panel(&state));
+        assert!(ui.find("Capture Focus (netring)").is_ok());
+        assert!(ui.find("current: host 10.0.0.5").is_ok());
+        assert!(ui.find("✕ rejected: unexpected token foo").is_ok());
+    }
+
+    // Clicking Apply emits ApplyPacketFilter.
+    let mut ui = simulator(detection_tuning_panel(&state));
+    let _ = ui.click("Apply");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::ApplyPacketFilter))
+    );
 }
 
 /// #70: the netring view shows the passive asset-inventory section — the

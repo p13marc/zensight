@@ -358,6 +358,39 @@ pub mod netring {
                 "tls/handshakes_total",
                 TelemetryValue::Counter(2_048),
             ),
+            // Capture self-health (#227/#224): resolved backend + a per-NIC leg
+            // with a light, non-overload drop rate so the GUI's capture panel and
+            // backend badge render in demo mode.
+            telemetry_point(
+                Protocol::Netring,
+                name,
+                "capture/backend",
+                TelemetryValue::Text("af_packet".to_string()),
+            ),
+            telemetry_point(
+                Protocol::Netring,
+                name,
+                "capture/0/packets",
+                TelemetryValue::Counter(1_048_576),
+            ),
+            telemetry_point(
+                Protocol::Netring,
+                name,
+                "capture/0/drops",
+                TelemetryValue::Counter(2_100),
+            ),
+            telemetry_point(
+                Protocol::Netring,
+                name,
+                "capture/0/drop_rate",
+                TelemetryValue::Gauge(0.002),
+            ),
+            telemetry_point(
+                Protocol::Netring,
+                name,
+                "capture/focus/packets",
+                TelemetryValue::Counter(512),
+            ),
         ]
     }
 }

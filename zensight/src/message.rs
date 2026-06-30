@@ -124,6 +124,17 @@ pub enum Message {
     /// inventory fingerprint explorer's per-row allowlist action.
     AddNetringAllowlistEntry(String),
 
+    // Netring capture-focus (#225/#228): hot-swap the reloadable packet-tier
+    // BPF filter live, narrowing capture attention during an incident.
+    /// Edit the capture-focus filter expression input (not yet applied).
+    SetPacketFilterInput(String),
+    /// Apply the typed capture-focus filter to the netring sensor.
+    ApplyPacketFilter,
+    /// Clear the capture-focus filter back to the configured base.
+    ClearPacketFilter,
+    /// A capture-filter status reply (`CaptureFilterStatus` JSON), or an error.
+    CaptureFilterStatusReceived(Result<String, String>),
+
     /// Open the unified Incidents triage view (#129).
     OpenIncidents,
     /// Expand/collapse an incident by id (`None` collapses) (#129).
