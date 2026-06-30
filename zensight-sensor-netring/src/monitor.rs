@@ -3,7 +3,7 @@
 //! capture path).
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -510,6 +510,8 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
     // Capture-focus counters (#225), advanced by the reloadable packet sub.
     let focus_packets = Arc::new(AtomicU64::new(0));
     let focus_bytes = Arc::new(AtomicU64::new(0));
+    // Latch so the `capture-leg-asymmetry` alert (#226) fires once per run.
+    let asymmetry_alerted = Arc::new(AtomicBool::new(false));
     let tcp_resets = Arc::new(AtomicU64::new(0));
     let tcp_refused = Arc::new(AtomicU64::new(0));
     let tls_handshakes = Arc::new(AtomicU64::new(0));
@@ -630,6 +632,12 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
         let exfil_cfg = det_cfg.clone();
         let exfil_sensor_id = cfg.sensor_id.clone();
         let shed_fe = shed_ctl.clone();
+        // Capture-leg asymmetry (#226): a flow whose two directions arrived on
+        // legs that shouldn't pair (tap miswire / asymmetric routing). Sticky
+        // IOC — alert once per sensor run (latched), not per flow.
+        let asym_tx = alert_tx.clone();
+        let asym_sensor_id = cfg.sensor_id.clone();
+        let asym_latch = asymmetry_alerted.clone();
         b = b.on_ctx::<FlowEnded<Tcp>>(move |e: &FlowEnded<Tcp>, _ctx: &mut Ctx<'_>| {
             // Honest shed: a flow shed at start is dropped from telemetry here
             // (not silently retained), so "data is sampled" is the truth.
@@ -638,6 +646,13 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
                 && s.take_shed(crate::shed::ShedController::flow_hash(&e.key))
             {
                 return Ok(());
+            }
+            if e.stats.capture_leg_inconsistent && !asym_latch.swap(true, Ordering::Relaxed) {
+                let _ = asym_tx.send(map::leg_asymmetry_alert(
+                    &asym_sensor_id,
+                    e.stats.source_idx_forward,
+                    e.stats.source_idx_reverse,
+                ));
             }
             on_flow_ended(
                 e,
@@ -665,11 +680,21 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
         let matrix_udp = matrix.clone();
         let collect_talkers_udp = cfg.collect.talkers;
         b = b.protocol::<Udp>();
+        let asym_tx_udp = alert_tx.clone();
+        let asym_sensor_id_udp = cfg.sensor_id.clone();
+        let asym_latch_udp = asymmetry_alerted.clone();
         b = b.on_ctx::<FlowEnded<Udp>>(move |e: &FlowEnded<Udp>, _ctx: &mut Ctx<'_>| {
             l4_udp
                 .udp_bytes
                 .fetch_add(e.stats.total_bytes(), Ordering::Relaxed);
             l4_udp.udp_flows.fetch_add(1, Ordering::Relaxed);
+            if e.stats.capture_leg_inconsistent && !asym_latch_udp.swap(true, Ordering::Relaxed) {
+                let _ = asym_tx_udp.send(map::leg_asymmetry_alert(
+                    &asym_sensor_id_udp,
+                    e.stats.source_idx_forward,
+                    e.stats.source_idx_reverse,
+                ));
+            }
             if collect_talkers_udp {
                 // UDP has no handshake, so the initiator is the first-packet
                 // sender (best-effort); still order initiator → responder so the

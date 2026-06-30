@@ -639,6 +639,39 @@ pub fn overload_alert_shed(
     alert
 }
 
+/// Build the `capture-leg-asymmetry` SensorHealth alert (#226): a flow whose two
+/// directions arrived on capture legs that shouldn't pair — a tap miswire or
+/// asymmetric routing, meaning flow direction/volume may be wrong. Same channel
+/// / kind as `capture-overload`. `fwd`/`rev` are the bound source indices, if
+/// known, for the operator to chase the miswire.
+pub fn leg_asymmetry_alert(sensor_id: &str, fwd: Option<u32>, rev: Option<u32>) -> Alert {
+    let legs = match (fwd, rev) {
+        (Some(f), Some(r)) => format!(" (forward leg {f}, reverse leg {r})"),
+        (Some(f), None) => format!(" (forward leg {f})"),
+        (None, Some(r)) => format!(" (reverse leg {r})"),
+        (None, None) => String::new(),
+    };
+    let mut alert = Alert::new(
+        sensor_id,
+        Protocol::Netring,
+        AlertKind::SensorHealth,
+        "capture-leg-asymmetry",
+        AlertSeverity::Warning,
+        format!(
+            "capture-leg asymmetry{legs}: a flow's two directions arrived on \
+             mismatched legs — tap miswire or asymmetric routing; flow \
+             direction/volume may be unreliable"
+        ),
+    );
+    if let Some(f) = fwd {
+        alert = alert.with_label("source_idx_forward", f.to_string());
+    }
+    if let Some(r) = rev {
+        alert = alert.with_label("source_idx_reverse", r.to_string());
+    }
+    alert
+}
+
 /// Build the `capture/<source>/shed/*` telemetry family (#224): cumulative
 /// deliberately-shed flow count (split by policy leaf) plus an `active` gauge
 /// (`1` while shedding). Emitted alongside the rest of `capture/<source>/*`.
@@ -1379,6 +1412,29 @@ mod tests {
             community_id_v1(udp_a, udp_b, 17, 0),
             "1:7/iy0TWjrq0cVVQ9n2zZP8McXdg="
         );
+    }
+
+    #[test]
+    fn leg_asymmetry_alert_shape() {
+        // Drive the alert builder with synthetic leg indices (a real
+        // capture_leg_inconsistent flag needs a multi-NIC host — #226 is
+        // host-gated; the boolean decision is wired in `monitor.rs`).
+        let a = leg_asymmetry_alert("netsensor", Some(0), Some(1));
+        assert_eq!(a.rule, "capture-leg-asymmetry");
+        assert_eq!(a.kind, AlertKind::SensorHealth);
+        assert_eq!(a.severity, AlertSeverity::Warning);
+        assert_eq!(
+            a.labels.get("source_idx_forward").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            a.labels.get("source_idx_reverse").map(String::as_str),
+            Some("1")
+        );
+        // Unknown legs: no labels, still a well-formed alert.
+        let b = leg_asymmetry_alert("netsensor", None, None);
+        assert!(b.labels.is_empty());
+        assert_eq!(b.rule, "capture-leg-asymmetry");
     }
 
     #[test]
