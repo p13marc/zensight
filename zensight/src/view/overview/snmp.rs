@@ -10,6 +10,7 @@ use zensight_common::TelemetryValue;
 use crate::message::{DeviceId, Message};
 use crate::view::components::{StatusLed, StatusLedState, empty_state};
 use crate::view::dashboard::DeviceState;
+use crate::view::formatting::format_bytes;
 use crate::view::theme;
 
 /// Interface summary data.
@@ -48,8 +49,8 @@ pub fn snmp_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Element<
         render_status_stat("UP", up_count, StatusLedState::Active),
         render_status_stat("DOWN", down_count, StatusLedState::Inactive),
         render_stat("With Errors", error_count.to_string()),
-        render_stat("Total In", format_bytes(total_in)),
-        render_stat("Total Out", format_bytes(total_out)),
+        render_stat("Total In", format_bytes(total_in as f64)),
+        render_stat("Total Out", format_bytes(total_out as f64)),
     ]
     .spacing(25)
     .align_y(Alignment::Center);
@@ -276,9 +277,9 @@ fn render_interface_row<'a>(rank: usize, iface: &InterfaceSummary) -> Element<'a
         text(format!("{}/{}", iface.device, iface.name))
             .size(11)
             .width(Length::Fixed(180.0)),
-        text(format!("In: {}", format_bytes(iface.in_octets))).size(10),
-        text(format!("Out: {}", format_bytes(iface.out_octets))).size(10),
-        text(format!("Total: {}", format_bytes(total)))
+        text(format!("In: {}", format_bytes(iface.in_octets as f64))).size(10),
+        text(format!("Out: {}", format_bytes(iface.out_octets as f64))).size(10),
+        text(format!("Total: {}", format_bytes(total as f64)))
             .size(10)
             .style(|t: &Theme| text::Style {
                 color: Some(theme::colors(t).primary()),
@@ -287,31 +288,4 @@ fn render_interface_row<'a>(rank: usize, iface: &InterfaceSummary) -> Element<'a
     .spacing(10)
     .align_y(Alignment::Center)
     .into()
-}
-
-/// Format bytes as human-readable string.
-fn format_bytes(bytes: u64) -> String {
-    let bytes = bytes as f64;
-    if bytes >= 1_073_741_824.0 {
-        format!("{:.1} GB", bytes / 1_073_741_824.0)
-    } else if bytes >= 1_048_576.0 {
-        format!("{:.1} MB", bytes / 1_048_576.0)
-    } else if bytes >= 1024.0 {
-        format!("{:.1} KB", bytes / 1024.0)
-    } else {
-        format!("{:.0} B", bytes)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_format_bytes() {
-        assert_eq!(format_bytes(500), "500 B");
-        assert_eq!(format_bytes(1536), "1.5 KB");
-        assert_eq!(format_bytes(1_572_864), "1.5 MB");
-        assert_eq!(format_bytes(1_610_612_736), "1.5 GB");
-    }
 }

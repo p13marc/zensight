@@ -8,6 +8,7 @@ use zensight_common::TelemetryValue;
 use crate::message::Message;
 use crate::view::components::{card, empty_state, section_header};
 use crate::view::device::DeviceDetailState;
+use crate::view::formatting::{format_bytes, format_count, format_rate};
 use crate::view::specialized::fetch::Fetch;
 use crate::view::theme;
 use crate::view::tokens::{font, space};
@@ -364,17 +365,31 @@ fn render_capture(state: &DeviceDetailState) -> Element<'_, Message> {
         .spacing(8),
     );
     for (src, stats) in &sources {
-        let g = |s: &str| num(stats.get(s).copied());
-        let drop_rate = match stats.get("drop_rate") {
-            Some(TelemetryValue::Gauge(r)) => format!("{:.2}%", r * 100.0),
-            _ => "-".into(),
+        // Counters read large; scale them (1.2M) but keep small values exact.
+        let g = |s: &str| match stats.get(s).copied() {
+            Some(TelemetryValue::Counter(c)) => format_count(*c),
+            other => num(other),
+        };
+        let dr = match stats.get("drop_rate") {
+            Some(TelemetryValue::Gauge(r)) => Some(*r),
+            _ => None,
+        };
+        let drop_rate = dr
+            .map(|r| format!("{:.2}%", r * 100.0))
+            .unwrap_or_else(|| "-".into());
+        // Tint the drop-rate per source: danger at/above the overload threshold,
+        // warning once it's non-trivial, so the lossy source stands out in the row.
+        let drop_cell = match dr {
+            Some(r) if r >= OVERLOAD_DROP_RATE => cell_styled(&drop_rate, 100, danger),
+            Some(r) if r >= 0.01 => cell_styled(&drop_rate, 100, warn),
+            _ => cell(&drop_rate, 100),
         };
         list = list.push(
             row![
                 cell(src, 90),
                 cell(&g("packets"), 120),
                 cell(&g("drops"), 100),
-                cell(&drop_rate, 100),
+                drop_cell,
                 cell(&g("freezes"), 90),
             ]
             .spacing(8),
@@ -384,7 +399,11 @@ fn render_capture(state: &DeviceDetailState) -> Element<'_, Message> {
             .iter()
             .filter_map(|(stat, v)| {
                 let cause = stat.strip_prefix("xdp/")?;
-                Some((cause.to_string(), num(Some(*v))))
+                let formatted = match **v {
+                    TelemetryValue::Counter(c) => format_count(c),
+                    _ => num(Some(*v)),
+                };
+                Some((cause.to_string(), formatted))
             })
             .collect();
         for (cause, v) in xdp {
@@ -419,6 +438,16 @@ fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
 fn render_flows(state: &DeviceDetailState) -> Element<'_, Message> {
     let title = section_header("Flows", None);
     let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
+    let get_bytes = |m: &str| {
+        metric_f64(state, m)
+            .map(format_bytes)
+            .unwrap_or_else(|| "-".into())
+    };
+    let get_count = |m: &str| {
+        metric_f64(state, m)
+            .map(|v| format_count(v as u64))
+            .unwrap_or_else(|| "-".into())
+    };
     column![
         title,
         row![
@@ -434,22 +463,31 @@ fn render_flows(state: &DeviceDetailState) -> Element<'_, Message> {
         row![cell("active", 160), cell(&get("flow/active"), 100)].spacing(8),
         row![
             cell("bytes (total)", 160),
-            cell(&get("flow/bytes_total"), 100)
+            cell(&get_bytes("flow/bytes_total"), 100)
         ]
         .spacing(8),
         row![
             cell("packets (total)", 160),
-            cell(&get("flow/packets_total"), 100)
+            cell(&get_count("flow/packets_total"), 100)
         ]
         .spacing(8),
         row![
             cell("retransmits (total)", 160),
-            cell(&get("flow/retransmits_total"), 100)
+            cell(&get_count("flow/retransmits_total"), 100)
         ]
         .spacing(8),
     ]
     .spacing(4)
     .into()
+}
+
+/// Read a metric as `f64` (Counter or Gauge), `None` if absent or non-numeric.
+fn metric_f64(state: &DeviceDetailState, metric: &str) -> Option<f64> {
+    match state.metrics.get(metric).map(|p| &p.value) {
+        Some(TelemetryValue::Counter(c)) => Some(*c as f64),
+        Some(TelemetryValue::Gauge(g)) => Some(*g),
+        _ => None,
+    }
 }
 
 /// TCP health: reset / connection-refused counters.
@@ -698,8 +736,8 @@ fn render_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
                 list = list.push(
                     row![
                         cell(&r.dst, 240),
-                        cell(&r.bytes.to_string(), 120),
-                        cell(&r.packets.to_string(), 100),
+                        cell(&format_bytes(r.bytes as f64), 120),
+                        cell(&format_count(r.packets), 100),
                         cell(&r.flows.to_string(), 80),
                     ]
                     .spacing(8),
@@ -753,8 +791,8 @@ fn render_matrix(state: &DeviceDetailState) -> Element<'_, Message> {
                     row![
                         cell(&r.src, 200),
                         cell(&r.dst, 200),
-                        cell(&r.bytes.to_string(), 120),
-                        cell(&r.packets.to_string(), 100),
+                        cell(&format_bytes(r.bytes as f64), 120),
+                        cell(&format_count(r.packets), 100),
                         cell(&r.flows.to_string(), 80),
                     ]
                     .spacing(8),
@@ -809,8 +847,8 @@ fn render_elephants(state: &DeviceDetailState) -> Element<'_, Message> {
                         cell(&r.src, 180),
                         cell(&r.dst, 180),
                         cell(&r.proto, 60),
-                        cell(&r.bytes.to_string(), 110),
-                        cell(&r.packets.to_string(), 90),
+                        cell(&format_bytes(r.bytes as f64), 110),
+                        cell(&format_count(r.packets), 90),
                         cell(&r.duration_ms.to_string(), 80),
                     ]
                     .spacing(8),
@@ -826,21 +864,19 @@ fn render_elephants(state: &DeviceDetailState) -> Element<'_, Message> {
 
 /// Per-L4 (tcp/udp/icmp) flow + byte split (#45).
 fn render_per_l4(state: &DeviceDetailState) -> Element<'_, Message> {
-    let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
     let mut col = column![
         section_header("Per-protocol (L4)", None),
         row![cell("proto", 120), cell("flows", 120), cell("bytes", 140)].spacing(8),
     ]
     .spacing(4);
     for proto in ["tcp", "udp", "icmp"] {
-        col = col.push(
-            row![
-                cell(proto, 120),
-                cell(&get(&format!("flow/by_l4/{proto}/flows_total")), 120),
-                cell(&get(&format!("flow/by_l4/{proto}/bytes_total")), 140),
-            ]
-            .spacing(8),
-        );
+        let flows = metric_f64(state, &format!("flow/by_l4/{proto}/flows_total"))
+            .map(|v| format_count(v as u64))
+            .unwrap_or_else(|| "-".into());
+        let bytes = metric_f64(state, &format!("flow/by_l4/{proto}/bytes_total"))
+            .map(format_bytes)
+            .unwrap_or_else(|| "-".into());
+        col = col.push(row![cell(proto, 120), cell(&flows, 120), cell(&bytes, 140)].spacing(8));
     }
     col.into()
 }
@@ -887,8 +923,8 @@ fn render_flow_detail(state: &DeviceDetailState) -> Element<'_, Message> {
                         cell(&f.src, 190),
                         cell(&f.dst, 190),
                         cell(&f.proto, 60),
-                        cell(&f.bytes.to_string(), 90),
-                        cell(&f.packets.to_string(), 80),
+                        cell(&format_bytes(f.bytes as f64), 90),
+                        cell(&format_count(f.packets), 80),
                         cell(&f.duration_ms.to_string(), 80),
                         cell(&f.reason, 90),
                     ]
@@ -934,7 +970,7 @@ fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
     let mut list = Column::new().spacing(4).push(
         row![
             cell("application", 200),
-            cell("bytes/sec", 140),
+            cell("throughput", 140),
             cell("trend", 80)
         ]
         .spacing(8),
@@ -945,7 +981,7 @@ fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
         list = list.push(
             row![
                 cell(app, 200),
-                cell(&format!("{bps:.0}"), 140),
+                cell(&format_rate(*bps), 140),
                 super::metric_sparkline(state, &metric),
             ]
             .spacing(8)
@@ -962,6 +998,15 @@ fn cell<'a>(s: &str, width: u16) -> Element<'a, Message> {
         .into()
 }
 
+/// A fixed-width table cell whose text is tinted by `style` (e.g. drop-rate).
+fn cell_styled<'a>(s: &str, width: u16, style: fn(&Theme) -> text::Style) -> Element<'a, Message> {
+    text(s.to_string())
+        .size(12)
+        .width(Length::Fixed(width as f32))
+        .style(style)
+        .into()
+}
+
 fn dim(theme: &Theme) -> text::Style {
     text::Style {
         color: Some(theme::colors(theme).text_dimmed()),
@@ -971,6 +1016,12 @@ fn dim(theme: &Theme) -> text::Style {
 fn danger(theme: &Theme) -> text::Style {
     text::Style {
         color: Some(theme::colors(theme).danger()),
+    }
+}
+
+fn warn(theme: &Theme) -> text::Style {
+    text::Style {
+        color: Some(theme::colors(theme).warning()),
     }
 }
 

@@ -14,6 +14,7 @@ use zensight_common::TelemetryValue;
 use crate::message::Message;
 use crate::view::components::{card, empty_state};
 use crate::view::device::DeviceDetailState;
+use crate::view::formatting::{format_bytes, format_count};
 use crate::view::icons::{self, IconSize};
 use crate::view::theme;
 use crate::view::tokens::space;
@@ -406,28 +407,6 @@ fn parse_flows(state: &DeviceDetailState) -> Vec<FlowRecord> {
     }
 
     flows
-}
-
-fn format_bytes(bytes: f64) -> String {
-    if bytes >= 1_073_741_824.0 {
-        format!("{:.1} GB", bytes / 1_073_741_824.0)
-    } else if bytes >= 1_048_576.0 {
-        format!("{:.1} MB", bytes / 1_048_576.0)
-    } else if bytes >= 1024.0 {
-        format!("{:.1} KB", bytes / 1024.0)
-    } else {
-        format!("{:.0} B", bytes)
-    }
-}
-
-fn format_count(count: u64) -> String {
-    if count >= 1_000_000 {
-        format!("{:.1}M", count as f64 / 1_000_000.0)
-    } else if count >= 1000 {
-        format!("{:.1}K", count as f64 / 1000.0)
-    } else {
-        format!("{}", count)
-    }
 }
 
 fn section_style(t: &Theme) -> container::Style {

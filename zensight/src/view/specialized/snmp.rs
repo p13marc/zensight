@@ -14,6 +14,7 @@ use zensight_common::TelemetryValue;
 use crate::message::Message;
 use crate::view::components::{Gauge, StatusLed, StatusLedState, card, empty_state};
 use crate::view::device::DeviceDetailState;
+use crate::view::formatting::format_bytes;
 use crate::view::icons::{self, IconSize};
 use crate::view::theme;
 use crate::view::tokens::space;
@@ -483,18 +484,6 @@ fn value_to_u64(value: &TelemetryValue) -> Option<u64> {
         TelemetryValue::Counter(v) => Some(*v),
         TelemetryValue::Gauge(v) => Some(*v as u64),
         _ => None,
-    }
-}
-
-fn format_bytes(bytes: f64) -> String {
-    if bytes >= 1_073_741_824.0 {
-        format!("{:.1}G", bytes / 1_073_741_824.0)
-    } else if bytes >= 1_048_576.0 {
-        format!("{:.1}M", bytes / 1_048_576.0)
-    } else if bytes >= 1024.0 {
-        format!("{:.1}K", bytes / 1024.0)
-    } else {
-        format!("{:.0}", bytes)
     }
 }
 
