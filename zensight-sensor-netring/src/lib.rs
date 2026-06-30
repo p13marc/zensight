@@ -16,5 +16,6 @@ pub mod map;
 pub mod monitor;
 pub mod publish;
 pub mod query;
+pub mod shed;
 
 pub use config::{NetringConfig, NetringSensorConfig};

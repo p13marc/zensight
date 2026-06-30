@@ -523,11 +523,31 @@ pub fn capture_points(
 /// transition — "the sensor is silently losing your packets" — and resolved
 /// (`firing = false`) on the `Emergency → Normal` recovery. Bucketed per source.
 pub fn overload_alert(sensor_id: &str, source: u8, drop_rate: f64, firing: bool) -> Alert {
+    overload_alert_shed(sensor_id, source, drop_rate, firing, None)
+}
+
+/// `overload_alert` with optional active-shedding annotation (#224). When the
+/// sensor is deliberately shedding, `shed_policy` is `Some(label)` and the
+/// alert carries `shedding=true` + the policy, so the operator knows the data
+/// is intentionally lossy (sampled, not complete) — not just kernel-dropped.
+pub fn overload_alert_shed(
+    sensor_id: &str,
+    source: u8,
+    drop_rate: f64,
+    firing: bool,
+    shed_policy: Option<&str>,
+) -> Alert {
     let summary = if firing {
-        format!(
-            "capture overload on source {source}: dropping {:.1}% of packets",
-            drop_rate * 100.0
-        )
+        match shed_policy {
+            Some(p) => format!(
+                "capture overload on source {source}: dropping {:.1}% of packets — shedding ({p})",
+                drop_rate * 100.0
+            ),
+            None => format!(
+                "capture overload on source {source}: dropping {:.1}% of packets",
+                drop_rate * 100.0
+            ),
+        }
     } else {
         format!("capture recovered on source {source}")
     };
@@ -541,10 +561,46 @@ pub fn overload_alert(sensor_id: &str, source: u8, drop_rate: f64, firing: bool)
     )
     .with_label("source", source.to_string())
     .with_label("drop_rate", format!("{drop_rate:.4}"));
+    if firing && let Some(p) = shed_policy {
+        alert = alert
+            .with_label("shedding", "true".to_string())
+            .with_label("shed_policy", p.to_string());
+    }
     if !firing {
         alert = alert.resolved();
     }
     alert
+}
+
+/// Build the `capture/<source>/shed/*` telemetry family (#224): cumulative
+/// deliberately-shed flow count (split by policy leaf) plus an `active` gauge
+/// (`1` while shedding). Emitted alongside the rest of `capture/<source>/*`.
+pub fn shed_points(
+    sensor_id: &str,
+    source: u8,
+    shed_total: u64,
+    active: bool,
+    policy: &str,
+) -> Vec<TelemetryPoint> {
+    let leaf = match policy {
+        "sample" => "sampled_total",
+        _ => "new_flows_total",
+    };
+    let pfx = format!("capture/{source}/shed");
+    vec![
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            format!("{pfx}/{leaf}"),
+            TelemetryValue::Counter(shed_total),
+        ),
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            format!("{pfx}/active"),
+            TelemetryValue::Gauge(if active { 1.0 } else { 0.0 }),
+        ),
+    ]
 }
 
 /// TLS handshake aggregate: total ClientHellos fingerprinted + distinct
