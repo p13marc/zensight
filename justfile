@@ -15,7 +15,7 @@
 profile := "release"
 
 # Network interface for netring capture (defaults to the default-route iface).
-iface := `ip route show default 2>/dev/null | awk '{print $5; exit}' || echo lo`
+iface := `ip route show default 2>/dev/null | awk '{print $5; exit}' | grep -m1 . || ip -o link show up 2>/dev/null | awk -F': ' '$2 != "lo" {print $2; exit}' | grep -m1 . || echo lo`
 
 # Derived: where cargo puts the binaries, and the --release flag.
 bindir := if profile == "release" { "target/release" } else { "target/debug" }
