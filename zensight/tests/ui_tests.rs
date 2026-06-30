@@ -1529,6 +1529,7 @@ fn test_netring_specialized_view() {
             duration_ms: 100,
             reason: "fin".into(),
             community_id: None,
+            directed: true,
         }]));
 
     // Loading state: button reads "Fetching…" while a fetch is in flight; an

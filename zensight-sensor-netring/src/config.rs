@@ -218,6 +218,14 @@ pub struct CollectConfig {
     /// it's opt-in on top of `assets`. No effect unless `assets` is also set.
     #[serde(default)]
     pub asset_cdp: bool,
+    /// TCP initiator inference (netring 0.28, issue #122). When on, the tracker
+    /// uses SYN / SYN+ACK analysis to recover the true flow initiator even when
+    /// the capture starts mid-handshake or the SYN+ACK races ahead — so flow
+    /// records / matrix / talkers are labelled client → server regardless of
+    /// capture endpoint order. Zero cost when off (falls back to first-packet
+    /// order). Default ON; TCP-only (UDP flows stay first-packet best-effort).
+    #[serde(default = "default_true")]
+    pub infer_initiator: bool,
 }
 
 impl Default for CollectConfig {
@@ -238,6 +246,7 @@ impl Default for CollectConfig {
             snmp_cleartext: false,
             assets: false,
             asset_cdp: false,
+            infer_initiator: true,
         }
     }
 }

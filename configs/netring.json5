@@ -43,6 +43,10 @@
       bandwidth: true,   // per-application bytes/sec
       flows: true,       // flow lifecycle aggregates
       tcp_resets: true,  // TCP reset + connection-refused counters
+      // TCP initiator inference (netring 0.28, #122): recover the true SYN
+      // sender so flow/matrix/talkers are labelled client -> server regardless
+      // of capture endpoint order. No-op cost when off. Default ON, TCP-only.
+      infer_initiator: true,
       // L7 RED analytics (cleartext only). Enabled here so the GUI's DNS/HTTP
       // detail tabs (@/query/dns, @/query/http) work out of the box; without
       // these the sensor declares no DNS/HTTP queryable and a fetch returns

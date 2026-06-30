@@ -16,7 +16,9 @@ use zensight_common::{
 /// Kept pure so its shape is unit-testable without the netring capture machinery.
 ///
 /// `community_id` is the precomputed Community ID v1 hash (see [`community_id_v1`]),
-/// `None` when the 5-tuple is incomplete.
+/// `None` when the 5-tuple is incomplete. `directed` is `true` when `src`/`dst`
+/// are an authoritative initiator → responder pair (TCP); `false` for
+/// best-effort orderings (UDP). See [`initiator_responder`].
 #[allow(clippy::too_many_arguments)]
 pub fn flow_record(
     src: String,
@@ -27,6 +29,7 @@ pub fn flow_record(
     duration_ms: u64,
     reason: &str,
     community_id: Option<String>,
+    directed: bool,
 ) -> FlowRecord {
     FlowRecord {
         src,
@@ -37,6 +40,25 @@ pub fn flow_record(
         duration_ms,
         reason: reason.to_string(),
         community_id,
+        directed,
+    }
+}
+
+/// Resolve `(initiator, responder)` from netring's address-sorted flow key and
+/// the flow's [`initiator_orientation`](flowscope::event::FlowStats). The key
+/// `(a, b)` is canonical/directionless (it backs the Community ID); orientation
+/// is presentation metadata that says which endpoint opened the conversation:
+/// `Forward` → the initiator is `a`, `Reverse` → the initiator is `b`. With
+/// `infer_tcp_initiator` on this reflects the SYN sender regardless of capture
+/// endpoint order. Pure + total so it is unit-testable without capture.
+pub fn initiator_responder(
+    a: SocketAddr,
+    b: SocketAddr,
+    orientation: flowscope::Orientation,
+) -> (SocketAddr, SocketAddr) {
+    match orientation {
+        flowscope::Orientation::Forward => (a, b),
+        flowscope::Orientation::Reverse => (b, a),
     }
 }
 
@@ -1164,6 +1186,7 @@ mod tests {
             100,
             "fin",
             Some("1:abc".into()),
+            true,
         );
         assert_eq!(r.src, "10.0.0.1:5555");
         assert_eq!(r.dst, "1.1.1.1:443");
@@ -1172,6 +1195,24 @@ mod tests {
         assert_eq!(r.duration_ms, 100);
         assert_eq!(r.reason, "fin");
         assert_eq!(r.community_id.as_deref(), Some("1:abc"));
+        assert!(r.directed);
+    }
+
+    #[test]
+    fn initiator_responder_follows_orientation() {
+        let a: SocketAddr = "10.0.0.10:49152".parse().unwrap();
+        let b: SocketAddr = "10.0.0.20:80".parse().unwrap();
+        // Forward: the canonical `a` opened the conversation → initiator is `a`.
+        assert_eq!(
+            initiator_responder(a, b, flowscope::Orientation::Forward),
+            (a, b)
+        );
+        // Reverse: the SYN actually came from `b` → initiator/responder swap,
+        // independent of the address-sorted key order.
+        assert_eq!(
+            initiator_responder(a, b, flowscope::Orientation::Reverse),
+            (b, a)
+        );
     }
 
     #[test]

@@ -1112,6 +1112,7 @@ mod tests {
             duration_ms: 0,
             reason: "fin".to_string(),
             community_id: None,
+            directed: true,
         }
     }
 
