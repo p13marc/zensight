@@ -509,12 +509,29 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
     // capture-order-independent. No-op cost when off. TCP-only.
     b = b.infer_tcp_initiator(cfg.collect.infer_initiator);
 
+    // Active load-shedding (#224): built only when armed AND detection is on.
+    // When absent the flow handlers and capture-stats path behave byte-for-byte
+    // as before (pure detection). Shared across the FlowStarted (admit),
+    // FlowEnded (drop shed flows) and capture-stats (observe + telemetry) paths.
+    let shed_ctl: Option<Arc<Mutex<crate::shed::ShedController>>> = (cfg.overload.enabled
+        && cfg.overload.shed.enabled)
+        .then(|| Arc::new(Mutex::new(crate::shed::ShedController::new(&cfg.overload))));
+
     // Flow lifecycle counters + per-L4/connection-state breakdown + top-talkers.
     if cfg.collect.flows {
         use netring::protocol::event_typed::FlowStarted;
         let started = flow_started.clone();
-        b = b.on_ctx::<FlowStarted<Tcp>>(move |_e: &FlowStarted<Tcp>, _ctx: &mut Ctx<'_>| {
+        let shed_fs = shed_ctl.clone();
+        b = b.on_ctx::<FlowStarted<Tcp>>(move |e: &FlowStarted<Tcp>, _ctx: &mut Ctx<'_>| {
             started.fetch_add(1, Ordering::Relaxed);
+            // Admission decision (deliberate, counted). A shed flow's hash is
+            // remembered so its FlowEnded is dropped from telemetry below.
+            if let Some(shed) = &shed_fs
+                && let Ok(mut s) = shed.lock()
+            {
+                let h = crate::shed::ShedController::flow_hash(&e.key);
+                s.admit(h);
+            }
             Ok(())
         });
         let ended = flow_ended.clone();
@@ -541,7 +558,16 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
         let exfil_alert_tx = alert_tx.clone();
         let exfil_cfg = det_cfg.clone();
         let exfil_sensor_id = cfg.sensor_id.clone();
+        let shed_fe = shed_ctl.clone();
         b = b.on_ctx::<FlowEnded<Tcp>>(move |e: &FlowEnded<Tcp>, _ctx: &mut Ctx<'_>| {
+            // Honest shed: a flow shed at start is dropped from telemetry here
+            // (not silently retained), so "data is sampled" is the truth.
+            if let Some(shed) = &shed_fe
+                && let Ok(mut s) = shed.lock()
+                && s.take_shed(crate::shed::ShedController::flow_hash(&e.key))
+            {
+                return Ok(());
+            }
             on_flow_ended(
                 e,
                 &ended,
@@ -987,8 +1013,13 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
         let sensor_id = cfg.sensor_id.clone();
         let overload_cfg = cfg.overload.clone();
         let alerts_h = alert_tx.clone();
-        // Per-source detectors, lazily created on first sight of a source. The
-        // capture-stats handler is FnMut, so this state persists across samples.
+        // When shedding is armed, a single controller drives detection + the
+        // shed action (its hysteresis replaces the per-source detector — same
+        // thresholds, no double-instantiation). Multi-source shedding is an
+        // approximation today (worst source drives Emergency); per-NIC isolation
+        // arrives with the multi-NIC issue (#226). When unarmed, the per-source
+        // OverloadDetector path below is byte-for-byte today's behaviour.
+        let shed_cs = shed_ctl.clone();
         let mut detectors: HashMap<u8, OverloadDetector> = HashMap::new();
         b = b.on_capture_stats(
             Duration::from_secs(cfg.bandwidth_period_secs.max(1)),
@@ -1005,24 +1036,51 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
                     let _ = tx.send(p);
                 }
                 if overload_cfg.enabled {
-                    let det = detectors.entry(source).or_insert_with(|| {
-                        OverloadDetector::new(
-                            OverloadConfig::default()
-                                .enter_at(overload_cfg.enter_drop_rate)
-                                .recover_at(
-                                    overload_cfg.recover_drop_rate,
-                                    overload_cfg.recover_windows,
-                                ),
-                        )
-                    });
-                    if let Some(state) = det.observe(t.drop_rate) {
-                        let firing = matches!(state, OverloadState::Emergency);
-                        let _ = alerts_h.send(crate::map::overload_alert(
-                            &sensor_id,
-                            source,
-                            t.drop_rate,
-                            firing,
-                        ));
+                    if let Some(shed) = &shed_cs {
+                        if let Ok(mut s) = shed.lock() {
+                            if let Some(state) = s.observe(t.drop_rate) {
+                                let firing = matches!(state, OverloadState::Emergency);
+                                let policy = firing.then(|| s.policy_label());
+                                let _ = alerts_h.send(crate::map::overload_alert_shed(
+                                    &sensor_id,
+                                    source,
+                                    t.drop_rate,
+                                    firing,
+                                    policy,
+                                ));
+                            }
+                            // Honest shed accounting: cumulative shed count +
+                            // an `active` gauge, every tick.
+                            for p in crate::map::shed_points(
+                                &sensor_id,
+                                source,
+                                s.shed_total(),
+                                s.is_shedding(),
+                                s.policy_label(),
+                            ) {
+                                let _ = tx.send(p);
+                            }
+                        }
+                    } else {
+                        let det = detectors.entry(source).or_insert_with(|| {
+                            OverloadDetector::new(
+                                OverloadConfig::default()
+                                    .enter_at(overload_cfg.enter_drop_rate)
+                                    .recover_at(
+                                        overload_cfg.recover_drop_rate,
+                                        overload_cfg.recover_windows,
+                                    ),
+                            )
+                        });
+                        if let Some(state) = det.observe(t.drop_rate) {
+                            let firing = matches!(state, OverloadState::Emergency);
+                            let _ = alerts_h.send(crate::map::overload_alert(
+                                &sensor_id,
+                                source,
+                                t.drop_rate,
+                                firing,
+                            ));
+                        }
                     }
                 }
                 Ok(())

@@ -81,6 +81,58 @@ pub struct OverloadConfig {
     /// Consecutive calm windows required to recover. Default 3.
     #[serde(default = "default_recover_windows")]
     pub recover_windows: u32,
+    /// Active load-shedding under overload (netring 0.28, issue #224). Off by
+    /// default: when disabled the sensor only *detects* overload (today's
+    /// behaviour). When enabled it *deliberately* sheds new flows at the
+    /// dispatch boundary while in Emergency — honest, counted drops instead of
+    /// opaque kernel loss. Needs `enabled` (detection) to fire.
+    #[serde(default)]
+    pub shed: ShedConfig,
+}
+
+/// Load-shedding policy + arming (netring 0.28, issue #224). Couples with the
+/// surrounding [`OverloadConfig`] hysteresis: shedding is only ever *active*
+/// while the detector is in Emergency.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShedConfig {
+    /// Arm shedding. `false` (default) → detection only, byte-for-byte today.
+    #[serde(default)]
+    pub enabled: bool,
+    /// `"new_flows"` → admit no new flows while overloaded (keep tracked ones);
+    /// `"sample"` → admit a deterministic `sample_rate` fraction of new flows.
+    #[serde(default = "default_shed_policy")]
+    pub policy: ShedPolicyKind,
+    /// Fraction of new flows to keep under the `"sample"` policy (`0.0..=1.0`).
+    /// Ignored by `"new_flows"`. Default 0.5.
+    #[serde(default = "default_sample_rate")]
+    pub sample_rate: f64,
+}
+
+/// Which shed policy to apply while overloaded (issue #224).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShedPolicyKind {
+    /// Drop every new flow while in Emergency (keep already-tracked flows).
+    NewFlows,
+    /// Keep a deterministic `sample_rate` fraction of new flows; shed the rest.
+    Sample,
+}
+
+fn default_shed_policy() -> ShedPolicyKind {
+    ShedPolicyKind::NewFlows
+}
+fn default_sample_rate() -> f64 {
+    0.5
+}
+
+impl Default for ShedConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            policy: default_shed_policy(),
+            sample_rate: default_sample_rate(),
+        }
+    }
 }
 
 fn default_enter_drop_rate() -> f64 {
@@ -100,6 +152,7 @@ impl Default for OverloadConfig {
             enter_drop_rate: default_enter_drop_rate(),
             recover_drop_rate: default_recover_drop_rate(),
             recover_windows: default_recover_windows(),
+            shed: ShedConfig::default(),
         }
     }
 }

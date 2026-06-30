@@ -114,6 +114,16 @@
       enter_drop_rate: 0.05,    // enter Emergency at 5% windowed drop rate
       recover_drop_rate: 0.01,  // recover below 1% ...
       recover_windows: 3,       // ... sustained for 3 calm windows (hysteresis)
+      // Active load-shedding (netring 0.28, #224). Off by default: when on, the
+      // sensor *deliberately* sheds new flows while in Emergency — honest,
+      // counted drops (capture/<source>/shed/*) and a `shedding` label on the
+      // capture-overload alert, instead of opaque kernel loss. Already-tracked
+      // flows keep flowing (elephant-friendly).
+      shed: {
+        enabled: false,
+        policy: "new_flows",    // "new_flows" (drop all new) | "sample"
+        sample_rate: 0.5,       // for "sample": fraction of new flows to keep
+      },
     },
   },
 
