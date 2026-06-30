@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Aggregate publishers** (opt-in Cargo feature `aggregate-publishers`, off by
+  default): three sensors can now publish a single typed, structured object per
+  host so a consumer (e.g. a supervision HMI) can `get`/`subscribe` it directly
+  instead of re-assembling the `TelemetryPoint` stream. The feature is purely
+  additive — when off, each crate compiles and behaves exactly as before.
+  - `zensight-sensor-sysinfo` → `HostInfo` on
+    `zensight/sysinfo/<host>/host` (per-core CPU, memory, disk, load, uptime,
+    aggregate net throughput).
+  - `zensight-sensor-netlink` → `{ host, interfaces: [NetIface] }` on
+    `zensight/netlink/<host>/interfaces` (state UP/DOWN/DEGRADED, ip, mtu,
+    rx/tx bps + errors, and `bound_pids` resolved via sockdiag inode + a
+    `/proc` scan). Comm-domain enrichment (link `kind`, `bound_driver_ids`) is
+    intentionally out of scope and left to the consumer.
+  - `zensight-sensor-syslog` → typed `LogEvent` on
+    `zensight/syslog/<host>/events/<uid>` (time-sortable `uid`), in addition to
+    the unchanged per-message `TelemetryPoint`.
+  - See `docs/AGGREGATE_PUBLISHERS.md` for the wire schemas and key layout.
+
 ### Changed
 
 - **BREAKING**: Renamed the "bridge" crate family to "sensor". `zenoh-bridge-*`

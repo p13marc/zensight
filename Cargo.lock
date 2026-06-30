@@ -9391,6 +9391,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zensight-aggregates"
+version = "0.5.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "zensight-common"
 version = "0.5.0"
 dependencies = [
@@ -9557,6 +9565,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zenoh",
+ "zensight-aggregates",
  "zensight-common",
  "zensight-sensor-core",
 ]
@@ -9620,6 +9629,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zenoh",
+ "zensight-aggregates",
  "zensight-common",
  "zensight-sensor-core",
 ]
@@ -9643,6 +9653,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "zenoh",
+ "zensight-aggregates",
  "zensight-common",
  "zensight-sensor-core",
 ]

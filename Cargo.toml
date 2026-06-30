@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "zensight",
+    "zensight-aggregates",
     "zensight-common",
     "zensight-sensor-core",
     "zensight-exporter-prometheus",
@@ -54,5 +55,6 @@ clap = { version = "4", features = ["derive"] }
 dirs = "5"
 
 # Internal crates
+zensight-aggregates = { path = "zensight-aggregates" }
 zensight-common = { path = "zensight-common" }
 zensight-sensor-core = { path = "zensight-sensor-core" }

@@ -13,9 +13,19 @@ path = "src/main.rs"
 [lib]
 path = "src/lib.rs"
 
+[features]
+# Additive, off by default. When on, the collector also publishes a single
+# structured `{ host, interfaces: [NetIface] }` object to
+# `zensight/netlink/<host>/interfaces` (in addition to the unchanged per-metric
+# TelemetryPoint stream). When off the crate compiles and behaves identically
+# (the zenoh-free types crate is not pulled in).
+aggregate-publishers = ["dep:zensight-aggregates"]
+
 [dependencies]
 zensight-common = { path = "../zensight-common" }
 zensight-sensor-core = { path = "../zensight-sensor-core" }
+# Pure, zenoh-free wire types for the aggregated interfaces object (feature-gated).
+zensight-aggregates = { workspace = true, optional = true }
 
 # Netlink (Linux kernel networking) — reads are unprivileged.
 nlink = { git = "https://github.com/p13marc/nlink", features = ["sockdiag"] }

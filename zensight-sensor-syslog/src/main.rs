@@ -4,6 +4,8 @@
 //! parses them (RFC 3164 and RFC 5424 formats), and publishes
 //! them to Zenoh as TelemetryPoints.
 
+#[cfg(feature = "aggregate-publishers")]
+mod aggregate;
 mod commands;
 mod config;
 mod events;
@@ -163,6 +165,10 @@ async fn main() -> Result<()> {
 
     // Spawn the message processing task
     let session_clone = session.clone();
+    // Publisher for the aggregated typed events (feature-gated). Cloned into the
+    // task so the aggregate path uses `publish_json`, like the rest of the SDK.
+    #[cfg(feature = "aggregate-publishers")]
+    let agg_publisher = runner.publisher();
     runner.spawn(async move {
         loop {
             tokio::select! {
@@ -182,6 +188,38 @@ async fn main() -> Result<()> {
                             received.message.severity.as_str()
                         );
                         continue;
+                    }
+
+                    // Aggregated typed event (feature-gated, additive). Published
+                    // IN ADDITION to the TelemetryPoint below, to a time-sortable
+                    // per-event key so a consumer gets a stable, ordered log.
+                    #[cfg(feature = "aggregate-publishers")]
+                    {
+                        let ts = received
+                            .message
+                            .timestamp
+                            .map(|t| t.timestamp_millis())
+                            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+                        let uid = zensight_aggregates::next_uid(ts);
+                        let category = received
+                            .message
+                            .msg_id
+                            .as_deref()
+                            .and_then(events::known_event_category)
+                            .map(str::to_string);
+                        let event = aggregate::build_log_event(
+                            &received.message,
+                            ts,
+                            uid.clone(),
+                            category,
+                        );
+                        let event_key = format!(
+                            "{}/{}/events/{}",
+                            key_prefix, received.resolved_hostname, uid
+                        );
+                        if let Err(e) = agg_publisher.publish_json(&event_key, &event).await {
+                            tracing::error!("Failed to publish log event to {}: {}", event_key, e);
+                        }
                     }
 
                     // Convert to telemetry point

@@ -6,9 +6,18 @@ authors.workspace = true
 description = "Zenoh sensor for system monitoring (CPU, memory, disk, network)"
 license = "Apache-2.0"
 
+[features]
+# Additive, off by default. When on, the collector also publishes a single
+# structured `HostInfo` object to `zensight/sysinfo/<host>/host` (in addition to
+# the unchanged per-metric TelemetryPoint stream). When off the crate compiles
+# and behaves identically (the zenoh-free types crate is not pulled in).
+aggregate-publishers = ["dep:zensight-aggregates"]
+
 [dependencies]
 zensight-common = { path = "../zensight-common" }
 zensight-sensor-core = { path = "../zensight-sensor-core" }
+# Pure, zenoh-free wire types for the aggregated HostInfo (feature-gated).
+zensight-aggregates = { workspace = true, optional = true }
 
 # System information
 sysinfo = "0.33"

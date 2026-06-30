@@ -148,6 +148,14 @@ pub struct Collector {
     /// Warn-once latch for the XFRM SA dump (EPERM where the host gates it):
     /// avoids a WARN every poll tick for an expected recurring failure (P05 §4).
     warned_xfrm: std::sync::atomic::AtomicBool,
+    /// Publisher used to push the aggregated typed interfaces object via
+    /// `publish_json`. Kept only when the aggregate feature is on.
+    #[cfg(feature = "aggregate-publishers")]
+    agg_publisher: zensight_sensor_core::Publisher,
+    /// Previous per-interface (rx_bytes, tx_bytes) totals, for deriving the
+    /// aggregated `NetIface` throughput across ticks.
+    #[cfg(feature = "aggregate-publishers")]
+    agg_prev_iface: std::sync::Mutex<std::collections::HashMap<String, (u64, u64)>>,
 }
 
 impl Collector {
@@ -158,10 +166,16 @@ impl Collector {
         format: Format,
     ) -> Self {
         let registry = AdvancedPublisherRegistry::new(
-            session,
+            session.clone(),
             config.key_prefix.clone(),
             format,
             AdvancedPublisherConfig::default(),
+        );
+        #[cfg(feature = "aggregate-publishers")]
+        let agg_publisher = zensight_sensor_core::Publisher::new(
+            session.clone(),
+            config.key_prefix.clone(),
+            format,
         );
         let collect = CollectHandle::new(config.collect.clone());
         let health = Arc::new(zensight_sensor_core::SensorHealth::new("netlink"));
@@ -176,6 +190,10 @@ impl Collector {
             event_state,
             sentinel_wake: Arc::new(Notify::new()),
             warned_xfrm: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "aggregate-publishers")]
+            agg_publisher,
+            #[cfg(feature = "aggregate-publishers")]
+            agg_prev_iface: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -383,6 +401,12 @@ impl Collector {
             if let Some(wg) = &wireguard {
                 self.poll_wireguard(wg).await;
             }
+            // Aggregated typed interface snapshot (feature-gated, additive).
+            // Built from a fresh links + addresses dump plus the socket inode→PID
+            // join; reuses the same `should_include` filter as `poll_interfaces`.
+            #[cfg(feature = "aggregate-publishers")]
+            self.poll_aggregate_interfaces(&route, sockdiag.as_ref())
+                .await;
             self.health
                 .record_poll_duration(started.elapsed().as_millis() as u64);
             match tick_error {
@@ -754,6 +778,145 @@ impl Collector {
             self.publish(&point).await;
         }
         Ok(())
+    }
+
+    /// Build and publish the aggregated [`HostInterfaces`](zensight_aggregates::HostInterfaces)
+    /// snapshot to `zensight/netlink/<host>/interfaces`. Best-effort: a failed
+    /// dump logs and yields a partial/empty object, never panics. Published via a
+    /// plain `put` of a JSON object (control-plane style), mirroring `publish_json`.
+    #[cfg(feature = "aggregate-publishers")]
+    async fn poll_aggregate_interfaces(
+        &self,
+        route: &Connection<Route>,
+        sockdiag: Option<&Connection<SockDiag>>,
+    ) {
+        use std::collections::HashMap;
+
+        use zensight_aggregates::{
+            HostInterfaces, NetIface, bound_pids_by_iface, iface_state, rate_bps,
+        };
+
+        use crate::aggregate::socket_inode_pids;
+
+        let links = match route.get_links().await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(error = %e, "aggregate: get_links failed");
+                return;
+            }
+        };
+
+        // ifindex -> name, to join the address dump back to interfaces.
+        let mut name_by_ifindex: HashMap<u32, String> = HashMap::new();
+        for link in &links {
+            let name = link.name_or("?").to_string();
+            if name != "?" {
+                name_by_ifindex.insert(link.ifindex(), name);
+            }
+        }
+
+        // First IP per interface (for `ip_address`) + IP -> ifname (for the
+        // socket→interface join). Best-effort: a failed dump just leaves both empty.
+        let mut first_ip: HashMap<String, String> = HashMap::new();
+        let mut ip_to_iface: HashMap<String, String> = HashMap::new();
+        match route.get_addresses().await {
+            Ok(addrs) => {
+                for a in &addrs {
+                    let Some(name) = name_by_ifindex.get(&a.ifindex()) else {
+                        continue;
+                    };
+                    if let Some(ip) = a.address().or_else(|| a.local()).map(|ip| ip.to_string()) {
+                        first_ip.entry(name.clone()).or_insert_with(|| ip.clone());
+                        ip_to_iface.entry(ip).or_insert_with(|| name.clone());
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "aggregate: get_addresses failed"),
+        }
+
+        // bound PIDs per interface: map each socket's local IP to an interface,
+        // then resolve its inode to owning PIDs via /proc. Best-effort throughout.
+        let bound_pids = match sockdiag {
+            Some(sd) => {
+                let filter = SocketFilter::tcp().all_states().build();
+                match sd.query(&filter).await {
+                    Ok(socks) => {
+                        let sockets: Vec<(String, u64)> = socks
+                            .iter()
+                            .filter_map(|s| {
+                                let SocketInfo::Inet(inet) = s else {
+                                    return None;
+                                };
+                                // Display → parse roundtrip yields the bare IP for
+                                // both v4/v6 without depending on the field's type.
+                                let ip = inet
+                                    .local
+                                    .to_string()
+                                    .parse::<std::net::SocketAddr>()
+                                    .ok()?
+                                    .ip()
+                                    .to_string();
+                                Some((ip, inet.inode as u64))
+                            })
+                            .collect();
+                        let inode_pids = socket_inode_pids();
+                        bound_pids_by_iface(&ip_to_iface, &sockets, &inode_pids)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "aggregate: sockdiag query failed");
+                        HashMap::new()
+                    }
+                }
+            }
+            None => HashMap::new(),
+        };
+
+        // Per-interface entries, deriving throughput against the previous tick.
+        let interval = self.config.poll_interval_secs;
+        let mut interfaces = Vec::new();
+        for link in &links {
+            let name = link.name_or("?").to_string();
+            if name == "?" || !self.config.interfaces.should_include(&name) {
+                continue;
+            }
+            let stats = link.stats();
+            let rx_bytes = stats.map(|s| s.rx_bytes).unwrap_or(0);
+            let tx_bytes = stats.map(|s| s.tx_bytes).unwrap_or(0);
+            let (rx_bps, tx_bps) = {
+                // Non-panicking lock (recover the guard if a prior holder panicked).
+                let mut prev = self
+                    .agg_prev_iface
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let (prev_rx, prev_tx) = prev.get(&name).copied().unwrap_or((rx_bytes, tx_bytes));
+                prev.insert(name.clone(), (rx_bytes, tx_bytes));
+                (
+                    rate_bps(prev_rx, rx_bytes, interval),
+                    rate_bps(prev_tx, tx_bytes, interval),
+                )
+            };
+            interfaces.push(NetIface {
+                state: iface_state(link.is_up(), link.carrier()).to_string(),
+                ip_address: first_ip.get(&name).cloned(),
+                mtu: link.mtu(),
+                rx_bps,
+                tx_bps,
+                rx_errs: stats.map(|s| s.rx_errors).unwrap_or(0),
+                tx_errs: stats.map(|s| s.tx_errors).unwrap_or(0),
+                bound_pids: bound_pids.get(&name).cloned().unwrap_or_default(),
+                name,
+            });
+        }
+
+        let snapshot = HostInterfaces {
+            host: self.host.clone(),
+            interfaces,
+        };
+        let key = format!("{}/{}/interfaces", self.config.key_prefix, self.host);
+        match self.agg_publisher.publish_json(&key, &snapshot).await {
+            Ok(()) => self.health.record_metrics_published(1),
+            Err(e) => tracing::warn!(error = %e, key = %key, "aggregate: publish failed"),
+        }
     }
 
     async fn publish(&self, point: &zensight_common::TelemetryPoint) {

@@ -25,6 +25,13 @@ pub struct SystemCollector {
     format: Format,
     /// Previous network stats for calculating rates
     prev_network: HashMap<String, (u64, u64)>,
+    /// Previous aggregate (rx, tx) byte totals across all included interfaces,
+    /// for deriving the host-level throughput in the aggregated `HostInfo`.
+    #[cfg(feature = "aggregate-publishers")]
+    prev_net_total: Option<(u64, u64)>,
+    /// Publisher used to push the aggregated typed `HostInfo` via `publish_json`.
+    #[cfg(feature = "aggregate-publishers")]
+    agg_publisher: zensight_sensor_core::Publisher,
     /// Previous RAPL energy readings (zone -> (energy_uj, max_energy_uj)) for
     /// deriving instantaneous watts across ticks (Linux power depth, §G).
     #[cfg(target_os = "linux")]
@@ -44,6 +51,13 @@ impl SystemCollector {
         session: Arc<Session>,
         format: Format,
     ) -> Self {
+        // Built before the moves below so it can borrow `session`/`config`/`format`.
+        #[cfg(feature = "aggregate-publishers")]
+        let agg_publisher = zensight_sensor_core::Publisher::new(
+            session.clone(),
+            config.key_prefix.clone(),
+            format,
+        );
         Self {
             system: System::new_all(),
             disks: Disks::new_with_refreshed_list(),
@@ -53,7 +67,11 @@ impl SystemCollector {
             config,
             session,
             format,
+            #[cfg(feature = "aggregate-publishers")]
+            agg_publisher,
             prev_network: HashMap::new(),
+            #[cfg(feature = "aggregate-publishers")]
+            prev_net_total: None,
             #[cfg(target_os = "linux")]
             prev_rapl: HashMap::new(),
             health: Arc::new(zensight_sensor_core::SensorHealth::new("sysinfo")),
@@ -167,7 +185,87 @@ impl SystemCollector {
             }
         }
 
+        // Aggregated typed snapshot (feature-gated, additive). Reuses the state
+        // already refreshed above (`system`, `disks`, `networks`) — no extra
+        // OS polling.
+        #[cfg(feature = "aggregate-publishers")]
+        self.publish_host_info(timestamp).await;
+
         debug!("Published {} metrics for '{}'", count, self.hostname);
+    }
+
+    /// Publish the aggregated, typed [`HostInfo`](zensight_aggregates::HostInfo)
+    /// snapshot to `zensight/sysinfo/<host>/host`. Best-effort: a publish/encode
+    /// failure is logged and counted like the per-metric path, never panics.
+    #[cfg(feature = "aggregate-publishers")]
+    async fn publish_host_info(&mut self, _timestamp: i64) {
+        use zensight_aggregates::{HostInfo, bytes_to_gb, bytes_to_mb, rate_bps};
+
+        // Per-core CPU usage (0..=100). `system` was refreshed in `collect_cpu`.
+        let cpu_cores: Vec<f32> = self.system.cpus().iter().map(|c| c.cpu_usage()).collect();
+
+        let mem_used_mb = bytes_to_mb(self.system.used_memory());
+        let mem_total_mb = bytes_to_mb(self.system.total_memory());
+
+        // Sum the volumes the per-metric path already includes (skips the
+        // pseudo/filtered filesystems), so the host total matches the detail.
+        let mut disk_used_bytes: u64 = 0;
+        let mut disk_total_bytes: u64 = 0;
+        for disk in self.disks.list() {
+            let mount = disk.mount_point().to_string_lossy().to_string();
+            let fs_type = disk.file_system().to_string_lossy().to_string();
+            if !self.config.disk.should_include(&mount, &fs_type) {
+                continue;
+            }
+            let total = disk.total_space();
+            disk_total_bytes = disk_total_bytes.saturating_add(total);
+            disk_used_bytes =
+                disk_used_bytes.saturating_add(total.saturating_sub(disk.available_space()));
+        }
+
+        let load = System::load_average();
+
+        // Aggregate throughput from the cumulative per-interface byte counters,
+        // derived against the previous tick (interval flooring guards tick 1).
+        let (cur_rx, cur_tx) = self
+            .networks
+            .list()
+            .iter()
+            .filter(|(name, _)| self.config.network.should_include(name))
+            .fold((0u64, 0u64), |(rx, tx), (_, data)| {
+                (
+                    rx.saturating_add(data.total_received()),
+                    tx.saturating_add(data.total_transmitted()),
+                )
+            });
+        let interval = self.config.poll_interval_secs;
+        let (net_rx_bps, net_tx_bps) = match self.prev_net_total {
+            Some((prev_rx, prev_tx)) => (
+                rate_bps(prev_rx, cur_rx, interval),
+                rate_bps(prev_tx, cur_tx, interval),
+            ),
+            None => (0, 0),
+        };
+        self.prev_net_total = Some((cur_rx, cur_tx));
+
+        let info = HostInfo {
+            host: self.hostname.clone(),
+            cpu_cores,
+            mem_used_mb,
+            mem_total_mb,
+            disk_used_gb: bytes_to_gb(disk_used_bytes),
+            disk_total_gb: bytes_to_gb(disk_total_bytes),
+            load_avg: [load.one, load.five, load.fifteen],
+            uptime_s: System::uptime(),
+            net_rx_bps,
+            net_tx_bps,
+        };
+
+        let key = format!("{}/{}/host", self.key_prefix, self.hostname);
+        match self.agg_publisher.publish_json(&key, &info).await {
+            Ok(()) => self.health.record_metrics_published(1),
+            Err(e) => warn!("Failed to publish host info '{}': {}", key, e),
+        }
     }
 
     /// Publish a batch of mapped metrics, lifting label pairs into the wire

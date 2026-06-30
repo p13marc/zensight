@@ -48,6 +48,17 @@ fn known_event(message_id: &str) -> Option<KnownEvent> {
     Some(KnownEvent { name, severity })
 }
 
+/// Known-event category name for a `MESSAGE_ID`, or `None` when unrecognized.
+///
+/// Reuses the same catalog as the alert path so the aggregated `LogEvent.category`
+/// stays consistent with the alerts the sensor raises. Feature-gated: only the
+/// `aggregate-publishers` build needs it. `pub` (not `pub(crate)`) so the lib
+/// target sees it as reachable public API — it is consumed by the binary.
+#[cfg(feature = "aggregate-publishers")]
+pub fn known_event_category(message_id: &str) -> Option<&'static str> {
+    known_event(message_id).map(|e| e.name)
+}
+
 /// Parse a config severity override.
 fn parse_severity(s: &str) -> Option<AlertSeverity> {
     match s.trim().to_ascii_lowercase().as_str() {

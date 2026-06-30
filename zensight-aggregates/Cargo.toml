@@ -1,0 +1,14 @@
+[package]
+name = "zensight-aggregates"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Zenoh-free, pure-serde type definitions for ZenSight aggregate publishers (HostInfo, NetIface/HostInterfaces, LogEvent), consumable by external tools without pulling zenoh/tokio."
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

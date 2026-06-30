@@ -12,6 +12,8 @@ path = "src/main.rs"
 [dependencies]
 zensight-common.workspace = true
 zensight-sensor-core.workspace = true
+# Pure, zenoh-free wire types for the aggregated LogEvent (feature-gated).
+zensight-aggregates = { workspace = true, optional = true }
 zenoh.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -44,6 +46,11 @@ systemd = { version = "0.10", optional = true, features = ["systemd_v245"] }
 # `--no-default-features` on platforms without libsystemd.
 default = ["journald"]
 journald = ["dep:systemd"]
+# Additive, off by default. When on, each accepted message is ALSO published as
+# a typed `LogEvent` to `zensight/syslog/<host>/events/<uid>` (the existing
+# TelemetryPoint stream is unchanged). When off the crate behaves identically
+# (the zenoh-free types crate is not pulled in).
+aggregate-publishers = ["dep:zensight-aggregates"]
 
 [dev-dependencies]
 tokio-test = "0.4"

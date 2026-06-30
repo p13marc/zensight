@@ -7,6 +7,8 @@
 //!
 //! Reads are unprivileged (no `CAP_NET_ADMIN` needed). Linux only.
 
+#[cfg(feature = "aggregate-publishers")]
+pub mod aggregate;
 pub mod collector;
 pub mod command;
 pub mod config;
