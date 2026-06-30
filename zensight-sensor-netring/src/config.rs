@@ -65,6 +65,45 @@ pub struct NetringConfig {
     /// debounced Normal↔Emergency transition. Needs `collect.capture_stats`.
     #[serde(default)]
     pub overload: OverloadConfig,
+    /// Runtime capture-focus filter (netring 0.28, issue #225). Off by default.
+    /// When enabled, registers a reloadable packet-tier subscription whose BPF
+    /// filter can be hot-swapped at runtime via `@/commands/capture_filter`
+    /// (no capture restart) to narrow attention to a host/port under
+    /// investigation, with focused packet/byte counters as the visible effect.
+    #[serde(default)]
+    pub capture_focus: CaptureFocusConfig,
+}
+
+/// Runtime capture-focus config (netring 0.28, issue #225). Opt-in because the
+/// packet-tier handler runs in the zero-copy drain (a per-frame cost the default
+/// build avoids).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureFocusConfig {
+    /// Arm the reloadable capture-focus subscription. `false` (default) → no
+    /// packet sub, zero-cost hot loop, `@/commands/capture_filter` is a no-op.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Base packet filter (netring `.expr()` / tcpdump-like grammar) installed
+    /// at startup and restored by `clear_packet_filter`. Permissive by default
+    /// so a runtime narrow can focus within it.
+    #[serde(default = "default_focus_expr")]
+    pub base_expr: String,
+}
+
+fn default_focus_expr() -> String {
+    // netring `.expr()` grammar: `tcp|udp|icmp`, `dir? port N`, `dir? host IP`,
+    // `dir? net CIDR`, combined with and/or/!/parens. This permissive base
+    // matches all L4 we track, leaving room to narrow at runtime.
+    "tcp or udp or icmp".to_string()
+}
+
+impl Default for CaptureFocusConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_expr: default_focus_expr(),
+        }
+    }
 }
 
 /// Capture backend selection (netring 0.28, issue #227). Maps to netring's
