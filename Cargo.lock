@@ -3832,8 +3832,9 @@ dependencies = [
 
 [[package]]
 name = "nlink"
-version = "0.21.0"
-source = "git+https://github.com/p13marc/nlink#91f6d5a6cf5203eed8dc765d5a84c3991f3fb2bd"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5584327ae3df35d410c01a164670a81390511095bf88741a6f303b80082c896c"
 dependencies = [
  "bitflags 2.13.0",
  "bytes",
@@ -3851,8 +3852,9 @@ dependencies = [
 
 [[package]]
 name = "nlink-macros"
-version = "0.21.0"
-source = "git+https://github.com/p13marc/nlink#91f6d5a6cf5203eed8dc765d5a84c3991f3fb2bd"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43416aed71c5557f55fa6c7468f22d138e758bdd48a934cb4a6c79bf7daca3c4"
 dependencies = [
  "proc-macro2",
  "quote",

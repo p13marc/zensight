@@ -28,13 +28,17 @@ use nlink::netlink::neigh::State as NeighborState;
 
 use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-/// The four RTNETLINK families we track for event counting.
+/// The event families we track for counting. The first four are RTNETLINK
+/// (link/addr/route/neighbor); [`EventFamily::Ipsec`] folds the XFRM monitor
+/// stream (SA/policy lifecycle, nlink 0.23 `Connection::<Xfrm>::events()`) onto
+/// the same control-plane timeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventFamily {
     Link,
     Addr,
     Route,
     Neighbor,
+    Ipsec,
 }
 
 impl EventFamily {
@@ -45,6 +49,7 @@ impl EventFamily {
             EventFamily::Addr => "addr",
             EventFamily::Route => "route",
             EventFamily::Neighbor => "neighbor",
+            EventFamily::Ipsec => "ipsec",
         }
     }
 
@@ -54,14 +59,16 @@ impl EventFamily {
             EventFamily::Addr => 1,
             EventFamily::Route => 2,
             EventFamily::Neighbor => 3,
+            EventFamily::Ipsec => 4,
         }
     }
 
-    const ALL: [EventFamily; 4] = [
+    const ALL: [EventFamily; 5] = [
         EventFamily::Link,
         EventFamily::Addr,
         EventFamily::Route,
         EventFamily::Neighbor,
+        EventFamily::Ipsec,
     ];
 }
 
@@ -156,7 +163,7 @@ pub fn is_sentinel_relevant(ev: &NetworkEvent) -> bool {
 pub struct EventRecord {
     /// Wall-clock seconds since the Unix epoch when observed.
     pub ts_unix: u64,
-    /// `"link"` / `"addr"` / `"route"` / `"neighbor"`.
+    /// `"link"` / `"addr"` / `"route"` / `"neighbor"` / `"ipsec"`.
     pub family: String,
     /// `"added"` / `"removed"` / `"changed"`.
     pub action: String,
@@ -219,7 +226,7 @@ pub struct EventState {
 
 struct EventStateInner {
     /// `[family][action]` counters.
-    counters: [[AtomicU64; 3]; 4],
+    counters: [[AtomicU64; 3]; 5],
     /// Known link ifindexes, to tell an `add` from a `change` (`RTM_NEWLINK`).
     seen_links: Mutex<HashSet<u32>>,
     /// Most-recent events (drop-oldest), bounded by `capacity`.
@@ -265,6 +272,48 @@ impl EventState {
         Some(action)
     }
 
+    /// Fold an XFRM monitor event onto the control-plane timeline as the
+    /// `ipsec` family, stamped at the current wall-clock time. The caller
+    /// (collector) has already decoded the nlink `XfrmEvent` into a refined
+    /// [`EventAction`] + human `detail` (`classify_xfrm_event`).
+    pub fn observe_ipsec(
+        &self,
+        action: EventAction,
+        ifindex: Option<u32>,
+        detail: impl Into<String>,
+    ) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.observe_ipsec_at(action, ifindex, detail, now);
+    }
+
+    /// [`observe_ipsec`] stamped at `now_unix` — the generic, nlink-free record
+    /// path (testable without constructing kernel-only XFRM event payloads).
+    pub fn observe_ipsec_at(
+        &self,
+        action: EventAction,
+        ifindex: Option<u32>,
+        detail: impl Into<String>,
+        now_unix: u64,
+    ) {
+        self.inner.counters[EventFamily::Ipsec.index()][action.index()]
+            .fetch_add(1, Ordering::Relaxed);
+        let rec = EventRecord {
+            ts_unix: now_unix,
+            family: EventFamily::Ipsec.label().to_string(),
+            action: action.label().to_string(),
+            ifindex,
+            detail: detail.into(),
+        };
+        let mut ring = self.inner.ring.lock().unwrap();
+        if ring.len() == self.inner.capacity {
+            ring.pop_front();
+        }
+        ring.push_back(rec);
+    }
+
     /// Decide add vs change vs remove. Only links distinguish add from change
     /// (a `RTM_NEWLINK` for a known ifindex is a state change).
     fn refine_action(&self, class: &EventClass, ev: &NetworkEvent) -> EventAction {
@@ -291,7 +340,7 @@ impl EventState {
     /// Current counter values as telemetry points
     /// (`events/<family>/<action>_total`).
     pub fn counter_points(&self, host: &str) -> Vec<TelemetryPoint> {
-        let mut out = Vec::with_capacity(12);
+        let mut out = Vec::with_capacity(EventFamily::ALL.len() * EventAction::ALL.len());
         for family in EventFamily::ALL {
             for action in EventAction::ALL {
                 let v = self.inner.counters[family.index()][action.index()].load(Ordering::Relaxed);
@@ -396,6 +445,43 @@ mod tests {
         assert_eq!(recent[1].detail, "c");
         assert_eq!(recent[1].action, "added");
         assert_eq!(recent[1].family, "link");
+    }
+
+    #[test]
+    fn ipsec_events_fold_onto_timeline() {
+        let st = EventState::new(8);
+        // SA appears, soft-expires (rekey-soon), then hard-expires (dead).
+        st.observe_ipsec_at(
+            EventAction::Added,
+            None,
+            "SA 10.0.0.1→10.0.0.2 spi=0x1 esp",
+            200,
+        );
+        st.observe_ipsec_at(EventAction::Changed, None, "SA expire(soft) spi=0x1", 201);
+        st.observe_ipsec_at(EventAction::Removed, None, "SA expire(hard) spi=0x1", 202);
+
+        let pts = st.counter_points("h");
+        let find = |m: &str| {
+            pts.iter()
+                .find(|p| p.metric == m)
+                .map(|p| p.value.clone())
+                .unwrap()
+        };
+        assert_eq!(find("events/ipsec/added_total"), TelemetryValue::Counter(1));
+        assert_eq!(
+            find("events/ipsec/changed_total"),
+            TelemetryValue::Counter(1)
+        );
+        assert_eq!(
+            find("events/ipsec/removed_total"),
+            TelemetryValue::Counter(1)
+        );
+
+        let recent = st.recent();
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0].family, "ipsec");
+        assert_eq!(recent[0].action, "added");
+        assert_eq!(recent[2].action, "removed");
     }
 
     #[test]

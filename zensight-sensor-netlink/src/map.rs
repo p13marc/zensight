@@ -635,6 +635,17 @@ pub struct EthtoolSample {
     pub pause_tx_frames: Option<u64>,
     /// Curated offload features `(short_name, active)` (bounded cardinality).
     pub features: Vec<(String, bool)>,
+    /// Forward Error Correction (nlink 0.23 `get_fec`): configured mode names
+    /// (e.g. `RS`, `BASER`, `None`) joined for display, and whether FEC mode is
+    /// auto-negotiated. High-speed links silently corrupting under marginal
+    /// optics show up here before they show up as drops.
+    pub fec_modes: Option<String>,
+    pub fec_auto: Option<bool>,
+    /// Energy-Efficient Ethernet (nlink 0.23 `get_eee`): administratively
+    /// enabled vs currently active. EEE is a common culprit for added latency /
+    /// micro-stalls on NICs that negotiate it unexpectedly.
+    pub eee_enabled: Option<bool>,
+    pub eee_active: Option<bool>,
 }
 
 /// Build telemetry points for one interface's ethtool view. Metric paths are
@@ -730,6 +741,36 @@ pub fn ethtool_points(host: &str, s: &EthtoolSample) -> Vec<TelemetryPoint> {
             host,
             format!("{pfx}/features/{name}"),
             TelemetryValue::Boolean(*active),
+        ));
+    }
+    // FEC (nlink 0.23): configured mode(s) as text + an auto-negotiation flag.
+    if let Some(modes) = &s.fec_modes {
+        out.push(point(
+            host,
+            format!("{pfx}/fec/modes"),
+            TelemetryValue::Text(modes.clone()),
+        ));
+    }
+    if let Some(v) = s.fec_auto {
+        out.push(point(
+            host,
+            format!("{pfx}/fec/auto"),
+            TelemetryValue::Boolean(v),
+        ));
+    }
+    // EEE (nlink 0.23): admin-enabled vs link-active power saving.
+    if let Some(v) = s.eee_enabled {
+        out.push(point(
+            host,
+            format!("{pfx}/eee/enabled"),
+            TelemetryValue::Boolean(v),
+        ));
+    }
+    if let Some(v) = s.eee_active {
+        out.push(point(
+            host,
+            format!("{pfx}/eee/active"),
+            TelemetryValue::Boolean(v),
         ));
     }
     out
@@ -1756,6 +1797,10 @@ mod tests {
             pause_rx_frames: Some(7),
             pause_tx_frames: None,
             features: vec![("tso".into(), true), ("gro".into(), false)],
+            fec_modes: Some("RS".into()),
+            fec_auto: Some(true),
+            eee_enabled: Some(true),
+            eee_active: Some(false),
         };
         let pts = ethtool_points("h", &s);
         let find = |m: &str| pts.iter().find(|p| p.metric == m);
@@ -1782,6 +1827,14 @@ mod tests {
         assert_eq!(
             find("ethtool/eth0/features/tso").unwrap().value,
             TelemetryValue::Boolean(true)
+        );
+        assert_eq!(
+            find("ethtool/eth0/fec/modes").unwrap().value,
+            TelemetryValue::Text("RS".into())
+        );
+        assert_eq!(
+            find("ethtool/eth0/eee/active").unwrap().value,
+            TelemetryValue::Boolean(false)
         );
         // Absent optionals produce no point (no misleading zeros).
         assert!(find("ethtool/eth0/pause/tx").is_none());

@@ -39,8 +39,11 @@ pub fn netlink_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
     if has_prefix(state, "tc/") {
         content = content.push(card(render_tc(state)));
     }
-    if has_prefix(state, "xfrm/") {
+    if has_prefix(state, "xfrm/") || has_prefix(state, "events/ipsec/") {
         content = content.push(card(render_xfrm(state)));
+    }
+    if has_prefix(state, "ethtool/") {
+        content = content.push(card(render_ethtool(state)));
     }
 
     content = content.push(card(render_detail(state)));
@@ -222,6 +225,34 @@ fn render_xfrm(state: &DeviceDetailState) -> Element<'_, Message> {
             }
         }
     }
+
+    // Real-time SA/policy lifecycle counters (nlink 0.23 XFRM monitor stream),
+    // folded onto the control-plane timeline as the `ipsec` family. Surfacing
+    // them here ties the live signal (rekeys, soft/hard expiries, acquires) to
+    // the IPsec panel — the periodic SA snapshot above misses churn between
+    // poll ticks. Individual events show in the control-plane timeline.
+    let ev = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
+    let has_ev = ["added", "changed", "removed"].iter().any(|a| {
+        state
+            .metrics
+            .contains_key(&format!("events/ipsec/{a}_total"))
+    });
+    if has_ev {
+        col = col.push(text("lifecycle events").size(font::CAPTION).style(dim));
+        for (label, action) in [
+            ("  added (new SA/policy)", "added"),
+            ("  changed (soft-expire/acquire)", "changed"),
+            ("  removed (del/hard-expire)", "removed"),
+        ] {
+            col = col.push(
+                row![
+                    cell(label, 220),
+                    cell(&ev(&format!("events/ipsec/{action}_total")), 100)
+                ]
+                .spacing(8),
+            );
+        }
+    }
     col.into()
 }
 
@@ -274,6 +305,77 @@ fn render_tc(state: &DeviceDetailState) -> Element<'_, Message> {
                 cell(&g("requeues"), 90),
                 cell(&g("backlog_pkts"), 110),
                 cell(&g("backlog_bytes"), 120),
+            ]
+            .spacing(8),
+        );
+    }
+
+    column![title, list].spacing(8).into()
+}
+
+/// ethtool per-interface link view: negotiated speed/duplex/autoneg plus the
+/// link-health signals nlink 0.23 adds — FEC mode (silent corruption on
+/// marginal optics) and EEE (power-saving that can add latency). Streamed
+/// `ethtool/<iface>/<stat...>` metrics; only present when ethtool collection is
+/// enabled and the driver exposes the family.
+fn render_ethtool(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = section_header("ethtool (link / FEC / EEE)", None);
+
+    // Group ethtool/<iface>/<stat...> by interface (stat may contain '/').
+    let mut ifaces: BTreeMap<String, BTreeMap<String, &TelemetryValue>> = BTreeMap::new();
+    for (metric, point) in &state.metrics {
+        if let Some(rest) = metric.strip_prefix("ethtool/")
+            && let Some((iface, stat)) = rest.split_once('/')
+        {
+            ifaces
+                .entry(iface.to_string())
+                .or_default()
+                .insert(stat.to_string(), &point.value);
+        }
+    }
+
+    if ifaces.is_empty() {
+        return column![title, empty_state("No ethtool data", None)]
+            .spacing(space::SM)
+            .into();
+    }
+
+    let mut list = Column::new().spacing(4).push(
+        row![
+            cell("interface", 110),
+            cell("link", 60),
+            cell("speed", 80),
+            cell("duplex", 80),
+            cell("autoneg", 80),
+            cell("FEC", 110),
+            cell("EEE", 90),
+        ]
+        .spacing(8),
+    );
+    for (iface, stats) in &ifaces {
+        let g = |s: &str| num(stats.get(s).copied());
+        // EEE: prefer the live "active" signal, fall back to admin "enabled".
+        let eee = match (stats.get("eee/active"), stats.get("eee/enabled")) {
+            (Some(TelemetryValue::Boolean(true)), _) => "active".to_string(),
+            (Some(TelemetryValue::Boolean(false)), Some(TelemetryValue::Boolean(true))) => {
+                "enabled".to_string()
+            }
+            (Some(_), _) | (_, Some(_)) => "off".to_string(),
+            _ => "-".to_string(),
+        };
+        let fec = stats
+            .get("fec/modes")
+            .map(|v| num(Some(v)))
+            .unwrap_or_else(|| "-".into());
+        list = list.push(
+            row![
+                cell(iface, 110),
+                cell(&g("carrier"), 60),
+                cell(&g("speed_mbps"), 80),
+                cell(&g("duplex"), 80),
+                cell(&g("autoneg"), 80),
+                cell(&fec, 110),
+                cell(&eee, 90),
             ]
             .spacing(8),
         );

@@ -32,7 +32,8 @@ zensight-common = { path = "../zensight-common" }
 zensight-sensor-core = { path = "../zensight-sensor-core" }
 
 # Netlink (Linux kernel networking) — reads are unprivileged.
-nlink = { git = "https://github.com/p13marc/nlink", features = ["sockdiag"] }
+# Published crate (crates.io), not the git repo: pin to the 0.23 line.
+nlink = { version = "0.23", features = ["sockdiag"] }
 
 # Shared kernel<->user eBPF types (CONNLAT_BUCKETS, RetransKey, ConnRecord).
 # Plain no_std lib — always present (no aya) so map.rs pure code/tests build on

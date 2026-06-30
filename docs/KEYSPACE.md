@@ -48,6 +48,8 @@ zensight/netflow/exporter01/10.0.0.1/10.0.0.2
 zensight/modbus/plc01/holding/temperature
 zensight/gnmi/router01/interfaces/interface[name=eth0]/state/counters
 zensight/netlink/host01/sockets/tcp/established
+zensight/netlink/host01/events/ipsec/changed_total      # XFRM monitor: SA/policy lifecycle (nlink 0.23)
+zensight/netlink/host01/ethtool/eth0/fec/modes          # ethtool FEC mode(s) (nlink 0.23)
 zensight/netring/sensor01/flow/by_l4/tcp/bytes_total
 ```
 
