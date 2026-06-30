@@ -33,6 +33,11 @@
   netring: {
     key_prefix: "zensight/netring",
     sensor_id: "auto",
+    // Capture backend (netring 0.28, #227): "auto" (default) probes + selects
+    // (AF_XDP where available, else AF_PACKET) and logs/publishes the resolved
+    // plan; "afpacket" forces AF_PACKET; "afxdp" needs an AF_XDP-enabled build
+    // (falls back to auto here). The `pcap` setting below always overrides.
+    backend: "auto",
 
     // Live capture interfaces (needs CAP_NET_RAW). Leave empty and set `pcap`
     // below to replay an offline capture instead (no privileges required).

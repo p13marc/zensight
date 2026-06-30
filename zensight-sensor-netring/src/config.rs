@@ -41,6 +41,11 @@ pub struct NetringConfig {
     /// Capture interfaces (e.g. ["eth0"]). Ignored when `pcap` is set.
     #[serde(default)]
     pub interfaces: Vec<String>,
+    /// Capture backend selection (netring 0.28, issue #227). `auto` (default)
+    /// probes the host/interface and picks the best available backend, logging
+    /// the choice; explicit values force it. `pcap` always overrides (replay).
+    #[serde(default)]
+    pub backend: BackendKind,
     /// Replay an offline pcap instead of live capture (no privileges needed).
     #[serde(default)]
     pub pcap: Option<String>,
@@ -60,6 +65,24 @@ pub struct NetringConfig {
     /// debounced Normal↔Emergency transition. Needs `collect.capture_stats`.
     #[serde(default)]
     pub overload: OverloadConfig,
+}
+
+/// Capture backend selection (netring 0.28, issue #227). Maps to netring's
+/// `Backend`. `AfXdp` only takes effect in a build with AF_XDP support; this
+/// sensor doesn't enable those netring features, so it falls back to `Auto`
+/// (which resolves to AF_PACKET) with a warning.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendKind {
+    /// Probe + auto-select (logs the choice). Resolves to AF_PACKET here.
+    #[default]
+    Auto,
+    /// Force AF_PACKET (TPACKET_v3).
+    #[serde(rename = "afpacket")]
+    AfPacket,
+    /// Request AF_XDP — needs an AF_XDP-enabled build; falls back to Auto here.
+    #[serde(rename = "afxdp")]
+    AfXdp,
 }
 
 /// Capture-overload detection config (netring 0.27). Drives an
