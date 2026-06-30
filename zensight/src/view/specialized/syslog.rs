@@ -940,10 +940,10 @@ fn render_severity_summary<'a>(
 const COL_TIME: f32 = 140.0;
 const COL_SEV: f32 = 72.0;
 const COL_SRC: f32 = 56.0;
-const COL_HOST: f32 = 110.0;
+const COL_HOST: f32 = 96.0;
 const COL_FAC: f32 = 80.0;
-const COL_UNIT: f32 = 150.0;
-const COL_APP: f32 = 110.0;
+const COL_UNIT: f32 = 120.0;
+const COL_APP: f32 = 100.0;
 
 fn muted_cell(value: String, width: f32) -> Element<'static, Message> {
     text(value)
@@ -1027,7 +1027,7 @@ fn render_log_stream<'a>(
         head("Facility", COL_FAC),
         head("Unit", COL_UNIT),
         head("App", COL_APP),
-        text("Message").size(11),
+        text("Message").size(11).width(Length::Fill),
     ]
     .spacing(8)
     .padding([0, 6]);
@@ -1065,7 +1065,7 @@ fn render_log_stream<'a>(
                 .style(|t: &Theme| text::Style {
                     color: Some(theme::colors(t).primary()),
                 }),
-            text(message_text).size(11),
+            text(message_text).size(11).width(Length::Fill),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
