@@ -3171,7 +3171,15 @@ impl ZenSight {
         // Syslog/journald lines feed the rolling buffer behind the Logs view.
         // Unlike per-metric device state (which keeps only the latest point per
         // facility/severity), this preserves the full recent stream.
-        if point.protocol == zensight_common::Protocol::Logs {
+        //
+        // Only actual per-line log events (a Text payload) belong here. The logs
+        // sensor also streams derived rollup telemetry (`logs/by_severity/*`,
+        // `logs/ingest/*`, `logs/by_unit/*` — counters/gauges) on the same
+        // `Protocol::Logs`; those are real metrics for the per-device derived
+        // cards but must not masquerade as log lines, or they render as
+        // `Counter(N)` junk and evict real messages from the bounded buffer. This
+        // mirrors the cold-store guard in `StoredLog::from_point` (Text-only).
+        if point_is_log_line(&point) {
             self.recent_logs
                 .push_back(crate::view::specialized::syslog_message_from_point(
                     &point,
@@ -3511,6 +3519,17 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Whether a telemetry point is an actual per-line log event (so it belongs in
+/// the Logs view's rolling buffer), as opposed to the logs sensor's derived
+/// rollup telemetry. Log lines carry a `Text` payload; rollups (`logs/by_*`,
+/// `logs/ingest/*`, …) are counters/gauges. Pure, and the unit of testing for
+/// the Logs-buffer admission policy — keeping rollups out so they don't render
+/// as `Counter(N)` junk and evict real messages. Mirrors `StoredLog::from_point`.
+fn point_is_log_line(point: &TelemetryPoint) -> bool {
+    point.protocol == zensight_common::Protocol::Logs
+        && matches!(point.value, TelemetryValue::Text(_))
+}
+
 /// The primary on-demand detail channels to prefetch when a device of this
 /// protocol is opened (#127), as the `Fetch*` messages that drive them. Pure
 /// (the unit of testing for the prefetch policy); empty for protocols whose
@@ -3694,6 +3713,43 @@ mod prefetch_tests {
         assert!(prefetch_channels(Protocol::Snmp).is_empty());
         assert!(prefetch_channels(Protocol::Logs).is_empty());
         assert!(prefetch_channels(Protocol::Modbus).is_empty());
+    }
+
+    /// Regression: only per-line Text log events feed the Logs buffer — the logs
+    /// sensor's derived rollup counters/gauges (`logs/by_severity/*`,
+    /// `logs/ingest/*`, …) stream on the same `Protocol::Logs` but must not be
+    /// admitted, or they render as `Counter(N)` junk and evict real messages.
+    #[test]
+    fn only_text_log_events_feed_the_buffer() {
+        let line = TelemetryPoint::new(
+            "host01",
+            Protocol::Logs,
+            "events/0000000000000000000000001",
+            TelemetryValue::Text("INTRUDER ALERT from 10.0.0.9".to_string()),
+        );
+        assert!(point_is_log_line(&line));
+
+        // Derived rollups (counters/gauges) are excluded.
+        for (metric, value) in [
+            ("logs/by_severity/error_total", TelemetryValue::Counter(3)),
+            ("logs/ingest/received_total", TelemetryValue::Counter(6)),
+            ("logs/units_in_failure", TelemetryValue::Gauge(0.0)),
+        ] {
+            let rollup = TelemetryPoint::new("host01", Protocol::Logs, metric, value);
+            assert!(
+                !point_is_log_line(&rollup),
+                "{metric} must not be a log line"
+            );
+        }
+
+        // Non-Logs telemetry is never a log line, even when Text.
+        let snmp_text = TelemetryPoint::new(
+            "router01",
+            Protocol::Snmp,
+            "system/sysDescr",
+            TelemetryValue::Text("Cisco IOS".to_string()),
+        );
+        assert!(!point_is_log_line(&snmp_text));
     }
 }
 
