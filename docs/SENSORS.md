@@ -192,10 +192,24 @@ expectations and alerts on deviation.
   program crate is a member that compiles to an empty host stub off the `bpf`
   target). **Runtime:** needs `CAP_BPF` + `CAP_NET_ADMIN`; off / missing caps /
   unsupported kernel → one warning and the unprivileged baseline is unchanged.
-  See the commented `AmbientCapabilities` block in the systemd unit.
+  The shipped systemd unit grants `CAP_BPF`/`CAP_PERFMON` (alongside
+  `CAP_NET_ADMIN`) via `AmbientCapabilities` for a "just run" demo; the stock
+  binary ignores them unless built `--features ebpf` with `collect.ebpf = true`.
 - **Default-route flaps:** a streamed `routes/default_v4_flaps_total` counter plus
   a per-transition history ring served on `@/query/route_changes` (gateway change /
   withdrawal / re-appearance with timestamps) — the #1 connectivity incident.
+- **Control-plane timeline + IPsec events (nlink 0.23):** real-time RTNETLINK
+  changes fold into counters `events/{link,addr,route,neighbor}/{added,removed,
+  changed}_total` and a recent-events ring (`@/query/events`). The XFRM **monitor**
+  stream adds a fifth `ipsec` family — SA/policy lifecycle (`NewSa`/`DelSa`,
+  soft/hard `ExpireSa`, `Acquire`, …) the periodic SA snapshot misses between
+  ticks — as `events/ipsec/{added,changed,removed}_total` + timeline rows. Gated on
+  `collect.events && collect.xfrm`; degrades cleanly where no IPsec is configured.
+- **ethtool link health (nlink 0.23):** beyond speed/duplex/autoneg/rings/pause,
+  per-interface **FEC** (`ethtool/<iface>/fec/{modes,auto}` — silent corruption on
+  marginal optics) and **EEE** (`ethtool/<iface>/eee/{enabled,active}` — power-save
+  that can add latency). Best-effort per family; drivers lacking one still yield the
+  rest.
 - **nftables firewall hit-rate (#115):** the per-rule `counter` expression is
   decoded from the raw ruleset, so beyond ruleset shape (`nft/{tables,chains,rules}
   _total`) the sensor streams monotonic `nft/{packets,bytes}_total` and per-table

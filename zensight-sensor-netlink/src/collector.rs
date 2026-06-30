@@ -19,10 +19,10 @@ use nlink::netlink::{
     netfilter::{ConntrackEntry, IpProtocol},
     nftables::types::Family as NftFamily,
     types::addr::Scope,
-    xfrm::{SecurityAssociation, XfrmMode},
+    xfrm::{PolicyDirection, SecurityAssociation, TrafficSelector, XfrmEvent, XfrmMode},
 };
 
-use crate::events::EventState;
+use crate::events::{EventAction, EventState};
 use crate::map::WgPeerView;
 use crate::route_history::RouteHistory;
 use nlink::sockdiag::{SocketFilter, SocketInfo, SocketState, TcpState};
@@ -325,6 +325,31 @@ impl Collector {
             }
         }
 
+        // Real-time XFRM/IPsec monitor (nlink 0.23): a dedicated `Connection<Xfrm>`
+        // subscribed to the SA/policy/expire/acquire multicast groups streams SA
+        // lifecycle events the periodic `poll_xfrm` snapshot structurally misses
+        // (rekeys and soft/hard expiries between ticks, ACQUIRE negotiations). They
+        // fold onto the same control-plane timeline as the `ipsec` family. Gated on
+        // both toggles: `events` (the timeline) and `xfrm` (IPsec collection).
+        if self.config.collect.events && self.config.collect.xfrm {
+            match Connection::<Xfrm>::new() {
+                Ok(xfrm_ev_conn) => {
+                    if let Err(e) = xfrm_ev_conn.subscribe_all() {
+                        tracing::warn!(error = %e, "xfrm event subscribe failed; IPsec events disabled");
+                    } else {
+                        let state = self.event_state.clone();
+                        tokio::spawn(async move {
+                            run_xfrm_event_stream(xfrm_ev_conn, state).await;
+                        });
+                        tracing::info!("real-time XFRM/IPsec event stream active");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "xfrm event connection failed; IPsec events disabled")
+                }
+            }
+        }
+
         // WireGuard genl handle (needs the wireguard module; full peer data needs
         // CAP_NET_ADMIN). Only opened when interfaces are configured.
         let wireguard = if self.config.wireguard.interfaces.is_empty() {
@@ -548,16 +573,16 @@ impl Collector {
                 mtu: link.mtu(),
                 mac: link.mac_address(),
                 oper_state: link.operstate().map(|o| format!("{o:?}").to_lowercase()),
-                rx_bytes: stats.map(|s| s.rx_bytes).unwrap_or(0),
-                tx_bytes: stats.map(|s| s.tx_bytes).unwrap_or(0),
-                rx_packets: stats.map(|s| s.rx_packets).unwrap_or(0),
-                tx_packets: stats.map(|s| s.tx_packets).unwrap_or(0),
-                rx_errors: stats.map(|s| s.rx_errors).unwrap_or(0),
-                tx_errors: stats.map(|s| s.tx_errors).unwrap_or(0),
-                rx_dropped: stats.map(|s| s.rx_dropped).unwrap_or(0),
-                tx_dropped: stats.map(|s| s.tx_dropped).unwrap_or(0),
-                multicast: stats.map(|s| s.multicast).unwrap_or(0),
-                collisions: stats.map(|s| s.collisions).unwrap_or(0),
+                rx_bytes: stats.map(|s| s.rx_bytes()).unwrap_or(0),
+                tx_bytes: stats.map(|s| s.tx_bytes()).unwrap_or(0),
+                rx_packets: stats.map(|s| s.rx_packets()).unwrap_or(0),
+                tx_packets: stats.map(|s| s.tx_packets()).unwrap_or(0),
+                rx_errors: stats.map(|s| s.rx_errors()).unwrap_or(0),
+                tx_errors: stats.map(|s| s.tx_errors()).unwrap_or(0),
+                rx_dropped: stats.map(|s| s.rx_dropped()).unwrap_or(0),
+                tx_dropped: stats.map(|s| s.tx_dropped()).unwrap_or(0),
+                multicast: stats.map(|s| s.multicast()).unwrap_or(0),
+                collisions: stats.map(|s| s.collisions()).unwrap_or(0),
             };
             for point in map::iface_points(&self.host, &sample) {
                 self.publish(&point).await;
@@ -651,6 +676,20 @@ impl Collector {
                     s.features.push((feat.to_string(), f.is_active(feat)));
                 }
             }
+        }
+        // FEC + EEE (nlink 0.23): link-health signals many drivers expose. Both
+        // best-effort — drivers that lack the family are silently skipped. FEC
+        // mode names are kernel-labelled (`RS`, `BASER`, `None`, …); join the
+        // configured set for a compact, bounded-cardinality text value.
+        if let Ok(fec) = et.get_fec(iface).await {
+            if !fec.modes.is_empty() {
+                s.fec_modes = Some(fec.modes.join(","));
+            }
+            s.fec_auto = fec.auto;
+        }
+        if let Ok(eee) = et.get_eee(iface).await {
+            s.eee_enabled = eee.enabled;
+            s.eee_active = eee.active;
         }
         s
     }
@@ -1097,6 +1136,156 @@ async fn run_event_stream(conn: Connection<Route>, state: EventState, wake: Arc<
         }
     }
     tracing::info!("RTNETLINK event stream ended");
+}
+
+/// Consume the XFRM/IPsec monitor stream (nlink 0.23): decode each
+/// [`XfrmEvent`] via [`classify_xfrm_event`] and fold it onto the control-plane
+/// timeline as the `ipsec` family. Like the RTNETLINK stream, `events()` holds
+/// the connection's request lock for the stream's lifetime, so this runs on its
+/// own dedicated `Connection<Xfrm>`.
+async fn run_xfrm_event_stream(conn: Connection<Xfrm>, state: EventState) {
+    let mut events = conn.events().await;
+    while let Some(item) = events.next().await {
+        match item {
+            Ok(ev) => {
+                let (action, detail) = classify_xfrm_event(&ev);
+                // XFRM notifications are host-global, not tied to a link → no ifindex.
+                state.observe_ipsec(action, None, detail);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "xfrm event stream error; stopping event task");
+                break;
+            }
+        }
+    }
+    tracing::info!("XFRM event stream ended");
+}
+
+/// Decode an XFRM monitor [`XfrmEvent`] into a refined control-plane
+/// [`EventAction`] + a short human `detail`, for the `ipsec` timeline family.
+/// Pure (nlink in, strings out) so the mapping is unit-testable. Soft expiry
+/// (rekey-soon) maps to `changed`; hard expiry (SA dead) and deletes/flushes map
+/// to `removed`; new SA/policy map to `added`; acquire/report are `changed`.
+fn classify_xfrm_event(ev: &XfrmEvent) -> (EventAction, String) {
+    let ep = |a: Option<std::net::IpAddr>| a.map(|x| x.to_string()).unwrap_or_else(|| "*".into());
+    match ev {
+        XfrmEvent::NewSa(sa) => (
+            EventAction::Added,
+            format!(
+                "SA {}→{} spi={:#x} {} {}",
+                ep(sa.src_addr),
+                ep(sa.dst_addr),
+                sa.spi,
+                ipsec_proto_label(&sa.protocol),
+                xfrm_mode_label(&sa.mode),
+            ),
+        ),
+        XfrmEvent::DelSa(id) => (
+            EventAction::Removed,
+            format!(
+                "SA del →{} spi={:#x} {}",
+                ep(id.dst_addr),
+                id.spi,
+                ipsec_proto_label(&id.protocol),
+            ),
+        ),
+        XfrmEvent::ExpireSa { sa, hard } => (
+            if *hard {
+                EventAction::Removed
+            } else {
+                EventAction::Changed
+            },
+            format!(
+                "SA expire({}) {}→{} spi={:#x}",
+                if *hard { "hard" } else { "soft" },
+                ep(sa.src_addr),
+                ep(sa.dst_addr),
+                sa.spi,
+            ),
+        ),
+        XfrmEvent::NewPolicy(sp) => (
+            EventAction::Added,
+            format!(
+                "policy {} {}",
+                policy_dir_label(&sp.direction),
+                selector_str(&sp.selector),
+            ),
+        ),
+        XfrmEvent::DelPolicy(id) => (
+            EventAction::Removed,
+            format!(
+                "policy del {} idx={}",
+                policy_dir_label(&id.direction),
+                id.index,
+            ),
+        ),
+        XfrmEvent::ExpirePolicy { policy, hard } => (
+            if *hard {
+                EventAction::Removed
+            } else {
+                EventAction::Changed
+            },
+            format!(
+                "policy expire({}) {} idx={}",
+                if *hard { "hard" } else { "soft" },
+                policy_dir_label(&policy.direction),
+                policy.index,
+            ),
+        ),
+        XfrmEvent::Acquire { selector, .. } => (
+            EventAction::Changed,
+            format!("acquire {}", selector_str(selector)),
+        ),
+        XfrmEvent::Report { protocol, selector } => (
+            EventAction::Changed,
+            format!(
+                "report {} {}",
+                ipsec_proto_label(protocol),
+                selector_str(selector)
+            ),
+        ),
+        XfrmEvent::FlushSa => (EventAction::Removed, "flush all SAs".to_string()),
+        XfrmEvent::FlushPolicy => (EventAction::Removed, "flush all policies".to_string()),
+        XfrmEvent::Other { msg_type } => {
+            (EventAction::Changed, format!("xfrm msg_type={msg_type}"))
+        }
+        // `XfrmEvent` is `#[non_exhaustive]`; surface unknown notifications rather
+        // than dropping them.
+        _ => (EventAction::Changed, "xfrm event".to_string()),
+    }
+}
+
+/// Stable lowercase label for an XFRM mode (`#[non_exhaustive]` upstream).
+fn xfrm_mode_label(m: &XfrmMode) -> &'static str {
+    match m {
+        XfrmMode::Transport => "transport",
+        XfrmMode::Tunnel => "tunnel",
+        XfrmMode::Beet => "beet",
+        _ => "other",
+    }
+}
+
+/// Short label for an XFRM policy direction.
+fn policy_dir_label(d: &PolicyDirection) -> &'static str {
+    match d {
+        PolicyDirection::In => "in",
+        PolicyDirection::Out => "out",
+        PolicyDirection::Forward => "fwd",
+        _ => "?",
+    }
+}
+
+/// Compact `src→dst` rendering of an XFRM traffic selector (with prefix lengths).
+fn selector_str(sel: &TrafficSelector) -> String {
+    let a = |ip: Option<std::net::IpAddr>, len: u8| {
+        ip.map(|x| format!("{x}/{len}"))
+            .unwrap_or_else(|| "*".into())
+    };
+    format!(
+        "{}→{}",
+        a(sel.src_addr, sel.src_prefix_len),
+        a(sel.dst_addr, sel.dst_prefix_len),
+    )
 }
 
 /// Decompose an nlink [`WgPeer`] into the pure [`WgPeerView`] (computes the

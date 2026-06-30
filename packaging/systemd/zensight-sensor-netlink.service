@@ -1,5 +1,5 @@
 [Unit]
-Description=ZenSight netlink — Linux kernel net telemetry (RTNETLINK/sock_diag, unprivileged)
+Description=ZenSight netlink — Linux kernel net telemetry (RTNETLINK/sock_diag)
 Documentation=https://github.com/p13marc/zensight
 After=network-online.target
 Wants=network-online.target
@@ -13,20 +13,30 @@ RestartSec=5s
 # tombstone any firing alerts before exit.
 KillSignal=SIGTERM
 TimeoutStopSec=20s
-# Run unprivileged under a transient system user, with a minimal sandbox.
+# Run under a transient system user with a minimal sandbox.
 DynamicUser=yes
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadOnlyPaths=/etc/zensight
 
-# The opt-in eBPF module (#114) needs CAP_BPF + CAP_NET_ADMIN (and CAP_PERFMON
-# for perf-based attach on some kernels) and a binary built with `--features
-# ebpf`. Uncomment ONLY for that build; leave commented for the default
-# unprivileged build. MemoryDenyWriteExecute would break the BPF JIT (off here).
-# AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
-# CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
-# ProtectKernelTunables=no
+# DEMO POSTURE — "just run" with every collector enabled.
+#
+# The default reads (interfaces/routes/neighbors/addresses/sockets/ethtool/tc/
+# diagnostics/RTNETLINK events/XFRM SA dump) are unprivileged and need NONE of
+# the below. These capabilities unlock the *optional* collectors so a demo shows
+# everything:
+#   - CAP_NET_ADMIN → nftables + conntrack telemetry, and subscribing to the XFRM
+#     monitor multicast groups (real-time IPsec lifecycle → events/ipsec/*).
+#   - CAP_BPF (+ CAP_PERFMON for perf-based attach) → the eBPF module (#114).
+#
+# eBPF additionally requires a binary built with `--features ebpf` and
+# `collect.ebpf = true`; the stock release binary ignores the BPF caps.
+# (Ambient caps coexist with NoNewPrivileges=yes — systemd raises them at exec.)
+# To return to the locked-down baseline, drop the three lines below.
+AmbientCapabilities=CAP_NET_ADMIN CAP_BPF CAP_PERFMON
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_BPF CAP_PERFMON
+ProtectKernelTunables=no
 
 [Install]
 WantedBy=multi-user.target

@@ -7,7 +7,8 @@
 #   just <sensor>       # run a single sensor (netring | netlink | sysinfo | logs)
 #
 # netring captures packets and needs CAP_NET_RAW (+CAP_IPC_LOCK for AF_XDP);
-# `just caps` grants them via sudo. netlink reads and sysinfo are unprivileged.
+# netlink's optional collectors (nftables/conntrack + the XFRM monitor) need
+# CAP_NET_ADMIN. `just caps` grants both via sudo. sysinfo is unprivileged.
 # logs ingests the systemd journal (journald); reading the *system* journal needs
 # journal-read access — add your user to the `systemd-journal` group if it can't.
 
@@ -46,11 +47,17 @@ build:
 
 # ── Capabilities ─────────────────────────────────────────────────────────────
 
-# Grant netring packet-capture capabilities via sudo (re-run after each rebuild).
+# Grant capture/admin capabilities via sudo (re-run after each rebuild):
+#   netring → CAP_NET_RAW,CAP_IPC_LOCK  (AF_PACKET/AF_XDP capture)
+#   netlink → CAP_NET_ADMIN             (optional nftables/conntrack + XFRM monitor)
+# netlink's baseline reads work without this; the cap only unlocks the extras.
+# (eBPF additionally needs a `--features ebpf` build + CAP_BPF/CAP_PERFMON.)
 caps: build
     @echo "Granting CAP_NET_RAW,CAP_IPC_LOCK to {{bindir}}/zensight-sensor-netring (sudo)…"
     sudo setcap 'cap_net_raw,cap_ipc_lock=+ep' {{bindir}}/zensight-sensor-netring
-    @echo "netlink + sysinfo need no capabilities."
+    @echo "Granting CAP_NET_ADMIN to {{bindir}}/zensight-sensor-netlink (sudo)…"
+    sudo setcap 'cap_net_admin=+ep' {{bindir}}/zensight-sensor-netlink
+    @echo "sysinfo + logs need no capabilities."
 
 # Build + grant capabilities.
 setup: build caps
@@ -95,7 +102,7 @@ netring: caps configure
     ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-sensor-netring --config {{rundir}}/netring.json5
 
 # Run the netlink sensor (kernel interfaces/sockets + expectation alerts).
-netlink: build configure
+netlink: caps configure
     ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-sensor-netlink --config {{rundir}}/netlink.json5
 
 # Run the sysinfo sensor (CPU/memory/disk/network).

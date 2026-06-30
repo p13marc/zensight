@@ -32,9 +32,10 @@
       addresses: true,   // IP address inventory (#10)
       tc: true,          // TC/QoS qdisc drops/overlimits/backlog (#12) — drives the TC panel
       xfrm: true,        // IPsec/xfrm SA + policy health (#13); empty without IPsec
-      // The two below need CAP_NET_ADMIN — enable on a firewall / NAT gateway:
-      nftables: false,   // nftables table/chain/rule counters (#14)
-      conntrack: false,  // conntrack table summary
+      // The two below need CAP_NET_ADMIN (granted in the demo systemd unit) —
+      // enable on a firewall / NAT gateway:
+      nftables: true,    // nftables table/chain/rule counters (#14)
+      conntrack: true,   // conntrack table summary
       // Opt-in eBPF module (#114) — connect-latency gauges + retransmit
       // attribution (@/query/retransmits) + tcplife records (@/query/connections).
       // Needs a binary built with `--features ebpf` (nightly + bpf-linker) AND

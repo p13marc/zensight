@@ -478,12 +478,20 @@ fn scope_label(scope: Scope) -> &'static str {
 async fn collect_sockets(conn: &Connection<SockDiag>, sel: &SocketSelector) -> Vec<SocketRecord> {
     // Mirror the streamed aggregate's extensions (#11) so the drill-down shows
     // congestion algorithm / window and per-socket buffer sizes.
-    let filter = SocketFilter::tcp()
-        .all_states()
+    // Mirror the streamed aggregate's extensions. When the selector names a
+    // state, push it into the kernel as a sockdiag state bitmask (nlink 0.23) so
+    // the kernel returns only matching sockets instead of dumping every socket
+    // for us to filter. The port match stays in user space: its "local OR
+    // remote" semantics doesn't map to sockdiag's `sport AND dport` bytecode.
+    let builder = SocketFilter::tcp()
         .with_tcp_info()
         .with_mem_info()
-        .with_congestion()
-        .build();
+        .with_congestion();
+    let builder = match sel.state.as_deref().and_then(tcp_state_from_label) {
+        Some(st) => builder.states(&[st]),
+        None => builder.all_states(),
+    };
+    let filter = builder.build();
     let socks = match conn.query(&filter).await {
         Ok(s) => s,
         Err(e) => {
@@ -550,6 +558,21 @@ async fn collect_sockets(conn: &Connection<SockDiag>, sel: &SocketSelector) -> V
             sel.matches(&rec).then_some(rec)
         })
         .collect()
+}
+
+/// Inverse of [`socket_state_str`]: map a canonical lowercase state label back
+/// to an nlink [`TcpState`] for kernel-side sockdiag filtering. Unknown labels
+/// return `None`, so the caller dumps all states and relies on the user-space
+/// [`SocketSelector::matches`] filter.
+fn tcp_state_from_label(s: &str) -> Option<TcpState> {
+    Some(match s {
+        "established" => TcpState::Established,
+        "listen" => TcpState::Listen,
+        "time_wait" => TcpState::TimeWait,
+        "syn_sent" => TcpState::SynSent,
+        "close_wait" => TcpState::CloseWait,
+        _ => return None,
+    })
 }
 
 /// Canonical lowercase state string, matching the streamed `sockets/tcp/<state>`
