@@ -7,7 +7,7 @@ ARG EXPORTER_NAME=prometheus
 # =============================================================================
 # Stage 1: Build the exporter binary
 # =============================================================================
-FROM rust:1.92-bookworm AS builder
+FROM rust:1.95-bookworm AS builder
 
 ARG EXPORTER_PACKAGE
 
