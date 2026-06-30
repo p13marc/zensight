@@ -31,7 +31,12 @@
       ethtool: true,     // link speed/duplex, ring sizes, drops (#9)
       addresses: true,   // IP address inventory (#10)
       tc: true,          // TC/QoS qdisc drops/overlimits/backlog (#12) — drives the TC panel
-      xfrm: true,        // IPsec/xfrm SA + policy health (#13); empty without IPsec
+      // Temporarily OFF: nlink's XFRM dump requests trip a ratelimited kernel
+      // warning ("netlink: 224 bytes leftover after parsing attributes") on every
+      // poll — cosmetic but noisy in the demo. Re-enable once nlink ships the fix
+      // (https://github.com/p13marc/nlink/issues/160). Also gates the XFRM monitor
+      // event stream. Empty without IPsec anyway. (#13)
+      xfrm: false,       // IPsec/xfrm SA + policy health
       // The two below need CAP_NET_ADMIN (granted in the demo systemd unit) —
       // enable on a firewall / NAT gateway:
       nftables: true,    // nftables table/chain/rule counters (#14)
