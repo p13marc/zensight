@@ -55,6 +55,14 @@ pub struct FlowRecord {
     /// the 5-tuple is incomplete. Additive (`#[serde(default)]` for old records).
     #[serde(default)]
     pub community_id: Option<String>,
+    /// Whether `src`/`dst` are an authoritative initiator → responder pair
+    /// (netring 0.28 orientation, issue #122). `true` for TCP, where the
+    /// handshake-aware tracker resolves the initiator (SYN sender). `false` for
+    /// UDP and other handshake-less flows, where the ordering is a first-packet
+    /// best-effort guess — render those as undirected (`↔`). Additive
+    /// (`#[serde(default)]` → old records decode as undirected).
+    #[serde(default)]
+    pub directed: bool,
 }
 
 /// One observed TLS client fingerprint (passive asset inventory from netring's

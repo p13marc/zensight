@@ -369,6 +369,7 @@ mod tests {
             duration_ms: 100,
             reason: "fin".into(),
             community_id: Some("1:abc".into()),
+            directed: true,
         }]));
         assert_eq!(s.flows.ready().map(|v| v.len()), Some(1));
         s.apply(Err("no sensor".into()));

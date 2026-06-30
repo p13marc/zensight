@@ -504,6 +504,11 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
 
     b = b.protocol::<Tcp>();
 
+    // TCP initiator inference (#122): recover the true initiator (SYN sender)
+    // even on mid-handshake capture / SYN+ACK races, so flow direction is
+    // capture-order-independent. No-op cost when off. TCP-only.
+    b = b.infer_tcp_initiator(cfg.collect.infer_initiator);
+
     // Flow lifecycle counters + per-L4/connection-state breakdown + top-talkers.
     if cfg.collect.flows {
         use netring::protocol::event_typed::FlowStarted;
@@ -569,13 +574,13 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
                 .fetch_add(e.stats.total_bytes(), Ordering::Relaxed);
             l4_udp.udp_flows.fetch_add(1, Ordering::Relaxed);
             if collect_talkers_udp {
-                record_talker(&talkers_udp, &e.key.b.to_string(), &e.stats);
-                record_matrix(
-                    &matrix_udp,
-                    &e.key.a.to_string(),
-                    &e.key.b.to_string(),
-                    &e.stats,
-                );
+                // UDP has no handshake, so the initiator is the first-packet
+                // sender (best-effort); still order initiator → responder so the
+                // service map is directional (e.g. DNS client → resolver).
+                let (ini, resp) =
+                    map::initiator_responder(e.key.a, e.key.b, e.stats.initiator_orientation);
+                record_talker(&talkers_udp, &resp.to_string(), &e.stats);
+                record_matrix(&matrix_udp, &ini.to_string(), &resp.to_string(), &e.stats);
             }
             Ok(())
         });
@@ -1506,18 +1511,25 @@ fn on_flow_ended(
 
     let proto = e.l4.map(|p| p.canonical_name()).unwrap_or("tcp");
     let reason = e.reason.as_str();
-    // Community ID v1 (#116) — directionless 5-tuple hash for cross-tool correlation.
+    // Community ID v1 (#116) — directionless 5-tuple hash for cross-tool
+    // correlation. Computed on the canonical (a, b) key; orientation must NOT
+    // leak into the hash (regression-pinned by `community_id_symmetric`).
     let community_id =
         map::proto_number(proto).map(|n| map::community_id_v1(e.key.a, e.key.b, n, 0));
+    // Direction (#122): present src/dst as initiator → responder. TCP is
+    // handshake-aware, so the record is authoritatively `directed`.
+    let (ini, resp) = map::initiator_responder(e.key.a, e.key.b, e.stats.initiator_orientation);
+    let (ini_s, resp_s) = (ini.to_string(), resp.to_string());
     let rec = crate::map::flow_record(
-        e.key.a.to_string(),
-        e.key.b.to_string(),
+        ini_s.clone(),
+        resp_s.clone(),
         proto,
         total_bytes,
         total_packets,
         duration_ms,
         reason,
         community_id,
+        true,
     );
     if let Ok(mut r) = records.lock() {
         if r.len() == FLOW_RING_CAP {
@@ -1527,13 +1539,13 @@ fn on_flow_ended(
     }
 
     if collect_talkers {
-        record_talker(talkers, &e.key.b.to_string(), &e.stats);
-        record_matrix(matrix, &e.key.a.to_string(), &e.key.b.to_string(), &e.stats);
+        record_talker(talkers, &resp_s, &e.stats);
+        record_matrix(matrix, &ini_s, &resp_s, &e.stats);
         // Elephant ring: keep the largest recent flows (push, trim by size).
         if let Ok(mut ring) = elephants.lock() {
             let er = crate::map::elephant_record(
-                e.key.a.to_string(),
-                e.key.b.to_string(),
+                ini_s.clone(),
+                resp_s.clone(),
                 proto,
                 total_bytes,
                 total_packets,
@@ -1565,7 +1577,11 @@ fn feed_exfil(
     if !c.data_exfil {
         return;
     }
-    let src_ip = e.key.a.ip();
+    // Attribute the exfil baseline to the resolved initiator (the host pushing
+    // bytes out), not the canonical key order (#122).
+    let (initiator, responder) =
+        map::initiator_responder(e.key.a, e.key.b, e.stats.initiator_orientation);
+    let src_ip = initiator.ip();
     if allowlisted(&src_ip.to_string(), &c.allowlist) {
         return;
     }
@@ -1578,8 +1594,8 @@ fn feed_exfil(
     };
     if let Some(f) = finding {
         let view = map::exfil_view(
-            e.key.a.to_string(),
-            e.key.b.to_string(),
+            initiator.to_string(),
+            responder.to_string(),
             f.bytes_out,
             f.zscore,
         );
