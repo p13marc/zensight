@@ -41,6 +41,10 @@
 
     // Live capture interfaces (needs CAP_NET_RAW). Leave empty and set `pcap`
     // below to replay an offline capture instead (no privileges required).
+    // Multiple interfaces are each captured per-NIC under AF_PACKET; unified
+    // AF_XDP multi-NIC fan-in (#226) needs an AF_XDP-enabled build + CAP_IPC_LOCK
+    // (host-only). A `capture-leg-asymmetry` alert fires if a flow's two
+    // directions arrive on mismatched capture legs (tap miswire).
     interfaces: ["eth0"],
     // pcap: "/path/to/capture.pcap",
 
