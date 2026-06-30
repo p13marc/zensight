@@ -507,6 +507,9 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
     let flow_records: FlowRing = Arc::new(Mutex::new(VecDeque::with_capacity(FLOW_RING_CAP)));
     #[cfg(feature = "ipfix")]
     let ipfix_records: IpfixRing = Arc::new(Mutex::new(VecDeque::with_capacity(FLOW_RING_CAP)));
+    // Capture-focus counters (#225), advanced by the reloadable packet sub.
+    let focus_packets = Arc::new(AtomicU64::new(0));
+    let focus_bytes = Arc::new(AtomicU64::new(0));
     let tcp_resets = Arc::new(AtomicU64::new(0));
     let tcp_refused = Arc::new(AtomicU64::new(0));
     let tls_handshakes = Arc::new(AtomicU64::new(0));
@@ -689,6 +692,57 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
         b = b.export_flows(IpfixSink {
             ring: ipfix_records.clone(),
         });
+    }
+
+    // Runtime capture-focus (#225): an opt-in reloadable packet-tier
+    // subscription whose BPF filter is hot-swappable via
+    // `@/commands/capture_filter` (no capture restart). Its handler counts
+    // focused packets/bytes — the visible effect of narrowing — and the reload
+    // itself is driven from `main` via the monitor's `ReloadHandle`. Off by
+    // default: the per-frame handler is a cost the zero-cost hot loop avoids.
+    if cfg.capture_focus.enabled {
+        use netring::monitor::subscription::builder::packet;
+        match packet().expr(&cfg.capture_focus.base_expr) {
+            Ok(sub) => {
+                let fp = focus_packets.clone();
+                let fb = focus_bytes.clone();
+                let sub = sub.to(move |pkt: &flowscope::PacketView<'_>, _ctx: &mut Ctx<'_>| {
+                    fp.fetch_add(1, Ordering::Relaxed);
+                    fb.fetch_add(pkt.frame.len() as u64, Ordering::Relaxed);
+                    Ok(())
+                });
+                b = b.subscribe(sub);
+                // Publish the focus counters on the bandwidth cadence so the GUI
+                // sees the filter's effect (telemetry isn't retained).
+                let tx = tel_tx.clone();
+                let sensor_id = cfg.sensor_id.clone();
+                let period = cfg.bandwidth_period_secs.max(1);
+                let (fp2, fb2) = (focus_packets.clone(), focus_bytes.clone());
+                tokio::spawn(async move {
+                    let mut tick = tokio::time::interval(Duration::from_secs(period));
+                    loop {
+                        tick.tick().await;
+                        let pts = map::focus_points(
+                            &sensor_id,
+                            fp2.load(Ordering::Relaxed),
+                            fb2.load(Ordering::Relaxed),
+                        );
+                        if pts.into_iter().any(|p| tx.send(p).is_err()) {
+                            break; // telemetry pump gone
+                        }
+                    }
+                });
+                tracing::info!(
+                    base_expr = %cfg.capture_focus.base_expr,
+                    "netring: capture-focus armed (reloadable packet filter)"
+                );
+            }
+            Err(e) => tracing::error!(
+                error = %e,
+                expr = %cfg.capture_focus.base_expr,
+                "netring: invalid capture-focus base_expr; capture focus disabled"
+            ),
+        }
     }
 
     // TCP resets (connection refused vs mid-transfer abort).

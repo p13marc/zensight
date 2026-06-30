@@ -78,6 +78,18 @@ async fn main() -> Result<()> {
         detector_handle,
     ));
 
+    // Runtime capture-focus channel (#225): hot-swap the packet-tier BPF filter
+    // during an incident with no capture restart. Only spawned when armed; the
+    // ReloadHandle is harmless either way (packet_filter_count() == 0 if not).
+    if cfg.capture_focus.enabled {
+        runner.spawn(zensight_sensor_netring::command::run_capture_filter(
+            runner.session().clone(),
+            key_prefix.clone(),
+            mon.reload_handle(),
+            cfg.capture_focus.base_expr.clone(),
+        ));
+    }
+
     // On-demand query channels (P2): recent-flow ring, TLS asset inventory,
     // top-talkers, elephant flows, top DNS domains, top HTTP hosts.
     {

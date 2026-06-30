@@ -25,6 +25,38 @@ use crate::config::AnomalyConfig;
 /// The control topic under `@/commands/` and `@/status/`.
 pub const DETECTORS_TOPIC: &str = "detectors";
 
+/// The capture-focus control topic (netring 0.28, issue #225).
+pub const CAPTURE_FILTER_TOPIC: &str = "capture_filter";
+
+/// A runtime capture-focus command (tagged JSON), applied to the reloadable
+/// packet-tier subscription via netring's `ReloadHandle::set_packet_filter`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CaptureFilterCommand {
+    /// Narrow (or replace) the live packet filter with this `.expr()` / BPF
+    /// expression — e.g. `"host 10.0.0.5 and port 443"`. Validated before swap.
+    SetPacketFilter { expr: String },
+    /// Restore the configured base filter (revert an in-incident narrow).
+    ClearPacketFilter,
+}
+
+/// The capture-focus status served on `@/status/capture_filter` (#225) so the
+/// GUI can show what is live and surface a friendly error for a bad expression.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CaptureFilterStatus {
+    /// Whether capture focus is armed (a reloadable packet sub exists).
+    pub enabled: bool,
+    /// Number of reloadable packet-tier filters (`packet_filter_count()`).
+    pub reloadable: usize,
+    /// The currently-applied filter expression (the base when not narrowed).
+    pub current: String,
+    /// The configured base filter, restored by `clear_packet_filter`.
+    pub base: String,
+    /// Last validation error, if the most recent `set_packet_filter` was
+    /// rejected (the previous filter stayed live). `None` once a valid one lands.
+    pub last_error: Option<String>,
+}
+
 /// A lock-free, cheaply-cloneable handle to the live [`AnomalyConfig`]. The
 /// monitor's detectors hold a clone and `load()` the current config per scored
 /// candidate; the command loop `store`s a new `Arc` on each change.
@@ -213,9 +245,143 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, handle: Detec
     }
 }
 
+/// Run the capture-focus command subscriber + status queryable (#225) until the
+/// session closes. `reload` is netring's handle; `base_expr` is the configured
+/// default restored by `clear_packet_filter`. The packet filter lives at index 0
+/// (our single capture-focus subscription). Validation happens in
+/// `set_packet_filter` (parse-before-swap), so a bad expression becomes a status
+/// error and the previous filter keeps running — never a panic or dropped capture.
+pub async fn run_capture_filter(
+    session: Arc<zenoh::Session>,
+    key_prefix: String,
+    reload: netring::monitor::ReloadHandle,
+    base_expr: String,
+) {
+    let cmd_key = command_key(&key_prefix, CAPTURE_FILTER_TOPIC);
+    let stat_key = status_key(&key_prefix, CAPTURE_FILTER_TOPIC);
+
+    let subscriber = match session.declare_subscriber(&cmd_key).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, key = %cmd_key, "netring: failed to subscribe to capture-filter commands");
+            return;
+        }
+    };
+    let queryable = match session.declare_queryable(&stat_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %stat_key, "netring: failed to declare capture-filter status queryable");
+            return;
+        }
+    };
+    tracing::info!(commands = %cmd_key, status = %stat_key, "netring: capture-focus channel ready");
+
+    let mut current = base_expr.clone();
+    let mut last_error: Option<String> = None;
+
+    loop {
+        tokio::select! {
+            sample = subscriber.recv_async() => {
+                let Ok(sample) = sample else {
+                    tracing::warn!("netring: capture-filter command subscriber ended");
+                    return;
+                };
+                let payload = sample.payload().to_bytes();
+                match serde_json::from_slice::<CaptureFilterCommand>(&payload) {
+                    Ok(CaptureFilterCommand::SetPacketFilter { expr }) => {
+                        apply_filter(&reload, &expr, &mut current, &mut last_error);
+                    }
+                    Ok(CaptureFilterCommand::ClearPacketFilter) => {
+                        let base = base_expr.clone();
+                        apply_filter(&reload, &base, &mut current, &mut last_error);
+                    }
+                    Err(e) => tracing::warn!(error = %e, "netring: bad capture-filter command"),
+                }
+            }
+            query = queryable.recv_async() => {
+                let Ok(query) = query else {
+                    tracing::warn!("netring: capture-filter status queryable ended");
+                    return;
+                };
+                let status = CaptureFilterStatus {
+                    enabled: reload.packet_filter_count() > 0,
+                    reloadable: reload.packet_filter_count(),
+                    current: current.clone(),
+                    base: base_expr.clone(),
+                    last_error: last_error.clone(),
+                };
+                match serde_json::to_vec(&status) {
+                    Ok(payload) => {
+                        if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                            tracing::warn!(error = %e, "netring: failed to reply to capture-filter status query");
+                        }
+                    }
+                    Err(e) => tracing::warn!(error = %e, "netring: failed to serialize capture-filter status"),
+                }
+            }
+        }
+    }
+}
+
+/// Apply `expr` to the packet filter at index 0, updating `current`/`last_error`.
+/// A parse error or absent filter leaves the live filter untouched (fail-safe).
+fn apply_filter(
+    reload: &netring::monitor::ReloadHandle,
+    expr: &str,
+    current: &mut String,
+    last_error: &mut Option<String>,
+) {
+    match reload.set_packet_filter(0, expr) {
+        Ok(true) => {
+            *current = expr.to_string();
+            *last_error = None;
+            tracing::info!(filter = %expr, "netring: capture filter hot-reloaded");
+        }
+        Ok(false) => {
+            *last_error = Some("no reloadable packet filter (capture_focus disabled)".to_string());
+            tracing::warn!("netring: set_packet_filter with no reloadable filter");
+        }
+        Err(e) => {
+            *last_error = Some(format!("invalid filter: {e}"));
+            tracing::warn!(error = %e, filter = %expr, "netring: rejected invalid capture filter");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_filter_command_wire_format() {
+        // Pin the JSON the GUI (#228) sends on @/commands/capture_filter.
+        let set: CaptureFilterCommand = serde_json::from_str(
+            r#"{"type":"set_packet_filter","expr":"host 10.0.0.5 and port 443"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            set,
+            CaptureFilterCommand::SetPacketFilter {
+                expr: "host 10.0.0.5 and port 443".into()
+            }
+        );
+        let clear: CaptureFilterCommand =
+            serde_json::from_str(r#"{"type":"clear_packet_filter"}"#).unwrap();
+        assert_eq!(clear, CaptureFilterCommand::ClearPacketFilter);
+        // Status round-trips (the @/status/capture_filter shape the GUI reads).
+        let status = CaptureFilterStatus {
+            enabled: true,
+            reloadable: 1,
+            current: "host 10.0.0.5".into(),
+            base: "tcp or udp or icmp".into(),
+            last_error: None,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(
+            serde_json::from_str::<CaptureFilterStatus>(&json).unwrap(),
+            status
+        );
+    }
 
     #[test]
     fn set_enabled_and_threshold() {

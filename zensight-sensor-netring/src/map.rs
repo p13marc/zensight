@@ -98,6 +98,26 @@ pub fn netring_backend(kind: crate::config::BackendKind) -> netring::monitor::Ba
     }
 }
 
+/// `capture/focus/*` counters (#225): packets/bytes seen by the reloadable
+/// capture-focus packet sub. Narrowing the live filter slows these for
+/// non-matching traffic — the visible effect of a runtime capture focus.
+pub fn focus_points(sensor_id: &str, packets: u64, bytes: u64) -> Vec<TelemetryPoint> {
+    vec![
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            "capture/focus/packets".to_string(),
+            TelemetryValue::Counter(packets),
+        ),
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            "capture/focus/bytes".to_string(),
+            TelemetryValue::Counter(bytes),
+        ),
+    ]
+}
+
 /// One-shot `capture/backend` info point (#227): the resolved capture backend
 /// (or `pcap-replay`) as Text, so the GUI Sensors view can show what is live.
 pub fn backend_point(sensor_id: &str, label: &str) -> TelemetryPoint {

@@ -135,6 +135,18 @@
         sample_rate: 0.5,       // for "sample": fraction of new flows to keep
       },
     },
+
+    // Runtime capture-focus (netring 0.28, #225). Off by default. When enabled,
+    // registers a reloadable packet-tier subscription whose filter can be
+    // hot-swapped during an incident via `@/commands/capture_filter` (no capture
+    // restart) to narrow attention to a host/port; `capture/focus/{packets,
+    // bytes}` counters show the effect, and `@/status/capture_filter` reports the
+    // live filter. Grammar: `tcp|udp|icmp`, `[src|dst] port N`, `[src|dst] host
+    // IP`, `[src|dst] net CIDR`, combined with `and`/`or`/`!`/parens.
+    capture_focus: {
+      enabled: false,
+      base_expr: "tcp or udp or icmp",
+    },
   },
 
   logging: { level: "info" },
