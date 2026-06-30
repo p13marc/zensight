@@ -1530,6 +1530,10 @@ fn test_netring_specialized_view() {
             reason: "fin".into(),
             community_id: None,
             directed: true,
+            bytes_initiator: 120,
+            bytes_responder: 574,
+            packets_initiator: 4,
+            packets_responder: 6,
         }]));
 
     // Loading state: button reads "Fetching…" while a fetch is in flight; an

@@ -370,6 +370,10 @@ mod tests {
             reason: "fin".into(),
             community_id: Some("1:abc".into()),
             directed: true,
+            bytes_initiator: 120,
+            bytes_responder: 574,
+            packets_initiator: 4,
+            packets_responder: 6,
         }]));
         assert_eq!(s.flows.ready().map(|v| v.len()), Some(1));
         s.apply(Err("no sensor".into()));

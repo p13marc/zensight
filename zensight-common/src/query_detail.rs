@@ -63,6 +63,21 @@ pub struct FlowRecord {
     /// (`#[serde(default)]` → old records decode as undirected).
     #[serde(default)]
     pub directed: bool,
+    /// Per-direction byte counts (netring 0.28, issue #223): `initiator` =
+    /// `src`→`dst` (IPFIX IE 1), `responder` = the reverse (IE 1 reverse). The
+    /// `bytes` field above stays the both-directions total (IE 85). `0` on old
+    /// records. Lets a drill-down show flow asymmetry (e.g. a tiny request, a
+    /// huge response).
+    #[serde(default)]
+    pub bytes_initiator: u64,
+    #[serde(default)]
+    pub bytes_responder: u64,
+    /// Per-direction packet counts (IPFIX IE 2 / IE 2 reverse). `packets` stays
+    /// the total (IE 86).
+    #[serde(default)]
+    pub packets_initiator: u64,
+    #[serde(default)]
+    pub packets_responder: u64,
 }
 
 /// One observed TLS client fingerprint (passive asset inventory from netring's

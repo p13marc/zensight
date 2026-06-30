@@ -60,6 +60,11 @@
       // Flag cleartext SNMP v1/v2c community strings as anomalies. Needs the
       // sensor built with `--features snmp` (pulls the SNMP parser).
       snmp_cleartext: false,
+      // Canonical IPFIX flow export (netring 0.28, #223). No-op unless built
+      // with `--features ipfix`. Serves IANA-IE-keyed flow records on
+      // @/query/ipfix (per-direction deltas IE 1/2, totals IE 85/86, precise
+      // flowEndReason IE 136, Community ID) for SIEM / flow-collector consumers.
+      ipfix: false,
       // Passive asset inventory (netring 0.27): discover hosts on the wire from
       // ARP / NDP / LLDP. Streams an `assets/discovered` count; the per-asset
       // detail (MAC / IP / hostname / platform / seen-via) is served on demand

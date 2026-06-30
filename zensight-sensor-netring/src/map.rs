@@ -30,6 +30,7 @@ pub fn flow_record(
     reason: &str,
     community_id: Option<String>,
     directed: bool,
+    dir_counts: DirCounts,
 ) -> FlowRecord {
     FlowRecord {
         src,
@@ -41,7 +42,21 @@ pub fn flow_record(
         reason: reason.to_string(),
         community_id,
         directed,
+        bytes_initiator: dir_counts.bytes_initiator,
+        bytes_responder: dir_counts.bytes_responder,
+        packets_initiator: dir_counts.packets_initiator,
+        packets_responder: dir_counts.packets_responder,
     }
+}
+
+/// Per-direction byte/packet split for a flow (#223), oriented initiator →
+/// responder. Bundled so [`flow_record`] keeps a readable call site.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DirCounts {
+    pub bytes_initiator: u64,
+    pub bytes_responder: u64,
+    pub packets_initiator: u64,
+    pub packets_responder: u64,
 }
 
 /// Resolve `(initiator, responder)` from netring's address-sorted flow key and
@@ -1243,6 +1258,12 @@ mod tests {
             "fin",
             Some("1:abc".into()),
             true,
+            DirCounts {
+                bytes_initiator: 120,
+                bytes_responder: 574,
+                packets_initiator: 4,
+                packets_responder: 6,
+            },
         );
         assert_eq!(r.src, "10.0.0.1:5555");
         assert_eq!(r.dst, "1.1.1.1:443");
@@ -1252,6 +1273,10 @@ mod tests {
         assert_eq!(r.reason, "fin");
         assert_eq!(r.community_id.as_deref(), Some("1:abc"));
         assert!(r.directed);
+        // Per-direction split (#223); totals stay the both-directions sum.
+        assert_eq!(r.bytes_initiator + r.bytes_responder, r.bytes);
+        assert_eq!(r.packets_initiator, 4);
+        assert_eq!(r.packets_responder, 6);
     }
 
     #[test]
@@ -1281,6 +1306,27 @@ mod tests {
         assert_eq!(id, "1:LQU9qZlK+B5F3KDmev6m5PMibrg=");
         // Directionless: swapping endpoints yields the same hash.
         assert_eq!(community_id_v1(b, a, 6, 0), id);
+    }
+
+    #[test]
+    fn community_id_agrees_with_netring_ipfix() {
+        // Cross-check (#223): our hand-rolled Community ID must equal the value
+        // netring stamps on its IPFIX records (`FlowRecord::to_ipfix_record`).
+        // These vectors were captured live from `@/query/ipfix` for the same
+        // 5-tuples we serve on `@/query/flows` — they agree because both follow
+        // the Corelight spec with universal seed 0. Pins both impls.
+        let tcp_a: SocketAddr = "10.0.0.10:49152".parse().unwrap();
+        let tcp_b: SocketAddr = "10.0.0.20:80".parse().unwrap();
+        assert_eq!(
+            community_id_v1(tcp_a, tcp_b, 6, 0),
+            "1:UG6cynLHoE34uLlABaTLnoF9dWI="
+        );
+        let udp_a: SocketAddr = "10.0.0.10:40000".parse().unwrap();
+        let udp_b: SocketAddr = "10.0.0.20:53".parse().unwrap();
+        assert_eq!(
+            community_id_v1(udp_a, udp_b, 17, 0),
+            "1:7/iy0TWjrq0cVVQ9n2zZP8McXdg="
+        );
     }
 
     #[test]

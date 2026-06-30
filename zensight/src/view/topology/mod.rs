@@ -1113,6 +1113,10 @@ mod tests {
             reason: "fin".to_string(),
             community_id: None,
             directed: true,
+            bytes_initiator: bytes / 2,
+            bytes_responder: bytes - bytes / 2,
+            packets_initiator: packets / 2,
+            packets_responder: packets - packets / 2,
         }
     }
 

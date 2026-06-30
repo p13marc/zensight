@@ -31,6 +31,13 @@ lateral = ["netring/smb", "netring/rdp", "netring/kerberos"]
 # build stays OSI-clean. Enable with `--features ja4plus`, then set
 # `collect.http_fp` to serve JA4H fingerprints on `@/query/ja4h`.
 ja4plus = ["netring/ja4plus"]
+# Canonical IPFIX flow export (netring 0.28, issue #223). Off by default —
+# pulls netring's IPFIX encoder (`FlowRecord::to_ipfix_record`) and flowscope's
+# serde so the IANA-IE record can be JSON-serialised. Enable with
+# `--features ipfix`, then set `collect.ipfix` to serve canonical, IANA-IE-keyed
+# flow records on `@/query/ipfix` (per-direction deltas IE 1/2, totals IE 85/86,
+# precise `flowEndReason` IE 136, Community ID).
+ipfix = ["netring/ipfix", "flowscope/serde"]
 
 [dependencies]
 zensight-common = { path = "../zensight-common" }
