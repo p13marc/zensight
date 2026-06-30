@@ -77,6 +77,38 @@ pub fn initiator_responder(
     }
 }
 
+/// Map our config [`BackendKind`](crate::config::BackendKind) to netring's
+/// `Backend` (#227). `AfXdp` needs an AF_XDP-enabled build, which this sensor
+/// doesn't compile, so it degrades to `Auto` (→ AF_PACKET) with a warning
+/// rather than failing — the resolved plan reports the truth either way.
+pub fn netring_backend(kind: crate::config::BackendKind) -> netring::monitor::Backend {
+    use crate::config::BackendKind;
+    use netring::monitor::{Backend, Fanout};
+    match kind {
+        BackendKind::Auto => Backend::Auto,
+        BackendKind::AfPacket => Backend::AfPacket {
+            fanout: Fanout::None,
+        },
+        BackendKind::AfXdp => {
+            tracing::warn!(
+                "backend \"afxdp\" requested but this build has no AF_XDP support; using auto"
+            );
+            Backend::Auto
+        }
+    }
+}
+
+/// One-shot `capture/backend` info point (#227): the resolved capture backend
+/// (or `pcap-replay`) as Text, so the GUI Sensors view can show what is live.
+pub fn backend_point(sensor_id: &str, label: &str) -> TelemetryPoint {
+    TelemetryPoint::new(
+        sensor_id,
+        Protocol::Netring,
+        "capture/backend".to_string(),
+        TelemetryValue::Text(label.to_string()),
+    )
+}
+
 /// IANA protocol number for an L4 protocol label (`tcp`/`udp`/`icmp`/`icmpv6`).
 /// Returns `None` for labels without a well-known number — Community ID is only
 /// attached when the protocol is known.

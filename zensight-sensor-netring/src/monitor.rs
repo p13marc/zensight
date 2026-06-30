@@ -526,13 +526,48 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
     let mut b = Monitor::builder();
     b = b.name(cfg.sensor_id.clone());
 
-    // Source: pcap replay (privilege-free) or live interfaces.
-    if let Some(pcap) = &cfg.pcap {
+    // Source: pcap replay (privilege-free) or live interfaces. The resolved
+    // capture backend (#227) is surfaced as a `capture/backend` info point + log
+    // so an AF_XDP→AF_PACKET fallback isn't an invisible perf cliff.
+    let backend_label = if let Some(pcap) = &cfg.pcap {
         b = b.pcap_source(pcap);
+        "pcap-replay".to_string()
     } else {
+        let backend = map::netring_backend(cfg.backend);
         for iface in &cfg.interfaces {
-            b = b.interface(iface);
+            // `capture(iface, backend)` probes + selects (Auto) and records the
+            // resolved plan, unlike the bare `interface()`.
+            b = b.capture(iface, backend.clone());
         }
+        // The actual backend chosen, straight from netring (not our request).
+        let plan = b.resolved_capture_plan();
+        if plan.is_empty() {
+            "none".to_string()
+        } else {
+            plan.iter()
+                .map(|(iface, desc)| format!("{iface}: {desc}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
+    tracing::info!(backend = %backend_label, "netring capture backend resolved");
+    // Publish the resolved backend as a `capture/backend` info point for the
+    // GUI Sensors view (#227/#228). Re-emitted on a slow tick (telemetry isn't
+    // retained) so a late-joining frontend reliably sees it; the first tick
+    // fires immediately. One tiny Text point — negligible cost.
+    {
+        let tx = tel_tx.clone();
+        let sensor_id = cfg.sensor_id.clone();
+        let label = backend_label.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(15));
+            loop {
+                tick.tick().await;
+                if tx.send(map::backend_point(&sensor_id, &label)).is_err() {
+                    break; // telemetry pump gone — sensor shutting down
+                }
+            }
+        });
     }
 
     b = b.protocol::<Tcp>();
