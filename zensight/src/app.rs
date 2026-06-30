@@ -2972,7 +2972,7 @@ impl ZenSight {
 
     /// Render the view.
     pub fn view(&self) -> Element<'_, Message> {
-        use iced::widget::{row, stack};
+        use iced::widget::{Stack, row};
 
         // Badge counts both unacknowledged rule alerts and active sensor-pushed
         // alerts (anomalies + expectation violations).
@@ -3108,11 +3108,22 @@ impl ZenSight {
             .into();
 
         // Show groups panel as a sidebar if open
-        let mut base_view: Element<'_, Message> = if self.groups.panel_open {
+        let base_view: Element<'_, Message> = if self.groups.panel_open {
             row![view_container, groups_panel(&self.groups)].into()
         } else {
             view_container
         };
+
+        // All overlays live in a single, always-present `Stack` with `base_view`
+        // permanently at layer 0. This keeps the root widget's identity stable
+        // across frames: previously the root flipped between `Container` and
+        // `Stack` (and base_view was re-wrapped) as toasts/palette/help/search
+        // came and went, so Iced saw a different node type at the root, rebuilt
+        // the entire widget-state tree, and reset every scrollable's offset —
+        // i.e. an alert toast popping in scrolled the page back to the top.
+        // Keeping base_view at index 0 lets Iced reconcile (not rebuild) its
+        // subtree, so scroll position survives. (#alerts-scroll)
+        let mut layers: Vec<Element<'_, Message>> = vec![base_view];
 
         // Global metric search overlay (#27), centered over the current view.
         if self.global_search.open {
@@ -3120,54 +3131,61 @@ impl ZenSight {
                 self.dashboard.devices.values(),
                 &self.global_search.query,
             );
-            let panel = container(crate::view::search::global_search_panel(
-                &self.global_search,
-                hits,
-            ))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill);
-            base_view = stack![base_view, panel].into();
+            layers.push(
+                container(crate::view::search::global_search_panel(
+                    &self.global_search,
+                    hits,
+                ))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into(),
+            );
         }
 
         // Command palette overlay (#28), centered over the current view.
         if self.command_palette.open {
             let filtered = crate::view::palette::filter(&self.command_palette.query);
-            let panel = container(crate::view::palette::command_palette_panel(
-                &self.command_palette,
-                &filtered,
-            ))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill);
-            base_view = stack![base_view, panel].into();
+            layers.push(
+                container(crate::view::palette::command_palette_panel(
+                    &self.command_palette,
+                    &filtered,
+                ))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into(),
+            );
         }
 
         // Keyboard-shortcuts help overlay (#28), centered over the current view.
         if self.help_open {
-            let panel = container(crate::view::help::help_overlay())
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill);
-            base_view = stack![base_view, panel].into();
+            layers.push(
+                container(crate::view::help::help_overlay())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                    .into(),
+            );
         }
 
-        // Overlay toast notifications in the bottom-right corner
-        if !self.toasts.is_empty() {
-            let toasts = container(toast_overlay(&self.toasts))
+        // Toast notifications, bottom-right. ALWAYS pushed as the top layer
+        // (it renders nothing when there are no toasts) so adding or removing a
+        // toast never changes the root topology — see the note above.
+        layers.push(
+            container(toast_overlay(&self.toasts))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .align_right(Length::Shrink)
                 .align_bottom(Length::Shrink)
-                .padding(20);
+                .padding(20)
+                .into(),
+        );
 
-            stack![base_view, toasts].into()
-        } else {
-            base_view
-        }
+        Stack::with_children(layers).into()
     }
 
     /// Get the application theme.
