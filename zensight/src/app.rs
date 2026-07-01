@@ -825,6 +825,21 @@ impl ZenSight {
                     }
                 }
             }
+            Message::NetringTableSort(which, col) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.table_mut(which).toggle_sort(col);
+                }
+            }
+            Message::NetringTableFilter(which, filter) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.table_mut(which).set_filter(filter);
+                }
+            }
+            Message::NetringTableMore(which) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.table_mut(which).load_more();
+                }
+            }
             Message::FetchNetringFlows => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netring_detail.loading();

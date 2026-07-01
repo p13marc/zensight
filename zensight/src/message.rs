@@ -167,6 +167,13 @@ pub enum Message {
     /// per device in `DeviceDetailState`.
     SelectSpecializedTab(DeviceId, crate::view::specialized::SpecializedTab),
 
+    /// Sort a netring data-table by column index (toggles direction) (#244).
+    NetringTableSort(crate::view::specialized::netring_detail::NetringTable, usize),
+    /// Set a netring data-table's substring filter (#244).
+    NetringTableFilter(crate::view::specialized::netring_detail::NetringTable, String),
+    /// Reveal another page of rows in a netring data-table (#244).
+    NetringTableMore(crate::view::specialized::netring_detail::NetringTable),
+
     /// Fetch the on-demand netring flow detail (recent flows).
     FetchNetringFlows,
     /// A netring flow-detail reply: the decoded flows, or an error message.

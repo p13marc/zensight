@@ -6,10 +6,11 @@ use iced::{Length, Theme};
 use zensight_common::TelemetryValue;
 
 use crate::message::Message;
-use crate::view::components::{card, empty_state, section_header};
+use crate::view::components::{Column as TableColumn, DataTable, SortKey, card, empty_state, section_header};
 use crate::view::device::DeviceDetailState;
 use crate::view::formatting::{format_bytes, format_count, format_rate};
 use crate::view::specialized::fetch::Fetch;
+use crate::view::specialized::netring_detail::NetringTable;
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
@@ -962,48 +963,64 @@ fn render_flow_detail(state: &DeviceDetailState) -> Element<'_, Message> {
         if flows.is_empty() {
             col = col.push(empty_state("No recent flows", None));
         } else {
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("initiator", 175),
-                    cell("dir", 26),
-                    cell("responder", 175),
-                    cell("proto", 55),
-                    cell("bytes", 85),
-                    cell("out↑ / in↓", 150),
-                    cell("dur_ms", 70),
-                    cell("reason", 80),
-                ]
-                .spacing(8),
-            );
-            for f in flows.iter().take(200) {
-                // Authoritative initiator→responder (TCP, SYN-resolved) renders a
-                // directed arrow; UDP / handshake-less flows are a best-effort
-                // first-packet guess, shown undirected (↔).
-                let dir = cell_styled(
-                    dir_glyph(f.directed),
-                    26,
-                    if f.directed { dim } else { warn },
-                );
-                list = list.push(
-                    row![
-                        cell(&f.src, 175),
-                        dir,
-                        cell(&f.dst, 175),
-                        cell(&f.proto, 55),
-                        cell(&format_bytes(f.bytes as f64), 85),
-                        cell(&dir_split(f.bytes_initiator, f.bytes_responder), 150),
-                        cell(&f.duration_ms.to_string(), 70),
-                        cell(&f.reason, 80),
-                    ]
-                    .spacing(8),
-                );
-            }
-            col = col
-                .push(text(format!("{} flows", flows.len())).size(font::EMPHASIS))
-                .push(list);
+            col = col.push(flows_table(flows, state));
         }
     }
     col.into()
+}
+
+/// The Recent-Flows table, rendered through the shared [`DataTable`] (#244) —
+/// sortable/filterable columns, responsive widths, and an explicit "N of M"
+/// footer instead of a silent `.take(200)`.
+fn flows_table<'a>(
+    flows: &'a [zensight_common::FlowRecord],
+    state: &'a DeviceDetailState,
+) -> Element<'a, Message> {
+    let columns = vec![
+        TableColumn::fill("initiator", 3, |f: &zensight_common::FlowRecord| {
+            text(f.src.clone()).size(font::CAPTION).into()
+        })
+        .sortable(|f: &zensight_common::FlowRecord| SortKey::Text(f.src.clone())),
+        // Directedness glyph: authoritative initiator→responder (TCP, SYN-resolved)
+        // renders "→"; UDP / handshake-less flows are undirected ("↔").
+        TableColumn::fixed("dir", 26.0, |f: &zensight_common::FlowRecord| {
+            text(dir_glyph(f.directed))
+                .size(font::CAPTION)
+                .style(if f.directed { dim } else { warn })
+                .into()
+        }),
+        TableColumn::fill("responder", 3, |f: &zensight_common::FlowRecord| {
+            text(f.dst.clone()).size(font::CAPTION).into()
+        })
+        .sortable(|f: &zensight_common::FlowRecord| SortKey::Text(f.dst.clone())),
+        TableColumn::fixed("proto", 55.0, |f: &zensight_common::FlowRecord| {
+            text(f.proto.clone()).size(font::CAPTION).into()
+        })
+        .sortable(|f: &zensight_common::FlowRecord| SortKey::Text(f.proto.clone())),
+        TableColumn::fixed("bytes", 85.0, |f: &zensight_common::FlowRecord| {
+            text(format_bytes(f.bytes as f64)).size(font::CAPTION).into()
+        })
+        .sortable(|f: &zensight_common::FlowRecord| SortKey::Num(f.bytes as f64)),
+        TableColumn::fixed("out↑ / in↓", 150.0, |f: &zensight_common::FlowRecord| {
+            text(dir_split(f.bytes_initiator, f.bytes_responder))
+                .size(font::CAPTION)
+                .into()
+        }),
+        TableColumn::fixed("dur_ms", 70.0, |f: &zensight_common::FlowRecord| {
+            text(f.duration_ms.to_string()).size(font::CAPTION).into()
+        })
+        .sortable(|f: &zensight_common::FlowRecord| SortKey::Num(f.duration_ms as f64)),
+        TableColumn::fixed("reason", 80.0, |f: &zensight_common::FlowRecord| {
+            text(f.reason.clone()).size(font::CAPTION).into()
+        }),
+    ];
+    DataTable::new(columns)
+        .searchable(|f: &zensight_common::FlowRecord| format!("{} {} {}", f.src, f.dst, f.proto))
+        .on_sort(|col| Message::NetringTableSort(NetringTable::Flows, col))
+        .on_filter(|q| Message::NetringTableFilter(NetringTable::Flows, q))
+        .on_more(Message::NetringTableMore(NetringTable::Flows))
+        .noun("flows")
+        .view(flows, state.netring_detail.table(NetringTable::Flows))
 }
 
 fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
