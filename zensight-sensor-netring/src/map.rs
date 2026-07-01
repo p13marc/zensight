@@ -788,6 +788,20 @@ pub fn asset_count_point(sensor_id: &str, discovered: u64) -> TelemetryPoint {
     )
 }
 
+/// Per-detector anomaly count (#254): a monotonic `Counter` of how many anomaly
+/// alerts a detector (`kind`, e.g. `RitaBeacon` / `DnsTunnel` / `NewlyObservedDomain`)
+/// has fired since sensor start, published as `anomaly/<kind>/total`. Lets the GUI
+/// Overview anomaly strip roll up per-detector activity without a Security-view
+/// round-trip; the same slug is the alert `rule`, so the two correlate.
+pub fn anomaly_count_point(sensor_id: &str, kind: &str, count: u64) -> TelemetryPoint {
+    TelemetryPoint::new(
+        sensor_id,
+        Protocol::Netring,
+        format!("anomaly/{kind}/total"),
+        TelemetryValue::Counter(count),
+    )
+}
+
 // ─── ICMP error telemetry (issue #15) ───────────────────────────────────────
 
 /// A flattened ICMP error, decomposed from netring's `IcmpError` event. Kept
@@ -1227,6 +1241,7 @@ pub fn elephant_record(
     bytes: u64,
     packets: u64,
     duration_ms: u64,
+    dir_counts: DirCounts,
 ) -> ElephantRecord {
     ElephantRecord {
         src,
@@ -1235,6 +1250,10 @@ pub fn elephant_record(
         bytes,
         packets,
         duration_ms,
+        bytes_initiator: dir_counts.bytes_initiator,
+        bytes_responder: dir_counts.bytes_responder,
+        packets_initiator: dir_counts.packets_initiator,
+        packets_responder: dir_counts.packets_responder,
     }
 }
 
@@ -1967,11 +1986,32 @@ mod tests {
             10_000_000,
             8000,
             4200,
+            DirCounts {
+                bytes_initiator: 400_000,
+                bytes_responder: 9_600_000,
+                packets_initiator: 3000,
+                packets_responder: 5000,
+            },
         );
         assert_eq!(r.src, "10.0.0.1:5");
         assert_eq!(r.bytes, 10_000_000);
         assert_eq!(r.proto, "tcp");
         assert_eq!(r.duration_ms, 4200);
+        // Per-direction split (#255): totals stay, splits are carried through.
+        assert_eq!(r.bytes_initiator, 400_000);
+        assert_eq!(r.bytes_responder, 9_600_000);
+        assert_eq!(r.packets_initiator, 3000);
+        assert_eq!(r.packets_responder, 5000);
+        assert_eq!(r.bytes_initiator + r.bytes_responder, r.bytes);
+    }
+
+    #[test]
+    fn anomaly_count_point_is_counter_with_slug_path() {
+        let p = anomaly_count_point("host01", "RitaBeacon", 7);
+        assert_eq!(p.metric, "anomaly/RitaBeacon/total");
+        assert_eq!(p.value, TelemetryValue::Counter(7));
+        assert_eq!(p.source, "host01");
+        assert_eq!(p.protocol, Protocol::Netring);
     }
 
     #[test]

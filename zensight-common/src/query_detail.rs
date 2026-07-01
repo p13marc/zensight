@@ -184,6 +184,17 @@ pub struct ElephantRecord {
     pub bytes: u64,
     pub packets: u64,
     pub duration_ms: u64,
+    /// Per-direction byte counts (#255): initiator = src→dst, responder = the
+    /// reverse. `bytes` stays the both-directions total. Additive/backward-compatible.
+    #[serde(default)]
+    pub bytes_initiator: u64,
+    #[serde(default)]
+    pub bytes_responder: u64,
+    /// Per-direction packet counts (#255). `packets` stays the total.
+    #[serde(default)]
+    pub packets_initiator: u64,
+    #[serde(default)]
+    pub packets_responder: u64,
 }
 
 /// One observed DNS second-level domain (netring), served on demand. Carries the

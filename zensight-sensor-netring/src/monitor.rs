@@ -1777,6 +1777,7 @@ fn on_flow_ended(
                 total_bytes,
                 total_packets,
                 duration_ms,
+                dir_counts,
             );
             ring.push_back(er);
             if ring.len() > ELEPHANT_RING_CAP {

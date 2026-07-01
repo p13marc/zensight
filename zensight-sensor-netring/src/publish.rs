@@ -168,6 +168,12 @@ pub async fn run_drains(
         points
     };
 
+    // Per-detector anomaly counts (#254): monotonic totals keyed by detector slug
+    // (the alert `rule` / `AnomalyView::kind`), re-emitted each aggregate tick as
+    // `anomaly/<kind>/total` counters so the GUI can roll up per-detector activity.
+    let mut anomaly_counts: std::collections::HashMap<String, u64> =
+        std::collections::HashMap::new();
+
     loop {
         tokio::select! {
             // Telemetry points from monitor callbacks.
@@ -188,15 +194,23 @@ pub async fn run_drains(
                         // (fast pcap EOF, or a clean live shutdown).
                         while let Ok(a) = channels.anomalies.try_recv() {
                             let view = to_view(&a);
+                            *anomaly_counts.entry(view.kind.clone()).or_default() += 1;
                             let alert = map::anomaly_alert(&sensor_id, &view);
                             if let Err(e) = reporter.observe(alert, Some(Duration::ZERO)).await {
                                 tracing::warn!(error = %e, "failed to publish anomaly alert");
                             }
                         }
                         while let Ok(alert) = channels.alerts.try_recv() {
+                            count_anomaly_alert(&mut anomaly_counts, &alert);
                             if let Err(e) = drain_sensor_alert(&reporter, alert).await {
                                 tracing::warn!(error = %e, "failed to publish sensor alert");
                             }
+                        }
+                        // Flush a final per-detector count so short replays surface totals.
+                        for (kind, count) in &anomaly_counts {
+                            let point = map::anomaly_count_point(&sensor_id, kind, *count);
+                            let suffix = format!("{}/{}", point.source, point.metric);
+                            let _ = registry.publish(&suffix, &point).await;
                         }
                         // Give late subscribers a moment to pull from the cache.
                         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -208,6 +222,7 @@ pub async fn run_drains(
             anomaly = channels.anomalies.recv() => {
                 if let Some(a) = anomaly {
                     let view = to_view(&a);
+                    *anomaly_counts.entry(view.kind.clone()).or_default() += 1;
                     let alert = map::anomaly_alert(&sensor_id, &view);
                     if let Err(e) = reporter.observe(alert, Some(Duration::ZERO)).await {
                         tracing::warn!(error = %e, "failed to publish anomaly alert");
@@ -218,9 +233,11 @@ pub async fn run_drains(
             // AlertReporter (never lossy). Firing alerts are observed; resolved
             // alerts (capture recovered) reconcile the firing set away.
             alert = channels.alerts.recv() => {
-                if let Some(alert) = alert
-                    && let Err(e) = drain_sensor_alert(&reporter, alert).await {
-                    tracing::warn!(error = %e, "failed to publish sensor alert");
+                if let Some(alert) = alert {
+                    count_anomaly_alert(&mut anomaly_counts, &alert);
+                    if let Err(e) = drain_sensor_alert(&reporter, alert).await {
+                        tracing::warn!(error = %e, "failed to publish sensor alert");
+                    }
                 }
             }
             // Periodic aggregates.
@@ -230,10 +247,32 @@ pub async fn run_drains(
                     let suffix = format!("{}/{}", point.source, point.metric);
                     if let Err(e) = registry.publish(&suffix, &point).await { tracing::warn!(error=%e, "publish failed"); }
                 }
+                // Per-detector anomaly counters (#254): re-emit the running totals.
+                for (kind, count) in &anomaly_counts {
+                    let point = map::anomaly_count_point(&sensor_id, kind, *count);
+                    health.record_metrics_published(1);
+                    let suffix = format!("{}/{}", point.source, point.metric);
+                    if let Err(e) = registry.publish(&suffix, &point).await { tracing::warn!(error=%e, "publish failed"); }
+                }
                 // The capture host responded this window.
                 health.record_device_success(&sensor_id);
             }
         }
+    }
+}
+
+/// Tally a firing **anomaly** alert into the per-detector counts (#254), keyed by
+/// its rule (detector slug). DNS-tunnel / NOD detectors arrive here as pre-built
+/// `Alert`s on the alerts channel (unlike flowscope anomalies), so this is where
+/// they get counted. Operational alerts (capture-overload, ICMP flow-killed) carry
+/// a non-`Anomaly` kind and are skipped, as are resolve transitions.
+fn count_anomaly_alert(
+    counts: &mut std::collections::HashMap<String, u64>,
+    alert: &zensight_common::Alert,
+) {
+    use zensight_common::AlertKind;
+    if alert.kind == AlertKind::Anomaly && alert.is_firing() {
+        *counts.entry(alert.rule.clone()).or_default() += 1;
     }
 }
 
@@ -249,5 +288,53 @@ async fn drain_sensor_alert(
         reporter.observe(alert, Some(Duration::ZERO)).await
     } else {
         reporter.reconcile(&alert.rule, &[]).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use zensight_common::{Alert, AlertKind, AlertSeverity, Protocol};
+
+    use super::count_anomaly_alert;
+
+    fn anomaly(rule: &str) -> Alert {
+        Alert::new(
+            "host01",
+            Protocol::Netring,
+            AlertKind::Anomaly,
+            rule,
+            AlertSeverity::Warning,
+            "test",
+        )
+    }
+
+    #[test]
+    fn counts_firing_anomalies_by_rule() {
+        let mut counts: HashMap<String, u64> = HashMap::new();
+        count_anomaly_alert(&mut counts, &anomaly("DnsTunnel"));
+        count_anomaly_alert(&mut counts, &anomaly("DnsTunnel"));
+        count_anomaly_alert(&mut counts, &anomaly("NewlyObservedDomain"));
+        assert_eq!(counts.get("DnsTunnel"), Some(&2));
+        assert_eq!(counts.get("NewlyObservedDomain"), Some(&1));
+    }
+
+    #[test]
+    fn skips_non_anomaly_and_resolved() {
+        let mut counts: HashMap<String, u64> = HashMap::new();
+        // Operational (non-anomaly) alerts must not inflate detector counts.
+        let health = Alert::new(
+            "host01",
+            Protocol::Netring,
+            AlertKind::SensorHealth,
+            "capture-overload",
+            AlertSeverity::Warning,
+            "test",
+        );
+        count_anomaly_alert(&mut counts, &health);
+        // A resolved anomaly (reconcile transition) must not be counted either.
+        count_anomaly_alert(&mut counts, &anomaly("PortScanTRW").resolved());
+        assert!(counts.is_empty());
     }
 }
