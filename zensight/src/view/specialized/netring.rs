@@ -321,46 +321,83 @@ fn render_assets(state: &DeviceDetailState) -> Element<'_, Message> {
         if records.is_empty() {
             col = col.push(empty_state("No assets discovered yet", None));
         } else {
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("mac", 150),
-                    cell("ip", 150),
-                    cell("hostname", 150),
-                    cell("vendor", 150),
-                    cell("platform", 160),
-                    cell("caps", 130),
-                    cell("seen via", 110),
-                ]
-                .spacing(8),
-            );
-            for r in records.iter().take(200) {
-                let ip = r
-                    .ipv4
-                    .first()
-                    .or_else(|| r.ipv6.first())
-                    .map(String::as_str)
-                    .unwrap_or("-");
-                list = list.push(
-                    row![
-                        cell(&r.mac, 150),
-                        cell(ip, 150),
-                        cell(r.hostname.as_deref().unwrap_or("-"), 150),
-                        // vendor was collected (DHCP opt 60 / LLDP / SSDP) but never
-                        // rendered (#120).
-                        cell(r.vendor.as_deref().unwrap_or("-"), 150),
-                        cell(r.platform.as_deref().unwrap_or("-"), 160),
-                        cell(&join_or_dash(&r.capabilities), 130),
-                        cell(&join_or_dash(&r.seen_via), 110),
-                    ]
-                    .spacing(8),
-                );
-            }
-            col = col
-                .push(text(format!("{} assets", records.len())).size(font::EMPHASIS))
-                .push(list);
+            col = col.push(assets_table(records, state));
         }
     }
     col.into()
+}
+
+/// First IPv4 (else first IPv6) of an asset, or `"-"`.
+fn asset_ip(r: &zensight_common::AssetRecord) -> &str {
+    r.ipv4
+        .first()
+        .or_else(|| r.ipv6.first())
+        .map(String::as_str)
+        .unwrap_or("-")
+}
+
+/// Assets tab table (#252): first-class, filterable/sortable inventory. The IP
+/// column is a drill-down pivot to the asset's flows.
+fn assets_table<'a>(
+    records: &'a [zensight_common::AssetRecord],
+    state: &'a DeviceDetailState,
+) -> Element<'a, Message> {
+    use zensight_common::AssetRecord;
+    let columns = vec![
+        TableColumn::fill("mac", 3, |r: &AssetRecord| {
+            text(r.mac.clone()).size(font::CAPTION).into()
+        })
+        .sortable(|r: &AssetRecord| SortKey::Text(r.mac.clone())),
+        // IP → flows pivot (asset drill-down, #246/#252).
+        TableColumn::fill("ip", 3, |r: &AssetRecord| {
+            let ip = asset_ip(r);
+            if ip == "-" {
+                text("-").size(font::CAPTION).into()
+            } else {
+                pivot_button(state, ip, ip)
+            }
+        })
+        .sortable(|r: &AssetRecord| SortKey::Text(asset_ip(r).to_string())),
+        TableColumn::fill("hostname", 3, |r: &AssetRecord| {
+            text(r.hostname.clone().unwrap_or_else(|| "-".into()))
+                .size(font::CAPTION)
+                .into()
+        })
+        .sortable(|r: &AssetRecord| SortKey::Text(r.hostname.clone().unwrap_or_default())),
+        // vendor was collected (DHCP opt 60 / LLDP / SSDP) but never rendered (#120).
+        TableColumn::fill("vendor", 3, |r: &AssetRecord| {
+            text(r.vendor.clone().unwrap_or_else(|| "-".into()))
+                .size(font::CAPTION)
+                .into()
+        })
+        .sortable(|r: &AssetRecord| SortKey::Text(r.vendor.clone().unwrap_or_default())),
+        TableColumn::fill("platform", 3, |r: &AssetRecord| {
+            text(r.platform.clone().unwrap_or_else(|| "-".into()))
+                .size(font::CAPTION)
+                .into()
+        }),
+        TableColumn::fill("caps", 3, |r: &AssetRecord| {
+            text(join_or_dash(&r.capabilities)).size(font::CAPTION).into()
+        }),
+        TableColumn::fill("seen via", 2, |r: &AssetRecord| {
+            text(join_or_dash(&r.seen_via)).size(font::CAPTION).into()
+        }),
+    ];
+    DataTable::new(columns)
+        .searchable(|r: &AssetRecord| {
+            format!(
+                "{} {} {} {}",
+                r.mac,
+                asset_ip(r),
+                r.hostname.clone().unwrap_or_default(),
+                r.vendor.clone().unwrap_or_default(),
+            )
+        })
+        .on_sort(|c| Message::NetringTableSort(NetringTable::Assets, c))
+        .on_filter(|q| Message::NetringTableFilter(NetringTable::Assets, q))
+        .on_more(Message::NetringTableMore(NetringTable::Assets))
+        .noun("assets")
+        .view(records, state.netring_detail.table(NetringTable::Assets))
 }
 
 /// Join a slug list with commas, or `"-"` when empty.
@@ -1176,17 +1213,27 @@ fn cell<'a>(s: &str, width: u16) -> Element<'a, Message> {
 /// clicking it jumps to the Flows tab filtered to `endpoint`. The shared
 /// affordance reused by talkers / matrix / assets rows ("every label is a link").
 fn pivot_cell<'a>(state: &DeviceDetailState, endpoint: &str, width: u16) -> Element<'a, Message> {
-    container(
-        button(text(endpoint.to_string()).size(12))
-            .padding(0)
-            .style(iced::widget::button::text)
-            .on_press(Message::NetringPivotToFlows(
-                state.device_id.clone(),
-                endpoint.to_string(),
-            )),
-    )
-    .width(Length::Fixed(width as f32))
-    .into()
+    container(pivot_button(state, endpoint, endpoint))
+        .width(Length::Fixed(width as f32))
+        .into()
+}
+
+/// The width-less drill-down affordance for use inside a [`DataTable`] cell
+/// (the table owns the column width). Clicking pivots to the Flows tab filtered
+/// to `endpoint` (#246).
+fn pivot_button<'a>(
+    state: &DeviceDetailState,
+    endpoint: &str,
+    label: &str,
+) -> Element<'a, Message> {
+    button(text(label.to_string()).size(font::CAPTION))
+        .padding(0)
+        .style(iced::widget::button::text)
+        .on_press(Message::NetringPivotToFlows(
+            state.device_id.clone(),
+            endpoint.to_string(),
+        ))
+        .into()
 }
 
 /// A fixed-width table cell whose text is tinted by `style` (e.g. drop-rate).
