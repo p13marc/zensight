@@ -1,16 +1,19 @@
-# ZenSight — build / configure / run the GUI + sensors (netring, netlink, sysinfo, logs)
+# ZenSight — build / configure / run the GUI + sensors (netring, netlink, sysinfo, logs, systemd)
 #
 #   just run            # build, grant caps, configure, then launch everything
 #   just demo           # run the GUI in demo mode (simulated data, no sensors)
 #   just setup          # build + grant capabilities only
 #   just gui            # run just the GUI
-#   just <sensor>       # run a single sensor (netring | netlink | sysinfo | logs)
+#   just <sensor>       # run a single sensor (netring | netlink | sysinfo | logs | systemd)
 #
 # netring captures packets and needs CAP_NET_RAW (+CAP_IPC_LOCK for AF_XDP);
 # netlink's optional collectors (nftables/conntrack + the XFRM monitor) need
 # CAP_NET_ADMIN. `just caps` grants both via sudo. sysinfo is unprivileged.
 # logs ingests the systemd journal (journald); reading the *system* journal needs
 # journal-read access — add your user to the `systemd-journal` group if it can't.
+# systemd reads the org.freedesktop.systemd1 D-Bus (system bus) read-only and is
+# unprivileged; the demo config enables everything *except* gated service control
+# (`actions`), which is left off because it stops/restarts real units.
 
 # Build profile: "release" (default) or "dev".
 profile := "release"
@@ -43,7 +46,8 @@ build:
         -p zensight-sensor-netring \
         -p zensight-sensor-netlink \
         -p zensight-sensor-sysinfo \
-        -p zensight-sensor-logs
+        -p zensight-sensor-logs \
+        -p zensight-sensor-systemd
 
 # ── Capabilities ─────────────────────────────────────────────────────────────
 
@@ -82,7 +86,55 @@ configure:
         s/enabled: false/enabled: true/
         s#dirs: \[#dirs: [ { name: "docs", path: "{{justfile_directory()}}/docs" },#
     }' configs/sysinfo.json5 > {{rundir}}/sysinfo.json5
-    echo "Configured: netring iface='{{iface}}', logs=journald, sysinfo snapshot='docs/'  (configs in {{rundir}}/)"
+    # systemd: generate a demo config with (nearly) everything on. NOTE the
+    # watchlist is deliberately a *curated* set, not `*.service` — the Units /
+    # Timers / Sockets / cgroup tabs all populate from the on-demand @/query/*
+    # channels regardless of the watchlist, so a broad watch just streams a lot of
+    # per-unit telemetry every tick for no UI gain (and, stacked on the other
+    # maxed-out sensors, can starve the desktop). `actions` (gated start/stop/
+    # restart) stays OFF — it mutates real units and is privileged.
+    cat > {{rundir}}/systemd.json5 <<'JSON5'
+    {
+      zenoh: { mode: "peer", serialization: "json" },
+      // On-demand redacted debug bundle (Sensors → report) — safe to enable.
+      report: { enabled: true, max_bytes: 67108864, cooldown_secs: 30, ttl_secs: 600, chunk_size: 524288 },
+      systemd: {
+        key_prefix: "zensight/systemd",
+        poll_interval_secs: 15,
+        // Curated per-unit stream (timers + sockets + a few high-value services).
+        // The full inventory is still browsable via the on-demand query tabs.
+        watch_units: ["*.timer", "*.socket", "sshd.service", "NetworkManager.service",
+                      "systemd-journald.service", "systemd-logind.service",
+                      "dbus-broker.service", "polkit.service", "user@*.service"],
+        watch_max: 50,
+        ip_io_accounting: true,       // per-unit IP + disk IO byte counters
+        events_capacity: 512,         // control-plane event ring (@/query/events)
+        alerts: {
+          enabled: true,
+          for_secs: 15,
+          unit_failed: true,
+          system_degraded: true,
+          restart_storm_threshold: 3,
+          restart_storm_window_secs: 300,
+          unit_mem_ceiling_bytes: 0,  // 0 = unit-mem rule off (avoids demo noise)
+          timer_overdue_grace_secs: 300,
+        },
+        cgroup: { root: "system.slice", max_depth: 6, max_children: 64, max_pids: 32 },
+        // Sentinel: default.target must be active and nothing may be failed — the
+        // latter fires a real, actionable alert iff the host has a failed unit.
+        expectations: {
+          eval_interval_secs: 15,
+          for_secs: 15,
+          targets_active: [{ target: "default.target" }],
+          forbid_failed: true,
+        },
+        // actions: { enabled: false }  // gated service control — off for the demo.
+        collect: { list_units: true, boot: true, mounts: true, journal: true },
+      },
+      logging: { level: "info" },
+    }
+    JSON5
+    echo "Configured: netring iface='{{iface}}', logs=journald, sysinfo snapshot='docs/', systemd=full  (configs in {{rundir}}/)"
 
 # ── Run (individual) ─────────────────────────────────────────────────────────
 
@@ -113,9 +165,13 @@ sysinfo: build configure
 logs: build configure
     ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-sensor-logs --config {{rundir}}/logs.json5
 
+# Run the systemd sensor (unit/boot telemetry + threshold alerts + sentinel).
+systemd: build configure
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-sensor-systemd --config {{rundir}}/systemd.json5
+
 # ── Run (everything) ─────────────────────────────────────────────────────────
 
-# Build + caps + configure, then launch the 3 sensors + GUI (close GUI to stop all).
+# Build + caps + configure, then launch the sensors + GUI (close GUI to stop all).
 run: setup configure
     #!/usr/bin/env bash
     set -euo pipefail
@@ -126,6 +182,7 @@ run: setup configure
     {{bindir}}/zensight-sensor-netlink --config {{rundir}}/netlink.json5 > {{rundir}}/netlink.log 2>&1 &
     {{bindir}}/zensight-sensor-netring --config {{rundir}}/netring.json5 > {{rundir}}/netring.log 2>&1 &
     {{bindir}}/zensight-sensor-logs --config {{rundir}}/logs.json5 > {{rundir}}/logs.log 2>&1 &
+    {{bindir}}/zensight-sensor-systemd --config {{rundir}}/systemd.json5 > {{rundir}}/systemd.log 2>&1 &
     # Stop all sensors when the GUI exits (or on Ctrl-C).
     trap 'echo; echo "Stopping sensors…"; kill 0' EXIT
     sleep 1
@@ -135,7 +192,7 @@ run: setup configure
 
 # Stop any running sensors started by `just run`.
 stop:
-    -pkill -f 'zensight-sensor-(netring|netlink|sysinfo|logs)' || true
+    -pkill -f 'zensight-sensor-(netring|netlink|sysinfo|logs|systemd)' || true
 
 # Remove generated run configs and logs.
 clean-run:
