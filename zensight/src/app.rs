@@ -798,16 +798,41 @@ impl ZenSight {
             Message::SetNetlinkSocketStateFilter(state_filter) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netlink_detail.socket_state_filter = state_filter;
+                    // Changing the filter resets pagination so matches aren't hidden.
+                    device.netlink_detail.sockets_table.limit =
+                        crate::view::components::data_table::DEFAULT_LIMIT;
                 }
             }
             Message::SetNetlinkSocketPortFilter(port) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netlink_detail.socket_port_filter = port;
+                    device.netlink_detail.sockets_table.limit =
+                        crate::view::components::data_table::DEFAULT_LIMIT;
                 }
             }
             Message::SetNetlinkSocketSort(sort) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netlink_detail.socket_sort = sort;
+                }
+            }
+            Message::NetlinkSocketsMore => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netlink_detail.sockets_table.load_more();
+                }
+            }
+            Message::NetlinkTableSort(which, col) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netlink_detail.table_mut(which).toggle_sort(col);
+                }
+            }
+            Message::NetlinkTableFilter(which, filter) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netlink_detail.table_mut(which).set_filter(filter);
+                }
+            }
+            Message::NetlinkTableMore(which) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netlink_detail.table_mut(which).load_more();
                 }
             }
 
@@ -817,11 +842,14 @@ impl ZenSight {
                 {
                     device.specialized_tab = tab;
                 }
-                // Prefetch the newly-activated tab's on-demand channel so it
-                // isn't empty until a manual fetch (netring only for now).
-                if device_id.protocol == zensight_common::Protocol::Netring
-                    && let Some(task) = self.prefetch_netring_tab(tab)
-                {
+                // Prefetch the newly-activated tab's on-demand channel(s) so it
+                // isn't empty until a manual fetch.
+                let prefetch = match device_id.protocol {
+                    zensight_common::Protocol::Netring => self.prefetch_netring_tab(tab),
+                    zensight_common::Protocol::Netlink => self.prefetch_netlink_tab(tab),
+                    _ => None,
+                };
+                if let Some(task) = prefetch {
                     return ControlFlow::Break(task);
                 }
             }
@@ -2815,6 +2843,57 @@ impl ZenSight {
             tasks.push(self.query_netring_assets());
         }
         Some(Task::batch(tasks))
+    }
+
+    /// Prefetch the on-demand `@/query` channels a newly-activated netlink tab
+    /// needs, so tabs populate without a manual "Fetch" click (#258). Only idle
+    /// channels are fetched; Overview/Interfaces/WireGuard stream live.
+    fn prefetch_netlink_tab(
+        &mut self,
+        tab: crate::view::specialized::SpecializedTab,
+    ) -> Option<Task<Message>> {
+        use crate::view::specialized::SpecializedTab as T;
+        use crate::view::specialized::fetch::Fetch;
+        use crate::view::specialized::netlink_detail::NetlinkDetailTopic as Topic;
+
+        let topics: &[Topic] = match tab {
+            T::Sockets => &[Topic::Sockets],
+            T::RoutingNeighbors => &[
+                Topic::Routes,
+                Topic::Neighbors,
+                Topic::Addresses,
+                Topic::RouteChanges,
+            ],
+            T::Qos => &[Topic::Tc],
+            T::FirewallIpsec => &[Topic::Xfrm, Topic::Nft],
+            T::Events => &[Topic::Events],
+            _ => return None,
+        };
+
+        let d = &self.selected_device.as_ref()?.netlink_detail;
+        let is_idle = |t: Topic| match t {
+            Topic::Sockets => matches!(d.sockets, Fetch::Idle),
+            Topic::Routes => matches!(d.routes, Fetch::Idle),
+            Topic::Neighbors => matches!(d.neighbors, Fetch::Idle),
+            Topic::Addresses => matches!(d.addresses, Fetch::Idle),
+            Topic::Events => matches!(d.events, Fetch::Idle),
+            Topic::RouteChanges => matches!(d.route_changes, Fetch::Idle),
+            Topic::Tc => matches!(d.tc, Fetch::Idle),
+            Topic::Xfrm => matches!(d.xfrm, Fetch::Idle),
+            Topic::Nft => matches!(d.nft, Fetch::Idle),
+        };
+        let todo: Vec<Topic> = topics.iter().copied().filter(|t| is_idle(*t)).collect();
+        if todo.is_empty() {
+            return None;
+        }
+        if let Some(device) = self.selected_device.as_mut() {
+            for t in &todo {
+                device.netlink_detail.loading(*t);
+            }
+        }
+        Some(Task::batch(
+            todo.into_iter().map(|t| self.query_netlink_detail(t)),
+        ))
     }
 
     fn query_netring_flows(&self) -> Task<Message> {

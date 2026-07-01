@@ -117,7 +117,7 @@ zensight/                    # Workspace root
 │   │       │   ├── graph.rs # Canvas-based graph rendering
 │   │       │   └── layout.rs# Force-directed layout algorithm
 │   │       ├── specialized/ # Per-protocol views + drill-down detail panels
-│   │       │   ├── netlink.rs / netlink_detail.rs  # interfaces, sockets, control-plane
+│   │       │   ├── netlink.rs / netlink_detail.rs  # tabbed: overview/interfaces/sockets/routing/qos/firewall-ipsec/events/wireguard
 │   │       │   ├── netring.rs / netring_detail.rs  # tabbed: flows/talkers/DNS/HTTP-TLS/bandwidth/assets/security/capture
 │   │       │   ├── sysinfo.rs / sysinfo_detail.rs  # host metrics, process explorer
 │   │       │   └── syslog.rs, snmp.rs, ...         # other protocol views

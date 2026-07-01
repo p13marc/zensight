@@ -11,6 +11,9 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use zensight_common::{NeighborRecord, RouteRecord, SocketRecord};
 
+use std::collections::HashMap;
+
+use crate::view::components::TableState;
 use crate::view::specialized::fetch::Fetch;
 
 // The sensor defines these record types locally (it owns only its own crate); we
@@ -157,6 +160,21 @@ pub enum NetlinkDetailData {
     Nft(Vec<NftRuleRecord>),
 }
 
+/// Identifies a sortable/filterable netlink detail table so the shared sort/
+/// filter/load-more messages can address one table without a message per table
+/// (#244, reused across the Routing/QoS/Firewall tabs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NetlinkTable {
+    Routes,
+    Neighbors,
+    Addresses,
+    RouteChanges,
+    Tc,
+    Xfrm,
+    Nft,
+    Events,
+}
+
 /// Sort order for the socket explorer (#112). `Default` keeps the sensor's order;
 /// the others surface the worst flows first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -188,6 +206,28 @@ pub struct NetlinkDetailState {
     pub socket_port_filter: String,
     /// Socket explorer: active sort order.
     pub socket_sort: SocketSort,
+    /// Socket explorer pagination (#261): only `limit` used here (row cap + load
+    /// more), replacing the old silent `.take(200)` cutoff. Default = 200 rows.
+    pub sockets_table: TableState,
+    /// Per-detail-table sort/filter/pagination state, addressed by
+    /// [`NetlinkTable`] (#244).
+    pub tables: HashMap<NetlinkTable, TableState>,
+}
+
+impl NetlinkDetailState {
+    /// Read a detail table's interaction state (a shared default when untouched).
+    pub fn table(&self, which: NetlinkTable) -> &TableState {
+        use std::sync::OnceLock;
+        static DEFAULT: OnceLock<TableState> = OnceLock::new();
+        self.tables
+            .get(&which)
+            .unwrap_or_else(|| DEFAULT.get_or_init(TableState::default))
+    }
+
+    /// Mutable table state, created lazily on first interaction.
+    pub fn table_mut(&mut self, which: NetlinkTable) -> &mut TableState {
+        self.tables.entry(which).or_default()
+    }
 }
 
 /// The port component of an `addr:port` endpoint (after the last colon), so IPv6
@@ -245,8 +285,15 @@ impl NetlinkDetailState {
             Ok(NetlinkDetailData::Routes(v)) => self.routes = Fetch::Ready(v),
             Ok(NetlinkDetailData::Neighbors(v)) => self.neighbors = Fetch::Ready(v),
             Ok(NetlinkDetailData::Addresses(v)) => self.addresses = Fetch::Ready(v),
-            Ok(NetlinkDetailData::Events(v)) => self.events = Fetch::Ready(v),
-            Ok(NetlinkDetailData::RouteChanges(v)) => self.route_changes = Fetch::Ready(v),
+            Ok(NetlinkDetailData::Events(mut v)) => {
+                // Timelines render newest-first (#265).
+                v.sort_by_key(|r| std::cmp::Reverse(r.ts_unix));
+                self.events = Fetch::Ready(v);
+            }
+            Ok(NetlinkDetailData::RouteChanges(mut v)) => {
+                v.sort_by_key(|r| std::cmp::Reverse(r.ts_unix));
+                self.route_changes = Fetch::Ready(v);
+            }
             Ok(NetlinkDetailData::Tc(v)) => self.tc = Fetch::Ready(v),
             Ok(NetlinkDetailData::Xfrm(v)) => self.xfrm = Fetch::Ready(v),
             Ok(NetlinkDetailData::Nft(v)) => self.nft = Fetch::Ready(v),

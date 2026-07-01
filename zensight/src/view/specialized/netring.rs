@@ -125,6 +125,8 @@ fn netring_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Elemen
         Assets => column![card(render_assets(state))].spacing(space::MD),
         Capture => column![card(render_capture(state))].spacing(space::MD),
         Security => column![card(render_netring_security(state))].spacing(space::MD),
+        // netlink-only tabs never reach a netring view (falls back to Overview).
+        _ => column![].spacing(space::MD),
     };
     scrollable(inner.width(Length::Fill))
         .height(Length::Fill)
