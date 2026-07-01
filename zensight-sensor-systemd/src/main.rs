@@ -76,8 +76,15 @@ async fn main() -> Result<()> {
     let query_session = runner.session().clone();
     let query_prefix = systemd_config.key_prefix.clone();
     let query_events = event_state.clone();
+    let query_cgroup = systemd_config.cgroup.clone();
     runner.spawn(async move {
-        zensight_sensor_systemd::query::run(query_session, query_prefix, query_events).await;
+        zensight_sensor_systemd::query::run(
+            query_session,
+            query_prefix,
+            query_events,
+            query_cgroup,
+        )
+        .await;
     });
 
     // Shared AlertReporter → zensight/systemd/@/alerts/* for both the built-in
@@ -142,6 +149,15 @@ async fn main() -> Result<()> {
             Err(e) => tracing::error!(error = %e, "systemd sentinel: system bus connect failed"),
         }
     }
+
+    // Gated service control (#283) — default OFF; only declared when explicitly
+    // enabled. Read-only sensor otherwise.
+    let action_session = runner.session().clone();
+    let action_prefix = systemd_config.key_prefix.clone();
+    let action_cfg = systemd_config.actions.clone();
+    runner.spawn(async move {
+        zensight_sensor_systemd::action::run(action_session, action_prefix, action_cfg).await;
+    });
 
     let metadata = serde_json::json!({
         "source": source,

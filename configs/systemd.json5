@@ -47,6 +47,10 @@
       timer_overdue_grace_secs: 300,
     },
 
+    // cgroup-tree query (#280) — served on demand at @/query/cgroups[?path=<rel>];
+    // never streamed. Unprivileged /sys/fs/cgroup v2 walk, depth/breadth capped.
+    cgroup: { root: "system.slice", max_depth: 6, max_children: 64, max_pids: 32 },
+
     // Embedded sentinel (#277) — declarative expectations → @/alerts/*,
     // hot-swappable via @/commands/expectations. Omit to disable.
     // expectations: {
@@ -59,12 +63,27 @@
     //   forbid_failed: true,
     // },
 
+    // Gated service control (#283) — DEFAULT OFF. Destructive + privileged; the
+    // sensor is strictly read-only unless this is explicitly enabled with an
+    // allowlist. Authorization is enforced by systemd/polkit (run as root, or add
+    // a scoped polkit rule granting org.freedesktop.systemd1.manage-units for the
+    // allowlisted units). @/commands/action {verb,unit} → @/status/action.
+    // actions: {
+    //   enabled: false,
+    //   allow_units: ["nginx.service", "app-*.service"],
+    //   job_timeout_secs: 30,
+    // },
+
     collect: {
       // Enumerate units (ListUnits) for units/{total,active,failed,loaded,inactive}.
       // Turn off to only collect the cheap manager/* scalars + boot timings.
       list_units: true,
       // Boot-performance phase durations (boot/*_usec), like systemd-analyze.
       boot: true,
+      // Mount/automount state aggregates mounts/{total,mounted,failed} (#279).
+      mounts: false,
+      // Journal store health journal/{disk_usage_bytes,disk_available_bytes} (#279).
+      journal: false,
     },
   },
 

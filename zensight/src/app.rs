@@ -783,6 +783,23 @@ impl ZenSight {
     /// can fall through to the next handler.
     fn update_detail(&mut self, message: Message) -> ControlFlow<Task<Message>, Message> {
         match message {
+            Message::FetchSystemdDetail(topic) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.loading(topic);
+                }
+                return ControlFlow::Break(self.query_systemd_detail(topic));
+            }
+            Message::SystemdDetailReceived(topic, result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.apply(topic, result);
+                }
+            }
+            Message::SystemdSetUnitFilter(filter) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.unit_state_filter = filter;
+                }
+            }
+
             Message::FetchNetlinkDetail(topic) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netlink_detail.loading(topic);
@@ -847,6 +864,7 @@ impl ZenSight {
                 let prefetch = match device_id.protocol {
                     zensight_common::Protocol::Netring => self.prefetch_netring_tab(tab),
                     zensight_common::Protocol::Netlink => self.prefetch_netlink_tab(tab),
+                    zensight_common::Protocol::Systemd => self.prefetch_systemd_tab(tab),
                     _ => None,
                 };
                 if let Some(task) = prefetch {
@@ -1841,6 +1859,22 @@ impl ZenSight {
             Message::CloseExpectations => {
                 self.set_view(CurrentView::Dashboard);
             }
+            Message::SetExpTarget(target) => {
+                use crate::view::expectations::ExpTarget;
+                self.expectations.target = target;
+                self.expectations.status_note = None;
+                return match target {
+                    ExpTarget::Netlink => self.query_expectations(),
+                    ExpTarget::Systemd => self.query_systemd_expectations(),
+                };
+            }
+            Message::SetSystemdExpKind(kind) => {
+                self.expectations.systemd_kind = kind;
+            }
+            Message::SystemdExpectationsReceived(json) => {
+                self.expectations.systemd =
+                    crate::view::expectations::SystemdExpDraft::from_status(&json);
+            }
             Message::SetExpectationKind(kind) => {
                 self.expectations.new_kind = kind;
             }
@@ -1863,7 +1897,60 @@ impl ZenSight {
                 self.expectations.new_value = value;
             }
             Message::AddExpectation => {
-                use crate::view::expectations::ExpKind;
+                use crate::view::expectations::{ExpKind, ExpTarget, SystemdExpKind};
+                // Systemd sentinel (#278): mutate the accumulated draft, then push
+                // the full set via SetExpectations.
+                if self.expectations.target == ExpTarget::Systemd {
+                    let name = self.expectations.new_name.trim().to_string();
+                    let kind = self.expectations.systemd_kind;
+                    if kind != SystemdExpKind::ForbidFailed && name.is_empty() {
+                        self.toasts
+                            .push(ToastSeverity::Error, "Unit/target/timer name is required");
+                        return Task::none();
+                    }
+                    let val = self.expectations.new_value.trim().to_string();
+                    let win = self.expectations.new_port.trim().to_string();
+                    let draft = &mut self.expectations.systemd;
+                    match kind {
+                        SystemdExpKind::ServiceActive => {
+                            if !draft.services.contains(&name) {
+                                draft.services.push(name);
+                            }
+                        }
+                        SystemdExpKind::TargetActive => {
+                            if !draft.targets.contains(&name) {
+                                draft.targets.push(name);
+                            }
+                        }
+                        SystemdExpKind::TimerWithin => {
+                            let Ok(within) = val.parse::<u64>() else {
+                                self.toasts
+                                    .push(ToastSeverity::Error, "within (secs) must be a number");
+                                return Task::none();
+                            };
+                            draft.timers.retain(|(t, _)| t != &name);
+                            draft.timers.push((name, within));
+                        }
+                        SystemdExpKind::RestartRate => {
+                            let (Ok(max), Ok(window)) = (val.parse::<u32>(), win.parse::<u64>())
+                            else {
+                                self.toasts.push(
+                                    ToastSeverity::Error,
+                                    "max restarts + window (secs) must be numbers",
+                                );
+                                return Task::none();
+                            };
+                            draft.restart_rates.retain(|(u, _, _)| u != &name);
+                            draft.restart_rates.push((name, max, window));
+                        }
+                        SystemdExpKind::ForbidFailed => draft.forbid_failed = true,
+                    }
+                    let command = self.expectations.systemd.to_command_json();
+                    let key = zensight_common::command_key("zensight/systemd", "expectations");
+                    return self
+                        .send_command(key, &command, "systemd expectations pushed".to_string())
+                        .chain(self.query_systemd_expectations());
+                }
                 let e = &self.expectations;
                 let sev = severity_str(e.new_severity);
                 if e.new_name.trim().is_empty() {
@@ -1923,6 +2010,15 @@ impl ZenSight {
                     .chain(self.query_expectations());
             }
             Message::RemoveExpectation(rule) => {
+                use crate::view::expectations::ExpTarget;
+                if self.expectations.target == ExpTarget::Systemd {
+                    self.expectations.systemd.remove_rule(&rule);
+                    let command = self.expectations.systemd.to_command_json();
+                    let key = zensight_common::command_key("zensight/systemd", "expectations");
+                    return self
+                        .send_command(key, &command, format!("Removed {rule}"))
+                        .chain(self.query_systemd_expectations());
+                }
                 let command = serde_json::json!({ "type": "remove", "rule": rule });
                 let key = zensight_common::command_key("zensight/netlink", "expectations");
                 return self
@@ -1930,7 +2026,11 @@ impl ZenSight {
                     .chain(self.query_expectations());
             }
             Message::RefreshExpectations => {
-                return self.query_expectations();
+                use crate::view::expectations::ExpTarget;
+                return match self.expectations.target {
+                    ExpTarget::Netlink => self.query_expectations(),
+                    ExpTarget::Systemd => self.query_systemd_expectations(),
+                };
             }
             Message::ExpectationStatusReceived(json) => {
                 self.expectations.current = crate::view::expectations::parse_status(&json);
@@ -2583,6 +2683,36 @@ impl ZenSight {
         })
     }
 
+    /// Query the systemd sentinel's current expectation set (#278). Routes to
+    /// `SystemdExpectationsReceived`.
+    fn query_systemd_expectations(&self) -> Task<Message> {
+        let Some(session) = self.session.clone() else {
+            return Task::none();
+        };
+        let key = zensight_common::status_key("zensight/systemd", "expectations");
+        Task::future(async move {
+            match session.get(&key).await {
+                Ok(replies) => {
+                    if let Ok(reply) = replies.recv_async().await
+                        && let Ok(sample) = reply.result()
+                    {
+                        let body =
+                            String::from_utf8_lossy(&sample.payload().to_bytes()).to_string();
+                        return Message::SystemdExpectationsReceived(body);
+                    }
+                    Message::CommandFeedback {
+                        success: false,
+                        message: "No systemd sentinel responded".to_string(),
+                    }
+                }
+                Err(e) => Message::CommandFeedback {
+                    success: false,
+                    message: format!("Status query failed: {e}"),
+                },
+            }
+        })
+    }
+
     /// Query the netring sensor's current detector config (#121, status
     /// queryable). Routes to `DetectorConfigReceived`.
     fn query_detector_status(&self) -> Task<Message> {
@@ -2640,6 +2770,74 @@ impl ZenSight {
     }
 
     /// Fetch an on-demand netlink detail table from the sensor's query channel.
+    /// Prefetch the systemd detail channel(s) a newly-activated tab renders, so
+    /// the panel isn't empty until a manual refresh (#281).
+    fn prefetch_systemd_tab(
+        &self,
+        tab: crate::view::specialized::SpecializedTab,
+    ) -> Option<Task<Message>> {
+        use crate::view::specialized::SpecializedTab;
+        use crate::view::specialized::fetch::Fetch;
+        use crate::view::specialized::systemd_detail::SystemdDetailTopic;
+        let device = self.selected_device.as_ref()?;
+        let topic = match tab {
+            SpecializedTab::Units => SystemdDetailTopic::Units,
+            SpecializedTab::Timers => SystemdDetailTopic::Timers,
+            SpecializedTab::Events => SystemdDetailTopic::Events,
+            SpecializedTab::Cgroups => SystemdDetailTopic::Cgroups,
+            _ => return None,
+        };
+        // Only prefetch when we haven't already loaded/started this channel.
+        let already = match topic {
+            SystemdDetailTopic::Units => !matches!(device.systemd_detail.units, Fetch::Idle),
+            SystemdDetailTopic::Timers => !matches!(device.systemd_detail.timers, Fetch::Idle),
+            SystemdDetailTopic::Events => !matches!(device.systemd_detail.events, Fetch::Idle),
+            SystemdDetailTopic::Cgroups => !matches!(device.systemd_detail.cgroups, Fetch::Idle),
+        };
+        if already {
+            return None;
+        }
+        Some(self.query_systemd_detail(topic))
+    }
+
+    /// Fetch a systemd on-demand detail channel and wrap the outcome (#281).
+    fn query_systemd_detail(
+        &self,
+        topic: crate::view::specialized::systemd_detail::SystemdDetailTopic,
+    ) -> Task<Message> {
+        use crate::view::specialized::netlink_detail::fetch_records;
+        use crate::view::specialized::systemd_detail::{
+            SystemdDetailData, SystemdDetailTopic, fetch_one,
+        };
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::SystemdDetailReceived(
+                topic,
+                Err("Not connected to Zenoh".to_string()),
+            ));
+        };
+        let key = topic.key();
+        Task::future(async move {
+            let data = match topic {
+                SystemdDetailTopic::Units => fetch_records(session, key)
+                    .await
+                    .map(SystemdDetailData::Units),
+                SystemdDetailTopic::Timers => fetch_records(session, key)
+                    .await
+                    .map(SystemdDetailData::Timers),
+                SystemdDetailTopic::Events => fetch_records(session, key)
+                    .await
+                    .map(SystemdDetailData::Events),
+                // cgroups replies a single tree object (or null), not an array.
+                SystemdDetailTopic::Cgroups => {
+                    Some(SystemdDetailData::Cgroups(fetch_one(session, key).await))
+                }
+            };
+            let result =
+                data.ok_or_else(|| format!("No systemd sensor responded for {}", topic.label()));
+            Message::SystemdDetailReceived(topic, result)
+        })
+    }
+
     fn query_netlink_detail(
         &self,
         topic: crate::view::specialized::netlink_detail::NetlinkDetailTopic,

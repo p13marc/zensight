@@ -76,6 +76,12 @@ pub enum Message {
     OpenExpectations,
     /// Close the expectations view.
     CloseExpectations,
+    /// Select the sentinel target being authored (netlink vs systemd) (#278).
+    SetExpTarget(crate::view::expectations::ExpTarget),
+    /// Set the systemd expectation kind being authored (#278).
+    SetSystemdExpKind(crate::view::expectations::SystemdExpKind),
+    /// A systemd sentinel status reply (ExpectationsConfig JSON) (#278).
+    SystemdExpectationsReceived(String),
     /// Set the kind of expectation being authored.
     SetExpectationKind(crate::view::expectations::ExpKind),
     /// Set the expectation name (socket) or interface (link).
@@ -148,6 +154,16 @@ pub enum Message {
     SetInventoryAssetSort(crate::view::inventory::AssetSort),
     /// Set the fingerprint-explorer kind filter (`None` = all kinds).
     SetInventoryFpFilter(Option<crate::view::inventory::FpKind>),
+
+    /// Fetch an on-demand systemd detail channel (units/timers/events/cgroups) (#281).
+    FetchSystemdDetail(crate::view::specialized::systemd_detail::SystemdDetailTopic),
+    /// A systemd detail reply for a topic: the decoded payload, or an error message.
+    SystemdDetailReceived(
+        crate::view::specialized::systemd_detail::SystemdDetailTopic,
+        Result<crate::view::specialized::systemd_detail::SystemdDetailData, String>,
+    ),
+    /// Units table (#281): set the active-state filter (`None` = all).
+    SystemdSetUnitFilter(Option<String>),
 
     /// Fetch an on-demand netlink detail table (sockets/routes/neighbors).
     FetchNetlinkDetail(crate::view::specialized::netlink_detail::NetlinkDetailTopic),

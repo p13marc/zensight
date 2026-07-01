@@ -10,9 +10,9 @@
 
 use std::sync::Arc;
 
-use zensight_common::query_detail::{UnitDetail, UnitRecord};
+use zensight_common::query_detail::{TimerRecord, UnitDetail, UnitRecord};
 
-use crate::dbus::{ListedUnit, ManagerProxy, ServiceProxy, UnitProxy};
+use crate::dbus::{ListedUnit, ManagerProxy, ServiceProxy, TimerProxy, UnitProxy};
 use crate::events::EventState;
 
 /// Map one `ListUnits` row to a [`UnitRecord`] (pure — unit-testable).
@@ -41,7 +41,12 @@ fn accounting(v: u64) -> Option<u64> {
 }
 
 /// Run the on-demand unit inventory query channel until the session closes.
-pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: EventState) {
+pub async fn run(
+    session: Arc<zenoh::Session>,
+    key_prefix: String,
+    events: EventState,
+    cgroup: crate::config::CgroupConfig,
+) {
     let conn = match zbus::Connection::system().await {
         Ok(c) => c,
         Err(e) => {
@@ -61,6 +66,8 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
     let failed_key = zensight_common::command::query_key(&key_prefix, "failed");
     let unit_key = zensight_common::command::query_key(&key_prefix, "unit");
     let events_key = zensight_common::command::query_key(&key_prefix, "events");
+    let timers_key = zensight_common::command::query_key(&key_prefix, "timers");
+    let cgroups_key = zensight_common::command::query_key(&key_prefix, "cgroups");
 
     let units_q = match session.declare_queryable(&units_key).await {
         Ok(q) => q,
@@ -90,8 +97,22 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
             return;
         }
     };
+    let timers_q = match session.declare_queryable(&timers_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %timers_key, "query: declare timers failed");
+            return;
+        }
+    };
+    let cgroups_q = match session.declare_queryable(&cgroups_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %cgroups_key, "query: declare cgroups failed");
+            return;
+        }
+    };
     tracing::info!(units = %units_key, failed = %failed_key, unit = %unit_key, events = %events_key,
-        "systemd unit inventory query channel ready");
+        timers = %timers_key, cgroups = %cgroups_key, "systemd unit inventory query channel ready");
 
     loop {
         tokio::select! {
@@ -118,8 +139,73 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
                 let Ok(query) = q else { return };
                 reply_json(&query, &events.recent()).await;
             }
+            q = timers_q.recv_async() => {
+                let Ok(query) = q else { return };
+                let now = chrono::Utc::now().timestamp_micros().max(0) as u64;
+                let recs = list_timers(&conn, &manager, now).await;
+                reply_json(&query, &recs).await;
+            }
+            q = cgroups_q.recv_async() => {
+                let Ok(query) = q else { return };
+                let tree = build_cgroup_tree(&cgroup, query.parameters().as_str());
+                reply_json(&query, &tree).await;
+            }
         }
     }
+}
+
+/// Build the cgroup subtree for a `@/query/cgroups[?path=<rel>]` request (#280).
+/// `None` when the path is rejected (traversal) or the subtree doesn't exist.
+fn build_cgroup_tree(
+    cfg: &crate::config::CgroupConfig,
+    params: &str,
+) -> Option<zensight_common::query_detail::CgroupNode> {
+    let requested = param(params, "path").unwrap_or_else(|| cfg.root.clone());
+    let rel = crate::cgroup::sanitize_rel(&requested)?;
+    crate::cgroup::build_tree(
+        std::path::Path::new(crate::cgroup::CGROUP_ROOT),
+        std::path::Path::new(crate::cgroup::PROC_ROOT),
+        &rel,
+        &cfg.caps(),
+    )
+}
+
+/// Whether a next-elapse timestamp is in the past (a run is overdue).
+fn timer_overdue(next_elapse_usec: u64, now_usec: u64) -> bool {
+    next_elapse_usec != 0 && next_elapse_usec != u64::MAX && next_elapse_usec < now_usec
+}
+
+/// Enumerate `.timer` units and read their schedule into [`TimerRecord`]s (#279).
+async fn list_timers(
+    conn: &zbus::Connection,
+    manager: &ManagerProxy<'_>,
+    now_usec: u64,
+) -> Vec<TimerRecord> {
+    let listed = match manager.list_units().await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(error = %e, "query: ListUnits (timers) failed");
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for u in listed.iter().filter(|u| u.0.ends_with(".timer")) {
+        let (mut last, mut next) = (0u64, 0u64);
+        if let Ok(builder) = TimerProxy::builder(conn).path(u.6.clone())
+            && let Ok(timer) = builder.build().await
+        {
+            last = timer.last_trigger_usec().await.unwrap_or(0);
+            next = timer.next_elapse_usec_realtime().await.unwrap_or(0);
+        }
+        out.push(TimerRecord {
+            name: u.0.clone(),
+            active_state: u.3.clone(),
+            last_trigger_usec: last,
+            next_elapse_usec: next,
+            overdue: timer_overdue(next, now_usec),
+        });
+    }
+    out
 }
 
 /// Collect the unit inventory, optionally filtered to failed units only.
@@ -171,8 +257,15 @@ async fn unit_detail(
         before: unit.before().await.unwrap_or_default(),
         recent_changes: Vec::new(),
     };
-    // Service-interface resource accounting is best-effort.
-    if let Ok(svc) = ServiceProxy::builder(conn).path(path).ok()?.build().await {
+    // Service-interface resource accounting is best-effort; uncached (one-shot
+    // read, avoids the eager GetAll warning on non-service units).
+    if let Ok(svc) = ServiceProxy::builder(conn)
+        .path(path)
+        .ok()?
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
+        .await
+    {
         d.n_restarts = svc.n_restarts().await.unwrap_or(0);
         d.exec_main_status = svc.exec_main_status().await.unwrap_or(0);
         d.mem_bytes = svc.memory_current().await.ok().and_then(accounting);
@@ -248,5 +341,14 @@ mod tests {
     fn accounting_normalizes_unset() {
         assert_eq!(accounting(u64::MAX), None);
         assert_eq!(accounting(42), Some(42));
+    }
+
+    #[test]
+    fn timer_overdue_only_for_past_scheduled_elapse() {
+        let now = 1_000_000u64;
+        assert!(timer_overdue(999_999, now)); // next in the past
+        assert!(!timer_overdue(1_000_001, now)); // next in the future
+        assert!(!timer_overdue(0, now)); // no next elapse
+        assert!(!timer_overdue(u64::MAX, now)); // no next elapse
     }
 }

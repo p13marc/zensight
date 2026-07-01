@@ -345,12 +345,14 @@ impl Evaluator {
         restarts.saturating_sub(e.base)
     }
 
-    // ── D-Bus reads (best-effort) ──
+    // ── D-Bus reads (best-effort, uncached: one-shot per sweep, and the eager
+    // GetAll populate would warn on interface mismatch) ──
     async fn active_state(&self, manager: &ManagerProxy<'_>, unit: &str) -> Option<String> {
         let path = manager.load_unit(unit).await.ok()?;
         let p = UnitProxy::builder(&self.conn)
             .path(path)
             .ok()?
+            .cache_properties(zbus::proxy::CacheProperties::No)
             .build()
             .await
             .ok()?;
@@ -361,6 +363,7 @@ impl Evaluator {
         let p = TimerProxy::builder(&self.conn)
             .path(path)
             .ok()?
+            .cache_properties(zbus::proxy::CacheProperties::No)
             .build()
             .await
             .ok()?;
@@ -371,6 +374,7 @@ impl Evaluator {
         let p = crate::dbus::ServiceProxy::builder(&self.conn)
             .path(path)
             .ok()?
+            .cache_properties(zbus::proxy::CacheProperties::No)
             .build()
             .await
             .ok()?;

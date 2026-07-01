@@ -32,6 +32,7 @@ The single root is `zensight/`. Everything below it is either **telemetry**
 | `gnmi`    | zensight-sensor-gnmi    | device name |
 | `netlink` | zensight-sensor-netlink | hostname |
 | `netring` | zensight-sensor-netring | sensor id |
+| `systemd` | zensight-sensor-systemd | hostname |
 
 ---
 
@@ -51,6 +52,11 @@ zensight/netlink/host01/sockets/tcp/established
 zensight/netlink/host01/events/ipsec/changed_total      # XFRM monitor: SA/policy lifecycle (nlink 0.23)
 zensight/netlink/host01/ethtool/eth0/fec/modes          # ethtool FEC mode(s) (nlink 0.23)
 zensight/netring/sensor01/flow/by_l4/tcp/bytes_total
+zensight/systemd/host01/units/failed                    # unit-state aggregate
+zensight/systemd/host01/boot/total_usec                 # boot-performance phase (like systemd-analyze)
+zensight/systemd/host01/unit/sshd.service/active        # watched-unit telemetry (unit label carries raw name)
+zensight/systemd/host01/mounts/mounted                  # opt-in mount roll-up (collect.mounts)
+zensight/systemd/host01/journal/disk_usage_bytes        # opt-in journal health (collect.journal)
 ```
 
 Payload: a serialized [`TelemetryPoint`] (JSON or CBOR per the sensor's
@@ -115,6 +121,8 @@ Per-sensor operational channels. All are derived from the sensor's `key_prefix`.
 | netlink | `expectations` | hot-swap sentinel expectations |
 | netlink | `collection` | toggle collectors at runtime |
 | netring | `detectors` | runtime detection tuning: allowlist + per-detector mute/threshold |
+| systemd | `expectations` | hot-swap sentinel expectations (service/target/timer/restart-rate/forbid-failed) |
+| systemd | `action` | gated service control `{verb,unit}` (start/stop/restart/reload) — **default OFF**, allowlist + polkit |
 
 ### 3.1a Debug reports — `@/report/*`
 
@@ -170,6 +178,7 @@ as Zenoh selector params (e.g. `?top=20`, `?state=&port=`).
 | sysinfo | `processes?sort=cpu\|mem\|io&top=N`, `latency`² | `Vec<ProcessRecord>` / `LatencyReport` |
 | netlink | `routes`, `neighbors`, `sockets?state=&port=`, `addresses`, `events`, `route_changes`, `tc`, `xfrm`, `nft`, `retransmits`³, `connections`³ | `Vec<…Record>` |
 | netring | `flows`, `tls`, `talkers?top=N`, `matrix?top=N`, `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`, `ja4h?top=N`¹, `assets` | `Vec<…Record>` |
+| systemd | `units`, `failed`, `unit?name=<u>`, `timers`, `events`, `cgroups?path=<rel>` | `Vec<UnitRecord>` / `UnitDetail` / `Vec<TimerRecord>` / `Vec<EventRecord>` / `CgroupNode` |
 
 Note: sysinfo's `@/query/*` keys carry the `<hostname>` segment
 (`zensight/sysinfo/<host>/@/query/<topic>`), unlike netlink/netring which use the

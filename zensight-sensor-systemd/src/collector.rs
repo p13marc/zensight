@@ -231,8 +231,9 @@ impl SystemdCollector {
             None
         };
 
-        // Enumerate units once if either the aggregates or the watchlist need it.
-        let need_units = collect.list_units || !self.watch.is_empty();
+        // Enumerate units once if the aggregates, the watchlist, or the mount
+        // roll-up need it.
+        let need_units = collect.list_units || collect.mounts || !self.watch.is_empty();
         let listed = if need_units {
             proxy.list_units().await?
         } else {
@@ -288,20 +289,57 @@ impl SystemdCollector {
                         tracing::warn!(unit = %u.0, error = %e, "failed to sample watched unit")
                     }
                 }
-                // Read the timer schedule for watched `.timer` units (#276).
+                // Read the timer schedule for watched `.timer` units (#276 alert
+                // input + #279 telemetry).
                 if u.0.ends_with(".timer")
                     && let Ok(builder) = crate::dbus::TimerProxy::builder(&conn).path(u.6.clone())
-                    && let Ok(timer) = builder.build().await
+                    && let Ok(timer) = builder
+                        .cache_properties(zbus::proxy::CacheProperties::No)
+                        .build()
+                        .await
                 {
                     let next = timer.next_elapse_usec_realtime().await.unwrap_or(0);
+                    let last = timer.last_trigger_usec().await.unwrap_or(0);
+                    points.extend(crate::map::timer_points(&self.source, &u.0, last, next));
                     timers.push(crate::alerts::TimerSample {
                         name: u.0.clone(),
                         next_elapse_usec_realtime: next,
                     });
                 }
+                // Read socket counters for watched `.socket` units (#279).
+                if u.0.ends_with(".socket")
+                    && let Ok(builder) = crate::dbus::SocketProxy::builder(&conn).path(u.6.clone())
+                    && let Ok(sock) = builder
+                        .cache_properties(zbus::proxy::CacheProperties::No)
+                        .build()
+                        .await
+                {
+                    let na = sock.n_accepted().await.unwrap_or(0);
+                    let nc = sock.n_connections().await.unwrap_or(0);
+                    let nr = sock.n_refused().await.unwrap_or(0);
+                    points.extend(crate::map::socket_points(&self.source, &u.0, na, nc, nr));
+                }
             }
             let unwatched = (listed.len().saturating_sub(streamed)) as u64;
             points.extend(crate::map::other_points(&self.source, unwatched));
+        }
+
+        // Mount/automount state aggregates (#279, opt-in).
+        if collect.mounts {
+            let states = listed
+                .iter()
+                .filter(|u| u.0.ends_with(".mount") || u.0.ends_with(".automount"))
+                .map(|u| u.3.as_str());
+            points.extend(crate::map::mount_points(&self.source, states));
+        }
+
+        // Journal store health (#279, opt-in): usage walk + statvfs free space.
+        if collect.journal {
+            let paths = crate::journal::DEFAULT_JOURNAL_PATHS;
+            let usage = crate::journal::usage_bytes(&paths);
+            let available =
+                crate::journal::primary_store(&paths).and_then(crate::journal::available_bytes);
+            points.extend(crate::map::journal_points(&self.source, usage, available));
         }
 
         // Optional streamed control-plane event counters (#275).

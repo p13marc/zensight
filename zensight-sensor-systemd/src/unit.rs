@@ -66,9 +66,13 @@ pub async fn sample_unit(
         active_enter_usec: unit.active_enter_timestamp().await.unwrap_or(0),
         ..Default::default()
     };
-    // Service-interface resource accounting is best-effort.
+    // Service-interface resource accounting is best-effort. Disable the property
+    // cache: these are one-shot reads, and the eager `GetAll` populate would warn
+    // for every non-service unit (timers/sockets/mounts) whose Service interface
+    // is absent.
     if let Ok(svc) = ServiceProxy::builder(conn)
         .path(path.clone())?
+        .cache_properties(zbus::proxy::CacheProperties::No)
         .build()
         .await
     {

@@ -3052,3 +3052,116 @@ fn test_syslog_device_shows_host_history() {
     assert!(ui.find("FIRST LINE alpha").is_ok());
     assert!(ui.find("SECOND LINE bravo").is_ok());
 }
+
+/// #281: the systemd specialized view renders its tab strip + overview, and
+/// clicking a tab emits SelectSpecializedTab.
+#[test]
+fn test_systemd_specialized_view_tabs() {
+    use zensight::view::specialized::{SpecializedTab, specialized_view};
+    use zensight_common::{TelemetryPoint, TelemetryValue};
+
+    let id = DeviceId {
+        protocol: Protocol::Systemd,
+        source: "server01".to_string(),
+    };
+    let mut state = DeviceDetailState::new(id.clone());
+    for (metric, v) in [
+        ("units/total", 300.0),
+        ("units/active", 280.0),
+        ("units/failed", 2.0),
+        ("manager/n_failed_units", 2.0),
+        ("boot/firmware_usec", 5_000_000.0),
+        ("boot/userspace_usec", 12_000_000.0),
+    ] {
+        state.update(TelemetryPoint::new(
+            "server01",
+            Protocol::Systemd,
+            metric,
+            TelemetryValue::Gauge(v),
+        ));
+    }
+
+    let view = specialized_view(&state).expect("systemd specialized view");
+    let mut ui = simulator(view);
+
+    // Tab strip + overview content.
+    assert!(ui.find("Overview").is_ok());
+    assert!(ui.find("Units").is_ok());
+    assert!(ui.find("Timers").is_ok());
+    assert!(ui.find("Sentinel").is_ok());
+    assert!(ui.find("cgroups").is_ok());
+    assert!(ui.find("System state").is_ok());
+    assert!(ui.find("Boot performance").is_ok());
+
+    // Clicking Units emits a tab-select for this device.
+    let _ = ui.click("Units");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(messages.iter().any(|m| matches!(
+        m,
+        Message::SelectSpecializedTab(d, SpecializedTab::Units) if d.protocol == Protocol::Systemd
+    )));
+}
+
+/// #281: the systemd Units tab shows an on-demand load affordance emitting a fetch.
+#[test]
+fn test_systemd_units_tab_fetches_on_demand() {
+    use zensight::view::specialized::specialized_view;
+    use zensight::view::specialized::systemd_detail::SystemdDetailTopic;
+
+    let id = DeviceId {
+        protocol: Protocol::Systemd,
+        source: "server01".to_string(),
+    };
+    let mut state = DeviceDetailState::new(id);
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Units;
+
+    let view = specialized_view(&state).expect("systemd view");
+    let mut ui = simulator(view);
+    // Idle fetch panel offers a Load button.
+    let _ = ui.click("Load");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::FetchSystemdDetail(SystemdDetailTopic::Units)))
+    );
+}
+
+/// #278: the expectations view can target the systemd sentinel — the systemd form
+/// renders and "Add & Push" emits AddExpectation.
+#[test]
+fn test_systemd_expectations_authoring() {
+    use zensight::view::expectations::{ExpTarget, ExpectationsState, expectations_view};
+
+    let mut state = ExpectationsState::default();
+    state.target = ExpTarget::Systemd;
+    state.new_name = "sshd.service".to_string();
+
+    let mut ui = simulator(expectations_view(&state));
+    // Systemd-flavoured header + form.
+    assert!(ui.find("Expectations (systemd sentinel)").is_ok());
+    assert!(ui.find("Declare a systemd expectation").is_ok());
+
+    let _ = ui.click("Add & Push");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::AddExpectation))
+    );
+}
+
+/// #278: a systemd draft with entries shows them in the Configured list.
+#[test]
+fn test_systemd_expectations_configured_list() {
+    use zensight::view::expectations::{ExpTarget, ExpectationsState, expectations_view};
+
+    let mut state = ExpectationsState::default();
+    state.target = ExpTarget::Systemd;
+    state.systemd.services.push("sshd.service".to_string());
+    state.systemd.forbid_failed = true;
+
+    let mut ui = simulator(expectations_view(&state));
+    assert!(ui.find("service:sshd.service").is_ok());
+    assert!(ui.find("forbid:failed").is_ok());
+}

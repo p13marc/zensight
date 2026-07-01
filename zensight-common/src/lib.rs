@@ -47,9 +47,9 @@ pub use keyexpr::{
     all_sensors_wildcard, all_telemetry_wildcard, parse_key_expr,
 };
 pub use query_detail::{
-    AssetRecord, DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord, Ja4hRecord, MatrixRecord,
-    NeighborRecord, ProcessRecord, QuicRecord, RouteRecord, SocketRecord, SshRecord, TalkerRecord,
-    TlsRecord, UnitDetail, UnitRecord,
+    AssetRecord, CgroupNode, CgroupPid, DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord,
+    Ja4hRecord, MatrixRecord, NeighborRecord, ProcessRecord, QuicRecord, RouteRecord, SocketRecord,
+    SshRecord, TalkerRecord, TimerRecord, TlsRecord, UnitDetail, UnitRecord,
 };
 pub use report::{Manifest, ReportKind, ReportOptions, ReportRequest, ReportState, ReportStatus};
 pub use serialization::{Format, decode, decode_auto, encode};

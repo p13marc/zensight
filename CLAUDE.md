@@ -54,6 +54,7 @@ cargo test -p zensight-sensor-sysinfo  # 88 tests (collectors, saturation, alert
 cargo test -p zensight-sensor-gnmi     # 15 tests   (needs protoc)
 cargo test -p zensight-sensor-netlink  # 52 tests (interfaces, sockets, sentinel rules, nft counters)
 cargo test -p zensight-sensor-netring  # 71 tests (flows, beaconing, DNS-tunnel, ATT&CK, traffic-matrix, lateral/exfil, JA4H)
+cargo test -p zensight-sensor-systemd  # 47 tests (aggregates, boot math, watchlist, timers/sockets/mounts/journal, cgroup tree, alerts, sentinel, actions)
 cargo test -p zensight-exporter-prometheus  # 60 tests (mapping, collector, alerts, HTTP)
 cargo test -p zensight-exporter-otel        # 46 tests (metrics, logs, alerts, severity)
 
@@ -155,6 +156,7 @@ zensight/                    # Workspace root
 ├── zensight-sensor-gnmi/       # gNMI streaming sensor
 ├── zensight-sensor-netlink/    # Linux kernel net telemetry (RTNETLINK/sock_diag) + embedded sentinel
 ├── zensight-sensor-netring/    # Wire-level flow telemetry (AF_PACKET/AF_XDP/pcap) + NDR detectors
+├── zensight-sensor-systemd/    # systemd unit/service/boot telemetry (D-Bus) + sentinel + gated actions
 ├── zensight-exporter-prometheus/  # Prometheus metrics exporter
 │   └── src/
 │       ├── config.rs        # Configuration parsing

@@ -57,6 +57,13 @@ pub trait Manager {
     /// Resolve (loading if needed) a unit name to its object path.
     fn load_unit(&self, name: &str) -> zbus::Result<OwnedObjectPath>;
 
+    // ── Gated service control (#283). `mode` is typically `replace`. Each returns
+    // the enqueued job object path, tracked to completion via `JobRemoved`. ──
+    fn start_unit(&self, name: &str, mode: &str) -> zbus::Result<OwnedObjectPath>;
+    fn stop_unit(&self, name: &str, mode: &str) -> zbus::Result<OwnedObjectPath>;
+    fn restart_unit(&self, name: &str, mode: &str) -> zbus::Result<OwnedObjectPath>;
+    fn reload_unit(&self, name: &str, mode: &str) -> zbus::Result<OwnedObjectPath>;
+
     /// Enable emission of `UnitNew`/`UnitRemoved`/`JobNew`/`JobRemoved` signals.
     fn subscribe(&self) -> zbus::Result<()>;
 
@@ -134,7 +141,8 @@ pub trait Service {
     fn io_write_bytes(&self) -> zbus::Result<u64>;
 }
 
-/// The `org.freedesktop.systemd1.Timer` interface subset (#276 timer-overdue).
+/// The `org.freedesktop.systemd1.Timer` interface subset (#276 timer-overdue,
+/// #279 timer telemetry).
 #[zbus::proxy(
     interface = "org.freedesktop.systemd1.Timer",
     default_service = "org.freedesktop.systemd1"
@@ -146,4 +154,19 @@ pub trait Timer {
     /// Wall-clock µs of the next scheduled elapse (0/`u64::MAX` if none).
     #[zbus(property, name = "NextElapseUSecRealtime")]
     fn next_elapse_usec_realtime(&self) -> zbus::Result<u64>;
+}
+
+/// The `org.freedesktop.systemd1.Socket` interface subset (#279 socket telemetry).
+/// Present only on `.socket` units.
+#[zbus::proxy(
+    interface = "org.freedesktop.systemd1.Socket",
+    default_service = "org.freedesktop.systemd1"
+)]
+pub trait Socket {
+    #[zbus(property, name = "NAccepted")]
+    fn n_accepted(&self) -> zbus::Result<u32>;
+    #[zbus(property, name = "NConnections")]
+    fn n_connections(&self) -> zbus::Result<u32>;
+    #[zbus(property, name = "NRefused")]
+    fn n_refused(&self) -> zbus::Result<u32>;
 }

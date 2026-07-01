@@ -36,14 +36,49 @@ impl SemConv {
 }
 
 /// Map a telemetry `(protocol, metric)` to OTel semconv, or `None` when the key
-/// has no standard equivalent (caller uses the raw name). Only sysinfo host
-/// metrics are mapped today; the entry point is protocol-keyed so other sensors
-/// can join the table later without touching the exporters.
+/// has no standard equivalent (caller uses the raw name). Sysinfo host metrics
+/// (factored `state`/`direction`/`device`) and systemd per-unit series (clean
+/// name + `unit` label) are mapped; the entry point is protocol-keyed so other
+/// sensors can join the table later without touching the exporters.
 pub fn metric_semconv(protocol: Protocol, metric: &str) -> Option<SemConv> {
     match protocol {
         Protocol::Sysinfo => sysinfo_semconv(metric),
+        Protocol::Systemd => systemd_semconv(metric),
         _ => None,
     }
+}
+
+/// The systemd key → clean-name table (#282). Per-unit series (`unit/<u>/<field>`)
+/// map to a single metric name with the unit carried as the point's existing
+/// `unit` **label** — so exporters don't bake the unit name into the metric name
+/// (Prometheus cardinality anti-pattern). Attributes are intentionally empty: the
+/// telemetry point already carries the `unit` label, and the exporters would
+/// otherwise emit it twice. Aggregate keys (`units/*`, `manager/*`, `boot/*`,
+/// `mounts/*`, `journal/*`) have no per-entity segment, so they fall through to
+/// the raw `zensight.systemd.<metric>` name.
+pub fn systemd_semconv(metric: &str) -> Option<SemConv> {
+    let parts: Vec<&str> = metric.split('/').collect();
+    let name = match parts.as_slice() {
+        ["unit", _, "active"] => "systemd.unit.active",
+        ["unit", _, "state"] => "systemd.unit.state",
+        ["unit", _, "restarts_total"] => "systemd.unit.restarts",
+        ["unit", _, "active_since_usec"] => "systemd.unit.active_since_usec",
+        ["unit", _, "mem_bytes"] => "systemd.unit.memory_bytes",
+        ["unit", _, "cpu_usec"] => "systemd.unit.cpu_usec",
+        ["unit", _, "tasks"] => "systemd.unit.tasks",
+        ["unit", _, "exit_code"] => "systemd.unit.exit_code",
+        ["unit", _, "ip_ingress_bytes"] => "systemd.unit.ip_ingress_bytes",
+        ["unit", _, "ip_egress_bytes"] => "systemd.unit.ip_egress_bytes",
+        ["unit", _, "io_read_bytes"] => "systemd.unit.io_read_bytes",
+        ["unit", _, "io_write_bytes"] => "systemd.unit.io_write_bytes",
+        ["unit", _, "n_accepted"] => "systemd.socket.accepted",
+        ["unit", _, "n_connections"] => "systemd.socket.connections",
+        ["unit", _, "n_refused"] => "systemd.socket.refused",
+        ["unit", _, "last_trigger_usec"] => "systemd.timer.last_trigger_usec",
+        ["unit", _, "next_trigger_usec"] => "systemd.timer.next_trigger_usec",
+        _ => return None,
+    };
+    SemConv::new(name, vec![])
 }
 
 /// The sysinfo key → `system.*` semconv table (#100). Pure and exhaustively
@@ -256,9 +291,47 @@ mod tests {
     }
 
     #[test]
-    fn only_sysinfo_is_mapped() {
+    fn only_sysinfo_and_systemd_are_mapped() {
         assert!(metric_semconv(Protocol::Sysinfo, "memory/used").is_some());
+        assert!(metric_semconv(Protocol::Systemd, "unit/sshd.service/active").is_some());
         assert!(metric_semconv(Protocol::Snmp, "memory/used").is_none());
         assert!(metric_semconv(Protocol::Netlink, "cpu/usage").is_none());
+    }
+
+    #[test]
+    fn systemd_per_unit_maps_to_clean_name_no_attrs() {
+        // Per-unit series collapse to one metric name; the unit rides as the
+        // point's existing label, so semconv adds NO attributes (avoids a
+        // duplicate `unit` label in the exporters).
+        let sc = systemd_semconv("unit/sshd.service/active").unwrap();
+        assert_eq!(sc.name, "systemd.unit.active");
+        assert!(sc.attributes.is_empty());
+        assert_eq!(
+            systemd_semconv("unit/user_1000.service/mem_bytes")
+                .unwrap()
+                .name,
+            "systemd.unit.memory_bytes"
+        );
+        assert_eq!(
+            systemd_semconv("unit/sshd.socket/n_accepted").unwrap().name,
+            "systemd.socket.accepted"
+        );
+        assert_eq!(
+            systemd_semconv("unit/logrotate.timer/next_trigger_usec")
+                .unwrap()
+                .name,
+            "systemd.timer.next_trigger_usec"
+        );
+    }
+
+    #[test]
+    fn systemd_aggregates_fall_through_to_raw_name() {
+        // Aggregates keep the raw zensight.systemd.<metric> name (no per-entity
+        // segment to factor out).
+        assert!(systemd_semconv("units/failed").is_none());
+        assert!(systemd_semconv("manager/n_failed_units").is_none());
+        assert!(systemd_semconv("boot/total_usec").is_none());
+        assert!(systemd_semconv("mounts/total").is_none());
+        assert!(systemd_semconv("journal/disk_usage_bytes").is_none());
     }
 }

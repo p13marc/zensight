@@ -74,9 +74,98 @@ pub struct SystemdConfig {
     #[serde(default)]
     pub expectations: Option<crate::sentinel::ExpectationsConfig>,
 
+    /// cgroup-tree query settings (#280).
+    #[serde(default)]
+    pub cgroup: CgroupConfig,
+
+    /// Gated service control (#283) — **default OFF**.
+    #[serde(default)]
+    pub actions: ActionsConfig,
+
     /// Collector toggles.
     #[serde(default)]
     pub collect: CollectConfig,
+}
+
+/// Gated service-control settings (#283). Disabled by default — the sensor is
+/// strictly read-only unless this is explicitly enabled with an allowlist.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionsConfig {
+    /// Master switch. When false, no `@/commands/action` channel is declared.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Unit-name globs a start/stop/restart/reload may target. Empty = reject all.
+    #[serde(default)]
+    pub allow_units: Vec<String>,
+    /// Bounded wait (seconds) for the `JobRemoved` completion result.
+    #[serde(default = "default_job_timeout_secs")]
+    pub job_timeout_secs: u64,
+}
+
+impl Default for ActionsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allow_units: Vec::new(),
+            job_timeout_secs: default_job_timeout_secs(),
+        }
+    }
+}
+
+fn default_job_timeout_secs() -> u64 {
+    30
+}
+
+/// `@/query/cgroups` walk settings (#280).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CgroupConfig {
+    /// Default subtree to walk when the query carries no `?path=`.
+    #[serde(default = "default_cgroup_root")]
+    pub root: String,
+    /// Maximum recursion depth.
+    #[serde(default = "default_cgroup_max_depth")]
+    pub max_depth: u32,
+    /// Maximum child directories walked per node.
+    #[serde(default = "default_cgroup_max_children")]
+    pub max_children: usize,
+    /// Maximum member PIDs recorded per node.
+    #[serde(default = "default_cgroup_max_pids")]
+    pub max_pids: usize,
+}
+
+impl Default for CgroupConfig {
+    fn default() -> Self {
+        Self {
+            root: default_cgroup_root(),
+            max_depth: default_cgroup_max_depth(),
+            max_children: default_cgroup_max_children(),
+            max_pids: default_cgroup_max_pids(),
+        }
+    }
+}
+
+impl CgroupConfig {
+    /// The walk caps derived from this config.
+    pub fn caps(&self) -> crate::cgroup::Caps {
+        crate::cgroup::Caps {
+            max_depth: self.max_depth,
+            max_children: self.max_children,
+            max_pids: self.max_pids,
+        }
+    }
+}
+
+fn default_cgroup_root() -> String {
+    "system.slice".to_string()
+}
+fn default_cgroup_max_depth() -> u32 {
+    6
+}
+fn default_cgroup_max_children() -> usize {
+    64
+}
+fn default_cgroup_max_pids() -> usize {
+    32
 }
 
 /// Compile `watch_units` globs, logging and skipping any invalid pattern. Shared
@@ -107,6 +196,16 @@ pub struct CollectConfig {
     /// monotonic timestamps. Cheap; default on.
     #[serde(default = "default_true")]
     pub boot: bool,
+
+    /// Mount/automount state aggregates (`mounts/*`) from `ListUnits` (#279).
+    /// Opt-in; default off.
+    #[serde(default)]
+    pub mounts: bool,
+
+    /// Journal-store health (`journal/*`) — disk usage + free space (#279).
+    /// Opt-in; default off.
+    #[serde(default)]
+    pub journal: bool,
 }
 
 impl Default for CollectConfig {
@@ -114,6 +213,8 @@ impl Default for CollectConfig {
         Self {
             list_units: true,
             boot: true,
+            mounts: false,
+            journal: false,
         }
     }
 }
@@ -130,6 +231,8 @@ impl Default for SystemdConfig {
             events_capacity: default_events_capacity(),
             alerts: crate::alerts::AlertsConfig::default(),
             expectations: None,
+            cgroup: CgroupConfig::default(),
+            actions: ActionsConfig::default(),
             collect: CollectConfig::default(),
         }
     }

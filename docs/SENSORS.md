@@ -338,11 +338,20 @@ unhealthy on `@/health`, retries — never crashes).
     `unit/<name>/{active,state,restarts_total,active_since_usec,mem_bytes,
     cpu_usec,tasks,exit_code}` (+ `ip/io_*_bytes` when `ip_io_accounting` and the
     unit enables accounting). Overflow → `other/units_total`.
+  - **Timers/sockets** (#279): watched `.timer` units add `unit/<t>/{last_trigger_usec,
+    next_trigger_usec}`; watched `.socket` units add `unit/<s>/{n_accepted,
+    n_connections,n_refused}`.
+  - **Mounts** (#279, opt-in `collect.mounts`): `mounts/{total,mounted,failed}`.
+  - **Journal health** (#279, opt-in `collect.journal`): `journal/{disk_usage_bytes,
+    disk_available_bytes}` (unprivileged file-size walk + statvfs).
   - **Event counters** (#275): `events/<kind>_total` (unit_new/removed,
     job_new/removed).
-- **On-demand queries** (#274/#275, never streamed): `@/query/units` →
-  `Vec<UnitRecord>`, `@/query/failed` (failed only), `@/query/unit?name=<u>` →
-  `UnitDetail` (props + deps), `@/query/events` → recent control-plane timeline.
+- **On-demand queries** (never streamed): `@/query/units` → `Vec<UnitRecord>`,
+  `@/query/failed` (failed only), `@/query/unit?name=<u>` → `UnitDetail`
+  (props + deps), `@/query/timers` → `Vec<TimerRecord>` (with `overdue` flag, #279),
+  `@/query/events` → recent control-plane timeline, `@/query/cgroups[?path=<rel>]`
+  → `CgroupNode` tree (systemd-cgls-style slice→service→scope with per-node
+  mem/cpu/tasks/io + pid/comm, #280; unprivileged `/sys/fs/cgroup` walk, capped).
 - **D-Bus event stream** (#275): `Manager.Subscribe()` → watched UnitNew/Removed +
   JobNew/Removed → the bounded timeline ring; job completions carry the
   `ActiveState` from→to transition. Nudges the sentinel for instant re-eval.
@@ -355,12 +364,20 @@ unhealthy on `@/health`, retries — never crashes).
   `restarts_rate < N/window`, `forbid failed`) → `@/alerts/*`, hot-swappable via
   `@/commands/expectations` (+ `@/status/expectations` queryable). Mirrors the
   netlink sentinel.
+- **Gated service control** (#283, `actions.*`, **DEFAULT OFF**): `@/commands/action`
+  `{verb,unit}` (start/stop/restart/reload) → `@/status/action`. The unit is
+  validated against `actions.allow_units`; the job is tracked to completion via
+  `JobRemoved`; every request is audit-logged. Authorization is delegated to
+  systemd/polkit (run as root, or a scoped polkit rule granting
+  `org.freedesktop.systemd1.manage-units` for the allowlisted units). Uses
+  `StartUnit`, not `StartTransientUnit`. No `@/commands/action` channel exists
+  unless explicitly enabled.
+- **Exporters** (#282): per-unit series export with a clean name + `unit` label
+  (e.g. `zensight_systemd_unit_active{unit="sshd.service"}`) via the shared
+  `zensight-common::semconv` table; aggregates + alerts flow through unchanged.
 - **Config:** `configs/systemd.json5` (`systemd.{key_prefix,poll_interval_secs,
   source,watch_units,watch_max,ip_io_accounting,events_capacity,alerts,
-  expectations,collect.*}`).
-- **Scope:** epic #285 — the GUI specialized view (#281), exporters (#282),
-  breadth collectors (#279), cgroup tree (#280), gated service control (#283),
-  and full docs (#284) land in follow-ups.
+  expectations,cgroup,actions,collect.*}`).
 
 ---
 
