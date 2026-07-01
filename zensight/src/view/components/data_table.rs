@@ -89,9 +89,7 @@ impl SortKey {
         use std::cmp::Ordering;
         match (self, other) {
             (SortKey::Num(a), SortKey::Num(b)) => a.total_cmp(b),
-            (SortKey::Text(a), SortKey::Text(b)) => {
-                a.to_lowercase().cmp(&b.to_lowercase())
-            }
+            (SortKey::Text(a), SortKey::Text(b)) => a.to_lowercase().cmp(&b.to_lowercase()),
             // Mixed types shouldn't happen within a column; keep it total.
             (SortKey::Num(_), SortKey::Text(_)) => Ordering::Less,
             (SortKey::Text(_), SortKey::Num(_)) => Ordering::Greater,
@@ -325,9 +323,18 @@ mod tests {
 
     fn rows() -> Vec<Row> {
         vec![
-            Row { name: "alpha".into(), bytes: 30 },
-            Row { name: "bravo".into(), bytes: 10 },
-            Row { name: "charlie".into(), bytes: 20 },
+            Row {
+                name: "alpha".into(),
+                bytes: 30,
+            },
+            Row {
+                name: "bravo".into(),
+                bytes: 10,
+            },
+            Row {
+                name: "charlie".into(),
+                bytes: 20,
+            },
         ]
     }
 

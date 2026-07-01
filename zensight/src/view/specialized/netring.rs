@@ -9,11 +9,11 @@ use iced::{Length, Theme};
 use zensight_common::TelemetryValue;
 
 use crate::message::Message;
+use crate::view::chart;
 use crate::view::components::{
     Column as TableColumn, DataTable, SortKey, TabItem, badge, card, empty_state, section_header,
     tabbed_view,
 };
-use crate::view::chart;
 use crate::view::device::DeviceDetailState;
 use crate::view::formatting::{format_bytes, format_count, format_rate};
 use crate::view::specialized::SpecializedTab;
@@ -95,10 +95,11 @@ fn netring_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Elemen
             }
             c
         }
-        Flows => {
-            column![card(render_flow_detail(state)), card(render_elephants(state))]
-                .spacing(space::MD)
-        }
+        Flows => column![
+            card(render_flow_detail(state)),
+            card(render_elephants(state))
+        ]
+        .spacing(space::MD),
         TalkersMatrix => {
             column![card(render_talkers(state)), card(render_matrix(state))].spacing(space::MD)
         }
@@ -386,7 +387,9 @@ fn assets_table<'a>(
                 .into()
         }),
         TableColumn::fill("caps", 3, |r: &AssetRecord| {
-            text(join_or_dash(&r.capabilities)).size(font::CAPTION).into()
+            text(join_or_dash(&r.capabilities))
+                .size(font::CAPTION)
+                .into()
         }),
         TableColumn::fill("seen via", 2, |r: &AssetRecord| {
             text(join_or_dash(&r.seen_via)).size(font::CAPTION).into()
@@ -711,7 +714,10 @@ fn render_dns(state: &DeviceDetailState) -> Element<'_, Message> {
         .iter()
         .filter_map(|(m, p)| {
             let r = m.strip_prefix("dns/responses_by_rcode/")?;
-            Some((r.trim_end_matches("_total").to_string(), value_f64(&p.value)))
+            Some((
+                r.trim_end_matches("_total").to_string(),
+                value_f64(&p.value),
+            ))
         })
         .collect();
     rcodes.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -1107,14 +1113,20 @@ fn flows_table<'a>(
         })
         .sortable(|f: &zensight_common::FlowRecord| SortKey::Text(f.proto.clone())),
         TableColumn::fixed("bytes", 85.0, |f: &zensight_common::FlowRecord| {
-            text(format_bytes(f.bytes as f64)).size(font::CAPTION).into()
-        })
-        .sortable(|f: &zensight_common::FlowRecord| SortKey::Num(f.bytes as f64)),
-        TableColumn::fixed("out↑ / in↓", 150.0, |f: &zensight_common::FlowRecord| {
-            text(dir_split(f.bytes_initiator, f.bytes_responder))
+            text(format_bytes(f.bytes as f64))
                 .size(font::CAPTION)
                 .into()
-        }),
+        })
+        .sortable(|f: &zensight_common::FlowRecord| SortKey::Num(f.bytes as f64)),
+        TableColumn::fixed(
+            "out↑ / in↓",
+            150.0,
+            |f: &zensight_common::FlowRecord| {
+                text(dir_split(f.bytes_initiator, f.bytes_responder))
+                    .size(font::CAPTION)
+                    .into()
+            },
+        ),
         TableColumn::fixed("dur_ms", 70.0, |f: &zensight_common::FlowRecord| {
             text(f.duration_ms.to_string()).size(font::CAPTION).into()
         })
@@ -1243,7 +1255,10 @@ fn anomaly_strip(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
     let label = if tech.is_empty() {
         format!("⚠ {n} anomal{plural} · highest {}", sev_label(highest))
     } else {
-        format!("⚠ {n} anomal{plural} · highest {} · {tech}", sev_label(highest))
+        format!(
+            "⚠ {n} anomal{plural} · highest {} · {tech}",
+            sev_label(highest)
+        )
     };
     Some(
         button(
@@ -1279,7 +1294,9 @@ fn render_netring_security(state: &DeviceDetailState) -> Element<'_, Message> {
     .spacing(space::SM);
 
     if anoms.is_empty() {
-        return col.push(empty_state("No anomalies for this sensor", None)).into();
+        return col
+            .push(empty_state("No anomalies for this sensor", None))
+            .into();
     }
 
     // Rollup by detector (rule): count + highest severity.
@@ -1430,11 +1447,13 @@ fn value_f64(v: &TelemetryValue) -> f64 {
 /// A compact RED/KPI tile: a big value over a muted caption, in a card. Used by
 /// the DNS/HTTP RED headers (#250).
 fn metric_tile<'a>(label: &str, value: String) -> Element<'a, Message> {
-    card(column![
-        text(value).size(font::SECTION),
-        text(label.to_string()).size(font::CAPTION).style(dim),
-    ]
-    .spacing(space::XS))
+    card(
+        column![
+            text(value).size(font::SECTION),
+            text(label.to_string()).size(font::CAPTION).style(dim),
+        ]
+        .spacing(space::XS),
+    )
 }
 
 #[cfg(test)]

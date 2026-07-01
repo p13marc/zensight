@@ -95,9 +95,11 @@ where
     }
 
     column![
-        container(scrollable(strip).direction(scrollable::Direction::Horizontal(
-            scrollable::Scrollbar::hidden(),
-        )))
+        container(
+            scrollable(strip).direction(scrollable::Direction::Horizontal(
+                scrollable::Scrollbar::hidden(),
+            ))
+        )
         .width(Length::Fill),
         rule::horizontal(1),
         content,
@@ -155,12 +157,7 @@ mod tests {
     #[test]
     fn clicking_inactive_tab_emits_select() {
         let items = tabs();
-        let view = tabbed_view(
-            &items,
-            DummyTab::A,
-            text("body").into(),
-            Msg::Select,
-        );
+        let view = tabbed_view(&items, DummyTab::A, text("body").into(), Msg::Select);
         let mut ui = simulator(view);
         let _ = ui.click("Bravo");
         let msgs: Vec<Msg> = ui.into_messages().collect();

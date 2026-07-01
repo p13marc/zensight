@@ -168,9 +168,15 @@ pub enum Message {
     SelectSpecializedTab(DeviceId, crate::view::specialized::SpecializedTab),
 
     /// Sort a netring data-table by column index (toggles direction) (#244).
-    NetringTableSort(crate::view::specialized::netring_detail::NetringTable, usize),
+    NetringTableSort(
+        crate::view::specialized::netring_detail::NetringTable,
+        usize,
+    ),
     /// Set a netring data-table's substring filter (#244).
-    NetringTableFilter(crate::view::specialized::netring_detail::NetringTable, String),
+    NetringTableFilter(
+        crate::view::specialized::netring_detail::NetringTable,
+        String,
+    ),
     /// Reveal another page of rows in a netring data-table (#244).
     NetringTableMore(crate::view::specialized::netring_detail::NetringTable),
 

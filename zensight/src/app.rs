@@ -2705,17 +2705,35 @@ impl ZenSight {
         let nd = &self.selected_device.as_ref()?.netring_detail;
         // Per-tab channel needs (flows, elephants, talkers, matrix, dns, http,
         // tls, quic, ssh, assets); overview/bandwidth/security/capture stream.
-        let (mut flows, mut elephants, mut talkers, mut matrix, mut dns, mut http, mut tls, mut quic, mut ssh, mut assets) =
-            match tab {
-                T::Flows => (true, true, false, false, false, false, false, false, false, false),
-                T::TalkersMatrix => {
-                    (false, false, true, true, false, false, false, false, false, false)
-                }
-                T::Dns => (false, false, false, false, true, false, false, false, false, false),
-                T::HttpTls => (false, false, false, false, false, true, true, true, true, false),
-                T::Assets => (false, false, false, false, false, false, false, false, false, true),
-                _ => return None,
-            };
+        let (
+            mut flows,
+            mut elephants,
+            mut talkers,
+            mut matrix,
+            mut dns,
+            mut http,
+            mut tls,
+            mut quic,
+            mut ssh,
+            mut assets,
+        ) = match tab {
+            T::Flows => (
+                true, true, false, false, false, false, false, false, false, false,
+            ),
+            T::TalkersMatrix => (
+                false, false, true, true, false, false, false, false, false, false,
+            ),
+            T::Dns => (
+                false, false, false, false, true, false, false, false, false, false,
+            ),
+            T::HttpTls => (
+                false, false, false, false, false, true, true, true, true, false,
+            ),
+            T::Assets => (
+                false, false, false, false, false, false, false, false, false, true,
+            ),
+            _ => return None,
+        };
         // Only fetch idle channels.
         flows &= matches!(nd.flows, Fetch::Idle);
         elephants &= matches!(nd.elephants, Fetch::Idle);

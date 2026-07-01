@@ -1696,11 +1696,9 @@ pub fn ranked_bar<'a, Message: 'a>(
         .width(Length::Fill);
         col = col.push(
             row![
-                container(text(label.clone()).size(font_caption()))
-                    .width(Length::FillPortion(3)),
+                container(text(label.clone()).size(font_caption())).width(Length::FillPortion(3)),
                 container(track).width(Length::FillPortion(5)),
-                container(text(value_fmt(*value)).size(font_caption()))
-                    .width(Length::Fixed(90.0)),
+                container(text(value_fmt(*value)).size(font_caption())).width(Length::Fixed(90.0)),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
@@ -1733,10 +1731,7 @@ pub fn donut<'a, Message: 'a>(data: &[(String, f64)], diameter: f32) -> Element<
         } else {
             0.0
         };
-        legend = legend.push(kit::badge(
-            category_color(i),
-            format!("{label} {pct:.0}%"),
-        ));
+        legend = legend.push(kit::badge(category_color(i), format!("{label} {pct:.0}%")));
     }
 
     row![canvas, legend]
@@ -1859,10 +1854,8 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for HeatmapWidget {
                     let alpha = (value / max).clamp(0.05, 1.0) as f32;
                     let color = Color { a: alpha, ..base };
                     let top_left = Point::new(x as f32 * self.cell, y as f32 * self.cell);
-                    let rect = Path::rectangle(
-                        top_left,
-                        Size::new(self.cell - 1.0, self.cell - 1.0),
-                    );
+                    let rect =
+                        Path::rectangle(top_left, Size::new(self.cell - 1.0, self.cell - 1.0));
                     frame.fill(&rect, color);
                 }
             }
