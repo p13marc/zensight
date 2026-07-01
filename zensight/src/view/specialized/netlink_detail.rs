@@ -100,6 +100,34 @@ pub struct NftRuleRecord {
     pub bytes: u64,
 }
 
+/// One top-retransmit peer from the eBPF module (`@/query/retransmits`, #269).
+/// Mirrors the sensor's `RetransRecord`; only served on eBPF-enabled hosts.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RetransRecord {
+    pub peer: String,
+    pub family: u8,
+    pub count: u64,
+}
+
+/// One tcplife connection-lifecycle record from the eBPF module
+/// (`@/query/connections`, #269). Mirrors the sensor's `ConnView`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ConnRecord {
+    pub pid: u32,
+    pub comm: String,
+    pub family: u8,
+    pub local: String,
+    pub lport: u16,
+    pub remote: String,
+    pub rport: u16,
+    pub duration_ms: u64,
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
+    pub segs_out: u32,
+    pub segs_in: u32,
+    pub retrans: u32,
+}
+
 /// Which detail table to fetch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetlinkDetailTopic {
@@ -112,6 +140,10 @@ pub enum NetlinkDetailTopic {
     Tc,
     Xfrm,
     Nft,
+    /// eBPF top-retransmit peers (#269), served only on eBPF-enabled hosts.
+    Retransmits,
+    /// eBPF tcplife connection records (#269).
+    Connections,
 }
 
 impl NetlinkDetailTopic {
@@ -127,6 +159,8 @@ impl NetlinkDetailTopic {
             NetlinkDetailTopic::Tc => "tc",
             NetlinkDetailTopic::Xfrm => "xfrm",
             NetlinkDetailTopic::Nft => "nft",
+            NetlinkDetailTopic::Retransmits => "retransmits",
+            NetlinkDetailTopic::Connections => "connections",
         };
         format!("zensight/netlink/@/query/{topic}")
     }
@@ -142,6 +176,8 @@ impl NetlinkDetailTopic {
             NetlinkDetailTopic::Tc => "TC",
             NetlinkDetailTopic::Xfrm => "XFRM",
             NetlinkDetailTopic::Nft => "NFT",
+            NetlinkDetailTopic::Retransmits => "Retransmits",
+            NetlinkDetailTopic::Connections => "Connections",
         }
     }
 }
@@ -158,6 +194,8 @@ pub enum NetlinkDetailData {
     Tc(Vec<TcRecord>),
     Xfrm(Vec<XfrmSaRecord>),
     Nft(Vec<NftRuleRecord>),
+    Retransmits(Vec<RetransRecord>),
+    Connections(Vec<ConnRecord>),
 }
 
 /// Identifies a sortable/filterable netlink detail table so the shared sort/
@@ -200,6 +238,10 @@ pub struct NetlinkDetailState {
     pub tc: Fetch<Vec<TcRecord>>,
     pub xfrm: Fetch<Vec<XfrmSaRecord>>,
     pub nft: Fetch<Vec<NftRuleRecord>>,
+    /// eBPF top-retransmit peers (#269); populated only on eBPF-enabled hosts.
+    pub retransmits: Fetch<Vec<RetransRecord>>,
+    /// eBPF tcplife connection records (#269).
+    pub connections: Fetch<Vec<ConnRecord>>,
     /// Socket explorer (#112): active TCP-state filter (`None` = all states).
     pub socket_state_filter: Option<String>,
     /// Socket explorer: port substring filter (matches local or remote port).
@@ -275,6 +317,8 @@ impl NetlinkDetailState {
             NetlinkDetailTopic::Tc => self.tc = Fetch::Loading,
             NetlinkDetailTopic::Xfrm => self.xfrm = Fetch::Loading,
             NetlinkDetailTopic::Nft => self.nft = Fetch::Loading,
+            NetlinkDetailTopic::Retransmits => self.retransmits = Fetch::Loading,
+            NetlinkDetailTopic::Connections => self.connections = Fetch::Loading,
         }
     }
 
@@ -297,6 +341,16 @@ impl NetlinkDetailState {
             Ok(NetlinkDetailData::Tc(v)) => self.tc = Fetch::Ready(v),
             Ok(NetlinkDetailData::Xfrm(v)) => self.xfrm = Fetch::Ready(v),
             Ok(NetlinkDetailData::Nft(v)) => self.nft = Fetch::Ready(v),
+            Ok(NetlinkDetailData::Retransmits(mut v)) => {
+                // Worst peers first.
+                v.sort_by_key(|r| std::cmp::Reverse(r.count));
+                self.retransmits = Fetch::Ready(v);
+            }
+            Ok(NetlinkDetailData::Connections(mut v)) => {
+                // Longest-lived first.
+                v.sort_by_key(|r| std::cmp::Reverse(r.duration_ms));
+                self.connections = Fetch::Ready(v);
+            }
             Err(e) => match topic {
                 NetlinkDetailTopic::Sockets => self.sockets = Fetch::Error(e),
                 NetlinkDetailTopic::Routes => self.routes = Fetch::Error(e),
@@ -307,6 +361,8 @@ impl NetlinkDetailState {
                 NetlinkDetailTopic::Tc => self.tc = Fetch::Error(e),
                 NetlinkDetailTopic::Xfrm => self.xfrm = Fetch::Error(e),
                 NetlinkDetailTopic::Nft => self.nft = Fetch::Error(e),
+                NetlinkDetailTopic::Retransmits => self.retransmits = Fetch::Error(e),
+                NetlinkDetailTopic::Connections => self.connections = Fetch::Error(e),
             },
         }
     }

@@ -79,11 +79,20 @@ fn netlink_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Elemen
     let inner: Column<'_, Message> = match tab {
         Overview => render_overview(state),
         Interfaces => render_interfaces_tab(state),
-        Sockets => column![
-            card(render_sockets(state)),
-            card(render_sockets_explorer(state)),
-        ]
-        .spacing(space::MD),
+        Sockets => {
+            let mut c = column![
+                card(render_sockets(state)),
+                card(render_sockets_explorer(state)),
+            ]
+            .spacing(space::MD);
+            // eBPF socket internals (#269) — only when the sensor's eBPF module
+            // answered (connlat/retransmits/connections). Absent on the
+            // unprivileged baseline, so gate on presence.
+            if let Some(ebpf) = render_ebpf_sockets(state) {
+                c = c.push(ebpf);
+            }
+            c
+        }
         RoutingNeighbors => render_routing_tab(state),
         Qos => render_qos_tab(state),
         FirewallIpsec => render_firewall_tab(state),
@@ -442,6 +451,118 @@ fn render_sockets_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
         );
     }
     col.push(list).push(footer).into()
+}
+
+/// eBPF socket internals (#269): connect-latency percentiles + top-retransmit
+/// peers + tcplife connection records, served by the sensor's opt-in eBPF module
+/// (`@/query/retransmits`, `@/query/connections`, `sockets/tcp/connlat_us_*`).
+/// Returns `None` on the unprivileged baseline (no eBPF) so the Sockets tab shows
+/// nothing extra.
+fn render_ebpf_sockets(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
+    let d = &state.netlink_detail;
+    let has_connlat = state.metrics.contains_key("sockets/tcp/connlat_us_p50")
+        || state.metrics.contains_key("sockets/tcp/connlat_us_p95");
+    let retrans = d.retransmits.ready().filter(|v| !v.is_empty());
+    let conns = d.connections.ready().filter(|v| !v.is_empty());
+    if !has_connlat && retrans.is_none() && conns.is_none() {
+        return None;
+    }
+
+    let mut col = column![section_header("eBPF socket internals", None)].spacing(space::SM);
+
+    // Connect-latency percentiles from the eBPF connlat histogram.
+    if has_connlat {
+        col = col.push(
+            row![
+                metric_tile(
+                    state,
+                    "connect p50 (µs)",
+                    "sockets/tcp/connlat_us_p50",
+                    None
+                ),
+                metric_tile(
+                    state,
+                    "connect p95 (µs)",
+                    "sockets/tcp/connlat_us_p95",
+                    None
+                ),
+            ]
+            .spacing(space::MD),
+        );
+    }
+
+    // Top-retransmit peers.
+    if let Some(rows) = retrans {
+        let mut t = Column::new().spacing(3).push(
+            row![
+                cell("peer", 240),
+                cell("family", 70),
+                cell("retransmits", 100),
+            ]
+            .spacing(8),
+        );
+        for r in rows.iter().take(20) {
+            t = t.push(
+                row![
+                    cell(&r.peer, 240),
+                    cell(fam_label(r.family), 70),
+                    cell(&r.count.to_string(), 100),
+                ]
+                .spacing(8),
+            );
+        }
+        col = col
+            .push(text("Top retransmit peers").size(font::CAPTION).style(dim))
+            .push(t);
+    }
+
+    // tcplife connection records (longest-lived first).
+    if let Some(rows) = conns {
+        let mut t = Column::new().spacing(3).push(
+            row![
+                cell("comm", 120),
+                cell("local", 170),
+                cell("remote", 170),
+                cell("dur_ms", 80),
+                cell("tx", 80),
+                cell("rx", 80),
+                cell("retx", 55),
+            ]
+            .spacing(8),
+        );
+        for c in rows.iter().take(30) {
+            t = t.push(
+                row![
+                    cell(&c.comm, 120),
+                    cell(&format!("{}:{}", c.local, c.lport), 170),
+                    cell(&format!("{}:{}", c.remote, c.rport), 170),
+                    cell(&c.duration_ms.to_string(), 80),
+                    cell(&c.tx_bytes.to_string(), 80),
+                    cell(&c.rx_bytes.to_string(), 80),
+                    cell(&c.retrans.to_string(), 55),
+                ]
+                .spacing(8),
+            );
+        }
+        col = col
+            .push(
+                text("Recent connections (tcplife)")
+                    .size(font::CAPTION)
+                    .style(dim),
+            )
+            .push(t);
+    }
+
+    Some(card(col))
+}
+
+/// Address-family label for the eBPF records' numeric `family` (AF_INET/AF_INET6).
+fn fam_label(family: u8) -> &'static str {
+    match family {
+        2 => "IPv4",
+        10 => "IPv6",
+        _ => "?",
+    }
 }
 
 /// Bucket sockets by smoothed RTT (µs) into human ranges for the histogram (#261).
