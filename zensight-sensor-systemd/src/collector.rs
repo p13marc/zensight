@@ -122,6 +122,9 @@ pub struct SystemdCollector {
     health: Arc<SensorHealth>,
     /// Compiled `watch_units` globs (#273); empty = no per-unit streaming.
     watch: Vec<glob::Pattern>,
+    /// Optional event ring (#275): when set, per-kind `events/*_total` counters
+    /// are re-emitted each tick.
+    events: Option<crate::events::EventState>,
     conn: Option<zbus::Connection>,
 }
 
@@ -133,25 +136,23 @@ impl SystemdCollector {
         health: Arc<SensorHealth>,
     ) -> Self {
         // Compile watchlist globs once; a bad pattern is logged and skipped.
-        let watch = config
-            .watch_units
-            .iter()
-            .filter_map(|p| match glob::Pattern::new(p) {
-                Ok(pat) => Some(pat),
-                Err(e) => {
-                    tracing::warn!(pattern = %p, error = %e, "ignoring invalid watch_units glob");
-                    None
-                }
-            })
-            .collect();
+        let watch = crate::config::compile_watch(&config.watch_units);
         Self {
             source,
             config,
             publisher,
             health,
             watch,
+            events: None,
             conn: None,
         }
+    }
+
+    /// Attach the shared event ring so per-kind `events/*_total` counters are
+    /// re-emitted each tick (#275).
+    pub fn with_events(mut self, events: crate::events::EventState) -> Self {
+        self.events = Some(events);
+        self
     }
 
     /// Run the periodic collect loop. Never panics: a bus/connection error records
@@ -275,6 +276,11 @@ impl SystemdCollector {
             }
             let unwatched = (listed.len().saturating_sub(streamed)) as u64;
             points.extend(crate::map::other_points(&self.source, unwatched));
+        }
+
+        // Optional streamed control-plane event counters (#275).
+        if let Some(events) = &self.events {
+            points.extend(events.counter_points(&self.source));
         }
 
         let n = points.len();

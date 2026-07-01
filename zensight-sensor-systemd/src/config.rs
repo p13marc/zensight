@@ -61,9 +61,29 @@ pub struct SystemdConfig {
     #[serde(default)]
     pub ip_io_accounting: bool,
 
+    /// Bounded capacity of the control-plane event ring (#275) served on
+    /// `@/query/events`.
+    #[serde(default = "default_events_capacity")]
+    pub events_capacity: usize,
+
     /// Collector toggles.
     #[serde(default)]
     pub collect: CollectConfig,
+}
+
+/// Compile `watch_units` globs, logging and skipping any invalid pattern. Shared
+/// by the collector (#273) and the event stream (#275).
+pub fn compile_watch(patterns: &[String]) -> Vec<glob::Pattern> {
+    patterns
+        .iter()
+        .filter_map(|p| match glob::Pattern::new(p) {
+            Ok(pat) => Some(pat),
+            Err(e) => {
+                tracing::warn!(pattern = %p, error = %e, "ignoring invalid watch_units glob");
+                None
+            }
+        })
+        .collect()
 }
 
 /// Which families the collector gathers.
@@ -99,6 +119,7 @@ impl Default for SystemdConfig {
             watch_units: Vec::new(),
             watch_max: default_watch_max(),
             ip_io_accounting: false,
+            events_capacity: default_events_capacity(),
             collect: CollectConfig::default(),
         }
     }
@@ -106,6 +127,10 @@ impl Default for SystemdConfig {
 
 fn default_watch_max() -> usize {
     50
+}
+
+fn default_events_capacity() -> usize {
+    256
 }
 
 fn default_key_prefix() -> String {

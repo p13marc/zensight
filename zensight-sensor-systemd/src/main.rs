@@ -49,11 +49,25 @@ async fn main() -> Result<()> {
         source
     );
 
-    // On-demand unit inventory query channel (#274): @/query/{units,failed,unit}.
+    // Shared control-plane event ring (#275), fed by the D-Bus event stream and
+    // served on @/query/events.
+    let event_state =
+        zensight_sensor_systemd::events::EventState::new(systemd_config.events_capacity);
+
+    // D-Bus event stream (#275): watched UnitNew/Removed + JobNew/Removed → ring.
+    let watch = zensight_sensor_systemd::config::compile_watch(&systemd_config.watch_units);
+    let events_state = event_state.clone();
+    runner.spawn(async move {
+        zensight_sensor_systemd::events::run(watch, events_state, None).await;
+    });
+
+    // On-demand unit inventory query channel (#274/#275):
+    // @/query/{units,failed,unit,events}.
     let query_session = runner.session().clone();
     let query_prefix = systemd_config.key_prefix.clone();
+    let query_events = event_state.clone();
     runner.spawn(async move {
-        zensight_sensor_systemd::query::run(query_session, query_prefix).await;
+        zensight_sensor_systemd::query::run(query_session, query_prefix, query_events).await;
     });
 
     // Spawn the collector task.
@@ -62,7 +76,8 @@ async fn main() -> Result<()> {
         systemd_config.clone(),
         runner.publisher(),
         runner.health(),
-    );
+    )
+    .with_events(event_state);
     runner.spawn(async move {
         collector.run().await;
     });

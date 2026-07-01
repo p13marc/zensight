@@ -13,6 +13,7 @@ use std::sync::Arc;
 use zensight_common::query_detail::{UnitDetail, UnitRecord};
 
 use crate::dbus::{ListedUnit, ManagerProxy, ServiceProxy, UnitProxy};
+use crate::events::EventState;
 
 /// Map one `ListUnits` row to a [`UnitRecord`] (pure — unit-testable).
 pub fn unit_record(u: &ListedUnit) -> UnitRecord {
@@ -40,7 +41,7 @@ fn accounting(v: u64) -> Option<u64> {
 }
 
 /// Run the on-demand unit inventory query channel until the session closes.
-pub async fn run(session: Arc<zenoh::Session>, key_prefix: String) {
+pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: EventState) {
     let conn = match zbus::Connection::system().await {
         Ok(c) => c,
         Err(e) => {
@@ -59,6 +60,7 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String) {
     let units_key = zensight_common::command::query_key(&key_prefix, "units");
     let failed_key = zensight_common::command::query_key(&key_prefix, "failed");
     let unit_key = zensight_common::command::query_key(&key_prefix, "unit");
+    let events_key = zensight_common::command::query_key(&key_prefix, "events");
 
     let units_q = match session.declare_queryable(&units_key).await {
         Ok(q) => q,
@@ -81,7 +83,14 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String) {
             return;
         }
     };
-    tracing::info!(units = %units_key, failed = %failed_key, unit = %unit_key,
+    let events_q = match session.declare_queryable(&events_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %events_key, "query: declare events failed");
+            return;
+        }
+    };
+    tracing::info!(units = %units_key, failed = %failed_key, unit = %unit_key, events = %events_key,
         "systemd unit inventory query channel ready");
 
     loop {
@@ -104,6 +113,10 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String) {
                     None => None,
                 };
                 reply_json(&query, &detail).await;
+            }
+            q = events_q.recv_async() => {
+                let Ok(query) = q else { return };
+                reply_json(&query, &events.recent()).await;
             }
         }
     }
