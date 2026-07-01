@@ -1,4 +1,7 @@
-//! Netring sensor specialized view — flows + per-app bandwidth.
+//! Netring sensor specialized view — a tabbed, chart-driven, drill-down surface
+//! (Overview · Flows · Talkers & Matrix · DNS · HTTP/TLS · Bandwidth · Assets ·
+//! Security · Capture) over the sensor's streamed metrics and `@/query/*`
+//! channels (#247, epic #257).
 
 use iced::Element;
 use iced::widget::{Column, button, column, container, row, scrollable, text};
@@ -6,64 +9,110 @@ use iced::{Length, Theme};
 use zensight_common::TelemetryValue;
 
 use crate::message::Message;
-use crate::view::components::{Column as TableColumn, DataTable, SortKey, card, empty_state, section_header};
+use crate::view::components::{
+    Column as TableColumn, DataTable, SortKey, TabItem, card, empty_state, section_header,
+    tabbed_view,
+};
 use crate::view::device::DeviceDetailState;
 use crate::view::formatting::{format_bytes, format_count, format_rate};
+use crate::view::specialized::SpecializedTab;
 use crate::view::specialized::fetch::Fetch;
 use crate::view::specialized::netring_detail::NetringTable;
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
-/// Render the netring sensor specialized view.
+/// Render the netring sensor specialized view: a header + the tabbed container
+/// over the active tab's content (#247).
 pub fn netring_sensor_view(state: &DeviceDetailState) -> Element<'_, Message> {
-    let mut content = column![
+    let tabs = netring_tabs(state);
+    // Fall back to Overview if the remembered tab is currently hidden (e.g. the
+    // DNS tab after the sensor stopped publishing `dns/`).
+    let active = if tabs
+        .iter()
+        .any(|t| t.visible && t.id == state.specialized_tab)
+    {
+        state.specialized_tab
+    } else {
+        SpecializedTab::Overview
+    };
+    let device_id = state.device_id.clone();
+    let content = netring_tab_content(state, active);
+    column![
         render_header(state),
-        card(render_flows(state)),
-        card(render_tcp_health(state)),
-        card(render_bandwidth(state)),
-        card(render_tls(state)),
+        tabbed_view(&tabs, active, content, move |t| {
+            Message::SelectSpecializedTab(device_id.clone(), t)
+        }),
     ]
-    .spacing(space::MD)
-    .padding(space::LG);
+    .spacing(space::SM)
+    .padding(space::LG)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
 
-    // L7 RED + per-protocol breakdowns — only when the sensor publishes them (#45).
-    if has_prefix(state, "dns/") {
-        content = content.push(card(render_dns(state)));
-    }
-    if has_prefix(state, "http/") {
-        content = content.push(card(render_http(state)));
-    }
-    if has_prefix(state, "flow/by_l4/") {
-        content = content.push(card(render_per_l4(state)));
-    }
-    // L7 QUIC SNI/ALPN + SSH/HASSH inventories (#72) — shown when the sensor
-    // publishes their aggregate count or after a fetch has been attempted.
-    if has_prefix(state, "quic/") || !matches!(state.netring_detail.quic, Fetch::Idle) {
-        content = content.push(card(render_quic(state)));
-    }
-    if has_prefix(state, "ssh/") || !matches!(state.netring_detail.ssh, Fetch::Idle) {
-        content = content.push(card(render_ssh(state)));
-    }
+/// The netring tab strip, capability-aware: tabs render only when the sensor
+/// publishes the data (or a fetch was attempted). Overview / Flows / Talkers &
+/// Matrix / HTTP-TLS / Bandwidth are always available (streamed or on-demand).
+fn netring_tabs(state: &DeviceDetailState) -> Vec<TabItem<SpecializedTab>> {
+    use SpecializedTab::*;
+    vec![
+        TabItem::new(Overview, "Overview"),
+        TabItem::new(Flows, "Flows"),
+        TabItem::new(TalkersMatrix, "Talkers & Matrix"),
+        TabItem::new(Dns, "DNS").visible(has_prefix(state, "dns/")),
+        TabItem::new(HttpTls, "HTTP/TLS"),
+        TabItem::new(Bandwidth, "Bandwidth"),
+        TabItem::new(Assets, "Assets").visible(
+            has_prefix(state, "assets/") || !matches!(state.netring_detail.assets, Fetch::Idle),
+        ),
+        TabItem::new(Capture, "Capture")
+            .visible(state.metrics.keys().any(|k| k.starts_with("capture/"))),
+    ]
+}
 
-    // Passive asset inventory (#70) — shown when the sensor publishes a
-    // discovered-count or after a fetch has been attempted.
-    if has_prefix(state, "assets/") || !matches!(state.netring_detail.assets, Fetch::Idle) {
-        content = content.push(card(render_assets(state)));
-    }
-
-    // Capture self-health only exists under live capture (not pcap replay).
-    if state.metrics.keys().any(|k| k.starts_with("capture/")) {
-        content = content.push(card(render_capture(state)));
-    }
-    content = content.push(card(render_flow_detail(state)));
-    // On-demand top-talker histogram + elephant-flow ring (#45) — always
-    // available drill-downs (the sensor serves them whenever talkers are on).
-    content = content.push(card(render_talkers(state)));
-    content = content.push(card(render_matrix(state)));
-    content = content.push(card(render_elephants(state)));
-
-    container(scrollable(content))
-        .width(Length::Fill)
+/// Build the scrollable content for a netring tab by composing the existing
+/// per-section cards. No data regression: every card in the old single-scroll
+/// view is reachable from exactly one tab.
+fn netring_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Element<'_, Message> {
+    use SpecializedTab::*;
+    let inner: Column<'_, Message> = match tab {
+        Overview => {
+            let mut c = column![card(render_flows(state)), card(render_tcp_health(state))]
+                .spacing(space::MD);
+            if has_prefix(state, "flow/by_l4/") {
+                c = c.push(card(render_per_l4(state)));
+            }
+            c
+        }
+        Flows => {
+            column![card(render_flow_detail(state)), card(render_elephants(state))]
+                .spacing(space::MD)
+        }
+        TalkersMatrix => {
+            column![card(render_talkers(state)), card(render_matrix(state))].spacing(space::MD)
+        }
+        Dns => column![card(render_dns(state))].spacing(space::MD),
+        HttpTls => {
+            let mut c = column![].spacing(space::MD);
+            if has_prefix(state, "http/") {
+                c = c.push(card(render_http(state)));
+            }
+            c = c.push(card(render_tls(state)));
+            if has_prefix(state, "quic/") || !matches!(state.netring_detail.quic, Fetch::Idle) {
+                c = c.push(card(render_quic(state)));
+            }
+            if has_prefix(state, "ssh/") || !matches!(state.netring_detail.ssh, Fetch::Idle) {
+                c = c.push(card(render_ssh(state)));
+            }
+            c
+        }
+        Bandwidth => column![card(render_bandwidth(state))].spacing(space::MD),
+        Assets => column![card(render_assets(state))].spacing(space::MD),
+        Capture => column![card(render_capture(state))].spacing(space::MD),
+        // Filled in by C4 (#253); Overview shows the anomaly strip.
+        Security => column![empty_state("No anomalies for this sensor", None)].spacing(space::MD),
+    };
+    scrollable(inner.width(Length::Fill))
         .height(Length::Fill)
         .into()
 }
