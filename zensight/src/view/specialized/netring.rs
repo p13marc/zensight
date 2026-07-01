@@ -1,4 +1,7 @@
-//! Netring sensor specialized view — flows + per-app bandwidth.
+//! Netring sensor specialized view — a tabbed, chart-driven, drill-down surface
+//! (Overview · Flows · Talkers & Matrix · DNS · HTTP/TLS · Bandwidth · Assets ·
+//! Security · Capture) over the sensor's streamed metrics and `@/query/*`
+//! channels (#247, epic #257).
 
 use iced::Element;
 use iced::widget::{Column, button, column, container, row, scrollable, text};
@@ -6,63 +9,124 @@ use iced::{Length, Theme};
 use zensight_common::TelemetryValue;
 
 use crate::message::Message;
-use crate::view::components::{card, empty_state, section_header};
+use crate::view::chart;
+use crate::view::components::{
+    Column as TableColumn, DataTable, SortKey, TabItem, badge, card, empty_state, section_header,
+    tabbed_view,
+};
 use crate::view::device::DeviceDetailState;
 use crate::view::formatting::{format_bytes, format_count, format_rate};
+use crate::view::specialized::SpecializedTab;
 use crate::view::specialized::fetch::Fetch;
+use crate::view::specialized::netring_detail::NetringTable;
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
-/// Render the netring sensor specialized view.
+/// Render the netring sensor specialized view: a header + the tabbed container
+/// over the active tab's content (#247).
 pub fn netring_sensor_view(state: &DeviceDetailState) -> Element<'_, Message> {
-    let mut content = column![
+    let tabs = netring_tabs(state);
+    // Fall back to Overview if the remembered tab is currently hidden (e.g. the
+    // DNS tab after the sensor stopped publishing `dns/`).
+    let active = if tabs
+        .iter()
+        .any(|t| t.visible && t.id == state.specialized_tab)
+    {
+        state.specialized_tab
+    } else {
+        SpecializedTab::Overview
+    };
+    let device_id = state.device_id.clone();
+    let content = netring_tab_content(state, active);
+    column![
         render_header(state),
-        card(render_flows(state)),
-        card(render_tcp_health(state)),
-        card(render_bandwidth(state)),
-        card(render_tls(state)),
+        tabbed_view(&tabs, active, content, move |t| {
+            Message::SelectSpecializedTab(device_id.clone(), t)
+        }),
     ]
-    .spacing(space::MD)
-    .padding(space::LG);
+    .spacing(space::SM)
+    .padding(space::LG)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
 
-    // L7 RED + per-protocol breakdowns — only when the sensor publishes them (#45).
-    if has_prefix(state, "dns/") {
-        content = content.push(card(render_dns(state)));
-    }
-    if has_prefix(state, "http/") {
-        content = content.push(card(render_http(state)));
-    }
-    if has_prefix(state, "flow/by_l4/") {
-        content = content.push(card(render_per_l4(state)));
-    }
-    // L7 QUIC SNI/ALPN + SSH/HASSH inventories (#72) — shown when the sensor
-    // publishes their aggregate count or after a fetch has been attempted.
-    if has_prefix(state, "quic/") || !matches!(state.netring_detail.quic, Fetch::Idle) {
-        content = content.push(card(render_quic(state)));
-    }
-    if has_prefix(state, "ssh/") || !matches!(state.netring_detail.ssh, Fetch::Idle) {
-        content = content.push(card(render_ssh(state)));
-    }
+/// The netring tab strip, capability-aware: tabs render only when the sensor
+/// publishes the data (or a fetch was attempted). Overview / Flows / Talkers &
+/// Matrix / HTTP-TLS / Bandwidth are always available (streamed or on-demand).
+fn netring_tabs(state: &DeviceDetailState) -> Vec<TabItem<SpecializedTab>> {
+    use SpecializedTab::*;
+    vec![
+        TabItem::new(Overview, "Overview"),
+        TabItem::new(Flows, "Flows"),
+        TabItem::new(TalkersMatrix, "Talkers & Matrix"),
+        TabItem::new(Dns, "DNS").visible(has_prefix(state, "dns/")),
+        TabItem::new(HttpTls, "HTTP/TLS"),
+        TabItem::new(Bandwidth, "Bandwidth"),
+        TabItem::new(Assets, "Assets").visible(
+            has_prefix(state, "assets/") || !matches!(state.netring_detail.assets, Fetch::Idle),
+        ),
+        TabItem::new(Security, "Security")
+            .visible(!state.netring_detail.anomalies.is_empty())
+            .badge(state.netring_detail.anomalies.len()),
+        TabItem::new(Capture, "Capture")
+            .visible(state.metrics.keys().any(|k| k.starts_with("capture/"))),
+    ]
+}
 
-    // Passive asset inventory (#70) — shown when the sensor publishes a
-    // discovered-count or after a fetch has been attempted.
-    if has_prefix(state, "assets/") || !matches!(state.netring_detail.assets, Fetch::Idle) {
-        content = content.push(card(render_assets(state)));
-    }
-
-    // Capture self-health only exists under live capture (not pcap replay).
-    if state.metrics.keys().any(|k| k.starts_with("capture/")) {
-        content = content.push(card(render_capture(state)));
-    }
-    content = content.push(card(render_flow_detail(state)));
-    // On-demand top-talker histogram + elephant-flow ring (#45) — always
-    // available drill-downs (the sensor serves them whenever talkers are on).
-    content = content.push(card(render_talkers(state)));
-    content = content.push(card(render_matrix(state)));
-    content = content.push(card(render_elephants(state)));
-
-    container(scrollable(content))
-        .width(Length::Fill)
+/// Build the scrollable content for a netring tab by composing the existing
+/// per-section cards. No data regression: every card in the old single-scroll
+/// view is reachable from exactly one tab.
+fn netring_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Element<'_, Message> {
+    use SpecializedTab::*;
+    let inner: Column<'_, Message> = match tab {
+        Overview => {
+            let mut c = column![].spacing(space::MD);
+            // Live anomaly strip: a compact rollup of firing detectors that
+            // click-throughs to the Security tab (#253).
+            if let Some(strip) = anomaly_strip(state) {
+                c = c.push(strip);
+            }
+            if let Some(chip) = capture_chip(state) {
+                c = c.push(chip);
+            }
+            c = c
+                .push(card(render_flows(state)))
+                .push(card(render_tcp_health(state)));
+            if has_prefix(state, "flow/by_l4/") {
+                c = c.push(card(render_per_l4(state)));
+            }
+            c
+        }
+        Flows => column![
+            card(render_flow_detail(state)),
+            card(render_elephants(state))
+        ]
+        .spacing(space::MD),
+        TalkersMatrix => {
+            column![card(render_talkers(state)), card(render_matrix(state))].spacing(space::MD)
+        }
+        Dns => column![card(render_dns(state))].spacing(space::MD),
+        HttpTls => {
+            let mut c = column![].spacing(space::MD);
+            if has_prefix(state, "http/") {
+                c = c.push(card(render_http(state)));
+            }
+            c = c.push(card(render_tls(state)));
+            if has_prefix(state, "quic/") || !matches!(state.netring_detail.quic, Fetch::Idle) {
+                c = c.push(card(render_quic(state)));
+            }
+            if has_prefix(state, "ssh/") || !matches!(state.netring_detail.ssh, Fetch::Idle) {
+                c = c.push(card(render_ssh(state)));
+            }
+            c
+        }
+        Bandwidth => column![card(render_bandwidth(state))].spacing(space::MD),
+        Assets => column![card(render_assets(state))].spacing(space::MD),
+        Capture => column![card(render_capture(state))].spacing(space::MD),
+        Security => column![card(render_netring_security(state))].spacing(space::MD),
+    };
+    scrollable(inner.width(Length::Fill))
         .height(Length::Fill)
         .into()
 }
@@ -103,32 +167,51 @@ fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
         if records.is_empty() {
             col = col.push(empty_state("No TLS handshakes observed", None));
         } else {
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("sni", 220),
-                    cell("ja4", 220),
-                    cell("ja3", 220),
-                    cell("alpn", 90),
-                    cell("count", 60)
-                ]
-                .spacing(8),
+            use zensight_common::TlsRecord;
+            let columns = vec![
+                TableColumn::fill("sni", 4, |r: &TlsRecord| {
+                    text(r.sni.clone().unwrap_or_else(|| "-".into()))
+                        .size(font::CAPTION)
+                        .into()
+                })
+                .sortable(|r: &TlsRecord| SortKey::Text(r.sni.clone().unwrap_or_default())),
+                TableColumn::fill("ja4", 4, |r: &TlsRecord| {
+                    text(r.ja4.clone().unwrap_or_else(|| "-".into()))
+                        .size(font::CAPTION)
+                        .into()
+                }),
+                // JA3 was fetched but never rendered before (#45/#249).
+                TableColumn::fill("ja3", 4, |r: &TlsRecord| {
+                    text(r.ja3.clone().unwrap_or_else(|| "-".into()))
+                        .size(font::CAPTION)
+                        .into()
+                }),
+                TableColumn::fixed("alpn", 90.0, |r: &TlsRecord| {
+                    text(r.alpn.clone().unwrap_or_else(|| "-".into()))
+                        .size(font::CAPTION)
+                        .into()
+                }),
+                TableColumn::fixed("count", 60.0, |r: &TlsRecord| {
+                    text(r.count.to_string()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &TlsRecord| SortKey::Num(r.count as f64)),
+            ];
+            col = col.push(
+                DataTable::new(columns)
+                    .searchable(|r: &TlsRecord| {
+                        format!(
+                            "{} {} {}",
+                            r.sni.clone().unwrap_or_default(),
+                            r.ja4.clone().unwrap_or_default(),
+                            r.ja3.clone().unwrap_or_default(),
+                        )
+                    })
+                    .on_sort(|c| Message::NetringTableSort(NetringTable::Tls, c))
+                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Tls, q))
+                    .on_more(Message::NetringTableMore(NetringTable::Tls))
+                    .noun("fingerprints")
+                    .view(records, state.netring_detail.table(NetringTable::Tls)),
             );
-            for r in records.iter().take(200) {
-                list = list.push(
-                    row![
-                        cell(r.sni.as_deref().unwrap_or("-"), 220),
-                        cell(r.ja4.as_deref().unwrap_or("-"), 220),
-                        // JA3 was fetched but never rendered before (#45).
-                        cell(r.ja3.as_deref().unwrap_or("-"), 220),
-                        cell(r.alpn.as_deref().unwrap_or("-"), 90),
-                        cell(&r.count.to_string(), 60),
-                    ]
-                    .spacing(8),
-                );
-            }
-            col = col
-                .push(text(format!("{} fingerprints", records.len())).size(font::EMPHASIS))
-                .push(list);
         }
     }
     col.into()
@@ -162,29 +245,34 @@ fn render_quic(state: &DeviceDetailState) -> Element<'_, Message> {
         if records.is_empty() {
             col = col.push(empty_state("No QUIC Initials observed", None));
         } else {
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("sni", 280),
-                    cell("alpn", 120),
-                    cell("version", 90),
-                    cell("count", 60),
-                ]
-                .spacing(8),
+            use zensight_common::QuicRecord;
+            let columns = vec![
+                TableColumn::fill("sni", 5, |r: &QuicRecord| {
+                    text(r.sni.clone().unwrap_or_else(|| "-".into()))
+                        .size(font::CAPTION)
+                        .into()
+                })
+                .sortable(|r: &QuicRecord| SortKey::Text(r.sni.clone().unwrap_or_default())),
+                TableColumn::fill("alpn", 3, |r: &QuicRecord| {
+                    text(join_or_dash(&r.alpn)).size(font::CAPTION).into()
+                }),
+                TableColumn::fixed("version", 90.0, |r: &QuicRecord| {
+                    text(r.version.clone()).size(font::CAPTION).into()
+                }),
+                TableColumn::fixed("count", 60.0, |r: &QuicRecord| {
+                    text(r.count.to_string()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &QuicRecord| SortKey::Num(r.count as f64)),
+            ];
+            col = col.push(
+                DataTable::new(columns)
+                    .searchable(|r: &QuicRecord| r.sni.clone().unwrap_or_default())
+                    .on_sort(|c| Message::NetringTableSort(NetringTable::Quic, c))
+                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Quic, q))
+                    .on_more(Message::NetringTableMore(NetringTable::Quic))
+                    .noun("SNI/version pairs")
+                    .view(records, state.netring_detail.table(NetringTable::Quic)),
             );
-            for r in records.iter().take(200) {
-                list = list.push(
-                    row![
-                        cell(r.sni.as_deref().unwrap_or("-"), 280),
-                        cell(&join_or_dash(&r.alpn), 120),
-                        cell(&r.version, 90),
-                        cell(&r.count.to_string(), 60),
-                    ]
-                    .spacing(8),
-                );
-            }
-            col = col
-                .push(text(format!("{} SNI/version pairs", records.len())).size(font::EMPHASIS))
-                .push(list);
         }
     }
     col.into()
@@ -213,29 +301,36 @@ fn render_ssh(state: &DeviceDetailState) -> Element<'_, Message> {
         if records.is_empty() {
             col = col.push(empty_state("No SSH handshakes observed", None));
         } else {
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("hassh", 260),
-                    cell("role", 70),
-                    cell("banner", 220),
-                    cell("count", 60),
-                ]
-                .spacing(8),
+            use zensight_common::SshRecord;
+            let columns = vec![
+                TableColumn::fill("hassh", 5, |r: &SshRecord| {
+                    text(r.hassh.clone()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &SshRecord| SortKey::Text(r.hassh.clone())),
+                TableColumn::fixed("role", 70.0, |r: &SshRecord| {
+                    text(r.role.clone()).size(font::CAPTION).into()
+                }),
+                TableColumn::fill("banner", 4, |r: &SshRecord| {
+                    text(r.banner.clone().unwrap_or_else(|| "-".into()))
+                        .size(font::CAPTION)
+                        .into()
+                }),
+                TableColumn::fixed("count", 60.0, |r: &SshRecord| {
+                    text(r.count.to_string()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &SshRecord| SortKey::Num(r.count as f64)),
+            ];
+            col = col.push(
+                DataTable::new(columns)
+                    .searchable(|r: &SshRecord| {
+                        format!("{} {}", r.hassh, r.banner.clone().unwrap_or_default())
+                    })
+                    .on_sort(|c| Message::NetringTableSort(NetringTable::Ssh, c))
+                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Ssh, q))
+                    .on_more(Message::NetringTableMore(NetringTable::Ssh))
+                    .noun("fingerprints")
+                    .view(records, state.netring_detail.table(NetringTable::Ssh)),
             );
-            for r in records.iter().take(200) {
-                list = list.push(
-                    row![
-                        cell(&r.hassh, 260),
-                        cell(&r.role, 70),
-                        cell(r.banner.as_deref().unwrap_or("-"), 220),
-                        cell(&r.count.to_string(), 60),
-                    ]
-                    .spacing(8),
-                );
-            }
-            col = col
-                .push(text(format!("{} fingerprints", records.len())).size(font::EMPHASIS))
-                .push(list);
         }
     }
     col.into()
@@ -270,46 +365,85 @@ fn render_assets(state: &DeviceDetailState) -> Element<'_, Message> {
         if records.is_empty() {
             col = col.push(empty_state("No assets discovered yet", None));
         } else {
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("mac", 150),
-                    cell("ip", 150),
-                    cell("hostname", 150),
-                    cell("vendor", 150),
-                    cell("platform", 160),
-                    cell("caps", 130),
-                    cell("seen via", 110),
-                ]
-                .spacing(8),
-            );
-            for r in records.iter().take(200) {
-                let ip = r
-                    .ipv4
-                    .first()
-                    .or_else(|| r.ipv6.first())
-                    .map(String::as_str)
-                    .unwrap_or("-");
-                list = list.push(
-                    row![
-                        cell(&r.mac, 150),
-                        cell(ip, 150),
-                        cell(r.hostname.as_deref().unwrap_or("-"), 150),
-                        // vendor was collected (DHCP opt 60 / LLDP / SSDP) but never
-                        // rendered (#120).
-                        cell(r.vendor.as_deref().unwrap_or("-"), 150),
-                        cell(r.platform.as_deref().unwrap_or("-"), 160),
-                        cell(&join_or_dash(&r.capabilities), 130),
-                        cell(&join_or_dash(&r.seen_via), 110),
-                    ]
-                    .spacing(8),
-                );
-            }
-            col = col
-                .push(text(format!("{} assets", records.len())).size(font::EMPHASIS))
-                .push(list);
+            col = col.push(assets_table(records, state));
         }
     }
     col.into()
+}
+
+/// First IPv4 (else first IPv6) of an asset, or `"-"`.
+fn asset_ip(r: &zensight_common::AssetRecord) -> &str {
+    r.ipv4
+        .first()
+        .or_else(|| r.ipv6.first())
+        .map(String::as_str)
+        .unwrap_or("-")
+}
+
+/// Assets tab table (#252): first-class, filterable/sortable inventory. The IP
+/// column is a drill-down pivot to the asset's flows.
+fn assets_table<'a>(
+    records: &'a [zensight_common::AssetRecord],
+    state: &'a DeviceDetailState,
+) -> Element<'a, Message> {
+    use zensight_common::AssetRecord;
+    let columns = vec![
+        TableColumn::fill("mac", 3, |r: &AssetRecord| {
+            text(r.mac.clone()).size(font::CAPTION).into()
+        })
+        .sortable(|r: &AssetRecord| SortKey::Text(r.mac.clone())),
+        // IP → flows pivot (asset drill-down, #246/#252).
+        TableColumn::fill("ip", 3, |r: &AssetRecord| {
+            let ip = asset_ip(r);
+            if ip == "-" {
+                text("-").size(font::CAPTION).into()
+            } else {
+                pivot_button(state, ip, ip)
+            }
+        })
+        .sortable(|r: &AssetRecord| SortKey::Text(asset_ip(r).to_string())),
+        TableColumn::fill("hostname", 3, |r: &AssetRecord| {
+            text(r.hostname.clone().unwrap_or_else(|| "-".into()))
+                .size(font::CAPTION)
+                .into()
+        })
+        .sortable(|r: &AssetRecord| SortKey::Text(r.hostname.clone().unwrap_or_default())),
+        // vendor was collected (DHCP opt 60 / LLDP / SSDP) but never rendered (#120).
+        TableColumn::fill("vendor", 3, |r: &AssetRecord| {
+            text(r.vendor.clone().unwrap_or_else(|| "-".into()))
+                .size(font::CAPTION)
+                .into()
+        })
+        .sortable(|r: &AssetRecord| SortKey::Text(r.vendor.clone().unwrap_or_default())),
+        TableColumn::fill("platform", 3, |r: &AssetRecord| {
+            text(r.platform.clone().unwrap_or_else(|| "-".into()))
+                .size(font::CAPTION)
+                .into()
+        }),
+        TableColumn::fill("caps", 3, |r: &AssetRecord| {
+            text(join_or_dash(&r.capabilities))
+                .size(font::CAPTION)
+                .into()
+        }),
+        TableColumn::fill("seen via", 2, |r: &AssetRecord| {
+            text(join_or_dash(&r.seen_via)).size(font::CAPTION).into()
+        }),
+    ];
+    DataTable::new(columns)
+        .searchable(|r: &AssetRecord| {
+            format!(
+                "{} {} {} {}",
+                r.mac,
+                asset_ip(r),
+                r.hostname.clone().unwrap_or_default(),
+                r.vendor.clone().unwrap_or_default(),
+            )
+        })
+        .on_sort(|c| Message::NetringTableSort(NetringTable::Assets, c))
+        .on_filter(|q| Message::NetringTableFilter(NetringTable::Assets, q))
+        .on_more(Message::NetringTableMore(NetringTable::Assets))
+        .noun("assets")
+        .view(records, state.netring_detail.table(NetringTable::Assets))
 }
 
 /// Join a slug list with commas, or `"-"` when empty.
@@ -590,40 +724,44 @@ fn has_prefix(state: &DeviceDetailState, prefix: &str) -> bool {
     state.metrics.keys().any(|k| k.starts_with(prefix))
 }
 
-/// DNS RED card (#45): rates, RTT percentiles, and rcode breakdown.
+/// DNS tab (#250): RED tiles (rate / unanswered / RTT percentiles) + an rcode
+/// bar chart + an on-demand top-SLD table with an NXDOMAIN callout.
 fn render_dns(state: &DeviceDetailState) -> Element<'_, Message> {
     let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
-    let line =
-        |label: &str, metric: &str| row![cell(label, 200), cell(&get(metric), 120)].spacing(8);
 
-    let mut col = column![
-        section_header("DNS (RED)", None),
-        line("queries (total)", "dns/queries_total"),
-        line("unanswered (total)", "dns/unanswered_total"),
-        line("RTT p50 (ms)", "dns/query_rtt_p50_ms"),
-        line("RTT p95 (ms)", "dns/query_rtt_p95_ms"),
-        line("RTT p99 (ms)", "dns/query_rtt_p99_ms"),
+    // RED tiles.
+    let tiles = row![
+        metric_tile("queries", get("dns/queries_total")),
+        metric_tile("unanswered", get("dns/unanswered_total")),
+        metric_tile("RTT p50 (ms)", get("dns/query_rtt_p50_ms")),
+        metric_tile("RTT p95 (ms)", get("dns/query_rtt_p95_ms")),
+        metric_tile("RTT p99 (ms)", get("dns/query_rtt_p99_ms")),
     ]
-    .spacing(4);
+    .spacing(space::SM);
 
-    // Response-code breakdown (dynamic `dns/responses_by_rcode/<rcode>_total`).
-    let mut rcodes: Vec<(String, String)> = state
+    let mut col = column![section_header("DNS (RED)", None), tiles].spacing(space::SM);
+
+    // Response-code breakdown (`dns/responses_by_rcode/<rcode>_total`) as a
+    // ranked bar chart instead of a text list.
+    let mut rcodes: Vec<(String, f64)> = state
         .metrics
         .iter()
         .filter_map(|(m, p)| {
             let r = m.strip_prefix("dns/responses_by_rcode/")?;
-            Some((r.to_string(), num(Some(&p.value))))
+            Some((
+                r.trim_end_matches("_total").to_string(),
+                value_f64(&p.value),
+            ))
         })
         .collect();
-    rcodes.sort();
+    rcodes.sort_by(|a, b| b.1.total_cmp(&a.1));
     if !rcodes.is_empty() {
-        col = col.push(text("by rcode").size(font::CAPTION).style(dim));
-        for (r, v) in rcodes {
-            col = col.push(row![cell(&format!("  {r}"), 200), cell(&v, 120)].spacing(8));
-        }
+        col = col
+            .push(text("by rcode").size(font::CAPTION).style(dim))
+            .push(chart::ranked_bar(&rcodes, |v| format_count(v as u64), 8));
     }
 
-    // On-demand top-SLD / top-NXDOMAIN drill-down via `@/query/dns` (#45).
+    // On-demand top-SLD / top-NXDOMAIN drill-down via `@/query/dns`.
     let loading = state.netring_detail.dns.is_loading();
     let mut fetch = button(
         text(if loading {
@@ -644,64 +782,90 @@ fn render_dns(state: &DeviceDetailState) -> Element<'_, Message> {
         if records.is_empty() {
             col = col.push(empty_state("No DNS detail", None));
         } else {
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("domain", 240),
-                    cell("queries", 100),
-                    cell("nxdomain", 100),
-                ]
-                .spacing(8),
-            );
-            for r in records.iter().take(200) {
-                list = list.push(
-                    row![
-                        cell(&r.domain, 240),
-                        cell(&r.queries.to_string(), 100),
-                        cell(&r.nxdomain.to_string(), 100),
-                    ]
-                    .spacing(8),
+            // NXDOMAIN callout: how many SLDs returned NXDOMAIN (a DGA / NOD
+            // signal that pivots to the Security tab).
+            let nx = records.iter().filter(|r| r.nxdomain > 0).count();
+            if nx > 0 {
+                col = col.push(
+                    text(format!("⚠ {nx} domain(s) returned NXDOMAIN"))
+                        .size(font::CAPTION)
+                        .style(warn),
                 );
             }
-            col = col
-                .push(text(format!("{} domains", records.len())).size(font::EMPHASIS))
-                .push(list);
+            let columns = vec![
+                TableColumn::fill("domain", 4, |r: &zensight_common::DnsRecord| {
+                    text(r.domain.clone()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &zensight_common::DnsRecord| SortKey::Text(r.domain.clone())),
+                TableColumn::fixed("queries", 100.0, |r: &zensight_common::DnsRecord| {
+                    text(r.queries.to_string()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &zensight_common::DnsRecord| SortKey::Num(r.queries as f64)),
+                TableColumn::fixed("nxdomain", 100.0, |r: &zensight_common::DnsRecord| {
+                    let t = text(r.nxdomain.to_string()).size(font::CAPTION);
+                    if r.nxdomain > 0 { t.style(warn) } else { t }.into()
+                })
+                .sortable(|r: &zensight_common::DnsRecord| SortKey::Num(r.nxdomain as f64)),
+            ];
+            let table = DataTable::new(columns)
+                .searchable(|r: &zensight_common::DnsRecord| r.domain.clone())
+                .on_sort(|c| Message::NetringTableSort(NetringTable::Dns, c))
+                .on_filter(|q| Message::NetringTableFilter(NetringTable::Dns, q))
+                .on_more(Message::NetringTableMore(NetringTable::Dns))
+                .noun("domains")
+                .view(records, state.netring_detail.table(NetringTable::Dns));
+            col = col.push(table);
         }
     }
     col.into()
 }
 
-/// HTTP RED card (#45): requests, status-class breakdown, latency, methods.
+/// HTTP tab (#250-style): RED tiles + status-class & method bar charts + an
+/// on-demand top-hosts table.
 fn render_http(state: &DeviceDetailState) -> Element<'_, Message> {
+    let getf = |m: &str| {
+        state
+            .metrics
+            .get(m)
+            .map(|p| value_f64(&p.value))
+            .unwrap_or(0.0)
+    };
     let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
-    let line =
-        |label: &str, metric: &str| row![cell(label, 200), cell(&get(metric), 120)].spacing(8);
 
-    let mut col = column![
-        section_header("HTTP (RED)", None),
-        line("requests (total)", "http/requests_total"),
-        line("2xx", "http/status_2xx_total"),
-        line("3xx", "http/status_3xx_total"),
-        line("4xx", "http/status_4xx_total"),
-        line("5xx", "http/status_5xx_total"),
-        line("latency p50 (ms)", "http/latency_p50_ms"),
-        line("latency p95 (ms)", "http/latency_p95_ms"),
+    let tiles = row![
+        metric_tile("requests", get("http/requests_total")),
+        metric_tile("latency p50 (ms)", get("http/latency_p50_ms")),
+        metric_tile("latency p95 (ms)", get("http/latency_p95_ms")),
     ]
-    .spacing(4);
+    .spacing(space::SM);
+    let mut col = column![section_header("HTTP (RED)", None), tiles].spacing(space::SM);
 
-    let mut methods: Vec<(String, String)> = state
+    // Status-class distribution as a bar chart (fixed 2xx→5xx order).
+    let statuses: Vec<(String, f64)> = ["2xx", "3xx", "4xx", "5xx"]
+        .iter()
+        .map(|c| (c.to_string(), getf(&format!("http/status_{c}_total"))))
+        .filter(|(_, v)| *v > 0.0)
+        .collect();
+    if !statuses.is_empty() {
+        col = col
+            .push(text("by status class").size(font::CAPTION).style(dim))
+            .push(chart::ranked_bar(&statuses, |v| format_count(v as u64), 4));
+    }
+
+    // Method distribution as a bar chart (desc by count).
+    let mut methods: Vec<(String, f64)> = state
         .metrics
         .iter()
         .filter_map(|(m, p)| {
             let meth = m.strip_prefix("http/methods/")?.strip_suffix("_total")?;
-            Some((meth.to_string(), num(Some(&p.value))))
+            Some((meth.to_string(), value_f64(&p.value)))
         })
         .collect();
-    methods.sort();
+    methods.sort_by(|a, b| b.1.total_cmp(&a.1));
     if !methods.is_empty() {
-        col = col.push(text("by method").size(font::CAPTION).style(dim));
-        for (meth, v) in methods {
-            col = col.push(row![cell(&format!("  {meth}"), 200), cell(&v, 120)].spacing(8));
-        }
+        col = col
+            .push(text("by method").size(font::CAPTION).style(dim))
+            .push(chart::ranked_bar(&methods, |v| format_count(v as u64), 8));
     }
 
     // On-demand top-hosts / error-hosts drill-down via `@/query/http` (#45).
@@ -725,27 +889,31 @@ fn render_http(state: &DeviceDetailState) -> Element<'_, Message> {
         if records.is_empty() {
             col = col.push(empty_state("No HTTP detail", None));
         } else {
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("host", 280),
-                    cell("requests", 100),
-                    cell("errors", 100),
-                ]
-                .spacing(8),
+            use zensight_common::HttpHostRecord;
+            let columns = vec![
+                TableColumn::fill("host", 6, |r: &HttpHostRecord| {
+                    text(r.host.clone()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &HttpHostRecord| SortKey::Text(r.host.clone())),
+                TableColumn::fixed("requests", 100.0, |r: &HttpHostRecord| {
+                    text(r.requests.to_string()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &HttpHostRecord| SortKey::Num(r.requests as f64)),
+                TableColumn::fixed("errors", 100.0, |r: &HttpHostRecord| {
+                    let t = text(r.errors.to_string()).size(font::CAPTION);
+                    if r.errors > 0 { t.style(warn) } else { t }.into()
+                })
+                .sortable(|r: &HttpHostRecord| SortKey::Num(r.errors as f64)),
+            ];
+            col = col.push(
+                DataTable::new(columns)
+                    .searchable(|r: &HttpHostRecord| r.host.clone())
+                    .on_sort(|c| Message::NetringTableSort(NetringTable::Http, c))
+                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Http, q))
+                    .on_more(Message::NetringTableMore(NetringTable::Http))
+                    .noun("hosts")
+                    .view(records, state.netring_detail.table(NetringTable::Http)),
             );
-            for r in records.iter().take(200) {
-                list = list.push(
-                    row![
-                        cell(&r.host, 280),
-                        cell(&r.requests.to_string(), 100),
-                        cell(&r.errors.to_string(), 100),
-                    ]
-                    .spacing(8),
-                );
-            }
-            col = col
-                .push(text(format!("{} hosts", records.len())).size(font::EMPHASIS))
-                .push(list);
         }
     }
     col.into()
@@ -776,29 +944,43 @@ fn render_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
         if records.is_empty() {
             col = col.push(empty_state("No talkers", None));
         } else {
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("destination", 240),
-                    cell("bytes", 120),
-                    cell("packets", 100),
-                    cell("flows", 80),
-                ]
-                .spacing(8),
+            // Ranked bar chart of the heaviest destinations by bytes.
+            let bars: Vec<(String, f64)> = records
+                .iter()
+                .take(RANKED_BAR_ROWS)
+                .map(|r| (r.dst.clone(), r.bytes as f64))
+                .collect();
+            col = col.push(chart::ranked_bar(&bars, format_bytes, RANKED_BAR_ROWS));
+
+            let columns = vec![
+                TableColumn::fill("destination", 4, |r: &zensight_common::TalkerRecord| {
+                    pivot_button(state, &r.dst, &r.dst)
+                })
+                .sortable(|r: &zensight_common::TalkerRecord| SortKey::Text(r.dst.clone())),
+                TableColumn::fixed("bytes", 120.0, |r: &zensight_common::TalkerRecord| {
+                    text(format_bytes(r.bytes as f64))
+                        .size(font::CAPTION)
+                        .into()
+                })
+                .sortable(|r: &zensight_common::TalkerRecord| SortKey::Num(r.bytes as f64)),
+                TableColumn::fixed("packets", 100.0, |r: &zensight_common::TalkerRecord| {
+                    text(format_count(r.packets)).size(font::CAPTION).into()
+                })
+                .sortable(|r: &zensight_common::TalkerRecord| SortKey::Num(r.packets as f64)),
+                TableColumn::fixed("flows", 80.0, |r: &zensight_common::TalkerRecord| {
+                    text(r.flows.to_string()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &zensight_common::TalkerRecord| SortKey::Num(r.flows as f64)),
+            ];
+            col = col.push(
+                DataTable::new(columns)
+                    .searchable(|r: &zensight_common::TalkerRecord| r.dst.clone())
+                    .on_sort(|c| Message::NetringTableSort(NetringTable::Talkers, c))
+                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Talkers, q))
+                    .on_more(Message::NetringTableMore(NetringTable::Talkers))
+                    .noun("talkers")
+                    .view(records, state.netring_detail.table(NetringTable::Talkers)),
             );
-            for r in records.iter().take(200) {
-                list = list.push(
-                    row![
-                        cell(&r.dst, 240),
-                        cell(&format_bytes(r.bytes as f64), 120),
-                        cell(&format_count(r.packets), 100),
-                        cell(&r.flows.to_string(), 80),
-                    ]
-                    .spacing(8),
-                );
-            }
-            col = col
-                .push(text(format!("{} talkers", records.len())).size(font::EMPHASIS))
-                .push(list);
         }
     }
     col.into()
@@ -829,38 +1011,76 @@ fn render_matrix(state: &DeviceDetailState) -> Element<'_, Message> {
         if records.is_empty() {
             col = col.push(empty_state("No traffic matrix yet", None));
         } else {
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("source", 190),
-                    cell("", 22),
-                    cell("destination", 190),
-                    cell("bytes", 120),
-                    cell("packets", 100),
-                    cell("flows", 80),
-                ]
-                .spacing(8),
-            );
-            for r in records.iter().take(200) {
-                // Matrix rows are authoritative initiator→responder pairs (#122),
-                // so the edge is directional — render the arrowhead.
-                list = list.push(
-                    row![
-                        cell(&r.src, 190),
-                        cell_styled("→", 22, dim),
-                        cell(&r.dst, 190),
-                        cell(&format_bytes(r.bytes as f64), 120),
-                        cell(&format_count(r.packets), 100),
-                        cell(&r.flows.to_string(), 80),
-                    ]
-                    .spacing(8),
-                );
+            // Heatmap: src (rows) × dst (cols), cell intensity = bytes. Capped so
+            // the canvas stays bounded; the table below carries the full detail.
+            if let Some(hm) = matrix_heatmap(records) {
+                col = col.push(hm);
             }
-            col = col
-                .push(text(format!("{} src→dst pairs", records.len())).size(font::EMPHASIS))
-                .push(list);
+            let columns = vec![
+                TableColumn::fill("source", 4, |r: &zensight_common::MatrixRecord| {
+                    text(r.src.clone()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &zensight_common::MatrixRecord| SortKey::Text(r.src.clone())),
+                TableColumn::fill("destination", 4, |r: &zensight_common::MatrixRecord| {
+                    pivot_button(state, &r.dst, &r.dst)
+                })
+                .sortable(|r: &zensight_common::MatrixRecord| SortKey::Text(r.dst.clone())),
+                TableColumn::fixed("bytes", 120.0, |r: &zensight_common::MatrixRecord| {
+                    text(format_bytes(r.bytes as f64))
+                        .size(font::CAPTION)
+                        .into()
+                })
+                .sortable(|r: &zensight_common::MatrixRecord| SortKey::Num(r.bytes as f64)),
+                TableColumn::fixed("packets", 100.0, |r: &zensight_common::MatrixRecord| {
+                    text(format_count(r.packets)).size(font::CAPTION).into()
+                })
+                .sortable(|r: &zensight_common::MatrixRecord| SortKey::Num(r.packets as f64)),
+                TableColumn::fixed("flows", 80.0, |r: &zensight_common::MatrixRecord| {
+                    text(r.flows.to_string()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &zensight_common::MatrixRecord| SortKey::Num(r.flows as f64)),
+            ];
+            col = col.push(
+                DataTable::new(columns)
+                    .searchable(|r: &zensight_common::MatrixRecord| format!("{} {}", r.src, r.dst))
+                    .on_sort(|c| Message::NetringTableSort(NetringTable::Matrix, c))
+                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Matrix, q))
+                    .on_more(Message::NetringTableMore(NetringTable::Matrix))
+                    .noun("src→dst pairs")
+                    .view(records, state.netring_detail.table(NetringTable::Matrix)),
+            );
         }
     }
     col.into()
+}
+
+/// Largest square of the traffic matrix rendered as a heatmap (src rows × dst
+/// cols, cell = bytes). `None` when there's nothing to plot. Capped at
+/// [`MATRIX_HEATMAP_DIM`] rows/cols so the canvas stays bounded.
+fn matrix_heatmap<'a>(records: &[zensight_common::MatrixRecord]) -> Option<Element<'a, Message>> {
+    use std::collections::HashMap;
+    let mut src_idx: HashMap<&str, usize> = HashMap::new();
+    let mut dst_idx: HashMap<&str, usize> = HashMap::new();
+    for r in records {
+        let sn = src_idx.len();
+        if sn < MATRIX_HEATMAP_DIM {
+            src_idx.entry(r.src.as_str()).or_insert(sn);
+        }
+        let dn = dst_idx.len();
+        if dn < MATRIX_HEATMAP_DIM {
+            dst_idx.entry(r.dst.as_str()).or_insert(dn);
+        }
+    }
+    if src_idx.is_empty() || dst_idx.is_empty() {
+        return None;
+    }
+    let mut grid = vec![vec![0.0_f64; dst_idx.len()]; src_idx.len()];
+    for r in records {
+        if let (Some(&s), Some(&d)) = (src_idx.get(r.src.as_str()), dst_idx.get(r.dst.as_str())) {
+            grid[s][d] += r.bytes as f64;
+        }
+    }
+    Some(chart::heatmap(&grid, 16.0))
 }
 
 /// Elephant-flow drill-down (#45): the biggest recently-ended flows, served on
@@ -887,45 +1107,67 @@ fn render_elephants(state: &DeviceDetailState) -> Element<'_, Message> {
         if records.is_empty() {
             col = col.push(empty_state("No elephant flows", None));
         } else {
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("src", 180),
-                    cell("dst", 180),
-                    cell("proto", 60),
-                    cell("bytes", 110),
-                    cell("packets", 90),
-                    cell("dur_ms", 80),
-                ]
-                .spacing(8),
+            use zensight_common::ElephantRecord;
+            let columns = vec![
+                TableColumn::fill("src", 4, |r: &ElephantRecord| {
+                    pivot_button(state, &r.src, &r.src)
+                })
+                .sortable(|r: &ElephantRecord| SortKey::Text(r.src.clone())),
+                TableColumn::fill("dst", 4, |r: &ElephantRecord| {
+                    pivot_button(state, &r.dst, &r.dst)
+                })
+                .sortable(|r: &ElephantRecord| SortKey::Text(r.dst.clone())),
+                TableColumn::fixed("proto", 60.0, |r: &ElephantRecord| {
+                    text(r.proto.clone()).size(font::CAPTION).into()
+                }),
+                TableColumn::fixed("bytes", 110.0, |r: &ElephantRecord| {
+                    text(format_bytes(r.bytes as f64))
+                        .size(font::CAPTION)
+                        .into()
+                })
+                .sortable(|r: &ElephantRecord| SortKey::Num(r.bytes as f64)),
+                TableColumn::fixed("packets", 90.0, |r: &ElephantRecord| {
+                    text(format_count(r.packets)).size(font::CAPTION).into()
+                })
+                .sortable(|r: &ElephantRecord| SortKey::Num(r.packets as f64)),
+                TableColumn::fixed("dur_ms", 80.0, |r: &ElephantRecord| {
+                    text(r.duration_ms.to_string()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &ElephantRecord| SortKey::Num(r.duration_ms as f64)),
+            ];
+            col = col.push(
+                DataTable::new(columns)
+                    .searchable(|r: &ElephantRecord| format!("{} {} {}", r.src, r.dst, r.proto))
+                    .on_sort(|c| Message::NetringTableSort(NetringTable::Elephants, c))
+                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Elephants, q))
+                    .on_more(Message::NetringTableMore(NetringTable::Elephants))
+                    .noun("flows")
+                    .view(records, state.netring_detail.table(NetringTable::Elephants)),
             );
-            for r in records.iter().take(200) {
-                list = list.push(
-                    row![
-                        cell(&r.src, 180),
-                        cell(&r.dst, 180),
-                        cell(&r.proto, 60),
-                        cell(&format_bytes(r.bytes as f64), 110),
-                        cell(&format_count(r.packets), 90),
-                        cell(&r.duration_ms.to_string(), 80),
-                    ]
-                    .spacing(8),
-                );
-            }
-            col = col
-                .push(text(format!("{} flows", records.len())).size(font::EMPHASIS))
-                .push(list);
         }
     }
     col.into()
 }
 
-/// Per-L4 (tcp/udp/icmp) flow + byte split (#45).
+/// Per-L4 (tcp/udp/icmp) split (#45): a donut of the byte distribution over a
+/// compact flows/bytes table.
 fn render_per_l4(state: &DeviceDetailState) -> Element<'_, Message> {
-    let mut col = column![
-        section_header("Per-protocol (L4)", None),
-        row![cell("proto", 120), cell("flows", 120), cell("bytes", 140)].spacing(8),
-    ]
-    .spacing(4);
+    let mut col = column![section_header("Per-protocol (L4)", None)].spacing(space::SM);
+
+    // Byte-distribution donut (skips protocols with no bytes).
+    let split: Vec<(String, f64)> = ["tcp", "udp", "icmp"]
+        .iter()
+        .filter_map(|proto| {
+            metric_f64(state, &format!("flow/by_l4/{proto}/bytes_total"))
+                .filter(|v| *v > 0.0)
+                .map(|v| (proto.to_string(), v))
+        })
+        .collect();
+    if !split.is_empty() {
+        col = col.push(chart::donut(&split, 90.0));
+    }
+
+    col = col.push(row![cell("proto", 120), cell("flows", 120), cell("bytes", 140)].spacing(8));
     for proto in ["tcp", "udp", "icmp"] {
         let flows = metric_f64(state, &format!("flow/by_l4/{proto}/flows_total"))
             .map(|v| format_count(v as u64))
@@ -936,6 +1178,44 @@ fn render_per_l4(state: &DeviceDetailState) -> Element<'_, Message> {
         col = col.push(row![cell(proto, 120), cell(&flows, 120), cell(&bytes, 140)].spacing(8));
     }
     col.into()
+}
+
+/// Compact capture-health chip for the Overview tab (#247): backend + worst
+/// drop-rate, tinted and flagged when a source is overloaded or shedding.
+/// `None` when the sensor publishes no `capture/*` metrics (e.g. pcap replay).
+fn capture_chip(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
+    let has_capture = state.metrics.keys().any(|k| k.starts_with("capture/"));
+    if !has_capture {
+        return None;
+    }
+    let backend = match state.metrics.get("capture/backend").map(|p| &p.value) {
+        Some(TelemetryValue::Text(s)) => s.clone(),
+        _ => "capture".to_string(),
+    };
+    // Worst windowed drop-rate across sources.
+    let worst = state
+        .metrics
+        .iter()
+        .filter(|(k, _)| k.starts_with("capture/") && k.ends_with("/drop_rate"))
+        .map(|(_, p)| value_f64(&p.value))
+        .fold(0.0_f64, f64::max);
+    let shedding = state.metrics.iter().any(|(k, p)| {
+        k.starts_with("capture/") && k.ends_with("/shed/active") && value_f64(&p.value) >= 1.0
+    });
+    let style: fn(&Theme) -> text::Style = if worst >= OVERLOAD_DROP_RATE {
+        danger
+    } else if shedding || worst >= 0.01 {
+        warn
+    } else {
+        dim
+    };
+    let mut label = format!("capture: {backend} · drop {:.2}%", worst * 100.0);
+    if shedding {
+        label.push_str(" · SHEDDING");
+    } else if worst >= OVERLOAD_DROP_RATE {
+        label.push_str(" · OVERLOAD");
+    }
+    Some(card(text(label).size(font::CAPTION).style(style)))
 }
 
 /// On-demand recent-flow detail: a fetch button + the fetched flow table (P2 —
@@ -962,50 +1242,84 @@ fn render_flow_detail(state: &DeviceDetailState) -> Element<'_, Message> {
         if flows.is_empty() {
             col = col.push(empty_state("No recent flows", None));
         } else {
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("initiator", 175),
-                    cell("dir", 26),
-                    cell("responder", 175),
-                    cell("proto", 55),
-                    cell("bytes", 85),
-                    cell("out↑ / in↓", 150),
-                    cell("dur_ms", 70),
-                    cell("reason", 80),
-                ]
-                .spacing(8),
-            );
-            for f in flows.iter().take(200) {
-                // Authoritative initiator→responder (TCP, SYN-resolved) renders a
-                // directed arrow; UDP / handshake-less flows are a best-effort
-                // first-packet guess, shown undirected (↔).
-                let dir = cell_styled(
-                    dir_glyph(f.directed),
-                    26,
-                    if f.directed { dim } else { warn },
-                );
-                list = list.push(
-                    row![
-                        cell(&f.src, 175),
-                        dir,
-                        cell(&f.dst, 175),
-                        cell(&f.proto, 55),
-                        cell(&format_bytes(f.bytes as f64), 85),
-                        cell(&dir_split(f.bytes_initiator, f.bytes_responder), 150),
-                        cell(&f.duration_ms.to_string(), 70),
-                        cell(&f.reason, 80),
-                    ]
-                    .spacing(8),
-                );
-            }
-            col = col
-                .push(text(format!("{} flows", flows.len())).size(font::EMPHASIS))
-                .push(list);
+            col = col.push(flows_table(flows, state));
         }
     }
     col.into()
 }
 
+/// The Recent-Flows table, rendered through the shared [`DataTable`] (#244) —
+/// sortable/filterable columns, responsive widths, and an explicit "N of M"
+/// footer instead of a silent `.take(200)`.
+fn flows_table<'a>(
+    flows: &'a [zensight_common::FlowRecord],
+    state: &'a DeviceDetailState,
+) -> Element<'a, Message> {
+    let columns = vec![
+        TableColumn::fill("initiator", 3, |f: &zensight_common::FlowRecord| {
+            text(f.src.clone()).size(font::CAPTION).into()
+        })
+        .sortable(|f: &zensight_common::FlowRecord| SortKey::Text(f.src.clone())),
+        // Directedness glyph: authoritative initiator→responder (TCP, SYN-resolved)
+        // renders "→"; UDP / handshake-less flows are undirected ("↔").
+        TableColumn::fixed("dir", 26.0, |f: &zensight_common::FlowRecord| {
+            text(dir_glyph(f.directed))
+                .size(font::CAPTION)
+                .style(if f.directed { dim } else { warn })
+                .into()
+        }),
+        TableColumn::fill("responder", 3, |f: &zensight_common::FlowRecord| {
+            text(f.dst.clone()).size(font::CAPTION).into()
+        })
+        .sortable(|f: &zensight_common::FlowRecord| SortKey::Text(f.dst.clone())),
+        TableColumn::fixed("proto", 55.0, |f: &zensight_common::FlowRecord| {
+            text(f.proto.clone()).size(font::CAPTION).into()
+        })
+        .sortable(|f: &zensight_common::FlowRecord| SortKey::Text(f.proto.clone())),
+        TableColumn::fixed("bytes", 85.0, |f: &zensight_common::FlowRecord| {
+            text(format_bytes(f.bytes as f64))
+                .size(font::CAPTION)
+                .into()
+        })
+        .sortable(|f: &zensight_common::FlowRecord| SortKey::Num(f.bytes as f64)),
+        TableColumn::fixed(
+            "out↑ / in↓",
+            150.0,
+            |f: &zensight_common::FlowRecord| {
+                text(dir_split(f.bytes_initiator, f.bytes_responder))
+                    .size(font::CAPTION)
+                    .into()
+            },
+        ),
+        TableColumn::fixed("dur_ms", 70.0, |f: &zensight_common::FlowRecord| {
+            text(f.duration_ms.to_string()).size(font::CAPTION).into()
+        })
+        .sortable(|f: &zensight_common::FlowRecord| SortKey::Num(f.duration_ms as f64)),
+        TableColumn::fixed("reason", 80.0, |f: &zensight_common::FlowRecord| {
+            text(f.reason.clone()).size(font::CAPTION).into()
+        }),
+    ];
+    DataTable::new(columns)
+        .searchable(|f: &zensight_common::FlowRecord| format!("{} {} {}", f.src, f.dst, f.proto))
+        .on_sort(|col| Message::NetringTableSort(NetringTable::Flows, col))
+        .on_filter(|q| Message::NetringTableFilter(NetringTable::Flows, q))
+        .on_more(Message::NetringTableMore(NetringTable::Flows))
+        .noun("flows")
+        .view(flows, state.netring_detail.table(NetringTable::Flows))
+}
+
+/// Number of apps shown in the Bandwidth tab before the "N of M" footer.
+const BANDWIDTH_TOP_N: usize = 20;
+
+/// Rows in a ranked-bar chart (talkers, bandwidth) before it truncates.
+const RANKED_BAR_ROWS: usize = 15;
+
+/// Max rows/cols of the traffic-matrix heatmap (keeps the canvas bounded).
+const MATRIX_HEATMAP_DIM: usize = 24;
+
+/// Bandwidth-by-app tab (#251): a ranked bar chart of current per-app throughput
+/// plus a table (app → flows pivot · throughput · trend sparkline) with a top-N
+/// "N of M" footer. Distinct from the per-destination talker histogram.
 fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
     // Collect `bandwidth/<app>/bytes_per_sec` and sort by value desc.
     let mut rows: Vec<(String, f64)> = state
@@ -1015,18 +1329,11 @@ fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
             let app = metric
                 .strip_prefix("bandwidth/")?
                 .strip_suffix("/bytes_per_sec")?;
-            let bps = match &point.value {
-                TelemetryValue::Gauge(g) => *g,
-                TelemetryValue::Counter(c) => *c as f64,
-                _ => return None,
-            };
-            Some((app.to_string(), bps))
+            Some((app.to_string(), value_f64(&point.value)))
         })
         .collect();
     rows.sort_by(|a, b| b.1.total_cmp(&a.1));
 
-    // This is per-application bandwidth, NOT the per-destination talker histogram
-    // (that's the on-demand `render_talkers` card, #45) — label it correctly.
     let title = section_header(format!("Per-app bandwidth ({})", rows.len()), None);
     if rows.is_empty() {
         return column![title, empty_state("No bandwidth data", None)]
@@ -1034,6 +1341,12 @@ fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
             .into();
     }
 
+    // Ranked bar chart of current throughput (top-N).
+    let bars = chart::ranked_bar(&rows, format_rate, BANDWIDTH_TOP_N);
+
+    // Per-app table: clickable app (→ flows pivot), throughput, trend sparkline.
+    let total = rows.len();
+    let shown = total.min(BANDWIDTH_TOP_N);
     let mut list = Column::new().spacing(4).push(
         row![
             cell("application", 200),
@@ -1042,12 +1355,11 @@ fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
         ]
         .spacing(8),
     );
-    for (app, bps) in rows.iter().take(30) {
-        // Per-talker bytes/sec trend sparkline (#44).
+    for (app, bps) in rows.iter().take(BANDWIDTH_TOP_N) {
         let metric = format!("bandwidth/{app}/bytes_per_sec");
         list = list.push(
             row![
-                cell(app, 200),
+                pivot_cell(state, app, 200),
                 cell(&format_rate(*bps), 140),
                 super::metric_sparkline(state, &metric),
             ]
@@ -1055,7 +1367,149 @@ fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
             .align_y(iced::Alignment::Center),
         );
     }
-    column![title, list].spacing(8).into()
+    let footer = text(format!("showing {shown} of {total} apps"))
+        .size(font::CAPTION)
+        .style(dim);
+    column![title, bars, list, footer].spacing(space::SM).into()
+}
+
+/// Rank an alert severity for ordering / "highest severity" rollups.
+fn sev_rank(s: zensight_common::AlertSeverity) -> u8 {
+    use zensight_common::AlertSeverity::*;
+    match s {
+        Critical => 3,
+        Warning => 2,
+        Info => 1,
+    }
+}
+
+/// Human label for a severity.
+fn sev_label(s: zensight_common::AlertSeverity) -> &'static str {
+    use zensight_common::AlertSeverity::*;
+    match s {
+        Critical => "critical",
+        Warning => "warning",
+        Info => "info",
+    }
+}
+
+/// Design-system color for a severity (D2 severity palette).
+fn sev_color(s: zensight_common::AlertSeverity) -> iced::Color {
+    use zensight_common::AlertSeverity::*;
+    match s {
+        Critical => theme::SEVERITY_CRITICAL,
+        Warning => theme::SEVERITY_WARNING,
+        Info => theme::SEVERITY_INFO,
+    }
+}
+
+/// The ATT&CK technique tagged on an anomaly, if any (#117).
+fn anomaly_technique(a: &zensight_common::Alert) -> Option<&str> {
+    a.labels.get("technique").map(String::as_str)
+}
+
+/// Overview anomaly strip (#253): a one-line rollup of firing netring detectors
+/// that click-throughs to the Security tab. `None` when there are no anomalies.
+fn anomaly_strip(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
+    let anoms = &state.netring_detail.anomalies;
+    if anoms.is_empty() {
+        return None;
+    }
+    let highest = anoms
+        .iter()
+        .map(|a| a.severity)
+        .max_by_key(|s| sev_rank(*s))?;
+    let tech = anoms.iter().find_map(anomaly_technique).unwrap_or("");
+    let n = anoms.len();
+    let plural = if n == 1 { "y" } else { "ies" };
+    let label = if tech.is_empty() {
+        format!("⚠ {n} anomal{plural} · highest {}", sev_label(highest))
+    } else {
+        format!(
+            "⚠ {n} anomal{plural} · highest {} · {tech}",
+            sev_label(highest)
+        )
+    };
+    Some(
+        button(
+            text(label)
+                .size(font::CAPTION)
+                .style(move |_: &Theme| text::Style {
+                    color: Some(sev_color(highest)),
+                }),
+        )
+        .padding([space::XS as u16, space::SM as u16])
+        .style(iced::widget::button::text)
+        .on_press(Message::SelectSpecializedTab(
+            state.device_id.clone(),
+            SpecializedTab::Security,
+        ))
+        .into(),
+    )
+}
+
+/// Security tab (#253): an in-view rollup of this sensor's firing anomalies by
+/// detector, scoped to this source, that deep-links to the global Security view
+/// and pivots each anomaly to its offending flows. Deliberately compact — it
+/// does not duplicate the full Security view.
+fn render_netring_security(state: &DeviceDetailState) -> Element<'_, Message> {
+    let anoms = &state.netring_detail.anomalies;
+    let open = button(text("Open Security view").size(font::CAPTION))
+        .padding([4, 10])
+        .on_press(Message::OpenSecurity);
+    let mut col = column![section_header(
+        format!("Anomalies ({})", anoms.len()),
+        Some(open.into())
+    )]
+    .spacing(space::SM);
+
+    if anoms.is_empty() {
+        return col
+            .push(empty_state("No anomalies for this sensor", None))
+            .into();
+    }
+
+    // Rollup by detector (rule): count + highest severity.
+    let mut by_rule: std::collections::BTreeMap<String, (usize, zensight_common::AlertSeverity)> =
+        Default::default();
+    for a in anoms {
+        let e = by_rule
+            .entry(a.rule.clone())
+            .or_insert((0, zensight_common::AlertSeverity::Info));
+        e.0 += 1;
+        if sev_rank(a.severity) > sev_rank(e.1) {
+            e.1 = a.severity;
+        }
+    }
+    col = col.push(text("by detector").size(font::CAPTION).style(dim));
+    for (rule, (count, sev)) in &by_rule {
+        col = col.push(
+            row![
+                badge(sev_color(*sev), rule.clone()),
+                text(format!("×{count}")).size(font::CAPTION).style(dim),
+            ]
+            .spacing(space::SM)
+            .align_y(iced::Alignment::Center),
+        );
+    }
+
+    // Individual anomalies (severity desc), each pivoting to its flows.
+    let mut sorted: Vec<&zensight_common::Alert> = anoms.iter().collect();
+    sorted.sort_by_key(|a| std::cmp::Reverse(sev_rank(a.severity)));
+    col = col.push(text("detections").size(font::CAPTION).style(dim));
+    for a in sorted {
+        let mut r = row![
+            badge(sev_color(a.severity), sev_label(a.severity)),
+            text(a.summary.clone()).size(font::CAPTION),
+        ]
+        .spacing(space::SM)
+        .align_y(iced::Alignment::Center);
+        if let Some(src) = a.labels.get("src") {
+            r = r.push(pivot_button(state, src, "flows →"));
+        }
+        col = col.push(r);
+    }
+    col.into()
 }
 
 /// Flow-direction glyph: a directed initiator→responder arrow when orientation
@@ -1082,6 +1536,33 @@ fn cell<'a>(s: &str, width: u16) -> Element<'a, Message> {
     text(s.to_string())
         .size(12)
         .width(Length::Fixed(width as f32))
+        .into()
+}
+
+/// A fixed-width table cell whose endpoint text is a **drill-down pivot** (#246):
+/// clicking it jumps to the Flows tab filtered to `endpoint`. The shared
+/// affordance reused by talkers / matrix / assets rows ("every label is a link").
+fn pivot_cell<'a>(state: &DeviceDetailState, endpoint: &str, width: u16) -> Element<'a, Message> {
+    container(pivot_button(state, endpoint, endpoint))
+        .width(Length::Fixed(width as f32))
+        .into()
+}
+
+/// The width-less drill-down affordance for use inside a [`DataTable`] cell
+/// (the table owns the column width). Clicking pivots to the Flows tab filtered
+/// to `endpoint` (#246).
+fn pivot_button<'a>(
+    state: &DeviceDetailState,
+    endpoint: &str,
+    label: &str,
+) -> Element<'a, Message> {
+    button(text(label.to_string()).size(font::CAPTION))
+        .padding(0)
+        .style(iced::widget::button::text)
+        .on_press(Message::NetringPivotToFlows(
+            state.device_id.clone(),
+            endpoint.to_string(),
+        ))
         .into()
 }
 
@@ -1119,5 +1600,60 @@ fn num(v: Option<&TelemetryValue>) -> String {
         Some(TelemetryValue::Text(s)) => s.clone(),
         Some(TelemetryValue::Boolean(b)) => b.to_string(),
         _ => "-".into(),
+    }
+}
+
+/// Numeric projection of a telemetry value for charts (`0.0` for non-numerics).
+fn value_f64(v: &TelemetryValue) -> f64 {
+    match v {
+        TelemetryValue::Counter(c) => *c as f64,
+        TelemetryValue::Gauge(g) => *g,
+        TelemetryValue::Boolean(true) => 1.0,
+        TelemetryValue::Boolean(false) => 0.0,
+        _ => 0.0,
+    }
+}
+
+/// A compact RED/KPI tile: a big value over a muted caption, in a card. Used by
+/// the DNS/HTTP RED headers (#250).
+fn metric_tile<'a>(label: &str, value: String) -> Element<'a, Message> {
+    card(
+        column![
+            text(value).size(font::SECTION),
+            text(label.to_string()).size(font::CAPTION).style(dim),
+        ]
+        .spacing(space::XS),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use iced_test::simulator;
+    use zensight_common::{MatrixRecord, Protocol};
+
+    use super::*;
+    use crate::message::DeviceId;
+    use crate::view::specialized::fetch::Fetch;
+
+    #[test]
+    fn matrix_destination_pivots_to_flows() {
+        // The matrix table's destination is a drill-down pivot (#246). Use the
+        // matrix (heatmap is canvas, no text) so the clicked dst is unambiguous.
+        let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Netring, "host01"));
+        state.netring_detail.matrix = Fetch::Ready(vec![MatrixRecord {
+            src: "10.0.0.1:5555".to_string(),
+            dst: "10.0.0.42:443".to_string(),
+            bytes: 1234,
+            packets: 10,
+            flows: 3,
+        }]);
+        let mut ui = simulator(render_matrix(&state));
+        let _ = ui.click("10.0.0.42:443");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(msgs.iter().any(|m| matches!(
+            m,
+            Message::NetringPivotToFlows(d, ep)
+                if d.source == "host01" && ep == "10.0.0.42:443"
+        )));
     }
 }

@@ -1646,9 +1646,260 @@ pub fn parse_datetime_to_ms(input: &str) -> Option<i64> {
     Some(naive.and_utc().timestamp_millis())
 }
 
+// ───────────────────────── Chart primitives (#245) ─────────────────────────
+//
+// Distributions and trends were previously rendered as text lists (DNS rcode
+// split, HTTP status classes, per-L4 split, traffic matrix, top-talkers). These
+// three primitives turn them into charts. Data colors go through `kit::rgb`
+// (the only D2-clean path to a `Color`); structural colors come from `theme`.
+
+/// A palette entry for categorical charts (donut slices, ranked bars). Wraps the
+/// shared [`SERIES_COLORS`] so callers don't touch raw tuples.
+fn category_color(index: usize) -> Color {
+    kit::rgb(SERIES_COLORS[index % SERIES_COLORS.len()])
+}
+
+/// Horizontal **ranked bar chart** from `(label, value)` pairs. Rows are shown
+/// biggest-first (caller may pre-sort; this does not reorder) up to `max_rows`,
+/// each a label + a proportional bar + the formatted value. Widget-based (no
+/// canvas) so it's fully theme-aware and screen-reader legible.
+pub fn ranked_bar<'a, Message: 'a>(
+    data: &[(String, f64)],
+    value_fmt: impl Fn(f64) -> String,
+    max_rows: usize,
+) -> Element<'a, Message> {
+    use iced::widget::{column, container, row, text};
+
+    let max = data
+        .iter()
+        .map(|(_, v)| *v)
+        .fold(0.0_f64, f64::max)
+        .max(f64::MIN_POSITIVE);
+    let mut col = column![].spacing(4);
+    for (label, value) in data.iter().take(max_rows) {
+        // Bar fills a fraction of the track proportional to value/max, scaled to
+        // an integer FillPortion (0..1000). The remainder is an empty spacer.
+        let filled = ((value / max) * 1000.0).round().clamp(0.0, 1000.0) as u16;
+        let empty = 1000u16.saturating_sub(filled);
+        let bar = container(text(""))
+            .width(Length::FillPortion(filled.max(1)))
+            .height(Length::Fixed(12.0))
+            .style(|t: &Theme| container::Style {
+                background: Some(iced::Background::Color(theme::colors(t).primary())),
+                border: iced::Border::default().rounded(2.0),
+                ..Default::default()
+            });
+        let track = row![
+            bar,
+            container(text("")).width(Length::FillPortion(empty.max(1))),
+        ]
+        .width(Length::Fill);
+        col = col.push(
+            row![
+                container(text(label.clone()).size(font_caption())).width(Length::FillPortion(3)),
+                container(track).width(Length::FillPortion(5)),
+                container(text(value_fmt(*value)).size(font_caption())).width(Length::Fixed(90.0)),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        );
+    }
+    col.into()
+}
+
+/// A **donut chart** of categorical `(label, value)` slices with a legend. Slice
+/// colors cycle the categorical palette; the legend renders label + percentage so
+/// the split is legible without relying on color alone.
+pub fn donut<'a, Message: 'a>(data: &[(String, f64)], diameter: f32) -> Element<'a, Message> {
+    use iced::widget::{Canvas, column, container, row};
+
+    let total: f64 = data.iter().map(|(_, v)| v.max(0.0)).sum();
+    let widget = DonutWidget {
+        slices: data.iter().map(|(_, v)| v.max(0.0)).collect(),
+        cache: Cache::new(),
+    };
+    let canvas = container(
+        Canvas::new(widget)
+            .width(Length::Fixed(diameter))
+            .height(Length::Fixed(diameter)),
+    );
+
+    let mut legend = column![].spacing(4);
+    for (i, (label, value)) in data.iter().enumerate() {
+        let pct = if total > 0.0 {
+            (value / total) * 100.0
+        } else {
+            0.0
+        };
+        legend = legend.push(kit::badge(category_color(i), format!("{label} {pct:.0}%")));
+    }
+
+    row![canvas, legend]
+        .spacing(16)
+        .align_y(iced::Alignment::Center)
+        .into()
+}
+
+/// A **heatmap** of a dense `grid[row][col]` of values; cell opacity scales with
+/// value (brightest = max). Used for the traffic matrix (src × dst). `cell` is
+/// the pixel size of one square.
+pub fn heatmap<'a, Message: 'a>(grid: &[Vec<f64>], cell: f32) -> Element<'a, Message> {
+    use iced::widget::{Canvas, container};
+
+    let rows = grid.len();
+    let cols = grid.iter().map(|r| r.len()).max().unwrap_or(0);
+    let widget = HeatmapWidget {
+        grid: grid.to_vec(),
+        cell,
+        cache: Cache::new(),
+    };
+    container(
+        Canvas::new(widget)
+            .width(Length::Fixed(cols as f32 * cell))
+            .height(Length::Fixed(rows as f32 * cell)),
+    )
+    .into()
+}
+
+/// Caption font size (kept local so the primitives don't import the tokens
+/// module directly; matches `tokens::font::CAPTION`).
+fn font_caption() -> f32 {
+    12.0
+}
+
+/// Canvas program for [`donut`].
+struct DonutWidget {
+    slices: Vec<f64>,
+    cache: Cache,
+}
+
+impl<Message> canvas::Program<Message, Theme, Renderer> for DonutWidget {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry<Renderer>> {
+        let geo = self.cache.draw(renderer, bounds.size(), |frame| {
+            let total: f64 = self.slices.iter().sum();
+            if total <= 0.0 {
+                return;
+            }
+            let size = bounds.size();
+            let center = Point::new(size.width / 2.0, size.height / 2.0);
+            let outer = size.width.min(size.height) / 2.0;
+            let thickness = outer * 0.36;
+            let mid = outer - thickness / 2.0;
+            // Start at the top (−90°) and sweep clockwise.
+            let mut start = -std::f32::consts::FRAC_PI_2;
+            for (i, value) in self.slices.iter().enumerate() {
+                let frac = (value / total) as f32;
+                let end = start + frac * std::f32::consts::TAU;
+                let arc = canvas::path::Arc {
+                    center,
+                    radius: mid,
+                    start_angle: iced::Radians(start),
+                    end_angle: iced::Radians(end),
+                };
+                let path = Path::new(|b| b.arc(arc));
+                frame.stroke(
+                    &path,
+                    Stroke::default()
+                        .with_color(category_color(i))
+                        .with_width(thickness),
+                );
+                start = end;
+            }
+        });
+        vec![geo]
+    }
+}
+
+/// Canvas program for [`heatmap`].
+struct HeatmapWidget {
+    grid: Vec<Vec<f64>>,
+    cell: f32,
+    cache: Cache,
+}
+
+impl<Message> canvas::Program<Message, Theme, Renderer> for HeatmapWidget {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry<Renderer>> {
+        let geo = self.cache.draw(renderer, bounds.size(), |frame| {
+            let max = self
+                .grid
+                .iter()
+                .flat_map(|r| r.iter())
+                .cloned()
+                .fold(0.0_f64, f64::max)
+                .max(f64::MIN_POSITIVE);
+            let base = theme::colors(theme).primary();
+            for (y, r_row) in self.grid.iter().enumerate() {
+                for (x, value) in r_row.iter().enumerate() {
+                    if *value <= 0.0 {
+                        continue;
+                    }
+                    let alpha = (value / max).clamp(0.05, 1.0) as f32;
+                    let color = Color { a: alpha, ..base };
+                    let top_left = Point::new(x as f32 * self.cell, y as f32 * self.cell);
+                    let rect =
+                        Path::rectangle(top_left, Size::new(self.cell - 1.0, self.cell - 1.0));
+                    frame.fill(&rect, color);
+                }
+            }
+        });
+        vec![geo]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iced_test::simulator;
+
+    #[derive(Debug, Clone)]
+    enum TestMsg {}
+
+    #[test]
+    fn ranked_bar_shows_labels_and_values() {
+        let data = vec![("eth0".to_string(), 300.0), ("wlan0".to_string(), 100.0)];
+        let view = ranked_bar::<TestMsg>(&data, |v| format!("{v:.0}B"), 10);
+        let mut ui = simulator(view);
+        assert!(ui.find("eth0").is_ok());
+        assert!(ui.find("300B").is_ok());
+        assert!(ui.find("wlan0").is_ok());
+    }
+
+    #[test]
+    fn donut_legend_shows_percentages() {
+        let data = vec![("TCP".to_string(), 75.0), ("UDP".to_string(), 25.0)];
+        let view = donut::<TestMsg>(&data, 80.0);
+        let mut ui = simulator(view);
+        assert!(ui.find("TCP 75%").is_ok());
+        assert!(ui.find("UDP 25%").is_ok());
+    }
+
+    #[test]
+    fn heatmap_renders_without_panic() {
+        // Canvas content isn't introspectable via the simulator; assert it builds
+        // and lays out (empty grid + populated grid) without panicking.
+        let empty: Vec<Vec<f64>> = vec![];
+        let _ = simulator(heatmap::<TestMsg>(&empty, 12.0));
+        let grid = vec![vec![0.0, 5.0], vec![2.0, 0.0]];
+        let _ = simulator(heatmap::<TestMsg>(&grid, 12.0));
+    }
 
     #[test]
     fn parse_datetime_accepts_minute_and_second_precision_as_utc() {

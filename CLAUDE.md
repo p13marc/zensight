@@ -118,13 +118,13 @@ zensight/                    # Workspace root
 │   │       │   └── layout.rs# Force-directed layout algorithm
 │   │       ├── specialized/ # Per-protocol views + drill-down detail panels
 │   │       │   ├── netlink.rs / netlink_detail.rs  # interfaces, sockets, control-plane
-│   │       │   ├── netring.rs / netring_detail.rs  # flows, bandwidth, DNS/HTTP RED
+│   │       │   ├── netring.rs / netring_detail.rs  # tabbed: flows/talkers/DNS/HTTP-TLS/bandwidth/assets/security/capture
 │   │       │   ├── sysinfo.rs / sysinfo_detail.rs  # host metrics, process explorer
 │   │       │   └── syslog.rs, snmp.rs, ...         # other protocol views
 │   │       ├── overview/    # Cross-protocol overview panels
-│   │       ├── components/  # Shared widgets, tokens, theme
+│   │       ├── components/  # Shared widgets, tokens, theme (tabs.rs, data_table.rs, kit, gauge, sparkline)
 │   │       ├── toast.rs     # Toast notification system
-│   │       ├── chart.rs     # Time-series charts (booleans as 0/1 step series)
+│   │       ├── chart.rs     # Time-series + primitives: ranked_bar / donut / heatmap
 │   │       ├── formatting.rs# Value formatting utilities
 │   │       └── icons/       # SVG icons
 │   └── tests/

@@ -5,6 +5,7 @@
 //! Reuses the Iced-independent [`fetch_records`](super::netlink_detail::fetch_records)
 //! so the fetch+decode path is shared and already integration-tested.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use zensight_common::{
@@ -12,7 +13,24 @@ use zensight_common::{
     QuicRecord, SshRecord, TalkerRecord, TlsRecord,
 };
 
+use crate::view::components::TableState;
 use crate::view::specialized::fetch::Fetch;
+
+/// Identifies a sortable/filterable netring table so the shared sort/filter/
+/// load-more messages can address one table without a message per table (#244).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NetringTable {
+    Flows,
+    Elephants,
+    Talkers,
+    Matrix,
+    Dns,
+    Http,
+    Tls,
+    Quic,
+    Ssh,
+    Assets,
+}
 
 /// How many rows the top-N query channels (talkers/dns/http) ask the sensor for.
 const TOP_N: usize = 50;
@@ -85,9 +103,30 @@ pub struct NetringDetailState {
     pub elephants: Fetch<Vec<ElephantRecord>>,
     pub dns: Fetch<Vec<DnsRecord>>,
     pub http: Fetch<Vec<HttpHostRecord>>,
+    /// Per-table sort/filter/limit state, addressed by [`NetringTable`] (#244).
+    pub tables: HashMap<NetringTable, TableState>,
+    /// Firing netring anomalies scoped to this device's source (#253), projected
+    /// by the app from the external alert set so the Security tab + Overview
+    /// anomaly strip render without threading `AlertsState` through the view.
+    pub anomalies: Vec<zensight_common::Alert>,
 }
 
 impl NetringDetailState {
+    /// Read a table's interaction state (a shared default when never touched).
+    /// Returns a reference so views can borrow the filter text for a `text_input`.
+    pub fn table(&self, which: NetringTable) -> &TableState {
+        use std::sync::OnceLock;
+        static DEFAULT: OnceLock<TableState> = OnceLock::new();
+        self.tables
+            .get(&which)
+            .unwrap_or_else(|| DEFAULT.get_or_init(TableState::default))
+    }
+
+    /// Mutable table state, created lazily on first interaction.
+    pub fn table_mut(&mut self, which: NetringTable) -> &mut TableState {
+        self.tables.entry(which).or_default()
+    }
+
     /// Mark a flow fetch as in flight (called when the request is sent).
     pub fn loading(&mut self) {
         self.flows = Fetch::Loading;

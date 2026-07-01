@@ -811,6 +811,57 @@ impl ZenSight {
                 }
             }
 
+            Message::SelectSpecializedTab(device_id, tab) => {
+                if let Some(device) = self.selected_device.as_mut()
+                    && device.device_id == device_id
+                {
+                    device.specialized_tab = tab;
+                }
+                // Prefetch the newly-activated tab's on-demand channel so it
+                // isn't empty until a manual fetch (netring only for now).
+                if device_id.protocol == zensight_common::Protocol::Netring
+                    && let Some(task) = self.prefetch_netring_tab(tab)
+                {
+                    return ControlFlow::Break(task);
+                }
+            }
+            Message::NetringTableSort(which, col) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.table_mut(which).toggle_sort(col);
+                }
+            }
+            Message::NetringTableFilter(which, filter) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.table_mut(which).set_filter(filter);
+                }
+            }
+            Message::NetringTableMore(which) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.table_mut(which).load_more();
+                }
+            }
+            Message::NetringPivotToFlows(device_id, endpoint) => {
+                use crate::view::specialized::SpecializedTab;
+                use crate::view::specialized::fetch::Fetch;
+                use crate::view::specialized::netring_detail::NetringTable;
+                let mut fetch_needed = false;
+                if let Some(device) = self.selected_device.as_mut()
+                    && device.device_id == device_id
+                {
+                    device.specialized_tab = SpecializedTab::Flows;
+                    device
+                        .netring_detail
+                        .table_mut(NetringTable::Flows)
+                        .set_filter(endpoint);
+                    if matches!(device.netring_detail.flows, Fetch::Idle) {
+                        device.netring_detail.loading();
+                        fetch_needed = true;
+                    }
+                }
+                if fetch_needed {
+                    return ControlFlow::Break(self.query_netring_flows());
+                }
+            }
             Message::FetchNetringFlows => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netring_detail.loading();
@@ -1025,6 +1076,7 @@ impl ZenSight {
                 if self.current_view == CurrentView::Topology {
                     self.topology.apply_alerts(&self.alerts.external);
                 }
+                self.refresh_netring_anomalies();
             }
 
             Message::AlertCleared { alert_key, .. } => {
@@ -1037,6 +1089,7 @@ impl ZenSight {
                 if self.current_view == CurrentView::Topology {
                     self.topology.apply_alerts(&self.alerts.external);
                 }
+                self.refresh_netring_anomalies();
             }
 
             Message::AlertsSeed(alerts) => {
@@ -1048,6 +1101,7 @@ impl ZenSight {
                 if self.current_view == CurrentView::Topology {
                     self.topology.apply_alerts(&self.alerts.external);
                 }
+                self.refresh_netring_anomalies();
             }
 
             Message::Connecting => {
@@ -2637,6 +2691,132 @@ impl ZenSight {
         })
     }
 
+    /// On tab activation (#243), prefetch the on-demand channels that back a
+    /// netring tab — but only those still `Idle`, so we never clobber loaded
+    /// data or re-fire an in-flight request. Returns a batched task, or `None`
+    /// when the tab is fully streamed (no queryables) or everything is fetched.
+    fn prefetch_netring_tab(
+        &mut self,
+        tab: crate::view::specialized::SpecializedTab,
+    ) -> Option<Task<Message>> {
+        use crate::view::specialized::SpecializedTab as T;
+        use crate::view::specialized::fetch::Fetch;
+
+        let nd = &self.selected_device.as_ref()?.netring_detail;
+        // Per-tab channel needs (flows, elephants, talkers, matrix, dns, http,
+        // tls, quic, ssh, assets); overview/bandwidth/security/capture stream.
+        let (
+            mut flows,
+            mut elephants,
+            mut talkers,
+            mut matrix,
+            mut dns,
+            mut http,
+            mut tls,
+            mut quic,
+            mut ssh,
+            mut assets,
+        ) = match tab {
+            T::Flows => (
+                true, true, false, false, false, false, false, false, false, false,
+            ),
+            T::TalkersMatrix => (
+                false, false, true, true, false, false, false, false, false, false,
+            ),
+            T::Dns => (
+                false, false, false, false, true, false, false, false, false, false,
+            ),
+            T::HttpTls => (
+                false, false, false, false, false, true, true, true, true, false,
+            ),
+            T::Assets => (
+                false, false, false, false, false, false, false, false, false, true,
+            ),
+            _ => return None,
+        };
+        // Only fetch idle channels.
+        flows &= matches!(nd.flows, Fetch::Idle);
+        elephants &= matches!(nd.elephants, Fetch::Idle);
+        talkers &= matches!(nd.talkers, Fetch::Idle);
+        matrix &= matches!(nd.matrix, Fetch::Idle);
+        dns &= matches!(nd.dns, Fetch::Idle);
+        http &= matches!(nd.http, Fetch::Idle);
+        tls &= matches!(nd.tls, Fetch::Idle);
+        quic &= matches!(nd.quic, Fetch::Idle);
+        ssh &= matches!(nd.ssh, Fetch::Idle);
+        assets &= matches!(nd.assets, Fetch::Idle);
+        if !(flows || elephants || talkers || matrix || dns || http || tls || quic || ssh || assets)
+        {
+            return None;
+        }
+        // Mark loading (mutable borrow ends before we build the &self tasks).
+        if let Some(device) = self.selected_device.as_mut() {
+            let d = &mut device.netring_detail;
+            if flows {
+                d.loading();
+            }
+            if elephants {
+                d.loading_elephants();
+            }
+            if talkers {
+                d.loading_talkers();
+            }
+            if matrix {
+                d.loading_matrix();
+            }
+            if dns {
+                d.loading_dns();
+            }
+            if http {
+                d.loading_http();
+            }
+            if tls {
+                d.loading_tls();
+            }
+            if quic {
+                d.loading_quic();
+            }
+            if ssh {
+                d.loading_ssh();
+            }
+            if assets {
+                d.loading_assets();
+            }
+        }
+        let mut tasks: Vec<Task<Message>> = Vec::new();
+        if flows {
+            tasks.push(self.query_netring_flows());
+        }
+        if elephants {
+            tasks.push(self.query_netring_elephants());
+        }
+        if talkers {
+            tasks.push(self.query_netring_talkers());
+        }
+        if matrix {
+            tasks.push(self.query_netring_matrix());
+        }
+        if dns {
+            tasks.push(self.query_netring_dns());
+        }
+        if http {
+            tasks.push(self.query_netring_http());
+        }
+        if tls {
+            tasks.push(self.query_netring_tls());
+        }
+        if quic {
+            tasks.push(self.query_netring_quic());
+        }
+        if ssh {
+            tasks.push(self.query_netring_ssh());
+        }
+        if assets {
+            tasks.push(self.query_netring_assets());
+        }
+        Some(Task::batch(tasks))
+    }
+
     fn query_netring_flows(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_flows;
         self.query_channel(
@@ -3350,6 +3530,32 @@ impl ZenSight {
     /// Select a device to view in detail. Returns a task that pre-loads this
     /// device's restart-survived history from the local store off the UI thread
     /// (#22), so the detail chart opens pre-populated with persisted trends.
+    /// Project the firing external anomalies scoped to the selected netring
+    /// device's source into its detail state, so the Security tab + Overview
+    /// anomaly strip render without threading `AlertsState` through the view
+    /// (#253). No-op unless a netring device is open.
+    fn refresh_netring_anomalies(&mut self) {
+        use zensight_common::{AlertKind, Protocol};
+        let Some(source) = self
+            .selected_device
+            .as_ref()
+            .filter(|d| d.device_id.protocol == Protocol::Netring)
+            .map(|d| d.device_id.source.clone())
+        else {
+            return;
+        };
+        let anomalies: Vec<zensight_common::Alert> = self
+            .alerts
+            .active_external()
+            .into_iter()
+            .filter(|a| a.kind == AlertKind::Anomaly && a.source == source)
+            .cloned()
+            .collect();
+        if let Some(device) = self.selected_device.as_mut() {
+            device.netring_detail.anomalies = anomalies;
+        }
+    }
+
     fn select_device(&mut self, device_id: DeviceId) -> Task<Message> {
         tracing::info!(device = %device_id, "Selected device");
         // We don't have the full TelemetryPoints in the dashboard,
@@ -3360,6 +3566,8 @@ impl ZenSight {
         detail_state.set_favorites(self.device_favorites(&device_id));
         self.selected_device = Some(detail_state);
         self.set_view(CurrentView::Device);
+        // Project firing anomalies for this source into the netring view (#253).
+        self.refresh_netring_anomalies();
 
         // Prefetch this protocol's primary detail channels so the drill-in opens
         // pre-populated rather than Idle-until-clicked (#127).

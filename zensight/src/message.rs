@@ -163,6 +163,28 @@ pub enum Message {
     /// Socket explorer (#112): set the sort order.
     SetNetlinkSocketSort(crate::view::specialized::netlink_detail::SocketSort),
 
+    /// Select the active tab of a tabbed specialized view (#243). Remembered
+    /// per device in `DeviceDetailState`.
+    SelectSpecializedTab(DeviceId, crate::view::specialized::SpecializedTab),
+
+    /// Sort a netring data-table by column index (toggles direction) (#244).
+    NetringTableSort(
+        crate::view::specialized::netring_detail::NetringTable,
+        usize,
+    ),
+    /// Set a netring data-table's substring filter (#244).
+    NetringTableFilter(
+        crate::view::specialized::netring_detail::NetringTable,
+        String,
+    ),
+    /// Reveal another page of rows in a netring data-table (#244).
+    NetringTableMore(crate::view::specialized::netring_detail::NetringTable),
+
+    /// Drill-down pivot (#246): jump to the Flows tab filtered to an endpoint
+    /// (talker → flows, asset → flows, matrix cell → flows). Reuses the Flows
+    /// data-table filter; fetches flows if not already loaded.
+    NetringPivotToFlows(DeviceId, String),
+
     /// Fetch the on-demand netring flow detail (recent flows).
     FetchNetringFlows,
     /// A netring flow-detail reply: the decoded flows, or an error message.

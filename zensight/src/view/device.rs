@@ -107,6 +107,9 @@ pub struct DeviceDetailState {
     /// persisted favorites on selection; pinned metrics sort to the top of the
     /// table and show a filled star.
     pub favorites: HashSet<String>,
+    /// Active tab of the tabbed specialized view (#243), remembered per device.
+    /// Defaults to `Overview`.
+    pub specialized_tab: crate::view::specialized::SpecializedTab,
 }
 
 impl DeviceDetailState {
@@ -136,6 +139,7 @@ impl DeviceDetailState {
             chart_from_input: String::new(),
             chart_to_input: String::new(),
             favorites: HashSet::new(),
+            specialized_tab: Default::default(),
         }
     }
 

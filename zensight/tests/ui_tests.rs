@@ -633,10 +633,26 @@ fn test_netring_red_cards() {
     put("flow/by_l4/tcp/flows_total", 7.0);
 
     let syslog_filter = SyslogFilterState::default();
-    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
-    assert!(ui.find("DNS (RED)").is_ok());
-    assert!(ui.find("HTTP (RED)").is_ok());
-    assert!(ui.find("Per-protocol (L4)").is_ok());
+    // #247: the RED cards now live in tabs. Overview carries per-L4; DNS and
+    // HTTP/TLS each have their own tab. Drive the active tab per assertion
+    // (view tests can't run the app update loop to switch via click).
+    {
+        // Overview (default): per-L4 split + capability-aware tab labels present.
+        let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
+        assert!(ui.find("Per-protocol (L4)").is_ok());
+        assert!(ui.find("DNS").is_ok());
+        assert!(ui.find("HTTP/TLS").is_ok());
+    }
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Dns;
+    {
+        let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
+        assert!(ui.find("DNS (RED)").is_ok());
+    }
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::HttpTls;
+    {
+        let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
+        assert!(ui.find("HTTP (RED)").is_ok());
+    }
 }
 
 /// Test settings view renders correctly.
@@ -1536,11 +1552,11 @@ fn test_netring_specialized_view() {
             packets_responder: 6,
         }]));
 
-    // Loading state: button reads "Fetching…" while a fetch is in flight; an
-    // error renders inline. Use a fresh state so the main assertions below still
-    // see the ready flow table.
+    // #247: content is tabbed. Loading/error render inline on the Flows tab;
+    // drive the active tab explicitly (view tests can't switch via click).
     {
         let mut s = DeviceDetailState::new(DeviceId::new(Protocol::Netring, "wiretap1"));
+        s.specialized_tab = zensight::view::specialized::SpecializedTab::Flows;
         s.netring_detail.loading();
         {
             let mut ui = simulator(netring_sensor_view(&s));
@@ -1552,23 +1568,36 @@ fn test_netring_specialized_view() {
         assert!(ui.find("Fetch failed: no sensor").is_ok());
     }
 
-    let mut ui = simulator(netring_sensor_view(&state));
-    assert!(ui.find("Netring: wiretap1").is_ok());
-    assert!(ui.find("Flows").is_ok());
-    assert!(ui.find("https").is_ok());
-    // enh-03 flow-volume + TCP health sections.
-    assert!(ui.find("TCP Health").is_ok());
-    assert!(ui.find("bytes (total)").is_ok());
-    // enh-03 §D on-demand flow detail: fetch button + fetched flow row.
-    assert!(ui.find("Recent Flows (on demand)").is_ok());
-    assert!(ui.find("Fetch Flows").is_ok());
-    assert!(ui.find("10.0.0.1:54321").is_ok());
-    // #228 orientation: directed flows show initiator→responder columns + the
-    // directed arrow + a per-direction byte split.
-    assert!(ui.find("initiator").is_ok());
-    assert!(ui.find("responder").is_ok());
-    assert!(ui.find("out↑ / in↓").is_ok());
-    assert!(ui.find("→").is_ok());
+    // Overview (default): header + flow-volume + TCP health + tab strip.
+    {
+        let mut ui = simulator(netring_sensor_view(&state));
+        assert!(ui.find("Netring: wiretap1").is_ok());
+        assert!(ui.find("Flows").is_ok()); // tab label
+        assert!(ui.find("TCP Health").is_ok());
+        assert!(ui.find("bytes (total)").is_ok());
+    }
+
+    // Bandwidth tab: per-app throughput.
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Bandwidth;
+    {
+        let mut ui = simulator(netring_sensor_view(&state));
+        assert!(ui.find("https").is_ok());
+    }
+
+    // Flows tab: on-demand flow detail (fetch button + fetched row + orientation).
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Flows;
+    {
+        let mut ui = simulator(netring_sensor_view(&state));
+        assert!(ui.find("Recent Flows (on demand)").is_ok());
+        assert!(ui.find("Fetch Flows").is_ok());
+        assert!(ui.find("10.0.0.1:54321").is_ok());
+        // #228 orientation: directed flows show initiator→responder columns + the
+        // directed arrow + a per-direction byte split.
+        assert!(ui.find("initiator").is_ok());
+        assert!(ui.find("responder").is_ok());
+        assert!(ui.find("out↑ / in↓").is_ok());
+        assert!(ui.find("→").is_ok());
+    }
 }
 
 /// Sensor-pushed alerts render in the alerts view's "Anomalies & Expectations"
@@ -1909,11 +1938,19 @@ fn test_netring_tls_capture_sections() {
         count: 7,
     }]));
 
-    let mut ui = simulator(netring_sensor_view(&state));
-    assert!(ui.find("TLS").is_ok());
-    assert!(ui.find("Fetch inventory").is_ok());
-    assert!(ui.find("api.example.com").is_ok());
-    assert!(ui.find("Capture Health").is_ok());
+    // TLS is on the HTTP/TLS tab; Capture Health on the Capture tab (#247).
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::HttpTls;
+    {
+        let mut ui = simulator(netring_sensor_view(&state));
+        assert!(ui.find("TLS").is_ok());
+        assert!(ui.find("Fetch inventory").is_ok());
+        assert!(ui.find("api.example.com").is_ok());
+    }
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Capture;
+    {
+        let mut ui = simulator(netring_sensor_view(&state));
+        assert!(ui.find("Capture Health").is_ok());
+    }
 }
 
 /// #72: the netring view surfaces the QUIC SNI/ALPN and SSH/HASSH inventories —
@@ -1945,6 +1982,8 @@ fn test_netring_quic_ssh_sections() {
         count: 2,
     }]));
 
+    // QUIC/SSH inventories live on the HTTP/TLS tab (#247).
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::HttpTls;
     let mut ui = simulator(netring_sensor_view(&state));
     assert!(ui.find("QUIC (SNI / ALPN)").is_ok());
     assert!(ui.find("cloudflare-quic.com").is_ok());
@@ -1976,6 +2015,7 @@ fn test_netring_capture_overload_and_breakdown() {
         state.update(TelemetryPoint::new("wiretap1", Protocol::Netring, m, v));
     }
 
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Capture;
     let mut ui = simulator(netring_sensor_view(&state));
     assert!(ui.find("Capture Health").is_ok());
     assert!(ui.find("⚠ OVERLOAD — losing packets").is_ok());
@@ -2010,6 +2050,7 @@ fn test_netring_capture_backend_and_shedding() {
         state.update(TelemetryPoint::new("wiretap1", Protocol::Netring, m, v));
     }
 
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Capture;
     let mut ui = simulator(netring_sensor_view(&state));
     assert!(ui.find("Capture Health").is_ok());
     assert!(ui.find("backend: af_xdp").is_ok());
@@ -2088,6 +2129,7 @@ fn test_netring_assets_section() {
         last_seen: 1_700_000_000_000,
     }]));
 
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Assets;
     let mut ui = simulator(netring_sensor_view(&state));
     assert!(ui.find("Assets (passive discovery)").is_ok());
     assert!(ui.find("switch01").is_ok());
@@ -2100,6 +2142,147 @@ fn test_netring_assets_section() {
         msgs.iter()
             .any(|m| matches!(m, Message::FetchNetringAssets))
     );
+}
+
+/// #247: the netring view is tabbed — always-on tabs render, capability-gated
+/// tabs (DNS) appear only with their data, and clicking a tab emits the select
+/// message that the app persists per device.
+#[test]
+fn test_netring_tabs_capability_and_switch() {
+    use zensight::view::specialized::SpecializedTab;
+    use zensight::view::specialized::netring::netring_sensor_view;
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let mut state = DeviceDetailState::new(device_id);
+    // No dns/ metrics → DNS tab hidden; always-on tabs present.
+    {
+        let mut ui = simulator(netring_sensor_view(&state));
+        assert!(ui.find("Overview").is_ok());
+        assert!(ui.find("Talkers & Matrix").is_ok());
+        assert!(ui.find("HTTP/TLS").is_ok());
+        assert!(ui.find("DNS").is_err());
+    }
+    // Add a dns/ metric → the DNS tab becomes visible.
+    state.update(TelemetryPoint::new(
+        "wiretap1",
+        Protocol::Netring,
+        "dns/queries_total",
+        TelemetryValue::Counter(1),
+    ));
+    {
+        let mut ui = simulator(netring_sensor_view(&state));
+        assert!(ui.find("DNS").is_ok());
+    }
+    // Clicking a tab emits SelectSpecializedTab for this device.
+    let mut ui = simulator(netring_sensor_view(&state));
+    let _ = ui.click("Talkers & Matrix");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(msgs.iter().any(|m| matches!(
+        m,
+        Message::SelectSpecializedTab(d, SpecializedTab::TalkersMatrix) if d.source == "wiretap1"
+    )));
+}
+
+/// #253: firing netring anomalies surface in-view — an Overview strip that
+/// click-throughs to the Security tab, and a Security tab that rolls them up by
+/// detector, deep-links to the global Security view, and pivots to flows.
+#[test]
+fn test_netring_security_tab_and_strip() {
+    use std::collections::HashMap;
+
+    use zensight::view::specialized::SpecializedTab;
+    use zensight::view::specialized::netring::netring_sensor_view;
+    use zensight_common::{Alert, AlertKind, AlertSeverity, AlertState, Protocol};
+
+    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let mut state = DeviceDetailState::new(device_id);
+    state.netring_detail.anomalies = vec![Alert {
+        timestamp: 0,
+        source: "wiretap1".into(),
+        protocol: Protocol::Netring,
+        kind: AlertKind::Anomaly,
+        rule: "RitaBeacon".into(),
+        severity: AlertSeverity::Critical,
+        state: AlertState::Firing,
+        summary: "periodic beaconing to 1.2.3.4".into(),
+        labels: HashMap::from([
+            ("technique".to_string(), "T1071".to_string()),
+            ("src".to_string(), "10.0.0.9".to_string()),
+        ]),
+    }];
+
+    // Overview: the anomaly strip is present and clicks through to Security.
+    {
+        let mut ui = simulator(netring_sensor_view(&state));
+        assert!(ui.find("Security").is_ok()); // tab visible with a badge
+        let _ = ui.click("⚠ 1 anomaly · highest critical · T1071");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(msgs.iter().any(|m| matches!(
+            m,
+            Message::SelectSpecializedTab(_, SpecializedTab::Security)
+        )));
+    }
+
+    // Security tab: rollup + deep-link + flow pivot.
+    state.specialized_tab = SpecializedTab::Security;
+    {
+        let mut ui = simulator(netring_sensor_view(&state));
+        assert!(ui.find("Anomalies (1)").is_ok());
+        assert!(ui.find("RitaBeacon").is_ok());
+        assert!(ui.find("periodic beaconing to 1.2.3.4").is_ok());
+        assert!(ui.find("Open Security view").is_ok());
+    }
+    // The per-anomaly flow pivot targets the offending src.
+    {
+        let mut ui = simulator(netring_sensor_view(&state));
+        let _ = ui.click("flows →");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(msgs.iter().any(|m| matches!(
+            m,
+            Message::NetringPivotToFlows(_, ep) if ep == "10.0.0.9"
+        )));
+    }
+}
+
+/// #247/#248: Overview shows a capture-health chip; the Talkers & Matrix tab
+/// renders the ranked-bar + sortable table from fetched data.
+#[test]
+fn test_netring_overview_chip_and_talkers_tab() {
+    use zensight::view::specialized::SpecializedTab;
+    use zensight::view::specialized::netring::netring_sensor_view;
+    use zensight_common::{Protocol, TalkerRecord, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let mut state = DeviceDetailState::new(device_id);
+    for (m, v) in [
+        ("flow/started_total", TelemetryValue::Counter(3)),
+        ("capture/backend", TelemetryValue::Text("af_xdp".into())),
+        ("capture/0/packets", TelemetryValue::Counter(1000)),
+        ("capture/0/drop_rate", TelemetryValue::Gauge(0.0)),
+    ] {
+        state.update(TelemetryPoint::new("wiretap1", Protocol::Netring, m, v));
+    }
+    // Overview: capture-health chip present.
+    {
+        let mut ui = simulator(netring_sensor_view(&state));
+        assert!(ui.find("capture: af_xdp · drop 0.00%").is_ok());
+    }
+
+    // Talkers & Matrix tab: ranked bar + table render from fetched talkers.
+    state.netring_detail.talkers =
+        zensight::view::specialized::fetch::Fetch::Ready(vec![TalkerRecord {
+            dst: "10.0.0.42:443".into(),
+            bytes: 4096,
+            packets: 12,
+            flows: 2,
+        }]);
+    state.specialized_tab = SpecializedTab::TalkersMatrix;
+    {
+        let mut ui = simulator(netring_sensor_view(&state));
+        assert!(ui.find("10.0.0.42:443").is_ok());
+        assert!(ui.find("showing 1 of 1 talkers").is_ok());
+    }
 }
 
 /// The top-level Logs view renders buffered log lines (the message text and the

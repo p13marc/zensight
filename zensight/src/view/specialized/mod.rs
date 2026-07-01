@@ -28,6 +28,24 @@ pub use syslog::{
     SyslogFilterState, SyslogMessage, logs_view, syslog_event_view, syslog_message_from_point,
 };
 
+/// The active tab of a tabbed specialized view (#243, epic #257). Currently
+/// carries the netring tab set (the netlink redesign #270 will extend this).
+/// Stored per device in [`DeviceDetailState`] so each sensor screen remembers
+/// the last tab you looked at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SpecializedTab {
+    #[default]
+    Overview,
+    Flows,
+    TalkersMatrix,
+    Dns,
+    HttpTls,
+    Bandwidth,
+    Assets,
+    Security,
+    Capture,
+}
+
 /// Number of trailing history samples to render in an inline sparkline (#44).
 const SPARKLINE_SAMPLES: usize = 60;
 
