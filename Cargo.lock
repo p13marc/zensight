@@ -10172,6 +10172,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "glob",
  "hostname",
  "json5",
  "serde",

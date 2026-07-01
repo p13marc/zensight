@@ -17,6 +17,21 @@ use zensight_sensor_core::{Publisher, SensorHealth};
 
 use crate::config::SystemdConfig;
 
+/// One `ListUnits` row: `(name, description, load_state, active_state, sub_state,
+/// following, unit_path, job_id, job_type, job_path)`.
+type ListedUnit = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    OwnedObjectPath,
+    u32,
+    String,
+    OwnedObjectPath,
+);
+
 /// The `org.freedesktop.systemd1.Manager` subset we need: scalar counters, the
 /// six boot monotonic timestamps, and `ListUnits`.
 #[zbus::proxy(
@@ -57,23 +72,7 @@ trait Manager {
     /// Enumerate all loaded units. Each tuple is
     /// `(name, description, load_state, active_state, sub_state, following,
     ///   unit_path, job_id, job_type, job_path)`.
-    #[allow(clippy::type_complexity)]
-    fn list_units(
-        &self,
-    ) -> zbus::Result<
-        Vec<(
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            OwnedObjectPath,
-            u32,
-            String,
-            OwnedObjectPath,
-        )>,
-    >;
+    fn list_units(&self) -> zbus::Result<Vec<ListedUnit>>;
 }
 
 /// The load/active state pair extracted from one `ListUnits` row — the only
@@ -179,7 +178,9 @@ pub struct SystemdCollector {
     config: SystemdConfig,
     publisher: Publisher,
     health: Arc<SensorHealth>,
-    proxy: Option<ManagerProxy<'static>>,
+    /// Compiled `watch_units` globs (#273); empty = no per-unit streaming.
+    watch: Vec<glob::Pattern>,
+    conn: Option<zbus::Connection>,
 }
 
 impl SystemdCollector {
@@ -189,12 +190,25 @@ impl SystemdCollector {
         publisher: Publisher,
         health: Arc<SensorHealth>,
     ) -> Self {
+        // Compile watchlist globs once; a bad pattern is logged and skipped.
+        let watch = config
+            .watch_units
+            .iter()
+            .filter_map(|p| match glob::Pattern::new(p) {
+                Ok(pat) => Some(pat),
+                Err(e) => {
+                    tracing::warn!(pattern = %p, error = %e, "ignoring invalid watch_units glob");
+                    None
+                }
+            })
+            .collect();
         Self {
             source,
             config,
             publisher,
             health,
-            proxy: None,
+            watch,
+            conn: None,
         }
     }
 
@@ -217,8 +231,8 @@ impl SystemdCollector {
                 }
                 Err(e) => {
                     // Non-systemd host / bus unavailable: report unhealthy, drop the
-                    // proxy so the next tick reconnects, and keep the loop alive.
-                    self.proxy = None;
+                    // connection so the next tick reconnects, and keep the loop alive.
+                    self.conn = None;
                     self.health
                         .record_device_failure(&self.source, &e.to_string());
                     tracing::warn!(error = %e, "systemd collect failed");
@@ -230,60 +244,97 @@ impl SystemdCollector {
         }
     }
 
-    /// Ensure a live `ManagerProxy`, connecting to the system bus on first use or
-    /// after a prior failure.
-    async fn ensure_proxy(&mut self) -> zbus::Result<&ManagerProxy<'static>> {
-        if self.proxy.is_none() {
-            let conn = zbus::Connection::system().await?;
-            let proxy = ManagerProxy::new(&conn).await?;
-            self.proxy = Some(proxy);
+    /// Ensure a live system-bus connection, (re)connecting on first use or after a
+    /// prior failure. Returned by clone (the connection is cheap `Arc`-backed) so
+    /// callers hold an owned handle without borrowing `self`.
+    async fn ensure_conn(&mut self) -> zbus::Result<zbus::Connection> {
+        if self.conn.is_none() {
+            self.conn = Some(zbus::Connection::system().await?);
         }
-        Ok(self.proxy.as_ref().expect("proxy just set"))
+        Ok(self.conn.as_ref().expect("conn just set").clone())
     }
 
     /// One collection pass: read the Manager, build points, publish. Returns the
     /// number of points published.
     async fn collect_and_publish(&mut self) -> zbus::Result<usize> {
-        // Gather everything from D-Bus first (borrow of `self.proxy`), then publish
-        // (borrows `self.publisher`) — keeps the borrows non-overlapping.
         let collect = self.config.collect.clone();
-        let (counts, boot, aggregates) = {
-            let proxy = self.ensure_proxy().await?;
-            let counts = ManagerCounts {
-                n_names: proxy.n_names().await?,
-                n_failed_units: proxy.n_failed_units().await?,
-                n_jobs: proxy.n_jobs().await?,
-                n_installed_jobs: proxy.n_installed_jobs().await?,
-            };
-            let boot = if collect.boot {
-                Some(BootTimestamps {
-                    firmware: proxy.firmware_timestamp_monotonic().await?,
-                    loader: proxy.loader_timestamp_monotonic().await?,
-                    initrd: proxy.initrd_timestamp_monotonic().await?,
-                    userspace: proxy.userspace_timestamp_monotonic().await?,
-                    finish: proxy.finish_timestamp_monotonic().await?,
-                })
-            } else {
-                None
-            };
-            let aggregates = if collect.list_units {
-                let units: Vec<UnitEntry> = proxy
-                    .list_units()
-                    .await?
-                    .into_iter()
-                    .map(|u| UnitEntry {
-                        load_state: u.2,
-                        active_state: u.3,
-                    })
-                    .collect();
-                Some(unit_aggregates(&units))
-            } else {
-                None
-            };
-            (counts, boot, aggregates)
+        let conn = self.ensure_conn().await?;
+        let proxy = ManagerProxy::new(&conn).await?;
+
+        let counts = ManagerCounts {
+            n_names: proxy.n_names().await?,
+            n_failed_units: proxy.n_failed_units().await?,
+            n_jobs: proxy.n_jobs().await?,
+            n_installed_jobs: proxy.n_installed_jobs().await?,
+        };
+        let boot = if collect.boot {
+            Some(BootTimestamps {
+                firmware: proxy.firmware_timestamp_monotonic().await?,
+                loader: proxy.loader_timestamp_monotonic().await?,
+                initrd: proxy.initrd_timestamp_monotonic().await?,
+                userspace: proxy.userspace_timestamp_monotonic().await?,
+                finish: proxy.finish_timestamp_monotonic().await?,
+            })
+        } else {
+            None
         };
 
-        let points = build_points(&self.source, &counts, boot.as_ref(), aggregates.as_ref());
+        // Enumerate units once if either the aggregates or the watchlist need it.
+        let need_units = collect.list_units || !self.watch.is_empty();
+        let listed = if need_units {
+            proxy.list_units().await?
+        } else {
+            Vec::new()
+        };
+        let aggregates = collect.list_units.then(|| {
+            let units: Vec<UnitEntry> = listed
+                .iter()
+                .map(|u| UnitEntry {
+                    load_state: u.2.clone(),
+                    active_state: u.3.clone(),
+                })
+                .collect();
+            unit_aggregates(&units)
+        });
+
+        let mut points = build_points(&self.source, &counts, boot.as_ref(), aggregates.as_ref());
+
+        // Per-unit watchlist streaming (#273): match names, cap at watch_max, and
+        // fold the rest into the `other/*` bucket.
+        if !self.watch.is_empty() {
+            let matched: Vec<&ListedUnit> = listed
+                .iter()
+                .filter(|u| self.watch.iter().any(|g| g.matches(&u.0)))
+                .collect();
+
+            let cap = self.config.watch_max;
+            let streamed = matched.len().min(cap);
+            if matched.len() > cap {
+                tracing::warn!(
+                    matched = matched.len(),
+                    watch_max = cap,
+                    "watch_units matched more units than watch_max; truncating (excess folded into other/*)"
+                );
+            }
+            for u in matched.iter().take(cap) {
+                match crate::unit::sample_unit(
+                    &conn,
+                    &u.6,
+                    u.0.clone(),
+                    self.config.ip_io_accounting,
+                )
+                .await
+                {
+                    Ok(sample) => points.extend(crate::map::unit_points(&self.source, &sample)),
+                    Err(e) => {
+                        tracing::warn!(unit = %u.0, error = %e, "failed to sample watched unit")
+                    }
+                }
+            }
+            let unwatched = (listed.len().saturating_sub(streamed)) as u64;
+            points.extend(crate::map::other_points(&self.source, unwatched));
+        }
+
         let n = points.len();
         for point in &points {
             let suffix = format!("{}/{}", point.source, point.metric);

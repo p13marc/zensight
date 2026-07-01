@@ -44,6 +44,23 @@ pub struct SystemdConfig {
     #[serde(default)]
     pub source: Option<String>,
 
+    /// Unit-name globs to stream per-unit telemetry for (#273). Empty = none.
+    /// Hundreds of units exist per host, so per-unit series are watchlist-scoped
+    /// to bound key cardinality. Matched with `glob` semantics (`*`, `?`, `[…]`).
+    #[serde(default)]
+    pub watch_units: Vec<String>,
+
+    /// Hard cap on how many matched units stream per-unit telemetry (#273). Excess
+    /// matches are dropped (and logged — no silent truncation) and folded into the
+    /// `other/*` aggregate bucket.
+    #[serde(default = "default_watch_max")]
+    pub watch_max: usize,
+
+    /// Collect opt-in IP/IO accounting per watched unit (#273). Only surfaces when
+    /// the unit itself enabled `IPAccounting=`/`IOAccounting=`; absent otherwise.
+    #[serde(default)]
+    pub ip_io_accounting: bool,
+
     /// Collector toggles.
     #[serde(default)]
     pub collect: CollectConfig,
@@ -79,9 +96,16 @@ impl Default for SystemdConfig {
             key_prefix: default_key_prefix(),
             poll_interval_secs: default_poll_interval_secs(),
             source: None,
+            watch_units: Vec::new(),
+            watch_max: default_watch_max(),
+            ip_io_accounting: false,
             collect: CollectConfig::default(),
         }
     }
+}
+
+fn default_watch_max() -> usize {
+    50
 }
 
 fn default_key_prefix() -> String {
