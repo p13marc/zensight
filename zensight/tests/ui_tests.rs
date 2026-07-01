@@ -1947,7 +1947,7 @@ fn test_netlink_conntrack_wireguard_sections() {
         state.specialized_tab = SpecializedTab::FirewallIpsec;
         let mut ui = simulator(netlink_host_view(&state));
         assert!(ui.find("Conntrack").is_ok());
-        assert!(ui.find("75.0%").is_ok()); // utilization as a percentage
+        assert!(ui.find("75%").is_ok()); // utilization as a proper gauge (#264)
     }
     {
         state.specialized_tab = SpecializedTab::WireGuard;
@@ -2009,6 +2009,49 @@ fn test_netlink_tabs_capability_and_switch() {
                     && *t == zensight::view::specialized::SpecializedTab::Sockets
         )));
     }
+}
+
+/// #264: the Firewall & IPsec tab renders the conntrack gauge + per-proto donut,
+/// the nft rule DataTable, and the xfrm SA DataTable.
+#[test]
+fn test_netlink_firewall_tab() {
+    use zensight::view::specialized::netlink::netlink_host_view;
+    use zensight::view::specialized::netlink_detail::{NetlinkDetailData, NetlinkDetailTopic};
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let mut state = DeviceDetailState::new(device_id);
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::FirewallIpsec;
+    for (m, v) in [
+        ("conntrack/entries", TelemetryValue::Gauge(100.0)),
+        ("conntrack/utilization", TelemetryValue::Gauge(0.5)),
+        ("conntrack/by_proto/tcp", TelemetryValue::Gauge(80.0)),
+        ("xfrm/sa/total", TelemetryValue::Gauge(1.0)),
+    ] {
+        state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
+    }
+    state.netlink_detail.apply(
+        NetlinkDetailTopic::Nft,
+        Ok(NetlinkDetailData::Nft(vec![
+            zensight::view::specialized::netlink_detail::NftRuleRecord {
+                family: "inet".into(),
+                table: "filter".into(),
+                chain: "input".into(),
+                handle: 4,
+                comment: Some("drop-bad".into()),
+                packets: 12,
+                bytes: 900,
+            },
+        ])),
+    );
+
+    let mut ui = simulator(netlink_host_view(&state));
+    assert!(ui.find("Conntrack").is_ok());
+    assert!(ui.find("50%").is_ok()); // conntrack utilization gauge
+    // nft rule DataTable (per-rule hit counters).
+    assert!(ui.find("drop-bad").is_ok());
+    assert!(ui.find("nftables rules").is_ok());
+    assert!(ui.find("IPsec SAs").is_ok());
 }
 
 /// #263: the QoS tab renders a per-qdisc health chip + AQM class + backlog

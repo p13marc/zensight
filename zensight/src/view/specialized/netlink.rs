@@ -18,8 +18,8 @@ use crate::view::device::DeviceDetailState;
 use crate::view::specialized::SpecializedTab;
 use crate::view::specialized::fetch::Fetch;
 use crate::view::specialized::netlink_detail::{
-    AddressRecord, NetlinkDetailState, NetlinkDetailTopic, NetlinkTable, RouteChangeRecord,
-    SocketSort, TcRecord, filter_sort_sockets,
+    AddressRecord, NetlinkDetailState, NetlinkDetailTopic, NetlinkTable, NftRuleRecord,
+    RouteChangeRecord, SocketSort, TcRecord, XfrmSaRecord, filter_sort_sockets,
 };
 use crate::view::theme;
 use crate::view::tokens::{font, space};
@@ -86,20 +86,7 @@ fn netlink_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Elemen
         .spacing(space::MD),
         RoutingNeighbors => render_routing_tab(state),
         Qos => render_qos_tab(state),
-        FirewallIpsec => {
-            let mut c = column![].spacing(space::MD);
-            if has_prefix(state, "conntrack/") {
-                c = c.push(card(render_conntrack(state)));
-            }
-            if has_prefix(state, "xfrm/") || has_prefix(state, "events/ipsec/") {
-                c = c.push(card(render_xfrm(state)));
-            }
-            c = c.push(card(render_detail(
-                state,
-                &[NetlinkDetailTopic::Xfrm, NetlinkDetailTopic::Nft],
-            )));
-            c
-        }
+        FirewallIpsec => render_firewall_tab(state),
         Events => {
             column![card(render_detail(state, &[NetlinkDetailTopic::Events]))].spacing(space::MD)
         }
@@ -1732,6 +1719,51 @@ fn render_socket_controls<'a>(
 }
 
 /// Conntrack (NAT/flow-table health) section.
+/// Firewall & IPsec tab (#264): conntrack utilization gauge + per-proto donut,
+/// nft per-rule hit-rate table, and the xfrm/IPsec SA inventory + lifecycle.
+fn render_firewall_tab(state: &DeviceDetailState) -> Column<'_, Message> {
+    let d = &state.netlink_detail;
+    let mut col = column![].spacing(space::MD);
+
+    if has_prefix(state, "conntrack/") {
+        col = col.push(card(render_conntrack(state)));
+    }
+    // nft per-rule hit-rate (@/query/nft) with decoded packet/byte counters.
+    col = col.push(card(detail_datatable(
+        d,
+        NetlinkTable::Nft,
+        NetlinkDetailTopic::Nft,
+        &d.nft,
+        "nftables rules",
+        "rules",
+        nft_columns(),
+        |r: &NftRuleRecord| format!("{} {} {}", r.family, r.table, r.chain),
+    )));
+    // IPsec / xfrm summary + lifecycle counters, then the SA inventory.
+    if has_prefix(state, "xfrm/") || has_prefix(state, "events/ipsec/") {
+        col = col.push(card(render_xfrm(state)));
+    }
+    col = col.push(card(detail_datatable(
+        d,
+        NetlinkTable::Xfrm,
+        NetlinkDetailTopic::Xfrm,
+        &d.xfrm,
+        "IPsec SAs",
+        "SAs",
+        xfrm_columns(),
+        |s: &XfrmSaRecord| {
+            format!(
+                "{} {} {}",
+                s.src.as_deref().unwrap_or(""),
+                s.dst.as_deref().unwrap_or(""),
+                s.proto
+            )
+        },
+    )));
+
+    col
+}
+
 fn render_conntrack(state: &DeviceDetailState) -> Element<'_, Message> {
     let title = section_header("Conntrack", None);
     let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
@@ -1741,27 +1773,100 @@ fn render_conntrack(state: &DeviceDetailState) -> Element<'_, Message> {
     let mut col = column![
         title,
         line("entries", "conntrack/entries"),
-        line("tcp", "conntrack/by_proto/tcp"),
-        line("udp", "conntrack/by_proto/udp"),
-        line("icmp", "conntrack/by_proto/icmp"),
-        line("other", "conntrack/by_proto/other"),
         line("max", "conntrack/max"),
     ]
     .spacing(4);
 
-    // Utilization is a 0..1 ratio — render as a percentage (num() would floor it).
-    if let Some(TelemetryValue::Gauge(u)) =
-        state.metrics.get("conntrack/utilization").map(|p| &p.value)
-    {
+    // Utilization is a 0..1 ratio → a proper gauge (kills the inline *100 hack).
+    if let Some(u) = fval(state, "conntrack/utilization") {
         col = col.push(
-            row![
-                cell("utilization", 180),
-                cell(&format!("{:.1}%", u * 100.0), 120)
-            ]
-            .spacing(8),
+            Gauge::percentage(u * 100.0, "utilization")
+                .with_thresholds(0.75, 0.9)
+                .with_width(200.0)
+                .view(),
         );
     }
+
+    // Per-protocol breakdown donut.
+    let mix = conntrack_proto_mix(state);
+    if !mix.is_empty() {
+        col = col.push(text("by protocol").size(font::CAPTION).style(dim));
+        col = col.push(crate::view::chart::donut(&mix, 120.0));
+    }
     col.into()
+}
+
+/// Conntrack entries per protocol (`conntrack/by_proto/*`) for the donut.
+fn conntrack_proto_mix(state: &DeviceDetailState) -> Vec<(String, f64)> {
+    let mut out = Vec::new();
+    for p in ["tcp", "udp", "icmp", "other"] {
+        if let Some(v) = fval(state, &format!("conntrack/by_proto/{p}"))
+            && v > 0.0
+        {
+            out.push((p.to_string(), v));
+        }
+    }
+    out
+}
+
+fn nft_columns<'a>() -> Vec<DataColumn<'a, NftRuleRecord, Message>> {
+    vec![
+        DataColumn::fixed("family", 70.0, |r: &NftRuleRecord| {
+            text(r.family.clone()).size(font::CAPTION).into()
+        })
+        .sortable(|r: &NftRuleRecord| SortKey::Text(r.family.clone())),
+        DataColumn::fill("table", 2, |r: &NftRuleRecord| {
+            text(r.table.clone()).size(font::CAPTION).into()
+        })
+        .sortable(|r: &NftRuleRecord| SortKey::Text(r.table.clone())),
+        DataColumn::fill("chain", 2, |r: &NftRuleRecord| {
+            text(r.chain.clone()).size(font::CAPTION).into()
+        })
+        .sortable(|r: &NftRuleRecord| SortKey::Text(r.chain.clone())),
+        DataColumn::fixed("packets", 90.0, |r: &NftRuleRecord| {
+            text(fmt_count(r.packets)).size(font::CAPTION).into()
+        })
+        .sortable(|r: &NftRuleRecord| SortKey::Num(r.packets as f64)),
+        DataColumn::fixed("bytes", 90.0, |r: &NftRuleRecord| {
+            text(fmt_bytes(r.bytes)).size(font::CAPTION).into()
+        })
+        .sortable(|r: &NftRuleRecord| SortKey::Num(r.bytes as f64)),
+        DataColumn::fill("comment", 2, |r: &NftRuleRecord| {
+            text(r.comment.clone().unwrap_or_else(|| "-".into()))
+                .size(font::CAPTION)
+                .into()
+        }),
+    ]
+}
+
+fn xfrm_columns<'a>() -> Vec<DataColumn<'a, XfrmSaRecord, Message>> {
+    vec![
+        DataColumn::fill("src", 3, |s: &XfrmSaRecord| {
+            text(s.src.clone().unwrap_or_else(|| "-".into()))
+                .size(font::CAPTION)
+                .into()
+        })
+        .sortable(|s: &XfrmSaRecord| SortKey::Text(s.src.clone().unwrap_or_default())),
+        DataColumn::fill("dst", 3, |s: &XfrmSaRecord| {
+            text(s.dst.clone().unwrap_or_else(|| "-".into()))
+                .size(font::CAPTION)
+                .into()
+        })
+        .sortable(|s: &XfrmSaRecord| SortKey::Text(s.dst.clone().unwrap_or_default())),
+        DataColumn::fixed("proto", 70.0, |s: &XfrmSaRecord| {
+            text(s.proto.clone()).size(font::CAPTION).into()
+        }),
+        DataColumn::fixed("mode", 90.0, |s: &XfrmSaRecord| {
+            text(s.mode.clone()).size(font::CAPTION).into()
+        }),
+        DataColumn::fixed("spi", 100.0, |s: &XfrmSaRecord| {
+            text(format!("{:#x}", s.spi)).size(font::CAPTION).into()
+        }),
+        DataColumn::fixed("bytes", 90.0, |s: &XfrmSaRecord| {
+            text(fmt_bytes(s.bytes)).size(font::CAPTION).into()
+        })
+        .sortable(|s: &XfrmSaRecord| SortKey::Num(s.bytes as f64)),
+    ]
 }
 
 /// WireGuard peers section: one sub-table per WG interface.
