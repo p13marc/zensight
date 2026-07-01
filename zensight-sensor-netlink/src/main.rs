@@ -105,6 +105,16 @@ async fn main() -> Result<()> {
     .with_health(runner.health());
     #[cfg(feature = "ebpf")]
     let collector = collector.with_ebpf(ebpf_state);
+    // wg-quick peer labels (#268): parse configured wg-quick files once at start.
+    let collector = if netlink_config.wireguard.wg_quick_configs.is_empty() {
+        collector
+    } else {
+        let labels = zensight_sensor_netlink::collector::load_wg_labels(
+            &netlink_config.wireguard.wg_quick_configs,
+        );
+        tracing::info!(peers = labels.len(), "loaded wg-quick peer labels");
+        collector.with_wg_labels(labels)
+    };
     // XFRM lifecycle sentinel (#267): only meaningful when both the event stream
     // and IPsec collection are on.
     let collector = if netlink_config.collect.events && netlink_config.collect.xfrm {

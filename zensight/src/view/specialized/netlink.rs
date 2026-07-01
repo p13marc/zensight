@@ -1694,15 +1694,22 @@ fn render_wg_peer<'a>(
         }
         _ => badge(theme::STATUS_UNKNOWN, "handshake never".to_string()),
     };
-    // Short peer id (public keys are long); keep it recognizable.
-    let short = if peer.len() > 14 {
-        format!("{}…", &peer[..14])
-    } else {
-        peer.to_string()
-    };
+    // Prefer the wg-quick AllowedIPs label (#268) as a readable name; else the
+    // short public key (keys are long).
+    let name = stats
+        .get("rx_bytes")
+        .and_then(|p| p.labels.get("allowed_ips"))
+        .cloned()
+        .unwrap_or_else(|| {
+            if peer.len() > 14 {
+                format!("{}…", &peer[..14])
+            } else {
+                peer.to_string()
+            }
+        });
 
     let header = row![
-        text(short).size(font::EMPHASIS),
+        text(name).size(font::EMPHASIS),
         up_chip,
         hs_chip,
         text(endpoint).size(font::CAPTION).style(dim),

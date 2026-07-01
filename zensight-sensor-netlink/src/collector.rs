@@ -156,6 +156,9 @@ pub struct Collector {
     /// XFRM lifecycle sentinel (#267): moved into the XFRM event task at `run()`.
     /// `None` unless a reporter was wired in via [`Collector::with_xfrm_sentinel`].
     xfrm_sentinel: Option<crate::xfrm_sentinel::XfrmSentinel>,
+    /// wg-quick peer labels (#268): `pubkey → AllowedIPs`, used to enrich the
+    /// WireGuard telemetry with readable peer names. Empty unless configured.
+    wg_labels: std::collections::HashMap<[u8; 32], String>,
     /// Opt-in eBPF state (#114): connect-latency histogram + retransmit/conn
     /// readers. `None` unless the feature is built and load+attach succeeded.
     #[cfg(feature = "ebpf")]
@@ -191,9 +194,17 @@ impl Collector {
             sentinel_wake: Arc::new(Notify::new()),
             warned_xfrm: std::sync::atomic::AtomicBool::new(false),
             xfrm_sentinel: None,
+            wg_labels: std::collections::HashMap::new(),
             #[cfg(feature = "ebpf")]
             ebpf: None,
         }
+    }
+
+    /// Attach wg-quick peer labels (#268) so WireGuard telemetry carries readable
+    /// per-peer AllowedIPs labels for the GUI.
+    pub fn with_wg_labels(mut self, labels: std::collections::HashMap<[u8; 32], String>) -> Self {
+        self.wg_labels = labels;
+        self
     }
 
     /// Attach the XFRM lifecycle sentinel (#267) so the XFRM event stream alerts
@@ -489,7 +500,11 @@ impl Collector {
                     continue;
                 }
             };
-            let views: Vec<WgPeerView> = device.peers.iter().map(wg_peer_view).collect();
+            let views: Vec<WgPeerView> = device
+                .peers
+                .iter()
+                .map(|p| wg_peer_view(p, &self.wg_labels))
+                .collect();
             for point in map::wireguard_points(&self.host, iface, &views, stale) {
                 self.publish(&point).await;
             }
@@ -1338,7 +1353,7 @@ fn selector_str(sel: &TrafficSelector) -> String {
 
 /// Decompose an nlink [`WgPeer`] into the pure [`WgPeerView`] (computes the
 /// handshake age relative to now and a short, stable peer id from the pubkey).
-fn wg_peer_view(peer: &WgPeer) -> WgPeerView {
+fn wg_peer_view(peer: &WgPeer, labels: &std::collections::HashMap<[u8; 32], String>) -> WgPeerView {
     // Short id: first 8 chars of the base64 public key (bounded-cardinality
     // label that still distinguishes peers).
     let b64 = base64_encode(&peer.public_key);
@@ -1355,7 +1370,55 @@ fn wg_peer_view(peer: &WgPeer) -> WgPeerView {
         handshake_age_s,
         rx_bytes: peer.rx_bytes,
         tx_bytes: peer.tx_bytes,
+        // wg-quick enrichment (#268): AllowedIPs keyed by the peer's public key.
+        allowed_ips: labels.get(&peer.public_key).cloned(),
     }
+}
+
+/// Parse `wg-quick` config files into a `pubkey → AllowedIPs` label map (#268).
+/// Each peer's AllowedIPs are joined with commas. Unreadable/unparseable files
+/// are skipped with a warning (graceful degradation — peers just keep their
+/// short-pubkey label). The interface name passed to `from_wg_quick` is derived
+/// from the file stem (it doesn't affect the extracted peer labels).
+pub fn load_wg_labels(paths: &[String]) -> std::collections::HashMap<[u8; 32], String> {
+    use nlink::netlink::genl::wireguard::WireguardConfig as WgQuickConfig;
+    let mut map = std::collections::HashMap::new();
+    for path in paths {
+        let contents = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path, "wg-quick config unreadable; skipping");
+                continue;
+            }
+        };
+        let ifname = std::path::Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("wg")
+            .to_string();
+        match WgQuickConfig::from_wg_quick(ifname, &contents) {
+            Ok(cfg) => {
+                for dev in cfg.devices() {
+                    for peer in &dev.peers {
+                        if peer.allowed_ips.is_empty() {
+                            continue;
+                        }
+                        let aips = peer
+                            .allowed_ips
+                            .iter()
+                            .map(|a| a.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        map.insert(peer.public_key, aips);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path, "wg-quick config parse failed; skipping")
+            }
+        }
+    }
+    map
 }
 
 /// Minimal standard-base64 of a 32-byte key (no external dep), for a short peer

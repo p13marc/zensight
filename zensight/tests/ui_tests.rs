@@ -2027,20 +2027,31 @@ fn test_netlink_wireguard_tab() {
             "wireguard/wg0/AbCd1234/last_handshake_age_s",
             TelemetryValue::Gauge(30.0),
         ),
-        (
-            "wireguard/wg0/AbCd1234/rx_bytes",
-            TelemetryValue::Counter(1000),
-        ),
         ("wireguard/wg0/AbCd1234/up", TelemetryValue::Boolean(true)),
     ] {
         state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
     }
+    // rx_bytes carries the wg-quick AllowedIPs enrichment label (#268).
+    state.update(
+        TelemetryPoint::new(
+            "gw01",
+            Protocol::Netlink,
+            "wireguard/wg0/AbCd1234/rx_bytes",
+            TelemetryValue::Counter(1000),
+        )
+        .with_labels(HashMap::from([(
+            "allowed_ips".to_string(),
+            "10.8.0.2/32".to_string(),
+        )])),
+    );
 
     let mut ui = simulator(netlink_host_view(&state));
     assert!(ui.find("1 interfaces · 1 peers · 1 active").is_ok());
     assert!(ui.find("wg0 — 1 peers").is_ok());
     assert!(ui.find("handshake 30s ago").is_ok());
     assert!(ui.find("up").is_ok());
+    // The peer is named by its AllowedIPs (from wg-quick), not the pubkey (#268).
+    assert!(ui.find("10.8.0.2/32").is_ok());
 }
 
 /// #265: the Events tab renders the per-family context chart + a structured,
