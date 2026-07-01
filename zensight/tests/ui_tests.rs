@@ -578,12 +578,12 @@ fn test_netlink_tc_panel() {
     put("tc/eth0/fq_codel/drops", 42);
     put("tc/eth0/fq_codel/overlimits", 7);
 
-    // TC now lives under the QoS / Queues tab (#258).
+    // TC now lives under the QoS / Queues tab as per-qdisc cards (#258/#263).
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Qos;
     let syslog_filter = SyslogFilterState::default();
     let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
-    assert!(ui.find("TC / QoS qdiscs").is_ok());
-    assert!(ui.find("fq_codel").is_ok());
+    assert!(ui.find("eth0 / fq_codel").is_ok());
+    assert!(ui.find("Qdisc / class tree").is_ok());
 }
 
 /// #46: netlink renders the IPsec/xfrm card and RTT-percentile socket lines.
@@ -2009,6 +2009,36 @@ fn test_netlink_tabs_capability_and_switch() {
                     && *t == zensight::view::specialized::SpecializedTab::Sockets
         )));
     }
+}
+
+/// #263: the QoS tab renders a per-qdisc health chip + AQM class + backlog
+/// trend, plus the qdisc/class tree DataTable.
+#[test]
+fn test_netlink_qos_tab() {
+    use zensight::view::specialized::netlink::netlink_host_view;
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let mut state = DeviceDetailState::new(device_id);
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Qos;
+    for (m, v) in [
+        ("tc/eth0/fq_codel/drops", TelemetryValue::Counter(5)),
+        (
+            "tc/eth0/fq_codel/backlog_bytes",
+            TelemetryValue::Gauge(2048.0),
+        ),
+        ("tc/eth0/fq_codel/health_score", TelemetryValue::Gauge(0.9)),
+        ("tc/eth0/aqm_class", TelemetryValue::Text("aqm".into())),
+    ] {
+        state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
+    }
+
+    let mut ui = simulator(netlink_host_view(&state));
+    assert!(ui.find("eth0 / fq_codel").is_ok());
+    assert!(ui.find("health 0.90").is_ok());
+    assert!(ui.find("AQM aqm").is_ok());
+    assert!(ui.find("backlog bytes").is_ok());
+    assert!(ui.find("Qdisc / class tree").is_ok());
 }
 
 /// #262: the Routing & Neighbors tab renders the routes DataTable (sortable),

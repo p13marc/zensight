@@ -19,7 +19,7 @@ use crate::view::specialized::SpecializedTab;
 use crate::view::specialized::fetch::Fetch;
 use crate::view::specialized::netlink_detail::{
     AddressRecord, NetlinkDetailState, NetlinkDetailTopic, NetlinkTable, RouteChangeRecord,
-    SocketSort, filter_sort_sockets,
+    SocketSort, TcRecord, filter_sort_sockets,
 };
 use crate::view::theme;
 use crate::view::tokens::{font, space};
@@ -85,11 +85,7 @@ fn netlink_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Elemen
         ]
         .spacing(space::MD),
         RoutingNeighbors => render_routing_tab(state),
-        Qos => column![
-            card(render_tc(state)),
-            card(render_detail(state, &[NetlinkDetailTopic::Tc])),
-        ]
-        .spacing(space::MD),
+        Qos => render_qos_tab(state),
         FirewallIpsec => {
             let mut c = column![].spacing(space::MD);
             if has_prefix(state, "conntrack/") {
@@ -561,12 +557,11 @@ fn render_xfrm(state: &DeviceDetailState) -> Element<'_, Message> {
     col.into()
 }
 
-/// TC / QoS qdisc panel (#46): per-qdisc drops/overlimits/requeues/backlog from
-/// streamed `tc/<iface>/<kind>/<stat>` metrics — the egress-congestion signal.
-/// Only present when the sensor has TC collection enabled.
-fn render_tc(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = section_header("TC / QoS qdiscs", None);
-
+/// QoS / Queues tab (#263): per-(iface, qdisc) health chips + AQM class, backlog
+/// trend sparklines, drops/overlimits/requeues, and the full qdisc/class tree
+/// (`@/query/tc`) as a DataTable. From streamed `tc/<iface>/<kind>/<stat>` +
+/// iface-level `tc/<iface>/aqm_class`.
+fn render_qos_tab(state: &DeviceDetailState) -> Column<'_, Message> {
     // Group tc/<iface>/<kind>/<stat> by (iface, kind).
     let mut qdiscs: BTreeMap<(String, String), BTreeMap<String, &TelemetryValue>> = BTreeMap::new();
     for (metric, point) in &state.metrics {
@@ -581,41 +576,125 @@ fn render_tc(state: &DeviceDetailState) -> Element<'_, Message> {
         }
     }
 
+    let mut col = column![].spacing(space::MD);
     if qdiscs.is_empty() {
-        return column![title, empty_state("No TC/qdisc data", None)]
-            .spacing(space::SM)
-            .into();
-    }
-
-    let mut list = Column::new().spacing(4).push(
-        row![
-            cell("interface", 120),
-            cell("qdisc", 110),
-            cell("drops", 90),
-            cell("overlimits", 100),
-            cell("requeues", 90),
-            cell("backlog pkts", 110),
-            cell("backlog bytes", 120),
-        ]
-        .spacing(8),
-    );
-    for ((iface, kind), stats) in &qdiscs {
-        let g = |s: &str| num(stats.get(s).copied());
-        list = list.push(
-            row![
-                cell(iface, 120),
-                cell(kind, 110),
-                cell(&g("drops"), 90),
-                cell(&g("overlimits"), 100),
-                cell(&g("requeues"), 90),
-                cell(&g("backlog_pkts"), 110),
-                cell(&g("backlog_bytes"), 120),
+        col = col.push(card(
+            column![
+                section_header("TC / QoS qdiscs", None),
+                empty_state("No TC/qdisc data", None),
             ]
-            .spacing(8),
-        );
+            .spacing(space::SM),
+        ));
+    }
+    for ((iface, kind), stats) in &qdiscs {
+        col = col.push(card(render_qdisc_card(state, iface, kind, stats)));
     }
 
-    column![title, list].spacing(8).into()
+    // Full qdisc/class tree (@/query/tc).
+    let d = &state.netlink_detail;
+    col = col.push(card(detail_datatable(
+        d,
+        NetlinkTable::Tc,
+        NetlinkDetailTopic::Tc,
+        &d.tc,
+        "Qdisc / class tree",
+        "nodes",
+        tc_columns(),
+        |t: &TcRecord| format!("{} {}", t.iface, t.kind.as_deref().unwrap_or("")),
+    )));
+
+    col
+}
+
+/// One qdisc card: iface/kind header + health chip + AQM class + backlog trend
+/// sparklines + drops/overlimits/requeues.
+fn render_qdisc_card<'a>(
+    state: &'a DeviceDetailState,
+    iface: &str,
+    kind: &str,
+    stats: &BTreeMap<String, &TelemetryValue>,
+) -> Element<'a, Message> {
+    let g = |s: &str| num(stats.get(s).copied());
+    let health = stats.get("health_score").and_then(|v| tv_num(v));
+    let health_chip = match health {
+        Some(h) => {
+            let color = if h >= 0.7 {
+                theme::STATUS_ONLINE
+            } else if h >= 0.4 {
+                theme::STATUS_DEGRADED
+            } else {
+                theme::STATUS_OFFLINE
+            };
+            badge(color, format!("health {h:.2}"))
+        }
+        None => badge(theme::STATUS_UNKNOWN, "health -".to_string()),
+    };
+    let aqm = num(state
+        .metrics
+        .get(&format!("tc/{iface}/aqm_class"))
+        .map(|p| &p.value));
+
+    let header = row![
+        text(format!("{iface} / {kind}")).size(font::EMPHASIS),
+        health_chip,
+        badge(theme::SEVERITY_INFO, format!("AQM {aqm}")),
+    ]
+    .spacing(space::SM)
+    .align_y(iced::Alignment::Center);
+
+    let backlog = row![
+        tput_tile(
+            state,
+            "backlog bytes",
+            &format!("tc/{iface}/{kind}/backlog_bytes")
+        ),
+        tput_tile(
+            state,
+            "backlog pkts",
+            &format!("tc/{iface}/{kind}/backlog_pkts")
+        ),
+    ]
+    .spacing(space::LG);
+
+    let counters = text(format!(
+        "drops {} · overlimits {} · requeues {}",
+        g("drops"),
+        g("overlimits"),
+        g("requeues"),
+    ))
+    .size(font::CAPTION)
+    .style(dim);
+
+    column![header, backlog, counters].spacing(space::SM).into()
+}
+
+fn tc_columns<'a>() -> Vec<DataColumn<'a, TcRecord, Message>> {
+    vec![
+        DataColumn::fill("iface", 2, |t: &TcRecord| {
+            text(t.iface.clone()).size(font::CAPTION).into()
+        })
+        .sortable(|t: &TcRecord| SortKey::Text(t.iface.clone())),
+        DataColumn::fixed("node", 70.0, |t: &TcRecord| {
+            text(t.node.clone()).size(font::CAPTION).into()
+        }),
+        DataColumn::fill("kind", 2, |t: &TcRecord| {
+            text(t.kind.clone().unwrap_or_else(|| "-".into()))
+                .size(font::CAPTION)
+                .into()
+        })
+        .sortable(|t: &TcRecord| SortKey::Text(t.kind.clone().unwrap_or_default())),
+        DataColumn::fixed("handle", 90.0, |t: &TcRecord| {
+            text(t.handle.clone()).size(font::CAPTION).into()
+        }),
+        DataColumn::fixed("drops", 90.0, |t: &TcRecord| {
+            text(fmt_count(t.drops)).size(font::CAPTION).into()
+        })
+        .sortable(|t: &TcRecord| SortKey::Num(t.drops as f64)),
+        DataColumn::fixed("backlog_b", 100.0, |t: &TcRecord| {
+            text(fmt_bytes(t.backlog_bytes)).size(font::CAPTION).into()
+        })
+        .sortable(|t: &TcRecord| SortKey::Num(t.backlog_bytes as f64)),
+    ]
 }
 
 /// Diagnostics summary: bottleneck score + issue counts (from the nlink scan).
