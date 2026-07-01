@@ -101,11 +101,16 @@ impl SortKey {
 
 /// One column of a [`DataTable`]: a header label, a width, a cell renderer, and
 /// an optional sort-key extractor (columns without one aren't clickable).
+/// Boxed cell renderer: a row reference to its rendered [`Element`].
+type CellFn<'a, T, Message> = Box<dyn Fn(&'a T) -> Element<'a, Message> + 'a>;
+/// Boxed sort-key extractor for a sortable column.
+type SortFn<'a, T> = Box<dyn Fn(&T) -> SortKey + 'a>;
+
 pub struct Column<'a, T, Message> {
     label: String,
     width: Length,
-    cell: Box<dyn Fn(&'a T) -> Element<'a, Message> + 'a>,
-    sort: Option<Box<dyn Fn(&T) -> SortKey + 'a>>,
+    cell: CellFn<'a, T, Message>,
+    sort: Option<SortFn<'a, T>>,
 }
 
 impl<'a, T, Message> Column<'a, T, Message> {
@@ -148,11 +153,16 @@ impl<'a, T, Message> Column<'a, T, Message> {
 /// A responsive, sortable, filterable table. Build with columns, optionally wire
 /// `searchable`/`on_sort`/`on_filter`/`on_more`, then call [`DataTable::view`]
 /// with the rows and their [`TableState`].
+/// Boxed per-row searchable-string extractor for the filter box.
+type SearchFn<'a, T> = Box<dyn Fn(&T) -> String + 'a>;
+/// Boxed message builder for a table interaction (sort/filter) taking one arg.
+type ActionFn<'a, A, Message> = Box<dyn Fn(A) -> Message + 'a>;
+
 pub struct DataTable<'a, T, Message> {
     columns: Vec<Column<'a, T, Message>>,
-    searchable: Option<Box<dyn Fn(&T) -> String + 'a>>,
-    on_sort: Option<Box<dyn Fn(usize) -> Message + 'a>>,
-    on_filter: Option<Box<dyn Fn(String) -> Message + 'a>>,
+    searchable: Option<SearchFn<'a, T>>,
+    on_sort: Option<ActionFn<'a, usize, Message>>,
+    on_filter: Option<ActionFn<'a, String, Message>>,
     on_more: Option<Message>,
     noun: String,
 }
@@ -214,12 +224,12 @@ impl<'a, T, Message: Clone + 'a> DataTable<'a, T, Message> {
         let total = view_rows.len();
 
         // 2. Sort.
-        if let Some(col) = st.sort_col {
-            if let Some(key) = self.columns.get(col).and_then(|c| c.sort.as_ref()) {
-                view_rows.sort_by(|a, b| key(a).cmp(&key(b)));
-                if !st.ascending {
-                    view_rows.reverse();
-                }
+        if let Some(col) = st.sort_col
+            && let Some(key) = self.columns.get(col).and_then(|c| c.sort.as_ref())
+        {
+            view_rows.sort_by(|a, b| key(a).cmp(&key(b)));
+            if !st.ascending {
+                view_rows.reverse();
             }
         }
 
@@ -277,15 +287,15 @@ impl<'a, T, Message: Clone + 'a> DataTable<'a, T, Message> {
                     color: Some(theme::colors(t).text_muted()),
                 }),
         );
-        if shown < total {
-            if let Some(on_more) = self.on_more {
-                footer = footer.push(
-                    button(text("Show more").size(font::CAPTION))
-                        .padding([space::XS as u16, space::SM as u16])
-                        .style(button::text)
-                        .on_press(on_more),
-                );
-            }
+        if shown < total
+            && let Some(on_more) = self.on_more
+        {
+            footer = footer.push(
+                button(text("Show more").size(font::CAPTION))
+                    .padding([space::XS as u16, space::SM as u16])
+                    .style(button::text)
+                    .on_press(on_more),
+            );
         }
 
         column![header, body, footer]
@@ -369,8 +379,10 @@ mod tests {
     #[test]
     fn limit_truncates_and_shows_footer_count() {
         let data = rows();
-        let mut st = TableState::default();
-        st.limit = 2;
+        let st = TableState {
+            limit: 2,
+            ..Default::default()
+        };
         let mut ui = simulator(table().view(&data, &st));
         assert!(ui.find("showing 2 of 3 flows").is_ok());
         assert!(ui.find("Show more").is_ok());

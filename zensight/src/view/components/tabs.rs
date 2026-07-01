@@ -76,13 +76,10 @@ where
         let mut label_row = row![text(tab.label.clone()).size(font::CAPTION)]
             .spacing(space::XS)
             .align_y(Alignment::Center);
-        if let Some(count) = tab.badge {
-            if count > 0 {
-                label_row = label_row.push(kit::badge(
-                    theme::ACCENT_ANOMALY,
-                    format!("{count}"),
-                ));
-            }
+        if let Some(count) = tab.badge
+            && count > 0
+        {
+            label_row = label_row.push(kit::badge(theme::ACCENT_ANOMALY, format!("{count}")));
         }
         let btn = if is_active {
             button(label_row)

@@ -812,17 +812,17 @@ impl ZenSight {
             }
 
             Message::SelectSpecializedTab(device_id, tab) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    if device.device_id == device_id {
-                        device.specialized_tab = tab;
-                    }
+                if let Some(device) = self.selected_device.as_mut()
+                    && device.device_id == device_id
+                {
+                    device.specialized_tab = tab;
                 }
                 // Prefetch the newly-activated tab's on-demand channel so it
                 // isn't empty until a manual fetch (netring only for now).
-                if device_id.protocol == zensight_common::Protocol::Netring {
-                    if let Some(task) = self.prefetch_netring_tab(tab) {
-                        return ControlFlow::Break(task);
-                    }
+                if device_id.protocol == zensight_common::Protocol::Netring
+                    && let Some(task) = self.prefetch_netring_tab(tab)
+                {
+                    return ControlFlow::Break(task);
                 }
             }
             Message::NetringTableSort(which, col) => {
