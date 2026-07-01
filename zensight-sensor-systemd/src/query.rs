@@ -41,7 +41,12 @@ fn accounting(v: u64) -> Option<u64> {
 }
 
 /// Run the on-demand unit inventory query channel until the session closes.
-pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: EventState) {
+pub async fn run(
+    session: Arc<zenoh::Session>,
+    key_prefix: String,
+    events: EventState,
+    cgroup: crate::config::CgroupConfig,
+) {
     let conn = match zbus::Connection::system().await {
         Ok(c) => c,
         Err(e) => {
@@ -62,6 +67,7 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
     let unit_key = zensight_common::command::query_key(&key_prefix, "unit");
     let events_key = zensight_common::command::query_key(&key_prefix, "events");
     let timers_key = zensight_common::command::query_key(&key_prefix, "timers");
+    let cgroups_key = zensight_common::command::query_key(&key_prefix, "cgroups");
 
     let units_q = match session.declare_queryable(&units_key).await {
         Ok(q) => q,
@@ -98,8 +104,15 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
             return;
         }
     };
+    let cgroups_q = match session.declare_queryable(&cgroups_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %cgroups_key, "query: declare cgroups failed");
+            return;
+        }
+    };
     tracing::info!(units = %units_key, failed = %failed_key, unit = %unit_key, events = %events_key,
-        timers = %timers_key, "systemd unit inventory query channel ready");
+        timers = %timers_key, cgroups = %cgroups_key, "systemd unit inventory query channel ready");
 
     loop {
         tokio::select! {
@@ -132,8 +145,29 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, events: Event
                 let recs = list_timers(&conn, &manager, now).await;
                 reply_json(&query, &recs).await;
             }
+            q = cgroups_q.recv_async() => {
+                let Ok(query) = q else { return };
+                let tree = build_cgroup_tree(&cgroup, query.parameters().as_str());
+                reply_json(&query, &tree).await;
+            }
         }
     }
+}
+
+/// Build the cgroup subtree for a `@/query/cgroups[?path=<rel>]` request (#280).
+/// `None` when the path is rejected (traversal) or the subtree doesn't exist.
+fn build_cgroup_tree(
+    cfg: &crate::config::CgroupConfig,
+    params: &str,
+) -> Option<zensight_common::query_detail::CgroupNode> {
+    let requested = param(params, "path").unwrap_or_else(|| cfg.root.clone());
+    let rel = crate::cgroup::sanitize_rel(&requested)?;
+    crate::cgroup::build_tree(
+        std::path::Path::new(crate::cgroup::CGROUP_ROOT),
+        std::path::Path::new(crate::cgroup::PROC_ROOT),
+        &rel,
+        &cfg.caps(),
+    )
 }
 
 /// Whether a next-elapse timestamp is in the past (a run is overdue).

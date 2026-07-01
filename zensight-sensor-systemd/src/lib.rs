@@ -9,6 +9,7 @@
 //! as free functions so it is unit-testable without a live bus.
 
 pub mod alerts;
+pub mod cgroup;
 pub mod collector;
 pub mod command;
 pub mod config;

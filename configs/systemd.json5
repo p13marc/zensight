@@ -47,6 +47,10 @@
       timer_overdue_grace_secs: 300,
     },
 
+    // cgroup-tree query (#280) — served on demand at @/query/cgroups[?path=<rel>];
+    // never streamed. Unprivileged /sys/fs/cgroup v2 walk, depth/breadth capped.
+    cgroup: { root: "system.slice", max_depth: 6, max_children: 64, max_pids: 32 },
+
     // Embedded sentinel (#277) — declarative expectations → @/alerts/*,
     // hot-swappable via @/commands/expectations. Omit to disable.
     // expectations: {

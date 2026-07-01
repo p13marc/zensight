@@ -76,8 +76,15 @@ async fn main() -> Result<()> {
     let query_session = runner.session().clone();
     let query_prefix = systemd_config.key_prefix.clone();
     let query_events = event_state.clone();
+    let query_cgroup = systemd_config.cgroup.clone();
     runner.spawn(async move {
-        zensight_sensor_systemd::query::run(query_session, query_prefix, query_events).await;
+        zensight_sensor_systemd::query::run(
+            query_session,
+            query_prefix,
+            query_events,
+            query_cgroup,
+        )
+        .await;
     });
 
     // Shared AlertReporter → zensight/systemd/@/alerts/* for both the built-in
