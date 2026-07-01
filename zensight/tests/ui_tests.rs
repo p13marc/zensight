@@ -2027,20 +2027,31 @@ fn test_netlink_wireguard_tab() {
             "wireguard/wg0/AbCd1234/last_handshake_age_s",
             TelemetryValue::Gauge(30.0),
         ),
-        (
-            "wireguard/wg0/AbCd1234/rx_bytes",
-            TelemetryValue::Counter(1000),
-        ),
         ("wireguard/wg0/AbCd1234/up", TelemetryValue::Boolean(true)),
     ] {
         state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
     }
+    // rx_bytes carries the wg-quick AllowedIPs enrichment label (#268).
+    state.update(
+        TelemetryPoint::new(
+            "gw01",
+            Protocol::Netlink,
+            "wireguard/wg0/AbCd1234/rx_bytes",
+            TelemetryValue::Counter(1000),
+        )
+        .with_labels(HashMap::from([(
+            "allowed_ips".to_string(),
+            "10.8.0.2/32".to_string(),
+        )])),
+    );
 
     let mut ui = simulator(netlink_host_view(&state));
     assert!(ui.find("1 interfaces · 1 peers · 1 active").is_ok());
     assert!(ui.find("wg0 — 1 peers").is_ok());
     assert!(ui.find("handshake 30s ago").is_ok());
     assert!(ui.find("up").is_ok());
+    // The peer is named by its AllowedIPs (from wg-quick), not the pubkey (#268).
+    assert!(ui.find("10.8.0.2/32").is_ok());
 }
 
 /// #265: the Events tab renders the per-family context chart + a structured,
@@ -2339,6 +2350,77 @@ fn test_netlink_sockets_explorer_pagination_and_charts() {
         msgs.iter()
             .any(|m| matches!(m, Message::NetlinkSocketsMore))
     );
+}
+
+/// #269: the Sockets tab surfaces the eBPF section (connect-latency percentiles,
+/// top-retransmit peers, tcplife connections) when the sensor's eBPF module
+/// answered; it stays hidden on the unprivileged baseline.
+#[test]
+fn test_netlink_sockets_ebpf_section() {
+    use zensight::view::specialized::SpecializedTab;
+    use zensight::view::specialized::netlink::netlink_host_view;
+    use zensight::view::specialized::netlink_detail::{
+        ConnRecord, NetlinkDetailData, NetlinkDetailTopic, RetransRecord,
+    };
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let mut state = DeviceDetailState::new(device_id);
+    state.specialized_tab = SpecializedTab::Sockets;
+    // A socket aggregate so the Sockets tab renders its base content.
+    state.update(TelemetryPoint::new(
+        "gw01",
+        Protocol::Netlink,
+        "sockets/tcp/established",
+        TelemetryValue::Gauge(3.0),
+    ));
+
+    // Baseline (no eBPF): the section is absent.
+    {
+        let mut ui = simulator(netlink_host_view(&state));
+        assert!(ui.find("eBPF socket internals").is_err());
+    }
+
+    // eBPF active: connlat metrics + retransmits + connections.
+    for (m, v) in [
+        ("sockets/tcp/connlat_us_p50", TelemetryValue::Gauge(120.0)),
+        ("sockets/tcp/connlat_us_p95", TelemetryValue::Gauge(950.0)),
+    ] {
+        state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
+    }
+    state.netlink_detail.apply(
+        NetlinkDetailTopic::Retransmits,
+        Ok(NetlinkDetailData::Retransmits(vec![RetransRecord {
+            peer: "203.0.113.9".into(),
+            family: 2,
+            count: 42,
+        }])),
+    );
+    state.netlink_detail.apply(
+        NetlinkDetailTopic::Connections,
+        Ok(NetlinkDetailData::Connections(vec![ConnRecord {
+            pid: 1234,
+            comm: "curl".into(),
+            family: 2,
+            local: "10.0.0.1".into(),
+            lport: 5555,
+            remote: "1.1.1.1".into(),
+            rport: 443,
+            duration_ms: 3200,
+            tx_bytes: 8000,
+            rx_bytes: 90000,
+            segs_out: 60,
+            segs_in: 80,
+            retrans: 1,
+        }])),
+    );
+
+    let mut ui = simulator(netlink_host_view(&state));
+    assert!(ui.find("eBPF socket internals").is_ok());
+    assert!(ui.find("Top retransmit peers").is_ok());
+    assert!(ui.find("203.0.113.9").is_ok());
+    assert!(ui.find("Recent connections (tcplife)").is_ok());
+    assert!(ui.find("curl").is_ok());
 }
 
 /// The netring view shows the TLS section (with a fetched inventory) and the

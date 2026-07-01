@@ -153,6 +153,12 @@ pub struct Collector {
     /// Warn-once latch for the XFRM SA dump (EPERM where the host gates it):
     /// avoids a WARN every poll tick for an expected recurring failure (P05 §4).
     warned_xfrm: std::sync::atomic::AtomicBool,
+    /// XFRM lifecycle sentinel (#267): moved into the XFRM event task at `run()`.
+    /// `None` unless a reporter was wired in via [`Collector::with_xfrm_sentinel`].
+    xfrm_sentinel: Option<crate::xfrm_sentinel::XfrmSentinel>,
+    /// wg-quick peer labels (#268): `pubkey → AllowedIPs`, used to enrich the
+    /// WireGuard telemetry with readable peer names. Empty unless configured.
+    wg_labels: std::collections::HashMap<[u8; 32], String>,
     /// Opt-in eBPF state (#114): connect-latency histogram + retransmit/conn
     /// readers. `None` unless the feature is built and load+attach succeeded.
     #[cfg(feature = "ebpf")]
@@ -187,9 +193,26 @@ impl Collector {
             route_history,
             sentinel_wake: Arc::new(Notify::new()),
             warned_xfrm: std::sync::atomic::AtomicBool::new(false),
+            xfrm_sentinel: None,
+            wg_labels: std::collections::HashMap::new(),
             #[cfg(feature = "ebpf")]
             ebpf: None,
         }
+    }
+
+    /// Attach wg-quick peer labels (#268) so WireGuard telemetry carries readable
+    /// per-peer AllowedIPs labels for the GUI.
+    pub fn with_wg_labels(mut self, labels: std::collections::HashMap<[u8; 32], String>) -> Self {
+        self.wg_labels = labels;
+        self
+    }
+
+    /// Attach the XFRM lifecycle sentinel (#267) so the XFRM event stream alerts
+    /// on hard-expire-without-rekey and repeated ACQUIRE. Only takes effect when
+    /// the `events` + `xfrm` collectors are both on.
+    pub fn with_xfrm_sentinel(mut self, sentinel: crate::xfrm_sentinel::XfrmSentinel) -> Self {
+        self.xfrm_sentinel = Some(sentinel);
+        self
     }
 
     /// Attach the opt-in eBPF state (#114) so the poll loop publishes
@@ -236,7 +259,7 @@ impl Collector {
         self.metric_cache.clone()
     }
 
-    pub async fn run(self) {
+    pub async fn run(mut self) {
         let route = match Connection::<Route>::new() {
             Ok(c) => c,
             Err(e) => {
@@ -338,8 +361,9 @@ impl Collector {
                         tracing::warn!(error = %e, "xfrm event subscribe failed; IPsec events disabled");
                     } else {
                         let state = self.event_state.clone();
+                        let sentinel = self.xfrm_sentinel.take();
                         tokio::spawn(async move {
-                            run_xfrm_event_stream(xfrm_ev_conn, state).await;
+                            run_xfrm_event_stream(xfrm_ev_conn, state, sentinel).await;
                         });
                         tracing::info!("real-time XFRM/IPsec event stream active");
                     }
@@ -476,7 +500,11 @@ impl Collector {
                     continue;
                 }
             };
-            let views: Vec<WgPeerView> = device.peers.iter().map(wg_peer_view).collect();
+            let views: Vec<WgPeerView> = device
+                .peers
+                .iter()
+                .map(|p| wg_peer_view(p, &self.wg_labels))
+                .collect();
             for point in map::wireguard_points(&self.host, iface, &views, stale) {
                 self.publish(&point).await;
             }
@@ -1143,7 +1171,12 @@ async fn run_event_stream(conn: Connection<Route>, state: EventState, wake: Arc<
 /// timeline as the `ipsec` family. Like the RTNETLINK stream, `events()` holds
 /// the connection's request lock for the stream's lifetime, so this runs on its
 /// own dedicated `Connection<Xfrm>`.
-async fn run_xfrm_event_stream(conn: Connection<Xfrm>, state: EventState) {
+async fn run_xfrm_event_stream(
+    conn: Connection<Xfrm>,
+    state: EventState,
+    mut sentinel: Option<crate::xfrm_sentinel::XfrmSentinel>,
+) {
+    use std::time::Instant;
     let mut events = conn.events().await;
     while let Some(item) = events.next().await {
         match item {
@@ -1151,6 +1184,11 @@ async fn run_xfrm_event_stream(conn: Connection<Xfrm>, state: EventState) {
                 let (action, detail) = classify_xfrm_event(&ev);
                 // XFRM notifications are host-global, not tied to a link → no ifindex.
                 state.observe_ipsec(action, None, detail);
+                // Sentinel hooks (#267): alert on hard-expire-without-rekey and
+                // repeated ACQUIRE. Off unless a reporter was wired in.
+                if let Some(s) = sentinel.as_mut() {
+                    s.observe(&xfrm_signal(&ev), Instant::now()).await;
+                }
             }
             Err(e) => {
                 tracing::warn!(error = %e, "xfrm event stream error; stopping event task");
@@ -1159,6 +1197,31 @@ async fn run_xfrm_event_stream(conn: Connection<Xfrm>, state: EventState) {
         }
     }
     tracing::info!("XFRM event stream ended");
+}
+
+/// Distil an XFRM monitor event into the sentinel's string-keyed
+/// [`XfrmSignal`](crate::xfrm_sentinel::XfrmSignal) (#267). The tunnel key is
+/// src→dst proto (stable across a rekey, which changes only the SPI); the
+/// selector key reuses the timeline's `selector_str`.
+fn xfrm_signal(ev: &XfrmEvent) -> crate::xfrm_sentinel::XfrmSignal {
+    use crate::xfrm_sentinel::XfrmSignal;
+    let ep = |a: Option<std::net::IpAddr>| a.map(|x| x.to_string()).unwrap_or_else(|| "*".into());
+    let tunnel = |sa: &SecurityAssociation| {
+        format!(
+            "{}→{} {}",
+            ep(sa.src_addr),
+            ep(sa.dst_addr),
+            ipsec_proto_label(&sa.protocol),
+        )
+    };
+    match ev {
+        XfrmEvent::NewSa(sa) => XfrmSignal::NewSa { tunnel: tunnel(sa) },
+        XfrmEvent::ExpireSa { sa, hard: true } => XfrmSignal::HardExpire { tunnel: tunnel(sa) },
+        XfrmEvent::Acquire { selector, .. } => XfrmSignal::Acquire {
+            selector: selector_str(selector),
+        },
+        _ => XfrmSignal::Ignore,
+    }
 }
 
 /// Decode an XFRM monitor [`XfrmEvent`] into a refined control-plane
@@ -1290,7 +1353,7 @@ fn selector_str(sel: &TrafficSelector) -> String {
 
 /// Decompose an nlink [`WgPeer`] into the pure [`WgPeerView`] (computes the
 /// handshake age relative to now and a short, stable peer id from the pubkey).
-fn wg_peer_view(peer: &WgPeer) -> WgPeerView {
+fn wg_peer_view(peer: &WgPeer, labels: &std::collections::HashMap<[u8; 32], String>) -> WgPeerView {
     // Short id: first 8 chars of the base64 public key (bounded-cardinality
     // label that still distinguishes peers).
     let b64 = base64_encode(&peer.public_key);
@@ -1307,7 +1370,55 @@ fn wg_peer_view(peer: &WgPeer) -> WgPeerView {
         handshake_age_s,
         rx_bytes: peer.rx_bytes,
         tx_bytes: peer.tx_bytes,
+        // wg-quick enrichment (#268): AllowedIPs keyed by the peer's public key.
+        allowed_ips: labels.get(&peer.public_key).cloned(),
     }
+}
+
+/// Parse `wg-quick` config files into a `pubkey → AllowedIPs` label map (#268).
+/// Each peer's AllowedIPs are joined with commas. Unreadable/unparseable files
+/// are skipped with a warning (graceful degradation — peers just keep their
+/// short-pubkey label). The interface name passed to `from_wg_quick` is derived
+/// from the file stem (it doesn't affect the extracted peer labels).
+pub fn load_wg_labels(paths: &[String]) -> std::collections::HashMap<[u8; 32], String> {
+    use nlink::netlink::genl::wireguard::WireguardConfig as WgQuickConfig;
+    let mut map = std::collections::HashMap::new();
+    for path in paths {
+        let contents = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path, "wg-quick config unreadable; skipping");
+                continue;
+            }
+        };
+        let ifname = std::path::Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("wg")
+            .to_string();
+        match WgQuickConfig::from_wg_quick(ifname, &contents) {
+            Ok(cfg) => {
+                for dev in cfg.devices() {
+                    for peer in &dev.peers {
+                        if peer.allowed_ips.is_empty() {
+                            continue;
+                        }
+                        let aips = peer
+                            .allowed_ips
+                            .iter()
+                            .map(|a| a.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        map.insert(peer.public_key, aips);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path, "wg-quick config parse failed; skipping")
+            }
+        }
+    }
+    map
 }
 
 /// Minimal standard-base64 of a 32-byte key (no external dep), for a short peer

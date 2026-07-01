@@ -98,6 +98,11 @@ pub struct WireguardConfig {
     /// A peer is "up" when its last handshake is within this many seconds.
     #[serde(default = "default_wg_stale")]
     pub stale_after_secs: u64,
+    /// Paths to `wg-quick` config files (`*.conf`) used to enrich peer labels
+    /// with their AllowedIPs / endpoint for readable GUI display (#268). Peers
+    /// not present in any config keep their short-pubkey label. Empty = disabled.
+    #[serde(default)]
+    pub wg_quick_configs: Vec<String>,
 }
 
 fn default_wg_stale() -> u64 {

@@ -2683,6 +2683,12 @@ impl ZenSight {
                 NetlinkDetailTopic::Nft => fetch_records(session, key)
                     .await
                     .map(NetlinkDetailData::Nft),
+                NetlinkDetailTopic::Retransmits => fetch_records(session, key)
+                    .await
+                    .map(NetlinkDetailData::Retransmits),
+                NetlinkDetailTopic::Connections => fetch_records(session, key)
+                    .await
+                    .map(NetlinkDetailData::Connections),
             };
             let result =
                 data.ok_or_else(|| format!("No netlink sensor responded for {}", topic.label()));
@@ -2857,7 +2863,10 @@ impl ZenSight {
         use crate::view::specialized::netlink_detail::NetlinkDetailTopic as Topic;
 
         let topics: &[Topic] = match tab {
-            T::Sockets => &[Topic::Sockets],
+            // eBPF retransmits/connections (#269) are served only on eBPF-enabled
+            // hosts; a non-responding host just leaves them Error (rendered as a
+            // hint), so prefetching them unconditionally is safe.
+            T::Sockets => &[Topic::Sockets, Topic::Retransmits, Topic::Connections],
             T::RoutingNeighbors => &[
                 Topic::Routes,
                 Topic::Neighbors,
@@ -2881,6 +2890,8 @@ impl ZenSight {
             Topic::Tc => matches!(d.tc, Fetch::Idle),
             Topic::Xfrm => matches!(d.xfrm, Fetch::Idle),
             Topic::Nft => matches!(d.nft, Fetch::Idle),
+            Topic::Retransmits => matches!(d.retransmits, Fetch::Idle),
+            Topic::Connections => matches!(d.connections, Fetch::Idle),
         };
         let todo: Vec<Topic> = topics.iter().copied().filter(|t| is_idle(*t)).collect();
         if todo.is_empty() {
