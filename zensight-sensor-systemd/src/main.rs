@@ -6,7 +6,7 @@
 //! crashes) on non-systemd hosts.
 
 use anyhow::Result;
-use zensight_sensor_core::{Format, SensorArgs, SensorConfig, SensorRunner};
+use zensight_sensor_core::{Format, Protocol, SensorArgs, SensorConfig, SensorRunner};
 
 use zensight_sensor_systemd::collector::SystemdCollector;
 use zensight_sensor_systemd::config::SystemdSensorConfig;
@@ -70,14 +70,32 @@ async fn main() -> Result<()> {
         zensight_sensor_systemd::query::run(query_session, query_prefix, query_events).await;
     });
 
-    // Spawn the collector task.
-    let collector = SystemdCollector::new(
+    // Threshold alerts (#276): AlertReporter → zensight/systemd/@/alerts/*, with a
+    // late-joiner firing-set seed on @/query/alerts.
+    let mut collector = SystemdCollector::new(
         source.clone(),
         systemd_config.clone(),
         runner.publisher(),
         runner.health(),
     )
     .with_events(event_state);
+    if systemd_config.alerts.enabled {
+        use std::sync::Arc;
+        use std::time::Duration;
+        use zensight_sensor_core::{AlertReporter, serve_alerts_query};
+        let reporter = Arc::new(
+            AlertReporter::new(runner.publisher(), Protocol::Systemd, Format::Json)
+                .with_debounce(Duration::from_secs(systemd_config.alerts.for_secs)),
+        );
+        runner.spawn(serve_alerts_query(reporter.clone()));
+        let evaluator = zensight_sensor_systemd::alerts::AlertEvaluator::new(
+            source.clone(),
+            systemd_config.alerts.clone(),
+            reporter,
+        );
+        collector = collector.with_alerts(evaluator);
+        tracing::info!("systemd threshold alerting enabled");
+    }
     runner.spawn(async move {
         collector.run().await;
     });

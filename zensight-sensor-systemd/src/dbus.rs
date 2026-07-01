@@ -143,4 +143,7 @@ pub trait Timer {
     /// Wall-clock µs of the last trigger (0 if never fired).
     #[zbus(property, name = "LastTriggerUSec")]
     fn last_trigger_usec(&self) -> zbus::Result<u64>;
+    /// Wall-clock µs of the next scheduled elapse (0/`u64::MAX` if none).
+    #[zbus(property, name = "NextElapseUSecRealtime")]
+    fn next_elapse_usec_realtime(&self) -> zbus::Result<u64>;
 }

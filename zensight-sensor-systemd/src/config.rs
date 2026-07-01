@@ -66,6 +66,10 @@ pub struct SystemdConfig {
     #[serde(default = "default_events_capacity")]
     pub events_capacity: usize,
 
+    /// Built-in threshold alerts (#276).
+    #[serde(default)]
+    pub alerts: crate::alerts::AlertsConfig,
+
     /// Collector toggles.
     #[serde(default)]
     pub collect: CollectConfig,
@@ -120,6 +124,7 @@ impl Default for SystemdConfig {
             watch_max: default_watch_max(),
             ip_io_accounting: false,
             events_capacity: default_events_capacity(),
+            alerts: crate::alerts::AlertsConfig::default(),
             collect: CollectConfig::default(),
         }
     }

@@ -125,6 +125,8 @@ pub struct SystemdCollector {
     /// Optional event ring (#275): when set, per-kind `events/*_total` counters
     /// are re-emitted each tick.
     events: Option<crate::events::EventState>,
+    /// Optional threshold-alert evaluator (#276), driven each tick.
+    alerts: Option<crate::alerts::AlertEvaluator>,
     conn: Option<zbus::Connection>,
 }
 
@@ -144,6 +146,7 @@ impl SystemdCollector {
             health,
             watch,
             events: None,
+            alerts: None,
             conn: None,
         }
     }
@@ -152,6 +155,12 @@ impl SystemdCollector {
     /// re-emitted each tick (#275).
     pub fn with_events(mut self, events: crate::events::EventState) -> Self {
         self.events = Some(events);
+        self
+    }
+
+    /// Attach the threshold-alert evaluator, driven each collect tick (#276).
+    pub fn with_alerts(mut self, alerts: crate::alerts::AlertEvaluator) -> Self {
+        self.alerts = Some(alerts);
         self
     }
 
@@ -243,7 +252,10 @@ impl SystemdCollector {
         let mut points = build_points(&self.source, &counts, boot.as_ref(), aggregates.as_ref());
 
         // Per-unit watchlist streaming (#273): match names, cap at watch_max, and
-        // fold the rest into the `other/*` bucket.
+        // fold the rest into the `other/*` bucket. The sampled units + timers are
+        // also fed to the threshold-alert evaluator (#276).
+        let mut samples: Vec<crate::unit::UnitSample> = Vec::new();
+        let mut timers: Vec<crate::alerts::TimerSample> = Vec::new();
         if !self.watch.is_empty() {
             let matched: Vec<&ListedUnit> = listed
                 .iter()
@@ -268,10 +280,24 @@ impl SystemdCollector {
                 )
                 .await
                 {
-                    Ok(sample) => points.extend(crate::map::unit_points(&self.source, &sample)),
+                    Ok(sample) => {
+                        points.extend(crate::map::unit_points(&self.source, &sample));
+                        samples.push(sample);
+                    }
                     Err(e) => {
                         tracing::warn!(unit = %u.0, error = %e, "failed to sample watched unit")
                     }
+                }
+                // Read the timer schedule for watched `.timer` units (#276).
+                if u.0.ends_with(".timer")
+                    && let Ok(builder) = crate::dbus::TimerProxy::builder(&conn).path(u.6.clone())
+                    && let Ok(timer) = builder.build().await
+                {
+                    let next = timer.next_elapse_usec_realtime().await.unwrap_or(0);
+                    timers.push(crate::alerts::TimerSample {
+                        name: u.0.clone(),
+                        next_elapse_usec_realtime: next,
+                    });
                 }
             }
             let unwatched = (listed.len().saturating_sub(streamed)) as u64;
@@ -291,6 +317,23 @@ impl SystemdCollector {
             } else {
                 self.health.record_metrics_published(1);
             }
+        }
+
+        // Threshold alerts (#276): evaluate + reconcile from the freshly-read
+        // state. `system_state` is read here so the degraded rule works even with
+        // no watchlist.
+        if let Some(ev) = &mut self.alerts {
+            let system_state = proxy.system_state().await.unwrap_or_default();
+            let now_usec = chrono::Utc::now().timestamp_micros().max(0) as u64;
+            ev.tick(
+                system_state,
+                counts.n_failed_units,
+                samples,
+                timers,
+                now_usec,
+                std::time::Instant::now(),
+            )
+            .await;
         }
         Ok(n)
     }
