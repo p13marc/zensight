@@ -27,6 +27,38 @@
     // Telemetry source id; defaults to the local hostname when omitted.
     // source: "gw01",
 
+    // Per-unit telemetry watchlist (#273): globs of units to stream
+    // unit/<name>/* for. Empty = none (only aggregates). Capped by watch_max.
+    watch_units: [],           // e.g. ["sshd.service", "nginx*.service", "*.timer"]
+    watch_max: 50,
+    ip_io_accounting: false,   // include ip/io bytes when the unit enables accounting
+
+    events_capacity: 256,      // control-plane event ring size (#275, @/query/events)
+
+    // Built-in threshold alerts (#276) → @/alerts/*.
+    alerts: {
+      enabled: true,
+      for_secs: 15,            // debounce before a firing alert publishes
+      unit_failed: true,       // watched unit ActiveState=failed (see logs-sensor dedup)
+      system_degraded: true,   // SystemState=degraded / NFailedUnits>0
+      restart_storm_threshold: 3,
+      restart_storm_window_secs: 300,
+      unit_mem_ceiling_bytes: 0,   // 0 disables the unit-mem rule
+      timer_overdue_grace_secs: 300,
+    },
+
+    // Embedded sentinel (#277) — declarative expectations → @/alerts/*,
+    // hot-swappable via @/commands/expectations. Omit to disable.
+    // expectations: {
+    //   eval_interval_secs: 10,
+    //   for_secs: 15,
+    //   services_active: [{ unit: "sshd.service" }],
+    //   targets_active: [{ target: "multi-user.target" }],
+    //   timers: [{ timer: "logrotate.timer", within_secs: 90000 }],
+    //   restart_rates: [{ unit: "nginx.service", max: 5, window_secs: 600 }],
+    //   forbid_failed: true,
+    // },
+
     collect: {
       // Enumerate units (ListUnits) for units/{total,active,failed,loaded,inactive}.
       // Turn off to only collect the cheap manager/* scalars + boot timings.

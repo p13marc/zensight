@@ -70,6 +70,10 @@ pub struct SystemdConfig {
     #[serde(default)]
     pub alerts: crate::alerts::AlertsConfig,
 
+    /// Embedded sentinel expectations (#277); `None` = sentinel disabled.
+    #[serde(default)]
+    pub expectations: Option<crate::sentinel::ExpectationsConfig>,
+
     /// Collector toggles.
     #[serde(default)]
     pub collect: CollectConfig,
@@ -125,6 +129,7 @@ impl Default for SystemdConfig {
             ip_io_accounting: false,
             events_capacity: default_events_capacity(),
             alerts: crate::alerts::AlertsConfig::default(),
+            expectations: None,
             collect: CollectConfig::default(),
         }
     }

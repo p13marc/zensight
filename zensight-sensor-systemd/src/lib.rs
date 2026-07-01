@@ -10,9 +10,11 @@
 
 pub mod alerts;
 pub mod collector;
+pub mod command;
 pub mod config;
 pub mod dbus;
 pub mod events;
 pub mod map;
 pub mod query;
+pub mod sentinel;
 pub mod unit;

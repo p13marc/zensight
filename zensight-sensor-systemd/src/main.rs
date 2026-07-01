@@ -54,11 +54,21 @@ async fn main() -> Result<()> {
     let event_state =
         zensight_sensor_systemd::events::EventState::new(systemd_config.events_capacity);
 
-    // D-Bus event stream (#275): watched UnitNew/Removed + JobNew/Removed → ring.
+    use std::sync::Arc;
+    use std::time::Duration;
+    use zensight_sensor_core::{AlertReporter, serve_alerts_query};
+
+    // Sentinel wake (#277): the event stream nudges the sentinel for instant
+    // re-eval on watched control-plane changes.
+    let sentinel_wake = Arc::new(tokio::sync::Notify::new());
+
+    // D-Bus event stream (#275): watched UnitNew/Removed + JobNew/Removed → ring,
+    // and nudge the sentinel on watched changes.
     let watch = zensight_sensor_systemd::config::compile_watch(&systemd_config.watch_units);
     let events_state = event_state.clone();
+    let events_wake = sentinel_wake.clone();
     runner.spawn(async move {
-        zensight_sensor_systemd::events::run(watch, events_state, None).await;
+        zensight_sensor_systemd::events::run(watch, events_state, Some(events_wake)).await;
     });
 
     // On-demand unit inventory query channel (#274/#275):
@@ -70,8 +80,20 @@ async fn main() -> Result<()> {
         zensight_sensor_systemd::query::run(query_session, query_prefix, query_events).await;
     });
 
-    // Threshold alerts (#276): AlertReporter → zensight/systemd/@/alerts/*, with a
-    // late-joiner firing-set seed on @/query/alerts.
+    // Shared AlertReporter → zensight/systemd/@/alerts/* for both the built-in
+    // threshold alerts (#276) and the sentinel (#277), with one late-joiner
+    // firing-set seed on @/query/alerts. Created when either feature is active.
+    let expectations = systemd_config.expectations.clone();
+    let alerts_active = systemd_config.alerts.enabled || expectations.is_some();
+    let reporter = alerts_active.then(|| {
+        let r = Arc::new(
+            AlertReporter::new(runner.publisher(), Protocol::Systemd, Format::Json)
+                .with_debounce(Duration::from_secs(systemd_config.alerts.for_secs)),
+        );
+        runner.spawn(serve_alerts_query(r.clone()));
+        r
+    });
+
     let mut collector = SystemdCollector::new(
         source.clone(),
         systemd_config.clone(),
@@ -79,19 +101,14 @@ async fn main() -> Result<()> {
         runner.health(),
     )
     .with_events(event_state);
-    if systemd_config.alerts.enabled {
-        use std::sync::Arc;
-        use std::time::Duration;
-        use zensight_sensor_core::{AlertReporter, serve_alerts_query};
-        let reporter = Arc::new(
-            AlertReporter::new(runner.publisher(), Protocol::Systemd, Format::Json)
-                .with_debounce(Duration::from_secs(systemd_config.alerts.for_secs)),
-        );
-        runner.spawn(serve_alerts_query(reporter.clone()));
+    // Threshold alerts (#276).
+    if systemd_config.alerts.enabled
+        && let Some(reporter) = &reporter
+    {
         let evaluator = zensight_sensor_systemd::alerts::AlertEvaluator::new(
             source.clone(),
             systemd_config.alerts.clone(),
-            reporter,
+            reporter.clone(),
         );
         collector = collector.with_alerts(evaluator);
         tracing::info!("systemd threshold alerting enabled");
@@ -99,6 +116,32 @@ async fn main() -> Result<()> {
     runner.spawn(async move {
         collector.run().await;
     });
+
+    // Embedded sentinel (#277): declarative expectations → alerts, hot-swappable
+    // via @/commands/expectations (+ @/status/expectations). Needs its own D-Bus
+    // connection for per-expectation state reads.
+    if let (Some(exp_cfg), Some(reporter)) = (expectations, reporter) {
+        match zbus::Connection::system().await {
+            Ok(conn) => {
+                let evaluator = zensight_sensor_systemd::sentinel::Evaluator::new(
+                    source.clone(),
+                    exp_cfg,
+                    reporter,
+                    conn,
+                )
+                .with_wake(sentinel_wake);
+                let handle = evaluator.handle();
+                runner.spawn(async move { evaluator.run().await });
+                let cmd_session = runner.session().clone();
+                let cmd_prefix = systemd_config.key_prefix.clone();
+                runner.spawn(async move {
+                    zensight_sensor_systemd::command::run(cmd_session, cmd_prefix, handle).await;
+                });
+                tracing::info!("systemd sentinel enabled");
+            }
+            Err(e) => tracing::error!(error = %e, "systemd sentinel: system bus connect failed"),
+        }
+    }
 
     let metadata = serde_json::json!({
         "source": source,

@@ -321,11 +321,33 @@ unhealthy on `@/health`, retries — never crashes).
   - **Boot performance** (`collect.boot`, default on, Gauge µs): `boot/{firmware,
     loader,kernel,initrd,userspace,total}_usec`, computed from the Manager
     monotonic timestamps exactly like `systemd-analyze`.
+  - **Per-unit watchlist** (#273, `watch_units` globs, capped by `watch_max`):
+    `unit/<name>/{active,state,restarts_total,active_since_usec,mem_bytes,
+    cpu_usec,tasks,exit_code}` (+ `ip/io_*_bytes` when `ip_io_accounting` and the
+    unit enables accounting). Overflow → `other/units_total`.
+  - **Event counters** (#275): `events/<kind>_total` (unit_new/removed,
+    job_new/removed).
+- **On-demand queries** (#274/#275, never streamed): `@/query/units` →
+  `Vec<UnitRecord>`, `@/query/failed` (failed only), `@/query/unit?name=<u>` →
+  `UnitDetail` (props + deps), `@/query/events` → recent control-plane timeline.
+- **D-Bus event stream** (#275): `Manager.Subscribe()` → watched UnitNew/Removed +
+  JobNew/Removed → the bounded timeline ring; job completions carry the
+  `ActiveState` from→to transition. Nudges the sentinel for instant re-eval.
+- **Threshold alerts** (#276, `alerts.*`) on `@/alerts/*`: `systemd-unit-failed`
+  (state-based; dedups with the logs sensor's `MESSAGE_ID`-based rule — set
+  `alerts.unit_failed=false` to defer), `systemd-system-degraded`,
+  `systemd-restart-storm`, `systemd-timer-overdue`, `systemd-unit-mem`.
+- **Sentinel** (#277, `expectations`) — declarative service-health expectations
+  (`expect service/target active`, `expect timer triggered_within`,
+  `restarts_rate < N/window`, `forbid failed`) → `@/alerts/*`, hot-swappable via
+  `@/commands/expectations` (+ `@/status/expectations` queryable). Mirrors the
+  netlink sentinel.
 - **Config:** `configs/systemd.json5` (`systemd.{key_prefix,poll_interval_secs,
-  source,collect.*}`).
-- **Scope:** this is the epic-#285 keystone (#271 scaffold + #272 aggregates);
-  per-unit watchlists, the D-Bus event stream, the unit sentinel, and the GUI
-  specialized view land in follow-ups.
+  source,watch_units,watch_max,ip_io_accounting,events_capacity,alerts,
+  expectations,collect.*}`).
+- **Scope:** epic #285 — the GUI specialized view (#281), exporters (#282),
+  breadth collectors (#279), cgroup tree (#280), gated service control (#283),
+  and full docs (#284) land in follow-ups.
 
 ---
 
