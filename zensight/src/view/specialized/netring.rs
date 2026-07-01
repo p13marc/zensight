@@ -958,7 +958,9 @@ fn render_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
                 })
                 .sortable(|r: &zensight_common::TalkerRecord| SortKey::Text(r.dst.clone())),
                 TableColumn::fixed("bytes", 120.0, |r: &zensight_common::TalkerRecord| {
-                    text(format_bytes(r.bytes as f64)).size(font::CAPTION).into()
+                    text(format_bytes(r.bytes as f64))
+                        .size(font::CAPTION)
+                        .into()
                 })
                 .sortable(|r: &zensight_common::TalkerRecord| SortKey::Num(r.bytes as f64)),
                 TableColumn::fixed("packets", 100.0, |r: &zensight_common::TalkerRecord| {
@@ -1024,7 +1026,9 @@ fn render_matrix(state: &DeviceDetailState) -> Element<'_, Message> {
                 })
                 .sortable(|r: &zensight_common::MatrixRecord| SortKey::Text(r.dst.clone())),
                 TableColumn::fixed("bytes", 120.0, |r: &zensight_common::MatrixRecord| {
-                    text(format_bytes(r.bytes as f64)).size(font::CAPTION).into()
+                    text(format_bytes(r.bytes as f64))
+                        .size(font::CAPTION)
+                        .into()
                 })
                 .sortable(|r: &zensight_common::MatrixRecord| SortKey::Num(r.bytes as f64)),
                 TableColumn::fixed("packets", 100.0, |r: &zensight_common::MatrixRecord| {
@@ -1038,9 +1042,7 @@ fn render_matrix(state: &DeviceDetailState) -> Element<'_, Message> {
             ];
             col = col.push(
                 DataTable::new(columns)
-                    .searchable(|r: &zensight_common::MatrixRecord| {
-                        format!("{} {}", r.src, r.dst)
-                    })
+                    .searchable(|r: &zensight_common::MatrixRecord| format!("{} {}", r.src, r.dst))
                     .on_sort(|c| Message::NetringTableSort(NetringTable::Matrix, c))
                     .on_filter(|q| Message::NetringTableFilter(NetringTable::Matrix, q))
                     .on_more(Message::NetringTableMore(NetringTable::Matrix))
@@ -1119,7 +1121,9 @@ fn render_elephants(state: &DeviceDetailState) -> Element<'_, Message> {
                     text(r.proto.clone()).size(font::CAPTION).into()
                 }),
                 TableColumn::fixed("bytes", 110.0, |r: &ElephantRecord| {
-                    text(format_bytes(r.bytes as f64)).size(font::CAPTION).into()
+                    text(format_bytes(r.bytes as f64))
+                        .size(font::CAPTION)
+                        .into()
                 })
                 .sortable(|r: &ElephantRecord| SortKey::Num(r.bytes as f64)),
                 TableColumn::fixed("packets", 90.0, |r: &ElephantRecord| {
@@ -1625,22 +1629,25 @@ fn metric_tile<'a>(label: &str, value: String) -> Element<'a, Message> {
 #[cfg(test)]
 mod tests {
     use iced_test::simulator;
-    use zensight_common::{Protocol, TalkerRecord};
+    use zensight_common::{MatrixRecord, Protocol};
 
     use super::*;
     use crate::message::DeviceId;
     use crate::view::specialized::fetch::Fetch;
 
     #[test]
-    fn talker_destination_pivots_to_flows() {
+    fn matrix_destination_pivots_to_flows() {
+        // The matrix table's destination is a drill-down pivot (#246). Use the
+        // matrix (heatmap is canvas, no text) so the clicked dst is unambiguous.
         let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Netring, "host01"));
-        state.netring_detail.talkers = Fetch::Ready(vec![TalkerRecord {
+        state.netring_detail.matrix = Fetch::Ready(vec![MatrixRecord {
+            src: "10.0.0.1:5555".to_string(),
             dst: "10.0.0.42:443".to_string(),
             bytes: 1234,
             packets: 10,
             flows: 3,
         }]);
-        let mut ui = simulator(render_talkers(&state));
+        let mut ui = simulator(render_matrix(&state));
         let _ = ui.click("10.0.0.42:443");
         let msgs: Vec<Message> = ui.into_messages().collect();
         assert!(msgs.iter().any(|m| matches!(

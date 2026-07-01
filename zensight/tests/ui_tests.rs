@@ -2245,6 +2245,46 @@ fn test_netring_security_tab_and_strip() {
     }
 }
 
+/// #247/#248: Overview shows a capture-health chip; the Talkers & Matrix tab
+/// renders the ranked-bar + sortable table from fetched data.
+#[test]
+fn test_netring_overview_chip_and_talkers_tab() {
+    use zensight::view::specialized::SpecializedTab;
+    use zensight::view::specialized::netring::netring_sensor_view;
+    use zensight_common::{Protocol, TalkerRecord, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let mut state = DeviceDetailState::new(device_id);
+    for (m, v) in [
+        ("flow/started_total", TelemetryValue::Counter(3)),
+        ("capture/backend", TelemetryValue::Text("af_xdp".into())),
+        ("capture/0/packets", TelemetryValue::Counter(1000)),
+        ("capture/0/drop_rate", TelemetryValue::Gauge(0.0)),
+    ] {
+        state.update(TelemetryPoint::new("wiretap1", Protocol::Netring, m, v));
+    }
+    // Overview: capture-health chip present.
+    {
+        let mut ui = simulator(netring_sensor_view(&state));
+        assert!(ui.find("capture: af_xdp · drop 0.00%").is_ok());
+    }
+
+    // Talkers & Matrix tab: ranked bar + table render from fetched talkers.
+    state.netring_detail.talkers =
+        zensight::view::specialized::fetch::Fetch::Ready(vec![TalkerRecord {
+            dst: "10.0.0.42:443".into(),
+            bytes: 4096,
+            packets: 12,
+            flows: 2,
+        }]);
+    state.specialized_tab = SpecializedTab::TalkersMatrix;
+    {
+        let mut ui = simulator(netring_sensor_view(&state));
+        assert!(ui.find("10.0.0.42:443").is_ok());
+        assert!(ui.find("showing 1 of 1 talkers").is_ok());
+    }
+}
+
 /// The top-level Logs view renders buffered log lines (the message text and the
 /// originating host) — verifying the unified logs feed surfaces journald/syslog.
 #[test]
