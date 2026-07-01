@@ -63,6 +63,17 @@
     //   forbid_failed: true,
     // },
 
+    // Gated service control (#283) — DEFAULT OFF. Destructive + privileged; the
+    // sensor is strictly read-only unless this is explicitly enabled with an
+    // allowlist. Authorization is enforced by systemd/polkit (run as root, or add
+    // a scoped polkit rule granting org.freedesktop.systemd1.manage-units for the
+    // allowlisted units). @/commands/action {verb,unit} → @/status/action.
+    // actions: {
+    //   enabled: false,
+    //   allow_units: ["nginx.service", "app-*.service"],
+    //   job_timeout_secs: 30,
+    // },
+
     collect: {
       // Enumerate units (ListUnits) for units/{total,active,failed,loaded,inactive}.
       // Turn off to only collect the cheap manager/* scalars + boot timings.

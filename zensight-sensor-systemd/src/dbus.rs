@@ -57,6 +57,13 @@ pub trait Manager {
     /// Resolve (loading if needed) a unit name to its object path.
     fn load_unit(&self, name: &str) -> zbus::Result<OwnedObjectPath>;
 
+    // ── Gated service control (#283). `mode` is typically `replace`. Each returns
+    // the enqueued job object path, tracked to completion via `JobRemoved`. ──
+    fn start_unit(&self, name: &str, mode: &str) -> zbus::Result<OwnedObjectPath>;
+    fn stop_unit(&self, name: &str, mode: &str) -> zbus::Result<OwnedObjectPath>;
+    fn restart_unit(&self, name: &str, mode: &str) -> zbus::Result<OwnedObjectPath>;
+    fn reload_unit(&self, name: &str, mode: &str) -> zbus::Result<OwnedObjectPath>;
+
     /// Enable emission of `UnitNew`/`UnitRemoved`/`JobNew`/`JobRemoved` signals.
     fn subscribe(&self) -> zbus::Result<()>;
 

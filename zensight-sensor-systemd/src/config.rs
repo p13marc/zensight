@@ -78,9 +78,42 @@ pub struct SystemdConfig {
     #[serde(default)]
     pub cgroup: CgroupConfig,
 
+    /// Gated service control (#283) — **default OFF**.
+    #[serde(default)]
+    pub actions: ActionsConfig,
+
     /// Collector toggles.
     #[serde(default)]
     pub collect: CollectConfig,
+}
+
+/// Gated service-control settings (#283). Disabled by default — the sensor is
+/// strictly read-only unless this is explicitly enabled with an allowlist.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionsConfig {
+    /// Master switch. When false, no `@/commands/action` channel is declared.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Unit-name globs a start/stop/restart/reload may target. Empty = reject all.
+    #[serde(default)]
+    pub allow_units: Vec<String>,
+    /// Bounded wait (seconds) for the `JobRemoved` completion result.
+    #[serde(default = "default_job_timeout_secs")]
+    pub job_timeout_secs: u64,
+}
+
+impl Default for ActionsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allow_units: Vec::new(),
+            job_timeout_secs: default_job_timeout_secs(),
+        }
+    }
+}
+
+fn default_job_timeout_secs() -> u64 {
+    30
 }
 
 /// `@/query/cgroups` walk settings (#280).
@@ -199,6 +232,7 @@ impl Default for SystemdConfig {
             alerts: crate::alerts::AlertsConfig::default(),
             expectations: None,
             cgroup: CgroupConfig::default(),
+            actions: ActionsConfig::default(),
             collect: CollectConfig::default(),
         }
     }

@@ -150,6 +150,15 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Gated service control (#283) — default OFF; only declared when explicitly
+    // enabled. Read-only sensor otherwise.
+    let action_session = runner.session().clone();
+    let action_prefix = systemd_config.key_prefix.clone();
+    let action_cfg = systemd_config.actions.clone();
+    runner.spawn(async move {
+        zensight_sensor_systemd::action::run(action_session, action_prefix, action_cfg).await;
+    });
+
     let metadata = serde_json::json!({
         "source": source,
         "poll_interval_secs": systemd_config.poll_interval_secs,
