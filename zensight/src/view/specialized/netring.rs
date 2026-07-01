@@ -1128,6 +1128,11 @@ fn render_elephants(state: &DeviceDetailState) -> Element<'_, Message> {
                         .into()
                 })
                 .sortable(|r: &ElephantRecord| SortKey::Num(r.bytes as f64)),
+                TableColumn::fixed("out↑ / in↓", 150.0, |r: &ElephantRecord| {
+                    text(dir_split(r.bytes_initiator, r.bytes_responder))
+                        .size(font::CAPTION)
+                        .into()
+                }),
                 TableColumn::fixed("packets", 90.0, |r: &ElephantRecord| {
                     text(format_count(r.packets)).size(font::CAPTION).into()
                 })

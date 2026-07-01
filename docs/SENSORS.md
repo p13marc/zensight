@@ -275,7 +275,20 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
   MAC-keyed inventory (MAC / IP / hostname / platform / capabilities / seen-via),
   served on `@/query/assets`. Covers hosts that emit no telemetry of their own.
 - **Alerts:** `@/alerts/<alert_key>` from detectors and threat-intel —
-  - Detectors: TRW port-scan, RITA beaconing, connection-flood, DGA/DNS-tunneling.
+  - Detectors: TRW port-scan (`anomalies.port_scan`), CV + RITA beaconing
+    (`anomalies.beaconing` / `anomalies.rita_beacon`, thresholds
+    `beacon_threshold` / `rita_beacon_threshold`), connection-flood
+    (`anomalies.connection_flood`), DGA (`anomalies.dga`), DNS-tunneling
+    (`anomalies.dns_tunnel`, `dns_tunnel_distinct` / `dns_tunnel_qname_len`), and
+    Newly-Observed-Domain / NOD (`anomalies.nod`). Each carries a MITRE ATT&CK
+    `technique` label (T1046 / T1071 / T1071.004 / T1568 / …) and a Community ID.
+    `anomalies.allowlist` (case-insensitive substring) suppresses noisy
+    destinations/SLDs; all enables/thresholds hot-swap at runtime (see below).
+  - **Per-detector metric surfacing (#254):** each detector also publishes a
+    monotonic `anomaly/<kind>/total` counter (e.g. `anomaly/RitaBeacon/total`,
+    `anomaly/DnsTunnel/total`) — re-emitted each aggregate tick — so the GUI
+    Overview anomaly strip can roll up per-detector activity without a
+    Security-view round-trip. The `<kind>` slug equals the alert `rule`.
   - **Lateral movement (#123, opt-in):** SMB admin-share / `IPC$` service-pipe
     access (T1021.002), RDP connection requests (T1021.001), and Kerberos
     kerberoast / weak-etype / brute-force signals (T1558). Build with
