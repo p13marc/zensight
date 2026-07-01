@@ -220,6 +220,18 @@ expectations and alerts on deviation.
 - **Control:** `@/commands/expectations` (+ `@/status/expectations`) to
   hot-swap expectations; `@/commands/collection` (+ status) to toggle collectors.
 - **Config:** `configs/netlink.json5` (`collect.*` flags, `expectations` block).
+- **GUI (#270):** the netlink device screen is a tabbed, chart-driven view —
+  **Overview** (bottleneck gauge + issue badges + interface status strip +
+  TCP-health tiles w/ sparklines + route/neighbor chips) · **Interfaces**
+  (per-iface throughput trends + ethtool link health + iface→sockets pivot) ·
+  **Sockets** (first-class explorer: RTT histogram + congestion donut + paginated
+  table, no silent cutoff) · **Routing & Neighbors** (route/neighbor/address
+  DataTables + neighbor-state donut + default-route flap section) · **QoS/Queues**
+  (per-qdisc health chips + AQM + backlog trends + qdisc tree) · **Firewall &
+  IPsec** (conntrack gauge + per-proto donut + nft/xfrm DataTables) · **Events**
+  (structured control-plane timeline + per-family context chart) · **WireGuard**
+  (peer cards w/ handshake-age chips + rx/tx trends). Capability-gated tabs appear
+  only when their data is present.
 
 ## netring
 
