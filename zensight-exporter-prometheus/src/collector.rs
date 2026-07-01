@@ -666,6 +666,28 @@ mod tests {
     }
 
     #[test]
+    fn systemd_per_unit_point_has_single_unit_label() {
+        // #282: per-unit systemd series must export as one clean metric name with
+        // the unit as a SINGLE label — semconv adds no attrs, so the point's own
+        // `unit` label isn't duplicated.
+        let mut point = make_point(
+            "host01",
+            Protocol::Systemd,
+            "unit/sshd.service/active",
+            TelemetryValue::Boolean(true),
+        );
+        point
+            .labels
+            .insert("unit".to_string(), "sshd.service".to_string());
+        let key = SeriesKey::from_telemetry(&point, "zensight", &HashMap::new());
+
+        assert_eq!(key.name, "zensight_systemd_unit_active");
+        let unit_labels: Vec<_> = key.labels.iter().filter(|(k, _)| k == "unit").collect();
+        assert_eq!(unit_labels.len(), 1, "unit label must not be duplicated");
+        assert_eq!(unit_labels[0].1, "sshd.service");
+    }
+
+    #[test]
     fn test_series_key_with_default_labels() {
         let point = make_point(
             "server01",

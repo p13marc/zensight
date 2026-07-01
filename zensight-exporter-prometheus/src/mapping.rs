@@ -258,6 +258,16 @@ mod tests {
             build_metric_name("", Protocol::Netflow, "bytes"),
             "netflow_bytes"
         );
+        // #282: systemd per-unit series collapse to a clean name (unit rides as a
+        // label); aggregates keep the protocol-qualified raw name.
+        assert_eq!(
+            build_metric_name("zensight", Protocol::Systemd, "unit/sshd.service/active"),
+            "zensight_systemd_unit_active"
+        );
+        assert_eq!(
+            build_metric_name("zensight", Protocol::Systemd, "units/failed"),
+            "zensight_systemd_units_failed"
+        );
     }
 
     #[test]
