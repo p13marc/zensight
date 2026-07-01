@@ -105,6 +105,10 @@ pub struct NetringDetailState {
     pub http: Fetch<Vec<HttpHostRecord>>,
     /// Per-table sort/filter/limit state, addressed by [`NetringTable`] (#244).
     pub tables: HashMap<NetringTable, TableState>,
+    /// Firing netring anomalies scoped to this device's source (#253), projected
+    /// by the app from the external alert set so the Security tab + Overview
+    /// anomaly strip render without threading `AlertsState` through the view.
+    pub anomalies: Vec<zensight_common::Alert>,
 }
 
 impl NetringDetailState {

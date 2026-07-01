@@ -10,7 +10,7 @@ use zensight_common::TelemetryValue;
 
 use crate::message::Message;
 use crate::view::components::{
-    Column as TableColumn, DataTable, SortKey, TabItem, card, empty_state, section_header,
+    Column as TableColumn, DataTable, SortKey, TabItem, badge, card, empty_state, section_header,
     tabbed_view,
 };
 use crate::view::chart;
@@ -66,6 +66,9 @@ fn netring_tabs(state: &DeviceDetailState) -> Vec<TabItem<SpecializedTab>> {
         TabItem::new(Assets, "Assets").visible(
             has_prefix(state, "assets/") || !matches!(state.netring_detail.assets, Fetch::Idle),
         ),
+        TabItem::new(Security, "Security")
+            .visible(!state.netring_detail.anomalies.is_empty())
+            .badge(state.netring_detail.anomalies.len()),
         TabItem::new(Capture, "Capture")
             .visible(state.metrics.keys().any(|k| k.starts_with("capture/"))),
     ]
@@ -78,8 +81,15 @@ fn netring_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Elemen
     use SpecializedTab::*;
     let inner: Column<'_, Message> = match tab {
         Overview => {
-            let mut c = column![card(render_flows(state)), card(render_tcp_health(state))]
-                .spacing(space::MD);
+            let mut c = column![].spacing(space::MD);
+            // Live anomaly strip: a compact rollup of firing detectors that
+            // click-throughs to the Security tab (#253).
+            if let Some(strip) = anomaly_strip(state) {
+                c = c.push(strip);
+            }
+            c = c
+                .push(card(render_flows(state)))
+                .push(card(render_tcp_health(state)));
             if has_prefix(state, "flow/by_l4/") {
                 c = c.push(card(render_per_l4(state)));
             }
@@ -110,8 +120,7 @@ fn netring_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Elemen
         Bandwidth => column![card(render_bandwidth(state))].spacing(space::MD),
         Assets => column![card(render_assets(state))].spacing(space::MD),
         Capture => column![card(render_capture(state))].spacing(space::MD),
-        // Filled in by C4 (#253); Overview shows the anomaly strip.
-        Security => column![empty_state("No anomalies for this sensor", None)].spacing(space::MD),
+        Security => column![card(render_netring_security(state))].spacing(space::MD),
     };
     scrollable(inner.width(Length::Fill))
         .height(Length::Fill)
@@ -1180,6 +1189,140 @@ fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
         .size(font::CAPTION)
         .style(dim);
     column![title, bars, list, footer].spacing(space::SM).into()
+}
+
+/// Rank an alert severity for ordering / "highest severity" rollups.
+fn sev_rank(s: zensight_common::AlertSeverity) -> u8 {
+    use zensight_common::AlertSeverity::*;
+    match s {
+        Critical => 3,
+        Warning => 2,
+        Info => 1,
+    }
+}
+
+/// Human label for a severity.
+fn sev_label(s: zensight_common::AlertSeverity) -> &'static str {
+    use zensight_common::AlertSeverity::*;
+    match s {
+        Critical => "critical",
+        Warning => "warning",
+        Info => "info",
+    }
+}
+
+/// Design-system color for a severity (D2 severity palette).
+fn sev_color(s: zensight_common::AlertSeverity) -> iced::Color {
+    use zensight_common::AlertSeverity::*;
+    match s {
+        Critical => theme::SEVERITY_CRITICAL,
+        Warning => theme::SEVERITY_WARNING,
+        Info => theme::SEVERITY_INFO,
+    }
+}
+
+/// The ATT&CK technique tagged on an anomaly, if any (#117).
+fn anomaly_technique(a: &zensight_common::Alert) -> Option<&str> {
+    a.labels.get("technique").map(String::as_str)
+}
+
+/// Overview anomaly strip (#253): a one-line rollup of firing netring detectors
+/// that click-throughs to the Security tab. `None` when there are no anomalies.
+fn anomaly_strip(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
+    let anoms = &state.netring_detail.anomalies;
+    if anoms.is_empty() {
+        return None;
+    }
+    let highest = anoms
+        .iter()
+        .map(|a| a.severity)
+        .max_by_key(|s| sev_rank(*s))?;
+    let tech = anoms.iter().find_map(anomaly_technique).unwrap_or("");
+    let n = anoms.len();
+    let plural = if n == 1 { "y" } else { "ies" };
+    let label = if tech.is_empty() {
+        format!("⚠ {n} anomal{plural} · highest {}", sev_label(highest))
+    } else {
+        format!("⚠ {n} anomal{plural} · highest {} · {tech}", sev_label(highest))
+    };
+    Some(
+        button(
+            text(label)
+                .size(font::CAPTION)
+                .style(move |_: &Theme| text::Style {
+                    color: Some(sev_color(highest)),
+                }),
+        )
+        .padding([space::XS as u16, space::SM as u16])
+        .style(iced::widget::button::text)
+        .on_press(Message::SelectSpecializedTab(
+            state.device_id.clone(),
+            SpecializedTab::Security,
+        ))
+        .into(),
+    )
+}
+
+/// Security tab (#253): an in-view rollup of this sensor's firing anomalies by
+/// detector, scoped to this source, that deep-links to the global Security view
+/// and pivots each anomaly to its offending flows. Deliberately compact — it
+/// does not duplicate the full Security view.
+fn render_netring_security(state: &DeviceDetailState) -> Element<'_, Message> {
+    let anoms = &state.netring_detail.anomalies;
+    let open = button(text("Open Security view").size(font::CAPTION))
+        .padding([4, 10])
+        .on_press(Message::OpenSecurity);
+    let mut col = column![section_header(
+        format!("Anomalies ({})", anoms.len()),
+        Some(open.into())
+    )]
+    .spacing(space::SM);
+
+    if anoms.is_empty() {
+        return col.push(empty_state("No anomalies for this sensor", None)).into();
+    }
+
+    // Rollup by detector (rule): count + highest severity.
+    let mut by_rule: std::collections::BTreeMap<String, (usize, zensight_common::AlertSeverity)> =
+        Default::default();
+    for a in anoms {
+        let e = by_rule
+            .entry(a.rule.clone())
+            .or_insert((0, zensight_common::AlertSeverity::Info));
+        e.0 += 1;
+        if sev_rank(a.severity) > sev_rank(e.1) {
+            e.1 = a.severity;
+        }
+    }
+    col = col.push(text("by detector").size(font::CAPTION).style(dim));
+    for (rule, (count, sev)) in &by_rule {
+        col = col.push(
+            row![
+                badge(sev_color(*sev), rule.clone()),
+                text(format!("×{count}")).size(font::CAPTION).style(dim),
+            ]
+            .spacing(space::SM)
+            .align_y(iced::Alignment::Center),
+        );
+    }
+
+    // Individual anomalies (severity desc), each pivoting to its flows.
+    let mut sorted: Vec<&zensight_common::Alert> = anoms.iter().collect();
+    sorted.sort_by_key(|a| std::cmp::Reverse(sev_rank(a.severity)));
+    col = col.push(text("detections").size(font::CAPTION).style(dim));
+    for a in sorted {
+        let mut r = row![
+            badge(sev_color(a.severity), sev_label(a.severity)),
+            text(a.summary.clone()).size(font::CAPTION),
+        ]
+        .spacing(space::SM)
+        .align_y(iced::Alignment::Center);
+        if let Some(src) = a.labels.get("src") {
+            r = r.push(pivot_button(state, src, "flows →"));
+        }
+        col = col.push(r);
+    }
+    col.into()
 }
 
 /// Flow-direction glyph: a directed initiator→responder arrow when orientation

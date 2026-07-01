@@ -1076,6 +1076,7 @@ impl ZenSight {
                 if self.current_view == CurrentView::Topology {
                     self.topology.apply_alerts(&self.alerts.external);
                 }
+                self.refresh_netring_anomalies();
             }
 
             Message::AlertCleared { alert_key, .. } => {
@@ -1088,6 +1089,7 @@ impl ZenSight {
                 if self.current_view == CurrentView::Topology {
                     self.topology.apply_alerts(&self.alerts.external);
                 }
+                self.refresh_netring_anomalies();
             }
 
             Message::AlertsSeed(alerts) => {
@@ -1099,6 +1101,7 @@ impl ZenSight {
                 if self.current_view == CurrentView::Topology {
                     self.topology.apply_alerts(&self.alerts.external);
                 }
+                self.refresh_netring_anomalies();
             }
 
             Message::Connecting => {
@@ -3509,6 +3512,32 @@ impl ZenSight {
     /// Select a device to view in detail. Returns a task that pre-loads this
     /// device's restart-survived history from the local store off the UI thread
     /// (#22), so the detail chart opens pre-populated with persisted trends.
+    /// Project the firing external anomalies scoped to the selected netring
+    /// device's source into its detail state, so the Security tab + Overview
+    /// anomaly strip render without threading `AlertsState` through the view
+    /// (#253). No-op unless a netring device is open.
+    fn refresh_netring_anomalies(&mut self) {
+        use zensight_common::{AlertKind, Protocol};
+        let Some(source) = self
+            .selected_device
+            .as_ref()
+            .filter(|d| d.device_id.protocol == Protocol::Netring)
+            .map(|d| d.device_id.source.clone())
+        else {
+            return;
+        };
+        let anomalies: Vec<zensight_common::Alert> = self
+            .alerts
+            .active_external()
+            .into_iter()
+            .filter(|a| a.kind == AlertKind::Anomaly && a.source == source)
+            .cloned()
+            .collect();
+        if let Some(device) = self.selected_device.as_mut() {
+            device.netring_detail.anomalies = anomalies;
+        }
+    }
+
     fn select_device(&mut self, device_id: DeviceId) -> Task<Message> {
         tracing::info!(device = %device_id, "Selected device");
         // We don't have the full TelemetryPoints in the dashboard,
@@ -3519,6 +3548,8 @@ impl ZenSight {
         detail_state.set_favorites(self.device_favorites(&device_id));
         self.selected_device = Some(detail_state);
         self.set_view(CurrentView::Device);
+        // Project firing anomalies for this source into the netring view (#253).
+        self.refresh_netring_anomalies();
 
         // Prefetch this protocol's primary detail channels so the drill-in opens
         // pre-populated rather than Idle-until-clicked (#127).

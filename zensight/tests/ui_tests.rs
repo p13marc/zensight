@@ -2184,6 +2184,67 @@ fn test_netring_tabs_capability_and_switch() {
     )));
 }
 
+/// #253: firing netring anomalies surface in-view — an Overview strip that
+/// click-throughs to the Security tab, and a Security tab that rolls them up by
+/// detector, deep-links to the global Security view, and pivots to flows.
+#[test]
+fn test_netring_security_tab_and_strip() {
+    use std::collections::HashMap;
+
+    use zensight::view::specialized::SpecializedTab;
+    use zensight::view::specialized::netring::netring_sensor_view;
+    use zensight_common::{Alert, AlertKind, AlertSeverity, AlertState, Protocol};
+
+    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let mut state = DeviceDetailState::new(device_id);
+    state.netring_detail.anomalies = vec![Alert {
+        timestamp: 0,
+        source: "wiretap1".into(),
+        protocol: Protocol::Netring,
+        kind: AlertKind::Anomaly,
+        rule: "RitaBeacon".into(),
+        severity: AlertSeverity::Critical,
+        state: AlertState::Firing,
+        summary: "periodic beaconing to 1.2.3.4".into(),
+        labels: HashMap::from([
+            ("technique".to_string(), "T1071".to_string()),
+            ("src".to_string(), "10.0.0.9".to_string()),
+        ]),
+    }];
+
+    // Overview: the anomaly strip is present and clicks through to Security.
+    {
+        let mut ui = simulator(netring_sensor_view(&state));
+        assert!(ui.find("Security").is_ok()); // tab visible with a badge
+        let _ = ui.click("⚠ 1 anomaly · highest critical · T1071");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(msgs.iter().any(|m| matches!(
+            m,
+            Message::SelectSpecializedTab(_, SpecializedTab::Security)
+        )));
+    }
+
+    // Security tab: rollup + deep-link + flow pivot.
+    state.specialized_tab = SpecializedTab::Security;
+    {
+        let mut ui = simulator(netring_sensor_view(&state));
+        assert!(ui.find("Anomalies (1)").is_ok());
+        assert!(ui.find("RitaBeacon").is_ok());
+        assert!(ui.find("periodic beaconing to 1.2.3.4").is_ok());
+        assert!(ui.find("Open Security view").is_ok());
+    }
+    // The per-anomaly flow pivot targets the offending src.
+    {
+        let mut ui = simulator(netring_sensor_view(&state));
+        let _ = ui.click("flows →");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(msgs.iter().any(|m| matches!(
+            m,
+            Message::NetringPivotToFlows(_, ep) if ep == "10.0.0.9"
+        )));
+    }
+}
+
 /// The top-level Logs view renders buffered log lines (the message text and the
 /// originating host) — verifying the unified logs feed surfaces journald/syslog.
 #[test]
