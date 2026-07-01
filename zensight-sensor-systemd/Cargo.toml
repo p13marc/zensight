@@ -1,0 +1,78 @@
+[package]
+name = "zensight-sensor-systemd"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Zenoh sensor for systemd unit/service state and boot performance (D-Bus)"
+license = "Apache-2.0"
+
+[dependencies]
+zensight-common = { path = "../zensight-common" }
+zensight-sensor-core = { path = "../zensight-sensor-core" }
+hostname = "0.4"
+
+# Async runtime
+tokio = { workspace = true, features = ["full", "sync", "time"] }
+
+# D-Bus / systemd Manager API. Hand-rolled `#[zbus::proxy]` against the locked
+# zbus 5; `tokio` feature (no default async-io stack) so it runs on our runtime.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+# Zenoh
+zenoh.workspace = true
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+json5.workspace = true
+
+# CLI
+clap = { workspace = true, features = ["derive"] }
+
+# Logging
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Time
+chrono = "0.4"
+
+[[bin]]
+name = "zensight-sensor-systemd"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+# =============================================================================
+# Package metadata for cargo-deb
+# =============================================================================
+[package.metadata.deb]
+maintainer = "Marc Pardo <p13marc@gmail.com>"
+copyright = "2024, Marc Pardo"
+license-file = ["../LICENSE", "0"]
+extended-description = """Zenoh sensor for systemd telemetry. Reads unit/service
+state aggregates and boot-performance timings from the systemd D-Bus Manager API
+and publishes them to Zenoh for consumption by ZenSight or other Zenoh subscribers."""
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/zensight-sensor-systemd", "usr/bin/", "755"],
+    ["../packaging/systemd/zensight-sensor-systemd.service", "lib/systemd/system/", "644"],
+    ["../configs/systemd.json5", "etc/zensight/systemd.json5", "644"],
+]
+conf-files = ["/etc/zensight/systemd.json5"]
+depends = "$auto"
+
+# =============================================================================
+# Package metadata for cargo-generate-rpm
+# =============================================================================
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/zensight-sensor-systemd", dest = "/usr/bin/zensight-sensor-systemd", mode = "755" },
+    { source = "../packaging/systemd/zensight-sensor-systemd.service", dest = "/lib/systemd/system/zensight-sensor-systemd.service", mode = "644" },
+    { source = "../configs/systemd.json5", dest = "/etc/zensight/systemd.json5", mode = "644", config = true },
+]

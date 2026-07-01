@@ -1,0 +1,25 @@
+[Unit]
+Description=ZenSight systemd — unit/service state + boot performance
+Documentation=https://github.com/p13marc/zensight
+After=dbus.service
+Wants=dbus.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/zensight-sensor-systemd --config /etc/zensight/systemd.json5
+Restart=on-failure
+RestartSec=5s
+# Graceful stop (#161): SIGTERM lets the process publish its offline status and
+# tombstone any firing alerts before exit.
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+# Introspection over the system bus is read-only; run unprivileged under a
+# transient system user with a minimal sandbox.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/etc/zensight
+
+[Install]
+WantedBy=multi-user.target

@@ -85,6 +85,7 @@ fn test_all_protocol_variants() {
         (Protocol::Netflow, "netflow"),
         (Protocol::Opcua, "opcua"),
         (Protocol::Modbus, "modbus"),
+        (Protocol::Systemd, "systemd"),
     ];
 
     for (protocol, expected_str) in protocols {

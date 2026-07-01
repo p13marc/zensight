@@ -144,6 +144,8 @@ pub enum Protocol {
     Netlink,
     /// Wire-level packet/flow telemetry via netring (AF_PACKET / AF_XDP).
     Netring,
+    /// systemd unit/service state + resource accounting via the D-Bus Manager API.
+    Systemd,
 }
 
 impl Protocol {
@@ -159,6 +161,7 @@ impl Protocol {
             Protocol::Sysinfo => "sysinfo",
             Protocol::Netlink => "netlink",
             Protocol::Netring => "netring",
+            Protocol::Systemd => "systemd",
         }
     }
 
@@ -192,6 +195,7 @@ impl std::str::FromStr for Protocol {
             "sysinfo" => Ok(Protocol::Sysinfo),
             "netlink" => Ok(Protocol::Netlink),
             "netring" => Ok(Protocol::Netring),
+            "systemd" => Ok(Protocol::Systemd),
             _ => Err(()),
         }
     }
@@ -246,6 +250,7 @@ mod tests {
         assert_eq!("opcua".parse::<Protocol>(), Ok(Protocol::Opcua));
         assert_eq!("modbus".parse::<Protocol>(), Ok(Protocol::Modbus));
         assert_eq!("sysinfo".parse::<Protocol>(), Ok(Protocol::Sysinfo));
+        assert_eq!("systemd".parse::<Protocol>(), Ok(Protocol::Systemd));
 
         // Case insensitive
         assert_eq!("SNMP".parse::<Protocol>(), Ok(Protocol::Snmp));
@@ -254,6 +259,20 @@ mod tests {
         // Invalid
         assert!("unknown".parse::<Protocol>().is_err());
         assert!("".parse::<Protocol>().is_err());
+    }
+
+    #[test]
+    fn test_protocol_systemd_serde_roundtrip() {
+        // Wire token is the lowercase `"systemd"` (via `#[serde(rename_all)]`).
+        assert_eq!(
+            serde_json::to_value(Protocol::Systemd).unwrap(),
+            serde_json::json!("systemd")
+        );
+        assert_eq!(
+            serde_json::from_value::<Protocol>(serde_json::json!("systemd")).unwrap(),
+            Protocol::Systemd
+        );
+        assert_eq!(Protocol::Systemd.as_str(), "systemd");
     }
 
     #[test]

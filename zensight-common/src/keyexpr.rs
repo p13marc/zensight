@@ -269,6 +269,9 @@ pub fn parse_key_expr(key: &str) -> Result<ParsedKeyExpr<'_>, ParseError> {
         "opcua" => Protocol::Opcua,
         "modbus" => Protocol::Modbus,
         "sysinfo" => Protocol::Sysinfo,
+        "netlink" => Protocol::Netlink,
+        "netring" => Protocol::Netring,
+        "systemd" => Protocol::Systemd,
         other => return Err(ParseError::UnknownProtocol(other.to_string())),
     };
 

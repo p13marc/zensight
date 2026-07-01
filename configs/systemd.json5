@@ -1,0 +1,43 @@
+{
+  // Zenoh connection settings
+  zenoh: {
+    mode: "peer",                    // "client", "peer", or "router"
+    // connect: ["tcp/localhost:7447"], // Router endpoints (if client mode)
+    serialization: "json",           // "json" or "cbor"
+  },
+
+  // On-demand debug reports (@/report) — opt-in. When enabled, an operator can
+  // download a redacted tar.zst bundle (config + health + counters) from the GUI.
+  report: {
+    enabled: false,
+    max_bytes: 67108864,   // 64 MiB cap on the (uncompressed) bundle
+    cooldown_secs: 30,
+    ttl_secs: 600,
+    chunk_size: 524288,
+  },
+
+  // systemd sensor settings
+  systemd: {
+    // Key expression prefix
+    key_prefix: "zensight/systemd",
+
+    // How often to read the systemd Manager (seconds)
+    poll_interval_secs: 15,
+
+    // Telemetry source id; defaults to the local hostname when omitted.
+    // source: "gw01",
+
+    collect: {
+      // Enumerate units (ListUnits) for units/{total,active,failed,loaded,inactive}.
+      // Turn off to only collect the cheap manager/* scalars + boot timings.
+      list_units: true,
+      // Boot-performance phase durations (boot/*_usec), like systemd-analyze.
+      boot: true,
+    },
+  },
+
+  // Logging
+  logging: {
+    level: "info",
+  },
+}
