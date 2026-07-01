@@ -13,6 +13,7 @@ use crate::view::components::{
     Column as TableColumn, DataTable, SortKey, TabItem, card, empty_state, section_header,
     tabbed_view,
 };
+use crate::view::chart;
 use crate::view::device::DeviceDetailState;
 use crate::view::formatting::{format_bytes, format_count, format_rate};
 use crate::view::specialized::SpecializedTab;
@@ -640,40 +641,41 @@ fn has_prefix(state: &DeviceDetailState, prefix: &str) -> bool {
     state.metrics.keys().any(|k| k.starts_with(prefix))
 }
 
-/// DNS RED card (#45): rates, RTT percentiles, and rcode breakdown.
+/// DNS tab (#250): RED tiles (rate / unanswered / RTT percentiles) + an rcode
+/// bar chart + an on-demand top-SLD table with an NXDOMAIN callout.
 fn render_dns(state: &DeviceDetailState) -> Element<'_, Message> {
     let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
-    let line =
-        |label: &str, metric: &str| row![cell(label, 200), cell(&get(metric), 120)].spacing(8);
 
-    let mut col = column![
-        section_header("DNS (RED)", None),
-        line("queries (total)", "dns/queries_total"),
-        line("unanswered (total)", "dns/unanswered_total"),
-        line("RTT p50 (ms)", "dns/query_rtt_p50_ms"),
-        line("RTT p95 (ms)", "dns/query_rtt_p95_ms"),
-        line("RTT p99 (ms)", "dns/query_rtt_p99_ms"),
+    // RED tiles.
+    let tiles = row![
+        metric_tile("queries", get("dns/queries_total")),
+        metric_tile("unanswered", get("dns/unanswered_total")),
+        metric_tile("RTT p50 (ms)", get("dns/query_rtt_p50_ms")),
+        metric_tile("RTT p95 (ms)", get("dns/query_rtt_p95_ms")),
+        metric_tile("RTT p99 (ms)", get("dns/query_rtt_p99_ms")),
     ]
-    .spacing(4);
+    .spacing(space::SM);
 
-    // Response-code breakdown (dynamic `dns/responses_by_rcode/<rcode>_total`).
-    let mut rcodes: Vec<(String, String)> = state
+    let mut col = column![section_header("DNS (RED)", None), tiles].spacing(space::SM);
+
+    // Response-code breakdown (`dns/responses_by_rcode/<rcode>_total`) as a
+    // ranked bar chart instead of a text list.
+    let mut rcodes: Vec<(String, f64)> = state
         .metrics
         .iter()
         .filter_map(|(m, p)| {
             let r = m.strip_prefix("dns/responses_by_rcode/")?;
-            Some((r.to_string(), num(Some(&p.value))))
+            Some((r.trim_end_matches("_total").to_string(), value_f64(&p.value)))
         })
         .collect();
-    rcodes.sort();
+    rcodes.sort_by(|a, b| b.1.total_cmp(&a.1));
     if !rcodes.is_empty() {
-        col = col.push(text("by rcode").size(font::CAPTION).style(dim));
-        for (r, v) in rcodes {
-            col = col.push(row![cell(&format!("  {r}"), 200), cell(&v, 120)].spacing(8));
-        }
+        col = col
+            .push(text("by rcode").size(font::CAPTION).style(dim))
+            .push(chart::ranked_bar(&rcodes, |v| format_count(v as u64), 8));
     }
 
-    // On-demand top-SLD / top-NXDOMAIN drill-down via `@/query/dns` (#45).
+    // On-demand top-SLD / top-NXDOMAIN drill-down via `@/query/dns`.
     let loading = state.netring_detail.dns.is_loading();
     let mut fetch = button(
         text(if loading {
@@ -694,27 +696,39 @@ fn render_dns(state: &DeviceDetailState) -> Element<'_, Message> {
         if records.is_empty() {
             col = col.push(empty_state("No DNS detail", None));
         } else {
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("domain", 240),
-                    cell("queries", 100),
-                    cell("nxdomain", 100),
-                ]
-                .spacing(8),
-            );
-            for r in records.iter().take(200) {
-                list = list.push(
-                    row![
-                        cell(&r.domain, 240),
-                        cell(&r.queries.to_string(), 100),
-                        cell(&r.nxdomain.to_string(), 100),
-                    ]
-                    .spacing(8),
+            // NXDOMAIN callout: how many SLDs returned NXDOMAIN (a DGA / NOD
+            // signal that pivots to the Security tab).
+            let nx = records.iter().filter(|r| r.nxdomain > 0).count();
+            if nx > 0 {
+                col = col.push(
+                    text(format!("⚠ {nx} domain(s) returned NXDOMAIN"))
+                        .size(font::CAPTION)
+                        .style(warn),
                 );
             }
-            col = col
-                .push(text(format!("{} domains", records.len())).size(font::EMPHASIS))
-                .push(list);
+            let columns = vec![
+                TableColumn::fill("domain", 4, |r: &zensight_common::DnsRecord| {
+                    text(r.domain.clone()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &zensight_common::DnsRecord| SortKey::Text(r.domain.clone())),
+                TableColumn::fixed("queries", 100.0, |r: &zensight_common::DnsRecord| {
+                    text(r.queries.to_string()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &zensight_common::DnsRecord| SortKey::Num(r.queries as f64)),
+                TableColumn::fixed("nxdomain", 100.0, |r: &zensight_common::DnsRecord| {
+                    let t = text(r.nxdomain.to_string()).size(font::CAPTION);
+                    if r.nxdomain > 0 { t.style(warn) } else { t }.into()
+                })
+                .sortable(|r: &zensight_common::DnsRecord| SortKey::Num(r.nxdomain as f64)),
+            ];
+            let table = DataTable::new(columns)
+                .searchable(|r: &zensight_common::DnsRecord| r.domain.clone())
+                .on_sort(|c| Message::NetringTableSort(NetringTable::Dns, c))
+                .on_filter(|q| Message::NetringTableFilter(NetringTable::Dns, q))
+                .on_more(Message::NetringTableMore(NetringTable::Dns))
+                .noun("domains")
+                .view(records, state.netring_detail.table(NetringTable::Dns));
+            col = col.push(table);
         }
     }
     col.into()
@@ -1203,6 +1217,27 @@ fn num(v: Option<&TelemetryValue>) -> String {
         Some(TelemetryValue::Boolean(b)) => b.to_string(),
         _ => "-".into(),
     }
+}
+
+/// Numeric projection of a telemetry value for charts (`0.0` for non-numerics).
+fn value_f64(v: &TelemetryValue) -> f64 {
+    match v {
+        TelemetryValue::Counter(c) => *c as f64,
+        TelemetryValue::Gauge(g) => *g,
+        TelemetryValue::Boolean(true) => 1.0,
+        TelemetryValue::Boolean(false) => 0.0,
+        _ => 0.0,
+    }
+}
+
+/// A compact RED/KPI tile: a big value over a muted caption, in a card. Used by
+/// the DNS/HTTP RED headers (#250).
+fn metric_tile<'a>(label: &str, value: String) -> Element<'a, Message> {
+    card(column![
+        text(value).size(font::SECTION),
+        text(label.to_string()).size(font::CAPTION).style(dim),
+    ]
+    .spacing(space::XS))
 }
 
 #[cfg(test)]
