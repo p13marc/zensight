@@ -15,6 +15,7 @@ pub mod map;
 pub mod query;
 pub mod route_history;
 pub mod sentinel;
+pub mod xfrm_sentinel;
 
 /// Opt-in eBPF module (#114). Compiled only with `--features ebpf`; the rest of
 /// the crate stays aya-free.
@@ -25,3 +26,4 @@ pub use collector::Collector;
 pub use collector::MetricCache;
 pub use config::{NetlinkConfig, NetlinkSensorConfig};
 pub use sentinel::{Evaluator, ExpectationsConfig, MetricExpectation, SentinelHandle};
+pub use xfrm_sentinel::{XfrmSentinel, XfrmSentinelConfig};

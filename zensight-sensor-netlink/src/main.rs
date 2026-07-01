@@ -84,6 +84,18 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Alert reporter shared by the expectation sentinel (Pillar B) and the XFRM
+    // lifecycle sentinel (#267). Built here so it can be attached to the collector
+    // before `run()` moves it.
+    use std::sync::Arc;
+    use std::time::Duration;
+    use zensight_sensor_core::{AlertReporter, Protocol};
+    let exp_cfg = netlink_config.expectations.clone().unwrap_or_default();
+    let reporter = Arc::new(
+        AlertReporter::new(runner.publisher(), Protocol::Netlink, Format::Json)
+            .with_debounce(Duration::from_secs(exp_cfg.default_for_secs)),
+    );
+
     let collector = Collector::new(
         hostname.clone(),
         netlink_config.clone(),
@@ -93,6 +105,18 @@ async fn main() -> Result<()> {
     .with_health(runner.health());
     #[cfg(feature = "ebpf")]
     let collector = collector.with_ebpf(ebpf_state);
+    // XFRM lifecycle sentinel (#267): only meaningful when both the event stream
+    // and IPsec collection are on.
+    let collector = if netlink_config.collect.events && netlink_config.collect.xfrm {
+        use zensight_sensor_netlink::{XfrmSentinel, XfrmSentinelConfig};
+        collector.with_xfrm_sentinel(XfrmSentinel::new(
+            hostname.clone(),
+            reporter.clone(),
+            XfrmSentinelConfig::default(),
+        ))
+    } else {
+        collector
+    };
     // Hot-swappable collector toggles, driven by the `collection` command channel.
     let collect_handle = collector.collect_handle();
     // Latest-metric cache shared with the sentinel's metric-threshold expectations.
@@ -144,14 +168,8 @@ async fn main() -> Result<()> {
     // accept runtime expectation commands from the GUI (always on, so the GUI
     // can author expectations even when none are configured on disk).
     {
-        use std::sync::Arc;
-        use std::time::Duration;
-        use zensight_sensor_core::{AlertReporter, Protocol, serve_alerts_query};
-        let exp_cfg = netlink_config.expectations.clone().unwrap_or_default();
-        let reporter = Arc::new(
-            AlertReporter::new(runner.publisher(), Protocol::Netlink, Format::Json)
-                .with_debounce(Duration::from_secs(exp_cfg.default_for_secs)),
-        );
+        use zensight_sensor_core::serve_alerts_query;
+        // `reporter` + `exp_cfg` were built above (shared with the XFRM sentinel).
         // Late-joiner seed: serve the current firing set to consumers that connect
         // after an alert fired.
         runner.spawn(serve_alerts_query(reporter.clone()));
