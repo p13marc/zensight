@@ -87,6 +87,9 @@ fn netring_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Elemen
             if let Some(strip) = anomaly_strip(state) {
                 c = c.push(strip);
             }
+            if let Some(chip) = capture_chip(state) {
+                c = c.push(chip);
+            }
             c = c
                 .push(card(render_flows(state)))
                 .push(card(render_tcp_health(state)));
@@ -1093,13 +1096,25 @@ fn render_elephants(state: &DeviceDetailState) -> Element<'_, Message> {
     col.into()
 }
 
-/// Per-L4 (tcp/udp/icmp) flow + byte split (#45).
+/// Per-L4 (tcp/udp/icmp) split (#45): a donut of the byte distribution over a
+/// compact flows/bytes table.
 fn render_per_l4(state: &DeviceDetailState) -> Element<'_, Message> {
-    let mut col = column![
-        section_header("Per-protocol (L4)", None),
-        row![cell("proto", 120), cell("flows", 120), cell("bytes", 140)].spacing(8),
-    ]
-    .spacing(4);
+    let mut col = column![section_header("Per-protocol (L4)", None)].spacing(space::SM);
+
+    // Byte-distribution donut (skips protocols with no bytes).
+    let split: Vec<(String, f64)> = ["tcp", "udp", "icmp"]
+        .iter()
+        .filter_map(|proto| {
+            metric_f64(state, &format!("flow/by_l4/{proto}/bytes_total"))
+                .filter(|v| *v > 0.0)
+                .map(|v| (proto.to_string(), v))
+        })
+        .collect();
+    if !split.is_empty() {
+        col = col.push(chart::donut(&split, 90.0));
+    }
+
+    col = col.push(row![cell("proto", 120), cell("flows", 120), cell("bytes", 140)].spacing(8));
     for proto in ["tcp", "udp", "icmp"] {
         let flows = metric_f64(state, &format!("flow/by_l4/{proto}/flows_total"))
             .map(|v| format_count(v as u64))
@@ -1110,6 +1125,44 @@ fn render_per_l4(state: &DeviceDetailState) -> Element<'_, Message> {
         col = col.push(row![cell(proto, 120), cell(&flows, 120), cell(&bytes, 140)].spacing(8));
     }
     col.into()
+}
+
+/// Compact capture-health chip for the Overview tab (#247): backend + worst
+/// drop-rate, tinted and flagged when a source is overloaded or shedding.
+/// `None` when the sensor publishes no `capture/*` metrics (e.g. pcap replay).
+fn capture_chip(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
+    let has_capture = state.metrics.keys().any(|k| k.starts_with("capture/"));
+    if !has_capture {
+        return None;
+    }
+    let backend = match state.metrics.get("capture/backend").map(|p| &p.value) {
+        Some(TelemetryValue::Text(s)) => s.clone(),
+        _ => "capture".to_string(),
+    };
+    // Worst windowed drop-rate across sources.
+    let worst = state
+        .metrics
+        .iter()
+        .filter(|(k, _)| k.starts_with("capture/") && k.ends_with("/drop_rate"))
+        .map(|(_, p)| value_f64(&p.value))
+        .fold(0.0_f64, f64::max);
+    let shedding = state.metrics.iter().any(|(k, p)| {
+        k.starts_with("capture/") && k.ends_with("/shed/active") && value_f64(&p.value) >= 1.0
+    });
+    let style: fn(&Theme) -> text::Style = if worst >= OVERLOAD_DROP_RATE {
+        danger
+    } else if shedding || worst >= 0.01 {
+        warn
+    } else {
+        dim
+    };
+    let mut label = format!("capture: {backend} · drop {:.2}%", worst * 100.0);
+    if shedding {
+        label.push_str(" · SHEDDING");
+    } else if worst >= OVERLOAD_DROP_RATE {
+        label.push_str(" · OVERLOAD");
+    }
+    Some(card(text(label).size(font::CAPTION).style(style)))
 }
 
 /// On-demand recent-flow detail: a fetch button + the fetched flow table (P2 —
