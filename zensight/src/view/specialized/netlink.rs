@@ -1,55 +1,131 @@
-//! Netlink host specialized view — interfaces + TCP socket aggregates.
+//! Netlink host specialized view — a tabbed, chart-driven, drill-down surface
+//! (Overview · Interfaces · Sockets · Routing & Neighbors · QoS · Firewall &
+//! IPsec · Events · WireGuard) over the sensor's streamed metrics and
+//! `@/query/*` channels (#258, epic #270).
 
 use std::collections::BTreeMap;
 
-use iced::widget::{Column, button, column, container, row, scrollable, text, text_input};
+use iced::widget::{Column, button, column, row, scrollable, text, text_input};
 use iced::{Element, Length, Theme};
 use zensight_common::{SocketRecord, TelemetryValue};
 
 use crate::message::Message;
-use crate::view::components::{card, empty_state, section_header};
+use crate::view::components::{TabItem, card, empty_state, section_header, tabbed_view};
 use crate::view::device::DeviceDetailState;
+use crate::view::specialized::SpecializedTab;
 use crate::view::specialized::netlink_detail::{
     NetlinkDetailState, NetlinkDetailTopic, SocketSort, filter_sort_sockets,
 };
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
-/// Render the netlink host specialized view.
+/// Render the netlink host specialized view: a header + the tabbed container
+/// over the active tab's content (#258).
 pub fn netlink_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
-    let mut content = column![
+    let tabs = netlink_tabs(state);
+    let active = if tabs
+        .iter()
+        .any(|t| t.visible && t.id == state.specialized_tab)
+    {
+        state.specialized_tab
+    } else {
+        SpecializedTab::Overview
+    };
+    let device_id = state.device_id.clone();
+    let content = netlink_tab_content(state, active);
+    column![
         render_header(state),
-        card(render_diagnostics(state)),
-        card(render_interfaces(state)),
-        card(render_sockets(state)),
-        card(render_neighbors(state)),
-        card(render_routes(state)),
+        tabbed_view(&tabs, active, content, move |t| {
+            Message::SelectSpecializedTab(device_id.clone(), t)
+        }),
     ]
-    .spacing(space::MD)
-    .padding(space::LG);
+    .spacing(space::SM)
+    .padding(space::LG)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
 
-    // Conntrack + WireGuard are environment-specific (NAT gateway / VPN host),
-    // so only show their cards when the host actually publishes them.
-    if has_prefix(state, "conntrack/") {
-        content = content.push(card(render_conntrack(state)));
-    }
-    if has_prefix(state, "wireguard/") {
-        content = content.push(card(render_wireguard(state)));
-    }
-    if has_prefix(state, "tc/") {
-        content = content.push(card(render_tc(state)));
-    }
-    if has_prefix(state, "xfrm/") || has_prefix(state, "events/ipsec/") {
-        content = content.push(card(render_xfrm(state)));
-    }
-    if has_prefix(state, "ethtool/") {
-        content = content.push(card(render_ethtool(state)));
-    }
+/// The netlink tab strip, capability-aware: environment-specific tabs (QoS,
+/// Firewall/IPsec, WireGuard) show only when the host publishes their data.
+fn netlink_tabs(state: &DeviceDetailState) -> Vec<TabItem<SpecializedTab>> {
+    use SpecializedTab::*;
+    let has_fw = has_prefix(state, "conntrack/")
+        || has_prefix(state, "xfrm/")
+        || has_prefix(state, "nft/")
+        || has_prefix(state, "events/ipsec/");
+    vec![
+        TabItem::new(Overview, "Overview"),
+        TabItem::new(Interfaces, "Interfaces"),
+        TabItem::new(Sockets, "Sockets"),
+        TabItem::new(RoutingNeighbors, "Routing & Neighbors"),
+        TabItem::new(Qos, "QoS / Queues").visible(has_prefix(state, "tc/")),
+        TabItem::new(FirewallIpsec, "Firewall & IPsec").visible(has_fw),
+        TabItem::new(Events, "Events"),
+        TabItem::new(WireGuard, "WireGuard").visible(has_prefix(state, "wireguard/")),
+    ]
+}
 
-    content = content.push(card(render_detail(state)));
-
-    container(scrollable(content))
-        .width(Length::Fill)
+/// Build the scrollable content for a netlink tab by composing the existing
+/// per-section cards + on-demand detail tables. No data regression: every
+/// section reachable in the old single-scroll view lives in exactly one tab.
+fn netlink_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Element<'_, Message> {
+    use SpecializedTab::*;
+    let inner: Column<'_, Message> = match tab {
+        Overview => column![card(render_diagnostics(state))].spacing(space::MD),
+        Interfaces => {
+            let mut c = column![card(render_interfaces(state))].spacing(space::MD);
+            if has_prefix(state, "ethtool/") {
+                c = c.push(card(render_ethtool(state)));
+            }
+            c
+        }
+        Sockets => column![
+            card(render_sockets(state)),
+            card(render_detail(state, &[NetlinkDetailTopic::Sockets])),
+        ]
+        .spacing(space::MD),
+        RoutingNeighbors => column![
+            card(render_routes(state)),
+            card(render_neighbors(state)),
+            card(render_detail(
+                state,
+                &[
+                    NetlinkDetailTopic::Routes,
+                    NetlinkDetailTopic::Neighbors,
+                    NetlinkDetailTopic::Addresses,
+                    NetlinkDetailTopic::RouteChanges,
+                ],
+            )),
+        ]
+        .spacing(space::MD),
+        Qos => column![
+            card(render_tc(state)),
+            card(render_detail(state, &[NetlinkDetailTopic::Tc])),
+        ]
+        .spacing(space::MD),
+        FirewallIpsec => {
+            let mut c = column![].spacing(space::MD);
+            if has_prefix(state, "conntrack/") {
+                c = c.push(card(render_conntrack(state)));
+            }
+            if has_prefix(state, "xfrm/") || has_prefix(state, "events/ipsec/") {
+                c = c.push(card(render_xfrm(state)));
+            }
+            c = c.push(card(render_detail(
+                state,
+                &[NetlinkDetailTopic::Xfrm, NetlinkDetailTopic::Nft],
+            )));
+            c
+        }
+        Events => {
+            column![card(render_detail(state, &[NetlinkDetailTopic::Events]))].spacing(space::MD)
+        }
+        WireGuard => column![card(render_wireguard(state))].spacing(space::MD),
+        // netring tabs never reach a netlink view (falls back to Overview).
+        _ => column![card(render_diagnostics(state))].spacing(space::MD),
+    };
+    scrollable(inner.width(Length::Fill))
         .height(Length::Fill)
         .into()
 }
@@ -489,13 +565,19 @@ fn render_routes(state: &DeviceDetailState) -> Element<'_, Message> {
     .into()
 }
 
-/// On-demand detail: fetch buttons + the fetched full tables (P2 — pulled from
-/// the sensor's `@/query/*` channels only when the user asks, never streamed).
-fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
+/// On-demand detail tables for the requested `topics` (#258): fetch buttons plus
+/// the fetched full tables (pulled from the sensor's `@/query/*` channels), so
+/// each tab shows only its own drill-downs. `loading(topic)` relabels/disables
+/// the button while a fetch is in flight.
+fn render_detail<'a>(
+    state: &'a DeviceDetailState,
+    topics: &[NetlinkDetailTopic],
+) -> Element<'a, Message> {
     let title = section_header("On-demand Detail", None);
     let d = &state.netlink_detail;
+    let want = |t: NetlinkDetailTopic| topics.contains(&t);
 
-    // A fetch button per topic; disabled (and relabelled) while that topic loads.
+    // A fetch button per requested topic; disabled/relabelled while loading.
     let fetch = |topic: NetlinkDetailTopic, loading: bool| {
         let label = if loading {
             format!("Fetching {}…", topic.label())
@@ -508,33 +590,32 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
         }
         b
     };
-    let buttons = row![
-        fetch(NetlinkDetailTopic::Sockets, d.sockets.is_loading()),
-        fetch(NetlinkDetailTopic::Routes, d.routes.is_loading()),
-        fetch(NetlinkDetailTopic::Neighbors, d.neighbors.is_loading()),
-        fetch(NetlinkDetailTopic::Addresses, d.addresses.is_loading()),
-    ]
-    .spacing(space::SM);
-    // The remaining queryables (events ring, full TC tree, per-SA xfrm, nft
-    // inventory) — previously served but unreachable from the UI (#109).
-    let buttons2 = row![
-        fetch(NetlinkDetailTopic::Events, d.events.is_loading()),
-        fetch(
-            NetlinkDetailTopic::RouteChanges,
-            d.route_changes.is_loading()
-        ),
-        fetch(NetlinkDetailTopic::Tc, d.tc.is_loading()),
-        fetch(NetlinkDetailTopic::Xfrm, d.xfrm.is_loading()),
-        fetch(NetlinkDetailTopic::Nft, d.nft.is_loading()),
-    ]
-    .spacing(space::SM);
+    let loading_of = |t: NetlinkDetailTopic| match t {
+        NetlinkDetailTopic::Sockets => d.sockets.is_loading(),
+        NetlinkDetailTopic::Routes => d.routes.is_loading(),
+        NetlinkDetailTopic::Neighbors => d.neighbors.is_loading(),
+        NetlinkDetailTopic::Addresses => d.addresses.is_loading(),
+        NetlinkDetailTopic::Events => d.events.is_loading(),
+        NetlinkDetailTopic::RouteChanges => d.route_changes.is_loading(),
+        NetlinkDetailTopic::Tc => d.tc.is_loading(),
+        NetlinkDetailTopic::Xfrm => d.xfrm.is_loading(),
+        NetlinkDetailTopic::Nft => d.nft.is_loading(),
+    };
+    let mut buttons = row![].spacing(space::SM);
+    for t in topics {
+        buttons = buttons.push(fetch(*t, loading_of(*t)));
+    }
 
-    let mut col = column![title, buttons, buttons2].spacing(space::SM);
+    let mut col = column![title, buttons].spacing(space::SM);
 
     // Sockets
-    if let Some(err) = d.sockets.error() {
+    if want(NetlinkDetailTopic::Sockets)
+        && let Some(err) = d.sockets.error()
+    {
         col = col.push(empty_state(format!("Sockets fetch failed: {err}"), None));
-    } else if let Some(socks) = d.sockets.ready() {
+    } else if want(NetlinkDetailTopic::Sockets)
+        && let Some(socks) = d.sockets.ready()
+    {
         // Socket explorer (#112): filter by state/port and sort by RTT/retrans to
         // surface the worst flows, driving the already-fetched record set.
         let shown = filter_sort_sockets(
@@ -584,9 +665,13 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     // Routes
-    if let Some(err) = d.routes.error() {
+    if want(NetlinkDetailTopic::Routes)
+        && let Some(err) = d.routes.error()
+    {
         col = col.push(empty_state(format!("Routes fetch failed: {err}"), None));
-    } else if let Some(routes) = d.routes.ready() {
+    } else if want(NetlinkDetailTopic::Routes)
+        && let Some(routes) = d.routes.ready()
+    {
         let mut list = Column::new().spacing(3).push(
             row![
                 cell("destination", 220),
@@ -613,9 +698,13 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     // Neighbors
-    if let Some(err) = d.neighbors.error() {
+    if want(NetlinkDetailTopic::Neighbors)
+        && let Some(err) = d.neighbors.error()
+    {
         col = col.push(empty_state(format!("Neighbors fetch failed: {err}"), None));
-    } else if let Some(neighbors) = d.neighbors.ready() {
+    } else if want(NetlinkDetailTopic::Neighbors)
+        && let Some(neighbors) = d.neighbors.ready()
+    {
         let mut list = Column::new()
             .spacing(3)
             .push(row![cell("ip", 200), cell("mac", 200), cell("state", 120)].spacing(8));
@@ -635,9 +724,13 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     // Addresses (#109)
-    if let Some(err) = d.addresses.error() {
+    if want(NetlinkDetailTopic::Addresses)
+        && let Some(err) = d.addresses.error()
+    {
         col = col.push(empty_state(format!("Addresses fetch failed: {err}"), None));
-    } else if let Some(addrs) = d.addresses.ready() {
+    } else if want(NetlinkDetailTopic::Addresses)
+        && let Some(addrs) = d.addresses.ready()
+    {
         let mut list = Column::new().spacing(3).push(
             row![
                 cell("address", 240),
@@ -670,9 +763,13 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
     // Control-plane change timeline (#111): the recent-events ring (#109)
     // rendered most-recent-first with a relative timestamp — link up/down,
     // address add/del, route changes, neighbor failures on one time axis.
-    if let Some(err) = d.events.error() {
+    if want(NetlinkDetailTopic::Events)
+        && let Some(err) = d.events.error()
+    {
         col = col.push(empty_state(format!("Events fetch failed: {err}"), None));
-    } else if let Some(events) = d.events.ready() {
+    } else if want(NetlinkDetailTopic::Events)
+        && let Some(events) = d.events.ready()
+    {
         let mut evs: Vec<&_> = events.iter().collect();
         evs.sort_by_key(|b| std::cmp::Reverse(b.ts_unix));
         let mut list = Column::new().spacing(3).push(
@@ -705,12 +802,16 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
 
     // Default-route flap history (#111): per-transition gateway/withdrawal ring,
     // most-recent-first — the history behind the `default_v4_flaps_total` counter.
-    if let Some(err) = d.route_changes.error() {
+    if want(NetlinkDetailTopic::RouteChanges)
+        && let Some(err) = d.route_changes.error()
+    {
         col = col.push(empty_state(
             format!("Route flaps fetch failed: {err}"),
             None,
         ));
-    } else if let Some(changes) = d.route_changes.ready() {
+    } else if want(NetlinkDetailTopic::RouteChanges)
+        && let Some(changes) = d.route_changes.ready()
+    {
         if changes.is_empty() {
             col = col.push(
                 text("Default-route flaps: none observed")
@@ -750,9 +851,13 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     // TC qdisc/class tree (#109)
-    if let Some(err) = d.tc.error() {
+    if want(NetlinkDetailTopic::Tc)
+        && let Some(err) = d.tc.error()
+    {
         col = col.push(empty_state(format!("TC fetch failed: {err}"), None));
-    } else if let Some(tc) = d.tc.ready() {
+    } else if want(NetlinkDetailTopic::Tc)
+        && let Some(tc) = d.tc.ready()
+    {
         let mut list = Column::new().spacing(3).push(
             row![
                 cell("iface", 90),
@@ -783,9 +888,13 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     // XFRM / IPsec SAs (#109)
-    if let Some(err) = d.xfrm.error() {
+    if want(NetlinkDetailTopic::Xfrm)
+        && let Some(err) = d.xfrm.error()
+    {
         col = col.push(empty_state(format!("XFRM fetch failed: {err}"), None));
-    } else if let Some(sas) = d.xfrm.ready() {
+    } else if want(NetlinkDetailTopic::Xfrm)
+        && let Some(sas) = d.xfrm.ready()
+    {
         let mut list = Column::new().spacing(3).push(
             row![
                 cell("src", 150),
@@ -814,9 +923,13 @@ fn render_detail(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     // nftables rule inventory (#109)
-    if let Some(err) = d.nft.error() {
+    if want(NetlinkDetailTopic::Nft)
+        && let Some(err) = d.nft.error()
+    {
         col = col.push(empty_state(format!("NFT fetch failed: {err}"), None));
-    } else if let Some(rules) = d.nft.ready() {
+    } else if want(NetlinkDetailTopic::Nft)
+        && let Some(rules) = d.nft.ready()
+    {
         let mut list = Column::new().spacing(3).push(
             row![
                 cell("family", 80),

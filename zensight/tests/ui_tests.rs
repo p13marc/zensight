@@ -578,6 +578,8 @@ fn test_netlink_tc_panel() {
     put("tc/eth0/fq_codel/drops", 42);
     put("tc/eth0/fq_codel/overlimits", 7);
 
+    // TC now lives under the QoS / Queues tab (#258).
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Qos;
     let syslog_filter = SyslogFilterState::default();
     let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
     assert!(ui.find("TC / QoS qdiscs").is_ok());
@@ -606,9 +608,18 @@ fn test_netlink_depth_cards() {
     put("xfrm/sa/total", 4.0);
 
     let syslog_filter = SyslogFilterState::default();
-    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
-    assert!(ui.find("IPsec / xfrm").is_ok());
-    assert!(ui.find("RTT p95 (us)").is_ok());
+    // Socket aggregates (incl. RTT p95) now live under the Sockets tab (#258).
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Sockets;
+    {
+        let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
+        assert!(ui.find("RTT p95 (us)").is_ok());
+    }
+    // xfrm/IPsec now lives under the Firewall & IPsec tab.
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::FirewallIpsec;
+    {
+        let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
+        assert!(ui.find("IPsec / xfrm").is_ok());
+    }
 }
 
 /// #45: netring renders DNS RED, HTTP RED, and per-L4 cards when present.
@@ -1490,18 +1501,39 @@ fn test_netlink_specialized_view() {
         );
     }
 
-    let mut ui = simulator(netlink_host_view(&state));
-    assert!(ui.find("Netlink: router01").is_ok());
-    assert!(ui.find("eth0").is_ok());
-    assert!(ui.find("TCP Sockets").is_ok());
-    // New enh-01 sections surface diagnostics, neighbors, and routes.
-    assert!(ui.find("Diagnostics").is_ok());
-    assert!(ui.find("Neighbors (ARP/NDP)").is_ok());
-    assert!(ui.find("Routes").is_ok());
-    // enh-02 §3 on-demand detail: fetch buttons + the fetched socket table.
-    assert!(ui.find("On-demand Detail").is_ok());
-    assert!(ui.find("Fetch Sockets").is_ok());
-    assert!(ui.find("10.0.0.1:5555").is_ok());
+    // #258: the view is tabbed. The header is always visible; each section now
+    // lives in exactly one tab — drive the active tab explicitly (view tests
+    // can't switch via click) and assert per-tab.
+    use zensight::view::specialized::SpecializedTab;
+    // Overview: header + diagnostics hero.
+    {
+        state.specialized_tab = SpecializedTab::Overview;
+        let mut ui = simulator(netlink_host_view(&state));
+        assert!(ui.find("Netlink: router01").is_ok());
+        assert!(ui.find("Diagnostics").is_ok());
+    }
+    // Interfaces tab.
+    {
+        state.specialized_tab = SpecializedTab::Interfaces;
+        let mut ui = simulator(netlink_host_view(&state));
+        assert!(ui.find("eth0").is_ok());
+    }
+    // Sockets tab: aggregates + on-demand detail (fetch buttons + fetched table).
+    {
+        state.specialized_tab = SpecializedTab::Sockets;
+        let mut ui = simulator(netlink_host_view(&state));
+        assert!(ui.find("TCP Sockets").is_ok());
+        assert!(ui.find("On-demand Detail").is_ok());
+        assert!(ui.find("Fetch Sockets").is_ok());
+        assert!(ui.find("10.0.0.1:5555").is_ok());
+    }
+    // Routing & Neighbors tab.
+    {
+        state.specialized_tab = SpecializedTab::RoutingNeighbors;
+        let mut ui = simulator(netlink_host_view(&state));
+        assert!(ui.find("Neighbors (ARP/NDP)").is_ok());
+        assert!(ui.find("Routes").is_ok());
+    }
 }
 
 /// The netring specialized view renders flows + top talkers.
@@ -1904,11 +1936,75 @@ fn test_netlink_conntrack_wireguard_sections() {
     ] {
         state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
     }
-    let mut ui = simulator(netlink_host_view(&state));
-    assert!(ui.find("Conntrack").is_ok());
-    assert!(ui.find("WireGuard").is_ok());
-    assert!(ui.find("75.0%").is_ok()); // utilization as a percentage
-    assert!(ui.find("wg0 — 1 peers").is_ok());
+    // #258: conntrack now lives under the Firewall & IPsec tab, WireGuard under
+    // its own (now-visible) tab.
+    use zensight::view::specialized::SpecializedTab;
+    {
+        state.specialized_tab = SpecializedTab::FirewallIpsec;
+        let mut ui = simulator(netlink_host_view(&state));
+        assert!(ui.find("Conntrack").is_ok());
+        assert!(ui.find("75.0%").is_ok()); // utilization as a percentage
+    }
+    {
+        state.specialized_tab = SpecializedTab::WireGuard;
+        let mut ui = simulator(netlink_host_view(&state));
+        // The WireGuard tab is visible (capability-aware) and shows the peers.
+        assert!(ui.find("WireGuard").is_ok());
+        assert!(ui.find("wg0 — 1 peers").is_ok());
+    }
+}
+
+/// #258: the netlink view is capability-aware (QoS/Firewall/WireGuard tabs only
+/// when their data is present) and clicking an inactive tab emits a select.
+#[test]
+fn test_netlink_tabs_capability_and_switch() {
+    use zensight::view::specialized::netlink::netlink_host_view;
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let mut state = DeviceDetailState::new(device_id);
+    // Bare host: only base metrics, no tc/xfrm/conntrack/wireguard.
+    state.update(TelemetryPoint::new(
+        "gw01",
+        Protocol::Netlink,
+        "iface/eth0/up",
+        TelemetryValue::Boolean(true),
+    ));
+    {
+        let mut ui = simulator(netlink_host_view(&state));
+        // Always-on tabs.
+        assert!(ui.find("Overview").is_ok());
+        assert!(ui.find("Interfaces").is_ok());
+        assert!(ui.find("Sockets").is_ok());
+        // Capability tabs hidden without data.
+        assert!(ui.find("QoS / Queues").is_err());
+        assert!(ui.find("Firewall & IPsec").is_err());
+        assert!(ui.find("WireGuard").is_err());
+    }
+
+    // Add tc + xfrm + wireguard → those tabs appear.
+    for (m, v) in [
+        ("tc/eth0/fq_codel/drops", TelemetryValue::Counter(1)),
+        ("xfrm/sa/total", TelemetryValue::Gauge(2.0)),
+        ("wireguard/wg0/peers", TelemetryValue::Gauge(1.0)),
+    ] {
+        state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
+    }
+    {
+        let mut ui = simulator(netlink_host_view(&state));
+        assert!(ui.find("QoS / Queues").is_ok());
+        assert!(ui.find("Firewall & IPsec").is_ok());
+        assert!(ui.find("WireGuard").is_ok());
+        // Clicking an inactive tab emits SelectSpecializedTab for it.
+        let _ = ui.click("Sockets");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(msgs.iter().any(|m| matches!(
+            m,
+            Message::SelectSpecializedTab(d, t)
+                if d.source == "gw01"
+                    && *t == zensight::view::specialized::SpecializedTab::Sockets
+        )));
+    }
 }
 
 /// The netring view shows the TLS section (with a fetched inventory) and the

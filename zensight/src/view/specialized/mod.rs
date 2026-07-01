@@ -31,11 +31,14 @@ pub use syslog::{
 /// The active tab of a tabbed specialized view (#243, epic #257). Currently
 /// carries the netring tab set (the netlink redesign #270 will extend this).
 /// Stored per device in [`DeviceDetailState`] so each sensor screen remembers
-/// the last tab you looked at.
+/// the last tab you looked at. Shared across the netring and netlink tabbed
+/// views (#257, #270); `Overview` is common, the rest are per-protocol. A view
+/// falls back to `Overview` if the remembered tab isn't one of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SpecializedTab {
     #[default]
     Overview,
+    // netring
     Flows,
     TalkersMatrix,
     Dns,
@@ -44,6 +47,14 @@ pub enum SpecializedTab {
     Assets,
     Security,
     Capture,
+    // netlink
+    Interfaces,
+    Sockets,
+    RoutingNeighbors,
+    Qos,
+    FirewallIpsec,
+    Events,
+    WireGuard,
 }
 
 /// Number of trailing history samples to render in an inline sparkline (#44).
