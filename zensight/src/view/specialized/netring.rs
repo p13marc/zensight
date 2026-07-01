@@ -167,32 +167,51 @@ fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
         if records.is_empty() {
             col = col.push(empty_state("No TLS handshakes observed", None));
         } else {
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("sni", 220),
-                    cell("ja4", 220),
-                    cell("ja3", 220),
-                    cell("alpn", 90),
-                    cell("count", 60)
-                ]
-                .spacing(8),
+            use zensight_common::TlsRecord;
+            let columns = vec![
+                TableColumn::fill("sni", 4, |r: &TlsRecord| {
+                    text(r.sni.clone().unwrap_or_else(|| "-".into()))
+                        .size(font::CAPTION)
+                        .into()
+                })
+                .sortable(|r: &TlsRecord| SortKey::Text(r.sni.clone().unwrap_or_default())),
+                TableColumn::fill("ja4", 4, |r: &TlsRecord| {
+                    text(r.ja4.clone().unwrap_or_else(|| "-".into()))
+                        .size(font::CAPTION)
+                        .into()
+                }),
+                // JA3 was fetched but never rendered before (#45/#249).
+                TableColumn::fill("ja3", 4, |r: &TlsRecord| {
+                    text(r.ja3.clone().unwrap_or_else(|| "-".into()))
+                        .size(font::CAPTION)
+                        .into()
+                }),
+                TableColumn::fixed("alpn", 90.0, |r: &TlsRecord| {
+                    text(r.alpn.clone().unwrap_or_else(|| "-".into()))
+                        .size(font::CAPTION)
+                        .into()
+                }),
+                TableColumn::fixed("count", 60.0, |r: &TlsRecord| {
+                    text(r.count.to_string()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &TlsRecord| SortKey::Num(r.count as f64)),
+            ];
+            col = col.push(
+                DataTable::new(columns)
+                    .searchable(|r: &TlsRecord| {
+                        format!(
+                            "{} {} {}",
+                            r.sni.clone().unwrap_or_default(),
+                            r.ja4.clone().unwrap_or_default(),
+                            r.ja3.clone().unwrap_or_default(),
+                        )
+                    })
+                    .on_sort(|c| Message::NetringTableSort(NetringTable::Tls, c))
+                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Tls, q))
+                    .on_more(Message::NetringTableMore(NetringTable::Tls))
+                    .noun("fingerprints")
+                    .view(records, state.netring_detail.table(NetringTable::Tls)),
             );
-            for r in records.iter().take(200) {
-                list = list.push(
-                    row![
-                        cell(r.sni.as_deref().unwrap_or("-"), 220),
-                        cell(r.ja4.as_deref().unwrap_or("-"), 220),
-                        // JA3 was fetched but never rendered before (#45).
-                        cell(r.ja3.as_deref().unwrap_or("-"), 220),
-                        cell(r.alpn.as_deref().unwrap_or("-"), 90),
-                        cell(&r.count.to_string(), 60),
-                    ]
-                    .spacing(8),
-                );
-            }
-            col = col
-                .push(text(format!("{} fingerprints", records.len())).size(font::EMPHASIS))
-                .push(list);
         }
     }
     col.into()
@@ -226,29 +245,34 @@ fn render_quic(state: &DeviceDetailState) -> Element<'_, Message> {
         if records.is_empty() {
             col = col.push(empty_state("No QUIC Initials observed", None));
         } else {
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("sni", 280),
-                    cell("alpn", 120),
-                    cell("version", 90),
-                    cell("count", 60),
-                ]
-                .spacing(8),
+            use zensight_common::QuicRecord;
+            let columns = vec![
+                TableColumn::fill("sni", 5, |r: &QuicRecord| {
+                    text(r.sni.clone().unwrap_or_else(|| "-".into()))
+                        .size(font::CAPTION)
+                        .into()
+                })
+                .sortable(|r: &QuicRecord| SortKey::Text(r.sni.clone().unwrap_or_default())),
+                TableColumn::fill("alpn", 3, |r: &QuicRecord| {
+                    text(join_or_dash(&r.alpn)).size(font::CAPTION).into()
+                }),
+                TableColumn::fixed("version", 90.0, |r: &QuicRecord| {
+                    text(r.version.clone()).size(font::CAPTION).into()
+                }),
+                TableColumn::fixed("count", 60.0, |r: &QuicRecord| {
+                    text(r.count.to_string()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &QuicRecord| SortKey::Num(r.count as f64)),
+            ];
+            col = col.push(
+                DataTable::new(columns)
+                    .searchable(|r: &QuicRecord| r.sni.clone().unwrap_or_default())
+                    .on_sort(|c| Message::NetringTableSort(NetringTable::Quic, c))
+                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Quic, q))
+                    .on_more(Message::NetringTableMore(NetringTable::Quic))
+                    .noun("SNI/version pairs")
+                    .view(records, state.netring_detail.table(NetringTable::Quic)),
             );
-            for r in records.iter().take(200) {
-                list = list.push(
-                    row![
-                        cell(r.sni.as_deref().unwrap_or("-"), 280),
-                        cell(&join_or_dash(&r.alpn), 120),
-                        cell(&r.version, 90),
-                        cell(&r.count.to_string(), 60),
-                    ]
-                    .spacing(8),
-                );
-            }
-            col = col
-                .push(text(format!("{} SNI/version pairs", records.len())).size(font::EMPHASIS))
-                .push(list);
         }
     }
     col.into()
@@ -277,29 +301,36 @@ fn render_ssh(state: &DeviceDetailState) -> Element<'_, Message> {
         if records.is_empty() {
             col = col.push(empty_state("No SSH handshakes observed", None));
         } else {
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("hassh", 260),
-                    cell("role", 70),
-                    cell("banner", 220),
-                    cell("count", 60),
-                ]
-                .spacing(8),
+            use zensight_common::SshRecord;
+            let columns = vec![
+                TableColumn::fill("hassh", 5, |r: &SshRecord| {
+                    text(r.hassh.clone()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &SshRecord| SortKey::Text(r.hassh.clone())),
+                TableColumn::fixed("role", 70.0, |r: &SshRecord| {
+                    text(r.role.clone()).size(font::CAPTION).into()
+                }),
+                TableColumn::fill("banner", 4, |r: &SshRecord| {
+                    text(r.banner.clone().unwrap_or_else(|| "-".into()))
+                        .size(font::CAPTION)
+                        .into()
+                }),
+                TableColumn::fixed("count", 60.0, |r: &SshRecord| {
+                    text(r.count.to_string()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &SshRecord| SortKey::Num(r.count as f64)),
+            ];
+            col = col.push(
+                DataTable::new(columns)
+                    .searchable(|r: &SshRecord| {
+                        format!("{} {}", r.hassh, r.banner.clone().unwrap_or_default())
+                    })
+                    .on_sort(|c| Message::NetringTableSort(NetringTable::Ssh, c))
+                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Ssh, q))
+                    .on_more(Message::NetringTableMore(NetringTable::Ssh))
+                    .noun("fingerprints")
+                    .view(records, state.netring_detail.table(NetringTable::Ssh)),
             );
-            for r in records.iter().take(200) {
-                list = list.push(
-                    row![
-                        cell(&r.hassh, 260),
-                        cell(&r.role, 70),
-                        cell(r.banner.as_deref().unwrap_or("-"), 220),
-                        cell(&r.count.to_string(), 60),
-                    ]
-                    .spacing(8),
-                );
-            }
-            col = col
-                .push(text(format!("{} fingerprints", records.len())).size(font::EMPHASIS))
-                .push(list);
         }
     }
     col.into()
@@ -789,38 +820,52 @@ fn render_dns(state: &DeviceDetailState) -> Element<'_, Message> {
     col.into()
 }
 
-/// HTTP RED card (#45): requests, status-class breakdown, latency, methods.
+/// HTTP tab (#250-style): RED tiles + status-class & method bar charts + an
+/// on-demand top-hosts table.
 fn render_http(state: &DeviceDetailState) -> Element<'_, Message> {
+    let getf = |m: &str| {
+        state
+            .metrics
+            .get(m)
+            .map(|p| value_f64(&p.value))
+            .unwrap_or(0.0)
+    };
     let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
-    let line =
-        |label: &str, metric: &str| row![cell(label, 200), cell(&get(metric), 120)].spacing(8);
 
-    let mut col = column![
-        section_header("HTTP (RED)", None),
-        line("requests (total)", "http/requests_total"),
-        line("2xx", "http/status_2xx_total"),
-        line("3xx", "http/status_3xx_total"),
-        line("4xx", "http/status_4xx_total"),
-        line("5xx", "http/status_5xx_total"),
-        line("latency p50 (ms)", "http/latency_p50_ms"),
-        line("latency p95 (ms)", "http/latency_p95_ms"),
+    let tiles = row![
+        metric_tile("requests", get("http/requests_total")),
+        metric_tile("latency p50 (ms)", get("http/latency_p50_ms")),
+        metric_tile("latency p95 (ms)", get("http/latency_p95_ms")),
     ]
-    .spacing(4);
+    .spacing(space::SM);
+    let mut col = column![section_header("HTTP (RED)", None), tiles].spacing(space::SM);
 
-    let mut methods: Vec<(String, String)> = state
+    // Status-class distribution as a bar chart (fixed 2xx→5xx order).
+    let statuses: Vec<(String, f64)> = ["2xx", "3xx", "4xx", "5xx"]
+        .iter()
+        .map(|c| (c.to_string(), getf(&format!("http/status_{c}_total"))))
+        .filter(|(_, v)| *v > 0.0)
+        .collect();
+    if !statuses.is_empty() {
+        col = col
+            .push(text("by status class").size(font::CAPTION).style(dim))
+            .push(chart::ranked_bar(&statuses, |v| format_count(v as u64), 4));
+    }
+
+    // Method distribution as a bar chart (desc by count).
+    let mut methods: Vec<(String, f64)> = state
         .metrics
         .iter()
         .filter_map(|(m, p)| {
             let meth = m.strip_prefix("http/methods/")?.strip_suffix("_total")?;
-            Some((meth.to_string(), num(Some(&p.value))))
+            Some((meth.to_string(), value_f64(&p.value)))
         })
         .collect();
-    methods.sort();
+    methods.sort_by(|a, b| b.1.total_cmp(&a.1));
     if !methods.is_empty() {
-        col = col.push(text("by method").size(font::CAPTION).style(dim));
-        for (meth, v) in methods {
-            col = col.push(row![cell(&format!("  {meth}"), 200), cell(&v, 120)].spacing(8));
-        }
+        col = col
+            .push(text("by method").size(font::CAPTION).style(dim))
+            .push(chart::ranked_bar(&methods, |v| format_count(v as u64), 8));
     }
 
     // On-demand top-hosts / error-hosts drill-down via `@/query/http` (#45).
@@ -844,27 +889,31 @@ fn render_http(state: &DeviceDetailState) -> Element<'_, Message> {
         if records.is_empty() {
             col = col.push(empty_state("No HTTP detail", None));
         } else {
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("host", 280),
-                    cell("requests", 100),
-                    cell("errors", 100),
-                ]
-                .spacing(8),
+            use zensight_common::HttpHostRecord;
+            let columns = vec![
+                TableColumn::fill("host", 6, |r: &HttpHostRecord| {
+                    text(r.host.clone()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &HttpHostRecord| SortKey::Text(r.host.clone())),
+                TableColumn::fixed("requests", 100.0, |r: &HttpHostRecord| {
+                    text(r.requests.to_string()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &HttpHostRecord| SortKey::Num(r.requests as f64)),
+                TableColumn::fixed("errors", 100.0, |r: &HttpHostRecord| {
+                    let t = text(r.errors.to_string()).size(font::CAPTION);
+                    if r.errors > 0 { t.style(warn) } else { t }.into()
+                })
+                .sortable(|r: &HttpHostRecord| SortKey::Num(r.errors as f64)),
+            ];
+            col = col.push(
+                DataTable::new(columns)
+                    .searchable(|r: &HttpHostRecord| r.host.clone())
+                    .on_sort(|c| Message::NetringTableSort(NetringTable::Http, c))
+                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Http, q))
+                    .on_more(Message::NetringTableMore(NetringTable::Http))
+                    .noun("hosts")
+                    .view(records, state.netring_detail.table(NetringTable::Http)),
             );
-            for r in records.iter().take(200) {
-                list = list.push(
-                    row![
-                        cell(&r.host, 280),
-                        cell(&r.requests.to_string(), 100),
-                        cell(&r.errors.to_string(), 100),
-                    ]
-                    .spacing(8),
-                );
-            }
-            col = col
-                .push(text(format!("{} hosts", records.len())).size(font::EMPHASIS))
-                .push(list);
         }
     }
     col.into()
