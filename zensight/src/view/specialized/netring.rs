@@ -1086,6 +1086,12 @@ fn flows_table<'a>(
         .view(flows, state.netring_detail.table(NetringTable::Flows))
 }
 
+/// Number of apps shown in the Bandwidth tab before the "N of M" footer.
+const BANDWIDTH_TOP_N: usize = 20;
+
+/// Bandwidth-by-app tab (#251): a ranked bar chart of current per-app throughput
+/// plus a table (app → flows pivot · throughput · trend sparkline) with a top-N
+/// "N of M" footer. Distinct from the per-destination talker histogram.
 fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
     // Collect `bandwidth/<app>/bytes_per_sec` and sort by value desc.
     let mut rows: Vec<(String, f64)> = state
@@ -1095,18 +1101,11 @@ fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
             let app = metric
                 .strip_prefix("bandwidth/")?
                 .strip_suffix("/bytes_per_sec")?;
-            let bps = match &point.value {
-                TelemetryValue::Gauge(g) => *g,
-                TelemetryValue::Counter(c) => *c as f64,
-                _ => return None,
-            };
-            Some((app.to_string(), bps))
+            Some((app.to_string(), value_f64(&point.value)))
         })
         .collect();
     rows.sort_by(|a, b| b.1.total_cmp(&a.1));
 
-    // This is per-application bandwidth, NOT the per-destination talker histogram
-    // (that's the on-demand `render_talkers` card, #45) — label it correctly.
     let title = section_header(format!("Per-app bandwidth ({})", rows.len()), None);
     if rows.is_empty() {
         return column![title, empty_state("No bandwidth data", None)]
@@ -1114,6 +1113,12 @@ fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
             .into();
     }
 
+    // Ranked bar chart of current throughput (top-N).
+    let bars = chart::ranked_bar(&rows, format_rate, BANDWIDTH_TOP_N);
+
+    // Per-app table: clickable app (→ flows pivot), throughput, trend sparkline.
+    let total = rows.len();
+    let shown = total.min(BANDWIDTH_TOP_N);
     let mut list = Column::new().spacing(4).push(
         row![
             cell("application", 200),
@@ -1122,12 +1127,11 @@ fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
         ]
         .spacing(8),
     );
-    for (app, bps) in rows.iter().take(30) {
-        // Per-talker bytes/sec trend sparkline (#44).
+    for (app, bps) in rows.iter().take(BANDWIDTH_TOP_N) {
         let metric = format!("bandwidth/{app}/bytes_per_sec");
         list = list.push(
             row![
-                cell(app, 200),
+                pivot_cell(state, app, 200),
                 cell(&format_rate(*bps), 140),
                 super::metric_sparkline(state, &metric),
             ]
@@ -1135,7 +1139,10 @@ fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
             .align_y(iced::Alignment::Center),
         );
     }
-    column![title, list].spacing(8).into()
+    let footer = text(format!("showing {shown} of {total} apps"))
+        .size(font::CAPTION)
+        .style(dim);
+    column![title, bars, list, footer].spacing(space::SM).into()
 }
 
 /// Flow-direction glyph: a directed initiator→responder arrow when orientation
