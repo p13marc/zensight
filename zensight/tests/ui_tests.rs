@@ -3044,3 +3044,42 @@ fn test_systemd_units_tab_fetches_on_demand() {
             .any(|m| matches!(m, Message::FetchSystemdDetail(SystemdDetailTopic::Units)))
     );
 }
+
+/// #278: the expectations view can target the systemd sentinel — the systemd form
+/// renders and "Add & Push" emits AddExpectation.
+#[test]
+fn test_systemd_expectations_authoring() {
+    use zensight::view::expectations::{ExpTarget, ExpectationsState, expectations_view};
+
+    let mut state = ExpectationsState::default();
+    state.target = ExpTarget::Systemd;
+    state.new_name = "sshd.service".to_string();
+
+    let mut ui = simulator(expectations_view(&state));
+    // Systemd-flavoured header + form.
+    assert!(ui.find("Expectations (systemd sentinel)").is_ok());
+    assert!(ui.find("Declare a systemd expectation").is_ok());
+
+    let _ = ui.click("Add & Push");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::AddExpectation))
+    );
+}
+
+/// #278: a systemd draft with entries shows them in the Configured list.
+#[test]
+fn test_systemd_expectations_configured_list() {
+    use zensight::view::expectations::{ExpTarget, ExpectationsState, expectations_view};
+
+    let mut state = ExpectationsState::default();
+    state.target = ExpTarget::Systemd;
+    state.systemd.services.push("sshd.service".to_string());
+    state.systemd.forbid_failed = true;
+
+    let mut ui = simulator(expectations_view(&state));
+    assert!(ui.find("service:sshd.service").is_ok());
+    assert!(ui.find("forbid:failed").is_ok());
+}

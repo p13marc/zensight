@@ -76,6 +76,12 @@ pub enum Message {
     OpenExpectations,
     /// Close the expectations view.
     CloseExpectations,
+    /// Select the sentinel target being authored (netlink vs systemd) (#278).
+    SetExpTarget(crate::view::expectations::ExpTarget),
+    /// Set the systemd expectation kind being authored (#278).
+    SetSystemdExpKind(crate::view::expectations::SystemdExpKind),
+    /// A systemd sentinel status reply (ExpectationsConfig JSON) (#278).
+    SystemdExpectationsReceived(String),
     /// Set the kind of expectation being authored.
     SetExpectationKind(crate::view::expectations::ExpKind),
     /// Set the expectation name (socket) or interface (link).
