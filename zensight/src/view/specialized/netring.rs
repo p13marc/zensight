@@ -892,29 +892,41 @@ fn render_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
         if records.is_empty() {
             col = col.push(empty_state("No talkers", None));
         } else {
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("destination", 240),
-                    cell("bytes", 120),
-                    cell("packets", 100),
-                    cell("flows", 80),
-                ]
-                .spacing(8),
+            // Ranked bar chart of the heaviest destinations by bytes.
+            let bars: Vec<(String, f64)> = records
+                .iter()
+                .take(RANKED_BAR_ROWS)
+                .map(|r| (r.dst.clone(), r.bytes as f64))
+                .collect();
+            col = col.push(chart::ranked_bar(&bars, format_bytes, RANKED_BAR_ROWS));
+
+            let columns = vec![
+                TableColumn::fill("destination", 4, |r: &zensight_common::TalkerRecord| {
+                    pivot_button(state, &r.dst, &r.dst)
+                })
+                .sortable(|r: &zensight_common::TalkerRecord| SortKey::Text(r.dst.clone())),
+                TableColumn::fixed("bytes", 120.0, |r: &zensight_common::TalkerRecord| {
+                    text(format_bytes(r.bytes as f64)).size(font::CAPTION).into()
+                })
+                .sortable(|r: &zensight_common::TalkerRecord| SortKey::Num(r.bytes as f64)),
+                TableColumn::fixed("packets", 100.0, |r: &zensight_common::TalkerRecord| {
+                    text(format_count(r.packets)).size(font::CAPTION).into()
+                })
+                .sortable(|r: &zensight_common::TalkerRecord| SortKey::Num(r.packets as f64)),
+                TableColumn::fixed("flows", 80.0, |r: &zensight_common::TalkerRecord| {
+                    text(r.flows.to_string()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &zensight_common::TalkerRecord| SortKey::Num(r.flows as f64)),
+            ];
+            col = col.push(
+                DataTable::new(columns)
+                    .searchable(|r: &zensight_common::TalkerRecord| r.dst.clone())
+                    .on_sort(|c| Message::NetringTableSort(NetringTable::Talkers, c))
+                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Talkers, q))
+                    .on_more(Message::NetringTableMore(NetringTable::Talkers))
+                    .noun("talkers")
+                    .view(records, state.netring_detail.table(NetringTable::Talkers)),
             );
-            for r in records.iter().take(200) {
-                list = list.push(
-                    row![
-                        pivot_cell(state, &r.dst, 240),
-                        cell(&format_bytes(r.bytes as f64), 120),
-                        cell(&format_count(r.packets), 100),
-                        cell(&r.flows.to_string(), 80),
-                    ]
-                    .spacing(8),
-                );
-            }
-            col = col
-                .push(text(format!("{} talkers", records.len())).size(font::EMPHASIS))
-                .push(list);
         }
     }
     col.into()
@@ -945,38 +957,76 @@ fn render_matrix(state: &DeviceDetailState) -> Element<'_, Message> {
         if records.is_empty() {
             col = col.push(empty_state("No traffic matrix yet", None));
         } else {
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("source", 190),
-                    cell("", 22),
-                    cell("destination", 190),
-                    cell("bytes", 120),
-                    cell("packets", 100),
-                    cell("flows", 80),
-                ]
-                .spacing(8),
-            );
-            for r in records.iter().take(200) {
-                // Matrix rows are authoritative initiator→responder pairs (#122),
-                // so the edge is directional — render the arrowhead.
-                list = list.push(
-                    row![
-                        cell(&r.src, 190),
-                        cell_styled("→", 22, dim),
-                        cell(&r.dst, 190),
-                        cell(&format_bytes(r.bytes as f64), 120),
-                        cell(&format_count(r.packets), 100),
-                        cell(&r.flows.to_string(), 80),
-                    ]
-                    .spacing(8),
-                );
+            // Heatmap: src (rows) × dst (cols), cell intensity = bytes. Capped so
+            // the canvas stays bounded; the table below carries the full detail.
+            if let Some(hm) = matrix_heatmap(records) {
+                col = col.push(hm);
             }
-            col = col
-                .push(text(format!("{} src→dst pairs", records.len())).size(font::EMPHASIS))
-                .push(list);
+            let columns = vec![
+                TableColumn::fill("source", 4, |r: &zensight_common::MatrixRecord| {
+                    text(r.src.clone()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &zensight_common::MatrixRecord| SortKey::Text(r.src.clone())),
+                TableColumn::fill("destination", 4, |r: &zensight_common::MatrixRecord| {
+                    pivot_button(state, &r.dst, &r.dst)
+                })
+                .sortable(|r: &zensight_common::MatrixRecord| SortKey::Text(r.dst.clone())),
+                TableColumn::fixed("bytes", 120.0, |r: &zensight_common::MatrixRecord| {
+                    text(format_bytes(r.bytes as f64)).size(font::CAPTION).into()
+                })
+                .sortable(|r: &zensight_common::MatrixRecord| SortKey::Num(r.bytes as f64)),
+                TableColumn::fixed("packets", 100.0, |r: &zensight_common::MatrixRecord| {
+                    text(format_count(r.packets)).size(font::CAPTION).into()
+                })
+                .sortable(|r: &zensight_common::MatrixRecord| SortKey::Num(r.packets as f64)),
+                TableColumn::fixed("flows", 80.0, |r: &zensight_common::MatrixRecord| {
+                    text(r.flows.to_string()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &zensight_common::MatrixRecord| SortKey::Num(r.flows as f64)),
+            ];
+            col = col.push(
+                DataTable::new(columns)
+                    .searchable(|r: &zensight_common::MatrixRecord| {
+                        format!("{} {}", r.src, r.dst)
+                    })
+                    .on_sort(|c| Message::NetringTableSort(NetringTable::Matrix, c))
+                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Matrix, q))
+                    .on_more(Message::NetringTableMore(NetringTable::Matrix))
+                    .noun("src→dst pairs")
+                    .view(records, state.netring_detail.table(NetringTable::Matrix)),
+            );
         }
     }
     col.into()
+}
+
+/// Largest square of the traffic matrix rendered as a heatmap (src rows × dst
+/// cols, cell = bytes). `None` when there's nothing to plot. Capped at
+/// [`MATRIX_HEATMAP_DIM`] rows/cols so the canvas stays bounded.
+fn matrix_heatmap<'a>(records: &[zensight_common::MatrixRecord]) -> Option<Element<'a, Message>> {
+    use std::collections::HashMap;
+    let mut src_idx: HashMap<&str, usize> = HashMap::new();
+    let mut dst_idx: HashMap<&str, usize> = HashMap::new();
+    for r in records {
+        let sn = src_idx.len();
+        if sn < MATRIX_HEATMAP_DIM {
+            src_idx.entry(r.src.as_str()).or_insert(sn);
+        }
+        let dn = dst_idx.len();
+        if dn < MATRIX_HEATMAP_DIM {
+            dst_idx.entry(r.dst.as_str()).or_insert(dn);
+        }
+    }
+    if src_idx.is_empty() || dst_idx.is_empty() {
+        return None;
+    }
+    let mut grid = vec![vec![0.0_f64; dst_idx.len()]; src_idx.len()];
+    for r in records {
+        if let (Some(&s), Some(&d)) = (src_idx.get(r.src.as_str()), dst_idx.get(r.dst.as_str())) {
+            grid[s][d] += r.bytes as f64;
+        }
+    }
+    Some(chart::heatmap(&grid, 16.0))
 }
 
 /// Elephant-flow drill-down (#45): the biggest recently-ended flows, served on
@@ -1003,33 +1053,41 @@ fn render_elephants(state: &DeviceDetailState) -> Element<'_, Message> {
         if records.is_empty() {
             col = col.push(empty_state("No elephant flows", None));
         } else {
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("src", 180),
-                    cell("dst", 180),
-                    cell("proto", 60),
-                    cell("bytes", 110),
-                    cell("packets", 90),
-                    cell("dur_ms", 80),
-                ]
-                .spacing(8),
+            use zensight_common::ElephantRecord;
+            let columns = vec![
+                TableColumn::fill("src", 4, |r: &ElephantRecord| {
+                    pivot_button(state, &r.src, &r.src)
+                })
+                .sortable(|r: &ElephantRecord| SortKey::Text(r.src.clone())),
+                TableColumn::fill("dst", 4, |r: &ElephantRecord| {
+                    pivot_button(state, &r.dst, &r.dst)
+                })
+                .sortable(|r: &ElephantRecord| SortKey::Text(r.dst.clone())),
+                TableColumn::fixed("proto", 60.0, |r: &ElephantRecord| {
+                    text(r.proto.clone()).size(font::CAPTION).into()
+                }),
+                TableColumn::fixed("bytes", 110.0, |r: &ElephantRecord| {
+                    text(format_bytes(r.bytes as f64)).size(font::CAPTION).into()
+                })
+                .sortable(|r: &ElephantRecord| SortKey::Num(r.bytes as f64)),
+                TableColumn::fixed("packets", 90.0, |r: &ElephantRecord| {
+                    text(format_count(r.packets)).size(font::CAPTION).into()
+                })
+                .sortable(|r: &ElephantRecord| SortKey::Num(r.packets as f64)),
+                TableColumn::fixed("dur_ms", 80.0, |r: &ElephantRecord| {
+                    text(r.duration_ms.to_string()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &ElephantRecord| SortKey::Num(r.duration_ms as f64)),
+            ];
+            col = col.push(
+                DataTable::new(columns)
+                    .searchable(|r: &ElephantRecord| format!("{} {} {}", r.src, r.dst, r.proto))
+                    .on_sort(|c| Message::NetringTableSort(NetringTable::Elephants, c))
+                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Elephants, q))
+                    .on_more(Message::NetringTableMore(NetringTable::Elephants))
+                    .noun("flows")
+                    .view(records, state.netring_detail.table(NetringTable::Elephants)),
             );
-            for r in records.iter().take(200) {
-                list = list.push(
-                    row![
-                        cell(&r.src, 180),
-                        cell(&r.dst, 180),
-                        cell(&r.proto, 60),
-                        cell(&format_bytes(r.bytes as f64), 110),
-                        cell(&format_count(r.packets), 90),
-                        cell(&r.duration_ms.to_string(), 80),
-                    ]
-                    .spacing(8),
-                );
-            }
-            col = col
-                .push(text(format!("{} flows", records.len())).size(font::EMPHASIS))
-                .push(list);
         }
     }
     col.into()
@@ -1146,6 +1204,12 @@ fn flows_table<'a>(
 
 /// Number of apps shown in the Bandwidth tab before the "N of M" footer.
 const BANDWIDTH_TOP_N: usize = 20;
+
+/// Rows in a ranked-bar chart (talkers, bandwidth) before it truncates.
+const RANKED_BAR_ROWS: usize = 15;
+
+/// Max rows/cols of the traffic-matrix heatmap (keeps the canvas bounded).
+const MATRIX_HEATMAP_DIM: usize = 24;
 
 /// Bandwidth-by-app tab (#251): a ranked bar chart of current per-app throughput
 /// plus a table (app → flows pivot · throughput · trend sparkline) with a top-N
