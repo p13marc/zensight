@@ -49,7 +49,7 @@ pub use keyexpr::{
 pub use query_detail::{
     AssetRecord, DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord, Ja4hRecord, MatrixRecord,
     NeighborRecord, ProcessRecord, QuicRecord, RouteRecord, SocketRecord, SshRecord, TalkerRecord,
-    TlsRecord,
+    TlsRecord, UnitDetail, UnitRecord,
 };
 pub use report::{Manifest, ReportKind, ReportOptions, ReportRequest, ReportState, ReportStatus};
 pub use serialization::{Format, decode, decode_auto, encode};

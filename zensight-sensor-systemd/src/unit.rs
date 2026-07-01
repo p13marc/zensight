@@ -9,51 +9,7 @@
 
 use zbus::zvariant::OwnedObjectPath;
 
-/// The `org.freedesktop.systemd1.Unit` interface subset we read per unit.
-#[zbus::proxy(
-    interface = "org.freedesktop.systemd1.Unit",
-    default_service = "org.freedesktop.systemd1"
-)]
-trait Unit {
-    #[zbus(property)]
-    fn id(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn load_state(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn active_state(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn sub_state(&self) -> zbus::Result<String>;
-    /// Wall-clock µs of the last active-enter transition (0 if never).
-    #[zbus(property)]
-    fn active_enter_timestamp(&self) -> zbus::Result<u64>;
-}
-
-/// The `org.freedesktop.systemd1.Service` interface subset — present only on
-/// `.service` units; reads fail (→ skipped) on other unit types.
-#[zbus::proxy(
-    interface = "org.freedesktop.systemd1.Service",
-    default_service = "org.freedesktop.systemd1"
-)]
-trait Service {
-    #[zbus(property, name = "NRestarts")]
-    fn n_restarts(&self) -> zbus::Result<u32>;
-    #[zbus(property)]
-    fn memory_current(&self) -> zbus::Result<u64>;
-    #[zbus(property, name = "CPUUsageNSec")]
-    fn cpu_usage_nsec(&self) -> zbus::Result<u64>;
-    #[zbus(property)]
-    fn tasks_current(&self) -> zbus::Result<u64>;
-    #[zbus(property)]
-    fn exec_main_status(&self) -> zbus::Result<i32>;
-    #[zbus(property, name = "IPIngressBytes")]
-    fn ip_ingress_bytes(&self) -> zbus::Result<u64>;
-    #[zbus(property, name = "IPEgressBytes")]
-    fn ip_egress_bytes(&self) -> zbus::Result<u64>;
-    #[zbus(property, name = "IOReadBytes")]
-    fn io_read_bytes(&self) -> zbus::Result<u64>;
-    #[zbus(property, name = "IOWriteBytes")]
-    fn io_write_bytes(&self) -> zbus::Result<u64>;
-}
+use crate::dbus::{ServiceProxy, UnitProxy};
 
 /// A per-unit snapshot combining `Unit` state and (best-effort) `Service`
 /// resource accounting. `None` resource fields = accounting disabled / not a

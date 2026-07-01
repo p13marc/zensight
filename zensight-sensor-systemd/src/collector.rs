@@ -11,69 +11,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use zbus::zvariant::OwnedObjectPath;
 use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
 use zensight_sensor_core::{Publisher, SensorHealth};
 
 use crate::config::SystemdConfig;
-
-/// One `ListUnits` row: `(name, description, load_state, active_state, sub_state,
-/// following, unit_path, job_id, job_type, job_path)`.
-type ListedUnit = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    OwnedObjectPath,
-    u32,
-    String,
-    OwnedObjectPath,
-);
-
-/// The `org.freedesktop.systemd1.Manager` subset we need: scalar counters, the
-/// six boot monotonic timestamps, and `ListUnits`.
-#[zbus::proxy(
-    interface = "org.freedesktop.systemd1.Manager",
-    default_service = "org.freedesktop.systemd1",
-    default_path = "/org/freedesktop/systemd1"
-)]
-trait Manager {
-    /// Number of currently loaded bus names.
-    #[zbus(property)]
-    fn n_names(&self) -> zbus::Result<u32>;
-    /// Number of units currently in a failed state.
-    #[zbus(property)]
-    fn n_failed_units(&self) -> zbus::Result<u32>;
-    /// Number of jobs currently queued.
-    #[zbus(property)]
-    fn n_jobs(&self) -> zbus::Result<u32>;
-    /// Total number of jobs ever scheduled.
-    #[zbus(property)]
-    fn n_installed_jobs(&self) -> zbus::Result<u32>;
-
-    /// Firmware monotonic timestamp (µs before kernel start, `systemd-analyze`).
-    #[zbus(property)]
-    fn firmware_timestamp_monotonic(&self) -> zbus::Result<u64>;
-    /// Boot-loader monotonic timestamp (µs before kernel start).
-    #[zbus(property)]
-    fn loader_timestamp_monotonic(&self) -> zbus::Result<u64>;
-    /// initrd handoff monotonic timestamp (µs since kernel start; 0 if no initrd).
-    #[zbus(property, name = "InitRDTimestampMonotonic")]
-    fn initrd_timestamp_monotonic(&self) -> zbus::Result<u64>;
-    /// Userspace start monotonic timestamp (µs since kernel start).
-    #[zbus(property)]
-    fn userspace_timestamp_monotonic(&self) -> zbus::Result<u64>;
-    /// Basic-boot-finished monotonic timestamp (µs since kernel start).
-    #[zbus(property)]
-    fn finish_timestamp_monotonic(&self) -> zbus::Result<u64>;
-
-    /// Enumerate all loaded units. Each tuple is
-    /// `(name, description, load_state, active_state, sub_state, following,
-    ///   unit_path, job_id, job_type, job_path)`.
-    fn list_units(&self) -> zbus::Result<Vec<ListedUnit>>;
-}
+use crate::dbus::{ListedUnit, ManagerProxy};
 
 /// The load/active state pair extracted from one `ListUnits` row — the only
 /// fields the aggregates need.

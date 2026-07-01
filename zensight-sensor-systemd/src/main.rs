@@ -49,6 +49,13 @@ async fn main() -> Result<()> {
         source
     );
 
+    // On-demand unit inventory query channel (#274): @/query/{units,failed,unit}.
+    let query_session = runner.session().clone();
+    let query_prefix = systemd_config.key_prefix.clone();
+    runner.spawn(async move {
+        zensight_sensor_systemd::query::run(query_session, query_prefix).await;
+    });
+
     // Spawn the collector task.
     let collector = SystemdCollector::new(
         source.clone(),

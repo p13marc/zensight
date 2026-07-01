@@ -10,5 +10,7 @@
 
 pub mod collector;
 pub mod config;
+pub mod dbus;
 pub mod map;
+pub mod query;
 pub mod unit;

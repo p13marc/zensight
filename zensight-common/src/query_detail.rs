@@ -321,3 +321,53 @@ pub struct SocketRecord {
     #[serde(default)]
     pub reord_seen: u32,
 }
+
+/// One systemd unit inventory row (#274), served on demand from `@/query/units`
+/// / `@/query/failed`. High-cardinality (hundreds per host) → never streamed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnitRecord {
+    pub name: String,
+    pub description: String,
+    pub load_state: String,
+    pub active_state: String,
+    pub sub_state: String,
+    /// Queued job type for this unit (`start`/`stop`/…), or `None` if idle.
+    #[serde(default)]
+    pub job: Option<String>,
+}
+
+/// Full detail for one systemd unit (#274), served from `@/query/unit?name=<u>`:
+/// the inventory fields plus resource accounting, the unit file path, and the
+/// dependency edges. Resource fields are `None` when accounting is off / the unit
+/// isn't a service.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnitDetail {
+    pub name: String,
+    pub description: String,
+    pub load_state: String,
+    pub active_state: String,
+    pub sub_state: String,
+    #[serde(default)]
+    pub fragment_path: Option<String>,
+    pub active_enter_usec: u64,
+    pub n_restarts: u32,
+    #[serde(default)]
+    pub mem_bytes: Option<u64>,
+    #[serde(default)]
+    pub cpu_usec: Option<u64>,
+    #[serde(default)]
+    pub tasks: Option<u64>,
+    pub exec_main_status: i32,
+    #[serde(default)]
+    pub requires: Vec<String>,
+    #[serde(default)]
+    pub wants: Vec<String>,
+    #[serde(default)]
+    pub after: Vec<String>,
+    #[serde(default)]
+    pub before: Vec<String>,
+    /// Recent state-change lines from the event ring (#275); empty until events
+    /// land or when the querier didn't ask for them.
+    #[serde(default)]
+    pub recent_changes: Vec<String>,
+}
