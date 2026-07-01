@@ -10166,6 +10166,27 @@ name = "zensight-sensor-sysinfo-ebpf-common"
 version = "0.6.2"
 
 [[package]]
+name = "zensight-sensor-systemd"
+version = "0.6.2"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "hostname",
+ "json5",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zbus",
+ "zenoh",
+ "zensight-common",
+ "zensight-sensor-core",
+]
+
+[[package]]
 name = "zerocopy"
 version = "0.8.52"
 source = "registry+https://github.com/rust-lang/crates.io-index"

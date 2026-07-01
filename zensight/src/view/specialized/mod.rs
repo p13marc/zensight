@@ -125,6 +125,7 @@ pub fn specialized_view<'a>(state: &'a DeviceDetailState) -> Option<Element<'a, 
         Protocol::Opcua => None, // No specialized view yet, use generic
         Protocol::Netlink => Some(netlink::netlink_host_view(state)),
         Protocol::Netring => Some(netring::netring_sensor_view(state)),
+        Protocol::Systemd => None, // No specialized view yet (#281), use generic
     }
 }
 

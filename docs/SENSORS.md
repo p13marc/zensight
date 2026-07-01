@@ -36,6 +36,7 @@ configure it, and the exact Zenoh keys it publishes/serves.
 | [gnmi](#gnmi) | `gnmi` | gNMI streaming telemetry | `configs/gnmi.json5` | none |
 | [netlink](#netlink) | `netlink` | Linux kernel networking (RTNETLINK/sock_diag) | `configs/netlink.json5` | none (unprivileged reads) |
 | [netring](#netring) | `netring` | wire-level capture (AF_PACKET/AF_XDP) or pcap | `configs/netring.json5` | `CAP_NET_RAW` for live capture |
+| [systemd](#systemd) | `systemd` | systemd D-Bus Manager (unit state + boot perf) | `configs/systemd.json5` | none (read-only system-bus) |
 
 ---
 
@@ -302,6 +303,29 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
   rollup, deep-links to the global Security view) · **Capture**. Endpoints are
   drill-down pivots to filtered flows. Tabs appear only when their data is
   present.
+
+## systemd
+
+Reads the `org.freedesktop.systemd1.Manager` interface on the **system D-Bus**
+(read-only, unprivileged) and publishes system-level unit/service state plus
+boot-performance timings. Complements `sysinfo` (hardware) and `logs` (messages)
+with the *unit* dimension. Fails gracefully on non-systemd hosts (reports
+unhealthy on `@/health`, retries — never crashes).
+
+- **Telemetry:** `zensight/systemd/<host>/<metric>`, refreshed every
+  `poll_interval_secs` (default 15):
+  - **Manager scalars** (`collect` always): `manager/{n_names,n_failed_units,
+    n_jobs,n_installed_jobs}` (Gauge).
+  - **Unit-state aggregates** (`collect.list_units`, default on, from `ListUnits`):
+    `units/{total,active,failed,loaded,inactive}` (Gauge).
+  - **Boot performance** (`collect.boot`, default on, Gauge µs): `boot/{firmware,
+    loader,kernel,initrd,userspace,total}_usec`, computed from the Manager
+    monotonic timestamps exactly like `systemd-analyze`.
+- **Config:** `configs/systemd.json5` (`systemd.{key_prefix,poll_interval_secs,
+  source,collect.*}`).
+- **Scope:** this is the epic-#285 keystone (#271 scaffold + #272 aggregates);
+  per-unit watchlists, the D-Bus event stream, the unit sentinel, and the GUI
+  specialized view land in follow-ups.
 
 ---
 
