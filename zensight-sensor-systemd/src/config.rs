@@ -44,9 +44,54 @@ pub struct SystemdConfig {
     #[serde(default)]
     pub source: Option<String>,
 
+    /// Unit-name globs to stream per-unit telemetry for (#273). Empty = none.
+    /// Hundreds of units exist per host, so per-unit series are watchlist-scoped
+    /// to bound key cardinality. Matched with `glob` semantics (`*`, `?`, `[…]`).
+    #[serde(default)]
+    pub watch_units: Vec<String>,
+
+    /// Hard cap on how many matched units stream per-unit telemetry (#273). Excess
+    /// matches are dropped (and logged — no silent truncation) and folded into the
+    /// `other/*` aggregate bucket.
+    #[serde(default = "default_watch_max")]
+    pub watch_max: usize,
+
+    /// Collect opt-in IP/IO accounting per watched unit (#273). Only surfaces when
+    /// the unit itself enabled `IPAccounting=`/`IOAccounting=`; absent otherwise.
+    #[serde(default)]
+    pub ip_io_accounting: bool,
+
+    /// Bounded capacity of the control-plane event ring (#275) served on
+    /// `@/query/events`.
+    #[serde(default = "default_events_capacity")]
+    pub events_capacity: usize,
+
+    /// Built-in threshold alerts (#276).
+    #[serde(default)]
+    pub alerts: crate::alerts::AlertsConfig,
+
+    /// Embedded sentinel expectations (#277); `None` = sentinel disabled.
+    #[serde(default)]
+    pub expectations: Option<crate::sentinel::ExpectationsConfig>,
+
     /// Collector toggles.
     #[serde(default)]
     pub collect: CollectConfig,
+}
+
+/// Compile `watch_units` globs, logging and skipping any invalid pattern. Shared
+/// by the collector (#273) and the event stream (#275).
+pub fn compile_watch(patterns: &[String]) -> Vec<glob::Pattern> {
+    patterns
+        .iter()
+        .filter_map(|p| match glob::Pattern::new(p) {
+            Ok(pat) => Some(pat),
+            Err(e) => {
+                tracing::warn!(pattern = %p, error = %e, "ignoring invalid watch_units glob");
+                None
+            }
+        })
+        .collect()
 }
 
 /// Which families the collector gathers.
@@ -79,9 +124,23 @@ impl Default for SystemdConfig {
             key_prefix: default_key_prefix(),
             poll_interval_secs: default_poll_interval_secs(),
             source: None,
+            watch_units: Vec::new(),
+            watch_max: default_watch_max(),
+            ip_io_accounting: false,
+            events_capacity: default_events_capacity(),
+            alerts: crate::alerts::AlertsConfig::default(),
+            expectations: None,
             collect: CollectConfig::default(),
         }
     }
+}
+
+fn default_watch_max() -> usize {
+    50
+}
+
+fn default_events_capacity() -> usize {
+    256
 }
 
 fn default_key_prefix() -> String {

@@ -11,70 +11,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use zbus::zvariant::OwnedObjectPath;
 use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
 use zensight_sensor_core::{Publisher, SensorHealth};
 
 use crate::config::SystemdConfig;
-
-/// The `org.freedesktop.systemd1.Manager` subset we need: scalar counters, the
-/// six boot monotonic timestamps, and `ListUnits`.
-#[zbus::proxy(
-    interface = "org.freedesktop.systemd1.Manager",
-    default_service = "org.freedesktop.systemd1",
-    default_path = "/org/freedesktop/systemd1"
-)]
-trait Manager {
-    /// Number of currently loaded bus names.
-    #[zbus(property)]
-    fn n_names(&self) -> zbus::Result<u32>;
-    /// Number of units currently in a failed state.
-    #[zbus(property)]
-    fn n_failed_units(&self) -> zbus::Result<u32>;
-    /// Number of jobs currently queued.
-    #[zbus(property)]
-    fn n_jobs(&self) -> zbus::Result<u32>;
-    /// Total number of jobs ever scheduled.
-    #[zbus(property)]
-    fn n_installed_jobs(&self) -> zbus::Result<u32>;
-
-    /// Firmware monotonic timestamp (µs before kernel start, `systemd-analyze`).
-    #[zbus(property)]
-    fn firmware_timestamp_monotonic(&self) -> zbus::Result<u64>;
-    /// Boot-loader monotonic timestamp (µs before kernel start).
-    #[zbus(property)]
-    fn loader_timestamp_monotonic(&self) -> zbus::Result<u64>;
-    /// initrd handoff monotonic timestamp (µs since kernel start; 0 if no initrd).
-    #[zbus(property, name = "InitRDTimestampMonotonic")]
-    fn initrd_timestamp_monotonic(&self) -> zbus::Result<u64>;
-    /// Userspace start monotonic timestamp (µs since kernel start).
-    #[zbus(property)]
-    fn userspace_timestamp_monotonic(&self) -> zbus::Result<u64>;
-    /// Basic-boot-finished monotonic timestamp (µs since kernel start).
-    #[zbus(property)]
-    fn finish_timestamp_monotonic(&self) -> zbus::Result<u64>;
-
-    /// Enumerate all loaded units. Each tuple is
-    /// `(name, description, load_state, active_state, sub_state, following,
-    ///   unit_path, job_id, job_type, job_path)`.
-    #[allow(clippy::type_complexity)]
-    fn list_units(
-        &self,
-    ) -> zbus::Result<
-        Vec<(
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            OwnedObjectPath,
-            u32,
-            String,
-            OwnedObjectPath,
-        )>,
-    >;
-}
+use crate::dbus::{ListedUnit, ManagerProxy};
 
 /// The load/active state pair extracted from one `ListUnits` row — the only
 /// fields the aggregates need.
@@ -179,7 +120,14 @@ pub struct SystemdCollector {
     config: SystemdConfig,
     publisher: Publisher,
     health: Arc<SensorHealth>,
-    proxy: Option<ManagerProxy<'static>>,
+    /// Compiled `watch_units` globs (#273); empty = no per-unit streaming.
+    watch: Vec<glob::Pattern>,
+    /// Optional event ring (#275): when set, per-kind `events/*_total` counters
+    /// are re-emitted each tick.
+    events: Option<crate::events::EventState>,
+    /// Optional threshold-alert evaluator (#276), driven each tick.
+    alerts: Option<crate::alerts::AlertEvaluator>,
+    conn: Option<zbus::Connection>,
 }
 
 impl SystemdCollector {
@@ -189,13 +137,31 @@ impl SystemdCollector {
         publisher: Publisher,
         health: Arc<SensorHealth>,
     ) -> Self {
+        // Compile watchlist globs once; a bad pattern is logged and skipped.
+        let watch = crate::config::compile_watch(&config.watch_units);
         Self {
             source,
             config,
             publisher,
             health,
-            proxy: None,
+            watch,
+            events: None,
+            alerts: None,
+            conn: None,
         }
+    }
+
+    /// Attach the shared event ring so per-kind `events/*_total` counters are
+    /// re-emitted each tick (#275).
+    pub fn with_events(mut self, events: crate::events::EventState) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    /// Attach the threshold-alert evaluator, driven each collect tick (#276).
+    pub fn with_alerts(mut self, alerts: crate::alerts::AlertEvaluator) -> Self {
+        self.alerts = Some(alerts);
+        self
     }
 
     /// Run the periodic collect loop. Never panics: a bus/connection error records
@@ -217,8 +183,8 @@ impl SystemdCollector {
                 }
                 Err(e) => {
                     // Non-systemd host / bus unavailable: report unhealthy, drop the
-                    // proxy so the next tick reconnects, and keep the loop alive.
-                    self.proxy = None;
+                    // connection so the next tick reconnects, and keep the loop alive.
+                    self.conn = None;
                     self.health
                         .record_device_failure(&self.source, &e.to_string());
                     tracing::warn!(error = %e, "systemd collect failed");
@@ -230,60 +196,119 @@ impl SystemdCollector {
         }
     }
 
-    /// Ensure a live `ManagerProxy`, connecting to the system bus on first use or
-    /// after a prior failure.
-    async fn ensure_proxy(&mut self) -> zbus::Result<&ManagerProxy<'static>> {
-        if self.proxy.is_none() {
-            let conn = zbus::Connection::system().await?;
-            let proxy = ManagerProxy::new(&conn).await?;
-            self.proxy = Some(proxy);
+    /// Ensure a live system-bus connection, (re)connecting on first use or after a
+    /// prior failure. Returned by clone (the connection is cheap `Arc`-backed) so
+    /// callers hold an owned handle without borrowing `self`.
+    async fn ensure_conn(&mut self) -> zbus::Result<zbus::Connection> {
+        if self.conn.is_none() {
+            self.conn = Some(zbus::Connection::system().await?);
         }
-        Ok(self.proxy.as_ref().expect("proxy just set"))
+        Ok(self.conn.as_ref().expect("conn just set").clone())
     }
 
     /// One collection pass: read the Manager, build points, publish. Returns the
     /// number of points published.
     async fn collect_and_publish(&mut self) -> zbus::Result<usize> {
-        // Gather everything from D-Bus first (borrow of `self.proxy`), then publish
-        // (borrows `self.publisher`) — keeps the borrows non-overlapping.
         let collect = self.config.collect.clone();
-        let (counts, boot, aggregates) = {
-            let proxy = self.ensure_proxy().await?;
-            let counts = ManagerCounts {
-                n_names: proxy.n_names().await?,
-                n_failed_units: proxy.n_failed_units().await?,
-                n_jobs: proxy.n_jobs().await?,
-                n_installed_jobs: proxy.n_installed_jobs().await?,
-            };
-            let boot = if collect.boot {
-                Some(BootTimestamps {
-                    firmware: proxy.firmware_timestamp_monotonic().await?,
-                    loader: proxy.loader_timestamp_monotonic().await?,
-                    initrd: proxy.initrd_timestamp_monotonic().await?,
-                    userspace: proxy.userspace_timestamp_monotonic().await?,
-                    finish: proxy.finish_timestamp_monotonic().await?,
-                })
-            } else {
-                None
-            };
-            let aggregates = if collect.list_units {
-                let units: Vec<UnitEntry> = proxy
-                    .list_units()
-                    .await?
-                    .into_iter()
-                    .map(|u| UnitEntry {
-                        load_state: u.2,
-                        active_state: u.3,
-                    })
-                    .collect();
-                Some(unit_aggregates(&units))
-            } else {
-                None
-            };
-            (counts, boot, aggregates)
+        let conn = self.ensure_conn().await?;
+        let proxy = ManagerProxy::new(&conn).await?;
+
+        let counts = ManagerCounts {
+            n_names: proxy.n_names().await?,
+            n_failed_units: proxy.n_failed_units().await?,
+            n_jobs: proxy.n_jobs().await?,
+            n_installed_jobs: proxy.n_installed_jobs().await?,
+        };
+        let boot = if collect.boot {
+            Some(BootTimestamps {
+                firmware: proxy.firmware_timestamp_monotonic().await?,
+                loader: proxy.loader_timestamp_monotonic().await?,
+                initrd: proxy.initrd_timestamp_monotonic().await?,
+                userspace: proxy.userspace_timestamp_monotonic().await?,
+                finish: proxy.finish_timestamp_monotonic().await?,
+            })
+        } else {
+            None
         };
 
-        let points = build_points(&self.source, &counts, boot.as_ref(), aggregates.as_ref());
+        // Enumerate units once if either the aggregates or the watchlist need it.
+        let need_units = collect.list_units || !self.watch.is_empty();
+        let listed = if need_units {
+            proxy.list_units().await?
+        } else {
+            Vec::new()
+        };
+        let aggregates = collect.list_units.then(|| {
+            let units: Vec<UnitEntry> = listed
+                .iter()
+                .map(|u| UnitEntry {
+                    load_state: u.2.clone(),
+                    active_state: u.3.clone(),
+                })
+                .collect();
+            unit_aggregates(&units)
+        });
+
+        let mut points = build_points(&self.source, &counts, boot.as_ref(), aggregates.as_ref());
+
+        // Per-unit watchlist streaming (#273): match names, cap at watch_max, and
+        // fold the rest into the `other/*` bucket. The sampled units + timers are
+        // also fed to the threshold-alert evaluator (#276).
+        let mut samples: Vec<crate::unit::UnitSample> = Vec::new();
+        let mut timers: Vec<crate::alerts::TimerSample> = Vec::new();
+        if !self.watch.is_empty() {
+            let matched: Vec<&ListedUnit> = listed
+                .iter()
+                .filter(|u| self.watch.iter().any(|g| g.matches(&u.0)))
+                .collect();
+
+            let cap = self.config.watch_max;
+            let streamed = matched.len().min(cap);
+            if matched.len() > cap {
+                tracing::warn!(
+                    matched = matched.len(),
+                    watch_max = cap,
+                    "watch_units matched more units than watch_max; truncating (excess folded into other/*)"
+                );
+            }
+            for u in matched.iter().take(cap) {
+                match crate::unit::sample_unit(
+                    &conn,
+                    &u.6,
+                    u.0.clone(),
+                    self.config.ip_io_accounting,
+                )
+                .await
+                {
+                    Ok(sample) => {
+                        points.extend(crate::map::unit_points(&self.source, &sample));
+                        samples.push(sample);
+                    }
+                    Err(e) => {
+                        tracing::warn!(unit = %u.0, error = %e, "failed to sample watched unit")
+                    }
+                }
+                // Read the timer schedule for watched `.timer` units (#276).
+                if u.0.ends_with(".timer")
+                    && let Ok(builder) = crate::dbus::TimerProxy::builder(&conn).path(u.6.clone())
+                    && let Ok(timer) = builder.build().await
+                {
+                    let next = timer.next_elapse_usec_realtime().await.unwrap_or(0);
+                    timers.push(crate::alerts::TimerSample {
+                        name: u.0.clone(),
+                        next_elapse_usec_realtime: next,
+                    });
+                }
+            }
+            let unwatched = (listed.len().saturating_sub(streamed)) as u64;
+            points.extend(crate::map::other_points(&self.source, unwatched));
+        }
+
+        // Optional streamed control-plane event counters (#275).
+        if let Some(events) = &self.events {
+            points.extend(events.counter_points(&self.source));
+        }
+
         let n = points.len();
         for point in &points {
             let suffix = format!("{}/{}", point.source, point.metric);
@@ -292,6 +317,23 @@ impl SystemdCollector {
             } else {
                 self.health.record_metrics_published(1);
             }
+        }
+
+        // Threshold alerts (#276): evaluate + reconcile from the freshly-read
+        // state. `system_state` is read here so the degraded rule works even with
+        // no watchlist.
+        if let Some(ev) = &mut self.alerts {
+            let system_state = proxy.system_state().await.unwrap_or_default();
+            let now_usec = chrono::Utc::now().timestamp_micros().max(0) as u64;
+            ev.tick(
+                system_state,
+                counts.n_failed_units,
+                samples,
+                timers,
+                now_usec,
+                std::time::Instant::now(),
+            )
+            .await;
         }
         Ok(n)
     }

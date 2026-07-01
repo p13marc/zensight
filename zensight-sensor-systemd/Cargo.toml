@@ -40,6 +40,12 @@ anyhow.workspace = true
 # Time
 chrono = "0.4"
 
+# Unit-name watchlist globbing (#273)
+glob = "0.3"
+
+# D-Bus signal stream consumption (#275)
+futures-util = "0.3"
+
 [[bin]]
 name = "zensight-sensor-systemd"
 path = "src/main.rs"
