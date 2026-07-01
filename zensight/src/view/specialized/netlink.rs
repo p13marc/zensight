@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use iced::widget::{Column, button, column, row, scrollable, text, text_input};
+use iced::widget::{Column, button, column, container, row, scrollable, text, text_input};
 use iced::{Element, Length, Theme};
 use zensight_common::{SocketRecord, TelemetryValue};
 
@@ -82,7 +82,7 @@ fn netlink_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Elemen
         }
         Sockets => column![
             card(render_sockets(state)),
-            card(render_detail(state, &[NetlinkDetailTopic::Sockets])),
+            card(render_sockets_explorer(state)),
         ]
         .spacing(space::MD),
         RoutingNeighbors => column![
@@ -264,6 +264,163 @@ fn render_sockets(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     col.into()
+}
+
+/// First-class TCP socket explorer (#261): a refresh affordance, the state/port/
+/// sort controls, RTT-distribution + congestion-mix charts derived from the
+/// fetched set, and a paginated table with an explicit "N of M" footer (no more
+/// silent `.take(200)` cutoff). Surfaces the enriched tcp_info columns
+/// (delivery/pacing rate, bytes_retrans, rcv_rtt, lost, reord, cong).
+fn render_sockets_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
+    let d = &state.netlink_detail;
+    let title = section_header("Socket Explorer", None);
+    let loading = d.sockets.is_loading();
+    let refresh_label = if loading {
+        "Fetching Sockets…".to_string()
+    } else {
+        "Fetch Sockets".to_string()
+    };
+    let mut refresh = button(text(refresh_label).size(font::CAPTION)).padding([4, 10]);
+    if !loading {
+        refresh = refresh.on_press(Message::FetchNetlinkDetail(NetlinkDetailTopic::Sockets));
+    }
+    let header = row![title, refresh]
+        .spacing(space::MD)
+        .align_y(iced::Alignment::Center);
+    let mut col = column![header].spacing(space::SM);
+
+    if let Some(err) = d.sockets.error() {
+        return col
+            .push(empty_state(format!("Sockets fetch failed: {err}"), None))
+            .into();
+    }
+    let Some(socks) = d.sockets.ready() else {
+        return col.push(empty_state("Loading sockets…", None)).into();
+    };
+    if socks.is_empty() {
+        return col.push(empty_state("No sockets", None)).into();
+    }
+
+    // Distribution charts from the fetched set: RTT histogram + congestion mix.
+    let charts = row![
+        container(card(
+            column![
+                text("RTT distribution").size(font::CAPTION).style(dim),
+                crate::view::chart::ranked_bar(
+                    &rtt_histogram(socks),
+                    |v| format!("{}", v as u64),
+                    8
+                ),
+            ]
+            .spacing(space::XS)
+        ))
+        .width(Length::FillPortion(1)),
+        container(card(
+            column![
+                text("Congestion control").size(font::CAPTION).style(dim),
+                crate::view::chart::donut(&cong_mix(socks), 120.0),
+            ]
+            .spacing(space::XS)
+        ))
+        .width(Length::FillPortion(1)),
+    ]
+    .spacing(space::MD);
+    col = col.push(charts);
+
+    // State/port/sort controls, then the paginated record table.
+    col = col.push(render_socket_controls(socks, d));
+    let shown = filter_sort_sockets(
+        socks,
+        d.socket_state_filter.as_deref(),
+        &d.socket_port_filter,
+        d.socket_sort,
+    );
+    let total = shown.len();
+    let limit = d.sockets_table.limit;
+    let mut list = Column::new().spacing(3).push(
+        row![
+            cell("local", 180),
+            cell("remote", 180),
+            cell("state", 90),
+            cell("rtt_us", 70),
+            cell("rcv_rtt", 70),
+            cell("deliv_bps", 90),
+            cell("pacing_bps", 90),
+            cell("retx", 50),
+            cell("bret", 70),
+            cell("lost", 50),
+            cell("reord", 55),
+            cell("cong", 70),
+        ]
+        .spacing(8),
+    );
+    for s in shown.iter().take(limit) {
+        list = list.push(
+            row![
+                cell(&s.local, 180),
+                cell(&s.remote, 180),
+                cell(&s.state, 90),
+                cell(&s.rtt_us.to_string(), 70),
+                cell(&s.rcv_rtt_us.to_string(), 70),
+                cell(&s.delivery_rate.to_string(), 90),
+                cell(&s.pacing_rate.to_string(), 90),
+                cell(&s.retrans.to_string(), 50),
+                cell(&s.bytes_retrans.to_string(), 70),
+                cell(&s.lost.to_string(), 50),
+                cell(&s.reord_seen.to_string(), 55),
+                cell(s.congestion.as_deref().unwrap_or("-"), 70),
+            ]
+            .spacing(8),
+        );
+    }
+    let shown_n = total.min(limit);
+    let mut footer = row![
+        text(format!("showing {shown_n} of {total} sockets"))
+            .size(font::CAPTION)
+            .style(dim)
+    ]
+    .spacing(space::MD)
+    .align_y(iced::Alignment::Center);
+    if shown_n < total {
+        footer = footer.push(
+            button(text("Show more").size(font::CAPTION))
+                .padding([2, 8])
+                .on_press(Message::NetlinkSocketsMore),
+        );
+    }
+    col.push(list).push(footer).into()
+}
+
+/// Bucket sockets by smoothed RTT (µs) into human ranges for the histogram (#261).
+fn rtt_histogram(socks: &[SocketRecord]) -> Vec<(String, f64)> {
+    let buckets: [(&str, u32, u32); 6] = [
+        ("<1ms", 0, 1_000),
+        ("1–5ms", 1_000, 5_000),
+        ("5–20ms", 5_000, 20_000),
+        ("20–100ms", 20_000, 100_000),
+        ("100–300ms", 100_000, 300_000),
+        ("300ms+", 300_000, u32::MAX),
+    ];
+    buckets
+        .iter()
+        .map(|(label, lo, hi)| {
+            let n = socks
+                .iter()
+                .filter(|s| s.rtt_us >= *lo && s.rtt_us < *hi)
+                .count();
+            (label.to_string(), n as f64)
+        })
+        .collect()
+}
+
+/// Count sockets per congestion-control algorithm for the donut (#261).
+fn cong_mix(socks: &[SocketRecord]) -> Vec<(String, f64)> {
+    let mut map: BTreeMap<String, f64> = BTreeMap::new();
+    for s in socks {
+        let algo = s.congestion.clone().unwrap_or_else(|| "unknown".into());
+        *map.entry(algo).or_default() += 1.0;
+    }
+    map.into_iter().collect()
 }
 
 /// IPsec / xfrm SA + policy summary (#46). Only present on hosts running IPsec.
@@ -608,61 +765,8 @@ fn render_detail<'a>(
 
     let mut col = column![title, buttons].spacing(space::SM);
 
-    // Sockets
-    if want(NetlinkDetailTopic::Sockets)
-        && let Some(err) = d.sockets.error()
-    {
-        col = col.push(empty_state(format!("Sockets fetch failed: {err}"), None));
-    } else if want(NetlinkDetailTopic::Sockets)
-        && let Some(socks) = d.sockets.ready()
-    {
-        // Socket explorer (#112): filter by state/port and sort by RTT/retrans to
-        // surface the worst flows, driving the already-fetched record set.
-        let shown = filter_sort_sockets(
-            socks,
-            d.socket_state_filter.as_deref(),
-            &d.socket_port_filter,
-            d.socket_sort,
-        );
-        let mut list = Column::new().spacing(3).push(
-            row![
-                cell("local", 190),
-                cell("remote", 190),
-                cell("state", 100),
-                cell("rtt_us", 70),
-                cell("rcv_rtt", 70),
-                cell("deliv_bps", 100),
-                cell("pacing_bps", 100),
-                cell("retx", 50),
-                cell("bret", 70),
-            ]
-            .spacing(8),
-        );
-        for s in shown.iter().take(200) {
-            // Surface the enriched tcp_info (#108): delivery/pacing rate and the
-            // receiver RTT turn "state counts" into "are flows delivering".
-            list = list.push(
-                row![
-                    cell(&s.local, 190),
-                    cell(&s.remote, 190),
-                    cell(&s.state, 100),
-                    cell(&s.rtt_us.to_string(), 70),
-                    cell(&s.rcv_rtt_us.to_string(), 70),
-                    cell(&s.delivery_rate.to_string(), 100),
-                    cell(&s.pacing_rate.to_string(), 100),
-                    cell(&s.retrans.to_string(), 50),
-                    cell(&s.bytes_retrans.to_string(), 70),
-                ]
-                .spacing(8),
-            );
-        }
-        col = col
-            .push(
-                text(format!("Sockets ({} of {})", shown.len(), socks.len())).size(font::EMPHASIS),
-            )
-            .push(render_socket_controls(socks, d))
-            .push(list);
-    }
+    // Sockets are rendered by the first-class explorer (`render_sockets_explorer`,
+    // #261), not here — the Sockets topic isn't routed through `render_detail`.
 
     // Routes
     if want(NetlinkDetailTopic::Routes)

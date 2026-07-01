@@ -11,6 +11,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use zensight_common::{NeighborRecord, RouteRecord, SocketRecord};
 
+use crate::view::components::TableState;
 use crate::view::specialized::fetch::Fetch;
 
 // The sensor defines these record types locally (it owns only its own crate); we
@@ -188,6 +189,9 @@ pub struct NetlinkDetailState {
     pub socket_port_filter: String,
     /// Socket explorer: active sort order.
     pub socket_sort: SocketSort,
+    /// Socket explorer pagination (#261): only `limit` used here (row cap + load
+    /// more), replacing the old silent `.take(200)` cutoff. Default = 200 rows.
+    pub sockets_table: TableState,
 }
 
 /// The port component of an `addr:port` endpoint (after the last colon), so IPv6

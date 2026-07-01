@@ -162,6 +162,9 @@ pub enum Message {
     SetNetlinkSocketPortFilter(String),
     /// Socket explorer (#112): set the sort order.
     SetNetlinkSocketSort(crate::view::specialized::netlink_detail::SocketSort),
+    /// Socket explorer (#261): reveal another page of socket rows (replaces the
+    /// old silent `.take(200)` cutoff).
+    NetlinkSocketsMore,
 
     /// Select the active tab of a tabbed specialized view (#243). Remembered
     /// per device in `DeviceDetailState`.

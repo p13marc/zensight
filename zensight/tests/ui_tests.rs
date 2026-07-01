@@ -1518,14 +1518,17 @@ fn test_netlink_specialized_view() {
         let mut ui = simulator(netlink_host_view(&state));
         assert!(ui.find("eth0").is_ok());
     }
-    // Sockets tab: aggregates + on-demand detail (fetch buttons + fetched table).
+    // Sockets tab: aggregates + first-class explorer (refresh + fetched table).
     {
         state.specialized_tab = SpecializedTab::Sockets;
         let mut ui = simulator(netlink_host_view(&state));
         assert!(ui.find("TCP Sockets").is_ok());
-        assert!(ui.find("On-demand Detail").is_ok());
+        assert!(ui.find("Socket Explorer").is_ok());
         assert!(ui.find("Fetch Sockets").is_ok());
         assert!(ui.find("10.0.0.1:5555").is_ok());
+        // Enriched columns + pagination footer (#261, no silent .take(200)).
+        assert!(ui.find("cong").is_ok());
+        assert!(ui.find("showing 1 of 1 sockets").is_ok());
     }
     // Routing & Neighbors tab.
     {
@@ -2005,6 +2008,63 @@ fn test_netlink_tabs_capability_and_switch() {
                     && *t == zensight::view::specialized::SpecializedTab::Sockets
         )));
     }
+}
+
+/// #261: the Sockets explorer paginates (no silent .take(200)) and renders the
+/// RTT-distribution + congestion charts.
+#[test]
+fn test_netlink_sockets_explorer_pagination_and_charts() {
+    use zensight::view::specialized::netlink::netlink_host_view;
+    use zensight::view::specialized::netlink_detail::{NetlinkDetailData, NetlinkDetailTopic};
+    use zensight_common::{Protocol, SocketRecord};
+
+    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let mut state = DeviceDetailState::new(device_id);
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Sockets;
+
+    let socks: Vec<SocketRecord> = (0..3)
+        .map(|i| SocketRecord {
+            local: format!("10.0.0.1:{}", 1000 + i),
+            remote: "1.1.1.1:443".into(),
+            state: "established".into(),
+            uid: 0,
+            recv_q: 0,
+            send_q: 0,
+            rtt_us: 2_000 + i,
+            retrans: 0,
+            inode: 0,
+            congestion: Some(if i % 2 == 0 { "cubic" } else { "bbr" }.into()),
+            snd_cwnd: 10,
+            snd_buf: 0,
+            rcv_buf: 0,
+            delivery_rate: 0,
+            pacing_rate: 0,
+            bytes_retrans: 0,
+            total_retrans: 0,
+            rcv_rtt_us: 0,
+            lost: 0,
+            reord_seen: 0,
+        })
+        .collect();
+    state.netlink_detail.apply(
+        NetlinkDetailTopic::Sockets,
+        Ok(NetlinkDetailData::Sockets(socks)),
+    );
+    // Force a small page cap so the "Show more" footer sits within the test
+    // viewport (the default 200-row cap would push it off-screen).
+    state.netlink_detail.sockets_table.limit = 2;
+
+    let mut ui = simulator(netlink_host_view(&state));
+    assert!(ui.find("RTT distribution").is_ok());
+    assert!(ui.find("Congestion control").is_ok());
+    assert!(ui.find("showing 2 of 3 sockets").is_ok());
+    // Load-more affordance emits NetlinkSocketsMore.
+    let _ = ui.click("Show more");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::NetlinkSocketsMore))
+    );
 }
 
 /// The netring view shows the TLS section (with a fetched inventory) and the

@@ -798,16 +798,26 @@ impl ZenSight {
             Message::SetNetlinkSocketStateFilter(state_filter) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netlink_detail.socket_state_filter = state_filter;
+                    // Changing the filter resets pagination so matches aren't hidden.
+                    device.netlink_detail.sockets_table.limit =
+                        crate::view::components::data_table::DEFAULT_LIMIT;
                 }
             }
             Message::SetNetlinkSocketPortFilter(port) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netlink_detail.socket_port_filter = port;
+                    device.netlink_detail.sockets_table.limit =
+                        crate::view::components::data_table::DEFAULT_LIMIT;
                 }
             }
             Message::SetNetlinkSocketSort(sort) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netlink_detail.socket_sort = sort;
+                }
+            }
+            Message::NetlinkSocketsMore => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netlink_detail.sockets_table.load_more();
                 }
             }
 
