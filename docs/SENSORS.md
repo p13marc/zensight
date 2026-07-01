@@ -282,6 +282,14 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
   built detectors are immediate.
 - **Config:** `configs/netring.json5` (`collect.*`, `anomalies.*`, `threat.*`,
   `pcap` for replay).
+- **GUI (#257):** the netring device screen is a tabbed, chart-driven view —
+  **Overview** (RED hero + per-L4 donut + live anomaly strip) · **Flows** ·
+  **Talkers & Matrix** · **DNS** (RED tiles + rcode bars + top-SLD table) ·
+  **HTTP/TLS** (RED + TLS/QUIC/SSH inventories, JA3+JA4) · **Bandwidth** (ranked
+  bars) · **Assets** (filterable inventory) · **Security** (in-view ATT&CK
+  rollup, deep-links to the global Security view) · **Capture**. Endpoints are
+  drill-down pivots to filtered flows. Tabs appear only when their data is
+  present.
 
 ---
 
