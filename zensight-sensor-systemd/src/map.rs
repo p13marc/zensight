@@ -106,6 +106,110 @@ pub fn unit_points(source: &str, s: &UnitSample) -> Vec<TelemetryPoint> {
     pts
 }
 
+/// Per-socket-unit counters (#279): `unit/<socket>/{n_accepted,n_connections,
+/// n_refused}`. Emitted for watched `.socket` units.
+pub fn socket_points(
+    source: &str,
+    name: &str,
+    n_accepted: u32,
+    n_connections: u32,
+    n_refused: u32,
+) -> Vec<TelemetryPoint> {
+    let base = format!("unit/{}", sanitize_unit(name));
+    let point = |metric: String, value: TelemetryValue| {
+        TelemetryPoint::new(source, Protocol::Systemd, metric, value).with_label("unit", name)
+    };
+    vec![
+        // n_accepted is monotonic (lifetime connections accepted) → Counter.
+        point(
+            format!("{base}/n_accepted"),
+            TelemetryValue::Counter(n_accepted as u64),
+        ),
+        point(
+            format!("{base}/n_connections"),
+            TelemetryValue::Gauge(n_connections as f64),
+        ),
+        point(
+            format!("{base}/n_refused"),
+            TelemetryValue::Counter(n_refused as u64),
+        ),
+    ]
+}
+
+/// Per-timer-unit schedule (#279): `unit/<timer>/{last_trigger_usec,
+/// next_trigger_usec}`. Emitted for watched `.timer` units. `u64::MAX` next-elapse
+/// (no scheduled run) is dropped.
+pub fn timer_points(
+    source: &str,
+    name: &str,
+    last_trigger_usec: u64,
+    next_elapse_usec: u64,
+) -> Vec<TelemetryPoint> {
+    let base = format!("unit/{}", sanitize_unit(name));
+    let point = |metric: String, value: TelemetryValue| {
+        TelemetryPoint::new(source, Protocol::Systemd, metric, value).with_label("unit", name)
+    };
+    let mut pts = vec![point(
+        format!("{base}/last_trigger_usec"),
+        TelemetryValue::Gauge(last_trigger_usec as f64),
+    )];
+    if next_elapse_usec != 0 && next_elapse_usec != u64::MAX {
+        pts.push(point(
+            format!("{base}/next_trigger_usec"),
+            TelemetryValue::Gauge(next_elapse_usec as f64),
+        ));
+    }
+    pts
+}
+
+/// Mount/automount state aggregates (#279, `collect.mounts`): `mounts/{total,
+/// mounted,failed}` from the enumerated units. `states` is the `active_state` of
+/// each `.mount`/`.automount` unit.
+pub fn mount_points<'a>(
+    source: &str,
+    states: impl IntoIterator<Item = &'a str>,
+) -> Vec<TelemetryPoint> {
+    let (mut total, mut mounted, mut failed) = (0u64, 0u64, 0u64);
+    for s in states {
+        total += 1;
+        match s {
+            "active" | "mounted" => mounted += 1,
+            "failed" => failed += 1,
+            _ => {}
+        }
+    }
+    let gauge = |metric: &str, v: u64| {
+        TelemetryPoint::new(
+            source,
+            Protocol::Systemd,
+            metric,
+            TelemetryValue::Gauge(v as f64),
+        )
+    };
+    vec![
+        gauge("mounts/total", total),
+        gauge("mounts/mounted", mounted),
+        gauge("mounts/failed", failed),
+    ]
+}
+
+/// Journal store health (#279, `collect.journal`): `journal/{disk_usage_bytes,
+/// disk_available_bytes}`.
+pub fn journal_points(
+    source: &str,
+    usage_bytes: u64,
+    available_bytes: Option<u64>,
+) -> Vec<TelemetryPoint> {
+    let gauge = |metric: &str, v: f64| {
+        TelemetryPoint::new(source, Protocol::Systemd, metric, TelemetryValue::Gauge(v))
+    };
+    let mut pts = vec![gauge("journal/disk_usage_bytes", usage_bytes as f64)];
+    if let Some(avail) = available_bytes {
+        pts.push(gauge("journal/disk_available_bytes", avail as f64));
+    }
+    pts
+}
+
 /// The `systemd/other/*` overflow bucket (#273): a single gauge counting the
 /// units that are NOT individually streamed (total minus watched), so their
 /// existence isn't lost to the watchlist scoping.
@@ -214,5 +318,57 @@ mod tests {
         assert_eq!(pts.len(), 1);
         assert_eq!(pts[0].metric, "other/units_total");
         assert_eq!(pts[0].value, TelemetryValue::Gauge(512.0));
+    }
+
+    #[test]
+    fn socket_points_shape() {
+        let pts = socket_points("h", "sshd.socket", 12, 3, 1);
+        let by: std::collections::HashMap<_, _> =
+            pts.iter().map(|p| (p.metric.as_str(), &p.value)).collect();
+        assert_eq!(
+            by["unit/sshd.socket/n_accepted"],
+            &TelemetryValue::Counter(12)
+        );
+        assert_eq!(
+            by["unit/sshd.socket/n_connections"],
+            &TelemetryValue::Gauge(3.0)
+        );
+        assert_eq!(
+            by["unit/sshd.socket/n_refused"],
+            &TelemetryValue::Counter(1)
+        );
+        assert_eq!(
+            pts[0].labels.get("unit").map(String::as_str),
+            Some("sshd.socket")
+        );
+    }
+
+    #[test]
+    fn timer_points_drops_absent_next() {
+        // Scheduled next → both points.
+        let pts = timer_points("h", "logrotate.timer", 100, 200);
+        assert_eq!(pts.len(), 2);
+        // No next elapse (u64::MAX) → only last_trigger.
+        let pts = timer_points("h", "logrotate.timer", 100, u64::MAX);
+        assert_eq!(pts.len(), 1);
+        assert_eq!(pts[0].metric, "unit/logrotate.timer/last_trigger_usec");
+    }
+
+    #[test]
+    fn mount_points_counts_by_state() {
+        let pts = mount_points("h", ["active", "mounted", "failed", "inactive"]);
+        let by: std::collections::HashMap<_, _> =
+            pts.iter().map(|p| (p.metric.as_str(), &p.value)).collect();
+        assert_eq!(by["mounts/total"], &TelemetryValue::Gauge(4.0));
+        assert_eq!(by["mounts/mounted"], &TelemetryValue::Gauge(2.0));
+        assert_eq!(by["mounts/failed"], &TelemetryValue::Gauge(1.0));
+    }
+
+    #[test]
+    fn journal_points_gates_available() {
+        assert_eq!(journal_points("h", 1024, Some(2048)).len(), 2);
+        let one = journal_points("h", 1024, None);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].metric, "journal/disk_usage_bytes");
     }
 }

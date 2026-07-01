@@ -14,6 +14,7 @@ pub mod command;
 pub mod config;
 pub mod dbus;
 pub mod events;
+pub mod journal;
 pub mod map;
 pub mod query;
 pub mod sentinel;

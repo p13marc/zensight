@@ -134,7 +134,8 @@ pub trait Service {
     fn io_write_bytes(&self) -> zbus::Result<u64>;
 }
 
-/// The `org.freedesktop.systemd1.Timer` interface subset (#276 timer-overdue).
+/// The `org.freedesktop.systemd1.Timer` interface subset (#276 timer-overdue,
+/// #279 timer telemetry).
 #[zbus::proxy(
     interface = "org.freedesktop.systemd1.Timer",
     default_service = "org.freedesktop.systemd1"
@@ -146,4 +147,19 @@ pub trait Timer {
     /// Wall-clock µs of the next scheduled elapse (0/`u64::MAX` if none).
     #[zbus(property, name = "NextElapseUSecRealtime")]
     fn next_elapse_usec_realtime(&self) -> zbus::Result<u64>;
+}
+
+/// The `org.freedesktop.systemd1.Socket` interface subset (#279 socket telemetry).
+/// Present only on `.socket` units.
+#[zbus::proxy(
+    interface = "org.freedesktop.systemd1.Socket",
+    default_service = "org.freedesktop.systemd1"
+)]
+pub trait Socket {
+    #[zbus(property, name = "NAccepted")]
+    fn n_accepted(&self) -> zbus::Result<u32>;
+    #[zbus(property, name = "NConnections")]
+    fn n_connections(&self) -> zbus::Result<u32>;
+    #[zbus(property, name = "NRefused")]
+    fn n_refused(&self) -> zbus::Result<u32>;
 }

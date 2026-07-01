@@ -371,3 +371,55 @@ pub struct UnitDetail {
     #[serde(default)]
     pub recent_changes: Vec<String>,
 }
+
+/// One systemd `.timer` unit row (#279), served on demand from `@/query/timers`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimerRecord {
+    pub name: String,
+    pub active_state: String,
+    /// Wall-clock µs of the last trigger (0 = never fired).
+    pub last_trigger_usec: u64,
+    /// Wall-clock µs of the next scheduled elapse (0 / `u64::MAX` = none).
+    pub next_elapse_usec: u64,
+    /// The next elapse is in the past (a run is overdue / the timer is behind).
+    pub overdue: bool,
+}
+
+/// One node of the systemd cgroup-v2 tree (#280), served from `@/query/cgroups`.
+/// A point-in-time snapshot keyed by `path` (transient scopes churn).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CgroupNode {
+    /// Path relative to the cgroup root, e.g. `system.slice/sshd.service`.
+    pub path: String,
+    /// The leaf name, e.g. `sshd.service`.
+    pub name: String,
+    /// Owning unit name when the node maps to one (`.service`/`.scope`/`.slice`).
+    #[serde(default)]
+    pub unit: Option<String>,
+    /// Node classification derived from the name: `slice` / `service` / `scope` /
+    /// `other`.
+    pub kind: String,
+    #[serde(default)]
+    pub mem_bytes: Option<u64>,
+    #[serde(default)]
+    pub cpu_usec: Option<u64>,
+    #[serde(default)]
+    pub tasks: Option<u64>,
+    #[serde(default)]
+    pub io_read_bytes: Option<u64>,
+    #[serde(default)]
+    pub io_write_bytes: Option<u64>,
+    /// Direct-member processes (leaves only, per the cgroup-v2 no-internal-process
+    /// rule): `(pid, comm)`.
+    #[serde(default)]
+    pub pids: Vec<CgroupPid>,
+    #[serde(default)]
+    pub children: Vec<CgroupNode>,
+}
+
+/// A process member of a cgroup node (#280).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CgroupPid {
+    pub pid: u32,
+    pub comm: String,
+}

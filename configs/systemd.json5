@@ -65,6 +65,10 @@
       list_units: true,
       // Boot-performance phase durations (boot/*_usec), like systemd-analyze.
       boot: true,
+      // Mount/automount state aggregates mounts/{total,mounted,failed} (#279).
+      mounts: false,
+      // Journal store health journal/{disk_usage_bytes,disk_available_bytes} (#279).
+      journal: false,
     },
   },
 

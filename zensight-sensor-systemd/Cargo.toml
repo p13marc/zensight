@@ -46,6 +46,9 @@ glob = "0.3"
 # D-Bus signal stream consumption (#275)
 futures-util = "0.3"
 
+# Journal-store filesystem free space via statvfs (#279, opt-in journal health)
+rustix = { version = "0.38", features = ["fs"] }
+
 [[bin]]
 name = "zensight-sensor-systemd"
 path = "src/main.rs"

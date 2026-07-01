@@ -107,6 +107,16 @@ pub struct CollectConfig {
     /// monotonic timestamps. Cheap; default on.
     #[serde(default = "default_true")]
     pub boot: bool,
+
+    /// Mount/automount state aggregates (`mounts/*`) from `ListUnits` (#279).
+    /// Opt-in; default off.
+    #[serde(default)]
+    pub mounts: bool,
+
+    /// Journal-store health (`journal/*`) — disk usage + free space (#279).
+    /// Opt-in; default off.
+    #[serde(default)]
+    pub journal: bool,
 }
 
 impl Default for CollectConfig {
@@ -114,6 +124,8 @@ impl Default for CollectConfig {
         Self {
             list_units: true,
             boot: true,
+            mounts: false,
+            journal: false,
         }
     }
 }

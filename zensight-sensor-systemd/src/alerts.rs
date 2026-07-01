@@ -523,7 +523,8 @@ mod tests {
             units: vec![over, under, noacct],
             ..Default::default()
         };
-        let ra = rule(&evaluate(HOST, &cfg, &inputs), UNIT_MEM_RULE);
+        let evaluated = evaluate(HOST, &cfg, &inputs);
+        let ra = rule(&evaluated, UNIT_MEM_RULE);
         assert_eq!(ra.alerts.len(), 1);
         assert_eq!(
             ra.alerts[0].labels.get("unit").map(String::as_str),
