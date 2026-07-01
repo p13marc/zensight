@@ -10,7 +10,9 @@ use iced::{Element, Length, Theme};
 use zensight_common::{SocketRecord, TelemetryValue};
 
 use crate::message::Message;
-use crate::view::components::{TabItem, card, empty_state, section_header, tabbed_view};
+use crate::view::components::{
+    Gauge, TabItem, badge, card, empty_state, section_header, tabbed_view,
+};
 use crate::view::device::DeviceDetailState;
 use crate::view::specialized::SpecializedTab;
 use crate::view::specialized::netlink_detail::{
@@ -72,7 +74,7 @@ fn netlink_tabs(state: &DeviceDetailState) -> Vec<TabItem<SpecializedTab>> {
 fn netlink_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Element<'_, Message> {
     use SpecializedTab::*;
     let inner: Column<'_, Message> = match tab {
-        Overview => column![card(render_diagnostics(state))].spacing(space::MD),
+        Overview => render_overview(state),
         Interfaces => {
             let mut c = column![card(render_interfaces(state))].spacing(space::MD);
             if has_prefix(state, "ethtool/") {
@@ -672,6 +674,261 @@ fn render_diagnostics(state: &DeviceDetailState) -> Element<'_, Message> {
             .push(row![cell("  recommendation", 180), cell(&rec, 360)].spacing(8));
     }
     col.into()
+}
+
+/// Overview health hero (#259): a bottleneck gauge + issue badges, an interface
+/// status strip, TCP-health tiles (sparklined; retransmits as a rate not a raw
+/// counter), and default-route + neighbor health chips.
+fn render_overview(state: &DeviceDetailState) -> Column<'_, Message> {
+    let mut col = column![card(render_health_hero(state))].spacing(space::MD);
+
+    // Interface status strip.
+    let ifaces = interfaces(state);
+    if !ifaces.is_empty() {
+        let mut strip = row![].spacing(space::SM);
+        for (name, stats) in &ifaces {
+            strip = strip.push(iface_chip(name, iface_up(stats)));
+        }
+        col = col.push(card(
+            column![
+                section_header("Interfaces", None),
+                scrollable(strip).direction(scrollable::Direction::Horizontal(
+                    scrollable::Scrollbar::hidden(),
+                )),
+            ]
+            .spacing(space::SM),
+        ));
+    }
+
+    // TCP-health tiles.
+    if state.metrics.keys().any(|k| k.starts_with("sockets/tcp/")) {
+        let tiles = row![
+            metric_tile(state, "established", "sockets/tcp/established", None),
+            metric_tile(
+                state,
+                "retransmits/s",
+                "sockets/tcp/retransmits_total",
+                Some(rate_str(state, "sockets/tcp/retransmits_total")),
+            ),
+            metric_tile(state, "RTT p50 (µs)", "sockets/tcp/rtt_p50_us", None),
+            metric_tile(state, "RTT p95 (µs)", "sockets/tcp/rtt_p95_us", None),
+        ]
+        .spacing(space::MD);
+        col = col.push(card(
+            column![section_header("TCP health", None), tiles].spacing(space::SM),
+        ));
+    }
+
+    // Default-route + neighbor health chips.
+    if let Some(chips) = render_route_neighbor_chips(state) {
+        col = col.push(card(chips));
+    }
+
+    col
+}
+
+/// Health hero: bottleneck gauge + severity issue badges + worst-bottleneck
+/// location/recommendation, with the promote-to-alert affordance retained.
+fn render_health_hero(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = section_header("Health", None);
+    let score = fval(state, "diagnostics/bottleneck_score").unwrap_or(0.0);
+    let gauge = Gauge::percentage(score * 100.0, "bottleneck")
+        .with_thresholds(0.5, 0.8)
+        .with_width(200.0)
+        .view();
+
+    let issue = |label: &str, metric: &str, color| {
+        let n = fval(state, metric).unwrap_or(0.0) as u64;
+        badge(color, format!("{label}: {n}"))
+    };
+    let issues = row![
+        issue(
+            "critical",
+            "diagnostics/issues/critical",
+            theme::SEVERITY_CRITICAL
+        ),
+        issue(
+            "error",
+            "diagnostics/issues/error",
+            theme::SEVERITY_CRITICAL
+        ),
+        issue(
+            "warning",
+            "diagnostics/issues/warning",
+            theme::SEVERITY_WARNING
+        ),
+        issue("info", "diagnostics/issues/info", theme::SEVERITY_INFO),
+    ]
+    .spacing(space::SM);
+
+    let hero = row![
+        gauge,
+        column![
+            issues,
+            super::metric_trend_and_alert(state, "diagnostics/bottleneck_score")
+        ]
+        .spacing(space::XS),
+    ]
+    .spacing(space::LG)
+    .align_y(iced::Alignment::Center);
+    let mut col = column![title, hero].spacing(space::SM);
+
+    if let Some(point) = state.metrics.get("diagnostics/bottleneck") {
+        let kind = match &point.value {
+            TelemetryValue::Text(s) => s.clone(),
+            _ => "-".into(),
+        };
+        let loc = point.labels.get("location").cloned().unwrap_or_default();
+        let rec = point
+            .labels
+            .get("recommendation")
+            .cloned()
+            .unwrap_or_default();
+        col = col.push(text(format!("{kind} @ {loc}")).size(font::EMPHASIS));
+        if !rec.is_empty() {
+            col = col.push(text(rec).size(font::CAPTION).style(dim));
+        }
+    }
+    col.into()
+}
+
+/// A compact metric tile: big value + label + trend sparkline (#259).
+fn metric_tile<'a>(
+    state: &'a DeviceDetailState,
+    label: &str,
+    metric: &str,
+    value_override: Option<String>,
+) -> Element<'a, Message> {
+    let value = value_override.unwrap_or_else(|| num(state.metrics.get(metric).map(|p| &p.value)));
+    container(card(
+        column![
+            text(value).size(font::SECTION),
+            text(label.to_string()).size(font::CAPTION).style(dim),
+            super::metric_sparkline(state, metric),
+        ]
+        .spacing(space::XS),
+    ))
+    .width(Length::FillPortion(1))
+    .into()
+}
+
+/// Format a counter's per-second rate from the last two history points (#259),
+/// falling back to the raw value when there isn't enough history yet.
+fn rate_str(state: &DeviceDetailState, metric: &str) -> String {
+    match counter_rate(state, metric) {
+        Some(r) => format!("{r:.1}"),
+        None => num(state.metrics.get(metric).map(|p| &p.value)),
+    }
+}
+
+/// Per-second rate of a monotonic counter from its two most-recent history
+/// points; `None` on insufficient history, zero dt, or a counter reset.
+fn counter_rate(state: &DeviceDetailState, metric: &str) -> Option<f64> {
+    let hist = state.history.get(metric)?;
+    if hist.len() < 2 {
+        return None;
+    }
+    let last = hist.back()?;
+    let prev = &hist[hist.len() - 2];
+    let dt = (last.timestamp - prev.timestamp) as f64 / 1000.0;
+    if dt <= 0.0 {
+        return None;
+    }
+    let v = |p: &zensight_common::TelemetryPoint| match &p.value {
+        TelemetryValue::Counter(c) => Some(*c as f64),
+        TelemetryValue::Gauge(g) => Some(*g),
+        _ => None,
+    };
+    let (a, b) = (v(last)?, v(prev)?);
+    if a < b {
+        return None; // counter reset
+    }
+    Some((a - b) / dt)
+}
+
+/// The raw numeric value of a metric (counter/gauge/bool→0|1), if present.
+fn fval(state: &DeviceDetailState, metric: &str) -> Option<f64> {
+    match state.metrics.get(metric).map(|p| &p.value) {
+        Some(TelemetryValue::Counter(c)) => Some(*c as f64),
+        Some(TelemetryValue::Gauge(g)) => Some(*g),
+        Some(TelemetryValue::Boolean(b)) => Some(if *b { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
+/// Interface up/down (from `oper_state` text, else the `up` boolean).
+fn iface_up(stats: &BTreeMap<String, &TelemetryValue>) -> Option<bool> {
+    if let Some(s) = stats.get("oper_state").and_then(text_val) {
+        return Some(s.eq_ignore_ascii_case("up"));
+    }
+    stats.get("up").and_then(bool_val)
+}
+
+/// A colored interface chip for the Overview status strip.
+fn iface_chip<'a>(name: &str, up: Option<bool>) -> Element<'a, Message> {
+    let color = match up {
+        Some(true) => theme::STATUS_ONLINE,
+        Some(false) => theme::STATUS_OFFLINE,
+        None => theme::STATUS_UNKNOWN,
+    };
+    badge(color, name.to_string())
+}
+
+/// Default-route + neighbor health chips (#259).
+fn render_route_neighbor_chips(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
+    let has_routes = state.metrics.keys().any(|k| k.starts_with("routes/"));
+    let has_neigh = state.metrics.keys().any(|k| k.starts_with("neighbors/"));
+    if !has_routes && !has_neigh {
+        return None;
+    }
+    let mut r = row![].spacing(space::SM);
+    if has_routes {
+        let present = matches!(
+            state
+                .metrics
+                .get("routes/default_v4_present")
+                .map(|p| &p.value),
+            Some(TelemetryValue::Boolean(true))
+        );
+        let gw = state
+            .metrics
+            .get("routes/default_v4_gw")
+            .and_then(|p| text_val(&&p.value));
+        let color = if present {
+            theme::STATUS_ONLINE
+        } else {
+            theme::STATUS_OFFLINE
+        };
+        let label = match gw {
+            Some(g) if present => format!("default → {g}"),
+            _ if present => "default route".to_string(),
+            _ => "no default route".to_string(),
+        };
+        r = r.push(badge(color, label));
+        if let Some(f) = fval(state, "routes/default_v4_flaps_total")
+            && f > 0.0
+        {
+            r = r.push(badge(theme::STATUS_DEGRADED, format!("{} flaps", f as u64)));
+        }
+    }
+    if has_neigh {
+        let total = fval(state, "neighbors/total").unwrap_or(0.0) as u64;
+        let failed = fval(state, "neighbors/by_state/failed").unwrap_or(0.0) as u64;
+        let color = if failed > 0 {
+            theme::STATUS_DEGRADED
+        } else {
+            theme::STATUS_ONLINE
+        };
+        r = r.push(badge(
+            color,
+            format!("neighbors: {total} ({failed} failed)"),
+        ));
+    }
+    Some(
+        column![section_header("Routing & neighbors", None), r]
+            .spacing(space::SM)
+            .into(),
+    )
 }
 
 /// ARP/NDP neighbor state summary.

@@ -1505,12 +1505,13 @@ fn test_netlink_specialized_view() {
     // lives in exactly one tab — drive the active tab explicitly (view tests
     // can't switch via click) and assert per-tab.
     use zensight::view::specialized::SpecializedTab;
-    // Overview: header + diagnostics hero.
+    // Overview: header + health hero (bottleneck gauge) + TCP-health tiles.
     {
         state.specialized_tab = SpecializedTab::Overview;
         let mut ui = simulator(netlink_host_view(&state));
         assert!(ui.find("Netlink: router01").is_ok());
-        assert!(ui.find("Diagnostics").is_ok());
+        assert!(ui.find("Health").is_ok());
+        assert!(ui.find("TCP health").is_ok());
     }
     // Interfaces tab.
     {
@@ -2008,6 +2009,46 @@ fn test_netlink_tabs_capability_and_switch() {
                     && *t == zensight::view::specialized::SpecializedTab::Sockets
         )));
     }
+}
+
+/// #259: the Overview hero renders the interface status strip + route/neighbor
+/// health chips + TCP-health tiles from live data.
+#[test]
+fn test_netlink_overview_hero() {
+    use zensight::view::specialized::netlink::netlink_host_view;
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let mut state = DeviceDetailState::new(device_id);
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Overview;
+    for (m, v) in [
+        ("diagnostics/bottleneck_score", TelemetryValue::Gauge(0.4)),
+        ("diagnostics/issues/critical", TelemetryValue::Gauge(1.0)),
+        ("iface/eth0/oper_state", TelemetryValue::Text("up".into())),
+        ("iface/wan0/oper_state", TelemetryValue::Text("down".into())),
+        ("sockets/tcp/established", TelemetryValue::Gauge(12.0)),
+        ("sockets/tcp/retransmits_total", TelemetryValue::Counter(50)),
+        ("routes/default_v4_present", TelemetryValue::Boolean(true)),
+        (
+            "routes/default_v4_gw",
+            TelemetryValue::Text("10.0.0.1".into()),
+        ),
+        ("neighbors/total", TelemetryValue::Gauge(8.0)),
+        ("neighbors/by_state/failed", TelemetryValue::Gauge(2.0)),
+    ] {
+        state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
+    }
+
+    let mut ui = simulator(netlink_host_view(&state));
+    // Interface strip chips.
+    assert!(ui.find("eth0").is_ok());
+    assert!(ui.find("wan0").is_ok());
+    // TCP-health tiles incl. retransmit rate label.
+    assert!(ui.find("retransmits/s").is_ok());
+    assert!(ui.find("RTT p95 (µs)").is_ok());
+    // Route + neighbor chips.
+    assert!(ui.find("default → 10.0.0.1").is_ok());
+    assert!(ui.find("neighbors: 8 (2 failed)").is_ok());
 }
 
 /// #261: the Sockets explorer paginates (no silent .take(200)) and renders the
