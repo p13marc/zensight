@@ -1616,55 +1616,107 @@ fn xfrm_columns<'a>() -> Vec<DataColumn<'a, XfrmSaRecord, Message>> {
 }
 
 /// WireGuard peers section: one sub-table per WG interface.
+/// WireGuard tab (#266): a summary line (interfaces / peers / active) over
+/// per-peer cards with handshake-age chips, up/stale status, endpoint, and
+/// rx/tx throughput trend tiles.
 fn render_wireguard(state: &DeviceDetailState) -> Element<'_, Message> {
-    let mut col = column![section_header("WireGuard", None)].spacing(space::SM);
-    for (iface, peers) in wireguard(state) {
+    let wg = wireguard(state);
+    let n_ifaces = wg.len();
+    let mut n_peers = 0usize;
+    let mut n_active = 0usize;
+    for peers in wg.values() {
+        for stats in peers.values() {
+            n_peers += 1;
+            if matches!(
+                stats.get("up").map(|p| &p.value),
+                Some(TelemetryValue::Boolean(true))
+            ) {
+                n_active += 1;
+            }
+        }
+    }
+    let summary = text(format!(
+        "{n_ifaces} interfaces · {n_peers} peers · {n_active} active"
+    ))
+    .size(font::CAPTION)
+    .style(dim);
+    let mut col = column![section_header("WireGuard", None), summary].spacing(space::SM);
+
+    for (iface, peers) in &wg {
         let count = num(state
             .metrics
             .get(&format!("wireguard/{iface}/peers"))
             .map(|p| &p.value));
         col = col.push(text(format!("{iface} — {count} peers")).size(font::EMPHASIS));
-        let mut list = Column::new().spacing(3).push(
-            row![
-                cell("peer", 110),
-                cell("endpoint", 190),
-                cell("handshake", 110),
-                cell("rx", 90),
-                cell("tx", 90),
-                cell("up", 50),
-            ]
-            .spacing(8),
-        );
         for (peer, stats) in peers {
-            let endpoint = stats
-                .get("rx_bytes")
-                .and_then(|p| p.labels.get("endpoint"))
-                .cloned()
-                .unwrap_or_else(|| "-".into());
-            let g = |s: &str| num(stats.get(s).map(|p| &p.value));
-            let handshake = match stats.get("last_handshake_age_s").map(|p| &p.value) {
-                Some(TelemetryValue::Gauge(a)) => format!("{a:.0}s ago"),
-                _ => "never".into(),
-            };
-            let up = matches!(
-                stats.get("up").map(|p| &p.value),
-                Some(TelemetryValue::Boolean(true))
-            );
-            list = list.push(
-                row![
-                    cell(&peer, 110),
-                    cell(&endpoint, 190),
-                    cell(&handshake, 110),
-                    cell(&g("rx_bytes"), 90),
-                    cell(&g("tx_bytes"), 90),
-                    cell(if up { "yes" } else { "no" }, 50),
-                ]
-                .spacing(8),
-            );
+            col = col.push(card(render_wg_peer(state, iface, peer, stats)));
         }
-        col = col.push(list);
     }
     col.into()
+}
+
+/// One WireGuard peer card: id + up/stale + handshake-age chips + endpoint, and
+/// rx/tx throughput trend tiles.
+fn render_wg_peer<'a>(
+    state: &'a DeviceDetailState,
+    iface: &str,
+    peer: &str,
+    stats: &BTreeMap<String, &zensight_common::TelemetryPoint>,
+) -> Element<'a, Message> {
+    let endpoint = stats
+        .get("rx_bytes")
+        .and_then(|p| p.labels.get("endpoint"))
+        .cloned()
+        .unwrap_or_else(|| "-".into());
+    let up = matches!(
+        stats.get("up").map(|p| &p.value),
+        Some(TelemetryValue::Boolean(true))
+    );
+    let up_chip = badge(
+        if up {
+            theme::STATUS_ONLINE
+        } else {
+            theme::STATUS_OFFLINE
+        },
+        if up { "up" } else { "stale" }.to_string(),
+    );
+    // Handshake-age chip: fresh (green) < 180s, aging (amber) < 900s, else red.
+    let hs_chip = match stats.get("last_handshake_age_s").map(|p| &p.value) {
+        Some(TelemetryValue::Gauge(a)) => {
+            let color = if *a < 180.0 {
+                theme::STATUS_ONLINE
+            } else if *a < 900.0 {
+                theme::STATUS_DEGRADED
+            } else {
+                theme::STATUS_OFFLINE
+            };
+            badge(color, format!("handshake {a:.0}s ago"))
+        }
+        _ => badge(theme::STATUS_UNKNOWN, "handshake never".to_string()),
+    };
+    // Short peer id (public keys are long); keep it recognizable.
+    let short = if peer.len() > 14 {
+        format!("{}…", &peer[..14])
+    } else {
+        peer.to_string()
+    };
+
+    let header = row![
+        text(short).size(font::EMPHASIS),
+        up_chip,
+        hs_chip,
+        text(endpoint).size(font::CAPTION).style(dim),
+    ]
+    .spacing(space::SM)
+    .align_y(iced::Alignment::Center);
+
+    let throughput = row![
+        tput_tile(state, "rx ↓", &format!("wireguard/{iface}/{peer}/rx_bytes")),
+        tput_tile(state, "tx ↑", &format!("wireguard/{iface}/{peer}/tx_bytes")),
+    ]
+    .spacing(space::LG);
+
+    column![header, throughput].spacing(space::SM).into()
 }
 
 /// Group `wireguard/<iface>/<peer>/<stat>` metrics by interface then peer.

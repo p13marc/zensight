@@ -2011,6 +2011,38 @@ fn test_netlink_tabs_capability_and_switch() {
     }
 }
 
+/// #266: the WireGuard tab renders the summary line + per-peer handshake-age
+/// chip + up/stale status.
+#[test]
+fn test_netlink_wireguard_tab() {
+    use zensight::view::specialized::netlink::netlink_host_view;
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let mut state = DeviceDetailState::new(device_id);
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::WireGuard;
+    for (m, v) in [
+        ("wireguard/wg0/peers", TelemetryValue::Gauge(1.0)),
+        (
+            "wireguard/wg0/AbCd1234/last_handshake_age_s",
+            TelemetryValue::Gauge(30.0),
+        ),
+        (
+            "wireguard/wg0/AbCd1234/rx_bytes",
+            TelemetryValue::Counter(1000),
+        ),
+        ("wireguard/wg0/AbCd1234/up", TelemetryValue::Boolean(true)),
+    ] {
+        state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
+    }
+
+    let mut ui = simulator(netlink_host_view(&state));
+    assert!(ui.find("1 interfaces · 1 peers · 1 active").is_ok());
+    assert!(ui.find("wg0 — 1 peers").is_ok());
+    assert!(ui.find("handshake 30s ago").is_ok());
+    assert!(ui.find("up").is_ok());
+}
+
 /// #265: the Events tab renders the per-family context chart + a structured,
 /// newest-first control-plane timeline DataTable.
 #[test]
