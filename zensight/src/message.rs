@@ -163,6 +163,10 @@ pub enum Message {
     /// Socket explorer (#112): set the sort order.
     SetNetlinkSocketSort(crate::view::specialized::netlink_detail::SocketSort),
 
+    /// Select the active tab of a tabbed specialized view (#243). Remembered
+    /// per device in `DeviceDetailState`.
+    SelectSpecializedTab(DeviceId, crate::view::specialized::SpecializedTab),
+
     /// Fetch the on-demand netring flow detail (recent flows).
     FetchNetringFlows,
     /// A netring flow-detail reply: the decoded flows, or an error message.
