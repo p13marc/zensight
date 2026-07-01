@@ -2011,6 +2011,43 @@ fn test_netlink_tabs_capability_and_switch() {
     }
 }
 
+/// #260: the Interfaces tab renders per-iface throughput tiles + inline ethtool
+/// link health, and the "View sockets →" pivot navigates to the Sockets tab.
+#[test]
+fn test_netlink_interfaces_tab_and_pivot() {
+    use zensight::view::specialized::netlink::netlink_host_view;
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let mut state = DeviceDetailState::new(device_id);
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Interfaces;
+    for (m, v) in [
+        ("iface/eth0/oper_state", TelemetryValue::Text("up".into())),
+        ("iface/eth0/mtu", TelemetryValue::Gauge(1500.0)),
+        ("iface/eth0/rx_bytes", TelemetryValue::Counter(1000)),
+        ("iface/eth0/tx_bytes", TelemetryValue::Counter(2000)),
+        ("ethtool/eth0/carrier", TelemetryValue::Gauge(1.0)),
+        ("ethtool/eth0/speed_mbps", TelemetryValue::Gauge(1000.0)),
+        ("ethtool/eth0/fec/modes", TelemetryValue::Text("RS".into())),
+    ] {
+        state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
+    }
+
+    let mut ui = simulator(netlink_host_view(&state));
+    assert!(ui.find("eth0").is_ok());
+    assert!(ui.find("rx ↓").is_ok());
+    assert!(ui.find("FEC RS").is_ok());
+    // iface → sockets pivot.
+    let _ = ui.click("View sockets →");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(msgs.iter().any(|m| matches!(
+        m,
+        Message::SelectSpecializedTab(d, t)
+            if d.source == "gw01"
+                && *t == zensight::view::specialized::SpecializedTab::Sockets
+    )));
+}
+
 /// #259: the Overview hero renders the interface status strip + route/neighbor
 /// health chips + TCP-health tiles from live data.
 #[test]

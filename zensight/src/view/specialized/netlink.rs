@@ -75,13 +75,7 @@ fn netlink_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Elemen
     use SpecializedTab::*;
     let inner: Column<'_, Message> = match tab {
         Overview => render_overview(state),
-        Interfaces => {
-            let mut c = column![card(render_interfaces(state))].spacing(space::MD);
-            if has_prefix(state, "ethtool/") {
-                c = c.push(card(render_ethtool(state)));
-            }
-            c
-        }
+        Interfaces => render_interfaces_tab(state),
         Sockets => column![
             card(render_sockets(state)),
             card(render_sockets_explorer(state)),
@@ -159,63 +153,149 @@ fn interfaces(state: &DeviceDetailState) -> BTreeMap<String, BTreeMap<String, &T
     map
 }
 
-fn render_interfaces(state: &DeviceDetailState) -> Element<'_, Message> {
+/// Interfaces tab (#260): one card per interface — rx/tx throughput trend charts,
+/// drops/errors, MTU/state, ethtool link health (speed/duplex/autoneg/FEC/EEE),
+/// and a drill-down to the interface's sockets.
+fn render_interfaces_tab(state: &DeviceDetailState) -> Column<'_, Message> {
     let ifaces = interfaces(state);
-    let title = section_header(format!("Interfaces ({})", ifaces.len()), None);
-
     if ifaces.is_empty() {
-        return column![title, empty_state("No interface data", None)]
-            .spacing(space::SM)
-            .into();
-    }
-
-    // Header row. Now includes packets + errors columns (#46) — carrier-vs-admin
-    // state and error counters were previously dropped at render.
-    let mut list = Column::new().spacing(4).push(
-        row![
-            cell("interface", 130),
-            cell("state", 70),
-            cell("mtu", 60),
-            cell("rx bytes", 110),
-            cell("tx bytes", 110),
-            cell("rx pkts", 100),
-            cell("tx pkts", 100),
-            cell("rx drop", 80),
-            cell("tx drop", 80),
-            cell("rx err", 80),
-            cell("tx err", 80),
-        ]
-        .spacing(8),
-    );
-
-    for (name, stats) in &ifaces {
-        let st = stats
-            .get("oper_state")
-            .and_then(text_val)
-            .unwrap_or_else(|| match stats.get("up").and_then(bool_val) {
-                Some(true) => "up".to_string(),
-                Some(false) => "down".to_string(),
-                None => "-".into(),
-            });
-        list = list.push(
-            row![
-                cell(name, 130),
-                cell(&st, 70),
-                cell(&num(stats.get("mtu").copied()), 60),
-                cell(&num(stats.get("rx_bytes").copied()), 110),
-                cell(&num(stats.get("tx_bytes").copied()), 110),
-                cell(&num(stats.get("rx_packets").copied()), 100),
-                cell(&num(stats.get("tx_packets").copied()), 100),
-                cell(&num(stats.get("rx_dropped").copied()), 80),
-                cell(&num(stats.get("tx_dropped").copied()), 80),
-                cell(&num(stats.get("rx_errors").copied()), 80),
-                cell(&num(stats.get("tx_errors").copied()), 80),
+        return column![card(
+            column![
+                section_header("Interfaces", None),
+                empty_state("No interface data", None),
             ]
-            .spacing(8),
-        );
+            .spacing(space::SM)
+        )]
+        .spacing(space::MD);
+    }
+    let eth = ethtool_by_iface(state);
+    let mut col = column![].spacing(space::MD);
+    for (name, stats) in &ifaces {
+        col = col.push(card(render_iface_card(state, name, stats, eth.get(name))));
+    }
+    col
+}
+
+/// A single interface card: header (name/state/MTU + sockets pivot), rx/tx
+/// throughput trend tiles, drops/errors, and inline ethtool link health.
+fn render_iface_card<'a>(
+    state: &'a DeviceDetailState,
+    name: &str,
+    stats: &BTreeMap<String, &TelemetryValue>,
+    eth: Option<&BTreeMap<String, &'a TelemetryValue>>,
+) -> Element<'a, Message> {
+    let header = row![
+        text(name.to_string()).size(font::EMPHASIS),
+        iface_chip(name, iface_up(stats)),
+        text(format!("MTU {}", num(stats.get("mtu").copied())))
+            .size(font::CAPTION)
+            .style(dim),
+        container(text("")).width(Length::Fill),
+        button(text("View sockets →").size(font::CAPTION))
+            .padding([2, 8])
+            .on_press(Message::SelectSpecializedTab(
+                state.device_id.clone(),
+                SpecializedTab::Sockets,
+            )),
+    ]
+    .spacing(space::SM)
+    .align_y(iced::Alignment::Center);
+
+    let throughput = row![
+        tput_tile(state, "rx ↓", &format!("iface/{name}/rx_bytes")),
+        tput_tile(state, "tx ↑", &format!("iface/{name}/tx_bytes")),
+    ]
+    .spacing(space::LG);
+
+    let counters = row![
+        text(format!(
+            "drops rx {} / tx {}",
+            num(stats.get("rx_dropped").copied()),
+            num(stats.get("tx_dropped").copied()),
+        ))
+        .size(font::CAPTION)
+        .style(dim),
+        text(format!(
+            "errors rx {} / tx {}",
+            num(stats.get("rx_errors").copied()),
+            num(stats.get("tx_errors").copied()),
+        ))
+        .size(font::CAPTION)
+        .style(dim),
+    ]
+    .spacing(space::LG);
+
+    let mut col = column![header, throughput, counters].spacing(space::SM);
+
+    // ethtool link health, inline (#260).
+    if let Some(e) = eth {
+        let g = |s: &str| {
+            e.get(s)
+                .copied()
+                .map(|v| num(Some(v)))
+                .unwrap_or_else(|| "-".into())
+        };
+        let eee = match (e.get("eee/active").copied(), e.get("eee/enabled").copied()) {
+            (Some(TelemetryValue::Boolean(true)), _) => "active".to_string(),
+            (Some(TelemetryValue::Boolean(false)), Some(TelemetryValue::Boolean(true))) => {
+                "enabled".to_string()
+            }
+            (Some(_), _) | (_, Some(_)) => "off".to_string(),
+            _ => "-".to_string(),
+        };
+        let fec = e
+            .get("fec/modes")
+            .copied()
+            .map(|v| num(Some(v)))
+            .unwrap_or_else(|| "-".into());
+        let ethline = row![
+            text(format!("link {}", g("carrier"))).size(font::CAPTION),
+            text(format!("{} Mb/s", g("speed_mbps"))).size(font::CAPTION),
+            text(format!("{} duplex", g("duplex"))).size(font::CAPTION),
+            text(format!("autoneg {}", g("autoneg"))).size(font::CAPTION),
+            text(format!("FEC {fec}")).size(font::CAPTION),
+            text(format!("EEE {eee}")).size(font::CAPTION),
+        ]
+        .spacing(space::MD);
+        col = col.push(ethline);
     }
 
-    column![title, list].spacing(8).into()
+    col.into()
+}
+
+/// A throughput trend tile: per-second rate (from history) + counter sparkline.
+fn tput_tile<'a>(state: &'a DeviceDetailState, label: &str, key: &str) -> Element<'a, Message> {
+    let rate = counter_rate(state, key)
+        .map(|r| format!("{}/s", fmt_bytes(r.max(0.0) as u64)))
+        .unwrap_or_else(|| num(state.metrics.get(key).map(|p| &p.value)));
+    column![
+        row![
+            text(label.to_string()).size(font::CAPTION).style(dim),
+            text(rate).size(font::EMPHASIS),
+        ]
+        .spacing(space::XS)
+        .align_y(iced::Alignment::Center),
+        super::metric_sparkline(state, key),
+    ]
+    .spacing(space::XS)
+    .into()
+}
+
+/// Group `ethtool/<iface>/<stat...>` metrics by interface (stat may contain '/').
+fn ethtool_by_iface(
+    state: &DeviceDetailState,
+) -> BTreeMap<String, BTreeMap<String, &TelemetryValue>> {
+    let mut m: BTreeMap<String, BTreeMap<String, &TelemetryValue>> = BTreeMap::new();
+    for (metric, point) in &state.metrics {
+        if let Some(rest) = metric.strip_prefix("ethtool/")
+            && let Some((iface, stat)) = rest.split_once('/')
+        {
+            m.entry(iface.to_string())
+                .or_default()
+                .insert(stat.to_string(), &point.value);
+        }
+    }
+    m
 }
 
 fn render_sockets(state: &DeviceDetailState) -> Element<'_, Message> {
@@ -540,77 +620,6 @@ fn render_tc(state: &DeviceDetailState) -> Element<'_, Message> {
                 cell(&g("requeues"), 90),
                 cell(&g("backlog_pkts"), 110),
                 cell(&g("backlog_bytes"), 120),
-            ]
-            .spacing(8),
-        );
-    }
-
-    column![title, list].spacing(8).into()
-}
-
-/// ethtool per-interface link view: negotiated speed/duplex/autoneg plus the
-/// link-health signals nlink 0.23 adds — FEC mode (silent corruption on
-/// marginal optics) and EEE (power-saving that can add latency). Streamed
-/// `ethtool/<iface>/<stat...>` metrics; only present when ethtool collection is
-/// enabled and the driver exposes the family.
-fn render_ethtool(state: &DeviceDetailState) -> Element<'_, Message> {
-    let title = section_header("ethtool (link / FEC / EEE)", None);
-
-    // Group ethtool/<iface>/<stat...> by interface (stat may contain '/').
-    let mut ifaces: BTreeMap<String, BTreeMap<String, &TelemetryValue>> = BTreeMap::new();
-    for (metric, point) in &state.metrics {
-        if let Some(rest) = metric.strip_prefix("ethtool/")
-            && let Some((iface, stat)) = rest.split_once('/')
-        {
-            ifaces
-                .entry(iface.to_string())
-                .or_default()
-                .insert(stat.to_string(), &point.value);
-        }
-    }
-
-    if ifaces.is_empty() {
-        return column![title, empty_state("No ethtool data", None)]
-            .spacing(space::SM)
-            .into();
-    }
-
-    let mut list = Column::new().spacing(4).push(
-        row![
-            cell("interface", 110),
-            cell("link", 60),
-            cell("speed", 80),
-            cell("duplex", 80),
-            cell("autoneg", 80),
-            cell("FEC", 110),
-            cell("EEE", 90),
-        ]
-        .spacing(8),
-    );
-    for (iface, stats) in &ifaces {
-        let g = |s: &str| num(stats.get(s).copied());
-        // EEE: prefer the live "active" signal, fall back to admin "enabled".
-        let eee = match (stats.get("eee/active"), stats.get("eee/enabled")) {
-            (Some(TelemetryValue::Boolean(true)), _) => "active".to_string(),
-            (Some(TelemetryValue::Boolean(false)), Some(TelemetryValue::Boolean(true))) => {
-                "enabled".to_string()
-            }
-            (Some(_), _) | (_, Some(_)) => "off".to_string(),
-            _ => "-".to_string(),
-        };
-        let fec = stats
-            .get("fec/modes")
-            .map(|v| num(Some(v)))
-            .unwrap_or_else(|| "-".into());
-        list = list.push(
-            row![
-                cell(iface, 110),
-                cell(&g("carrier"), 60),
-                cell(&g("speed_mbps"), 80),
-                cell(&g("duplex"), 80),
-                cell(&g("autoneg"), 80),
-                cell(&fec, 110),
-                cell(&eee, 90),
             ]
             .spacing(8),
         );
