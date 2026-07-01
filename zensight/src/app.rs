@@ -840,6 +840,28 @@ impl ZenSight {
                     device.netring_detail.table_mut(which).load_more();
                 }
             }
+            Message::NetringPivotToFlows(device_id, endpoint) => {
+                use crate::view::specialized::SpecializedTab;
+                use crate::view::specialized::fetch::Fetch;
+                use crate::view::specialized::netring_detail::NetringTable;
+                let mut fetch_needed = false;
+                if let Some(device) = self.selected_device.as_mut()
+                    && device.device_id == device_id
+                {
+                    device.specialized_tab = SpecializedTab::Flows;
+                    device
+                        .netring_detail
+                        .table_mut(NetringTable::Flows)
+                        .set_filter(endpoint);
+                    if matches!(device.netring_detail.flows, Fetch::Idle) {
+                        device.netring_detail.loading();
+                        fetch_needed = true;
+                    }
+                }
+                if fetch_needed {
+                    return ControlFlow::Break(self.query_netring_flows());
+                }
+            }
             Message::FetchNetringFlows => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netring_detail.loading();

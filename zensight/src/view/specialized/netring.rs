@@ -789,7 +789,7 @@ fn render_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
             for r in records.iter().take(200) {
                 list = list.push(
                     row![
-                        cell(&r.dst, 240),
+                        pivot_cell(state, &r.dst, 240),
                         cell(&format_bytes(r.bytes as f64), 120),
                         cell(&format_count(r.packets), 100),
                         cell(&r.flows.to_string(), 80),
@@ -1102,6 +1102,23 @@ fn cell<'a>(s: &str, width: u16) -> Element<'a, Message> {
         .into()
 }
 
+/// A fixed-width table cell whose endpoint text is a **drill-down pivot** (#246):
+/// clicking it jumps to the Flows tab filtered to `endpoint`. The shared
+/// affordance reused by talkers / matrix / assets rows ("every label is a link").
+fn pivot_cell<'a>(state: &DeviceDetailState, endpoint: &str, width: u16) -> Element<'a, Message> {
+    container(
+        button(text(endpoint.to_string()).size(12))
+            .padding(0)
+            .style(iced::widget::button::text)
+            .on_press(Message::NetringPivotToFlows(
+                state.device_id.clone(),
+                endpoint.to_string(),
+            )),
+    )
+    .width(Length::Fixed(width as f32))
+    .into()
+}
+
 /// A fixed-width table cell whose text is tinted by `style` (e.g. drop-rate).
 fn cell_styled<'a>(s: &str, width: u16, style: fn(&Theme) -> text::Style) -> Element<'a, Message> {
     text(s.to_string())
@@ -1136,5 +1153,34 @@ fn num(v: Option<&TelemetryValue>) -> String {
         Some(TelemetryValue::Text(s)) => s.clone(),
         Some(TelemetryValue::Boolean(b)) => b.to_string(),
         _ => "-".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use iced_test::simulator;
+    use zensight_common::{Protocol, TalkerRecord};
+
+    use super::*;
+    use crate::message::DeviceId;
+    use crate::view::specialized::fetch::Fetch;
+
+    #[test]
+    fn talker_destination_pivots_to_flows() {
+        let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Netring, "host01"));
+        state.netring_detail.talkers = Fetch::Ready(vec![TalkerRecord {
+            dst: "10.0.0.42:443".to_string(),
+            bytes: 1234,
+            packets: 10,
+            flows: 3,
+        }]);
+        let mut ui = simulator(render_talkers(&state));
+        let _ = ui.click("10.0.0.42:443");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(msgs.iter().any(|m| matches!(
+            m,
+            Message::NetringPivotToFlows(d, ep)
+                if d.source == "host01" && ep == "10.0.0.42:443"
+        )));
     }
 }

@@ -174,6 +174,11 @@ pub enum Message {
     /// Reveal another page of rows in a netring data-table (#244).
     NetringTableMore(crate::view::specialized::netring_detail::NetringTable),
 
+    /// Drill-down pivot (#246): jump to the Flows tab filtered to an endpoint
+    /// (talker → flows, asset → flows, matrix cell → flows). Reuses the Flows
+    /// data-table filter; fetches flows if not already loaded.
+    NetringPivotToFlows(DeviceId, String),
+
     /// Fetch the on-demand netring flow detail (recent flows).
     FetchNetringFlows,
     /// A netring flow-detail reply: the decoded flows, or an error message.
