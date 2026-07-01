@@ -2011,6 +2011,54 @@ fn test_netlink_tabs_capability_and_switch() {
     }
 }
 
+/// #265: the Events tab renders the per-family context chart + a structured,
+/// newest-first control-plane timeline DataTable.
+#[test]
+fn test_netlink_events_tab() {
+    use zensight::view::specialized::netlink::netlink_host_view;
+    use zensight::view::specialized::netlink_detail::{
+        EventRecord, NetlinkDetailData, NetlinkDetailTopic,
+    };
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let mut state = DeviceDetailState::new(device_id);
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Events;
+    state.update(TelemetryPoint::new(
+        "gw01",
+        Protocol::Netlink,
+        "events/link/added_total",
+        TelemetryValue::Counter(4),
+    ));
+    state.netlink_detail.apply(
+        NetlinkDetailTopic::Events,
+        Ok(NetlinkDetailData::Events(vec![
+            EventRecord {
+                ts_unix: 100,
+                family: "link".into(),
+                action: "changed".into(),
+                ifindex: Some(3),
+                detail: "eth0".into(),
+            },
+            EventRecord {
+                ts_unix: 200,
+                family: "route".into(),
+                action: "added".into(),
+                ifindex: None,
+                detail: "default".into(),
+            },
+        ])),
+    );
+
+    let mut ui = simulator(netlink_host_view(&state));
+    assert!(ui.find("Event families").is_ok());
+    assert!(ui.find("Event timeline").is_ok());
+    assert!(ui.find("eth0").is_ok());
+    assert!(ui.find("default").is_ok());
+    // Timeline is newest-first: the ts=200 route event sorted ahead of ts=100.
+    assert_eq!(state.netlink_detail.events.ready().unwrap()[0].ts_unix, 200);
+}
+
 /// #264: the Firewall & IPsec tab renders the conntrack gauge + per-proto donut,
 /// the nft rule DataTable, and the xfrm SA DataTable.
 #[test]

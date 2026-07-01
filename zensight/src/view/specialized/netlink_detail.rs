@@ -172,6 +172,7 @@ pub enum NetlinkTable {
     Tc,
     Xfrm,
     Nft,
+    Events,
 }
 
 /// Sort order for the socket explorer (#112). `Default` keeps the sensor's order;
@@ -284,8 +285,15 @@ impl NetlinkDetailState {
             Ok(NetlinkDetailData::Routes(v)) => self.routes = Fetch::Ready(v),
             Ok(NetlinkDetailData::Neighbors(v)) => self.neighbors = Fetch::Ready(v),
             Ok(NetlinkDetailData::Addresses(v)) => self.addresses = Fetch::Ready(v),
-            Ok(NetlinkDetailData::Events(v)) => self.events = Fetch::Ready(v),
-            Ok(NetlinkDetailData::RouteChanges(v)) => self.route_changes = Fetch::Ready(v),
+            Ok(NetlinkDetailData::Events(mut v)) => {
+                // Timelines render newest-first (#265).
+                v.sort_by_key(|r| std::cmp::Reverse(r.ts_unix));
+                self.events = Fetch::Ready(v);
+            }
+            Ok(NetlinkDetailData::RouteChanges(mut v)) => {
+                v.sort_by_key(|r| std::cmp::Reverse(r.ts_unix));
+                self.route_changes = Fetch::Ready(v);
+            }
             Ok(NetlinkDetailData::Tc(v)) => self.tc = Fetch::Ready(v),
             Ok(NetlinkDetailData::Xfrm(v)) => self.xfrm = Fetch::Ready(v),
             Ok(NetlinkDetailData::Nft(v)) => self.nft = Fetch::Ready(v),

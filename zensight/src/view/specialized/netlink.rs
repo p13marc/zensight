@@ -18,8 +18,8 @@ use crate::view::device::DeviceDetailState;
 use crate::view::specialized::SpecializedTab;
 use crate::view::specialized::fetch::Fetch;
 use crate::view::specialized::netlink_detail::{
-    AddressRecord, NetlinkDetailState, NetlinkDetailTopic, NetlinkTable, NftRuleRecord,
-    RouteChangeRecord, SocketSort, TcRecord, XfrmSaRecord, filter_sort_sockets,
+    AddressRecord, EventRecord, NetlinkDetailState, NetlinkDetailTopic, NetlinkTable,
+    NftRuleRecord, RouteChangeRecord, SocketSort, TcRecord, XfrmSaRecord, filter_sort_sockets,
 };
 use crate::view::theme;
 use crate::view::tokens::{font, space};
@@ -87,9 +87,7 @@ fn netlink_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Elemen
         RoutingNeighbors => render_routing_tab(state),
         Qos => render_qos_tab(state),
         FirewallIpsec => render_firewall_tab(state),
-        Events => {
-            column![card(render_detail(state, &[NetlinkDetailTopic::Events]))].spacing(space::MD)
-        }
+        Events => render_events_tab(state),
         WireGuard => column![card(render_wireguard(state))].spacing(space::MD),
         // netring tabs never reach a netlink view (falls back to Overview).
         _ => column![card(render_diagnostics(state))].spacing(space::MD),
@@ -1303,351 +1301,99 @@ fn route_changes_columns<'a>() -> Vec<DataColumn<'a, RouteChangeRecord, Message>
     ]
 }
 
-/// On-demand detail tables for the requested `topics` (#258): fetch buttons plus
-/// the fetched full tables (pulled from the sensor's `@/query/*` channels), so
-/// each tab shows only its own drill-downs. `loading(topic)` relabels/disables
-/// the button while a fetch is in flight.
-fn render_detail<'a>(
-    state: &'a DeviceDetailState,
-    topics: &[NetlinkDetailTopic],
-) -> Element<'a, Message> {
-    let title = section_header("On-demand Detail", None);
+/// Events tab (#265): a structured, filterable control-plane timeline
+/// (`@/query/events`, newest-first) across link/addr/route/neighbor/ipsec, with
+/// per-family event counters as a context chart. Family/action are their own
+/// columns so the DataTable filter box filters by either; `detail` is the
+/// sensor's already-humanized field (iface name / ip / route dest), not raw JSON.
+fn render_events_tab(state: &DeviceDetailState) -> Column<'_, Message> {
     let d = &state.netlink_detail;
-    let want = |t: NetlinkDetailTopic| topics.contains(&t);
+    let mut col = column![].spacing(space::MD);
 
-    // A fetch button per requested topic; disabled/relabelled while loading.
-    let fetch = |topic: NetlinkDetailTopic, loading: bool| {
-        let label = if loading {
-            format!("Fetching {}…", topic.label())
-        } else {
-            format!("Fetch {}", topic.label())
-        };
-        let mut b = button(text(label).size(font::CAPTION)).padding([4, 10]);
-        if !loading {
-            b = b.on_press(Message::FetchNetlinkDetail(topic));
-        }
-        b
-    };
-    let loading_of = |t: NetlinkDetailTopic| match t {
-        NetlinkDetailTopic::Sockets => d.sockets.is_loading(),
-        NetlinkDetailTopic::Routes => d.routes.is_loading(),
-        NetlinkDetailTopic::Neighbors => d.neighbors.is_loading(),
-        NetlinkDetailTopic::Addresses => d.addresses.is_loading(),
-        NetlinkDetailTopic::Events => d.events.is_loading(),
-        NetlinkDetailTopic::RouteChanges => d.route_changes.is_loading(),
-        NetlinkDetailTopic::Tc => d.tc.is_loading(),
-        NetlinkDetailTopic::Xfrm => d.xfrm.is_loading(),
-        NetlinkDetailTopic::Nft => d.nft.is_loading(),
-    };
-    let mut buttons = row![].spacing(space::SM);
-    for t in topics {
-        buttons = buttons.push(fetch(*t, loading_of(*t)));
-    }
-
-    let mut col = column![title, buttons].spacing(space::SM);
-
-    // Sockets are rendered by the first-class explorer (`render_sockets_explorer`,
-    // #261), not here — the Sockets topic isn't routed through `render_detail`.
-
-    // Routes
-    if want(NetlinkDetailTopic::Routes)
-        && let Some(err) = d.routes.error()
-    {
-        col = col.push(empty_state(format!("Routes fetch failed: {err}"), None));
-    } else if want(NetlinkDetailTopic::Routes)
-        && let Some(routes) = d.routes.ready()
-    {
-        let mut list = Column::new().spacing(3).push(
-            row![
-                cell("destination", 220),
-                cell("gateway", 160),
-                cell("proto", 90),
-                cell("scope", 90),
+    let fam = event_family_totals(state);
+    if !fam.is_empty() {
+        col = col.push(card(
+            column![
+                section_header("Event families", None),
+                crate::view::chart::ranked_bar(&fam, |v| format!("{}", v as u64), 8),
             ]
-            .spacing(8),
-        );
-        for r in routes.iter().take(200) {
-            list = list.push(
-                row![
-                    cell(&r.dst, 220),
-                    cell(r.gateway.as_deref().unwrap_or("-"), 160),
-                    cell(&r.protocol, 90),
-                    cell(&r.scope, 90),
-                ]
-                .spacing(8),
-            );
-        }
-        col = col
-            .push(text(format!("Routes ({})", routes.len())).size(font::EMPHASIS))
-            .push(list);
-    }
-
-    // Neighbors
-    if want(NetlinkDetailTopic::Neighbors)
-        && let Some(err) = d.neighbors.error()
-    {
-        col = col.push(empty_state(format!("Neighbors fetch failed: {err}"), None));
-    } else if want(NetlinkDetailTopic::Neighbors)
-        && let Some(neighbors) = d.neighbors.ready()
-    {
-        let mut list = Column::new()
-            .spacing(3)
-            .push(row![cell("ip", 200), cell("mac", 200), cell("state", 120)].spacing(8));
-        for n in neighbors.iter().take(200) {
-            list = list.push(
-                row![
-                    cell(n.ip.as_deref().unwrap_or("-"), 200),
-                    cell(n.mac.as_deref().unwrap_or("-"), 200),
-                    cell(&n.state, 120),
-                ]
-                .spacing(8),
-            );
-        }
-        col = col
-            .push(text(format!("Neighbors ({})", neighbors.len())).size(font::EMPHASIS))
-            .push(list);
-    }
-
-    // Addresses (#109)
-    if want(NetlinkDetailTopic::Addresses)
-        && let Some(err) = d.addresses.error()
-    {
-        col = col.push(empty_state(format!("Addresses fetch failed: {err}"), None));
-    } else if want(NetlinkDetailTopic::Addresses)
-        && let Some(addrs) = d.addresses.ready()
-    {
-        let mut list = Column::new().spacing(3).push(
-            row![
-                cell("address", 240),
-                cell("scope", 90),
-                cell("label", 120),
-                cell("ifindex", 70),
-            ]
-            .spacing(8),
-        );
-        for a in addrs.iter().take(200) {
-            let addr = match &a.ip {
-                Some(ip) => format!("{ip}/{}", a.prefix_len),
-                None => "-".to_string(),
-            };
-            list = list.push(
-                row![
-                    cell(&addr, 240),
-                    cell(&a.scope, 90),
-                    cell(a.label.as_deref().unwrap_or("-"), 120),
-                    cell(&a.ifindex.to_string(), 70),
-                ]
-                .spacing(8),
-            );
-        }
-        col = col
-            .push(text(format!("Addresses ({})", addrs.len())).size(font::EMPHASIS))
-            .push(list);
-    }
-
-    // Control-plane change timeline (#111): the recent-events ring (#109)
-    // rendered most-recent-first with a relative timestamp — link up/down,
-    // address add/del, route changes, neighbor failures on one time axis.
-    if want(NetlinkDetailTopic::Events)
-        && let Some(err) = d.events.error()
-    {
-        col = col.push(empty_state(format!("Events fetch failed: {err}"), None));
-    } else if want(NetlinkDetailTopic::Events)
-        && let Some(events) = d.events.ready()
-    {
-        let mut evs: Vec<&_> = events.iter().collect();
-        evs.sort_by_key(|b| std::cmp::Reverse(b.ts_unix));
-        let mut list = Column::new().spacing(3).push(
-            row![
-                cell("when", 90),
-                cell("family", 80),
-                cell("action", 80),
-                cell("ifindex", 70),
-                cell("detail", 240),
-            ]
-            .spacing(8),
-        );
-        for e in evs.iter().take(200) {
-            let when = crate::view::formatting::format_timestamp(e.ts_unix as i64 * 1000);
-            list = list.push(
-                row![
-                    cell(&when, 90),
-                    cell(&e.family, 80),
-                    cell(&e.action, 80),
-                    cell(&e.ifindex.map(|i| i.to_string()).unwrap_or_default(), 70),
-                    cell(&e.detail, 240),
-                ]
-                .spacing(8),
-            );
-        }
-        col = col
-            .push(text(format!("Control-plane timeline ({})", events.len())).size(font::EMPHASIS))
-            .push(list);
-    }
-
-    // Default-route flap history (#111): per-transition gateway/withdrawal ring,
-    // most-recent-first — the history behind the `default_v4_flaps_total` counter.
-    if want(NetlinkDetailTopic::RouteChanges)
-        && let Some(err) = d.route_changes.error()
-    {
-        col = col.push(empty_state(
-            format!("Route flaps fetch failed: {err}"),
-            None,
+            .spacing(space::XS),
         ));
-    } else if want(NetlinkDetailTopic::RouteChanges)
-        && let Some(changes) = d.route_changes.ready()
-    {
-        if changes.is_empty() {
-            col = col.push(
-                text("Default-route flaps: none observed")
-                    .size(font::CAPTION)
-                    .style(dim),
-            );
-        } else {
-            let mut chs: Vec<&_> = changes.iter().collect();
-            chs.sort_by_key(|c| std::cmp::Reverse(c.ts_unix));
-            let mut list = Column::new().spacing(3).push(
-                row![
-                    cell("when", 90),
-                    cell("family", 60),
-                    cell("action", 90),
-                    cell("gateway", 150),
-                    cell("was", 150),
-                ]
-                .spacing(8),
-            );
-            for c in chs.iter().take(200) {
-                let when = crate::view::formatting::format_timestamp(c.ts_unix as i64 * 1000);
-                list = list.push(
-                    row![
-                        cell(&when, 90),
-                        cell(&c.family, 60),
-                        cell(&c.action, 90),
-                        cell(c.gateway.as_deref().unwrap_or("-"), 150),
-                        cell(c.prev_gateway.as_deref().unwrap_or("-"), 150),
-                    ]
-                    .spacing(8),
-                );
-            }
-            col = col
-                .push(text(format!("Default-route flaps ({})", changes.len())).size(font::EMPHASIS))
-                .push(list);
-        }
     }
 
-    // TC qdisc/class tree (#109)
-    if want(NetlinkDetailTopic::Tc)
-        && let Some(err) = d.tc.error()
-    {
-        col = col.push(empty_state(format!("TC fetch failed: {err}"), None));
-    } else if want(NetlinkDetailTopic::Tc)
-        && let Some(tc) = d.tc.ready()
-    {
-        let mut list = Column::new().spacing(3).push(
-            row![
-                cell("iface", 90),
-                cell("node", 70),
-                cell("kind", 110),
-                cell("handle", 90),
-                cell("drops", 90),
-                cell("backlog_b", 100),
-            ]
-            .spacing(8),
-        );
-        for t in tc.iter().take(200) {
-            list = list.push(
-                row![
-                    cell(&t.iface, 90),
-                    cell(&t.node, 70),
-                    cell(t.kind.as_deref().unwrap_or("-"), 110),
-                    cell(&t.handle, 90),
-                    cell(&t.drops.to_string(), 90),
-                    cell(&t.backlog_bytes.to_string(), 100),
-                ]
-                .spacing(8),
-            );
-        }
-        col = col
-            .push(text(format!("TC ({})", tc.len())).size(font::EMPHASIS))
-            .push(list);
-    }
+    col = col.push(card(detail_datatable(
+        d,
+        NetlinkTable::Events,
+        NetlinkDetailTopic::Events,
+        &d.events,
+        "Event timeline",
+        "events",
+        events_columns(),
+        |e: &EventRecord| format!("{} {} {}", e.family, e.action, e.detail),
+    )));
 
-    // XFRM / IPsec SAs (#109)
-    if want(NetlinkDetailTopic::Xfrm)
-        && let Some(err) = d.xfrm.error()
-    {
-        col = col.push(empty_state(format!("XFRM fetch failed: {err}"), None));
-    } else if want(NetlinkDetailTopic::Xfrm)
-        && let Some(sas) = d.xfrm.ready()
-    {
-        let mut list = Column::new().spacing(3).push(
-            row![
-                cell("src", 150),
-                cell("dst", 150),
-                cell("proto", 70),
-                cell("mode", 90),
-                cell("spi", 100),
-            ]
-            .spacing(8),
-        );
-        for s in sas.iter().take(200) {
-            list = list.push(
-                row![
-                    cell(s.src.as_deref().unwrap_or("-"), 150),
-                    cell(s.dst.as_deref().unwrap_or("-"), 150),
-                    cell(&s.proto, 70),
-                    cell(&s.mode, 90),
-                    cell(&format!("{:#x}", s.spi), 100),
-                ]
-                .spacing(8),
-            );
-        }
-        col = col
-            .push(text(format!("XFRM SAs ({})", sas.len())).size(font::EMPHASIS))
-            .push(list);
-    }
+    col
+}
 
-    // nftables rule inventory (#109)
-    if want(NetlinkDetailTopic::Nft)
-        && let Some(err) = d.nft.error()
-    {
-        col = col.push(empty_state(format!("NFT fetch failed: {err}"), None));
-    } else if want(NetlinkDetailTopic::Nft)
-        && let Some(rules) = d.nft.ready()
-    {
-        let mut list = Column::new().spacing(3).push(
-            row![
-                cell("family", 80),
-                cell("table", 140),
-                cell("chain", 120),
-                cell("handle", 70),
-                // #115: decoded firewall hit counters (packets / bytes matched).
-                cell("packets", 90),
-                cell("bytes", 90),
-                cell("comment", 180),
-            ]
-            .spacing(8),
-        );
-        for r in rules.iter().take(200) {
-            list = list.push(
-                row![
-                    cell(&r.family, 80),
-                    cell(&r.table, 140),
-                    cell(&r.chain, 120),
-                    cell(&r.handle.to_string(), 70),
-                    cell(&fmt_count(r.packets), 90),
-                    cell(&fmt_bytes(r.bytes), 90),
-                    cell(r.comment.as_deref().unwrap_or("-"), 180),
-                ]
-                .spacing(8),
-            );
-        }
-        col = col
-            .push(text(format!("NFT rules ({})", rules.len())).size(font::EMPHASIS))
-            .push(list);
-    }
+fn events_columns<'a>() -> Vec<DataColumn<'a, EventRecord, Message>> {
+    vec![
+        DataColumn::fixed("when", 160.0, |e: &EventRecord| {
+            text(crate::view::formatting::format_timestamp(
+                e.ts_unix as i64 * 1000,
+            ))
+            .size(font::CAPTION)
+            .into()
+        })
+        .sortable(|e: &EventRecord| SortKey::Num(e.ts_unix as f64)),
+        DataColumn::fixed("family", 80.0, |e: &EventRecord| {
+            badge(family_color(&e.family), e.family.clone())
+        })
+        .sortable(|e: &EventRecord| SortKey::Text(e.family.clone())),
+        DataColumn::fixed("action", 90.0, |e: &EventRecord| {
+            text(e.action.clone()).size(font::CAPTION).into()
+        })
+        .sortable(|e: &EventRecord| SortKey::Text(e.action.clone())),
+        DataColumn::fixed("iface", 60.0, |e: &EventRecord| {
+            text(
+                e.ifindex
+                    .map(|i| i.to_string())
+                    .unwrap_or_else(|| "-".into()),
+            )
+            .size(font::CAPTION)
+            .into()
+        }),
+        DataColumn::fill("detail", 3, |e: &EventRecord| {
+            text(e.detail.clone()).size(font::CAPTION).into()
+        }),
+    ]
+}
 
-    col.into()
+/// Per-family event totals (`events/<family>/*_total`) for the context chart.
+fn event_family_totals(state: &DeviceDetailState) -> Vec<(String, f64)> {
+    let mut map: BTreeMap<String, f64> = BTreeMap::new();
+    for (m, p) in &state.metrics {
+        if let Some(rest) = m.strip_prefix("events/")
+            && let Some((fam, _)) = rest.split_once('/')
+            && let Some(v) = tv_num(&p.value)
+        {
+            *map.entry(fam.to_string()).or_default() += v;
+        }
+    }
+    let mut v: Vec<(String, f64)> = map.into_iter().collect();
+    v.sort_by(|a, b| b.1.total_cmp(&a.1));
+    v
+}
+
+/// Distinct colors per control-plane event family (for the timeline badges).
+fn family_color(family: &str) -> iced::Color {
+    match family {
+        "link" => theme::SEVERITY_INFO,
+        "addr" | "address" => theme::STATUS_ONLINE,
+        "route" => theme::ACCENT_GOLD,
+        "neigh" | "neighbor" => theme::STATUS_DEGRADED,
+        "ipsec" | "xfrm" => theme::SEVERITY_CRITICAL,
+        _ => theme::STATUS_UNKNOWN,
+    }
 }
 
 /// Socket-explorer filter/sort controls (#112): state chips (derived from the
