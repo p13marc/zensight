@@ -249,6 +249,11 @@ pub fn protocol_netring<Message: 'static>(size: IconSize) -> Element<'static, Me
     svg_icon(include_bytes!("protocol-netring.svg"), size)
 }
 
+/// systemd protocol icon (teal gear — the system/service manager).
+pub fn protocol_systemd<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("protocol-systemd.svg"), size)
+}
+
 /// Generic protocol icon (gray info circle).
 pub fn protocol_generic<Message: 'static>(size: IconSize) -> Element<'static, Message> {
     svg_icon(include_bytes!("protocol-generic.svg"), size)
@@ -269,8 +274,7 @@ pub fn protocol_icon<Message: 'static>(
         zensight_common::Protocol::Opcua => protocol_opcua(size),
         zensight_common::Protocol::Netlink => protocol_netlink(size),
         zensight_common::Protocol::Netring => protocol_netring(size),
-        // No dedicated systemd glyph yet (#281): reuse the sysinfo host icon.
-        zensight_common::Protocol::Systemd => protocol_sysinfo(size),
+        zensight_common::Protocol::Systemd => protocol_systemd(size),
     }
 }
 

@@ -783,6 +783,23 @@ impl ZenSight {
     /// can fall through to the next handler.
     fn update_detail(&mut self, message: Message) -> ControlFlow<Task<Message>, Message> {
         match message {
+            Message::FetchSystemdDetail(topic) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.loading(topic);
+                }
+                return ControlFlow::Break(self.query_systemd_detail(topic));
+            }
+            Message::SystemdDetailReceived(topic, result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.apply(topic, result);
+                }
+            }
+            Message::SystemdSetUnitFilter(filter) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.unit_state_filter = filter;
+                }
+            }
+
             Message::FetchNetlinkDetail(topic) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netlink_detail.loading(topic);
@@ -847,6 +864,7 @@ impl ZenSight {
                 let prefetch = match device_id.protocol {
                     zensight_common::Protocol::Netring => self.prefetch_netring_tab(tab),
                     zensight_common::Protocol::Netlink => self.prefetch_netlink_tab(tab),
+                    zensight_common::Protocol::Systemd => self.prefetch_systemd_tab(tab),
                     _ => None,
                 };
                 if let Some(task) = prefetch {
@@ -2640,6 +2658,74 @@ impl ZenSight {
     }
 
     /// Fetch an on-demand netlink detail table from the sensor's query channel.
+    /// Prefetch the systemd detail channel(s) a newly-activated tab renders, so
+    /// the panel isn't empty until a manual refresh (#281).
+    fn prefetch_systemd_tab(
+        &self,
+        tab: crate::view::specialized::SpecializedTab,
+    ) -> Option<Task<Message>> {
+        use crate::view::specialized::SpecializedTab;
+        use crate::view::specialized::fetch::Fetch;
+        use crate::view::specialized::systemd_detail::SystemdDetailTopic;
+        let device = self.selected_device.as_ref()?;
+        let topic = match tab {
+            SpecializedTab::Units => SystemdDetailTopic::Units,
+            SpecializedTab::Timers => SystemdDetailTopic::Timers,
+            SpecializedTab::Events => SystemdDetailTopic::Events,
+            SpecializedTab::Cgroups => SystemdDetailTopic::Cgroups,
+            _ => return None,
+        };
+        // Only prefetch when we haven't already loaded/started this channel.
+        let already = match topic {
+            SystemdDetailTopic::Units => !matches!(device.systemd_detail.units, Fetch::Idle),
+            SystemdDetailTopic::Timers => !matches!(device.systemd_detail.timers, Fetch::Idle),
+            SystemdDetailTopic::Events => !matches!(device.systemd_detail.events, Fetch::Idle),
+            SystemdDetailTopic::Cgroups => !matches!(device.systemd_detail.cgroups, Fetch::Idle),
+        };
+        if already {
+            return None;
+        }
+        Some(self.query_systemd_detail(topic))
+    }
+
+    /// Fetch a systemd on-demand detail channel and wrap the outcome (#281).
+    fn query_systemd_detail(
+        &self,
+        topic: crate::view::specialized::systemd_detail::SystemdDetailTopic,
+    ) -> Task<Message> {
+        use crate::view::specialized::netlink_detail::fetch_records;
+        use crate::view::specialized::systemd_detail::{
+            SystemdDetailData, SystemdDetailTopic, fetch_one,
+        };
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::SystemdDetailReceived(
+                topic,
+                Err("Not connected to Zenoh".to_string()),
+            ));
+        };
+        let key = topic.key();
+        Task::future(async move {
+            let data = match topic {
+                SystemdDetailTopic::Units => fetch_records(session, key)
+                    .await
+                    .map(SystemdDetailData::Units),
+                SystemdDetailTopic::Timers => fetch_records(session, key)
+                    .await
+                    .map(SystemdDetailData::Timers),
+                SystemdDetailTopic::Events => fetch_records(session, key)
+                    .await
+                    .map(SystemdDetailData::Events),
+                // cgroups replies a single tree object (or null), not an array.
+                SystemdDetailTopic::Cgroups => {
+                    Some(SystemdDetailData::Cgroups(fetch_one(session, key).await))
+                }
+            };
+            let result =
+                data.ok_or_else(|| format!("No systemd sensor responded for {}", topic.label()));
+            Message::SystemdDetailReceived(topic, result)
+        })
+    }
+
     fn query_netlink_detail(
         &self,
         topic: crate::view::specialized::netlink_detail::NetlinkDetailTopic,

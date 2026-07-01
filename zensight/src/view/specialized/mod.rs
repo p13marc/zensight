@@ -15,6 +15,8 @@ pub mod snmp;
 pub mod sysinfo;
 pub mod sysinfo_detail;
 pub mod syslog;
+pub mod systemd;
+pub mod systemd_detail;
 
 use iced::{Element, Length};
 
@@ -55,6 +57,11 @@ pub enum SpecializedTab {
     FirewallIpsec,
     Events,
     WireGuard,
+    // systemd (#281)
+    Units,
+    Timers,
+    Sentinel,
+    Cgroups,
 }
 
 /// Number of trailing history samples to render in an inline sparkline (#44).
@@ -125,7 +132,7 @@ pub fn specialized_view<'a>(state: &'a DeviceDetailState) -> Option<Element<'a, 
         Protocol::Opcua => None, // No specialized view yet, use generic
         Protocol::Netlink => Some(netlink::netlink_host_view(state)),
         Protocol::Netring => Some(netring::netring_sensor_view(state)),
-        Protocol::Systemd => None, // No specialized view yet (#281), use generic
+        Protocol::Systemd => Some(systemd::systemd_host_view(state)),
     }
 }
 
