@@ -820,6 +820,21 @@ impl ZenSight {
                     device.netlink_detail.sockets_table.load_more();
                 }
             }
+            Message::NetlinkTableSort(which, col) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netlink_detail.table_mut(which).toggle_sort(col);
+                }
+            }
+            Message::NetlinkTableFilter(which, filter) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netlink_detail.table_mut(which).set_filter(filter);
+                }
+            }
+            Message::NetlinkTableMore(which) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netlink_detail.table_mut(which).load_more();
+                }
+            }
 
             Message::SelectSpecializedTab(device_id, tab) => {
                 if let Some(device) = self.selected_device.as_mut()

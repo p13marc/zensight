@@ -165,6 +165,18 @@ pub enum Message {
     /// Socket explorer (#261): reveal another page of socket rows (replaces the
     /// old silent `.take(200)` cutoff).
     NetlinkSocketsMore,
+    /// Netlink detail-table (#244): toggle the sort column.
+    NetlinkTableSort(
+        crate::view::specialized::netlink_detail::NetlinkTable,
+        usize,
+    ),
+    /// Netlink detail-table: set the substring filter.
+    NetlinkTableFilter(
+        crate::view::specialized::netlink_detail::NetlinkTable,
+        String,
+    ),
+    /// Netlink detail-table: reveal another page of rows.
+    NetlinkTableMore(crate::view::specialized::netlink_detail::NetlinkTable),
 
     /// Select the active tab of a tabbed specialized view (#243). Remembered
     /// per device in `DeviceDetailState`.

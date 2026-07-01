@@ -11,6 +11,8 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use zensight_common::{NeighborRecord, RouteRecord, SocketRecord};
 
+use std::collections::HashMap;
+
 use crate::view::components::TableState;
 use crate::view::specialized::fetch::Fetch;
 
@@ -158,6 +160,20 @@ pub enum NetlinkDetailData {
     Nft(Vec<NftRuleRecord>),
 }
 
+/// Identifies a sortable/filterable netlink detail table so the shared sort/
+/// filter/load-more messages can address one table without a message per table
+/// (#244, reused across the Routing/QoS/Firewall tabs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NetlinkTable {
+    Routes,
+    Neighbors,
+    Addresses,
+    RouteChanges,
+    Tc,
+    Xfrm,
+    Nft,
+}
+
 /// Sort order for the socket explorer (#112). `Default` keeps the sensor's order;
 /// the others surface the worst flows first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -192,6 +208,25 @@ pub struct NetlinkDetailState {
     /// Socket explorer pagination (#261): only `limit` used here (row cap + load
     /// more), replacing the old silent `.take(200)` cutoff. Default = 200 rows.
     pub sockets_table: TableState,
+    /// Per-detail-table sort/filter/pagination state, addressed by
+    /// [`NetlinkTable`] (#244).
+    pub tables: HashMap<NetlinkTable, TableState>,
+}
+
+impl NetlinkDetailState {
+    /// Read a detail table's interaction state (a shared default when untouched).
+    pub fn table(&self, which: NetlinkTable) -> &TableState {
+        use std::sync::OnceLock;
+        static DEFAULT: OnceLock<TableState> = OnceLock::new();
+        self.tables
+            .get(&which)
+            .unwrap_or_else(|| DEFAULT.get_or_init(TableState::default))
+    }
+
+    /// Mutable table state, created lazily on first interaction.
+    pub fn table_mut(&mut self, which: NetlinkTable) -> &mut TableState {
+        self.tables.entry(which).or_default()
+    }
 }
 
 /// The port component of an `addr:port` endpoint (after the last colon), so IPv6

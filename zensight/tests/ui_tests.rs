@@ -2011,6 +2011,49 @@ fn test_netlink_tabs_capability_and_switch() {
     }
 }
 
+/// #262: the Routing & Neighbors tab renders the routes DataTable (sortable),
+/// the neighbor-state donut, and the default-route flap section.
+#[test]
+fn test_netlink_routing_tab() {
+    use zensight::view::specialized::netlink::netlink_host_view;
+    use zensight::view::specialized::netlink_detail::{NetlinkDetailData, NetlinkDetailTopic};
+    use zensight_common::{Protocol, RouteRecord, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let mut state = DeviceDetailState::new(device_id);
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::RoutingNeighbors;
+    for (m, v) in [
+        ("routes/ipv4_count", TelemetryValue::Gauge(5.0)),
+        ("routes/default_v4_flaps_total", TelemetryValue::Counter(3)),
+        ("neighbors/total", TelemetryValue::Gauge(4.0)),
+        ("neighbors/by_state/reachable", TelemetryValue::Gauge(3.0)),
+        ("neighbors/by_state/stale", TelemetryValue::Gauge(1.0)),
+    ] {
+        state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
+    }
+    state.netlink_detail.apply(
+        NetlinkDetailTopic::Routes,
+        Ok(NetlinkDetailData::Routes(vec![RouteRecord {
+            family: 2,
+            dst: "10.0.0.0/24".into(),
+            gateway: Some("10.0.0.1".into()),
+            oif: None,
+            priority: None,
+            protocol: "kernel".into(),
+            scope: "link".into(),
+            table: 254,
+        }])),
+    );
+
+    let mut ui = simulator(netlink_host_view(&state));
+    assert!(ui.find("Default-route flaps").is_ok());
+    assert!(ui.find("Neighbor states").is_ok());
+    // Routes DataTable rendered (sortable "destination" header + fetched row);
+    // header click→NetlinkTableSort wiring is covered by data_table's own tests.
+    assert!(ui.find("destination").is_ok());
+    assert!(ui.find("10.0.0.0/24").is_ok());
+}
+
 /// #260: the Interfaces tab renders per-iface throughput tiles + inline ethtool
 /// link health, and the "View sockets →" pivot navigates to the Sockets tab.
 #[test]

@@ -7,16 +7,19 @@ use std::collections::BTreeMap;
 
 use iced::widget::{Column, button, column, container, row, scrollable, text, text_input};
 use iced::{Element, Length, Theme};
-use zensight_common::{SocketRecord, TelemetryValue};
+use zensight_common::{NeighborRecord, RouteRecord, SocketRecord, TelemetryValue};
 
 use crate::message::Message;
 use crate::view::components::{
-    Gauge, TabItem, badge, card, empty_state, section_header, tabbed_view,
+    Column as DataColumn, DataTable, Gauge, SortKey, TabItem, badge, card, empty_state,
+    section_header, tabbed_view,
 };
 use crate::view::device::DeviceDetailState;
 use crate::view::specialized::SpecializedTab;
+use crate::view::specialized::fetch::Fetch;
 use crate::view::specialized::netlink_detail::{
-    NetlinkDetailState, NetlinkDetailTopic, SocketSort, filter_sort_sockets,
+    AddressRecord, NetlinkDetailState, NetlinkDetailTopic, NetlinkTable, RouteChangeRecord,
+    SocketSort, filter_sort_sockets,
 };
 use crate::view::theme;
 use crate::view::tokens::{font, space};
@@ -81,20 +84,7 @@ fn netlink_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Elemen
             card(render_sockets_explorer(state)),
         ]
         .spacing(space::MD),
-        RoutingNeighbors => column![
-            card(render_routes(state)),
-            card(render_neighbors(state)),
-            card(render_detail(
-                state,
-                &[
-                    NetlinkDetailTopic::Routes,
-                    NetlinkDetailTopic::Neighbors,
-                    NetlinkDetailTopic::Addresses,
-                    NetlinkDetailTopic::RouteChanges,
-                ],
-            )),
-        ]
-        .spacing(space::MD),
+        RoutingNeighbors => render_routing_tab(state),
         Qos => column![
             card(render_tc(state)),
             card(render_detail(state, &[NetlinkDetailTopic::Tc])),
@@ -986,6 +976,265 @@ fn render_routes(state: &DeviceDetailState) -> Element<'_, Message> {
     ]
     .spacing(4)
     .into()
+}
+
+/// Routing & Neighbors tab (#262): route + neighbor summaries, a default-route
+/// flap section (count tile + flap timeline table), a neighbor-state breakdown
+/// donut, and DataTable views of routes / neighbors / addresses.
+fn render_routing_tab(state: &DeviceDetailState) -> Column<'_, Message> {
+    let d = &state.netlink_detail;
+    let mut col = column![card(render_routes(state))].spacing(space::MD);
+
+    // Default-route flap section: count tile + flap timeline table.
+    col = col.push(card(render_flap_section(state)));
+
+    // Neighbor summary + state-breakdown donut.
+    col = col.push(card(render_neighbors(state)));
+    if state
+        .metrics
+        .keys()
+        .any(|k| k.starts_with("neighbors/by_state/"))
+    {
+        col = col.push(card(
+            column![
+                section_header("Neighbor states", None),
+                crate::view::chart::donut(&neighbor_state_mix(state), 120.0),
+            ]
+            .spacing(space::XS),
+        ));
+    }
+
+    // Record tables (DataTable, #244 — sortable/filterable, no silent cutoff).
+    col = col.push(card(detail_datatable(
+        d,
+        NetlinkTable::Routes,
+        NetlinkDetailTopic::Routes,
+        &d.routes,
+        "Routes",
+        "routes",
+        routes_columns(),
+        |r: &RouteRecord| format!("{} {}", r.dst, r.gateway.as_deref().unwrap_or("")),
+    )));
+    col = col.push(card(detail_datatable(
+        d,
+        NetlinkTable::Neighbors,
+        NetlinkDetailTopic::Neighbors,
+        &d.neighbors,
+        "Neighbors",
+        "neighbors",
+        neighbors_columns(),
+        |n: &NeighborRecord| {
+            format!(
+                "{} {} {}",
+                n.ip.as_deref().unwrap_or(""),
+                n.mac.as_deref().unwrap_or(""),
+                n.state
+            )
+        },
+    )));
+    col = col.push(card(detail_datatable(
+        d,
+        NetlinkTable::Addresses,
+        NetlinkDetailTopic::Addresses,
+        &d.addresses,
+        "Addresses",
+        "addresses",
+        addresses_columns(),
+        |a: &AddressRecord| a.ip.clone().unwrap_or_default(),
+    )));
+
+    col
+}
+
+/// Default-route flap count tile + the flap timeline record table (#262).
+fn render_flap_section(state: &DeviceDetailState) -> Element<'_, Message> {
+    let d = &state.netlink_detail;
+    let tile = row![metric_tile(
+        state,
+        "flaps (total)",
+        "routes/default_v4_flaps_total",
+        None,
+    )]
+    .spacing(space::MD);
+    let table = detail_datatable(
+        d,
+        NetlinkTable::RouteChanges,
+        NetlinkDetailTopic::RouteChanges,
+        &d.route_changes,
+        "Flap timeline",
+        "flaps",
+        route_changes_columns(),
+        |c: &RouteChangeRecord| format!("{} {}", c.family, c.action),
+    );
+    column![section_header("Default-route flaps", None), tile, table]
+        .spacing(space::SM)
+        .into()
+}
+
+/// Per-neighbor-state counts (`neighbors/by_state/*`) for the breakdown donut.
+fn neighbor_state_mix(state: &DeviceDetailState) -> Vec<(String, f64)> {
+    let mut v: Vec<(String, f64)> = state
+        .metrics
+        .iter()
+        .filter_map(|(m, p)| {
+            let st = m.strip_prefix("neighbors/by_state/")?;
+            Some((st.to_string(), tv_num(&p.value)?))
+        })
+        .collect();
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    v
+}
+
+/// A `TelemetryValue`'s numeric projection (counter/gauge/bool→0|1).
+fn tv_num(v: &TelemetryValue) -> Option<f64> {
+    match v {
+        TelemetryValue::Counter(c) => Some(*c as f64),
+        TelemetryValue::Gauge(g) => Some(*g),
+        TelemetryValue::Boolean(b) => Some(if *b { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
+/// Generic detail-table renderer (#244): a fetch/refresh affordance + the
+/// fetched records as a sortable/filterable [`DataTable`] addressed by `which`.
+/// Reused across the Routing, QoS, and Firewall tabs.
+#[allow(clippy::too_many_arguments)]
+fn detail_datatable<'a, T>(
+    d: &'a NetlinkDetailState,
+    which: NetlinkTable,
+    topic: NetlinkDetailTopic,
+    fetch: &'a Fetch<Vec<T>>,
+    title: &'static str,
+    noun: &'static str,
+    columns: Vec<DataColumn<'a, T, Message>>,
+    searchable: impl Fn(&T) -> String + 'a,
+) -> Element<'a, Message> {
+    let loading = fetch.is_loading();
+    let label = if loading {
+        format!("Fetching {title}…")
+    } else {
+        format!("Fetch {title}")
+    };
+    let mut refresh = button(text(label).size(font::CAPTION)).padding([4, 10]);
+    if !loading {
+        refresh = refresh.on_press(Message::FetchNetlinkDetail(topic));
+    }
+    let head = row![section_header(title, None), refresh]
+        .spacing(space::MD)
+        .align_y(iced::Alignment::Center);
+    let body: Element<'a, Message> = if let Some(err) = fetch.error() {
+        empty_state(format!("{title} fetch failed: {err}"), None)
+    } else if let Some(rows) = fetch.ready() {
+        DataTable::new(columns)
+            .searchable(searchable)
+            .on_sort(move |c| Message::NetlinkTableSort(which, c))
+            .on_filter(move |f| Message::NetlinkTableFilter(which, f))
+            .on_more(Message::NetlinkTableMore(which))
+            .noun(noun)
+            .view(rows, d.table(which))
+    } else {
+        empty_state(format!("Fetch {title} to load"), None)
+    };
+    column![head, body].spacing(space::SM).into()
+}
+
+fn routes_columns<'a>() -> Vec<DataColumn<'a, RouteRecord, Message>> {
+    vec![
+        DataColumn::fill("destination", 3, |r: &RouteRecord| {
+            text(r.dst.clone()).size(font::CAPTION).into()
+        })
+        .sortable(|r: &RouteRecord| SortKey::Text(r.dst.clone())),
+        DataColumn::fill("gateway", 2, |r: &RouteRecord| {
+            text(r.gateway.clone().unwrap_or_else(|| "-".into()))
+                .size(font::CAPTION)
+                .into()
+        })
+        .sortable(|r: &RouteRecord| SortKey::Text(r.gateway.clone().unwrap_or_default())),
+        DataColumn::fixed("proto", 90.0, |r: &RouteRecord| {
+            text(r.protocol.clone()).size(font::CAPTION).into()
+        })
+        .sortable(|r: &RouteRecord| SortKey::Text(r.protocol.clone())),
+        DataColumn::fixed("scope", 90.0, |r: &RouteRecord| {
+            text(r.scope.clone()).size(font::CAPTION).into()
+        })
+        .sortable(|r: &RouteRecord| SortKey::Text(r.scope.clone())),
+    ]
+}
+
+fn neighbors_columns<'a>() -> Vec<DataColumn<'a, NeighborRecord, Message>> {
+    vec![
+        DataColumn::fill("ip", 3, |n: &NeighborRecord| {
+            text(n.ip.clone().unwrap_or_else(|| "-".into()))
+                .size(font::CAPTION)
+                .into()
+        })
+        .sortable(|n: &NeighborRecord| SortKey::Text(n.ip.clone().unwrap_or_default())),
+        DataColumn::fill("mac", 3, |n: &NeighborRecord| {
+            text(n.mac.clone().unwrap_or_else(|| "-".into()))
+                .size(font::CAPTION)
+                .into()
+        }),
+        DataColumn::fixed("state", 120.0, |n: &NeighborRecord| {
+            text(n.state.clone()).size(font::CAPTION).into()
+        })
+        .sortable(|n: &NeighborRecord| SortKey::Text(n.state.clone())),
+    ]
+}
+
+fn addresses_columns<'a>() -> Vec<DataColumn<'a, AddressRecord, Message>> {
+    vec![
+        DataColumn::fill("address", 3, |a: &AddressRecord| {
+            let s = match &a.ip {
+                Some(ip) => format!("{ip}/{}", a.prefix_len),
+                None => "-".to_string(),
+            };
+            text(s).size(font::CAPTION).into()
+        })
+        .sortable(|a: &AddressRecord| SortKey::Text(a.ip.clone().unwrap_or_default())),
+        DataColumn::fixed("scope", 90.0, |a: &AddressRecord| {
+            text(a.scope.clone()).size(font::CAPTION).into()
+        })
+        .sortable(|a: &AddressRecord| SortKey::Text(a.scope.clone())),
+        DataColumn::fill("label", 2, |a: &AddressRecord| {
+            text(a.label.clone().unwrap_or_else(|| "-".into()))
+                .size(font::CAPTION)
+                .into()
+        }),
+        DataColumn::fixed("ifindex", 70.0, |a: &AddressRecord| {
+            text(a.ifindex.to_string()).size(font::CAPTION).into()
+        })
+        .sortable(|a: &AddressRecord| SortKey::Num(a.ifindex as f64)),
+    ]
+}
+
+fn route_changes_columns<'a>() -> Vec<DataColumn<'a, RouteChangeRecord, Message>> {
+    vec![
+        DataColumn::fixed("when", 160.0, |c: &RouteChangeRecord| {
+            text(crate::view::formatting::format_timestamp(
+                c.ts_unix as i64 * 1000,
+            ))
+            .size(font::CAPTION)
+            .into()
+        })
+        .sortable(|c: &RouteChangeRecord| SortKey::Num(c.ts_unix as f64)),
+        DataColumn::fixed("family", 70.0, |c: &RouteChangeRecord| {
+            text(c.family.clone()).size(font::CAPTION).into()
+        }),
+        DataColumn::fixed("action", 90.0, |c: &RouteChangeRecord| {
+            text(c.action.clone()).size(font::CAPTION).into()
+        })
+        .sortable(|c: &RouteChangeRecord| SortKey::Text(c.action.clone())),
+        DataColumn::fill("gateway", 2, |c: &RouteChangeRecord| {
+            text(c.gateway.clone().unwrap_or_else(|| "-".into()))
+                .size(font::CAPTION)
+                .into()
+        }),
+        DataColumn::fill("was", 2, |c: &RouteChangeRecord| {
+            text(c.prev_gateway.clone().unwrap_or_else(|| "-".into()))
+                .size(font::CAPTION)
+                .into()
+        }),
+    ]
 }
 
 /// On-demand detail tables for the requested `topics` (#258): fetch buttons plus
