@@ -282,9 +282,17 @@ Build with `--features tester` and press F12 to:
 
 ## Feature Flags
 
-| Feature | Purpose |
-|---------|---------|
-| `tester` | Enable F12 UI recorder (iced/tester) |
+| Crate | Feature | Purpose |
+|-------|---------|---------|
+| `zensight` | `tester` | Enable F12 UI recorder (iced/tester) |
+| `zensight-sensor-netring` | `ja4plus` | JA4/JA4H fingerprints — FoxIO License 1.1 (NOT OSI); default build stays OSI-clean |
+| `zensight-sensor-netring` | `lateral` | Lateral-movement detection (SMB/RDP/Kerberos parsers, ATT&CK T1021/T1558) |
+| `zensight-sensor-netring` | `sigma` | Sigma rule evaluation (`sigma-rust` via netring) |
+| `zensight-sensor-netring` | `snmp` | Cleartext-SNMP community-string detection |
+
+All netring detector features are **off by default**; the distribution decision
+(what ships in packages vs. opt-in source builds) is documented in
+`docs/SENSORS.md` under the netring sensor.
 
 ## Configuration
 

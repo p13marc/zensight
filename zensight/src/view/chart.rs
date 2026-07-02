@@ -1761,6 +1761,54 @@ pub fn heatmap<'a, Message: 'a>(grid: &[Vec<f64>], cell: f32) -> Element<'a, Mes
     .into()
 }
 
+/// A **stacked-area chart** of aligned time series (#251). Each entry is a
+/// `(label, values)` pair; values are trailing samples oldest→newest (as
+/// returned by `DeviceDetailState::history_values`). Shorter series are
+/// front-padded with zeros so all series align on the newest sample. Series
+/// colors cycle the categorical palette; a legend renders label + latest value
+/// so the split is legible without relying on color alone.
+pub fn stacked_area<'a, Message: 'a>(
+    series: &[(String, Vec<f64>)],
+    value_fmt: impl Fn(f64) -> String,
+    height: f32,
+) -> Element<'a, Message> {
+    use iced::widget::{Canvas, column, container, row};
+
+    let len = series.iter().map(|(_, v)| v.len()).max().unwrap_or(0);
+    let aligned: Vec<Vec<f64>> = series
+        .iter()
+        .map(|(_, v)| {
+            let mut padded = vec![0.0; len - v.len()];
+            padded.extend_from_slice(v);
+            padded
+        })
+        .collect();
+
+    let widget = StackedAreaWidget {
+        series: aligned,
+        cache: Cache::new(),
+    };
+    let canvas = container(
+        Canvas::new(widget)
+            .width(Length::Fill)
+            .height(Length::Fixed(height)),
+    )
+    .width(Length::Fill);
+
+    let mut legend = row![].spacing(8);
+    for (i, (label, values)) in series.iter().enumerate() {
+        let latest = values.last().copied().unwrap_or(0.0);
+        legend = legend.push(kit::badge(
+            category_color(i),
+            format!("{label} {}", value_fmt(latest)),
+        ));
+    }
+
+    column![canvas, iced::widget::scrollable(legend)]
+        .spacing(4)
+        .into()
+}
+
 /// Caption font size (kept local so the primitives don't import the tokens
 /// module directly; matches `tokens::font::CAPTION`).
 fn font_caption() -> f32 {
@@ -1864,6 +1912,72 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for HeatmapWidget {
     }
 }
 
+/// Canvas program for [`stacked_area`]. `series[s][i]` is the value of series
+/// `s` at sample index `i`; all series are pre-aligned to the same length.
+struct StackedAreaWidget {
+    series: Vec<Vec<f64>>,
+    cache: Cache,
+}
+
+impl<Message> canvas::Program<Message, Theme, Renderer> for StackedAreaWidget {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry<Renderer>> {
+        let geo = self.cache.draw(renderer, bounds.size(), |frame| {
+            let len = self.series.first().map_or(0, Vec::len);
+            if len < 2 {
+                return;
+            }
+            // Total per sample = the stack top; scale y to the max total.
+            let mut totals = vec![0.0_f64; len];
+            for series in &self.series {
+                for (t, v) in totals.iter_mut().zip(series) {
+                    *t += v.max(0.0);
+                }
+            }
+            let max = totals.iter().cloned().fold(0.0_f64, f64::max);
+            if max <= 0.0 {
+                return;
+            }
+            let size = bounds.size();
+            let x_at = |i: usize| i as f32 / (len - 1) as f32 * size.width;
+            let y_at = |v: f64| size.height - ((v / max) as f32 * size.height);
+
+            // Draw each band between the previous cumulative line and the new
+            // one: forward along the top edge, back along the bottom edge.
+            let mut below = vec![0.0_f64; len];
+            for (s, series) in self.series.iter().enumerate() {
+                let above: Vec<f64> = below
+                    .iter()
+                    .zip(series)
+                    .map(|(b, v)| b + v.max(0.0))
+                    .collect();
+                let path = Path::new(|b| {
+                    b.move_to(Point::new(x_at(0), y_at(above[0])));
+                    for (i, v) in above.iter().enumerate().skip(1) {
+                        b.line_to(Point::new(x_at(i), y_at(*v)));
+                    }
+                    for (i, v) in below.iter().enumerate().rev() {
+                        b.line_to(Point::new(x_at(i), y_at(*v)));
+                    }
+                    b.close();
+                });
+                let base = category_color(s);
+                frame.fill(&path, Color { a: 0.85, ..base });
+                below = above;
+            }
+        });
+        vec![geo]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1889,6 +2003,22 @@ mod tests {
         let mut ui = simulator(view);
         assert!(ui.find("TCP 75%").is_ok());
         assert!(ui.find("UDP 25%").is_ok());
+    }
+
+    #[test]
+    fn stacked_area_legend_shows_latest_values() {
+        // Series of unequal length: the shorter one is front-padded, and the
+        // legend shows each series' latest value.
+        let series = vec![
+            ("https".to_string(), vec![10.0, 20.0, 30.0]),
+            ("dns".to_string(), vec![5.0]),
+        ];
+        let view = stacked_area::<TestMsg>(&series, |v| format!("{v:.0}B/s"), 80.0);
+        let mut ui = simulator(view);
+        assert!(ui.find("https 30B/s").is_ok());
+        assert!(ui.find("dns 5B/s").is_ok());
+        // Empty input builds without panicking.
+        let _ = simulator(stacked_area::<TestMsg>(&[], |v| format!("{v}"), 80.0));
     }
 
     #[test]

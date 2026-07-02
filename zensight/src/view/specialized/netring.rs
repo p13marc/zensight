@@ -119,6 +119,7 @@ fn netring_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Elemen
             if has_prefix(state, "ssh/") || !matches!(state.netring_detail.ssh, Fetch::Idle) {
                 c = c.push(card(render_ssh(state)));
             }
+            c = c.push(card(render_ja4h(state)));
             c
         }
         Bandwidth => column![card(render_bandwidth(state))].spacing(space::MD),
@@ -280,6 +281,75 @@ fn render_quic(state: &DeviceDetailState) -> Element<'_, Message> {
     col.into()
 }
 
+/// JA4H section (#256): on-demand HTTP-client fingerprint inventory fetched
+/// from `@/query/ja4h`. Served only by `ja4plus` sensor builds, so there is no
+/// streamed metric to gate on — the section always shows its fetch button and
+/// the error path names the build flag.
+fn render_ja4h(state: &DeviceDetailState) -> Element<'_, Message> {
+    let loading = state.netring_detail.ja4h.is_loading();
+    let label = if loading { "Fetching…" } else { "Fetch JA4H" };
+    let mut fetch = button(text(label).size(font::CAPTION)).padding([4, 10]);
+    if !loading {
+        fetch = fetch.on_press(Message::FetchNetringJa4h);
+    }
+
+    let mut col =
+        column![section_header("HTTP clients (JA4H)", Some(fetch.into()))].spacing(space::SM);
+
+    if let Some(err) = state.netring_detail.ja4h.error() {
+        col = col.push(empty_state(format!("Fetch failed: {err}"), None));
+    } else if let Some(records) = state.netring_detail.ja4h.ready() {
+        if records.is_empty() {
+            col = col.push(empty_state("No HTTP client fingerprints observed", None));
+        } else {
+            use zensight_common::Ja4hRecord;
+            let columns = vec![
+                TableColumn::fill("ja4h", 4, |r: &Ja4hRecord| {
+                    text(r.ja4h.clone()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &Ja4hRecord| SortKey::Text(r.ja4h.clone())),
+                TableColumn::fixed("method", 70.0, |r: &Ja4hRecord| {
+                    text(r.method.clone().unwrap_or_else(|| "-".into()))
+                        .size(font::CAPTION)
+                        .into()
+                }),
+                TableColumn::fill("host", 3, |r: &Ja4hRecord| {
+                    text(r.host.clone().unwrap_or_else(|| "-".into()))
+                        .size(font::CAPTION)
+                        .into()
+                })
+                .sortable(|r: &Ja4hRecord| SortKey::Text(r.host.clone().unwrap_or_default())),
+                TableColumn::fill("user-agent", 4, |r: &Ja4hRecord| {
+                    text(r.user_agent.clone().unwrap_or_else(|| "-".into()))
+                        .size(font::CAPTION)
+                        .into()
+                }),
+                TableColumn::fixed("count", 60.0, |r: &Ja4hRecord| {
+                    text(r.count.to_string()).size(font::CAPTION).into()
+                })
+                .sortable(|r: &Ja4hRecord| SortKey::Num(r.count as f64)),
+            ];
+            col = col.push(
+                DataTable::new(columns)
+                    .searchable(|r: &Ja4hRecord| {
+                        format!(
+                            "{} {} {}",
+                            r.ja4h,
+                            r.host.clone().unwrap_or_default(),
+                            r.user_agent.clone().unwrap_or_default(),
+                        )
+                    })
+                    .on_sort(|c| Message::NetringTableSort(NetringTable::Ja4h, c))
+                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Ja4h, q))
+                    .on_more(Message::NetringTableMore(NetringTable::Ja4h))
+                    .noun("fingerprints")
+                    .view(records, state.netring_detail.table(NetringTable::Ja4h)),
+            );
+        }
+    }
+    col.into()
+}
+
 /// SSH section (#72): streamed distinct-HASSH count + an on-demand HASSH
 /// inventory (fingerprint · role · banner) fetched from `@/query/ssh`.
 fn render_ssh(state: &DeviceDetailState) -> Element<'_, Message> {
@@ -429,6 +499,22 @@ fn assets_table<'a>(
         }),
         TableColumn::fill("seen via", 2, |r: &AssetRecord| {
             text(join_or_dash(&r.seen_via)).size(font::CAPTION).into()
+        }),
+        // Asset → topology node pivot (#252); resolution (hostname, then the
+        // ip→node map) happens in the handler, which toasts when unmapped.
+        TableColumn::fill("topology", 2, |r: &AssetRecord| {
+            let ip = asset_ip(r);
+            if ip == "-" {
+                text("-").size(font::CAPTION).into()
+            } else {
+                button(text("map").size(font::CAPTION))
+                    .padding([2, 8])
+                    .on_press(Message::NetringAssetToTopology {
+                        ip: ip.to_string(),
+                        hostname: r.hostname.clone(),
+                    })
+                    .into()
+            }
         }),
     ];
     DataTable::new(columns)
@@ -1318,6 +1404,13 @@ fn flows_table<'a>(
 /// Number of apps shown in the Bandwidth tab before the "N of M" footer.
 const BANDWIDTH_TOP_N: usize = 20;
 
+/// How many apps the stacked-area bandwidth trend stacks (#251) — kept below
+/// the table's top-N so the bands and legend stay legible.
+const BANDWIDTH_TREND_SERIES: usize = 6;
+
+/// Pixel height of the stacked-area bandwidth trend (#251).
+const BANDWIDTH_TREND_HEIGHT: f32 = 120.0;
+
 /// Rows in a ranked-bar chart (talkers, bandwidth) before it truncates.
 const RANKED_BAR_ROWS: usize = 15;
 
@@ -1348,6 +1441,20 @@ fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
             .into();
     }
 
+    // Stacked-area trend of the top apps over the stored history (#251) — the
+    // share-over-time view; per-row sparklines below show shape only.
+    let series: Vec<(String, Vec<f64>)> = rows
+        .iter()
+        .take(BANDWIDTH_TREND_SERIES)
+        .map(|(app, _)| {
+            let metric = format!("bandwidth/{app}/bytes_per_sec");
+            (app.clone(), state.history_values(&metric, 60))
+        })
+        .filter(|(_, values)| values.len() >= 2)
+        .collect();
+    let trend: Option<Element<'_, Message>> = (!series.is_empty())
+        .then(|| chart::stacked_area(&series, format_rate, BANDWIDTH_TREND_HEIGHT));
+
     // Ranked bar chart of current throughput (top-N).
     let bars = chart::ranked_bar(&rows, format_rate, BANDWIDTH_TOP_N);
 
@@ -1377,7 +1484,11 @@ fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
     let footer = text(format!("showing {shown} of {total} apps"))
         .size(font::CAPTION)
         .style(dim);
-    column![title, bars, list, footer].spacing(space::SM).into()
+    let mut content = column![title].spacing(space::SM);
+    if let Some(trend) = trend {
+        content = content.push(trend);
+    }
+    content.push(bars).push(list).push(footer).into()
 }
 
 /// Rank an alert severity for ordering / "highest severity" rollups.
