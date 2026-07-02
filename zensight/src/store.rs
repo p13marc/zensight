@@ -905,15 +905,6 @@ impl MetricStore {
             .collect()
     }
 
-    /// Number of distinct interned metric paths (append-only; never shrinks).
-    /// Exposed for the `zensight::diag` startup-freeze instrumentation — this is
-    /// the size of the linear scan `device_hot_samples`/`with_prefix` walks per
-    /// device on every dashboard render, so watching it grow pinpoints the
-    /// high-cardinality (e.g. netring per-flow) pressure on the render path.
-    pub fn interned_len(&self) -> usize {
-        self.interner.len()
-    }
-
     /// A clone of the persistent handle, if any (for off-thread queries).
     pub fn persistent(&self) -> Option<PersistentStore> {
         self.persistent.clone()
