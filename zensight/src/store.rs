@@ -169,10 +169,17 @@ fn key_range(metric: MetricId, tier: Tier) -> std::ops::RangeInclusive<u128> {
 }
 
 /// Interns metric paths into compact [`MetricId`]s.
+///
+/// Metric keys have the shape `"<protocol>/<source>|<metric>"` (see
+/// [`MetricStore::metric_key`]). `by_device` buckets ids under the
+/// `"<protocol>/<source>"` prefix (everything before the `|`) so per-device
+/// lookups are O(metrics-for-that-device) instead of a linear scan of every
+/// interned path — the hot path behind the dashboard render (#freeze).
 #[derive(Debug, Default)]
 pub struct MetricInterner {
     ids: HashMap<String, MetricId>,
     paths: Vec<String>,
+    by_device: HashMap<String, Vec<MetricId>>,
 }
 
 impl MetricInterner {
@@ -189,7 +196,25 @@ impl MetricInterner {
         let id = MetricId(self.paths.len() as u32);
         self.paths.push(path.to_string());
         self.ids.insert(path.to_string(), id);
+        // Index by device prefix (the part before `|`) for O(device) lookups.
+        if let Some((device, _metric)) = path.split_once('|') {
+            self.by_device
+                .entry(device.to_string())
+                .or_default()
+                .push(id);
+        }
         id
+    }
+
+    /// Ids + paths for a device, where `device` is `"<protocol>/<source>"`
+    /// (no trailing `|`). O(metrics-for-that-device) via the `by_device` index —
+    /// this replaced a per-render linear scan of every interned path.
+    pub fn device_ids<'a>(&'a self, device: &str) -> impl Iterator<Item = (MetricId, &'a str)> {
+        self.by_device
+            .get(device)
+            .into_iter()
+            .flatten()
+            .map(move |&id| (id, self.paths[id.0 as usize].as_str()))
     }
 
     /// Look up an already-interned path's id, if present.
@@ -855,9 +880,9 @@ impl MetricStore {
     /// Returns `(metric_suffix, samples)` pairs. Reads only the in-memory ring
     /// (no disk), so it's cheap to call per dashboard render (#24 sparklines).
     pub fn device_hot_samples(&self, protocol: &str, source: &str) -> Vec<(String, Vec<Sample>)> {
-        let prefix = format!("{protocol}/{source}|");
+        let device = format!("{protocol}/{source}");
         self.interner
-            .with_prefix(&prefix)
+            .device_ids(&device)
             .filter_map(|(id, path)| {
                 let metric = path.split_once('|').map(|(_, m)| m.to_string())?;
                 let samples = self.series.get(&id).map(|s| s.hot.to_vec())?;
@@ -870,14 +895,23 @@ impl MetricStore {
     /// Returns `(metric_suffix, metric_id)` pairs where `metric_suffix` is the
     /// metric name (the part after `|`).
     pub fn device_metric_ids(&self, protocol: &str, source: &str) -> Vec<(String, MetricId)> {
-        let prefix = format!("{protocol}/{source}|");
+        let device = format!("{protocol}/{source}");
         self.interner
-            .with_prefix(&prefix)
+            .device_ids(&device)
             .filter_map(|(id, path)| {
                 path.split_once('|')
                     .map(|(_, metric)| (metric.to_string(), id))
             })
             .collect()
+    }
+
+    /// Number of distinct interned metric paths (append-only; never shrinks).
+    /// Exposed for the `zensight::diag` startup-freeze instrumentation — this is
+    /// the size of the linear scan `device_hot_samples`/`with_prefix` walks per
+    /// device on every dashboard render, so watching it grow pinpoints the
+    /// high-cardinality (e.g. netring per-flow) pressure on the render path.
+    pub fn interned_len(&self) -> usize {
+        self.interner.len()
     }
 
     /// A clone of the persistent handle, if any (for off-thread queries).

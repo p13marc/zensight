@@ -370,14 +370,43 @@ impl NetlinkDetailState {
 
 /// Fetch + decode the first reply on `key` into `Vec<T>`. Returns `None` if no
 /// sensor replied or the payload didn't decode. Iced-independent (testable).
+///
+/// Each failure path logs a `warn` (target `zensight::diag`) naming the key, so a
+/// silently-empty detail table (netring/netlink on-demand tabs) is diagnosable
+/// from the log instead of just rendering blank.
 pub async fn fetch_records<T: DeserializeOwned>(
     session: Arc<zenoh::Session>,
     key: String,
 ) -> Option<Vec<T>> {
-    let replies = session.get(&key).await.ok()?;
-    let reply = replies.recv_async().await.ok()?;
-    let sample = reply.result().ok()?;
-    serde_json::from_slice(&sample.payload().to_bytes()).ok()
+    let replies = match session.get(&key).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(target: "zensight::diag", key = %key, error = %e, "query get failed");
+            return None;
+        }
+    };
+    let Ok(reply) = replies.recv_async().await else {
+        tracing::warn!(target: "zensight::diag", key = %key, "query: no sensor replied");
+        return None;
+    };
+    let sample = match reply.result() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(target: "zensight::diag", key = %key, error = ?e, "query reply was an error");
+            return None;
+        }
+    };
+    match serde_json::from_slice(&sample.payload().to_bytes()) {
+        Ok(records) => Some(records),
+        Err(e) => {
+            tracing::warn!(
+                target: "zensight::diag", key = %key, error = %e,
+                bytes = sample.payload().len(),
+                "query reply failed to decode (JSON)"
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]
