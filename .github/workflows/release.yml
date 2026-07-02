@@ -124,11 +124,12 @@ jobs:
             -p zensight-sensor-modbus \
             -p zensight-sensor-netflow \
             -p zensight-sensor-netlink \
-            -p zensight-sensor-netring
+            -p zensight-sensor-netring \
+            -p zensight-sensor-systemd
 
       - name: Build .deb packages for sensors
         run: |
-          for s in logs sysinfo snmp gnmi modbus netflow netlink netring; do
+          for s in logs sysinfo snmp gnmi modbus netflow netlink netring systemd; do
             cargo deb -p "zensight-sensor-$s" --no-build
           done
 
@@ -253,7 +254,8 @@ jobs:
             -p zensight-sensor-modbus \
             -p zensight-sensor-netflow \
             -p zensight-sensor-netlink \
-            -p zensight-sensor-netring
+            -p zensight-sensor-netring \
+            -p zensight-sensor-systemd
           cargo build --release -p zensight-exporter-prometheus
           cargo build --release -p zensight-exporter-otel
 
@@ -261,7 +263,7 @@ jobs:
         run: |
           source $HOME/.cargo/env
           cargo generate-rpm -p zensight
-          for s in logs sysinfo snmp gnmi modbus netflow netlink netring; do
+          for s in logs sysinfo snmp gnmi modbus netflow netlink netring systemd; do
             cargo generate-rpm -p "zensight-sensor-$s"
           done
           cargo generate-rpm -p zensight-exporter-prometheus
@@ -339,6 +341,10 @@ jobs:
             package: zensight-sensor-netlink
           - name: netring
             package: zensight-sensor-netring
+          # Needs the host D-Bus system bus mounted at runtime:
+          # -v /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro
+          - name: systemd
+            package: zensight-sensor-systemd
     steps:
       - uses: actions/checkout@v4
         with:
