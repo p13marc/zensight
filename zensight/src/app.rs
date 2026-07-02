@@ -1130,6 +1130,12 @@ impl ZenSight {
                 self.handle_telemetry(point);
             }
 
+            Message::TelemetryBatch(points) => {
+                for point in points {
+                    self.handle_telemetry(point);
+                }
+            }
+
             Message::HealthSnapshotReceived(snapshot) => {
                 self.sensor_health.insert(snapshot.sensor.clone(), snapshot);
             }

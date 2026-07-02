@@ -771,6 +771,27 @@ impl MetricStore {
                     tracing::info!(path = %path.display(), "Opened metric history store");
                     Some(store)
                 }
+                // A redb major bump changes the on-disk file format and old
+                // files can't be auto-upgraded (observed: v2 file vs v3 code
+                // after the redb 2→4 bump). The store is a local history
+                // cache, so losing it beats silently running memory-only on
+                // every launch: move the old file aside and start fresh.
+                Err(redb::Error::UpgradeRequired(version)) => {
+                    let backup = path.with_extension(format!("redb.incompatible-v{version}"));
+                    tracing::warn!(path = %path.display(), backup = %backup.display(),
+                        "Metric store file format is from an older redb; moving it aside and starting fresh");
+                    match std::fs::rename(&path, &backup)
+                        .map_err(redb::Error::from)
+                        .and_then(|()| PersistentStore::open(&path))
+                    {
+                        Ok(store) => Some(store),
+                        Err(e) => {
+                            tracing::warn!(error = %e, path = %path.display(),
+                                "Failed to recreate metric store; history will be in-memory only");
+                            None
+                        }
+                    }
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, path = %path.display(),
                         "Failed to open metric store; history will be in-memory only");

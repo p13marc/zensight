@@ -34,6 +34,9 @@ iced_anim = { version = "0.3", features = ["widgets", "derive"] }
 
 # Async utilities
 async-stream = "0.3"
+# Unbounded channels for the Zenoh subscribers (must match zenoh's flume so the
+# (Sender, Receiver) pair satisfies zenoh's IntoHandler impl).
+flume = "0.11"
 
 # Random number generation (for demo mode)
 rand = "0.9"
