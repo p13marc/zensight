@@ -189,15 +189,6 @@ pub struct ZenSight {
     /// Favorited metrics (#27), keyed `protocol/source/metric`. Persisted; the
     /// per-device projection is pushed into the device detail state on selection.
     favorites: std::collections::HashSet<String>,
-    /// Startup-freeze diagnostics (target `zensight::diag`): wall-clock instant of
-    /// the last processed `Tick`. The tick subscription fires every 1s, so if the
-    /// UI thread is starved (the freeze), the *observed* gap balloons well past
-    /// 1000ms — a direct, in-process freeze detector. `None` until the first tick.
-    diag_last_tick: Option<std::time::Instant>,
-    /// Messages processed since the last tick (whole `update()` call rate).
-    diag_msgs_since_tick: u32,
-    /// `TelemetryReceived` messages since the last tick (ingest rate ≈ per second).
-    diag_telemetry_since_tick: u32,
     /// Cached dashboard-card sparklines, rebuilt once per tick (not per frame).
     /// `view()` used to call `build_device_sparks` on every render; under a high
     /// telemetry rate that pegged the single UI thread (the startup freeze).
@@ -337,9 +328,6 @@ impl ZenSight {
             command_palette: crate::view::palette::CommandPaletteState::default(),
             help_open: false,
             favorites: persistent.favorite_metrics.iter().cloned().collect(),
-            diag_last_tick: None,
-            diag_msgs_since_tick: 0,
-            diag_telemetry_since_tick: 0,
             dashboard_sparks: crate::view::trend::DeviceSparks::new(),
         };
 
@@ -1057,8 +1045,6 @@ impl ZenSight {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
-        // Startup-freeze diagnostics: count the whole-loop message rate.
-        self.diag_msgs_since_tick = self.diag_msgs_since_tick.saturating_add(1);
         // #132: per-domain handlers — each consumes the message and returns a
         // Task, or hands the message back (Err) for the next handler / the match.
         let message = match self.update_chart(message) {
@@ -1302,37 +1288,6 @@ impl ZenSight {
             }
 
             Message::Tick => {
-                // Startup-freeze diagnostics (target `zensight::diag`). The tick
-                // fires every 1s; a much larger observed gap means the UI thread
-                // was starved (the freeze). Also reports ingest rate, message
-                // rate, device count, and interned-path count (the per-render
-                // linear-scan size — netring per-flow cardinality shows up here).
-                let now = std::time::Instant::now();
-                let gap_ms = self
-                    .diag_last_tick
-                    .map(|prev| now.duration_since(prev).as_millis() as u64);
-                self.diag_last_tick = Some(now);
-                let devices = self.dashboard.devices.len();
-                let paths = self.store.interned_len();
-                let telem = self.diag_telemetry_since_tick;
-                let msgs = self.diag_msgs_since_tick;
-                self.diag_telemetry_since_tick = 0;
-                self.diag_msgs_since_tick = 0;
-                match gap_ms {
-                    Some(g) if g >= 2000 => tracing::warn!(
-                        target: "zensight::diag",
-                        gap_ms = g, telem_per_tick = telem, msgs_per_tick = msgs,
-                        devices, interned_paths = paths, view = ?self.current_view,
-                        "UI thread STARVED — tick gap ≫ 1s (freeze window)"
-                    ),
-                    _ => tracing::info!(
-                        target: "zensight::diag",
-                        gap_ms = gap_ms.unwrap_or(0), telem_per_tick = telem,
-                        msgs_per_tick = msgs, devices, interned_paths = paths,
-                        view = ?self.current_view,
-                        "tick"
-                    ),
-                }
                 self.handle_tick();
                 // Periodically flush downsampled buckets to redb off the UI thread
                 // (every ~15 ticks ≈ 15s). Never block update()/view() on disk I/O.
@@ -3780,8 +3735,6 @@ impl ZenSight {
 
     /// Handle incoming telemetry.
     fn handle_telemetry(&mut self, point: TelemetryPoint) {
-        // Startup-freeze diagnostics: ingest rate (≈ per second, logged at Tick).
-        self.diag_telemetry_since_tick = self.diag_telemetry_since_tick.saturating_add(1);
         // Write through to the local tiered store (O(1) hot-ring append; numeric
         // values only). Charts/trends read back from here so history survives restart.
         self.store.record(&point);

@@ -187,14 +187,12 @@ run: setup configure
     trap 'echo; echo "Stopping sensors…"; kill 0' EXIT
     sleep 1
     echo "Launching GUI (listening on {{hub}}; close it to stop everything)…"
-    echo "GUI log → {{rundir}}/gui.log  (freeze diagnostics on target 'zensight::diag')"
+    echo "GUI log → {{rundir}}/gui.log"
     unset ZENSIGHT_ZENOH_CONNECT
-    # Capture the GUI's logs to a file we can inspect after a freeze, while still
-    # echoing to the terminal. `zensight::diag` (info/warn) reports per-second
-    # ingest/message rates, device + interned-path counts, and — the key signal —
-    # the observed gap between 1s ticks, which balloons when the UI thread freezes.
+    # Capture the GUI's logs to a file we can inspect afterward, while still
+    # echoing to the terminal. Override verbosity with RUST_LOG if needed.
     export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
-    export RUST_LOG="${RUST_LOG:-info,zensight::diag=info}"
+    export RUST_LOG="${RUST_LOG:-info}"
     ZENSIGHT_ZENOH_LISTEN="{{hub}}" {{bindir}}/zensight 2>&1 | tee {{rundir}}/gui.log
 
 # Stop any running sensors started by `just run`.
