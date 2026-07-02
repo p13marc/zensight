@@ -9834,6 +9834,7 @@ dependencies = [
  "async-stream",
  "chrono",
  "dirs 5.0.1",
+ "flume",
  "iced",
  "iced_anim",
  "iced_test",

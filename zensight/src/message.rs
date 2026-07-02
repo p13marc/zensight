@@ -13,6 +13,10 @@ pub enum Message {
     /// Telemetry received from Zenoh subscription.
     TelemetryReceived(TelemetryPoint),
 
+    /// A burst of telemetry drained in one go (startup history / streaming
+    /// spikes) — one iced update instead of one per sample.
+    TelemetryBatch(Vec<TelemetryPoint>),
+
     /// A periodic off-thread store flush finished. Payload is the number of
     /// downsampled buckets persisted (or `Err` with a message on failure). #22.
     StoreFlushed(Result<usize, String>),

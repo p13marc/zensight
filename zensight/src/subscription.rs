@@ -40,28 +40,16 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
                 }
             };
 
-            // Subscribe to all zensight telemetry using AdvancedSubscriber
-            // This enables:
-            // - history(): Get cached samples from publishers on subscription
-            // - detect_late_publishers(): Get history from publishers that appear later
-            // - recovery(): Automatically recover missed samples
-            let key_expr = all_telemetry_wildcard();
-            let subscriber = match session
-                .declare_subscriber(&key_expr)
-                .history(HistoryConfig::default().detect_late_publishers())
-                .recovery(RecoveryConfig::default())
-                .subscriber_detection()
-                .await
-            {
-                Ok(sub) => sub,
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to create advanced subscriber");
-                    yield Message::Disconnected(e.to_string());
-                    return;
-                }
-            };
-
-            tracing::info!("Advanced subscriber created with history and recovery");
+            // ORDERING MATTERS HERE. The telemetry AdvancedSubscriber is
+            // deliberately declared LAST, after every one-shot seed query below.
+            // Its channel is bounded, and on declare the sensors' advanced
+            // publishers deliver their whole history caches at once; if it is
+            // declared first, the channel fills before the drain loop starts,
+            // the session's RX task blocks on the full channel, and the seed
+            // queries below can never receive their replies — the GUI then sits
+            // frozen with no telemetry until the query timeout, and wakes up to
+            // a multi-second backlog (observed live: alerts-seed query 0 timing
+            // out at exactly 10s with every reply arriving as "unknown Query").
 
             // The telemetry subscriber's `zensight/**` does NOT match the
             // control-plane keys: a key chunk starting with `@` is matched
@@ -71,6 +59,7 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
             // which has a `<source>` segment where this has `@`.)
             let control = session
                 .declare_subscriber("zensight/*/@/**")
+                .with(flume::unbounded())
                 .await
                 .ok();
             if control.is_none() {
@@ -103,8 +92,17 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
                 }
             };
 
-            // Query existing liveliness tokens to get current state
-            if let Ok(replies) = session.liveliness().get(SENSOR_LIVELINESS_EXPR).await {
+            // Query existing liveliness tokens to get current state. The seed
+            // queries are bounded to a short timeout: they run before telemetry
+            // drains, so a dead/slow sensor must not hold up the whole GUI for
+            // zenoh's default 10s.
+            let seed_timeout = std::time::Duration::from_secs(3);
+            if let Ok(replies) = session
+                .liveliness()
+                .get(SENSOR_LIVELINESS_EXPR)
+                .timeout(seed_timeout)
+                .await
+            {
                 while let Ok(reply) = replies.recv_async().await {
                     if let Ok(sample) = reply.result()
                         && let Some(msg) = parse_sensor_liveliness(sample.key_expr().as_str(), true)
@@ -114,7 +112,12 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
                 }
             }
 
-            if let Ok(replies) = session.liveliness().get(DEVICE_LIVELINESS_EXPR).await {
+            if let Ok(replies) = session
+                .liveliness()
+                .get(DEVICE_LIVELINESS_EXPR)
+                .timeout(seed_timeout)
+                .await
+            {
                 while let Ok(reply) = replies.recv_async().await {
                     if let Ok(sample) = reply.result()
                         && let Some(msg) = parse_device_liveliness(sample.key_expr().as_str(), true)
@@ -125,8 +128,14 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
             }
 
             // Late-joiner alert seed: fetch each sensor's current firing set so a
-            // GUI opened after an alert fired shows it immediately.
-            if let Ok(replies) = session.get("zensight/*/@/query/alerts").await {
+            // GUI opened after an alert fired shows it immediately. (The control
+            // subscriber above is already declared, so an alert firing during
+            // this get is not lost.)
+            if let Ok(replies) = session
+                .get("zensight/*/@/query/alerts")
+                .timeout(seed_timeout)
+                .await
+            {
                 while let Ok(reply) = replies.recv_async().await {
                     if let Ok(sample) = reply.result()
                         && let Ok(alerts) =
@@ -137,24 +146,75 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
                 }
             }
 
+            // Only now — with every blocking one-shot done and the drain loop
+            // next — subscribe to the telemetry firehose. AdvancedSubscriber:
+            // - history(): cached samples from publishers on subscription
+            // - detect_late_publishers(): history from publishers appearing later
+            // - recovery(): automatic recovery of missed samples
+            //
+            // The channel MUST be unbounded. With the default bounded (256)
+            // channel, the history fetch deadlocks the whole session at declare
+            // time: cached samples pour into the channel before anything drains
+            // it, the channel fills, the session RX task blocks on it, and the
+            // in-flight history queries can never finalize — `.await` below
+            // never returns, no telemetry is ever delivered, and every other
+            // query on the session times out (observed live with 5 sensors'
+            // caches; "Advanced subscriber created" never logged). Memory stays
+            // bounded in practice: publisher caches are finite and the drain
+            // loop batches the backlog away as soon as the declare completes.
+            let key_expr = all_telemetry_wildcard();
+            let subscriber = match session
+                .declare_subscriber(&key_expr)
+                .with(flume::unbounded())
+                .history(HistoryConfig::default().detect_late_publishers())
+                .recovery(RecoveryConfig::default())
+                .subscriber_detection()
+                .await
+            {
+                Ok(sub) => sub,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to create advanced subscriber");
+                    yield Message::Disconnected(e.to_string());
+                    return;
+                }
+            };
+
+            tracing::info!("Advanced subscriber created with history and recovery");
+
             // Process incoming samples from all subscriptions
             loop {
                 tokio::select! {
-                    // Telemetry subscription
+                    // Telemetry subscription. One awaited sample, then an
+                    // opportunistic drain of whatever else is already queued:
+                    // a startup history burst (or any streaming spike) becomes
+                    // ONE batched message per iced update instead of thousands
+                    // of per-sample updates starving the UI thread.
                     result = subscriber.recv_async() => {
                         match result {
                             Ok(sample) => {
-                                let key = sample.key_expr().as_str();
-                                // A Delete on an alert key is a resolve tombstone.
-                                if sample.kind() == SampleKind::Delete {
-                                    if let Some(msg) = parse_alert_cleared(key) {
-                                        yield msg;
+                                let mut telemetry: Vec<TelemetryPoint> = Vec::new();
+                                let mut others: Vec<Message> = Vec::new();
+                                if let Some(msg) = sample_to_message(&sample) {
+                                    push_sorted(msg, &mut telemetry, &mut others);
+                                }
+                                while telemetry.len() < TELEMETRY_BATCH_MAX {
+                                    match subscriber.try_recv() {
+                                        Ok(s) => {
+                                            if let Some(msg) = sample_to_message(&s) {
+                                                push_sorted(msg, &mut telemetry, &mut others);
+                                            }
+                                        }
+                                        Err(_) => break,
                                     }
-                                } else {
-                                    let payload = sample.payload().to_bytes();
-                                    if let Some(msg) = decode_sample(key, &payload) {
-                                        yield msg;
-                                    }
+                                }
+                                match telemetry.len() {
+                                    0 => {}
+                                    1 => yield Message::TelemetryReceived(
+                                        telemetry.pop().expect("len checked")),
+                                    _ => yield Message::TelemetryBatch(telemetry),
+                                }
+                                for msg in others {
+                                    yield msg;
                                 }
                             }
                             Err(e) => {
@@ -222,6 +282,29 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
             }
         }
     })
+}
+
+/// Cap on how many already-queued telemetry samples are folded into one
+/// [`Message::TelemetryBatch`] per stream iteration. Bounds per-update latency
+/// while still collapsing a startup history burst into a handful of updates.
+const TELEMETRY_BATCH_MAX: usize = 512;
+
+/// Decode one subscriber sample into a message (Delete = alert tombstone).
+fn sample_to_message(sample: &zenoh::sample::Sample) -> Option<Message> {
+    let key = sample.key_expr().as_str();
+    if sample.kind() == SampleKind::Delete {
+        parse_alert_cleared(key)
+    } else {
+        decode_sample(key, &sample.payload().to_bytes())
+    }
+}
+
+/// Route a decoded message into the telemetry batch or the pass-through list.
+fn push_sorted(msg: Message, telemetry: &mut Vec<TelemetryPoint>, others: &mut Vec<Message>) {
+    match msg {
+        Message::TelemetryReceived(point) => telemetry.push(point),
+        other => others.push(other),
+    }
 }
 
 /// Parse a sensor liveliness key expression.
