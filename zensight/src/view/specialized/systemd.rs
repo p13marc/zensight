@@ -220,7 +220,8 @@ fn render_units_tab(state: &DeviceDetailState) -> Column<'_, Message> {
             "Active",
             "Sub",
             "Load",
-            "Description"
+            "Description",
+            "Actions"
         ])]
         .spacing(2);
         for u in rows.iter().take(400) {
@@ -231,8 +232,10 @@ fn render_units_tab(state: &DeviceDetailState) -> Column<'_, Message> {
                     cell(&u.sub_state, 1),
                     cell(&u.load_state, 1),
                     cell(&u.description, 3),
+                    action_cell(u, d.pending_action.as_ref()),
                 ]
-                .spacing(space::SM),
+                .spacing(space::SM)
+                .align_y(iced::Alignment::Center),
             );
         }
         column![list, count_note(rows.len(), "units")]
@@ -468,10 +471,44 @@ fn table_header<'a>(labels: &[&'a str]) -> Element<'a, Message> {
 fn header_weights(n: usize) -> Vec<u16> {
     // Heuristic: first column widest; keep in sync with the per-row `cell` weights.
     match n {
+        6 => vec![3, 1, 1, 1, 3, 2],
         5 => vec![3, 1, 1, 1, 3],
         4 => vec![4, 1, 1, 1],
         _ => vec![2; n],
     }
+}
+
+/// Per-unit service-control cell (#283): start/stop/restart buttons that arm an
+/// inline confirm — the sensor side is allowlisted and off by default, so the
+/// confirmed command may still come back rejected (surfaced via toast).
+fn action_cell<'a>(unit: &UnitRecord, pending: Option<&(String, String)>) -> Element<'a, Message> {
+    let tiny = |label: &'a str| button(text(label).size(font::CAPTION)).padding([2, 6]);
+    let inner: Element<'a, Message> = match pending {
+        Some((verb, armed_unit)) if armed_unit == &unit.name => row![
+            text(format!("{verb}?")).size(font::CAPTION),
+            tiny("confirm").on_press(Message::SystemdUnitActionConfirm),
+            tiny("cancel").on_press(Message::SystemdUnitActionCancel),
+        ]
+        .spacing(space::XS)
+        .align_y(iced::Alignment::Center)
+        .into(),
+        _ => {
+            let arm = |verb: &str| Message::SystemdUnitActionArm {
+                verb: verb.to_string(),
+                unit: unit.name.clone(),
+            };
+            row![
+                tiny("start").on_press(arm("start")),
+                tiny("stop").on_press(arm("stop")),
+                tiny("restart").on_press(arm("restart")),
+            ]
+            .spacing(space::XS)
+            .into()
+        }
+    };
+    iced::widget::container(inner)
+        .width(Length::FillPortion(2))
+        .into()
 }
 
 fn cell<'a>(value: &str, portion: u16) -> Element<'a, Message> {

@@ -77,6 +77,9 @@ pub struct SystemdDetailState {
     pub cgroups: Fetch<Option<CgroupNode>>,
     /// Units table: active-state filter (`None` = all).
     pub unit_state_filter: Option<String>,
+    /// Armed (verb, unit) awaiting inline confirmation in the Units tab (#283).
+    /// `Some` swaps that unit's action buttons for a confirm/cancel pair.
+    pub pending_action: Option<(String, String)>,
 }
 
 impl SystemdDetailState {

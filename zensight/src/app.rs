@@ -806,6 +806,30 @@ impl ZenSight {
                     device.systemd_detail.unit_state_filter = filter;
                 }
             }
+            Message::SystemdUnitActionArm { verb, unit } => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.pending_action = Some((verb, unit));
+                }
+            }
+            Message::SystemdUnitActionCancel => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.pending_action = None;
+                }
+            }
+            Message::SystemdUnitActionConfirm => {
+                if let Some((verb, unit)) = self
+                    .selected_device
+                    .as_mut()
+                    .and_then(|d| d.systemd_detail.pending_action.take())
+                {
+                    let key = zensight_common::command_key("zensight/systemd", "action");
+                    let command = serde_json::json!({ "verb": verb, "unit": unit });
+                    return ControlFlow::Break(
+                        self.send_command(key, &command, format!("Sent {verb} {unit}"))
+                            .chain(self.query_systemd_action_status()),
+                    );
+                }
+            }
 
             Message::FetchNetlinkDetail(topic) => {
                 if let Some(device) = self.selected_device.as_mut() {
@@ -2724,6 +2748,66 @@ impl ZenSight {
                 Err(e) => Message::CommandFeedback {
                     success: false,
                     message: format!("Status query failed: {e}"),
+                },
+            }
+        })
+    }
+
+    /// Poll `@/status/action` after sending a unit action (#283) and toast the
+    /// outcome. The short delay lets the sensor's async `JobRemoved` tracking
+    /// resolve first, so the toast usually carries the real job result.
+    fn query_systemd_action_status(&self) -> Task<Message> {
+        let Some(session) = self.session.clone() else {
+            return Task::none();
+        };
+        let key = zensight_common::status_key("zensight/systemd", "action");
+        Task::future(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            let no_reply = Message::CommandFeedback {
+                success: false,
+                message: "No systemd sensor replied with an action status — are actions enabled?"
+                    .to_string(),
+            };
+            match session.get(&key).await {
+                Ok(replies) => {
+                    if let Ok(reply) = replies.recv_async().await
+                        && let Ok(sample) = reply.result()
+                        && let Ok(status) = serde_json::from_slice::<serde_json::Value>(
+                            &sample.payload().to_bytes(),
+                        )
+                    {
+                        let accepted = status["accepted"].as_bool().unwrap_or(false);
+                        let unit = status["unit"].as_str().unwrap_or("?").to_string();
+                        let verb = status["verb"].as_str().unwrap_or("?").to_string();
+                        let result = status["result"].as_str().map(str::to_string);
+                        let error = status["error"].as_str().map(str::to_string);
+                        let (success, message) = match (accepted, result, error) {
+                            (false, _, reason) => (
+                                false,
+                                format!(
+                                    "{verb} {unit} rejected: {}",
+                                    reason.unwrap_or_else(|| "actions disabled".into())
+                                ),
+                            ),
+                            (true, Some(r), _) if r == "done" => {
+                                (true, format!("{verb} {unit}: done"))
+                            }
+                            (true, Some(r), e) => (
+                                false,
+                                format!(
+                                    "{verb} {unit}: {r}{}",
+                                    e.map(|e| format!(" — {e}")).unwrap_or_default()
+                                ),
+                            ),
+                            (true, None, _) => (true, format!("{verb} {unit} accepted (pending)")),
+                        };
+                        return Message::CommandFeedback { success, message };
+                    }
+                    no_reply
+                }
+                Err(e) => Message::CommandFeedback {
+                    success: false,
+                    message: format!("Action status query failed: {e}"),
                 },
             }
         })

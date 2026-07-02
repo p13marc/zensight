@@ -83,6 +83,23 @@ impl EventState {
             .unwrap_or_default()
     }
 
+    /// Recent state-change lines for one unit, newest-first, capped at `max`
+    /// (#274). Feeds `UnitDetail.recent_changes` on `@/query/unit?name=`.
+    pub fn recent_for_unit(&self, unit: &str, max: usize) -> Vec<String> {
+        self.inner
+            .ring
+            .lock()
+            .map(|r| {
+                r.iter()
+                    .rev()
+                    .filter(|rec| rec.unit.as_deref() == Some(unit))
+                    .take(max)
+                    .map(format_event_line)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Optional streamed per-kind counters: `events/<kind>_total`.
     pub fn counter_points(&self, source: &str) -> Vec<TelemetryPoint> {
         let snapshot: Vec<(String, u64)> = self
@@ -103,6 +120,26 @@ impl EventState {
             })
             .collect()
     }
+}
+
+/// One human-readable timeline line for a [`UnitDetail.recent_changes`] entry
+/// (#274). Pure — the unit of testing. The unit name is omitted (the caller
+/// asked for exactly one unit); state transition and job result render only
+/// when present, e.g. `2026-07-02 10:31:04 job_removed: inactive → active (done)`.
+fn format_event_line(rec: &EventRecord) -> String {
+    let ts = chrono::DateTime::from_timestamp(rec.ts_unix.min(i64::MAX as u64) as i64, 0)
+        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| rec.ts_unix.to_string());
+    let mut line = format!("{ts} {}", rec.kind);
+    if let (Some(from), Some(to)) = (&rec.from, &rec.to) {
+        line.push_str(&format!(": {from} → {to}"));
+    } else if let Some(to) = &rec.to {
+        line.push_str(&format!(": → {to}"));
+    }
+    if let Some(result) = &rec.job_result {
+        line.push_str(&format!(" ({result})"));
+    }
+    line
 }
 
 /// Current wall-clock seconds (runtime code — `chrono` is fine here).
@@ -240,6 +277,37 @@ mod tests {
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].unit.as_deref(), Some("c.service")); // newest first
         assert_eq!(recent[1].unit.as_deref(), Some("b.service"));
+    }
+
+    #[test]
+    fn recent_for_unit_filters_formats_and_caps() {
+        let s = EventState::new(10);
+        s.record(rec("unit_new", "a.service"));
+        s.record(EventRecord {
+            ts_unix: 0, // 1970-01-01 00:00:00
+            kind: "job_removed".into(),
+            unit: Some("a.service".into()),
+            from: Some("inactive".into()),
+            to: Some("active".into()),
+            job_result: Some("done".into()),
+        });
+        s.record(rec("job_new", "other.service"));
+
+        // Filtered to the unit, newest-first, transition + result formatted.
+        let lines = s.recent_for_unit("a.service", 20);
+        assert_eq!(
+            lines,
+            vec![
+                "1970-01-01 00:00:00 job_removed: inactive → active (done)".to_string(),
+                "1970-01-01 00:01:40 unit_new".to_string(), // ts_unix = 100
+            ]
+        );
+        // The cap applies after filtering (newest survives).
+        let capped = s.recent_for_unit("a.service", 1);
+        assert_eq!(capped.len(), 1);
+        assert!(capped[0].contains("job_removed"));
+        // Unknown unit → empty, not an error.
+        assert!(s.recent_for_unit("nope.service", 20).is_empty());
     }
 
     #[test]

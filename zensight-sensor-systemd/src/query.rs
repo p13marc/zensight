@@ -40,6 +40,9 @@ fn accounting(v: u64) -> Option<u64> {
     (v != u64::MAX).then_some(v)
 }
 
+/// How many event-ring lines a `@/query/unit?name=` reply carries (#274).
+const RECENT_CHANGES_MAX: usize = 20;
+
 /// Run the on-demand unit inventory query channel until the session closes.
 pub async fn run(
     session: Arc<zenoh::Session>,
@@ -129,10 +132,14 @@ pub async fn run(
             q = unit_q.recv_async() => {
                 let Ok(query) = q else { return };
                 let name = param(query.parameters().as_str(), "name");
-                let detail = match name {
-                    Some(n) => unit_detail(&conn, &manager, &n).await,
+                let mut detail = match name.as_deref() {
+                    Some(n) => unit_detail(&conn, &manager, n).await,
                     None => None,
                 };
+                // This unit's slice of the event ring, newest-first (#274).
+                if let (Some(d), Some(n)) = (detail.as_mut(), name.as_deref()) {
+                    d.recent_changes = events.recent_for_unit(n, RECENT_CHANGES_MAX);
+                }
                 reply_json(&query, &detail).await;
             }
             q = events_q.recv_async() => {
