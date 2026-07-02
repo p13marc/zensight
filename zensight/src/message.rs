@@ -164,6 +164,18 @@ pub enum Message {
     ),
     /// Units table (#281): set the active-state filter (`None` = all).
     SystemdSetUnitFilter(Option<String>),
+    /// Arm a unit action (#283): the row's start/stop/restart buttons swap to an
+    /// inline confirm/cancel pair until resolved.
+    SystemdUnitActionArm {
+        verb: String,
+        unit: String,
+    },
+    /// Cancel the armed unit action (#283).
+    SystemdUnitActionCancel,
+    /// Send the armed unit action as `{verb, unit}` on
+    /// `zensight/systemd/@/commands/action` (#283), then poll `@/status/action`
+    /// for the job outcome. The sensor refuses unless `actions.enabled` is set.
+    SystemdUnitActionConfirm,
 
     /// Fetch an on-demand netlink detail table (sockets/routes/neighbors).
     FetchNetlinkDetail(crate::view::specialized::netlink_detail::NetlinkDetailTopic),

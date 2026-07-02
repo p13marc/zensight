@@ -3127,6 +3127,68 @@ fn test_systemd_units_tab_fetches_on_demand() {
     );
 }
 
+/// #283: Units-tab service controls use an inline two-step confirm — "start"
+/// arms the action, then "confirm" emits SystemdUnitActionConfirm (which the app
+/// sends to `@/commands/action`); "cancel" backs out.
+#[test]
+fn test_systemd_units_action_confirm_flow() {
+    use zensight::view::specialized::specialized_view;
+    use zensight::view::specialized::systemd_detail::{SystemdDetailData, SystemdDetailTopic};
+    use zensight_common::query_detail::UnitRecord;
+
+    let id = DeviceId {
+        protocol: Protocol::Systemd,
+        source: "server01".to_string(),
+    };
+    let mut state = DeviceDetailState::new(id);
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Units;
+    state.systemd_detail.apply(
+        SystemdDetailTopic::Units,
+        Ok(SystemdDetailData::Units(vec![UnitRecord {
+            name: "nginx.service".into(),
+            description: "web server".into(),
+            load_state: "loaded".into(),
+            active_state: "active".into(),
+            sub_state: "running".into(),
+            job: None,
+        }])),
+    );
+
+    // Step 1: the row offers start/stop/restart; clicking "start" arms it.
+    let mut ui = simulator(specialized_view(&state).expect("systemd view"));
+    assert!(ui.find("restart").is_ok());
+    let _ = ui.click("start");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(messages.iter().any(|m| matches!(
+        m,
+        Message::SystemdUnitActionArm { verb, unit }
+            if verb == "start" && unit == "nginx.service"
+    )));
+
+    // Step 2: with the action armed, the row swaps to confirm/cancel and
+    // "confirm" emits the send.
+    state.systemd_detail.pending_action = Some(("start".to_string(), "nginx.service".to_string()));
+    let mut ui = simulator(specialized_view(&state).expect("systemd view"));
+    assert!(ui.find("start?").is_ok());
+    let _ = ui.click("confirm");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::SystemdUnitActionConfirm))
+    );
+
+    // Cancel path emits the disarm.
+    let mut ui = simulator(specialized_view(&state).expect("systemd view"));
+    let _ = ui.click("cancel");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::SystemdUnitActionCancel))
+    );
+}
+
 /// #278: the expectations view can target the systemd sentinel — the systemd form
 /// renders and "Add & Push" emits AddExpectation.
 #[test]
