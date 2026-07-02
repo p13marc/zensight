@@ -30,6 +30,7 @@ pub enum NetringTable {
     Quic,
     Ssh,
     Assets,
+    Ja4h,
 }
 
 /// How many rows the top-N query channels (talkers/dns/http) ask the sensor for.
@@ -103,6 +104,9 @@ pub struct NetringDetailState {
     pub elephants: Fetch<Vec<ElephantRecord>>,
     pub dns: Fetch<Vec<DnsRecord>>,
     pub http: Fetch<Vec<HttpHostRecord>>,
+    /// JA4H HTTP-client fingerprints (#256); served only by `ja4plus` sensor
+    /// builds, so this is fetched manually rather than prefetched with the tab.
+    pub ja4h: Fetch<Vec<Ja4hRecord>>,
     /// Per-table sort/filter/limit state, addressed by [`NetringTable`] (#244).
     pub tables: HashMap<NetringTable, TableState>,
     /// Firing netring anomalies scoped to this device's source (#253), projected
@@ -225,6 +229,16 @@ impl NetringDetailState {
     /// Store the HTTP-detail fetch outcome.
     pub fn apply_http(&mut self, result: Result<Vec<HttpHostRecord>, String>) {
         self.http = Fetch::from_result(result);
+    }
+
+    /// Mark a JA4H-inventory fetch as in flight (#256).
+    pub fn loading_ja4h(&mut self) {
+        self.ja4h = Fetch::Loading;
+    }
+
+    /// Store the JA4H-inventory fetch outcome.
+    pub fn apply_ja4h(&mut self, result: Result<Vec<Ja4hRecord>, String>) {
+        self.ja4h = Fetch::from_result(result);
     }
 }
 

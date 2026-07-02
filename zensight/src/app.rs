@@ -915,6 +915,29 @@ impl ZenSight {
                     return ControlFlow::Break(self.query_netring_flows());
                 }
             }
+            Message::NetringAssetToTopology { ip, hostname } => {
+                // Asset → topology node (#252). Seed the graph the same way
+                // OpenTopology does so the lookup sees current nodes.
+                self.topology.update_from_devices(&self.dashboard.devices);
+                self.topology.apply_alerts(&self.alerts.external);
+                self.topology.apply_correlations(&self.correlations);
+                let node = hostname
+                    .filter(|h| self.topology.nodes.contains_key(h))
+                    .or_else(|| self.topology_ip_to_node().get(&ip).cloned());
+                if let Some(node_id) = node {
+                    self.topology.select_node(node_id);
+                    self.set_view(CurrentView::Topology);
+                    self.save_current_view();
+                    return ControlFlow::Break(Task::batch([
+                        self.query_topology_flows(),
+                        self.query_topology_neighbors(),
+                    ]));
+                }
+                self.toasts.push(
+                    ToastSeverity::Info,
+                    format!("No topology node found for asset {ip}"),
+                );
+            }
             Message::FetchNetringFlows => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netring_detail.loading();
@@ -957,6 +980,17 @@ impl ZenSight {
             Message::NetringSshReceived(result) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netring_detail.apply_ssh(result);
+                }
+            }
+            Message::FetchNetringJa4h => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_ja4h();
+                }
+                return ControlFlow::Break(self.query_netring_ja4h());
+            }
+            Message::NetringJa4hReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_ja4h(result);
                 }
             }
             Message::FetchNetringAssets => {
@@ -3212,6 +3246,16 @@ impl ZenSight {
             fetch_ssh,
             Message::NetringSshReceived,
             "No SSH data — is the netring sensor running with collect.ssh enabled?",
+        )
+    }
+
+    /// Fetch the on-demand netring JA4H HTTP-fingerprint inventory (#256).
+    fn query_netring_ja4h(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_ja4h;
+        self.query_channel(
+            fetch_ja4h,
+            Message::NetringJa4hReceived,
+            "No JA4H data — needs a netring sensor built with the ja4plus feature and collect.http_fp enabled",
         )
     }
 

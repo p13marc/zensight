@@ -216,6 +216,14 @@ pub enum Message {
     /// data-table filter; fetches flows if not already loaded.
     NetringPivotToFlows(DeviceId, String),
 
+    /// Asset → topology pivot (#252): open the topology view with the node for
+    /// this asset selected (resolved via hostname, then the ip→node map). Falls
+    /// back to an info toast when the asset has no topology node.
+    NetringAssetToTopology {
+        ip: String,
+        hostname: Option<String>,
+    },
+
     /// Fetch the on-demand netring flow detail (recent flows).
     FetchNetringFlows,
     /// A netring flow-detail reply: the decoded flows, or an error message.
@@ -239,6 +247,11 @@ pub enum Message {
     FetchNetringSsh,
     /// A netring SSH-inventory reply: the decoded records, or an error message.
     NetringSshReceived(Result<Vec<zensight_common::SshRecord>, String>),
+    /// Fetch the on-demand netring JA4H HTTP-fingerprint inventory (#256).
+    /// Manual only — the queryable exists only on `ja4plus` sensor builds.
+    FetchNetringJa4h,
+    /// A netring JA4H-inventory reply: the decoded records, or an error message.
+    NetringJa4hReceived(Result<Vec<zensight_common::Ja4hRecord>, String>),
     /// Fetch the on-demand netring passive asset inventory (#70).
     FetchNetringAssets,
     /// A netring asset-inventory reply: the decoded records, or an error message.
