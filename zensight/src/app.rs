@@ -189,6 +189,21 @@ pub struct ZenSight {
     /// Favorited metrics (#27), keyed `protocol/source/metric`. Persisted; the
     /// per-device projection is pushed into the device detail state on selection.
     favorites: std::collections::HashSet<String>,
+    /// Startup-freeze diagnostics (target `zensight::diag`): wall-clock instant of
+    /// the last processed `Tick`. The tick subscription fires every 1s, so if the
+    /// UI thread is starved (the freeze), the *observed* gap balloons well past
+    /// 1000ms — a direct, in-process freeze detector. `None` until the first tick.
+    diag_last_tick: Option<std::time::Instant>,
+    /// Messages processed since the last tick (whole `update()` call rate).
+    diag_msgs_since_tick: u32,
+    /// `TelemetryReceived` messages since the last tick (ingest rate ≈ per second).
+    diag_telemetry_since_tick: u32,
+    /// Cached dashboard-card sparklines, rebuilt once per tick (not per frame).
+    /// `view()` used to call `build_device_sparks` on every render; under a high
+    /// telemetry rate that pegged the single UI thread (the startup freeze).
+    /// Now the (indexed, O(device)) build runs at 1 Hz in `handle_tick`, and the
+    /// render just clones this small truncated result.
+    dashboard_sparks: crate::view::trend::DeviceSparks,
 }
 
 impl ZenSight {
@@ -322,6 +337,10 @@ impl ZenSight {
             command_palette: crate::view::palette::CommandPaletteState::default(),
             help_open: false,
             favorites: persistent.favorite_metrics.iter().cloned().collect(),
+            diag_last_tick: None,
+            diag_msgs_since_tick: 0,
+            diag_telemetry_since_tick: 0,
+            dashboard_sparks: crate::view::trend::DeviceSparks::new(),
         };
 
         (app, Task::none())
@@ -1038,6 +1057,8 @@ impl ZenSight {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // Startup-freeze diagnostics: count the whole-loop message rate.
+        self.diag_msgs_since_tick = self.diag_msgs_since_tick.saturating_add(1);
         // #132: per-domain handlers — each consumes the message and returns a
         // Task, or hands the message back (Err) for the next handler / the match.
         let message = match self.update_chart(message) {
@@ -1281,6 +1302,37 @@ impl ZenSight {
             }
 
             Message::Tick => {
+                // Startup-freeze diagnostics (target `zensight::diag`). The tick
+                // fires every 1s; a much larger observed gap means the UI thread
+                // was starved (the freeze). Also reports ingest rate, message
+                // rate, device count, and interned-path count (the per-render
+                // linear-scan size — netring per-flow cardinality shows up here).
+                let now = std::time::Instant::now();
+                let gap_ms = self
+                    .diag_last_tick
+                    .map(|prev| now.duration_since(prev).as_millis() as u64);
+                self.diag_last_tick = Some(now);
+                let devices = self.dashboard.devices.len();
+                let paths = self.store.interned_len();
+                let telem = self.diag_telemetry_since_tick;
+                let msgs = self.diag_msgs_since_tick;
+                self.diag_telemetry_since_tick = 0;
+                self.diag_msgs_since_tick = 0;
+                match gap_ms {
+                    Some(g) if g >= 2000 => tracing::warn!(
+                        target: "zensight::diag",
+                        gap_ms = g, telem_per_tick = telem, msgs_per_tick = msgs,
+                        devices, interned_paths = paths, view = ?self.current_view,
+                        "UI thread STARVED — tick gap ≫ 1s (freeze window)"
+                    ),
+                    _ => tracing::info!(
+                        target: "zensight::diag",
+                        gap_ms = gap_ms.unwrap_or(0), telem_per_tick = telem,
+                        msgs_per_tick = msgs, devices, interned_paths = paths,
+                        view = ?self.current_view,
+                        "tick"
+                    ),
+                }
                 self.handle_tick();
                 // Periodically flush downsampled buckets to redb off the UI thread
                 // (every ~15 ticks ≈ 15s). Never block update()/view() on disk I/O.
@@ -2308,6 +2360,15 @@ impl ZenSight {
     /// Set the current view.
     fn set_view(&mut self, view: CurrentView) {
         self.current_view = view;
+        // Populate card sparklines immediately on entering a grid view so they
+        // don't blink empty for up to a tick (they're otherwise rebuilt at 1 Hz).
+        if self.on_dashboard_grid() {
+            self.dashboard_sparks = crate::view::trend::build_device_sparks(
+                &self.store,
+                self.dashboard.devices.keys(),
+                2,
+            );
+        }
     }
 
     /// Focus the appropriate search input based on current view.
@@ -3446,15 +3507,12 @@ impl ZenSight {
         // alerts (anomalies + expectation violations).
         let unack = self.alerts.unacknowledged_count + self.alerts.external_count();
 
-        // Precompute per-card sparkline + trend previews from the store's hot ring
-        // (cheap, in-memory) only when a dashboard grid will actually render (#24).
-        let on_dashboard = matches!(
-            self.current_view,
-            CurrentView::Dashboard | CurrentView::Device
-        ) && !(self.current_view == CurrentView::Device
-            && self.selected_device.is_some());
-        let sparks = if on_dashboard {
-            crate::view::trend::build_device_sparks(&self.store, self.dashboard.devices.keys(), 2)
+        // Per-card sparkline previews (#24). Built at 1 Hz in `handle_tick` and
+        // cached in `dashboard_sparks` — rendering just clones the small (≤2
+        // metrics/device) result rather than rescanning the store every frame,
+        // which is what pegged the UI thread under a high telemetry rate.
+        let sparks = if self.on_dashboard_grid() {
+            self.dashboard_sparks.clone()
         } else {
             crate::view::trend::DeviceSparks::new()
         };
@@ -3722,6 +3780,8 @@ impl ZenSight {
 
     /// Handle incoming telemetry.
     fn handle_telemetry(&mut self, point: TelemetryPoint) {
+        // Startup-freeze diagnostics: ingest rate (≈ per second, logged at Tick).
+        self.diag_telemetry_since_tick = self.diag_telemetry_since_tick.saturating_add(1);
         // Write through to the local tiered store (O(1) hot-ring append; numeric
         // values only). Charts/trends read back from here so history survives restart.
         self.store.record(&point);
@@ -4059,6 +4119,15 @@ impl ZenSight {
     }
 
     /// Handle periodic tick (update health status, etc.).
+    /// Whether the current view renders the device-card grid (which needs the
+    /// sparkline previews). Dashboard, or the Device route with no device open.
+    fn on_dashboard_grid(&self) -> bool {
+        matches!(
+            self.current_view,
+            CurrentView::Dashboard | CurrentView::Device
+        ) && !(self.current_view == CurrentView::Device && self.selected_device.is_some())
+    }
+
     fn handle_tick(&mut self) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -4067,6 +4136,19 @@ impl ZenSight {
 
         for device in self.dashboard.devices.values_mut() {
             device.update_health(now, self.stale_threshold_ms);
+        }
+
+        // Rebuild the dashboard-card sparklines at 1 Hz (only when a card grid is
+        // actually showing), so the per-frame render just clones the cached result
+        // instead of rescanning the store on every redraw (startup-freeze fix).
+        if self.on_dashboard_grid() {
+            self.dashboard_sparks = crate::view::trend::build_device_sparks(
+                &self.store,
+                self.dashboard.devices.keys(),
+                2,
+            );
+        } else if !self.dashboard_sparks.is_empty() {
+            self.dashboard_sparks.clear();
         }
 
         // Bound the device map over long sessions: reap devices gone for a day
