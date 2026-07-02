@@ -19,10 +19,21 @@ on:
         required: false
         type: string
 
+# A force-push to a packaging PR obsoletes the in-flight validation run —
+# cancel it instead of stacking full-matrix runs. Tag builds never cancel.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
   IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/zensight
+
+# PR runs are build-only validation: one distro leg, amd64 only — the full
+# 4-distro × 2-arch matrix runs on tags (and workflow_dispatch). The selection
+# is a fromJSON ternary inlined in each job's `strategy.matrix.include`
+# (strategy cannot read the env context, so the JSON can't be shared here).
 
 jobs:
   # =============================================================================
@@ -32,15 +43,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-22.04
-            name: ubuntu22.04
-          - os: ubuntu-24.04
-            name: ubuntu24.04
-          - os: ubuntu-22.04-arm
-            name: ubuntu22.04-arm64
-          - os: ubuntu-24.04-arm
-            name: ubuntu24.04-arm64
+        # PR validation: ubuntu-24.04/amd64 only. Tags: full distro × arch set.
+        include: ${{ github.event_name == 'pull_request' && fromJSON('[{"os":"ubuntu-24.04","name":"ubuntu24.04"}]') || fromJSON('[{"os":"ubuntu-22.04","name":"ubuntu22.04"},{"os":"ubuntu-24.04","name":"ubuntu24.04"},{"os":"ubuntu-22.04-arm","name":"ubuntu22.04-arm64"},{"os":"ubuntu-24.04-arm","name":"ubuntu24.04-arm64"}]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -55,8 +59,11 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Install cargo-deb
-        run: cargo install cargo-deb
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install cargo-deb (prebuilt)
+        run: cargo binstall -y cargo-deb
 
       - name: Build release binary
         run: cargo build --release -p zensight
@@ -86,15 +93,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-22.04
-            name: ubuntu22.04
-          - os: ubuntu-24.04
-            name: ubuntu24.04
-          - os: ubuntu-22.04-arm
-            name: ubuntu22.04-arm64
-          - os: ubuntu-24.04-arm
-            name: ubuntu24.04-arm64
+        # PR validation: ubuntu-24.04/amd64 only. Tags: full distro × arch set.
+        include: ${{ github.event_name == 'pull_request' && fromJSON('[{"os":"ubuntu-24.04","name":"ubuntu24.04"}]') || fromJSON('[{"os":"ubuntu-22.04","name":"ubuntu22.04"},{"os":"ubuntu-24.04","name":"ubuntu24.04"},{"os":"ubuntu-22.04-arm","name":"ubuntu22.04-arm64"},{"os":"ubuntu-24.04-arm","name":"ubuntu24.04-arm64"}]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -111,8 +111,11 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Install cargo-deb
-        run: cargo install cargo-deb
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install cargo-deb (prebuilt)
+        run: cargo binstall -y cargo-deb
 
       - name: Build release binaries
         run: |
@@ -155,15 +158,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-22.04
-            name: ubuntu22.04
-          - os: ubuntu-24.04
-            name: ubuntu24.04
-          - os: ubuntu-22.04-arm
-            name: ubuntu22.04-arm64
-          - os: ubuntu-24.04-arm
-            name: ubuntu24.04-arm64
+        # PR validation: ubuntu-24.04/amd64 only. Tags: full distro × arch set.
+        include: ${{ github.event_name == 'pull_request' && fromJSON('[{"os":"ubuntu-24.04","name":"ubuntu24.04"}]') || fromJSON('[{"os":"ubuntu-22.04","name":"ubuntu22.04"},{"os":"ubuntu-24.04","name":"ubuntu24.04"},{"os":"ubuntu-22.04-arm","name":"ubuntu22.04-arm64"},{"os":"ubuntu-24.04-arm","name":"ubuntu24.04-arm64"}]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -178,8 +174,11 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Install cargo-deb
-        run: cargo install cargo-deb
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install cargo-deb (prebuilt)
+        run: cargo binstall -y cargo-deb
 
       - name: Build release binaries
         run: |
@@ -213,11 +212,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            arch: x86_64
-          - os: ubuntu-24.04-arm
-            arch: aarch64
+        # PR validation: x86_64 only. Tags: both arches.
+        include: ${{ github.event_name == 'pull_request' && fromJSON('[{"os":"ubuntu-latest","arch":"x86_64"}]') || fromJSON('[{"os":"ubuntu-latest","arch":"x86_64"},{"os":"ubuntu-24.04-arm","arch":"aarch64"}]') }}
     runs-on: ${{ matrix.os }}
     container: fedora:41
     steps:
@@ -237,10 +233,13 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
-      - name: Install cargo-generate-rpm
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install cargo-generate-rpm (prebuilt)
         run: |
           source $HOME/.cargo/env
-          cargo install cargo-generate-rpm
+          cargo binstall -y cargo-generate-rpm
 
       - name: Build release binaries
         run: |
@@ -314,9 +313,74 @@ jobs:
           if-no-files-found: error
 
   # =============================================================================
-  # Build Docker images for sensors
+  # Prebuild every sensor/exporter binary for the Docker images — ONE native
+  # workspace build per arch. Previously each of the 11 images compiled the
+  # whole workspace per platform (22 builds, arm64 under QEMU → hours). Built
+  # inside rust:1.95-bookworm so the glibc matches the debian:bookworm-slim
+  # runtime base in Dockerfile.runtime.
+  # =============================================================================
+  build-docker-binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        # PR validation: amd64 only (the image jobs also build amd64-only on PRs).
+        include: ${{ github.event_name == 'pull_request' && fromJSON('[{"arch":"amd64","runner":"ubuntu-24.04"}]') || fromJSON('[{"arch":"amd64","runner":"ubuntu-24.04"},{"arch":"arm64","runner":"ubuntu-24.04-arm"}]') }}
+    runs-on: ${{ matrix.runner }}
+    container: rust:1.95-bookworm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          # protobuf-compiler: gnmi · libssl-dev: snmp · libsystemd-dev: logs
+          # (journald) · libpcap-dev: netring
+          apt-get install -y protobuf-compiler pkg-config libssl-dev libsystemd-dev libpcap-dev
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: docker-binaries-${{ matrix.arch }}
+
+      - name: Build all sensor + exporter binaries
+        run: |
+          cargo build --release \
+            -p zensight-sensor-logs \
+            -p zensight-sensor-sysinfo \
+            -p zensight-sensor-snmp \
+            -p zensight-sensor-gnmi \
+            -p zensight-sensor-modbus \
+            -p zensight-sensor-netflow \
+            -p zensight-sensor-netlink \
+            -p zensight-sensor-netring \
+            -p zensight-sensor-systemd \
+            -p zensight-exporter-prometheus \
+            -p zensight-exporter-otel
+
+      - name: Stage binaries
+        run: |
+          mkdir -p out
+          for b in zensight-sensor-logs zensight-sensor-sysinfo zensight-sensor-snmp \
+                   zensight-sensor-gnmi zensight-sensor-modbus zensight-sensor-netflow \
+                   zensight-sensor-netlink zensight-sensor-netring zensight-sensor-systemd \
+                   zensight-exporter-prometheus zensight-exporter-otel; do
+            cp "target/release/$b" out/
+          done
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-binaries-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
+
+  # =============================================================================
+  # Assemble Docker images for sensors from the prebuilt binaries. Runtime-only:
+  # multi-arch builds run just the apt layer under emulation (seconds), never
+  # the Rust compiler. Dockerfile.sensor remains for local from-source builds.
   # =============================================================================
   build-docker:
+    needs: build-docker-binaries
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -347,8 +411,12 @@ jobs:
             package: zensight-sensor-systemd
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download prebuilt binaries
+        uses: actions/download-artifact@v4
         with:
-          fetch-depth: 0
+          pattern: docker-binaries-*
+          path: docker-bins
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -380,21 +448,21 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: docker/Dockerfile.sensor
+          file: docker/Dockerfile.runtime
           build-args: |
-            SENSOR_PACKAGE=${{ matrix.sensor.package }}
-            SENSOR_NAME=${{ matrix.sensor.name }}
+            BINARY_PACKAGE=${{ matrix.sensor.package }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
 
   # =============================================================================
-  # Build Docker images for exporters
+  # Assemble Docker images for exporters from the same prebuilt binaries.
   # =============================================================================
   build-docker-exporters:
+    needs: build-docker-binaries
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -409,8 +477,12 @@ jobs:
             package: zensight-exporter-otel
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download prebuilt binaries
+        uses: actions/download-artifact@v4
         with:
-          fetch-depth: 0
+          pattern: docker-binaries-*
+          path: docker-bins
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -442,16 +514,15 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: docker/Dockerfile.exporter
+          file: docker/Dockerfile.runtime
           build-args: |
-            EXPORTER_PACKAGE=${{ matrix.exporter.package }}
-            EXPORTER_NAME=${{ matrix.exporter.name }}
+            BINARY_PACKAGE=${{ matrix.exporter.package }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
 
   # =============================================================================
   # Create GitHub Release with all artifacts

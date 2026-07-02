@@ -1,0 +1,52 @@
+# Runtime-only image for ZenSight sensors and exporters, assembled from
+# binaries prebuilt in CI (release.yml `build-docker-binaries`, one native
+# workspace build per arch inside rust:<ver>-bookworm so the glibc matches this
+# base). No Rust compilation happens here — multi-arch builds only run the apt
+# layer under emulation, which keeps release Docker jobs to minutes instead of
+# compiling the workspace once per image per platform.
+#
+# Build context must contain the prebuilt binaries at
+#   docker-bins/docker-binaries-<targetarch>/<BINARY_PACKAGE>
+# (the layout produced by actions/download-artifact with pattern matching).
+#
+# For local one-off builds without prebuilt binaries, use Dockerfile.sensor /
+# Dockerfile.exporter instead — they compile from source.
+
+ARG BINARY_PACKAGE=zensight-sensor-logs
+
+FROM debian:bookworm-slim
+
+ARG BINARY_PACKAGE
+ARG TARGETARCH
+
+# Union of runtime deps across sensors/exporters (all small):
+# libsystemd0: logs (journald) · libssl3: snmp · libpcap0.8: netring
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libsystemd0 \
+    libssl3 \
+    libpcap0.8 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for running the binary
+RUN useradd --create-home --shell /bin/bash zensight
+
+# actions/upload-artifact does not preserve the exec bit, so restore it.
+COPY docker-bins/docker-binaries-${TARGETARCH}/${BINARY_PACKAGE} /usr/local/bin/${BINARY_PACKAGE}
+RUN chmod 755 /usr/local/bin/${BINARY_PACKAGE}
+
+# Create config directory
+RUN mkdir -p /etc/zensight && chown zensight:zensight /etc/zensight
+
+USER zensight
+WORKDIR /home/zensight
+
+# 7447: Zenoh default port (TCP). Sensor-specific ports (syslog 514, SNMP
+# traps 162, Prometheus 9090, …) are documented per sensor in docs/SENSORS.md.
+EXPOSE 7447
+
+ENV ZENSIGHT_BINARY=${BINARY_PACKAGE}
+
+# Default command runs the binary with config from /etc/zensight
+ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/${ZENSIGHT_BINARY} \"$@\"", "--"]
+CMD ["--help"]
