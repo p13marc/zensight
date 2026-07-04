@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Dependencies**: bumped `nlink` 0.23 → 0.24, `netring` 0.28 → 0.29, and
+  `flowscope` 0.20 → 0.22 (netlink and netring sensors). Migrated the breaking
+  surface: `MonitorBuilder::flow_risk()` → `flow_analysis()`, and our local
+  `DetectorScore` impls (`RitaBeaconHit`, `FloodScore`) to the typed
+  `DetectorKind` (`DetectorKind::Other(...)`). Published anomaly kind slugs are
+  byte-identical, so alert keys, the detection-tuning panel, and the Security
+  view are unaffected.
+
+### Fixed
+
+These are upstream bug fixes inherited with the bump; they change values on
+metrics ZenSight already publishes, so dashboards and alerts on these series
+will see a step:
+
+- **netlink `sockets/tcp/bytes_retrans_total` and `.../reordered_total` were
+  always zero.** `nlink` < 0.24 stopped parsing `TcpInfo` at byte 168, so
+  `bytes_retrans` and `reord_seen` silently read 0 on every kernel. They now
+  carry real values.
+- **netlink socket memory metrics never appeared.** An off-by-one in
+  `nlink`'s `InetExtension::mask()` meant `with_mem_info()` actually requested a
+  different extension, so `InetSocket.mem_info` was always `None` and the skmem
+  branch was dead. Socket-memory metrics now flow for the first time.
+- **netring IPv6 ICMP error counters were wrong.** `flowscope` misdetected
+  ICMPv6 error types (Destination Unreachable, Time Exceeded) as ICMPv4, so the
+  `on_icmp_error` counters (unreachable / time-exceeded / MTU) undercounted or
+  mislabeled IPv6 errors. Counts are now correct.
+- **netring AF_XDP could hang under sparse traffic.** `flowscope`'s async
+  AF_XDP poller could miss a wakeup when packets arrived during an idle gap;
+  fixed upstream.
+- **netlink XFRM/IPsec polling no longer spams the kernel log.** `nlink`'s XFRM
+  dumps appended a stray struct that made the kernel log a ratelimited
+  `netlink: … bytes leftover` warning on every poll. Results were always
+  correct; the log noise is gone.
+
 ## [0.6.2] - 2026-06-27
 
 ### Fixed

@@ -275,19 +275,23 @@ struct RitaBeacon {
 struct RitaBeaconHit(RitaBeaconScore<FiveTupleKey>);
 
 impl flowscope::DetectorScore for RitaBeaconHit {
-    fn name(&self) -> &'static str {
-        "RitaBeacon"
+    fn kind(&self) -> flowscope::DetectorKind {
+        flowscope::DetectorKind::Other("RitaBeacon")
     }
     fn into_anomaly(self, ts: flowscope::Timestamp) -> flowscope::OwnedAnomaly {
         let s = self.0;
-        flowscope::OwnedAnomaly::new("RitaBeacon", flowscope::event::Severity::Warning, ts)
-            .with_key(&s.key)
-            .with_metric("score", s.score)
-            .with_metric("ts_score", s.ts_score)
-            .with_metric("ds_score", s.ds_score)
-            .with_metric("dur_score", s.dur_score)
-            .with_metric("mean_interval_secs", s.mean_interval.as_secs_f64())
-            .with_metric("n", s.n as f64)
+        flowscope::OwnedAnomaly::new(
+            flowscope::DetectorKind::Other("RitaBeacon"),
+            flowscope::event::Severity::Warning,
+            ts,
+        )
+        .with_key(&s.key)
+        .with_metric("score", s.score)
+        .with_metric("ts_score", s.ts_score)
+        .with_metric("ds_score", s.ds_score)
+        .with_metric("dur_score", s.dur_score)
+        .with_metric("mean_interval_secs", s.mean_interval.as_secs_f64())
+        .with_metric("n", s.n as f64)
     }
 }
 
@@ -1493,8 +1497,13 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
     // emitted as anomalies, so they ride the same ChannelSink → drain →
     // AlertReporter path as the built-in detectors — no extra plumbing.
     if cfg.threat.flow_risk {
-        b = b.flow_risk();
-        tracing::info!("netring: flow-risk scoring enabled");
+        // netring 0.29 (#124): `flow_risk()` is a deprecated alias for the
+        // upgraded `flow_analysis()` (full 14-flag FlowRisk, one anomaly/flow).
+        // Our `threat.flow_risk` config knob keeps its name; the builder call
+        // migrates. Each analyzed flow emits one `flow_risk` anomaly at its max
+        // severity, riding the same ChannelSink → drain → AlertReporter path.
+        b = b.flow_analysis();
+        tracing::info!("netring: flow-risk analysis enabled");
     }
     let ioc = build_ioc_set(&cfg.threat.ioc);
     if !ioc.is_empty() {
@@ -1676,13 +1685,17 @@ struct FloodScore {
 }
 
 impl flowscope::DetectorScore for FloodScore {
-    fn name(&self) -> &'static str {
-        "ConnectionFlood"
+    fn kind(&self) -> flowscope::DetectorKind {
+        flowscope::DetectorKind::Other("ConnectionFlood")
     }
     fn into_anomaly(self, ts: flowscope::Timestamp) -> flowscope::OwnedAnomaly {
-        flowscope::OwnedAnomaly::new("ConnectionFlood", flowscope::event::Severity::Warning, ts)
-            .with_observation("dst", self.dst)
-            .with_metric("connections", self.count as f64)
+        flowscope::OwnedAnomaly::new(
+            flowscope::DetectorKind::Other("ConnectionFlood"),
+            flowscope::event::Severity::Warning,
+            ts,
+        )
+        .with_observation("dst", self.dst)
+        .with_metric("connections", self.count as f64)
     }
 }
 
@@ -1918,10 +1931,13 @@ mod tests {
         };
         let set = build_ioc_set(&cfg);
         assert!(!set.is_empty());
-        assert!(set.matches_ip(&"10.0.0.2".parse::<IpAddr>().unwrap()));
+        assert!(
+            set.contains_ip("10.0.0.2".parse::<IpAddr>().unwrap())
+                .is_some()
+        );
         // subdomain-aware
-        assert!(set.matches_domain("host.evil.example").is_some());
-        assert!(set.matches_domain("good.example").is_none());
+        assert!(set.contains_domain("host.evil.example").is_some());
+        assert!(set.contains_domain("good.example").is_none());
     }
 
     #[test]
@@ -2033,8 +2049,11 @@ mod tests {
             ..Default::default()
         };
         let set = build_ioc_set(&cfg);
-        assert!(set.matches_ip(&"198.51.100.7".parse::<IpAddr>().unwrap()));
-        assert!(set.matches_domain("sub.malware.test").is_some());
+        assert!(
+            set.contains_ip("198.51.100.7".parse::<IpAddr>().unwrap())
+                .is_some()
+        );
+        assert!(set.contains_domain("sub.malware.test").is_some());
         let _ = std::fs::remove_file(&path);
     }
 }
