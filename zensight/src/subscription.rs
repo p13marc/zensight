@@ -5,8 +5,8 @@ use zenoh::sample::SampleKind;
 use zenoh_ext::{AdvancedSubscriberBuilderExt, HistoryConfig, RecoveryConfig};
 
 use zensight_common::{
-    Alert, CorrelationEntry, DeviceLiveness, ErrorReport, HealthSnapshot, SensorInfo,
-    TelemetryPoint, ZenohConfig, all_telemetry_wildcard, decode_auto,
+    Alert, DeviceLiveness, ErrorReport, HealthSnapshot, SensorInfo, TelemetryPoint, ZenohConfig,
+    all_telemetry_wildcard, decode_auto,
 };
 
 use crate::message::Message;
@@ -374,8 +374,8 @@ fn parse_alert_cleared(key: &str) -> Option<Message> {
 /// - `zensight/<protocol>/@/health` -> HealthSnapshot
 /// - `zensight/<protocol>/@/devices/<device>/liveness` -> DeviceLiveness
 /// - `zensight/<protocol>/@/errors` -> ErrorReport
-/// - `zensight/_meta/sensors/<name>` -> SensorInfo
-/// - `zensight/_meta/correlation/<ip>` -> CorrelationEntry
+/// - `zensight/_meta/sensors/<name>/<source>` -> SensorInfo
+/// - `zensight/_meta/evidence/**` is correlator input, not decoded here
 /// - `zensight/<protocol>/<source>/<metric>` -> TelemetryPoint
 fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
     // Parse without allocating a Vec — use positional split_once
@@ -392,14 +392,6 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
                 Ok(info) => Some(Message::SensorInfoReceived(info)),
                 Err(e) => {
                     tracing::warn!(error = %e, key = %key, "Failed to decode SensorInfo");
-                    None
-                }
-            };
-        } else if segment2 == "correlation" {
-            return match decode_auto::<CorrelationEntry>(payload) {
-                Ok(entry) => Some(Message::CorrelationReceived(entry)),
-                Err(e) => {
-                    tracing::warn!(error = %e, key = %key, "Failed to decode CorrelationEntry");
                     None
                 }
             };

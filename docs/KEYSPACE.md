@@ -219,8 +219,27 @@ Cross-sensor, protocol-independent registries.
 
 | Key | Payload | Emitted by |
 |-----|---------|------------|
-| `zensight/_meta/sensors/<name>` | `SensorInfo` (registration/discovery) | every sensor |
-| `zensight/_meta/correlation/<ip>` | `CorrelationEntry` (which sensors see a device) | sensors with correlation |
+| `zensight/_meta/sensors/<name>/<source>` | `SensorInfo` (identity-stamped registration) | every sensor (runner, 60 s re-emit) |
+| `zensight/_meta/evidence/host/<sensor>/<source>` | `HostEvidence` (identity claim) | every sensor (self-report) + observers (#307) |
+| `zensight/_meta/evidence/names/<sensor>/<ip-slug>` | `NameObservation` (latest name for an IP) | netring passive DNS (#308) |
+
+### 4.1 Evidence contract (#301)
+
+- Evidence is a **claim**, not a verdict: `observer: None` marks a sensor's
+  self-report about its own host; `observer: Some(sensor)` marks a third-party
+  claim about a device observed on the wire (weighted lower by the correlator).
+- `host_id` is `sha256(machine-id + app salt)` hex — the raw machine-id never
+  leaves the host. All ZenSight sensors on one machine derive the same value.
+- **TTL**: consumers ignore evidence whose `last_updated` is older than the
+  evidence TTL (correlator default 900 s). Publishers therefore refresh live
+  claims at ≤ TTL/2 — the runner's 60 s re-emission satisfies this for
+  self-reports — and stale claims age out instead of binding entities forever.
+- Publishers use cached AdvancedPublishers (`cache(1)`), so a late joiner
+  seeds the latest doc per key immediately.
+
+The former `zensight/_meta/correlation/<ip>` keyspace (`CorrelationEntry`) is
+**deleted** — it was never published by any sensor; entity resolution moves to
+the correlator's `_meta/entity/**` keyspace (#305).
 
 ---
 
@@ -235,8 +254,8 @@ Cross-sensor, protocol-independent registries.
 | `zensight/*/@/query/alerts` | frontend (GET at startup) | firing-set seed for late joiners |
 | `zensight/<protocol>/@/alerts/**` | any alert consumer | one sensor's alerts (note explicit `@`) |
 | `zensight/*/@/alerts/*` | exporters (`export_alerts`) | all sensors' alerts, mirrored to Prometheus/OTel |
-| `zensight/_meta/sensors/*` | frontend | sensor registrations |
-| `zensight/_meta/correlation/*` | frontend | device correlations |
+| `zensight/_meta/sensors/**` | frontend | sensor registrations (per `<name>/<source>` instance) |
+| `zensight/_meta/evidence/**` | correlator (#305) | host-identity claims + name observations |
 
 Exporters (`prometheus`, `otel`) subscribe to `zensight/**` and **skip**
 control/metadata by filtering keys containing `/@/` or starting with
@@ -304,8 +323,10 @@ zensight/
 │       ├── store/<algo>/<hash>         # content-addressed chunks — Tree delivery (queryable)
 │       └── tree/<id>                   # TreeIndex — Tree delivery (queryable)
 └── _meta/
-    ├── sensors/<name>                  # SensorInfo
-    └── correlation/<ip>                # CorrelationEntry
+    ├── sensors/<name>/<source>         # SensorInfo (identity-stamped registration)
+    └── evidence/                       # host-identity claims (correlator input)
+        ├── host/<sensor>/<source>      # HostEvidence (self-report / observed)
+        └── names/<sensor>/<ip-slug>    # NameObservation (passive DNS)
 ```
 
 ---

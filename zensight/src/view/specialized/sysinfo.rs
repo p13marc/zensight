@@ -975,20 +975,30 @@ fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
                 row![
                     text("pid").size(10).width(70),
                     text("name").size(10).width(160),
+                    text("user").size(10).width(90),
                     text("cpu%").size(10).width(60),
                     text("rss").size(10).width(90),
                     text("vsz").size(10).width(90),
                     text("thr").size(10).width(50),
                     text("state").size(10).width(70),
                     text("io r/w").size(10).width(140),
+                    text("command").size(10).width(iced::Length::Fill),
                 ]
                 .spacing(8),
             );
             for p in procs.iter().take(200) {
+                // cmdline arrives scrubbed + capped from the sensor (#302);
+                // fall back to the bare name for kernel threads / stripped args.
+                let command = if p.cmdline.is_empty() {
+                    p.name.clone()
+                } else {
+                    p.cmdline.clone()
+                };
                 list = list.push(
                     row![
                         text(p.pid.to_string()).size(11).width(70),
                         text(p.name.clone()).size(11).width(160),
+                        text(p.user.clone().unwrap_or_default()).size(11).width(90),
                         text(format!("{:.1}", p.cpu)).size(11).width(60),
                         text(format_bytes(p.rss as f64)).size(11).width(90),
                         text(format_bytes(p.vsz as f64)).size(11).width(90),
@@ -1003,6 +1013,7 @@ fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
                         ))
                         .size(11)
                         .width(140),
+                        text(command).size(11).width(iced::Length::Fill),
                     ]
                     .spacing(8),
                 );

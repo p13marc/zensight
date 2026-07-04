@@ -6,7 +6,7 @@ use zensight_sensor_core::{LoggingConfig, SensorConfig, ZenohConfig};
 fn default_key_prefix() -> String {
     "zensight/netring".to_string()
 }
-fn default_sensor_id() -> String {
+fn default_source() -> String {
     "auto".to_string()
 }
 fn default_bw_period() -> u64 {
@@ -33,9 +33,9 @@ pub struct NetringSensorConfig {
 pub struct NetringConfig {
     #[serde(default = "default_key_prefix")]
     pub key_prefix: String,
-    /// Sensor identifier used as telemetry `source`. "auto" → hostname.
-    #[serde(default = "default_sensor_id")]
-    pub sensor_id: String,
+    /// Host identifier used as telemetry `source`. "auto" → hostname.
+    #[serde(default = "default_source")]
+    pub source: String,
     /// Capture interfaces (e.g. ["eth0"]). Ignored when `pcap` is set.
     #[serde(default)]
     pub interfaces: Vec<String>,
@@ -483,14 +483,14 @@ fn default_exfil_min_bytes() -> u64 {
 }
 
 impl NetringConfig {
-    pub fn resolved_sensor_id(&self) -> String {
-        if self.sensor_id == "auto" {
+    pub fn resolved_source(&self) -> String {
+        if self.source == "auto" {
             hostname::get()
                 .ok()
                 .and_then(|h| h.into_string().ok())
                 .unwrap_or_else(|| "unknown".to_string())
         } else {
-            self.sensor_id.clone()
+            self.source.clone()
         }
     }
 }
@@ -525,9 +525,9 @@ mod tests {
     #[test]
     fn parse_with_interface() {
         let cfg: NetringSensorConfig =
-            json5::from_str(r#"{ netring: { sensor_id: "s1", interfaces: ["eth0"] } }"#).unwrap();
+            json5::from_str(r#"{ netring: { source: "s1", interfaces: ["eth0"] } }"#).unwrap();
         assert_eq!(cfg.netring.key_prefix, "zensight/netring");
-        assert_eq!(cfg.netring.resolved_sensor_id(), "s1");
+        assert_eq!(cfg.netring.resolved_source(), "s1");
         assert!(cfg.netring.collect.bandwidth);
         assert!(cfg.validate().is_ok());
     }

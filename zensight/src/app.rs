@@ -10,8 +10,7 @@ use std::ops::ControlFlow;
 use std::sync::LazyLock;
 
 use zensight_common::{
-    CorrelationEntry, ErrorReport, HealthSnapshot, Protocol, SensorInfo, TelemetryPoint,
-    TelemetryValue, ZenohConfig,
+    ErrorReport, HealthSnapshot, Protocol, SensorInfo, TelemetryPoint, TelemetryValue, ZenohConfig,
 };
 
 /// Flush the metric store to redb every this many 1s ticks (#22).
@@ -140,10 +139,9 @@ pub struct ZenSight {
     sensor_health: std::collections::HashMap<String, HealthSnapshot>,
     /// Recent error reports per sensor (bounded ring), for the Sensors view.
     recent_errors: std::collections::HashMap<String, std::collections::VecDeque<ErrorReport>>,
-    /// Known sensors, keyed by sensor name.
+    /// Known sensor instances, keyed by `<name>@<source>` (one sensor can run
+    /// on many hosts).
     known_sensors: std::collections::HashMap<String, SensorInfo>,
-    /// Device correlation entries, keyed by IP address.
-    correlations: std::collections::HashMap<String, CorrelationEntry>,
     /// Toast notification state.
     toasts: ToastState,
     /// Live Zenoh session handle (set on connect) for sending commands to
@@ -296,7 +294,6 @@ impl ZenSight {
             sensor_health: std::collections::HashMap::new(),
             recent_errors: std::collections::HashMap::new(),
             known_sensors: std::collections::HashMap::new(),
-            correlations: std::collections::HashMap::new(),
             toasts: ToastState::default(),
             session: None,
             artifact_fetch: crate::view::artifact_fetch::ArtifactFetch::default(),
@@ -938,7 +935,6 @@ impl ZenSight {
                 // OpenTopology does so the lookup sees current nodes.
                 self.topology.update_from_devices(&self.dashboard.devices);
                 self.topology.apply_alerts(&self.alerts.external);
-                self.topology.apply_correlations(&self.correlations);
                 let node = hostname
                     .filter(|h| self.topology.nodes.contains_key(h))
                     .or_else(|| self.topology_ip_to_node().get(&ip).cloned());
@@ -1156,11 +1152,8 @@ impl ZenSight {
             }
 
             Message::SensorInfoReceived(info) => {
-                self.known_sensors.insert(info.name.clone(), info);
-            }
-
-            Message::CorrelationReceived(entry) => {
-                self.correlations.insert(entry.ip.clone(), entry);
+                self.known_sensors
+                    .insert(format!("{}@{}", info.name, info.source), info);
             }
 
             Message::AlertReceived(alert) => {
@@ -1847,7 +1840,6 @@ impl ZenSight {
                 // Update topology from current device data before showing
                 self.topology.update_from_devices(&self.dashboard.devices);
                 self.topology.apply_alerts(&self.alerts.external);
-                self.topology.apply_correlations(&self.correlations);
                 self.set_view(CurrentView::Topology);
                 self.save_current_view();
                 // Derive real edges from observed flows (#25) and netlink
@@ -3180,23 +3172,13 @@ impl ZenSight {
     }
 
     /// Build a map from endpoint IP to topology node id (#25). A node's `source`
-    /// that is itself an IP maps directly; correlation entries map additional IPs
-    /// to a hostname that matches a node.
+    /// that is itself an IP maps directly; the entity keyspace (#306) will map
+    /// additional IPs to hostname nodes once the correlator lands.
     fn topology_ip_to_node(&self) -> std::collections::HashMap<String, String> {
         let mut map = std::collections::HashMap::new();
         // Direct: a node whose id looks like an IP maps that IP to itself.
         for node_id in self.topology.nodes.keys() {
             map.insert(node_id.clone(), node_id.clone());
-        }
-        // Indirect: correlation IP -> any of its hostnames that is a known node.
-        for entry in self.correlations.values() {
-            if let Some(node) = entry
-                .hostnames
-                .iter()
-                .find(|h| self.topology.nodes.contains_key(*h))
-            {
-                map.insert(entry.ip.clone(), node.clone());
-            }
         }
         map
     }

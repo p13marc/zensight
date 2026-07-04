@@ -46,6 +46,10 @@ pub struct ModbusConfig {
     #[serde(default = "default_key_prefix")]
     pub key_prefix: String,
 
+    /// Override the agent-host source id (default: the local hostname).
+    #[serde(default)]
+    pub source: Option<String>,
+
     /// Devices to poll
     pub devices: Vec<DeviceConfig>,
 
@@ -60,6 +64,17 @@ pub struct ModbusConfig {
 
 fn default_key_prefix() -> String {
     "zensight/modbus".to_string()
+}
+
+impl ModbusConfig {
+    /// The agent host's unified source id: the `source` override, else the hostname.
+    pub fn resolved_source(&self) -> String {
+        self.source.clone().unwrap_or_else(|| {
+            hostname::get()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "unknown".to_string())
+        })
+    }
 }
 
 /// Configuration for a single Modbus device.

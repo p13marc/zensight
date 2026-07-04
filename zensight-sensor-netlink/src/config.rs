@@ -6,7 +6,7 @@ use zensight_sensor_core::{LoggingConfig, SensorConfig, ZenohConfig};
 fn default_key_prefix() -> String {
     "zensight/netlink".to_string()
 }
-fn default_hostname() -> String {
+fn default_source() -> String {
     "auto".to_string()
 }
 fn default_poll() -> u64 {
@@ -35,8 +35,8 @@ pub struct NetlinkConfig {
     #[serde(default = "default_key_prefix")]
     pub key_prefix: String,
     /// Host identifier used as telemetry `source`. "auto" detects the hostname.
-    #[serde(default = "default_hostname")]
-    pub hostname: String,
+    #[serde(default = "default_source")]
+    pub source: String,
     #[serde(default = "default_poll")]
     pub poll_interval_secs: u64,
     #[serde(default)]
@@ -240,15 +240,15 @@ fn is_virtual(name: &str) -> bool {
 }
 
 impl NetlinkConfig {
-    /// Resolve the configured hostname, detecting it when set to "auto".
-    pub fn resolved_hostname(&self) -> String {
-        if self.hostname == "auto" {
+    /// Resolve the configured source id, detecting the hostname when set to "auto".
+    pub fn resolved_source(&self) -> String {
+        if self.source == "auto" {
             hostname::get()
                 .ok()
                 .and_then(|h| h.into_string().ok())
                 .unwrap_or_else(|| "unknown".to_string())
         } else {
-            self.hostname.clone()
+            self.source.clone()
         }
     }
 }
@@ -307,10 +307,9 @@ mod tests {
 
     #[test]
     fn parse_minimal_config() {
-        let cfg: NetlinkSensorConfig =
-            json5::from_str(r#"{ netlink: { hostname: "h1" } }"#).unwrap();
+        let cfg: NetlinkSensorConfig = json5::from_str(r#"{ netlink: { source: "h1" } }"#).unwrap();
         assert_eq!(cfg.netlink.key_prefix, "zensight/netlink");
-        assert_eq!(cfg.netlink.resolved_hostname(), "h1");
+        assert_eq!(cfg.netlink.resolved_source(), "h1");
         assert!(cfg.netlink.collect.interfaces);
     }
 }

@@ -113,6 +113,8 @@ pub struct SensorHealth {
     last_poll_duration_ms: AtomicU64,
     /// Per-device liveness tracking.
     device_liveness: Arc<RwLock<HashMap<String, DeviceState>>>,
+    /// Hashed machine-id stamped onto snapshots (identity envelope, #301).
+    host_id: RwLock<Option<String>>,
     /// Publisher for health metrics.
     publisher: Option<Publisher>,
     /// Liveliness manager for Zenoh presence tokens.
@@ -181,6 +183,9 @@ pub struct HealthSnapshot {
     pub errors_last_hour: u64,
     /// Total metrics published.
     pub metrics_published: u64,
+    /// Hashed machine-id of the publishing host (identity envelope, #301).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
 }
 
 /// Device liveness information for serialization.
@@ -251,9 +256,15 @@ impl SensorHealth {
             errors_last_hour: RollingErrorCounter::new(),
             last_poll_duration_ms: AtomicU64::new(0),
             device_liveness: Arc::new(RwLock::new(HashMap::new())),
+            host_id: RwLock::new(None),
             publisher: None,
             liveliness_manager: None,
         }
+    }
+
+    /// Stamp the host identity onto future snapshots (identity envelope, #301).
+    pub fn set_host_id(&self, host_id: Option<String>) {
+        *self.host_id.write().expect("host_id lock poisoned") = host_id;
     }
 
     /// Set the publisher for health metrics.
@@ -461,6 +472,7 @@ impl SensorHealth {
             last_poll_duration_ms: self.last_poll_duration_ms.load(Ordering::SeqCst),
             errors_last_hour: self.errors_last_hour.count(),
             metrics_published: self.metrics_published.load(Ordering::SeqCst),
+            host_id: self.host_id.read().expect("host_id lock poisoned").clone(),
         }
     }
 

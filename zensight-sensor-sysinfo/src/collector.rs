@@ -18,7 +18,7 @@ pub struct SystemCollector {
     system: System,
     disks: Disks,
     networks: Networks,
-    hostname: String,
+    source: String,
     key_prefix: String,
     config: SysinfoConfig,
     session: Arc<Session>,
@@ -50,7 +50,7 @@ pub struct SystemCollector {
 impl SystemCollector {
     /// Create a new system collector.
     pub fn new(
-        hostname: String,
+        source: String,
         config: SysinfoConfig,
         session: Arc<Session>,
         format: Format,
@@ -60,7 +60,7 @@ impl SystemCollector {
             disks: Disks::new_with_refreshed_list(),
             networks: Networks::new_with_refreshed_list(),
             key_prefix: config.key_prefix.clone(),
-            hostname,
+            source,
             config,
             session,
             format,
@@ -95,7 +95,7 @@ impl SystemCollector {
 
         tracing::info!(
             "Starting system collector for '{}' (interval: {}s)",
-            self.hostname,
+            self.source,
             self.config.poll_interval_secs
         );
 
@@ -107,7 +107,7 @@ impl SystemCollector {
             self.collect_and_publish().await;
             self.health
                 .record_poll_duration(started.elapsed().as_millis() as u64);
-            self.health.record_device_success(&self.hostname);
+            self.health.record_device_success(&self.source);
             tokio::time::sleep(interval).await;
         }
     }
@@ -226,7 +226,7 @@ impl SystemCollector {
             count += self.collect_saturation_score(timestamp).await;
         }
 
-        debug!("Published {} metrics for '{}'", count, self.hostname);
+        debug!("Published {} metrics for '{}'", count, self.source);
     }
 
     /// Gather the per-tick alert inputs from the same `/proc`/`/sys` + sysinfo
@@ -1454,11 +1454,11 @@ impl SystemCollector {
         labels: HashMap<String, String>,
     ) {
         self.health.record_metrics_published(1);
-        let key = format!("{}/{}/{}", self.key_prefix, self.hostname, metric);
+        let key = format!("{}/{}/{}", self.key_prefix, self.source, metric);
 
         let point = TelemetryPoint {
             timestamp,
-            source: self.hostname.clone(),
+            source: self.source.clone(),
             protocol: Protocol::Sysinfo,
             metric: metric.to_string(),
             value,
@@ -1479,8 +1479,8 @@ impl SystemCollector {
 }
 
 /// Build a key expression for a sysinfo metric.
-pub fn build_key_expr(prefix: &str, hostname: &str, metric: &str) -> String {
-    format!("{}/{}/{}", prefix, hostname, metric)
+pub fn build_key_expr(prefix: &str, source: &str, metric: &str) -> String {
+    format!("{}/{}/{}", prefix, source, metric)
 }
 
 #[cfg(test)]

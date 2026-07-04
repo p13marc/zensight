@@ -116,6 +116,12 @@ mod tests {
             io_read: 0,
             io_write: 0,
             uid: Some(1000),
+            cmdline: "redis-server *:6379".into(),
+            exe: Some("/usr/bin/redis-server".into()),
+            ppid: Some(1),
+            cgroup: Some("/system.slice/redis.service".into()),
+            start_time: 12345,
+            user: Some("redis".into()),
         }]));
         assert_eq!(s.processes.ready().map(|v| v.len()), Some(1));
         s.apply(Err("no sensor".into()));

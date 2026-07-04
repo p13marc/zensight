@@ -22,6 +22,9 @@
   syslog: {
     key_prefix: "zensight/logs",
 
+    // Override the agent-host source id (default: the local hostname).
+    // source: "agent-host-01",
+
     // No network listeners — this instance reads the local journal only.
     listeners: [],
 

@@ -202,32 +202,60 @@ pub fn all_errors_wildcard() -> String {
     format!("{}/*/@/errors", KEY_PREFIX)
 }
 
-/// Build a wildcard key expression for all correlation data.
-///
-/// Matches: `zensight/_meta/correlation/<ip>`
-///
-/// # Example
-/// ```
-/// use zensight_common::keyexpr::all_correlation_wildcard;
-///
-/// assert_eq!(all_correlation_wildcard(), "zensight/_meta/correlation/*");
-/// ```
-pub fn all_correlation_wildcard() -> String {
-    format!("{}/_meta/correlation/*", KEY_PREFIX)
-}
-
 /// Build a wildcard key expression for all sensor discovery data.
 ///
-/// Matches: `zensight/_meta/sensors/<sensor_name>`
+/// Matches: `zensight/_meta/sensors/<sensor_name>/<source>`
 ///
 /// # Example
 /// ```
 /// use zensight_common::keyexpr::all_sensors_wildcard;
 ///
-/// assert_eq!(all_sensors_wildcard(), "zensight/_meta/sensors/*");
+/// assert_eq!(all_sensors_wildcard(), "zensight/_meta/sensors/**");
 /// ```
 pub fn all_sensors_wildcard() -> String {
-    format!("{}/_meta/sensors/*", KEY_PREFIX)
+    format!("{}/_meta/sensors/**", KEY_PREFIX)
+}
+
+/// Build the sensor-registration key for one sensor instance. Keyed by
+/// `<name>/<source>` — per-name keys would collide across hosts running the
+/// same sensor.
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::sensor_info_key;
+///
+/// assert_eq!(sensor_info_key("sysinfo", "host1"), "zensight/_meta/sensors/sysinfo/host1");
+/// ```
+pub fn sensor_info_key(name: &str, source: &str) -> String {
+    format!("{}/_meta/sensors/{}/{}", KEY_PREFIX, name, source)
+}
+
+/// Build the host-evidence key for one `(sensor, source)` claim.
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::host_evidence_key;
+///
+/// assert_eq!(
+///     host_evidence_key("netlink", "host1"),
+///     "zensight/_meta/evidence/host/netlink/host1"
+/// );
+/// ```
+pub fn host_evidence_key(sensor: &str, source: &str) -> String {
+    format!("{}/_meta/evidence/host/{}/{}", KEY_PREFIX, sensor, source)
+}
+
+/// Build a wildcard key expression for the whole evidence keyspace
+/// (`host/**` claims and `names/**` observation batches).
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::all_evidence_wildcard;
+///
+/// assert_eq!(all_evidence_wildcard(), "zensight/_meta/evidence/**");
+/// ```
+pub fn all_evidence_wildcard() -> String {
+    format!("{}/_meta/evidence/**", KEY_PREFIX)
 }
 
 /// Build a wildcard key expression for all sensor-emitted alerts.

@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
     let args = SensorArgs::parse_with_default("netlink.json5");
     let config = NetlinkSensorConfig::load(&args.config).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let hostname = config.netlink.resolved_hostname();
+    let source = config.netlink.resolved_source();
 
     let runner = SensorRunner::new_with_args("netlink", config, Some(&args))
         .await
@@ -29,13 +29,13 @@ async fn main() -> Result<()> {
     // unless enabled in the config's `artifacts` limits.
     let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
         "netlink",
-        hostname.clone(),
+        source.clone(),
         runner.config().clone(),
         runner.health(),
     ));
     let artifacts = runner.config().artifact_limits();
-    let runner = runner.with_artifacts(
-        hostname.clone(),
+    let runner = runner.with_identity(source.clone()).with_artifacts(
+        source.clone(),
         vec![
             std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
                 report_source,
@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
         "Netlink sensor running (prefix: {}, interval: {}s, host: {})",
         netlink_config.key_prefix,
         netlink_config.poll_interval_secs,
-        hostname
+        source
     );
 
     let mut runner = runner;
@@ -101,13 +101,16 @@ async fn main() -> Result<()> {
     use std::time::Duration;
     use zensight_sensor_core::{AlertReporter, Protocol};
     let exp_cfg = netlink_config.expectations.clone().unwrap_or_default();
-    let reporter = Arc::new(
-        AlertReporter::new(runner.publisher(), Protocol::Netlink, Format::Json)
-            .with_debounce(Duration::from_secs(exp_cfg.default_for_secs)),
-    );
+    let reporter = AlertReporter::new(runner.publisher(), Protocol::Netlink, Format::Json)
+        .with_debounce(Duration::from_secs(exp_cfg.default_for_secs));
+    let reporter = match runner.identity() {
+        Some(id) => reporter.with_identity(id),
+        None => reporter,
+    };
+    let reporter = Arc::new(reporter);
 
     let collector = Collector::new(
-        hostname.clone(),
+        source.clone(),
         netlink_config.clone(),
         session,
         Format::Json,
@@ -130,7 +133,7 @@ async fn main() -> Result<()> {
     let collector = if netlink_config.collect.events && netlink_config.collect.xfrm {
         use zensight_sensor_netlink::{XfrmSentinel, XfrmSentinelConfig};
         collector.with_xfrm_sentinel(XfrmSentinel::new(
-            hostname.clone(),
+            source.clone(),
             reporter.clone(),
             XfrmSentinelConfig::default(),
         ))
@@ -194,7 +197,7 @@ async fn main() -> Result<()> {
         // after an alert fired.
         runner.spawn(serve_alerts_query(reporter.clone()));
         let evaluator = zensight_sensor_netlink::Evaluator::new(
-            hostname.clone(),
+            source.clone(),
             exp_cfg,
             reporter.clone(),
             metric_cache,
@@ -214,7 +217,7 @@ async fn main() -> Result<()> {
 
     let metadata = serde_json::json!({
         "sentinel": true,
-        "host": hostname,
+        "host": source,
         "collect": {
             "interfaces": netlink_config.collect.interfaces,
             "sockets": netlink_config.collect.sockets,

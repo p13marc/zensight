@@ -62,7 +62,7 @@ anyhow.workspace = true
 chrono = "0.4"
 
 # Hostname detection
-hostname = "0.4"
+hostname = { workspace = true }
 
 # Compiles the excluded eBPF program crate to bytecode. Only pulled in (and only
 # used by build.rs) when the `ebpf` feature is enabled — stable builds never

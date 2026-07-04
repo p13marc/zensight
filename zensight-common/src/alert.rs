@@ -162,6 +162,13 @@ impl Alert {
     /// Including `source` keeps alerts from different hosts on distinct keys (no
     /// cross-host collisions). The key is stable under label reordering (labels
     /// are sorted before hashing).
+    ///
+    /// Labels prefixed **`host.`** are the *annotation namespace* — identity
+    /// metadata (`host.id`, `host.boot_id`, ...) stamped onto alerts for
+    /// correlation. They are **excluded** from the key: `source` already
+    /// distinguishes hosts, and keying on annotations would orphan a firing
+    /// alert whenever the identity envelope refreshes or a publisher stamps
+    /// inconsistently (a pre-stamp `Firing` could never be `Resolved` post-stamp).
     pub fn alert_key(&self) -> String {
         let mut hasher = Fnv1a::new();
         hasher.update(self.source.as_bytes());
@@ -171,6 +178,9 @@ impl Alert {
         // BTreeMap iterates in sorted key order → deterministic.
         let sorted: BTreeMap<&String, &String> = self.labels.iter().collect();
         for (k, v) in sorted {
+            if k.starts_with("host.") {
+                continue; // annotation namespace — never part of alert identity
+            }
             hasher.update(k.as_bytes());
             hasher.update(b"=");
             hasher.update(v.as_bytes());
@@ -255,6 +265,29 @@ mod tests {
         let with_other = base.clone().with_label("src", "10.0.0.6");
         assert_ne!(base.alert_key(), with_src.alert_key());
         assert_ne!(with_src.alert_key(), with_other.alert_key());
+    }
+
+    #[test]
+    fn alert_key_ignores_host_annotation_labels() {
+        let base = Alert::new(
+            "h",
+            Protocol::Netring,
+            AlertKind::Anomaly,
+            "port_scan",
+            AlertSeverity::Warning,
+            "scan",
+        )
+        .with_label("src", "10.0.0.5");
+        let stamped = base
+            .clone()
+            .with_label("host.id", "ab".repeat(32))
+            .with_label("host.boot_id", "bbbb");
+        // Annotation labels never change alert identity: a pre-stamp Firing and
+        // a post-stamp Resolved must land on the same key.
+        assert_eq!(base.alert_key(), stamped.alert_key());
+        // ...but a non-annotation label still does.
+        let other = base.clone().with_label("dst", "10.0.0.9");
+        assert_ne!(base.alert_key(), other.alert_key());
     }
 
     #[test]

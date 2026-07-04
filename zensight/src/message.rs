@@ -1,6 +1,6 @@
 use zensight_common::{
-    Alert, CorrelationEntry, DeviceLiveness, DeviceStatus, ErrorReport, HealthSnapshot, Protocol,
-    SensorInfo, TelemetryPoint,
+    Alert, DeviceLiveness, DeviceStatus, ErrorReport, HealthSnapshot, Protocol, SensorInfo,
+    TelemetryPoint,
 };
 
 use crate::view::alerts::{ComparisonOp, Severity};
@@ -40,9 +40,6 @@ pub enum Message {
 
     /// Sensor discovery/info received.
     SensorInfoReceived(SensorInfo),
-
-    /// Correlation entry received.
-    CorrelationReceived(CorrelationEntry),
 
     /// A sensor-emitted alert was received (firing or resolved). Published on
     /// `zensight/<protocol>/@/alerts/<alert_key>`.

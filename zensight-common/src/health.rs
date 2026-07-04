@@ -4,7 +4,6 @@
 //! for deserialization in the frontend without requiring the full framework.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Sensor health status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -82,6 +81,9 @@ pub struct HealthSnapshot {
     pub errors_last_hour: u64,
     /// Total metrics published.
     pub metrics_published: u64,
+    /// Hashed machine-id of the publishing host (identity envelope, #301).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
 }
 
 /// Device liveness information.
@@ -139,38 +141,35 @@ pub struct ErrorReport {
     pub retryable: bool,
 }
 
-/// Correlation entry from cross-sensor device correlation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CorrelationEntry {
-    /// Primary IP address (as string for frontend compatibility).
-    pub ip: String,
-    /// All known hostnames across sensors.
-    pub hostnames: Vec<String>,
-    /// Sensors that have seen this device.
-    pub sensors: Vec<String>,
-    /// Source IDs per sensor.
-    pub sources: HashMap<String, String>,
-    /// Last update timestamp.
-    pub last_updated: i64,
-}
-
-/// Sensor discovery information.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Sensor registration/discovery record, published by every sensor's runner on
+/// `zensight/_meta/sensors/<name>/<source>` (identity envelope, #301). Health
+/// and device counts live on `@/health`, not here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SensorInfo {
-    /// Sensor name (e.g., "snmp", "syslog").
+    /// Sensor name (e.g., "sysinfo", "netlink").
     pub name: String,
-    /// Sensor version.
+    /// Sensor crate version.
     pub version: String,
-    /// Key prefix used by this sensor.
+    /// Key prefix used by this sensor (e.g. "zensight/netlink").
     pub key_prefix: String,
-    /// Protocol handled.
-    pub protocol: String,
-    /// Number of devices being monitored.
-    pub device_count: u64,
-    /// Sensor status.
-    pub status: HealthStatus,
-    /// Last heartbeat timestamp.
-    pub last_heartbeat: i64,
+    /// Unified host/source id (the `<source>` telemetry key segment).
+    pub source: String,
+    /// Hashed machine-id (never the raw id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
+    /// Kernel boot id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fqdn: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ips: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub macs: Vec<String>,
+    /// Unix epoch millis of the latest re-emission.
+    pub last_updated: i64,
 }
 
 #[cfg(test)]
@@ -226,17 +225,22 @@ mod tests {
     }
 
     #[test]
-    fn test_correlation_entry_deserialize() {
+    fn test_sensor_info_roundtrip() {
         let json = r#"{
-            "ip": "10.0.0.1",
-            "hostnames": ["router01", "router01.local"],
-            "sensors": ["snmp", "syslog"],
-            "sources": {"snmp": "router01", "syslog": "router01.local"},
+            "name": "sysinfo",
+            "version": "0.6.2",
+            "key_prefix": "zensight/sysinfo",
+            "source": "host1",
+            "host_id": "abcd",
+            "ips": ["10.0.0.1"],
             "last_updated": 1703500000000
         }"#;
 
-        let entry: CorrelationEntry = serde_json::from_str(json).unwrap();
-        assert_eq!(entry.ip, "10.0.0.1");
-        assert_eq!(entry.sensors.len(), 2);
+        let info: SensorInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.source, "host1");
+        assert_eq!(info.host_id.as_deref(), Some("abcd"));
+        // Absent optional fields default cleanly.
+        assert!(info.macs.is_empty());
+        assert_eq!(info.boot_id, None);
     }
 }

@@ -25,6 +25,9 @@
     // Key expression prefix for publishing
     key_prefix: "zensight/netflow",
 
+    // Override the agent-host source id (default: the local hostname).
+    // source: "agent-host-01",
+
     // UDP listener configurations
     // Standard ports: 2055 (NetFlow), 4739 (IPFIX), 9995 (common alternative)
     listeners: [

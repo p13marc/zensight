@@ -12,6 +12,9 @@
     // Key expression prefix for publishing
     key_prefix: "zensight/logs",
 
+    // Override the agent-host source id (default: the local hostname).
+    // source: "agent-host-01",
+
     // Listener configurations
     listeners: [
       {

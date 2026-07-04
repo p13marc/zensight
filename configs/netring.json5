@@ -35,7 +35,8 @@
   // Netring sensor settings
   netring: {
     key_prefix: "zensight/netring",
-    sensor_id: "auto",
+    // Host identifier used as telemetry `source`. "auto" → hostname.
+    source: "auto",
     // Capture backend (netring 0.28, #227): "auto" (default) probes + selects
     // (AF_XDP where available, else AF_PACKET) and logs/publishes the resolved
     // plan; "afpacket" forces AF_PACKET; "afxdp" needs an AF_XDP-enabled build

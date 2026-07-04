@@ -34,5 +34,10 @@ tempfile = { workspace = true }
 # Artifact producer registry (#332)
 async-trait = { workspace = true }
 
+# Host identity envelope (#301)
+sha2 = { workspace = true }
+hostname = { workspace = true }
+if-addrs = { workspace = true }
+
 [dev-dependencies]
 tokio-test = "0.4"

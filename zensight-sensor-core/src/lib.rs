@@ -36,13 +36,15 @@ mod alert;
 mod args;
 pub mod artifact;
 mod config;
-mod correlation;
 mod error;
 mod health;
+mod identity;
 mod liveliness;
+pub mod procutil;
 mod publisher;
 pub mod report;
 mod runner;
+pub mod scrub;
 mod status;
 
 pub use advanced_publisher::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
@@ -53,15 +55,16 @@ pub use artifact::{
     ReportProducer, SnapshotProducer,
 };
 pub use config::SensorConfig;
-pub use correlation::{CorrelationEntry, CorrelationRegistry, DeviceIdentity, SensorInfo};
 pub use error::{Result, SensorError};
 pub use health::{
     DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, SensorHealth,
 };
+pub use identity::{HostIdentity, SharedIdentity};
 pub use liveliness::LivelinessManager;
 pub use publisher::Publisher;
 pub use report::{DebugBundleSource, SimpleBundleSource, redact};
 pub use runner::SensorRunner;
+pub use scrub::{ArgScrubber, CMDLINE_CAP_BYTES};
 pub use status::SensorStatus;
 
 // Re-export commonly used types from zensight-common

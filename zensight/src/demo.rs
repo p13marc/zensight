@@ -2141,6 +2141,8 @@ impl DemoSimulator {
                     last_poll_duration_ms: self.rng.random_range(50..200),
                     errors_last_hour: errors,
                     metrics_published: metrics,
+                    // Demo host identity arrives with the mock entities (#306).
+                    host_id: None,
                 }
             })
             .collect()

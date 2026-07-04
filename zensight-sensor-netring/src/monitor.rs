@@ -533,7 +533,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
     let assets: AssetInventory = Arc::new(Mutex::new(HashMap::new()));
 
     let mut b = Monitor::builder();
-    b = b.name(cfg.sensor_id.clone());
+    b = b.name(cfg.source.clone());
 
     // Source: pcap replay (privilege-free) or live interfaces. The resolved
     // capture backend (#227) is surfaced as a `capture/backend` info point + log
@@ -566,7 +566,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
     // fires immediately. One tiny Text point — negligible cost.
     {
         let tx = tel_tx.clone();
-        let sensor_id = cfg.sensor_id.clone();
+        let sensor_id = cfg.source.clone();
         let label = backend_label.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(15));
@@ -634,13 +634,13 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
         let exfil_h = exfil.clone();
         let exfil_alert_tx = alert_tx.clone();
         let exfil_cfg = det_cfg.clone();
-        let exfil_sensor_id = cfg.sensor_id.clone();
+        let exfil_sensor_id = cfg.source.clone();
         let shed_fe = shed_ctl.clone();
         // Capture-leg asymmetry (#226): a flow whose two directions arrived on
         // legs that shouldn't pair (tap miswire / asymmetric routing). Sticky
         // IOC — alert once per sensor run (latched), not per flow.
         let asym_tx = alert_tx.clone();
-        let asym_sensor_id = cfg.sensor_id.clone();
+        let asym_sensor_id = cfg.source.clone();
         let asym_latch = asymmetry_alerted.clone();
         b = b.on_ctx::<FlowEnded<Tcp>>(move |e: &FlowEnded<Tcp>, _ctx: &mut Ctx<'_>| {
             // Honest shed: a flow shed at start is dropped from telemetry here
@@ -685,7 +685,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
         let collect_talkers_udp = cfg.collect.talkers;
         b = b.protocol::<Udp>();
         let asym_tx_udp = alert_tx.clone();
-        let asym_sensor_id_udp = cfg.sensor_id.clone();
+        let asym_sensor_id_udp = cfg.source.clone();
         let asym_latch_udp = asymmetry_alerted.clone();
         b = b.on_ctx::<FlowEnded<Udp>>(move |e: &FlowEnded<Udp>, _ctx: &mut Ctx<'_>| {
             l4_udp
@@ -744,7 +744,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
                 // Publish the focus counters on the bandwidth cadence so the GUI
                 // sees the filter's effect (telemetry isn't retained).
                 let tx = tel_tx.clone();
-                let sensor_id = cfg.sensor_id.clone();
+                let sensor_id = cfg.source.clone();
                 let period = cfg.bandwidth_period_secs.max(1);
                 let (fp2, fb2) = (focus_packets.clone(), focus_bytes.clone());
                 tokio::spawn(async move {
@@ -794,7 +794,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
         use netring::prelude::{DestUnreachableKind, IcmpErrorKind};
         let icmp_h = icmp.clone();
         let alerts_h = alert_tx.clone();
-        let sensor_id = cfg.sensor_id.clone();
+        let sensor_id = cfg.source.clone();
         b = b.on_icmp_error(move |err: &IcmpError, _ctx: &mut Ctx<'_>| {
             // Classify into the headline counters + per-kind breakdown.
             let mut is_unreachable = false;
@@ -1127,7 +1127,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
         use flowscope::snmp::{SnmpMessage, SnmpVersion};
         b = b.protocol::<Snmp>();
         let alerts_h = alert_tx.clone();
-        let sensor_id = cfg.sensor_id.clone();
+        let sensor_id = cfg.source.clone();
         b = b.on_ctx::<Snmp>(move |msg: &SnmpMessage, ctx: &mut Ctx<'_>| {
             if matches!(msg.version, SnmpVersion::V1 | SnmpVersion::V2c) {
                 let version = match msg.version {
@@ -1151,7 +1151,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
     // Per-application bandwidth (periodic report).
     if cfg.collect.bandwidth {
         let tx = tel_tx.clone();
-        let sensor_id = cfg.sensor_id.clone();
+        let sensor_id = cfg.source.clone();
         b = b.on_bandwidth(
             Duration::from_secs(cfg.bandwidth_period_secs.max(1)),
             move |bw: &BandwidthReport<'_>| {
@@ -1172,7 +1172,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
         use netring::monitor::overload::{OverloadConfig, OverloadDetector, OverloadState};
         use netring::monitor::telemetry::CaptureTelemetry;
         let tx = tel_tx.clone();
-        let sensor_id = cfg.sensor_id.clone();
+        let sensor_id = cfg.source.clone();
         let overload_cfg = cfg.overload.clone();
         let alerts_h = alert_tx.clone();
         // When shedding is armed, a single controller drives detection + the
@@ -1431,7 +1431,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
     if (cfg.anomalies.dns_tunnel || cfg.anomalies.nod) && cfg.collect.dns {
         use flowscope::dns::DnsMessage;
         let alerts_h = alert_tx.clone();
-        let sensor_id = cfg.sensor_id.clone();
+        let sensor_id = cfg.source.clone();
         // Read allowlist + per-detector enables/thresholds live so they hot-swap
         // at runtime (#121).
         let det = det_cfg.clone();
@@ -1571,7 +1571,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
 
         // SMB → admin-share / service-pipe access.
         b = b.protocol::<Smb>();
-        let (alerts, det, sid) = (alert_tx.clone(), det_cfg.clone(), cfg.sensor_id.clone());
+        let (alerts, det, sid) = (alert_tx.clone(), det_cfg.clone(), cfg.source.clone());
         b = b.on_ctx::<Smb>(move |m: &SmbMessage, ctx: &mut Ctx<'_>| {
             if det.load().lateral_movement
                 && let Some(f) = crate::lateral::smb_finding(
@@ -1589,7 +1589,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
 
         // RDP → connection request between peers.
         b = b.protocol::<Rdp>();
-        let (alerts, det, sid) = (alert_tx.clone(), det_cfg.clone(), cfg.sensor_id.clone());
+        let (alerts, det, sid) = (alert_tx.clone(), det_cfg.clone(), cfg.source.clone());
         b = b.on_ctx::<Rdp>(move |m: &RdpMessage, ctx: &mut Ctx<'_>| {
             if det.load().lateral_movement
                 && let RdpMessage::ConnectionRequest {
@@ -1604,7 +1604,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
 
         // Kerberos → kerberoasting / weak-etype / brute-force signals.
         b = b.protocol::<Kerberos>();
-        let (alerts, det, sid) = (alert_tx.clone(), det_cfg.clone(), cfg.sensor_id.clone());
+        let (alerts, det, sid) = (alert_tx.clone(), det_cfg.clone(), cfg.source.clone());
         b = b.on_ctx::<Kerberos>(move |m: &KerberosMessage, ctx: &mut Ctx<'_>| {
             if det.load().lateral_movement {
                 let weak = m.etypes.iter().any(|e| e.is_weak());

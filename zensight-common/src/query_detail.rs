@@ -277,6 +277,30 @@ pub struct ProcessRecord {
     pub io_write: u64,
     /// Owning user id, if available.
     pub uid: Option<u32>,
+    /// Command line — **scrubbed** of secret-looking argv values before publish
+    /// and truncated to a byte cap (#302). Empty when unavailable or when the
+    /// sensor is configured to strip arguments.
+    #[serde(default)]
+    pub cmdline: String,
+    /// Executable path (readlink of `/proc/<pid>/exe`); `None` without
+    /// permission (other users' processes, unprivileged sensor).
+    #[serde(default)]
+    pub exe: Option<String>,
+    /// Parent pid.
+    #[serde(default)]
+    pub ppid: Option<i32>,
+    /// cgroup v2 unified path — the join key to systemd units
+    /// (`process.cgroup == unit.control_group`).
+    #[serde(default)]
+    pub cgroup: Option<String>,
+    /// `/proc/<pid>/stat` field 22: start time in clock ticks since boot.
+    /// Process identity is the `(pid, start_time)` pair everywhere (PIDs get
+    /// reused); matches nlink's `ProcessRef.start_time` exactly. `0` = unknown.
+    #[serde(default)]
+    pub start_time: u64,
+    /// Resolved username for `uid`, if available.
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 /// One TCP socket (served filterable by state/port).

@@ -52,20 +52,17 @@ async fn main() -> Result<()> {
 
     // On-demand debug-report (`@/artifact`): bundle redacted config + health +
     // counters. No-op unless `report.enabled` is set in the config.
-    let report_host = hostname::get()
-        .ok()
-        .and_then(|h| h.into_string().ok())
-        .unwrap_or_else(|| "unknown".to_string());
+    let source = runner.config().syslog.resolved_source();
     let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
         "logs",
-        report_host.clone(),
+        source.clone(),
         runner.config().clone(),
         runner.health(),
     ));
     // Tier-2 directory snapshots (`@/artifact`). No-op unless `snapshot.enabled`.
     let artifacts = runner.config().artifact_limits();
-    let runner = runner.with_artifacts(
-        report_host,
+    let runner = runner.with_identity(source.clone()).with_artifacts(
+        source.clone(),
         vec![
             std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
                 report_source,
@@ -189,11 +186,13 @@ async fn main() -> Result<()> {
     let novelty_alerts_on = syslog_config.templating.enabled && syslog_config.novelty.enabled;
     let alert_reporter: Option<Arc<AlertReporter>> =
         if journald_events_on || budget_alerts_on || novelty_alerts_on {
-            let reporter = Arc::new(AlertReporter::new(
-                runner.publisher(),
-                Protocol::Logs,
-                format,
-            ));
+            let reporter = AlertReporter::new(runner.publisher(), Protocol::Logs, format);
+            // Stamp alerts with the host identity envelope when available.
+            let reporter = match runner.identity() {
+                Some(id) => reporter.with_identity(id),
+                None => reporter,
+            };
+            let reporter = Arc::new(reporter);
             // Seed late-joining consumers (e.g. the GUI) with the firing set.
             runner.spawn(serve_alerts_query(reporter.clone()));
             Some(reporter)
@@ -299,10 +298,7 @@ async fn main() -> Result<()> {
         let key_prefix_tick = key_prefix.clone();
         let interval_secs = syslog_config.derived_interval_secs.max(1);
         let drop_alert_ratio = syslog_config.ingest.drop_alert_ratio;
-        let source = hostname::get()
-            .ok()
-            .and_then(|h| h.into_string().ok())
-            .unwrap_or_else(|| "localhost".to_string());
+        let source = source.clone();
         runner.spawn(async move {
             use std::time::Duration;
             let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
@@ -384,10 +380,7 @@ async fn main() -> Result<()> {
         // Local host identifies this sensor's rollups (network syslog spans many
         // hosts; journald is local — a single sensor-wide source keeps the
         // derived series cardinality bounded).
-        let source = hostname::get()
-            .ok()
-            .and_then(|h| h.into_string().ok())
-            .unwrap_or_else(|| "localhost".to_string());
+        let source = source.clone();
         runner.spawn(async move {
             use std::time::Duration;
             let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
@@ -449,10 +442,7 @@ async fn main() -> Result<()> {
         let session_tick = session.clone();
         let key_prefix_tick = key_prefix.clone();
         let interval_secs = syslog_config.derived_interval_secs.max(1);
-        let source = hostname::get()
-            .ok()
-            .and_then(|h| h.into_string().ok())
-            .unwrap_or_else(|| "localhost".to_string());
+        let source = source.clone();
         runner.spawn(async move {
             use std::time::Duration;
             let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
@@ -483,10 +473,7 @@ async fn main() -> Result<()> {
         (Some(_), Some(_)) if novelty_alerts_on => {
             let n = &syslog_config.novelty;
             use std::time::Duration;
-            let source = hostname::get()
-                .ok()
-                .and_then(|h| h.into_string().ok())
-                .unwrap_or_else(|| "localhost".to_string());
+            let source = source.clone();
             let params = novelty::NoveltyParams {
                 warm_up: Duration::from_secs(n.warm_up_secs),
                 dedup: Duration::from_secs(n.novelty_dedup_secs.max(1)),

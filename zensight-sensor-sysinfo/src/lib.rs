@@ -6,18 +6,18 @@
 //! # Key Expressions
 //!
 //! ```text
-//! zensight/sysinfo/<hostname>/cpu/usage
-//! zensight/sysinfo/<hostname>/cpu/<core_id>/usage
-//! zensight/sysinfo/<hostname>/cpu/times/user
-//! zensight/sysinfo/<hostname>/cpu/times/system
-//! zensight/sysinfo/<hostname>/cpu/times/iowait
-//! zensight/sysinfo/<hostname>/memory/used
-//! zensight/sysinfo/<hostname>/memory/available
-//! zensight/sysinfo/<hostname>/disk/<mount>/usage
-//! zensight/sysinfo/<hostname>/disk/<device>/io/read_bytes
-//! zensight/sysinfo/<hostname>/network/<interface>/rx_bytes
-//! zensight/sysinfo/<hostname>/sensors/<chip>/<label>/temp
-//! zensight/sysinfo/<hostname>/tcp/established
+//! zensight/sysinfo/<source>/cpu/usage
+//! zensight/sysinfo/<source>/cpu/<core_id>/usage
+//! zensight/sysinfo/<source>/cpu/times/user
+//! zensight/sysinfo/<source>/cpu/times/system
+//! zensight/sysinfo/<source>/cpu/times/iowait
+//! zensight/sysinfo/<source>/memory/used
+//! zensight/sysinfo/<source>/memory/available
+//! zensight/sysinfo/<source>/disk/<mount>/usage
+//! zensight/sysinfo/<source>/disk/<device>/io/read_bytes
+//! zensight/sysinfo/<source>/network/<interface>/rx_bytes
+//! zensight/sysinfo/<source>/sensors/<chip>/<label>/temp
+//! zensight/sysinfo/<source>/tcp/established
 //! ```
 
 pub mod alerts;

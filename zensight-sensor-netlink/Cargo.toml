@@ -55,7 +55,7 @@ clap = { workspace = true, features = ["derive"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 anyhow.workspace = true
-hostname = "0.4"
+hostname = { workspace = true }
 
 # Compiles the eBPF program crate to bytecode. Only pulled in (and only used by
 # build.rs) under `--features ebpf`; stable builds never touch bpf-linker.

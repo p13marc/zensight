@@ -65,6 +65,10 @@ pub struct SensorRunner<C: SensorConfig> {
     /// the frontend's Sensors view / health bar populate. Sensors may update it
     /// (device counts, poll durations) via [`Self::health`].
     health: Arc<crate::health::SensorHealth>,
+    /// Host identity envelope + the unified `source` id (identity envelope, #301).
+    /// Set via [`Self::with_identity`]; drives the `_meta/sensors` +
+    /// `_meta/evidence` publication task.
+    identity: Option<(String, crate::identity::SharedIdentity)>,
     /// Spawned tasks.
     tasks: Vec<JoinHandle<()>>,
 }
@@ -140,6 +144,7 @@ impl<C: SensorConfig> SensorRunner<C> {
             status_publisher: None,
             liveliness: None,
             health,
+            identity: None,
             tasks: Vec::new(),
         })
     }
@@ -195,6 +200,41 @@ impl<C: SensorConfig> SensorRunner<C> {
             tracing::info!("artifact channel enabled");
         }
         self
+    }
+
+    /// Enable the host-identity envelope (#301).
+    ///
+    /// Detects the local [`HostIdentity`](crate::HostIdentity) (hashed
+    /// machine-id, boot id, hostname, IPs, MACs), stamps `host_id` onto health
+    /// snapshots, and — once [`run`](Self::run) starts — publishes the sensor's
+    /// registration (`zensight/_meta/sensors/<name>/<source>`) and self-report
+    /// evidence (`zensight/_meta/evidence/host/<name>/<source>`) every 60 s via
+    /// cached publishers, re-detecting on a slow timer for DHCP churn.
+    ///
+    /// `source` is the sensor's unified host id — the same value used as the
+    /// telemetry `<source>` segment and passed to
+    /// [`with_artifacts`](Self::with_artifacts).
+    pub fn with_identity(self, source: impl Into<String>) -> Self {
+        let identity = crate::identity::SharedIdentity::detect();
+        self.with_shared_identity(source, identity)
+    }
+
+    /// [`with_identity`](Self::with_identity) with a pre-built identity (tests).
+    pub fn with_shared_identity(
+        mut self,
+        source: impl Into<String>,
+        identity: crate::identity::SharedIdentity,
+    ) -> Self {
+        self.health.set_host_id(identity.get().host_id.clone());
+        self.identity = Some((source.into(), identity));
+        self
+    }
+
+    /// The shared host identity, when [`with_identity`](Self::with_identity)
+    /// was enabled — for stamping alerts via
+    /// [`AlertReporter::with_identity`](crate::AlertReporter::with_identity).
+    pub fn identity(&self) -> Option<crate::identity::SharedIdentity> {
+        self.identity.as_ref().map(|(_, id)| id.clone())
     }
 
     /// Set a custom serialization format for the publisher.
@@ -313,6 +353,76 @@ impl<C: SensorConfig> SensorRunner<C> {
                     tick.tick().await;
                     if let Err(e) = health.publish_health().await {
                         tracing::warn!(error = %e, "Failed to publish sensor health");
+                    }
+                }
+            });
+            self.tasks.push(task);
+        }
+
+        // Identity envelope (#301): publish the sensor registration + self-report
+        // host evidence every 60 s via cached publishers (late-joiner seed), and
+        // re-detect the identity every 5th tick so DHCP address churn is
+        // eventually reflected (health host_id refreshes alongside).
+        if let Some((source, identity)) = self.identity.clone() {
+            let registry = crate::advanced_publisher::AdvancedPublisherRegistry::new(
+                self.session.clone(),
+                self.config.key_prefix().to_string(),
+                Format::Json,
+                crate::advanced_publisher::AdvancedPublisherConfig::cache_only(1),
+            );
+            let name = self.name.clone();
+            let version = self.version.clone();
+            let key_prefix = self.config.key_prefix().to_string();
+            let health = self.health.clone();
+            let task = tokio::spawn(async move {
+                let info_key = zensight_common::sensor_info_key(&name, &source);
+                let evidence_key = zensight_common::host_evidence_key(&name, &source);
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+                let mut n: u64 = 0;
+                loop {
+                    tick.tick().await;
+                    if n > 0 && n.is_multiple_of(5) {
+                        identity.refresh();
+                        health.set_host_id(identity.get().host_id.clone());
+                    }
+                    n += 1;
+                    let id = identity.get();
+                    let now = zensight_common::current_timestamp_millis();
+                    let info = zensight_common::SensorInfo {
+                        name: name.clone(),
+                        version: version.clone(),
+                        key_prefix: key_prefix.clone(),
+                        source: source.clone(),
+                        host_id: id.host_id.clone(),
+                        boot_id: id.boot_id.clone(),
+                        hostname: Some(id.hostname.clone()),
+                        fqdn: id.fqdn.clone(),
+                        ips: id.ips.clone(),
+                        macs: id.macs.clone(),
+                        last_updated: now,
+                    };
+                    let evidence = zensight_common::HostEvidence {
+                        sensor: name.clone(),
+                        source: source.clone(),
+                        observer: None, // self-report
+                        host_id: id.host_id,
+                        boot_id: id.boot_id,
+                        hostname: Some(id.hostname),
+                        fqdn: id.fqdn,
+                        ips: id.ips,
+                        macs: id.macs,
+                        vendor: None,
+                        platform: None,
+                        last_updated: now,
+                    };
+                    if let Err(e) = registry.publish_serializable(&info_key, &info).await {
+                        tracing::warn!(error = %e, "Failed to publish sensor registration");
+                    }
+                    if let Err(e) = registry
+                        .publish_serializable(&evidence_key, &evidence)
+                        .await
+                    {
+                        tracing::warn!(error = %e, "Failed to publish host evidence");
                     }
                 }
             });

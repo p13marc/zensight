@@ -43,9 +43,9 @@
     // Key expression prefix
     key_prefix: "zensight/sysinfo",
 
-    // Hostname for key expressions
-    // Use "auto" to detect automatically, or specify a custom name
-    hostname: "auto",
+    // Source id (hostname) for key expressions
+    // Use "auto" to detect the local hostname automatically, or specify a custom name
+    source: "auto",
 
     // Poll interval in seconds
     poll_interval_secs: 5,
@@ -81,6 +81,15 @@
       // Ignored (graceful, baseline unaffected) if either prerequisite is
       // missing.
       ebpf: false,
+    },
+
+    // Process-explorer privacy (#302): argv values whose key looks secret
+    // (password, *_token, api_key, ...) are scrubbed before cmdlines leave the
+    // host — even on the query channel. Scrubbing is ON by default.
+    processes: {
+      scrub_args: true,              // false = publish raw argv (trusted env only)
+      // custom_sensitive_words: ["*_key_file"],  // extra keys, "*" globs allowed
+      strip_proc_arguments: false,   // true = publish no arguments at all
     },
 
     // Network interface filtering

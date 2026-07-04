@@ -33,6 +33,10 @@ pub struct NetFlowConfig {
     #[serde(default = "default_key_prefix")]
     pub key_prefix: String,
 
+    /// Override the agent-host source id (default: the local hostname).
+    #[serde(default)]
+    pub source: Option<String>,
+
     /// UDP listener configurations.
     #[serde(default)]
     pub listeners: Vec<ListenerConfig>,
@@ -60,6 +64,17 @@ fn default_key_prefix() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+impl NetFlowConfig {
+    /// The agent host's unified source id: the `source` override, else the hostname.
+    pub fn resolved_source(&self) -> String {
+        self.source.clone().unwrap_or_else(|| {
+            hostname::get()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "unknown".to_string())
+        })
+    }
 }
 
 /// Individual listener configuration.
@@ -136,6 +151,7 @@ impl Default for NetFlowConfig {
     fn default() -> Self {
         Self {
             key_prefix: default_key_prefix(),
+            source: None,
             listeners: vec![ListenerConfig {
                 bind: "0.0.0.0:2055".to_string(),
                 max_packet_size: default_max_packet_size(),

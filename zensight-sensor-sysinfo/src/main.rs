@@ -17,8 +17,8 @@ async fn main() -> Result<()> {
     // Load configuration using the framework's SensorConfig trait
     let config = SysinfoSensorConfig::load(&args.config).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    // Resolve hostname
-    let hostname = config.get_hostname();
+    // Resolve the source id (hostname)
+    let source = config.resolved_source();
 
     // Create the sensor runner
     let runner = SensorRunner::new_with_args("sysinfo", config, Some(&args))
@@ -33,13 +33,14 @@ async fn main() -> Result<()> {
     // package). No-op unless the matching `artifacts.*` kind is enabled in config.
     let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
         "sysinfo",
-        hostname.clone(),
+        source.clone(),
         runner.config().clone(),
         runner.health(),
     ));
     let artifacts = runner.config().artifact_limits();
+    let runner = runner.with_identity(source.clone());
     let runner = runner.with_artifacts(
-        hostname.clone(),
+        source.clone(),
         vec![
             std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
                 report_source,
@@ -56,10 +57,10 @@ async fn main() -> Result<()> {
     let session = runner.session().clone();
 
     tracing::info!(
-        "Sysinfo sensor running (prefix: {}, interval: {}s, hostname: {})",
+        "Sysinfo sensor running (prefix: {}, interval: {}s, source: {})",
         sysinfo_config.key_prefix,
         sysinfo_config.poll_interval_secs,
-        hostname
+        source
     );
 
     // Spawn the collector task
@@ -70,9 +71,10 @@ async fn main() -> Result<()> {
     if sysinfo_config.collect.process_query {
         let q_session = session.clone();
         let q_prefix = sysinfo_config.key_prefix.clone();
-        let q_host = hostname.clone();
+        let q_source = source.clone();
+        let q_scrub = sysinfo_config.processes.clone();
         runner.spawn(async move {
-            zensight_sensor_sysinfo::query::run(q_session, q_prefix, q_host).await;
+            zensight_sensor_sysinfo::query::run(q_session, q_prefix, q_source, q_scrub).await;
         });
     }
 
@@ -80,7 +82,7 @@ async fn main() -> Result<()> {
     // for OOM / PSI / disk / FD / thermal / swap saturation (mirrors the other
     // sensors). Late-joining GUIs seed their firing set via serve_alerts_query.
     let mut collector = SystemCollector::new(
-        hostname.clone(),
+        source.clone(),
         sysinfo_config.clone(),
         session,
         Format::Json,
@@ -90,13 +92,15 @@ async fn main() -> Result<()> {
         use std::sync::Arc;
         use std::time::Duration;
         use zensight_sensor_core::{AlertReporter, serve_alerts_query};
-        let reporter = Arc::new(
-            AlertReporter::new(runner.publisher(), Protocol::Sysinfo, Format::Json)
-                .with_debounce(Duration::from_secs(sysinfo_config.alerts.for_secs)),
-        );
+        let mut reporter = AlertReporter::new(runner.publisher(), Protocol::Sysinfo, Format::Json)
+            .with_debounce(Duration::from_secs(sysinfo_config.alerts.for_secs));
+        if let Some(id) = runner.identity() {
+            reporter = reporter.with_identity(id);
+        }
+        let reporter = Arc::new(reporter);
         runner.spawn(serve_alerts_query(reporter.clone()));
         let evaluator = zensight_sensor_sysinfo::alerts::AlertEvaluator::new(
-            hostname.clone(),
+            source.clone(),
             sysinfo_config.alerts.clone(),
             reporter,
         );
@@ -138,9 +142,10 @@ async fn main() -> Result<()> {
         }
         let q_session = runner.session().clone();
         let q_prefix = sysinfo_config.key_prefix.clone();
-        let q_host = hostname.clone();
+        let q_source = source.clone();
         runner.spawn(async move {
-            zensight_sensor_sysinfo::query::run_latency(q_session, q_prefix, q_host, report).await;
+            zensight_sensor_sysinfo::query::run_latency(q_session, q_prefix, q_source, report)
+                .await;
         });
     }
     #[cfg(not(all(target_os = "linux", feature = "ebpf")))]
@@ -153,7 +158,7 @@ async fn main() -> Result<()> {
 
     // Build status metadata
     let metadata = serde_json::json!({
-        "hostname": runner.config().get_hostname(),
+        "source": runner.config().resolved_source(),
         "collect": {
             "cpu": runner.config().sysinfo.collect.cpu,
             "cpu_times": runner.config().sysinfo.collect.cpu_times,
