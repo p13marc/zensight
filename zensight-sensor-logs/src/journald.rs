@@ -476,6 +476,10 @@ const STANDARD_FIELDS: &[(&str, &str)] = &[
     ("_SYSTEMD_UNIT", "unit"),
     ("_SYSTEMD_USER_UNIT", "user_unit"),
     ("_SYSTEMD_SLICE", "slice"),
+    // Per-run identity (#303): matches `UnitDetail.invocation_id`, so a log
+    // line resolves to an exact unit run. Surfaces as label
+    // `sd.journald.invocation_id`.
+    ("_SYSTEMD_INVOCATION_ID", "invocation_id"),
     ("_COMM", "comm"),
     ("_EXE", "exe"),
     ("_CMDLINE", "cmdline"),
@@ -779,12 +783,18 @@ mod tests {
             ("_SYSTEMD_UNIT", "nginx.service"),
             ("_PID", "4242"),
             ("_BOOT_ID", "abc"),
+            ("_SYSTEMD_INVOCATION_ID", "3f9a1c2e4b5d6a7f"),
             ("MESSAGE_ID", "fc2e22bc6ee647b6b90729ab34a250b1"),
         ]);
         let m = map_record(&r, &JournaldConfig::default(), None);
         let jd = m.structured_data.get("journald").unwrap();
         assert_eq!(jd.get("unit").map(String::as_str), Some("nginx.service"));
         assert_eq!(jd.get("boot_id").map(String::as_str), Some("abc"));
+        // Per-run identity (#303) — joins UnitDetail.invocation_id.
+        assert_eq!(
+            jd.get("invocation_id").map(String::as_str),
+            Some("3f9a1c2e4b5d6a7f")
+        );
         assert_eq!(m.proc_id.as_deref(), Some("4242"));
         assert_eq!(
             m.msg_id.as_deref(),
