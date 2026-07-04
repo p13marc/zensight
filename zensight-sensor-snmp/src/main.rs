@@ -11,7 +11,7 @@ mod trap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use zensight_sensor_core::{SensorArgs, SensorRunner};
+use zensight_sensor_core::{SensorArgs, SensorConfig, SensorRunner};
 
 use crate::config::SnmpSensorConfig;
 use crate::mib::MibResolver;
