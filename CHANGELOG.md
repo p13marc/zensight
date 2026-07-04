@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **hashed** machine-id (`host_id` = sha256(machine-id + app salt); the raw id
   never leaves the host), boot id, hostname/fqdn, and non-loopback IPs/MACs.
   Health snapshots gain `host_id`; alerts gain a `host.id` annotation label.
+- **sysinfo process enrichment + argv scrubber (#302)**: the on-demand
+  `@/query/processes` `ProcessRecord` gains `cmdline`, `exe`, `ppid`, `cgroup`
+  (v2 path — joins a process to its systemd unit), `start_time` (the
+  `(pid, start_time)` identity pair), and `user`. Command lines are **scrubbed of
+  secret-looking argv values** (Datadog-style key list; both `key=value` and
+  `--key value` shapes) and byte-capped before publish — controlled by
+  `processes.scrub_args` (default `true`), `custom_sensitive_words`, and
+  `strip_proc_arguments`.
 
 ### Changed
 

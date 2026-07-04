@@ -25,6 +25,15 @@ configure it, and the exact Zenoh keys it publishes/serves.
   Every config has a `zenoh` block (`mode`, `connect`, `listen`) and a
   `logging` block. The `ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN}` env vars override
   the `zenoh` block (used by `just run` to pin a loopback rendezvous).
+- **`source` (identity, #301):** every sensor takes a `source` config field — the
+  `<source>` chunk in its telemetry keys and its host identity. It defaults to the
+  local hostname (`"auto"`). This unified the old per-sensor names: netlink
+  `hostname`, netring `sensor_id`, and sysinfo `hostname` are all now `source`. On
+  remote-device sensors (snmp, gnmi, modbus, netflow, logs) `source` names the
+  **agent host** (used for identity evidence and artifact routing), while each
+  observed device keeps its own `<source>` in telemetry keys. Every sensor also
+  publishes a self-report `HostEvidence` claim and a `SensorInfo` registration
+  keyed by `source` (see KEYSPACE.md §4.1).
 - Telemetry is published with zenoh-ext **advanced publishers** (so it pairs
   with the GUI's advanced subscriber); control-plane (`@/…`) uses plain puts.
   See [Architecture → Zenoh Transport & Pub/Sub Model](ARCHITECTURE.md#zenoh-transport--pubsub-model).
@@ -116,7 +125,7 @@ Local host metrics (CPU, memory, disk, network, load) plus a Linux saturation /
 error surface (PSI, vmstat, cgroup-v2, thermal/power). All families are gated by
 `collect.*` flags; the families marked **default off** below are opt-in.
 
-- **Telemetry:** `zensight/sysinfo/<hostname>/<metric>`. The metric families:
+- **Telemetry:** `zensight/sysinfo/<source>/<metric>`. The metric families:
 
   | Family | `collect` flag | Example keys |
   |--------|----------------|--------------|
@@ -145,7 +154,13 @@ error surface (PSI, vmstat, cgroup-v2, thermal/power). All families are gated by
   carry the original name back in a label.
 - **On-demand detail** (`@/query/<topic>`): `processes?sort=cpu|mem|io&top=N`
   (`collect.process_query`, default on) — the per-pid firehose, served on
-  request rather than streamed.
+  request rather than streamed. Each `ProcessRecord` carries identity/context
+  fields (#302): `cmdline`, `exe`, `ppid`, `cgroup` (v2 path — the join key to a
+  systemd unit's `control_group`), `start_time` (stat field-22 ticks — the
+  `(pid, start_time)` identity pair used fleet-wide), and `user`. The command line
+  is **scrubbed of secret-looking argv values** before publish and byte-capped;
+  tune via `processes.scrub_args` (default `true`), `processes.custom_sensitive_words`,
+  and `processes.strip_proc_arguments`.
 - **eBPF saturation histograms** (`collect.ebpf`, **default off**, opt-in build
   — issue #99): scheduler run-queue latency (`runqlat`) and block-I/O latency
   (`biolatency`) as log2 histograms with derived p50/p95/p99 + max, served only

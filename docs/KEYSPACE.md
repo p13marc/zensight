@@ -221,7 +221,7 @@ Cross-sensor, protocol-independent registries.
 |-----|---------|------------|
 | `zensight/_meta/sensors/<name>/<source>` | `SensorInfo` (identity-stamped registration) | every sensor (runner, 60 s re-emit) |
 | `zensight/_meta/evidence/host/<sensor>/<source>` | `HostEvidence` (identity claim) | every sensor (self-report) + observers (#307) |
-| `zensight/_meta/evidence/names/<sensor>/<source>` | `Vec<NameObservation>` (IP↔name deltas) | netring passive DNS (#308) |
+| `zensight/_meta/evidence/names/<sensor>/<ip-slug>` | `NameObservation` (latest name for an IP) | netring passive DNS (#308) |
 
 ### 4.1 Evidence contract (#301)
 
@@ -323,8 +323,10 @@ zensight/
 │       ├── store/<algo>/<hash>         # content-addressed chunks — Tree delivery (queryable)
 │       └── tree/<id>                   # TreeIndex — Tree delivery (queryable)
 └── _meta/
-    ├── sensors/<name>                  # SensorInfo
-    └── correlation/<ip>                # CorrelationEntry
+    ├── sensors/<name>/<source>         # SensorInfo (identity-stamped registration)
+    └── evidence/                       # host-identity claims (correlator input)
+        ├── host/<sensor>/<source>      # HostEvidence (self-report / observed)
+        └── names/<sensor>/<ip-slug>    # NameObservation (passive DNS)
 ```
 
 ---
