@@ -69,7 +69,7 @@ fn netring_tabs(state: &DeviceDetailState) -> Vec<TabItem<SpecializedTab>> {
         TabItem::new(Security, "Security")
             .visible(!state.netring_detail.anomalies.is_empty())
             .badge(state.netring_detail.anomalies.len()),
-        TabItem::new(Capture, "Capture")
+        TabItem::new(Capture, "Capture health")
             .visible(state.metrics.keys().any(|k| k.starts_with("capture/"))),
     ]
 }
@@ -603,6 +603,15 @@ fn render_capture(state: &DeviceDetailState) -> Element<'_, Message> {
     });
 
     let mut col = column![section_header("Capture Health", badge)].spacing(space::SM);
+
+    // This tab shows live capture *health* (backend, shedding, drops). To
+    // request an on-demand pcap capture, use the sensor's artifact card on the
+    // Sensors page (#333).
+    col = col.push(
+        text("Live capture health. Request an on-demand pcap from the sensor card on the Sensors page.")
+            .size(font::CAPTION)
+            .style(dim),
+    );
 
     // Resolved-backend badge — what's actually live (AF_PACKET / AF_XDP / replay).
     if let Some(b) = &backend {
