@@ -34,6 +34,7 @@
 mod advanced_publisher;
 mod alert;
 mod args;
+pub mod artifact;
 mod config;
 mod correlation;
 mod error;
@@ -48,6 +49,10 @@ mod status;
 pub use advanced_publisher::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
 pub use alert::{AlertReporter, serve_alerts_query};
 pub use args::SensorArgs;
+pub use artifact::{
+    ArtifactChannel, ArtifactProducer, DeliveryKind, ProduceCtx, Produced, ProgressUpdate,
+    ReportProducer, SnapshotProducer,
+};
 pub use config::SensorConfig;
 pub use correlation::{CorrelationEntry, CorrelationRegistry, DeviceIdentity, SensorInfo};
 pub use error::{Result, SensorError};

@@ -294,6 +294,158 @@ impl SnapshotLimits {
     }
 }
 
+/// The bounds every artifact producer shares (the unified-channel view). Producers
+/// hold one of these; the channel enforces `cooldown_secs` + `ttl_secs` and
+/// advertises `max_bytes`, while `enabled` gates whether the kind is served.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommonArtifactLimits {
+    /// Whether this artifact kind is served at all.
+    pub enabled: bool,
+    /// Hard cap on the produced artifact size, bytes.
+    pub max_bytes: u64,
+    /// Minimum gap between successive productions, seconds (rate-limit).
+    pub cooldown_secs: u64,
+    /// How long a produced artifact stays available before the reaper drops it.
+    pub ttl_secs: u64,
+    /// Chunk size for the transfer (clamped by `zenoh-blob` to 256 KiB–1 MiB).
+    pub chunk_size: u32,
+}
+
+/// `artifacts.report` — limits/policy for on-demand debug bundles (Tier-1).
+///
+/// Disabled by default. Serde defaults match the historic `ReportLimits`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactReportLimits {
+    /// Whether the sensor serves debug-report requests at all.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Hard cap on the generated bundle size; generation fails past this.
+    #[serde(default = "default_report_max_bytes")]
+    pub max_bytes: u64,
+    /// Minimum gap between successive generations, seconds.
+    #[serde(default = "default_report_cooldown")]
+    pub cooldown_secs: u64,
+    /// How long a generated bundle stays available.
+    #[serde(default = "default_report_ttl")]
+    pub ttl_secs: u64,
+    /// Chunk size used by the blob transfer (clamped to 256 KiB–1 MiB).
+    #[serde(default = "default_report_chunk_size")]
+    pub chunk_size: u32,
+    /// Extra config field-name patterns to redact (case-insensitive substring).
+    #[serde(default)]
+    pub redact_extra: Vec<String>,
+}
+
+impl Default for ArtifactReportLimits {
+    fn default() -> Self {
+        ArtifactReportLimits {
+            enabled: false,
+            max_bytes: default_report_max_bytes(),
+            cooldown_secs: default_report_cooldown(),
+            ttl_secs: default_report_ttl(),
+            chunk_size: default_report_chunk_size(),
+            redact_extra: Vec::new(),
+        }
+    }
+}
+
+impl ArtifactReportLimits {
+    /// The shared bounds view used by the artifact channel.
+    pub fn common(&self) -> CommonArtifactLimits {
+        CommonArtifactLimits {
+            enabled: self.enabled,
+            max_bytes: self.max_bytes,
+            cooldown_secs: self.cooldown_secs,
+            ttl_secs: self.ttl_secs,
+            chunk_size: self.chunk_size,
+        }
+    }
+}
+
+/// `artifacts.snapshot` — limits/policy for on-demand directory snapshots (Tier-2).
+///
+/// Disabled by default. Serde defaults match the historic `SnapshotLimits`, incl.
+/// the directory allowlist (the authorization boundary).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactSnapshotLimits {
+    /// Whether the sensor serves directory-snapshot requests at all.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The allowlist of named directories that may be snapshotted.
+    #[serde(default)]
+    pub dirs: Vec<SnapshotDir>,
+    /// Hard cap on the total (uncompressed) snapshot size; build fails past this.
+    #[serde(default = "default_snapshot_max_bytes")]
+    pub max_bytes: u64,
+    /// Hard cap on the number of files in a snapshot; build fails past this.
+    #[serde(default = "default_snapshot_max_files")]
+    pub max_files: u64,
+    /// Minimum gap between successive snapshot builds, seconds.
+    #[serde(default = "default_report_cooldown")]
+    pub cooldown_secs: u64,
+    /// How long a built snapshot stays available.
+    #[serde(default = "default_report_ttl")]
+    pub ttl_secs: u64,
+    /// Average chunk size for the content-defined (FastCDC) chunker, bytes.
+    #[serde(default = "default_snapshot_chunk_size")]
+    pub chunk_size: u32,
+}
+
+impl Default for ArtifactSnapshotLimits {
+    fn default() -> Self {
+        ArtifactSnapshotLimits {
+            enabled: false,
+            dirs: Vec::new(),
+            max_bytes: default_snapshot_max_bytes(),
+            max_files: default_snapshot_max_files(),
+            cooldown_secs: default_report_cooldown(),
+            ttl_secs: default_report_ttl(),
+            chunk_size: default_snapshot_chunk_size(),
+        }
+    }
+}
+
+impl ArtifactSnapshotLimits {
+    /// The shared bounds view used by the artifact channel.
+    pub fn common(&self) -> CommonArtifactLimits {
+        CommonArtifactLimits {
+            enabled: self.enabled,
+            max_bytes: self.max_bytes,
+            cooldown_secs: self.cooldown_secs,
+            ttl_secs: self.ttl_secs,
+            chunk_size: self.chunk_size,
+        }
+    }
+
+    /// Resolve a requested logical `name` to its configured absolute path, if
+    /// allowlisted.
+    pub fn resolve(&self, name: &str) -> Option<&str> {
+        self.dirs
+            .iter()
+            .find(|d| d.name == name)
+            .map(|d| d.path.as_str())
+    }
+
+    /// The logical names of every allowlisted directory.
+    pub fn dir_names(&self) -> Vec<String> {
+        self.dirs.iter().map(|d| d.name.clone()).collect()
+    }
+}
+
+/// The `artifacts` config section: one limits block per artifact kind a sensor
+/// can serve. Every kind is disabled by default. Capture limits live in the
+/// netring sensor's own config (producers own their limits; the channel only
+/// sees each producer's [`CommonArtifactLimits`]).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ArtifactLimits {
+    /// Tier-1 debug-bundle limits.
+    #[serde(default)]
+    pub report: ArtifactReportLimits,
+    /// Tier-2 directory-snapshot limits.
+    #[serde(default)]
+    pub snapshot: ArtifactSnapshotLimits,
+}
+
 /// Load a configuration file in JSON5 format.
 pub fn load_config<T: for<'de> Deserialize<'de>>(path: impl AsRef<Path>) -> Result<T> {
     let path = path.as_ref();

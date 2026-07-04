@@ -31,5 +31,8 @@ tar = { workspace = true }
 zstd = { workspace = true }
 tempfile = { workspace = true }
 
+# Artifact producer registry (#332)
+async-trait = { workspace = true }
+
 [dev-dependencies]
 tokio-test = "0.4"

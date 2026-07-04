@@ -157,25 +157,26 @@ pub fn redact(value: &mut serde_json::Value, extra: &[String]) {
 }
 
 /// The owned inputs assembled (on the async side) before the blocking build.
-struct BundleInputs {
-    sensor_name: String,
-    source_id: String,
-    config: serde_json::Value,
-    health: serde_json::Value,
-    counters: serde_json::Value,
-    created_ms: i64,
+pub(crate) struct BundleInputs {
+    pub(crate) sensor_name: String,
+    pub(crate) source_id: String,
+    pub(crate) config: serde_json::Value,
+    pub(crate) health: serde_json::Value,
+    pub(crate) counters: serde_json::Value,
+    pub(crate) created_ms: i64,
 }
 
 /// Build a `tar.zst` debug bundle into a temp file under `dir`, returning its
 /// path + suggested filename. Runs in `spawn_blocking` (it's synchronous I/O).
-/// Enforces `limits.max_bytes` on the uncompressed entry sizes and redacts the
-/// config.
-fn build_debug_bundle(
+/// Enforces `max_bytes` on the uncompressed entry sizes and redacts the config
+/// (built-in denylist plus `redact_extra`).
+pub(crate) fn build_debug_bundle(
     mut inputs: BundleInputs,
-    limits: &ReportLimits,
+    max_bytes: u64,
+    redact_extra: &[String],
     dir: &Path,
 ) -> std::io::Result<(PathBuf, String)> {
-    redact(&mut inputs.config, &limits.redact_extra);
+    redact(&mut inputs.config, redact_extra);
 
     let meta = serde_json::json!({
         "schema": 1,
@@ -200,10 +201,9 @@ fn build_debug_bundle(
         total += data.len() as u64;
         serialized.push((name, data));
     }
-    if total > limits.max_bytes {
+    if total > max_bytes {
         return Err(std::io::Error::other(format!(
-            "bundle ({total} bytes) exceeds max_bytes ({})",
-            limits.max_bytes
+            "bundle ({total} bytes) exceeds max_bytes ({max_bytes})"
         )));
     }
 
@@ -494,10 +494,12 @@ async fn generate(
     blob_prefix: String,
 ) -> anyhow::Result<GenOutput> {
     let dir = std::env::temp_dir();
-    let limits_blocking = limits.clone();
-    let (temp_path, filename) =
-        tokio::task::spawn_blocking(move || build_debug_bundle(inputs, &limits_blocking, &dir))
-            .await??;
+    let max_bytes = limits.max_bytes;
+    let redact_extra = limits.redact_extra.clone();
+    let (temp_path, filename) = tokio::task::spawn_blocking(move || {
+        build_debug_bundle(inputs, max_bytes, &redact_extra, &dir)
+    })
+    .await??;
 
     // Compute the manifest by streaming the temp file (never read_to_end).
     let chunker = FixedSizeChunker::new(limits.chunk_size);
@@ -574,11 +576,8 @@ mod tests {
             counters: serde_json::json!({ "received": 10 }),
             created_ms: 1_700_000_000_000,
         };
-        let limits = ReportLimits {
-            enabled: true,
-            ..Default::default()
-        };
-        let (path, filename) = build_debug_bundle(inputs, &limits, dir.path()).unwrap();
+        let (path, filename) =
+            build_debug_bundle(inputs, ReportLimits::default().max_bytes, &[], dir.path()).unwrap();
         assert!(filename.starts_with("zensight-debug-netlink-host1-"));
         assert!(path.exists());
 
@@ -614,11 +613,6 @@ mod tests {
             counters: serde_json::json!({}),
             created_ms: 1,
         };
-        let limits = ReportLimits {
-            enabled: true,
-            max_bytes: 100,
-            ..Default::default()
-        };
-        assert!(build_debug_bundle(inputs, &limits, dir.path()).is_err());
+        assert!(build_debug_bundle(inputs, 100, &[], dir.path()).is_err());
     }
 }

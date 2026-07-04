@@ -216,6 +216,32 @@ impl<C: SensorConfig> SensorRunner<C> {
         self
     }
 
+    /// Enable the unified on-demand artifact channel (`@/artifact`).
+    ///
+    /// Registers the given producers (e.g. [`ReportProducer`](crate::ReportProducer)
+    /// for debug bundles, [`SnapshotProducer`](crate::SnapshotProducer) for
+    /// directory snapshots, or a sensor-specific capture producer). A no-op unless
+    /// at least one producer is enabled in the sensor's `artifacts.*` config; when
+    /// enabled, spawns one [`ArtifactChannel`](crate::ArtifactChannel) as a tracked
+    /// worker. `source_id` is this host's id (for a request's `target_source`
+    /// filter).
+    pub fn with_artifacts(
+        mut self,
+        source_id: impl Into<String>,
+        producers: Vec<Arc<dyn crate::artifact::ArtifactProducer>>,
+    ) -> Self {
+        if let Some(channel) = crate::artifact::ArtifactChannel::new(
+            self.session.clone(),
+            self.config.key_prefix().to_string(),
+            source_id,
+            producers,
+        ) {
+            self.spawn(channel.run());
+            tracing::info!("artifact channel enabled");
+        }
+        self
+    }
+
     /// Set a custom serialization format for the publisher.
     pub fn with_format(mut self, format: Format) -> Self {
         self.publisher = Publisher::new(self.session.clone(), self.config.key_prefix(), format);

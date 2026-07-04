@@ -6,7 +6,7 @@ use serde::de::DeserializeOwned;
 
 use crate::error::{Result, SensorError};
 use crate::{LoggingConfig, ZenohConfig};
-use zensight_common::{ReportLimits, SnapshotLimits};
+use zensight_common::{ArtifactLimits, ReportLimits, SnapshotLimits};
 
 /// Trait for sensor configuration types.
 ///
@@ -69,6 +69,13 @@ pub trait SensorConfig: Sized + DeserializeOwned {
     /// enabling `with_snapshot` in `main`).
     fn snapshot_limits(&self) -> SnapshotLimits {
         SnapshotLimits::default()
+    }
+
+    /// Unified artifact-channel limits (`artifacts.{report,snapshot}`). Every kind
+    /// is disabled by default; a sensor opts in by overriding this to return its
+    /// configured [`ArtifactLimits`] and calling `with_artifacts` in `main`.
+    fn artifact_limits(&self) -> ArtifactLimits {
+        ArtifactLimits::default()
     }
 
     /// Validate the configuration.

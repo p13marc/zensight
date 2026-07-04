@@ -1,0 +1,670 @@
+//! Unified artifact production + serving (`@/artifact` + `@/store` + `@/tree`).
+//!
+//! One channel subsumes the former `@/report` (Tier-1 whole-file) and
+//! `@/snapshot` (Tier-2 directory-tree) channels and hosts new artifact kinds
+//! (e.g. on-demand packet capture) as pluggable [`ArtifactProducer`]s instead of
+//! a third copy of the same request/status/serve/TTL machinery.
+//!
+//! The channel owns the control plane — a **request** subscriber
+//! (`@/artifact/request`), a **status** queryable (`@/artifact/status`, one entry
+//! per registered kind), a **cancel** subscriber (`@/artifact/cancel`) and a TTL
+//! reaper — plus the `zenoh-blob` delivery servers (a [`BlobServer`] for Tier-1
+//! producers, a [`TreeServer`] + in-memory chunk store for Tier-2 producers),
+//! spun up only when a producer of that delivery kind is registered.
+//!
+//! Producers never touch zenoh: a producer validates + authorizes a request
+//! ([`ArtifactProducer::accepts`]) and produces a file or directory
+//! ([`ArtifactProducer::produce`]); the channel turns that into a `Delivery` and
+//! publishes the lifecycle. Busy/cooldown are **per kind**, so a long capture
+//! never blocks a quick debug bundle.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+use tokio::sync::{Mutex, watch};
+use ulid::Ulid;
+use zenoh_blob::{
+    BlobServer, CancelToken, ContentStore, FastCdcChunker, FileBlobSource, FixedSizeChunker,
+    Format, Hash, Manifest, MemoryStore, Sha256Digest, TreeIndex, TreeServer, build_tree,
+};
+use zensight_common::artifact::{
+    ArtifactKind, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, KindAdvert, KindStatus,
+    TreeSummary,
+};
+use zensight_common::{
+    CommonArtifactLimits, artifact_blob_prefix, artifact_cancel_key, artifact_request_key,
+    artifact_status_key, artifact_store_prefix, artifact_tree_prefix,
+};
+
+mod producers;
+pub use producers::{ReportProducer, SnapshotProducer};
+
+/// Which transfer tier an artifact is delivered over. Declared up front (not
+/// inferred from a produced artifact) so the channel can spin up the matching
+/// `zenoh-blob` server before any request arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryKind {
+    /// Tier-1 whole-blob (a single file), served by [`BlobServer`].
+    Blob,
+    /// Tier-2 content-addressed tree (a directory), served by [`TreeServer`].
+    Tree,
+}
+
+/// A produced artifact handed back to the channel for delivery. The variant must
+/// match the producer's declared [`ArtifactProducer::delivery_kind`].
+pub enum Produced {
+    /// A single file → [`Delivery::Blob`]. `filename` is the suggested save name.
+    File {
+        /// Path to the produced file (owned by the channel afterwards; reaped on TTL).
+        path: PathBuf,
+        /// Suggested download filename.
+        filename: String,
+    },
+    /// A directory → [`Delivery::Tree`]. The channel walks + chunks it.
+    Dir {
+        /// Absolute path of the directory to snapshot.
+        path: PathBuf,
+    },
+}
+
+/// A progress update a producer streams while generating (surfaced in
+/// [`ArtifactState::Generating`]).
+#[derive(Debug, Clone, Default)]
+pub struct ProgressUpdate {
+    /// Human-readable line (e.g. `"capturing 12s/30s · 3.1 MiB"`).
+    pub detail: Option<String>,
+    /// Fractional progress in `0.0..=1.0`.
+    pub progress: Option<f32>,
+}
+
+/// Context handed to [`ArtifactProducer::produce`].
+pub struct ProduceCtx {
+    /// A private working directory for temp files (cleaned by the channel).
+    pub workdir: PathBuf,
+    /// Fires when the request is cancelled — a long-running producer must poll
+    /// this and stop promptly.
+    pub cancel: CancelToken,
+    /// Send incremental progress here; the channel republishes it as `Generating`.
+    pub progress: watch::Sender<ProgressUpdate>,
+}
+
+/// A pluggable artifact producer. One instance is registered per kind on an
+/// [`ArtifactChannel`]; the channel drives its lifecycle.
+#[async_trait]
+pub trait ArtifactProducer: Send + Sync + 'static {
+    /// The kind slug this producer serves (`"report"` / `"snapshot"` / `"capture"`).
+    /// Must match the corresponding [`ArtifactKind::slug`].
+    fn kind(&self) -> &'static str;
+
+    /// The shared bounds the channel enforces (cooldown/TTL) and advertises.
+    fn common(&self) -> &CommonArtifactLimits;
+
+    /// The transfer tier this producer delivers over.
+    fn delivery_kind(&self) -> DeliveryKind;
+
+    /// What the GUI needs to render this kind's request affordance.
+    fn advert(&self) -> KindAdvert;
+
+    /// Validate + authorize a request's parameters against this producer's policy
+    /// (e.g. snapshot allowlist resolution, capture filter/duration clamps). An
+    /// `Err(reason)` is published as `Failed`.
+    fn accepts(&self, kind: &ArtifactKind) -> Result<(), String>;
+
+    /// For a `Tree` producer, an optional cap on the file count (enforced by the
+    /// channel after the walk, since it depends on the walk result). Ignored for
+    /// `Blob` producers.
+    fn tree_max_files(&self) -> Option<u64> {
+        None
+    }
+
+    /// Produce the artifact. Long-running producers must honor `ctx.cancel` and
+    /// stream `ctx.progress`.
+    async fn produce(&self, kind: ArtifactKind, ctx: ProduceCtx) -> anyhow::Result<Produced>;
+}
+
+/// The live artifact for one kind (for TTL reaping + cancel).
+struct Active {
+    id: Ulid,
+    cleanup: Cleanup,
+    expires: Instant,
+}
+
+/// How to release a delivered artifact.
+enum Cleanup {
+    /// Unregister the blob (by artifact id) and remove the temp file.
+    TempFile { id: Ulid, path: PathBuf },
+    /// Unregister the tree index and clear the chunk store.
+    Tree(String),
+}
+
+/// Per-kind runtime state.
+#[derive(Default)]
+struct KindRuntime {
+    current: Option<ArtifactState>,
+    busy: bool,
+    last_gen: Option<Instant>,
+    active: Option<Active>,
+    /// Cancellation handle for an in-flight production (fired on `@/artifact/cancel`).
+    in_flight: Option<(Ulid, CancelToken)>,
+}
+
+/// Serves the `@/artifact` channel for one sensor.
+pub struct ArtifactChannel {
+    session: Arc<zenoh::Session>,
+    key_prefix: String,
+    source_id: String,
+    producers: HashMap<&'static str, Arc<dyn ArtifactProducer>>,
+    /// Tier-1 blob server (present iff a `Blob` producer is registered).
+    blob: Option<BlobServer>,
+    /// Tier-2 chunk store + tree server (present iff a `Tree` producer is registered).
+    store: Option<Arc<MemoryStore>>,
+    tree_server: Option<TreeServer>,
+    state: Arc<Mutex<HashMap<&'static str, KindRuntime>>>,
+}
+
+impl ArtifactChannel {
+    /// Build a channel for `key_prefix` (e.g. `"zensight/netlink"`) serving the
+    /// given producers. `source_id` is this host's id (for `target_source`
+    /// matching). Returns `None` if no producer is enabled (so `main` can skip
+    /// spawning it entirely).
+    pub fn new(
+        session: Arc<zenoh::Session>,
+        key_prefix: impl Into<String>,
+        source_id: impl Into<String>,
+        producers: Vec<Arc<dyn ArtifactProducer>>,
+    ) -> Option<Self> {
+        let enabled: Vec<_> = producers
+            .into_iter()
+            .filter(|p| p.common().enabled)
+            .collect();
+        if enabled.is_empty() {
+            return None;
+        }
+        let key_prefix = key_prefix.into();
+
+        let wants_blob = enabled
+            .iter()
+            .any(|p| p.delivery_kind() == DeliveryKind::Blob);
+        let wants_tree = enabled
+            .iter()
+            .any(|p| p.delivery_kind() == DeliveryKind::Tree);
+
+        let blob = wants_blob.then(|| {
+            BlobServer::new(
+                session.clone(),
+                artifact_blob_prefix(&key_prefix),
+                Format::Json,
+            )
+        });
+        let (store, tree_server) = if wants_tree {
+            let store = Arc::new(MemoryStore::new());
+            let tree_server = TreeServer::new(
+                session.clone(),
+                artifact_store_prefix(&key_prefix),
+                artifact_tree_prefix(&key_prefix),
+                Format::Json,
+                store.clone() as Arc<dyn ContentStore>,
+            );
+            (Some(store), Some(tree_server))
+        } else {
+            (None, None)
+        };
+
+        let mut map = HashMap::new();
+        for p in enabled {
+            map.insert(p.kind(), p);
+        }
+
+        Some(ArtifactChannel {
+            session,
+            key_prefix,
+            source_id: source_id.into(),
+            producers: map,
+            blob,
+            store,
+            tree_server,
+            state: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    /// Serve forever. Spawned as a worker by `SensorRunner::with_artifacts`.
+    pub async fn run(self) {
+        if let Err(e) = self.run_inner().await {
+            tracing::error!(error = %e, "artifact channel exited");
+        }
+    }
+
+    async fn run_inner(self: &ArtifactChannel) -> anyhow::Result<()> {
+        let req_sub = self
+            .session
+            .declare_subscriber(artifact_request_key(&self.key_prefix))
+            .await
+            .map_err(|e| anyhow::anyhow!("declare artifact request sub: {e}"))?;
+        let status_q = self
+            .session
+            .declare_queryable(artifact_status_key(&self.key_prefix))
+            .await
+            .map_err(|e| anyhow::anyhow!("declare artifact status queryable: {e}"))?;
+        let cancel_sub = self
+            .session
+            .declare_subscriber(artifact_cancel_key(&self.key_prefix))
+            .await
+            .map_err(|e| anyhow::anyhow!("declare artifact cancel sub: {e}"))?;
+
+        if let Some(blob) = &self.blob {
+            tokio::spawn(blob.clone().run());
+        }
+        if let Some(tree_server) = &self.tree_server {
+            tokio::spawn(tree_server.clone().run());
+        }
+
+        let mut ttl_tick = tokio::time::interval(Duration::from_secs(5));
+        tracing::info!(
+            prefix = %self.key_prefix,
+            kinds = ?self.producers.keys().collect::<Vec<_>>(),
+            "artifact channel ready"
+        );
+
+        loop {
+            tokio::select! {
+                Ok(sample) = req_sub.recv_async() => {
+                    self.handle_request(&sample.payload().to_bytes()).await;
+                }
+                Ok(query) = status_q.recv_async() => {
+                    let status = self.status().await;
+                    let payload = serde_json::to_vec(&status).unwrap_or_default();
+                    if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                        tracing::warn!(error = %e, "artifact status reply failed");
+                    }
+                }
+                Ok(sample) = cancel_sub.recv_async() => {
+                    let body = sample.payload().to_bytes();
+                    if let Ok(id) = std::str::from_utf8(&body).unwrap_or("").trim().parse::<Ulid>() {
+                        self.cancel(id).await;
+                    }
+                }
+                _ = ttl_tick.tick() => {
+                    self.reap_expired().await;
+                }
+            }
+        }
+    }
+
+    async fn status(&self) -> ArtifactStatus {
+        let rt = self.state.lock().await;
+        let mut kinds: Vec<KindStatus> = self
+            .producers
+            .values()
+            .map(|p| {
+                let k = p.kind();
+                let common = p.common();
+                let kr = rt.get(k);
+                KindStatus {
+                    kind: k.to_string(),
+                    busy: kr.map(|r| r.busy).unwrap_or(false),
+                    current: kr.and_then(|r| r.current.clone()),
+                    max_bytes: common.max_bytes,
+                    cooldown_secs: common.cooldown_secs,
+                    advert: p.advert(),
+                }
+            })
+            .collect();
+        kinds.sort_by(|a, b| a.kind.cmp(&b.kind));
+        ArtifactStatus { kinds }
+    }
+
+    async fn handle_request(&self, payload: &[u8]) {
+        let req: ArtifactRequest = match serde_json::from_slice(payload) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "bad artifact request");
+                return;
+            }
+        };
+
+        // Not for us — another host running this protocol will answer.
+        if let Some(target) = &req.opts.target_source
+            && target != &self.source_id
+        {
+            return;
+        }
+
+        let slug = req.kind.slug();
+        let Some(producer) = self.producers.get(slug).cloned() else {
+            self.set_failed(slug, req.id, &format!("unsupported artifact kind: {slug}"))
+                .await;
+            return;
+        };
+
+        // Producer-specific validation / authorization.
+        if let Err(reason) = producer.accepts(&req.kind) {
+            self.set_failed(slug, req.id, &reason).await;
+            return;
+        }
+
+        // Per-kind busy + cooldown gate.
+        let cancel = CancelToken::new();
+        {
+            let mut rt = self.state.lock().await;
+            let kr = rt.entry(slug).or_default();
+            if kr.busy {
+                drop(rt);
+                self.set_failed(slug, req.id, "already producing this artifact kind")
+                    .await;
+                return;
+            }
+            if let Some(last) = kr.last_gen
+                && last.elapsed() < Duration::from_secs(producer.common().cooldown_secs)
+            {
+                drop(rt);
+                self.set_failed(slug, req.id, "cooling down; try again shortly")
+                    .await;
+                return;
+            }
+            kr.busy = true;
+            kr.in_flight = Some((req.id, cancel.clone()));
+            kr.current = Some(ArtifactState::Generating {
+                id: req.id,
+                kind: slug.to_string(),
+                detail: None,
+                progress: None,
+            });
+        }
+
+        // Produce off the loop so status stays responsive.
+        let this = self.clone_handle();
+        let id = req.id;
+        let kind = req.kind;
+        tokio::spawn(async move {
+            this.drive(slug, id, kind, producer, cancel).await;
+        });
+    }
+
+    /// Run one production to completion and record the outcome.
+    async fn drive(
+        &self,
+        slug: &'static str,
+        id: Ulid,
+        kind: ArtifactKind,
+        producer: Arc<dyn ArtifactProducer>,
+        cancel: CancelToken,
+    ) {
+        let (progress_tx, mut progress_rx) = watch::channel(ProgressUpdate::default());
+
+        // Relay progress updates into the published Generating state.
+        let progress_relay = {
+            let state = self.state.clone();
+            tokio::spawn(async move {
+                while progress_rx.changed().await.is_ok() {
+                    let upd = progress_rx.borrow().clone();
+                    let mut rt = state.lock().await;
+                    if let Some(kr) = rt.get_mut(slug)
+                        && matches!(&kr.current, Some(ArtifactState::Generating { id: cur, .. }) if *cur == id)
+                    {
+                        kr.current = Some(ArtifactState::Generating {
+                            id,
+                            kind: slug.to_string(),
+                            detail: upd.detail,
+                            progress: upd.progress,
+                        });
+                    }
+                }
+            })
+        };
+
+        let workdir = std::env::temp_dir();
+        let ctx = ProduceCtx {
+            workdir,
+            cancel: cancel.clone(),
+            progress: progress_tx,
+        };
+        let outcome = producer.produce(kind, ctx).await;
+        progress_relay.abort();
+
+        // Finalize: turn the produced artifact into a Delivery + Active record.
+        let finalized = match outcome {
+            Ok(_) if cancel.is_cancelled() => Err(anyhow::anyhow!("cancelled")),
+            Ok(produced) => self.finalize(id, slug, &producer, produced).await,
+            Err(e) => Err(e),
+        };
+
+        let mut rt = self.state.lock().await;
+        let kr = rt.entry(slug).or_default();
+        kr.busy = false;
+        kr.last_gen = Some(Instant::now());
+        kr.in_flight = None;
+        match finalized {
+            Ok((state, active)) => {
+                // Replace any prior artifact of this kind.
+                if let Some(prev) = kr.active.take() {
+                    self.release(prev.cleanup).await;
+                }
+                kr.active = Some(active);
+                kr.current = Some(state);
+            }
+            Err(e) => {
+                kr.current = Some(ArtifactState::Failed {
+                    id,
+                    kind: slug.to_string(),
+                    reason: e.to_string(),
+                });
+            }
+        }
+    }
+
+    /// Turn a produced file/dir into a published `Ready` state + a live-artifact
+    /// record. Delivery is decided by the produced variant (which must match the
+    /// producer's declared delivery kind).
+    async fn finalize(
+        &self,
+        id: Ulid,
+        slug: &'static str,
+        producer: &Arc<dyn ArtifactProducer>,
+        produced: Produced,
+    ) -> anyhow::Result<(ArtifactState, Active)> {
+        let ttl_secs = producer.common().ttl_secs;
+        let chunk_size = producer.common().chunk_size;
+        let max_bytes = producer.common().max_bytes;
+        let created_ms = chrono::Utc::now().timestamp_millis();
+        let expires_ms = created_ms + (ttl_secs as i64) * 1000;
+        let expires = Instant::now() + Duration::from_secs(ttl_secs);
+
+        match produced {
+            Produced::File { path, filename } => {
+                let blob = self
+                    .blob
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("no blob server for a File artifact"))?;
+                let chunker = FixedSizeChunker::new(chunk_size);
+                let mut reader = tokio::fs::File::open(&path).await?;
+                let manifest = Manifest::compute::<_, Sha256Digest>(
+                    &mut reader,
+                    &chunker,
+                    id.to_string(),
+                    filename,
+                    created_ms,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("manifest: {e}"))?;
+                blob.register(manifest.clone(), Arc::new(FileBlobSource::new(&path)))
+                    .await;
+                let state = ArtifactState::Ready {
+                    id,
+                    kind: slug.to_string(),
+                    delivery: Delivery::Blob {
+                        manifest,
+                        blob_prefix: artifact_blob_prefix(&self.key_prefix),
+                    },
+                    expires_ms,
+                };
+                Ok((
+                    state,
+                    Active {
+                        id,
+                        cleanup: Cleanup::TempFile { id, path },
+                        expires,
+                    },
+                ))
+            }
+            Produced::Dir { path } => {
+                let store = self
+                    .store
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("no chunk store for a Dir artifact"))?;
+                let tree_server = self
+                    .tree_server
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("no tree server for a Dir artifact"))?;
+                let tree_id = id.to_string();
+                let build_id = tree_id.clone();
+                let (index, chunks): (TreeIndex, Vec<(Hash, Vec<u8>)>) =
+                    tokio::task::spawn_blocking(move || {
+                        let chunker = FastCdcChunker::new(chunk_size);
+                        build_tree(&path, build_id, &chunker)
+                    })
+                    .await??;
+
+                let total_bytes = index.total_size();
+                let file_count = index.file_count() as u64;
+                if total_bytes > max_bytes {
+                    anyhow::bail!("snapshot ({total_bytes} bytes) exceeds max_bytes ({max_bytes})");
+                }
+                if let Some(max_files) = producer.tree_max_files()
+                    && file_count > max_files
+                {
+                    anyhow::bail!("snapshot ({file_count} files) exceeds max_files ({max_files})");
+                }
+
+                // Single live tree: drop prior chunks, then publish this one's.
+                store.clear();
+                for (h, bytes) in &chunks {
+                    store.put(h, bytes)?;
+                }
+                let summary = TreeSummary {
+                    file_count,
+                    total_bytes,
+                    root_hash_hex: index.root_hash.to_string(),
+                };
+                tree_server.register(index).await;
+
+                let state = ArtifactState::Ready {
+                    id,
+                    kind: slug.to_string(),
+                    delivery: Delivery::Tree {
+                        tree_id: tree_id.clone(),
+                        store_prefix: artifact_store_prefix(&self.key_prefix),
+                        tree_prefix: artifact_tree_prefix(&self.key_prefix),
+                        summary,
+                    },
+                    expires_ms,
+                };
+                Ok((
+                    state,
+                    Active {
+                        id,
+                        cleanup: Cleanup::Tree(tree_id),
+                        expires,
+                    },
+                ))
+            }
+        }
+    }
+
+    async fn set_failed(&self, slug: &'static str, id: Ulid, reason: &str) {
+        let mut rt = self.state.lock().await;
+        let kr = rt.entry(slug).or_default();
+        kr.current = Some(ArtifactState::Failed {
+            id,
+            kind: slug.to_string(),
+            reason: reason.to_string(),
+        });
+    }
+
+    /// Cancel by id: abort an in-flight production, or expire a ready artifact.
+    async fn cancel(&self, id: Ulid) {
+        let mut rt = self.state.lock().await;
+        for (slug, kr) in rt.iter_mut() {
+            // In-flight: signal the producer to stop; `drive` records Failed.
+            if let Some((in_id, token)) = &kr.in_flight
+                && *in_id == id
+            {
+                token.cancel();
+                return;
+            }
+            // Ready: expire the delivered artifact now.
+            if let Some(active) = &kr.active
+                && active.id == id
+            {
+                let cleanup = kr.active.take().map(|a| a.cleanup);
+                kr.current = Some(ArtifactState::Expired {
+                    id,
+                    kind: slug.to_string(),
+                });
+                if let Some(cleanup) = cleanup {
+                    drop(rt);
+                    self.release(cleanup).await;
+                }
+                return;
+            }
+        }
+    }
+
+    /// Reap any artifact past its TTL.
+    async fn reap_expired(&self) {
+        let now = Instant::now();
+        let mut to_release = Vec::new();
+        {
+            let mut rt = self.state.lock().await;
+            for (slug, kr) in rt.iter_mut() {
+                if kr.active.as_ref().is_some_and(|a| a.expires <= now) {
+                    let active = kr.active.take().unwrap();
+                    kr.current = Some(ArtifactState::Expired {
+                        id: active.id,
+                        kind: slug.to_string(),
+                    });
+                    to_release.push(active.cleanup);
+                }
+            }
+        }
+        for cleanup in to_release {
+            self.release(cleanup).await;
+        }
+    }
+
+    /// Release a delivered artifact's resources.
+    async fn release(&self, cleanup: Cleanup) {
+        match cleanup {
+            Cleanup::TempFile { id, path } => {
+                if let Some(blob) = &self.blob {
+                    blob.unregister(&id.to_string()).await;
+                }
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+            Cleanup::Tree(tree_id) => {
+                if let Some(store) = &self.store {
+                    store.clear();
+                }
+                if let Some(tree_server) = &self.tree_server {
+                    tree_server.unregister(&tree_id).await;
+                }
+            }
+        }
+    }
+
+    /// A cheap handle sharing the channel's Arcs for the spawned `drive` task.
+    fn clone_handle(&self) -> ArtifactChannel {
+        ArtifactChannel {
+            session: self.session.clone(),
+            key_prefix: self.key_prefix.clone(),
+            source_id: self.source_id.clone(),
+            producers: self.producers.clone(),
+            blob: self.blob.clone(),
+            store: self.store.clone(),
+            tree_server: self.tree_server.clone(),
+            state: self.state.clone(),
+        }
+    }
+}
