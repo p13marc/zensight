@@ -64,6 +64,10 @@ tempfile = "3"
 # Object-safe async traits (artifact producer registry, #332)
 async-trait = "0.1"
 
+# Host identity envelope (#301): hostname + local interface addresses
+hostname = "0.4"
+if-addrs = "0.14"
+
 # Configuration
 json5 = "0.4"
 

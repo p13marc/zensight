@@ -217,9 +217,30 @@ impl AdvancedPublisherRegistry {
     /// Publish a telemetry point to a full key (bypassing the prefix), via an
     /// advanced publisher created on first use for that key.
     pub async fn publish_to_key(&self, key: &str, point: &TelemetryPoint) -> Result<()> {
-        self.get_or_create_publisher(key).await?;
         let payload =
             encode(point, self.format).map_err(|e| SensorError::Serialization(e.to_string()))?;
+        self.put_raw(key, payload).await
+    }
+
+    /// Publish any serializable document to a full key (bypassing the prefix),
+    /// via an advanced publisher created on first use for that key.
+    ///
+    /// Used for non-telemetry control-plane docs (`SensorInfo`, `HostEvidence`,
+    /// ... — identity envelope, #301) that want the same cached-publisher
+    /// late-joiner semantics as telemetry. Encoded with the registry's format.
+    pub async fn publish_serializable<T: serde::Serialize>(
+        &self,
+        key: &str,
+        value: &T,
+    ) -> Result<()> {
+        let payload =
+            encode(value, self.format).map_err(|e| SensorError::Serialization(e.to_string()))?;
+        self.put_raw(key, payload).await
+    }
+
+    /// Shared put path: ensure the cached publisher for `key` exists, then put.
+    async fn put_raw(&self, key: &str, payload: Vec<u8>) -> Result<()> {
+        self.get_or_create_publisher(key).await?;
         let publishers = self.publishers.read().await;
         if let Some(publisher) = publishers.get(key) {
             publisher
