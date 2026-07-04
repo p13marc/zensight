@@ -1066,7 +1066,7 @@ fn render_host_card<'a>(
     // Correlated host: a "merged from N sources" caption + staleness note (#306).
     if let Some(entity) = host.entity {
         let n = host.merged_source_count().unwrap_or(host.facets.len());
-        let stale = current_timestamp() - entity.last_updated > crate::entity::ENTITY_STALE_MS;
+        let stale = crate::entity::EntityStore::is_stale(entity, current_timestamp());
         let caption = if stale {
             format!("merged from {n} sources · stale")
         } else {

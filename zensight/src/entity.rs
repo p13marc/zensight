@@ -125,8 +125,10 @@ impl EntityStore {
         cur
     }
 
-    /// Whether an entity doc is stale (older than [`ENTITY_STALE_MS`]).
-    pub fn is_stale(&self, e: &HostEntity, now_ms: i64) -> bool {
+    /// Whether an entity doc is stale (older than [`ENTITY_STALE_MS`]) at
+    /// `now_ms` — i.e. the correlator has missed several re-emit periods.
+    /// Associated (no `&self`) so views can call it with just the entity.
+    pub fn is_stale(e: &HostEntity, now_ms: i64) -> bool {
         now_ms - e.last_updated > ENTITY_STALE_MS
     }
 
@@ -287,10 +289,12 @@ mod tests {
 
     #[test]
     fn staleness_uses_threshold() {
-        let store = EntityStore::default();
         let e = entity("h_aaa", vec![], vec![]);
-        assert!(!store.is_stale(&e, e.last_updated + ENTITY_STALE_MS));
-        assert!(store.is_stale(&e, e.last_updated + ENTITY_STALE_MS + 1));
+        assert!(!EntityStore::is_stale(&e, e.last_updated + ENTITY_STALE_MS));
+        assert!(EntityStore::is_stale(
+            &e,
+            e.last_updated + ENTITY_STALE_MS + 1
+        ));
     }
 
     #[test]

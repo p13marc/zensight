@@ -56,6 +56,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names resolve on demand via `_meta/query/names?ip=`. A `--demo` mode feeds
   synthetic evidence through the real pipeline. A Zenoh liveliness token
   guarantees a single writer.
+- **Host-entity frontend (#306)**: the GUI consumes the correlator's `HostEntity`
+  docs (subscribe `_meta/entity/**` + connect-time seed) into an `EntityStore`.
+  The dashboard groups a host's per-protocol devices under **one host card**
+  (worst-of-members status, facet chips, alert rollup, a persisted "group by host"
+  toggle); the host detail page gains an identity header and a "merged from N
+  sources" resolution drill-down (each member's binding rule + confidence); the
+  topology keys nodes by entity, bridges wire flows via identifying IPs, and shows
+  wire-only hosts as passive nodes. With no correlator the store is empty and every
+  view falls back to the per-source rendering (degraded path, pinned by test).
 
 ### Changed
 
