@@ -70,13 +70,29 @@ async fn main() -> anyhow::Result<()> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (tx, rx) = mpsc::channel(ENGINE_CHANNEL_CAP);
+    let (op_tx, mut op_rx) = mpsc::channel::<zensight_correlator::EntityOp>(ENGINE_CHANNEL_CAP);
 
     // Engine.
-    let engine = Engine::new(config.clone(), rx);
+    let engine = Engine::new(config.clone(), rx, op_tx);
     let engine_shutdown = shutdown_rx.clone();
     let engine_task = tokio::spawn(async move {
         if let Err(e) = engine.run(engine_shutdown).await {
             error!(error = %e, "engine error");
+        }
+    });
+
+    // Entity-op consumer. Commit 4 replaces this logging drain with the real
+    // Zenoh entity publisher + queryables.
+    let publish_task = tokio::spawn(async move {
+        while let Some(op) = op_rx.recv().await {
+            match op {
+                zensight_correlator::EntityOp::Upsert(e) => {
+                    info!(entity_id = %e.entity_id, members = e.members.len(), "entity upsert")
+                }
+                zensight_correlator::EntityOp::Tombstone(id) => {
+                    info!(entity_id = %id, "entity tombstone")
+                }
+            }
         }
     });
 
@@ -98,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = tokio::time::timeout(Duration::from_secs(5), async {
         let _ = sub_task.await;
         let _ = engine_task.await;
+        let _ = publish_task.await;
     })
     .await;
 

@@ -20,7 +20,8 @@ pub mod config;
 pub mod engine;
 pub mod guard;
 pub mod merge;
+pub mod store;
 pub mod subscriber;
 
 pub use config::CorrelatorConfig;
-pub use engine::{Engine, EvidenceMsg};
+pub use engine::{CorrelatorState, Engine, EntityOp, EvidenceMsg};

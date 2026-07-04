@@ -19,7 +19,12 @@ pub enum ConfigError {
 }
 
 /// Complete correlator configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+///
+/// `Default` is implemented by hand (not derived) so it matches the serde
+/// per-field defaults — a derived `Default` would give `evidence_ttl_secs = 0`
+/// etc., which would make a config-less run (or any `CorrelatorConfig::default()`)
+/// silently age out all evidence immediately.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorrelatorConfig {
     /// Zenoh connection settings.
     #[serde(default)]
@@ -72,6 +77,21 @@ fn default_reemit_secs() -> u64 {
 
 fn default_status_from_liveness() -> bool {
     true
+}
+
+impl Default for CorrelatorConfig {
+    fn default() -> Self {
+        Self {
+            zenoh: ZenohConfig::default(),
+            serialization: Format::default(),
+            evidence_ttl_secs: default_evidence_ttl(),
+            recompute_debounce_ms: default_recompute_debounce_ms(),
+            reemit_secs: default_reemit_secs(),
+            status_from_liveness: default_status_from_liveness(),
+            rules: RulesConfig::default(),
+            logging: LoggingConfig::default(),
+        }
+    }
 }
 
 /// Merge-rule kill-switches. Weaker rules are more false-merge-prone; the
@@ -184,5 +204,17 @@ mod tests {
     #[test]
     fn zero_ttl_rejected() {
         assert!(CorrelatorConfig::parse(r#"{ evidence_ttl_secs: 0 }"#).is_err());
+    }
+
+    #[test]
+    fn default_matches_serde_defaults() {
+        // A hand-written Default must agree with parsing "{}" — a derived Default
+        // would give evidence_ttl_secs = 0 and break config-less runs.
+        let d = CorrelatorConfig::default();
+        assert_eq!(d.evidence_ttl_secs, 900);
+        assert_eq!(d.recompute_debounce_ms, 500);
+        assert_eq!(d.reemit_secs, 60);
+        assert!(d.status_from_liveness);
+        assert!(d.rules.hostname_enabled);
     }
 }
