@@ -43,6 +43,7 @@ mod liveliness;
 mod publisher;
 pub mod report;
 mod runner;
+pub mod scrub;
 mod status;
 
 pub use advanced_publisher::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
@@ -62,6 +63,7 @@ pub use liveliness::LivelinessManager;
 pub use publisher::Publisher;
 pub use report::{DebugBundleSource, SimpleBundleSource, redact};
 pub use runner::SensorRunner;
+pub use scrub::{ArgScrubber, CMDLINE_CAP_BYTES};
 pub use status::SensorStatus;
 
 // Re-export commonly used types from zensight-common
