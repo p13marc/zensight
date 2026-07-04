@@ -6,7 +6,7 @@
 use anyhow::Result;
 use tracing::info;
 use zensight_common::serialization::Format;
-use zensight_sensor_core::{SensorArgs, SensorRunner};
+use zensight_sensor_core::{SensorArgs, SensorConfig, SensorRunner};
 use zensight_sensor_modbus::config::ModbusSensorConfig;
 use zensight_sensor_modbus::poller::ModbusPoller;
 
@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
     // Enable status publishing
     let runner = runner.with_status_publishing();
 
-    // On-demand debug-report (`@/report`): bundle redacted config + health +
+    // On-demand debug-report (`@/artifact`): bundle redacted config + health +
     // counters. No-op unless `report.enabled` is set in the config.
     let report_host = hostname::get()
         .ok()
@@ -38,8 +38,20 @@ async fn main() -> Result<()> {
         runner.config().clone(),
         runner.health(),
     ));
-    // Tier-2 directory snapshots (`@/snapshot`). No-op unless `snapshot.enabled`.
-    let mut runner = runner.with_report(report_source).with_snapshot(report_host);
+    // Tier-2 directory snapshots. No-op unless enabled in the config.
+    let artifacts = runner.config().artifact_limits();
+    let mut runner = runner.with_artifacts(
+        report_host,
+        vec![
+            std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
+                report_source,
+                &artifacts.report,
+            )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
+            std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
+                &artifacts.snapshot,
+            )),
+        ],
+    );
 
     // Get session and config
     let session = runner.session().clone();

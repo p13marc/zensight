@@ -34,6 +34,7 @@
 mod advanced_publisher;
 mod alert;
 mod args;
+pub mod artifact;
 mod config;
 mod correlation;
 mod error;
@@ -42,12 +43,15 @@ mod liveliness;
 mod publisher;
 pub mod report;
 mod runner;
-pub mod snapshot;
 mod status;
 
 pub use advanced_publisher::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
 pub use alert::{AlertReporter, serve_alerts_query};
 pub use args::SensorArgs;
+pub use artifact::{
+    ArtifactChannel, ArtifactProducer, DeliveryKind, ProduceCtx, Produced, ProgressUpdate,
+    ReportProducer, SnapshotProducer,
+};
 pub use config::SensorConfig;
 pub use correlation::{CorrelationEntry, CorrelationRegistry, DeviceIdentity, SensorInfo};
 pub use error::{Result, SensorError};
@@ -56,13 +60,13 @@ pub use health::{
 };
 pub use liveliness::LivelinessManager;
 pub use publisher::Publisher;
-pub use report::{DebugBundleSource, ReportChannel, SimpleBundleSource, redact};
+pub use report::{DebugBundleSource, SimpleBundleSource, redact};
 pub use runner::SensorRunner;
-pub use snapshot::SnapshotChannel;
 pub use status::SensorStatus;
 
 // Re-export commonly used types from zensight-common
 pub use zensight_common::{
-    Alert, AlertKind, AlertSeverity, AlertState, Format, LogFormat, LoggingConfig, Protocol,
-    ReportLimits, SnapshotDir, SnapshotLimits, TelemetryPoint, TelemetryValue, ZenohConfig,
+    Alert, AlertKind, AlertSeverity, AlertState, ArtifactLimits, ArtifactReportLimits,
+    ArtifactSnapshotLimits, CommonArtifactLimits, Format, LogFormat, LoggingConfig, Protocol,
+    SnapshotDir, TelemetryPoint, TelemetryValue, ZenohConfig,
 };

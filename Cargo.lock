@@ -9926,6 +9926,7 @@ name = "zensight-sensor-core"
 version = "0.6.2"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "clap",
  "json5",

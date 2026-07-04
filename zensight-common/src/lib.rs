@@ -10,6 +10,7 @@
 //! - [`error`] - Error types
 
 pub mod alert;
+pub mod artifact;
 pub mod command;
 pub mod comparison;
 pub mod config;
@@ -17,24 +18,25 @@ pub mod error;
 pub mod health;
 pub mod keyexpr;
 pub mod query_detail;
-pub mod report;
 pub mod semconv;
 pub mod serialization;
 pub mod session;
-pub mod snapshot;
 pub mod telemetry;
 
 // Re-export commonly used types at the crate root
 pub use alert::{Alert, AlertKind, AlertSeverity, AlertState};
+pub use artifact::{
+    ArtifactKind, ArtifactOptions, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, Entry,
+    KindAdvert, KindStatus, Manifest, TreeIndex, TreeSummary,
+};
 pub use command::{
-    Command, command_key, report_blob_prefix, report_cancel_key, report_request_key,
-    report_status_key, snapshot_cancel_key, snapshot_request_key, snapshot_status_key,
-    snapshot_store_prefix, snapshot_tree_prefix, status_key,
+    Command, artifact_blob_prefix, artifact_cancel_key, artifact_request_key, artifact_status_key,
+    artifact_store_prefix, artifact_tree_prefix, command_key, status_key,
 };
 pub use comparison::ComparisonOp;
 pub use config::{
-    BaseConfig, LogFormat, LoggingConfig, ReportLimits, SnapshotDir, SnapshotLimits, ZenohConfig,
-    load_config, parse_config,
+    ArtifactLimits, ArtifactReportLimits, ArtifactSnapshotLimits, BaseConfig, CommonArtifactLimits,
+    LogFormat, LoggingConfig, SnapshotDir, ZenohConfig, load_config, parse_config,
 };
 pub use error::{Error, Result};
 pub use health::{
@@ -51,13 +53,8 @@ pub use query_detail::{
     Ja4hRecord, MatrixRecord, NeighborRecord, ProcessRecord, QuicRecord, RouteRecord, SocketRecord,
     SshRecord, TalkerRecord, TimerRecord, TlsRecord, UnitDetail, UnitRecord,
 };
-pub use report::{Manifest, ReportKind, ReportOptions, ReportRequest, ReportState, ReportStatus};
 pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;
-pub use snapshot::{
-    Entry, SnapshotDirInfo, SnapshotOptions, SnapshotRequest, SnapshotState, SnapshotStatus,
-    SnapshotSummary, TreeIndex,
-};
 pub use telemetry::{Protocol, TelemetryPoint, TelemetryValue, current_timestamp_millis};
 
 /// Initialize tracing with the given configuration.

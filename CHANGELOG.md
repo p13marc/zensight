@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (large-data transfer): unified the `@/report` and `@/snapshot`
+  control-plane channels into one `@/artifact` channel.** Operator-facing
+  migration note — anything that PUT report/snapshot requests or GET the bytes
+  must move to the new keyspace and wire types:
+  - **Keyspace**: `@/report/{request,status,blob/<id>/**,cancel}` and
+    `@/snapshot/{request,status,cancel}` collapse to
+    `@/artifact/{request,status,cancel}` + `@/artifact/blob/<id>/**`. The Tier-2
+    `@/store/<algo>/<hash>` and `@/tree/<id>` queryables are unchanged but are now
+    kind-agnostic delivery infra shared by any artifact whose producer emits a
+    `Tree` delivery.
+  - **Wire types** (`zensight-common`): `Report*`/`Snapshot*` → `Artifact*` —
+    `ReportRequest`/`SnapshotRequest` → `ArtifactRequest` (+ tagged `ArtifactKind`:
+    `Report`, `Snapshot { dir }`, reserved `Capture`); `ReportState` → tagged
+    `ArtifactState`; the new tagged `Delivery` (`Blob` | `Tree`) tells the client
+    which tier to pull; `ReportStatus`/`SnapshotStatus` → `ArtifactStatus { kinds:
+    Vec<KindStatus> }` (one entry per kind). The old `report_*`/`snapshot_*` key
+    builders are replaced by `artifact_{request,status,cancel}_key` +
+    `artifact_{blob,store,tree}_prefix`.
+  - **Config**: the top-level `report:` / `snapshot:` sections (`ReportLimits` /
+    `SnapshotLimits`) move under a single `artifacts: { report, snapshot }` section
+    (`ArtifactLimits`); every kind stays **disabled by default**. `SnapshotDir {
+    name, path }` allowlist entries now live under `artifacts.snapshot.dirs`.
+  - **Sensor-core API**: `SensorRunner::with_report`/`with_snapshot` →
+    `with_artifacts(source_id, vec![ReportProducer, SnapshotProducer, …])`;
+    `SensorConfig::report_limits`/`snapshot_limits` → `artifact_limits()`. One
+    `ArtifactChannel` owns request/status/cancel + reaper (per-kind busy +
+    cooldown, lazy `BlobServer`/`TreeServer`); producers implement the
+    `ArtifactProducer` trait. See `docs/KEYSPACE.md` §3.1a and
+    `docs/LARGE-DATA-TRANSFER.md`.
+  - **Frontend**: the `blob_fetch.rs` + `dir_fetch.rs` views merge into one
+    `zensight/src/view/artifact_fetch.rs` whose `download_stream` matches on
+    `Delivery`.
 - **Dependencies**: bumped `nlink` 0.23 → 0.24, `netring` 0.28 → 0.29, and
   `flowscope` 0.20 → 0.22 (netlink and netring sensors). Migrated the breaking
   surface: `MonitorBuilder::flow_risk()` → `flow_analysis()`, and our local

@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{}", e))?;
     let runner = runner.with_status_publishing().with_format(Format::Json);
 
-    // On-demand debug-report (`@/report`): bundle redacted config + health +
+    // On-demand debug-report (`@/artifact`): bundle redacted config + health +
     // counters. No-op unless `report.enabled` is set in the config.
     let report_source = Arc::new(zensight_sensor_core::SimpleBundleSource::new(
         "netring",
@@ -33,11 +33,21 @@ async fn main() -> Result<()> {
         runner.config().clone(),
         runner.health(),
     ));
-    // Tier-2 directory snapshots (`@/snapshot`). No-op unless `snapshot.enabled`.
+    // Tier-2 directory snapshots (`@/artifact`). No-op unless `snapshot.enabled`.
     // A natural use is pointing a snapshot dir at netring's pcap output directory.
-    let runner = runner
-        .with_report(report_source)
-        .with_snapshot(sensor_id.clone());
+    let artifacts = runner.config().artifact_limits();
+    let runner = runner.with_artifacts(
+        sensor_id.clone(),
+        vec![
+            std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
+                report_source,
+                &artifacts.report,
+            )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
+            std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
+                &artifacts.snapshot,
+            )),
+        ],
+    );
 
     let mut cfg = runner.config().netring.clone();
     cfg.sensor_id = sensor_id.clone();

@@ -587,75 +587,56 @@ pub enum Message {
     /// `Ok(None)` the user cancelled the dialog, `Err(msg)` the write failed.
     ExportFinished(Result<Option<String>, String>),
 
-    // Debug-report download messages (#197)
-    /// Request + download a debug report from the sensor at this key prefix
+    // Unified artifact download messages (report / snapshot / capture) via `@/artifact`.
+    /// Discover the artifact kinds each connected sensor produces (queries every
+    /// sensor's `@/artifact/status`), so the GUI knows which affordances to render.
+    LoadArtifactKinds,
+    /// The advertised artifact kinds (+ bounds/adverts) for one sensor key prefix.
+    ArtifactKindsLoaded {
+        /// Sensor key prefix, e.g. `zensight/sysinfo`.
+        key_prefix: String,
+        /// The kinds this sensor produces and their per-kind status.
+        kinds: Vec<zensight_common::KindStatus>,
+    },
+    /// Request + download an artifact of `kind` from the sensor at `key_prefix`
     /// (e.g. `zensight/netlink`).
-    DownloadDebugReport(String),
-    /// The report request resolved: a `Ready` state to download, or an error.
-    ReportRequested(Result<zensight_common::report::ReportState, String>),
-    /// Streaming download progress (chunks received / total).
-    ReportProgress {
-        /// Chunks received so far.
-        got: u64,
-        /// Total chunks.
-        total: u64,
-    },
-    /// The bundle finished downloading + verifying to a temp path, or failed.
-    ReportDownloaded(Result<std::path::PathBuf, String>),
-    /// Outcome of the "Save as…" dialog for a downloaded report.
-    ReportSaved(Result<Option<String>, String>),
-    /// Pause the in-flight report download (keeps the partial; resumable).
-    PauseDownload,
-    /// Resume a paused report download.
-    ResumeDownload,
-    /// Cancel the in-flight report download (discards the partial).
-    CancelDownload,
-
-    // Tier-2 directory-snapshot download messages (#199 follow-up)
-    /// Discover the directories each connected sensor advertises for snapshot
-    /// download (queries every sensor's `@/snapshot/status`).
-    LoadSnapshotDirs,
-    /// The advertised snapshot directories for one sensor key prefix.
-    SnapshotDirsLoaded {
-        /// Sensor key prefix, e.g. `zensight/sysinfo`.
-        key_prefix: String,
-        /// Advertised directory names.
-        dirs: Vec<String>,
-    },
-    /// Download the named directory from the sensor at this key prefix (opens a
-    /// destination-folder picker first).
-    DownloadSnapshot {
-        /// Sensor key prefix, e.g. `zensight/sysinfo`.
-        key_prefix: String,
-        /// Logical directory name to download.
-        dir: String,
-    },
-    /// The destination-folder picker resolved (`None` = the user cancelled).
-    SnapshotDestChosen {
+    StartArtifact {
         /// Sensor key prefix.
         key_prefix: String,
-        /// Logical directory name.
-        dir: String,
+        /// What to produce (report / snapshot / capture).
+        kind: zensight_common::ArtifactKind,
+    },
+    /// The destination-folder picker resolved for a tree artifact (`None` = the
+    /// user cancelled). Only tree kinds (snapshots) pick a folder first; blobs go
+    /// to a temp dir then a Save-as dialog.
+    ArtifactDestChosen {
+        /// Sensor key prefix.
+        key_prefix: String,
+        /// What to produce.
+        kind: zensight_common::ArtifactKind,
         /// Chosen destination folder, or `None` if cancelled.
         dest: Option<std::path::PathBuf>,
     },
-    /// The snapshot request resolved: a `Ready` state to download, or an error.
-    SnapshotRequested(Result<zensight_common::snapshot::SnapshotState, String>),
-    /// Streaming download progress (chunks resolved / total).
-    SnapshotProgress {
-        /// Chunks resolved so far.
+    /// The artifact request resolved: a `Ready` state to download, or an error.
+    ArtifactRequested(Result<zensight_common::ArtifactState, String>),
+    /// Streaming download progress (units resolved / total).
+    ArtifactProgress {
+        /// Units resolved so far.
         got: u64,
-        /// Total distinct chunks.
+        /// Total units.
         total: u64,
     },
-    /// The tree finished reconstructing into a folder, or failed.
-    SnapshotDownloaded(Result<std::path::PathBuf, String>),
-    /// Pause the in-flight directory download (chunks kept; resumable).
-    PauseSnapshot,
-    /// Resume a paused directory download.
-    ResumeSnapshot,
-    /// Cancel the in-flight directory download.
-    CancelSnapshot,
+    /// The artifact finished downloading (a temp file for a blob, the chosen
+    /// folder for a tree), or failed.
+    ArtifactDownloaded(Result<std::path::PathBuf, String>),
+    /// Outcome of the "Save as…" dialog for a downloaded blob artifact.
+    ArtifactSaved(Result<Option<String>, String>),
+    /// Pause the in-flight artifact download (keeps the partial; resumable).
+    PauseArtifact,
+    /// Resume a paused artifact download.
+    ResumeArtifact,
+    /// Cancel the in-flight artifact download (discards the partial).
+    CancelArtifact,
 
     // Theme messages
     /// Toggle between light and dark theme.

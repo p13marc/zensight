@@ -149,16 +149,12 @@ pub struct ZenSight {
     /// Live Zenoh session handle (set on connect) for sending commands to
     /// sensors. `None` while disconnected or in demo mode.
     session: Option<std::sync::Arc<zenoh::Session>>,
-    /// In-flight debug-report download state (#197).
-    blob_fetch: crate::view::blob_fetch::BlobFetch,
-    /// The in-flight download's identity (key prefix, id, blob prefix, filename).
-    blob_job: Option<crate::view::blob_fetch::BlobJob>,
-    /// In-flight Tier-2 directory-snapshot download state (#199 follow-up).
-    dir_fetch: crate::view::dir_fetch::DirFetch,
-    /// The in-flight directory download's identity.
-    dir_job: Option<crate::view::dir_fetch::DirJob>,
-    /// Per-sensor advertised snapshot directories (`key_prefix` → dir names).
-    snapshot_dirs: std::collections::HashMap<String, Vec<String>>,
+    /// In-flight artifact download state (report / snapshot / capture).
+    artifact_fetch: crate::view::artifact_fetch::ArtifactFetch,
+    /// The in-flight download's identity (key prefix, kind, id, delivery, dest).
+    artifact_job: Option<crate::view::artifact_fetch::ArtifactJob>,
+    /// Per-sensor advertised artifact kinds (`key_prefix` → kinds + bounds/adverts).
+    artifact_kinds: std::collections::HashMap<String, Vec<zensight_common::KindStatus>>,
     /// Expectations authoring view state (netlink sentinel, Plan 08).
     expectations: crate::view::expectations::ExpectationsState,
     /// Security view state: severity filter + expanded anomaly (#48).
@@ -303,11 +299,9 @@ impl ZenSight {
             correlations: std::collections::HashMap::new(),
             toasts: ToastState::default(),
             session: None,
-            blob_fetch: crate::view::blob_fetch::BlobFetch::default(),
-            blob_job: None,
-            dir_fetch: crate::view::dir_fetch::DirFetch::default(),
-            dir_job: None,
-            snapshot_dirs: std::collections::HashMap::new(),
+            artifact_fetch: crate::view::artifact_fetch::ArtifactFetch::default(),
+            artifact_job: None,
+            artifact_kinds: std::collections::HashMap::new(),
             expectations: crate::view::expectations::ExpectationsState::default(),
             security: crate::view::security::SecurityState::default(),
             detection_tuning: crate::view::detection_tuning::DetectionTuningState::default(),
@@ -1430,8 +1424,8 @@ impl ZenSight {
 
             Message::OpenSensors => {
                 self.set_view(CurrentView::Sensors);
-                // Discover each sensor's advertised snapshot directories.
-                if let Some(task) = self.load_snapshot_dirs() {
+                // Discover each sensor's advertised artifact kinds (+ adverts).
+                if let Some(task) = self.load_artifact_kinds() {
                     return task;
                 }
             }
@@ -1715,158 +1709,105 @@ impl ZenSight {
                 }
             },
 
-            // Debug-report download (#197)
-            Message::DownloadDebugReport(key_prefix) => {
-                if let Some(task) = self.start_report_download(key_prefix) {
+            // Unified artifact download (report / snapshot / capture) via `@/artifact`.
+            Message::LoadArtifactKinds => {
+                if let Some(task) = self.load_artifact_kinds() {
                     return task;
                 }
             }
 
-            Message::ReportRequested(result) => {
-                if let Some(task) = self.on_report_requested(result) {
+            Message::ArtifactKindsLoaded { key_prefix, kinds } => {
+                self.artifact_kinds.insert(key_prefix, kinds);
+            }
+
+            Message::StartArtifact { key_prefix, kind } => {
+                if let Some(task) = self.start_artifact(key_prefix, kind) {
                     return task;
                 }
             }
 
-            Message::ReportProgress { got, total } => {
+            Message::ArtifactDestChosen {
+                key_prefix,
+                kind,
+                dest,
+            } => {
+                if let Some(dest) = dest
+                    && let Some(task) = self.start_artifact_with_dest(key_prefix, kind, dest)
+                {
+                    return task;
+                }
+            }
+
+            Message::ArtifactRequested(result) => {
+                if let Some(task) = self.on_artifact_requested(result) {
+                    return task;
+                }
+            }
+
+            Message::ArtifactProgress { got, total } => {
                 // Only update while actively downloading (ignore stale progress
                 // from a paused/cancelled job).
                 if matches!(
-                    self.blob_fetch,
-                    crate::view::blob_fetch::BlobFetch::Downloading { .. }
+                    self.artifact_fetch,
+                    crate::view::artifact_fetch::ArtifactFetch::Downloading { .. }
                 ) {
-                    self.blob_fetch =
-                        crate::view::blob_fetch::BlobFetch::Downloading { got, total };
+                    self.artifact_fetch =
+                        crate::view::artifact_fetch::ArtifactFetch::Downloading { got, total };
                 }
             }
 
-            Message::ReportDownloaded(result) => {
-                if let Some(task) = self.on_report_downloaded(result) {
+            Message::ArtifactDownloaded(result) => {
+                if let Some(task) = self.on_artifact_downloaded(result) {
                     return task;
                 }
             }
 
-            Message::PauseDownload => {
-                if let crate::view::blob_fetch::BlobFetch::Downloading { got, total } =
-                    self.blob_fetch
-                {
-                    // Signal the in-flight stream to stop; the partial persists.
-                    if let Some(job) = &self.blob_job {
-                        job.cancel.cancel();
-                    }
-                    self.blob_fetch = crate::view::blob_fetch::BlobFetch::Paused { got, total };
-                }
-            }
-
-            Message::ResumeDownload => {
-                if let Some(task) = self.resume_report_download() {
-                    return task;
-                }
-            }
-
-            Message::ReportSaved(result) => match result {
+            Message::ArtifactSaved(result) => match result {
                 Ok(Some(path)) => {
-                    self.blob_fetch = crate::view::blob_fetch::BlobFetch::Saved(path.clone());
+                    self.artifact_fetch =
+                        crate::view::artifact_fetch::ArtifactFetch::Saved(path.clone());
                     self.toasts
-                        .push(ToastSeverity::Success, format!("Report saved to {path}"));
+                        .push(ToastSeverity::Success, format!("Artifact saved to {path}"));
                 }
                 Ok(None) => {
                     // User cancelled the save dialog — discard, back to idle.
-                    self.blob_fetch = crate::view::blob_fetch::BlobFetch::Idle;
-                    self.blob_job = None;
+                    self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Idle;
+                    self.artifact_job = None;
                 }
                 Err(e) => {
-                    self.blob_fetch = crate::view::blob_fetch::BlobFetch::Failed(e.clone());
+                    self.artifact_fetch =
+                        crate::view::artifact_fetch::ArtifactFetch::Failed(e.clone());
                     self.toasts
                         .push(ToastSeverity::Error, format!("Save failed: {e}"));
                 }
             },
 
-            Message::CancelDownload => {
-                let task = self.cancel_report_download();
-                self.blob_fetch = crate::view::blob_fetch::BlobFetch::Idle;
-                self.blob_job = None;
+            Message::PauseArtifact => {
+                if let crate::view::artifact_fetch::ArtifactFetch::Downloading { got, total } =
+                    self.artifact_fetch
+                {
+                    // Signal the in-flight stream to stop; the partial persists.
+                    if let Some(job) = &self.artifact_job {
+                        job.cancel.cancel();
+                    }
+                    self.artifact_fetch =
+                        crate::view::artifact_fetch::ArtifactFetch::Paused { got, total };
+                }
+            }
+
+            Message::ResumeArtifact => {
+                if let Some(task) = self.resume_artifact() {
+                    return task;
+                }
+            }
+
+            Message::CancelArtifact => {
+                let task = self.cancel_artifact();
+                self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Idle;
+                self.artifact_job = None;
                 if let Some(task) = task {
                     return task;
                 }
-            }
-
-            // Tier-2 directory-snapshot download (#199 follow-up)
-            Message::LoadSnapshotDirs => {
-                if let Some(task) = self.load_snapshot_dirs() {
-                    return task;
-                }
-            }
-
-            Message::SnapshotDirsLoaded { key_prefix, dirs } => {
-                self.snapshot_dirs.insert(key_prefix, dirs);
-            }
-
-            Message::DownloadSnapshot { key_prefix, dir } => {
-                // Pick a destination folder first, then start the download.
-                return Task::future(async move {
-                    let dest = rfd::AsyncFileDialog::new()
-                        .pick_folder()
-                        .await
-                        .map(|h| h.path().to_path_buf());
-                    Message::SnapshotDestChosen {
-                        key_prefix,
-                        dir,
-                        dest,
-                    }
-                });
-            }
-
-            Message::SnapshotDestChosen {
-                key_prefix,
-                dir,
-                dest,
-            } => {
-                if let Some(dest) = dest
-                    && let Some(task) = self.start_snapshot_download(key_prefix, dir, dest)
-                {
-                    return task;
-                }
-            }
-
-            Message::SnapshotRequested(result) => {
-                if let Some(task) = self.on_snapshot_requested(result) {
-                    return task;
-                }
-            }
-
-            Message::SnapshotProgress { got, total } => {
-                if matches!(
-                    self.dir_fetch,
-                    crate::view::dir_fetch::DirFetch::Fetching { .. }
-                ) {
-                    self.dir_fetch = crate::view::dir_fetch::DirFetch::Fetching { got, total };
-                }
-            }
-
-            Message::SnapshotDownloaded(result) => self.on_snapshot_downloaded(result),
-
-            Message::PauseSnapshot => {
-                if let crate::view::dir_fetch::DirFetch::Fetching { got, total } = self.dir_fetch {
-                    if let Some(job) = &self.dir_job {
-                        job.cancel.cancel();
-                    }
-                    self.dir_fetch = crate::view::dir_fetch::DirFetch::Paused { got, total };
-                }
-            }
-
-            Message::ResumeSnapshot => {
-                if let Some(task) = self.resume_snapshot_download() {
-                    return task;
-                }
-            }
-
-            Message::CancelSnapshot => {
-                if let Some(job) = &self.dir_job {
-                    job.cancel.cancel();
-                }
-                self.dir_fetch = crate::view::dir_fetch::DirFetch::Idle;
-                self.dir_job = None;
             }
 
             Message::ToggleTheme => {
@@ -2440,95 +2381,156 @@ impl ZenSight {
         })
     }
 
-    /// Begin a debug-report download from the sensor at `key_prefix`: PUT the
-    /// request, then poll its status to `Ready`.
-    fn start_report_download(&mut self, key_prefix: String) -> Option<Task<Message>> {
-        let Some(session) = self.session.clone() else {
+    /// Begin an artifact request. A tree kind (snapshot) needs a destination
+    /// folder, so it opens a folder picker first (→ `ArtifactDestChosen`); a blob
+    /// kind (report/capture) goes straight to a temp dir + Requesting.
+    fn start_artifact(
+        &mut self,
+        key_prefix: String,
+        kind: zensight_common::ArtifactKind,
+    ) -> Option<Task<Message>> {
+        if self.session.is_none() {
             self.toasts
                 .push(ToastSeverity::Error, "Not connected to Zenoh".to_string());
             return None;
+        }
+        match &kind {
+            zensight_common::ArtifactKind::Snapshot { .. } => {
+                // Pick a destination folder first, then start the download.
+                Some(Task::future(async move {
+                    let dest = rfd::AsyncFileDialog::new()
+                        .pick_folder()
+                        .await
+                        .map(|h| h.path().to_path_buf());
+                    Message::ArtifactDestChosen {
+                        key_prefix,
+                        kind,
+                        dest,
+                    }
+                }))
+            }
+            _ => {
+                let dest = std::env::temp_dir().join("zensight-downloads");
+                self.start_artifact_with_dest(key_prefix, kind, dest)
+            }
+        }
+    }
+
+    /// Build the job with the resolved `dest`, set Requesting, and spawn the
+    /// request/poll-to-`Ready` future.
+    fn start_artifact_with_dest(
+        &mut self,
+        key_prefix: String,
+        kind: zensight_common::ArtifactKind,
+        dest: std::path::PathBuf,
+    ) -> Option<Task<Message>> {
+        let session = self.session.clone()?;
+        // A tree is reconstructed into a clearly-named subfolder of the picked dir.
+        let dest = match &kind {
+            zensight_common::ArtifactKind::Snapshot { dir } => {
+                let sensor = key_prefix.rsplit('/').next().unwrap_or("sensor");
+                dest.join(format!("{sensor}-{dir}-snapshot"))
+            }
+            _ => dest,
         };
-        let job = crate::view::blob_fetch::BlobJob::new(key_prefix.clone());
+        let job =
+            crate::view::artifact_fetch::ArtifactJob::new(key_prefix.clone(), kind.clone(), dest);
         let id = job.id;
-        self.blob_job = Some(job);
-        self.blob_fetch = crate::view::blob_fetch::BlobFetch::Requesting;
+        self.artifact_job = Some(job);
+        self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Requesting;
         Some(Task::future(async move {
             let result =
-                crate::view::blob_fetch::request_and_await_ready(session, key_prefix, id).await;
-            Message::ReportRequested(result)
+                crate::view::artifact_fetch::request_and_await_ready(session, key_prefix, kind, id)
+                    .await;
+            Message::ArtifactRequested(result)
         }))
     }
 
-    /// Handle the `Ready`/error outcome of a report request and, on `Ready`, kick
-    /// off the streaming download.
-    fn on_report_requested(
+    /// Handle the `Ready`/error outcome of an artifact request and, on `Ready`,
+    /// pick the transfer client off the delivery tag and kick off the stream.
+    fn on_artifact_requested(
         &mut self,
-        result: Result<zensight_common::report::ReportState, String>,
+        result: Result<zensight_common::ArtifactState, String>,
     ) -> Option<Task<Message>> {
-        use zensight_common::report::ReportState;
-        let job = self.blob_job.as_mut()?;
+        use zensight_common::{ArtifactState, Delivery};
         match result {
-            Ok(ReportState::Ready {
-                manifest,
-                blob_prefix,
-                ..
-            }) => {
-                job.blob_prefix = Some(blob_prefix.clone());
-                job.filename = Some(manifest.filename.clone());
-                let id = job.id.to_string();
-                let dir = job.dest_dir.clone();
-                let cancel = job.cancel.clone();
-                self.blob_fetch = crate::view::blob_fetch::BlobFetch::Downloading {
-                    got: 0,
-                    total: manifest.chunk_count as u64,
+            Ok(ArtifactState::Ready { delivery, .. }) => {
+                let job = self.artifact_job.as_mut()?;
+                job.delivery = Some(delivery.clone());
+                // Total & filename depend on the delivery type (chunk count for a
+                // blob, file count for a tree — matching the old per-tier behavior).
+                let total = match &delivery {
+                    Delivery::Blob { manifest, .. } => {
+                        job.filename = Some(manifest.filename.clone());
+                        manifest.chunk_count as u64
+                    }
+                    Delivery::Tree { summary, .. } => summary.file_count.max(1),
                 };
+                let id = job.id.to_string();
+                let dest = job.dest.clone();
+                let cancel = job.cancel.clone();
+                self.artifact_fetch =
+                    crate::view::artifact_fetch::ArtifactFetch::Downloading { got: 0, total };
                 let session = self.session.clone()?;
-                Some(Task::stream(crate::view::blob_fetch::download_stream(
-                    session,
-                    blob_prefix,
-                    id,
-                    dir,
-                    cancel,
+                let store = self.content_store();
+                Some(Task::stream(crate::view::artifact_fetch::download_stream(
+                    session, delivery, id, dest, store, cancel,
                 )))
             }
             Ok(_) => None, // request helper only returns Ready on success
             Err(e) => {
-                self.blob_fetch = crate::view::blob_fetch::BlobFetch::Failed(e.clone());
+                self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Failed(e.clone());
                 self.toasts
-                    .push(ToastSeverity::Error, format!("Report failed: {e}"));
+                    .push(ToastSeverity::Error, format!("Artifact failed: {e}"));
                 None
             }
         }
     }
 
-    /// Handle a finished download: open a "Save as…" dialog (move/stream the
-    /// verified temp file), or surface the error.
-    fn on_report_downloaded(
+    /// Handle a finished artifact download. A blob lands in a temp file, so open a
+    /// "Save as…" dialog; a tree is already reconstructed into the chosen folder,
+    /// so just record `Saved`.
+    fn on_artifact_downloaded(
         &mut self,
         result: Result<std::path::PathBuf, String>,
     ) -> Option<Task<Message>> {
-        // Ignore if the user cancelled (job cleared).
-        let job = self.blob_job.as_ref()?;
+        // Ignore if the user cancelled (job cleared). Extract the delivery-shape +
+        // filename up front so no borrow of the job outlives the state mutation.
+        let (is_tree, filename) = {
+            let job = self.artifact_job.as_ref()?;
+            (
+                matches!(job.delivery, Some(zensight_common::Delivery::Tree { .. })),
+                job.filename.clone(),
+            )
+        };
         match result {
+            Ok(path) if is_tree => {
+                // Tree already reconstructed into the chosen folder.
+                let shown = path.display().to_string();
+                self.artifact_fetch =
+                    crate::view::artifact_fetch::ArtifactFetch::Saved(shown.clone());
+                self.toasts
+                    .push(ToastSeverity::Success, format!("Snapshot saved to {shown}"));
+                None
+            }
             Ok(temp_path) => {
-                self.blob_fetch = crate::view::blob_fetch::BlobFetch::Verifying;
-                let default_name = job
-                    .filename
-                    .clone()
-                    .unwrap_or_else(|| "zensight-debug-report.tar.zst".to_string());
+                // Blob: move the verified temp file via a Save-as dialog.
+                self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Verifying;
+                let default_name =
+                    filename.unwrap_or_else(|| "zensight-debug-report.tar.zst".to_string());
                 Some(save_blob_dialog(default_name, temp_path))
             }
             // A paused download reports Cancelled — that's expected, keep Paused.
             Err(_)
                 if matches!(
-                    self.blob_fetch,
-                    crate::view::blob_fetch::BlobFetch::Paused { .. }
+                    self.artifact_fetch,
+                    crate::view::artifact_fetch::ArtifactFetch::Paused { .. }
                 ) =>
             {
                 None
             }
             Err(e) => {
-                self.blob_fetch = crate::view::blob_fetch::BlobFetch::Failed(e.clone());
+                self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Failed(e.clone());
                 self.toasts
                     .push(ToastSeverity::Error, format!("Download failed: {e}"));
                 None
@@ -2536,51 +2538,56 @@ impl ZenSight {
         }
     }
 
-    /// Resume a paused download from its on-disk partial (a fresh stream + token).
-    fn resume_report_download(&mut self) -> Option<Task<Message>> {
-        let crate::view::blob_fetch::BlobFetch::Paused { got, total } = self.blob_fetch else {
+    /// Resume a paused download (a fresh stream + token; a blob resumes from its
+    /// on-disk partial, a tree from the chunks already in the local content store).
+    fn resume_artifact(&mut self) -> Option<Task<Message>> {
+        let crate::view::artifact_fetch::ArtifactFetch::Paused { got, total } = self.artifact_fetch
+        else {
             return None;
         };
         let session = self.session.clone()?;
-        let job = self.blob_job.as_mut()?;
-        let blob_prefix = job.blob_prefix.clone()?;
+        let store = self.content_store();
+        let job = self.artifact_job.as_mut()?;
+        let delivery = job.delivery.clone()?;
         let id = job.id.to_string();
-        let dir = job.dest_dir.clone();
+        let dest = job.dest.clone();
         let cancel = job.reset_cancel();
-        self.blob_fetch = crate::view::blob_fetch::BlobFetch::Downloading { got, total };
-        Some(Task::stream(crate::view::blob_fetch::download_stream(
-            session,
-            blob_prefix,
-            id,
-            dir,
-            cancel,
+        self.artifact_fetch =
+            crate::view::artifact_fetch::ArtifactFetch::Downloading { got, total };
+        Some(Task::stream(crate::view::artifact_fetch::download_stream(
+            session, delivery, id, dest, store, cancel,
         )))
     }
 
-    /// Cancel the in-flight download: stop the stream, delete the partial, and
-    /// hint the sensor to free its temp artifact early.
-    fn cancel_report_download(&mut self) -> Option<Task<Message>> {
-        let job = self.blob_job.as_ref()?;
+    /// Cancel the in-flight download: stop the stream, delete a blob partial, and
+    /// hint the sensor to free its ready artifact early.
+    fn cancel_artifact(&mut self) -> Option<Task<Message>> {
+        let job = self.artifact_job.as_ref()?;
         job.cancel.cancel();
         let session = self.session.clone()?;
-        let blob_prefix = job.blob_prefix.clone();
-        let id = job.id.to_string();
         let key_prefix = job.key_prefix.clone();
-        let dir = job.dest_dir.clone();
+        let id = job.id.to_string();
+        // Only a blob delivery leaves an on-disk partial to clean up.
+        let blob = match &job.delivery {
+            Some(zensight_common::Delivery::Blob { blob_prefix, .. }) => {
+                Some((blob_prefix.clone(), job.dest.clone()))
+            }
+            _ => None,
+        };
         Some(Task::future(async move {
-            if let Some(bp) = blob_prefix {
+            if let Some((bp, dir)) = blob {
                 let client =
                     zenoh_blob::BlobClient::new(session.clone(), bp, zenoh_blob::Format::Json);
                 client.delete_partial(&id, &dir).await;
             }
-            // Best-effort hint to the sensor (free the TTL'd temp file now).
+            // Best-effort hint to the sensor (free the TTL'd artifact now).
             let _ = session
                 .put(
-                    zensight_common::report_cancel_key(&key_prefix),
+                    zensight_common::artifact_cancel_key(&key_prefix),
                     id.into_bytes(),
                 )
                 .await;
-            Message::ReportSaved(Ok(None))
+            Message::ArtifactSaved(Ok(None))
         }))
     }
 
@@ -2594,9 +2601,10 @@ impl ZenSight {
         }
     }
 
-    /// Query every connected sensor's `@/snapshot/status` to learn which
-    /// directories it advertises for download.
-    fn load_snapshot_dirs(&self) -> Option<Task<Message>> {
+    /// Query every connected sensor's `@/artifact/status` to learn which kinds it
+    /// produces (report/snapshot/capture) plus their bounds/adverts, storing the
+    /// result per key prefix so the Sensors view renders the right affordances.
+    fn load_artifact_kinds(&self) -> Option<Task<Message>> {
         let session = self.session.clone()?;
         let prefixes: Vec<String> = self
             .sensor_health
@@ -2609,129 +2617,13 @@ impl ZenSight {
         let tasks = prefixes.into_iter().map(|key_prefix| {
             let session = session.clone();
             Task::future(async move {
-                let dirs =
-                    crate::view::dir_fetch::load_snapshot_dirs(session, key_prefix.clone()).await;
-                Message::SnapshotDirsLoaded { key_prefix, dirs }
+                let kinds =
+                    crate::view::artifact_fetch::load_artifact_kinds(session, key_prefix.clone())
+                        .await;
+                Message::ArtifactKindsLoaded { key_prefix, kinds }
             })
         });
         Some(Task::batch(tasks))
-    }
-
-    /// Begin a directory download: PUT the request, then poll its status to `Ready`.
-    fn start_snapshot_download(
-        &mut self,
-        key_prefix: String,
-        dir: String,
-        dest: std::path::PathBuf,
-    ) -> Option<Task<Message>> {
-        let session = self.session.clone()?;
-        // Reconstruct into a clearly-named subfolder of the chosen destination.
-        let sensor = key_prefix.rsplit('/').next().unwrap_or("sensor");
-        let dest_root = dest.join(format!("{sensor}-{dir}-snapshot"));
-        let job = crate::view::dir_fetch::DirJob::new(key_prefix.clone(), dir.clone(), dest_root);
-        let id = job.id;
-        self.dir_job = Some(job);
-        self.dir_fetch = crate::view::dir_fetch::DirFetch::Requesting;
-        Some(Task::future(async move {
-            let result =
-                crate::view::dir_fetch::request_and_await_ready(session, key_prefix, dir, id).await;
-            Message::SnapshotRequested(result)
-        }))
-    }
-
-    /// On `Ready`, record the prefixes + tree id and start the chunk stream.
-    fn on_snapshot_requested(
-        &mut self,
-        result: Result<zensight_common::snapshot::SnapshotState, String>,
-    ) -> Option<Task<Message>> {
-        use zensight_common::snapshot::SnapshotState;
-        let job = self.dir_job.as_mut()?;
-        match result {
-            Ok(SnapshotState::Ready {
-                tree_id,
-                store_prefix,
-                tree_prefix,
-                summary,
-                ..
-            }) => {
-                job.tree_id = Some(tree_id.clone());
-                job.store_prefix = Some(store_prefix.clone());
-                job.tree_prefix = Some(tree_prefix.clone());
-                let dest_root = job.dest_root.clone();
-                let cancel = job.cancel.clone();
-                self.dir_fetch = crate::view::dir_fetch::DirFetch::Fetching {
-                    got: 0,
-                    total: summary.file_count.max(1),
-                };
-                let session = self.session.clone()?;
-                let store = self.content_store();
-                Some(Task::stream(crate::view::dir_fetch::download_stream(
-                    session,
-                    store_prefix,
-                    tree_prefix,
-                    tree_id,
-                    dest_root,
-                    store,
-                    cancel,
-                )))
-            }
-            Ok(_) => None, // request helper only returns Ready on success
-            Err(e) => {
-                self.dir_fetch = crate::view::dir_fetch::DirFetch::Failed(e.clone());
-                self.toasts
-                    .push(ToastSeverity::Error, format!("Snapshot failed: {e}"));
-                None
-            }
-        }
-    }
-
-    /// Handle a finished directory download.
-    fn on_snapshot_downloaded(&mut self, result: Result<std::path::PathBuf, String>) {
-        match result {
-            Ok(path) => {
-                let shown = path.display().to_string();
-                self.dir_fetch = crate::view::dir_fetch::DirFetch::Saved(shown.clone());
-                self.toasts
-                    .push(ToastSeverity::Success, format!("Snapshot saved to {shown}"));
-            }
-            // A paused download reports Cancelled — keep the Paused state.
-            Err(_)
-                if matches!(
-                    self.dir_fetch,
-                    crate::view::dir_fetch::DirFetch::Paused { .. }
-                ) => {}
-            Err(e) => {
-                self.dir_fetch = crate::view::dir_fetch::DirFetch::Failed(e.clone());
-                self.toasts
-                    .push(ToastSeverity::Error, format!("Download failed: {e}"));
-            }
-        }
-    }
-
-    /// Resume a paused directory download (a fresh stream + token; the local store
-    /// already holds the chunks fetched so far, so it picks up where it stopped).
-    fn resume_snapshot_download(&mut self) -> Option<Task<Message>> {
-        let crate::view::dir_fetch::DirFetch::Paused { got, total } = self.dir_fetch else {
-            return None;
-        };
-        let session = self.session.clone()?;
-        let store = self.content_store();
-        let job = self.dir_job.as_mut()?;
-        let store_prefix = job.store_prefix.clone()?;
-        let tree_prefix = job.tree_prefix.clone()?;
-        let tree_id = job.tree_id.clone()?;
-        let dest_root = job.dest_root.clone();
-        let cancel = job.reset_cancel();
-        self.dir_fetch = crate::view::dir_fetch::DirFetch::Fetching { got, total };
-        Some(Task::stream(crate::view::dir_fetch::download_stream(
-            session,
-            store_prefix,
-            tree_prefix,
-            tree_id,
-            dest_root,
-            store,
-            cancel,
-        )))
     }
 
     /// Query the netlink sentinel's current expectation set (status queryable).
@@ -3621,11 +3513,10 @@ impl ZenSight {
             CurrentView::Sensors => crate::view::sensors::sensors_view(
                 &self.sensor_health,
                 &self.recent_errors,
-                &self.blob_fetch,
-                self.blob_job.as_ref().map(|j| j.key_prefix.as_str()),
-                &self.dir_fetch,
-                &self.snapshot_dirs,
-                self.dir_job.as_ref().map(|j| j.key_prefix.as_str()),
+                &self.artifact_fetch,
+                self.artifact_job.as_ref().map(|j| j.key_prefix.as_str()),
+                self.artifact_job.as_ref().map(|j| j.kind.slug()),
+                &self.artifact_kinds,
             ),
             CurrentView::Logs => {
                 let logs: Vec<_> = self.recent_logs.iter().cloned().collect();
@@ -4421,7 +4312,7 @@ fn save_blob_dialog(default_name: String, src: std::path::PathBuf) -> Task<Messa
         let Some(handle) = dialog.save_file().await else {
             // Cancelled: discard the temp artifact.
             let _ = tokio::fs::remove_file(&src).await;
-            return Message::ReportSaved(Ok(None));
+            return Message::ArtifactSaved(Ok(None));
         };
         let dst = handle.path().to_path_buf();
         // Rename first (same filesystem); fall back to a streamed copy on EXDEV.
@@ -4435,7 +4326,7 @@ fn save_blob_dialog(default_name: String, src: std::path::PathBuf) -> Task<Messa
                 Err(e) => Err(e.to_string()),
             },
         };
-        Message::ReportSaved(result.map(Some))
+        Message::ArtifactSaved(result.map(Some))
     })
 }
 

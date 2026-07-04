@@ -28,19 +28,28 @@ async fn main() -> Result<()> {
     // Enable status publishing and set format
     let runner = runner.with_status_publishing().with_format(Format::Json);
 
-    // On-demand debug-report (`@/report`): bundle redacted config + health +
-    // counters. No-op unless `report.enabled` is set in the config.
+    // On-demand artifact channel (`@/artifact`): a report producer (redacted
+    // config + health + counters) and a snapshot producer (allowlisted directory
+    // package). No-op unless the matching `artifacts.*` kind is enabled in config.
     let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
         "sysinfo",
         hostname.clone(),
         runner.config().clone(),
         runner.health(),
     ));
-    let runner = runner.with_report(report_source);
-
-    // Tier-2 directory snapshots (`@/snapshot`): package an allowlisted directory
-    // for download. No-op unless `snapshot.enabled` is set in the config.
-    let runner = runner.with_snapshot(hostname.clone());
+    let artifacts = runner.config().artifact_limits();
+    let runner = runner.with_artifacts(
+        hostname.clone(),
+        vec![
+            std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
+                report_source,
+                &artifacts.report,
+            )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
+            std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
+                &artifacts.snapshot,
+            )),
+        ],
+    );
 
     // Get the config and publisher for the collector
     let sysinfo_config = runner.config().sysinfo.clone();

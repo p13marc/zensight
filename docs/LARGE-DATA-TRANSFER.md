@@ -209,33 +209,64 @@ pattern, generalized to many binary replies**.
 
 ---
 
-## 5. Recommended design — a `@/report` chunked blob transfer
+## 5. Recommended design — a unified `@/artifact` channel
 
-A thin, self-contained capability that drops into the existing architecture. Two new building blocks:
-a **command** to generate a report and a **queryable** to stream it.
+A thin, self-contained capability that drops into the existing architecture. Two building blocks:
+a **command** to generate an artifact and a **queryable** to stream it.
+
+> **Status: implemented, and unified (release 0.7.0).** What this memo proposed as two separate channels
+> (`@/report` for the Tier-1 file blob, `@/snapshot` for the Tier-2 directory tree) shipped as **one**
+> `@/artifact` channel. The Tier-1 (whole-file blob) vs Tier-2 (content-addressed tree) *mechanics* below
+> are unchanged — they are now the two **`Delivery` variants** (`Blob` / `Tree`) of one channel, **chosen by
+> the producer's output**, not two channels/modules. Read the rest of this section with that mapping in mind:
+> a single `ArtifactChannel` in `zensight-sensor-core` owns request/status/cancel + reaper (per-kind busy +
+> cooldown, lazy `BlobServer`/`TreeServer`); each artifact **kind** (`Report`, `Snapshot`, and the
+> planned/reserved `Capture`) is an `ArtifactProducer`; the GUI has one `zensight/src/view/artifact_fetch.rs`
+> (was `blob_fetch.rs` + `dir_fetch.rs`) whose `download_stream` matches on `Delivery`. See
+> `docs/KEYSPACE.md` §3.1a for the authoritative keyspace and wire types.
 
 ### 5.1 Keyspace (consistent with `docs/KEYSPACE.md`)
 
 ```
 # 1) Request generation (operator-initiated, authz point) — command channel pattern (like netlink @/commands)
-zensight/<protocol>/@/report/request        # PUT a ReportRequest{ id, kind, options }
-zensight/<protocol>/@/report/status         # queryable: ReportStatus{ id, state, manifest? }
+zensight/<protocol>/@/artifact/request       # PUT an ArtifactRequest{ id, kind, opts }
+zensight/<protocol>/@/artifact/status        # queryable: ArtifactStatus{ kinds: Vec<KindStatus> }
+zensight/<protocol>/@/artifact/cancel        # PUT an artifact id (ULID) to free it early
 
-# 2) Stream the bytes — queryable returning a manifest reply + N chunk replies
-zensight/<protocol>/@/report/<id>            # GET ?from=<k>  -> Manifest + chunks[k..]
+# 2) Stream the bytes — the Ready state's Delivery selects one:
+#    Blob delivery (Tier-1 whole file):
+zensight/<protocol>/@/artifact/blob/<id>/**  # zenoh-blob: Manifest + chunk replies (?from=<k>)
+#    Tree delivery (Tier-2 content-addressed directory):
+zensight/<protocol>/@/tree/<id>              # GET a TreeIndex (depth-first Entry list)
+zensight/<protocol>/@/store/<algo>/<hash>    # GET a single content-addressed chunk
 ```
 
-`<protocol>/<source>` identifies which sensor/host produces the report (the GUI already knows the host).
+`<protocol>/<source>` identifies which sensor/host produces the artifact (the GUI already knows the host).
 
 ### 5.2 Wire types (`zensight-common`, serde → JSON/CBOR like everything else; chunk payloads are raw bytes)
 
 ```rust
-struct ReportRequest { id: Ulid, kind: ReportKind, opts: ReportOptions }   // kind: DebugBundle | Pcap | Logs…
-struct Manifest {
+struct ArtifactRequest { id: Ulid, #[serde(flatten)] kind: ArtifactKind, opts: ArtifactOptions }
+enum ArtifactKind {  // serde-tagged "kind"
+    Report {},
+    Snapshot { dir: String },   // an ALLOWLISTED logical name (the authz boundary), never a raw path
+    Capture { duration_secs, max_bytes, filter, snaplen, compress },   // planned/reserved (#333)
+    Unsupported,                // #[serde(other)] — a sensor replies Failed for kinds it can't do
+}
+struct Manifest {   // Tier-1 Blob delivery
     id: Ulid, filename: String, total_len: u64, chunk_size: u32,
     chunk_count: u32, sha256: [u8;32], created_ms: i64,
 }
-enum ReportState { Generating, Ready, Failed(String), Expired }
+enum ArtifactState {  // serde-tagged "state"
+    Generating { id, kind, detail, progress },
+    Ready { id, kind, delivery: Delivery, expires_ms },   // delivery = Blob{..} | Tree{..}
+    Failed { id, kind, reason },
+    Expired { id, kind },
+}
+enum Delivery {  // serde-tagged "delivery" — tells the client which client to use
+    Blob { manifest: Manifest, blob_prefix: String },                 // pull via BlobClient (Tier-1)
+    Tree { tree_id, store_prefix, tree_prefix, summary: TreeSummary }, // pull via TreeClient (Tier-2)
+}
 ```
 
 A **chunk reply** is a `Sample` whose key carries the chunk index and whose `ZBytes` payload is the chunk
@@ -243,7 +274,7 @@ bytes; the **manifest reply** is the JSON `Manifest` (distinguished by an encodi
 query → one manifest + the requested chunks.
 
 > **Borrow from sendit: metadata-in-key.** Instead of (or alongside) packing `seq` into the payload, encode
-> chunk metadata *in the key expression* — `…/report/<id>/__chunk/<total_len>/<chunk_count>/<index>` — as
+> chunk metadata *in the key expression* — `…/artifact/blob/<id>/__chunk/<total_len>/<chunk_count>/<index>` — as
 > sendit does (`{topic}/__chunk/{total_size}/{total_chunks}/{index}`). The index/total are then visible to
 > Zenoh routing/selectors and trivially parseable by the client (no payload framing), which also makes the
 > range-resume selector natural. **Keep the SHA-256 in the manifest** (sendit omits a content hash — its
@@ -252,13 +283,15 @@ query → one manifest + the requested chunks.
 
 ### 5.3 Flow
 
-1. **GUI → request.** Operator clicks "Download debug report" on a host → GUI PUTs `ReportRequest` to
-   `…/@/report/request`.
-2. **Sensor generates off-thread.** The sensor builds the bundle in a `spawn_blocking` task (tar+zstd of
-   configs + a redb store export + recent logs + optional pcap), writes it to a **temp file**, computes
-   SHA-256 and the chunk count, and registers a `Manifest` keyed by `id` (kept for a TTL, e.g. 10 min,
-   then the temp file is deleted → `Expired`). Status is observable via `…/@/report/status`.
-3. **GUI → download.** GUI `get`s `…/@/report/<id>?from=0`. The queryable handler streams the manifest
+1. **GUI → request.** Operator clicks "Download debug report" on a host → GUI PUTs an `ArtifactRequest`
+   (`kind: Report`) to `…/@/artifact/request`.
+2. **Sensor generates off-thread.** The `Report` `ArtifactProducer` builds the bundle in a `spawn_blocking`
+   task (tar+zstd of configs + a redb store export + recent logs + optional pcap), writes it to a **temp
+   file**, computes SHA-256 and the chunk count, and registers a `Manifest` keyed by `id` (kept for a TTL,
+   e.g. 10 min, then the temp file is deleted → `Expired`). The `ArtifactChannel` advances the state to
+   `Ready { delivery: Blob{ manifest, blob_prefix } }`, observable via the `…/@/artifact/status` queryable.
+3. **GUI → download.** Seeing `Delivery::Blob`, the GUI pulls via `BlobClient` from
+   `…/@/artifact/blob/<id>/**` (`?from=0`). The queryable handler streams the manifest
    reply, then reads the temp file chunk-by-chunk (`chunk_size`, e.g. **256 KB–1 MB**), `query.reply(...)`
    each with `CongestionControl::Block` (backpressure, R6). Memory stays O(chunk_size) on both ends.
 4. **GUI reassembles** to a temp file, updates a progress bar from `seq / chunk_count`, verifies length +
@@ -277,7 +310,10 @@ query → one manifest + the requested chunks.
 
 ### 5.5 Frontend (`Fetch<T>`-adjacent)
 
-A `BlobFetch` state machine mirroring the existing `Fetch<T>`, with explicit pause/cancel (§5.9):
+One `zensight/src/view/artifact_fetch.rs` state machine (which unified the earlier `blob_fetch.rs` +
+`dir_fetch.rs`) mirroring the existing `Fetch<T>`, with explicit pause/cancel (§5.9). Its `download_stream`
+**matches on the `Ready` state's `Delivery`** — `Blob` drives the Tier-1 path below, `Tree` drives the
+Tier-2 path (§5.7):
 
 ```
 Idle → Requesting → Generating(progress?) → Downloading{got,total}
@@ -293,22 +329,25 @@ GUI restart**.
 
 ### 5.6 Effort
 
-- `zensight-common`: types + a `report_key()` helper — **S**.
-- `zensight-sensor-core`: a reusable `report` module (generate→tempfile→manifest→chunked queryable),
-  so every sensor gets it for free — **M**.
-- Per-sensor `kind` content (what goes in the bundle) — **S** each.
-- Frontend `BlobFetch` + progress UI + save dialog — **M** (shares plumbing with #37/#127).
+- `zensight-common`: the wire types + the `artifact_*` key helpers — **S**.
+- `zensight-sensor-core`: the reusable `ArtifactChannel` (request/status/cancel + reaper) and the
+  `ArtifactProducer` trait (generate→tempfile→manifest→chunked queryable), so every sensor gets it for
+  free — **M**.
+- Per-sensor artifact-kind content (what goes in each `ArtifactProducer`) — **S** each.
+- Frontend `artifact_fetch.rs` + progress UI + save dialog — **M** (shares plumbing with #37/#127).
 
 Total ≈ a focused **M**. No new runtime dependency, no daemon, no storage volume.
 
 ### 5.7 Tier 2 — directories + interruptible/resumable sync (content-addressed, casync-style)
 
-> **Status: implemented.** The library (`zenoh-blob`: `TreeServer`/`TreeClient`/`build_tree` +
-> `ContentStore`), the producer (`zensight-sensor-core`'s `SnapshotChannel`, opt-in per sensor via
-> `snapshot.enabled` + a directory allowlist; `sysinfo` is the reference sensor), and the GUI
-> (`zensight/src/view/dir_fetch.rs`, surfaced per-directory in the Sensors view) are all in place.
-> The keyspace below is bound at `@/snapshot/{request,status,cancel}` + `@/store` + `@/tree`
-> (see `docs/KEYSPACE.md` §3.1b). FastCDC content-defined chunking is the default for cross-version dedup.
+> **Status: implemented, as the `Tree` delivery of the unified channel.** The library (`zenoh-blob`:
+> `TreeServer`/`TreeClient`/`build_tree` + `ContentStore`), the producer (the `Snapshot` `ArtifactProducer`
+> on `zensight-sensor-core`'s `ArtifactChannel`, opt-in per sensor via `artifacts.snapshot` + a directory
+> allowlist; `sysinfo` is the reference sensor), and the GUI (the `Tree` branch of
+> `zensight/src/view/artifact_fetch.rs`, surfaced per-directory in the Sensors view) are all in place.
+> A `Snapshot` request rides the shared `@/artifact/{request,status,cancel}` channel; its `Ready` state
+> carries a `Delivery::Tree` pointing at the kind-agnostic `@/store` + `@/tree` queryables (see
+> `docs/KEYSPACE.md` §3.1a). FastCDC content-defined chunking is the default for cross-version dedup.
 
 For the **rsync-like** ask (R9–R11: pull a whole **directory tree**; survive connection loss *and* restart;
 dedup), generalize Tier 1 from "ordered chunks of one blob" to a **content-addressed chunk store + a tree
@@ -423,10 +462,10 @@ stop** — not new protocol:
   from a Downloads list.
   - *Tier 1:* the clean pause is to **drop the in-flight `get`** — *not* merely stop reading, which with
     `CongestionControl::Block` would stall the stream and tie up the sensor. Resume issues a fresh
-    `…/report/<id>?from=K`.
+    `…/artifact/blob/<id>?from=K`.
   - *Tier 2:* just stop the fetch loop; the content store persists; resume recomputes `missing`.
 - **Cancel = stop + *discard*.** Stop fetching, delete the partial, go to `Cancelled`. Optionally PUT
-  `…/@/report/<id>/cancel` so the **sensor frees its temp artifact immediately** instead of waiting for the
+  the artifact id to `…/@/artifact/cancel` so the **sensor frees its temp artifact immediately** instead of waiting for the
   TTL (matters for big reports / scarce disk). Cancel is best-effort on the source; the TTL is the backstop.
 
 **Server cooperation — the one real design point.** The producer must stop **promptly** when the client goes
@@ -465,9 +504,10 @@ any Zenoh app that needs "download this big thing, resumably." That external val
   resume/pause/cancel, progress events, pluggable hash + chunker (fixed → FastCDC), its **own** configurable
   key prefix and its **own** serde. Apache-2.0/MIT, publishable to crates.io. Grows `zenoh-blob` (Tier 1) →
   `zenoh-casync` semantics (Tier 2).
-- **ZenSight adapter** (`zensight-sensor-core::report` + the `BlobFetch` GUI state) — *ZenSight-specific*
-  glue: maps the generic transfer onto the `zensight/<proto>/@/report` keyspace, the operator command/authz
-  channel, what goes *in* a debug bundle, the redb store as the client content-store, and the Iced UI
+- **ZenSight adapter** (`zensight-sensor-core`'s `ArtifactChannel` / `ArtifactProducer`s + the
+  `artifact_fetch.rs` GUI state) — *ZenSight-specific* glue: maps the generic transfer onto the
+  `zensight/<proto>/@/artifact` keyspace, the operator command/authz
+  channel, what goes *in* each artifact kind, the redb store as the client content-store, and the Iced UI
   (progress bar, pause/resume/cancel, Downloads list). **No protocol logic here** — just wiring.
 
 This boundary is the win: the generic crate is reusable and open-sourceable; the ZenSight-flavoured
@@ -514,12 +554,13 @@ directory-sync DFS; sendit → a standalone drag-and-drop app) — neither is th
 
 ## 8. Decision
 
-> **Build Option C, in two tiers.**
-> - **Now — Tier 1** (§5.1–5.6): a purpose-built `@/report` chunked blob transfer in `zensight-sensor-core`
->   + a `BlobFetch` client; stable queryable multi-reply + `CongestionControl::Block`, **256 KB–1 MB chunks**,
+> **Build Option C, in two tiers — shipped unified (release 0.7.0) as one `@/artifact` channel whose
+> `Delivery` variant (`Blob` / `Tree`) selects the tier.**
+> - **Tier 1 — `Blob` delivery** (§5.1–5.6): a purpose-built chunked blob transfer in `zensight-sensor-core`
+>   + the `artifact_fetch.rs` client; stable queryable multi-reply + `CongestionControl::Block`, **256 KB–1 MB chunks**,
 >   **metadata-in-key** (from sendit) + a **SHA-256 manifest** (which sendit lacks). Ships the debug-report
->   download.
-> - **When directory/dataset pull is actually needed — Tier 2** (§5.7): the **content-addressed chunk store
+>   download (the `Report` `ArtifactProducer`).
+> - **Tier 2 — `Tree` delivery** (§5.7): the **content-addressed chunk store
 >   + tree index** (casync model over Zenoh) for whole directories, true reconnect-*and*-restart resume, and
 >   dedup; back it with a router **storage backend** (Option E) for fleet-wide caching. **Don't** implement
 >   rsync's rolling-checksum delta — content-defined chunking (FastCDC) subsumes it.
@@ -537,8 +578,8 @@ directory-sync DFS; sendit → a standalone drag-and-drop app) — neither is th
 > **Do not depend on or fork zenoh-fs or sendit** — read them (and casync/desync/zsync) for ideas, attribute
 > the Apache-2.0 designs.
 
-If you agree, I can file this as an issue under the redesign epic (#94, Wave-1/2) and sketch the
-`zensight-common` types + the `zensight-sensor-core::report` module + the `BlobFetch` state machine.
+This shipped as the unified `@/artifact` channel: the `zensight-common` `Artifact*` wire types + the
+`zensight-sensor-core` `ArtifactChannel`/`ArtifactProducer` + the `artifact_fetch.rs` state machine.
 
 ---
 

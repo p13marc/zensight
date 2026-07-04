@@ -9,28 +9,27 @@ use std::collections::{HashMap, VecDeque};
 use iced::widget::{column, container, row, scrollable, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
-use zensight_common::{ErrorReport, HealthSnapshot, HealthStatus};
+use zensight_common::{ErrorReport, HealthSnapshot, HealthStatus, KindStatus};
 
 use crate::message::Message;
-use crate::view::blob_fetch::{BlobFetch, download_section};
+use crate::view::artifact_fetch::{ArtifactFetch, artifact_section};
 use crate::view::components::{card, empty_state, section_header};
-use crate::view::dir_fetch::{DirFetch, dir_section};
 use crate::view::formatting::format_timestamp;
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
-/// Render the sensors view. `blob_fetch`/`active_prefix` drive the per-sensor
-/// debug-report download control (#197); `dir_fetch`/`snapshot_dirs`/`dir_prefix`
-/// drive the Tier-2 directory-snapshot download control (#199 follow-up).
+/// Render the sensors view. `artifact_fetch`/`active_prefix`/`active_kind` drive
+/// the per-sensor artifact download control (report / snapshot / capture) over the
+/// unified `@/artifact` channel; `artifact_kinds` are the per-sensor advertised
+/// kinds that decide which affordances each card renders.
 #[allow(clippy::too_many_arguments)]
 pub fn sensors_view<'a>(
     sensor_health: &'a HashMap<String, HealthSnapshot>,
     recent_errors: &'a HashMap<String, VecDeque<ErrorReport>>,
-    blob_fetch: &'a BlobFetch,
+    artifact_fetch: &'a ArtifactFetch,
     active_prefix: Option<&'a str>,
-    dir_fetch: &'a DirFetch,
-    snapshot_dirs: &'a HashMap<String, Vec<String>>,
-    dir_prefix: Option<&'a str>,
+    active_kind: Option<&'a str>,
+    artifact_kinds: &'a HashMap<String, Vec<KindStatus>>,
 ) -> Element<'a, Message> {
     let title = text("Sensors").size(font::TITLE);
 
@@ -51,11 +50,10 @@ pub fn sensors_view<'a>(
         list = list.push(card(sensor_card(
             snap,
             errors,
-            blob_fetch,
+            artifact_fetch,
             active_prefix,
-            dir_fetch,
-            snapshot_dirs,
-            dir_prefix,
+            active_kind,
+            artifact_kinds,
         )));
     }
 
@@ -69,11 +67,10 @@ pub fn sensors_view<'a>(
 fn sensor_card<'a>(
     snap: &'a HealthSnapshot,
     errors: Option<&'a VecDeque<ErrorReport>>,
-    blob_fetch: &'a BlobFetch,
+    artifact_fetch: &'a ArtifactFetch,
     active_prefix: Option<&'a str>,
-    dir_fetch: &'a DirFetch,
-    snapshot_dirs: &'a HashMap<String, Vec<String>>,
-    dir_prefix: Option<&'a str>,
+    active_kind: Option<&'a str>,
+    artifact_kinds: &'a HashMap<String, Vec<KindStatus>>,
 ) -> Element<'a, Message> {
     let header = section_header(snap.sensor.clone(), Some(health_badge(snap.status)));
 
@@ -91,15 +88,19 @@ fn sensor_card<'a>(
 
     let mut col = column![header, stats].spacing(space::SM);
 
-    // Debug-report download control (#197). The key prefix is `zensight/<sensor>`.
+    // Unified artifact download controls (report / snapshot / capture) driven by
+    // the sensor's advertised kinds. The key prefix is `zensight/<sensor>`.
     let key_prefix = format!("zensight/{}", snap.sensor);
-    col = col.push(download_section(blob_fetch, &key_prefix, active_prefix));
-
-    // Tier-2 directory-snapshot download control (#199 follow-up), if this sensor
-    // advertises any directories.
-    if let Some(dirs) = snapshot_dirs.get(&key_prefix) {
-        col = col.push(dir_section(dir_fetch, &key_prefix, dirs, dir_prefix));
-    }
+    col = col.push(artifact_section(
+        artifact_fetch,
+        &key_prefix,
+        artifact_kinds
+            .get(&key_prefix)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]),
+        active_prefix,
+        active_kind,
+    ));
 
     // Recent errors (newest first), if any have arrived for this sensor.
     if let Some(errors) = errors.filter(|e| !e.is_empty()) {

@@ -26,7 +26,9 @@ use filter::FilterManager;
 use std::sync::Arc;
 use zensight_common::serialization::{Format, encode};
 use zensight_common::telemetry::Protocol;
-use zensight_sensor_core::{AlertReporter, SensorArgs, SensorRunner, serve_alerts_query};
+use zensight_sensor_core::{
+    AlertReporter, SensorArgs, SensorConfig, SensorRunner, serve_alerts_query,
+};
 
 /// Process-wide monotonic sequence that disambiguates per-line log event uids
 /// (#104) when multiple lines share a millisecond timestamp.
@@ -48,7 +50,7 @@ async fn main() -> Result<()> {
     // Enable status publishing
     let runner = runner.with_status_publishing();
 
-    // On-demand debug-report (`@/report`): bundle redacted config + health +
+    // On-demand debug-report (`@/artifact`): bundle redacted config + health +
     // counters. No-op unless `report.enabled` is set in the config.
     let report_host = hostname::get()
         .ok()
@@ -60,8 +62,20 @@ async fn main() -> Result<()> {
         runner.config().clone(),
         runner.health(),
     ));
-    // Tier-2 directory snapshots (`@/snapshot`). No-op unless `snapshot.enabled`.
-    let runner = runner.with_report(report_source).with_snapshot(report_host);
+    // Tier-2 directory snapshots (`@/artifact`). No-op unless `snapshot.enabled`.
+    let artifacts = runner.config().artifact_limits();
+    let runner = runner.with_artifacts(
+        report_host,
+        vec![
+            std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
+                report_source,
+                &artifacts.report,
+            )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
+            std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
+                &artifacts.snapshot,
+            )),
+        ],
+    );
 
     // Get session and config for the receiver
     let session = runner.session().clone();

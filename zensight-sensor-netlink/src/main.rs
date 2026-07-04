@@ -24,18 +24,28 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{}", e))?;
     let runner = runner.with_status_publishing().with_format(Format::Json);
 
-    // On-demand debug-report (`@/report`): bundle redacted config + health +
-    // counters. No-op unless `report.enabled` is set in the config.
+    // On-demand artifact channel (`@/artifact`): bundle redacted config + health +
+    // counters (report) plus tier-2 directory snapshots. Each kind is a no-op
+    // unless enabled in the config's `artifacts` limits.
     let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
         "netlink",
         hostname.clone(),
         runner.config().clone(),
         runner.health(),
     ));
-    // Tier-2 directory snapshots (`@/snapshot`). No-op unless `snapshot.enabled`.
-    let runner = runner
-        .with_report(report_source)
-        .with_snapshot(hostname.clone());
+    let artifacts = runner.config().artifact_limits();
+    let runner = runner.with_artifacts(
+        hostname.clone(),
+        vec![
+            std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
+                report_source,
+                &artifacts.report,
+            )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
+            std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
+                &artifacts.snapshot,
+            )),
+        ],
+    );
 
     let netlink_config = runner.config().netlink.clone();
     let session = runner.session().clone();
