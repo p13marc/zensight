@@ -136,7 +136,7 @@ opts in per **artifact kind**; every kind is disabled by default.
 |------|---------|-------|
 | `Report {}` | — | redacted `tar.zst` debug bundle (config + health + counters) |
 | `Snapshot { dir }` | `dir` = an **allowlisted logical name** | `dir` is the authz boundary — never a raw path |
-| `Capture { duration_secs, max_bytes, filter, snaplen, compress }` | — | **planned / reserved** for the netring pcap-capture feature (issue #333) |
+| `Capture { duration_secs, max_bytes, filter, snaplen, compress }` | — | on-demand pcap capture off netring's live packet tap (issue #333); netring only, gated on `capture.on_demand.enabled` |
 | *(unknown)* | — | forward-compat `Unsupported` — a sensor replies `Failed` for kinds it doesn't implement |
 
 The sensor generates the artifact off-thread and exposes progress via the

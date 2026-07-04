@@ -55,11 +55,11 @@ async fn main() -> Result<()> {
     let (mon, mut channels, keepalive, detector_handle, capture_tap_index) =
         monitor::build(&cfg, capture_tap.clone()).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    // Producers for the unified `@/artifact` channel. Report (`@/report` →
-    // Tier-1 bundle) and snapshot (Tier-2 dir tree — a natural use is a dir
-    // pointed at netring's pcap output) are always registered (no-op unless
-    // enabled). The on-demand capture producer (#333) is registered only when
-    // `capture.on_demand.enabled` armed the tap.
+    // Producers for the unified `@/artifact` channel: a Tier-1 report bundle and
+    // a Tier-2 dir snapshot (a natural use is a dir pointed at netring's pcap
+    // output) are always registered (no-op unless enabled). The on-demand capture
+    // producer (#333) is registered only when `capture.on_demand.enabled` armed
+    // the tap.
     let mut producers: Vec<std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>> = vec![
         std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
             report_source,

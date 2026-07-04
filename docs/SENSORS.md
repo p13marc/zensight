@@ -18,9 +18,10 @@ configure it, and the exact Zenoh keys it publishes/serves.
 - Large-data artifacts: every sensor can serve on-demand large-data artifacts
   over the unified `@/artifact/*` channel — a redacted `tar.zst` **report** bundle
   (config + health + counters, Tier-1 blob delivery) and a directory **snapshot**
-  (Tier-2 content-addressed tree; on-demand pcap **capture** is planned/reserved,
-  issue #333). **Opt-in per kind** via the `artifacts.{report,snapshot}` config
-  section (every kind disabled by default). See KEYSPACE.md §3.1a.
+  (Tier-2 content-addressed tree). The **netring** sensor additionally serves an
+  on-demand pcap **capture** (issue #333) off a live packet tap. **Opt-in per
+  kind** via the `artifacts.{report,snapshot}` config section (plus netring's
+  `capture.on_demand`); every kind is disabled by default. See KEYSPACE.md §3.1a.
 - Config: a JSON5 file under [`configs/`](../configs/); pass with `--config`.
   Every config has a `zenoh` block (`mode`, `connect`, `listen`) and a
   `logging` block. The `ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN}` env vars override

@@ -220,8 +220,8 @@ a **command** to generate an artifact and a **queryable** to stream it.
 > are unchanged — they are now the two **`Delivery` variants** (`Blob` / `Tree`) of one channel, **chosen by
 > the producer's output**, not two channels/modules. Read the rest of this section with that mapping in mind:
 > a single `ArtifactChannel` in `zensight-sensor-core` owns request/status/cancel + reaper (per-kind busy +
-> cooldown, lazy `BlobServer`/`TreeServer`); each artifact **kind** (`Report`, `Snapshot`, and the
-> planned/reserved `Capture`) is an `ArtifactProducer`; the GUI has one `zensight/src/view/artifact_fetch.rs`
+> cooldown, lazy `BlobServer`/`TreeServer`); each artifact **kind** (`Report`, `Snapshot`, and netring's
+> `Capture`) is an `ArtifactProducer`; the GUI has one `zensight/src/view/artifact_fetch.rs`
 > (was `blob_fetch.rs` + `dir_fetch.rs`) whose `download_stream` matches on `Delivery`. See
 > `docs/KEYSPACE.md` §3.1a for the authoritative keyspace and wire types.
 
