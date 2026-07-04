@@ -33,25 +33,10 @@ async fn main() -> Result<()> {
         runner.config().clone(),
         runner.health(),
     ));
-    // Tier-2 directory snapshots (`@/artifact`). No-op unless `snapshot.enabled`.
-    // A natural use is pointing a snapshot dir at netring's pcap output directory.
     let artifacts = runner.config().artifact_limits();
-    let runner = runner.with_identity(source.clone()).with_artifacts(
-        source.clone(),
-        vec![
-            std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
-                report_source,
-                &artifacts.report,
-            )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
-            std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
-                &artifacts.snapshot,
-            )),
-        ],
-    );
 
     let mut cfg = runner.config().netring.clone();
     cfg.source = source.clone();
-    let session = runner.session().clone();
     let key_prefix = cfg.key_prefix.clone();
 
     tracing::info!(
@@ -61,16 +46,52 @@ async fn main() -> Result<()> {
         cfg.pcap.clone().unwrap_or_else(|| cfg.interfaces.join(","))
     );
 
+    // Build the netring monitor FIRST (#333): the on-demand capture producer
+    // needs the monitor's `ReloadHandle` + the tap subscription's registration
+    // index, both known only after build, so `with_artifacts` runs after this.
+    // Returns the drain channels, the telemetry-channel keepalive, the runtime
+    // detection-tuning handle (#121), and the capture-tap index (if armed).
+    let capture_tap = zensight_sensor_netring::capture::CaptureTap::default();
+    let (mon, mut channels, keepalive, detector_handle, capture_tap_index) =
+        monitor::build(&cfg, capture_tap.clone()).map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    // Producers for the unified `@/artifact` channel. Report (`@/report` →
+    // Tier-1 bundle) and snapshot (Tier-2 dir tree — a natural use is a dir
+    // pointed at netring's pcap output) are always registered (no-op unless
+    // enabled). The on-demand capture producer (#333) is registered only when
+    // `capture.on_demand.enabled` armed the tap.
+    let mut producers: Vec<std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>> = vec![
+        std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
+            report_source,
+            &artifacts.report,
+        )),
+        std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
+            &artifacts.snapshot,
+        )),
+    ];
+    if let Some(tap_index) = capture_tap_index {
+        producers.push(std::sync::Arc::new(
+            zensight_sensor_netring::capture::CaptureProducer::new(
+                &cfg.capture.on_demand,
+                capture_tap.clone(),
+                mon.reload_handle(),
+                tap_index,
+                source.clone(),
+            ),
+        ));
+    }
+
+    let runner = runner
+        .with_identity(source.clone())
+        .with_artifacts(source.clone(), producers);
+
+    let session = runner.session().clone();
+
     let reporter = AlertReporter::new(runner.publisher(), Protocol::Netring, Format::Json);
     let reporter = Arc::new(match runner.identity() {
         Some(id) => reporter.with_identity(id),
         None => reporter,
     });
-
-    // Build the netring monitor + drain channels (+ telemetry-channel keepalive
-    // + the runtime detection-tuning handle, #121).
-    let (mon, mut channels, keepalive, detector_handle) =
-        monitor::build(&cfg).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let is_pcap = cfg.pcap.is_some();
     let flow_period = cfg.bandwidth_period_secs;

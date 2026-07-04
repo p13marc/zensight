@@ -250,7 +250,7 @@ struct ArtifactRequest { id: Ulid, #[serde(flatten)] kind: ArtifactKind, opts: A
 enum ArtifactKind {  // serde-tagged "kind"
     Report {},
     Snapshot { dir: String },   // an ALLOWLISTED logical name (the authz boundary), never a raw path
-    Capture { duration_secs, max_bytes, filter, snaplen, compress },   // planned/reserved (#333)
+    Capture { duration_secs, max_bytes, filter, snaplen, compress },   // netring on-demand pcap (#333)
     Unsupported,                // #[serde(other)] — a sensor replies Failed for kinds it can't do
 }
 struct Manifest {   // Tier-1 Blob delivery

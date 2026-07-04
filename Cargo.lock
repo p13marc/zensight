@@ -10122,12 +10122,14 @@ version = "0.6.2"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "async-trait",
  "base64",
  "clap",
  "flowscope",
  "hostname",
  "json5",
  "netring",
+ "pcap-file",
  "serde",
  "serde_json",
  "sha1",
@@ -10135,8 +10137,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zenoh",
+ "zenoh-blob",
  "zensight-common",
  "zensight-sensor-core",
+ "zstd",
 ]
 
 [[package]]

@@ -595,16 +595,26 @@ fn dns_client_ip(key: FiveTupleKey) -> Option<std::net::IpAddr> {
 }
 
 /// What [`build`] returns: the monitor, its emit channels, the telemetry-channel
-/// keepalive, and the runtime detection-tuning handle (#121).
+/// keepalive, the runtime detection-tuning handle (#121), and the registration
+/// index of the on-demand capture tap subscription (#333), if armed.
 pub type BuiltMonitor = (
     netring::monitor::Monitor,
     MonitorChannels,
     mpsc::UnboundedSender<TelemetryPoint>,
     DetectorHandle,
+    Option<usize>,
 );
 
 /// Build a netring `Monitor` from config plus the channels it emits on.
-pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Error>> {
+///
+/// `capture_tap` is the shared slot the on-demand capture producer (#333) arms;
+/// when `cfg.capture.on_demand.enabled` a dedicated reloadable packet-tier
+/// subscription is registered whose handler forwards frames into it. When not
+/// enabled the tap is never wired and stays a zero-cost idle handle.
+pub fn build(
+    cfg: &NetringConfig,
+    capture_tap: crate::capture::CaptureTap,
+) -> Result<BuiltMonitor, Box<dyn std::error::Error>> {
     // Live, hot-swappable anomaly config (#121). Detectors read `det_cfg`; the
     // command channel mutates it through the returned handle.
     let detector_handle = DetectorHandle::new(cfg.anomalies.clone());
@@ -898,6 +908,40 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
             ),
         }
     }
+
+    // On-demand capture tap (#333): a dedicated reloadable packet-tier
+    // subscription that forwards frames into `capture_tap` while a capture is in
+    // flight (idle cost is one ArcSwap load per matching frame). Registered
+    // AFTER capture-focus so its index is stable: capture-focus (when enabled)
+    // owns index 0 — `command.rs::apply_filter` hard-codes that — so the tap
+    // takes `usize::from(capture_focus.enabled)`. The permissive base means any
+    // per-request filter only *narrows* the build-time kernel prefilter union.
+    let capture_tap_index = if cfg.capture.on_demand.enabled {
+        use netring::monitor::subscription::builder::packet;
+        match packet().expr(crate::capture::CAPTURE_TAP_BASE_EXPR) {
+            Ok(sub) => {
+                let tap = capture_tap.clone();
+                let sub = sub.to(move |pkt: &flowscope::PacketView<'_>, _ctx: &mut Ctx<'_>| {
+                    tap.offer(pkt);
+                    Ok(())
+                });
+                b = b.subscribe(sub);
+                let idx = usize::from(cfg.capture_focus.enabled);
+                tracing::info!(
+                    index = idx,
+                    base_expr = crate::capture::CAPTURE_TAP_BASE_EXPR,
+                    "netring: on-demand capture tap armed (reloadable packet filter)"
+                );
+                Some(idx)
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "netring: on-demand capture tap base_expr failed to parse; capture disabled");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // TCP resets (connection refused vs mid-transfer abort).
     if cfg.collect.tcp_resets {
@@ -1929,6 +1973,15 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
     b = b.sink(ChannelSink::new(anom_tx));
 
     let monitor = b.build()?;
+    // Pin the capture-tap index against the actual registration order (#333):
+    // capture-focus (index 0, hard-coded in command.rs) then the tap. A drift
+    // here would swap the wrong subscription's filter at capture time.
+    debug_assert!(
+        capture_tap_index
+            .is_none_or(|idx| monitor.reload_handle().packet_filter_count() == idx + 1),
+        "capture tap index {capture_tap_index:?} inconsistent with packet_filter_count {}",
+        monitor.reload_handle().packet_filter_count()
+    );
     let keepalive = tel_tx.clone();
     Ok((
         monitor,
@@ -1966,6 +2019,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
         },
         keepalive,
         detector_handle,
+        capture_tap_index,
     ))
 }
 
