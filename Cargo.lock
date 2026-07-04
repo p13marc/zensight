@@ -9863,6 +9863,7 @@ dependencies = [
  "zenoh-blob",
  "zenoh-ext",
  "zensight-common",
+ "zstd",
 ]
 
 [[package]]

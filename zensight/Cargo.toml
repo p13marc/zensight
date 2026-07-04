@@ -20,6 +20,8 @@ zenoh-ext.workspace = true
 # Large-data (debug-report) download client (#197).
 zenoh-blob.workspace = true
 ulid.workspace = true
+# Decompress a saved `.pcap.zst` capture back to `.pcap` on save (#333).
+zstd.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
