@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Bandwidth-by-service from systemd IPAccounting (#315, epic #320)**: the systemd
+  sensor derives per-unit network rate `unit/<name>/{ip_ingress_bps,ip_egress_bps}`
+  from successive `IPIngressBytes`/`IPEgressBytes` deltas (the cheapest bandwidth-by-*
+  tier). Metrics are labelled `bw.source=systemd`/`bw.semantics=wire-l3` (cgroup_skb:
+  L3+ bytes, no L2) so they're never blended with app-goodput or wire-L2 sources; a
+  unit restart re-baselines the counter; an active unit with IPAccounting off emits an
+  explicit `ip_accounting=false` state rather than a silent zero. New shared vocabulary
+  in `zensight-common::bandwidth` (`BandwidthSource`/`ByteSemantics`/`ProtoScope`,
+  `BandwidthRecord`, and the `bw.*` label keys) underpins all bandwidth tiers.
+
 - **Host-identity envelope (#301)**: every sensor now publishes a registration
   record on `zensight/_meta/sensors/<name>/<source>` and a self-report
   `HostEvidence` claim on `zensight/_meta/evidence/host/<sensor>/<source>`

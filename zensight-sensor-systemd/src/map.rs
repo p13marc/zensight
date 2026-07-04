@@ -106,6 +106,64 @@ pub fn unit_points(source: &str, s: &UnitSample) -> Vec<TelemetryPoint> {
     pts
 }
 
+/// Bytes-per-second between two cumulative counter reads (#315). Returns `None`
+/// when the interval is non-positive or the counter went **backwards** — a unit
+/// restart resets its IPAccounting counters, so a backwards step is a re-baseline,
+/// not a negative rate. Callers skip that tick and re-seed the baseline.
+pub fn counter_bps(cur: u64, prev: u64, elapsed_secs: f64) -> Option<f64> {
+    if elapsed_secs <= 0.0 || cur < prev {
+        return None;
+    }
+    Some((cur - prev) as f64 / elapsed_secs)
+}
+
+/// Per-unit IP bandwidth-rate points (#315): `unit/<name>/{ip_ingress_bps,
+/// ip_egress_bps}` as **wire-L3** gauges (cgroup_skb: L3+ bytes incl. retransmits,
+/// no L2 framing), labelled `bw.source=systemd`/`bw.semantics=wire-l3` so the GUI
+/// never blends them with app-goodput (sock_diag/eBPF) or wire-L2 (capture)
+/// sources. When `accounting_off` (an *active* unit with IPAccounting disabled),
+/// emit `unit/<name>/ip_accounting=false` instead of a silent zero so the GUI can
+/// show the "off" state distinctly.
+pub fn ip_rate_points(
+    source: &str,
+    unit: &str,
+    ingress_bps: Option<f64>,
+    egress_bps: Option<f64>,
+    accounting_off: bool,
+) -> Vec<TelemetryPoint> {
+    use zensight_common::bandwidth::{
+        BandwidthSource, ByteSemantics, LABEL_SEMANTICS, LABEL_SOURCE,
+    };
+    let slug = sanitize_unit(unit);
+    let base = format!("unit/{slug}");
+    let gauge = |metric: String, v: f64| {
+        TelemetryPoint::new(source, Protocol::Systemd, metric, TelemetryValue::Gauge(v))
+            .with_label("unit", unit.to_string())
+            .with_label(LABEL_SOURCE, BandwidthSource::Systemd.as_str())
+            .with_label(LABEL_SEMANTICS, ByteSemantics::WireL3.as_str())
+            .with_label("accounting", "cgroup_skb")
+    };
+    let mut pts = Vec::new();
+    if let Some(bps) = ingress_bps {
+        pts.push(gauge(format!("{base}/ip_ingress_bps"), bps));
+    }
+    if let Some(bps) = egress_bps {
+        pts.push(gauge(format!("{base}/ip_egress_bps"), bps));
+    }
+    if accounting_off {
+        pts.push(
+            TelemetryPoint::new(
+                source,
+                Protocol::Systemd,
+                format!("{base}/ip_accounting"),
+                TelemetryValue::Boolean(false),
+            )
+            .with_label("unit", unit.to_string()),
+        );
+    }
+    pts
+}
+
 /// Per-socket-unit counters (#279): `unit/<socket>/{n_accepted,n_connections,
 /// n_refused}`. Emitted for watched `.socket` units.
 pub fn socket_points(
@@ -370,5 +428,44 @@ mod tests {
         let one = journal_points("h", 1024, None);
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].metric, "journal/disk_usage_bytes");
+    }
+
+    #[test]
+    fn counter_bps_computes_and_guards_reset() {
+        // 10_000 bytes over 2 s = 5000 B/s.
+        assert_eq!(counter_bps(20_000, 10_000, 2.0), Some(5000.0));
+        // Counter went backwards (unit restart) → no rate, re-baseline.
+        assert_eq!(counter_bps(500, 10_000, 2.0), None);
+        // Non-positive interval → no rate.
+        assert_eq!(counter_bps(20_000, 10_000, 0.0), None);
+    }
+
+    #[test]
+    fn ip_rate_points_are_labelled_wire_l3() {
+        let pts = ip_rate_points("h", "nginx.service", Some(1000.0), Some(250.0), false);
+        let by: std::collections::HashMap<_, _> =
+            pts.iter().map(|p| (p.metric.as_str(), p)).collect();
+        let ing = by["unit/nginx.service/ip_ingress_bps"];
+        assert_eq!(ing.value, TelemetryValue::Gauge(1000.0));
+        assert_eq!(
+            ing.labels.get("bw.source").map(String::as_str),
+            Some("systemd")
+        );
+        assert_eq!(
+            ing.labels.get("bw.semantics").map(String::as_str),
+            Some("wire-l3")
+        );
+        assert!(by.contains_key("unit/nginx.service/ip_egress_bps"));
+        // No accounting-off marker when accounting is on.
+        assert!(!by.contains_key("unit/nginx.service/ip_accounting"));
+    }
+
+    #[test]
+    fn ip_rate_points_surface_accounting_off_not_zero() {
+        // No bps (unknown), accounting off → emit the boolean marker, not a 0 bps.
+        let pts = ip_rate_points("h", "sshd.service", None, None, true);
+        assert_eq!(pts.len(), 1);
+        assert_eq!(pts[0].metric, "unit/sshd.service/ip_accounting");
+        assert_eq!(pts[0].value, TelemetryValue::Boolean(false));
     }
 }

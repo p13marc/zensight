@@ -11,6 +11,7 @@
 
 pub mod alert;
 pub mod artifact;
+pub mod bandwidth;
 pub mod command;
 pub mod comparison;
 pub mod config;
@@ -30,6 +31,10 @@ pub use alert::{Alert, AlertKind, AlertSeverity, AlertState};
 pub use artifact::{
     ArtifactKind, ArtifactOptions, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, Entry,
     KindAdvert, KindStatus, Manifest, TreeIndex, TreeSummary,
+};
+pub use bandwidth::{
+    BandwidthKey, BandwidthRecord, BandwidthSource, ByteSemantics, LABEL_SEMANTICS, LABEL_SOURCE,
+    ProtoScope, bandwidth_query_key,
 };
 pub use command::{
     Command, artifact_blob_prefix, artifact_cancel_key, artifact_request_key, artifact_status_key,
