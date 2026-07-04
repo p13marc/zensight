@@ -38,19 +38,30 @@ const AF_INET6: u8 = 10;
 
 /// Run the on-demand detail query channel until the session closes.
 ///
+/// The optional eBPF state handle threaded into the sockets queryable (#304,
+/// tier 2a): the recent-close map attributes closing-state sockets whose fd is
+/// gone. On non-`ebpf` builds this is an always-`None` placeholder so `run`'s
+/// signature (and `main`'s single call site) stay identical in both builds.
+#[cfg(feature = "ebpf")]
+pub type QueryEbpf = Option<crate::ebpf::EbpfState>;
+#[cfg(not(feature = "ebpf"))]
+pub type QueryEbpf = Option<std::convert::Infallible>;
+
 /// `key_prefix` is the sensor's telemetry prefix (e.g. `zensight/netlink`); the
 /// queryables live under `<key_prefix>/@/query/<topic>`. `events` is the shared
 /// real-time event ring (#8), served on `@/query/events`; `route_history` is the
 /// default-route flap ring (#111), served on `@/query/route_changes`. `collect`
 /// is the live collector-toggle handle (shared with the poll loop and the
 /// runtime `collection` command channel) so the socket→process attribution
-/// (#304) honors the same hot-swappable `socket_processes` toggle.
+/// (#304) honors the same hot-swappable `socket_processes` toggle. `ebpf` is
+/// the tier-2a recent-close attribution handle (see [`QueryEbpf`]).
 pub async fn run(
     session: Arc<zenoh::Session>,
     key_prefix: String,
     events: EventState,
     route_history: RouteHistory,
     collect: CollectHandle,
+    ebpf: QueryEbpf,
 ) {
     let route = match Connection::<Route>::new() {
         Ok(c) => c,
@@ -160,10 +171,13 @@ pub async fn run(
                 // Snapshot the live toggles at query time (#304) — a runtime
                 // `socket_processes` toggle takes effect on the next query.
                 let toggles = collect.snapshot().await;
-                let records = match &sockdiag {
+                let mut records = match &sockdiag {
                     Some(sd) => collect_sockets(sd, &sel, &toggles).await,
                     None => Vec::new(),
                 };
+                // Tier 2a (#304): closing-state sockets can never be
+                // /proc-attributed (fd gone) — consult the eBPF close map.
+                annotate_closing_sockets(&mut records, &ebpf);
                 reply_json(&query, &records).await;
             }
             q = addresses_q.recv_async() => {
@@ -658,6 +672,59 @@ async fn collect_sockets(
         .collect()
 }
 
+/// Annotate closing-state sockets the `/proc` scan left unattributed with the
+/// owner recorded by the eBPF tcplife close map (#304, tier 2a). A socket in
+/// TIME_WAIT / CLOSE_WAIT / FIN_WAIT* / LAST_ACK / CLOSING has no open fd, so
+/// tier 1 can never attribute it — but the kernel saw who closed it.
+#[cfg(feature = "ebpf")]
+fn annotate_closing_sockets(records: &mut [SocketRecord], ebpf: &QueryEbpf) {
+    let Some(eb) = ebpf else { return };
+    for rec in records.iter_mut() {
+        if rec.pid.is_some() || !is_closing_state_label(&rec.state) {
+            continue;
+        }
+        let Some((lip, lport)) = split_endpoint(&rec.local) else {
+            continue;
+        };
+        let Some((rip, rport)) = split_endpoint(&rec.remote) else {
+            continue;
+        };
+        if let Some((pid, comm)) = eb.recent_close_owner(lip, lport, rip, rport) {
+            rec.pid = Some(pid as i32);
+            rec.process = Some(comm);
+            // No proc_start_time: the close record carries none, and the
+            // process may already be gone. pid alone marks "attributed via
+            // close event" — consumers needing strong identity skip it.
+        }
+    }
+}
+
+/// No-op twin on non-`ebpf` builds (keeps `run`'s arm unconditional).
+#[cfg(not(feature = "ebpf"))]
+fn annotate_closing_sockets(_records: &mut [SocketRecord], _ebpf: &QueryEbpf) {}
+
+/// TCP states whose socket has no open fd anymore (the close path already
+/// ran) — exactly the set the /proc fd scan can never attribute (#304).
+#[cfg_attr(not(feature = "ebpf"), allow(dead_code))]
+fn is_closing_state_label(state: &str) -> bool {
+    matches!(
+        state,
+        "time_wait" | "close_wait" | "fin_wait1" | "fin_wait2" | "last_ack" | "closing"
+    )
+}
+
+/// Split an `addr:port` endpoint as rendered by `SocketAddr`'s `Display`
+/// (`1.2.3.4:80`, `[::1]:443`) into the bare address and port — the close
+/// map's key shape (its addresses come from `Ipv4Addr`/`Ipv6Addr` `Display`,
+/// bracket-free).
+#[cfg_attr(not(feature = "ebpf"), allow(dead_code))]
+fn split_endpoint(ep: &str) -> Option<(&str, u16)> {
+    let (host, port) = ep.rsplit_once(':')?;
+    let host = host.strip_prefix('[').unwrap_or(host);
+    let host = host.strip_suffix(']').unwrap_or(host);
+    Some((host, port.parse().ok()?))
+}
+
 /// Inverse of [`socket_state_str`]: map a canonical lowercase state label back
 /// to an nlink [`TcpState`] for kernel-side sockdiag filtering. Unknown labels
 /// return `None`, so the caller dumps all states and relies on the user-space
@@ -669,12 +736,18 @@ fn tcp_state_from_label(s: &str) -> Option<TcpState> {
         "time_wait" => TcpState::TimeWait,
         "syn_sent" => TcpState::SynSent,
         "close_wait" => TcpState::CloseWait,
+        "fin_wait1" => TcpState::FinWait1,
+        "fin_wait2" => TcpState::FinWait2,
+        "last_ack" => TcpState::LastAck,
+        "closing" => TcpState::Closing,
         _ => return None,
     })
 }
 
 /// Canonical lowercase state string, matching the streamed `sockets/tcp/<state>`
-/// aggregate names so GUI filters line up with the summary metrics.
+/// aggregate names so GUI filters line up with the summary metrics. The closing
+/// states get canonical labels too (previously the raw `Debug` fallback) so the
+/// tier-2a closing-state predicate (#304) and GUI state chips read cleanly.
 fn socket_state_str(state: &SocketState) -> String {
     match state {
         SocketState::Tcp(TcpState::Established) | SocketState::Established => "established",
@@ -682,6 +755,10 @@ fn socket_state_str(state: &SocketState) -> String {
         SocketState::Tcp(TcpState::TimeWait) => "time_wait",
         SocketState::Tcp(TcpState::SynSent) => "syn_sent",
         SocketState::Tcp(TcpState::CloseWait) => "close_wait",
+        SocketState::Tcp(TcpState::FinWait1) => "fin_wait1",
+        SocketState::Tcp(TcpState::FinWait2) => "fin_wait2",
+        SocketState::Tcp(TcpState::LastAck) => "last_ack",
+        SocketState::Tcp(TcpState::Closing) => "closing",
         other => return format!("{other:?}").to_lowercase(),
     }
     .to_string()
@@ -853,5 +930,34 @@ mod tests {
     async fn scan_owner_maps_honors_ceiling() {
         // A ceiling of 0 is always exceeded on a live host → skipped scan.
         assert!(scan_owner_maps(0).await.is_none());
+    }
+
+    #[test]
+    fn split_endpoint_handles_v4_and_bracketed_v6() {
+        assert_eq!(split_endpoint("10.0.0.1:80"), Some(("10.0.0.1", 80)));
+        assert_eq!(split_endpoint("[::1]:443"), Some(("::1", 443)));
+        assert_eq!(
+            split_endpoint("[fe80::1%eth0]:22"),
+            Some(("fe80::1%eth0", 22))
+        );
+        assert_eq!(split_endpoint("noport"), None);
+        assert_eq!(split_endpoint("host:notnum"), None);
+    }
+
+    #[test]
+    fn closing_state_labels_match_fd_gone_set() {
+        for s in [
+            "time_wait",
+            "close_wait",
+            "fin_wait1",
+            "fin_wait2",
+            "last_ack",
+            "closing",
+        ] {
+            assert!(is_closing_state_label(s), "{s} should be closing");
+        }
+        for s in ["established", "listen", "syn_sent", "close"] {
+            assert!(!is_closing_state_label(s), "{s} should not be closing");
+        }
     }
 }

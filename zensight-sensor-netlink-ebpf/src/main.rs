@@ -32,7 +32,7 @@ mod prog {
         helpers::{bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_ktime_get_ns},
         macros::{kprobe, kretprobe, map, tracepoint},
         maps::{HashMap, LruHashMap, PerCpuArray, RingBuf},
-        programs::{ProbeContext, TracePointContext},
+        programs::{ProbeContext, RetProbeContext, TracePointContext},
     };
     use zensight_sensor_netlink_ebpf_common::{
         connlat_bucket, ConnRecord, RetransKey, CONNLAT_BUCKETS,
@@ -98,11 +98,11 @@ mod prog {
     }
 
     #[kretprobe]
-    pub fn tcp_v4_connect_ret(_ctx: ProbeContext) -> u32 {
+    pub fn tcp_v4_connect_ret(_ctx: RetProbeContext) -> u32 {
         connect_return()
     }
     #[kretprobe]
-    pub fn tcp_v6_connect_ret(_ctx: ProbeContext) -> u32 {
+    pub fn tcp_v6_connect_ret(_ctx: RetProbeContext) -> u32 {
         connect_return()
     }
 

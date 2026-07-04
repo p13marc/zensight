@@ -26,5 +26,9 @@ aya-ebpf = "0.1"
 aya-log-ebpf = "0.1"
 
 [[bin]]
-name = "zensight-sensor-netlink-ebpf"
+# NOTE: must differ from the package name — aya-build 0.1 uses
+# OUT_DIR/<package> as its cargo target dir and copies the built object to
+# OUT_DIR/<bin>; identical names collide ("Is a directory"). The loader
+# includes OUT_DIR/zensight-netlink-ebpf-prog (see zensight-sensor-netlink/src/ebpf.rs).
+name = "zensight-netlink-ebpf-prog"
 path = "src/main.rs"

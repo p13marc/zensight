@@ -10,8 +10,9 @@
 //! returned as an `Err`; the caller logs one warning and the unprivileged
 //! baseline is untouched.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use aya::{
@@ -27,6 +28,85 @@ use zensight_sensor_netlink_ebpf_common::{CONNLAT_BUCKETS, ConnRecord, RetransKe
 
 use crate::map::{ConnView, RetransRecord, connlat_percentiles, top_k_retransmits};
 
+/// TCP 4-tuple key for the recent-close map (#304): (local ip, local port,
+/// remote ip, remote port). Addresses are the `Ipv4Addr`/`Ipv6Addr` `Display`
+/// strings — the same formatting `map::fmt_addr` (kernel record side) and
+/// `SocketAddr::ip().to_string()` (sockdiag side) produce, so lookups join.
+type ConnKey = (String, u16, String, u16);
+
+/// Cap on the recent-close map — bounds memory on churn-heavy hosts.
+const CLOSE_MAP_CAP: usize = 16384;
+/// Entries older than this are swept; comfortably covers the 60 s TIME_WAIT
+/// window the map exists to attribute.
+const CLOSE_TTL: Duration = Duration::from_secs(120);
+
+/// Bounded recently-closed-connection → owner map (#304, tier 2a).
+///
+/// Fed from the tcplife ring (which fires at TCP_CLOSE); consulted by
+/// `@/query/sockets` for closing-state sockets (TIME_WAIT/CLOSE_WAIT/
+/// FIN_WAIT*/LAST_ACK/CLOSING) that the `/proc` fd scan can never attribute —
+/// their fd is already gone by the time the socket lingers in those states.
+/// Standalone (no kernel maps) so the eviction/TTL logic is unit-testable.
+struct CloseMap {
+    map: Mutex<HashMap<ConnKey, (u32, String, Instant)>>,
+    cap: usize,
+    ttl: Duration,
+}
+
+impl CloseMap {
+    fn new(cap: usize, ttl: Duration) -> Self {
+        Self {
+            map: Mutex::new(HashMap::new()),
+            cap,
+            ttl,
+        }
+    }
+
+    /// Record who owned a just-closed connection, sweeping expired entries and
+    /// keeping the map bounded.
+    fn note(&self, v: &ConnView) {
+        let Ok(mut map) = self.map.lock() else {
+            return;
+        };
+        let now = Instant::now();
+        if map.len() >= self.cap {
+            let ttl = self.ttl;
+            map.retain(|_, (_, _, ts)| now.duration_since(*ts) < ttl);
+            if map.len() >= self.cap {
+                // Still full after the sweep (churn burst): drop one arbitrary
+                // entry rather than grow unbounded.
+                if let Some(k) = map.keys().next().cloned() {
+                    map.remove(&k);
+                }
+            }
+        }
+        map.insert(
+            (v.local.clone(), v.lport, v.remote.clone(), v.rport),
+            (v.pid, v.comm.clone(), now),
+        );
+    }
+
+    /// `(pid, comm)` of a connection that closed within the TTL.
+    fn owner(
+        &self,
+        local_ip: &str,
+        lport: u16,
+        remote_ip: &str,
+        rport: u16,
+    ) -> Option<(u32, String)> {
+        let map = self.map.lock().ok()?;
+        let key = (local_ip.to_string(), lport, remote_ip.to_string(), rport);
+        map.get(&key)
+            .filter(|(_, _, ts)| ts.elapsed() < self.ttl)
+            .map(|(pid, comm, _)| (*pid, comm.clone()))
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map.lock().map(|m| m.len()).unwrap_or(0)
+    }
+}
+
 /// Shared, clonable handle to the eBPF-derived state (mirrors `EventState`).
 #[derive(Clone)]
 pub struct EbpfState {
@@ -39,17 +119,33 @@ struct Inner {
     retrans: Mutex<AyaHashMap<MapData, RetransKey, u64>>,
     connlat: Mutex<PerCpuArray<MapData, u64>>,
     connlat_prev: Mutex<[u64; CONNLAT_BUCKETS]>,
+    /// Recently-closed connections → owning (pid, comm) (#304, tier 2a).
+    closed: CloseMap,
 }
 
 impl EbpfState {
-    /// Push a drained connection record, dropping the oldest past capacity.
+    /// Push a drained connection record, dropping the oldest past capacity,
+    /// and remember its owner in the recent-close map (#304).
     fn push_conn(&self, v: ConnView) {
+        self.inner.closed.note(&v);
         if let Ok(mut q) = self.inner.conns.lock() {
             if q.len() == self.inner.conn_cap {
                 q.pop_front();
             }
             q.push_back(v);
         }
+    }
+
+    /// Owner of a recently-closed connection by 4-tuple, if the tcplife ring
+    /// saw it close within the TTL (#304, tier 2a). Returns `(pid, comm)`.
+    pub fn recent_close_owner(
+        &self,
+        local_ip: &str,
+        lport: u16,
+        remote_ip: &str,
+        rport: u16,
+    ) -> Option<(u32, String)> {
+        self.inner.closed.owner(local_ip, lport, remote_ip, rport)
     }
 
     /// Recent completed-connection records (oldest first), for `@/query/connections`.
@@ -100,7 +196,9 @@ pub fn load(conn_ring_capacity: usize) -> Result<(Ebpf, EbpfState, RingBuf<MapDa
     let mut bpf = EbpfLoader::new()
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
-            "/zensight-sensor-netlink-ebpf"
+            // The bin-target name of the kernel crate (differs from its package
+            // name to dodge an aya-build target-dir/artifact path collision).
+            "/zensight-netlink-ebpf-prog"
         )))
         .context("load eBPF bytecode")?;
 
@@ -139,6 +237,7 @@ pub fn load(conn_ring_capacity: usize) -> Result<(Ebpf, EbpfState, RingBuf<MapDa
             retrans: Mutex::new(retrans),
             connlat: Mutex::new(connlat),
             connlat_prev: Mutex::new([0u64; CONNLAT_BUCKETS]),
+            closed: CloseMap::new(CLOSE_MAP_CAP, CLOSE_TTL),
         }),
     };
     Ok((bpf, state, ring))
@@ -208,5 +307,59 @@ fn bump_memlock() {
     // SAFETY: setrlimit with a valid rlimit pointer; failure is ignored.
     unsafe {
         libc::setrlimit(libc::RLIMIT_MEMLOCK, &lim);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conn(local: &str, lport: u16, pid: u32, comm: &str) -> ConnView {
+        ConnView {
+            pid,
+            comm: comm.into(),
+            family: 4,
+            local: local.into(),
+            lport,
+            remote: "1.1.1.1".into(),
+            rport: 443,
+            duration_ms: 10,
+            tx_bytes: 0,
+            rx_bytes: 0,
+            segs_out: 0,
+            segs_in: 0,
+            retrans: 0,
+        }
+    }
+
+    #[test]
+    fn close_map_records_and_resolves_owner() {
+        let m = CloseMap::new(16, Duration::from_secs(60));
+        m.note(&conn("10.0.0.1", 5555, 42, "curl"));
+
+        assert_eq!(
+            m.owner("10.0.0.1", 5555, "1.1.1.1", 443),
+            Some((42, "curl".to_string()))
+        );
+        // Different tuple → miss.
+        assert_eq!(m.owner("10.0.0.1", 5556, "1.1.1.1", 443), None);
+        assert_eq!(m.owner("10.0.0.2", 5555, "1.1.1.1", 443), None);
+    }
+
+    #[test]
+    fn close_map_expires_by_ttl() {
+        let m = CloseMap::new(16, Duration::ZERO);
+        m.note(&conn("10.0.0.1", 5555, 42, "curl"));
+        // TTL zero → immediately stale.
+        assert_eq!(m.owner("10.0.0.1", 5555, "1.1.1.1", 443), None);
+    }
+
+    #[test]
+    fn close_map_stays_bounded() {
+        let m = CloseMap::new(4, Duration::from_secs(60));
+        for port in 0..100u16 {
+            m.note(&conn("10.0.0.1", port, 1, "x"));
+        }
+        assert!(m.len() <= 4);
     }
 }
