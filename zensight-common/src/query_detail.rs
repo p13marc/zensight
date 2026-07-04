@@ -355,6 +355,33 @@ pub struct SocketRecord {
     /// Reordering events observed on this socket (`tcp_info.reord_seen`, #108).
     #[serde(default)]
     pub reord_seen: u32,
+    /// Kernel socket cookie (`SO_COOKIE`, #304) — the **stable** per-socket id.
+    /// Inodes get reused after close; cookies effectively don't. Prefer this
+    /// over `inode` when correlating socket records across snapshots.
+    #[serde(default)]
+    pub cookie: u64,
+    /// cgroup v2 ID of the owning cgroup (`INET_DIAG_CGROUP_ID`, #304).
+    /// `None` on kernels/hosts that don't report it (or cgroup v1).
+    #[serde(default)]
+    pub cgroup_id: Option<u64>,
+    /// Resolved cgroup v2 path relative to `/sys/fs/cgroup` (e.g.
+    /// `system.slice/sshd.service`, #304) — the join key to systemd units.
+    /// `None` when the id was absent or unresolved.
+    #[serde(default)]
+    pub cgroup: Option<String>,
+    /// Owning process id from the `/proc/<pid>/fd` scan (#304). `None` when
+    /// unattributed (scan disabled, socket closed, or unreadable process).
+    /// Not a stable identity on its own — pair with `proc_start_time`.
+    #[serde(default)]
+    pub pid: Option<i32>,
+    /// Owning process `comm` (kernel-truncated to 15 bytes, #304).
+    #[serde(default)]
+    pub process: Option<String>,
+    /// Owning process start time (`/proc/<pid>/stat` field 22, clock ticks
+    /// since boot, #304). `(pid, proc_start_time)` is the process-identity
+    /// pair used everywhere in ZenSight (PIDs get reused).
+    #[serde(default)]
+    pub proc_start_time: Option<u64>,
 }
 
 /// One systemd unit inventory row (#274), served on demand from `@/query/units`

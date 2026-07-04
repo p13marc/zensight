@@ -162,12 +162,16 @@ async fn main() -> Result<()> {
         let query_prefix = netlink_config.key_prefix.clone();
         let query_events = event_state.clone();
         let query_routes = route_history.clone();
+        // Live collector toggles: the sockets queryable reads `socket_processes`
+        // at query time so the runtime toggle applies without restart (#304).
+        let query_collect = collect_handle.clone();
         runner.spawn(async move {
             zensight_sensor_netlink::query::run(
                 query_session,
                 query_prefix,
                 query_events,
                 query_routes,
+                query_collect,
             )
             .await;
         });

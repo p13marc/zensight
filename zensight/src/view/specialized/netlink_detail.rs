@@ -532,6 +532,12 @@ mod tests {
             rcv_rtt_us: 0,
             lost: 0,
             reord_seen: 0,
+            cookie: 42,
+            cgroup_id: Some(7),
+            cgroup: Some("system.slice/sshd.service".into()),
+            pid: Some(4321),
+            process: Some("sshd".into()),
+            proc_start_time: Some(987654),
         }];
         let payload = serde_json::to_vec(&records).unwrap();
 
@@ -551,6 +557,12 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].local, "10.0.0.1:5555");
         assert_eq!(got[0].rtt_us, 1234);
+        // Socket→process attribution fields survive the wire round-trip (#304).
+        assert_eq!(got[0].cookie, 42);
+        assert_eq!(got[0].pid, Some(4321));
+        assert_eq!(got[0].process.as_deref(), Some("sshd"));
+        assert_eq!(got[0].proc_start_time, Some(987654));
+        assert_eq!(got[0].cgroup.as_deref(), Some("system.slice/sshd.service"));
 
         session.close().await.unwrap();
     }
@@ -579,6 +591,12 @@ mod tests {
             rcv_rtt_us: 0,
             lost: 0,
             reord_seen: 0,
+            cookie: 0,
+            cgroup_id: None,
+            cgroup: None,
+            pid: None,
+            process: None,
+            proc_start_time: None,
         }
     }
 

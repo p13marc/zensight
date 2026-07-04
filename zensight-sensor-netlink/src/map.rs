@@ -1762,6 +1762,12 @@ mod tests {
             rcv_rtt_us: 0,
             lost: 0,
             reord_seen: 0,
+            cookie: 0,
+            cgroup_id: None,
+            cgroup: None,
+            pid: None,
+            process: None,
+            proc_start_time: None,
         }
     }
 
