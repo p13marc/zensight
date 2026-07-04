@@ -275,18 +275,19 @@ fn anomaly_community_id(a: &AnomalyView) -> Option<String> {
 pub fn attack_technique(kind: &str) -> Option<&'static str> {
     let t = match kind {
         "PortScanTRW" => "T1046", // Network Service Discovery
-        "BeaconCv" | "BeaconDetector" | "RitaBeacon" => "T1071", // Application Layer Protocol (C2)
-        "DgaScorer" => "T1568.002", // Dynamic Resolution: DGA
-        "DnsTunnel" => "T1071.004", // Application Layer Protocol: DNS
+        // Application Layer Protocol (C2)
+        "BeaconCv" | "BeaconDetector" | "RitaBeacon" | "RitaBeaconFqdn" => "T1071",
+        "DgaScorer" => "T1568.002",       // Dynamic Resolution: DGA
+        "DnsTunnel" => "T1071.004",       // Application Layer Protocol: DNS
         "NewlyObservedDomain" => "T1568", // Dynamic Resolution
-        "ConnectionFlood" => "T1499", // Endpoint Denial of Service
-        "LateralSmb" => "T1021.002", // SMB/Windows Admin Shares
-        "LateralRdp" => "T1021.001", // Remote Desktop Protocol
-        "LateralKerberos" => "T1558", // Steal or Forge Kerberos Tickets
-        "DataExfiltration" => "T1048", // Exfiltration Over Alternative Protocol
+        "ConnectionFlood" => "T1499",     // Endpoint Denial of Service
+        "LateralSmb" => "T1021.002",      // SMB/Windows Admin Shares
+        "LateralRdp" => "T1021.001",      // Remote Desktop Protocol
+        "LateralKerberos" => "T1558",     // Steal or Forge Kerberos Tickets
+        "DataExfiltration" => "T1048",    // Exfiltration Over Alternative Protocol
         "cleartext_snmp" | "cleartext-snmp" => "T1040", // Network Sniffing
         "cleartext_http_credentials" => "T1040", // Network Sniffing
-        "ioc_match" => "T1071",   // C2 over app-layer protocol
+        "ioc_match" => "T1071",           // C2 over app-layer protocol
         _ => return None,
     };
     Some(t)
@@ -488,6 +489,54 @@ pub fn exfil_view(src: String, dst: String, bytes_out: u64, zscore: f64) -> Anom
         metrics: vec![
             ("bytes_out".into(), bytes_out as f64),
             ("zscore".into(), zscore),
+        ],
+    }
+}
+
+/// The RITA composite score decomposition carried by an FQDN beacon anomaly
+/// (#308). Bundled so [`fqdn_beacon_view`] keeps a readable call site (the
+/// `DirCounts` pattern) and stays constructible in tests — flowscope's
+/// `RitaBeaconScore` is `#[non_exhaustive]`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RitaSignal {
+    /// Composite score (`ts·0.45 + ds·0.35 + dur·0.20`).
+    pub score: f64,
+    /// Inter-arrival statistical score.
+    pub ts_score: f64,
+    /// Payload-size statistical score.
+    pub ds_score: f64,
+    /// Duration coverage bonus.
+    pub dur_score: f64,
+    /// Mean inter-arrival time (seconds).
+    pub mean_interval_secs: f64,
+    /// Observations in the window.
+    pub n: usize,
+}
+
+/// Build the `RitaBeaconFqdn` [`AnomalyView`] (#308 → ATT&CK T1071): robust
+/// RITA beaconing keyed by the destination's best forward DNS name. `src`/`dst`
+/// are bare host IPs (the beacon spans many ephemeral-port flows, so a port
+/// would shatter the alert bucket); the name rides as the `fqdn` observation.
+pub fn fqdn_beacon_view(
+    fqdn: &str,
+    src: Option<String>,
+    dst: Option<String>,
+    sig: RitaSignal,
+) -> AnomalyView {
+    AnomalyView {
+        kind: "RitaBeaconFqdn".into(),
+        severity: AlertSeverity::Warning,
+        src,
+        dst,
+        proto: Some("tcp".into()),
+        observations: vec![("fqdn".into(), fqdn.to_string())],
+        metrics: vec![
+            ("score".into(), sig.score),
+            ("ts_score".into(), sig.ts_score),
+            ("ds_score".into(), sig.ds_score),
+            ("dur_score".into(), sig.dur_score),
+            ("mean_interval_secs".into(), sig.mean_interval_secs),
+            ("n".into(), sig.n as f64),
         ],
     }
 }
@@ -1709,6 +1758,50 @@ mod tests {
             Some("T1071.004")
         );
         // Bare-IP src (no port) carries no community_id.
+        assert!(!alert.labels.contains_key("community_id"));
+    }
+
+    #[test]
+    fn fqdn_beacon_view_maps_to_alert_with_technique() {
+        let sig = RitaSignal {
+            score: 0.93,
+            ts_score: 1.0,
+            ds_score: 1.0,
+            dur_score: 0.4,
+            mean_interval_secs: 30.0,
+            n: 15,
+        };
+        let v = fqdn_beacon_view(
+            "beacon.evil.example",
+            Some("10.0.0.5".into()),
+            Some("93.184.216.34".into()),
+            sig,
+        );
+        assert_eq!(v.kind, "RitaBeaconFqdn");
+        assert_eq!(v.severity, AlertSeverity::Warning);
+        let alert = anomaly_alert("s", &v);
+        assert_eq!(alert.kind, AlertKind::Anomaly);
+        assert_eq!(alert.rule, "RitaBeaconFqdn");
+        assert_eq!(
+            alert.labels.get("fqdn").map(String::as_str),
+            Some("beacon.evil.example")
+        );
+        assert_eq!(
+            alert.labels.get("src").map(String::as_str),
+            Some("10.0.0.5")
+        );
+        assert_eq!(
+            alert.labels.get("dst").map(String::as_str),
+            Some("93.184.216.34")
+        );
+        // C2 over app-layer protocol, same tactic family as the 5-tuple beacons.
+        assert_eq!(
+            alert.labels.get("technique").map(String::as_str),
+            Some("T1071")
+        );
+        assert_eq!(alert.labels.get("score").map(String::as_str), Some("0.93"));
+        assert_eq!(alert.labels.get("n").map(String::as_str), Some("15"));
+        // Bare-IP endpoints (no ports) carry no community_id.
         assert!(!alert.labels.contains_key("community_id"));
     }
 

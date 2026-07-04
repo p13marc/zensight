@@ -321,6 +321,61 @@ struct Flood {
     last_hit: Option<(String, u64)>,
 }
 
+/// Per-flow memo cap for the FQDN beacon's name resolution (#308) — bounds the
+/// per-packet fast path; the memo is cleared wholesale at the cap (cheap, rare).
+const FQDN_BEACON_MEMO_CAP: usize = 8192;
+/// Per-name re-alert cooldown for the FQDN beacon (#308), in *event* time —
+/// mirrors flowscope's `observe_gated` default. A scoring beacon re-alerts at
+/// most every cooldown, not per packet.
+const FQDN_BEACON_COOLDOWN: Duration = Duration::from_secs(300);
+/// Cap on the per-name last-emission table (cleared wholesale at the cap).
+const FQDN_BEACON_EMIT_CAP: usize = 4096;
+
+/// State for the FQDN-pivoted RITA beacon detector (#308): the robust detector
+/// keyed by the destination's best forward DNS name, a per-flow memo of that
+/// resolution (one name-map ranking per *flow*, not per packet), and the
+/// per-name emission cooldown. Lives behind one `Mutex` (on_ctx handlers are
+/// `Fn`), held briefly per TCP packet.
+struct FqdnBeacon {
+    detector: RitaBeaconDetector<String>,
+    memo: HashMap<FiveTupleKey, Option<FqdnTarget>>,
+    last_emit: HashMap<String, flowscope::Timestamp>,
+}
+
+/// A resolved beacon target: the server endpoint's best forward name plus the
+/// client/server IPs (derived from which flow endpoint carried the claim).
+#[derive(Debug, Clone)]
+struct FqdnTarget {
+    name: String,
+    client: std::net::IpAddr,
+    server: std::net::IpAddr,
+}
+
+/// Resolve a flow's beacon target from the passive-DNS map (#308): the endpoint
+/// with a client-visible *forward* (A/AAAA) claim is the server; the other is
+/// the client. Flow keys are canonically sorted, so both orders are probed.
+/// `None` for unnamed destinations — an IP-only beacon is the 5-tuple
+/// detector's job.
+fn resolve_fqdn_target(
+    nm: &SharedNameMap,
+    key: &FiveTupleKey,
+    ts: flowscope::Timestamp,
+) -> Option<FqdnTarget> {
+    let map = nm.lock().ok()?;
+    for (server, client) in [(key.b, key.a), (key.a, key.b)] {
+        if let Some(name) =
+            crate::map::best_forward_name(map.names_for_client(client.ip(), server.ip(), ts))
+        {
+            return Some(FqdnTarget {
+                name,
+                client: client.ip(),
+                server: server.ip(),
+            });
+        }
+    }
+    None
+}
+
 /// Map a flowscope severity onto a ZenSight alert severity.
 pub fn map_severity(s: flowscope::event::Severity) -> zensight_common::AlertSeverity {
     use flowscope::event::Severity as S;
@@ -1449,6 +1504,97 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
             },
         };
         b = b.detect(rita);
+    }
+
+    // FQDN-pivoted RITA beaconing (#308): the same Bowley+MAD robust statistics
+    // as `rita_beacon`, keyed by the destination's best *forward* DNS name from
+    // the passive-DNS cache — C2 rotating resolved IPs behind one domain (fast
+    // flux, CDN fronting) accumulates one per-name series where every per-flow
+    // detector's state resets. Hits ride the manual `map::anomaly_alert` path
+    // (like DNS tunnel / NOD) so no generic DetectorScore impl is needed.
+    // Enable/allowlist/threshold are read live (#121); threshold is shared with
+    // `rita_beacon` (`rita_beacon_threshold`).
+    if cfg.anomalies.rita_beacon_fqdn {
+        if let Some(nm) = &name_map {
+            let nm_fqdn = nm.clone();
+            let det = det_cfg.clone();
+            let alerts_h = alert_tx.clone();
+            let sensor_id = cfg.source.clone();
+            let state = Mutex::new(FqdnBeacon {
+                detector: RitaBeaconDetector::new(),
+                memo: HashMap::new(),
+                last_emit: HashMap::new(),
+            });
+            b = b.on_ctx::<FlowPacket>(move |evt: &FlowPacket, _ctx: &mut Ctx<'_>| {
+                if !matches!(evt.proto, L4Proto::Tcp) {
+                    return Ok(());
+                }
+                let c = det.load();
+                if !c.rita_beacon_fqdn {
+                    return Ok(()); // muted at runtime (#121)
+                }
+                let Ok(mut st) = state.lock() else {
+                    return Ok(());
+                };
+                // Per-packet fast path: the flow's target name is memoized on
+                // its first packet (one name-map lock + ranking per flow; a
+                // beacon's later flows re-resolve — new ephemeral port, new key).
+                let target = match st.memo.get(&evt.key) {
+                    Some(t) => t.clone(),
+                    None => {
+                        let resolved = resolve_fqdn_target(&nm_fqdn, &evt.key, evt.ts);
+                        if st.memo.len() >= FQDN_BEACON_MEMO_CAP {
+                            st.memo.clear();
+                        }
+                        st.memo.insert(evt.key, resolved.clone());
+                        resolved
+                    }
+                };
+                let Some(target) = target else {
+                    return Ok(()); // unnamed destination — 5-tuple detectors' job
+                };
+                if allowlisted(&target.name, &c.allowlist) {
+                    return Ok(());
+                }
+                let score = st
+                    .detector
+                    .observe(target.name.clone(), evt.ts, evt.len as u64);
+                if let Some(s) = score
+                    && s.score >= c.rita_beacon_threshold
+                {
+                    let due = st
+                        .last_emit
+                        .get(&target.name)
+                        .is_none_or(|last| evt.ts.saturating_sub(*last) >= FQDN_BEACON_COOLDOWN);
+                    if due {
+                        if st.last_emit.len() >= FQDN_BEACON_EMIT_CAP {
+                            st.last_emit.clear();
+                        }
+                        st.last_emit.insert(target.name.clone(), evt.ts);
+                        let view = map::fqdn_beacon_view(
+                            &target.name,
+                            Some(target.client.to_string()),
+                            Some(target.server.to_string()),
+                            map::RitaSignal {
+                                score: s.score,
+                                ts_score: s.ts_score,
+                                ds_score: s.ds_score,
+                                dur_score: s.dur_score,
+                                mean_interval_secs: s.mean_interval.as_secs_f64(),
+                                n: s.n,
+                            },
+                        );
+                        let _ = alerts_h.send(map::anomaly_alert(&sensor_id, &view));
+                    }
+                }
+                Ok(())
+            });
+            tracing::info!("netring: FQDN-pivoted RITA beaconing enabled");
+        } else {
+            tracing::warn!(
+                "netring: anomalies.rita_beacon_fqdn needs collect.dns + names.enabled; detector disabled"
+            );
+        }
     }
 
     // Connection-flood detector (issue #18).

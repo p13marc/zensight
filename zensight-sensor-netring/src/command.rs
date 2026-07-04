@@ -119,6 +119,8 @@ pub fn detector_names() -> &'static [(&'static str, bool)] {
         ("port_scan", false),
         ("beaconing", true),
         ("rita_beacon", true),
+        // Shares `rita_beacon_threshold` — mute/unmute only, no own threshold.
+        ("rita_beacon_fqdn", false),
         ("dns_tunnel", false),
         ("nod", false),
         ("connection_flood", true),
@@ -136,6 +138,7 @@ pub fn apply_to(cfg: &mut AnomalyConfig, cmd: DetectorCommand) {
             "port_scan" => cfg.port_scan = enabled,
             "beaconing" => cfg.beaconing = enabled,
             "rita_beacon" => cfg.rita_beacon = enabled,
+            "rita_beacon_fqdn" => cfg.rita_beacon_fqdn = enabled,
             "dns_tunnel" => cfg.dns_tunnel = enabled,
             "nod" => cfg.nod = enabled,
             "connection_flood" => cfg.connection_flood = enabled,
@@ -415,6 +418,16 @@ mod tests {
             },
         );
         assert_eq!(cfg.flood_threshold, 250);
+        // The FQDN-pivoted beacon (#308) mutes/unmutes by name.
+        assert!(!cfg.rita_beacon_fqdn);
+        apply_to(
+            &mut cfg,
+            DetectorCommand::SetEnabled {
+                detector: "rita_beacon_fqdn".into(),
+                enabled: true,
+            },
+        );
+        assert!(cfg.rita_beacon_fqdn);
         // Unknown detector is ignored, not a panic.
         apply_to(
             &mut cfg,

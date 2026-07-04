@@ -462,8 +462,17 @@ pub struct AnomalyConfig {
     #[serde(default)]
     pub rita_beacon: bool,
     /// RITA beacon score threshold (0.0–1.0); higher = stricter. Default 0.9.
+    /// Shared by `rita_beacon` and `rita_beacon_fqdn`.
     #[serde(default = "default_rita_beacon_threshold")]
     pub rita_beacon_threshold: f64,
+    /// FQDN-pivoted RITA beaconing (issue #308): the same robust Bowley+MAD
+    /// statistics as `rita_beacon`, keyed by the destination's best *forward*
+    /// DNS name (from the passive-DNS `names` cache) instead of the 5-tuple —
+    /// C2 that rotates resolved IPs behind one domain accumulates a single
+    /// per-name series where the per-flow detector's state resets. Uses
+    /// `rita_beacon_threshold`. Requires `collect.dns` + `names.enabled`.
+    #[serde(default)]
+    pub rita_beacon_fqdn: bool,
     /// DNS tunneling detection (issue #118): flags a (src, SLD) whose distinct
     /// subdomain-label cardinality over a sliding window crosses
     /// `dns_tunnel_distinct`, or any single query name at/above
@@ -618,6 +627,8 @@ mod tests {
         assert!(!a.rita_beacon);
         assert!(!a.dns_tunnel);
         assert!(!a.nod);
+        // The #308 FQDN-pivoted beacon follows the rita_beacon default (off).
+        assert!(!a.rita_beacon_fqdn);
         // Thresholds carry their documented defaults.
         assert_eq!(a.rita_beacon_threshold, 0.9);
         assert_eq!(a.dns_tunnel_distinct, 50);
