@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 use zenoh::Session;
-use zenoh_ext::{AdvancedPublisher, AdvancedPublisherBuilderExt, CacheConfig};
+use zenoh_ext::{AdvancedPublisher, AdvancedPublisherBuilderExt, CacheConfig, MissDetectionConfig};
 use zensight_common::serialization::Format;
 use zensight_common::{HostEntity, encode, entity_key};
 
@@ -44,6 +44,10 @@ impl EntityPublisher {
                 .session
                 .declare_publisher(key.clone())
                 .cache(CacheConfig::default().max_samples(1))
+                // Sequence-number miss-detection (like the sensors) — without it
+                // the cache defaults to `Sequencing::Timestamp`, which fails
+                // unless the Zenoh session has timestamping enabled.
+                .sample_miss_detection(MissDetectionConfig::default())
                 .publisher_detection()
                 .await
                 .map_err(|e| anyhow::anyhow!("failed to declare entity publisher {key}: {e}"))?;
