@@ -691,6 +691,9 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
         let asym_tx = alert_tx.clone();
         let asym_sensor_id = cfg.source.clone();
         let asym_latch = asymmetry_alerted.clone();
+        // Passive-DNS enrichment (#308): the flow-end handler stamps the names
+        // the initiator resolved for the responder onto the served FlowRecord.
+        let nm_flow = name_map.clone();
         b = b.on_ctx::<FlowEnded<Tcp>>(move |e: &FlowEnded<Tcp>, _ctx: &mut Ctx<'_>| {
             // Honest shed: a flow shed at start is dropped from telemetry here
             // (not silently retained), so "data is sampled" is the truth.
@@ -720,6 +723,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
                 &matrix_h,
                 &elephants_h,
                 collect_talkers,
+                nm_flow.as_ref(),
             );
             if let Some(exfil) = &exfil_h {
                 feed_exfil(exfil, e, &exfil_cfg, &exfil_alert_tx, &exfil_sensor_id);
@@ -1816,6 +1820,7 @@ fn on_flow_ended(
     matrix: &MatrixHist,
     elephants: &ElephantRing,
     collect_talkers: bool,
+    name_map: Option<&SharedNameMap>,
 ) {
     let total_bytes = e.stats.total_bytes();
     let total_packets = e.stats.total_packets();
@@ -1859,7 +1864,7 @@ fn on_flow_ended(
         packets_initiator: e.stats.packets_initiator,
         packets_responder: e.stats.packets_responder,
     };
-    let rec = crate::map::flow_record(
+    let mut rec = crate::map::flow_record(
         ini_s.clone(),
         resp_s.clone(),
         proto,
@@ -1871,6 +1876,15 @@ fn on_flow_ended(
         true,
         dir_counts,
     );
+    // Passive-DNS enrichment (#308): the names the *initiator* resolved for the
+    // responder IP (client-scoped first, global fallback), ranked, top 3. One
+    // short-held lock per ended flow; `e.ts` (the flow's last packet) keeps
+    // expiry in event time, correct under both live capture and pcap replay.
+    if let Some(nm) = name_map
+        && let Ok(map) = nm.lock()
+    {
+        rec.dst_names = crate::map::rank_names(map.names_for_client(ini.ip(), resp.ip(), e.ts));
+    }
     if let Ok(mut r) = records.lock() {
         if r.len() == FLOW_RING_CAP {
             r.pop_front();

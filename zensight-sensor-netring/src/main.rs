@@ -120,6 +120,7 @@ async fn main() -> Result<()> {
                 s.clone(),
                 key_prefix.clone(),
                 channels.talkers.clone(),
+                channels.name_map.clone(),
             ));
             runner.spawn(query::run_elephants(
                 s.clone(),

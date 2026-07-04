@@ -168,7 +168,17 @@ pub async fn run_assets(
 
 /// Run the top-talkers query channel: `zensight/netring/@/query/talkers?top=N`
 /// replies with the top-N destinations by byte volume as JSON `Vec<TalkerRecord>`.
-pub async fn run_talkers(session: Arc<zenoh::Session>, key_prefix: String, hist: TalkerHist) {
+///
+/// When the passive-DNS name map is available (#308), each served row is
+/// enriched with the names observed for its destination IP — resolved at query
+/// time via the non-promoting `peek_names` (a query must not perturb the LRU),
+/// ranked, top 3.
+pub async fn run_talkers(
+    session: Arc<zenoh::Session>,
+    key_prefix: String,
+    hist: TalkerHist,
+    name_map: Option<crate::monitor::SharedNameMap>,
+) {
     let key = zensight_common::command::query_key(&key_prefix, "talkers");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
@@ -181,10 +191,23 @@ pub async fn run_talkers(session: Arc<zenoh::Session>, key_prefix: String, hist:
 
     while let Ok(query) = queryable.recv_async().await {
         let top = top_n(&query);
-        let records = match hist.lock() {
+        let mut records = match hist.lock() {
             Ok(h) => map::top_talkers(&h, top),
             Err(_) => Vec::new(),
         };
+        // Name enrichment: one lock for the whole reply, top-N rows only. Uses
+        // wall-clock "now" for expiry — correct for live capture; under pcap
+        // replay (event time in the past) rows may serve empty names.
+        if let Some(nm) = &name_map
+            && let Ok(names) = nm.lock()
+        {
+            let now = flowscope::Timestamp::from_system_time(std::time::SystemTime::now());
+            for rec in &mut records {
+                if let Some(ip) = map::endpoint_ip(&rec.dst) {
+                    rec.names = map::rank_names(names.peek_names(ip, now));
+                }
+            }
+        }
         reply(&query, &records, "talkers").await;
     }
 }

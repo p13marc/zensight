@@ -7,9 +7,10 @@
 use std::net::{IpAddr, SocketAddr};
 
 use base64::Engine as _;
+use flowscope::dns::{NameClaim, Provenance};
 use sha1::{Digest as _, Sha1};
 use zensight_common::{
-    Alert, AlertKind, AlertSeverity, FlowRecord, Protocol, TelemetryPoint, TelemetryValue,
+    Alert, AlertKind, AlertSeverity, FlowRecord, NameInfo, Protocol, TelemetryPoint, TelemetryValue,
 };
 
 /// Build a [`FlowRecord`] (on-demand flow detail) from already-extracted fields.
@@ -46,7 +47,84 @@ pub fn flow_record(
         bytes_responder: dir_counts.bytes_responder,
         packets_initiator: dir_counts.packets_initiator,
         packets_responder: dir_counts.packets_responder,
+        // Passive-DNS enrichment (#308) is attached by the caller (the flow-end
+        // handler ranks the responder's name claims); starts empty here.
+        dst_names: Vec::new(),
     }
+}
+
+/// Rank passive-DNS name claims for one IP into the top-3 [`NameInfo`] list
+/// (#308). Ordering: provenance rank (forward DNS > CNAME > SNI > mDNS > DHCP >
+/// PTR > other), then client-scoped claims before global ones, then most
+/// recently seen. Deduped by name (best-ranked sighting wins), capped at 3.
+/// Pure — unit-testable without the capture machinery.
+pub fn rank_names<'a, I>(claims: I) -> Vec<NameInfo>
+where
+    I: IntoIterator<Item = &'a NameClaim>,
+{
+    let mut ranked: Vec<&NameClaim> = claims.into_iter().collect();
+    ranked.sort_by_key(|c| {
+        (
+            provenance_rank(c.provenance),
+            c.client.is_none(),
+            std::cmp::Reverse(c.last_seen),
+        )
+    });
+    let mut out: Vec<NameInfo> = Vec::with_capacity(3);
+    for c in ranked {
+        if out.iter().any(|n| n.name == c.name) {
+            continue;
+        }
+        out.push(NameInfo {
+            name: c.name.clone(),
+            provenance: c.provenance.as_str().to_string(),
+        });
+        if out.len() == 3 {
+            break;
+        }
+    }
+    out
+}
+
+/// The best *forward* DNS name for an IP (#308): the top-ranked A/AAAA claim,
+/// applying the same client-scoped/recency tie-breaks as [`rank_names`].
+/// `None` when the IP has no forward claim — reverse-only (PTR) or SNI-only
+/// bindings do not qualify as a beacon key (an attacker controls those).
+pub fn best_forward_name<'a, I>(claims: I) -> Option<String>
+where
+    I: IntoIterator<Item = &'a NameClaim>,
+{
+    claims
+        .into_iter()
+        .filter(|c| matches!(c.provenance, Provenance::DnsA | Provenance::DnsAaaa))
+        .min_by_key(|c| (c.client.is_none(), std::cmp::Reverse(c.last_seen)))
+        .map(|c| c.name.clone())
+}
+
+/// Provenance ordering for [`rank_names`]: lower ranks first. Forward answers
+/// (what the client actually dialed) outrank the client-claimed (SNI) and
+/// reverse (PTR) sources; `Provenance` is `#[non_exhaustive]`, so unknown
+/// future sources sink to the bottom with `Other`.
+fn provenance_rank(p: Provenance) -> u8 {
+    match p {
+        Provenance::DnsA | Provenance::DnsAaaa => 0,
+        Provenance::DnsCname => 1,
+        Provenance::Sni => 2,
+        Provenance::Mdns => 3,
+        Provenance::Dhcp => 4,
+        Provenance::DnsPtr => 5,
+        _ => 6,
+    }
+}
+
+/// Parse a talker/flow endpoint label (`"ip:port"` or bare `"ip"`) back to its
+/// IP for name-map lookups (#308). `None` for non-address labels.
+pub fn endpoint_ip(endpoint: &str) -> Option<IpAddr> {
+    endpoint
+        .parse::<SocketAddr>()
+        .map(|sa| sa.ip())
+        .or_else(|_| endpoint.parse::<IpAddr>())
+        .ok()
 }
 
 /// Per-direction byte/packet split for a flow (#223), oriented initiator →
@@ -1198,6 +1276,9 @@ pub fn top_talkers(
             bytes,
             packets,
             flows,
+            // Passive-DNS enrichment (#308) is attached at query time (the
+            // talker channel peeks the name map per served row).
+            names: Vec::new(),
         })
         .collect();
     v.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.dst.cmp(&b.dst)));
@@ -1260,6 +1341,108 @@ pub fn elephant_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A name claim at `t` seconds, optionally client-scoped (#308 tests).
+    fn claim(name: &str, prov: Provenance, t: u32, client: Option<&str>) -> NameClaim {
+        let c = NameClaim::new(name, prov, flowscope::Timestamp::new(t, 0));
+        match client {
+            Some(ip) => c.with_client(ip.parse().unwrap()),
+            None => c,
+        }
+    }
+
+    #[test]
+    fn rank_names_orders_by_provenance() {
+        let claims = vec![
+            claim("reverse.example", Provenance::DnsPtr, 100, None),
+            claim("sni.example", Provenance::Sni, 100, None),
+            claim("forward.example", Provenance::DnsA, 100, None),
+            claim("chain.example", Provenance::DnsCname, 100, None),
+        ];
+        let ranked = rank_names(&claims);
+        let names: Vec<&str> = ranked.iter().map(|n| n.name.as_str()).collect();
+        // Forward > CNAME > SNI (> PTR, cut by the top-3 cap).
+        assert_eq!(
+            names,
+            vec!["forward.example", "chain.example", "sni.example"]
+        );
+        assert_eq!(ranked[0].provenance, "dns_a");
+    }
+
+    #[test]
+    fn rank_names_prefers_client_scoped_then_recency() {
+        let claims = vec![
+            claim("global.example", Provenance::DnsA, 200, None),
+            claim("scoped.example", Provenance::DnsA, 100, Some("10.0.0.5")),
+            claim("older.example", Provenance::DnsA, 50, Some("10.0.0.5")),
+        ];
+        let names: Vec<String> = rank_names(&claims).into_iter().map(|n| n.name).collect();
+        // Client-scoped beats global despite being older; recency breaks the
+        // client-scoped tie.
+        assert_eq!(
+            names,
+            vec!["scoped.example", "older.example", "global.example"]
+        );
+    }
+
+    #[test]
+    fn rank_names_dedupes_by_name_and_caps_at_three() {
+        let claims = vec![
+            claim("dup.example", Provenance::DnsA, 100, None),
+            claim("dup.example", Provenance::Sni, 100, None),
+            claim("b.example", Provenance::DnsA, 100, None),
+            claim("c.example", Provenance::DnsA, 100, None),
+            claim("d.example", Provenance::DnsA, 100, None),
+        ];
+        let ranked = rank_names(&claims);
+        assert_eq!(ranked.len(), 3);
+        // The dup keeps its best-ranked provenance.
+        assert_eq!(ranked[0].name, "dup.example");
+        assert_eq!(ranked[0].provenance, "dns_a");
+        assert!(ranked.iter().filter(|n| n.name == "dup.example").count() == 1);
+    }
+
+    #[test]
+    fn rank_names_empty_is_empty() {
+        assert!(rank_names([]).is_empty());
+    }
+
+    #[test]
+    fn best_forward_name_skips_non_forward_claims() {
+        let reverse_only = vec![
+            claim("reverse.example", Provenance::DnsPtr, 100, None),
+            claim("sni.example", Provenance::Sni, 100, None),
+        ];
+        assert_eq!(best_forward_name(&reverse_only), None);
+
+        let mixed = vec![
+            claim("reverse.example", Provenance::DnsPtr, 300, None),
+            claim("global.example", Provenance::DnsAaaa, 200, None),
+            claim("scoped.example", Provenance::DnsA, 100, Some("10.0.0.5")),
+        ];
+        // Client-scoped forward claim wins over the newer global one.
+        assert_eq!(
+            best_forward_name(&mixed),
+            Some("scoped.example".to_string())
+        );
+    }
+
+    #[test]
+    fn endpoint_ip_parses_socket_and_bare_forms() {
+        assert_eq!(
+            endpoint_ip("93.184.216.34:443"),
+            Some("93.184.216.34".parse().unwrap())
+        );
+        assert_eq!(
+            endpoint_ip("93.184.216.34"),
+            Some("93.184.216.34".parse().unwrap())
+        );
+        assert_eq!(
+            endpoint_ip("[2001:db8::1]:443"),
+            Some("2001:db8::1".parse().unwrap())
+        );
+        assert_eq!(endpoint_ip("not-an-endpoint"), None);
+    }
 
     fn scan_anomaly() -> AnomalyView {
         AnomalyView {

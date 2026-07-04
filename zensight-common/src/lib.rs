@@ -52,8 +52,8 @@ pub use keyexpr::{
 };
 pub use query_detail::{
     AssetRecord, CgroupNode, CgroupPid, DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord,
-    Ja4hRecord, MatrixRecord, NeighborRecord, ProcessRecord, QuicRecord, RouteRecord, SocketRecord,
-    SshRecord, TalkerRecord, TimerRecord, TlsRecord, UnitDetail, UnitRecord,
+    Ja4hRecord, MatrixRecord, NameInfo, NeighborRecord, ProcessRecord, QuicRecord, RouteRecord,
+    SocketRecord, SshRecord, TalkerRecord, TimerRecord, TlsRecord, UnitDetail, UnitRecord,
 };
 pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;

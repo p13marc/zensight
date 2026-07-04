@@ -1096,6 +1096,7 @@ mod tests {
             bytes_responder: bytes - bytes / 2,
             packets_initiator: packets / 2,
             packets_responder: packets - packets / 2,
+            dst_names: Vec::new(),
         }
     }
 

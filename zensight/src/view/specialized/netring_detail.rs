@@ -357,6 +357,7 @@ mod tests {
             bytes: 1000,
             packets: 10,
             flows: 2,
+            names: Vec::new(),
         }]));
         assert_eq!(s.talkers.ready().map(|v| v.len()), Some(1));
         s.apply_elephants(Err("no sensor".into()));
@@ -427,6 +428,7 @@ mod tests {
             bytes_responder: 574,
             packets_initiator: 4,
             packets_responder: 6,
+            dst_names: Vec::new(),
         }]));
         assert_eq!(s.flows.ready().map(|v| v.len()), Some(1));
         s.apply(Err("no sensor".into()));
