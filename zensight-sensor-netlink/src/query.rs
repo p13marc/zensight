@@ -20,8 +20,12 @@ use nlink::netlink::{
     types::addr::Scope,
     xfrm::{IpsecProtocol, SecurityAssociation, XfrmMode},
 };
-use nlink::sockdiag::{SocketFilter, SocketInfo, SocketState, TcpState};
+use nlink::sockdiag::{
+    CgroupPathMap, SocketFilter, SocketInfo, SocketOwnerMap, SocketState, TcpState,
+};
 
+use crate::collector::CollectHandle;
+use crate::config::CollectConfig;
 use crate::events::EventState;
 use crate::map::{
     AddressRecord, NeighborRecord, NftRuleRecord, RouteRecord, SocketRecord, SocketSelector,
@@ -34,15 +38,30 @@ const AF_INET6: u8 = 10;
 
 /// Run the on-demand detail query channel until the session closes.
 ///
+/// The optional eBPF state handle threaded into the sockets queryable (#304,
+/// tier 2a): the recent-close map attributes closing-state sockets whose fd is
+/// gone. On non-`ebpf` builds this is an always-`None` placeholder so `run`'s
+/// signature (and `main`'s single call site) stay identical in both builds.
+#[cfg(feature = "ebpf")]
+pub type QueryEbpf = Option<crate::ebpf::EbpfState>;
+#[cfg(not(feature = "ebpf"))]
+pub type QueryEbpf = Option<std::convert::Infallible>;
+
 /// `key_prefix` is the sensor's telemetry prefix (e.g. `zensight/netlink`); the
 /// queryables live under `<key_prefix>/@/query/<topic>`. `events` is the shared
 /// real-time event ring (#8), served on `@/query/events`; `route_history` is the
-/// default-route flap ring (#111), served on `@/query/route_changes`.
+/// default-route flap ring (#111), served on `@/query/route_changes`. `collect`
+/// is the live collector-toggle handle (shared with the poll loop and the
+/// runtime `collection` command channel) so the socket→process attribution
+/// (#304) honors the same hot-swappable `socket_processes` toggle. `ebpf` is
+/// the tier-2a recent-close attribution handle (see [`QueryEbpf`]).
 pub async fn run(
     session: Arc<zenoh::Session>,
     key_prefix: String,
     events: EventState,
     route_history: RouteHistory,
+    collect: CollectHandle,
+    ebpf: QueryEbpf,
 ) {
     let route = match Connection::<Route>::new() {
         Ok(c) => c,
@@ -149,10 +168,16 @@ pub async fn run(
             q = sockets_q.recv_async() => {
                 let Ok(query) = q else { return };
                 let sel = SocketSelector::parse(query.parameters().as_str());
-                let records = match &sockdiag {
-                    Some(sd) => collect_sockets(sd, &sel).await,
+                // Snapshot the live toggles at query time (#304) — a runtime
+                // `socket_processes` toggle takes effect on the next query.
+                let toggles = collect.snapshot().await;
+                let mut records = match &sockdiag {
+                    Some(sd) => collect_sockets(sd, &sel, &toggles).await,
                     None => Vec::new(),
                 };
+                // Tier 2a (#304): closing-state sockets can never be
+                // /proc-attributed (fd gone) — consult the eBPF close map.
+                annotate_closing_sockets(&mut records, &ebpf);
                 reply_json(&query, &records).await;
             }
             q = addresses_q.recv_async() => {
@@ -475,7 +500,83 @@ fn scope_label(scope: Scope) -> &'static str {
     }
 }
 
-async fn collect_sockets(conn: &Connection<SockDiag>, sel: &SocketSelector) -> Vec<SocketRecord> {
+/// One `/proc` fd walk + one cgroupfs walk for socket→process attribution
+/// (#304), off the async runtime (`spawn_blocking` — the walks are pure fs
+/// I/O). Returns `None` (→ reply unattributed) when the host has more numeric
+/// `/proc` entries than `max_procs` (query-time cost ceiling) or the blocking
+/// task failed.
+async fn scan_owner_maps(max_procs: usize) -> Option<(SocketOwnerMap, CgroupPathMap)> {
+    let joined = tokio::task::spawn_blocking(move || {
+        let procs = count_procs("/proc");
+        if procs > max_procs {
+            return Err(procs);
+        }
+        let t0 = std::time::Instant::now();
+        let owners = SocketOwnerMap::scan();
+        let cgroups = CgroupPathMap::scan();
+        Ok((owners, cgroups, t0.elapsed()))
+    })
+    .await;
+    match joined {
+        Ok(Ok((owners, cgroups, elapsed))) => {
+            tracing::debug!(ms = elapsed.as_millis() as u64, "socket owner scan");
+            Some((owners, cgroups))
+        }
+        Ok(Err(procs)) => {
+            tracing::warn!(procs, ceiling = max_procs, "socket process scan skipped");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "socket owner scan task failed");
+            None
+        }
+    }
+}
+
+/// Number of numeric (PID) entries under a proc root.
+fn count_procs(proc_root: &str) -> usize {
+    std::fs::read_dir(proc_root)
+        .map(|d| {
+            d.flatten()
+                .filter(|e| {
+                    e.file_name()
+                        .to_str()
+                        .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Join one socket record against the owner/cgroup maps (#304): first owning
+/// process (pid/comm/start_time — identity is the `(pid, start_time)` pair)
+/// plus the cgroup v2 path resolved from the sockdiag cgroup id. Pure, so the
+/// fixture tests exercise the exact production join.
+fn apply_attribution(rec: &mut SocketRecord, owners: &SocketOwnerMap, cgroups: &CgroupPathMap) {
+    if let Some(p) = owners.resolve(rec.inode).first() {
+        rec.pid = Some(p.pid);
+        rec.process = Some(p.comm.clone());
+        rec.proc_start_time = Some(p.start_time);
+    }
+    if let Some(id) = rec.cgroup_id {
+        rec.cgroup = cgroups
+            .resolve_relative(id)
+            .map(|p| p.to_string_lossy().into_owned());
+    }
+}
+
+async fn collect_sockets(
+    conn: &Connection<SockDiag>,
+    sel: &SocketSelector,
+    collect: &CollectConfig,
+) -> Vec<SocketRecord> {
+    // Socket→process attribution (#304): one amortized /proc + cgroupfs walk
+    // per query, joined per-record below. `None` → records stay unattributed.
+    let maps = if collect.socket_processes {
+        scan_owner_maps(collect.socket_process_max_procs).await
+    } else {
+        None
+    };
     // Mirror the streamed aggregate's extensions (#11) so the drill-down shows
     // congestion algorithm / window and per-socket buffer sizes.
     // Mirror the streamed aggregate's extensions. When the selector names a
@@ -533,7 +634,7 @@ async fn collect_sockets(conn: &Connection<SockDiag>, sel: &SocketSelector) -> V
                 .as_ref()
                 .map(|m| (m.sndbuf, m.rcvbuf))
                 .unwrap_or((0, 0));
-            let rec = SocketRecord {
+            let mut rec = SocketRecord {
                 local: inet.local.to_string(),
                 remote: inet.remote.to_string(),
                 state: socket_state_str(&inet.state),
@@ -554,10 +655,87 @@ async fn collect_sockets(conn: &Connection<SockDiag>, sel: &SocketSelector) -> V
                 rcv_rtt_us,
                 lost,
                 reord_seen,
+                // Stable socket id + owning cgroup id ride along even when the
+                // /proc attribution scan is off (#304).
+                cookie: inet.cookie,
+                cgroup_id: inet.cgroup_id,
+                cgroup: None,
+                pid: None,
+                process: None,
+                proc_start_time: None,
             };
+            if let Some((owners, cgroups)) = &maps {
+                apply_attribution(&mut rec, owners, cgroups);
+            }
             sel.matches(&rec).then_some(rec)
         })
         .collect()
+}
+
+/// Annotate sockets the `/proc` scan left unattributed with owners the eBPF
+/// module observed (#304):
+/// * closing states (TIME_WAIT / CLOSE_WAIT / FIN_WAIT* / LAST_ACK / CLOSING)
+///   have no open fd, so tier 1 can never attribute them — the tcplife close
+///   map (tier 2a) saw who closed them;
+/// * ESTABLISHED sockets the scan missed (e.g. other users' processes on an
+///   unprivileged sensor) may have a live-map entry from their client-connect
+///   ESTABLISHED event (tier 2b; server-side/accepted sockets deliberately
+///   have none — see the kernel crate).
+#[cfg(feature = "ebpf")]
+fn annotate_closing_sockets(records: &mut [SocketRecord], ebpf: &QueryEbpf) {
+    let Some(eb) = ebpf else { return };
+    for rec in records.iter_mut() {
+        if rec.pid.is_some() {
+            continue;
+        }
+        let Some((lip, lport)) = split_endpoint(&rec.local) else {
+            continue;
+        };
+        let Some((rip, rport)) = split_endpoint(&rec.remote) else {
+            continue;
+        };
+        let owner = if rec.state == "established" {
+            eb.live_conn_owner(lip, lport, rip, rport)
+        } else if is_closing_state_label(&rec.state) {
+            eb.recent_close_owner(lip, lport, rip, rport)
+        } else {
+            None
+        };
+        if let Some((pid, comm)) = owner {
+            rec.pid = Some(pid as i32);
+            rec.process = Some(comm);
+            // No proc_start_time: the kernel record carries none, and (for
+            // closes) the process may already be gone. pid alone marks
+            // "attributed via eBPF event" — consumers needing strong identity
+            // skip it.
+        }
+    }
+}
+
+/// No-op twin on non-`ebpf` builds (keeps `run`'s arm unconditional).
+#[cfg(not(feature = "ebpf"))]
+fn annotate_closing_sockets(_records: &mut [SocketRecord], _ebpf: &QueryEbpf) {}
+
+/// TCP states whose socket has no open fd anymore (the close path already
+/// ran) — exactly the set the /proc fd scan can never attribute (#304).
+#[cfg_attr(not(feature = "ebpf"), allow(dead_code))]
+fn is_closing_state_label(state: &str) -> bool {
+    matches!(
+        state,
+        "time_wait" | "close_wait" | "fin_wait1" | "fin_wait2" | "last_ack" | "closing"
+    )
+}
+
+/// Split an `addr:port` endpoint as rendered by `SocketAddr`'s `Display`
+/// (`1.2.3.4:80`, `[::1]:443`) into the bare address and port — the close
+/// map's key shape (its addresses come from `Ipv4Addr`/`Ipv6Addr` `Display`,
+/// bracket-free).
+#[cfg_attr(not(feature = "ebpf"), allow(dead_code))]
+fn split_endpoint(ep: &str) -> Option<(&str, u16)> {
+    let (host, port) = ep.rsplit_once(':')?;
+    let host = host.strip_prefix('[').unwrap_or(host);
+    let host = host.strip_suffix(']').unwrap_or(host);
+    Some((host, port.parse().ok()?))
 }
 
 /// Inverse of [`socket_state_str`]: map a canonical lowercase state label back
@@ -571,12 +749,18 @@ fn tcp_state_from_label(s: &str) -> Option<TcpState> {
         "time_wait" => TcpState::TimeWait,
         "syn_sent" => TcpState::SynSent,
         "close_wait" => TcpState::CloseWait,
+        "fin_wait1" => TcpState::FinWait1,
+        "fin_wait2" => TcpState::FinWait2,
+        "last_ack" => TcpState::LastAck,
+        "closing" => TcpState::Closing,
         _ => return None,
     })
 }
 
 /// Canonical lowercase state string, matching the streamed `sockets/tcp/<state>`
-/// aggregate names so GUI filters line up with the summary metrics.
+/// aggregate names so GUI filters line up with the summary metrics. The closing
+/// states get canonical labels too (previously the raw `Debug` fallback) so the
+/// tier-2a closing-state predicate (#304) and GUI state chips read cleanly.
 fn socket_state_str(state: &SocketState) -> String {
     match state {
         SocketState::Tcp(TcpState::Established) | SocketState::Established => "established",
@@ -584,6 +768,10 @@ fn socket_state_str(state: &SocketState) -> String {
         SocketState::Tcp(TcpState::TimeWait) => "time_wait",
         SocketState::Tcp(TcpState::SynSent) => "syn_sent",
         SocketState::Tcp(TcpState::CloseWait) => "close_wait",
+        SocketState::Tcp(TcpState::FinWait1) => "fin_wait1",
+        SocketState::Tcp(TcpState::FinWait2) => "fin_wait2",
+        SocketState::Tcp(TcpState::LastAck) => "last_ack",
+        SocketState::Tcp(TcpState::Closing) => "closing",
         other => return format!("{other:?}").to_lowercase(),
     }
     .to_string()
@@ -595,5 +783,194 @@ fn fam(family: u8) -> u8 {
         AF_INET => 4,
         AF_INET6 => 6,
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use super::*;
+
+    /// A blank record with just the attribution inputs set.
+    fn rec(inode: u32, cgroup_id: Option<u64>) -> SocketRecord {
+        SocketRecord {
+            local: "10.0.0.1:5555".into(),
+            remote: "1.1.1.1:443".into(),
+            state: "established".into(),
+            uid: 0,
+            recv_q: 0,
+            send_q: 0,
+            rtt_us: 0,
+            retrans: 0,
+            inode,
+            congestion: None,
+            snd_cwnd: 0,
+            snd_buf: 0,
+            rcv_buf: 0,
+            delivery_rate: 0,
+            pacing_rate: 0,
+            bytes_retrans: 0,
+            total_retrans: 0,
+            rcv_rtt_us: 0,
+            lost: 0,
+            reord_seen: 0,
+            cookie: 0,
+            cgroup_id,
+            cgroup: None,
+            pid: None,
+            process: None,
+            proc_start_time: None,
+        }
+    }
+
+    /// Build a /proc-shaped subtree the way `SocketOwnerMap::scan_with_root`
+    /// reads it: `<root>/<pid>/{comm,stat,fd/<n>}` with fd symlinks pointing at
+    /// `socket:[inode]` (dangling targets are fine for `read_link`). The stat
+    /// line puts `start_time` at field 22 — token index 19 after the last `)`.
+    fn fake_proc(root: &Path, pid: i32, comm: &str, start_time: u64, fds: &[(i32, u32)]) {
+        let pid_dir = root.join(pid.to_string());
+        fs::create_dir_all(pid_dir.join("fd")).unwrap();
+        fs::write(pid_dir.join("comm"), format!("{comm}\n")).unwrap();
+        fs::write(
+            pid_dir.join("stat"),
+            format!(
+                "{pid} ({comm}) S 1 {pid} {pid} 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 {start_time} 0 0 0"
+            ),
+        )
+        .unwrap();
+        for (fd, inode) in fds {
+            std::os::unix::fs::symlink(
+                format!("socket:[{inode}]"),
+                pid_dir.join("fd").join(fd.to_string()),
+            )
+            .unwrap();
+        }
+    }
+
+    /// Fresh temp dir per test (no tempfile dep; cleaned up at the end).
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "zensight-netlink-query-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn attribution_joins_inode_to_process() {
+        let root = temp_root("proc");
+        // Non-PID entries must be skipped by the scan.
+        fs::create_dir_all(root.join("self")).unwrap();
+        fake_proc(&root, 100, "nginx", 5000, &[(3, 777)]);
+        fake_proc(&root, 200, "sshd", 6000, &[(4, 888)]);
+
+        let owners = SocketOwnerMap::scan_with_root(&root);
+        let cgroups = CgroupPathMap::default(); // empty — no cgroup ids here
+
+        let mut r = rec(777, None);
+        apply_attribution(&mut r, &owners, &cgroups);
+        assert_eq!(r.pid, Some(100));
+        assert_eq!(r.process.as_deref(), Some("nginx"));
+        assert_eq!(r.proc_start_time, Some(5000));
+        assert_eq!(r.cgroup, None);
+
+        let mut r = rec(888, None);
+        apply_attribution(&mut r, &owners, &cgroups);
+        assert_eq!(r.pid, Some(200));
+        assert_eq!(r.process.as_deref(), Some("sshd"));
+        assert_eq!(r.proc_start_time, Some(6000));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn attribution_unknown_inode_stays_unattributed() {
+        let root = temp_root("proc-miss");
+        fake_proc(&root, 100, "nginx", 5000, &[(3, 777)]);
+
+        let owners = SocketOwnerMap::scan_with_root(&root);
+        let mut r = rec(999, None);
+        apply_attribution(&mut r, &owners, &CgroupPathMap::default());
+        assert_eq!(r.pid, None);
+        assert_eq!(r.process, None);
+        assert_eq!(r.proc_start_time, None);
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn attribution_resolves_cgroup_relative_path() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = temp_root("cgroup");
+        let leaf = root.join("system.slice").join("sshd.service");
+        fs::create_dir_all(&leaf).unwrap();
+
+        let cgroups = CgroupPathMap::scan_with_root(&root);
+        let leaf_id = fs::metadata(&leaf).unwrap().ino();
+
+        let mut r = rec(1, Some(leaf_id));
+        apply_attribution(&mut r, &SocketOwnerMap::new(), &cgroups);
+        assert_eq!(r.cgroup.as_deref(), Some("system.slice/sshd.service"));
+
+        // Unknown cgroup id → None.
+        let mut r = rec(1, Some(u64::MAX));
+        apply_attribution(&mut r, &SocketOwnerMap::new(), &cgroups);
+        assert_eq!(r.cgroup, None);
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn count_procs_counts_numeric_entries_only() {
+        let root = temp_root("count");
+        fs::create_dir_all(root.join("100")).unwrap();
+        fs::create_dir_all(root.join("200")).unwrap();
+        fs::create_dir_all(root.join("self")).unwrap();
+        fs::write(root.join("meminfo"), "x").unwrap();
+
+        assert_eq!(count_procs(root.to_str().unwrap()), 2);
+        assert_eq!(count_procs("/nonexistent-proc-root"), 0);
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn scan_owner_maps_honors_ceiling() {
+        // A ceiling of 0 is always exceeded on a live host → skipped scan.
+        assert!(scan_owner_maps(0).await.is_none());
+    }
+
+    #[test]
+    fn split_endpoint_handles_v4_and_bracketed_v6() {
+        assert_eq!(split_endpoint("10.0.0.1:80"), Some(("10.0.0.1", 80)));
+        assert_eq!(split_endpoint("[::1]:443"), Some(("::1", 443)));
+        assert_eq!(
+            split_endpoint("[fe80::1%eth0]:22"),
+            Some(("fe80::1%eth0", 22))
+        );
+        assert_eq!(split_endpoint("noport"), None);
+        assert_eq!(split_endpoint("host:notnum"), None);
+    }
+
+    #[test]
+    fn closing_state_labels_match_fd_gone_set() {
+        for s in [
+            "time_wait",
+            "close_wait",
+            "fin_wait1",
+            "fin_wait2",
+            "last_ack",
+            "closing",
+        ] {
+            assert!(is_closing_state_label(s), "{s} should be closing");
+        }
+        for s in ["established", "listen", "syn_sent", "close"] {
+            assert!(!is_closing_state_label(s), "{s} should not be closing");
+        }
     }
 }

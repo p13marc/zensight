@@ -117,7 +117,7 @@ async fn main() -> Result<()> {
     )
     .with_health(runner.health());
     #[cfg(feature = "ebpf")]
-    let collector = collector.with_ebpf(ebpf_state);
+    let collector = collector.with_ebpf(ebpf_state.clone());
     // wg-quick peer labels (#268): parse configured wg-quick files once at start.
     let collector = if netlink_config.wireguard.wg_quick_configs.is_empty() {
         collector
@@ -162,12 +162,23 @@ async fn main() -> Result<()> {
         let query_prefix = netlink_config.key_prefix.clone();
         let query_events = event_state.clone();
         let query_routes = route_history.clone();
+        // Live collector toggles: the sockets queryable reads `socket_processes`
+        // at query time so the runtime toggle applies without restart (#304).
+        let query_collect = collect_handle.clone();
+        // Tier-2a close-map attribution handle (#304): the loaded eBPF state on
+        // an `ebpf` build, an always-None placeholder otherwise.
+        #[cfg(feature = "ebpf")]
+        let query_ebpf = ebpf_state.clone();
+        #[cfg(not(feature = "ebpf"))]
+        let query_ebpf = None;
         runner.spawn(async move {
             zensight_sensor_netlink::query::run(
                 query_session,
                 query_prefix,
                 query_events,
                 query_routes,
+                query_collect,
+                query_ebpf,
             )
             .await;
         });

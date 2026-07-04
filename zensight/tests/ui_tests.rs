@@ -1496,6 +1496,12 @@ fn test_netlink_specialized_view() {
                     rcv_rtt_us: 0,
                     lost: 0,
                     reord_seen: 0,
+                    cookie: 42,
+                    cgroup_id: None,
+                    cgroup: None,
+                    pid: Some(4321),
+                    process: Some("sshd".into()),
+                    proc_start_time: Some(987654),
                 },
             ])),
         );
@@ -2343,6 +2349,12 @@ fn test_netlink_sockets_explorer_pagination_and_charts() {
             rcv_rtt_us: 0,
             lost: 0,
             reord_seen: 0,
+            cookie: 0,
+            cgroup_id: None,
+            cgroup: None,
+            pid: None,
+            process: None,
+            proc_start_time: None,
         })
         .collect();
     state.netlink_detail.apply(

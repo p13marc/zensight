@@ -10,8 +10,9 @@
 //! returned as an `Err`; the caller logs one warning and the unprivileged
 //! baseline is untouched.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use aya::{
@@ -23,9 +24,109 @@ use aya::{
     programs::{KProbe, TracePoint},
 };
 use tokio::io::unix::AsyncFd;
-use zensight_sensor_netlink_ebpf_common::{CONNLAT_BUCKETS, ConnRecord, RetransKey};
+use zensight_sensor_netlink_ebpf_common::{
+    CONN_EVENT_ESTABLISHED, CONNLAT_BUCKETS, ConnRecord, RetransKey,
+};
 
 use crate::map::{ConnView, RetransRecord, connlat_percentiles, top_k_retransmits};
+
+/// TCP 4-tuple key for the recent-close map (#304): (local ip, local port,
+/// remote ip, remote port). Addresses are the `Ipv4Addr`/`Ipv6Addr` `Display`
+/// strings — the same formatting `map::fmt_addr` (kernel record side) and
+/// `SocketAddr::ip().to_string()` (sockdiag side) produce, so lookups join.
+type ConnKey = (String, u16, String, u16);
+
+/// Cap on the recent-close map — bounds memory on churn-heavy hosts.
+const CLOSE_MAP_CAP: usize = 16384;
+/// Entries older than this are swept; comfortably covers the 60 s TIME_WAIT
+/// window the map exists to attribute.
+const CLOSE_TTL: Duration = Duration::from_secs(120);
+/// Cap on the live-connection map (#304, tier 2b).
+const LIVE_MAP_CAP: usize = 16384;
+/// Live entries whose close event was missed (ring overrun, load between
+/// events) must not leak forever; the trade-off is that a connection living
+/// longer than this loses its live-map attribution (the /proc scan usually
+/// still covers it — the live map only serves sockets that scan missed).
+const LIVE_TTL: Duration = Duration::from_secs(6 * 3600);
+
+/// Bounded connection → owner map keyed by 4-tuple (#304).
+///
+/// Two instances live in [`EbpfState`]:
+/// * `closed` (tier 2a) — fed at TCP_CLOSE from the tcplife ring; consulted by
+///   `@/query/sockets` for closing-state sockets (TIME_WAIT/CLOSE_WAIT/
+///   FIN_WAIT*/LAST_ACK/CLOSING) that the `/proc` fd scan can never attribute —
+///   their fd is already gone by the time the socket lingers in those states.
+/// * `live` (tier 2b) — fed at client-connect ESTABLISHED, removed at close;
+///   consulted for established sockets the `/proc` scan missed (e.g. other
+///   users' processes when the sensor runs unprivileged).
+///
+/// Standalone (no kernel maps) so the eviction/TTL logic is unit-testable.
+struct OwnerMap {
+    map: Mutex<HashMap<ConnKey, (u32, String, Instant)>>,
+    cap: usize,
+    ttl: Duration,
+}
+
+impl OwnerMap {
+    fn new(cap: usize, ttl: Duration) -> Self {
+        Self {
+            map: Mutex::new(HashMap::new()),
+            cap,
+            ttl,
+        }
+    }
+
+    /// Record who owned a just-closed connection, sweeping expired entries and
+    /// keeping the map bounded.
+    fn note(&self, v: &ConnView) {
+        let Ok(mut map) = self.map.lock() else {
+            return;
+        };
+        let now = Instant::now();
+        if map.len() >= self.cap {
+            let ttl = self.ttl;
+            map.retain(|_, (_, _, ts)| now.duration_since(*ts) < ttl);
+            if map.len() >= self.cap {
+                // Still full after the sweep (churn burst): drop one arbitrary
+                // entry rather than grow unbounded.
+                if let Some(k) = map.keys().next().cloned() {
+                    map.remove(&k);
+                }
+            }
+        }
+        map.insert(
+            (v.local.clone(), v.lport, v.remote.clone(), v.rport),
+            (v.pid, v.comm.clone(), now),
+        );
+    }
+
+    /// Forget a connection (its close event arrived — tier 2b live map).
+    fn remove(&self, v: &ConnView) {
+        if let Ok(mut map) = self.map.lock() {
+            map.remove(&(v.local.clone(), v.lport, v.remote.clone(), v.rport));
+        }
+    }
+
+    /// `(pid, comm)` of a connection noted within the TTL.
+    fn owner(
+        &self,
+        local_ip: &str,
+        lport: u16,
+        remote_ip: &str,
+        rport: u16,
+    ) -> Option<(u32, String)> {
+        let map = self.map.lock().ok()?;
+        let key = (local_ip.to_string(), lport, remote_ip.to_string(), rport);
+        map.get(&key)
+            .filter(|(_, _, ts)| ts.elapsed() < self.ttl)
+            .map(|(pid, comm, _)| (*pid, comm.clone()))
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map.lock().map(|m| m.len()).unwrap_or(0)
+    }
+}
 
 /// Shared, clonable handle to the eBPF-derived state (mirrors `EventState`).
 #[derive(Clone)]
@@ -39,17 +140,61 @@ struct Inner {
     retrans: Mutex<AyaHashMap<MapData, RetransKey, u64>>,
     connlat: Mutex<PerCpuArray<MapData, u64>>,
     connlat_prev: Mutex<[u64; CONNLAT_BUCKETS]>,
+    /// Recently-closed connections → owning (pid, comm) (#304, tier 2a).
+    closed: OwnerMap,
+    /// Live client connections → owning (pid, comm) (#304, tier 2b): inserted
+    /// on an ESTABLISHED event, removed (and pushed to `closed`) at close.
+    live: OwnerMap,
 }
 
 impl EbpfState {
-    /// Push a drained connection record, dropping the oldest past capacity.
+    /// Route one drained kernel record (#304): ESTABLISHED events feed the
+    /// live map (tier 2b); close events retire the live entry, feed the
+    /// recent-close map (tier 2a) and land in the tcplife ring.
+    fn ingest(&self, rec: &ConnRecord) {
+        let v = ConnView::from_record(rec);
+        if rec.event == CONN_EVENT_ESTABLISHED {
+            self.inner.live.note(&v);
+        } else {
+            self.inner.live.remove(&v);
+            self.push_conn(v);
+        }
+    }
+
+    /// Push a completed-connection record, dropping the oldest past capacity,
+    /// and remember its owner in the recent-close map (#304).
     fn push_conn(&self, v: ConnView) {
+        self.inner.closed.note(&v);
         if let Ok(mut q) = self.inner.conns.lock() {
             if q.len() == self.inner.conn_cap {
                 q.pop_front();
             }
             q.push_back(v);
         }
+    }
+
+    /// Owner of a recently-closed connection by 4-tuple, if the tcplife ring
+    /// saw it close within the TTL (#304, tier 2a). Returns `(pid, comm)`.
+    pub fn recent_close_owner(
+        &self,
+        local_ip: &str,
+        lport: u16,
+        remote_ip: &str,
+        rport: u16,
+    ) -> Option<(u32, String)> {
+        self.inner.closed.owner(local_ip, lport, remote_ip, rport)
+    }
+
+    /// Owner of a live client connection by 4-tuple, if an ESTABLISHED event
+    /// was seen and no close has retired it (#304, tier 2b). `(pid, comm)`.
+    pub fn live_conn_owner(
+        &self,
+        local_ip: &str,
+        lport: u16,
+        remote_ip: &str,
+        rport: u16,
+    ) -> Option<(u32, String)> {
+        self.inner.live.owner(local_ip, lport, remote_ip, rport)
     }
 
     /// Recent completed-connection records (oldest first), for `@/query/connections`.
@@ -100,7 +245,9 @@ pub fn load(conn_ring_capacity: usize) -> Result<(Ebpf, EbpfState, RingBuf<MapDa
     let mut bpf = EbpfLoader::new()
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
-            "/zensight-sensor-netlink-ebpf"
+            // The bin-target name of the kernel crate (differs from its package
+            // name to dodge an aya-build target-dir/artifact path collision).
+            "/zensight-netlink-ebpf-prog"
         )))
         .context("load eBPF bytecode")?;
 
@@ -139,6 +286,8 @@ pub fn load(conn_ring_capacity: usize) -> Result<(Ebpf, EbpfState, RingBuf<MapDa
             retrans: Mutex::new(retrans),
             connlat: Mutex::new(connlat),
             connlat_prev: Mutex::new([0u64; CONNLAT_BUCKETS]),
+            closed: OwnerMap::new(CLOSE_MAP_CAP, CLOSE_TTL),
+            live: OwnerMap::new(LIVE_MAP_CAP, LIVE_TTL),
         }),
     };
     Ok((bpf, state, ring))
@@ -169,7 +318,7 @@ pub async fn drain_ring(ring: RingBuf<MapData>, state: EbpfState) {
                 // SAFETY: ConnRecord is repr(C) POD; the kernel reserved exactly
                 // this layout. read_unaligned tolerates ring-buffer alignment.
                 let rec = unsafe { std::ptr::read_unaligned(item.as_ptr() as *const ConnRecord) };
-                state.push_conn(ConnView::from_record(&rec));
+                state.ingest(&rec);
             }
         }
         guard.clear_ready();
@@ -208,5 +357,71 @@ fn bump_memlock() {
     // SAFETY: setrlimit with a valid rlimit pointer; failure is ignored.
     unsafe {
         libc::setrlimit(libc::RLIMIT_MEMLOCK, &lim);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conn(local: &str, lport: u16, pid: u32, comm: &str) -> ConnView {
+        ConnView {
+            pid,
+            comm: comm.into(),
+            family: 4,
+            local: local.into(),
+            lport,
+            remote: "1.1.1.1".into(),
+            rport: 443,
+            duration_ms: 10,
+            tx_bytes: 0,
+            rx_bytes: 0,
+            segs_out: 0,
+            segs_in: 0,
+            retrans: 0,
+        }
+    }
+
+    #[test]
+    fn close_map_records_and_resolves_owner() {
+        let m = OwnerMap::new(16, Duration::from_secs(60));
+        m.note(&conn("10.0.0.1", 5555, 42, "curl"));
+
+        assert_eq!(
+            m.owner("10.0.0.1", 5555, "1.1.1.1", 443),
+            Some((42, "curl".to_string()))
+        );
+        // Different tuple → miss.
+        assert_eq!(m.owner("10.0.0.1", 5556, "1.1.1.1", 443), None);
+        assert_eq!(m.owner("10.0.0.2", 5555, "1.1.1.1", 443), None);
+    }
+
+    #[test]
+    fn close_map_expires_by_ttl() {
+        let m = OwnerMap::new(16, Duration::ZERO);
+        m.note(&conn("10.0.0.1", 5555, 42, "curl"));
+        // TTL zero → immediately stale.
+        assert_eq!(m.owner("10.0.0.1", 5555, "1.1.1.1", 443), None);
+    }
+
+    #[test]
+    fn close_map_stays_bounded() {
+        let m = OwnerMap::new(4, Duration::from_secs(60));
+        for port in 0..100u16 {
+            m.note(&conn("10.0.0.1", port, 1, "x"));
+        }
+        assert!(m.len() <= 4);
+    }
+
+    /// Tier-2b live-map lifecycle: an ESTABLISHED note is resolvable until the
+    /// close event retires it.
+    #[test]
+    fn owner_map_remove_retires_entry() {
+        let m = OwnerMap::new(16, Duration::from_secs(60));
+        let c = conn("10.0.0.1", 5555, 42, "curl");
+        m.note(&c);
+        assert!(m.owner("10.0.0.1", 5555, "1.1.1.1", 443).is_some());
+        m.remove(&c);
+        assert_eq!(m.owner("10.0.0.1", 5555, "1.1.1.1", 443), None);
     }
 }

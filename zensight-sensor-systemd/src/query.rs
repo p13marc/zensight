@@ -263,6 +263,17 @@ async fn unit_detail(
         after: unit.after().await.unwrap_or_default(),
         before: unit.before().await.unwrap_or_default(),
         recent_changes: Vec::new(),
+        main_pid: None,
+        main_pid_start_time: None,
+        // Per-run identity (#303): 16 bytes, hex-encoded; empty/all-zero when
+        // the unit isn't running. Matches journald `_SYSTEMD_INVOCATION_ID`.
+        invocation_id: unit
+            .invocation_id()
+            .await
+            .ok()
+            .filter(|b| !b.is_empty() && b.iter().any(|&x| x != 0))
+            .map(hex_lower),
+        control_group: None,
     };
     // Service-interface resource accounting is best-effort; uncached (one-shot
     // read, avoids the eager GetAll warning on non-service units).
@@ -283,8 +294,25 @@ async fn unit_detail(
             .and_then(accounting)
             .map(|ns| ns / 1000);
         d.tasks = svc.tasks_current().await.ok().and_then(accounting);
+        // Unit ↔ process ↔ log joins (#303): MainPID (0 = not running) with its
+        // stat-ticks start time — the reuse-proof `(pid, start_time)` identity —
+        // and the cgroup path (the sysinfo `process.cgroup` join key).
+        d.main_pid = svc.main_pid().await.ok().filter(|&p| p != 0);
+        d.main_pid_start_time = d
+            .main_pid
+            .and_then(|p| zensight_sensor_core::procutil::proc_start_time_ticks(p as i32));
+        d.control_group = svc.control_group().await.ok().filter(|c| !c.is_empty());
     }
     Some(d)
+}
+
+/// Lowercase hex of a byte string (InvocationID wire form).
+fn hex_lower(bytes: Vec<u8>) -> String {
+    bytes.iter().fold(String::with_capacity(32), |mut s, b| {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 async fn reply_json<T: serde::Serialize>(query: &zenoh::query::Query, records: &T) {
@@ -302,6 +330,12 @@ async fn reply_json<T: serde::Serialize>(query: &zenoh::query::Query, records: &
 mod tests {
     use super::*;
     use zbus::zvariant::OwnedObjectPath;
+
+    #[test]
+    fn invocation_id_hex_encoding() {
+        assert_eq!(hex_lower(vec![0xAB, 0x01, 0xFF]), "ab01ff");
+        assert_eq!(hex_lower(Vec::new()), "");
+    }
 
     fn listed(name: &str, active: &str, job: &str) -> ListedUnit {
         (

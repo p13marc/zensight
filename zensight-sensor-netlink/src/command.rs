@@ -355,6 +355,8 @@ mod tests {
             nftables: false,
             conntrack: false,
             ebpf: false,
+            socket_processes: false,
+            socket_process_max_procs: 0,
         };
         apply_collection(&handle, CollectionCommand::Set { collect: cfg }).await;
         let snap = handle.snapshot().await;

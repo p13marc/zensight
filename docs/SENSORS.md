@@ -75,7 +75,10 @@ Both feed the same model and keyspace.
   data model (`severity_number` 1–24, `severity_text`, `log.record.uid`, and
   `log.record.original` when raw is kept) land in **labels**, alongside structured
   fields — journald fields under `sd.journald.*`, `source_type` =
-  `udp`/`tcp`/`unix`/`journald`.
+  `udp`/`tcp`/`unix`/`journald`. Among the journald fields is
+  `sd.journald.invocation_id` (#303) — the unit's `_SYSTEMD_INVOCATION_ID`, which
+  joins a log line to the exact systemd unit invocation that produced it (matches
+  `UnitDetail.invocation_id`).
 - **Derived rollups** (`derived`, default on): cheap aggregates emitted every
   `derived_interval_secs` under `zensight/logs/<host>/logs/*` — per-severity
   counters (`logs/by_severity/<level>_total`), error/warning totals
@@ -199,6 +202,15 @@ expectations and alerts on deviation.
   `collect` config).
 - **On-demand detail** (`@/query/<topic>`): `routes`, `neighbors`,
   `sockets?state=&port=`, `addresses`, `events`, `route_changes`, `tc`, `xfrm`, `nft`.
+- **Socket → process attribution (#304):** with `collect.socket_processes`
+  (default on), each `sockets` `SocketRecord` is annotated — unprivileged — with
+  `cookie` (stable socket id; prefer over the reusable inode), `cgroup_id`/`cgroup`
+  (v2 path), and the owning `pid`/`process`/`proc_start_time` (the
+  `(pid, start_time)` identity pair). Attribution runs a `/proc` fd-scan **per
+  query request** (in a blocking task, duration logged), skipped above
+  `socket_process_max_procs` (default 4096). Sockets whose owner has exited stay
+  unattributed (`—`). An optional eBPF tier annotates recently-closed and
+  live-established sockets the fd-scan can't see.
 - **eBPF module** (`collect.ebpf`, **default off**, opt-in build — issue #114):
   what `sock_diag` snapshots cannot see — connection *lifecycle* and *attribution*.
   Streams connect-latency gauges `sockets/tcp/connlat_us_{p50,p95}` (through the
@@ -366,7 +378,11 @@ unhealthy on `@/health`, retries — never crashes).
     job_new/removed).
 - **On-demand queries** (never streamed): `@/query/units` → `Vec<UnitRecord>`,
   `@/query/failed` (failed only), `@/query/unit?name=<u>` → `UnitDetail`
-  (props + deps), `@/query/timers` → `Vec<TimerRecord>` (with `overdue` flag, #279),
+  (props + deps; identity fields **#303**: `main_pid` + `main_pid_start_time` (the
+  `(pid, start_time)` pair joining to a sysinfo process / netlink socket owner),
+  `invocation_id` (hex — the same id journald stamps as `_SYSTEMD_INVOCATION_ID`,
+  joining a unit to its log lines), and `control_group` (joins to a process
+  `cgroup`); detail-only, not streamed), `@/query/timers` → `Vec<TimerRecord>` (with `overdue` flag, #279),
   `@/query/events` → recent control-plane timeline, `@/query/cgroups[?path=<rel>]`
   → `CgroupNode` tree (systemd-cgls-style slice→service→scope with per-node
   mem/cpu/tasks/io + pid/comm, #280; unprivileged `/sys/fs/cgroup` walk, capped).

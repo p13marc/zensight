@@ -1762,6 +1762,12 @@ mod tests {
             rcv_rtt_us: 0,
             lost: 0,
             reord_seen: 0,
+            cookie: 0,
+            cgroup_id: None,
+            cgroup: None,
+            pid: None,
+            process: None,
+            proc_start_time: None,
         }
     }
 
@@ -2216,7 +2222,8 @@ mod tests {
             pid: 4821,
             comm,
             family: 2,
-            _pad: [0; 3],
+            event: zensight_sensor_netlink_ebpf_common::CONN_EVENT_CLOSE,
+            _pad: [0; 2],
             saddr,
             daddr,
             sport: 51234,

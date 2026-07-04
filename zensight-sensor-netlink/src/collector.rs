@@ -119,6 +119,7 @@ impl CollectHandle {
             "nftables" => g.nftables = enabled,
             "conntrack" => g.conntrack = enabled,
             "ebpf" => g.ebpf = enabled,
+            "socket_processes" => g.socket_processes = enabled,
             _ => return false,
         }
         true

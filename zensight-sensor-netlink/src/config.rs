@@ -176,6 +176,21 @@ pub struct CollectConfig {
     /// built with `--features ebpf` AND holds CAP_BPF/CAP_NET_ADMIN.
     #[serde(default)]
     pub ebpf: bool,
+    /// Socket→process attribution for the `@/query/sockets` drill-down (#304):
+    /// one `/proc/<pid>/fd` walk per query joins each socket inode to its
+    /// owning process (pid/comm/start_time) and resolves the cgroup v2 id to
+    /// its path. Unprivileged reads; other users' processes are skipped
+    /// without CAP_SYS_PTRACE (run privileged for whole-system attribution).
+    #[serde(default = "default_true")]
+    pub socket_processes: bool,
+    /// Skip the `/proc` fd walk (and reply unattributed) when the host has
+    /// more than this many processes — a query-time cost ceiling (#304).
+    #[serde(default = "default_socket_process_max_procs")]
+    pub socket_process_max_procs: usize,
+}
+
+fn default_socket_process_max_procs() -> usize {
+    4096
 }
 
 impl Default for CollectConfig {
@@ -194,6 +209,8 @@ impl Default for CollectConfig {
             nftables: false,
             conntrack: false,
             ebpf: false,
+            socket_processes: true,
+            socket_process_max_procs: default_socket_process_max_procs(),
         }
     }
 }

@@ -35,17 +35,29 @@ pub struct RetransKey {
     pub addr: [u8; 16],
 }
 
-/// A completed-connection record (tcplife), submitted to the ring buffer when a
-/// socket transitions to `TCP_CLOSE`. Fixed-size, no heap — kernel-safe.
+/// `ConnRecord.event`: the connection closed (tcplife record).
+pub const CONN_EVENT_CLOSE: u8 = 0;
+/// `ConnRecord.event`: the connection reached ESTABLISHED (client-side
+/// connect) — live-attribution record (#304, tier 2b).
+pub const CONN_EVENT_ESTABLISHED: u8 = 1;
+
+/// A connection event record, submitted to the ring buffer when a socket
+/// transitions to `TCP_CLOSE` (`event == CONN_EVENT_CLOSE`, tcplife) or —
+/// tier 2b (#304) — when a client-side connect reaches `TCP_ESTABLISHED`
+/// (`event == CONN_EVENT_ESTABLISHED`). Fixed-size, no heap — kernel-safe.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ConnRecord {
-    /// Wall-clock close time (ns since boot, from `bpf_ktime_get_ns`).
+    /// Wall-clock event time (ns since boot, from `bpf_ktime_get_ns`).
     pub ts_ns: u64,
     pub pid: u32,
     pub comm: [u8; 16],
     pub family: u8,
-    pub _pad: [u8; 3],
+    /// Event kind: [`CONN_EVENT_CLOSE`] or [`CONN_EVENT_ESTABLISHED`].
+    /// Repurposed from the first `_pad` byte (#304) — old producers zeroed
+    /// it, and 0 == close, so the layout AND semantics stay compatible.
+    pub event: u8,
+    pub _pad: [u8; 2],
     pub saddr: [u8; 16],
     pub daddr: [u8; 16],
     pub sport: u16,
@@ -80,5 +92,31 @@ mod tests {
         assert_eq!(connlat_bucket(1), 1);
         assert_eq!(connlat_bucket(4), 3);
         assert_eq!(connlat_bucket(u64::MAX), CONNLAT_BUCKETS as u32 - 1);
+    }
+
+    /// Pins the `repr(C)` layout across the kernel/userspace boundary. The
+    /// tier-2b `event` byte (#304) repurposes the first old `_pad` byte, so
+    /// the record must stay byte-identical to the pre-#304 shape: any change
+    /// here means kernel and userspace disagree on the wire format.
+    #[test]
+    fn conn_record_layout_is_stable() {
+        use core::mem::{align_of, offset_of, size_of};
+
+        assert_eq!(size_of::<ConnRecord>(), 112);
+        assert_eq!(align_of::<ConnRecord>(), 8);
+
+        assert_eq!(offset_of!(ConnRecord, ts_ns), 0);
+        assert_eq!(offset_of!(ConnRecord, pid), 8);
+        assert_eq!(offset_of!(ConnRecord, comm), 12);
+        assert_eq!(offset_of!(ConnRecord, family), 28);
+        // `event` sits exactly where the first padding byte used to be.
+        assert_eq!(offset_of!(ConnRecord, event), 29);
+        assert_eq!(offset_of!(ConnRecord, _pad), 30);
+        assert_eq!(offset_of!(ConnRecord, saddr), 32);
+        assert_eq!(offset_of!(ConnRecord, daddr), 48);
+        assert_eq!(offset_of!(ConnRecord, sport), 64);
+        assert_eq!(offset_of!(ConnRecord, dport), 66);
+        assert_eq!(offset_of!(ConnRecord, duration_ns), 72);
+        assert_eq!(offset_of!(ConnRecord, retrans), 104);
     }
 }

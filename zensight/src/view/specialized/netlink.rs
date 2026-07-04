@@ -404,6 +404,7 @@ fn render_sockets_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
             cell("local", 180),
             cell("remote", 180),
             cell("state", 90),
+            cell("process", 120),
             cell("rtt_us", 70),
             cell("rcv_rtt", 70),
             cell("deliv_bps", 90),
@@ -422,6 +423,7 @@ fn render_sockets_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
                 cell(&s.local, 180),
                 cell(&s.remote, 180),
                 cell(&s.state, 90),
+                cell(&socket_process_label(s), 120),
                 cell(&s.rtt_us.to_string(), 70),
                 cell(&s.rcv_rtt_us.to_string(), 70),
                 cell(&s.delivery_rate.to_string(), 90),
@@ -1514,6 +1516,18 @@ fn family_color(family: &str) -> iced::Color {
         "neigh" | "neighbor" => theme::STATUS_DEGRADED,
         "ipsec" | "xfrm" => theme::SEVERITY_CRITICAL,
         _ => theme::STATUS_UNKNOWN,
+    }
+}
+
+/// Owning-process cell for a socket row (#304): `comm (pid)` when attributed,
+/// an em dash when the sensor couldn't attribute the socket (scan disabled,
+/// unreadable process, or a closing-state socket whose fd is gone).
+fn socket_process_label(s: &SocketRecord) -> String {
+    match (s.process.as_deref(), s.pid) {
+        (Some(comm), Some(pid)) => format!("{comm} ({pid})"),
+        (Some(comm), None) => comm.to_string(),
+        (None, Some(pid)) => format!("({pid})"),
+        (None, None) => "—".to_string(),
     }
 }
 
