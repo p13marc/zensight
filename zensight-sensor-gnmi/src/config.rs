@@ -32,6 +32,10 @@ pub struct GnmiSettings {
     #[serde(default = "default_key_prefix")]
     pub key_prefix: String,
 
+    /// Override the agent-host source id (default: the local hostname).
+    #[serde(default)]
+    pub source: Option<String>,
+
     /// Serialization format
     #[serde(default)]
     pub serialization: SerializationFormat,
@@ -166,6 +170,17 @@ pub enum SerializationFormat {
 
 fn default_key_prefix() -> String {
     "zensight/gnmi".to_string()
+}
+
+impl GnmiSettings {
+    /// The agent host's unified source id: the `source` override, else the hostname.
+    pub fn resolved_source(&self) -> String {
+        self.source.clone().unwrap_or_else(|| {
+            hostname::get()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "unknown".to_string())
+        })
+    }
 }
 
 fn default_sample_interval() -> u64 {

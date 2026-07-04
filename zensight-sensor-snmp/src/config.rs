@@ -38,6 +38,10 @@ pub struct SnmpConfig {
     #[serde(default = "default_key_prefix")]
     pub key_prefix: String,
 
+    /// Override the agent-host source id (default: the local hostname).
+    #[serde(default)]
+    pub source: Option<String>,
+
     /// SNMP trap listener configuration.
     #[serde(default)]
     pub trap_listener: TrapListenerConfig,
@@ -86,6 +90,17 @@ impl Default for MibConfig {
 
 fn default_key_prefix() -> String {
     "zensight/snmp".to_string()
+}
+
+impl SnmpConfig {
+    /// The agent host's unified source id: the `source` override, else the hostname.
+    pub fn resolved_source(&self) -> String {
+        self.source.clone().unwrap_or_else(|| {
+            hostname::get()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "unknown".to_string())
+        })
+    }
 }
 
 /// SNMP trap listener configuration.

@@ -27,20 +27,17 @@ async fn main() -> anyhow::Result<()> {
     // counters. No-op unless `report.enabled` is set in the config. Target
     // `password` is redacted by default; add `redact_extra: ["username"]` in the
     // config if target usernames are sensitive.
-    let report_host = hostname::get()
-        .ok()
-        .and_then(|h| h.into_string().ok())
-        .unwrap_or_else(|| "unknown".to_string());
+    let source = runner.config().gnmi.resolved_source();
     let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
         "gnmi",
-        report_host.clone(),
+        source.clone(),
         runner.config().clone(),
         runner.health(),
     ));
     // Tier-2 directory snapshots (`@/artifact`). No-op unless `snapshot.enabled`.
     let artifacts = runner.config().artifact_limits();
-    let mut runner = runner.with_artifacts(
-        report_host,
+    let mut runner = runner.with_identity(source.clone()).with_artifacts(
+        source,
         vec![
             std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
                 report_source,

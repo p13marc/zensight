@@ -42,10 +42,10 @@ pub struct SysinfoConfig {
     #[serde(default = "default_key_prefix")]
     pub key_prefix: String,
 
-    /// Hostname to use in key expressions.
-    /// Use "auto" to detect automatically (default).
-    #[serde(default = "default_hostname")]
-    pub hostname: String,
+    /// Source id (hostname) to use in key expressions.
+    /// Use "auto" to detect the local hostname automatically (default).
+    #[serde(default = "default_source")]
+    pub source: String,
 
     /// Poll interval in seconds (default: 5).
     #[serde(default = "default_poll_interval")]
@@ -77,7 +77,7 @@ fn default_key_prefix() -> String {
     "zensight/sysinfo".to_string()
 }
 
-fn default_hostname() -> String {
+fn default_source() -> String {
     "auto".to_string()
 }
 
@@ -351,15 +351,15 @@ impl SysinfoSensorConfig {
         Ok(())
     }
 
-    /// Get the hostname to use, resolving "auto" if needed.
-    pub fn get_hostname(&self) -> String {
-        if self.sysinfo.hostname == "auto" {
+    /// Get the source id to use, resolving "auto" to the local hostname.
+    pub fn resolved_source(&self) -> String {
+        if self.sysinfo.source == "auto" {
             hostname::get()
                 .ok()
                 .and_then(|h| h.into_string().ok())
                 .unwrap_or_else(|| "unknown".to_string())
         } else {
-            self.sysinfo.hostname.clone()
+            self.sysinfo.source.clone()
         }
     }
 }
@@ -475,7 +475,7 @@ mod tests {
 
         let config: SysinfoSensorConfig = json5::from_str(json).unwrap();
         assert_eq!(config.sysinfo.key_prefix, "zensight/sysinfo");
-        assert_eq!(config.sysinfo.hostname, "auto");
+        assert_eq!(config.sysinfo.source, "auto");
         assert_eq!(config.sysinfo.poll_interval_secs, 5);
         assert!(config.sysinfo.collect.cpu);
         assert!(config.sysinfo.collect.memory);
@@ -523,7 +523,7 @@ mod tests {
             zenoh: { mode: "peer" },
             sysinfo: {
                 key_prefix: "metrics/host",
-                hostname: "server01",
+                source: "server01",
                 poll_interval_secs: 10,
                 collect: {
                     cpu: true,
@@ -549,7 +549,7 @@ mod tests {
         let config: SysinfoSensorConfig = json5::from_str(json).unwrap();
         config.validate().unwrap();
 
-        assert_eq!(config.sysinfo.hostname, "server01");
+        assert_eq!(config.sysinfo.source, "server01");
         assert_eq!(config.sysinfo.poll_interval_secs, 10);
         assert!(config.sysinfo.collect.processes);
         assert_eq!(config.sysinfo.collect.top_processes, 5);

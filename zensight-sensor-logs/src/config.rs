@@ -34,6 +34,10 @@ pub struct SyslogConfig {
     #[serde(default = "default_key_prefix")]
     pub key_prefix: String,
 
+    /// Override the agent-host source id (default: the local hostname).
+    #[serde(default)]
+    pub source: Option<String>,
+
     /// Listener configurations.
     #[serde(default)]
     pub listeners: Vec<ListenerConfig>,
@@ -644,6 +648,17 @@ fn default_key_prefix() -> String {
     "zensight/logs".to_string()
 }
 
+impl SyslogConfig {
+    /// The agent host's unified source id: the `source` override, else the hostname.
+    pub fn resolved_source(&self) -> String {
+        self.source.clone().unwrap_or_else(|| {
+            hostname::get()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "unknown".to_string())
+        })
+    }
+}
+
 /// Individual listener configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListenerConfig {
@@ -790,6 +805,7 @@ impl Default for SyslogConfig {
     fn default() -> Self {
         Self {
             key_prefix: default_key_prefix(),
+            source: None,
             listeners: vec![ListenerConfig {
                 protocol: ListenerProtocol::Udp,
                 bind: "0.0.0.0:514".to_string(),

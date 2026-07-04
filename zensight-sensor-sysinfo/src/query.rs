@@ -22,10 +22,10 @@ use crate::map::{ProcessSelector, ProcessSort};
 /// Run the per-process detail query channel until the session closes.
 ///
 /// `key_prefix` is the sensor's telemetry prefix (e.g. `zensight/sysinfo`) and
-/// `hostname` the source segment, so the queryable lives at
-/// `<key_prefix>/<hostname>/@/query/processes`.
-pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, hostname: String) {
-    let key = format!("{key_prefix}/{hostname}/@/query/processes");
+/// `source` the source segment, so the queryable lives at
+/// `<key_prefix>/<source>/@/query/processes`.
+pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, source: String) {
+    let key = format!("{key_prefix}/{source}/@/query/processes");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -50,7 +50,7 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, hostname: Str
 }
 
 /// Serve the opt-in eBPF saturation histograms on
-/// `<key_prefix>/<hostname>/@/query/latency` (issue #99).
+/// `<key_prefix>/<source>/@/query/latency` (issue #99).
 ///
 /// Reads the shared snapshot the eBPF poller maintains (runqlat + biolatency,
 /// never streamed) and replies it as JSON. Always declared when the feature is
@@ -59,10 +59,10 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, hostname: Str
 pub async fn run_latency(
     session: Arc<zenoh::Session>,
     key_prefix: String,
-    hostname: String,
+    source: String,
     report: Arc<std::sync::Mutex<crate::map::LatencyReport>>,
 ) {
-    let key = format!("{key_prefix}/{hostname}/@/query/latency");
+    let key = format!("{key_prefix}/{source}/@/query/latency");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {

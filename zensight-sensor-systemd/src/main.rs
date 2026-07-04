@@ -36,6 +36,7 @@ async fn main() -> Result<()> {
         runner.health(),
     ));
     let artifacts = runner.config().artifact_limits();
+    let runner = runner.with_identity(source.clone());
     let mut runner = runner.with_artifacts(
         source.clone(),
         vec![
@@ -102,10 +103,12 @@ async fn main() -> Result<()> {
     let expectations = systemd_config.expectations.clone();
     let alerts_active = systemd_config.alerts.enabled || expectations.is_some();
     let reporter = alerts_active.then(|| {
-        let r = Arc::new(
-            AlertReporter::new(runner.publisher(), Protocol::Systemd, Format::Json)
-                .with_debounce(Duration::from_secs(systemd_config.alerts.for_secs)),
-        );
+        let mut reporter = AlertReporter::new(runner.publisher(), Protocol::Systemd, Format::Json)
+            .with_debounce(Duration::from_secs(systemd_config.alerts.for_secs));
+        if let Some(id) = runner.identity() {
+            reporter = reporter.with_identity(id);
+        }
+        let r = Arc::new(reporter);
         runner.spawn(serve_alerts_query(r.clone()));
         r
     });

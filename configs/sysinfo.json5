@@ -43,9 +43,9 @@
     // Key expression prefix
     key_prefix: "zensight/sysinfo",
 
-    // Hostname for key expressions
-    // Use "auto" to detect automatically, or specify a custom name
-    hostname: "auto",
+    // Source id (hostname) for key expressions
+    // Use "auto" to detect the local hostname automatically, or specify a custom name
+    source: "auto",
 
     // Poll interval in seconds
     poll_interval_secs: 5,

@@ -25,6 +25,9 @@
     // Key expression prefix
     key_prefix: "zensight/modbus",
 
+    // Override the agent-host source id (default: the local hostname).
+    // source: "agent-host-01",
+
     // Devices to poll
     devices: [
       // Example: Modbus TCP device (PLC, power meter, etc.)

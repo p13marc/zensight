@@ -1774,6 +1774,7 @@ fn test_sensors_view() {
             last_poll_duration_ms: 42,
             errors_last_hour: 3,
             metrics_published: 1234,
+            host_id: None,
         },
     );
     // ...with a recent error report.
@@ -1853,6 +1854,7 @@ fn test_sensors_snapshot_dirs() {
             last_poll_duration_ms: 5,
             errors_last_hour: 0,
             metrics_published: 10,
+            host_id: None,
         },
     );
 

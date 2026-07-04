@@ -7,7 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Host-identity envelope (#301)**: every sensor now publishes a registration
+  record on `zensight/_meta/sensors/<name>/<source>` and a self-report
+  `HostEvidence` claim on `zensight/_meta/evidence/host/<sensor>/<source>`
+  (re-emitted every 60 s via cached publishers). The identity carries a
+  **hashed** machine-id (`host_id` = sha256(machine-id + app salt); the raw id
+  never leaves the host), boot id, hostname/fqdn, and non-loopback IPs/MACs.
+  Health snapshots gain `host_id`; alerts gain a `host.id` annotation label.
+
 ### Changed
+
+- **BREAKING (identity, #301): host-id config unified to `source`.** The
+  netlink `netlink.hostname`, netring `netring.sensor_id`, and sysinfo
+  `sysinfo.hostname` config fields are renamed to `source` (same `"auto"` →
+  local-hostname default). The remote-device sensors (snmp, gnmi, modbus,
+  netflow, logs) gain an optional `source` override for the *agent host* id
+  used in debug bundles and artifact routing. Update your JSON5 configs.
+- **BREAKING (identity, #301): `SensorInfo` redesigned and re-keyed.** The
+  (previously never-published) `zensight/_meta/sensors/<name>` record moves to
+  `zensight/_meta/sensors/<name>/<source>` — the per-name key collides across
+  hosts — and now carries identity fields instead of duplicated health data.
+  The dead `zensight/_meta/correlation/<ip>` keyspace and `CorrelationEntry`
+  wire type are deleted (replaced by `_meta/evidence/**` + the upcoming
+  entity keyspace).
+- **Alert keys ignore `host.`-prefixed labels** (the annotation namespace):
+  identity metadata stamped onto alerts never changes alert identity, so
+  firing/resolve pairs stay matched across identity refreshes. Alert keys for
+  alerts without such labels are unchanged.
 
 - **BREAKING (large-data transfer): unified the `@/report` and `@/snapshot`
   control-plane channels into one `@/artifact` channel.** Operator-facing

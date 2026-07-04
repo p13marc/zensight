@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
     let args = SensorArgs::parse_with_default("netring.json5");
     let config = NetringSensorConfig::load(&args.config).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let sensor_id = config.netring.resolved_sensor_id();
+    let source = config.netring.resolved_source();
 
     let runner = SensorRunner::new_with_args("netring", config, Some(&args))
         .await
@@ -29,15 +29,15 @@ async fn main() -> Result<()> {
     // counters. No-op unless `report.enabled` is set in the config.
     let report_source = Arc::new(zensight_sensor_core::SimpleBundleSource::new(
         "netring",
-        sensor_id.clone(),
+        source.clone(),
         runner.config().clone(),
         runner.health(),
     ));
     // Tier-2 directory snapshots (`@/artifact`). No-op unless `snapshot.enabled`.
     // A natural use is pointing a snapshot dir at netring's pcap output directory.
     let artifacts = runner.config().artifact_limits();
-    let runner = runner.with_artifacts(
-        sensor_id.clone(),
+    let runner = runner.with_identity(source.clone()).with_artifacts(
+        source.clone(),
         vec![
             std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
                 report_source,
@@ -50,22 +50,22 @@ async fn main() -> Result<()> {
     );
 
     let mut cfg = runner.config().netring.clone();
-    cfg.sensor_id = sensor_id.clone();
+    cfg.source = source.clone();
     let session = runner.session().clone();
     let key_prefix = cfg.key_prefix.clone();
 
     tracing::info!(
-        "Netring sensor running (prefix: {}, sensor: {}, source: {})",
+        "Netring sensor running (prefix: {}, source: {}, capture: {})",
         key_prefix,
-        sensor_id,
+        source,
         cfg.pcap.clone().unwrap_or_else(|| cfg.interfaces.join(","))
     );
 
-    let reporter = Arc::new(AlertReporter::new(
-        runner.publisher(),
-        Protocol::Netring,
-        Format::Json,
-    ));
+    let reporter = AlertReporter::new(runner.publisher(), Protocol::Netring, Format::Json);
+    let reporter = Arc::new(match runner.identity() {
+        Some(id) => reporter.with_identity(id),
+        None => reporter,
+    });
 
     // Build the netring monitor + drain channels (+ telemetry-channel keepalive
     // + the runtime detection-tuning handle, #121).
@@ -192,7 +192,7 @@ async fn main() -> Result<()> {
         channels,
         session,
         key_prefix,
-        sensor_id,
+        source,
         Format::Json,
         reporter,
         flow_period,
@@ -215,8 +215,8 @@ async fn main() -> Result<()> {
     });
 
     let metadata = serde_json::json!({
-        "sensor_id": cfg.sensor_id,
-        "source": if is_pcap { "pcap" } else { "capture" },
+        "source": cfg.source,
+        "capture": if is_pcap { "pcap" } else { "capture" },
         "collect": { "bandwidth": cfg.collect.bandwidth, "flows": cfg.collect.flows },
         "anomalies": { "port_scan": cfg.anomalies.port_scan },
     });

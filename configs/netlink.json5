@@ -22,7 +22,7 @@
   // Netlink sensor settings
   netlink: {
     key_prefix: "zensight/netlink",
-    hostname: "auto",
+    source: "auto",     // host id used as telemetry `source`; "auto" detects the hostname
     poll_interval_secs: 2,
     collect: {
       interfaces: true,
