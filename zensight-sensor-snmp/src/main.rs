@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     // Enable status publishing
     let runner = runner.with_status_publishing();
 
-    // On-demand debug-report (`@/report`): bundle redacted config + health +
+    // On-demand debug-report (`@/artifact`): bundle redacted config + health +
     // counters. No-op unless `report.enabled` is set in the config. SNMP secrets
     // (community, auth/priv passwords) are caught by the framework's redaction.
     let report_host = hostname::get()
@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
         runner.config().clone(),
         runner.health(),
     ));
-    // Tier-2 directory snapshots (`@/snapshot`). No-op unless `snapshot.enabled`.
+    // Tier-2 directory snapshots (`@/artifact`). No-op unless `snapshot.enabled`.
     let artifacts = runner.config().artifact_limits();
     let mut runner = runner.with_artifacts(
         report_host,

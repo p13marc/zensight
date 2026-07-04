@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
     // Enable status publishing
     let runner = runner.with_status_publishing();
 
-    // On-demand debug-report (`@/report`): bundle redacted config + health +
+    // On-demand debug-report (`@/artifact`): bundle redacted config + health +
     // counters. No-op unless `report.enabled` is set in the config.
     let report_host = hostname::get()
         .ok()

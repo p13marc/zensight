@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
     // Enable status publishing and pin JSON serialization.
     let runner = runner.with_status_publishing().with_format(Format::Json);
 
-    // On-demand debug-report (`@/report`): bundle redacted config + health +
+    // On-demand debug-report (`@/artifact`): bundle redacted config + health +
     // counters. No-op unless `report.enabled` is set in the config.
     let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
         "systemd",

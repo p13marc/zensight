@@ -31,7 +31,7 @@
     },
   },
 
-  // Tier-2 directory snapshots (@/snapshot + @/store + @/tree) — opt-in. When
+  // Tier-2 directory snapshots (@/artifact + @/store + @/tree) — opt-in. When
   // enabled, an operator can download a whole allowlisted directory tree from the
   // GUI (content-addressed + dedup'd + restart-resumable). The operator picks a
   // directory by its logical `name`, never an arbitrary path — `dirs` is the

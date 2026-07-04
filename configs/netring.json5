@@ -27,7 +27,7 @@
     },
   },
 
-  // Tier-2 directory snapshots (@/snapshot + @/store + @/tree) — opt-in. The
+  // Tier-2 directory snapshots (@/artifact + @/store + @/tree) — opt-in. The
   // natural fit for netring: expose a captured-pcap directory for forensic pull
   // (content-addressed, dedup'd, restart-resumable). The operator picks a dir by
   // its logical `name`, never a raw path — `dirs` is the authorization boundary.
