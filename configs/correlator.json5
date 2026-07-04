@@ -1,0 +1,55 @@
+{
+  // Zenoh connection settings
+  zenoh: {
+    // Mode: "client", "peer", or "router"
+    mode: "peer",
+
+    // Endpoints to connect to (for client mode)
+    // connect: ["tcp/localhost:7447"],
+
+    // Endpoints to listen on (for peer/router mode)
+    // listen: ["tcp/0.0.0.0:7448"],
+  },
+
+  // Wire serialization for the entity docs this service publishes: "json" or "cbor".
+  serialization: "json",
+
+  // How long (seconds) a HostEvidence claim is trusted after its last refresh.
+  // Claims older than this are ignored by the merge rules and age out of the
+  // entity view. Sensors refresh live claims at <= TTL/2, so 900s pairs with the
+  // sensors' 420s refresh cadence.
+  evidence_ttl_secs: 900,
+
+  // Debounce (ms) between an evidence change and a recompute, so a burst of
+  // arriving evidence collapses into one merge pass.
+  recompute_debounce_ms: 500,
+
+  // How often (seconds) to re-emit every current entity. Doubles as correlator
+  // liveness and lets a restarting frontend reseed from the AdvancedPublisher
+  // cache. The frontend marks an entity stale after ~3x this period.
+  reemit_secs: 60,
+
+  // Roll device-liveness (zensight/<proto>/@/devices/*/liveness) up into each
+  // entity's status field (worst-of-members). Set false to skip the liveness
+  // subscription entirely.
+  status_from_liveness: true,
+
+  // Identity merge rules (kill-switches). host_id is the strongest join and
+  // effectively never wrong; hostname is the weakest and most false-merge prone,
+  // so disable it on networks with duplicate hostnames.
+  rules: {
+    host_id: true,        // sha256(machine-id) equal  -> confidence 1.0
+    mac_ip: true,         // shared MAC AND shared IP   -> confidence 0.8
+    fqdn: true,           // equal FQDN                 -> confidence 0.5
+    hostname_enabled: true, // equal hostname           -> confidence 0.25
+  },
+
+  // Logging configuration
+  logging: {
+    // Log level: "trace", "debug", "info", "warn", "error"
+    level: "info",
+
+    // Log format: "text" or "json"
+    format: "text",
+  },
+}

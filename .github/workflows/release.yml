@@ -184,11 +184,13 @@ jobs:
         run: |
           cargo build --release -p zensight-exporter-prometheus
           cargo build --release -p zensight-exporter-otel
+          cargo build --release -p zensight-correlator
 
       - name: Build .deb packages for exporters
         run: |
           cargo deb -p zensight-exporter-prometheus --no-build
           cargo deb -p zensight-exporter-otel --no-build
+          cargo deb -p zensight-correlator --no-build
 
       - name: Rename packages with distro suffix
         run: |
@@ -257,6 +259,7 @@ jobs:
             -p zensight-sensor-systemd
           cargo build --release -p zensight-exporter-prometheus
           cargo build --release -p zensight-exporter-otel
+          cargo build --release -p zensight-correlator
 
       - name: Build .rpm packages
         run: |
@@ -267,6 +270,7 @@ jobs:
           done
           cargo generate-rpm -p zensight-exporter-prometheus
           cargo generate-rpm -p zensight-exporter-otel
+          cargo generate-rpm -p zensight-correlator
 
       - name: Rename packages with distro suffix
         run: |
@@ -355,7 +359,8 @@ jobs:
             -p zensight-sensor-netring \
             -p zensight-sensor-systemd \
             -p zensight-exporter-prometheus \
-            -p zensight-exporter-otel
+            -p zensight-exporter-otel \
+            -p zensight-correlator
 
       - name: Stage binaries
         run: |
@@ -363,7 +368,8 @@ jobs:
           for b in zensight-sensor-logs zensight-sensor-sysinfo zensight-sensor-snmp \
                    zensight-sensor-gnmi zensight-sensor-modbus zensight-sensor-netflow \
                    zensight-sensor-netlink zensight-sensor-netring zensight-sensor-systemd \
-                   zensight-exporter-prometheus zensight-exporter-otel; do
+                   zensight-exporter-prometheus zensight-exporter-otel \
+                   zensight-correlator; do
             cp "target/release/$b" out/
           done
 

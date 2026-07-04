@@ -1,0 +1,24 @@
+[Unit]
+Description=ZenSight correlator — merge host evidence into the single-writer entity keyspace
+Documentation=https://github.com/p13marc/zensight
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/zensight-correlator --config /etc/zensight/correlator.json5
+Restart=on-failure
+RestartSec=5s
+# Graceful stop: SIGTERM lets the process drop its single-writer liveliness token
+# before exit so a standby instance can take over cleanly.
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+# Run unprivileged under a transient system user, with a minimal sandbox.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/etc/zensight
+
+[Install]
+WantedBy=multi-user.target

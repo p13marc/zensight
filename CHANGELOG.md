@@ -35,6 +35,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`collect.socket_processes`, default on; ceiling `socket_process_max_procs`,
   default 4096). An optional eBPF tier attributes recently-closed / live-established
   sockets the fd-scan can't reach.
+- **Passive DNS name resolution (#308)**: the netring sensor parses DNS answers
+  (flowscope `NameMap` — CNAME-chain-following, glue-poisoning-safe, PTR-aware)
+  into a client-scoped IP↔name cache. Flow and talker records gain
+  provenance-ranked `dst_names`/`names`, and an FQDN-pivoted RITA beacon detector
+  flags periodic beaconing keyed by destination name (ATT&CK T1071).
+- **Identity evidence feeds (#307)**: netring publishes observed-asset evidence
+  (ARP/LLDP/DHCP inventory → `HostEvidence` with `observer=netring`) and
+  passive-DNS `NameObservation`s; netlink publishes observed-neighbor evidence
+  (ARP/ND table → `HostEvidence`). All third-party claims are rate-limited
+  (per-source min-interval + per-tick cap) and age out by TTL.
+- **`zensight-correlator` — identity correlation service (#305)**: a new
+  single-writer daemon that subscribes to the evidence keyspace and merges
+  claims into `HostEntity` docs on `zensight/_meta/entity/host/<id>` via a
+  deterministic union-find over ranked identity rules (host_id > MAC+IP > FQDN >
+  hostname; IP/MAC-alone never join; a host_id-conflict guard blocks weak
+  false-merges). Entities carry membership provenance (which rule + confidence
+  bound each source), are re-emitted for liveness, tombstoned on retire, and
+  seeded to late joiners via the `_meta/query/entities` queryable; arbitrary-IP
+  names resolve on demand via `_meta/query/names?ip=`. A `--demo` mode feeds
+  synthetic evidence through the real pipeline. A Zenoh liveliness token
+  guarantees a single writer.
 
 ### Changed
 
