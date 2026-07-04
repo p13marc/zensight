@@ -1,6 +1,6 @@
 //! ZenSight identity correlator daemon.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::Parser;
@@ -9,9 +9,9 @@ use tracing::{error, info};
 use zensight_common::config::LoggingConfig;
 
 use zensight_correlator::config::CorrelatorConfig;
-use zensight_correlator::engine::Engine;
+use zensight_correlator::engine::{CorrelatorState, Engine};
 use zensight_correlator::guard::{self, GuardOutcome};
-use zensight_correlator::subscriber;
+use zensight_correlator::{publisher, query, subscriber};
 
 /// Cross-sensor identity correlation service for ZenSight.
 #[derive(Parser, Debug)]
@@ -70,10 +70,13 @@ async fn main() -> anyhow::Result<()> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (tx, rx) = mpsc::channel(ENGINE_CHANNEL_CAP);
-    let (op_tx, mut op_rx) = mpsc::channel::<zensight_correlator::EntityOp>(ENGINE_CHANNEL_CAP);
+    let (op_tx, op_rx) = mpsc::channel::<zensight_correlator::EntityOp>(ENGINE_CHANNEL_CAP);
+
+    // Shared correlation state (engine mutates; queryables read).
+    let state = Arc::new(Mutex::new(CorrelatorState::new(config.clone())));
 
     // Engine.
-    let engine = Engine::new(config.clone(), rx, op_tx);
+    let engine = Engine::new(state.clone(), rx, op_tx);
     let engine_shutdown = shutdown_rx.clone();
     let engine_task = tokio::spawn(async move {
         if let Err(e) = engine.run(engine_shutdown).await {
@@ -81,20 +84,37 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Entity-op consumer. Commit 4 replaces this logging drain with the real
-    // Zenoh entity publisher + queryables.
+    // Entity publisher (drains ops → cached AdvancedPublishers + tombstones).
+    let pub_session = session.clone();
+    let pub_shutdown = shutdown_rx.clone();
+    let serialization = config.serialization;
     let publish_task = tokio::spawn(async move {
-        while let Some(op) = op_rx.recv().await {
-            match op {
-                zensight_correlator::EntityOp::Upsert(e) => {
-                    info!(entity_id = %e.entity_id, members = e.members.len(), "entity upsert")
-                }
-                zensight_correlator::EntityOp::Tombstone(id) => {
-                    info!(entity_id = %id, "entity tombstone")
-                }
-            }
+        if let Err(e) = publisher::run(pub_session, serialization, op_rx, pub_shutdown).await {
+            error!(error = %e, "publisher error");
         }
     });
+
+    // Late-joiner queryables (entities seed + on-demand names).
+    let entities_task = {
+        let s = session.clone();
+        let st = state.clone();
+        let sh = shutdown_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = query::serve_entities(s, st, sh).await {
+                error!(error = %e, "entities queryable error");
+            }
+        })
+    };
+    let names_task = {
+        let s = session.clone();
+        let st = state.clone();
+        let sh = shutdown_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = query::serve_names(s, st, sh).await {
+                error!(error = %e, "names queryable error");
+            }
+        })
+    };
 
     // Subscribers.
     let sub_session = session.clone();
@@ -115,6 +135,8 @@ async fn main() -> anyhow::Result<()> {
         let _ = sub_task.await;
         let _ = engine_task.await;
         let _ = publish_task.await;
+        let _ = entities_task.await;
+        let _ = names_task.await;
     })
     .await;
 

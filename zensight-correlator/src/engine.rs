@@ -263,9 +263,14 @@ fn content_hash(entity: &HostEntity) -> u64 {
     h.finish()
 }
 
-/// Async driver around [`CorrelatorState`].
+/// Shared, lockable correlation state — the engine mutates it; the queryables
+/// (commit 4) read snapshots from it. The lock is only ever held across cheap
+/// in-memory work (never across an `.await`).
+pub type SharedState = std::sync::Arc<std::sync::Mutex<CorrelatorState>>;
+
+/// Async driver around a [`SharedState`].
 pub struct Engine {
-    state: CorrelatorState,
+    state: SharedState,
     rx: mpsc::Receiver<EvidenceMsg>,
     out: mpsc::Sender<EntityOp>,
     debounce: Duration,
@@ -273,17 +278,22 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Create the engine. `rx` receives decoded evidence; `out` carries the
-    /// entity ops to the publisher.
+    /// Create the engine. `state` is shared with the queryables; `rx` receives
+    /// decoded evidence; `out` carries the entity ops to the publisher.
     pub fn new(
-        config: CorrelatorConfig,
+        state: SharedState,
         rx: mpsc::Receiver<EvidenceMsg>,
         out: mpsc::Sender<EntityOp>,
     ) -> Self {
-        let debounce = Duration::from_millis(config.recompute_debounce_ms);
-        let reemit = Duration::from_secs(config.reemit_secs);
+        let (debounce, reemit) = {
+            let s = state.lock().unwrap();
+            (
+                Duration::from_millis(s.config.recompute_debounce_ms),
+                Duration::from_secs(s.config.reemit_secs),
+            )
+        };
         Self {
-            state: CorrelatorState::new(config),
+            state,
             rx,
             out,
             debounce,
@@ -313,7 +323,7 @@ impl Engine {
                 msg = self.rx.recv() => {
                     match msg {
                         Some(msg) => {
-                            self.state.apply(msg);
+                            self.state.lock().unwrap().apply(msg);
                             deadline = Some(Instant::now() + self.debounce);
                         }
                         None => break, // subscribers gone
@@ -321,12 +331,12 @@ impl Engine {
                 }
                 _ = async { sleep_until(deadline.unwrap()).await }, if deadline.is_some() => {
                     deadline = None;
-                    let ops = self.state.recompute(current_timestamp_millis());
+                    let ops = self.state.lock().unwrap().recompute(current_timestamp_millis());
                     debug!(ops = ops.len(), "recompute produced ops");
                     self.forward(ops).await;
                 }
                 _ = reemit.tick() => {
-                    let ops = self.state.reemit(current_timestamp_millis());
+                    let ops = self.state.lock().unwrap().reemit(current_timestamp_millis());
                     debug!(ops = ops.len(), "re-emit");
                     self.forward(ops).await;
                 }
