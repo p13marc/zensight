@@ -14,6 +14,7 @@ pub mod artifact;
 pub mod command;
 pub mod comparison;
 pub mod config;
+pub mod entity;
 pub mod error;
 pub mod evidence;
 pub mod health;
@@ -39,21 +40,23 @@ pub use config::{
     ArtifactLimits, ArtifactReportLimits, ArtifactSnapshotLimits, BaseConfig, CommonArtifactLimits,
     LogFormat, LoggingConfig, SnapshotDir, ZenohConfig, load_config, parse_config,
 };
+pub use entity::{HostEntity, MemberClaim, NameVal};
 pub use error::{Error, Result};
-pub use evidence::HostEvidence;
+pub use evidence::{HostEvidence, NameObservation};
 pub use health::{
     DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, HealthStatus, SensorInfo,
 };
 pub use keyexpr::{
     KEY_PREFIX, KeyExprBuilder, ParseError, ParsedKeyExpr, all_alerts_wildcard,
-    all_errors_wildcard, all_evidence_wildcard, all_health_wildcard, all_liveness_wildcard,
-    all_sensors_wildcard, all_telemetry_wildcard, host_evidence_key, parse_key_expr,
-    sensor_info_key,
+    all_entity_wildcard, all_errors_wildcard, all_evidence_wildcard, all_health_wildcard,
+    all_liveness_wildcard, all_name_evidence_wildcard, all_sensors_wildcard,
+    all_telemetry_wildcard, correlator_alive_key, entities_query_key, entity_key,
+    host_evidence_key, name_observation_key, names_query_key, parse_key_expr, sensor_info_key,
 };
 pub use query_detail::{
     AssetRecord, CgroupNode, CgroupPid, DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord,
-    Ja4hRecord, MatrixRecord, NeighborRecord, ProcessRecord, QuicRecord, RouteRecord, SocketRecord,
-    SshRecord, TalkerRecord, TimerRecord, TlsRecord, UnitDetail, UnitRecord,
+    Ja4hRecord, MatrixRecord, NameInfo, NeighborRecord, ProcessRecord, QuicRecord, RouteRecord,
+    SocketRecord, SshRecord, TalkerRecord, TimerRecord, TlsRecord, UnitDetail, UnitRecord,
 };
 pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;

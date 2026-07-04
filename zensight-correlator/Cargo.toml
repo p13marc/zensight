@@ -1,0 +1,76 @@
+[package]
+name = "zensight-correlator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Cross-sensor identity correlation service for ZenSight — the single writer of the host-entity keyspace"
+
+[dependencies]
+# Internal crates
+zensight-common = { path = "../zensight-common" }
+
+# Zenoh
+zenoh.workspace = true
+zenoh-ext.workspace = true
+
+# Async runtime
+tokio.workspace = true
+
+# Unbounded channels for the Zenoh subscribers (must match zenoh's flume so the
+# `.with(flume::unbounded())` sink type-checks).
+flume = "0.11"
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+ciborium.workspace = true
+
+# Stable entity ids (sha256 of the best evidence key when no machine-id is known)
+sha2.workspace = true
+
+# Configuration
+json5.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# CLI
+clap.workspace = true
+
+# =============================================================================
+# Package metadata for cargo-deb
+# =============================================================================
+[package.metadata.deb]
+maintainer = "Marc Pardo <p13marc@gmail.com>"
+copyright = "2024, Marc Pardo"
+license-file = ["../LICENSE", "0"]
+extended-description = """Cross-sensor identity correlation service for ZenSight.
+Subscribes to the host-evidence keyspace, merges evidence into HostEntity docs
+(union-find over ranked identity rules) and publishes the single-writer entity
+materialized view for the frontend and consumers."""
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/zensight-correlator", "usr/bin/", "755"],
+    ["../packaging/systemd/zensight-correlator.service", "lib/systemd/system/", "644"],
+    ["../configs/correlator.json5", "etc/zensight/correlator.json5", "644"],
+]
+conf-files = ["/etc/zensight/correlator.json5"]
+depends = "$auto"
+
+# =============================================================================
+# Package metadata for cargo-generate-rpm
+# =============================================================================
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/zensight-correlator", dest = "/usr/bin/zensight-correlator", mode = "755" },
+    { source = "../packaging/systemd/zensight-correlator.service", dest = "/lib/systemd/system/zensight-correlator.service", mode = "644" },
+    { source = "../configs/correlator.json5", dest = "/etc/zensight/correlator.json5", mode = "644", config = true },
+]

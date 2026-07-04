@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "zensight",
     "zensight-common",
+    "zensight-correlator",
     "zensight-sensor-core",
     "zensight-exporter-prometheus",
     "zensight-exporter-otel",

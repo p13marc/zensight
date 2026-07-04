@@ -258,6 +258,110 @@ pub fn all_evidence_wildcard() -> String {
     format!("{}/_meta/evidence/**", KEY_PREFIX)
 }
 
+/// Build the name-observation key for one `(sensor, source)` claim, where
+/// `source` is the observed IP slugified (`.`/`:` → `-`) so updates for the
+/// same IP replace in place (#307).
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::name_observation_key;
+///
+/// assert_eq!(
+///     name_observation_key("netring", "10-0-0-9"),
+///     "zensight/_meta/evidence/names/netring/10-0-0-9"
+/// );
+/// ```
+pub fn name_observation_key(sensor: &str, source: &str) -> String {
+    format!("{}/_meta/evidence/names/{}/{}", KEY_PREFIX, sensor, source)
+}
+
+/// Build a wildcard key expression for all passive-DNS name observations
+/// (`zensight/_meta/evidence/names/**`), a subset of [`all_evidence_wildcard`]
+/// (#307).
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::all_name_evidence_wildcard;
+///
+/// assert_eq!(
+///     all_name_evidence_wildcard(),
+///     "zensight/_meta/evidence/names/**"
+/// );
+/// ```
+pub fn all_name_evidence_wildcard() -> String {
+    format!("{}/_meta/evidence/names/**", KEY_PREFIX)
+}
+
+/// Build the entity key for one resolved host, published by the correlator on
+/// `zensight/_meta/entity/host/<entity_id>` (#305).
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::entity_key;
+///
+/// assert_eq!(
+///     entity_key("h_0123456789ab"),
+///     "zensight/_meta/entity/host/h_0123456789ab"
+/// );
+/// ```
+pub fn entity_key(entity_id: &str) -> String {
+    format!("{}/_meta/entity/host/{}", KEY_PREFIX, entity_id)
+}
+
+/// Build a wildcard key expression for the whole entity keyspace — the
+/// correlator's single-writer materialized view (#305).
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::all_entity_wildcard;
+///
+/// assert_eq!(all_entity_wildcard(), "zensight/_meta/entity/**");
+/// ```
+pub fn all_entity_wildcard() -> String {
+    format!("{}/_meta/entity/**", KEY_PREFIX)
+}
+
+/// Build the queryable key a late joiner GETs to seed the full current entity
+/// set from the correlator (#305).
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::entities_query_key;
+///
+/// assert_eq!(entities_query_key(), "zensight/_meta/query/entities");
+/// ```
+pub fn entities_query_key() -> String {
+    format!("{}/_meta/query/entities", KEY_PREFIX)
+}
+
+/// Build the queryable key for on-demand IP→name resolution
+/// (`zensight/_meta/query/names`, selector `?ip=<ip>`), served by the correlator
+/// so arbitrary/external IPs don't flood the bus (#305).
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::names_query_key;
+///
+/// assert_eq!(names_query_key(), "zensight/_meta/query/names");
+/// ```
+pub fn names_query_key() -> String {
+    format!("{}/_meta/query/names", KEY_PREFIX)
+}
+
+/// Build the correlator's liveliness-token key. A second correlator instance
+/// GETs this to detect the first (single-writer guard) before declaring its own
+/// token (#305).
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::correlator_alive_key;
+///
+/// assert_eq!(correlator_alive_key(), "zensight/_meta/correlator/@/alive");
+/// ```
+pub fn correlator_alive_key() -> String {
+    format!("{}/_meta/correlator/@/alive", KEY_PREFIX)
+}
+
 /// Build a wildcard key expression for all sensor-emitted alerts.
 ///
 /// Matches: `zensight/<protocol>/@/alerts/<alert_key>`

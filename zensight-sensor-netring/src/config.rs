@@ -70,6 +70,123 @@ pub struct NetringConfig {
     /// investigation, with focused packet/byte counters as the visible effect.
     #[serde(default)]
     pub capture_focus: CaptureFocusConfig,
+    /// Passive-DNS name cache (issue #308): observe DNS answers on the wire into
+    /// a bounded IP → name map (flowscope `NameMap`), used to enrich flow/talker
+    /// records with destination hostnames and to key the FQDN beacon detector.
+    /// Requires `collect.dns` (the answer stream) — a no-op without it.
+    #[serde(default)]
+    pub names: NamesConfig,
+    /// Host-evidence feed (#307): republish observed assets / passive-DNS names
+    /// as identity evidence on `zensight/_meta/evidence/**` for the correlator.
+    #[serde(default)]
+    pub evidence: EvidenceConfig,
+}
+
+/// Host-evidence feed tuning (#307). Governs how the sensor republishes
+/// third-party identity claims (observed assets, passive-DNS names) onto the
+/// `zensight/_meta/evidence/**` keyspace for the correlator (epic #312).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceConfig {
+    /// Publish observed-device evidence at all. `true` by default.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Minimum seconds between evidence drain ticks — a per-source floor that
+    /// caps churn on a busy L2 segment. Default 60.
+    #[serde(default = "default_evidence_min_interval")]
+    pub min_interval_secs: u64,
+    /// Re-emit every live claim at least this often (liveness refresh) so the
+    /// correlator's TTL never lapses. Default 420 (≤ evidence_ttl/2). Publishes
+    /// happen immediately on change regardless.
+    #[serde(default = "default_evidence_refresh")]
+    pub refresh_secs: u64,
+    /// Hard cap on evidence records emitted per drain tick; the remainder is
+    /// carried to the next tick. Default 200.
+    #[serde(default = "default_evidence_max_per_tick")]
+    pub max_per_tick: usize,
+}
+
+fn default_evidence_min_interval() -> u64 {
+    60
+}
+fn default_evidence_refresh() -> u64 {
+    420
+}
+fn default_evidence_max_per_tick() -> usize {
+    200
+}
+
+impl Default for EvidenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_interval_secs: default_evidence_min_interval(),
+            refresh_secs: default_evidence_refresh(),
+            max_per_tick: default_evidence_max_per_tick(),
+        }
+    }
+}
+
+/// Passive-DNS name-cache tuning (issue #308). Maps onto flowscope's
+/// `NameMapConfig`; every cap is bounded so a CDN-heavy network can't grow the
+/// map without limit. Enabled by default but inert unless `collect.dns` is on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamesConfig {
+    /// Build the name map (still requires `collect.dns`).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Max distinct IPs held (LRU eviction). Default 16384.
+    #[serde(default = "default_names_max_ips")]
+    pub max_ips: usize,
+    /// Max name claims retained per IP (oldest dropped). Default 8.
+    #[serde(default = "default_names_max_claims")]
+    pub max_claims_per_ip: usize,
+    /// TTL (seconds) for claims whose source carries none. Default 300.
+    #[serde(default = "default_names_default_ttl")]
+    pub default_ttl_secs: u64,
+    /// Grace (seconds) added to every TTL before expiry — a connection can
+    /// legitimately start slightly after the lookup. Default 60.
+    #[serde(default = "default_names_grace")]
+    pub grace_secs: u64,
+    /// How often (seconds) the new-mapping delta feed is drained. Default 10.
+    #[serde(default = "default_names_batch_interval")]
+    pub batch_interval_secs: u64,
+    /// Max pending delta-feed entries between drains (oldest dropped past this).
+    /// Default 500.
+    #[serde(default = "default_names_max_batch")]
+    pub max_batch: usize,
+}
+
+fn default_names_max_ips() -> usize {
+    16_384
+}
+fn default_names_max_claims() -> usize {
+    8
+}
+fn default_names_default_ttl() -> u64 {
+    300
+}
+fn default_names_grace() -> u64 {
+    60
+}
+fn default_names_batch_interval() -> u64 {
+    10
+}
+fn default_names_max_batch() -> usize {
+    500
+}
+
+impl Default for NamesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_ips: default_names_max_ips(),
+            max_claims_per_ip: default_names_max_claims(),
+            default_ttl_secs: default_names_default_ttl(),
+            grace_secs: default_names_grace(),
+            batch_interval_secs: default_names_batch_interval(),
+            max_batch: default_names_max_batch(),
+        }
+    }
 }
 
 /// Runtime capture-focus config (netring 0.28, issue #225). Opt-in because the
@@ -393,8 +510,17 @@ pub struct AnomalyConfig {
     #[serde(default)]
     pub rita_beacon: bool,
     /// RITA beacon score threshold (0.0–1.0); higher = stricter. Default 0.9.
+    /// Shared by `rita_beacon` and `rita_beacon_fqdn`.
     #[serde(default = "default_rita_beacon_threshold")]
     pub rita_beacon_threshold: f64,
+    /// FQDN-pivoted RITA beaconing (issue #308): the same robust Bowley+MAD
+    /// statistics as `rita_beacon`, keyed by the destination's best *forward*
+    /// DNS name (from the passive-DNS `names` cache) instead of the 5-tuple —
+    /// C2 that rotates resolved IPs behind one domain accumulates a single
+    /// per-name series where the per-flow detector's state resets. Uses
+    /// `rita_beacon_threshold`. Requires `collect.dns` + `names.enabled`.
+    #[serde(default)]
+    pub rita_beacon_fqdn: bool,
     /// DNS tunneling detection (issue #118): flags a (src, SLD) whose distinct
     /// subdomain-label cardinality over a sliding window crosses
     /// `dns_tunnel_distinct`, or any single query name at/above
@@ -549,10 +675,44 @@ mod tests {
         assert!(!a.rita_beacon);
         assert!(!a.dns_tunnel);
         assert!(!a.nod);
+        // The #308 FQDN-pivoted beacon follows the rita_beacon default (off).
+        assert!(!a.rita_beacon_fqdn);
         // Thresholds carry their documented defaults.
         assert_eq!(a.rita_beacon_threshold, 0.9);
         assert_eq!(a.dns_tunnel_distinct, 50);
         assert_eq!(a.dns_tunnel_qname_len, 100);
+    }
+
+    #[test]
+    fn names_config_defaults_on_with_documented_caps() {
+        // Omitted entirely → derived Default; present-but-empty → serde field
+        // defaults. Both must agree (issue #308).
+        let cfg: NetringSensorConfig =
+            json5::from_str(r#"{ netring: { interfaces: ["eth0"], names: {} } }"#).unwrap();
+        let n = &cfg.netring.names;
+        assert!(n.enabled);
+        assert_eq!(n.max_ips, 16_384);
+        assert_eq!(n.max_claims_per_ip, 8);
+        assert_eq!(n.default_ttl_secs, 300);
+        assert_eq!(n.grace_secs, 60);
+        assert_eq!(n.batch_interval_secs, 10);
+        assert_eq!(n.max_batch, 500);
+        let omitted: NetringSensorConfig =
+            json5::from_str(r#"{ netring: { interfaces: ["eth0"] } }"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(&omitted.netring.names).unwrap(),
+            serde_json::to_value(n).unwrap()
+        );
+    }
+
+    #[test]
+    fn names_config_can_be_disabled_and_tuned() {
+        let cfg: NetringSensorConfig = json5::from_str(
+            r#"{ netring: { interfaces: ["eth0"], names: { enabled: false, max_ips: 64 } } }"#,
+        )
+        .unwrap();
+        assert!(!cfg.netring.names.enabled);
+        assert_eq!(cfg.netring.names.max_ips, 64);
     }
 
     #[test]

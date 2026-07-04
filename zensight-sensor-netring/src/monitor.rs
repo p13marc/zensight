@@ -10,8 +10,8 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use tokio::sync::mpsc;
 use zensight_common::{
-    Alert, AssetRecord, ElephantRecord, FlowRecord, Ja4hRecord, QuicRecord, SshRecord,
-    TelemetryPoint, TlsRecord,
+    Alert, AssetRecord, ElephantRecord, FlowRecord, Ja4hRecord, NameObservation, QuicRecord,
+    SshRecord, TelemetryPoint, TlsRecord,
 };
 
 use crate::command::DetectorHandle;
@@ -59,6 +59,7 @@ use flowscope::detect::patterns::{
     BeaconDetector, BeaconScore, DgaScore, DgaScorer, PortScanDetector, RitaBeaconDetector,
     RitaBeaconScore, ScanScore, ScanVerdict,
 };
+use flowscope::dns::{NameMap, NameMapConfig};
 use flowscope::extract::FiveTupleKey;
 use netring::anomaly::shipped_sinks::ChannelSink;
 use netring::monitor::fingerprint::TlsFingerprint;
@@ -83,6 +84,11 @@ pub type DnsInventory = Arc<Mutex<HashMap<String, (u64, u64)>>>;
 pub type HttpInventory = Arc<Mutex<HashMap<String, (u64, u64)>>>;
 /// Passive asset inventory: `mac -> AssetRecord` for `@/query/assets` (issue #70).
 pub type AssetInventory = Arc<Mutex<HashMap<String, AssetRecord>>>;
+
+/// Set of asset MACs that changed since the last host-evidence drain (#307).
+/// The `on_asset` closure inserts on every inventory event; the evidence feed
+/// task swaps it out each tick to publish only what moved.
+pub type AssetDirty = Arc<Mutex<std::collections::HashSet<String>>>;
 /// Per-flow in-flight HTTP request state: `flow -> (request_start_ms, host)`,
 /// used to derive request→response latency and attribute response status.
 type HttpPending = Arc<Mutex<HashMap<FiveTupleKey, (u64, Option<String>)>>>;
@@ -96,6 +102,10 @@ pub type Ja4hInventory = Arc<Mutex<HashMap<String, Ja4hRecord>>>;
 /// Per-flow SSH banner seen before the KEXINIT, to best-effort correlate a
 /// HASSH fingerprint with its version banner: `flow -> banner`.
 type SshPending = Arc<Mutex<HashMap<FiveTupleKey, String>>>;
+/// Shared passive-DNS name cache (issue #308): IP → provenance-tagged name
+/// claims, fed by the DNS answer handler and read at flow end / talker query
+/// time. `None` when `names.enabled` is off or `collect.dns` is off.
+pub type SharedNameMap = Arc<Mutex<NameMap>>;
 
 /// Max distinct TLS fingerprints retained (cardinality guard).
 const TLS_INVENTORY_CAP: usize = 4096;
@@ -216,11 +226,23 @@ pub struct MonitorChannels {
     pub ja4h_fp: Ja4hInventory,
     /// Passive asset inventory keyed by MAC: served on `@/query/assets` (#70).
     pub assets: AssetInventory,
+    /// MACs whose asset record changed since the last host-evidence drain (#307).
+    /// Fed by `on_asset`, consumed by the asset-evidence feed task in `main`.
+    pub asset_dirty: AssetDirty,
     /// Bounded ring of netring flow records for the canonical IPFIX query
     /// channel `@/query/ipfix` (#223). Populated only when built with
     /// `--features ipfix` and `collect.ipfix` is set; empty otherwise.
     #[cfg(feature = "ipfix")]
     pub ipfix_records: IpfixRing,
+    /// Passive-DNS name cache (issue #308): `Some` when `names.enabled` and
+    /// `collect.dns` are both set. Read by the flow-end enrichment and the
+    /// talker query channel; fed by the DNS answer handler.
+    pub name_map: Option<SharedNameMap>,
+    /// Receiver for passive-DNS name observations forwarded off the delta-feed
+    /// drain task (#307). `Some` iff `name_map` is `Some`; taken by `main` to
+    /// drive the name-evidence publisher. Each item is a batch of newly-observed
+    /// IP→name bindings republished as `NameObservation` evidence.
+    pub name_obs_rx: Option<mpsc::UnboundedReceiver<Vec<NameObservation>>>,
 }
 
 /// Flow exporter that captures netring's canonical `FlowRecord` into a bounded
@@ -310,6 +332,61 @@ struct Flood {
     counter: TimeBucketedCounter<String>,
     cfg: LiveConfig,
     last_hit: Option<(String, u64)>,
+}
+
+/// Per-flow memo cap for the FQDN beacon's name resolution (#308) — bounds the
+/// per-packet fast path; the memo is cleared wholesale at the cap (cheap, rare).
+const FQDN_BEACON_MEMO_CAP: usize = 8192;
+/// Per-name re-alert cooldown for the FQDN beacon (#308), in *event* time —
+/// mirrors flowscope's `observe_gated` default. A scoring beacon re-alerts at
+/// most every cooldown, not per packet.
+const FQDN_BEACON_COOLDOWN: Duration = Duration::from_secs(300);
+/// Cap on the per-name last-emission table (cleared wholesale at the cap).
+const FQDN_BEACON_EMIT_CAP: usize = 4096;
+
+/// State for the FQDN-pivoted RITA beacon detector (#308): the robust detector
+/// keyed by the destination's best forward DNS name, a per-flow memo of that
+/// resolution (one name-map ranking per *flow*, not per packet), and the
+/// per-name emission cooldown. Lives behind one `Mutex` (on_ctx handlers are
+/// `Fn`), held briefly per TCP packet.
+struct FqdnBeacon {
+    detector: RitaBeaconDetector<String>,
+    memo: HashMap<FiveTupleKey, Option<FqdnTarget>>,
+    last_emit: HashMap<String, flowscope::Timestamp>,
+}
+
+/// A resolved beacon target: the server endpoint's best forward name plus the
+/// client/server IPs (derived from which flow endpoint carried the claim).
+#[derive(Debug, Clone)]
+struct FqdnTarget {
+    name: String,
+    client: std::net::IpAddr,
+    server: std::net::IpAddr,
+}
+
+/// Resolve a flow's beacon target from the passive-DNS map (#308): the endpoint
+/// with a client-visible *forward* (A/AAAA) claim is the server; the other is
+/// the client. Flow keys are canonically sorted, so both orders are probed.
+/// `None` for unnamed destinations — an IP-only beacon is the 5-tuple
+/// detector's job.
+fn resolve_fqdn_target(
+    nm: &SharedNameMap,
+    key: &FiveTupleKey,
+    ts: flowscope::Timestamp,
+) -> Option<FqdnTarget> {
+    let map = nm.lock().ok()?;
+    for (server, client) in [(key.b, key.a), (key.a, key.b)] {
+        if let Some(name) =
+            crate::map::best_forward_name(map.names_for_client(client.ip(), server.ip(), ts))
+        {
+            return Some(FqdnTarget {
+                name,
+                client: client.ip(),
+                server: server.ip(),
+            });
+        }
+    }
+    None
 }
 
 /// Map a flowscope severity onto a ZenSight alert severity.
@@ -484,6 +561,39 @@ fn asset_to_record(a: &flowscope::Asset) -> AssetRecord {
     }
 }
 
+/// Map the sensor's [`NamesConfig`](crate::config::NamesConfig) onto flowscope's
+/// `NameMapConfig` (issue #308). `NameMapConfig` is `#[non_exhaustive]`, so this
+/// goes through `Default` + field assignment rather than a struct literal.
+#[allow(clippy::field_reassign_with_default)]
+fn name_map_config(cfg: &crate::config::NamesConfig) -> NameMapConfig {
+    let mut c = NameMapConfig::default();
+    c.max_ips = cfg.max_ips;
+    c.max_claims_per_ip = cfg.max_claims_per_ip;
+    c.default_ttl = Duration::from_secs(cfg.default_ttl_secs);
+    c.grace = Duration::from_secs(cfg.grace_secs);
+    c.max_pending = cfg.max_batch;
+    c
+}
+
+/// Derive the DNS **client** IP from a flow key: the endpoint whose port is not
+/// a DNS service port (53 / mDNS 5353). Flow keys are canonically sorted
+/// (`a < b`), so endpoint position carries no direction — the port does.
+/// `None` when both or neither endpoint looks like a server (server-to-server
+/// forwarding, mDNS peer exchange, nonstandard ports): a claim scoped to the
+/// wrong client would be *invisible* to the real one, so we record nothing
+/// rather than mis-scope. Verified against the pcap fixture in
+/// `tests/passive_dns.rs` (issue #308).
+fn dns_client_ip(key: FiveTupleKey) -> Option<std::net::IpAddr> {
+    const DNS_PORTS: [u16; 2] = [53, 5353];
+    let a_is_server = DNS_PORTS.contains(&key.a.port());
+    let b_is_server = DNS_PORTS.contains(&key.b.port());
+    match (a_is_server, b_is_server) {
+        (true, false) => Some(key.b.ip()),
+        (false, true) => Some(key.a.ip()),
+        _ => None,
+    }
+}
+
 /// What [`build`] returns: the monitor, its emit channels, the telemetry-channel
 /// keepalive, and the runtime detection-tuning handle (#121).
 pub type BuiltMonitor = (
@@ -531,6 +641,17 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
     let ssh: SshInventory = Arc::new(Mutex::new(HashMap::new()));
     let ja4h_fp: Ja4hInventory = Arc::new(Mutex::new(HashMap::new()));
     let assets: AssetInventory = Arc::new(Mutex::new(HashMap::new()));
+    let asset_dirty: AssetDirty = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    // Passive-DNS name cache (issue #308): only built when the DNS answer
+    // stream exists to feed it. Bounded (LRU IPs × per-IP claim cap).
+    let name_map: Option<SharedNameMap> = (cfg.names.enabled && cfg.collect.dns).then(|| {
+        Arc::new(Mutex::new(NameMap::with_config(name_map_config(
+            &cfg.names,
+        ))))
+    });
+    // Passive-DNS name-observation channel (#307): set to `Some` inside the
+    // name-map drain task below (only when the map exists) and handed to `main`.
+    let mut name_obs_rx: Option<mpsc::UnboundedReceiver<Vec<NameObservation>>> = None;
 
     let mut b = Monitor::builder();
     b = b.name(cfg.source.clone());
@@ -642,6 +763,9 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
         let asym_tx = alert_tx.clone();
         let asym_sensor_id = cfg.source.clone();
         let asym_latch = asymmetry_alerted.clone();
+        // Passive-DNS enrichment (#308): the flow-end handler stamps the names
+        // the initiator resolved for the responder onto the served FlowRecord.
+        let nm_flow = name_map.clone();
         b = b.on_ctx::<FlowEnded<Tcp>>(move |e: &FlowEnded<Tcp>, _ctx: &mut Ctx<'_>| {
             // Honest shed: a flow shed at start is dropped from telemetry here
             // (not silently retained), so "data is sampled" is the truth.
@@ -671,6 +795,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
                 &matrix_h,
                 &elephants_h,
                 collect_talkers,
+                nm_flow.as_ref(),
             );
             if let Some(exfil) = &exfil_h {
                 feed_exfil(exfil, e, &exfil_cfg, &exfil_alert_tx, &exfil_sensor_id);
@@ -928,6 +1053,73 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
             }
             Ok(())
         });
+
+        // Passive-DNS answer ingestion (issue #308) — a second `on_ctx::<Dns>`
+        // handler (handlers append) that feeds each response's answer section
+        // into the name map: CNAME-chain-resolved forward claims under the
+        // queried name, PTR reverse claims, answer-TTL-driven expiry. The
+        // client scoping the claims is derived from the flow key by port (the
+        // non-53/5353 endpoint). Allocation-light: one lock + one call.
+        if let Some(nm) = &name_map {
+            let nm_answers = nm.clone();
+            b = b.on_ctx::<Dns>(move |msg: &DnsMessage, ctx: &mut Ctx<'_>| {
+                if let DnsMessage::Response(r) = msg
+                    && let Some(client) = ctx.flow.and_then(dns_client_ip)
+                    && let Ok(mut map) = nm_answers.lock()
+                {
+                    map.observe_response(client, r, ctx.ts);
+                }
+                Ok(())
+            });
+
+            // Delta-feed drain: every `batch_interval_secs`, take the
+            // genuinely-new (ip, name) mappings out of the map's bounded
+            // pending queue (cap `max_batch`) so it stays fresh, and forward
+            // them to the name-evidence publisher (#307) as `NameObservation`s
+            // for the correlator (epic #312). `drain_new` is DESTRUCTIVE — this
+            // is the single owner of the pending queue; do not add a second
+            // drainer. No wall-clock `sweep()` here on purpose: claims are
+            // stamped with *event* time, which under pcap replay is far behind
+            // wall time — expiry is already enforced per-lookup with event
+            // timestamps.
+            let (obs_tx, obs_rx) = mpsc::unbounded_channel::<Vec<NameObservation>>();
+            name_obs_rx = Some(obs_rx);
+            let nm_drain = nm.clone();
+            let interval = cfg.names.batch_interval_secs.max(1);
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(interval));
+                let mut batch = Vec::new();
+                loop {
+                    tick.tick().await;
+                    let Ok(mut map) = nm_drain.lock() else { break };
+                    let drained = map.drain_new_into(&mut batch);
+                    let dropped = map.pending_dropped();
+                    drop(map);
+                    if drained > 0 {
+                        tracing::trace!(
+                            new = drained,
+                            dropped_total = dropped,
+                            "netring: passive-DNS new-name feed drained"
+                        );
+                        let observations: Vec<NameObservation> = batch
+                            .iter()
+                            .map(|(ip, claim)| NameObservation {
+                                observer: "netring".to_string(),
+                                ip: ip.to_string(),
+                                name: claim.name.clone(),
+                                provenance: claim.provenance.as_str().to_string(),
+                                last_seen: (claim.last_seen.to_unix_f64() * 1000.0) as i64,
+                            })
+                            .collect();
+                        // Receiver dropped (evidence disabled / shutdown) → stop
+                        // forwarding but keep draining so the queue can't saturate.
+                        let _ = obs_tx.send(observations);
+                    }
+                    batch.clear();
+                }
+            });
+            tracing::info!("netring: passive-DNS name cache enabled");
+        }
     }
 
     // L7 HTTP RED (issue #20) — cleartext only (TCP/80,8080).
@@ -1348,6 +1540,97 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
         b = b.detect(rita);
     }
 
+    // FQDN-pivoted RITA beaconing (#308): the same Bowley+MAD robust statistics
+    // as `rita_beacon`, keyed by the destination's best *forward* DNS name from
+    // the passive-DNS cache — C2 rotating resolved IPs behind one domain (fast
+    // flux, CDN fronting) accumulates one per-name series where every per-flow
+    // detector's state resets. Hits ride the manual `map::anomaly_alert` path
+    // (like DNS tunnel / NOD) so no generic DetectorScore impl is needed.
+    // Enable/allowlist/threshold are read live (#121); threshold is shared with
+    // `rita_beacon` (`rita_beacon_threshold`).
+    if cfg.anomalies.rita_beacon_fqdn {
+        if let Some(nm) = &name_map {
+            let nm_fqdn = nm.clone();
+            let det = det_cfg.clone();
+            let alerts_h = alert_tx.clone();
+            let sensor_id = cfg.source.clone();
+            let state = Mutex::new(FqdnBeacon {
+                detector: RitaBeaconDetector::new(),
+                memo: HashMap::new(),
+                last_emit: HashMap::new(),
+            });
+            b = b.on_ctx::<FlowPacket>(move |evt: &FlowPacket, _ctx: &mut Ctx<'_>| {
+                if !matches!(evt.proto, L4Proto::Tcp) {
+                    return Ok(());
+                }
+                let c = det.load();
+                if !c.rita_beacon_fqdn {
+                    return Ok(()); // muted at runtime (#121)
+                }
+                let Ok(mut st) = state.lock() else {
+                    return Ok(());
+                };
+                // Per-packet fast path: the flow's target name is memoized on
+                // its first packet (one name-map lock + ranking per flow; a
+                // beacon's later flows re-resolve — new ephemeral port, new key).
+                let target = match st.memo.get(&evt.key) {
+                    Some(t) => t.clone(),
+                    None => {
+                        let resolved = resolve_fqdn_target(&nm_fqdn, &evt.key, evt.ts);
+                        if st.memo.len() >= FQDN_BEACON_MEMO_CAP {
+                            st.memo.clear();
+                        }
+                        st.memo.insert(evt.key, resolved.clone());
+                        resolved
+                    }
+                };
+                let Some(target) = target else {
+                    return Ok(()); // unnamed destination — 5-tuple detectors' job
+                };
+                if allowlisted(&target.name, &c.allowlist) {
+                    return Ok(());
+                }
+                let score = st
+                    .detector
+                    .observe(target.name.clone(), evt.ts, evt.len as u64);
+                if let Some(s) = score
+                    && s.score >= c.rita_beacon_threshold
+                {
+                    let due = st
+                        .last_emit
+                        .get(&target.name)
+                        .is_none_or(|last| evt.ts.saturating_sub(*last) >= FQDN_BEACON_COOLDOWN);
+                    if due {
+                        if st.last_emit.len() >= FQDN_BEACON_EMIT_CAP {
+                            st.last_emit.clear();
+                        }
+                        st.last_emit.insert(target.name.clone(), evt.ts);
+                        let view = map::fqdn_beacon_view(
+                            &target.name,
+                            Some(target.client.to_string()),
+                            Some(target.server.to_string()),
+                            map::RitaSignal {
+                                score: s.score,
+                                ts_score: s.ts_score,
+                                ds_score: s.ds_score,
+                                dur_score: s.dur_score,
+                                mean_interval_secs: s.mean_interval.as_secs_f64(),
+                                n: s.n,
+                            },
+                        );
+                        let _ = alerts_h.send(map::anomaly_alert(&sensor_id, &view));
+                    }
+                }
+                Ok(())
+            });
+            tracing::info!("netring: FQDN-pivoted RITA beaconing enabled");
+        } else {
+            tracing::warn!(
+                "netring: anomalies.rita_beacon_fqdn needs collect.dns + names.enabled; detector disabled"
+            );
+        }
+    }
+
     // Connection-flood detector (issue #18).
     if cfg.anomalies.connection_flood {
         use netring::protocol::event_typed::FlowStarted;
@@ -1546,12 +1829,19 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
             b = b.on_cdp(|_m, _ctx| Ok(()));
         }
         let inv = assets.clone();
+        let dirty = asset_dirty.clone();
         b = b.on_asset(move |asset: &flowscope::Asset, _ctx: &mut Ctx<'_>| {
             let record = asset_to_record(asset);
+            let mac = record.mac.clone();
             if let Ok(mut map) = inv.lock()
                 && (map.contains_key(&record.mac) || map.len() < ASSET_INVENTORY_CAP)
             {
                 map.insert(record.mac.clone(), record);
+                // Flag this MAC for the host-evidence feed (#307). Bounded by the
+                // inventory cap above; a plain set insert is allocation-light.
+                if let Ok(mut d) = dirty.lock() {
+                    d.insert(mac);
+                }
             }
             Ok(())
         });
@@ -1668,8 +1958,11 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
             ssh,
             ja4h_fp,
             assets,
+            asset_dirty,
             #[cfg(feature = "ipfix")]
             ipfix_records,
+            name_map,
+            name_obs_rx,
         },
         keepalive,
         detector_handle,
@@ -1716,6 +2009,7 @@ fn on_flow_ended(
     matrix: &MatrixHist,
     elephants: &ElephantRing,
     collect_talkers: bool,
+    name_map: Option<&SharedNameMap>,
 ) {
     let total_bytes = e.stats.total_bytes();
     let total_packets = e.stats.total_packets();
@@ -1759,7 +2053,7 @@ fn on_flow_ended(
         packets_initiator: e.stats.packets_initiator,
         packets_responder: e.stats.packets_responder,
     };
-    let rec = crate::map::flow_record(
+    let mut rec = crate::map::flow_record(
         ini_s.clone(),
         resp_s.clone(),
         proto,
@@ -1771,6 +2065,15 @@ fn on_flow_ended(
         true,
         dir_counts,
     );
+    // Passive-DNS enrichment (#308): the names the *initiator* resolved for the
+    // responder IP (client-scoped first, global fallback), ranked, top 3. One
+    // short-held lock per ended flow; `e.ts` (the flow's last packet) keeps
+    // expiry in event time, correct under both live capture and pcap replay.
+    if let Some(nm) = name_map
+        && let Ok(map) = nm.lock()
+    {
+        rec.dst_names = crate::map::rank_names(map.names_for_client(ini.ip(), resp.ip(), e.ts));
+    }
     if let Ok(mut r) = records.lock() {
         if r.len() == FLOW_RING_CAP {
             r.pop_front();
@@ -2038,6 +2341,52 @@ mod tests {
         );
         assert_eq!(rec.seen_via, vec!["lldp".to_string()]);
         assert_eq!(rec.last_seen, 1_700_000_000_000);
+    }
+
+    #[test]
+    fn name_map_config_maps_all_fields() {
+        let names = crate::config::NamesConfig {
+            enabled: true,
+            max_ips: 128,
+            max_claims_per_ip: 3,
+            default_ttl_secs: 120,
+            grace_secs: 30,
+            batch_interval_secs: 5,
+            max_batch: 42,
+        };
+        let c = name_map_config(&names);
+        assert_eq!(c.max_ips, 128);
+        assert_eq!(c.max_claims_per_ip, 3);
+        assert_eq!(c.default_ttl, std::time::Duration::from_secs(120));
+        assert_eq!(c.grace, std::time::Duration::from_secs(30));
+        assert_eq!(c.max_pending, 42);
+    }
+
+    #[test]
+    fn dns_client_ip_picks_the_non_server_endpoint() {
+        use flowscope::extractor::L4Proto;
+        let key = |a: &str, b: &str| {
+            FiveTupleKey::new(L4Proto::Udp, a.parse().unwrap(), b.parse().unwrap())
+        };
+        // Canonical order puts the lower endpoint in `a` — the client can land
+        // on either side, so both orientations must resolve to 10.0.0.5.
+        assert_eq!(
+            dns_client_ip(key("10.0.0.5:53444", "10.0.0.8:53")),
+            Some("10.0.0.5".parse().unwrap())
+        );
+        assert_eq!(
+            dns_client_ip(key("10.0.0.8:53", "10.0.0.5:53444")),
+            Some("10.0.0.5".parse().unwrap())
+        );
+        // mDNS (5353) counts as a server port too.
+        assert_eq!(
+            dns_client_ip(key("10.0.0.5:44000", "224.0.0.251:5353")),
+            Some("10.0.0.5".parse().unwrap())
+        );
+        // Ambiguous: both look like servers (forwarding) or neither
+        // (nonstandard port) → no client attribution.
+        assert_eq!(dns_client_ip(key("10.0.0.8:53", "10.0.0.9:53")), None);
+        assert_eq!(dns_client_ip(key("10.0.0.5:40000", "10.0.0.9:8053")), None);
     }
 
     #[test]

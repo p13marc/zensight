@@ -1592,6 +1592,7 @@ fn test_netring_specialized_view() {
             bytes_responder: 574,
             packets_initiator: 4,
             packets_responder: 6,
+            dst_names: Vec::new(),
         }]));
 
     // #247: content is tabbed. Loading/error render inline on the Flows tab;
@@ -2814,6 +2815,7 @@ fn test_netring_overview_chip_and_talkers_tab() {
             bytes: 4096,
             packets: 12,
             flows: 2,
+            names: Vec::new(),
         }]);
     state.specialized_tab = SpecializedTab::TalkersMatrix;
     {

@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
 
     // Build the netring monitor + drain channels (+ telemetry-channel keepalive
     // + the runtime detection-tuning handle, #121).
-    let (mon, channels, keepalive, detector_handle) =
+    let (mon, mut channels, keepalive, detector_handle) =
         monitor::build(&cfg).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let is_pcap = cfg.pcap.is_some();
@@ -120,6 +120,7 @@ async fn main() -> Result<()> {
                 s.clone(),
                 key_prefix.clone(),
                 channels.talkers.clone(),
+                channels.name_map.clone(),
             ));
             runner.spawn(query::run_elephants(
                 s.clone(),
@@ -184,6 +185,45 @@ async fn main() -> Result<()> {
                 channels.ipfix_records.clone(),
             ));
         }
+    }
+
+    // Host-evidence feed (#307): republish observed assets as third-party
+    // identity evidence on `zensight/_meta/evidence/**` for the correlator.
+    // Change-driven with a periodic liveness refresh, capped per tick. Only
+    // runs when the asset inventory is collected and the feed is enabled.
+    if cfg.evidence.enabled && cfg.collect.assets {
+        use zensight_sensor_core::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
+        let ev_registry = Arc::new(AdvancedPublisherRegistry::new(
+            runner.session().clone(),
+            key_prefix.clone(),
+            Format::Json,
+            AdvancedPublisherConfig::cache_only(1),
+        ));
+        runner.spawn(zensight_sensor_netring::evidence::run_asset_evidence(
+            channels.assets.clone(),
+            channels.asset_dirty.clone(),
+            ev_registry,
+            cfg.evidence.clone(),
+        ));
+    }
+
+    // Passive-DNS name-observation feed (#307): republish newly-observed IP→name
+    // bindings (forwarded off the name-map drain task) as `NameObservation`
+    // evidence on `zensight/_meta/evidence/names/**` for the correlator.
+    if cfg.evidence.enabled
+        && let Some(name_obs_rx) = channels.name_obs_rx.take()
+    {
+        use zensight_sensor_core::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
+        let name_registry = Arc::new(AdvancedPublisherRegistry::new(
+            runner.session().clone(),
+            key_prefix.clone(),
+            Format::Json,
+            AdvancedPublisherConfig::cache_only(1),
+        ));
+        runner.spawn(zensight_sensor_netring::evidence::run_name_evidence(
+            name_obs_rx,
+            name_registry,
+        ));
     }
 
     // Drain task (telemetry + anomalies + periodic flow aggregates).

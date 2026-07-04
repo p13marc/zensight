@@ -1,6 +1,8 @@
 # Cross-Sensor Identity Correlation — Analysis, Architecture & Proposal
 
-*Status: draft for review — 2026-07-03 (v2: added Part II, architecture)*
+*Status: implemented — 2026-07-04 (Part II design realized as `zensight-correlator`
++ the `_meta/evidence/**` and `_meta/entity/**` keyspaces; retained as the design
+rationale). See `docs/KEYSPACE.md` §4 for the authoritative as-built keyspace.*
 
 This document analyzes what ZenSight could correlate across sensors (PID ↔ process
 metadata, socket ↔ process, IP ↔ hostname, flow ↔ process, unit ↔ PID, host identity
@@ -543,7 +545,7 @@ Compatibility is allowed to break; this section is the new contract.
 
 ```
 zensight/_meta/evidence/host/<sensor>/<source>      # HostEvidence (self-report or observed)
-zensight/_meta/evidence/names/<sensor>/<source>     # NameObservation deltas (batched, rate-limited)
+zensight/_meta/evidence/names/<sensor>/<ip-slug>    # NameObservation (one per IP, rate-limited)
 ```
 
 ```rust

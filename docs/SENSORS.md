@@ -250,6 +250,10 @@ expectations and alerts on deviation.
   (sockets listen/established/forbid, links up, …).
 - **Control:** `@/commands/expectations` (+ `@/status/expectations`) to
   hot-swap expectations; `@/commands/collection` (+ status) to toggle collectors.
+- **Identity evidence feed (#307):** with `evidence` (default on), the neighbor
+  poll publishes observed-neighbor `HostEvidence` (ARP/ND table → MAC↔IP,
+  `observer=netlink`) to the correlator's `_meta/evidence/**` keyspace, with the
+  same rate-limiting and TTL aging as the netring feed.
 - **Config:** `configs/netlink.json5` (`collect.*` flags, `expectations` block).
 - **GUI (#270):** the netlink device screen is a tabbed, chart-driven view —
   **Overview** (bottleneck gauge + issue badges + interface status strip +
@@ -304,6 +308,20 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
   hosts on the wire from ARP / NDP / LLDP (+ CDP via `collect.asset_cdp`) into a
   MAC-keyed inventory (MAC / IP / hostname / platform / capabilities / seen-via),
   served on `@/query/assets`. Covers hosts that emit no telemetry of their own.
+- **Passive DNS name resolution (#308):** with `collect.dns` + `names` (default
+  on), DNS answers are parsed (flowscope `NameMap` — follows CNAME chains,
+  glue-poisoning-safe, PTR-aware) into a client-scoped IP↔name cache. Flow and
+  talker records gain provenance-ranked names (`dst_names` on `flows`, `names` on
+  `talkers`), and an **FQDN-pivoted RITA beacon** detector
+  (`anomalies.rita_beacon_fqdn`, ATT&CK T1071) flags periodic beaconing keyed by
+  destination name rather than IP.
+- **Identity evidence feeds (#307):** with `evidence` (default on), netring
+  publishes observed-asset `HostEvidence` (from the asset inventory,
+  `observer=netring`) and passive-DNS `NameObservation`s to the correlator's
+  `_meta/evidence/**` keyspace, rate-limited (per-source min-interval + per-tick
+  cap) and TTL-aged. **Gating:** asset evidence requires `collect.assets`; name
+  evidence requires `collect.dns` — with those collectors off (the shipped
+  default), netring emits no evidence even though `evidence.enabled` is true.
 - **Alerts:** `@/alerts/<alert_key>` from detectors and threat-intel —
   - Detectors: TRW port-scan (`anomalies.port_scan`), CV + RITA beaconing
     (`anomalies.beaconing` / `anomalies.rita_beacon`, thresholds

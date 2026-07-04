@@ -221,7 +221,10 @@ Cross-sensor, protocol-independent registries.
 |-----|---------|------------|
 | `zensight/_meta/sensors/<name>/<source>` | `SensorInfo` (identity-stamped registration) | every sensor (runner, 60 s re-emit) |
 | `zensight/_meta/evidence/host/<sensor>/<source>` | `HostEvidence` (identity claim) | every sensor (self-report) + observers (#307) |
-| `zensight/_meta/evidence/names/<sensor>/<ip-slug>` | `NameObservation` (latest name for an IP) | netring passive DNS (#308) |
+| `zensight/_meta/evidence/names/<sensor>/<ip-slug>` | `NameObservation` (latest name for an IP) | netring passive DNS (#307/#308) |
+| `zensight/_meta/entity/host/<entity_id>` | `HostEntity` (merged host, cached + re-emitted) | **correlator only** (single writer, #305) |
+| `zensight/_meta/query/entities` | queryable → `Vec<HostEntity>` (late-joiner seed) | correlator (#305) |
+| `zensight/_meta/query/names?ip=<ip>` | queryable → `Vec<NameVal>` for one IP | correlator (#305) |
 
 ### 4.1 Evidence contract (#301)
 
@@ -241,6 +244,36 @@ The former `zensight/_meta/correlation/<ip>` keyspace (`CorrelationEntry`) is
 **deleted** — it was never published by any sensor; entity resolution moves to
 the correlator's `_meta/entity/**` keyspace (#305).
 
+### 4.2 Entity keyspace — the correlator (single writer, #305)
+
+`zensight-correlator` is the **only** publisher under `zensight/_meta/entity/**`.
+It subscribes to the evidence keyspace above, merges claims into hosts with a
+union-find over ranked identity rules (host_id 1.0 > MAC+IP 0.8 > FQDN 0.5 >
+hostname 0.25; IP and MAC each alone are *never* a join; a host_id-conflict guard
+blocks weaker bridges between two distinct machine-ids), and publishes one
+`HostEntity` per resolved host.
+
+- **Cached + re-emitted**: entities ride a cached AdvancedPublisher (late joiners
+  seed the latest doc) and are re-emitted every `reemit_secs` (default 60 s),
+  which doubles as correlator liveness. Consumers mark an entity stale after
+  ~3× that period; a `SampleKind::Delete` tombstones a retired/merged entity.
+- **Stable ids**: `entity_id = h_<12hex>` — the machine-id hash prefix when known,
+  else `sha256` of the best evidence key (fqdn > mac > hostname > ip). Ids are
+  order-independent and stable across restarts (the merge is a pure function of
+  the live evidence set), so a restart reseeds from the evidence caches with no
+  local database. On an id upgrade (a weak id later gaining a machine-id) the old
+  id is carried in `aliases[]` and tombstoned.
+- **Names served, not broadcast**: fleet-host names ride inline on their
+  `HostEntity`; arbitrary external IPs (every CDN netring ever saw) are resolved
+  on demand via the `_meta/query/names?ip=` queryable to avoid flooding the bus.
+- **Single-writer guard**: on startup the correlator probes a Zenoh liveliness
+  token on `zensight/_meta/correlator/@/alive`; a second instance detects the
+  first and exits rather than double-publishing.
+- **Telemetry keys are deliberately NOT re-keyed** on entity ids — `source` stays
+  human-readable; identity travels as evidence + labels, and the entity layer
+  provides the join. So no sensor or exporter depends on the correlator: if it is
+  down, entities go stale and consumers fall back to per-protocol devices.
+
 ---
 
 ## 5. Wildcards & subscriptions
@@ -256,6 +289,8 @@ the correlator's `_meta/entity/**` keyspace (#305).
 | `zensight/*/@/alerts/*` | exporters (`export_alerts`) | all sensors' alerts, mirrored to Prometheus/OTel |
 | `zensight/_meta/sensors/**` | frontend | sensor registrations (per `<name>/<source>` instance) |
 | `zensight/_meta/evidence/**` | correlator (#305) | host-identity claims + name observations |
+| `zensight/_meta/entity/**` | frontend (#306) | merged `HostEntity` docs + tombstones |
+| `zensight/_meta/query/entities` | frontend (GET at startup) | entity-set seed for late joiners |
 
 Exporters (`prometheus`, `otel`) subscribe to `zensight/**` and **skip**
 control/metadata by filtering keys containing `/@/` or starting with

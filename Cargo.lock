@@ -9883,6 +9883,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "zensight-correlator"
+version = "0.6.2"
+dependencies = [
+ "anyhow",
+ "ciborium",
+ "clap",
+ "flume",
+ "json5",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zenoh",
+ "zenoh-ext",
+ "zensight-common",
+]
+
+[[package]]
 name = "zensight-exporter-otel"
 version = "0.6.2"
 dependencies = [

@@ -11,6 +11,7 @@ pub mod collector;
 pub mod command;
 pub mod config;
 pub mod events;
+pub mod evidence;
 pub mod map;
 pub mod query;
 pub mod route_history;

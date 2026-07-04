@@ -89,9 +89,46 @@
     },
     bandwidth_period_secs: 5,
 
+    // Passive-DNS name cache (#308). Observes DNS answers (CNAME-chain-resolved
+    // A/AAAA claims under the queried name, PTR reverse claims, answer-TTL
+    // expiry) into a bounded IP -> names map used to (a) enrich flow/talker
+    // records with destination hostnames (`dst_names` / `names`) and (b) key the
+    // `rita_beacon_fqdn` detector. Requires `collect.dns`; inert without it.
+    names: {
+      enabled: true,
+      max_ips: 16384,           // LRU cap on distinct IPs tracked
+      max_claims_per_ip: 8,     // provenance-tagged names kept per IP
+      default_ttl_secs: 300,    // TTL for claims whose source carries none
+      grace_secs: 60,           // added to every TTL before expiry
+      batch_interval_secs: 10,  // new-mapping delta-feed drain cadence
+      max_batch: 500,           // pending delta-feed cap between drains
+    },
+
+    // Host-evidence feed (#307): republish observed assets (`collect.assets`)
+    // and passive-DNS name observations (`collect.dns` + `names`) as third-party
+    // identity evidence on `zensight/_meta/evidence/**` for the correlator
+    // (epic #312). Change-driven with a periodic liveness refresh; the per-tick
+    // cap keeps a busy L2 segment from flooding the evidence bus.
+    // NOTE: this feed is gated on its SOURCE collectors — asset evidence needs
+    // `collect.assets`, name evidence needs `collect.dns`. With those off (the
+    // shipped default) netring emits NO evidence even though `enabled` is true.
+    evidence: {
+      enabled: true,
+      min_interval_secs: 60,   // floor between evidence drain ticks
+      refresh_secs: 420,       // re-emit live claims at least this often (<= ttl/2)
+      max_per_tick: 200,       // hard cap on evidence records emitted per tick
+    },
+
     // Pillar A — network anomaly detectors.
     anomalies: {
       port_scan: true,   // TRW port-scan detection -> alerts
+
+      // FQDN-pivoted RITA beaconing (#308, ATT&CK T1071): robust Bowley+MAD
+      // beacon statistics keyed by the destination's best forward DNS name
+      // (from the `names` cache above) instead of the 5-tuple — catches C2
+      // that rotates resolved IPs behind one domain. Shares
+      // `rita_beacon_threshold` (default 0.9). Needs collect.dns + names.
+      rita_beacon_fqdn: false,
 
       // Lateral movement (#123, ATT&CK T1021/T1558): SMB admin-share / IPC$
       // service-pipe access, RDP connection requests, Kerberos kerberoast /

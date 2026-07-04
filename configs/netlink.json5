@@ -69,6 +69,17 @@
       exclude_virtual: false,
     },
 
+    // Host-evidence feed (#307): republish valid ARP/NDP neighbors as
+    // third-party identity evidence on `zensight/_meta/evidence/**` for the
+    // correlator (epic #312). Change-driven with a periodic liveness refresh;
+    // the neighbor poll drives it but `min_interval_secs` floors the rate.
+    evidence: {
+      enabled: true,
+      min_interval_secs: 60,   // floor between evidence feed runs
+      refresh_secs: 420,       // re-emit live claims at least this often (<= ttl/2)
+      max_per_tick: 200,       // hard cap on evidence records emitted per run
+    },
+
     // Pillar B — declared expectations for THIS host (sentinel). The sensor
     // evaluates these and emits alerts (zensight/netlink/@/alerts/*) on
     // deviation, auto-resolving when satisfied again. Expectations added live

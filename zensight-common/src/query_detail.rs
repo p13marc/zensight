@@ -34,6 +34,19 @@ pub struct NeighborRecord {
     pub is_router: bool,
 }
 
+/// One resolved name for a flow endpoint (netring passive DNS, #308): the
+/// hostname a client actually used to reach an IP, tagged with where the
+/// binding came from so a drill-down can weigh it (a forward DNS answer
+/// outranks a reverse PTR guess).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NameInfo {
+    /// Canonical name — lowercased, no trailing dot.
+    pub name: String,
+    /// Provenance slug: `dns_a` / `dns_aaaa` / `dns_cname` / `dns_ptr` /
+    /// `mdns` / `sni` / `dhcp` / `other`.
+    pub provenance: String,
+}
+
 /// One recent network flow (netring), served on demand from a bounded ring of
 /// the most-recently-ended flows. The 5-tuple + volume + lifetime + close reason
 /// — the NetFlow/IPFIX-style detail behind the streamed flow aggregates.
@@ -78,6 +91,11 @@ pub struct FlowRecord {
     pub packets_initiator: u64,
     #[serde(default)]
     pub packets_responder: u64,
+    /// Names the initiator resolved for the responder IP (netring passive DNS,
+    /// #308) — best-ranked first, at most 3. Empty when the sensor's name cache
+    /// is off / cold. Additive (`#[serde(default)]` for old records).
+    #[serde(default)]
+    pub dst_names: Vec<NameInfo>,
 }
 
 /// One observed TLS client fingerprint (passive asset inventory from netring's
@@ -159,6 +177,11 @@ pub struct TalkerRecord {
     pub bytes: u64,
     pub packets: u64,
     pub flows: u64,
+    /// Names observed for `dst` on the wire (netring passive DNS, #308) —
+    /// best-ranked first, at most 3. Empty when the name cache is off / cold.
+    /// Additive (`#[serde(default)]` for old records).
+    #[serde(default)]
+    pub names: Vec<NameInfo>,
 }
 
 /// One cell of the netring traffic matrix (#122): a directed `src → dst` pair with
@@ -501,4 +524,44 @@ pub struct CgroupNode {
 pub struct CgroupPid {
     pub pid: u32,
     pub comm: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Old producers don't emit the #308 name fields — records must still
+    /// decode (additive-compatibility pin for `dst_names` / `names`).
+    #[test]
+    fn flow_and_talker_records_decode_without_name_fields() {
+        let flow: FlowRecord = serde_json::from_str(
+            r#"{"src":"10.0.0.5:40000","dst":"93.184.216.34:443","proto":"tcp",
+                "bytes":100,"packets":2,"duration_ms":5,"reason":"fin"}"#,
+        )
+        .unwrap();
+        assert!(flow.dst_names.is_empty());
+
+        let talker: TalkerRecord = serde_json::from_str(
+            r#"{"dst":"93.184.216.34:443","bytes":100,"packets":2,"flows":1}"#,
+        )
+        .unwrap();
+        assert!(talker.names.is_empty());
+    }
+
+    /// The #308 name fields round-trip with their provenance slugs intact.
+    #[test]
+    fn name_info_round_trips() {
+        let rec = TalkerRecord {
+            dst: "93.184.216.34:443".into(),
+            bytes: 1,
+            packets: 1,
+            flows: 1,
+            names: vec![NameInfo {
+                name: "beacon.evil.example".into(),
+                provenance: "dns_a".into(),
+            }],
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        assert_eq!(serde_json::from_str::<TalkerRecord>(&json).unwrap(), rec);
+    }
 }

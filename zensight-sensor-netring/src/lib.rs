@@ -10,6 +10,7 @@
 
 pub mod command;
 pub mod config;
+pub mod evidence;
 pub mod exfil;
 pub mod lateral;
 pub mod map;
