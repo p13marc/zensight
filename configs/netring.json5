@@ -109,6 +109,9 @@
     // identity evidence on `zensight/_meta/evidence/**` for the correlator
     // (epic #312). Change-driven with a periodic liveness refresh; the per-tick
     // cap keeps a busy L2 segment from flooding the evidence bus.
+    // NOTE: this feed is gated on its SOURCE collectors — asset evidence needs
+    // `collect.assets`, name evidence needs `collect.dns`. With those off (the
+    // shipped default) netring emits NO evidence even though `enabled` is true.
     evidence: {
       enabled: true,
       min_interval_secs: 60,   // floor between evidence drain ticks
