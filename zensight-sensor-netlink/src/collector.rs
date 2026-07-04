@@ -164,6 +164,9 @@ pub struct Collector {
     /// readers. `None` unless the feature is built and load+attach succeeded.
     #[cfg(feature = "ebpf")]
     ebpf: Option<crate::ebpf::EbpfState>,
+    /// Per-source dedup/refresh bookkeeping for the neighbor host-evidence feed
+    /// (#307). `poll_neighbors` is `&self`, so this needs interior mutability.
+    evidence_state: std::sync::Mutex<crate::evidence::EvidenceState>,
 }
 
 impl Collector {
@@ -198,6 +201,7 @@ impl Collector {
             wg_labels: std::collections::HashMap::new(),
             #[cfg(feature = "ebpf")]
             ebpf: None,
+            evidence_state: std::sync::Mutex::new(crate::evidence::EvidenceState::default()),
         }
     }
 
@@ -580,6 +584,58 @@ impl Collector {
         let summary = aggregate_neighbors(&neighbors);
         for point in map::neighbor_points(&self.host, &summary) {
             self.publish(&point).await;
+        }
+        // Host-evidence feed (#307): republish valid neighbors as third-party
+        // identity evidence. Change-driven with a periodic liveness refresh and
+        // a per-run cap; the poll loop drives it but the `min_interval_secs`
+        // floor keeps a fast poll from spamming the evidence bus.
+        if self.config.evidence.enabled {
+            self.publish_neighbor_evidence(&neighbors).await;
+        }
+    }
+
+    /// Publish observed-neighbor `HostEvidence` (#307). Decides what moved under
+    /// the dedup lock, then publishes off-lock (no lock held across `.await`).
+    async fn publish_neighbor_evidence(&self, neighbors: &[NeighborMessage]) {
+        let ev = &self.config.evidence;
+        let now = zensight_common::current_timestamp_millis();
+        let refresh_ms = (ev.refresh_secs.max(1) as i64) * 1000;
+        let min_ms = (ev.min_interval_secs as i64) * 1000;
+
+        let mut to_publish = {
+            let Ok(mut st) = self.evidence_state.lock() else {
+                return;
+            };
+            if !st.may_run(now, min_ms) {
+                return;
+            }
+            let claims = crate::evidence::neighbor_evidence(neighbors, now);
+            st.select(claims, now, refresh_ms)
+        };
+
+        if to_publish.len() > ev.max_per_tick {
+            let dropped = to_publish.len() - ev.max_per_tick;
+            to_publish.truncate(ev.max_per_tick);
+            tracing::warn!(
+                dropped,
+                cap = ev.max_per_tick,
+                "netlink: neighbor-evidence run over cap; deferring remainder"
+            );
+        }
+
+        let mut published = Vec::with_capacity(to_publish.len());
+        for claim in to_publish {
+            let key = zensight_common::host_evidence_key("netlink", &claim.source);
+            if let Err(e) = self.registry.publish_serializable(&key, &claim).await {
+                tracing::warn!(error = %e, source = %claim.source, "netlink: neighbor-evidence publish failed");
+                continue;
+            }
+            published.push(claim);
+        }
+        // Record only the claims that actually went out, so deferred (over-cap)
+        // or failed publishes are retried next run instead of being suppressed.
+        if let Ok(mut st) = self.evidence_state.lock() {
+            st.commit(&published, now);
         }
     }
 
