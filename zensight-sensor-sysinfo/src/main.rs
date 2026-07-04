@@ -72,8 +72,9 @@ async fn main() -> Result<()> {
         let q_session = session.clone();
         let q_prefix = sysinfo_config.key_prefix.clone();
         let q_source = source.clone();
+        let q_scrub = sysinfo_config.processes.clone();
         runner.spawn(async move {
-            zensight_sensor_sysinfo::query::run(q_session, q_prefix, q_source).await;
+            zensight_sensor_sysinfo::query::run(q_session, q_prefix, q_source, q_scrub).await;
         });
     }
 

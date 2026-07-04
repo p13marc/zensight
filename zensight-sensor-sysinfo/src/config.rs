@@ -71,6 +71,10 @@ pub struct SysinfoConfig {
     /// `collect.saturation_score`.
     #[serde(default)]
     pub saturation: crate::saturation::SaturationConfig,
+
+    /// Process-explorer privacy policy (#302): argv secret scrubbing.
+    #[serde(default)]
+    pub processes: ProcessScrubConfig,
 }
 
 fn default_key_prefix() -> String {
@@ -83,6 +87,37 @@ fn default_source() -> String {
 
 fn default_poll_interval() -> u64 {
     5
+}
+
+/// Privacy policy for the `@/query/processes` command lines (#302).
+///
+/// Secrets must not transit Zenoh even on query channels: scrubbing is ON by
+/// default, with `strip_proc_arguments` as the belt-and-braces escape hatch
+/// (publish the executable name only) and `scrub_args: false` for fully
+/// trusted environments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessScrubConfig {
+    /// Replace secret-looking argv values (Datadog-style denylist) before
+    /// publishing cmdlines. Default true.
+    #[serde(default = "default_true")]
+    pub scrub_args: bool,
+    /// Extra sensitive argv keys on top of the built-in list; `*` wildcards
+    /// allowed (e.g. `"*_token"`).
+    #[serde(default)]
+    pub custom_sensitive_words: Vec<String>,
+    /// Publish no arguments at all (cmdline stays empty). Default false.
+    #[serde(default)]
+    pub strip_proc_arguments: bool,
+}
+
+impl Default for ProcessScrubConfig {
+    fn default() -> Self {
+        ProcessScrubConfig {
+            scrub_args: true,
+            custom_sensitive_words: Vec::new(),
+            strip_proc_arguments: false,
+        }
+    }
 }
 
 /// Configuration for which metrics to collect.

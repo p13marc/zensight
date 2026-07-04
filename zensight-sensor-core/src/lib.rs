@@ -40,6 +40,7 @@ mod error;
 mod health;
 mod identity;
 mod liveliness;
+pub mod procutil;
 mod publisher;
 pub mod report;
 mod runner;

@@ -16,15 +16,71 @@ use std::sync::Arc;
 
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 use zensight_common::query_detail::ProcessRecord;
+use zensight_sensor_core::scrub::{ArgScrubber, CMDLINE_CAP_BYTES};
 
+use crate::config::ProcessScrubConfig;
 use crate::map::{ProcessSelector, ProcessSort};
+
+/// How cmdlines leave the host (#302): compiled once from
+/// [`ProcessScrubConfig`], shared by every query.
+struct CmdlinePolicy {
+    /// `None` = arguments stripped entirely.
+    scrubber: Option<ArgScrubber>,
+    /// Scrubbing disabled (`scrub_args: false`) — raw argv, still capped.
+    raw: bool,
+}
+
+impl CmdlinePolicy {
+    fn new(cfg: &ProcessScrubConfig) -> Self {
+        if cfg.strip_proc_arguments {
+            CmdlinePolicy {
+                scrubber: None,
+                raw: false,
+            }
+        } else if cfg.scrub_args {
+            CmdlinePolicy {
+                scrubber: Some(ArgScrubber::new(&cfg.custom_sensitive_words)),
+                raw: false,
+            }
+        } else {
+            CmdlinePolicy {
+                scrubber: None,
+                raw: true,
+            }
+        }
+    }
+
+    fn render(&self, argv: &[String]) -> String {
+        if let Some(scrubber) = &self.scrubber {
+            scrubber.scrub_cmdline(argv, CMDLINE_CAP_BYTES)
+        } else if self.raw {
+            let mut s = argv.join(" ");
+            if s.len() > CMDLINE_CAP_BYTES {
+                let mut end = CMDLINE_CAP_BYTES;
+                while end > 0 && !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                s.truncate(end);
+                s.push('…');
+            }
+            s
+        } else {
+            String::new() // strip_proc_arguments
+        }
+    }
+}
 
 /// Run the per-process detail query channel until the session closes.
 ///
 /// `key_prefix` is the sensor's telemetry prefix (e.g. `zensight/sysinfo`) and
 /// `source` the source segment, so the queryable lives at
 /// `<key_prefix>/<source>/@/query/processes`.
-pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, source: String) {
+pub async fn run(
+    session: Arc<zenoh::Session>,
+    key_prefix: String,
+    source: String,
+    scrub: ProcessScrubConfig,
+) {
     let key = format!("{key_prefix}/{source}/@/query/processes");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
@@ -35,16 +91,19 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, source: Strin
     };
     tracing::info!(key = %key, "per-process detail query channel ready");
 
+    let policy = Arc::new(CmdlinePolicy::new(&scrub));
     while let Ok(query) = queryable.recv_async().await {
         let sel = ProcessSelector::parse(query.parameters().as_str());
+        let policy = policy.clone();
         // The per-pid /proc walk is blocking — keep it off the runtime thread.
-        let records = match tokio::task::spawn_blocking(move || collect_processes(sel)).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, "query: process walk task failed");
-                Vec::new()
-            }
-        };
+        let records =
+            match tokio::task::spawn_blocking(move || collect_processes(sel, &policy)).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "query: process walk task failed");
+                    Vec::new()
+                }
+            };
         reply_json(&query, &records).await;
     }
 }
@@ -92,7 +151,7 @@ async fn reply_json<T: serde::Serialize>(query: &zenoh::query::Query, records: &
 
 /// Build a fresh `System`, snapshot every process, rank by the selector, and
 /// return the top-N as wire DTOs. Blocking — call under `spawn_blocking`.
-fn collect_processes(sel: ProcessSelector) -> Vec<ProcessRecord> {
+fn collect_processes(sel: ProcessSelector, policy: &CmdlinePolicy) -> Vec<ProcessRecord> {
     let mut sys = System::new();
     // CPU usage needs two samples a short interval apart to be meaningful.
     sys.refresh_processes_specifics(
@@ -123,6 +182,12 @@ fn collect_processes(sel: ProcessSelector) -> Vec<ProcessRecord> {
                 io_read: io.total_read_bytes,
                 io_write: io.total_written_bytes,
                 uid: p.user_id().and_then(|u| u.to_string().parse::<u32>().ok()),
+                cmdline: String::new(),
+                exe: None,
+                ppid: None,
+                cgroup: None,
+                start_time: 0,
+                user: None,
             }
         })
         .collect();
@@ -137,6 +202,31 @@ fn collect_processes(sel: ProcessSelector) -> Vec<ProcessRecord> {
         ProcessSort::Io => records.sort_by_key(|r| std::cmp::Reverse(r.io_read + r.io_write)),
     }
     records.truncate(sel.top);
+
+    // Identity enrichment (#302) AFTER sort+truncate, so the per-pid procfs
+    // reads are bounded by `top` (≤ 200), not by the process count.
+    let users = sysinfo::Users::new_with_refreshed_list();
+    for rec in &mut records {
+        if let Some(p) = sys.process(sysinfo::Pid::from_u32(rec.pid as u32)) {
+            let argv: Vec<String> = p
+                .cmd()
+                .iter()
+                .map(|s| s.to_string_lossy().into_owned())
+                .collect();
+            rec.cmdline = policy.render(&argv);
+            // May be None for other users' processes without ptrace perms —
+            // documented degradation, not an error.
+            rec.exe = p.exe().map(|e| e.display().to_string());
+            rec.ppid = p.parent().map(|pp| pp.as_u32() as i32);
+            rec.user = p
+                .user_id()
+                .and_then(|uid| users.get_user_by_id(uid))
+                .map(|u| u.name().to_string());
+        }
+        rec.start_time =
+            zensight_sensor_core::procutil::proc_start_time_ticks(rec.pid).unwrap_or(0);
+        rec.cgroup = zensight_sensor_core::procutil::proc_cgroup_v2(rec.pid);
+    }
     records
 }
 
@@ -152,11 +242,35 @@ mod tests {
             sort: ProcessSort::Mem,
             top: 5,
         };
-        let recs = collect_processes(sel);
+        let policy = CmdlinePolicy::new(&ProcessScrubConfig::default());
+        let recs = collect_processes(sel, &policy);
         assert!(recs.len() <= 5);
         // Sorted descending by rss.
         for w in recs.windows(2) {
             assert!(w[0].rss >= w[1].rss);
         }
+        // Enrichment: every record has a start_time (own/visible processes);
+        // cmdline stays within the cap.
+        for r in &recs {
+            assert!(r.cmdline.len() <= CMDLINE_CAP_BYTES + '…'.len_utf8());
+        }
+        assert!(recs.iter().any(|r| r.start_time > 0));
+    }
+
+    #[test]
+    fn cmdline_policy_modes() {
+        let argv = vec!["app".to_string(), "--password=x".to_string()];
+        let scrub = CmdlinePolicy::new(&ProcessScrubConfig::default());
+        assert_eq!(scrub.render(&argv), "app --password=********");
+        let strip = CmdlinePolicy::new(&ProcessScrubConfig {
+            strip_proc_arguments: true,
+            ..Default::default()
+        });
+        assert_eq!(strip.render(&argv), "");
+        let raw = CmdlinePolicy::new(&ProcessScrubConfig {
+            scrub_args: false,
+            ..Default::default()
+        });
+        assert_eq!(raw.render(&argv), "app --password=x");
     }
 }
