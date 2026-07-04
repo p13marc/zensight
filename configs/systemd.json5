@@ -6,14 +6,18 @@
     serialization: "json",           // "json" or "cbor"
   },
 
-  // On-demand debug reports (@/report) — opt-in. When enabled, an operator can
-  // download a redacted tar.zst bundle (config + health + counters) from the GUI.
-  report: {
-    enabled: false,
-    max_bytes: 67108864,   // 64 MiB cap on the (uncompressed) bundle
-    cooldown_secs: 30,
-    ttl_secs: 600,
-    chunk_size: 524288,
+  // On-demand artifact channel (@/artifact) — opt-in per kind. When enabled,
+  // an operator can download a redacted tar.zst debug bundle (and, for
+  // snapshot, an allowlisted directory) from the GUI. Bounded + rate-limited;
+  // secrets are redacted.
+  artifacts: {
+    report: {
+      enabled: false,
+      max_bytes: 67108864,   // 64 MiB cap on the (uncompressed) bundle
+      cooldown_secs: 30,
+      ttl_secs: 600,
+      chunk_size: 524288,
+    },
   },
 
   // systemd sensor settings

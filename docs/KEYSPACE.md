@@ -99,15 +99,12 @@ Per-sensor operational channels. All are derived from the sensor's `key_prefix`.
 | `@/commands/<topic>` | subscribe | topic command | sensors with runtime control |
 | `@/status/<topic>` | queryable | topic status | sensors with runtime control |
 | `@/query/<topic>` | queryable | topic detail (`Vec<Record>`) | netlink, netring |
-| `@/report/request` | subscribe | `ReportRequest` (operator-initiated) | sensors with report support |
-| `@/report/status` | queryable | `ReportStatus` (lifecycle) | sensors with report support |
-| `@/report/blob/<id>/**` | queryable | `Manifest` + chunk bytes (`zenoh-blob`) | sensors with report support |
-| `@/report/cancel` | subscribe | report id (ULID) — free the artifact early | sensors with report support |
-| `@/snapshot/request` | subscribe | `SnapshotRequest` (operator-initiated, Tier-2) | sensors with snapshot support |
-| `@/snapshot/status` | queryable | `SnapshotStatus` (lifecycle + advertised dirs) | sensors with snapshot support |
-| `@/snapshot/cancel` | subscribe | snapshot id (ULID) — free the chunk store early | sensors with snapshot support |
-| `@/store/<algo>/<hash>` | queryable | content-addressed chunk bytes (`zenoh-blob` Tier-2) | sensors with snapshot support |
-| `@/tree/<id>` | queryable | a `TreeIndex` (depth-first entries) | sensors with snapshot support |
+| `@/artifact/request` | subscribe | `ArtifactRequest` (operator-initiated) | sensors with artifact support |
+| `@/artifact/status` | queryable | `ArtifactStatus { kinds: Vec<KindStatus> }` (one per kind) | sensors with artifact support |
+| `@/artifact/cancel` | subscribe | artifact id (ULID) — free an in-flight/ready artifact early | sensors with artifact support |
+| `@/artifact/blob/<id>/**` | queryable | `Manifest` + chunk bytes (`zenoh-blob`) — Tier-1 `Blob` delivery | sensors with artifact support |
+| `@/store/<algo>/<hash>` | queryable | content-addressed chunk bytes (`zenoh-blob` Tier-2, immutable ⇒ cacheable fleet-wide) — `Tree` delivery | sensors with artifact support |
+| `@/tree/<id>` | queryable | a `TreeIndex` (depth-first `Entry` list) — Tier-2 `Tree` delivery | sensors with artifact support |
 
 `<alert_key>` is a stable hash of `source + rule + sorted-labels`
 ([`Alert::alert_key`]) so the same logical alert always maps to the same key
@@ -124,48 +121,63 @@ Per-sensor operational channels. All are derived from the sensor's `key_prefix`.
 | systemd | `expectations` | hot-swap sentinel expectations (service/target/timer/restart-rate/forbid-failed) |
 | systemd | `action` | gated service control `{verb,unit}` (start/stop/restart/reload) — **default OFF**, allowlist + polkit |
 
-### 3.1a Debug reports — `@/report/*`
+### 3.1a Large-data artifacts — `@/artifact/*`
 
-Provided framework-wide by `zensight-sensor-core` (like `@/health`), opt-in per
-sensor via `report.enabled` in config. An operator PUTs a `ReportRequest` to
-`@/report/request`; the sensor generates a redacted `tar.zst` bundle off-thread,
-exposes its lifecycle on the `@/report/status` queryable, and serves the bytes
-via a [`zenoh-blob`](../zenoh-blob) server under `@/report/blob/` (manifest +
-chunk replies, with progress / SHA-256 integrity / range-resume). The blob lives
-under its own `blob/` segment so its `…/blob/**` queryable never collides with
-the `…/report/status` or `…/report/request` channels. See
-`docs/LARGE-DATA-TRANSFER.md`.
+One unified channel (release 0.7.0) for all on-demand large-data transfer,
+provided framework-wide by `zensight-sensor-core` (like `@/health`). It replaced
+the former separate `@/report/*` (Tier-1 file blob) and `@/snapshot/*` (Tier-2
+directory tree) channels — see the migration note in `CHANGELOG.md`. Each sensor
+opts in per **artifact kind**; every kind is disabled by default.
 
-### 3.1b Tier-2 directory sync — content store + tree index
+**Lifecycle.** An operator PUTs an `ArtifactRequest { id, kind, opts }` to
+`@/artifact/request`. `ArtifactKind` (serde-tagged `"kind"`) is one of:
 
-For whole-**directory** transfer (resumable, dedup'd), `zenoh-blob` provides a
-second model on top of a content-addressed chunk store (the casync approach).
-A sensor opts in (`snapshot.enabled`, with an allowlist of named directories) and
-serves, under its `@/` control plane:
+| Kind | Payload | Notes |
+|------|---------|-------|
+| `Report {}` | — | redacted `tar.zst` debug bundle (config + health + counters) |
+| `Snapshot { dir }` | `dir` = an **allowlisted logical name** | `dir` is the authz boundary — never a raw path |
+| `Capture { duration_secs, max_bytes, filter, snaplen, compress }` | — | **planned / reserved** for the netring pcap-capture feature (issue #333) |
+| *(unknown)* | — | forward-compat `Unsupported` — a sensor replies `Failed` for kinds it doesn't implement |
 
-| Key | Type | Payload |
-|-----|------|---------|
-| `@/snapshot/request` | sub | a `SnapshotRequest{ id, dir, opts }` — `dir` names an **allowlisted** directory (never a raw path; this is the authz boundary) |
-| `@/snapshot/status` | queryable | a `SnapshotStatus{ current, busy, dirs, … }` — lifecycle + advertised directory names |
-| `@/snapshot/cancel` | sub | a snapshot id (ULID) — free the temp chunk store early |
-| `@/store/<algo>/<hash>` | queryable | raw chunk bytes (immutable ⇒ cacheable fleet-wide) |
-| `@/tree/<id>` | queryable | a `TreeIndex` (depth-first `Entry` list; files reference chunks by hash) |
+The sensor generates the artifact off-thread and exposes progress via the
+`@/artifact/status` queryable, which returns an `ArtifactStatus { kinds:
+Vec<KindStatus> }` — **one `KindStatus` per artifact kind the sensor produces**
+(`{ kind, busy, current: Option<ArtifactState>, max_bytes, cooldown_secs, advert:
+KindAdvert }`). `ArtifactState` (tagged `"state"`) is `Generating { …, progress }`
+→ `Ready { …, delivery, expires_ms }` → `Failed { …, reason }` / `Expired { … }`.
+An operator can PUT an artifact id (ULID) to `@/artifact/cancel` to free an
+in-flight or ready artifact early (the TTL is the backstop otherwise).
 
-A client requests a snapshot of a named directory, polls `@/snapshot/status` until
-`Ready`, then GETs the index, computes `missing = needed − have` against its local
-[`ContentStore`] (ZenSight backs this with a redb `chunks` table — `RedbContentStore`
-in `zensight/src/store.rs`), fetches only the missing chunks (re-hashing each on
-receipt), reconstructs the tree (mode/symlinks), and verifies the root hash.
-Resume *is* "which hashes are already on disk", so it survives reconnect **and**
-restart for free. The chunk boundaries can be fixed-size or content-defined
-(FastCDC, for cross-version dedup) — the `TreeIndex.chunk_policy` tag records
-which, and the client never re-chunks (it fetches by hash), so producer and
-consumer needn't agree on a policy. The producer is framework-level
-(`zensight-sensor-core`'s `SnapshotChannel`, opt-in per sensor — `sysinfo` is the
-reference); the GUI offers each advertised directory for download in the Sensors
-view. The chunks/index can also be PUT into a **router-hosted Zenoh storage** so a
-producer publishes and exits and chunks dedup fleet-wide — see
-`docs/BLOB-ROUTER-STORAGE.md`. See also `docs/LARGE-DATA-TRANSFER.md` (Tier 2).
+**`Delivery` decides Blob vs Tree.** The `Ready` state carries a `Delivery`
+(tagged `"delivery"`) that tells the client how to pull the bytes:
+
+- `Blob { manifest: Manifest, blob_prefix }` — **Tier-1** whole-file blob. The
+  client pulls via `BlobClient` from a [`zenoh-blob`](../zenoh-blob) server under
+  `@/artifact/blob/<id>/**` (manifest + chunk replies, with progress / SHA-256
+  integrity / range-resume). The blob lives under its own `blob/` segment so its
+  `…/blob/**` queryable never collides with `…/artifact/status` or
+  `…/artifact/request`.
+- `Tree { tree_id, store_prefix, tree_prefix, summary: TreeSummary }` — **Tier-2**
+  content-addressed directory tree. The client pulls via `TreeClient`: GET the
+  `TreeIndex` (depth-first `Entry` list) from `@/tree/<id>`, compute `missing =
+  needed − have` against its local [`ContentStore`] (ZenSight backs this with a
+  redb `chunks` table — `RedbContentStore` in `zensight/src/store.rs`), fetch only
+  the missing chunks from `@/store/<algo>/<hash>` (re-hashing each on receipt),
+  reconstruct the tree (mode/symlinks), and verify the root hash. Resume *is*
+  "which hashes are already on disk", so it survives reconnect **and** restart for
+  free. `@/store` / `@/tree` are **kind-agnostic Tier-2 delivery infra** — shared
+  by any kind whose producer emits a `Tree` delivery. Chunk boundaries can be
+  fixed-size or content-defined (FastCDC, for cross-version dedup); the client
+  never re-chunks (it fetches by hash). Chunks/index can also be PUT into a
+  **router-hosted Zenoh storage** so a producer publishes and exits and chunks
+  dedup fleet-wide — see `docs/BLOB-ROUTER-STORAGE.md`.
+
+**Producers.** sensor-core owns one `ArtifactChannel` (request/status/cancel +
+reaper, per-kind busy + cooldown, lazy `BlobServer`/`TreeServer`). Each supported
+kind is an `ArtifactProducer` (the `Snapshot` producer advertises its allowlisted
+`dirs` via `KindAdvert::Snapshot { dirs }`; the GUI hides `KindAdvert::Unknown`
+kinds). The GUI surfaces available kinds/dirs for download in the Sensors view.
+See `docs/LARGE-DATA-TRANSFER.md`.
 
 ### 3.2 On-demand detail queries — `@/query/<topic>`
 
@@ -284,17 +296,13 @@ zensight/
 │       ├── query/<topic>               # on-demand detail (queryable)
 │       ├── commands/<topic>            # runtime control (sub)
 │       ├── status/<topic>              # control status (queryable)
-│       ├── report/                     # on-demand debug reports (opt-in)
-│       │   ├── request                 # ReportRequest (sub)
-│       │   ├── status                  # ReportStatus (queryable)
+│       ├── artifact/                   # on-demand large-data artifacts (opt-in per kind)
+│       │   ├── request                 # ArtifactRequest (sub)
+│       │   ├── status                  # ArtifactStatus{ kinds } (queryable)
 │       │   ├── cancel                  # free artifact early (sub)
-│       │   └── blob/<id>/**            # Manifest + chunks (zenoh-blob queryable)
-│       ├── snapshot/                   # Tier-2 directory snapshots (opt-in)
-│       │   ├── request                 # SnapshotRequest (sub)
-│       │   ├── status                  # SnapshotStatus (queryable)
-│       │   └── cancel                  # free chunk store early (sub)
-│       ├── store/<algo>/<hash>         # content-addressed chunks (queryable)
-│       └── tree/<id>                   # TreeIndex (queryable)
+│       │   └── blob/<id>/**            # Manifest + chunks — Blob delivery (zenoh-blob queryable)
+│       ├── store/<algo>/<hash>         # content-addressed chunks — Tree delivery (queryable)
+│       └── tree/<id>                   # TreeIndex — Tree delivery (queryable)
 └── _meta/
     ├── sensors/<name>                  # SensorInfo
     └── correlation/<ip>                # CorrelationEntry
@@ -315,22 +323,19 @@ enforced and a single change propagates everywhere.
 | `command::command_key(prefix, topic)` | `zensight-common/src/command.rs` | `…/@/commands/<topic>` |
 | `command::status_key(prefix, topic)` | `zensight-common/src/command.rs` | `…/@/status/<topic>` |
 | `command::query_key(prefix, topic)` | `zensight-common/src/command.rs` | `…/@/query/<topic>` |
-| `command::report_request_key(prefix)` | `zensight-common/src/command.rs` | `…/@/report/request` |
-| `command::report_status_key(prefix)` | `zensight-common/src/command.rs` | `…/@/report/status` |
-| `command::report_cancel_key(prefix)` | `zensight-common/src/command.rs` | `…/@/report/cancel` |
-| `command::report_blob_prefix(prefix)` | `zensight-common/src/command.rs` | `…/@/report/blob` (zenoh-blob server prefix) |
-| `command::snapshot_request_key(prefix)` | `zensight-common/src/command.rs` | `…/@/snapshot/request` |
-| `command::snapshot_status_key(prefix)` | `zensight-common/src/command.rs` | `…/@/snapshot/status` |
-| `command::snapshot_cancel_key(prefix)` | `zensight-common/src/command.rs` | `…/@/snapshot/cancel` |
-| `command::snapshot_store_prefix(prefix)` | `zensight-common/src/command.rs` | `…/@/store` (Tier-2 chunk queryable prefix) |
-| `command::snapshot_tree_prefix(prefix)` | `zensight-common/src/command.rs` | `…/@/tree` (Tier-2 index queryable prefix) |
+| `command::artifact_request_key(prefix)` | `zensight-common/src/command.rs` | `…/@/artifact/request` |
+| `command::artifact_status_key(prefix)` | `zensight-common/src/command.rs` | `…/@/artifact/status` |
+| `command::artifact_cancel_key(prefix)` | `zensight-common/src/command.rs` | `…/@/artifact/cancel` |
+| `command::artifact_blob_prefix(prefix)` | `zensight-common/src/command.rs` | `…/@/artifact/blob` (zenoh-blob server prefix; `Blob` delivery) |
+| `command::artifact_store_prefix(prefix)` | `zensight-common/src/command.rs` | `…/@/store` (kind-agnostic Tier-2 chunk queryable prefix; `Tree` delivery) |
+| `command::artifact_tree_prefix(prefix)` | `zensight-common/src/command.rs` | `…/@/tree` (kind-agnostic Tier-2 index queryable prefix; `Tree` delivery) |
 | `all_*_wildcard()` | `zensight-common/src/keyexpr.rs` | the wildcards in §5 |
 
 The control-plane keys for `health`, `errors`, `alive`, `devices/*`, `alerts/*`,
-`report/*`, and `snapshot/*` + `store/*` + `tree/*` are produced inside
-`zensight-sensor-core` (`health.rs`, `liveliness.rs`, `alert.rs`, `report.rs`,
-`snapshot.rs`) so every sensor inherits them identically by using the framework —
-sensors never build these by hand.
+and `artifact/*` + `store/*` + `tree/*` are produced inside `zensight-sensor-core`
+(`health.rs`, `liveliness.rs`, `alert.rs`, and the `ArtifactChannel`) so every
+sensor inherits them identically by using the framework — sensors never build
+these by hand.
 
 [`TelemetryPoint`]: ../zensight-common/src/telemetry.rs
 [`KeyExprBuilder::build(source, metric)`]: ../zensight-common/src/keyexpr.rs

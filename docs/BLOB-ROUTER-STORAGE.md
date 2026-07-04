@@ -3,7 +3,7 @@
 This describes how to run a Zenoh **router** as the fleet-wide content store for
 `zenoh-blob` Tier-2 directory sync (epic #193, issue #201). It complements
 [`docs/LARGE-DATA-TRANSFER.md`](LARGE-DATA-TRANSFER.md) and the keyspace contract
-in [`docs/KEYSPACE.md`](KEYSPACE.md) §3.1b.
+in [`docs/KEYSPACE.md`](KEYSPACE.md) §3.1a.
 
 ## Why
 
