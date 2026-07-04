@@ -1,6 +1,6 @@
 use zensight_common::{
-    Alert, DeviceLiveness, DeviceStatus, ErrorReport, HealthSnapshot, Protocol, SensorInfo,
-    TelemetryPoint,
+    Alert, DeviceLiveness, DeviceStatus, ErrorReport, HealthSnapshot, HostEntity, Protocol,
+    SensorInfo, TelemetryPoint,
 };
 
 use crate::view::alerts::{ComparisonOp, Severity};
@@ -55,6 +55,19 @@ pub enum Message {
     /// `@/query/alerts` queryables (late-joiner recovery — populates without
     /// toasting, since these aren't newly-fired).
     AlertsSeed(Vec<Alert>),
+
+    /// Connect-time snapshot of the correlator's [`HostEntity`] docs, fetched
+    /// from the `_meta/query/entities` queryable (#306). Absent correlator ⇒ no
+    /// replies ⇒ empty store ⇒ degraded per-source path.
+    EntitySeed(Vec<HostEntity>),
+
+    /// A single [`HostEntity`] doc was published/updated on
+    /// `zensight/_meta/entity/host/<entity_id>` (#306).
+    EntityReceived(HostEntity),
+
+    /// A [`HostEntity`] doc was tombstoned (Delete). Payload is the `entity_id`
+    /// parsed from the last key chunk (#306).
+    EntityRemoved(String),
 
     /// Zenoh connection attempt started.
     Connecting,
@@ -365,6 +378,10 @@ pub enum Message {
 
     /// Toggle dashboard view mode (grid vs table).
     ToggleDashboardViewMode,
+
+    /// Toggle "group by host" on the dashboard (#306): merge per-protocol
+    /// facets into one host card via correlator entities, or show per-source.
+    ToggleGroupByHost,
 
     /// User selected a metric to graph (single-series mode).
     SelectMetricForChart(String),

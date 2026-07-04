@@ -8,7 +8,7 @@ use iced::widget::{
 use iced::{Alignment, Element, Length, Theme};
 use iced_anim::widget::button;
 
-use zensight_common::{DeviceStatus, Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{DeviceStatus, HostEntity, Protocol, TelemetryPoint, TelemetryValue};
 
 use crate::app::DEVICE_SEARCH_ID;
 use crate::message::{DeviceId, Message};
@@ -716,15 +716,110 @@ pub fn host_detail_view<'a>(
     syslog_filter: &'a specialized::SyslogFilterState,
     host_logs: &[specialized::SyslogMessage],
     facets: &[FacetTab],
+    entity: Option<&HostEntity>,
 ) -> Element<'a, Message> {
     let inner = device_view_with_syslog_filter(state, syslog_filter, host_logs);
-    match facet_tab_strip(facets) {
-        Some(strip) => column![strip, rule::horizontal(1), inner]
+    let strip = facet_tab_strip(facets);
+    let identity = entity.map(entity_identity_panel);
+
+    match (identity, strip) {
+        (Some(id_panel), Some(strip)) => column![id_panel, strip, rule::horizontal(1), inner]
             .width(Length::Fill)
             .height(Length::Fill)
             .into(),
-        None => inner,
+        (Some(id_panel), None) => column![id_panel, rule::horizontal(1), inner]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+        (None, Some(strip)) => column![strip, rule::horizontal(1), inner]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+        (None, None) => inner,
     }
+}
+
+/// The entity landing-page identity panel (#306): an identity header
+/// (hostname/fqdn, short `entity_id` chip, IPs/MACs, vendor/platform, staleness)
+/// over a "merged from N sources" resolution drill-down that lists each
+/// [`MemberClaim`] (`sensor/source · rule · confidence · last_seen`) — the
+/// wrong-merge diagnosis affordance.
+fn entity_identity_panel(entity: &HostEntity) -> Element<'static, Message> {
+    let name = entity
+        .hostname
+        .clone()
+        .or_else(|| entity.fqdn.clone())
+        .unwrap_or_else(|| entity.entity_id.clone());
+
+    // Short entity-id chip.
+    let id_chip = container(text(entity.entity_id.clone()).size(11))
+        .padding([2, 8])
+        .style(container::rounded_box);
+
+    // Staleness indicator vs the correlator's re-emit cadence.
+    let now = current_timestamp();
+    let stale = now - entity.last_updated > crate::entity::ENTITY_STALE_MS;
+    let fresh_label = if stale { "stale" } else { "live" };
+    let fresh_color = if stale {
+        crate::view::theme::STATUS_UNKNOWN
+    } else {
+        crate::view::theme::STATUS_ONLINE
+    };
+    let freshness = text(fresh_label)
+        .size(11)
+        .style(move |_: &Theme| text::Style {
+            color: Some(fresh_color),
+        });
+
+    let header = row![
+        text(name).size(20),
+        id_chip,
+        freshness,
+        text(format!("merged from {} sources", entity.members.len())).size(12),
+    ]
+    .spacing(12)
+    .align_y(Alignment::Center);
+
+    let mut col = column![header].spacing(6);
+
+    // Identity facts row (IPs, MACs, vendor/platform, names).
+    let mut facts: Vec<String> = Vec::new();
+    if !entity.ips.is_empty() {
+        facts.push(format!("IPs: {}", entity.ips.join(", ")));
+    }
+    if !entity.macs.is_empty() {
+        facts.push(format!("MACs: {}", entity.macs.join(", ")));
+    }
+    if let Some(v) = &entity.vendor {
+        facts.push(format!("vendor: {v}"));
+    }
+    if let Some(p) = &entity.platform {
+        facts.push(format!("platform: {p}"));
+    }
+    if !entity.names.is_empty() {
+        let names: Vec<String> = entity
+            .names
+            .iter()
+            .map(|n| format!("{} ({})", n.name, n.provenance))
+            .collect();
+        facts.push(format!("names: {}", names.join(", ")));
+    }
+    for fact in facts {
+        col = col.push(text(fact).size(12));
+    }
+
+    // Resolution-group drill-down: one row per member claim.
+    col = col.push(text("Resolution group").size(13));
+    for m in &entity.members {
+        let row = text(format!(
+            "{}/{} · {} · confidence {:.2}",
+            m.sensor, m.source, m.rule, m.confidence
+        ))
+        .size(11);
+        col = col.push(row);
+    }
+
+    container(col).padding([12, 20]).into()
 }
 
 pub fn device_view(state: &DeviceDetailState) -> Element<'_, Message> {

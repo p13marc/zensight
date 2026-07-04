@@ -79,7 +79,11 @@ impl Default for TopologyState {
 
 impl TopologyState {
     /// Update topology from dashboard device states.
-    pub fn update_from_devices(&mut self, devices: &HashMap<DeviceId, DeviceState>) {
+    pub fn update_from_devices(
+        &mut self,
+        devices: &HashMap<DeviceId, DeviceState>,
+        entities: &crate::entity::EntityStore,
+    ) {
         let initial_count = self.nodes.len();
 
         // Recompute the per-host metric tally from scratch each pass (#83): nodes
@@ -89,15 +93,43 @@ impl TopologyState {
             node.metric_count = 0;
         }
 
-        // A node per physical host/device, merged by source. Widened beyond
-        // sysinfo/netlink (#83) so netflow exporters and gNMI/SNMP/Modbus gear
-        // also appear; syslog/netring are overlays (logs / flow edges), not nodes.
+        // A node per physical host (#83/#306): keyed by the correlator entity id
+        // when the device maps into one, else by `source`. Widened beyond
+        // sysinfo/netlink so netflow exporters and gNMI/SNMP/Modbus gear also
+        // appear; syslog/netring are overlays (logs / flow edges), not nodes.
         for (device_id, device_state) in devices {
             if !is_node_protocol(device_id.protocol) {
                 continue;
             }
 
-            let node_id = device_id.source.clone();
+            let source = device_id.source.clone();
+            let node_id = match entities.by_device.get(device_id) {
+                Some(eid) => entities.resolve_alias(eid).to_string(),
+                None => source.clone(),
+            };
+
+            // Re-key migration (#306): when an entity claims a device that
+            // already has a source-keyed node, transplant the old node's
+            // position/pin to the entity node so the layout stays stable, and
+            // follow the selection through the id change.
+            if node_id != source
+                && self.nodes.contains_key(&source)
+                && !self.nodes.contains_key(&node_id)
+            {
+                if let Some(mut old) = self.nodes.remove(&source) {
+                    old.id = node_id.clone();
+                    self.nodes.insert(node_id.clone(), old);
+                }
+                if self.selected_node.as_deref() == Some(source.as_str()) {
+                    self.selected_node = Some(node_id.clone());
+                }
+            }
+
+            let label = entities
+                .hosts
+                .get(&node_id)
+                .map(entity_node_label)
+                .unwrap_or_else(|| source.clone());
 
             if !self.nodes.contains_key(&node_id) {
                 // Create new node - position will be set by arrange_in_circle
@@ -105,7 +137,7 @@ impl TopologyState {
                     node_id.clone(),
                     Node {
                         id: node_id.clone(),
-                        label: device_id.source.clone(),
+                        label: label.clone(),
                         is_healthy: device_state.is_healthy,
                         ..Default::default()
                     },
@@ -114,12 +146,16 @@ impl TopologyState {
 
             // Update node metrics from telemetry
             if let Some(node) = self.nodes.get_mut(&node_id) {
+                node.label = label;
                 node.is_healthy = device_state.is_healthy;
                 node.protocols.insert(device_id.protocol);
                 node.metric_count += device_state.metric_count;
                 node.update_from_metrics(&device_state.metrics);
             }
         }
+
+        // Entity-derived overlays: passive wire-only nodes + sensor-count badge.
+        self.apply_entities(entities);
 
         // If new nodes were added, arrange in circle and trigger layout
         if self.nodes.len() > initial_count {
@@ -131,6 +167,34 @@ impl TopologyState {
         // NB: edges are derived from *observed* flow/neighbor data via
         // `apply_flow_edges` (#25), not fabricated here. We no longer synthesize a
         // demo mesh between active nodes.
+    }
+
+    /// Overlay correlator entity data onto the node set (#306):
+    /// - entity-backed nodes get a `sensor_count` badge (members merged),
+    /// - entities whose members map to **no** live device node become passive
+    ///   wire-only nodes ([`NodeType::Passive`]) so pure netring/netlink
+    ///   observations still appear on the map.
+    pub fn apply_entities(&mut self, entities: &crate::entity::EntityStore) {
+        for entity in entities.hosts.values() {
+            let id = entity.entity_id.as_str();
+            if let Some(node) = self.nodes.get_mut(id) {
+                // Live entity node: badge it with the merged member count.
+                node.sensor_count = Some(entity.members.len());
+            } else if !entity.members.is_empty() {
+                // Wire-only: no live device-backed node for this entity.
+                self.nodes.insert(
+                    id.to_string(),
+                    Node {
+                        id: id.to_string(),
+                        label: entity_node_label(entity),
+                        node_type: NodeType::Passive,
+                        is_healthy: true,
+                        sensor_count: Some(entity.members.len()),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
     }
 
     /// Overlay firing sensor alerts onto nodes: a node whose `source` matches a
@@ -225,8 +289,11 @@ impl TopologyState {
         }
 
         // Reset then reapply Router classification so it follows the live table.
+        // Passive wire-only nodes (#306) keep their type.
         for node in self.nodes.values_mut() {
-            node.node_type = NodeType::Host;
+            if node.node_type != NodeType::Passive {
+                node.node_type = NodeType::Host;
+            }
         }
         for id in &routers {
             if let Some(node) = self.nodes.get_mut(id) {
@@ -519,6 +586,10 @@ pub enum NodeType {
     Router,
     /// A network switch.
     Switch,
+    /// A passive, wire-only host (#306): a correlator entity observed purely on
+    /// the wire (netring/netlink), with no live sensor device of its own.
+    /// Rendered dimmed / dashed.
+    Passive,
     /// Unknown device type.
     Unknown,
 }
@@ -729,6 +800,14 @@ fn is_node_protocol(p: zensight_common::Protocol) -> bool {
             | Protocol::Snmp
             | Protocol::Modbus
     )
+}
+
+/// Display label for an entity-backed node: hostname > fqdn > short entity id.
+fn entity_node_label(e: &zensight_common::HostEntity) -> String {
+    e.hostname
+        .clone()
+        .or_else(|| e.fqdn.clone())
+        .unwrap_or_else(|| e.entity_id.clone())
 }
 
 fn primary_protocol(node: &Node) -> zensight_common::Protocol {
@@ -1470,7 +1549,7 @@ mod tests {
         add(Protocol::Netring, "sensor01", 99);
 
         let mut state = TopologyState::default();
-        state.update_from_devices(&devices);
+        state.update_from_devices(&devices, &crate::entity::EntityStore::default());
 
         // 5 distinct hosts (server01 merged), no syslog/netring nodes.
         assert_eq!(state.nodes.len(), 5);
@@ -1488,7 +1567,7 @@ mod tests {
         assert_eq!(server.metric_count, 15);
 
         // Re-running doesn't double-count the per-host metric tally.
-        state.update_from_devices(&devices);
+        state.update_from_devices(&devices, &crate::entity::EntityStore::default());
         assert_eq!(state.nodes.get("server01").unwrap().metric_count, 15);
         assert_eq!(state.nodes.len(), 5);
     }

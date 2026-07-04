@@ -4,6 +4,7 @@
 
 pub mod app;
 pub mod demo;
+pub mod entity;
 pub mod message;
 pub mod mock;
 pub mod store;

@@ -5,8 +5,8 @@ use zenoh::sample::SampleKind;
 use zenoh_ext::{AdvancedSubscriberBuilderExt, HistoryConfig, RecoveryConfig};
 
 use zensight_common::{
-    Alert, DeviceLiveness, ErrorReport, HealthSnapshot, SensorInfo, TelemetryPoint, ZenohConfig,
-    all_telemetry_wildcard, decode_auto,
+    Alert, DeviceLiveness, ErrorReport, HealthSnapshot, HostEntity, SensorInfo, TelemetryPoint,
+    ZenohConfig, all_entity_wildcard, all_telemetry_wildcard, decode_auto, entities_query_key,
 };
 
 use crate::message::Message;
@@ -64,6 +64,20 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
                 .ok();
             if control.is_none() {
                 tracing::warn!("Failed to create control-plane subscriber (health/alerts)");
+            }
+
+            // Entity subscriber (#306): correlator host-entity docs live under
+            // `zensight/_meta/entity/**`, which the telemetry `zensight/**` and
+            // the control `zensight/*/@/**` subscribers both miss (second
+            // segment is `_meta`, not `@`). Plain subscriber, unbounded — puts
+            // are HostEntity docs, deletes are tombstones.
+            let entity_sub = session
+                .declare_subscriber(&all_entity_wildcard())
+                .with(flume::unbounded())
+                .await
+                .ok();
+            if entity_sub.is_none() {
+                tracing::warn!("Failed to create entity subscriber (host entities)");
             }
 
             // Subscribe to sensor liveliness tokens
@@ -142,6 +156,25 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
                             serde_json::from_slice::<Vec<Alert>>(&sample.payload().to_bytes())
                     {
                         yield Message::AlertsSeed(alerts);
+                    }
+                }
+            }
+
+            // Late-joiner entity seed (#306): fetch the correlator's current
+            // host-entity set so a GUI opened mid-session groups by host
+            // immediately. Absent correlator ⇒ no replies ⇒ empty store ⇒
+            // degraded per-source path, by construction.
+            if let Ok(replies) = session
+                .get(entities_query_key())
+                .timeout(seed_timeout)
+                .await
+            {
+                while let Ok(reply) = replies.recv_async().await {
+                    if let Ok(sample) = reply.result()
+                        && let Ok(entities) =
+                            serde_json::from_slice::<Vec<HostEntity>>(&sample.payload().to_bytes())
+                    {
+                        yield Message::EntitySeed(entities);
                     }
                 }
             }
@@ -278,6 +311,29 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
                             }
                         }
                     }
+
+                    // Entity plane (#306): host-entity docs. Delete = tombstone
+                    // → EntityRemoved; Put = HostEntity doc → EntityReceived.
+                    result = async {
+                        match &entity_sub {
+                            Some(sub) => sub.recv_async().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Ok(sample) = result {
+                            let key = sample.key_expr().as_str();
+                            if sample.kind() == SampleKind::Delete {
+                                if let Some(msg) = parse_entity_removed(key) {
+                                    yield msg;
+                                }
+                            } else {
+                                let payload = sample.payload().to_bytes();
+                                if let Some(msg) = decode_sample(key, &payload) {
+                                    yield msg;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -368,6 +424,17 @@ fn parse_alert_cleared(key: &str) -> Option<Message> {
     })
 }
 
+/// Parse an entity-key Delete tombstone into a [`Message::EntityRemoved`].
+///
+/// Key format: `zensight/_meta/entity/host/<entity_id>`.
+fn parse_entity_removed(key: &str) -> Option<Message> {
+    let rest = key.strip_prefix("zensight/_meta/entity/host/")?;
+    if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    Some(Message::EntityRemoved(rest.to_string()))
+}
+
 /// Decode a sample based on its key expression pattern.
 ///
 /// Routes messages to the appropriate type based on the key structure:
@@ -392,6 +459,16 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
                 Ok(info) => Some(Message::SensorInfoReceived(info)),
                 Err(e) => {
                     tracing::warn!(error = %e, key = %key, "Failed to decode SensorInfo");
+                    None
+                }
+            };
+        }
+        if segment2 == "entity" {
+            // zensight/_meta/entity/host/<entity_id> (Put = HostEntity doc).
+            return match decode_auto::<HostEntity>(payload) {
+                Ok(entity) => Some(Message::EntityReceived(entity)),
+                Err(e) => {
+                    tracing::warn!(error = %e, key = %key, "Failed to decode HostEntity");
                     None
                 }
             };
@@ -626,6 +703,14 @@ pub fn demo_subscription() -> Subscription<Message> {
                     for (protocol, mut liveness) in simulator.generate_liveness_updates() {
                         liveness.last_seen = now;
                         yield Message::DeviceLivenessReceived(protocol, liveness);
+                    }
+                }
+
+                // Re-emit correlator host entities on the first tick and every
+                // ~30 ticks thereafter (~18 s) to exercise the freshness path (#306).
+                if tick_count.is_multiple_of(30) {
+                    for entity in simulator.generate_entities(now) {
+                        yield Message::EntityReceived(entity);
                     }
                 }
 

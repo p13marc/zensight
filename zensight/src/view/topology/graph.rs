@@ -332,6 +332,8 @@ impl<'a> TopologyGraphProgram<'a> {
                 }
                 NodeType::Router => self.node_router_color(),
                 NodeType::Switch => self.node_switch_color(),
+                // Passive wire-only hosts (#306) render dimmed like unknowns.
+                NodeType::Passive => self.node_unknown_color(),
                 NodeType::Unknown => self.node_unknown_color(),
             },
         };
@@ -363,9 +365,19 @@ impl<'a> TopologyGraphProgram<'a> {
             );
         }
 
-        // Draw node circle
+        // Draw node circle. Passive wire-only nodes (#306) get a dashed outline
+        // to read as "observed, not directly sensed".
         let circle = Path::circle(pos, radius);
-        frame.fill(&circle, base_color);
+        if node.node_type == NodeType::Passive {
+            let mut stroke = Stroke::default().with_color(base_color).with_width(2.0);
+            stroke.line_dash = iced::widget::canvas::LineDash {
+                segments: &[4.0, 4.0],
+                offset: 0,
+            };
+            frame.stroke(&circle, stroke);
+        } else {
+            frame.fill(&circle, base_color);
+        }
 
         // Draw pinned indicator
         if node.pinned {

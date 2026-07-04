@@ -44,6 +44,7 @@ pub static DASHBOARD_SEARCH_ID: LazyLock<Id> = LazyLock::new(|| Id::new("dashboa
 /// Text input ID for device metric search.
 pub static DEVICE_SEARCH_ID: LazyLock<Id> = LazyLock::new(|| Id::new("device-search"));
 
+use crate::entity::EntityStore;
 use crate::message::{DeviceId, Message};
 use crate::mock;
 use crate::subscription::{
@@ -122,6 +123,9 @@ pub struct ZenSight {
     overview: OverviewState,
     /// Topology state.
     topology: TopologyState,
+    /// Correlator host-entity view model (#306): groups per-protocol devices
+    /// into physical hosts. Empty ⇒ degraded per-source path.
+    entities: EntityStore,
     /// Syslog filter state.
     syslog_filter: SyslogFilterState,
     /// Rolling buffer of recent log lines (all syslog/journald sources) for the
@@ -189,6 +193,9 @@ pub struct ZenSight {
     /// Now the (indexed, O(device)) build runs at 1 Hz in `handle_tick`, and the
     /// render just clones this small truncated result.
     dashboard_sparks: crate::view::trend::DeviceSparks,
+    /// Firing external-alert counts keyed by source, for the dashboard host-card
+    /// alert rollup (#306). Rebuilt at 1 Hz in `handle_tick`.
+    firing_by_source: std::collections::HashMap<String, usize>,
 }
 
 impl ZenSight {
@@ -285,6 +292,15 @@ impl ZenSight {
             groups,
             overview,
             topology,
+            entities: {
+                // Demo mode: seed correlator host entities so the dashboard shows
+                // merged host cards immediately (the demo feed re-emits them).
+                let mut store = EntityStore::default();
+                if demo_mode {
+                    store.seed(mock::host_entities());
+                }
+                store
+            },
             syslog_filter,
             recent_logs: std::collections::VecDeque::new(),
             current_view,
@@ -320,6 +336,7 @@ impl ZenSight {
             help_open: false,
             favorites: persistent.favorite_metrics.iter().cloned().collect(),
             dashboard_sparks: crate::view::trend::DeviceSparks::new(),
+            firing_by_source: std::collections::HashMap::new(),
         };
 
         (app, Task::none())
@@ -933,7 +950,8 @@ impl ZenSight {
             Message::NetringAssetToTopology { ip, hostname } => {
                 // Asset → topology node (#252). Seed the graph the same way
                 // OpenTopology does so the lookup sees current nodes.
-                self.topology.update_from_devices(&self.dashboard.devices);
+                self.topology
+                    .update_from_devices(&self.dashboard.devices, &self.entities);
                 self.topology.apply_alerts(&self.alerts.external);
                 let node = hostname
                     .filter(|h| self.topology.nodes.contains_key(h))
@@ -1208,6 +1226,21 @@ impl ZenSight {
                 self.refresh_netring_anomalies();
             }
 
+            Message::EntitySeed(entities) => {
+                self.entities.seed(entities);
+                self.rederive_entities();
+            }
+
+            Message::EntityReceived(entity) => {
+                self.entities.upsert(entity);
+                self.rederive_entities();
+            }
+
+            Message::EntityRemoved(entity_id) => {
+                self.entities.remove(&entity_id);
+                self.rederive_entities();
+            }
+
             Message::Connecting => {
                 tracing::info!("Connecting to Zenoh...");
                 self.dashboard.connection_state =
@@ -1336,6 +1369,11 @@ impl ZenSight {
 
             Message::ToggleDashboardViewMode => {
                 self.dashboard.toggle_view_mode();
+            }
+
+            Message::ToggleGroupByHost => {
+                self.settings.group_by_host = !self.settings.group_by_host;
+                self.save_group_by_host();
             }
 
             Message::Tick => {
@@ -1838,7 +1876,8 @@ impl ZenSight {
             // Topology messages
             Message::OpenTopology => {
                 // Update topology from current device data before showing
-                self.topology.update_from_devices(&self.dashboard.devices);
+                self.topology
+                    .update_from_devices(&self.dashboard.devices, &self.entities);
                 self.topology.apply_alerts(&self.alerts.external);
                 self.set_view(CurrentView::Topology);
                 self.save_current_view();
@@ -2269,6 +2308,15 @@ impl ZenSight {
         persistent.dark_theme = matches!(self.theme, AppTheme::Dark);
         if let Err(e) = persistent.save() {
             tracing::error!("Failed to save theme: {}", e);
+        }
+    }
+
+    /// Persist the "group by host" dashboard preference (#306).
+    fn save_group_by_host(&self) {
+        let mut persistent = PersistentSettings::load();
+        persistent.group_by_host = self.settings.group_by_host;
+        if let Err(e) = persistent.save() {
+            tracing::error!("Failed to save group-by-host preference: {}", e);
         }
     }
 
@@ -3171,16 +3219,42 @@ impl ZenSight {
         })
     }
 
-    /// Build a map from endpoint IP to topology node id (#25). A node's `source`
-    /// that is itself an IP maps directly; the entity keyspace (#306) will map
-    /// additional IPs to hostname nodes once the correlator lands.
+    /// Build a map from endpoint IP to topology node id (#25/#306). A node whose
+    /// `source` is itself an IP maps directly; and each correlator entity's
+    /// identifying IPs map to that entity's node (or a member device's node),
+    /// bridging wire-level flow edges to hostname nodes.
     fn topology_ip_to_node(&self) -> std::collections::HashMap<String, String> {
         let mut map = std::collections::HashMap::new();
         // Direct: a node whose id looks like an IP maps that IP to itself.
         for node_id in self.topology.nodes.keys() {
             map.insert(node_id.clone(), node_id.clone());
         }
+        // Entity IPs (#306): an identifying IP resolves to the entity node when
+        // present, else to a member device's node — feeds apply_flow_edges.
+        for entity in self.entities.hosts.values() {
+            let node_id = if self.topology.nodes.contains_key(&entity.entity_id) {
+                Some(entity.entity_id.clone())
+            } else {
+                entity.members.iter().find_map(|m| {
+                    let src = &m.source;
+                    self.topology.nodes.contains_key(src).then(|| src.clone())
+                })
+            };
+            if let Some(node_id) = node_id {
+                for ip in &entity.ips {
+                    map.entry(ip.clone()).or_insert_with(|| node_id.clone());
+                }
+            }
+        }
         map
+    }
+
+    /// Re-derive entity-dependent view models after the [`EntityStore`] changes
+    /// (#306). Currently refreshes the topology; the dashboard/host views read
+    /// the store live at render time.
+    fn rederive_entities(&mut self) {
+        self.topology
+            .update_from_devices(&self.dashboard.devices, &self.entities);
     }
 
     /// Fetch the on-demand netring TLS asset inventory.
@@ -3520,14 +3594,26 @@ impl ZenSight {
                         .filter(|m| m.host() == host)
                         .cloned()
                         .collect();
-                    // #133: gather this physical host's sensor facets (same source,
-                    // one per protocol) so the detail renders them as tabs — the
-                    // protocol is a facet of a host, not a top-level axis.
+                    // #133/#306: gather this physical host's sensor facets so the
+                    // detail renders them as tabs — the protocol is a facet of a
+                    // host, not a top-level axis. When a correlator entity claims
+                    // the device, the facets span every member source (union),
+                    // else they fall back to the same-source facets.
+                    let entity = self.entities.entity_for_device(&device_state.device_id);
+                    let member_ids: Option<std::collections::HashSet<DeviceId>> = entity.map(|e| {
+                        e.members
+                            .iter()
+                            .filter_map(crate::entity::member_device_id)
+                            .collect()
+                    });
                     let mut facet_states: Vec<&DeviceState> = self
                         .dashboard
                         .devices
                         .values()
-                        .filter(|d| d.id.source == device_state.device_id.source)
+                        .filter(|d| match &member_ids {
+                            Some(ids) => ids.contains(&d.id),
+                            None => d.id.source == device_state.device_id.source,
+                        })
                         .collect();
                     facet_states.sort_by_key(|d| {
                         (
@@ -3535,7 +3621,7 @@ impl ZenSight {
                             d.id.protocol,
                         )
                     });
-                    let facets: Vec<crate::view::device::FacetTab> = facet_states
+                    let mut facets: Vec<crate::view::device::FacetTab> = facet_states
                         .iter()
                         .map(|d| crate::view::device::FacetTab {
                             id: d.id.clone(),
@@ -3544,11 +3630,34 @@ impl ZenSight {
                             active: d.id == device_state.device_id,
                         })
                         .collect();
+                    // Members with no live DeviceState still show as disabled tabs
+                    // (union), so the host's full sensor set is visible.
+                    if let Some(ids) = &member_ids {
+                        let live: std::collections::HashSet<&DeviceId> =
+                            facet_states.iter().map(|d| &d.id).collect();
+                        let mut missing: Vec<&DeviceId> =
+                            ids.iter().filter(|id| !live.contains(id)).collect();
+                        missing.sort_by_key(|id| {
+                            (
+                                crate::view::host::protocol_priority(id.protocol),
+                                id.protocol,
+                            )
+                        });
+                        for id in missing {
+                            facets.push(crate::view::device::FacetTab {
+                                id: id.clone(),
+                                protocol: id.protocol,
+                                status: zensight_common::DeviceStatus::Unknown,
+                                active: false,
+                            });
+                        }
+                    }
                     crate::view::device::host_detail_view(
                         device_state,
                         &self.syslog_filter,
                         &host_logs,
                         &facets,
+                        entity,
                     )
                 } else {
                     dashboard_view(
@@ -3559,6 +3668,9 @@ impl ZenSight {
                         &self.overview,
                         &self.sensor_health,
                         sparks,
+                        &self.entities,
+                        &self.firing_by_source,
+                        self.settings.group_by_host,
                     )
                 }
             }
@@ -3570,6 +3682,9 @@ impl ZenSight {
                 &self.overview,
                 &self.sensor_health,
                 sparks,
+                &self.entities,
+                &self.firing_by_source,
+                self.settings.group_by_host,
             ),
         };
 
@@ -3831,7 +3946,8 @@ impl ZenSight {
 
         // Update topology if we're viewing it
         if self.current_view == CurrentView::Topology {
-            self.topology.update_from_devices(&self.dashboard.devices);
+            self.topology
+                .update_from_devices(&self.dashboard.devices, &self.entities);
         }
     }
 
@@ -4123,6 +4239,15 @@ impl ZenSight {
         // Expire alert silences whose window has passed (#26).
         self.alerts.prune_silences(now);
 
+        // Rebuild the per-source firing-alert rollup for host cards (#306).
+        self.firing_by_source.clear();
+        for alert in self.alerts.active_external() {
+            *self
+                .firing_by_source
+                .entry(alert.source.clone())
+                .or_insert(0) += 1;
+        }
+
         // Apply debounced search filter
         self.dashboard.apply_pending_search();
 
@@ -4136,7 +4261,8 @@ impl ZenSight {
 
         // Update topology when viewing it
         if self.current_view == CurrentView::Topology {
-            self.topology.update_from_devices(&self.dashboard.devices);
+            self.topology
+                .update_from_devices(&self.dashboard.devices, &self.entities);
             // Run layout algorithm if not stable
             if !self.topology.layout_stable {
                 self.topology.run_layout_step();
