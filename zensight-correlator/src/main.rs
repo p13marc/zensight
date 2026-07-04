@@ -44,13 +44,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     init_tracing(&config.logging);
-    info!("starting ZenSight correlator");
-
-    if args.demo {
-        // Wired in commit 5.
-        info!("demo mode not yet implemented");
-        return Ok(());
-    }
+    info!(demo = args.demo, "starting ZenSight correlator");
 
     // Connect to Zenoh.
     let session = Arc::new(
@@ -116,15 +110,25 @@ async fn main() -> anyhow::Result<()> {
         })
     };
 
-    // Subscribers.
-    let sub_session = session.clone();
-    let sub_shutdown = shutdown_rx.clone();
-    let status_from_liveness = config.status_from_liveness;
-    let sub_task = tokio::spawn(async move {
-        if let Err(e) = subscriber::run(sub_session, tx, status_from_liveness, sub_shutdown).await {
-            error!(error = %e, "subscriber error");
-        }
-    });
+    // Input source: real evidence subscribers, or (in --demo) a synthetic feed
+    // driving the exact same engine/store/publisher pipeline.
+    let input_task = if args.demo {
+        let feed_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            zensight_correlator::demo::feed(tx, feed_shutdown).await;
+        })
+    } else {
+        let sub_session = session.clone();
+        let sub_shutdown = shutdown_rx.clone();
+        let status_from_liveness = config.status_from_liveness;
+        tokio::spawn(async move {
+            if let Err(e) =
+                subscriber::run(sub_session, tx, status_from_liveness, sub_shutdown).await
+            {
+                error!(error = %e, "subscriber error");
+            }
+        })
+    };
 
     // Wait for a termination signal.
     wait_for_shutdown().await;
@@ -132,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = shutdown_tx.send(true);
 
     let _ = tokio::time::timeout(Duration::from_secs(5), async {
-        let _ = sub_task.await;
+        let _ = input_task.await;
         let _ = engine_task.await;
         let _ = publish_task.await;
         let _ = entities_task.await;

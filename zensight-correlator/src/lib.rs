@@ -17,6 +17,7 @@
 //! See `docs/CORRELATION-ANALYSIS.md` §9.3 and `docs/KEYSPACE.md`.
 
 pub mod config;
+pub mod demo;
 pub mod engine;
 pub mod guard;
 pub mod merge;
