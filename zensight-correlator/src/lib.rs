@@ -19,6 +19,7 @@
 pub mod config;
 pub mod engine;
 pub mod guard;
+pub mod merge;
 pub mod subscriber;
 
 pub use config::CorrelatorConfig;
