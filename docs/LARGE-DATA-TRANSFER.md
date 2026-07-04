@@ -220,8 +220,8 @@ a **command** to generate an artifact and a **queryable** to stream it.
 > are unchanged — they are now the two **`Delivery` variants** (`Blob` / `Tree`) of one channel, **chosen by
 > the producer's output**, not two channels/modules. Read the rest of this section with that mapping in mind:
 > a single `ArtifactChannel` in `zensight-sensor-core` owns request/status/cancel + reaper (per-kind busy +
-> cooldown, lazy `BlobServer`/`TreeServer`); each artifact **kind** (`Report`, `Snapshot`, and the
-> planned/reserved `Capture`) is an `ArtifactProducer`; the GUI has one `zensight/src/view/artifact_fetch.rs`
+> cooldown, lazy `BlobServer`/`TreeServer`); each artifact **kind** (`Report`, `Snapshot`, and netring's
+> `Capture`) is an `ArtifactProducer`; the GUI has one `zensight/src/view/artifact_fetch.rs`
 > (was `blob_fetch.rs` + `dir_fetch.rs`) whose `download_stream` matches on `Delivery`. See
 > `docs/KEYSPACE.md` §3.1a for the authoritative keyspace and wire types.
 
@@ -250,7 +250,7 @@ struct ArtifactRequest { id: Ulid, #[serde(flatten)] kind: ArtifactKind, opts: A
 enum ArtifactKind {  // serde-tagged "kind"
     Report {},
     Snapshot { dir: String },   // an ALLOWLISTED logical name (the authz boundary), never a raw path
-    Capture { duration_secs, max_bytes, filter, snaplen, compress },   // planned/reserved (#333)
+    Capture { duration_secs, max_bytes, filter, snaplen, compress },   // netring on-demand pcap (#333)
     Unsupported,                // #[serde(other)] — a sensor replies Failed for kinds it can't do
 }
 struct Manifest {   // Tier-1 Blob delivery

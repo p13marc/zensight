@@ -12,7 +12,7 @@ use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 use zensight_common::{ErrorReport, HealthSnapshot, HealthStatus, KindStatus};
 
 use crate::message::Message;
-use crate::view::artifact_fetch::{ArtifactFetch, artifact_section};
+use crate::view::artifact_fetch::{ArtifactFetch, CaptureForm, artifact_section};
 use crate::view::components::{card, empty_state, section_header};
 use crate::view::formatting::format_timestamp;
 use crate::view::theme;
@@ -30,6 +30,7 @@ pub fn sensors_view<'a>(
     active_prefix: Option<&'a str>,
     active_kind: Option<&'a str>,
     artifact_kinds: &'a HashMap<String, Vec<KindStatus>>,
+    capture_forms: &'a HashMap<String, CaptureForm>,
 ) -> Element<'a, Message> {
     let title = text("Sensors").size(font::TITLE);
 
@@ -54,6 +55,7 @@ pub fn sensors_view<'a>(
             active_prefix,
             active_kind,
             artifact_kinds,
+            capture_forms,
         )));
     }
 
@@ -71,6 +73,7 @@ fn sensor_card<'a>(
     active_prefix: Option<&'a str>,
     active_kind: Option<&'a str>,
     artifact_kinds: &'a HashMap<String, Vec<KindStatus>>,
+    capture_forms: &'a HashMap<String, CaptureForm>,
 ) -> Element<'a, Message> {
     let header = section_header(snap.sensor.clone(), Some(health_badge(snap.status)));
 
@@ -100,6 +103,7 @@ fn sensor_card<'a>(
             .unwrap_or(&[]),
         active_prefix,
         active_kind,
+        capture_forms.get(&key_prefix),
     ));
 
     // Recent errors (newest first), if any have arrived for this sensor.

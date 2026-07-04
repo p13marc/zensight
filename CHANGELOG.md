@@ -65,6 +65,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   topology keys nodes by entity, bridges wire flows via identifying IPs, and shows
   wire-only hosts as passive nodes. With no correlator the store is empty and every
   view falls back to the per-source rendering (degraded path, pinned by test).
+- **On-demand pcap capture (#333)**: the netring sensor serves a `Capture` artifact
+  over the `@/artifact` channel — a dedicated build-time packet tap (idle cost: one
+  `ArcSwap` load per matching frame) is narrowed per request via the monitor's
+  reload handle, streamed through a bounded drop-on-overflow channel into a pcap
+  writer, and zstd-compressed to a `capture-<source>-<ts>.pcap.zst` blob. Requests
+  are clamped to configured `capture.on_demand` limits (duration, bytes, snaplen,
+  cooldown, optional filter allowlist); off by default. The GUI's artifact card
+  gains a capture request form (duration/filter/size/compress) with progress and
+  download; the netring device screen's tab is renamed **Capture health** and points
+  to the Sensors page for launching captures.
 
 ### Changed
 
@@ -98,7 +108,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `Tree` delivery.
   - **Wire types** (`zensight-common`): `Report*`/`Snapshot*` → `Artifact*` —
     `ReportRequest`/`SnapshotRequest` → `ArtifactRequest` (+ tagged `ArtifactKind`:
-    `Report`, `Snapshot { dir }`, reserved `Capture`); `ReportState` → tagged
+    `Report`, `Snapshot { dir }`, `Capture` — the last shipped by netring in
+    #333); `ReportState` → tagged
     `ArtifactState`; the new tagged `Delivery` (`Blob` | `Tree`) tells the client
     which tier to pull; `ReportStatus`/`SnapshotStatus` → `ArtifactStatus { kinds:
     Vec<KindStatus> }` (one entry per kind). The old `report_*`/`snapshot_*` key

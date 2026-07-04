@@ -157,6 +157,9 @@ pub struct ZenSight {
     artifact_job: Option<crate::view::artifact_fetch::ArtifactJob>,
     /// Per-sensor advertised artifact kinds (`key_prefix` → kinds + bounds/adverts).
     artifact_kinds: std::collections::HashMap<String, Vec<zensight_common::KindStatus>>,
+    /// Per-sensor on-demand capture form state (`key_prefix` → form), shared by
+    /// the sensor card and the netring Capture tab (#333).
+    capture_forms: std::collections::HashMap<String, crate::view::artifact_fetch::CaptureForm>,
     /// Expectations authoring view state (netlink sentinel, Plan 08).
     expectations: crate::view::expectations::ExpectationsState,
     /// Security view state: severity filter + expanded anomaly (#48).
@@ -315,6 +318,7 @@ impl ZenSight {
             artifact_fetch: crate::view::artifact_fetch::ArtifactFetch::default(),
             artifact_job: None,
             artifact_kinds: std::collections::HashMap::new(),
+            capture_forms: std::collections::HashMap::new(),
             expectations: crate::view::expectations::ExpectationsState::default(),
             security: crate::view::security::SecurityState::default(),
             detection_tuning: crate::view::detection_tuning::DetectionTuningState::default(),
@@ -1748,7 +1752,40 @@ impl ZenSight {
             }
 
             Message::ArtifactKindsLoaded { key_prefix, kinds } => {
+                // Seed a default capture form for a sensor that advertises the
+                // Capture kind, so the form renders before the operator edits it.
+                if kinds
+                    .iter()
+                    .any(|k| matches!(k.advert, zensight_common::KindAdvert::Capture { .. }))
+                {
+                    self.capture_forms.entry(key_prefix.clone()).or_default();
+                }
                 self.artifact_kinds.insert(key_prefix, kinds);
+            }
+
+            Message::CaptureFormEdited {
+                key_prefix,
+                field,
+                value,
+            } => {
+                use crate::view::artifact_fetch::CaptureField;
+                let form = self.capture_forms.entry(key_prefix).or_default();
+                match field {
+                    CaptureField::Duration => form.duration_secs = value,
+                    CaptureField::Filter => form.filter = value,
+                    CaptureField::MaxMib => form.max_mib = value,
+                }
+            }
+
+            Message::CaptureFormToggled { key_prefix, field } => {
+                use crate::view::artifact_fetch::CaptureToggle;
+                let form = self.capture_forms.entry(key_prefix).or_default();
+                match field {
+                    CaptureToggle::Compress => form.compress = !form.compress,
+                    CaptureToggle::DecompressOnSave => {
+                        form.decompress_on_save = !form.decompress_on_save
+                    }
+                }
             }
 
             Message::StartArtifact { key_prefix, kind } => {
@@ -2536,13 +2573,20 @@ impl ZenSight {
     ) -> Option<Task<Message>> {
         // Ignore if the user cancelled (job cleared). Extract the delivery-shape +
         // filename up front so no borrow of the job outlives the state mutation.
-        let (is_tree, filename) = {
+        let (is_tree, filename, key_prefix) = {
             let job = self.artifact_job.as_ref()?;
             (
                 matches!(job.delivery, Some(zensight_common::Delivery::Tree { .. })),
                 job.filename.clone(),
+                job.key_prefix.clone(),
             )
         };
+        // A capture (.pcap.zst) can be decompressed back to .pcap on save when the
+        // sensor's form asked for it (#333).
+        let decompress_on_save = self
+            .capture_forms
+            .get(&key_prefix)
+            .is_some_and(|f| f.decompress_on_save);
         match result {
             Ok(path) if is_tree => {
                 // Tree already reconstructed into the chosen folder.
@@ -2558,7 +2602,11 @@ impl ZenSight {
                 self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Verifying;
                 let default_name =
                     filename.unwrap_or_else(|| "zensight-debug-report.tar.zst".to_string());
-                Some(save_blob_dialog(default_name, temp_path))
+                Some(save_blob_dialog(
+                    default_name,
+                    temp_path,
+                    decompress_on_save,
+                ))
             }
             // A paused download reports Cancelled — that's expected, keep Paused.
             Err(_)
@@ -3573,6 +3621,7 @@ impl ZenSight {
                 self.artifact_job.as_ref().map(|j| j.key_prefix.as_str()),
                 self.artifact_job.as_ref().map(|j| j.kind.slug()),
                 &self.artifact_kinds,
+                &self.capture_forms,
             ),
             CurrentView::Logs => {
                 let logs: Vec<_> = self.recent_logs.iter().cloned().collect();
@@ -4411,7 +4460,11 @@ fn export_dialog(default_name: String, contents: String) -> Task<Message> {
 /// this **moves** an already-verified temp file to the chosen path (falling back
 /// to a streamed copy across filesystems), so a large blob is never read into
 /// RAM (memo R2). Cancelling the dialog discards the temp file.
-fn save_blob_dialog(default_name: String, src: std::path::PathBuf) -> Task<Message> {
+fn save_blob_dialog(
+    default_name: String,
+    src: std::path::PathBuf,
+    decompress_on_save: bool,
+) -> Task<Message> {
     Task::future(async move {
         let mut dialog = rfd::AsyncFileDialog::new().set_file_name(&default_name);
         if let Some(dir) = dirs::download_dir().or_else(dirs::home_dir) {
@@ -4433,6 +4486,28 @@ fn save_blob_dialog(default_name: String, src: std::path::PathBuf) -> Task<Messa
                 }
                 Err(e) => Err(e.to_string()),
             },
+        };
+
+        // Decompress a saved `.pcap.zst` capture back to a `.pcap` sibling (#333).
+        let result = match result {
+            Ok(saved) if decompress_on_save && saved.ends_with(".pcap.zst") => {
+                let zst = std::path::PathBuf::from(&saved);
+                let pcap = zst.with_extension(""); // strip trailing `.zst`
+                let decoded = tokio::task::spawn_blocking(move || {
+                    let reader = std::io::BufReader::new(std::fs::File::open(&zst)?);
+                    let writer = std::fs::File::create(&pcap)?;
+                    zstd::stream::copy_decode(reader, writer)?;
+                    let _ = std::fs::remove_file(&zst);
+                    Ok::<_, std::io::Error>(pcap.display().to_string())
+                })
+                .await;
+                match decoded {
+                    Ok(Ok(pcap_path)) => Ok(pcap_path),
+                    // Decompression failed: keep the saved .zst, report it.
+                    Ok(Err(_)) | Err(_) => Ok(saved),
+                }
+            }
+            other => other,
         };
         Message::ArtifactSaved(result.map(Some))
     })

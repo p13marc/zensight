@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use iced::futures::Stream;
-use iced::widget::{Row, button, column, row, text};
-use iced::{Alignment, Element};
+use iced::widget::{Row, button, checkbox, column, row, text, text_input};
+use iced::{Alignment, Element, Length};
 use ulid::Ulid;
 use zenoh::Session;
 use zenoh_blob::{
@@ -23,6 +23,7 @@ use zensight_common::{
 };
 
 use crate::message::Message;
+use crate::view::theme;
 use crate::view::tokens::{font, space};
 
 /// Client-side lifecycle of one artifact download. Kind-agnostic: the wording of
@@ -133,6 +134,125 @@ impl ArtifactFetch {
             ArtifactFetch::Saved(p) => format!("Saved to {p}"),
             ArtifactFetch::Failed(e) => format!("Failed: {e}"),
         }
+    }
+}
+
+/// Which text field of a [`CaptureForm`] an edit targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureField {
+    /// Capture duration, seconds.
+    Duration,
+    /// Capture filter expression.
+    Filter,
+    /// Byte cap, MiB.
+    MaxMib,
+}
+
+/// Which boolean toggle of a [`CaptureForm`] a click targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureToggle {
+    /// zstd-compress the capture before transfer.
+    Compress,
+    /// Decompress the saved `.pcap.zst` back to `.pcap` on save.
+    DecompressOnSave,
+}
+
+/// The operator-authored capture parameters, shared by the sensor card and the
+/// netring Capture tab (one form per sensor key prefix, held in `app.rs`). The
+/// numeric fields are free-text so [`CaptureForm::validate`] is the single
+/// source of truth — used both to render the inline error and to gate submit.
+#[derive(Debug, Clone)]
+pub struct CaptureForm {
+    /// Capture duration, seconds (text input).
+    pub duration_secs: String,
+    /// Capture filter expression (text input; empty ⇒ no filter).
+    pub filter: String,
+    /// Byte cap in MiB (text input; empty ⇒ the sensor's configured max).
+    pub max_mib: String,
+    /// zstd-compress before transfer (default on).
+    pub compress: bool,
+    /// Decompress the saved `.pcap.zst` back to `.pcap` on save.
+    pub decompress_on_save: bool,
+}
+
+impl Default for CaptureForm {
+    fn default() -> Self {
+        CaptureForm {
+            duration_secs: "30".to_string(),
+            filter: String::new(),
+            max_mib: String::new(),
+            compress: true,
+            decompress_on_save: true,
+        }
+    }
+}
+
+impl CaptureForm {
+    /// Validate the form against the sensor's advertised bounds + configured byte
+    /// cap. `Ok(kind)` is the request to submit; `Err(reason)` disables submit and
+    /// is shown inline. Clamping is defense-in-depth on the sensor; this keeps a
+    /// stale advert from submitting an obviously-over-cap request.
+    pub fn validate(&self, advert: &KindAdvert, ks: &KindStatus) -> Result<ArtifactKind, String> {
+        let (max_duration_secs, filter_allowed) = match advert {
+            KindAdvert::Capture {
+                max_duration_secs,
+                filter_allowed,
+                ..
+            } => (*max_duration_secs, *filter_allowed),
+            _ => return Err("this sensor does not offer capture".into()),
+        };
+
+        let duration_secs: u32 = self
+            .duration_secs
+            .trim()
+            .parse()
+            .map_err(|_| "duration must be a whole number of seconds".to_string())?;
+        if duration_secs == 0 {
+            return Err("duration must be greater than 0".into());
+        }
+        if duration_secs > max_duration_secs {
+            return Err(format!(
+                "duration exceeds the sensor max ({max_duration_secs}s)"
+            ));
+        }
+
+        let filter = match self.filter.trim() {
+            "" => None,
+            f => {
+                if !filter_allowed {
+                    return Err("this sensor does not allow capture filters".into());
+                }
+                Some(f.to_string())
+            }
+        };
+
+        let max_bytes = match self.max_mib.trim() {
+            "" => None,
+            m => {
+                let mib: u64 = m
+                    .parse()
+                    .map_err(|_| "size cap must be a whole number of MiB".to_string())?;
+                let bytes = mib.saturating_mul(1024 * 1024);
+                if bytes == 0 {
+                    return Err("size cap must be greater than 0".into());
+                }
+                if bytes > ks.max_bytes {
+                    return Err(format!(
+                        "size cap exceeds the sensor max ({} MiB)",
+                        ks.max_bytes / (1024 * 1024)
+                    ));
+                }
+                Some(bytes)
+            }
+        };
+
+        Ok(ArtifactKind::Capture {
+            duration_secs,
+            max_bytes,
+            filter,
+            snaplen: None,
+            compress: self.compress,
+        })
     }
 }
 
@@ -311,15 +431,123 @@ pub fn download_stream(
     }
 }
 
+fn caption_danger(theme: &iced::Theme) -> iced::widget::text::Style {
+    iced::widget::text::Style {
+        color: Some(theme::colors(theme).danger()),
+    }
+}
+
+/// The on-demand capture request form (#333) — one per sensor key prefix, shared
+/// by the sensor card and the netring Capture tab. `disabled` gates submit while
+/// another card's job is in flight; `validate` gates it against the advert.
+pub fn capture_form_view<'a>(
+    form: &CaptureForm,
+    key_prefix: &str,
+    advert: &KindAdvert,
+    ks: &KindStatus,
+    disabled: bool,
+) -> Element<'a, Message> {
+    let (max_dur, filter_allowed) = match advert {
+        KindAdvert::Capture {
+            max_duration_secs,
+            filter_allowed,
+            ..
+        } => (*max_duration_secs, *filter_allowed),
+        _ => (0, false),
+    };
+    let kp = key_prefix.to_string();
+    let max_mib = ks.max_bytes / (1024 * 1024);
+
+    let edit = |field: CaptureField| {
+        let kp = kp.clone();
+        move |value: String| Message::CaptureFormEdited {
+            key_prefix: kp.clone(),
+            field,
+            value,
+        }
+    };
+
+    let duration = text_input(&format!("≤ {max_dur}s"), &form.duration_secs)
+        .on_input(edit(CaptureField::Duration))
+        .size(font::CAPTION)
+        .width(Length::Fixed(80.0));
+    let size = text_input(&format!("≤ {max_mib} MiB"), &form.max_mib)
+        .on_input(edit(CaptureField::MaxMib))
+        .size(font::CAPTION)
+        .width(Length::Fixed(90.0));
+
+    let mut fields = row![
+        text("Duration (s)").size(font::CAPTION),
+        duration,
+        text("Max (MiB)").size(font::CAPTION),
+        size,
+    ]
+    .spacing(space::SM)
+    .align_y(Alignment::Center);
+    if filter_allowed {
+        fields = fields.push(
+            text_input("filter (e.g. udp and port 53)", &form.filter)
+                .on_input(edit(CaptureField::Filter))
+                .size(font::CAPTION)
+                .width(Length::Fixed(220.0)),
+        );
+    }
+
+    let kp_c = kp.clone();
+    let compress = checkbox(form.compress)
+        .label("Compress (zstd)")
+        .text_size(font::CAPTION)
+        .on_toggle(move |_| Message::CaptureFormToggled {
+            key_prefix: kp_c.clone(),
+            field: CaptureToggle::Compress,
+        });
+    let mut toggles = row![compress].spacing(space::MD).align_y(Alignment::Center);
+    if form.compress {
+        let kp_d = kp.clone();
+        toggles = toggles.push(
+            checkbox(form.decompress_on_save)
+                .label("Decompress on save")
+                .text_size(font::CAPTION)
+                .on_toggle(move |_| Message::CaptureFormToggled {
+                    key_prefix: kp_d.clone(),
+                    field: CaptureToggle::DecompressOnSave,
+                }),
+        );
+    }
+
+    let validation = form.validate(advert, ks);
+    let mut submit = button(text("Start capture").size(font::CAPTION));
+    if !disabled && let Ok(kind) = &validation {
+        submit = submit.on_press(Message::StartArtifact {
+            key_prefix: kp.clone(),
+            kind: kind.clone(),
+        });
+    }
+
+    let mut col = column![
+        text("On-demand packet capture").size(font::CAPTION),
+        fields,
+        toggles,
+        submit,
+    ]
+    .spacing(space::XS);
+    if let Err(e) = &validation {
+        col = col.push(text(e.clone()).size(font::CAPTION).style(caption_danger));
+    }
+    col.into()
+}
+
 /// Render the per-sensor artifact controls from the sensor's advertised `kinds`.
 /// `active_prefix`/`active_kind` identify the one in-flight job (if any), so only
-/// the matching card shows progress + the job controls.
+/// the matching card shows progress + the job controls. `capture_form` supplies
+/// the shared capture form for the `Capture` kind (None hides it).
 pub fn artifact_section<'a>(
     fetch: &ArtifactFetch,
     this_prefix: &str,
     kinds: &[KindStatus],
     active_prefix: Option<&str>,
     active_kind: Option<&str>,
+    capture_form: Option<&CaptureForm>,
 ) -> Element<'a, Message> {
     let is_this = active_prefix == Some(this_prefix);
 
@@ -382,8 +610,20 @@ pub fn artifact_section<'a>(
                 }
                 col = col.push(column![header, btns].spacing(space::XS));
             }
-            // Capture form is issue #333, not this PR; unknown kinds are hidden.
-            KindAdvert::Snapshot { .. } | KindAdvert::Capture { .. } | KindAdvert::Unknown => {}
+            KindAdvert::Capture { .. } => {
+                if let Some(form) = capture_form {
+                    any = true;
+                    col = col.push(capture_form_view(
+                        form,
+                        this_prefix,
+                        &ks.advert,
+                        ks,
+                        other_busy,
+                    ));
+                }
+            }
+            // Empty snapshot advert / unknown kinds are hidden.
+            KindAdvert::Snapshot { .. } | KindAdvert::Unknown => {}
         }
     }
     if !any {
@@ -401,6 +641,110 @@ pub fn artifact_section<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn capture_ks(max_duration_secs: u32, filter_allowed: bool, max_mib: u64) -> KindStatus {
+        KindStatus {
+            kind: "capture".into(),
+            busy: false,
+            current: None,
+            max_bytes: max_mib * 1024 * 1024,
+            cooldown_secs: 60,
+            advert: KindAdvert::Capture {
+                max_duration_secs,
+                filter_allowed,
+                snaplen_max: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn capture_form_validate_ok() {
+        let ks = capture_ks(300, true, 256);
+        let form = CaptureForm {
+            duration_secs: "30".into(),
+            filter: "udp and port 53".into(),
+            max_mib: "64".into(),
+            compress: true,
+            decompress_on_save: true,
+        };
+        let kind = form.validate(&ks.advert, &ks).unwrap();
+        assert_eq!(
+            kind,
+            ArtifactKind::Capture {
+                duration_secs: 30,
+                max_bytes: Some(64 * 1024 * 1024),
+                filter: Some("udp and port 53".into()),
+                snaplen: None,
+                compress: true,
+            }
+        );
+    }
+
+    #[test]
+    fn capture_form_validate_rejects() {
+        let ks = capture_ks(300, true, 256);
+        let with_duration = |d: &str| CaptureForm {
+            duration_secs: d.into(),
+            ..CaptureForm::default()
+        };
+        // non-numeric duration
+        assert!(with_duration("abc").validate(&ks.advert, &ks).is_err());
+        // over-cap duration
+        assert!(
+            with_duration("9999")
+                .validate(&ks.advert, &ks)
+                .unwrap_err()
+                .contains("exceeds the sensor max")
+        );
+        // zero duration
+        assert!(with_duration("0").validate(&ks.advert, &ks).is_err());
+        // over-cap size
+        let big_size = CaptureForm {
+            max_mib: "1024".into(),
+            ..CaptureForm::default()
+        };
+        assert!(
+            big_size
+                .validate(&ks.advert, &ks)
+                .unwrap_err()
+                .contains("size cap exceeds")
+        );
+        // filter when disallowed
+        let ks_nf = capture_ks(300, false, 256);
+        let filtered = CaptureForm {
+            filter: "udp".into(),
+            ..CaptureForm::default()
+        };
+        assert!(
+            filtered
+                .validate(&ks_nf.advert, &ks_nf)
+                .unwrap_err()
+                .contains("does not allow")
+        );
+    }
+
+    #[test]
+    fn capture_form_empty_optional_fields() {
+        let ks = capture_ks(300, true, 256);
+        let form = CaptureForm {
+            duration_secs: "10".into(),
+            filter: "  ".into(), // whitespace ⇒ no filter
+            max_mib: "".into(),  // empty ⇒ sensor default
+            compress: false,
+            decompress_on_save: false,
+        };
+        let kind = form.validate(&ks.advert, &ks).unwrap();
+        assert_eq!(
+            kind,
+            ArtifactKind::Capture {
+                duration_secs: 10,
+                max_bytes: None,
+                filter: None,
+                snaplen: None,
+                compress: false,
+            }
+        );
+    }
 
     #[test]
     fn active_states() {

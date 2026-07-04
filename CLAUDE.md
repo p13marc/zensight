@@ -7,10 +7,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ZenSight is a unified observability platform that sensors legacy monitoring protocols into Zenoh's pub/sub infrastructure. It consists of:
 
 1. **zensight** - Iced 0.14 desktop frontend for visualizing telemetry
-2. **zensight-common** - Shared library (telemetry model, alert/command model, Zenoh helpers, config)
-3. **zensight-sensor-core** - Shared sensor framework (publisher, health, alert reporting, liveness)
+2. **zensight-common** - Shared library (telemetry model, alert/command model, identity/evidence/entity types, artifact channel, Zenoh helpers, config)
+3. **zensight-sensor-core** - Shared sensor framework (publisher, health, alert reporting, liveness, host identity, artifact producers)
 4. **zensight-sensor-*** - Protocol sensors publishing telemetry to Zenoh
-5. **zensight-exporter-*** - Exporters forwarding Zenoh telemetry to external systems
+5. **zensight-correlator** - Headless service that fuses per-sensor identity evidence into one `HostEntity` per physical host
+6. **zensight-exporter-*** - Exporters forwarding Zenoh telemetry to external systems
 
 See `docs/SENSORS.md` for the full per-sensor reference and `docs/KEYSPACE.md` for
 the key-expression contract. The sensor/frontend redesign is tracked in
@@ -34,6 +35,11 @@ cargo run -p zensight-sensor-snmp --release -- --config configs/snmp.json5
 # Run an exporter
 cargo run -p zensight-exporter-prometheus --release -- --config configs/prometheus.json5
 cargo run -p zensight-exporter-otel --release -- --config configs/otel.json5
+
+# Run the identity correlator (fuses evidence → HostEntity docs)
+cargo run -p zensight-correlator --release -- --config configs/correlator.json5
+# ...or drive the GUI host view without real sensors:
+cargo run -p zensight-correlator --release -- --config configs/correlator.json5 --demo
 ```
 
 ## Testing
@@ -57,6 +63,7 @@ cargo test -p zensight-sensor-netring  # 71 tests (flows, beaconing, DNS-tunnel,
 cargo test -p zensight-sensor-systemd  # 47 tests (aggregates, boot math, watchlist, timers/sockets/mounts/journal, cgroup tree, alerts, sentinel, actions)
 cargo test -p zensight-exporter-prometheus  # 60 tests (mapping, collector, alerts, HTTP)
 cargo test -p zensight-exporter-otel        # 46 tests (metrics, logs, alerts, severity)
+cargo test -p zensight-correlator   # 35 tests (union-find merge, engine recompute, evidence/name stores, tombstones, key parsing)
 
 # Run a single test
 cargo test -p zensight test_dashboard_empty
@@ -133,9 +140,13 @@ zensight/                    # Workspace root
 ├── zensight-common/         # Shared library
 │   └── src/
 │       ├── telemetry.rs     # TelemetryPoint, Protocol
-│       ├── health.rs        # DeviceStatus, HealthSnapshot, DeviceLiveness
-│       ├── alert.rs         # Alert{Kind,Severity,State}, alert_key
+│       ├── health.rs        # DeviceStatus, HealthSnapshot (host_id), DeviceLiveness, SensorInfo
+│       ├── alert.rs         # Alert{Kind,Severity,State}, alert_key (skips host.* labels)
 │       ├── command.rs       # Sensor command/status channel (command_key/status_key)
+│       ├── evidence.rs      # HostEvidence, NameObservation + evidence keyexpr helpers (#301/#307/#308)
+│       ├── entity.rs        # HostEntity, MemberClaim, NameVal + entity/query keyexpr helpers (#305)
+│       ├── artifact.rs      # ArtifactRequest/Kind/State/Status, Delivery, artifact keyexpr (#332)
+│       ├── query_detail.rs  # On-demand @/query/<topic> detail record types
 │       ├── config.rs        # JSON5 config loading
 │       ├── session.rs       # Zenoh session helpers
 │       ├── keyexpr.rs       # Key expression builders
@@ -143,9 +154,13 @@ zensight/                    # Workspace root
 ├── zensight-sensor-core/ # Shared sensor framework
 │   └── src/
 │       ├── publisher.rs     # Zenoh publisher with key building
-│       ├── advanced_publisher.rs # Publisher with caching registry
+│       ├── advanced_publisher.rs # Publisher with caching registry (+ publish_serializable)
+│       ├── runner.rs        # SensorRunner; with_identity → publishes SensorInfo + self-report HostEvidence
+│       ├── identity.rs      # HostIdentity::detect (host_id = sha256(machine-id+salt)), SharedIdentity
+│       ├── procutil.rs      # /proc/<pid>/stat field-22 start-time parser (process identity)
+│       ├── scrub.rs         # ArgScrubber — redacts secrets in process argv (#302)
+│       ├── artifact.rs + artifact/ # ArtifactChannel + producers (Report/Snapshot; netring adds Capture)
 │       ├── health.rs        # HealthReporter with rolling error window
-│       ├── correlation.rs   # Cross-sensor device correlation
 │       ├── error.rs         # Sensor error categorization
 │       └── liveliness.rs    # Device liveness tracking
 ├── zensight-sensor-snmp/       # SNMP v1/v2c/v3 sensor
@@ -157,6 +172,16 @@ zensight/                    # Workspace root
 ├── zensight-sensor-netlink/    # Linux kernel net telemetry (RTNETLINK/sock_diag) + embedded sentinel
 ├── zensight-sensor-netring/    # Wire-level flow telemetry (AF_PACKET/AF_XDP/pcap) + NDR detectors
 ├── zensight-sensor-systemd/    # systemd unit/service/boot telemetry (D-Bus) + sentinel + gated actions
+├── zensight-correlator/     # Identity correlator: evidence → one HostEntity per host
+│   └── src/
+│       ├── subscriber.rs    # AdvancedSubscribers on _meta/evidence/** (host + names) + liveness
+│       ├── engine.rs        # Debounced recompute; 60s re-emit = liveness; aliases/tombstones
+│       ├── merge.rs         # Pure union-find over ranked identity rules (host_id > MAC+IP > fqdn > hostname)
+│       ├── store.rs         # TTL-swept EvidenceStore + NameStore
+│       ├── publisher.rs     # Publishes HostEntity docs on _meta/entity/host/<id>
+│       ├── query.rs         # _meta/query/{entities,names?ip=} queryables (late-joiner seed)
+│       ├── guard.rs         # Zenoh liveliness single-writer guard
+│       └── demo.rs          # --demo synthetic-evidence generator (feeds the real pipeline)
 ├── zensight-exporter-prometheus/  # Prometheus metrics exporter
 │   └── src/
 │       ├── config.rs        # Configuration parsing
@@ -210,15 +235,28 @@ See `docs/KEYSPACE.md` for the authoritative per-protocol key-expression layout.
 Sensors also publish health/liveness metadata:
 
 ```
-zensight/<protocol>/@/health              # Sensor health snapshots
-zensight/<protocol>/@/devices/*/liveness  # Per-device liveness status
-zensight/<protocol>/@/errors              # Error reports
-zensight/<protocol>/@/alerts/<alert_key>  # Alerts (firing → resolved → tombstone)
-zensight/<protocol>/@/query/alerts        # Queryable firing-set seed (late joiners)
-zensight/<protocol>/@/commands/*          # Runtime control commands (e.g. sentinel expectations)
-zensight/<protocol>/@/status              # Command status queryable
-zensight/_meta/sensors/*                  # Sensor registration info
-zensight/_meta/correlation/*              # Cross-sensor device correlation
+zensight/<protocol>/@/health                    # Sensor health snapshots
+zensight/<protocol>/@/devices/*/liveness        # Per-device liveness status
+zensight/<protocol>/@/errors                    # Error reports
+zensight/<protocol>/@/alerts/<alert_key>        # Alerts (firing → resolved → tombstone)
+zensight/<protocol>/@/query/alerts              # Queryable firing-set seed (late joiners)
+zensight/<protocol>/@/commands/*                # Runtime control commands (e.g. sentinel expectations)
+zensight/<protocol>/@/status                    # Command status queryable
+zensight/<protocol>/@/artifact/{request,status,cancel}  # On-demand large-data artifacts (report/snapshot/capture)
+zensight/_meta/sensors/<name>/<source>          # Sensor registration info (SensorInfo, per name+host)
+```
+
+### Identity, Evidence & Entities (#301/#305/#307/#308)
+
+Sensors self-report a stable `host_id` and (with `evidence` on) republish observed
+hosts/names; the **correlator** fuses them into one `HostEntity` per physical host:
+
+```
+zensight/_meta/evidence/host/<sensor>/<source>  # HostEvidence (self-report or observed)
+zensight/_meta/evidence/names/<sensor>/<ip-slug> # NameObservation (passive DNS, one per IP)
+zensight/_meta/entity/host/<entity_id>          # HostEntity (correlator output; firing → tombstone)
+zensight/_meta/query/entities                   # Queryable entity seed (late joiners)
+zensight/_meta/query/names?ip=<addr>            # Resolve names for an arbitrary IP on demand
 ```
 
 Note the explicit `@`: telemetry wildcards (`zensight/<protocol>/**`) do **not** match
@@ -428,11 +466,20 @@ Sensors publish alerts on `zensight/<protocol>/@/alerts/<alert_key>` as a lifecy
 
 - **netlink sensor** — Linux kernel networking state via RTNETLINK/sock_diag (unprivileged
   reads): interface counters, enriched `tcp_info` (delivery/pacing/retrans/reord), qdisc /
-  bufferbloat health score, and a control-plane change timeline. Embeds the sentinel.
+  bufferbloat health score, and a control-plane change timeline. Sockets carry
+  **socket→process attribution** (cookie/cgroup/pid via a per-request /proc fd-scan, #304).
+  Embeds the sentinel; with `evidence` on, publishes observed-neighbor evidence (#307).
 - **netring sensor** — wire-level flow telemetry via AF_PACKET/AF_XDP (needs `CAP_NET_RAW`)
   or pcap replay. Emits flows/bandwidth plus NDR detectors: RITA-style beaconing,
   DNS-tunnel / Newly-Observed-Domain, port-scan (TRW), Community ID v1, and MITRE ATT&CK
-  technique tags. Anomalies pivot to flow drill-downs in the Security view.
+  technique tags. **Passive DNS** (#308) resolves IP↔name and enriches flows/talkers
+  (`dst_names`), adding an FQDN-pivoted beacon detector; with `evidence` on it publishes
+  observed-asset + passive-DNS evidence (#307). Serves an **on-demand pcap capture**
+  artifact (#333) off a live packet tap. Anomalies pivot to flow drill-downs in the
+  Security view.
+- **correlator** — subscribes to the `_meta/evidence/**` feeds above and fuses them into
+  one `HostEntity` per host (union-find over ranked identity rules); the GUI groups all of
+  a host's per-protocol facets under a single host card + identity drill-down (#305/#306).
 
 ### Local Store (redb)
 

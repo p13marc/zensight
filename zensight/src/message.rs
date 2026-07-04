@@ -651,6 +651,22 @@ pub enum Message {
     ResumeArtifact,
     /// Cancel the in-flight artifact download (discards the partial).
     CancelArtifact,
+    /// Edit a text field of a sensor's capture form (#333).
+    CaptureFormEdited {
+        /// Sensor key prefix the form belongs to.
+        key_prefix: String,
+        /// Which field changed.
+        field: crate::view::artifact_fetch::CaptureField,
+        /// The new text value.
+        value: String,
+    },
+    /// Toggle a boolean of a sensor's capture form (#333).
+    CaptureFormToggled {
+        /// Sensor key prefix the form belongs to.
+        key_prefix: String,
+        /// Which toggle flipped.
+        field: crate::view::artifact_fetch::CaptureToggle,
+    },
 
     // Theme messages
     /// Toggle between light and dark theme.

@@ -1792,12 +1792,13 @@ fn test_sensors_view() {
 
     let idle = ArtifactFetch::default();
     let no_kinds: HashMap<String, Vec<KindStatus>> = HashMap::new();
+    let no_forms: HashMap<String, zensight::view::artifact_fetch::CaptureForm> = HashMap::new();
 
     // Empty state.
     let empty: HashMap<String, HealthSnapshot> = HashMap::new();
     let no_errors: HashMap<String, VecDeque<ErrorReport>> = HashMap::new();
     let mut ui = simulator(sensors_view(
-        &empty, &no_errors, &idle, None, None, &no_kinds,
+        &empty, &no_errors, &idle, None, None, &no_kinds, &no_forms,
     ));
     assert!(ui.find("Sensors").is_ok());
     assert!(ui.find("No sensor health received yet.").is_ok());
@@ -1845,7 +1846,9 @@ fn test_sensors_view() {
         }],
     );
 
-    let mut ui = simulator(sensors_view(&health, &errors, &idle, None, None, &kinds));
+    let mut ui = simulator(sensors_view(
+        &health, &errors, &idle, None, None, &kinds, &no_forms,
+    ));
     assert!(ui.find("snmp").is_ok());
     assert!(ui.find("Degraded").is_ok());
     assert!(ui.find("Responding").is_ok());
@@ -1863,6 +1866,7 @@ fn test_sensors_view() {
         Some("zensight/snmp"),
         Some("report"),
         &kinds,
+        &no_forms,
     ));
     assert!(ui.find("Cancel").is_ok());
     assert!(ui.find("Downloading 1/4 (25%)").is_ok());
@@ -1882,6 +1886,7 @@ fn test_sensors_snapshot_dirs() {
 
     let idle = ArtifactFetch::default();
     let no_errors: HashMap<String, VecDeque<ErrorReport>> = HashMap::new();
+    let no_forms: HashMap<String, zensight::view::artifact_fetch::CaptureForm> = HashMap::new();
 
     let mut health = HashMap::new();
     health.insert(
@@ -1918,7 +1923,9 @@ fn test_sensors_snapshot_dirs() {
 
     // Idle: a "Download <name>" button per directory, and clicking one emits a
     // StartArtifact with a Snapshot kind for that directory.
-    let mut ui = simulator(sensors_view(&health, &no_errors, &idle, None, None, &kinds));
+    let mut ui = simulator(sensors_view(
+        &health, &no_errors, &idle, None, None, &kinds, &no_forms,
+    ));
     assert!(ui.find("Directory snapshots").is_ok());
     assert!(ui.find("Download etc").is_ok());
     assert!(ui.find("Download pcaps").is_ok());
@@ -1939,6 +1946,7 @@ fn test_sensors_snapshot_dirs() {
         Some("zensight/sysinfo"),
         Some("snapshot"),
         &kinds,
+        &no_forms,
     ));
     assert!(ui.find("Downloading 2/5 chunks (40%)").is_ok());
     assert!(ui.find("Cancel").is_ok());
@@ -3510,4 +3518,111 @@ fn test_host_detail_entity_facet_tabs() {
     assert!(ui.find("Facets").is_ok());
     assert!(ui.find("sysinfo").is_ok());
     assert!(ui.find("netlink").is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// On-demand capture form (#333)
+// ---------------------------------------------------------------------------
+
+use zensight::view::artifact_fetch::{ArtifactFetch, CaptureForm, artifact_section};
+use zensight_common::{KindAdvert, KindStatus};
+
+fn capture_kinds(max_duration_secs: u32, filter_allowed: bool) -> Vec<KindStatus> {
+    vec![KindStatus {
+        kind: "capture".into(),
+        busy: false,
+        current: None,
+        max_bytes: 256 * 1024 * 1024,
+        cooldown_secs: 60,
+        advert: KindAdvert::Capture {
+            max_duration_secs,
+            filter_allowed,
+            snaplen_max: 0,
+        },
+    }]
+}
+
+#[test]
+fn capture_form_renders_from_advert() {
+    let kinds = capture_kinds(300, true);
+    let form = CaptureForm::default();
+    let mut ui = simulator(artifact_section(
+        &ArtifactFetch::Idle,
+        "zensight/netring",
+        &kinds,
+        None,
+        None,
+        Some(&form),
+    ));
+    assert!(ui.find("On-demand packet capture").is_ok());
+    assert!(ui.find("Start capture").is_ok());
+}
+
+#[test]
+fn capture_form_over_cap_duration_blocks_submit() {
+    let kinds = capture_kinds(300, true);
+    let form = CaptureForm {
+        duration_secs: "99999".into(), // over the 300s advert max
+        ..CaptureForm::default()
+    };
+    let mut ui = simulator(artifact_section(
+        &ArtifactFetch::Idle,
+        "zensight/netring",
+        &kinds,
+        None,
+        None,
+        Some(&form),
+    ));
+    // Inline validation error is shown …
+    assert!(ui.find("duration exceeds the sensor max (300s)").is_ok());
+    // … and the disabled submit emits no StartArtifact message.
+    let _ = ui.click("Start capture");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        !msgs
+            .iter()
+            .any(|m| matches!(m, Message::StartArtifact { .. }))
+    );
+}
+
+#[test]
+fn capture_generating_progress_line_renders() {
+    let kinds = capture_kinds(300, true);
+    let form = CaptureForm::default();
+    let fetch = ArtifactFetch::Generating {
+        detail: Some("capturing 12s/30s · 3.1 MiB · 42 pkts".into()),
+    };
+    let mut ui = simulator(artifact_section(
+        &fetch,
+        "zensight/netring",
+        &kinds,
+        Some("zensight/netring"),
+        Some("capture"),
+        Some(&form),
+    ));
+    assert!(ui.find("capturing 12s/30s · 3.1 MiB · 42 pkts").is_ok());
+}
+
+#[test]
+fn no_capture_advert_renders_no_form() {
+    // A sensor advertising only a report kind shows no capture form.
+    let kinds = vec![KindStatus {
+        kind: "report".into(),
+        busy: false,
+        current: None,
+        max_bytes: 1024,
+        cooldown_secs: 30,
+        advert: KindAdvert::Report {},
+    }];
+    let form = CaptureForm::default();
+    let mut ui = simulator(artifact_section(
+        &ArtifactFetch::Idle,
+        "zensight/netlink",
+        &kinds,
+        None,
+        None,
+        Some(&form),
+    ));
+    assert!(ui.find("Start capture").is_err());
+    assert!(ui.find("Download debug report").is_ok());
 }

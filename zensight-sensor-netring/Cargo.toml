@@ -68,6 +68,19 @@ arc-swap = "1"
 sha1 = "0.10"
 base64 = "0.22"
 
+# On-demand pcap capture compression (#333): the finished capture is zstd-encoded
+# (level 3) before Tier-1 blob delivery when the request asks for it.
+zstd = { workspace = true }
+# Object-safe async `ArtifactProducer` impl (the capture producer, #333).
+async-trait = { workspace = true }
+
+[dev-dependencies]
+# Read produced captures back in the tap-loop unit tests (pin the pcap magic +
+# record count — the "wireshark-openable" check). Matches netring's pcap_file.
+pcap-file = "2"
+# `CancelToken` for building a `ProduceCtx` in capture unit tests.
+zenoh-blob = { workspace = true }
+
 # =============================================================================
 # Package metadata for cargo-deb
 # =============================================================================

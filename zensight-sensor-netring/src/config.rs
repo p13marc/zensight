@@ -80,6 +80,97 @@ pub struct NetringConfig {
     /// as identity evidence on `zensight/_meta/evidence/**` for the correlator.
     #[serde(default)]
     pub evidence: EvidenceConfig,
+    /// On-demand packet capture over the `@/artifact` channel (#333). Disabled
+    /// by default; `capture.on_demand.enabled` arms a dedicated reloadable
+    /// packet-tier tap and registers the capture artifact producer.
+    #[serde(default)]
+    pub capture: CaptureConfig,
+}
+
+/// On-demand / triggered packet-capture config (#333). Nested so #327's
+/// `capture.triggered` can slot in later without disturbing the flat
+/// `capture_focus` filter section.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CaptureConfig {
+    /// Operator-triggered capture over the `@/artifact` channel.
+    #[serde(default)]
+    pub on_demand: CaptureOnDemandConfig,
+}
+
+fn d_capture_max_duration() -> u32 {
+    300
+}
+fn d_capture_max_bytes() -> u64 {
+    256 * 1024 * 1024
+}
+fn d_capture_cooldown() -> u64 {
+    60
+}
+fn d_capture_ttl() -> u64 {
+    600
+}
+fn d_capture_chunk() -> u32 {
+    512 * 1024
+}
+
+/// On-demand capture bounds (#333). The producer owns these limits and clamps
+/// every request to them; `zensight-common::ArtifactLimits` stays report +
+/// snapshot only (per the accepted design).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureOnDemandConfig {
+    /// Serve on-demand captures at all. `false` (default) ⇒ no tap subscription,
+    /// no producer, no advert (the GUI hides the form).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Largest allowed capture duration, seconds (requests are clamped down).
+    #[serde(default = "d_capture_max_duration")]
+    pub max_duration_secs: u32,
+    /// Hard byte cap; a capture stops early (truncated) once it is reached.
+    #[serde(default = "d_capture_max_bytes")]
+    pub max_bytes: u64,
+    /// Largest allowed per-packet snap length, bytes. `0` ⇒ full frames allowed.
+    #[serde(default)]
+    pub snaplen_max: u32,
+    /// Whether operator-supplied capture filter expressions are accepted.
+    #[serde(default = "default_true")]
+    pub allow_filter: bool,
+    /// Minimum gap between successive captures, seconds (rate-limit).
+    #[serde(default = "d_capture_cooldown")]
+    pub cooldown_secs: u64,
+    /// How long a finished capture stays available before the reaper drops it.
+    #[serde(default = "d_capture_ttl")]
+    pub ttl_secs: u64,
+    /// Chunk size for the blob transfer, bytes (clamped by zenoh-blob).
+    #[serde(default = "d_capture_chunk")]
+    pub chunk_size: u32,
+}
+
+impl Default for CaptureOnDemandConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_duration_secs: d_capture_max_duration(),
+            max_bytes: d_capture_max_bytes(),
+            snaplen_max: 0,
+            allow_filter: true,
+            cooldown_secs: d_capture_cooldown(),
+            ttl_secs: d_capture_ttl(),
+            chunk_size: d_capture_chunk(),
+        }
+    }
+}
+
+impl CaptureOnDemandConfig {
+    /// The shared-limits view the artifact channel enforces + advertises.
+    pub fn common(&self) -> zensight_sensor_core::CommonArtifactLimits {
+        zensight_sensor_core::CommonArtifactLimits {
+            enabled: self.enabled,
+            max_bytes: self.max_bytes,
+            cooldown_secs: self.cooldown_secs,
+            ttl_secs: self.ttl_secs,
+            chunk_size: self.chunk_size,
+        }
+    }
 }
 
 /// Host-evidence feed tuning (#307). Governs how the sensor republishes

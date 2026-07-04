@@ -595,16 +595,26 @@ fn dns_client_ip(key: FiveTupleKey) -> Option<std::net::IpAddr> {
 }
 
 /// What [`build`] returns: the monitor, its emit channels, the telemetry-channel
-/// keepalive, and the runtime detection-tuning handle (#121).
+/// keepalive, the runtime detection-tuning handle (#121), and the registration
+/// index of the on-demand capture tap subscription (#333), if armed.
 pub type BuiltMonitor = (
     netring::monitor::Monitor,
     MonitorChannels,
     mpsc::UnboundedSender<TelemetryPoint>,
     DetectorHandle,
+    Option<usize>,
 );
 
 /// Build a netring `Monitor` from config plus the channels it emits on.
-pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Error>> {
+///
+/// `capture_tap` is the shared slot the on-demand capture producer (#333) arms;
+/// when `cfg.capture.on_demand.enabled` a dedicated reloadable packet-tier
+/// subscription is registered whose handler forwards frames into it. When not
+/// enabled the tap is never wired and stays a zero-cost idle handle.
+pub fn build(
+    cfg: &NetringConfig,
+    capture_tap: crate::capture::CaptureTap,
+) -> Result<BuiltMonitor, Box<dyn std::error::Error>> {
     // Live, hot-swappable anomaly config (#121). Detectors read `det_cfg`; the
     // command channel mutates it through the returned handle.
     let detector_handle = DetectorHandle::new(cfg.anomalies.clone());
@@ -854,6 +864,12 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
     // focused packets/bytes — the visible effect of narrowing — and the reload
     // itself is driven from `main` via the monitor's `ReloadHandle`. Off by
     // default: the per-frame handler is a cost the zero-cost hot loop avoids.
+    //
+    // `capture_focus_registered` records whether the subscription was *actually*
+    // added (config-enabled AND the base_expr parsed) — the on-demand capture tap
+    // below keys its reload index off this, not off the config flag, so a
+    // failed-to-parse focus filter cannot shift the tap's index.
+    let mut capture_focus_registered = false;
     if cfg.capture_focus.enabled {
         use netring::monitor::subscription::builder::packet;
         match packet().expr(&cfg.capture_focus.base_expr) {
@@ -886,6 +902,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
                         }
                     }
                 });
+                capture_focus_registered = true;
                 tracing::info!(
                     base_expr = %cfg.capture_focus.base_expr,
                     "netring: capture-focus armed (reloadable packet filter)"
@@ -898,6 +915,43 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
             ),
         }
     }
+
+    // On-demand capture tap (#333): a dedicated reloadable packet-tier
+    // subscription that forwards frames into `capture_tap` while a capture is in
+    // flight (idle cost is one ArcSwap load per matching frame). Registered
+    // AFTER capture-focus so its index is stable: capture-focus (when actually
+    // registered) owns index 0 — `command.rs::apply_filter` hard-codes that — so
+    // the tap takes index `capture_focus_registered as usize`. Keying off the
+    // real registration (not `cfg.capture_focus.enabled`) means a focus filter
+    // that failed to parse — and so was NOT registered — doesn't leave the tap
+    // pointing one slot too high. The permissive base means any per-request
+    // filter only *narrows* the build-time kernel prefilter union.
+    let capture_tap_index = if cfg.capture.on_demand.enabled {
+        use netring::monitor::subscription::builder::packet;
+        match packet().expr(crate::capture::CAPTURE_TAP_BASE_EXPR) {
+            Ok(sub) => {
+                let tap = capture_tap.clone();
+                let sub = sub.to(move |pkt: &flowscope::PacketView<'_>, _ctx: &mut Ctx<'_>| {
+                    tap.offer(pkt);
+                    Ok(())
+                });
+                b = b.subscribe(sub);
+                let idx = usize::from(capture_focus_registered);
+                tracing::info!(
+                    index = idx,
+                    base_expr = crate::capture::CAPTURE_TAP_BASE_EXPR,
+                    "netring: on-demand capture tap armed (reloadable packet filter)"
+                );
+                Some(idx)
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "netring: on-demand capture tap base_expr failed to parse; capture disabled");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // TCP resets (connection refused vs mid-transfer abort).
     if cfg.collect.tcp_resets {
@@ -1929,6 +1983,22 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
     b = b.sink(ChannelSink::new(anom_tx));
 
     let monitor = b.build()?;
+    // Verify the capture-tap index against the *actual* registration order (#333):
+    // capture-focus (index 0, hard-coded in command.rs) then the tap. This is a
+    // runtime check (not a `debug_assert!` compiled out of release builds): on a
+    // mismatch, disable on-demand capture rather than risk `set_packet_filter`
+    // swapping the wrong subscription's filter at capture time.
+    let capture_tap_index = match capture_tap_index {
+        Some(idx) if monitor.reload_handle().packet_filter_count() != idx + 1 => {
+            tracing::error!(
+                expected = idx + 1,
+                actual = monitor.reload_handle().packet_filter_count(),
+                "netring: capture-tap index inconsistent with packet-filter count; disabling on-demand capture"
+            );
+            None
+        }
+        other => other,
+    };
     let keepalive = tel_tx.clone();
     Ok((
         monitor,
@@ -1966,6 +2036,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
         },
         keepalive,
         detector_handle,
+        capture_tap_index,
     ))
 }
 

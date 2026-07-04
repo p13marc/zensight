@@ -38,8 +38,11 @@ async fn passive_dns_replay_enriches_flows_and_fires_fqdn_beacon() {
     ))
     .expect("test config parses");
 
-    let (mon, mut channels, keepalive, _handle) =
-        monitor::build(&cfg.netring).expect("monitor builds");
+    let (mon, mut channels, keepalive, _handle, _tap_index) = monitor::build(
+        &cfg.netring,
+        zensight_sensor_netring::capture::CaptureTap::default(),
+    )
+    .expect("monitor builds");
     mon.replay().await.expect("pcap replay");
     drop(keepalive);
 

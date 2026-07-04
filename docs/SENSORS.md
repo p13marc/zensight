@@ -18,9 +18,10 @@ configure it, and the exact Zenoh keys it publishes/serves.
 - Large-data artifacts: every sensor can serve on-demand large-data artifacts
   over the unified `@/artifact/*` channel — a redacted `tar.zst` **report** bundle
   (config + health + counters, Tier-1 blob delivery) and a directory **snapshot**
-  (Tier-2 content-addressed tree; on-demand pcap **capture** is planned/reserved,
-  issue #333). **Opt-in per kind** via the `artifacts.{report,snapshot}` config
-  section (every kind disabled by default). See KEYSPACE.md §3.1a.
+  (Tier-2 content-addressed tree). The **netring** sensor additionally serves an
+  on-demand pcap **capture** (issue #333) off a live packet tap. **Opt-in per
+  kind** via the `artifacts.{report,snapshot}` config section (plus netring's
+  `capture.on_demand`); every kind is disabled by default. See KEYSPACE.md §3.1a.
 - Config: a JSON5 file under [`configs/`](../configs/); pass with `--config`.
   Every config has a `zenoh` block (`mode`, `connect`, `listen`) and a
   `logging` block. The `ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN}` env vars override
@@ -354,8 +355,19 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
   *Detection Tuning* panel. A detector that was off at startup isn't built into
   the pipeline, so enabling it still needs a restart; tuning and mute/unmute of
   built detectors are immediate.
+- **On-demand pcap capture (#333, opt-in):** with `capture.on_demand.enabled`, an
+  operator can pull a bounded packet capture over the unified `@/artifact`
+  channel (GUI *Capture* tab or any client). A dedicated reloadable packet-tier
+  tap streams frames to a `pcap[.zst]` file, delivered as a Tier-1 blob; every
+  request is clamped to the configured limits (`max_duration_secs` / `max_bytes`
+  / `snaplen_max`), an optional per-request filter *narrows* the capture
+  (`allow_filter`), and `compress` zstd-encodes it. Rate-limited by
+  `cooldown_secs`, reaped after `ttl_secs`. **Limitation:** the packet tier only
+  sees IP/L4 frames — non-IP traffic (ARP/LLDP) is not captured. Backpressure is
+  drop-with-count (a lossy capture never stalls global telemetry; drops are
+  surfaced in the progress line).
 - **Config:** `configs/netring.json5` (`collect.*`, `anomalies.*`, `threat.*`,
-  `pcap` for replay).
+  `capture.on_demand.*`, `pcap` for replay).
 - **GUI (#257):** the netring device screen is a tabbed, chart-driven view —
   **Overview** (RED hero + per-L4 donut + live anomaly strip) · **Flows** ·
   **Talkers & Matrix** · **DNS** (RED tiles + rcode bars + top-SLD table) ·

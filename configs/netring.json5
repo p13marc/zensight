@@ -192,6 +192,28 @@
       enabled: false,
       base_expr: "tcp or udp or icmp",
     },
+
+    // On-demand packet capture over the unified `@/artifact` channel (#333).
+    // Off by default. When `on_demand.enabled`, an operator can request a
+    // bounded pcap from the GUI (or any client) — a dedicated reloadable
+    // packet-tier tap streams frames to a `pcap[.zst]` file delivered as a
+    // Tier-1 blob. Every request is clamped to the limits below (duration /
+    // bytes / snaplen). NOTE: the packet tier only sees IP/L4 frames — non-IP
+    // (ARP/LLDP) traffic is not captured. Arming the tap adds a permissive
+    // build-time packet subscription (a per-frame predicate eval, like
+    // capture_focus), so leave it off unless captures are actually needed.
+    capture: {
+      on_demand: {
+        enabled: false,
+        max_duration_secs: 300,     // hard cap; longer requests are clamped
+        max_bytes: 268435456,       // 256 MiB; capture stops early (truncated)
+        snaplen_max: 0,             // 0 = full frames allowed
+        allow_filter: true,         // accept per-request narrowing filters
+        cooldown_secs: 60,          // min gap between captures
+        ttl_secs: 600,              // how long a finished capture stays fetchable
+        chunk_size: 524288,         // 512 KiB blob-transfer chunk
+      },
+    },
   },
 
   logging: { level: "info" },
