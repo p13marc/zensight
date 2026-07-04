@@ -68,5 +68,5 @@ pub use status::SensorStatus;
 pub use zensight_common::{
     Alert, AlertKind, AlertSeverity, AlertState, ArtifactLimits, ArtifactReportLimits,
     ArtifactSnapshotLimits, CommonArtifactLimits, Format, LogFormat, LoggingConfig, Protocol,
-    ReportLimits, SnapshotDir, SnapshotLimits, TelemetryPoint, TelemetryValue, ZenohConfig,
+    SnapshotDir, TelemetryPoint, TelemetryValue, ZenohConfig,
 };

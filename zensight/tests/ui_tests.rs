@@ -1742,20 +1742,20 @@ fn test_netlink_netring_overviews_render() {
 #[test]
 fn test_sensors_view() {
     use std::collections::{HashMap, VecDeque};
-    use zensight::view::blob_fetch::BlobFetch;
-    use zensight::view::dir_fetch::DirFetch;
+    use zensight::view::artifact_fetch::ArtifactFetch;
     use zensight::view::sensors::sensors_view;
-    use zensight_common::{ErrorReport, ErrorType, HealthSnapshot, HealthStatus};
+    use zensight_common::{
+        ErrorReport, ErrorType, HealthSnapshot, HealthStatus, KindAdvert, KindStatus,
+    };
 
-    let idle = BlobFetch::default();
-    let dir_idle = DirFetch::default();
-    let no_dirs: HashMap<String, Vec<String>> = HashMap::new();
+    let idle = ArtifactFetch::default();
+    let no_kinds: HashMap<String, Vec<KindStatus>> = HashMap::new();
 
     // Empty state.
     let empty: HashMap<String, HealthSnapshot> = HashMap::new();
     let no_errors: HashMap<String, VecDeque<ErrorReport>> = HashMap::new();
     let mut ui = simulator(sensors_view(
-        &empty, &no_errors, &idle, None, &dir_idle, &no_dirs, None,
+        &empty, &no_errors, &idle, None, None, &no_kinds,
     ));
     assert!(ui.find("Sensors").is_ok());
     assert!(ui.find("No sensor health received yet.").is_ok());
@@ -1788,26 +1788,38 @@ fn test_sensors_view() {
     });
     errors.insert("snmp".to_string(), ring);
 
-    let mut ui = simulator(sensors_view(
-        &health, &errors, &idle, None, &dir_idle, &no_dirs, None,
-    ));
+    // snmp advertises a debug-report artifact kind.
+    let mut kinds: HashMap<String, Vec<KindStatus>> = HashMap::new();
+    kinds.insert(
+        "zensight/snmp".to_string(),
+        vec![KindStatus {
+            kind: "report".into(),
+            busy: false,
+            current: None,
+            max_bytes: 1 << 20,
+            cooldown_secs: 30,
+            advert: KindAdvert::Report {},
+        }],
+    );
+
+    let mut ui = simulator(sensors_view(&health, &errors, &idle, None, None, &kinds));
     assert!(ui.find("snmp").is_ok());
     assert!(ui.find("Degraded").is_ok());
     assert!(ui.find("Responding").is_ok());
     assert!(ui.find("Recent errors (1)").is_ok());
-    // The per-sensor debug-report download control is present (#197).
+    // The per-sensor debug-report download control is present (report advert).
     assert!(ui.find("Download debug report").is_ok());
 
     // While a download is active for this sensor, the card shows progress + Cancel.
-    let active = BlobFetch::Downloading { got: 1, total: 4 };
+    // A report is a blob delivery, so its progress label has no "chunks".
+    let active = ArtifactFetch::Downloading { got: 1, total: 4 };
     let mut ui = simulator(sensors_view(
         &health,
         &errors,
         &active,
         Some("zensight/snmp"),
-        &dir_idle,
-        &no_dirs,
-        None,
+        Some("report"),
+        &kinds,
     ));
     assert!(ui.find("Cancel").is_ok());
     assert!(ui.find("Downloading 1/4 (25%)").is_ok());
@@ -1819,12 +1831,13 @@ fn test_sensors_view() {
 fn test_sensors_snapshot_dirs() {
     use std::collections::{HashMap, VecDeque};
     use zensight::message::Message;
-    use zensight::view::blob_fetch::BlobFetch;
-    use zensight::view::dir_fetch::DirFetch;
+    use zensight::view::artifact_fetch::ArtifactFetch;
     use zensight::view::sensors::sensors_view;
-    use zensight_common::{ErrorReport, HealthSnapshot, HealthStatus};
+    use zensight_common::{
+        ArtifactKind, ErrorReport, HealthSnapshot, HealthStatus, KindAdvert, KindStatus,
+    };
 
-    let idle = BlobFetch::default();
+    let idle = ArtifactFetch::default();
     let no_errors: HashMap<String, VecDeque<ErrorReport>> = HashMap::new();
 
     let mut health = HashMap::new();
@@ -1843,25 +1856,25 @@ fn test_sensors_snapshot_dirs() {
         },
     );
 
-    // sysinfo advertises two snapshot directories.
-    let mut snapshot_dirs: HashMap<String, Vec<String>> = HashMap::new();
-    snapshot_dirs.insert(
+    // sysinfo advertises a snapshot kind with two directories.
+    let mut kinds: HashMap<String, Vec<KindStatus>> = HashMap::new();
+    kinds.insert(
         "zensight/sysinfo".to_string(),
-        vec!["etc".to_string(), "pcaps".to_string()],
+        vec![KindStatus {
+            kind: "snapshot".into(),
+            busy: false,
+            current: None,
+            max_bytes: 1 << 20,
+            cooldown_secs: 30,
+            advert: KindAdvert::Snapshot {
+                dirs: vec!["etc".to_string(), "pcaps".to_string()],
+            },
+        }],
     );
 
-    // Idle: a "Download <name>" button per directory, and clicking one emits
-    // DownloadSnapshot for that directory.
-    let dir_idle = DirFetch::default();
-    let mut ui = simulator(sensors_view(
-        &health,
-        &no_errors,
-        &idle,
-        None,
-        &dir_idle,
-        &snapshot_dirs,
-        None,
-    ));
+    // Idle: a "Download <name>" button per directory, and clicking one emits a
+    // StartArtifact with a Snapshot kind for that directory.
+    let mut ui = simulator(sensors_view(&health, &no_errors, &idle, None, None, &kinds));
     assert!(ui.find("Directory snapshots").is_ok());
     assert!(ui.find("Download etc").is_ok());
     assert!(ui.find("Download pcaps").is_ok());
@@ -1869,20 +1882,19 @@ fn test_sensors_snapshot_dirs() {
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(msgs.iter().any(|m| matches!(
         m,
-        Message::DownloadSnapshot { key_prefix, dir }
+        Message::StartArtifact { key_prefix, kind: ArtifactKind::Snapshot { dir } }
             if key_prefix == "zensight/sysinfo" && dir == "etc"
     )));
 
-    // Fetching: the card shows chunk progress + a Cancel button.
-    let fetching = DirFetch::Fetching { got: 2, total: 5 };
+    // Downloading a snapshot (tree delivery): chunk progress + a Cancel button.
+    let fetching = ArtifactFetch::Downloading { got: 2, total: 5 };
     let mut ui = simulator(sensors_view(
         &health,
         &no_errors,
-        &idle,
-        None,
         &fetching,
-        &snapshot_dirs,
         Some("zensight/sysinfo"),
+        Some("snapshot"),
+        &kinds,
     ));
     assert!(ui.find("Downloading 2/5 chunks (40%)").is_ok());
     assert!(ui.find("Cancel").is_ok());
