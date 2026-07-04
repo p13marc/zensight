@@ -40,15 +40,15 @@ pub use config::{
     LogFormat, LoggingConfig, SnapshotDir, ZenohConfig, load_config, parse_config,
 };
 pub use error::{Error, Result};
-pub use evidence::HostEvidence;
+pub use evidence::{HostEvidence, NameObservation};
 pub use health::{
     DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, HealthStatus, SensorInfo,
 };
 pub use keyexpr::{
     KEY_PREFIX, KeyExprBuilder, ParseError, ParsedKeyExpr, all_alerts_wildcard,
     all_errors_wildcard, all_evidence_wildcard, all_health_wildcard, all_liveness_wildcard,
-    all_sensors_wildcard, all_telemetry_wildcard, host_evidence_key, parse_key_expr,
-    sensor_info_key,
+    all_name_evidence_wildcard, all_sensors_wildcard, all_telemetry_wildcard, host_evidence_key,
+    name_observation_key, parse_key_expr, sensor_info_key,
 };
 pub use query_detail::{
     AssetRecord, CgroupNode, CgroupPid, DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord,

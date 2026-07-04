@@ -10,8 +10,8 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use tokio::sync::mpsc;
 use zensight_common::{
-    Alert, AssetRecord, ElephantRecord, FlowRecord, Ja4hRecord, QuicRecord, SshRecord,
-    TelemetryPoint, TlsRecord,
+    Alert, AssetRecord, ElephantRecord, FlowRecord, Ja4hRecord, NameObservation, QuicRecord,
+    SshRecord, TelemetryPoint, TlsRecord,
 };
 
 use crate::command::DetectorHandle;
@@ -238,6 +238,11 @@ pub struct MonitorChannels {
     /// `collect.dns` are both set. Read by the flow-end enrichment and the
     /// talker query channel; fed by the DNS answer handler.
     pub name_map: Option<SharedNameMap>,
+    /// Receiver for passive-DNS name observations forwarded off the delta-feed
+    /// drain task (#307). `Some` iff `name_map` is `Some`; taken by `main` to
+    /// drive the name-evidence publisher. Each item is a batch of newly-observed
+    /// IP→name bindings republished as `NameObservation` evidence.
+    pub name_obs_rx: Option<mpsc::UnboundedReceiver<Vec<NameObservation>>>,
 }
 
 /// Flow exporter that captures netring's canonical `FlowRecord` into a bounded
@@ -644,6 +649,9 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
             &cfg.names,
         ))))
     });
+    // Passive-DNS name-observation channel (#307): set to `Some` inside the
+    // name-map drain task below (only when the map exists) and handed to `main`.
+    let mut name_obs_rx: Option<mpsc::UnboundedReceiver<Vec<NameObservation>>> = None;
 
     let mut b = Monitor::builder();
     b = b.name(cfg.source.clone());
@@ -1066,12 +1074,16 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
 
             // Delta-feed drain: every `batch_interval_secs`, take the
             // genuinely-new (ip, name) mappings out of the map's bounded
-            // pending queue (cap `max_batch`) so it stays fresh. The feed is
-            // reserved for identity propagation to the correlator (epic #312);
-            // today the drain only keeps the queue from saturating. No
-            // wall-clock `sweep()` here on purpose: claims are stamped with
-            // *event* time, which under pcap replay is far behind wall time —
-            // expiry is already enforced per-lookup with event timestamps.
+            // pending queue (cap `max_batch`) so it stays fresh, and forward
+            // them to the name-evidence publisher (#307) as `NameObservation`s
+            // for the correlator (epic #312). `drain_new` is DESTRUCTIVE — this
+            // is the single owner of the pending queue; do not add a second
+            // drainer. No wall-clock `sweep()` here on purpose: claims are
+            // stamped with *event* time, which under pcap replay is far behind
+            // wall time — expiry is already enforced per-lookup with event
+            // timestamps.
+            let (obs_tx, obs_rx) = mpsc::unbounded_channel::<Vec<NameObservation>>();
+            name_obs_rx = Some(obs_rx);
             let nm_drain = nm.clone();
             let interval = cfg.names.batch_interval_secs.max(1);
             tokio::spawn(async move {
@@ -1089,6 +1101,19 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
                             dropped_total = dropped,
                             "netring: passive-DNS new-name feed drained"
                         );
+                        let observations: Vec<NameObservation> = batch
+                            .iter()
+                            .map(|(ip, claim)| NameObservation {
+                                observer: "netring".to_string(),
+                                ip: ip.to_string(),
+                                name: claim.name.clone(),
+                                provenance: claim.provenance.as_str().to_string(),
+                                last_seen: (claim.last_seen.to_unix_f64() * 1000.0) as i64,
+                            })
+                            .collect();
+                        // Receiver dropped (evidence disabled / shutdown) → stop
+                        // forwarding but keep draining so the queue can't saturate.
+                        let _ = obs_tx.send(observations);
                     }
                     batch.clear();
                 }
@@ -1937,6 +1962,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
             #[cfg(feature = "ipfix")]
             ipfix_records,
             name_map,
+            name_obs_rx,
         },
         keepalive,
         detector_handle,

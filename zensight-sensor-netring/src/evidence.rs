@@ -13,7 +13,10 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
-use zensight_common::{AssetRecord, HostEvidence, host_evidence_key};
+use tokio::sync::mpsc;
+use zensight_common::{
+    AssetRecord, HostEvidence, NameObservation, host_evidence_key, name_observation_key,
+};
 use zensight_sensor_core::AdvancedPublisherRegistry;
 
 use crate::config::EvidenceConfig;
@@ -208,6 +211,53 @@ pub async fn run_asset_evidence(
     }
 }
 
+/// Slugify an IP for use as a name-observation `source`: `.`/`:` → `-`, so the
+/// correlator's per-IP GET is stable and updates replace in place.
+pub fn ip_slug(ip: &str) -> String {
+    ip.replace(['.', ':'], "-")
+}
+
+/// Max distinct IPs published per name-observation batch (a safety cap; the
+/// upstream delta feed is already bounded by `names.max_batch`).
+const NAME_MAX_PER_BATCH: usize = 500;
+
+/// Passive-DNS name-observation publisher task (#307). Consumes batches of
+/// newly-observed IP→name bindings forwarded off the name-map drain task,
+/// dedupes to the newest binding per IP, and publishes each as a
+/// `NameObservation` keyed by IP so updates replace in place.
+pub async fn run_name_evidence(
+    mut rx: mpsc::UnboundedReceiver<Vec<NameObservation>>,
+    registry: Arc<AdvancedPublisherRegistry>,
+) {
+    while let Some(batch) = rx.recv().await {
+        // Newest binding per IP wins (the key is per-IP; last write replaces).
+        let mut newest: HashMap<String, NameObservation> = HashMap::new();
+        for obs in batch {
+            match newest.get(&obs.ip) {
+                Some(existing) if existing.last_seen >= obs.last_seen => {}
+                _ => {
+                    newest.insert(obs.ip.clone(), obs);
+                }
+            }
+        }
+        let mut items: Vec<NameObservation> = newest.into_values().collect();
+        if items.len() > NAME_MAX_PER_BATCH {
+            tracing::warn!(
+                dropped = items.len() - NAME_MAX_PER_BATCH,
+                cap = NAME_MAX_PER_BATCH,
+                "netring: name-evidence batch over cap; dropping remainder"
+            );
+            items.truncate(NAME_MAX_PER_BATCH);
+        }
+        for obs in items {
+            let key = name_observation_key("netring", &ip_slug(&obs.ip));
+            if let Err(e) = registry.publish_serializable(&key, &obs).await {
+                tracing::warn!(error = %e, ip = %obs.ip, "netring: name-evidence publish failed");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +344,13 @@ mod tests {
         ));
         // Changed content → publish immediately.
         assert!(should_publish(1_000 + 1, Some(7), 9, Some(1_000), refresh));
+    }
+
+    #[test]
+    fn ip_slug_replaces_dots_and_colons() {
+        assert_eq!(ip_slug("10.0.0.9"), "10-0-0-9");
+        assert_eq!(ip_slug("fe80::1"), "fe80--1");
+        assert_eq!(ip_slug("2001:db8::42"), "2001-db8--42");
     }
 
     #[test]

@@ -53,9 +53,46 @@ pub struct HostEvidence {
     pub last_updated: i64,
 }
 
+/// One passive-DNS name observation, published on
+/// `zensight/_meta/evidence/names/<sensor>/<ip-slug>` (#307).
+///
+/// A **third-party** claim binding an observed IP to a name seen on the wire
+/// (DNS answer, PTR, TLS SNI, ...). The correlator uses these to attach
+/// hostnames/FQDNs to entities that emit no telemetry of their own. Like
+/// [`HostEvidence`], stale records (past the evidence TTL) are ignored, so the
+/// publisher refreshes live bindings periodically.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NameObservation {
+    /// Observing sensor (e.g. `"netring"`).
+    pub observer: String,
+    /// The observed IP address this name is bound to.
+    pub ip: String,
+    /// The canonical name (lowercased, no trailing dot).
+    pub name: String,
+    /// Provenance slug from the passive-DNS source (`dns_a`, `dns_cname`,
+    /// `dns_ptr`, `sni`, `mdns`, ...).
+    pub provenance: String,
+    /// Unix epoch millis of the most recent sighting.
+    pub last_seen: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn name_observation_roundtrip() {
+        let obs = NameObservation {
+            observer: "netring".into(),
+            ip: "10.0.0.9".into(),
+            name: "printer.example.com".into(),
+            provenance: "dns_a".into(),
+            last_seen: 1_700_000_000_000,
+        };
+        let json = serde_json::to_string(&obs).unwrap();
+        let back: NameObservation = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, obs);
+    }
 
     #[test]
     fn roundtrip_and_optional_field_defaults() {

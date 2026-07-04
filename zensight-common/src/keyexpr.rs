@@ -258,6 +258,40 @@ pub fn all_evidence_wildcard() -> String {
     format!("{}/_meta/evidence/**", KEY_PREFIX)
 }
 
+/// Build the name-observation key for one `(sensor, source)` claim, where
+/// `source` is the observed IP slugified (`.`/`:` → `-`) so updates for the
+/// same IP replace in place (#307).
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::name_observation_key;
+///
+/// assert_eq!(
+///     name_observation_key("netring", "10-0-0-9"),
+///     "zensight/_meta/evidence/names/netring/10-0-0-9"
+/// );
+/// ```
+pub fn name_observation_key(sensor: &str, source: &str) -> String {
+    format!("{}/_meta/evidence/names/{}/{}", KEY_PREFIX, sensor, source)
+}
+
+/// Build a wildcard key expression for all passive-DNS name observations
+/// (`zensight/_meta/evidence/names/**`), a subset of [`all_evidence_wildcard`]
+/// (#307).
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::all_name_evidence_wildcard;
+///
+/// assert_eq!(
+///     all_name_evidence_wildcard(),
+///     "zensight/_meta/evidence/names/**"
+/// );
+/// ```
+pub fn all_name_evidence_wildcard() -> String {
+    format!("{}/_meta/evidence/names/**", KEY_PREFIX)
+}
+
 /// Build a wildcard key expression for all sensor-emitted alerts.
 ///
 /// Matches: `zensight/<protocol>/@/alerts/<alert_key>`
