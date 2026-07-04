@@ -672,15 +672,20 @@ async fn collect_sockets(
         .collect()
 }
 
-/// Annotate closing-state sockets the `/proc` scan left unattributed with the
-/// owner recorded by the eBPF tcplife close map (#304, tier 2a). A socket in
-/// TIME_WAIT / CLOSE_WAIT / FIN_WAIT* / LAST_ACK / CLOSING has no open fd, so
-/// tier 1 can never attribute it — but the kernel saw who closed it.
+/// Annotate sockets the `/proc` scan left unattributed with owners the eBPF
+/// module observed (#304):
+/// * closing states (TIME_WAIT / CLOSE_WAIT / FIN_WAIT* / LAST_ACK / CLOSING)
+///   have no open fd, so tier 1 can never attribute them — the tcplife close
+///   map (tier 2a) saw who closed them;
+/// * ESTABLISHED sockets the scan missed (e.g. other users' processes on an
+///   unprivileged sensor) may have a live-map entry from their client-connect
+///   ESTABLISHED event (tier 2b; server-side/accepted sockets deliberately
+///   have none — see the kernel crate).
 #[cfg(feature = "ebpf")]
 fn annotate_closing_sockets(records: &mut [SocketRecord], ebpf: &QueryEbpf) {
     let Some(eb) = ebpf else { return };
     for rec in records.iter_mut() {
-        if rec.pid.is_some() || !is_closing_state_label(&rec.state) {
+        if rec.pid.is_some() {
             continue;
         }
         let Some((lip, lport)) = split_endpoint(&rec.local) else {
@@ -689,12 +694,20 @@ fn annotate_closing_sockets(records: &mut [SocketRecord], ebpf: &QueryEbpf) {
         let Some((rip, rport)) = split_endpoint(&rec.remote) else {
             continue;
         };
-        if let Some((pid, comm)) = eb.recent_close_owner(lip, lport, rip, rport) {
+        let owner = if rec.state == "established" {
+            eb.live_conn_owner(lip, lport, rip, rport)
+        } else if is_closing_state_label(&rec.state) {
+            eb.recent_close_owner(lip, lport, rip, rport)
+        } else {
+            None
+        };
+        if let Some((pid, comm)) = owner {
             rec.pid = Some(pid as i32);
             rec.process = Some(comm);
-            // No proc_start_time: the close record carries none, and the
-            // process may already be gone. pid alone marks "attributed via
-            // close event" — consumers needing strong identity skip it.
+            // No proc_start_time: the kernel record carries none, and (for
+            // closes) the process may already be gone. pid alone marks
+            // "attributed via eBPF event" — consumers needing strong identity
+            // skip it.
         }
     }
 }

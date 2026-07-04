@@ -35,7 +35,8 @@ mod prog {
         programs::{ProbeContext, RetProbeContext, TracePointContext},
     };
     use zensight_sensor_netlink_ebpf_common::{
-        connlat_bucket, ConnRecord, RetransKey, CONNLAT_BUCKETS,
+        connlat_bucket, ConnRecord, RetransKey, CONNLAT_BUCKETS, CONN_EVENT_CLOSE,
+        CONN_EVENT_ESTABLISHED,
     };
 
     // -- connlat -------------------------------------------------------------
@@ -59,6 +60,7 @@ mod prog {
     static CONNS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
 
     const TCP_ESTABLISHED: i32 = 1;
+    const TCP_SYN_SENT: i32 = 2;
     const TCP_CLOSE: i32 = 7;
     const AF_INET: u16 = 2;
     const AF_INET6: u16 = 10;
@@ -157,12 +159,27 @@ mod prog {
 
     fn try_set_state(ctx: &TracePointContext) -> Result<u32, i64> {
         let newstate: i32 = unsafe { ctx.read_at(SS_NEWSTATE)? };
-        let _oldstate: i32 = unsafe { ctx.read_at(SS_OLDSTATE)? };
+        let oldstate: i32 = unsafe { ctx.read_at(SS_OLDSTATE)? };
         let skaddr: u64 = unsafe { ctx.read_at(SS_SKADDR)? };
 
         if newstate == TCP_ESTABLISHED {
             let now = unsafe { bpf_ktime_get_ns() };
             let _ = BIRTH.insert(&skaddr, &now, 0);
+            // Tier 2b (#304): emit a live-attribution record for CLIENT-side
+            // connects only (SYN_SENT → ESTABLISHED). Inbound/accepted sockets
+            // (SYN_RECV → ESTABLISHED) are deliberately excluded: that
+            // transition fires in softirq context, where
+            // bpf_get_current_pid_tgid() is whatever task happens to be
+            // running — NOT the owning process. Server sockets stay on the
+            // /proc-scan path. CAVEAT (needs host validation, like #114): the
+            // SYN-ACK that completes a client connect is ALSO processed in
+            // softirq; whether current() here is reliably the connecting task
+            // must be verified on a real kernel — if not, the hardened variant
+            // is to stash pid/comm at the CLOSE → SYN_SENT transition (which
+            // runs in the connect(2) syscall context) and emit that identity.
+            if oldstate == TCP_SYN_SENT {
+                emit_conn_record(ctx, CONN_EVENT_ESTABLISHED, now, 0)?;
+            }
             return Ok(0);
         }
         if newstate != TCP_CLOSE {
@@ -175,6 +192,18 @@ mod prog {
         let duration_ns = birth.map(|b| now.saturating_sub(b)).unwrap_or(0);
         let _ = BIRTH.remove(&skaddr);
 
+        emit_conn_record(ctx, CONN_EVENT_CLOSE, now, duration_ns)?;
+        Ok(0)
+    }
+
+    /// Build + submit one `ConnRecord` from the `inet_sock_set_state` context.
+    /// Shared by the close (tcplife) and established (tier 2b, #304) paths.
+    fn emit_conn_record(
+        ctx: &TracePointContext,
+        event: u8,
+        now: u64,
+        duration_ns: u64,
+    ) -> Result<(), i64> {
         let family: u16 = unsafe { ctx.read_at(SS_FAMILY)? };
         let sport: u16 = unsafe { ctx.read_at(SS_SPORT)? };
         let dport: u16 = unsafe { ctx.read_at(SS_DPORT)? };
@@ -186,7 +215,8 @@ mod prog {
             pid,
             comm,
             family: family as u8,
-            _pad: [0; 3],
+            event,
+            _pad: [0; 2],
             saddr: [0; 16],
             daddr: [0; 16],
             sport,
@@ -214,7 +244,7 @@ mod prog {
             entry.write(rec);
             entry.submit(0);
         }
-        Ok(0)
+        Ok(())
     }
 }
 
