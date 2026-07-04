@@ -193,6 +193,9 @@ pub struct ZenSight {
     /// Now the (indexed, O(device)) build runs at 1 Hz in `handle_tick`, and the
     /// render just clones this small truncated result.
     dashboard_sparks: crate::view::trend::DeviceSparks,
+    /// Firing external-alert counts keyed by source, for the dashboard host-card
+    /// alert rollup (#306). Rebuilt at 1 Hz in `handle_tick`.
+    firing_by_source: std::collections::HashMap<String, usize>,
 }
 
 impl ZenSight {
@@ -325,6 +328,7 @@ impl ZenSight {
             help_open: false,
             favorites: persistent.favorite_metrics.iter().cloned().collect(),
             dashboard_sparks: crate::view::trend::DeviceSparks::new(),
+            firing_by_source: std::collections::HashMap::new(),
         };
 
         (app, Task::none())
@@ -1358,6 +1362,11 @@ impl ZenSight {
                 self.dashboard.toggle_view_mode();
             }
 
+            Message::ToggleGroupByHost => {
+                self.settings.group_by_host = !self.settings.group_by_host;
+                self.save_group_by_host();
+            }
+
             Message::Tick => {
                 self.handle_tick();
                 // Periodically flush downsampled buckets to redb off the UI thread
@@ -2289,6 +2298,15 @@ impl ZenSight {
         persistent.dark_theme = matches!(self.theme, AppTheme::Dark);
         if let Err(e) = persistent.save() {
             tracing::error!("Failed to save theme: {}", e);
+        }
+    }
+
+    /// Persist the "group by host" dashboard preference (#306).
+    fn save_group_by_host(&self) {
+        let mut persistent = PersistentSettings::load();
+        persistent.group_by_host = self.settings.group_by_host;
+        if let Err(e) = persistent.save() {
+            tracing::error!("Failed to save group-by-host preference: {}", e);
         }
     }
 
@@ -3586,6 +3604,9 @@ impl ZenSight {
                         &self.overview,
                         &self.sensor_health,
                         sparks,
+                        &self.entities,
+                        &self.firing_by_source,
+                        self.settings.group_by_host,
                     )
                 }
             }
@@ -3597,6 +3618,9 @@ impl ZenSight {
                 &self.overview,
                 &self.sensor_health,
                 sparks,
+                &self.entities,
+                &self.firing_by_source,
+                self.settings.group_by_host,
             ),
         };
 
@@ -4149,6 +4173,15 @@ impl ZenSight {
 
         // Expire alert silences whose window has passed (#26).
         self.alerts.prune_silences(now);
+
+        // Rebuild the per-source firing-alert rollup for host cards (#306).
+        self.firing_by_source.clear();
+        for alert in self.alerts.active_external() {
+            *self
+                .firing_by_source
+                .entry(alert.source.clone())
+                .or_insert(0) += 1;
+        }
 
         // Apply debounced search filter
         self.dashboard.apply_pending_search();

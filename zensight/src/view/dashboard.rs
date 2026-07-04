@@ -43,6 +43,7 @@ fn current_timestamp() -> i64 {
 }
 
 use crate::app::{AppTheme, DASHBOARD_SEARCH_ID};
+use crate::entity::EntityStore;
 use crate::message::{DeviceId, Message};
 use crate::view::groups::{GroupTag, GroupsState, device_group_tags, group_filter_bar};
 use crate::view::icons::{self, IconSize};
@@ -276,10 +277,10 @@ impl DashboardState {
     /// Count **hosts** by worst-facet status, for the fleet summary bar (#34/#128).
     /// One physical host counts once even when it runs several sensors. Returns
     /// (online, degraded, offline, unknown).
-    pub fn status_counts(&self) -> (usize, usize, usize, usize) {
+    pub fn status_counts(&self, entities: &EntityStore) -> (usize, usize, usize, usize) {
         let all: Vec<&DeviceState> = self.devices.values().collect();
         let mut counts = (0, 0, 0, 0);
-        for host in crate::view::host::aggregate(&all) {
+        for host in crate::view::host::aggregate(&all, entities) {
             match host.effective_status() {
                 DeviceStatus::Online => counts.0 += 1,
                 DeviceStatus::Degraded => counts.1 += 1,
@@ -397,6 +398,12 @@ impl DashboardState {
 
 /// Render the dashboard view.
 #[allow(clippy::too_many_arguments)]
+/// A permanently-empty entity store for the degraded / "group by host = off"
+/// path (`'static`, so it can back a returned `Element<'a>`).
+static EMPTY_ENTITIES: std::sync::LazyLock<EntityStore> =
+    std::sync::LazyLock::new(EntityStore::default);
+
+#[allow(clippy::too_many_arguments)]
 pub fn dashboard_view<'a>(
     state: &'a DashboardState,
     theme: AppTheme,
@@ -405,18 +412,35 @@ pub fn dashboard_view<'a>(
     overview: &'a OverviewState,
     sensor_health: &'a HashMap<String, HealthSnapshot>,
     mut sparks: crate::view::trend::DeviceSparks,
+    entities: &'a EntityStore,
+    firing_by_source: &'a HashMap<String, usize>,
+    group_by_host: bool,
 ) -> Element<'a, Message> {
     // Compute filtered devices once and pass through to avoid redundant work
     let filtered = state.filtered_devices();
 
-    let header = render_header(state, theme, unacknowledged_alerts);
-    let fleet_summary = render_fleet_summary(state, unacknowledged_alerts);
-    let health_overview = render_health_overview(state);
+    // "Group by host" off ⇒ fall back to per-source grouping (empty store).
+    let store: &'a EntityStore = if group_by_host {
+        entities
+    } else {
+        &EMPTY_ENTITIES
+    };
+
+    let header = render_header(state, theme, unacknowledged_alerts, group_by_host);
+    let fleet_summary = render_fleet_summary(state, unacknowledged_alerts, store);
+    let health_overview = render_health_overview(state, store);
     let sensor_summary = render_sensor_health_summary(sensor_health);
     let filters = render_protocol_filters(state, &filtered);
     let group_filters = group_filter_bar(groups);
     let overview_panel = overview_section(overview, &state.devices);
-    let devices = render_device_grid(state, groups, &filtered, &mut sparks);
+    let devices = render_device_grid(
+        state,
+        groups,
+        &filtered,
+        &mut sparks,
+        store,
+        firing_by_source,
+    );
 
     let content = column![
         header,
@@ -441,11 +465,12 @@ pub fn dashboard_view<'a>(
 /// Render the fleet-health summary bar: a click-to-filter rollup of how many
 /// devices are offline / degraded / unknown / online, plus a firing-alert chip
 /// (#34). Answers "what's wrong right now?" at the top of the dashboard.
-fn render_fleet_summary(
-    state: &DashboardState,
+fn render_fleet_summary<'a>(
+    state: &'a DashboardState,
     unacknowledged_alerts: usize,
-) -> Element<'_, Message> {
-    let (online, degraded, offline, unknown) = state.status_counts();
+    entities: &EntityStore,
+) -> Element<'a, Message> {
+    let (online, degraded, offline, unknown) = state.status_counts(entities);
 
     // A click-to-filter chip for one status; highlighted when it's the active
     // filter. Toggling the same chip clears the filter (see set_status_filter).
@@ -524,14 +549,17 @@ const HEALTH_OVERVIEW_LIMIT: usize = 8;
 /// surfaces the lowest-scoring (Degraded/Critical) hosts worst-first as
 /// click-to-open chips — the "what should I look at first" triage row. Collapses
 /// to a single reassuring line when nothing is unhealthy.
-fn render_health_overview(state: &DashboardState) -> Element<'_, Message> {
+fn render_health_overview<'a>(
+    state: &'a DashboardState,
+    entities: &EntityStore,
+) -> Element<'a, Message> {
     use crate::view::health::HealthBand;
 
     // Score by physical HOST (#128) so a multi-protocol host counts once, with
     // the composite (worst-facet) score; keep only the actionable ones.
     let all: Vec<&DeviceState> = state.devices.values().collect();
     let mut scored: Vec<(&DeviceState, crate::view::health::HealthScore)> =
-        crate::view::host::aggregate(&all)
+        crate::view::host::aggregate(&all, entities)
             .into_iter()
             .map(|h| (h.primary(), h.health()))
             .filter(|(_, s)| matches!(s.band, HealthBand::Degraded | HealthBand::Critical))
@@ -592,6 +620,7 @@ fn render_header(
     state: &DashboardState,
     theme: AppTheme,
     _unacknowledged_alerts: usize,
+    group_by_host: bool,
 ) -> Element<'_, Message> {
     let title = text("ZenSight Dashboard").size(24);
 
@@ -635,6 +664,28 @@ fn render_header(
     .on_press(Message::OpenGlobalSearch)
     .style(iced::widget::button::secondary);
 
+    // "Group by host" toggle (#306): on ⇒ merge per-protocol facets into one
+    // host card via the correlator entities; off ⇒ flat per-source grouping.
+    let group_toggle = button(
+        row![
+            icons::protocol(IconSize::Medium),
+            text(if group_by_host {
+                "Group: Host"
+            } else {
+                "Group: Source"
+            })
+            .size(14)
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    )
+    .on_press(Message::ToggleGroupByHost)
+    .style(if group_by_host {
+        iced::widget::button::primary
+    } else {
+        iced::widget::button::secondary
+    });
+
     // Connection status + primary navigation (Alerts/Topology/Settings) now live
     // in the persistent app shell (view/shell.rs), so the dashboard header keeps
     // only its page-local controls.
@@ -642,6 +693,7 @@ fn render_header(
         title,
         device_count,
         search_button,
+        group_toggle,
         view_mode_button,
         theme_button
     ]
@@ -779,6 +831,8 @@ fn render_device_grid<'a>(
     groups: &'a GroupsState,
     filtered: &[&'a DeviceState],
     sparks: &mut crate::view::trend::DeviceSparks,
+    entities: &'a EntityStore,
+    firing_by_source: &'a HashMap<String, usize>,
 ) -> Element<'a, Message> {
     // Apply group filter on top of pre-computed protocol/search filter
     let all_devices: Vec<_> = filtered
@@ -807,7 +861,7 @@ fn render_device_grid<'a>(
     let per_page = state.devices_per_page;
     let (content, total_units): (Element<'a, Message>, usize) = match state.view_mode {
         DashboardViewMode::Grid => {
-            let hosts = crate::view::host::aggregate(&all_devices);
+            let hosts = crate::view::host::aggregate(&all_devices, entities);
             let total = hosts.len();
             let start = state.current_page * per_page;
             let end = (start + per_page).min(total);
@@ -816,7 +870,10 @@ fn render_device_grid<'a>(
             } else {
                 &[]
             };
-            (render_host_cards(page, groups, sparks), total)
+            (
+                render_host_cards(page, groups, sparks, firing_by_source),
+                total,
+            )
         }
         DashboardViewMode::Table => {
             let total = all_devices.len();
@@ -866,6 +923,7 @@ fn render_host_cards<'a>(
     hosts: &[crate::view::host::Host<'a>],
     groups: &'a GroupsState,
     sparks: &mut crate::view::trend::DeviceSparks,
+    firing_by_source: &'a HashMap<String, usize>,
 ) -> Element<'a, Message> {
     let cards: Vec<Element<'a, Message>> = hosts
         .iter()
@@ -882,7 +940,13 @@ fn render_host_cards<'a>(
             } else {
                 Some(merged)
             };
-            render_host_card(host, groups, merged)
+            // Roll up firing alerts across all of the host's facet sources.
+            let alert_count: usize = host
+                .facets
+                .iter()
+                .map(|f| firing_by_source.get(&f.id.source).copied().unwrap_or(0))
+                .sum();
+            render_host_card(host, groups, merged, alert_count)
         })
         .collect();
 
@@ -900,6 +964,7 @@ fn render_host_card<'a>(
     host: &crate::view::host::Host<'a>,
     groups: &'a GroupsState,
     sparks: Option<Vec<crate::view::trend::MetricSpark>>,
+    alert_count: usize,
 ) -> Element<'a, Message> {
     let primary = host.primary();
     let status = host.effective_status();
@@ -928,14 +993,25 @@ fn render_host_card<'a>(
         .map(|f| f.id.protocol.display_name().to_string())
         .collect();
     let host_name = tooltip(
-        text(host.source).size(16),
-        container(text(format!("{} · {}", host.source, protocols.join(", "))).size(12))
+        text(host.display_name.clone()).size(16),
+        container(text(format!("{} · {}", host.display_name, protocols.join(", "))).size(12))
             .padding(6)
             .style(container::rounded_box),
         tooltip::Position::Top,
     );
 
     let metric_count = text(format!("{} metrics", host.metric_count())).size(12);
+
+    // Firing-alert rollup across the host's facet sources (#306).
+    let alert_badge: Option<Element<'a, Message>> = (alert_count > 0).then(|| {
+        badge::<Message>(
+            crate::view::theme::SEVERITY_CRITICAL,
+            format!(
+                "{alert_count} alert{}",
+                if alert_count == 1 { "" } else { "s" }
+            ),
+        )
+    });
 
     // Composite health across all facets (#128/#130): the worst facet wins.
     let health = host.health();
@@ -951,16 +1027,13 @@ fn render_host_card<'a>(
         .collect();
     let group_tags = device_group_tags(device_groups);
 
-    let header = row![
-        status_indicator,
-        primary_icon,
-        host_name,
-        health_badge,
-        metric_count,
-        group_tags
-    ]
-    .spacing(10)
-    .align_y(Alignment::Center);
+    let mut header = row![status_indicator, primary_icon, host_name, health_badge]
+        .spacing(10)
+        .align_y(Alignment::Center);
+    if let Some(badge) = alert_badge {
+        header = header.push(badge);
+    }
+    let header = header.push(metric_count).push(group_tags);
 
     // One clickable badge per facet — protocol icon + per-facet status dot —
     // pivoting to that sensor's device view.
@@ -989,6 +1062,28 @@ fn render_host_card<'a>(
     }
 
     let mut card_content = column![header, facet_row.wrap()].spacing(6);
+
+    // Correlated host: a "merged from N sources" caption + staleness note (#306).
+    if let Some(entity) = host.entity {
+        let n = host.merged_source_count().unwrap_or(host.facets.len());
+        let stale = current_timestamp() - entity.last_updated > crate::entity::ENTITY_STALE_MS;
+        let caption = if stale {
+            format!("merged from {n} sources · stale")
+        } else {
+            format!("merged from {n} sources")
+        };
+        let color = if stale {
+            crate::view::theme::STATUS_UNKNOWN
+        } else {
+            crate::view::theme::STATUS_ONLINE
+        };
+        card_content = card_content.push(
+            text(caption)
+                .size(11)
+                .style(move |_: &Theme| text::Style { color: Some(color) }),
+        );
+    }
+
     if let Some(sparks) = sparks.filter(|s| !s.is_empty()) {
         let mut spark_col = Column::new().spacing(2);
         for spark in sparks {
@@ -1306,7 +1401,7 @@ mod tests {
         }
 
         // (online, degraded, offline, unknown)
-        assert_eq!(state.status_counts(), (2, 1, 1, 0));
+        assert_eq!(state.status_counts(&EntityStore::default()), (2, 1, 1, 0));
 
         // Problem-first: offline, then degraded, then the two online.
         let order: Vec<String> = state
@@ -1331,7 +1426,7 @@ mod tests {
         state.devices.insert(net.id.clone(), net);
 
         // One host, worst facet Offline → (online, degraded, offline, unknown).
-        assert_eq!(state.status_counts(), (0, 0, 1, 0));
+        assert_eq!(state.status_counts(&EntityStore::default()), (0, 0, 1, 0));
     }
 
     #[test]

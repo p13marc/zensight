@@ -33,6 +33,8 @@ fn test_dashboard_empty() {
     let groups = GroupsState::default();
     let overview = OverviewState::default();
     let sensor_health = HashMap::new();
+    let entities = zensight::entity::EntityStore::default();
+    let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
@@ -41,6 +43,9 @@ fn test_dashboard_empty() {
         &overview,
         &sensor_health,
         zensight::view::trend::DeviceSparks::new(),
+        &entities,
+        &firing,
+        true,
     ));
 
     // Should show "Waiting for telemetry data..." message
@@ -67,6 +72,8 @@ fn test_dashboard_with_devices() {
     let groups = GroupsState::default();
     let overview = OverviewState::default();
     let sensor_health = HashMap::new();
+    let entities = zensight::entity::EntityStore::default();
+    let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
@@ -75,6 +82,9 @@ fn test_dashboard_with_devices() {
         &overview,
         &sensor_health,
         zensight::view::trend::DeviceSparks::new(),
+        &entities,
+        &firing,
+        true,
     ));
 
     // Should show the device name
@@ -105,6 +115,8 @@ fn test_dashboard_health_overview_surfaces_worst_host() {
     let groups = GroupsState::default();
     let overview = OverviewState::default();
     let sensor_health = HashMap::new();
+    let entities = zensight::entity::EntityStore::default();
+    let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
@@ -113,6 +125,9 @@ fn test_dashboard_health_overview_surfaces_worst_host() {
         &overview,
         &sensor_health,
         zensight::view::trend::DeviceSparks::new(),
+        &entities,
+        &firing,
+        true,
     ));
 
     // The worst-first overview banner appears with the unhealthy host.
@@ -166,6 +181,8 @@ fn test_dashboard_card_shows_trend_badge() {
     let groups = GroupsState::default();
     let overview = OverviewState::default();
     let sensor_health = HashMap::new();
+    let entities = zensight::entity::EntityStore::default();
+    let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
@@ -174,6 +191,9 @@ fn test_dashboard_card_shows_trend_badge() {
         &overview,
         &sensor_health,
         sparks,
+        &entities,
+        &firing,
+        true,
     ));
 
     assert!(ui.find("server01").is_ok());
@@ -917,6 +937,8 @@ fn test_overview_section_renders() {
     let groups = GroupsState::default();
     let overview = OverviewState::default();
     let sensor_health = HashMap::new();
+    let entities = zensight::entity::EntityStore::default();
+    let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
@@ -925,6 +947,9 @@ fn test_overview_section_renders() {
         &overview,
         &sensor_health,
         zensight::view::trend::DeviceSparks::new(),
+        &entities,
+        &firing,
+        true,
     ));
 
     // Should show Protocol Overviews header
@@ -964,6 +989,8 @@ fn test_overview_protocol_tab_click() {
     let groups = GroupsState::default();
     let overview = OverviewState::default();
     let sensor_health = HashMap::new();
+    let entities = zensight::entity::EntityStore::default();
+    let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
@@ -972,6 +999,9 @@ fn test_overview_protocol_tab_click() {
         &overview,
         &sensor_health,
         zensight::view::trend::DeviceSparks::new(),
+        &entities,
+        &firing,
+        true,
     ));
 
     // Click SNMP tab
@@ -1015,6 +1045,8 @@ fn test_overview_collapse_toggle() {
     let groups = GroupsState::default();
     let overview = OverviewState::default();
     let sensor_health = HashMap::new();
+    let entities = zensight::entity::EntityStore::default();
+    let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut ui = simulator(dashboard_view(
         &state,
         AppTheme::Dark,
@@ -1023,6 +1055,9 @@ fn test_overview_collapse_toggle() {
         &overview,
         &sensor_health,
         zensight::view::trend::DeviceSparks::new(),
+        &entities,
+        &firing,
+        true,
     ));
 
     // Click the Protocol Overviews header to toggle

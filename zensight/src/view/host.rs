@@ -1,25 +1,45 @@
-//! Physical-host aggregate (#128) — the keystone re-key of the dashboard.
+//! Physical-host aggregate (#128 → #306) — the keystone re-key of the dashboard.
 //!
 //! `DeviceId = (protocol, source)`, so one physical host running
 //! sysinfo+netlink+logs+netring is four [`DeviceState`]s. A [`Host`] groups those
-//! per-protocol **facets** by `source` so the dashboard renders **one card per
-//! host** with merged identity, a composite health score, and per-facet badges.
-//! `DeviceId` stays the facet key internally and on the wire — this is a pure
-//! view-model over the existing device map (the topology `update_from_devices`
-//! merge is the template).
+//! per-protocol **facets** into **one card per host** with merged identity, a
+//! composite health score, and per-facet badges.
+//!
+//! Before the correlator (#305) grouping was by `source` string alone. With an
+//! [`EntityStore`] the grouping key becomes **entity-or-source**: devices whose
+//! `DeviceId` maps into an entity's `members[]` collapse under one
+//! [`HostKey::Entity`]; everything else falls back to [`HostKey::Source`], which
+//! reproduces the pre-correlation behavior **bit-for-bit** when the store is
+//! empty (the degraded path).
 
 use std::collections::BTreeMap;
 
-use zensight_common::{DeviceStatus, Protocol};
+use zensight_common::{DeviceStatus, HostEntity, Protocol};
 
+use crate::entity::EntityStore;
 use crate::view::dashboard::{DeviceState, status_rank};
 use crate::view::health::{self, HealthScore};
 
-/// A physical host: all per-protocol facet [`DeviceState`]s that share a
-/// `source`, facet-sorted by identity priority.
+/// The grouping key for a [`Host`] card: a correlated entity, or a bare source
+/// (degraded / uncorrelated).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum HostKey {
+    /// A correlator entity id (`h_<12hex>`).
+    Entity(String),
+    /// A per-sensor source string (no entity claims this device).
+    Source(String),
+}
+
+/// A physical host: all per-protocol facet [`DeviceState`]s that share a host,
+/// facet-sorted by identity priority.
 #[derive(Debug)]
 pub struct Host<'a> {
-    pub source: &'a str,
+    /// Stable grouping key (entity id or source).
+    pub key: HostKey,
+    /// Display name: entity hostname/fqdn when correlated, else the source.
+    pub display_name: String,
+    /// The correlator entity backing this host, when correlated.
+    pub entity: Option<&'a HostEntity>,
     /// Facets (one per protocol present), primary-first.
     pub facets: Vec<&'a DeviceState>,
 }
@@ -35,6 +55,14 @@ pub fn protocol_priority(p: Protocol) -> u8 {
         Protocol::Logs => 3,
         _ => 4,
     }
+}
+
+/// Best display name for an entity: hostname > fqdn > short entity id.
+fn entity_display_name(e: &HostEntity) -> String {
+    e.hostname
+        .clone()
+        .or_else(|| e.fqdn.clone())
+        .unwrap_or_else(|| e.entity_id.clone())
 }
 
 impl<'a> Host<'a> {
@@ -61,42 +89,92 @@ impl<'a> Host<'a> {
     pub fn health(&self) -> HealthScore {
         health::score_host(self.facets.iter().copied())
     }
+
+    /// Number of merged member sources when correlated (for the "merged from N
+    /// sources" caption). `None` when uncorrelated.
+    pub fn merged_source_count(&self) -> Option<usize> {
+        self.entity.map(|e| e.members.len().max(self.facets.len()))
+    }
 }
 
-/// Group device refs by `source` into facet-sorted, problem-first hosts (#128).
-/// Pure + testable — feeds both the host-card grid and the fleet rollups.
-pub fn aggregate<'a>(devices: &[&'a DeviceState]) -> Vec<Host<'a>> {
-    let mut by_source: BTreeMap<&str, Vec<&DeviceState>> = BTreeMap::new();
+/// Group device refs into facet-sorted, problem-first hosts (#128/#306).
+///
+/// Grouping key: an entity via [`EntityStore::entity_for_device`] (resolved
+/// through aliases), else the bare `source`. An **empty** store reproduces the
+/// pre-correlation per-source grouping exactly (degraded parity). Pure +
+/// testable — feeds both the host-card grid and the fleet rollups.
+pub fn aggregate<'a>(devices: &[&'a DeviceState], entities: &'a EntityStore) -> Vec<Host<'a>> {
+    // Preserve deterministic ordering with a BTreeMap keyed by a sortable form.
+    let mut by_host: BTreeMap<HostKey, Vec<&DeviceState>> = BTreeMap::new();
     for d in devices {
-        by_source.entry(d.id.source.as_str()).or_default().push(d);
+        let key = match entities.by_device.get(&d.id) {
+            Some(eid) => HostKey::Entity(entities.resolve_alias(eid).to_string()),
+            None => HostKey::Source(d.id.source.clone()),
+        };
+        by_host.entry(key).or_default().push(d);
     }
 
-    let mut hosts: Vec<Host<'a>> = by_source
+    let mut hosts: Vec<Host<'a>> = by_host
         .into_iter()
-        .map(|(source, mut facets)| {
+        .map(|(key, mut facets)| {
             // Primary-first: identity priority, then protocol for stability.
             facets.sort_by(|a, b| {
                 protocol_priority(a.id.protocol)
                     .cmp(&protocol_priority(b.id.protocol))
                     .then(a.id.protocol.cmp(&b.id.protocol))
             });
-            Host { source, facets }
+            let (display_name, entity) = match &key {
+                HostKey::Entity(id) => {
+                    let e = entities.hosts.get(id);
+                    let name = e
+                        .map(entity_display_name)
+                        .unwrap_or_else(|| facets[0].id.source.clone());
+                    (name, e)
+                }
+                HostKey::Source(source) => (source.clone(), None),
+            };
+            Host {
+                key,
+                display_name,
+                entity,
+                facets,
+            }
         })
         .collect();
 
-    // Problem-first ordering, then host name (matches the device grid's #34 sort).
+    // Problem-first ordering, then display name (matches the device grid's #34 sort).
     hosts.sort_by(|a, b| {
         status_rank(a.effective_status())
             .cmp(&status_rank(b.effective_status()))
-            .then(a.source.cmp(b.source))
+            .then(a.display_name.cmp(&b.display_name))
     });
     hosts
+}
+
+// Ordering for HostKey so the BTreeMap groups deterministically (entities
+// before sources, then lexicographic within each).
+impl PartialOrd for HostKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for HostKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match (self, other) {
+            (HostKey::Entity(a), HostKey::Entity(b)) => a.cmp(b),
+            (HostKey::Source(a), HostKey::Source(b)) => a.cmp(b),
+            (HostKey::Entity(_), HostKey::Source(_)) => Ordering::Less,
+            (HostKey::Source(_), HostKey::Entity(_)) => Ordering::Greater,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::message::DeviceId;
+    use zensight_common::MemberClaim;
 
     fn facet(proto: Protocol, source: &str, status: DeviceStatus) -> DeviceState {
         let mut d = DeviceState::new(DeviceId::new(proto, source));
@@ -105,20 +183,88 @@ mod tests {
         d
     }
 
+    fn member(sensor: &str, source: &str) -> MemberClaim {
+        MemberClaim {
+            sensor: sensor.into(),
+            source: source.into(),
+            rule: "host_id".into(),
+            confidence: 1.0,
+            last_seen: 1,
+        }
+    }
+
+    fn entity(id: &str, members: Vec<MemberClaim>) -> HostEntity {
+        HostEntity {
+            entity_id: id.into(),
+            aliases: vec![],
+            host_id: None,
+            boot_id: None,
+            ips: vec![],
+            macs: vec![],
+            hostname: Some("web-01".into()),
+            fqdn: None,
+            names: vec![],
+            vendor: None,
+            platform: None,
+            members,
+            status: None,
+            last_updated: 1_000,
+        }
+    }
+
     #[test]
-    fn groups_facets_by_source_primary_first() {
+    fn groups_facets_by_source_primary_first_degraded() {
         let a = facet(Protocol::Netlink, "host1", DeviceStatus::Online);
         let b = facet(Protocol::Sysinfo, "host1", DeviceStatus::Online);
         let c = facet(Protocol::Logs, "host2", DeviceStatus::Online);
         let devices = vec![&a, &b, &c];
 
-        let hosts = aggregate(&devices);
+        // Empty store → per-source grouping, bit-for-bit as before.
+        let store = EntityStore::default();
+        let hosts = aggregate(&devices, &store);
         assert_eq!(hosts.len(), 2);
-        let h1 = &hosts.iter().find(|h| h.source == "host1").unwrap();
-        // Two facets, sysinfo primary (priority 0 < netlink 1).
+        let h1 = hosts.iter().find(|h| h.display_name == "host1").unwrap();
         assert_eq!(h1.facets.len(), 2);
         assert_eq!(h1.primary().id.protocol, Protocol::Sysinfo);
-        assert_eq!(h1.metric_count(), 6); // 3 + 3
+        assert_eq!(h1.metric_count(), 6);
+        assert!(h1.entity.is_none());
+        assert_eq!(h1.key, HostKey::Source("host1".into()));
+    }
+
+    #[test]
+    fn merges_two_sources_under_one_entity() {
+        // sysinfo on "srvA" and netlink on "srvB" both belong to one entity.
+        let a = facet(Protocol::Sysinfo, "srvA", DeviceStatus::Online);
+        let b = facet(Protocol::Netlink, "srvB", DeviceStatus::Online);
+        let devices = vec![&a, &b];
+
+        let mut store = EntityStore::default();
+        store.upsert(entity(
+            "h_web01",
+            vec![member("sysinfo", "srvA"), member("netlink", "srvB")],
+        ));
+
+        let hosts = aggregate(&devices, &store);
+        assert_eq!(hosts.len(), 1);
+        let h = &hosts[0];
+        assert_eq!(h.key, HostKey::Entity("h_web01".into()));
+        assert_eq!(h.display_name, "web-01");
+        assert_eq!(h.facets.len(), 2);
+        assert_eq!(h.merged_source_count(), Some(2));
+    }
+
+    #[test]
+    fn resolves_alias_to_current_entity() {
+        let a = facet(Protocol::Sysinfo, "srvA", DeviceStatus::Online);
+        let devices = vec![&a];
+        let mut store = EntityStore::default();
+        let mut e = entity("h_new", vec![member("sysinfo", "srvA")]);
+        e.aliases = vec!["h_old".into()];
+        store.upsert(e);
+        let hosts = aggregate(&devices, &store);
+        assert_eq!(hosts.len(), 1);
+        // The device maps to h_new directly (by_device points at the current id).
+        assert_eq!(hosts[0].key, HostKey::Entity("h_new".into()));
     }
 
     #[test]
@@ -128,10 +274,10 @@ mod tests {
         let down = facet(Protocol::Netring, "bad", DeviceStatus::Offline);
         let devices = vec![&healthy, &ok, &down];
 
-        let hosts = aggregate(&devices);
-        // "bad" host has an offline facet → Offline, sorts before the online "good".
-        assert_eq!(hosts[0].source, "bad");
+        let store = EntityStore::default();
+        let hosts = aggregate(&devices, &store);
+        assert_eq!(hosts[0].display_name, "bad");
         assert_eq!(hosts[0].effective_status(), DeviceStatus::Offline);
-        assert_eq!(hosts[1].source, "good");
+        assert_eq!(hosts[1].display_name, "good");
     }
 }

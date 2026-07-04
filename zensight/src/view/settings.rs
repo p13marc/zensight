@@ -59,6 +59,14 @@ pub struct PersistentSettings {
     /// Last active view (Dashboard, Alerts, or Topology).
     #[serde(default)]
     pub current_view: CurrentView,
+    /// Group dashboard cards by physical host (correlator entities) vs. by raw
+    /// per-sensor source (#306). Default on.
+    #[serde(default = "default_group_by_host")]
+    pub group_by_host: bool,
+}
+
+fn default_group_by_host() -> bool {
+    true
 }
 
 fn default_overview_expanded() -> bool {
@@ -95,6 +103,7 @@ impl Default for PersistentSettings {
             overview_selected_protocol: None,
             overview_expanded: default_overview_expanded(),
             current_view: CurrentView::default(),
+            group_by_host: default_group_by_host(),
         }
     }
 }
@@ -176,6 +185,7 @@ impl PersistentSettings {
             self.max_alerts,
         );
         state.desktop_notifications = self.desktop_notifications;
+        state.group_by_host = self.group_by_host;
         state
     }
 
@@ -198,6 +208,7 @@ impl PersistentSettings {
             overview_selected_protocol: None,
             overview_expanded: default_overview_expanded(),
             current_view: CurrentView::default(),
+            group_by_host: state.group_by_host,
         }
     }
 }
@@ -217,6 +228,8 @@ pub struct SettingsState {
     pub dark_theme: bool,
     /// Show a desktop notification on CRITICAL alert firing transitions (#26).
     pub desktop_notifications: bool,
+    /// Group dashboard cards by physical host (correlator entities) (#306).
+    pub group_by_host: bool,
     /// Maximum metric history entries per device.
     pub max_history: String,
     /// Maximum alerts to keep.
@@ -238,6 +251,7 @@ impl Default for SettingsState {
             stale_threshold_secs: "120".to_string(),
             dark_theme: true,
             desktop_notifications: false,
+            group_by_host: true,
             max_history: "500".to_string(),
             max_alerts: "100".to_string(),
             modified: false,
@@ -265,6 +279,7 @@ impl SettingsState {
             stale_threshold_secs: (stale_threshold_ms / 1000).to_string(),
             dark_theme,
             desktop_notifications: false,
+            group_by_host: true,
             max_history: max_history.to_string(),
             max_alerts: max_alerts.to_string(),
             modified: false,
@@ -810,6 +825,7 @@ mod tests {
             overview_selected_protocol: None,
             overview_expanded: true,
             current_view: CurrentView::default(),
+            group_by_host: true,
         };
 
         // Serialize to JSON
@@ -844,6 +860,7 @@ mod tests {
             overview_selected_protocol: None,
             overview_expanded: true,
             current_view: CurrentView::default(),
+            group_by_host: true,
         };
 
         // Convert to UI state

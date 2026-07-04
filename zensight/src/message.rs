@@ -379,6 +379,10 @@ pub enum Message {
     /// Toggle dashboard view mode (grid vs table).
     ToggleDashboardViewMode,
 
+    /// Toggle "group by host" on the dashboard (#306): merge per-protocol
+    /// facets into one host card via correlator entities, or show per-source.
+    ToggleGroupByHost,
+
     /// User selected a metric to graph (single-series mode).
     SelectMetricForChart(String),
 
