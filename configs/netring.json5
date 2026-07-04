@@ -89,6 +89,21 @@
     },
     bandwidth_period_secs: 5,
 
+    // Passive-DNS name cache (#308). Observes DNS answers (CNAME-chain-resolved
+    // A/AAAA claims under the queried name, PTR reverse claims, answer-TTL
+    // expiry) into a bounded IP -> names map used to (a) enrich flow/talker
+    // records with destination hostnames (`dst_names` / `names`) and (b) key the
+    // `rita_beacon_fqdn` detector. Requires `collect.dns`; inert without it.
+    names: {
+      enabled: true,
+      max_ips: 16384,           // LRU cap on distinct IPs tracked
+      max_claims_per_ip: 8,     // provenance-tagged names kept per IP
+      default_ttl_secs: 300,    // TTL for claims whose source carries none
+      grace_secs: 60,           // added to every TTL before expiry
+      batch_interval_secs: 10,  // new-mapping delta-feed drain cadence
+      max_batch: 500,           // pending delta-feed cap between drains
+    },
+
     // Pillar A — network anomaly detectors.
     anomalies: {
       port_scan: true,   // TRW port-scan detection -> alerts

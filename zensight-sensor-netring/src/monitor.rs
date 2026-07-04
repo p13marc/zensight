@@ -59,6 +59,7 @@ use flowscope::detect::patterns::{
     BeaconDetector, BeaconScore, DgaScore, DgaScorer, PortScanDetector, RitaBeaconDetector,
     RitaBeaconScore, ScanScore, ScanVerdict,
 };
+use flowscope::dns::{NameMap, NameMapConfig};
 use flowscope::extract::FiveTupleKey;
 use netring::anomaly::shipped_sinks::ChannelSink;
 use netring::monitor::fingerprint::TlsFingerprint;
@@ -96,6 +97,10 @@ pub type Ja4hInventory = Arc<Mutex<HashMap<String, Ja4hRecord>>>;
 /// Per-flow SSH banner seen before the KEXINIT, to best-effort correlate a
 /// HASSH fingerprint with its version banner: `flow -> banner`.
 type SshPending = Arc<Mutex<HashMap<FiveTupleKey, String>>>;
+/// Shared passive-DNS name cache (issue #308): IP → provenance-tagged name
+/// claims, fed by the DNS answer handler and read at flow end / talker query
+/// time. `None` when `names.enabled` is off or `collect.dns` is off.
+pub type SharedNameMap = Arc<Mutex<NameMap>>;
 
 /// Max distinct TLS fingerprints retained (cardinality guard).
 const TLS_INVENTORY_CAP: usize = 4096;
@@ -221,6 +226,10 @@ pub struct MonitorChannels {
     /// `--features ipfix` and `collect.ipfix` is set; empty otherwise.
     #[cfg(feature = "ipfix")]
     pub ipfix_records: IpfixRing,
+    /// Passive-DNS name cache (issue #308): `Some` when `names.enabled` and
+    /// `collect.dns` are both set. Read by the flow-end enrichment and the
+    /// talker query channel; fed by the DNS answer handler.
+    pub name_map: Option<SharedNameMap>,
 }
 
 /// Flow exporter that captures netring's canonical `FlowRecord` into a bounded
@@ -484,6 +493,39 @@ fn asset_to_record(a: &flowscope::Asset) -> AssetRecord {
     }
 }
 
+/// Map the sensor's [`NamesConfig`](crate::config::NamesConfig) onto flowscope's
+/// `NameMapConfig` (issue #308). `NameMapConfig` is `#[non_exhaustive]`, so this
+/// goes through `Default` + field assignment rather than a struct literal.
+#[allow(clippy::field_reassign_with_default)]
+fn name_map_config(cfg: &crate::config::NamesConfig) -> NameMapConfig {
+    let mut c = NameMapConfig::default();
+    c.max_ips = cfg.max_ips;
+    c.max_claims_per_ip = cfg.max_claims_per_ip;
+    c.default_ttl = Duration::from_secs(cfg.default_ttl_secs);
+    c.grace = Duration::from_secs(cfg.grace_secs);
+    c.max_pending = cfg.max_batch;
+    c
+}
+
+/// Derive the DNS **client** IP from a flow key: the endpoint whose port is not
+/// a DNS service port (53 / mDNS 5353). Flow keys are canonically sorted
+/// (`a < b`), so endpoint position carries no direction — the port does.
+/// `None` when both or neither endpoint looks like a server (server-to-server
+/// forwarding, mDNS peer exchange, nonstandard ports): a claim scoped to the
+/// wrong client would be *invisible* to the real one, so we record nothing
+/// rather than mis-scope. Verified against the pcap fixture in
+/// `tests/passive_dns.rs` (issue #308).
+fn dns_client_ip(key: FiveTupleKey) -> Option<std::net::IpAddr> {
+    const DNS_PORTS: [u16; 2] = [53, 5353];
+    let a_is_server = DNS_PORTS.contains(&key.a.port());
+    let b_is_server = DNS_PORTS.contains(&key.b.port());
+    match (a_is_server, b_is_server) {
+        (true, false) => Some(key.b.ip()),
+        (false, true) => Some(key.a.ip()),
+        _ => None,
+    }
+}
+
 /// What [`build`] returns: the monitor, its emit channels, the telemetry-channel
 /// keepalive, and the runtime detection-tuning handle (#121).
 pub type BuiltMonitor = (
@@ -531,6 +573,13 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
     let ssh: SshInventory = Arc::new(Mutex::new(HashMap::new()));
     let ja4h_fp: Ja4hInventory = Arc::new(Mutex::new(HashMap::new()));
     let assets: AssetInventory = Arc::new(Mutex::new(HashMap::new()));
+    // Passive-DNS name cache (issue #308): only built when the DNS answer
+    // stream exists to feed it. Bounded (LRU IPs × per-IP claim cap).
+    let name_map: Option<SharedNameMap> = (cfg.names.enabled && cfg.collect.dns).then(|| {
+        Arc::new(Mutex::new(NameMap::with_config(name_map_config(
+            &cfg.names,
+        ))))
+    });
 
     let mut b = Monitor::builder();
     b = b.name(cfg.source.clone());
@@ -928,6 +977,56 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
             }
             Ok(())
         });
+
+        // Passive-DNS answer ingestion (issue #308) — a second `on_ctx::<Dns>`
+        // handler (handlers append) that feeds each response's answer section
+        // into the name map: CNAME-chain-resolved forward claims under the
+        // queried name, PTR reverse claims, answer-TTL-driven expiry. The
+        // client scoping the claims is derived from the flow key by port (the
+        // non-53/5353 endpoint). Allocation-light: one lock + one call.
+        if let Some(nm) = &name_map {
+            let nm_answers = nm.clone();
+            b = b.on_ctx::<Dns>(move |msg: &DnsMessage, ctx: &mut Ctx<'_>| {
+                if let DnsMessage::Response(r) = msg
+                    && let Some(client) = ctx.flow.and_then(dns_client_ip)
+                    && let Ok(mut map) = nm_answers.lock()
+                {
+                    map.observe_response(client, r, ctx.ts);
+                }
+                Ok(())
+            });
+
+            // Delta-feed drain: every `batch_interval_secs`, take the
+            // genuinely-new (ip, name) mappings out of the map's bounded
+            // pending queue (cap `max_batch`) so it stays fresh. The feed is
+            // reserved for identity propagation to the correlator (epic #312);
+            // today the drain only keeps the queue from saturating. No
+            // wall-clock `sweep()` here on purpose: claims are stamped with
+            // *event* time, which under pcap replay is far behind wall time —
+            // expiry is already enforced per-lookup with event timestamps.
+            let nm_drain = nm.clone();
+            let interval = cfg.names.batch_interval_secs.max(1);
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(interval));
+                let mut batch = Vec::new();
+                loop {
+                    tick.tick().await;
+                    let Ok(mut map) = nm_drain.lock() else { break };
+                    let drained = map.drain_new_into(&mut batch);
+                    let dropped = map.pending_dropped();
+                    drop(map);
+                    if drained > 0 {
+                        tracing::trace!(
+                            new = drained,
+                            dropped_total = dropped,
+                            "netring: passive-DNS new-name feed drained"
+                        );
+                    }
+                    batch.clear();
+                }
+            });
+            tracing::info!("netring: passive-DNS name cache enabled");
+        }
     }
 
     // L7 HTTP RED (issue #20) — cleartext only (TCP/80,8080).
@@ -1670,6 +1769,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
             assets,
             #[cfg(feature = "ipfix")]
             ipfix_records,
+            name_map,
         },
         keepalive,
         detector_handle,
@@ -2038,6 +2138,52 @@ mod tests {
         );
         assert_eq!(rec.seen_via, vec!["lldp".to_string()]);
         assert_eq!(rec.last_seen, 1_700_000_000_000);
+    }
+
+    #[test]
+    fn name_map_config_maps_all_fields() {
+        let names = crate::config::NamesConfig {
+            enabled: true,
+            max_ips: 128,
+            max_claims_per_ip: 3,
+            default_ttl_secs: 120,
+            grace_secs: 30,
+            batch_interval_secs: 5,
+            max_batch: 42,
+        };
+        let c = name_map_config(&names);
+        assert_eq!(c.max_ips, 128);
+        assert_eq!(c.max_claims_per_ip, 3);
+        assert_eq!(c.default_ttl, std::time::Duration::from_secs(120));
+        assert_eq!(c.grace, std::time::Duration::from_secs(30));
+        assert_eq!(c.max_pending, 42);
+    }
+
+    #[test]
+    fn dns_client_ip_picks_the_non_server_endpoint() {
+        use flowscope::extractor::L4Proto;
+        let key = |a: &str, b: &str| {
+            FiveTupleKey::new(L4Proto::Udp, a.parse().unwrap(), b.parse().unwrap())
+        };
+        // Canonical order puts the lower endpoint in `a` — the client can land
+        // on either side, so both orientations must resolve to 10.0.0.5.
+        assert_eq!(
+            dns_client_ip(key("10.0.0.5:53444", "10.0.0.8:53")),
+            Some("10.0.0.5".parse().unwrap())
+        );
+        assert_eq!(
+            dns_client_ip(key("10.0.0.8:53", "10.0.0.5:53444")),
+            Some("10.0.0.5".parse().unwrap())
+        );
+        // mDNS (5353) counts as a server port too.
+        assert_eq!(
+            dns_client_ip(key("10.0.0.5:44000", "224.0.0.251:5353")),
+            Some("10.0.0.5".parse().unwrap())
+        );
+        // Ambiguous: both look like servers (forwarding) or neither
+        // (nonstandard port) → no client attribution.
+        assert_eq!(dns_client_ip(key("10.0.0.8:53", "10.0.0.9:53")), None);
+        assert_eq!(dns_client_ip(key("10.0.0.5:40000", "10.0.0.9:8053")), None);
     }
 
     #[test]
