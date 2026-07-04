@@ -415,7 +415,7 @@ fn test_host_detail_facet_tabs() {
     ];
 
     let syslog_filter = SyslogFilterState::default();
-    let mut ui = simulator(host_detail_view(&state, &syslog_filter, &[], &facets));
+    let mut ui = simulator(host_detail_view(&state, &syslog_filter, &[], &facets, None));
 
     // Both sensor facets are shown as tabs.
     assert!(ui.find("Facets").is_ok());
@@ -453,7 +453,7 @@ fn test_host_detail_single_facet_has_no_strip() {
     }];
 
     let syslog_filter = SyslogFilterState::default();
-    let mut ui = simulator(host_detail_view(&state, &syslog_filter, &[], &facets));
+    let mut ui = simulator(host_detail_view(&state, &syslog_filter, &[], &facets, None));
 
     // No "Facets" strip for a lone sensor; the detail still renders.
     assert!(ui.find("Facets").is_err());
