@@ -104,6 +104,18 @@
       max_batch: 500,           // pending delta-feed cap between drains
     },
 
+    // Host-evidence feed (#307): republish observed assets (`collect.assets`)
+    // and passive-DNS name observations (`collect.dns` + `names`) as third-party
+    // identity evidence on `zensight/_meta/evidence/**` for the correlator
+    // (epic #312). Change-driven with a periodic liveness refresh; the per-tick
+    // cap keeps a busy L2 segment from flooding the evidence bus.
+    evidence: {
+      enabled: true,
+      min_interval_secs: 60,   // floor between evidence drain ticks
+      refresh_secs: 420,       // re-emit live claims at least this often (<= ttl/2)
+      max_per_tick: 200,       // hard cap on evidence records emitted per tick
+    },
+
     // Pillar A — network anomaly detectors.
     anomalies: {
       port_scan: true,   // TRW port-scan detection -> alerts

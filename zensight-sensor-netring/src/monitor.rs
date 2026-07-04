@@ -84,6 +84,11 @@ pub type DnsInventory = Arc<Mutex<HashMap<String, (u64, u64)>>>;
 pub type HttpInventory = Arc<Mutex<HashMap<String, (u64, u64)>>>;
 /// Passive asset inventory: `mac -> AssetRecord` for `@/query/assets` (issue #70).
 pub type AssetInventory = Arc<Mutex<HashMap<String, AssetRecord>>>;
+
+/// Set of asset MACs that changed since the last host-evidence drain (#307).
+/// The `on_asset` closure inserts on every inventory event; the evidence feed
+/// task swaps it out each tick to publish only what moved.
+pub type AssetDirty = Arc<Mutex<std::collections::HashSet<String>>>;
 /// Per-flow in-flight HTTP request state: `flow -> (request_start_ms, host)`,
 /// used to derive request→response latency and attribute response status.
 type HttpPending = Arc<Mutex<HashMap<FiveTupleKey, (u64, Option<String>)>>>;
@@ -221,6 +226,9 @@ pub struct MonitorChannels {
     pub ja4h_fp: Ja4hInventory,
     /// Passive asset inventory keyed by MAC: served on `@/query/assets` (#70).
     pub assets: AssetInventory,
+    /// MACs whose asset record changed since the last host-evidence drain (#307).
+    /// Fed by `on_asset`, consumed by the asset-evidence feed task in `main`.
+    pub asset_dirty: AssetDirty,
     /// Bounded ring of netring flow records for the canonical IPFIX query
     /// channel `@/query/ipfix` (#223). Populated only when built with
     /// `--features ipfix` and `collect.ipfix` is set; empty otherwise.
@@ -628,6 +636,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
     let ssh: SshInventory = Arc::new(Mutex::new(HashMap::new()));
     let ja4h_fp: Ja4hInventory = Arc::new(Mutex::new(HashMap::new()));
     let assets: AssetInventory = Arc::new(Mutex::new(HashMap::new()));
+    let asset_dirty: AssetDirty = Arc::new(Mutex::new(std::collections::HashSet::new()));
     // Passive-DNS name cache (issue #308): only built when the DNS answer
     // stream exists to feed it. Bounded (LRU IPs × per-IP claim cap).
     let name_map: Option<SharedNameMap> = (cfg.names.enabled && cfg.collect.dns).then(|| {
@@ -1795,12 +1804,19 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
             b = b.on_cdp(|_m, _ctx| Ok(()));
         }
         let inv = assets.clone();
+        let dirty = asset_dirty.clone();
         b = b.on_asset(move |asset: &flowscope::Asset, _ctx: &mut Ctx<'_>| {
             let record = asset_to_record(asset);
+            let mac = record.mac.clone();
             if let Ok(mut map) = inv.lock()
                 && (map.contains_key(&record.mac) || map.len() < ASSET_INVENTORY_CAP)
             {
                 map.insert(record.mac.clone(), record);
+                // Flag this MAC for the host-evidence feed (#307). Bounded by the
+                // inventory cap above; a plain set insert is allocation-light.
+                if let Ok(mut d) = dirty.lock() {
+                    d.insert(mac);
+                }
             }
             Ok(())
         });
@@ -1917,6 +1933,7 @@ pub fn build(cfg: &NetringConfig) -> Result<BuiltMonitor, Box<dyn std::error::Er
             ssh,
             ja4h_fp,
             assets,
+            asset_dirty,
             #[cfg(feature = "ipfix")]
             ipfix_records,
             name_map,

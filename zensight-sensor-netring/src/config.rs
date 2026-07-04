@@ -76,6 +76,54 @@ pub struct NetringConfig {
     /// Requires `collect.dns` (the answer stream) — a no-op without it.
     #[serde(default)]
     pub names: NamesConfig,
+    /// Host-evidence feed (#307): republish observed assets / passive-DNS names
+    /// as identity evidence on `zensight/_meta/evidence/**` for the correlator.
+    #[serde(default)]
+    pub evidence: EvidenceConfig,
+}
+
+/// Host-evidence feed tuning (#307). Governs how the sensor republishes
+/// third-party identity claims (observed assets, passive-DNS names) onto the
+/// `zensight/_meta/evidence/**` keyspace for the correlator (epic #312).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceConfig {
+    /// Publish observed-device evidence at all. `true` by default.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Minimum seconds between evidence drain ticks — a per-source floor that
+    /// caps churn on a busy L2 segment. Default 60.
+    #[serde(default = "default_evidence_min_interval")]
+    pub min_interval_secs: u64,
+    /// Re-emit every live claim at least this often (liveness refresh) so the
+    /// correlator's TTL never lapses. Default 420 (≤ evidence_ttl/2). Publishes
+    /// happen immediately on change regardless.
+    #[serde(default = "default_evidence_refresh")]
+    pub refresh_secs: u64,
+    /// Hard cap on evidence records emitted per drain tick; the remainder is
+    /// carried to the next tick. Default 200.
+    #[serde(default = "default_evidence_max_per_tick")]
+    pub max_per_tick: usize,
+}
+
+fn default_evidence_min_interval() -> u64 {
+    60
+}
+fn default_evidence_refresh() -> u64 {
+    420
+}
+fn default_evidence_max_per_tick() -> usize {
+    200
+}
+
+impl Default for EvidenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_interval_secs: default_evidence_min_interval(),
+            refresh_secs: default_evidence_refresh(),
+            max_per_tick: default_evidence_max_per_tick(),
+        }
+    }
 }
 
 /// Passive-DNS name-cache tuning (issue #308). Maps onto flowscope's

@@ -187,6 +187,26 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Host-evidence feed (#307): republish observed assets as third-party
+    // identity evidence on `zensight/_meta/evidence/**` for the correlator.
+    // Change-driven with a periodic liveness refresh, capped per tick. Only
+    // runs when the asset inventory is collected and the feed is enabled.
+    if cfg.evidence.enabled && cfg.collect.assets {
+        use zensight_sensor_core::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
+        let ev_registry = Arc::new(AdvancedPublisherRegistry::new(
+            runner.session().clone(),
+            key_prefix.clone(),
+            Format::Json,
+            AdvancedPublisherConfig::cache_only(1),
+        ));
+        runner.spawn(zensight_sensor_netring::evidence::run_asset_evidence(
+            channels.assets.clone(),
+            channels.asset_dirty.clone(),
+            ev_registry,
+            cfg.evidence.clone(),
+        ));
+    }
+
     // Drain task (telemetry + anomalies + periodic flow aggregates).
     let health = runner.health();
     runner.spawn(publish::run_drains(
