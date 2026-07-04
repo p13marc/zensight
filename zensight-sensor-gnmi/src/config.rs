@@ -19,16 +19,10 @@ pub struct GnmiConfig {
     #[serde(default)]
     pub logging: LoggingConfig,
 
-    /// On-demand debug-report (`@/report`) limits. Disabled by default.
-    /// `#[serde(default)]` is required: GnmiConfig's other fields are not
-    /// defaulted, so existing config files omit `report`.
+    /// On-demand artifact channel (`@/artifact`) limits — report + snapshot.
+    /// Every kind disabled by default.
     #[serde(default)]
-    pub report: zensight_sensor_core::ReportLimits,
-
-    /// Tier-2 directory-snapshot (`@/snapshot`) limits. Disabled by default.
-    /// `#[serde(default)]` required for the same reason as `report` above.
-    #[serde(default)]
-    pub snapshot: zensight_sensor_core::SnapshotLimits,
+    pub artifacts: zensight_sensor_core::ArtifactLimits,
 }
 
 /// gNMI-specific settings
@@ -222,12 +216,8 @@ impl zensight_sensor_core::SensorConfig for GnmiConfig {
         Ok(())
     }
 
-    fn report_limits(&self) -> zensight_sensor_core::ReportLimits {
-        self.report.clone()
-    }
-
-    fn snapshot_limits(&self) -> zensight_sensor_core::SnapshotLimits {
-        self.snapshot.clone()
+    fn artifact_limits(&self) -> zensight_sensor_core::ArtifactLimits {
+        self.artifacts.clone()
     }
 }
 

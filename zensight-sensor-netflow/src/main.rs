@@ -9,7 +9,7 @@ mod receiver;
 use anyhow::Result;
 use config::NetFlowSensorConfig;
 use zensight_common::serialization::{Format, encode};
-use zensight_sensor_core::{SensorArgs, SensorRunner};
+use zensight_sensor_core::{SensorArgs, SensorConfig, SensorRunner};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -39,8 +39,18 @@ async fn main() -> Result<()> {
         runner.config().clone(),
         runner.health(),
     ));
-    // Tier-2 directory snapshots (`@/snapshot`). No-op unless `snapshot.enabled`.
-    let runner = runner.with_report(report_source).with_snapshot(report_host);
+    // Tier-2 directory snapshots. No-op unless the corresponding kind is enabled.
+    let artifacts = runner.config().artifact_limits();
+    let runner = runner.with_artifacts(
+        report_host,
+        vec![
+            std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
+                report_source,
+                &artifacts.report,
+            )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
+            std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(&artifacts.snapshot)),
+        ],
+    );
 
     // Get session and config
     let session = runner.session().clone();

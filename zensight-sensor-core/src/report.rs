@@ -1,30 +1,19 @@
-//! Debug-report generation + serving (`@/report`).
+//! Debug-bundle contents + packaging (the `report` artifact producer's payload).
 //!
-//! Wires the generic [`zenoh_blob`] transfer onto the ZenSight keyspace so every
-//! sensor can serve an operator-requested debug bundle:
+//! Provides the [`DebugBundleSource`] trait (+ the [`SimpleBundleSource`] blanket
+//! impl) that a sensor supplies to describe its config/health/counters, central
+//! secret [`redact`]ion, and [`build_debug_bundle`] which packages a redacted
+//! `tar.zst`. The request/status/serve/TTL plumbing lives in the unified
+//! [`ArtifactChannel`](crate::ArtifactChannel); the `report` kind is a
+//! [`ReportProducer`](crate::ReportProducer) over this module.
 //!
-//! - a **request** subscriber (`@/report/request`) — the single authorization
-//!   trigger (R7);
-//! - a **status** queryable (`@/report/status`) — the report lifecycle;
-//! - a **blob** queryable (`@/report/blob/**`, a [`zenoh_blob::BlobServer`]) —
-//!   the bytes, with progress / resume / integrity handled by `zenoh-blob`;
-//! - a **cancel** subscriber (`@/report/cancel`) — free a temp artifact early.
-//!
-//! Generation runs off the capture/poll path (`spawn_blocking`), is bounded and
-//! rate-limited, and the bundle's config is **redacted** of secrets.
+//! Packaging runs off the capture/poll path (`spawn_blocking`), is bounded, and
+//! the bundle's config is **redacted** of secrets.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tokio::sync::Mutex;
-use ulid::Ulid;
-use zenoh_blob::{BlobServer, FileBlobSource, FixedSizeChunker, Manifest, Sha256Digest};
-use zensight_common::report::{ReportKind, ReportRequest, ReportState, ReportStatus};
-use zensight_common::{
-    ReportLimits, report_blob_prefix, report_cancel_key, report_request_key, report_status_key,
-};
 
 use crate::health::HealthSnapshot;
 
@@ -243,297 +232,6 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
-/// Mutable runtime state shared between the channel loop and generation tasks.
-#[derive(Default)]
-struct Runtime {
-    current: Option<ReportState>,
-    busy: bool,
-    last_gen: Option<Instant>,
-    /// The live artifact: id, temp path, and TTL deadline.
-    active: Option<Active>,
-}
-
-struct Active {
-    id: Ulid,
-    temp_path: PathBuf,
-    expires: Instant,
-}
-
-/// Serves the `@/report` channel for one sensor.
-pub struct ReportChannel {
-    session: Arc<zenoh::Session>,
-    key_prefix: String,
-    limits: ReportLimits,
-    source: Arc<dyn DebugBundleSource>,
-    blob: BlobServer,
-    state: Arc<Mutex<Runtime>>,
-}
-
-impl ReportChannel {
-    /// Build a channel for `key_prefix` (e.g. `"zensight/netlink"`).
-    pub fn new(
-        session: Arc<zenoh::Session>,
-        key_prefix: impl Into<String>,
-        limits: ReportLimits,
-        source: Arc<dyn DebugBundleSource>,
-    ) -> Self {
-        let key_prefix = key_prefix.into();
-        let blob = BlobServer::new(
-            session.clone(),
-            report_blob_prefix(&key_prefix),
-            zenoh_blob::Format::Json,
-        );
-        ReportChannel {
-            session,
-            key_prefix,
-            limits,
-            source,
-            blob,
-            state: Arc::new(Mutex::new(Runtime::default())),
-        }
-    }
-
-    /// Serve forever. Spawned as a worker by `SensorRunner::with_report`.
-    pub async fn run(self) {
-        if let Err(e) = self.run_inner().await {
-            tracing::error!(error = %e, "report channel exited");
-        }
-    }
-
-    async fn run_inner(&self) -> anyhow::Result<()> {
-        let req_sub = self
-            .session
-            .declare_subscriber(report_request_key(&self.key_prefix))
-            .await
-            .map_err(|e| anyhow::anyhow!("declare request sub: {e}"))?;
-        let status_q = self
-            .session
-            .declare_queryable(report_status_key(&self.key_prefix))
-            .await
-            .map_err(|e| anyhow::anyhow!("declare status queryable: {e}"))?;
-        let cancel_sub = self
-            .session
-            .declare_subscriber(report_cancel_key(&self.key_prefix))
-            .await
-            .map_err(|e| anyhow::anyhow!("declare cancel sub: {e}"))?;
-
-        // Run the blob server on its own task.
-        tokio::spawn(self.blob.clone().run());
-
-        let mut ttl_tick = tokio::time::interval(Duration::from_secs(5));
-        tracing::info!(prefix = %self.key_prefix, "report channel ready");
-
-        loop {
-            tokio::select! {
-                Ok(sample) = req_sub.recv_async() => {
-                    self.handle_request(&sample.payload().to_bytes()).await;
-                }
-                Ok(query) = status_q.recv_async() => {
-                    let status = self.status().await;
-                    let payload = serde_json::to_vec(&status).unwrap_or_default();
-                    if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
-                        tracing::warn!(error = %e, "report status reply failed");
-                    }
-                }
-                Ok(sample) = cancel_sub.recv_async() => {
-                    let body = sample.payload().to_bytes();
-                    if let Ok(id) = std::str::from_utf8(&body).unwrap_or("").trim().parse::<Ulid>() {
-                        self.expire(id).await;
-                    }
-                }
-                _ = ttl_tick.tick() => {
-                    self.reap_expired().await;
-                }
-            }
-        }
-    }
-
-    async fn status(&self) -> ReportStatus {
-        let rt = self.state.lock().await;
-        ReportStatus {
-            current: rt.current.clone(),
-            busy: rt.busy,
-            max_bytes: self.limits.max_bytes,
-            cooldown_secs: self.limits.cooldown_secs,
-        }
-    }
-
-    async fn handle_request(&self, payload: &[u8]) {
-        let req: ReportRequest = match serde_json::from_slice(payload) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, "bad report request");
-                return;
-            }
-        };
-
-        // Authorization / validation (R7).
-        if !matches!(req.kind, ReportKind::DebugBundle) {
-            self.set_failed(req.id, "unsupported report kind").await;
-            return;
-        }
-        if let Some(target) = &req.opts.target_source
-            && target != &self.source.source_id()
-        {
-            // Not for us — another host running this protocol will answer.
-            return;
-        }
-
-        {
-            let mut rt = self.state.lock().await;
-            if rt.busy {
-                drop(rt);
-                self.set_failed(req.id, "already generating a report").await;
-                return;
-            }
-            if let Some(last) = rt.last_gen
-                && last.elapsed() < Duration::from_secs(self.limits.cooldown_secs)
-            {
-                drop(rt);
-                self.set_failed(req.id, "cooling down; try again shortly")
-                    .await;
-                return;
-            }
-            rt.busy = true;
-            rt.current = Some(ReportState::Generating { id: req.id });
-        }
-
-        // Generate off the loop so status stays responsive.
-        let inputs = BundleInputs {
-            sensor_name: self.source.sensor_name(),
-            source_id: self.source.source_id(),
-            config: self.source.config_json(),
-            health: serde_json::to_value(self.source.health()).unwrap_or(serde_json::Value::Null),
-            counters: self.source.counters(),
-            created_ms: chrono::Utc::now().timestamp_millis(),
-        };
-        let limits = self.limits.clone();
-        let blob = self.blob.clone();
-        let state = self.state.clone();
-        let blob_prefix = report_blob_prefix(&self.key_prefix);
-        let id = req.id;
-        tokio::spawn(async move {
-            let outcome = generate(id, inputs, &limits, &blob, blob_prefix).await;
-            let mut rt = state.lock().await;
-            rt.busy = false;
-            rt.last_gen = Some(Instant::now());
-            match outcome {
-                Ok(output) => {
-                    // Replace any prior artifact.
-                    if let Some(prev) = rt.active.take() {
-                        blob.unregister(&prev.id.to_string()).await;
-                        let _ = tokio::fs::remove_file(&prev.temp_path).await;
-                    }
-                    rt.active = Some(output.active);
-                    rt.current = Some(output.state);
-                }
-                Err(e) => {
-                    rt.current = Some(ReportState::Failed {
-                        id,
-                        reason: e.to_string(),
-                    });
-                }
-            }
-        });
-    }
-
-    async fn set_failed(&self, id: Ulid, reason: &str) {
-        let mut rt = self.state.lock().await;
-        rt.current = Some(ReportState::Failed {
-            id,
-            reason: reason.to_string(),
-        });
-    }
-
-    /// Expire a specific report now (cancel): drop its artifact + blob registration.
-    async fn expire(&self, id: Ulid) {
-        let mut rt = self.state.lock().await;
-        if let Some(active) = &rt.active
-            && active.id == id
-        {
-            let path = active.temp_path.clone();
-            rt.active = None;
-            self.blob.unregister(&id.to_string()).await;
-            let _ = tokio::fs::remove_file(&path).await;
-            rt.current = Some(ReportState::Expired { id });
-        }
-    }
-
-    /// Reap any artifact past its TTL.
-    async fn reap_expired(&self) {
-        let expired = {
-            let rt = self.state.lock().await;
-            rt.active
-                .as_ref()
-                .filter(|a| a.expires <= Instant::now())
-                .map(|a| (a.id, a.temp_path.clone()))
-        };
-        if let Some((id, path)) = expired {
-            let mut rt = self.state.lock().await;
-            rt.active = None;
-            self.blob.unregister(&id.to_string()).await;
-            let _ = tokio::fs::remove_file(&path).await;
-            rt.current = Some(ReportState::Expired { id });
-        }
-    }
-}
-
-/// Output of a successful generation: the `Ready` state to publish + the live
-/// artifact record for TTL reaping.
-struct GenOutput {
-    state: ReportState,
-    active: Active,
-}
-
-/// The blocking-build + manifest + registration step.
-async fn generate(
-    id: Ulid,
-    inputs: BundleInputs,
-    limits: &ReportLimits,
-    blob: &BlobServer,
-    blob_prefix: String,
-) -> anyhow::Result<GenOutput> {
-    let dir = std::env::temp_dir();
-    let max_bytes = limits.max_bytes;
-    let redact_extra = limits.redact_extra.clone();
-    let (temp_path, filename) = tokio::task::spawn_blocking(move || {
-        build_debug_bundle(inputs, max_bytes, &redact_extra, &dir)
-    })
-    .await??;
-
-    // Compute the manifest by streaming the temp file (never read_to_end).
-    let chunker = FixedSizeChunker::new(limits.chunk_size);
-    let mut reader = tokio::fs::File::open(&temp_path).await?;
-    let created_ms = chrono::Utc::now().timestamp_millis();
-    let manifest = Manifest::compute::<_, Sha256Digest>(
-        &mut reader,
-        &chunker,
-        id.to_string(),
-        filename,
-        created_ms,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("manifest: {e}"))?;
-
-    blob.register(manifest.clone(), Arc::new(FileBlobSource::new(&temp_path)))
-        .await;
-
-    let expires_ms = created_ms + (limits.ttl_secs as i64) * 1000;
-    Ok(GenOutput {
-        state: ReportState::Ready {
-            id,
-            manifest,
-            blob_prefix,
-            expires_ms,
-        },
-        active: Active {
-            id,
-            temp_path,
-            expires: Instant::now() + Duration::from_secs(limits.ttl_secs),
-        },
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,7 +275,7 @@ mod tests {
             created_ms: 1_700_000_000_000,
         };
         let (path, filename) =
-            build_debug_bundle(inputs, ReportLimits::default().max_bytes, &[], dir.path()).unwrap();
+            build_debug_bundle(inputs, 64 * 1024 * 1024, &[], dir.path()).unwrap();
         assert!(filename.starts_with("zensight-debug-netlink-host1-"));
         assert!(path.exists());
 

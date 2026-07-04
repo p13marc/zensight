@@ -23,12 +23,10 @@ pub struct NetlinkSensorConfig {
     pub zenoh: ZenohConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
-    /// On-demand debug-report (`@/report`) limits. Disabled by default.
+    /// On-demand artifact channel (`@/artifact`) limits — report + snapshot.
+    /// Every kind disabled by default.
     #[serde(default)]
-    pub report: zensight_sensor_core::ReportLimits,
-    /// Tier-2 directory-snapshot (`@/snapshot`) limits. Disabled by default.
-    #[serde(default)]
-    pub snapshot: zensight_sensor_core::SnapshotLimits,
+    pub artifacts: zensight_sensor_core::ArtifactLimits,
     pub netlink: NetlinkConfig,
 }
 
@@ -265,12 +263,8 @@ impl SensorConfig for NetlinkSensorConfig {
     fn key_prefix(&self) -> &str {
         &self.netlink.key_prefix
     }
-    fn report_limits(&self) -> zensight_sensor_core::ReportLimits {
-        self.report.clone()
-    }
-
-    fn snapshot_limits(&self) -> zensight_sensor_core::SnapshotLimits {
-        self.snapshot.clone()
+    fn artifact_limits(&self) -> zensight_sensor_core::ArtifactLimits {
+        self.artifacts.clone()
     }
 }
 

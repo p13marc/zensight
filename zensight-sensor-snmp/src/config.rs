@@ -25,13 +25,10 @@ pub struct SnmpSensorConfig {
     /// SNMP-specific settings.
     pub snmp: SnmpConfig,
 
-    /// On-demand debug-report (`@/report`) limits. Disabled by default.
+    /// On-demand artifact channel (`@/artifact`) limits — report + snapshot.
+    /// Every kind disabled by default.
     #[serde(default)]
-    pub report: zensight_sensor_core::ReportLimits,
-
-    /// Tier-2 directory-snapshot (`@/snapshot`) limits. Disabled by default.
-    #[serde(default)]
-    pub snapshot: zensight_sensor_core::SnapshotLimits,
+    pub artifacts: zensight_sensor_core::ArtifactLimits,
 }
 
 /// SNMP-specific configuration.
@@ -317,12 +314,8 @@ impl zensight_sensor_core::SensorConfig for SnmpSensorConfig {
         Ok(())
     }
 
-    fn report_limits(&self) -> zensight_sensor_core::ReportLimits {
-        self.report.clone()
-    }
-
-    fn snapshot_limits(&self) -> zensight_sensor_core::SnapshotLimits {
-        self.snapshot.clone()
+    fn artifact_limits(&self) -> zensight_sensor_core::ArtifactLimits {
+        self.artifacts.clone()
     }
 }
 
