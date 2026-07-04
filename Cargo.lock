@@ -1873,9 +1873,9 @@ checksum = "8bf7cc16383c4b8d58b9905a8509f02926ce3058053c056376248d958c9df1e8"
 
 [[package]]
 name = "flowscope"
-version = "0.20.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7f23396803cb35a8759a07ad28e3d5ee7119219cc1a0e114e9c63c4a564c568"
+checksum = "8553860f016bdd6ea70ddb389125d372c956b8490813caca8b69549d879ceb8d"
 dependencies = [
  "ahash",
  "arrayvec",
@@ -3765,9 +3765,9 @@ dependencies = [
 
 [[package]]
 name = "netring"
-version = "0.28.0"
+version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd15ce5064a013a4ac02c8c8f2d3a797f8d2816947c4b3096ebe590a8f68d154"
+checksum = "213fe46b0232e21ede2147521964850dce57108705d54d4b70c2cf0747964e17"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -3832,9 +3832,9 @@ dependencies = [
 
 [[package]]
 name = "nlink"
-version = "0.23.0"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5584327ae3df35d410c01a164670a81390511095bf88741a6f303b80082c896c"
+checksum = "fe5fb2161c342b2859a72a18d7b5854f1f8af2197a0904b789aabc4fec3c671c"
 dependencies = [
  "bitflags 2.13.0",
  "bytes",
@@ -3852,9 +3852,9 @@ dependencies = [
 
 [[package]]
 name = "nlink-macros"
-version = "0.23.0"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43416aed71c5557f55fa6c7468f22d138e758bdd48a934cb4a6c79bf7daca3c4"
+checksum = "7968b73556e86724f3cbdcaf22a0d97f20999a4f670d536bd04ab082b3dac481"
 dependencies = [
  "proc-macro2",
  "quote",
