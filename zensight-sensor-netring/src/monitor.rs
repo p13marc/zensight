@@ -864,6 +864,12 @@ pub fn build(
     // focused packets/bytes — the visible effect of narrowing — and the reload
     // itself is driven from `main` via the monitor's `ReloadHandle`. Off by
     // default: the per-frame handler is a cost the zero-cost hot loop avoids.
+    //
+    // `capture_focus_registered` records whether the subscription was *actually*
+    // added (config-enabled AND the base_expr parsed) — the on-demand capture tap
+    // below keys its reload index off this, not off the config flag, so a
+    // failed-to-parse focus filter cannot shift the tap's index.
+    let mut capture_focus_registered = false;
     if cfg.capture_focus.enabled {
         use netring::monitor::subscription::builder::packet;
         match packet().expr(&cfg.capture_focus.base_expr) {
@@ -896,6 +902,7 @@ pub fn build(
                         }
                     }
                 });
+                capture_focus_registered = true;
                 tracing::info!(
                     base_expr = %cfg.capture_focus.base_expr,
                     "netring: capture-focus armed (reloadable packet filter)"
@@ -912,10 +919,13 @@ pub fn build(
     // On-demand capture tap (#333): a dedicated reloadable packet-tier
     // subscription that forwards frames into `capture_tap` while a capture is in
     // flight (idle cost is one ArcSwap load per matching frame). Registered
-    // AFTER capture-focus so its index is stable: capture-focus (when enabled)
-    // owns index 0 — `command.rs::apply_filter` hard-codes that — so the tap
-    // takes `usize::from(capture_focus.enabled)`. The permissive base means any
-    // per-request filter only *narrows* the build-time kernel prefilter union.
+    // AFTER capture-focus so its index is stable: capture-focus (when actually
+    // registered) owns index 0 — `command.rs::apply_filter` hard-codes that — so
+    // the tap takes index `capture_focus_registered as usize`. Keying off the
+    // real registration (not `cfg.capture_focus.enabled`) means a focus filter
+    // that failed to parse — and so was NOT registered — doesn't leave the tap
+    // pointing one slot too high. The permissive base means any per-request
+    // filter only *narrows* the build-time kernel prefilter union.
     let capture_tap_index = if cfg.capture.on_demand.enabled {
         use netring::monitor::subscription::builder::packet;
         match packet().expr(crate::capture::CAPTURE_TAP_BASE_EXPR) {
@@ -926,7 +936,7 @@ pub fn build(
                     Ok(())
                 });
                 b = b.subscribe(sub);
-                let idx = usize::from(cfg.capture_focus.enabled);
+                let idx = usize::from(capture_focus_registered);
                 tracing::info!(
                     index = idx,
                     base_expr = crate::capture::CAPTURE_TAP_BASE_EXPR,
@@ -1973,15 +1983,22 @@ pub fn build(
     b = b.sink(ChannelSink::new(anom_tx));
 
     let monitor = b.build()?;
-    // Pin the capture-tap index against the actual registration order (#333):
-    // capture-focus (index 0, hard-coded in command.rs) then the tap. A drift
-    // here would swap the wrong subscription's filter at capture time.
-    debug_assert!(
-        capture_tap_index
-            .is_none_or(|idx| monitor.reload_handle().packet_filter_count() == idx + 1),
-        "capture tap index {capture_tap_index:?} inconsistent with packet_filter_count {}",
-        monitor.reload_handle().packet_filter_count()
-    );
+    // Verify the capture-tap index against the *actual* registration order (#333):
+    // capture-focus (index 0, hard-coded in command.rs) then the tap. This is a
+    // runtime check (not a `debug_assert!` compiled out of release builds): on a
+    // mismatch, disable on-demand capture rather than risk `set_packet_filter`
+    // swapping the wrong subscription's filter at capture time.
+    let capture_tap_index = match capture_tap_index {
+        Some(idx) if monitor.reload_handle().packet_filter_count() != idx + 1 => {
+            tracing::error!(
+                expected = idx + 1,
+                actual = monitor.reload_handle().packet_filter_count(),
+                "netring: capture-tap index inconsistent with packet-filter count; disabling on-demand capture"
+            );
+            None
+        }
+        other => other,
+    };
     let keepalive = tel_tx.clone();
     Ok((
         monitor,
