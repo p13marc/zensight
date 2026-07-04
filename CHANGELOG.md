@@ -24,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--key value` shapes) and byte-capped before publish — controlled by
   `processes.scrub_args` (default `true`), `custom_sensitive_words`, and
   `strip_proc_arguments`.
+- **systemd/logs unit↔process↔log identity (#303)**: `UnitDetail` (`@/query/unit`)
+  gains `main_pid` + `main_pid_start_time`, `invocation_id`, and `control_group`;
+  the logs sensor captures `_SYSTEMD_INVOCATION_ID` as `sd.journald.invocation_id`.
+  Together these join a systemd unit to its main process, its cgroup, and its exact
+  log lines.
+- **netlink socket→process attribution (#304)**: `@/query/sockets` `SocketRecord`
+  gains `cookie`, `cgroup_id`/`cgroup`, and the owning `pid`/`process`/
+  `proc_start_time`, resolved **unprivileged** via a per-request `/proc` fd-scan
+  (`collect.socket_processes`, default on; ceiling `socket_process_max_procs`,
+  default 4096). An optional eBPF tier attributes recently-closed / live-established
+  sockets the fd-scan can't reach.
 
 ### Changed
 
