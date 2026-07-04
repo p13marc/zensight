@@ -124,6 +124,17 @@ fn is_put(sample: &Sample) -> bool {
     sample.kind() == SampleKind::Put
 }
 
+/// Extract `(sensor, source)` from a host-evidence key
+/// `.../_meta/evidence/host/<sensor>/<source>` (used to resolve a tombstone).
+fn parse_host_evidence_key(key: &str) -> Option<(String, String)> {
+    let rest = key.split("/evidence/host/").nth(1)?;
+    let (sensor, source) = rest.split_once('/')?;
+    if sensor.is_empty() || source.is_empty() {
+        return None;
+    }
+    Some((sensor.to_string(), source.to_string()))
+}
+
 async fn handle_host(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
     let key = sample.key_expr().as_str();
     // The names subtree is handled by its own subscriber.
@@ -131,8 +142,13 @@ async fn handle_host(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
         return;
     }
     if !is_put(sample) {
-        // TODO(commit 3): evidence tombstones drop a claim from the store.
-        trace!(key = %key, "ignoring non-PUT host-evidence sample");
+        // Evidence tombstone (a `Delete`): drop that claim from the store now
+        // instead of waiting for it to age out by TTL.
+        if let Some((sensor, source)) = parse_host_evidence_key(key) {
+            let _ = tx.send(EvidenceMsg::RemoveHost { sensor, source }).await;
+        } else {
+            trace!(key = %key, "ignoring malformed host-evidence tombstone");
+        }
         return;
     }
     match decode::<HostEvidence>(&sample.payload().to_bytes()) {
@@ -171,5 +187,33 @@ async fn handle_liveness(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
                 .await;
         }
         None => trace!(key = %key, "failed to decode DeviceLiveness"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_host_evidence_key;
+
+    #[test]
+    fn parses_host_evidence_key() {
+        assert_eq!(
+            parse_host_evidence_key("zensight/_meta/evidence/host/netlink/host1"),
+            Some(("netlink".to_string(), "host1".to_string()))
+        );
+        // A MAC-slug source (third-party evidence) stays a single chunk.
+        assert_eq!(
+            parse_host_evidence_key("zensight/_meta/evidence/host/netring/aa-bb-cc-00-00-02"),
+            Some(("netring".to_string(), "aa-bb-cc-00-00-02".to_string()))
+        );
+        // The names subtree is not a host key.
+        assert_eq!(
+            parse_host_evidence_key("zensight/_meta/evidence/names/netring/10-0-0-5"),
+            None
+        );
+        // Missing source chunk.
+        assert_eq!(
+            parse_host_evidence_key("zensight/_meta/evidence/host/only"),
+            None
+        );
     }
 }

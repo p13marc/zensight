@@ -36,6 +36,10 @@ pub enum EvidenceMsg {
     /// A device-liveness update; `source` is the device id, `status` the
     /// reported status string.
     Liveness { source: String, status: String },
+    /// A host-evidence tombstone (a `Delete` on
+    /// `_meta/evidence/host/<sensor>/<source>`): drop that claim now instead of
+    /// waiting for it to age out by TTL.
+    RemoveHost { sensor: String, source: String },
 }
 
 /// A change to publish on the entity keyspace.
@@ -87,6 +91,9 @@ impl CorrelatorState {
             EvidenceMsg::Name(obs) => self.names.upsert(obs),
             EvidenceMsg::Liveness { source, status } => {
                 self.liveness.insert(source, status);
+            }
+            EvidenceMsg::RemoveHost { sensor, source } => {
+                self.evidence.remove(&sensor, &source);
             }
         }
     }
@@ -396,6 +403,24 @@ mod tests {
         // Idempotent: same evidence → no ops second time.
         let ops2 = s.recompute(3000);
         assert!(ops2.is_empty(), "no content change → no ops");
+    }
+
+    #[test]
+    fn remove_host_tombstones_the_entity() {
+        let mut s = CorrelatorState::new(cfg());
+        s.apply(EvidenceMsg::Host(self_report("sysinfo", "host1", &hid(7))));
+        let ops = s.recompute(2000);
+        assert!(matches!(ops.as_slice(), [EntityOp::Upsert(_)]));
+        // A tombstone on that evidence key drops the claim → the entity retires.
+        s.apply(EvidenceMsg::RemoveHost {
+            sensor: "sysinfo".into(),
+            source: "host1".into(),
+        });
+        let ops = s.recompute(3000);
+        assert!(
+            ops.iter().any(|o| matches!(o, EntityOp::Tombstone(_))),
+            "removing the only member's evidence must tombstone the entity"
+        );
     }
 
     #[test]
