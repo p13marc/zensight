@@ -44,6 +44,7 @@ pub static DASHBOARD_SEARCH_ID: LazyLock<Id> = LazyLock::new(|| Id::new("dashboa
 /// Text input ID for device metric search.
 pub static DEVICE_SEARCH_ID: LazyLock<Id> = LazyLock::new(|| Id::new("device-search"));
 
+use crate::entity::EntityStore;
 use crate::message::{DeviceId, Message};
 use crate::mock;
 use crate::subscription::{
@@ -122,6 +123,9 @@ pub struct ZenSight {
     overview: OverviewState,
     /// Topology state.
     topology: TopologyState,
+    /// Correlator host-entity view model (#306): groups per-protocol devices
+    /// into physical hosts. Empty ⇒ degraded per-source path.
+    entities: EntityStore,
     /// Syslog filter state.
     syslog_filter: SyslogFilterState,
     /// Rolling buffer of recent log lines (all syslog/journald sources) for the
@@ -285,6 +289,7 @@ impl ZenSight {
             groups,
             overview,
             topology,
+            entities: EntityStore::default(),
             syslog_filter,
             recent_logs: std::collections::VecDeque::new(),
             current_view,
@@ -1206,6 +1211,21 @@ impl ZenSight {
                     self.topology.apply_alerts(&self.alerts.external);
                 }
                 self.refresh_netring_anomalies();
+            }
+
+            Message::EntitySeed(entities) => {
+                self.entities.seed(entities);
+                self.rederive_entities();
+            }
+
+            Message::EntityReceived(entity) => {
+                self.entities.upsert(entity);
+                self.rederive_entities();
+            }
+
+            Message::EntityRemoved(entity_id) => {
+                self.entities.remove(&entity_id);
+                self.rederive_entities();
             }
 
             Message::Connecting => {
@@ -3181,6 +3201,13 @@ impl ZenSight {
             map.insert(node_id.clone(), node_id.clone());
         }
         map
+    }
+
+    /// Re-derive entity-dependent view models after the [`EntityStore`] changes
+    /// (#306). Currently refreshes the topology; the dashboard/host views read
+    /// the store live at render time.
+    fn rederive_entities(&mut self) {
+        self.topology.update_from_devices(&self.dashboard.devices);
     }
 
     /// Fetch the on-demand netring TLS asset inventory.
