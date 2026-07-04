@@ -42,14 +42,13 @@ pub use config::{
 pub use error::{Error, Result};
 pub use evidence::HostEvidence;
 pub use health::{
-    CorrelationEntry, DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot,
-    HealthStatus, SensorInfo,
+    DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, HealthStatus, SensorInfo,
 };
 pub use keyexpr::{
     KEY_PREFIX, KeyExprBuilder, ParseError, ParsedKeyExpr, all_alerts_wildcard,
-    all_correlation_wildcard, all_errors_wildcard, all_evidence_wildcard, all_health_wildcard,
-    all_liveness_wildcard, all_sensors_wildcard, all_telemetry_wildcard, host_evidence_key,
-    parse_key_expr, sensor_info_key,
+    all_errors_wildcard, all_evidence_wildcard, all_health_wildcard, all_liveness_wildcard,
+    all_sensors_wildcard, all_telemetry_wildcard, host_evidence_key, parse_key_expr,
+    sensor_info_key,
 };
 pub use query_detail::{
     AssetRecord, CgroupNode, CgroupPid, DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord,

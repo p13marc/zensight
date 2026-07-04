@@ -36,7 +36,6 @@ mod alert;
 mod args;
 pub mod artifact;
 mod config;
-mod correlation;
 mod error;
 mod health;
 mod identity;
@@ -54,7 +53,6 @@ pub use artifact::{
     ReportProducer, SnapshotProducer,
 };
 pub use config::SensorConfig;
-pub use correlation::{CorrelationEntry, CorrelationRegistry, DeviceIdentity, SensorInfo};
 pub use error::{Result, SensorError};
 pub use health::{
     DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, SensorHealth,

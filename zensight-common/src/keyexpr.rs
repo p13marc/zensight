@@ -202,20 +202,6 @@ pub fn all_errors_wildcard() -> String {
     format!("{}/*/@/errors", KEY_PREFIX)
 }
 
-/// Build a wildcard key expression for all correlation data.
-///
-/// Matches: `zensight/_meta/correlation/<ip>`
-///
-/// # Example
-/// ```
-/// use zensight_common::keyexpr::all_correlation_wildcard;
-///
-/// assert_eq!(all_correlation_wildcard(), "zensight/_meta/correlation/*");
-/// ```
-pub fn all_correlation_wildcard() -> String {
-    format!("{}/_meta/correlation/*", KEY_PREFIX)
-}
-
 /// Build a wildcard key expression for all sensor discovery data.
 ///
 /// Matches: `zensight/_meta/sensors/<sensor_name>/<source>`

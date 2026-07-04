@@ -164,30 +164,9 @@ impl TopologyState {
         self.cache.clear();
     }
 
-    /// Annotate nodes with how many sensors have correlated each host (#25),
-    /// from the cross-sensor correlation map. Matches a node by id appearing in a
-    /// correlation entry's hostnames; aggregates the max sensor count seen.
-    pub fn apply_correlations(
-        &mut self,
-        correlations: &HashMap<String, zensight_common::CorrelationEntry>,
-    ) {
-        for node in self.nodes.values_mut() {
-            node.sensor_count = None;
-        }
-        for entry in correlations.values() {
-            let count = entry.sensors.len();
-            for host in &entry.hostnames {
-                if let Some(node) = self.nodes.get_mut(host) {
-                    node.sensor_count = Some(node.sensor_count.map_or(count, |c| c.max(count)));
-                }
-            }
-        }
-        self.cache.clear();
-    }
-
     /// Replace the edge set with edges derived from *observed* netring flow
     /// records (#25). `ip_to_node` maps an endpoint IP to a topology node id
-    /// (built from correlations / node sources). Flows whose src and dst both
+    /// (built from node sources; entity IPs join in with #306). Flows whose src and dst both
     /// resolve to (distinct) known nodes are aggregated into one edge per
     /// unordered node pair, summing bytes/packets. Pure given its inputs; this
     /// is the Hubble model — topology from live flow data, not config.
