@@ -49,6 +49,7 @@ pub struct AlertReporter {
     protocol: Protocol,
     format: Format,
     debounce: Duration,
+    identity: Option<crate::identity::SharedIdentity>,
     active: Mutex<HashMap<String, ActiveAlert>>,
 }
 
@@ -62,6 +63,7 @@ impl AlertReporter {
             protocol,
             format,
             debounce: Duration::ZERO,
+            identity: None,
             active: Mutex::new(HashMap::new()),
         }
     }
@@ -69,6 +71,15 @@ impl AlertReporter {
     /// Set the default "must be violated continuously for" debounce window.
     pub fn with_debounce(mut self, d: Duration) -> Self {
         self.debounce = d;
+        self
+    }
+
+    /// Stamp the host identity onto every observed alert as the `host.id`
+    /// annotation label (identity envelope, #301). Annotation labels are
+    /// excluded from `alert_key()`, so stamping never changes alert identity —
+    /// firing/resolve pairs stay matched across identity refreshes.
+    pub fn with_identity(mut self, identity: crate::identity::SharedIdentity) -> Self {
+        self.identity = Some(identity);
         self
     }
 
@@ -80,7 +91,13 @@ impl AlertReporter {
     /// the alert has been continuously observed for `for_duration` (or the
     /// reporter default). Idempotent within the debounce window; re-publishes if
     /// the severity escalates after firing.
-    pub async fn observe(&self, alert: Alert, for_duration: Option<Duration>) -> Result<()> {
+    pub async fn observe(&self, mut alert: Alert, for_duration: Option<Duration>) -> Result<()> {
+        // Stamp the identity annotation once at entry: `entry.last` then carries
+        // it through the firing publication, the `@/query/alerts` seed, and the
+        // eventual resolve — one stamp site, consistent everywhere.
+        if let Some(host_id) = self.identity.as_ref().and_then(|i| i.get().host_id) {
+            alert.labels.insert("host.id".to_string(), host_id);
+        }
         let key = alert.alert_key();
         let dur = for_duration.unwrap_or(self.debounce);
         let action = {
