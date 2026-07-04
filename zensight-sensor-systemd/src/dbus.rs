@@ -112,6 +112,11 @@ pub trait Unit {
     fn after(&self) -> zbus::Result<Vec<String>>;
     #[zbus(property)]
     fn before(&self) -> zbus::Result<Vec<String>>;
+    /// Durable per-run identity (16 bytes; all-zero/empty when not running).
+    /// Solves "same unit, restarted" the way `start_time` solves PID reuse —
+    /// and joins journald lines via `_SYSTEMD_INVOCATION_ID` (#303).
+    #[zbus(property, name = "InvocationID")]
+    fn invocation_id(&self) -> zbus::Result<Vec<u8>>;
 }
 
 /// The `org.freedesktop.systemd1.Service` interface subset — present only on
@@ -139,6 +144,14 @@ pub trait Service {
     fn io_read_bytes(&self) -> zbus::Result<u64>;
     #[zbus(property, name = "IOWriteBytes")]
     fn io_write_bytes(&self) -> zbus::Result<u64>;
+    /// Main service PID (0 when not running). Identity is the
+    /// `(pid, start_time)` pair — see `main_pid_start_time` on `UnitDetail`.
+    #[zbus(property, name = "MainPID")]
+    fn main_pid(&self) -> zbus::Result<u32>;
+    /// The unit's cgroup path — **the cross-sensor join key**
+    /// (`unit.control_group == process.cgroup`, #303).
+    #[zbus(property)]
+    fn control_group(&self) -> zbus::Result<String>;
 }
 
 /// The `org.freedesktop.systemd1.Timer` interface subset (#276 timer-overdue,

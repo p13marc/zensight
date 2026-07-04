@@ -405,6 +405,23 @@ pub struct UnitDetail {
     /// land or when the querier didn't ask for them.
     #[serde(default)]
     pub recent_changes: Vec<String>,
+    /// Main service PID (`None` when not running / not a service) (#303).
+    #[serde(default)]
+    pub main_pid: Option<u32>,
+    /// `/proc/<main_pid>/stat` field 22 in clock ticks since boot — the
+    /// `(pid, start_time)` identity pair with `main_pid` (matches
+    /// `ProcessRecord.start_time` / nlink `ProcessRef.start_time`).
+    #[serde(default)]
+    pub main_pid_start_time: Option<u64>,
+    /// Durable per-run identity, hex — matches journald's
+    /// `_SYSTEMD_INVOCATION_ID` (label `sd.journald.invocation_id`), so a log
+    /// line resolves to an exact unit *run*, not a time-window guess.
+    #[serde(default)]
+    pub invocation_id: Option<String>,
+    /// The unit's cgroup path — the cross-sensor join key
+    /// (`unit.control_group == process.cgroup`).
+    #[serde(default)]
+    pub control_group: Option<String>,
 }
 
 /// One systemd `.timer` unit row (#279), served on demand from `@/query/timers`.
