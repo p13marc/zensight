@@ -56,7 +56,9 @@ async fn main() -> Result<()> {
                 report_source,
                 &artifacts.report,
             )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
-            std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(&artifacts.snapshot)),
+            std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
+                &artifacts.snapshot,
+            )),
         ],
     );
 
