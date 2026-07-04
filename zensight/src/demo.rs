@@ -2198,6 +2198,13 @@ impl DemoSimulator {
     }
 
     /// Generate device liveness updates based on active anomalies.
+    /// Generate the demo correlator host entities (#306), stamped `now` so the
+    /// freshness indicators animate as they are re-emitted. Consistent with the
+    /// mock device sources so the dashboard actually merges facets into hosts.
+    pub fn generate_entities(&self, now: i64) -> Vec<zensight_common::HostEntity> {
+        crate::mock::host_entities_at(now)
+    }
+
     pub fn generate_liveness_updates(&self) -> Vec<(String, DeviceLiveness)> {
         let mut updates = Vec::new();
 

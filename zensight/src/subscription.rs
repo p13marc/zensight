@@ -706,6 +706,14 @@ pub fn demo_subscription() -> Subscription<Message> {
                     }
                 }
 
+                // Re-emit correlator host entities on the first tick and every
+                // ~30 ticks thereafter (~18 s) to exercise the freshness path (#306).
+                if tick_count.is_multiple_of(30) {
+                    for entity in simulator.generate_entities(now) {
+                        yield Message::EntityReceived(entity);
+                    }
+                }
+
                 tick_count += 1;
             }
         }

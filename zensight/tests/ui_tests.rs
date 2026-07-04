@@ -3290,3 +3290,224 @@ fn test_systemd_expectations_configured_list() {
     assert!(ui.find("service:sshd.service").is_ok());
     assert!(ui.find("forbid:failed").is_ok());
 }
+
+// ---------------------------------------------------------------------------
+// #306 — Host entity: dashboard grouping, degraded parity, resolution group.
+// ---------------------------------------------------------------------------
+
+use zensight::entity::EntityStore;
+use zensight_common::{DeviceStatus, HostEntity, MemberClaim};
+
+/// Build a test HostEntity merging the given `(sensor, source)` members.
+fn test_entity(id: &str, hostname: &str, members: &[(&str, &str)]) -> HostEntity {
+    HostEntity {
+        entity_id: id.to_string(),
+        aliases: vec![],
+        host_id: None,
+        boot_id: None,
+        ips: vec!["10.0.0.5".to_string()],
+        macs: vec![],
+        hostname: Some(hostname.to_string()),
+        fqdn: None,
+        names: vec![],
+        vendor: None,
+        platform: Some("linux".to_string()),
+        members: members
+            .iter()
+            .map(|(sensor, source)| MemberClaim {
+                sensor: (*sensor).to_string(),
+                source: (*source).to_string(),
+                rule: "machine-id".to_string(),
+                confidence: 1.0,
+                last_seen: 0,
+            })
+            .collect(),
+        status: Some("online".to_string()),
+        last_updated: i64::MAX / 2, // never stale in-test
+    }
+}
+
+fn device(protocol: Protocol, source: &str) -> (DeviceId, DeviceState) {
+    let id = DeviceId {
+        protocol,
+        source: source.to_string(),
+    };
+    let mut d = DeviceState::new(id.clone());
+    d.metric_count = 3;
+    d.is_healthy = true;
+    d.update_from_liveness(DeviceStatus::Online, 0, None);
+    (id, d)
+}
+
+/// #306: two sensor sources merged by one entity render as a single host card
+/// with a "merged from 2 sources" caption.
+#[test]
+fn test_host_card_renders_entity_members() {
+    let mut state = DashboardState::default();
+    for (id, d) in [
+        device(Protocol::Sysinfo, "srvA"),
+        device(Protocol::Netlink, "srvB"),
+    ] {
+        state.devices.insert(id, d);
+    }
+
+    let mut entities = EntityStore::default();
+    entities.upsert(test_entity(
+        "h_web01",
+        "web-01",
+        &[("sysinfo", "srvA"), ("netlink", "srvB")],
+    ));
+
+    let groups = GroupsState::default();
+    let overview = OverviewState::default();
+    let sensor_health = HashMap::new();
+    let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut ui = simulator(dashboard_view(
+        &state,
+        AppTheme::Dark,
+        0,
+        &groups,
+        &overview,
+        &sensor_health,
+        zensight::view::trend::DeviceSparks::new(),
+        &entities,
+        &firing,
+        true,
+    ));
+
+    // One merged host card named by the entity hostname, both facet chips.
+    assert!(ui.find("web-01").is_ok());
+    assert!(ui.find("merged from 2 sources").is_ok());
+    assert!(ui.find("sysinfo").is_ok());
+    assert!(ui.find("netlink").is_ok());
+}
+
+/// #306: with an empty EntityStore, grouping falls back to per-source exactly as
+/// before correlation existed — correlation is never a hard render dependency.
+#[test]
+fn test_dashboard_empty_entity_store_degraded_parity() {
+    let mut state = DashboardState::default();
+    for (id, d) in [
+        device(Protocol::Sysinfo, "srvA"),
+        device(Protocol::Netlink, "srvB"),
+    ] {
+        state.devices.insert(id, d);
+    }
+
+    let entities = EntityStore::default(); // empty ⇒ degraded path
+    let groups = GroupsState::default();
+    let overview = OverviewState::default();
+    let sensor_health = HashMap::new();
+    let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut ui = simulator(dashboard_view(
+        &state,
+        AppTheme::Dark,
+        0,
+        &groups,
+        &overview,
+        &sensor_health,
+        zensight::view::trend::DeviceSparks::new(),
+        &entities,
+        &firing,
+        true,
+    ));
+
+    // Two separate source-grouped cards, no merge caption.
+    assert!(ui.find("srvA").is_ok());
+    assert!(ui.find("srvB").is_ok());
+    assert!(ui.find("merged from 2 sources").is_err());
+}
+
+/// #306: the host detail page shows the resolution-group drill-down with each
+/// member's rule + confidence — the wrong-merge diagnosis affordance.
+#[test]
+fn test_host_detail_resolution_group() {
+    let id = DeviceId {
+        protocol: Protocol::Sysinfo,
+        source: "server01".to_string(),
+    };
+    let mut detail = DeviceDetailState::new(id.clone());
+    for point in mock::sysinfo::host("server01") {
+        detail.update(point);
+    }
+    let facets = vec![FacetTab {
+        id: id.clone(),
+        protocol: Protocol::Sysinfo,
+        status: DeviceStatus::Online,
+        active: true,
+    }];
+    let entity = test_entity(
+        "h_web01",
+        "web-01",
+        &[("sysinfo", "server01"), ("netlink", "server01")],
+    );
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(host_detail_view(
+        &detail,
+        &syslog_filter,
+        &[],
+        &facets,
+        Some(&entity),
+    ));
+
+    assert!(ui.find("Resolution group").is_ok());
+    assert!(ui.find("web-01").is_ok());
+    // Member row shows the binding rule + confidence.
+    assert!(
+        ui.find("sysinfo/server01 · machine-id · confidence 1.00")
+            .is_ok()
+    );
+}
+
+/// #306: host-detail facet tabs include entity members that have no live
+/// DeviceState (union), shown as disabled tabs — here a syslog member without a
+/// live device still surfaces via the entity.
+#[test]
+fn test_host_detail_entity_facet_tabs() {
+    let id = DeviceId {
+        protocol: Protocol::Sysinfo,
+        source: "server01".to_string(),
+    };
+    let mut detail = DeviceDetailState::new(id.clone());
+    for point in mock::sysinfo::host("server01") {
+        detail.update(point);
+    }
+    // Two facet tabs built from the entity: the live sysinfo one + a netlink
+    // member (disabled, no live device).
+    let facets = vec![
+        FacetTab {
+            id: id.clone(),
+            protocol: Protocol::Sysinfo,
+            status: DeviceStatus::Online,
+            active: true,
+        },
+        FacetTab {
+            id: DeviceId {
+                protocol: Protocol::Netlink,
+                source: "server01".to_string(),
+            },
+            protocol: Protocol::Netlink,
+            status: DeviceStatus::Unknown,
+            active: false,
+        },
+    ];
+    let entity = test_entity(
+        "h_srv01",
+        "server01",
+        &[("sysinfo", "server01"), ("netlink", "server01")],
+    );
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(host_detail_view(
+        &detail,
+        &syslog_filter,
+        &[],
+        &facets,
+        Some(&entity),
+    ));
+
+    assert!(ui.find("Facets").is_ok());
+    assert!(ui.find("sysinfo").is_ok());
+    assert!(ui.find("netlink").is_ok());
+}

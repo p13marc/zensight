@@ -292,7 +292,15 @@ impl ZenSight {
             groups,
             overview,
             topology,
-            entities: EntityStore::default(),
+            entities: {
+                // Demo mode: seed correlator host entities so the dashboard shows
+                // merged host cards immediately (the demo feed re-emits them).
+                let mut store = EntityStore::default();
+                if demo_mode {
+                    store.seed(mock::host_entities());
+                }
+                store
+            },
             syslog_filter,
             recent_logs: std::collections::VecDeque::new(),
             current_view,

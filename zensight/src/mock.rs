@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{HostEntity, MemberClaim, Protocol, TelemetryPoint, TelemetryValue};
 
 /// Generate a mock telemetry point.
 pub fn telemetry_point(
@@ -489,6 +489,100 @@ pub mod modbus {
 }
 
 /// Generate a complete mock environment with multiple devices.
+/// Deterministic `h_<12hex>` entity id from a host name (FNV-1a). Mirrors the
+/// correlator's stable-id scheme so demo/mock ids are consistent across runs.
+fn entity_id_for(name: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in name.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("h_{:012x}", hash & 0xffff_ffff_ffff)
+}
+
+/// One correlator [`HostEntity`] merging the given `(sensor, source)` members
+/// under a host name. `ips`/`macs` are illustrative but stable.
+fn mock_entity(
+    name: &str,
+    members: &[(&str, &str)],
+    ips: &[&str],
+    macs: &[&str],
+    now: i64,
+) -> HostEntity {
+    let mut e = HostEntity {
+        entity_id: entity_id_for(name),
+        aliases: vec![],
+        host_id: Some(format!("{:064x}", entity_id_for(name).len() as u64)),
+        boot_id: None,
+        ips: ips.iter().map(|s| s.to_string()).collect(),
+        macs: macs.iter().map(|s| s.to_string()).collect(),
+        hostname: Some(name.to_string()),
+        fqdn: Some(format!("{name}.lab.example")),
+        names: vec![],
+        vendor: None,
+        platform: Some("linux".to_string()),
+        members: members
+            .iter()
+            .map(|(sensor, source)| MemberClaim {
+                sensor: (*sensor).to_string(),
+                source: (*source).to_string(),
+                rule: "machine-id".to_string(),
+                confidence: 1.0,
+                last_seen: now,
+            })
+            .collect(),
+        status: Some("online".to_string()),
+        last_updated: now,
+    };
+    e.canonicalize();
+    e
+}
+
+/// Mock correlator host entities (#306), consistent with the sources emitted by
+/// [`mock_environment`]: server01 (sysinfo+logs+netlink) and server02
+/// (sysinfo+netlink) each merge into one host, and a wire-only entity models a
+/// host observed purely on the wire (passive topology node) with no live sensor
+/// device. `now` stamps `last_updated` so freshness indicators animate.
+pub fn host_entities_at(now: i64) -> Vec<HostEntity> {
+    vec![
+        mock_entity(
+            "server01",
+            &[
+                ("sysinfo", "server01"),
+                ("logs", "server01"),
+                ("netlink", "server01"),
+            ],
+            &["10.0.0.11"],
+            &["02:42:0a:00:00:0b"],
+            now,
+        ),
+        mock_entity(
+            "server02",
+            &[("sysinfo", "server02"), ("netlink", "server02")],
+            &["10.0.0.12"],
+            &["02:42:0a:00:00:0c"],
+            now,
+        ),
+        // Wire-only host: a netring observation with no live device of its own.
+        mock_entity(
+            "wire-host-a",
+            &[("netring", "10.0.0.200")],
+            &["10.0.0.200"],
+            &[],
+            now,
+        ),
+    ]
+}
+
+/// [`host_entities_at`] stamped with the current wall clock.
+pub fn host_entities() -> Vec<HostEntity> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    host_entities_at(now)
+}
+
 pub fn mock_environment() -> Vec<TelemetryPoint> {
     let mut points = Vec::new();
 
@@ -552,5 +646,47 @@ mod tests {
         assert!(!points.is_empty());
         assert!(points.iter().any(|p| p.metric.contains("cpu")));
         assert!(points.iter().any(|p| p.metric.contains("memory")));
+    }
+
+    #[test]
+    fn host_entity_ids_are_stable_and_prefixed() {
+        // Deterministic across runs and correctly formatted.
+        assert_eq!(entity_id_for("server01"), entity_id_for("server01"));
+        assert_ne!(entity_id_for("server01"), entity_id_for("server02"));
+        let ents = host_entities_at(1_000);
+        assert!(ents.iter().all(|e| e.entity_id.starts_with("h_")));
+        assert!(ents.iter().all(|e| e.entity_id.len() == 14));
+    }
+
+    #[test]
+    fn mock_entity_members_track_mock_device_sources() {
+        // Every server-backed mock entity member must correspond to a real mock
+        // device source so grouping actually merges (demo/mock contract, #306).
+        let env = mock_environment();
+        let device_sources: std::collections::HashSet<(Protocol, String)> =
+            env.iter().map(|p| (p.protocol, p.source.clone())).collect();
+
+        for entity in host_entities_at(1_000) {
+            // The wire-only host is intentionally NOT backed by a device.
+            if entity.hostname.as_deref() == Some("wire-host-a") {
+                for m in &entity.members {
+                    let proto: Protocol = m.sensor.parse().unwrap();
+                    assert!(
+                        !device_sources.contains(&(proto, m.source.clone())),
+                        "wire-only member unexpectedly has a live device: {m:?}"
+                    );
+                }
+                continue;
+            }
+            for m in &entity.members {
+                let proto: Protocol = m.sensor.parse().unwrap();
+                assert!(
+                    device_sources.contains(&(proto, m.source.clone())),
+                    "mock entity member {}/{} has no mock device",
+                    m.sensor,
+                    m.source
+                );
+            }
+        }
     }
 }
