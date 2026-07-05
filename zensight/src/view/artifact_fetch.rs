@@ -157,10 +157,28 @@ pub enum CaptureToggle {
     DecompressOnSave,
 }
 
-/// The operator-authored capture parameters, shared by the sensor card and the
-/// netring Capture tab (one form per sensor key prefix, held in `app.rs`). The
-/// numeric fields are free-text so [`CaptureForm::validate`] is the single
-/// source of truth — used both to render the inline error and to gate submit.
+/// A borrow-bundle of the app's artifact state (#351), threaded into the
+/// device drill-down so contextual actions (the netring Capture tab's form)
+/// render the same shared state as the Sensors-page cards — mirror, not move.
+#[derive(Clone, Copy)]
+pub struct ArtifactCtx<'a> {
+    /// The single in-flight (or finished) transfer's state.
+    pub fetch: &'a ArtifactFetch,
+    /// Advertised artifact kinds per sensor key prefix (`zensight/<sensor>`).
+    pub kinds: &'a std::collections::HashMap<String, Vec<KindStatus>>,
+    /// The shared capture forms, one per sensor key prefix.
+    pub capture_forms: &'a std::collections::HashMap<String, CaptureForm>,
+    /// Key prefix of the active job, if any.
+    pub active_prefix: Option<&'a str>,
+    /// Kind slug of the active job, if any.
+    pub active_kind: Option<&'a str>,
+}
+
+/// The operator-authored capture parameters, shared by the Sensors-page sensor
+/// card and the netring Capture tab (#351) — one form per sensor key prefix,
+/// held in `app.rs`, so edits mirror between the two surfaces. The numeric
+/// fields are free-text so [`CaptureForm::validate`] is the single source of
+/// truth — used both to render the inline error and to gate submit.
 #[derive(Debug, Clone)]
 pub struct CaptureForm {
     /// Capture duration, seconds (text input).
@@ -480,9 +498,11 @@ fn caption_danger(theme: &iced::Theme) -> iced::widget::text::Style {
     }
 }
 
-/// The on-demand capture request form (#333) — one per sensor key prefix, shared
-/// by the sensor card and the netring Capture tab. `disabled` gates submit while
-/// another card's job is in flight; `validate` gates it against the advert.
+/// The on-demand capture request form (#333) — one per sensor key prefix,
+/// shared since #351 by the Sensors-page sensor card and the netring Capture
+/// tab (both render through [`artifact_section`]). `disabled` gates submit
+/// while another card's job is in flight; `validate` gates it against the
+/// advert.
 pub fn capture_form_view<'a>(
     form: &CaptureForm,
     key_prefix: &str,

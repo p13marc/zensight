@@ -1756,9 +1756,35 @@ impl ZenSight {
             }
 
             Message::OpenBandwidth => {
+                // Nav-rail entry = unscoped (#351); the per-host pivot below
+                // sets the scope instead.
+                self.bandwidth.host_filter = None;
                 self.set_view(CurrentView::Bandwidth);
-                self.bandwidth.services = self.bandwidth_service_rows();
+                let rows = self.bandwidth_service_rows();
+                self.bandwidth.set_services(rows);
                 // Only the Processes mode needs a fetch; Services reads the stream.
+                if self.bandwidth.mode == crate::view::bandwidth::BandwidthMode::Processes {
+                    self.bandwidth.loading();
+                    return self.query_bandwidth();
+                }
+            }
+
+            Message::OpenBandwidthForHost(host) => {
+                // Contextual pivot from a device view (#351): same open flow,
+                // pre-scoped to the host.
+                self.bandwidth.host_filter = Some(host);
+                self.set_view(CurrentView::Bandwidth);
+                let rows = self.bandwidth_service_rows();
+                self.bandwidth.set_services(rows);
+                // Always refetch processes: the scope is applied at fold time.
+                self.bandwidth.loading();
+                return self.query_bandwidth();
+            }
+
+            Message::ClearBandwidthHostFilter => {
+                self.bandwidth.host_filter = None;
+                let rows = self.bandwidth_service_rows();
+                self.bandwidth.set_services(rows);
                 if self.bandwidth.mode == crate::view::bandwidth::BandwidthMode::Processes {
                     self.bandwidth.loading();
                     return self.query_bandwidth();
@@ -1776,7 +1802,8 @@ impl ZenSight {
                 self.bandwidth.table = crate::view::components::TableState::default();
                 match mode {
                     crate::view::bandwidth::BandwidthMode::Services => {
-                        self.bandwidth.services = self.bandwidth_service_rows();
+                        let rows = self.bandwidth_service_rows();
+                        self.bandwidth.set_services(rows);
                     }
                     // Fetch per-process rows the first time that mode is shown.
                     crate::view::bandwidth::BandwidthMode::Processes => {
@@ -4503,6 +4530,16 @@ impl ZenSight {
                         facets: &facets,
                         entity,
                         identity_expanded: self.identity_expanded,
+                        artifact: Some(crate::view::artifact_fetch::ArtifactCtx {
+                            fetch: &self.artifact_fetch,
+                            kinds: &self.artifact_kinds,
+                            capture_forms: &self.capture_forms,
+                            active_prefix: self
+                                .artifact_job
+                                .as_ref()
+                                .map(|j| j.key_prefix.as_str()),
+                            active_kind: self.artifact_job.as_ref().map(|j| j.kind.slug()),
+                        }),
                     })
                 } else {
                     dashboard_view(
@@ -4907,7 +4944,8 @@ impl ZenSight {
 
         // Recompute the bandwidth Services table now that the point has landed.
         if bw_services_relevant {
-            self.bandwidth.services = self.bandwidth_service_rows();
+            let rows = self.bandwidth_service_rows();
+            self.bandwidth.set_services(rows);
         }
     }
 
@@ -4955,7 +4993,20 @@ impl ZenSight {
 
         // Prefetch this protocol's primary detail channels so the drill-in opens
         // pre-populated rather than Idle-until-clicked (#127).
-        let prefetch = self.prefetch_on_open(&device_id);
+        let mut prefetch = self.prefetch_on_open(&device_id);
+
+        // Contextual capture (#351): a netring drill-down hosts the on-demand
+        // capture form, which needs the sensor's advertised artifact kinds.
+        // Lazily discover them (and seed the shared form) if the Sensors page
+        // hasn't already.
+        if device_id.protocol == Protocol::Netring
+            && !self
+                .artifact_kinds
+                .contains_key(&format!("zensight/{}", Protocol::Netring.as_str()))
+            && let Some(task) = self.load_artifact_kinds()
+        {
+            prefetch = Task::batch([prefetch, task]);
+        }
 
         // Resolve the persisted metric ids for this device, then query the warm
         // (minute) tier off-thread. Last 24h of minute buckets is plenty to

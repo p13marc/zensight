@@ -122,7 +122,14 @@ pub fn metric_trend_and_alert<'a>(state: &DeviceDetailState, metric: &str) -> El
 /// protocol-specific view implementation. If the specialized view cannot
 /// be rendered (e.g., insufficient data), it returns `None` to indicate
 /// the caller should fall back to the generic device view.
-pub fn specialized_view<'a>(state: &'a DeviceDetailState) -> Option<Element<'a, Message>> {
+///
+/// `artifact` threads the app's shared artifact state into views with
+/// contextual actions (#351) — today only netring's Capture tab consumes it;
+/// `None` renders those views without the in-context controls.
+pub fn specialized_view<'a>(
+    state: &'a DeviceDetailState,
+    artifact: Option<crate::view::artifact_fetch::ArtifactCtx<'a>>,
+) -> Option<Element<'a, Message>> {
     match state.device_id.protocol {
         Protocol::Snmp => Some(snmp::snmp_device_view(state)),
         Protocol::Sysinfo => Some(sysinfo::sysinfo_host_view(state)),
@@ -132,7 +139,7 @@ pub fn specialized_view<'a>(state: &'a DeviceDetailState) -> Option<Element<'a, 
         Protocol::Gnmi => Some(gnmi::gnmi_streaming_view(state)),
         Protocol::Opcua => None, // No specialized view yet, use generic
         Protocol::Netlink => Some(netlink::netlink_host_view(state)),
-        Protocol::Netring => Some(netring::netring_sensor_view(state)),
+        Protocol::Netring => Some(netring::netring_sensor_view(state, artifact)),
         Protocol::Systemd => Some(systemd::systemd_host_view(state)),
     }
 }

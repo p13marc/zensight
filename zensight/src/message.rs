@@ -925,6 +925,12 @@ pub enum Message {
     /// Toggle the structured drill-down for a log row, keyed by content (#93).
     ToggleLogRow(String),
 
+    /// Open the global bandwidth monitor pre-scoped to one host (#351).
+    OpenBandwidthForHost(String),
+
+    /// Clear the bandwidth monitor's host scope (#351).
+    ClearBandwidthHostFilter,
+
     /// Toggle live-tail follow/pause on the log stream (#93).
     ToggleLogFollow,
 

@@ -422,6 +422,7 @@ fn test_host_detail_facet_tabs() {
         facets: &facets,
         entity: None,
         identity_expanded: false,
+        artifact: None,
     }));
 
     // Both sensor facets are shown as tabs.
@@ -467,6 +468,7 @@ fn test_host_detail_single_facet_has_no_strip() {
         facets: &facets,
         entity: None,
         identity_expanded: false,
+        artifact: None,
     }));
 
     // No "Facets" strip for a lone sensor; the detail still renders.
@@ -1690,18 +1692,18 @@ fn test_netring_specialized_view() {
         s.specialized_tab = zensight::view::specialized::SpecializedTab::Flows;
         s.netring_detail.loading();
         {
-            let mut ui = simulator(netring_sensor_view(&s));
+            let mut ui = simulator(netring_sensor_view(&s, None));
             assert!(ui.find("Fetching…").is_ok());
         }
 
         s.netring_detail.apply(Err("no sensor".into()));
-        let mut ui = simulator(netring_sensor_view(&s));
+        let mut ui = simulator(netring_sensor_view(&s, None));
         assert!(ui.find("Fetch failed: no sensor").is_ok());
     }
 
     // Overview (default): header + flow-volume + TCP health + tab strip.
     {
-        let mut ui = simulator(netring_sensor_view(&state));
+        let mut ui = simulator(netring_sensor_view(&state, None));
         assert!(ui.find("Netring: wiretap1").is_ok());
         assert!(ui.find("Flows").is_ok()); // tab label
         assert!(ui.find("TCP Health").is_ok());
@@ -1711,14 +1713,14 @@ fn test_netring_specialized_view() {
     // Bandwidth tab: per-app throughput.
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Bandwidth;
     {
-        let mut ui = simulator(netring_sensor_view(&state));
+        let mut ui = simulator(netring_sensor_view(&state, None));
         assert!(ui.find("https").is_ok());
     }
 
     // Flows tab: on-demand flow detail (fetch button + fetched row + orientation).
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Flows;
     {
-        let mut ui = simulator(netring_sensor_view(&state));
+        let mut ui = simulator(netring_sensor_view(&state, None));
         assert!(ui.find("Recent Flows (on demand)").is_ok());
         assert!(ui.find("Fetch Flows").is_ok());
         assert!(ui.find("10.0.0.1:54321").is_ok());
@@ -2583,7 +2585,7 @@ fn test_netring_tls_capture_sections() {
     // TLS is on the HTTP/TLS tab; Capture Health on the Capture tab (#247).
     state.specialized_tab = zensight::view::specialized::SpecializedTab::HttpTls;
     {
-        let mut ui = simulator(netring_sensor_view(&state));
+        let mut ui = simulator(netring_sensor_view(&state, None));
         assert!(ui.find("TLS").is_ok());
         assert!(ui.find("Fetch inventory").is_ok());
         assert!(ui.find("api.example.com").is_ok());
@@ -2593,7 +2595,7 @@ fn test_netring_tls_capture_sections() {
     }
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Capture;
     {
-        let mut ui = simulator(netring_sensor_view(&state));
+        let mut ui = simulator(netring_sensor_view(&state, None));
         assert!(ui.find("Capture Health").is_ok());
     }
 }
@@ -2612,7 +2614,7 @@ fn test_netring_encrypted_dns_panel() {
 
     // Before any encrypted-DNS metric, the panel is absent.
     {
-        let mut ui = simulator(netring_sensor_view(&state));
+        let mut ui = simulator(netring_sensor_view(&state, None));
         assert!(ui.find("Encrypted DNS").is_err());
     }
 
@@ -2623,7 +2625,7 @@ fn test_netring_encrypted_dns_panel() {
     ] {
         state.update(TelemetryPoint::new("wiretap1", Protocol::Netring, m, v));
     }
-    let mut ui = simulator(netring_sensor_view(&state));
+    let mut ui = simulator(netring_sensor_view(&state, None));
     assert!(ui.find("Encrypted DNS").is_ok());
     assert!(ui.find("DoH").is_ok());
     assert!(ui.find("unknown resolver").is_ok());
@@ -2662,7 +2664,7 @@ fn test_netring_quic_ssh_sections() {
 
     // QUIC/SSH inventories live on the HTTP/TLS tab (#247).
     state.specialized_tab = zensight::view::specialized::SpecializedTab::HttpTls;
-    let mut ui = simulator(netring_sensor_view(&state));
+    let mut ui = simulator(netring_sensor_view(&state, None));
     assert!(ui.find("QUIC (SNI / ALPN)").is_ok());
     assert!(ui.find("cloudflare-quic.com").is_ok());
     assert!(ui.find("SSH (HASSH)").is_ok());
@@ -2694,7 +2696,7 @@ fn test_netring_capture_overload_and_breakdown() {
     }
 
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Capture;
-    let mut ui = simulator(netring_sensor_view(&state));
+    let mut ui = simulator(netring_sensor_view(&state, None));
     assert!(ui.find("Capture Health").is_ok());
     assert!(ui.find("⚠ OVERLOAD — losing packets").is_ok());
     assert!(ui.find("xdp/rx_ring_full").is_ok());
@@ -2729,7 +2731,7 @@ fn test_netring_capture_backend_and_shedding() {
     }
 
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Capture;
-    let mut ui = simulator(netring_sensor_view(&state));
+    let mut ui = simulator(netring_sensor_view(&state, None));
     assert!(ui.find("Capture Health").is_ok());
     assert!(ui.find("backend: af_xdp").is_ok());
     assert!(ui.find("⚠ SHEDDING — data is sampled").is_ok());
@@ -2809,7 +2811,7 @@ fn test_netring_assets_section() {
     }]));
 
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Assets;
-    let mut ui = simulator(netring_sensor_view(&state));
+    let mut ui = simulator(netring_sensor_view(&state, None));
     assert!(ui.find("Assets (passive discovery)").is_ok());
     assert!(ui.find("switch01").is_ok());
     assert!(ui.find("cisco WS-C2960X").is_ok());
@@ -2836,7 +2838,7 @@ fn test_netring_tabs_capability_and_switch() {
     let mut state = DeviceDetailState::new(device_id);
     // No dns/ metrics → DNS tab hidden; always-on tabs present.
     {
-        let mut ui = simulator(netring_sensor_view(&state));
+        let mut ui = simulator(netring_sensor_view(&state, None));
         assert!(ui.find("Overview").is_ok());
         assert!(ui.find("Talkers & Matrix").is_ok());
         assert!(ui.find("HTTP/TLS").is_ok());
@@ -2850,11 +2852,11 @@ fn test_netring_tabs_capability_and_switch() {
         TelemetryValue::Counter(1),
     ));
     {
-        let mut ui = simulator(netring_sensor_view(&state));
+        let mut ui = simulator(netring_sensor_view(&state, None));
         assert!(ui.find("DNS").is_ok());
     }
     // Clicking a tab emits SelectSpecializedTab for this device.
-    let mut ui = simulator(netring_sensor_view(&state));
+    let mut ui = simulator(netring_sensor_view(&state, None));
     let _ = ui.click("Talkers & Matrix");
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(msgs.iter().any(|m| matches!(
@@ -2893,7 +2895,7 @@ fn test_netring_security_tab_and_strip() {
 
     // Overview: the anomaly strip is present and clicks through to Security.
     {
-        let mut ui = simulator(netring_sensor_view(&state));
+        let mut ui = simulator(netring_sensor_view(&state, None));
         assert!(ui.find("Security").is_ok()); // tab visible with a badge
         let _ = ui.click("⚠ 1 anomaly · highest critical · T1071");
         let msgs: Vec<Message> = ui.into_messages().collect();
@@ -2906,7 +2908,7 @@ fn test_netring_security_tab_and_strip() {
     // Security tab: rollup + deep-link + flow pivot.
     state.specialized_tab = SpecializedTab::Security;
     {
-        let mut ui = simulator(netring_sensor_view(&state));
+        let mut ui = simulator(netring_sensor_view(&state, None));
         assert!(ui.find("Anomalies (1)").is_ok());
         assert!(ui.find("RitaBeacon").is_ok());
         assert!(ui.find("periodic beaconing to 1.2.3.4").is_ok());
@@ -2914,7 +2916,7 @@ fn test_netring_security_tab_and_strip() {
     }
     // The per-anomaly flow pivot targets the offending src.
     {
-        let mut ui = simulator(netring_sensor_view(&state));
+        let mut ui = simulator(netring_sensor_view(&state, None));
         let _ = ui.click("flows →");
         let msgs: Vec<Message> = ui.into_messages().collect();
         assert!(msgs.iter().any(|m| matches!(
@@ -2944,7 +2946,7 @@ fn test_netring_overview_chip_and_talkers_tab() {
     }
     // Overview: capture-health chip present.
     {
-        let mut ui = simulator(netring_sensor_view(&state));
+        let mut ui = simulator(netring_sensor_view(&state, None));
         assert!(ui.find("capture: af_xdp · drop 0.00%").is_ok());
     }
 
@@ -2959,7 +2961,7 @@ fn test_netring_overview_chip_and_talkers_tab() {
         }]);
     state.specialized_tab = SpecializedTab::TalkersMatrix;
     {
-        let mut ui = simulator(netring_sensor_view(&state));
+        let mut ui = simulator(netring_sensor_view(&state, None));
         assert!(ui.find("10.0.0.42:443").is_ok());
         assert!(ui.find("showing 1 of 1 talkers").is_ok());
     }
@@ -3332,7 +3334,7 @@ fn test_systemd_specialized_view_tabs() {
         ));
     }
 
-    let view = specialized_view(&state).expect("systemd specialized view");
+    let view = specialized_view(&state, None).expect("systemd specialized view");
     let mut ui = simulator(view);
 
     // Tab strip + overview content.
@@ -3366,7 +3368,7 @@ fn test_systemd_units_tab_fetches_on_demand() {
     let mut state = DeviceDetailState::new(id);
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Units;
 
-    let view = specialized_view(&state).expect("systemd view");
+    let view = specialized_view(&state, None).expect("systemd view");
     let mut ui = simulator(view);
     // Idle fetch panel offers a Load button.
     let _ = ui.click("Load");
@@ -3406,7 +3408,7 @@ fn test_systemd_units_action_confirm_flow() {
     );
 
     // Step 1: the row offers start/stop/restart; clicking "start" arms it.
-    let mut ui = simulator(specialized_view(&state).expect("systemd view"));
+    let mut ui = simulator(specialized_view(&state, None).expect("systemd view"));
     assert!(ui.find("restart").is_ok());
     let _ = ui.click("start");
     let messages: Vec<Message> = ui.into_messages().collect();
@@ -3419,7 +3421,7 @@ fn test_systemd_units_action_confirm_flow() {
     // Step 2: with the action armed, the row swaps to confirm/cancel and
     // "confirm" emits the send.
     state.systemd_detail.pending_action = Some(("start".to_string(), "nginx.service".to_string()));
-    let mut ui = simulator(specialized_view(&state).expect("systemd view"));
+    let mut ui = simulator(specialized_view(&state, None).expect("systemd view"));
     assert!(ui.find("start?").is_ok());
     let _ = ui.click("confirm");
     let messages: Vec<Message> = ui.into_messages().collect();
@@ -3430,7 +3432,7 @@ fn test_systemd_units_action_confirm_flow() {
     );
 
     // Cancel path emits the disarm.
-    let mut ui = simulator(specialized_view(&state).expect("systemd view"));
+    let mut ui = simulator(specialized_view(&state, None).expect("systemd view"));
     let _ = ui.click("cancel");
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(
@@ -3638,6 +3640,7 @@ fn test_host_detail_resolution_group() {
         facets: &facets,
         entity: Some(&entity),
         identity_expanded: true,
+        artifact: None,
     }));
 
     assert!(ui.find("Resolution group").is_ok());
@@ -3695,6 +3698,7 @@ fn test_host_detail_entity_facet_tabs() {
         facets: &facets,
         entity: Some(&entity),
         identity_expanded: true,
+        artifact: None,
     }));
 
     assert!(ui.find("Facets").is_ok());
@@ -3735,6 +3739,7 @@ fn test_host_identity_collapsed_by_default() {
         facets: &facets,
         entity: Some(&entity),
         identity_expanded: false,
+        artifact: None,
     }));
 
     // Summary present, details hidden.
@@ -3782,6 +3787,7 @@ fn test_syslog_drilldown_single_back() {
         facets: &facets,
         entity: None,
         identity_expanded: false,
+        artifact: None,
     }));
     assert!(ui.find("Back").is_ok());
     let _ = ui.click("Back");
@@ -3809,6 +3815,123 @@ fn capture_kinds(max_duration_secs: u32, filter_allowed: bool) -> Vec<KindStatus
             snaplen_max: 0,
         },
     }]
+}
+
+/// #351 acceptance: the netring Capture tab hosts the real capture form when
+/// the sensor advertises the Capture kind — an operator starts a pcap without
+/// leaving the device view.
+#[test]
+fn netring_capture_tab_hosts_capture_form() {
+    use std::collections::HashMap;
+    use zensight::view::artifact_fetch::ArtifactCtx;
+    use zensight::view::specialized::SpecializedTab;
+    use zensight::view::specialized::netring::netring_sensor_view;
+    use zensight_common::ArtifactKind;
+
+    let device_id = DeviceId::new(Protocol::Netring, "host01");
+    let mut state = DeviceDetailState::new(device_id.clone());
+    state.specialized_tab = SpecializedTab::Capture;
+    // A capture/ metric so the tab is visible even without the advert path.
+    state.update(zensight_common::TelemetryPoint::new(
+        "host01",
+        Protocol::Netring,
+        "capture/eth0/packets_total",
+        zensight_common::TelemetryValue::Counter(10),
+    ));
+
+    let kinds_map: HashMap<String, Vec<KindStatus>> =
+        HashMap::from([("zensight/netring".to_string(), capture_kinds(300, true))]);
+    let forms: HashMap<String, CaptureForm> =
+        HashMap::from([("zensight/netring".to_string(), CaptureForm::default())]);
+    let ctx = ArtifactCtx {
+        fetch: &ArtifactFetch::Idle,
+        kinds: &kinds_map,
+        capture_forms: &forms,
+        active_prefix: None,
+        active_kind: None,
+    };
+
+    let mut ui = simulator(netring_sensor_view(&state, Some(ctx)));
+    assert!(ui.find("On-demand packet capture").is_ok());
+    let _ = ui.click("Start capture");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(messages.iter().any(|m| matches!(
+        m,
+        Message::StartArtifact { key_prefix, kind: ArtifactKind::Capture { .. } }
+            if key_prefix == "zensight/netring"
+    )));
+}
+
+/// #351: without a Capture advert the tab stays health-only with an honest
+/// caption (no dead form).
+#[test]
+fn netring_capture_tab_without_advert_is_health_only() {
+    use zensight::view::specialized::SpecializedTab;
+    use zensight::view::specialized::netring::netring_sensor_view;
+
+    let device_id = DeviceId::new(Protocol::Netring, "host01");
+    let mut state = DeviceDetailState::new(device_id);
+    state.specialized_tab = SpecializedTab::Capture;
+    state.update(zensight_common::TelemetryPoint::new(
+        "host01",
+        Protocol::Netring,
+        "capture/eth0/packets_total",
+        zensight_common::TelemetryValue::Counter(10),
+    ));
+
+    let mut ui = simulator(netring_sensor_view(&state, None));
+    assert!(ui.find("Capture Health").is_ok());
+    assert!(ui.find("Start capture").is_err());
+    assert!(
+        ui.find(
+            "Live capture health. This sensor does not advertise on-demand captures \
+             (enable `artifacts.capture` in its config)."
+        )
+        .is_ok()
+    );
+}
+
+/// #351: the netring Bandwidth tab pivots to the global monitor pre-scoped to
+/// this host, and the monitor's chip clears the scope.
+#[test]
+fn netring_bandwidth_pivot_and_chip_clear() {
+    use zensight::view::bandwidth::{BandwidthState, bandwidth_view};
+    use zensight::view::specialized::SpecializedTab;
+    use zensight::view::specialized::netring::netring_sensor_view;
+
+    let device_id = DeviceId::new(Protocol::Netring, "host01");
+    let mut state = DeviceDetailState::new(device_id);
+    state.specialized_tab = SpecializedTab::Bandwidth;
+    state.update(zensight_common::TelemetryPoint::new(
+        "host01",
+        Protocol::Netring,
+        "bandwidth/https/bytes_per_sec",
+        zensight_common::TelemetryValue::Gauge(1000.0),
+    ));
+
+    let mut ui = simulator(netring_sensor_view(&state, None));
+    let _ = ui.click("Open in Bandwidth monitor");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::OpenBandwidthForHost(h) if h == "host01"))
+    );
+
+    // The scoped monitor shows the chip; clearing dispatches the reset.
+    let bw = BandwidthState {
+        host_filter: Some("host01".to_string()),
+        ..BandwidthState::default()
+    };
+    let mut ui = simulator(bandwidth_view(&bw));
+    assert!(ui.find("Host: host01").is_ok());
+    let _ = ui.click("clear");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::ClearBandwidthHostFilter))
+    );
 }
 
 #[test]

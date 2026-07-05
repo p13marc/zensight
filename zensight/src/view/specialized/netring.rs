@@ -23,9 +23,14 @@ use crate::view::theme;
 use crate::view::tokens::{font, space};
 
 /// Render the netring sensor specialized view: a header + the tabbed container
-/// over the active tab's content (#247).
-pub fn netring_sensor_view(state: &DeviceDetailState) -> Element<'_, Message> {
-    let tabs = netring_tabs(state);
+/// over the active tab's content (#247). `artifact` threads the app's shared
+/// artifact state in so the Capture tab can host the on-demand capture form
+/// in-context (#351); `None` renders health-only.
+pub fn netring_sensor_view<'a>(
+    state: &'a DeviceDetailState,
+    artifact: Option<crate::view::artifact_fetch::ArtifactCtx<'a>>,
+) -> Element<'a, Message> {
+    let tabs = netring_tabs(state, capture_advertised(artifact));
     // Fall back to Overview if the remembered tab is currently hidden (e.g. the
     // DNS tab after the sensor stopped publishing `dns/`).
     let active = if tabs
@@ -37,7 +42,7 @@ pub fn netring_sensor_view(state: &DeviceDetailState) -> Element<'_, Message> {
         SpecializedTab::Overview
     };
     let device_id = state.device_id.clone();
-    let content = netring_tab_content(state, active);
+    let content = netring_tab_content(state, active, artifact);
     column![
         render_header(state),
         tabbed_view(&tabs, active, content, move |t| {
@@ -54,7 +59,10 @@ pub fn netring_sensor_view(state: &DeviceDetailState) -> Element<'_, Message> {
 /// The netring tab strip, capability-aware: tabs render only when the sensor
 /// publishes the data (or a fetch was attempted). Overview / Flows / Talkers &
 /// Matrix / HTTP-TLS / Bandwidth are always available (streamed or on-demand).
-fn netring_tabs(state: &DeviceDetailState) -> Vec<TabItem<SpecializedTab>> {
+fn netring_tabs(
+    state: &DeviceDetailState,
+    capture_advertised: bool,
+) -> Vec<TabItem<SpecializedTab>> {
     use SpecializedTab::*;
     vec![
         TabItem::new(Overview, "Overview"),
@@ -69,15 +77,19 @@ fn netring_tabs(state: &DeviceDetailState) -> Vec<TabItem<SpecializedTab>> {
         TabItem::new(Security, "Security")
             .visible(!state.netring_detail.anomalies.is_empty())
             .badge(state.netring_detail.anomalies.len()),
-        TabItem::new(Capture, "Capture health")
-            .visible(state.metrics.keys().any(|k| k.starts_with("capture/"))),
+        TabItem::new(Capture, "Capture")
+            .visible(state.metrics.keys().any(|k| k.starts_with("capture/")) || capture_advertised),
     ]
 }
 
 /// Build the scrollable content for a netring tab by composing the existing
 /// per-section cards. No data regression: every card in the old single-scroll
 /// view is reachable from exactly one tab.
-fn netring_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Element<'_, Message> {
+fn netring_tab_content<'a>(
+    state: &'a DeviceDetailState,
+    tab: SpecializedTab,
+    artifact: Option<crate::view::artifact_fetch::ArtifactCtx<'a>>,
+) -> Element<'a, Message> {
     use SpecializedTab::*;
     let inner: Column<'_, Message> = match tab {
         Overview => {
@@ -125,7 +137,7 @@ fn netring_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Elemen
         Bandwidth => column![card(render_bandwidth(state))].spacing(space::MD),
         Assets => column![card(render_assets(state))].spacing(space::MD),
         Capture => {
-            let mut c = column![card(render_capture(state))].spacing(space::MD);
+            let mut c = column![card(render_capture(state, artifact))].spacing(space::MD);
             if let Some(disk) = render_capture_to_disk(state) {
                 c = c.push(card(disk));
             }
@@ -573,7 +585,27 @@ fn join_or_dash(items: &[String]) -> String {
 /// honest drop breakdown (AF_PACKET freezes / AF_XDP ring + descriptor causes),
 /// and an "OVERLOAD" badge when a source is shedding ≥5% of packets — the trust
 /// signal that the sensor's *other* telemetry is currently incomplete.
-fn render_capture(state: &DeviceDetailState) -> Element<'_, Message> {
+/// The netring key prefix used for artifact lookups (matches `sensors.rs`'s
+/// `zensight/<sensor>` rule).
+fn netring_key_prefix() -> String {
+    format!("zensight/{}", zensight_common::Protocol::Netring.as_str())
+}
+
+/// Whether the app-side artifact state says this sensor advertises on-demand
+/// capture (#351) — gates both the Capture tab and the in-context form.
+fn capture_advertised(artifact: Option<crate::view::artifact_fetch::ArtifactCtx<'_>>) -> bool {
+    let Some(ctx) = artifact else { return false };
+    ctx.kinds.get(&netring_key_prefix()).is_some_and(|kinds| {
+        kinds
+            .iter()
+            .any(|k| matches!(k.advert, zensight_common::KindAdvert::Capture { .. }))
+    })
+}
+
+fn render_capture<'a>(
+    state: &'a DeviceDetailState,
+    artifact: Option<crate::view::artifact_fetch::ArtifactCtx<'a>>,
+) -> Element<'a, Message> {
     // Group capture/<src>/<stat>; `stat` may itself be `xdp/<cause>`.
     let mut sources: std::collections::BTreeMap<
         String,
@@ -632,14 +664,44 @@ fn render_capture(state: &DeviceDetailState) -> Element<'_, Message> {
 
     let mut col = column![section_header("Capture Health", badge)].spacing(space::SM);
 
-    // This tab shows live capture *health* (backend, shedding, drops). To
-    // request an on-demand pcap capture, use the sensor's artifact card on the
-    // Sensors page (#333).
-    col = col.push(
-        text("Live capture health. Request an on-demand pcap from the sensor card on the Sensors page.")
-            .size(font::CAPTION)
-            .style(dim),
-    );
+    // In-context on-demand capture (#351): render the shared capture form
+    // right here when the sensor advertises the Capture kind — same state as
+    // the Sensors-page card (mirror, not move), so edits track across both.
+    // `artifact_section` with the kinds filtered to Capture also carries the
+    // in-flight job controls (pause/resume/cancel) and the finished status.
+    let prefix = netring_key_prefix();
+    let capture_kinds: Vec<zensight_common::KindStatus> = artifact
+        .and_then(|ctx| ctx.kinds.get(&prefix))
+        .map(|kinds| {
+            kinds
+                .iter()
+                .filter(|k| matches!(k.advert, zensight_common::KindAdvert::Capture { .. }))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    match artifact {
+        Some(ctx) if !capture_kinds.is_empty() => {
+            col = col.push(crate::view::artifact_fetch::artifact_section(
+                ctx.fetch,
+                &prefix,
+                &capture_kinds,
+                ctx.active_prefix,
+                ctx.active_kind,
+                ctx.capture_forms.get(&prefix),
+            ));
+        }
+        _ => {
+            col = col.push(
+                text(
+                    "Live capture health. This sensor does not advertise on-demand captures \
+                      (enable `artifacts.capture` in its config).",
+                )
+                .size(font::CAPTION)
+                .style(dim),
+            );
+        }
+    }
 
     // Resolved-backend badge — what's actually live (AF_PACKET / AF_XDP / replay).
     if let Some(b) = &backend {
@@ -1725,7 +1787,17 @@ fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
         .collect();
     rows.sort_by(|a, b| b.1.total_cmp(&a.1));
 
-    let title = section_header(format!("Per-app bandwidth ({})", rows.len()), None);
+    // Contextual pivot (#351): the richer process/service live monitor is a
+    // global view — surface it from here, pre-scoped to this host.
+    let monitor_btn = button(text("Open in Bandwidth monitor").size(font::CAPTION))
+        .padding([2, 8])
+        .on_press(Message::OpenBandwidthForHost(
+            state.device_id.source.clone(),
+        ));
+    let title = section_header(
+        format!("Per-app bandwidth ({})", rows.len()),
+        Some(monitor_btn.into()),
+    );
     if rows.is_empty() {
         return column![title, empty_state("No bandwidth data", None)]
             .spacing(space::SM)
