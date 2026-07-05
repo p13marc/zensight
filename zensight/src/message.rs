@@ -401,6 +401,23 @@ pub enum Message {
     },
     /// A flow-pivot reply for anomaly `key`: the filtered flows, or an error.
     AnomalyFlowsReceived(String, Result<Vec<zensight_common::FlowRecord>, String>),
+    /// Flow ↔ process display join (#309): fetch the endpoint hosts' sockets
+    /// (`@/query/sockets?ip=`, all replies) and match the flow's 5-tuple to its
+    /// owning process. `key` identifies the flow row the result renders under.
+    FetchFlowAttribution {
+        target: AttributionTarget,
+        key: String,
+        src: String,
+        dst: String,
+    },
+    /// The flow↔process join outcome for flow `key` (#309): the matched owning
+    /// process, `Ok(None)` when no socket matched (unattributed), or `Err` when
+    /// no netlink sensor replied at all.
+    FlowAttributionReceived {
+        target: AttributionTarget,
+        key: String,
+        result: Result<Option<crate::view::specialized::attribution::AttributedProcess>, String>,
+    },
     /// The capture-to-disk index fetched for the Security drill-down (#327), so
     /// an expanded anomaly can offer its matching triggered capture.
     AnomalyCapturesReceived(Result<Vec<zensight_common::CaptureRecord>, String>),
@@ -910,6 +927,14 @@ pub struct SyslogFilterStatus {
     pub messages_received: u64,
     pub messages_passed: u64,
     pub messages_filtered: u64,
+}
+
+/// Which surface a flow↔process attribution result renders on (#309): the
+/// netring device Flows tab, or the Security anomaly pivot-flows table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttributionTarget {
+    Device,
+    Security,
 }
 
 /// Unique identifier for a device (protocol + source name).

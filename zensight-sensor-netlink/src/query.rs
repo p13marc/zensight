@@ -943,6 +943,7 @@ mod tests {
         let sel = SocketSelector {
             state: None,
             port: Some(port),
+            ip: None,
         };
         let expr = FilterExpr::parse(&selector_filter_string(&sel).unwrap()).unwrap();
         let filter = SocketFilter::tcp()
@@ -976,6 +977,7 @@ mod tests {
         let mk = |state: Option<&str>, port: Option<u16>| SocketSelector {
             state: state.map(|s| s.to_string()),
             port,
+            ip: None,
         };
         // Nothing selected → no kernel filter.
         assert!(selector_filter_string(&mk(None, None)).is_none());
