@@ -14,6 +14,10 @@ pub struct SyslogSensorConfig {
     /// Zenoh connection settings.
     pub zenoh: ZenohConfig,
 
+    /// Serialization format for telemetry.
+    #[serde(default)]
+    pub serialization: zensight_common::serialization::Format,
+
     /// Syslog-specific settings.
     pub syslog: SyslogConfig,
 

@@ -12,7 +12,7 @@
   },
 
   // Wire serialization for the entity docs this service publishes: "json" or "cbor".
-  serialization: "json",
+  serialization: "cbor",
 
   // How long (seconds) a HostEvidence claim is trusted after its last refresh.
   // Claims older than this are ignored by the merge rules and age out of the

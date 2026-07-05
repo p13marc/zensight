@@ -13,6 +13,10 @@ pub struct NetFlowSensorConfig {
     /// Zenoh connection settings.
     pub zenoh: ZenohConfig,
 
+    /// Serialization format for telemetry.
+    #[serde(default)]
+    pub serialization: zensight_common::serialization::Format,
+
     /// NetFlow-specific settings.
     pub netflow: NetFlowConfig,
 

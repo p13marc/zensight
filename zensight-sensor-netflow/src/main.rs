@@ -8,7 +8,7 @@ mod receiver;
 
 use anyhow::Result;
 use config::NetFlowSensorConfig;
-use zensight_common::serialization::{Format, encode};
+use zensight_common::serialization::encode;
 use zensight_sensor_core::{SensorArgs, SensorConfig, SensorRunner};
 
 #[tokio::main]
@@ -55,8 +55,8 @@ async fn main() -> Result<()> {
     let session = runner.session().clone();
     let netflow_config = runner.config().netflow.clone();
 
-    // Serialization format (default to JSON)
-    let format = Format::Json;
+    // Serialization format (from config; default CBOR)
+    let format = runner.config().serialization;
 
     // Start NetFlow listeners
     let mut rx = receiver::start_listeners(&netflow_config)

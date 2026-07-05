@@ -21,7 +21,7 @@
   },
 
   // Serialization format for telemetry
-  serialization: "json",               // "json" or "cbor"
+  serialization: "cbor",               // "json" or "cbor"
 
   // SNMP sensor settings
   snmp: {

@@ -7,10 +7,13 @@ use crate::error::{Error, Result};
 #[serde(rename_all = "lowercase")]
 pub enum Format {
     /// JSON format (human-readable, good for debugging).
-    #[default]
     Json,
 
     /// CBOR format (compact binary, better for high-volume telemetry).
+    /// Default: the wire is bytes-sensitive on low-bandwidth links, and every
+    /// consumer decodes via `decode_auto` (format-sniffing), so JSON senders stay
+    /// interoperable during rollout.
+    #[default]
     Cbor,
 }
 
@@ -113,7 +116,19 @@ mod tests {
         let json = encode(&point, Format::Json).unwrap();
         let cbor = encode(&point, Format::Cbor).unwrap();
 
-        assert!(cbor.len() < json.len(), "CBOR should be smaller than JSON");
+        // CBOR should be meaningfully smaller, not just `<` by a byte — pin a ratio
+        // floor so a regression that bloats CBOR can't slip through.
+        assert!(
+            (cbor.len() as f64) < 0.8 * (json.len() as f64),
+            "CBOR ({} B) should be <80% of JSON ({} B)",
+            cbor.len(),
+            json.len()
+        );
+    }
+
+    #[test]
+    fn test_default_format_is_cbor() {
+        assert_eq!(Format::default(), Format::Cbor);
     }
 
     #[test]

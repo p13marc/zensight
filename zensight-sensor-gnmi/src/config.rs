@@ -163,8 +163,9 @@ pub enum GnmiEncoding {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SerializationFormat {
-    #[default]
     Json,
+    /// Default: compact binary; every consumer decodes via `decode_auto`.
+    #[default]
     Cbor,
 }
 

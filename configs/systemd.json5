@@ -3,7 +3,7 @@
   zenoh: {
     mode: "peer",                    // "client", "peer", or "router"
     // connect: ["tcp/localhost:7447"], // Router endpoints (if client mode)
-    serialization: "json",           // "json" or "cbor"
+    serialization: "cbor",           // "json" or "cbor"
   },
 
   // On-demand artifact channel (@/artifact) — opt-in per kind. When enabled,
