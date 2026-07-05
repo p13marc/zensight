@@ -577,34 +577,23 @@ pub fn flow_volume_points(
     ]
 }
 
-/// Nearest-rank percentile of a sample set (sorts in place). 0 if empty.
-pub fn percentile(values: &mut [u64], p: u8) -> u64 {
-    if values.is_empty() {
-        return 0;
-    }
-    values.sort_unstable();
-    let rank = ((p as usize * values.len()).div_ceil(100)).max(1);
-    values[rank - 1]
-}
-
 /// Flow-duration percentile points (RED: duration) over the durations of flows
-/// ended in the current window. `durations_ms` is consumed (sorted) in place.
+/// ended in the current window. `pcts` is `[p50, p95, p99]` (ms) read from the
+/// bounded DDSketch (#325), or `None` when no flows ended this window.
 ///
-/// Returns an empty vec when no flows ended this window — we deliberately do NOT
-/// publish zeros, so the cached gauge keeps its last meaningful value instead of
-/// being clobbered to 0 every idle tick.
-pub fn flow_latency_points(sensor_id: &str, durations_ms: &mut [u64]) -> Vec<TelemetryPoint> {
-    if durations_ms.is_empty() {
+/// Returns an empty vec on `None` — we deliberately do NOT publish zeros, so the
+/// cached gauge keeps its last meaningful value instead of being clobbered to 0
+/// every idle tick.
+pub fn flow_latency_points(sensor_id: &str, pcts: Option<[f64; 3]>) -> Vec<TelemetryPoint> {
+    let Some([p50, p95, _p99]) = pcts else {
         return Vec::new();
-    }
-    let p50 = percentile(durations_ms, 50);
-    let p95 = percentile(durations_ms, 95);
-    let g = |metric: &str, v: u64| {
+    };
+    let g = |metric: &str, v: f64| {
         TelemetryPoint::new(
             sensor_id,
             Protocol::Netring,
             metric,
-            TelemetryValue::Gauge(v as f64),
+            TelemetryValue::Gauge(v),
         )
     };
     vec![
@@ -1217,7 +1206,7 @@ pub fn dns_points(
     queries_total: u64,
     by_rcode: &[(DnsRcodeClass, u64)],
     unanswered_total: u64,
-    rtt_ms: &mut [u64],
+    rtt_pcts: Option<[f64; 3]>,
 ) -> Vec<TelemetryPoint> {
     let c = |metric: String, v: u64| {
         TelemetryPoint::new(
@@ -1245,10 +1234,10 @@ pub fn dns_points(
             *count,
         ));
     }
-    if !rtt_ms.is_empty() {
-        pts.push(g("dns/query_rtt_p50_ms", percentile(rtt_ms, 50) as f64));
-        pts.push(g("dns/query_rtt_p95_ms", percentile(rtt_ms, 95) as f64));
-        pts.push(g("dns/query_rtt_p99_ms", percentile(rtt_ms, 99) as f64));
+    if let Some([p50, p95, p99]) = rtt_pcts {
+        pts.push(g("dns/query_rtt_p50_ms", p50));
+        pts.push(g("dns/query_rtt_p95_ms", p95));
+        pts.push(g("dns/query_rtt_p99_ms", p99));
     }
     pts
 }
@@ -1305,7 +1294,7 @@ pub fn http_points(
     status_4xx: u64,
     status_5xx: u64,
     by_method: &[(String, u64)],
-    latency_ms: &mut [u64],
+    latency_pcts: Option<[f64; 3]>,
 ) -> Vec<TelemetryPoint> {
     let c = |metric: String, v: u64| {
         TelemetryPoint::new(
@@ -1333,9 +1322,10 @@ pub fn http_points(
     for (method, count) in by_method {
         pts.push(c(format!("http/methods/{method}_total"), *count));
     }
-    if !latency_ms.is_empty() {
-        pts.push(g("http/latency_p50_ms", percentile(latency_ms, 50) as f64));
-        pts.push(g("http/latency_p95_ms", percentile(latency_ms, 95) as f64));
+    // p99 (index 2) is computed but HTTP surfaces only p50/p95 today.
+    if let Some([p50, p95, _p99]) = latency_pcts {
+        pts.push(g("http/latency_p50_ms", p50));
+        pts.push(g("http/latency_p95_ms", p95));
     }
     pts
 }
@@ -1661,25 +1651,16 @@ mod tests {
     }
 
     #[test]
-    fn percentile_nearest_rank() {
-        assert_eq!(percentile(&mut [], 50), 0);
-        assert_eq!(percentile(&mut [42], 95), 42);
-        let mut v: Vec<u64> = (1..=10).collect();
-        assert_eq!(percentile(&mut v, 50), 5);
-        assert_eq!(percentile(&mut v, 95), 10);
-    }
-
-    #[test]
     fn flow_latency_points_shape() {
-        // durations 10..=100ms: p50 -> 50, p95 -> 100 (nearest-rank).
-        let mut d: Vec<u64> = (1..=10).map(|n| n * 10).collect();
-        let pts = flow_latency_points("s", &mut d);
+        // p50/p95 are surfaced (p99 read but not published for flow duration).
+        let pts = flow_latency_points("s", Some([50.0, 100.0, 120.0]));
+        assert_eq!(pts.len(), 2);
         assert_eq!(pts[0].metric, "flow/duration_p50_ms");
         assert_eq!(pts[0].value, TelemetryValue::Gauge(50.0));
         assert_eq!(pts[1].metric, "flow/duration_p95_ms");
         assert_eq!(pts[1].value, TelemetryValue::Gauge(100.0));
         // Empty window → no points (don't clobber the cached gauge to 0).
-        assert!(flow_latency_points("s", &mut []).is_empty());
+        assert!(flow_latency_points("s", None).is_empty());
     }
 
     #[test]
@@ -2162,8 +2143,7 @@ mod tests {
             (DnsRcodeClass::NxDomain, 8),
             (DnsRcodeClass::ServFail, 1),
         ];
-        let mut rtt = vec![10u64, 20, 30, 40, 50, 60, 70, 80, 90, 100];
-        let pts = dns_points("s", 120, &by_rcode, 4, &mut rtt);
+        let pts = dns_points("s", 120, &by_rcode, 4, Some([50.0, 95.0, 100.0]));
         let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
         assert_eq!(
             find("dns/queries_total").value,
@@ -2193,7 +2173,7 @@ mod tests {
 
     #[test]
     fn dns_points_empty_rtt_no_latency_gauges() {
-        let pts = dns_points("s", 5, &[], 0, &mut []);
+        let pts = dns_points("s", 5, &[], 0, None);
         assert!(pts.iter().all(|p| !p.metric.contains("rtt")));
     }
 
@@ -2235,8 +2215,7 @@ mod tests {
     #[test]
     fn http_points_red() {
         let by_method = vec![("get".to_string(), 90), ("post".to_string(), 10)];
-        let mut lat = vec![5u64, 15, 25, 35, 45, 55, 65, 75, 85, 95];
-        let pts = http_points("s", 100, 80, 5, 12, 3, &by_method, &mut lat);
+        let pts = http_points("s", 100, 80, 5, 12, 3, &by_method, Some([45.0, 95.0, 99.0]));
         let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
         assert_eq!(
             find("http/requests_total").value,
@@ -2262,7 +2241,7 @@ mod tests {
 
     #[test]
     fn http_points_empty_latency_no_gauges() {
-        let pts = http_points("s", 1, 1, 0, 0, 0, &[], &mut []);
+        let pts = http_points("s", 1, 1, 0, 0, 0, &[], None);
         assert!(pts.iter().all(|p| !p.metric.contains("latency")));
     }
 

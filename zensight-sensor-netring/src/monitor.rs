@@ -61,6 +61,7 @@ use flowscope::EndReason;
 // into N one-flow series (the systematic under-detection the FiveTupleKey keying
 // caused). The emitted anomaly is still labelled with the triggering flow's full
 // 5-tuple (see the `*Hit` wrappers) so `src:port`/`proto`/Community-ID survive.
+use flowscope::correlate::DdSketch;
 use flowscope::detect::patterns::{
     BeaconDetector, BeaconScore, DgaScore, DgaScorer, PortScanDetector, RitaBeaconDetector,
     RitaBeaconScore, ScanScore, ScanVerdict,
@@ -126,6 +127,44 @@ const JA4H_INVENTORY_CAP: usize = 4096;
 /// on the served `@/query/assets` map (issue #70).
 const ASSET_INVENTORY_CAP: usize = 8192;
 
+/// A bounded DDSketch for RED latency / duration percentiles (#325): O(1)
+/// insert, ~512 log-spaced bins at 1% relative error. Replaces the per-window
+/// `Mutex<Vec<u64>>` sample buffers a burst could grow toward 1M entries (and
+/// which were sorted from scratch each tick). Newtype so it keeps a `Default`
+/// (`DdSketch::new` needs α + `max_bins`), letting the RED state structs stay
+/// `#[derive(Default)]`.
+pub struct RedSketch(DdSketch);
+
+impl Default for RedSketch {
+    fn default() -> Self {
+        // α = 1% relative-error quantiles; 512 bins caps memory regardless of rate.
+        Self(DdSketch::new(0.01, 512))
+    }
+}
+
+impl RedSketch {
+    /// Record one latency/duration sample (ms).
+    pub fn record(&mut self, ms: u64) {
+        self.0.insert(ms as f64);
+    }
+
+    /// Read `[p50, p95, p99]` (ms) for the current window and reset it. `None`
+    /// when the window is empty, so idle ticks never clobber the cached gauge to
+    /// zero (same discipline the drained `Vec` had).
+    pub fn drain_pcts(&mut self) -> Option<[f64; 3]> {
+        if self.0.is_empty() {
+            return None;
+        }
+        let p = [
+            self.0.quantile(0.50).unwrap_or(0.0),
+            self.0.quantile(0.95).unwrap_or(0.0),
+            self.0.quantile(0.99).unwrap_or(0.0),
+        ];
+        self.0.clear();
+        Some(p)
+    }
+}
+
 /// DNS RED accumulators shared across the capture path and the drain.
 #[derive(Default)]
 pub struct DnsState {
@@ -136,8 +175,8 @@ pub struct DnsState {
     pub servfail: AtomicU64,
     pub refused: AtomicU64,
     pub rcode_other: AtomicU64,
-    /// Windowed query-RTT samples (ms), drained each tick for percentiles.
-    pub rtt_ms: Mutex<Vec<u64>>,
+    /// Bounded query-RTT DDSketch (ms) for p50/p95/p99, reset each tick (#325).
+    pub rtt_ms: Mutex<RedSketch>,
     /// Per-SLD inventory for the on-demand top-domains channel.
     pub inventory: DnsInventory,
 }
@@ -166,8 +205,8 @@ pub struct HttpState {
     pub status_5xx: AtomicU64,
     /// Per-method counts (small closed set), `method -> count`.
     pub methods: Mutex<HashMap<String, u64>>,
-    /// Windowed request→response latency samples (ms).
-    pub latency_ms: Mutex<Vec<u64>>,
+    /// Bounded request→response latency DDSketch (ms), reset each tick (#325).
+    pub latency_ms: Mutex<RedSketch>,
     /// Per-host inventory for the on-demand top-hosts channel.
     pub inventory: HttpInventory,
 }
@@ -211,8 +250,8 @@ pub struct MonitorChannels {
     pub flow_bytes: Arc<AtomicU64>,
     pub flow_packets: Arc<AtomicU64>,
     pub flow_retransmits: Arc<AtomicU64>,
-    /// Per-flow durations (ms) of flows ended since the last aggregate tick.
-    pub flow_durations_ms: Arc<Mutex<Vec<u64>>>,
+    /// Bounded per-flow-duration DDSketch (ms) of flows ended since the last tick (#325).
+    pub flow_durations_ms: Arc<Mutex<RedSketch>>,
     /// Bounded ring of recent ended-flow detail records for `@/query/flows`.
     pub flow_records: FlowRing,
     /// TCP RST counters: total resets and the subset that are connection refusals.
@@ -727,7 +766,7 @@ pub fn build(
     let flow_bytes = Arc::new(AtomicU64::new(0));
     let flow_packets = Arc::new(AtomicU64::new(0));
     let flow_retransmits = Arc::new(AtomicU64::new(0));
-    let flow_durations_ms = Arc::new(Mutex::new(Vec::<u64>::new()));
+    let flow_durations_ms = Arc::new(Mutex::new(RedSketch::default()));
     let flow_records: FlowRing = Arc::new(Mutex::new(VecDeque::with_capacity(FLOW_RING_CAP)));
     #[cfg(feature = "ipfix")]
     let ipfix_records: IpfixRing = Arc::new(Mutex::new(VecDeque::with_capacity(FLOW_RING_CAP)));
@@ -1202,9 +1241,8 @@ pub fn build(
                     };
                     if let Some(rtt) = r.elapsed
                         && let Ok(mut v) = dns_h.rtt_ms.lock()
-                        && v.len() < 100_000
                     {
-                        v.push(rtt.as_millis() as u64);
+                        v.record(rtt.as_millis() as u64);
                     }
                     // NXDOMAIN tally per SLD for the on-demand top-NXDOMAIN view.
                     if matches!(r.rcode, DnsRcode::NXDomain)
@@ -1341,10 +1379,8 @@ pub fn build(
                         && let Some((start, host)) = p.remove(&k)
                     {
                         let lat = now_ms.saturating_sub(start);
-                        if let Ok(mut v) = http_h.latency_ms.lock()
-                            && v.len() < 100_000
-                        {
-                            v.push(lat);
+                        if let Ok(mut v) = http_h.latency_ms.lock() {
+                            v.record(lat);
                         }
                         // Attribute a 4xx/5xx to the request's Host (top-hosts).
                         if is_err
@@ -2266,7 +2302,7 @@ fn on_flow_ended(
     bytes: &AtomicU64,
     packets: &AtomicU64,
     retransmits: &AtomicU64,
-    durations: &Mutex<Vec<u64>>,
+    durations: &Mutex<RedSketch>,
     records: &FlowRing,
     l4: &L4State,
     talkers: &TalkerHist,
@@ -2292,10 +2328,8 @@ fn on_flow_ended(
         _ => l4.closed_idle.fetch_add(1, Ordering::Relaxed),
     };
 
-    if let Ok(mut d) = durations.lock()
-        && d.len() < 1_000_000
-    {
-        d.push(duration_ms);
+    if let Ok(mut d) = durations.lock() {
+        d.record(duration_ms);
     }
 
     let proto = e.l4.map(|p| p.canonical_name()).unwrap_or("tcp");
@@ -2668,6 +2702,27 @@ mod tests {
         );
         assert!(set.contains_domain("sub.malware.test").is_some());
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// #325: the bounded RED sketch tracks percentiles within DDSketch's 1%
+    /// relative error no matter how many samples a burst pushes (the old
+    /// `Vec<u64>` grew one entry per sample and sorted from scratch each tick),
+    /// and `drain_pcts` resets the window so idle ticks report `None`.
+    #[test]
+    fn red_sketch_is_bounded_and_resets() {
+        let mut s = RedSketch::default();
+        // A burst far larger than the old 1M soft-cap — memory stays at ~512 bins.
+        for v in 1..=2_000_000u64 {
+            s.record(v);
+        }
+        let [p50, p95, p99] = s.drain_pcts().expect("non-empty window");
+        // Uniform 1..=2e6 → p50≈1e6, p95≈1.9e6, p99≈1.98e6, each within 1%.
+        let near = |got: f64, want: f64| (got - want).abs() <= want * 0.01;
+        assert!(near(p50, 1_000_000.0), "p50 {p50}");
+        assert!(near(p95, 1_900_000.0), "p95 {p95}");
+        assert!(near(p99, 1_980_000.0), "p99 {p99}");
+        // Draining reset the window: an idle tick yields no points.
+        assert!(s.drain_pcts().is_none(), "window must reset after drain");
     }
 
     /// #324 regression proof: a beacon that rotates its source port each
