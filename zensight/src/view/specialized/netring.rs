@@ -161,6 +161,12 @@ fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
             cell(&get("tls/distinct_fingerprints"), 100)
         ]
         .spacing(8),
+        // Post-quantum readiness (#326): share of handshakes offering a PQ hybrid.
+        row![
+            cell("PQ readiness (ratio)", 180),
+            cell(&get("tls/pq_ratio"), 100)
+        ]
+        .spacing(8),
     ]
     .spacing(space::SM);
 
@@ -194,6 +200,20 @@ fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
                         .size(font::CAPTION)
                         .into()
                 }),
+                // App protocol classified from ALPN + SNI + port (#326).
+                TableColumn::fixed("app", 70.0, |r: &TlsRecord| {
+                    text(r.app_protocol.clone().unwrap_or_else(|| "-".into()))
+                        .size(font::CAPTION)
+                        .into()
+                }),
+                // Post-quantum key-share offered (#326) — the per-fingerprint
+                // PQ-readiness flag behind the aggregate `tls/pq_ratio`.
+                TableColumn::fixed("pq", 50.0, |r: &TlsRecord| {
+                    text(if r.pq_key_share { "PQ" } else { "-" })
+                        .size(font::CAPTION)
+                        .into()
+                })
+                .sortable(|r: &TlsRecord| SortKey::Num(r.pq_key_share as u8 as f64)),
                 TableColumn::fixed("count", 60.0, |r: &TlsRecord| {
                     text(r.count.to_string()).size(font::CAPTION).into()
                 })
@@ -837,6 +857,27 @@ fn render_dns(state: &DeviceDetailState) -> Element<'_, Message> {
     .spacing(space::SM);
 
     let mut col = column![section_header("DNS (RED)", None), tiles].spacing(space::SM);
+
+    // Encrypted-DNS visibility (#326): DoT/DoQ/DoH session split + the un-known
+    // resolver subset (the policy-bypass / tunneling signal). Only shown once the
+    // sensor has classified an encrypted-DNS session, so the panel stays hidden
+    // when `collect.encrypted_dns` is off.
+    if state
+        .metrics
+        .keys()
+        .any(|m| m.starts_with("dns/encrypted/"))
+    {
+        let enc_tiles = row![
+            metric_tile("DoT", get("dns/encrypted/dot")),
+            metric_tile("DoQ", get("dns/encrypted/doq")),
+            metric_tile("DoH", get("dns/encrypted/doh")),
+            metric_tile("unknown resolver", get("dns/encrypted/unknown_resolver")),
+        ]
+        .spacing(space::SM);
+        col = col
+            .push(section_header("Encrypted DNS", None))
+            .push(enc_tiles);
+    }
 
     // Response-code breakdown (`dns/responses_by_rcode/<rcode>_total`) as a
     // ranked bar chart instead of a text list.

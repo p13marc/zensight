@@ -287,6 +287,7 @@ pub fn attack_technique(kind: &str) -> Option<&'static str> {
         "DataExfiltration" => "T1048",    // Exfiltration Over Alternative Protocol
         "cleartext_snmp" | "cleartext-snmp" => "T1040", // Network Sniffing
         "cleartext_http_credentials" => "T1040", // Network Sniffing
+        "encrypted_dns_bypass" => "T1572", // Protocol Tunneling (DoH/DoT/DoQ bypass)
         "ioc_match" => "T1071",           // C2 over app-layer protocol
         _ => return None,
     };
@@ -903,6 +904,94 @@ pub fn snmp_cleartext_alert(
     alert
 }
 
+/// The `encrypted_dns_bypass` anomaly alert (#326): an encrypted-DNS (DoT/DoQ/DoH)
+/// session went to a resolver that isn't sanctioned by policy — the classic
+/// signal for DNS-based C2 / exfil tunneling past a network resolver. Tagged with
+/// ATT&CK **T1572** (Protocol Tunneling). Bucketed by `(rule, transport, sni)` so
+/// repeated sessions to the same rogue resolver collapse to one alert.
+pub fn encrypted_dns_bypass_alert(sensor_id: &str, transport: &str, sni: Option<&str>) -> Alert {
+    let summary = match sni {
+        Some(s) => format!("encrypted DNS ({transport}) to unsanctioned resolver {s}"),
+        None => format!("encrypted DNS ({transport}) to an unsanctioned resolver"),
+    };
+    let mut alert = Alert::new(
+        sensor_id,
+        Protocol::Netring,
+        AlertKind::Anomaly,
+        "encrypted_dns_bypass",
+        AlertSeverity::Warning,
+        summary,
+    )
+    .with_label("transport", transport)
+    .with_label("technique", "T1572");
+    if let Some(s) = sni {
+        alert = alert.with_label("sni", s);
+    }
+    alert
+}
+
+/// Encrypted-DNS aggregates (#326): per-transport session counters, the
+/// un-known-resolver subset (the policy-bypass signal), and the distinct
+/// destination count. Low-cardinality — safe to stream; per-destination detail is
+/// pulled on demand from `@/query/encrypted_dns`.
+pub fn encrypted_dns_points(
+    sensor_id: &str,
+    dot: u64,
+    doq: u64,
+    doh: u64,
+    unknown_resolver: u64,
+    distinct: u64,
+) -> Vec<TelemetryPoint> {
+    vec![
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            "dns/encrypted/dot",
+            TelemetryValue::Counter(dot),
+        ),
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            "dns/encrypted/doq",
+            TelemetryValue::Counter(doq),
+        ),
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            "dns/encrypted/doh",
+            TelemetryValue::Counter(doh),
+        ),
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            "dns/encrypted/unknown_resolver",
+            TelemetryValue::Counter(unknown_resolver),
+        ),
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            "dns/encrypted/distinct",
+            TelemetryValue::Gauge(distinct as f64),
+        ),
+    ]
+}
+
+/// TLS post-quantum readiness gauge (#326): the share of fingerprinted handshakes
+/// that offered a PQ (hybrid) key-share group. `0.0` when no handshakes yet.
+pub fn tls_pq_ratio_point(sensor_id: &str, pq: u64, total: u64) -> TelemetryPoint {
+    let ratio = if total > 0 {
+        pq as f64 / total as f64
+    } else {
+        0.0
+    };
+    TelemetryPoint::new(
+        sensor_id,
+        Protocol::Netring,
+        "tls/pq_ratio",
+        TelemetryValue::Gauge(ratio),
+    )
+}
+
 /// Passive asset-inventory aggregate: number of distinct assets (MACs) the
 /// inventory currently holds. Low-cardinality count safe to stream; the
 /// per-asset detail is pulled on demand from `@/query/assets` (principle P2).
@@ -1390,6 +1479,42 @@ pub fn elephant_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tls_pq_ratio_math() {
+        // 3 of 4 handshakes PQ → 0.75; the empty case is a clean 0.0, not NaN.
+        let p = tls_pq_ratio_point("s", 3, 4);
+        assert_eq!(p.metric, "tls/pq_ratio");
+        assert!(matches!(p.value, TelemetryValue::Gauge(g) if (g - 0.75).abs() < 1e-9));
+        let z = tls_pq_ratio_point("s", 0, 0);
+        assert!(matches!(z.value, TelemetryValue::Gauge(g) if g == 0.0));
+    }
+
+    #[test]
+    fn encrypted_dns_points_shape() {
+        let pts = encrypted_dns_points("s", 1, 2, 3, 4, 5);
+        let names: Vec<&str> = pts.iter().map(|p| p.metric.as_str()).collect();
+        assert!(names.contains(&"dns/encrypted/dot"));
+        assert!(names.contains(&"dns/encrypted/doq"));
+        assert!(names.contains(&"dns/encrypted/doh"));
+        assert!(names.contains(&"dns/encrypted/unknown_resolver"));
+        assert!(names.contains(&"dns/encrypted/distinct"));
+    }
+
+    #[test]
+    fn encrypted_dns_bypass_alert_is_tagged() {
+        // The bypass alert carries the transport, the SNI, and the ATT&CK tag —
+        // and the technique table maps the slug to Protocol Tunneling.
+        let a = encrypted_dns_bypass_alert("s", "doh", Some("dns.evil.example"));
+        assert_eq!(a.rule, "encrypted_dns_bypass");
+        assert_eq!(a.labels.get("transport").map(String::as_str), Some("doh"));
+        assert_eq!(
+            a.labels.get("sni").map(String::as_str),
+            Some("dns.evil.example")
+        );
+        assert_eq!(a.labels.get("technique").map(String::as_str), Some("T1572"));
+        assert_eq!(attack_technique("encrypted_dns_bypass"), Some("T1572"));
+    }
 
     /// A name claim at `t` seconds, optionally client-scoped (#308 tests).
     fn claim(name: &str, prov: Provenance, t: u32, client: Option<&str>) -> NameClaim {

@@ -68,8 +68,15 @@
       http: true,        // HTTP requests/status/latency + top hosts (TCP/80,8080)
       // L7 protocol visibility (netring 0.27, opt-in). Detail served on
       // @/query/quic and @/query/ssh; aggregate counts stream.
-      quic: false,       // passive QUIC Initial SNI/ALPN/version (UDP/443)
-      ssh: false,        // SSH banner + KEXINIT HASSH fingerprints (TCP/22)
+      quic: false,       // passive QUIC Initial JA4/SNI/ALPN/version + PQ (UDP/443)
+      ssh: false,        // client+server HASSH + KEXINIT fingerprints (TCP/22)
+      // Encrypted-DNS visibility (netring 0.29, #326): classify DoT/DoQ/DoH from
+      // the TLS/QUIC handshake into streamed `dns/encrypted/*` counts + the
+      // `@/query/encrypted_dns` inventory. Pairs with anomalies.encrypted_dns_bypass.
+      encrypted_dns: false,
+      // Reassemble IP fragments before L7 parsing so fragmented DNS / handshakes
+      // still parse (netring 0.29, #326). Small buffering cost.
+      ip_reassembly: false,
       // Flag cleartext SNMP v1/v2c community strings as anomalies. Needs the
       // sensor built with `--features snmp` (pulls the SNMP parser).
       snmp_cleartext: false,
@@ -122,6 +129,13 @@
     // Pillar A — network anomaly detectors.
     anomalies: {
       port_scan: true,   // TRW port-scan detection -> alerts
+
+      // Encrypted-DNS bypass policy (#326, ATT&CK T1572): fire an
+      // `encrypted_dns_bypass` anomaly when a DoT/DoQ/DoH session goes to a
+      // resolver not on `dns_resolver_allowlist` (empty ⇒ fall back to netring's
+      // known-public-resolver set). Needs collect.encrypted_dns.
+      encrypted_dns_bypass: false,
+      dns_resolver_allowlist: [],   // e.g. ["dns.google", "cloudflare-dns.com"]
 
       // FQDN-pivoted RITA beaconing (#308, ATT&CK T1071): robust Bowley+MAD
       // beacon statistics keyed by the destination's best forward DNS name

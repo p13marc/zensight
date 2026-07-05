@@ -555,6 +555,16 @@ pub struct CollectConfig {
     /// order). Default ON; TCP-only (UDP flows stay first-packet best-effort).
     #[serde(default = "default_true")]
     pub infer_initiator: bool,
+    /// Encrypted-DNS visibility (netring 0.29, #326): classify DoT/DoQ/DoH
+    /// sessions from the TLS/QUIC handshake, count them by transport + resolver
+    /// class, and serve `@/query/encrypted_dns`. Rides the `tls`/`quic` handshake
+    /// parsing, so it's cheap. Default OFF (opt-in L7).
+    #[serde(default)]
+    pub encrypted_dns: bool,
+    /// Reassemble IPv4/IPv6 fragments before L7 parsing (netring 0.29, #326) so
+    /// fragmented DNS / handshakes still parse. Small buffering cost. Default OFF.
+    #[serde(default)]
+    pub ip_reassembly: bool,
 }
 
 impl Default for CollectConfig {
@@ -577,6 +587,8 @@ impl Default for CollectConfig {
             asset_cdp: false,
             ipfix: false,
             infer_initiator: true,
+            encrypted_dns: false,
+            ip_reassembly: false,
         }
     }
 }
@@ -672,6 +684,16 @@ pub struct AnomalyConfig {
     /// beaconing telemetry agents + DGA-scored CDN/randomised-but-benign SLDs).
     #[serde(default)]
     pub allowlist: Vec<String>,
+    /// Encrypted-DNS bypass policy (#326): fire an `encrypted_dns_bypass` anomaly
+    /// (ATT&CK T1572 / T1071.004) when an encrypted-DNS (DoT/DoQ/DoH) session goes
+    /// to a resolver that is not sanctioned. Requires `collect.encrypted_dns`.
+    #[serde(default)]
+    pub encrypted_dns_bypass: bool,
+    /// Resolver SNIs sanctioned for encrypted DNS. Empty ⇒ fall back to netring's
+    /// known-public-resolver classification (`via_known_resolver`); a session to
+    /// anything not sanctioned is a bypass.
+    #[serde(default)]
+    pub dns_resolver_allowlist: Vec<String>,
 }
 
 fn default_beacon_threshold() -> f64 {

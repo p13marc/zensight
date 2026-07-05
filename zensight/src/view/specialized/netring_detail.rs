@@ -374,6 +374,8 @@ mod tests {
             alpn: vec!["h3".into()],
             version: "v1".into(),
             count: 4,
+            pq_key_share: true,
+            ..Default::default()
         }]));
         assert_eq!(s.quic.ready().map(|v| v.len()), Some(1));
 
@@ -382,6 +384,7 @@ mod tests {
             role: "client".into(),
             banner: Some("SSH-2.0-OpenSSH_9.6".into()),
             count: 2,
+            ..Default::default()
         }]));
         assert_eq!(s.ssh.ready().map(|v| v.len()), Some(1));
     }

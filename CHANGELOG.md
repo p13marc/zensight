@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **netring encrypted-traffic frontier from netring 0.29 (#326)**: the netring
+  sensor adopts netring 0.29's typed encrypted-traffic handlers. QUIC and SSH swap
+  to `on_quic_fingerprint` / `on_ssh_fingerprint` (deleting the hand-rolled
+  banner+KEXINIT correlation), surfacing QUIC JA4 (royalty-free `q`-prefixed) + PQ
+  key-share + app-protocol and both client/server HASSH + KEXINIT algorithms. TLS
+  fingerprints gain a post-quantum key-share flag, aggregated into a streamed
+  `tls/pq_ratio` PQ-readiness gauge with a GUI badge/stat. New `collect.encrypted_dns`
+  classifies DoT/DoQ/DoH from the handshake into streamed `dns/encrypted/*` counts +
+  an `@/query/encrypted_dns` inventory (GUI "Encrypted DNS" panel), and
+  `anomalies.encrypted_dns_bypass` (+ optional `dns_resolver_allowlist`) fires an
+  `encrypted_dns_bypass` anomaly (ATT&CK T1572) for sessions to un-sanctioned
+  resolvers. New `collect.ip_reassembly` reassembles IP fragments before L7 parsing.
+
 - **netlink sockdiag depth from nlink 0.24 (#322)**: the netlink sensor adopts
   three nlink 0.24 sockdiag features. Per-rule nftables counters now decode via
   nlink's native `RuleInfo::counter()` — the hand-rolled `NFTA_RULE_EXPRESSIONS`

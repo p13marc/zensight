@@ -317,6 +317,21 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
   `@/query/*` channel with a streamed distinct-count. Cleartext SNMP v1/v2c
   community strings can be flagged as `cleartext-snmp` anomalies with
   `collect.snmp_cleartext` (build with `--features snmp`).
+- **Encrypted-traffic frontier (netring 0.29, #326):** the QUIC and SSH handshakes
+  now use netring's typed fingerprint handlers — QUIC yields its royalty-free
+  `q`-prefixed JA4, a post-quantum key-share flag, and app-protocol; SSH yields
+  both client HASSH and server HASSH-Server plus the offered KEXINIT algorithms.
+  TLS fingerprints carry the PQ key-share flag, aggregated into a streamed
+  `tls/pq_ratio` PQ-readiness gauge (GUI badge + stat). With
+  `collect.encrypted_dns`, DoT/DoQ/DoH sessions are classified from the handshake
+  into streamed `dns/encrypted/*` counts + an `@/query/encrypted_dns` inventory
+  (GUI "Encrypted DNS" panel); arming `anomalies.encrypted_dns_bypass` (optionally
+  with a `dns_resolver_allowlist`) fires an `encrypted_dns_bypass` anomaly (ATT&CK
+  **T1572**) for a session to an un-sanctioned resolver — the DNS-tunnel / policy-
+  bypass signal. `collect.ip_reassembly` reassembles IP fragments before L7
+  parsing so fragmented DNS/handshakes still parse. (A programmatic
+  fragmentation-overlap *evasion* anomaly is deferred — netring 0.29 emits the
+  overlap counter only as a log warning, no getter yet.)
 - **JA4H HTTP fingerprints (#124, opt-in, license-gated):** with `collect.http_fp`
   on a build that enables `--features ja4plus`, cleartext HTTP requests are
   fingerprinted with JA4H (FoxIO `a_b_c_d` form) into a per-fingerprint inventory

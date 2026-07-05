@@ -2528,6 +2528,8 @@ fn test_netring_tls_capture_sections() {
         ja3: None,
         ja4: Some("t13d1516h2_8daaf6152771_b186095e22b6".into()),
         count: 7,
+        pq_key_share: true,
+        ..Default::default()
     }]));
 
     // TLS is on the HTTP/TLS tab; Capture Health on the Capture tab (#247).
@@ -2537,12 +2539,46 @@ fn test_netring_tls_capture_sections() {
         assert!(ui.find("TLS").is_ok());
         assert!(ui.find("Fetch inventory").is_ok());
         assert!(ui.find("api.example.com").is_ok());
+        // #326: post-quantum readiness stat + the per-fingerprint PQ badge.
+        assert!(ui.find("PQ readiness (ratio)").is_ok());
+        assert!(ui.find("PQ").is_ok());
     }
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Capture;
     {
         let mut ui = simulator(netring_sensor_view(&state));
         assert!(ui.find("Capture Health").is_ok());
     }
+}
+
+/// #326: once the netring sensor streams `dns/encrypted/*` aggregates, the DNS tab
+/// grows an "Encrypted DNS" panel with the DoT/DoQ/DoH transport split and the
+/// un-known-resolver (policy-bypass) count. Hidden until such a metric arrives.
+#[test]
+fn test_netring_encrypted_dns_panel() {
+    use zensight::view::specialized::netring::netring_sensor_view;
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let mut state = DeviceDetailState::new(device_id);
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Dns;
+
+    // Before any encrypted-DNS metric, the panel is absent.
+    {
+        let mut ui = simulator(netring_sensor_view(&state));
+        assert!(ui.find("Encrypted DNS").is_err());
+    }
+
+    for (m, v) in [
+        ("dns/encrypted/doh", TelemetryValue::Counter(12)),
+        ("dns/encrypted/dot", TelemetryValue::Counter(3)),
+        ("dns/encrypted/unknown_resolver", TelemetryValue::Counter(4)),
+    ] {
+        state.update(TelemetryPoint::new("wiretap1", Protocol::Netring, m, v));
+    }
+    let mut ui = simulator(netring_sensor_view(&state));
+    assert!(ui.find("Encrypted DNS").is_ok());
+    assert!(ui.find("DoH").is_ok());
+    assert!(ui.find("unknown resolver").is_ok());
 }
 
 /// #72: the netring view surfaces the QUIC SNI/ALPN and SSH/HASSH inventories —
@@ -2566,12 +2602,14 @@ fn test_netring_quic_ssh_sections() {
         alpn: vec!["h3".into()],
         version: "v1".into(),
         count: 9,
+        ..Default::default()
     }]));
     state.netring_detail.apply_ssh(Ok(vec![SshRecord {
         hassh: "06046964c022c6407d15a27b12a51c5b".into(),
         role: "client".into(),
         banner: Some("SSH-2.0-OpenSSH_9.6".into()),
         count: 2,
+        ..Default::default()
     }]));
 
     // QUIC/SSH inventories live on the HTTP/TLS tab (#247).
@@ -3067,6 +3105,7 @@ fn test_inventory_view_renders_assets_and_fingerprints() {
             ja3: None,
             ja4: Some("t13d1516h2_abc_def".into()),
             count: 3,
+            ..Default::default()
         }],
         quic: vec![],
         ssh: vec![],
