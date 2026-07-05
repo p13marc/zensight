@@ -63,11 +63,6 @@ hostname.workspace = true
 # new Arc. No per-packet locking.
 arc-swap = "1"
 
-# Community ID v1 flow hashing (#116): sorted 5-tuple + seed -> SHA1 -> base64.
-# The de-facto cross-tool flow-correlation key (Zeek/Suricata/Wireshark/SecOnion).
-sha1 = "0.10"
-base64 = "0.22"
-
 # On-demand pcap capture compression (#333): the finished capture is zstd-encoded
 # (level 3) before Tier-1 blob delivery when the request asks for it.
 zstd = { workspace = true }

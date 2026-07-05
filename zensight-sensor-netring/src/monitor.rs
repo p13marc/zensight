@@ -55,10 +55,17 @@ const DNS_TUNNEL_KEY_CAP: usize = 8192;
 const EXFIL_EWMA_ALPHA: f64 = 0.2;
 
 use flowscope::EndReason;
+// #324: beacon detectors key their state on `HostPair` (src, dst, dst_port) and
+// the port-scan detector on `SrcHost` (scanner IP), so a beacon/scan that rotates
+// its source port each connection accumulates ONE series instead of fragmenting
+// into N one-flow series (the systematic under-detection the FiveTupleKey keying
+// caused). The emitted anomaly is still labelled with the triggering flow's full
+// 5-tuple (see the `*Hit` wrappers) so `src:port`/`proto`/Community-ID survive.
 use flowscope::detect::patterns::{
     BeaconDetector, BeaconScore, DgaScore, DgaScorer, PortScanDetector, RitaBeaconDetector,
     RitaBeaconScore, ScanScore, ScanVerdict,
 };
+use flowscope::detect::{HostPair, SrcHost};
 use flowscope::dns::{NameMap, NameMapConfig};
 use flowscope::extract::FiveTupleKey;
 use netring::anomaly::shipped_sinks::ChannelSink;
@@ -284,34 +291,69 @@ impl netring::export::FlowExporter for IpfixSink {
 }
 
 /// Detector wrapper bridging `feed`→`verdict` for the TRW port-scan detector.
+/// State is keyed on [`SrcHost`] (the scanner IP) so a scanner fanning out from
+/// rotating source ports accumulates one TRW walk, not one-per-flow (#324); the
+/// emitted anomaly is still labelled with the triggering flow's 5-tuple.
 struct PortScan {
-    detector: PortScanDetector<FiveTupleKey>,
+    detector: PortScanDetector<SrcHost>,
     cfg: LiveConfig,
-    last_score: Option<ScanScore<FiveTupleKey>>,
+    last_score: Option<ScanScore<SrcHost>>,
 }
 
 /// Detector wrapper for the RITA-style beaconing detector (issue #17). Reads its
 /// threshold + allowlist live from `cfg` so they hot-swap at runtime (#121).
+/// State keyed on [`HostPair`] so each per-connection beacon ping lands in one
+/// series regardless of its ephemeral source port (#324); fed one observation per
+/// finished flow (`FlowEnded<Tcp>`) — a beacon ping is a connection, not a packet.
 struct Beacon {
-    detector: BeaconDetector<FiveTupleKey>,
+    detector: BeaconDetector<HostPair>,
     cfg: LiveConfig,
-    last_score: Option<BeaconScore<FiveTupleKey>>,
+    last_score: Option<BeaconScore<HostPair>>,
 }
 
 /// Detector wrapper for the RITA-style ROBUST beaconing detector (issue #118):
 /// Bowley skewness + MAD, bit-faithful to RITA, catches jittered C2 the CV
-/// detector misses. Fed the same `FlowPacket` (key, ts, len) stream as `Beacon`.
+/// detector misses. Fed the same per-flow `FlowEnded<Tcp>` stream as `Beacon`,
+/// keyed on [`HostPair`] (#324).
 struct RitaBeacon {
-    detector: RitaBeaconDetector<FiveTupleKey>,
+    detector: RitaBeaconDetector<HostPair>,
     cfg: LiveConfig,
-    last_score: Option<RitaBeaconScore<FiveTupleKey>>,
+    last_score: Option<RitaBeaconScore<HostPair>>,
+}
+
+/// `DetectorScore` for the CV beacon that labels the anomaly with the triggering
+/// flow's full 5-tuple (`.1`) rather than the `HostPair` the detector *state* is
+/// keyed on — preserving `src:port`/`proto`/Community-ID on the alert (#324).
+/// Metric schema is byte-identical to the built-in `BeaconScore` impl.
+struct BeaconCvHit(BeaconScore<HostPair>, FiveTupleKey);
+
+impl flowscope::DetectorScore for BeaconCvHit {
+    fn kind(&self) -> flowscope::DetectorKind {
+        flowscope::DetectorKind::BeaconCv
+    }
+    fn into_anomaly(self, ts: flowscope::Timestamp) -> flowscope::OwnedAnomaly {
+        let s = self.0;
+        flowscope::OwnedAnomaly::new(
+            flowscope::DetectorKind::BeaconCv,
+            flowscope::event::Severity::Warning,
+            ts,
+        )
+        .with_key(&self.1)
+        .with_metric("score", s.score)
+        .with_metric("cv_dt", s.cv_dt)
+        .with_metric("cv_bytes", s.cv_bytes)
+        .with_metric("mean_interval_secs", s.mean_interval.as_secs_f64())
+        .with_metric("n", s.n as f64)
+    }
 }
 
 /// Local detector-score wrapping a [`RitaBeaconScore`] so the published anomaly
 /// carries the ZenSight kind slug `"RitaBeacon"` (the built-in `DetectorScore`
-/// impl emits `"BeaconRita"`). `with_key` attaches the 5-tuple so the drain's
-/// `anomaly_alert` derives src/dst labels + the cross-tool Community ID.
-struct RitaBeaconHit(RitaBeaconScore<FiveTupleKey>);
+/// impl emits `"BeaconRita"`). `.1` is the triggering flow's 5-tuple; `with_key`
+/// attaches it so the drain's `anomaly_alert` derives src/dst labels + the
+/// cross-tool Community ID (the `HostPair` the detector state is keyed on has no
+/// source port, #324).
+struct RitaBeaconHit(RitaBeaconScore<HostPair>, FiveTupleKey);
 
 impl flowscope::DetectorScore for RitaBeaconHit {
     fn kind(&self) -> flowscope::DetectorKind {
@@ -324,13 +366,38 @@ impl flowscope::DetectorScore for RitaBeaconHit {
             flowscope::event::Severity::Warning,
             ts,
         )
-        .with_key(&s.key)
+        .with_key(&self.1)
         .with_metric("score", s.score)
         .with_metric("ts_score", s.ts_score)
         .with_metric("ds_score", s.ds_score)
         .with_metric("dur_score", s.dur_score)
         .with_metric("mean_interval_secs", s.mean_interval.as_secs_f64())
         .with_metric("n", s.n as f64)
+    }
+}
+
+/// `DetectorScore` for the TRW port scan labelled with the triggering flow's
+/// 5-tuple (`.1`); state is keyed on [`SrcHost`] (#324). Mirrors the built-in
+/// `ScanScore` anomaly (verdict observation + log-likelihood + observed count).
+struct PortScanHit(ScanScore<SrcHost>, FiveTupleKey);
+
+impl flowscope::DetectorScore for PortScanHit {
+    fn kind(&self) -> flowscope::DetectorKind {
+        flowscope::DetectorKind::PortScanTrw
+    }
+    fn into_anomaly(self, ts: flowscope::Timestamp) -> flowscope::OwnedAnomaly {
+        let s = self.0;
+        // Verdict is `Scanner` by the time we wrap (the verdict closure gates on
+        // it) → Warning severity, `"scanner"` slug.
+        flowscope::OwnedAnomaly::new(
+            flowscope::DetectorKind::PortScanTrw,
+            flowscope::event::Severity::Warning,
+            ts,
+        )
+        .with_key(&self.1)
+        .with_observation("verdict", "scanner")
+        .with_metric("log_likelihood", s.log_likelihood)
+        .with_metric("n_observed", s.n_observed as f64)
     }
 }
 
@@ -1616,17 +1683,22 @@ pub fn build(
             event: FlowEnded<Tcp>,
             detector: PortScan { detector: PortScanDetector::new(), cfg: det_cfg.clone(), last_score: None },
             feed: |evt, w| {
-                let success = matches!(evt.reason, EndReason::Fin | EndReason::IdleTimeout);
-                w.last_score = Some(w.detector.observe(evt.key, success));
+                // State keyed on the scanner IP (#324) — a fan-out from rotating
+                // source ports is one TRW walk, not one per ephemeral flow.
+                if let Some(src) = SrcHost::from_key(&evt.key) {
+                    let success = matches!(evt.reason, EndReason::Fin | EndReason::IdleTimeout);
+                    w.last_score = Some(w.detector.observe(src, success));
+                }
             },
-            verdict: |_evt, w| {
+            verdict: |evt, w| {
                 // Muted at runtime? (#121)
                 if !w.cfg.load().port_scan {
                     None
                 } else {
                     w.last_score.as_ref().and_then(|s| {
                         if matches!(s.verdict, ScanVerdict::Scanner) {
-                            Some(s.clone())
+                            // Label with the triggering flow's 5-tuple.
+                            Some(PortScanHit(s.clone(), evt.key))
                         } else {
                             None
                         }
@@ -1641,26 +1713,30 @@ pub fn build(
     if cfg.anomalies.beaconing {
         let beacon = netring::pattern_detector! {
             name: "BeaconCv",
-            event: FlowPacket,
+            event: FlowEnded<Tcp>,
             detector: Beacon {
                 detector: BeaconDetector::new(),
                 cfg: det_cfg.clone(),
                 last_score: None,
             },
             feed: |evt, w| {
-                if matches!(evt.proto, L4Proto::Tcp) {
-                    w.last_score = w.detector.observe(evt.key, evt.ts, evt.len as u64);
+                // One observation per finished flow, keyed by HostPair (#324): a
+                // beacon ping is a connection, not a packet, and its ephemeral
+                // source port no longer fragments the interval series.
+                if let Some(pair) = HostPair::from_key(&evt.key) {
+                    w.last_score =
+                        w.detector.observe(pair, evt.ts, evt.stats.bytes_initiator);
                 }
             },
-            verdict: |_evt, w| {
+            verdict: |evt, w| {
                 let c = w.cfg.load();
                 if !c.beaconing {
                     None // muted at runtime (#121)
                 } else {
                     w.last_score.as_ref().and_then(|s| {
-                        let dst = s.key.b.ip().to_string();
+                        let dst = s.key.dst.to_string();
                         if s.score >= c.beacon_threshold && !allowlisted(&dst, &c.allowlist) {
-                            Some(s.clone())
+                            Some(BeaconCvHit(s.clone(), evt.key))
                         } else {
                             None
                         }
@@ -1677,26 +1753,28 @@ pub fn build(
     if cfg.anomalies.rita_beacon {
         let rita = netring::pattern_detector! {
             name: "RitaBeacon",
-            event: FlowPacket,
+            event: FlowEnded<Tcp>,
             detector: RitaBeacon {
                 detector: RitaBeaconDetector::new(),
                 cfg: det_cfg.clone(),
                 last_score: None,
             },
             feed: |evt, w| {
-                if matches!(evt.proto, L4Proto::Tcp) {
-                    w.last_score = w.detector.observe(evt.key, evt.ts, evt.len as u64);
+                // Per-flow observation keyed by HostPair (#324), same as the CV beacon.
+                if let Some(pair) = HostPair::from_key(&evt.key) {
+                    w.last_score =
+                        w.detector.observe(pair, evt.ts, evt.stats.bytes_initiator);
                 }
             },
-            verdict: |_evt, w| {
+            verdict: |evt, w| {
                 let c = w.cfg.load();
                 if !c.rita_beacon {
                     None // muted at runtime (#121)
                 } else {
                     w.last_score.as_ref().and_then(|s| {
-                        let dst = s.key.b.ip().to_string();
+                        let dst = s.key.dst.to_string();
                         if s.score >= c.rita_beacon_threshold && !allowlisted(&dst, &c.allowlist) {
-                            Some(RitaBeaconHit(s.clone()))
+                            Some(RitaBeaconHit(s.clone(), evt.key))
                         } else {
                             None
                         }
@@ -2590,5 +2668,64 @@ mod tests {
         );
         assert!(set.contains_domain("sub.malware.test").is_some());
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// #324 regression proof: a beacon that rotates its source port each
+    /// connection (curl-in-a-loop / real-C2 shape) collapses to ONE series under
+    /// `HostPair` keying — and fires — but fragments into N one-shot series under
+    /// the old `FiveTupleKey` keying, which never accumulates enough samples to
+    /// score. This is the systematic under-detection the migration fixes.
+    #[test]
+    fn hostpair_keying_catches_source_port_rotating_beacon() {
+        use flowscope::Timestamp;
+        use flowscope::extractor::L4Proto;
+
+        // A perfectly periodic C2 beacon: same client → server:443, 60 s apart,
+        // each connection from a fresh ephemeral source port.
+        let server: std::net::SocketAddr = "203.0.113.9:443".parse().unwrap();
+        let flows: Vec<FiveTupleKey> = (0..24)
+            .map(|i| {
+                let src: std::net::SocketAddr = format!("10.0.0.5:{}", 40000 + i).parse().unwrap();
+                FiveTupleKey::new(L4Proto::Tcp, src, server)
+            })
+            .collect();
+
+        let mut hp = BeaconDetector::<HostPair>::new();
+        let mut ft = BeaconDetector::<FiveTupleKey>::new();
+        let mut hp_fired = false;
+        for (i, key) in flows.iter().enumerate() {
+            let ts = Timestamp::new(1_000 + (i as u32) * 60, 0);
+            let pair = HostPair::from_key(key).unwrap();
+            if let Some(s) = hp.observe(pair, ts, 512) {
+                // Perfectly periodic + constant size → a near-maximal beacon score.
+                assert!(
+                    s.score > 0.7,
+                    "periodic beacon should score high, got {}",
+                    s.score
+                );
+                hp_fired = true;
+            }
+            // The same series fed to the 5-tuple detector: every rotating source
+            // port is a brand-new key, so no series ever fills its window.
+            assert!(
+                ft.observe(*key, ts, 512).is_none(),
+                "5-tuple keying must never accumulate a beacon from rotating ports"
+            );
+        }
+
+        assert!(
+            hp_fired,
+            "HostPair keying must detect the rotating-port beacon (#324)"
+        );
+        assert_eq!(
+            hp.tracked(),
+            1,
+            "all connections collapse to one host-pair series"
+        );
+        assert_eq!(
+            ft.tracked(),
+            flows.len(),
+            "5-tuple keying fragments into one series per connection"
+        );
     }
 }
