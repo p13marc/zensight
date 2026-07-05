@@ -414,6 +414,7 @@ fn render_sockets_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
             cell("lost", 50),
             cell("reord", 55),
             cell("cong", 70),
+            cell("bbr_bps", 90),
         ]
         .spacing(8),
     );
@@ -433,6 +434,12 @@ fn render_sockets_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
                 cell(&s.lost.to_string(), 50),
                 cell(&s.reord_seen.to_string(), 55),
                 cell(s.congestion.as_deref().unwrap_or("-"), 70),
+                cell(
+                    &s.bbr_bw_bps
+                        .map(|b| b.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    90,
+                ),
             ]
             .spacing(8),
         );

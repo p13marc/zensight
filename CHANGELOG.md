@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **netlink sockdiag depth from nlink 0.24 (#322)**: the netlink sensor adopts
+  three nlink 0.24 sockdiag features. Per-rule nftables counters now decode via
+  nlink's native `RuleInfo::counter()` — the hand-rolled `NFTA_RULE_EXPRESSIONS`
+  TLV parser (#115) is deleted. `@/query/sockets` `SocketRecord`s gain structured
+  congestion-control fields (`bbr_bw_bps`, `cc_min_rtt_us`) via the `with_cc_info()`
+  extension, so BBR bottleneck bandwidth + min-RTT surface per socket (with a GUI
+  column). A port-filtered sockets query compiles the selector to kernel-side
+  INET_DIAG bytecode (`FilterExpr`, local-OR-remote port matching), cutting dump
+  volume on busy hosts while keeping the client-side match as a backstop.
+
 - **Bandwidth live monitor (#319, epic #320)**: a new bmon/nethogs-style
   **Bandwidth** view (nav rail) with two modes — **Processes** (per-process rows
   fetched from the netlink `@/query/bandwidth` channel) and **Services**

@@ -844,9 +844,9 @@ impl Collector {
             let mut packets = 0u64;
             let mut bytes = 0u64;
             for r in &rules {
-                if let Some(ctr) = map::decode_nft_counter(&r.expression_bytes) {
-                    packets = packets.saturating_add(ctr.packets);
-                    bytes = bytes.saturating_add(ctr.bytes);
+                if let Some((p, b)) = r.counter() {
+                    packets = packets.saturating_add(p);
+                    bytes = bytes.saturating_add(b);
                 }
             }
             summary.chains_total += chain_count;

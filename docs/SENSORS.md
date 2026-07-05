@@ -204,6 +204,14 @@ expectations and alerts on deviation.
 - **On-demand detail** (`@/query/<topic>`): `routes`, `neighbors`,
   `sockets?state=&port=`, `addresses`, `events`, `route_changes`, `tc`, `xfrm`, `nft`,
   `bandwidth?top=N`.
+- **nlink 0.24 sockdiag depth (#322):** per-rule nft counters now come from nlink's
+  native `RuleInfo::counter()` (the hand-rolled TLV parser is gone); `@/query/sockets`
+  rows gain structured **congestion-control** info — BBR bottleneck bandwidth
+  (`bbr_bw_bps`) + min-RTT (`cc_min_rtt_us`) when a socket runs BBR (cubic/reno report
+  none; the per-algorithm fleet count already ships as `sockets/tcp/by_cong/<algo>`);
+  and a port-filtered `sockets` query now compiles the selector to **kernel-side**
+  INET_DIAG bytecode (`FilterExpr`, local-OR-remote port) so the kernel returns fewer
+  rows, with the client-side match kept as a backstop.
 - **Per-process bandwidth (#317, epic #320, `collect.bandwidth`, default on):** the
   **unprivileged, TCP-only** bandwidth tier. A background sampler diffs each socket's
   `tcp_info` goodput byte counters (`bytes_acked` = TX, `bytes_received` = RX) **per
