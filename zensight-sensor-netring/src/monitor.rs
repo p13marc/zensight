@@ -10,8 +10,8 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use tokio::sync::mpsc;
 use zensight_common::{
-    Alert, AssetRecord, ElephantRecord, FlowRecord, Ja4hRecord, NameObservation, QuicRecord,
-    SshRecord, TelemetryPoint, TlsRecord,
+    Alert, AssetRecord, ElephantRecord, EncryptedDnsRecord, FlowRecord, Ja4hRecord,
+    NameObservation, QuicRecord, SshRecord, TelemetryPoint, TlsRecord,
 };
 
 use crate::command::DetectorHandle;
@@ -99,9 +99,6 @@ pub type SshInventory = Arc<Mutex<HashMap<String, SshRecord>>>;
 /// Passive JA4H HTTP-fingerprint inventory: ja4h → record for `@/query/ja4h`
 /// (#124, only populated with `--features ja4plus`).
 pub type Ja4hInventory = Arc<Mutex<HashMap<String, Ja4hRecord>>>;
-/// Per-flow SSH banner seen before the KEXINIT, to best-effort correlate a
-/// HASSH fingerprint with its version banner: `flow -> banner`.
-type SshPending = Arc<Mutex<HashMap<FiveTupleKey, String>>>;
 /// Shared passive-DNS name cache (issue #308): IP → provenance-tagged name
 /// claims, fed by the DNS answer handler and read at flow end / talker query
 /// time. `None` when `names.enabled` is off or `collect.dns` is off.
@@ -113,6 +110,7 @@ const TLS_INVENTORY_CAP: usize = 4096;
 /// Cardinality guards for the QUIC (sni,version) and SSH (hassh) inventories.
 const QUIC_INVENTORY_CAP: usize = 4096;
 const SSH_INVENTORY_CAP: usize = 4096;
+const ENC_DNS_INVENTORY_CAP: usize = 4096;
 /// Cardinality guard for the JA4H HTTP-fingerprint inventory (#124). Only the
 /// `ja4plus`-gated capture path consults it; unused in the default build.
 #[cfg(feature = "ja4plus")]
@@ -135,6 +133,20 @@ pub struct DnsState {
     pub rtt_ms: Mutex<Vec<u64>>,
     /// Per-SLD inventory for the on-demand top-domains channel.
     pub inventory: DnsInventory,
+}
+
+/// Encrypted-DNS (DoT/DoQ/DoH) accumulators (#326). Session counts per transport
+/// plus the un-known-resolver subset (the tunneling / policy-bypass signal), and a
+/// bounded per-(transport, sni) inventory served on `@/query/encrypted_dns`.
+#[derive(Default)]
+pub struct EncDnsState {
+    pub dot: AtomicU64,
+    pub doq: AtomicU64,
+    pub doh: AtomicU64,
+    /// Sessions whose destination did NOT match a known public resolver.
+    pub unknown_resolver: AtomicU64,
+    /// Keyed by `(transport, sni)` → the served [`EncryptedDnsRecord`].
+    pub inventory: Mutex<HashMap<(String, String), EncryptedDnsRecord>>,
 }
 
 /// HTTP RED accumulators shared across the capture path and the drain.
@@ -201,8 +213,13 @@ pub struct MonitorChannels {
     pub tcp_refused: Arc<AtomicU64>,
     /// Total TLS handshakes seen (ClientHello fingerprinted).
     pub tls_handshakes: Arc<AtomicU64>,
+    /// Subset of `tls_handshakes` that offered a post-quantum (hybrid) key-share
+    /// group (#326); the ratio is the streamed `tls/pq_ratio` PQ-readiness gauge.
+    pub tls_pq_handshakes: Arc<AtomicU64>,
     /// Passive TLS asset inventory keyed by (sni, ja4): the served `@/query/tls`.
     pub tls_inventory: TlsInventory,
+    /// Encrypted-DNS (DoT/DoQ/DoH) accumulators + inventory (#326).
+    pub enc_dns: Arc<EncDnsState>,
     /// Per-L4 + connection-state breakdown (issue #16).
     pub l4: Arc<L4State>,
     /// ICMP error accumulators (issue #15).
@@ -639,7 +656,9 @@ pub fn build(
     let tcp_resets = Arc::new(AtomicU64::new(0));
     let tcp_refused = Arc::new(AtomicU64::new(0));
     let tls_handshakes = Arc::new(AtomicU64::new(0));
+    let tls_pq_handshakes = Arc::new(AtomicU64::new(0));
     let tls_inventory: TlsInventory = Arc::new(Mutex::new(HashMap::new()));
+    let enc_dns = Arc::new(EncDnsState::default());
     let l4 = Arc::new(L4State::default());
     let icmp = Arc::new(IcmpState::default());
     let dns = Arc::new(DnsState::default());
@@ -665,6 +684,12 @@ pub fn build(
 
     let mut b = Monitor::builder();
     b = b.name(cfg.source.clone());
+
+    // Reassemble IP fragments before L7 parsing (#326) so fragmented DNS /
+    // handshakes still reach the TLS/QUIC/DNS parsers. Opt-in (small buffering).
+    if cfg.collect.ip_reassembly {
+        b = b.reassemble_ip_fragments();
+    }
 
     // Source: pcap replay (privilege-free) or live interfaces. The resolved
     // capture backend (#227) is surfaced as a `capture/backend` info point + log
@@ -1028,9 +1053,15 @@ pub fn build(
     // Passive TLS fingerprinting (ClientHello → SNI + JA3/JA4 asset inventory).
     if cfg.collect.tls {
         let count = tls_handshakes.clone();
+        let pq_count = tls_pq_handshakes.clone();
         let inventory = tls_inventory.clone();
         b = b.on_fingerprint(move |fp: &TlsFingerprint, _ctx: &mut Ctx<'_>| {
             count.fetch_add(1, Ordering::Relaxed);
+            // Post-quantum readiness (#326): the ClientHello offered a PQ hybrid
+            // key-share group. The share over all handshakes is `tls/pq_ratio`.
+            if fp.pq_key_share {
+                pq_count.fetch_add(1, Ordering::Relaxed);
+            }
             let key = (
                 fp.sni.clone().unwrap_or_default(),
                 fp.ja4.clone().unwrap_or_default(),
@@ -1047,6 +1078,8 @@ pub fn build(
                             ja3: fp.ja3.clone(),
                             ja4: fp.ja4.clone(),
                             count: 1,
+                            pq_key_share: fp.pq_key_share,
+                            app_protocol: Some(fp.app_protocol.as_str().to_string()),
                         },
                     );
                 }
@@ -1251,12 +1284,15 @@ pub fn build(
     // L7 QUIC Initial visibility (issue #72) — passive SNI/ALPN/version from the
     // unprotected ClientHello (UDP/443). The QUIC analogue of TLS fingerprinting.
     if cfg.collect.quic {
-        use flowscope::QuicInitial;
+        use netring::monitor::fingerprint::QuicFingerprint;
         b = b.protocol::<Quic>();
         let inv = quic.clone();
-        b = b.on::<Quic>(move |q: &QuicInitial| {
-            let version = q.version.to_string();
-            let key = (q.sni.clone().unwrap_or_default(), version.clone());
+        // Typed QUIC fingerprint (#326): netring recovers the Initial's embedded
+        // ClientHello, so we get JA4 (q-prefixed, royalty-free), the PQ key-share
+        // flag, and app-protocol classification — not just SNI/version.
+        b = b.on_quic_fingerprint(move |fp: &QuicFingerprint, _ctx: &mut Ctx<'_>| {
+            let version = fp.version.clone();
+            let key = (fp.sni.clone().unwrap_or_default(), version.clone());
             if let Ok(mut m) = inv.lock() {
                 if let Some(rec) = m.get_mut(&key) {
                     rec.count += 1;
@@ -1264,10 +1300,13 @@ pub fn build(
                     m.insert(
                         key,
                         QuicRecord {
-                            sni: q.sni.clone(),
-                            alpn: q.alpn.clone(),
+                            sni: fp.sni.clone(),
+                            alpn: fp.alpn.clone().into_iter().collect(),
                             version,
                             count: 1,
+                            ja4: fp.ja4.clone(),
+                            pq_key_share: fp.pq_key_share,
+                            app_protocol: Some(fp.app_protocol.as_str().to_string()),
                         },
                     );
                 }
@@ -1276,52 +1315,110 @@ pub fn build(
         });
     }
 
-    // L7 SSH/HASSH visibility (issue #72) — banner + KEXINIT HASSH fingerprints
-    // (TCP/22). The banner precedes the KEXINIT on the same flow, so we stash it
-    // per-flow and attach it to the fingerprint when the KEXINIT lands.
+    // L7 SSH/HASSH visibility (issue #72, typed handler #326) — netring's
+    // `on_ssh_fingerprint` does the two-peer banner+KEXINIT correlation for us and
+    // yields both the client HASSH and the server HASSH-Server plus the offered
+    // KEXINIT algorithm lists, replacing the hand-rolled per-flow banner stash.
     if cfg.collect.ssh {
-        use flowscope::ssh::SshMessage;
+        use netring::monitor::fingerprint::SshFingerprint;
         b = b.protocol::<Ssh>();
         let inv = ssh.clone();
-        let pending: SshPending = Arc::new(Mutex::new(HashMap::new()));
-        b = b.on_ctx::<Ssh>(move |msg: &SshMessage, ctx: &mut Ctx<'_>| {
-            match msg {
-                SshMessage::Banner { banner } => {
-                    if let (Some(k), Ok(mut p)) = (ctx.flow, pending.lock())
-                        && p.len() < 65_536
-                    {
-                        p.insert(k, banner.clone());
-                    }
-                }
-                SshMessage::KexInit(kex) => {
-                    // Consume the pending banner for this flow (remove, not get):
-                    // the entry is matched exactly once at KEXINIT, so leaving it
-                    // in the map would leak entries up to the 64k cap, after which
-                    // new flows' banners would be silently dropped.
-                    let banner = ctx
-                        .flow
-                        .and_then(|k| pending.lock().ok().and_then(|mut p| p.remove(&k)));
-                    let role = if kex.from_client { "client" } else { "server" };
-                    if let Ok(mut m) = inv.lock() {
-                        if let Some(rec) = m.get_mut(&kex.hassh) {
+        b = b.on_ssh_fingerprint(move |fp: &SshFingerprint, _ctx: &mut Ctx<'_>| {
+            if let Ok(mut m) = inv.lock() {
+                // Upsert one inventory row per side that carries a HASSH; the
+                // client keeps the offered KEXINIT list, banners map by position.
+                let mut upsert =
+                    |hassh: &str, role: &str, banner: Option<String>, kex: Vec<String>| {
+                        if let Some(rec) = m.get_mut(hassh) {
                             rec.count += 1;
                             if rec.banner.is_none() {
                                 rec.banner = banner;
                             }
                         } else if m.len() < SSH_INVENTORY_CAP {
                             m.insert(
-                                kex.hassh.clone(),
+                                hassh.to_string(),
                                 SshRecord {
-                                    hassh: kex.hassh.clone(),
+                                    hassh: hassh.to_string(),
                                     role: role.to_string(),
                                     banner,
                                     count: 1,
+                                    kex_algorithms: kex,
                                 },
                             );
                         }
-                    }
+                    };
+                if let Some(h) = &fp.hassh {
+                    upsert(
+                        h,
+                        "client",
+                        fp.banners.first().cloned(),
+                        fp.kex_algorithms.clone(),
+                    );
                 }
-                _ => {}
+                if let Some(h) = &fp.hassh_server {
+                    upsert(h, "server", fp.banners.get(1).cloned(), Vec::new());
+                }
+            }
+            Ok(())
+        });
+    }
+
+    // L7 encrypted-DNS visibility + policy (#326) — netring classifies DoT/DoQ/DoH
+    // from the TLS/QUIC handshake (ALPN + SNI + server port). We count sessions per
+    // transport + resolver class into a streamed aggregate, keep a bounded
+    // per-destination inventory (`@/query/encrypted_dns`), and — when the sentinel
+    // policy is armed — fire an `encrypted_dns_bypass` anomaly (ATT&CK T1572) for a
+    // session to an un-sanctioned resolver, the DNS-tunnel / policy-bypass signal.
+    if cfg.collect.encrypted_dns {
+        use netring::monitor::fingerprint::EncryptedDns;
+        let state = enc_dns.clone();
+        let alerts_h = alert_tx.clone();
+        let sensor_id = cfg.source.clone();
+        let policy = cfg.anomalies.encrypted_dns_bypass;
+        let allowlist: Vec<String> = cfg.anomalies.dns_resolver_allowlist.clone();
+        b = b.on_encrypted_dns(move |fp: &EncryptedDns, _ctx: &mut Ctx<'_>| {
+            // AppProtocol::as_str() yields the transport slug directly (dot/doq/doh).
+            let transport = fp.app_protocol.as_str().to_string();
+            match transport.as_str() {
+                "dot" => state.dot.fetch_add(1, Ordering::Relaxed),
+                "doq" => state.doq.fetch_add(1, Ordering::Relaxed),
+                "doh" => state.doh.fetch_add(1, Ordering::Relaxed),
+                _ => 0,
+            };
+            // Sanctioned iff the SNI is on the operator allowlist; with no
+            // allowlist, fall back to netring's known-public-resolver set.
+            let sanctioned = if allowlist.is_empty() {
+                fp.via_known_resolver
+            } else {
+                fp.sni
+                    .as_deref()
+                    .is_some_and(|s| allowlist.iter().any(|a| a.eq_ignore_ascii_case(s)))
+            };
+            if !sanctioned {
+                state.unknown_resolver.fetch_add(1, Ordering::Relaxed);
+            }
+            if let Ok(mut inv) = state.inventory.lock() {
+                let key = (transport.clone(), fp.sni.clone().unwrap_or_default());
+                if let Some(rec) = inv.get_mut(&key) {
+                    rec.count += 1;
+                } else if inv.len() < ENC_DNS_INVENTORY_CAP {
+                    inv.insert(
+                        key,
+                        EncryptedDnsRecord {
+                            transport: transport.clone(),
+                            sni: fp.sni.clone(),
+                            via_known_resolver: fp.via_known_resolver,
+                            count: 1,
+                        },
+                    );
+                }
+            }
+            if policy && !sanctioned {
+                let _ = alerts_h.send(crate::map::encrypted_dns_bypass_alert(
+                    &sensor_id,
+                    &transport,
+                    fp.sni.as_deref(),
+                ));
             }
             Ok(())
         });
@@ -2016,7 +2113,9 @@ pub fn build(
             tcp_resets,
             tcp_refused,
             tls_handshakes,
+            tls_pq_handshakes,
             tls_inventory,
+            enc_dns,
             l4,
             icmp,
             dns,

@@ -138,6 +138,34 @@ pub async fn run_ssh(session: Arc<zenoh::Session>, key_prefix: String, inventory
     }
 }
 
+/// Run the encrypted-DNS inventory query channel:
+/// `zensight/netring/@/query/encrypted_dns` replies with the passive DoT/DoQ/DoH
+/// destination inventory (most-seen first) as JSON `Vec<EncryptedDnsRecord>` (#326).
+pub async fn run_encrypted_dns(
+    session: Arc<zenoh::Session>,
+    key_prefix: String,
+    state: Arc<crate::monitor::EncDnsState>,
+) {
+    let key = zensight_common::command::query_key(&key_prefix, "encrypted_dns");
+    let queryable = match session.declare_queryable(&key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %key, "query: declare encrypted_dns failed");
+            return;
+        }
+    };
+    tracing::info!(key = %key, "on-demand encrypted-DNS inventory query channel ready");
+
+    while let Ok(query) = queryable.recv_async().await {
+        let mut records: Vec<_> = match state.inventory.lock() {
+            Ok(inv) => inv.values().cloned().collect(),
+            Err(_) => Vec::new(),
+        };
+        records.sort_by_key(|r| std::cmp::Reverse(r.count));
+        reply(&query, &records, "encrypted_dns").await;
+    }
+}
+
 /// Run the passive asset-inventory query channel: `zensight/netring/@/query/assets`
 /// replies with the discovered assets (most-recently-seen first) as JSON
 /// `Vec<AssetRecord>` (issue #70).

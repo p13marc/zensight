@@ -189,7 +189,7 @@ as Zenoh selector params (e.g. `?top=20`, `?state=&port=`).
 |--------|---|---|
 | sysinfo | `processes?sort=cpu\|mem\|io&top=N`, `latency`² | `Vec<ProcessRecord>` / `LatencyReport` |
 | netlink | `routes`, `neighbors`, `sockets?state=&port=`, `addresses`, `events`, `route_changes`, `tc`, `xfrm`, `nft`, `bandwidth?top=N`⁴, `retransmits`³, `connections`³ | `Vec<…Record>` |
-| netring | `flows`, `tls`, `talkers?top=N`, `matrix?top=N`, `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`, `ja4h?top=N`¹, `assets` | `Vec<…Record>` |
+| netring | `flows`, `tls`, `talkers?top=N`, `matrix?top=N`, `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`, `encrypted_dns`, `ja4h?top=N`¹, `assets` | `Vec<…Record>` |
 | systemd | `units`, `failed`, `unit?name=<u>`, `timers`, `events`, `cgroups?path=<rel>` | `Vec<UnitRecord>` / `UnitDetail` / `Vec<TimerRecord>` / `Vec<EventRecord>` / `CgroupNode` |
 
 Note: sysinfo's `@/query/*` keys carry the `<hostname>` segment

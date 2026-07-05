@@ -538,18 +538,21 @@ mod tests {
             ja3: Some("ja3hash".into()),
             ja4: Some("ja4hash".into()),
             count: 5,
+            ..Default::default()
         }];
         let quic = vec![QuicRecord {
             sni: Some("quic.example".into()),
             alpn: vec!["h3".into()],
             version: "v1".into(),
             count: 9,
+            ..Default::default()
         }];
         let ssh = vec![SshRecord {
             hassh: "hasshhash".into(),
             role: "client".into(),
             banner: Some("SSH-2.0-OpenSSH_9.6".into()),
             count: 1,
+            ..Default::default()
         }];
         let ja4h = vec![Ja4hRecord {
             ja4h: "ge11nn05enus_aaa".into(),
@@ -585,6 +588,7 @@ mod tests {
                 ja3: Some("j3".into()),
                 ja4: Some("j4".into()),
                 count: 1,
+                ..Default::default()
             }],
             quic: vec![],
             ssh: vec![],

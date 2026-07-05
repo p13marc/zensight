@@ -101,20 +101,28 @@ pub struct FlowRecord {
 /// One observed TLS client fingerprint (passive asset inventory from netring's
 /// ClientHello parsing) — SNI + JA3/JA4 + negotiated ALPN, with how many
 /// handshakes matched it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct TlsRecord {
     pub sni: Option<String>,
     pub alpn: Option<String>,
     pub ja3: Option<String>,
     pub ja4: Option<String>,
     pub count: u64,
+    /// The ClientHello offered a post-quantum (hybrid) key-share group (#326).
+    /// Fleet PQ-readiness signal; additive (`#[serde(default)]` for old records).
+    #[serde(default)]
+    pub pq_key_share: bool,
+    /// Application protocol classified from ALPN + SNI + port (e.g. `h2`, `doh`),
+    /// if known (#326). Additive.
+    #[serde(default)]
+    pub app_protocol: Option<String>,
 }
 
 /// One observed QUIC Initial (netring, passive). QUIC carries the destination
 /// hostname (SNI) and ALPN in the *unprotected* Initial ClientHello, so this is
 /// the QUIC analogue of TLS SNI visibility — for the growing share of HTTPS that
 /// has moved off TCP+TLS onto QUIC/h3. Served on demand from `@/query/quic`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct QuicRecord {
     /// Server Name Indication from the ClientHello (the dialed hostname).
     pub sni: Option<String>,
@@ -125,13 +133,24 @@ pub struct QuicRecord {
     pub version: String,
     /// Number of Initials matching this (sni, version).
     pub count: u64,
+    /// QUIC JA4 (`q`-prefixed FoxIO format, royalty-free — OSI-clean, #326), if
+    /// recoverable from the Initial's embedded ClientHello. Additive.
+    #[serde(default)]
+    pub ja4: Option<String>,
+    /// The Initial offered a post-quantum (hybrid) key-share group (#326). Additive.
+    #[serde(default)]
+    pub pq_key_share: bool,
+    /// Application protocol classified from ALPN + SNI + port (e.g. `h3`, `doq`),
+    /// if known (#326). Additive.
+    #[serde(default)]
+    pub app_protocol: Option<String>,
 }
 
 /// One observed SSH handshake fingerprint (netring, passive), keyed by HASSH.
 /// HASSH (client) / HASSHServer fingerprints the SSH implementation from its
 /// KEXINIT algorithm lists — fleet fingerprinting + rogue-client detection
 /// without touching the (encrypted) session. Served on demand from `@/query/ssh`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct SshRecord {
     /// HASSH / HASSHServer fingerprint (lowercase-hex MD5).
     pub hassh: String,
@@ -142,6 +161,10 @@ pub struct SshRecord {
     pub banner: Option<String>,
     /// Number of handshakes matching this fingerprint.
     pub count: u64,
+    /// KEXINIT key-exchange algorithms this side offered (#326, from netring's
+    /// typed SSH-fingerprint handler). Bounded; additive (`#[serde(default)]`).
+    #[serde(default)]
+    pub kex_algorithms: Vec<String>,
 }
 
 /// One observed JA4H HTTP-request fingerprint (netring, passive — issue #124),
@@ -230,6 +253,24 @@ pub struct DnsRecord {
     pub queries: u64,
     /// Responses for this domain that returned NXDOMAIN.
     pub nxdomain: u64,
+}
+
+/// One observed encrypted-DNS destination (netring, #326), served on demand from
+/// `@/query/encrypted_dns`. Encrypted DNS (DoT/DoQ/DoH) hides resolution from
+/// passive DNS RED and can tunnel/exfiltrate past a network resolver policy; this
+/// surfaces where it's going and whether the resolver is a known/sanctioned one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct EncryptedDnsRecord {
+    /// Transport slug: `dot` (DNS-over-TLS), `doq` (DNS-over-QUIC), or `doh`
+    /// (DNS-over-HTTPS).
+    pub transport: String,
+    /// Resolver hostname (SNI), if the handshake carried one.
+    pub sni: Option<String>,
+    /// The destination matched netring's known-public-resolver set (Cloudflare /
+    /// Google / Quad9 / …). `false` = an un-recognised (possibly rogue) resolver.
+    pub via_known_resolver: bool,
+    /// Number of encrypted-DNS sessions to this (transport, sni, resolver-class).
+    pub count: u64,
 }
 
 /// One observed HTTP host (netring, cleartext), served on demand. Carries request

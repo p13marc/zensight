@@ -35,7 +35,9 @@ pub async fn run_drains(
     let tcp_resets = channels.tcp_resets.clone();
     let tcp_refused = channels.tcp_refused.clone();
     let tls_handshakes = channels.tls_handshakes.clone();
+    let tls_pq_handshakes = channels.tls_pq_handshakes.clone();
     let tls_inventory = channels.tls_inventory.clone();
+    let enc_dns = channels.enc_dns.clone();
     let l4 = channels.l4.clone();
     let icmp = channels.icmp.clone();
     let dns = channels.dns.clone();
@@ -102,6 +104,35 @@ pub async fn run_drains(
         let tls_n = tls_handshakes.load(Ordering::Relaxed);
         let tls_distinct = tls_inventory.lock().map(|i| i.len() as u64).unwrap_or(0);
         points.extend(map::tls_points(sensor_id, tls_n, tls_distinct));
+        // TLS post-quantum readiness (#326): share of handshakes offering a PQ
+        // hybrid key-share. Only once any handshake is seen (avoid a 0/0 = 0 that
+        // clobbers the cached gauge on an unarmed build).
+        if tls_n > 0 {
+            let pq_n = tls_pq_handshakes.load(Ordering::Relaxed);
+            points.push(map::tls_pq_ratio_point(sensor_id, pq_n, tls_n));
+        }
+
+        // Encrypted-DNS aggregates (#326) — only once any encrypted-DNS session has
+        // been classified, so the cached counters aren't clobbered to 0.
+        let enc_dot = enc_dns.dot.load(Ordering::Relaxed);
+        let enc_doq = enc_dns.doq.load(Ordering::Relaxed);
+        let enc_doh = enc_dns.doh.load(Ordering::Relaxed);
+        if enc_dot + enc_doq + enc_doh > 0 {
+            let enc_unknown = enc_dns.unknown_resolver.load(Ordering::Relaxed);
+            let enc_distinct = enc_dns
+                .inventory
+                .lock()
+                .map(|i| i.len() as u64)
+                .unwrap_or(0);
+            points.extend(map::encrypted_dns_points(
+                sensor_id,
+                enc_dot,
+                enc_doq,
+                enc_doh,
+                enc_unknown,
+                enc_distinct,
+            ));
+        }
 
         // L7 QUIC / SSH inventory sizes (issue #72) — only published once the
         // inventory is non-empty, so the cached gauge isn't clobbered to 0 on a

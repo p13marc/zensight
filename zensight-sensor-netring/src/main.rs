@@ -183,6 +183,13 @@ async fn main() -> Result<()> {
                 channels.ssh.clone(),
             ));
         }
+        if cfg.collect.encrypted_dns {
+            runner.spawn(query::run_encrypted_dns(
+                s.clone(),
+                key_prefix.clone(),
+                channels.enc_dns.clone(),
+            ));
+        }
         #[cfg(feature = "ja4plus")]
         if cfg.collect.http_fp {
             runner.spawn(query::run_ja4h(
