@@ -107,6 +107,43 @@ mod zenoh_env_tests {
     }
 }
 
+/// Link profile for telemetry consumers on constrained links (#364).
+///
+/// `Constrained` bundles the low-bandwidth behaviors documented in
+/// `docs/ZENOH-EFFICIENCY.md` §R6: scoped subscriptions instead of the
+/// `zensight/**` firehose and no AdvancedSubscriber `history()`/`recovery()`
+/// (late-join back-fill comes from the consumer's local store instead of a
+/// reconnect history burst). Serialization already defaults to CBOR
+/// ([`Format::default`]) regardless of profile.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinkProfile {
+    /// Full-fidelity subscription: history, recovery, late-publisher detection.
+    #[default]
+    Standard,
+    /// Low-bandwidth links: plain subscribers, no history/recovery burst.
+    Constrained,
+}
+
+impl LinkProfile {
+    /// All profiles, for settings pickers.
+    pub const ALL: &'static [LinkProfile] = &[LinkProfile::Standard, LinkProfile::Constrained];
+
+    /// Stable lowercase name (matches the serde representation).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LinkProfile::Standard => "standard",
+            LinkProfile::Constrained => "constrained",
+        }
+    }
+}
+
+impl std::fmt::Display for LinkProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Log output format.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -373,6 +410,28 @@ pub fn load_config<T: for<'de> Deserialize<'de>>(path: impl AsRef<Path>) -> Resu
 /// Load a configuration from a JSON5 string.
 pub fn parse_config<T: for<'de> Deserialize<'de>>(content: &str) -> Result<T> {
     json5::from_str(content).map_err(|e| Error::Config(format!("Failed to parse config: {}", e)))
+}
+
+#[cfg(test)]
+mod link_profile_tests {
+    use super::*;
+
+    #[test]
+    fn default_is_standard() {
+        assert_eq!(LinkProfile::default(), LinkProfile::Standard);
+    }
+
+    #[test]
+    fn serde_lowercase_round_trip() {
+        for profile in LinkProfile::ALL {
+            let json = serde_json::to_string(profile).unwrap();
+            assert_eq!(json, format!("\"{}\"", profile.as_str()));
+            let back: LinkProfile = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, *profile);
+        }
+        let constrained: LinkProfile = json5::from_str("\"constrained\"").unwrap();
+        assert_eq!(constrained, LinkProfile::Constrained);
+    }
 }
 
 #[cfg(test)]

@@ -702,11 +702,45 @@ fn test_settings_view() {
     assert!(ui.find("Save Settings").is_ok());
 }
 
+/// The link-profile controls render in the Zenoh section (#364).
+#[test]
+fn test_settings_link_profile_controls() {
+    let state = SettingsState::default();
+    let mut ui = simulator(settings_view(&state));
+
+    assert!(ui.find("Link profile:").is_ok());
+    assert!(ui.find("Subscription scope:").is_ok());
+    // Standard profile help text is shown by default.
+    assert!(
+        ui.find("Full fidelity: reconnect history burst + missed-sample recovery")
+            .is_ok()
+    );
+}
+
+/// Constrained profile swaps in the low-bandwidth help caption (#364).
+#[test]
+fn test_settings_constrained_profile_help() {
+    let mut state = SettingsState::default();
+    state.set_link_profile(zensight_common::LinkProfile::Constrained);
+    assert!(state.modified);
+    let mut ui = simulator(settings_view(&state));
+    assert!(
+        ui.find("Low bandwidth: no history/recovery traffic; history comes from the local store")
+            .is_ok()
+    );
+}
+
 /// Test clicking Save Settings button.
 #[test]
 fn test_settings_save_button() {
     let state = SettingsState::default();
-    let mut ui = simulator(settings_view(&state));
+    // The settings form is taller than the default simulator viewport since
+    // the link-profile section (#364); size up so Save stays clickable.
+    let mut ui = iced_test::Simulator::with_size(
+        iced::Settings::default(),
+        iced::Size::new(1024.0, 1400.0),
+        settings_view(&state),
+    );
 
     // Click Save button
     let _ = ui.click("Save Settings");

@@ -12,7 +12,7 @@ use crate::message::Message;
 use crate::view::alerts::{AlertFilterPreset, AlertRule};
 use crate::view::groups::GroupsState;
 use crate::view::icons::{self, IconSize};
-use zensight_common::Protocol;
+use zensight_common::{LinkProfile, Protocol};
 
 /// Persistent settings that are saved to disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +63,14 @@ pub struct PersistentSettings {
     /// per-sensor source (#306). Default on.
     #[serde(default = "default_group_by_host")]
     pub group_by_host: bool,
+    /// Telemetry subscription scope (#364): key expressions replacing the
+    /// `zensight/**` firehose. Empty = subscribe to everything.
+    #[serde(default)]
+    pub subscription_scope: Vec<String>,
+    /// Link profile (#364): `standard` (history/recovery) or `constrained`
+    /// (plain subscribers, local-store back-fill) for low-bandwidth links.
+    #[serde(default)]
+    pub link_profile: LinkProfile,
 }
 
 fn default_group_by_host() -> bool {
@@ -104,6 +112,8 @@ impl Default for PersistentSettings {
             overview_expanded: default_overview_expanded(),
             current_view: CurrentView::default(),
             group_by_host: default_group_by_host(),
+            subscription_scope: Vec::new(),
+            link_profile: LinkProfile::default(),
         }
     }
 }
@@ -186,6 +196,8 @@ impl PersistentSettings {
         );
         state.desktop_notifications = self.desktop_notifications;
         state.group_by_host = self.group_by_host;
+        state.subscription_scope = self.subscription_scope.join(", ");
+        state.link_profile = self.link_profile;
         state
     }
 
@@ -209,6 +221,8 @@ impl PersistentSettings {
             overview_expanded: default_overview_expanded(),
             current_view: CurrentView::default(),
             group_by_host: state.group_by_host,
+            subscription_scope: state.scope_entries(),
+            link_profile: state.link_profile,
         }
     }
 }
@@ -230,6 +244,11 @@ pub struct SettingsState {
     pub desktop_notifications: bool,
     /// Group dashboard cards by physical host (correlator entities) (#306).
     pub group_by_host: bool,
+    /// Telemetry subscription scope (#364), comma-separated key expressions.
+    /// Empty = the `zensight/**` firehose.
+    pub subscription_scope: String,
+    /// Link profile (#364): standard vs. constrained (low-bandwidth).
+    pub link_profile: LinkProfile,
     /// Maximum metric history entries per device.
     pub max_history: String,
     /// Maximum alerts to keep.
@@ -252,6 +271,8 @@ impl Default for SettingsState {
             dark_theme: true,
             desktop_notifications: false,
             group_by_host: true,
+            subscription_scope: String::new(),
+            link_profile: LinkProfile::default(),
             max_history: "500".to_string(),
             max_alerts: "100".to_string(),
             modified: false,
@@ -280,6 +301,8 @@ impl SettingsState {
             dark_theme,
             desktop_notifications: false,
             group_by_host: true,
+            subscription_scope: String::new(),
+            link_profile: LinkProfile::default(),
             max_history: max_history.to_string(),
             max_alerts: max_alerts.to_string(),
             modified: false,
@@ -305,6 +328,20 @@ impl SettingsState {
     /// Update listen endpoints.
     pub fn set_listen(&mut self, listen: String) {
         self.zenoh_listen = listen;
+        self.modified = true;
+        self.clear_messages();
+    }
+
+    /// Update the telemetry subscription scope (#364).
+    pub fn set_subscription_scope(&mut self, scope: String) {
+        self.subscription_scope = scope;
+        self.modified = true;
+        self.clear_messages();
+    }
+
+    /// Update the link profile (#364).
+    pub fn set_link_profile(&mut self, profile: LinkProfile) {
+        self.link_profile = profile;
         self.modified = true;
         self.clear_messages();
     }
@@ -359,6 +396,13 @@ impl SettingsState {
             }
         }
 
+        // Validate subscription-scope key expressions (#364).
+        for scope in self.parse_endpoints(&self.subscription_scope) {
+            if zenoh::key_expr::KeyExpr::try_from(scope.as_str()).is_err() {
+                return Err(format!("Invalid subscription key expression: {}", scope));
+            }
+        }
+
         // Validate max history
         let max_history: usize = self
             .max_history
@@ -407,6 +451,11 @@ impl SettingsState {
     /// Get listen endpoints as a vector.
     pub fn listen_endpoints(&self) -> Vec<String> {
         self.parse_endpoints(&self.zenoh_listen)
+    }
+
+    /// Get subscription-scope key expressions as a vector (#364).
+    pub fn scope_entries(&self) -> Vec<String> {
+        self.parse_endpoints(&self.subscription_scope)
     }
 
     /// Get stale threshold in milliseconds.
@@ -602,6 +651,46 @@ fn render_zenoh_section(state: &SettingsState) -> Element<'_, Message> {
             color: Some(crate::view::theme::colors(theme).text_dimmed()),
         });
 
+    // Link profile (#364): standard vs. constrained (low-bandwidth links).
+    let profile_label = text("Link profile:").size(14);
+    let profile_picker = pick_list(
+        LinkProfile::ALL,
+        Some(state.link_profile),
+        Message::SetLinkProfile,
+    )
+    .placeholder("Select profile");
+    let profile_row = row![profile_label, profile_picker]
+        .spacing(10)
+        .align_y(Alignment::Center);
+    let profile_help = text(match state.link_profile {
+        LinkProfile::Standard => "Full fidelity: reconnect history burst + missed-sample recovery",
+        LinkProfile::Constrained => {
+            "Low bandwidth: no history/recovery traffic; history comes from the local store"
+        }
+    })
+    .size(11)
+    .style(|theme: &Theme| text::Style {
+        color: Some(crate::view::theme::colors(theme).text_dimmed()),
+    });
+
+    // Subscription scope (#364): narrow the zensight/** telemetry firehose.
+    let scope_label = text("Subscription scope:").size(14);
+    let scope_input = text_input(
+        "zensight/netring/**, zensight/sysinfo/**",
+        &state.subscription_scope,
+    )
+    .on_input(Message::SubscriptionScopeChanged)
+    .padding(8)
+    .width(Length::Fixed(400.0));
+    let scope_help = text(
+        "Comma-separated telemetry key expressions; empty = everything (zensight/**). \
+         Health, alerts, and entities are unaffected.",
+    )
+    .size(11)
+    .style(|theme: &Theme| text::Style {
+        color: Some(crate::view::theme::colors(theme).text_dimmed()),
+    });
+
     column![
         section_title,
         mode_row,
@@ -612,6 +701,11 @@ fn render_zenoh_section(state: &SettingsState) -> Element<'_, Message> {
         listen_label,
         listen_input,
         listen_help,
+        profile_row,
+        profile_help,
+        scope_label,
+        scope_input,
+        scope_help,
     ]
     .spacing(8)
     .into()
@@ -826,6 +920,8 @@ mod tests {
             overview_expanded: true,
             current_view: CurrentView::default(),
             group_by_host: true,
+            subscription_scope: vec!["zensight/netring/**".to_string()],
+            link_profile: LinkProfile::Constrained,
         };
 
         // Serialize to JSON
@@ -861,6 +957,11 @@ mod tests {
             overview_expanded: true,
             current_view: CurrentView::default(),
             group_by_host: true,
+            subscription_scope: vec![
+                "zensight/netring/**".to_string(),
+                "zensight/sysinfo/**".to_string(),
+            ],
+            link_profile: LinkProfile::Constrained,
         };
 
         // Convert to UI state
@@ -874,6 +975,13 @@ mod tests {
         // The opt-in notification flag survives the persistent→state hop (#26).
         assert!(state.desktop_notifications);
 
+        // The link-profile settings survive the persistent→state hop (#364).
+        assert_eq!(
+            state.subscription_scope,
+            "zensight/netring/**, zensight/sysinfo/**"
+        );
+        assert_eq!(state.link_profile, LinkProfile::Constrained);
+
         // Convert back to persistent
         let restored = PersistentSettings::from_state(&state);
         assert_eq!(restored.zenoh_mode, "client");
@@ -883,5 +991,43 @@ mod tests {
         assert_eq!(restored.max_history, 750);
         assert_eq!(restored.max_alerts, 150);
         assert!(restored.desktop_notifications);
+        assert_eq!(
+            restored.subscription_scope,
+            vec!["zensight/netring/**", "zensight/sysinfo/**"]
+        );
+        assert_eq!(restored.link_profile, LinkProfile::Constrained);
+    }
+
+    /// A pre-#364 settings file (no subscription_scope / link_profile keys)
+    /// must load with the defaults: full firehose, standard profile.
+    #[test]
+    fn test_pre_link_profile_settings_tolerated() {
+        let old = r#"{
+            "zenoh_mode": "peer",
+            "zenoh_connect": [],
+            "zenoh_listen": [],
+            "stale_threshold_secs": 120
+        }"#;
+        let settings: PersistentSettings = json5::from_str(old).expect("parse old settings");
+        assert!(settings.subscription_scope.is_empty());
+        assert_eq!(settings.link_profile, LinkProfile::Standard);
+    }
+
+    /// Scope entries must parse as valid zenoh key expressions (#364).
+    #[test]
+    fn test_scope_validation() {
+        let mut settings = SettingsState {
+            subscription_scope: "zensight/netring/**".to_string(),
+            ..SettingsState::default()
+        };
+        assert!(settings.validate().is_ok());
+
+        // Empty scope = firehose, valid.
+        settings.subscription_scope = String::new();
+        assert!(settings.validate().is_ok());
+
+        // A `//` (empty chunk) is not a valid key expression.
+        settings.subscription_scope = "zensight//broken".to_string();
+        assert!(settings.validate().is_err());
     }
 }

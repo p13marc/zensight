@@ -5,8 +5,9 @@ use zenoh::sample::SampleKind;
 use zenoh_ext::{AdvancedSubscriberBuilderExt, HistoryConfig, RecoveryConfig};
 
 use zensight_common::{
-    Alert, DeviceLiveness, ErrorReport, HealthSnapshot, HostEntity, SensorInfo, TelemetryPoint,
-    ZenohConfig, all_entity_wildcard, all_telemetry_wildcard, decode_auto, entities_query_key,
+    Alert, DeviceLiveness, ErrorReport, HealthSnapshot, HostEntity, LinkProfile, SensorInfo,
+    TelemetryPoint, ZenohConfig, all_entity_wildcard, all_telemetry_wildcard, decode_auto,
+    entities_query_key,
 };
 
 use crate::message::Message;
@@ -17,8 +18,36 @@ const SENSOR_LIVELINESS_EXPR: &str = "zensight/*/@/alive";
 /// Key expression for device liveliness tokens.
 const DEVICE_LIVELINESS_EXPR: &str = "zensight/*/@/devices/*/alive";
 
+/// Everything the telemetry subscription is keyed on (#364).
+///
+/// `Subscription::run_with` restarts the stream whenever this value changes
+/// (`Hash`/`Eq`), so a scope or profile edit tears the session down and
+/// reconnects exactly like a connection-settings change does.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LinkConfig {
+    /// How to join the Zenoh mesh.
+    pub zenoh: ZenohConfig,
+    /// Telemetry subscription key expressions. Empty ⇒ the full
+    /// [`all_telemetry_wildcard`] firehose (`zensight/**`).
+    pub scope: Vec<String>,
+    /// Standard (history/recovery) vs. constrained (plain, store back-fill).
+    pub profile: LinkProfile,
+}
+
+/// The telemetry key expressions to subscribe to: the configured scope, or the
+/// `zensight/**` firehose when no scope is set. Control-plane (`@/…`) and
+/// `_meta` subscribers are unaffected — those keys are `@`-verbatim or
+/// `_meta`-prefixed and never ride the telemetry scope.
+fn effective_scopes(config: &LinkConfig) -> Vec<String> {
+    if config.scope.is_empty() {
+        vec![all_telemetry_wildcard()]
+    } else {
+        config.scope.clone()
+    }
+}
+
 /// Create a subscription that connects to Zenoh and receives telemetry.
-pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
+pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
     Subscription::run_with(config, move |config| {
         let config = config.clone();
         async_stream::stream! {
@@ -26,7 +55,7 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
             yield Message::Connecting;
 
             // Connect to Zenoh
-            let session = match connect_zenoh(&config).await {
+            let session = match connect_zenoh(&config.zenoh).await {
                 Ok(session) => {
                     yield Message::Connected(Some(std::sync::Arc::new(session.clone())));
                     session
@@ -182,11 +211,17 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
             }
 
             // Only now — with every blocking one-shot done and the drain loop
-            // next — subscribe to the telemetry firehose. AdvancedSubscriber:
+            // next — subscribe to telemetry. In the Standard profile each scope
+            // gets an AdvancedSubscriber:
             // - history(): cached samples from publishers on subscription
             // - detect_late_publishers(): history from publishers appearing later
             // - recovery(): automatic recovery of missed samples
+            // In the Constrained profile (#364) each scope gets a PLAIN
+            // subscriber instead — no history burst, no recovery traffic; the
+            // app back-fills late-join state from the local redb store.
             //
+            // All telemetry subscribers feed ONE shared unbounded flume channel
+            // via callbacks (their handles are kept alive in `_telemetry_subs`).
             // The channel MUST be unbounded. With the default bounded (256)
             // channel, the history fetch deadlocks the whole session at declare
             // time: cached samples pour into the channel before anything drains
@@ -197,34 +232,77 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
             // caches; "Advanced subscriber created" never logged). Memory stays
             // bounded in practice: publisher caches are finite and the drain
             // loop batches the backlog away as soon as the declare completes.
-            let key_expr = all_telemetry_wildcard();
-            let subscriber = match session
-                .declare_subscriber(&key_expr)
-                .with(flume::unbounded())
-                .history(HistoryConfig::default().detect_late_publishers())
-                .recovery(RecoveryConfig::default())
-                .subscriber_detection()
-                .await
-            {
-                Ok(sub) => sub,
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to create advanced subscriber");
-                    yield Message::Disconnected(e.to_string());
-                    return;
+            let (telemetry_tx, telemetry_rx) = flume::unbounded::<zenoh::sample::Sample>();
+            let scopes = effective_scopes(&config);
+            let mut advanced_subs = Vec::new();
+            let mut plain_subs = Vec::new();
+            for key_expr in &scopes {
+                match config.profile {
+                    LinkProfile::Standard => {
+                        let tx = telemetry_tx.clone();
+                        match session
+                            .declare_subscriber(key_expr)
+                            .callback(move |sample| {
+                                let _ = tx.send(sample);
+                            })
+                            .history(HistoryConfig::default().detect_late_publishers())
+                            .recovery(RecoveryConfig::default())
+                            .subscriber_detection()
+                            .await
+                        {
+                            Ok(sub) => advanced_subs.push(sub),
+                            Err(e) => {
+                                tracing::error!(
+                                    error = %e, key = %key_expr,
+                                    "Failed to create advanced subscriber"
+                                );
+                                yield Message::Disconnected(e.to_string());
+                                return;
+                            }
+                        }
+                    }
+                    LinkProfile::Constrained => {
+                        let tx = telemetry_tx.clone();
+                        match session
+                            .declare_subscriber(key_expr)
+                            .callback(move |sample| {
+                                let _ = tx.send(sample);
+                            })
+                            .await
+                        {
+                            Ok(sub) => plain_subs.push(sub),
+                            Err(e) => {
+                                tracing::error!(
+                                    error = %e, key = %key_expr,
+                                    "Failed to create plain telemetry subscriber"
+                                );
+                                yield Message::Disconnected(e.to_string());
+                                return;
+                            }
+                        }
+                    }
                 }
-            };
+            }
+            // Drop the original sender so the channel closes if every
+            // subscriber is somehow gone (the clones live in the callbacks).
+            drop(telemetry_tx);
 
-            tracing::info!("Advanced subscriber created with history and recovery");
+            tracing::info!(
+                profile = %config.profile,
+                scopes = ?scopes,
+                "Telemetry subscribers created"
+            );
 
             // Process incoming samples from all subscriptions
             loop {
                 tokio::select! {
-                    // Telemetry subscription. One awaited sample, then an
-                    // opportunistic drain of whatever else is already queued:
-                    // a startup history burst (or any streaming spike) becomes
-                    // ONE batched message per iced update instead of thousands
-                    // of per-sample updates starving the UI thread.
-                    result = subscriber.recv_async() => {
+                    // Telemetry subscriptions (all scopes share one channel).
+                    // One awaited sample, then an opportunistic drain of
+                    // whatever else is already queued: a startup history burst
+                    // (or any streaming spike) becomes ONE batched message per
+                    // iced update instead of thousands of per-sample updates
+                    // starving the UI thread.
+                    result = telemetry_rx.recv_async() => {
                         match result {
                             Ok(sample) => {
                                 let mut telemetry: Vec<TelemetryPoint> = Vec::new();
@@ -233,7 +311,7 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
                                     push_sorted(msg, &mut telemetry, &mut others);
                                 }
                                 while telemetry.len() < TELEMETRY_BATCH_MAX {
-                                    match subscriber.try_recv() {
+                                    match telemetry_rx.try_recv() {
                                         Ok(s) => {
                                             if let Some(msg) = sample_to_message(&s) {
                                                 push_sorted(msg, &mut telemetry, &mut others);
@@ -253,7 +331,9 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
                                 }
                             }
                             Err(e) => {
-                                tracing::error!(error = %e, "Subscriber error");
+                                // Only closes if every telemetry subscriber
+                                // (and its callback sender) has been dropped.
+                                tracing::error!(error = %e, "Telemetry channel closed");
                                 yield Message::Disconnected(e.to_string());
                                 return;
                             }
@@ -776,6 +856,32 @@ mod tests {
         assert!(parse_device_liveliness("zensight/snmp/@/devices/router01/status", true).is_none());
         // Too short
         assert!(parse_device_liveliness("zensight/snmp/@/devices", true).is_none());
+    }
+
+    #[test]
+    fn test_effective_scopes_empty_is_firehose() {
+        let config = LinkConfig {
+            zenoh: ZenohConfig::default(),
+            scope: vec![],
+            profile: LinkProfile::Standard,
+        };
+        assert_eq!(effective_scopes(&config), vec!["zensight/**".to_string()]);
+    }
+
+    #[test]
+    fn test_effective_scopes_passthrough_preserves_order() {
+        let config = LinkConfig {
+            zenoh: ZenohConfig::default(),
+            scope: vec!["zensight/netring/**".into(), "zensight/sysinfo/**".into()],
+            profile: LinkProfile::Constrained,
+        };
+        assert_eq!(
+            effective_scopes(&config),
+            vec![
+                "zensight/netring/**".to_string(),
+                "zensight/sysinfo/**".to_string()
+            ]
+        );
     }
 
     #[test]

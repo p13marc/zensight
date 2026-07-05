@@ -45,7 +45,7 @@ pub use command::{
 pub use comparison::ComparisonOp;
 pub use config::{
     ArtifactLimits, ArtifactReportLimits, ArtifactSnapshotLimits, BaseConfig, CommonArtifactLimits,
-    LogFormat, LoggingConfig, SnapshotDir, ZenohConfig, load_config, parse_config,
+    LinkProfile, LogFormat, LoggingConfig, SnapshotDir, ZenohConfig, load_config, parse_config,
 };
 pub use entity::{HostEntity, MemberClaim, NameVal};
 pub use error::{Error, Result};
