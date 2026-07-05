@@ -369,7 +369,8 @@ impl<C: SensorConfig> SensorRunner<C> {
                 self.config.key_prefix().to_string(),
                 Format::Json,
                 crate::advanced_publisher::AdvancedPublisherConfig::cache_only(1),
-            );
+            )
+            .with_qos(zensight_common::QosClass::Evidence);
             let name = self.name.clone();
             let version = self.version.clone();
             let key_prefix = self.config.key_prefix().to_string();

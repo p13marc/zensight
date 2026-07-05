@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use zensight_common::{Format, TelemetryPoint};
+use zensight_common::{Format, QosClass, TelemetryPoint};
 
 use crate::advanced_publisher::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
 use crate::error::{Result, SensorError};
@@ -114,10 +114,18 @@ impl Publisher {
         stats
     }
 
-    /// Publish raw bytes to a key (for status messages, etc.).
-    pub async fn publish_raw(&self, key: &str, payload: Vec<u8>) -> Result<()> {
+    /// Publish raw bytes to a control-plane key with an explicit QoS class.
+    ///
+    /// Alerts/commands use [`QosClass::Alert`]/[`QosClass::Command`]
+    /// (reliable+block) so a firing/resolved event is never dropped on a lossy
+    /// link; health/liveness use [`QosClass::HealthLiveness`] (drop-friendly).
+    pub async fn publish_raw(&self, key: &str, payload: Vec<u8>, qos: QosClass) -> Result<()> {
         self.session
             .put(key, payload)
+            .congestion_control(qos.congestion_control())
+            .priority(qos.priority())
+            .express(qos.express())
+            .reliability(qos.reliability())
             .await
             .map_err(|e| SensorError::Publish {
                 key: key.to_string(),
@@ -127,17 +135,27 @@ impl Publisher {
         Ok(())
     }
 
-    /// Publish a JSON value to a key.
-    pub async fn publish_json<T: serde::Serialize>(&self, key: &str, value: &T) -> Result<()> {
+    /// Publish a JSON value to a control-plane key with an explicit QoS class.
+    pub async fn publish_json<T: serde::Serialize>(
+        &self,
+        key: &str,
+        value: &T,
+        qos: QosClass,
+    ) -> Result<()> {
         let payload = serde_json::to_vec(value)?;
-        self.publish_raw(key, payload).await
+        self.publish_raw(key, payload, qos).await
     }
 
-    /// Delete (tombstone) a key — used to clear keyed, lifecycle-managed state
-    /// such as resolved alerts so late subscribers don't see stale values.
-    pub async fn delete(&self, key: &str) -> Result<()> {
+    /// Delete (tombstone) a key with an explicit QoS class — used to clear keyed,
+    /// lifecycle-managed state such as resolved alerts so late subscribers don't
+    /// see stale values. Alert tombstones must arrive, so pass [`QosClass::Alert`].
+    pub async fn delete(&self, key: &str, qos: QosClass) -> Result<()> {
         self.session
             .delete(key)
+            .congestion_control(qos.congestion_control())
+            .priority(qos.priority())
+            .express(qos.express())
+            .reliability(qos.reliability())
             .await
             .map_err(|e| SensorError::Publish {
                 key: key.to_string(),

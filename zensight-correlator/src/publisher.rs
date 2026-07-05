@@ -38,9 +38,15 @@ impl EntityPublisher {
     async fn publisher_for(&mut self, entity_id: &str) -> anyhow::Result<&Publisher<'static>> {
         if !self.publishers.contains_key(entity_id) {
             let key = entity_key(entity_id);
+            // Entities are materialized fleet state — must arrive (reliable+block).
+            let q = zensight_common::QosClass::Entity;
             let pubr = self
                 .session
                 .declare_publisher(key.clone())
+                .congestion_control(q.congestion_control())
+                .priority(q.priority())
+                .express(q.express())
+                .reliability(q.reliability())
                 .await
                 .map_err(|e| anyhow::anyhow!("failed to declare entity publisher {key}: {e}"))?;
             self.publishers.insert(entity_id.to_string(), pubr);

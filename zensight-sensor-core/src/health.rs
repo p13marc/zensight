@@ -517,7 +517,9 @@ impl SensorHealth {
 
         let snapshot = self.snapshot();
         let key = format!("{}/@/health", publisher.key_prefix());
-        publisher.publish_json(&key, &snapshot).await
+        publisher
+            .publish_json(&key, &snapshot, zensight_common::QosClass::HealthLiveness)
+            .await
     }
 
     /// Publish device liveness to Zenoh.
@@ -532,7 +534,9 @@ impl SensorHealth {
                 publisher.key_prefix(),
                 device_id
             );
-            publisher.publish_json(&key, &liveness).await?;
+            publisher
+                .publish_json(&key, &liveness, zensight_common::QosClass::HealthLiveness)
+                .await?;
         }
 
         Ok(())
@@ -545,7 +549,9 @@ impl SensorHealth {
         };
 
         let key = format!("{}/@/errors", publisher.key_prefix());
-        publisher.publish_json(&key, report).await
+        publisher
+            .publish_json(&key, report, zensight_common::QosClass::HealthLiveness)
+            .await
     }
 }
 

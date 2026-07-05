@@ -65,7 +65,9 @@ impl SensorStatus {
     /// Publishes to `{key_prefix}/@/status`.
     pub async fn publish(&self, publisher: &Publisher) -> Result<()> {
         let key = format!("{}/@/status", publisher.key_prefix());
-        publisher.publish_json(&key, self).await
+        publisher
+            .publish_json(&key, self, zensight_common::QosClass::Command)
+            .await
     }
 }
 

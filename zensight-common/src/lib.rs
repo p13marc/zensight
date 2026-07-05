@@ -20,6 +20,7 @@ pub mod error;
 pub mod evidence;
 pub mod health;
 pub mod keyexpr;
+pub mod qos;
 pub mod query_detail;
 pub mod semconv;
 pub mod serialization;
@@ -58,6 +59,7 @@ pub use keyexpr::{
     all_telemetry_wildcard, correlator_alive_key, entities_query_key, entity_key,
     host_evidence_key, name_observation_key, names_query_key, parse_key_expr, sensor_info_key,
 };
+pub use qos::QosClass;
 pub use query_detail::{
     AssetRecord, CgroupNode, CgroupPid, DnsRecord, ElephantRecord, EncryptedDnsRecord, FlowRecord,
     HttpHostRecord, Ja4hRecord, MatrixRecord, NameInfo, NeighborRecord, ProcessRecord, QuicRecord,

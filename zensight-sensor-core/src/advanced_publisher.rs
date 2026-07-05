@@ -32,7 +32,7 @@ use tokio::sync::RwLock;
 use zenoh::Session;
 use zenoh_ext::{AdvancedPublisher, AdvancedPublisherBuilderExt, CacheConfig, MissDetectionConfig};
 
-use zensight_common::{Format, TelemetryPoint, encode};
+use zensight_common::{Format, QosClass, TelemetryPoint, encode};
 
 use crate::error::{Result, SensorError};
 
@@ -103,6 +103,10 @@ pub struct AdvancedPublisherRegistry {
     config: AdvancedPublisherConfig,
     /// Serialization format.
     format: Format,
+    /// QoS class applied to every publisher declared by this registry
+    /// (default [`QosClass::Telemetry`]; override with [`Self::with_qos`] for
+    /// must-arrive feeds like evidence).
+    qos: QosClass,
     /// Cached publishers by key expression.
     publishers: RwLock<HashMap<String, AdvancedPublisher<'static>>>,
 }
@@ -130,8 +134,17 @@ impl AdvancedPublisherRegistry {
             key_prefix: key_prefix.into(),
             config,
             format,
+            qos: QosClass::Telemetry,
             publishers: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Override the QoS class for publishers declared by this registry (default
+    /// [`QosClass::Telemetry`]). Use for must-arrive feeds, e.g.
+    /// `AdvancedPublisherRegistry::new(..).with_qos(QosClass::Evidence)`.
+    pub fn with_qos(mut self, qos: QosClass) -> Self {
+        self.qos = qos;
+        self
     }
 
     /// Get the key prefix.
@@ -174,6 +187,10 @@ impl AdvancedPublisherRegistry {
         let mut builder = self
             .session
             .declare_publisher(owned_key)
+            .congestion_control(self.qos.congestion_control())
+            .priority(self.qos.priority())
+            .express(self.qos.express())
+            .reliability(self.qos.reliability())
             .cache(CacheConfig::default().max_samples(self.config.cache_size));
         if self.config.miss_detection {
             builder = builder.sample_miss_detection(
