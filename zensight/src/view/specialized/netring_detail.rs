@@ -121,6 +121,13 @@ pub struct NetringDetailState {
     /// by the app from the external alert set so the Security tab + Overview
     /// anomaly strip render without threading `AlertsState` through the view.
     pub anomalies: Vec<zensight_common::Alert>,
+    /// The flow↔process join result for one flow row (#309): `(flow key,
+    /// fetched attribution)`. One in-flight join at a time — clicking another
+    /// row's "who?" replaces it.
+    pub attribution: Option<(
+        String,
+        Fetch<Option<crate::view::specialized::attribution::AttributedProcess>>,
+    )>,
 }
 
 impl NetringDetailState {

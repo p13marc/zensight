@@ -368,6 +368,42 @@ impl NetlinkDetailState {
     }
 }
 
+/// The sockets key narrowed to one endpoint IP (#309), for the flow↔process
+/// join. Matches the sensor's `SocketSelector` `ip=` parameter.
+pub fn sockets_match_key(ip: &str) -> String {
+    format!("zensight/netlink/@/query/sockets?ip={ip}")
+}
+
+/// Fetch + decode **all** replies on `key`, concatenated (#309). The shared
+/// netlink query keys are answered by every netlink sensor on the mesh — the
+/// flow↔process join needs every host's (already `?ip=`-narrowed) rows, not
+/// just whichever host replied first. `None` when no sensor replied at all.
+pub async fn fetch_records_all<T: DeserializeOwned>(
+    session: Arc<zenoh::Session>,
+    key: String,
+) -> Option<Vec<T>> {
+    let replies = match session.get(&key).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(key = %key, error = %e, "query get failed");
+            return None;
+        }
+    };
+    let mut out: Vec<T> = Vec::new();
+    let mut any = false;
+    while let Ok(reply) = replies.recv_async().await {
+        let Ok(sample) = reply.result() else { continue };
+        match zensight_common::decode_auto::<Vec<T>>(&sample.payload().to_bytes()) {
+            Ok(mut records) => {
+                out.append(&mut records);
+                any = true;
+            }
+            Err(e) => tracing::warn!(key = %key, error = %e, "query: reply decode failed"),
+        }
+    }
+    any.then_some(out)
+}
+
 /// Fetch + decode the first reply on `key` into `Vec<T>`. Returns `None` if no
 /// sensor replied or the payload didn't decode. Iced-independent (testable).
 ///
@@ -417,6 +453,12 @@ mod tests {
         assert_eq!(
             NetlinkDetailTopic::Sockets.key(),
             "zensight/netlink/@/query/sockets"
+        );
+        // The endpoint-narrowed sockets key (#309) matches the sensor's
+        // SocketSelector `ip=` parameter.
+        assert_eq!(
+            sockets_match_key("10.0.0.5"),
+            "zensight/netlink/@/query/sockets?ip=10.0.0.5"
         );
         assert_eq!(
             NetlinkDetailTopic::Routes.key(),

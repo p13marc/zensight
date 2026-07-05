@@ -522,19 +522,24 @@ pub fn diagnostics_points(host: &str, d: &DiagnosticsSummary) -> Vec<TelemetryPo
 
 pub use zensight_common::{NeighborRecord, RouteRecord, SocketRecord};
 
-/// Selector parameters for the sockets query (`?state=&port=`). Both optional;
-/// absent means "no filter on that field".
+/// Selector parameters for the sockets query (`?state=&port=&ip=`). All
+/// optional; absent means "no filter on that field".
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SocketSelector {
     /// Match `SocketRecord::state` case-insensitively (e.g. `"established"`).
     pub state: Option<String>,
     /// Match local OR remote port.
     pub port: Option<u16>,
+    /// Match local OR remote endpoint IP (#309): the GUI flow↔process join
+    /// narrows the reply to sockets touching one flow endpoint, so every
+    /// netlink sensor answering the shared key returns only relevant rows.
+    pub ip: Option<String>,
 }
 
 impl SocketSelector {
-    /// Parse a Zenoh selector parameter string (`"state=established&port=22"`).
-    /// Unknown keys and unparseable ports are ignored (best-effort filter).
+    /// Parse a Zenoh selector parameter string
+    /// (`"state=established&port=22&ip=10.0.0.5"`). Unknown keys and
+    /// unparseable ports are ignored (best-effort filter).
     pub fn parse(params: &str) -> Self {
         let mut sel = SocketSelector::default();
         for pair in params.split('&').filter(|s| !s.is_empty()) {
@@ -542,13 +547,14 @@ impl SocketSelector {
             match k.trim() {
                 "state" if !v.is_empty() => sel.state = Some(v.trim().to_lowercase()),
                 "port" => sel.port = v.trim().parse().ok(),
+                "ip" if !v.is_empty() => sel.ip = Some(v.trim().to_string()),
                 _ => {}
             }
         }
         sel
     }
 
-    /// Does `rec` pass this selector? Port matches either endpoint.
+    /// Does `rec` pass this selector? Port/IP match either endpoint.
     pub fn matches(&self, rec: &SocketRecord) -> bool {
         if let Some(state) = &self.state
             && !rec.state.eq_ignore_ascii_case(state)
@@ -561,7 +567,21 @@ impl SocketSelector {
                 return false;
             }
         }
+        if let Some(ip) = &self.ip
+            && endpoint_ip_part(&rec.local) != ip
+            && endpoint_ip_part(&rec.remote) != ip
+        {
+            return false;
+        }
         true
+    }
+}
+
+/// The IP part of an `ip:port` endpoint string (IPv6 renders as `[..]:port`).
+fn endpoint_ip_part(endpoint: &str) -> &str {
+    match endpoint.rsplit_once(':') {
+        Some((host, _port)) => host.trim_matches(['[', ']']),
+        None => endpoint,
     }
 }
 
@@ -1716,6 +1736,24 @@ mod tests {
         // Combined: state AND port must both hold.
         assert!(SocketSelector::parse("state=established&port=22").matches(&rec));
         assert!(!SocketSelector::parse("state=listen&port=22").matches(&rec));
+    }
+
+    #[test]
+    fn socket_selector_ip_matches_either_endpoint() {
+        // #309: the flow↔process join narrows by endpoint IP, port-agnostic.
+        let rec = sock("10.0.0.1:5555", "1.1.1.1:22", "established");
+        assert!(SocketSelector::parse("ip=10.0.0.1").matches(&rec)); // local
+        assert!(SocketSelector::parse("ip=1.1.1.1").matches(&rec)); // remote
+        assert!(!SocketSelector::parse("ip=10.0.0.2").matches(&rec));
+        // Exact IP match, not a prefix false-positive.
+        assert!(!SocketSelector::parse("ip=10.0.0").matches(&rec));
+        // Combined with port.
+        assert!(SocketSelector::parse("ip=1.1.1.1&port=22").matches(&rec));
+        assert!(!SocketSelector::parse("ip=1.1.1.1&port=80").matches(&rec));
+        // IPv6 endpoints render as `[ip]:port`; the bracket is stripped.
+        let rec6 = sock("[2001:db8::1]:443", "[2001:db8::2]:5555", "established");
+        assert!(SocketSelector::parse("ip=2001:db8::1").matches(&rec6));
+        assert!(!SocketSelector::parse("ip=2001:db8::3").matches(&rec6));
     }
 
     #[test]

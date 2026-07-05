@@ -2435,6 +2435,48 @@ impl ZenSight {
                         crate::view::specialized::fetch::Fetch::from_result(result);
                 }
             }
+            Message::FetchFlowAttribution {
+                target,
+                key,
+                src,
+                dst,
+            } => {
+                use crate::view::specialized::fetch::Fetch;
+                let slot = Some((key.clone(), Fetch::Loading));
+                match target {
+                    crate::message::AttributionTarget::Security => {
+                        self.security.attribution = slot;
+                    }
+                    crate::message::AttributionTarget::Device => {
+                        if let Some(device) = self.selected_device.as_mut() {
+                            device.netring_detail.attribution = slot;
+                        }
+                    }
+                }
+                return self.query_flow_attribution(target, key, src, dst);
+            }
+            Message::FlowAttributionReceived {
+                target,
+                key,
+                result,
+            } => {
+                use crate::view::specialized::fetch::Fetch;
+                let slot = match target {
+                    crate::message::AttributionTarget::Security => {
+                        Some(&mut self.security.attribution)
+                    }
+                    crate::message::AttributionTarget::Device => self
+                        .selected_device
+                        .as_mut()
+                        .map(|d| &mut d.netring_detail.attribution),
+                };
+                // Ignore a stale reply if another row was asked about since.
+                if let Some(slot) = slot
+                    && slot.as_ref().is_some_and(|(k, _)| *k == key)
+                {
+                    *slot = Some((key, Fetch::from_result(result)));
+                }
+            }
             Message::OpenSecurity => {
                 self.set_view(CurrentView::Security);
                 // Pull the netring detector config so the tuning panel is ready.
@@ -3797,6 +3839,53 @@ impl ZenSight {
                 None => Err("No netring sensor responded".to_string()),
             };
             Message::AnomalyFlowsReceived(key, result)
+        })
+    }
+
+    /// Flow ↔ process join (#309): fetch every netlink sensor's sockets
+    /// narrowed to the flow's endpoint IPs (`?ip=`, server-side), then match
+    /// the 5-tuple. Only the host that actually owns an endpoint can hold a
+    /// matching socket, so the tuple match is itself host-discriminating — no
+    /// per-host key needed.
+    fn query_flow_attribution(
+        &self,
+        target: crate::message::AttributionTarget,
+        key: String,
+        src: String,
+        dst: String,
+    ) -> Task<Message> {
+        use crate::view::specialized::attribution::match_flow_socket;
+        use crate::view::specialized::netlink_detail::{fetch_records_all, sockets_match_key};
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::FlowAttributionReceived {
+                target,
+                key,
+                result: Err("Not connected to Zenoh".to_string()),
+            });
+        };
+        Task::future(async move {
+            let src_ip = endpoint_ip(&src);
+            let dst_ip = endpoint_ip(&dst);
+            let a: Option<Vec<zensight_common::SocketRecord>> =
+                fetch_records_all(session.clone(), sockets_match_key(&src_ip)).await;
+            let b: Option<Vec<zensight_common::SocketRecord>> = if dst_ip != src_ip {
+                fetch_records_all(session, sockets_match_key(&dst_ip)).await
+            } else {
+                None
+            };
+            let result = match (a, b) {
+                (None, None) => Err("no netlink sensor responded".to_string()),
+                (a, b) => {
+                    let mut sockets = a.unwrap_or_default();
+                    sockets.extend(b.unwrap_or_default());
+                    Ok(match_flow_socket(&sockets, &src, &dst))
+                }
+            };
+            Message::FlowAttributionReceived {
+                target,
+                key,
+                result,
+            }
         })
     }
 

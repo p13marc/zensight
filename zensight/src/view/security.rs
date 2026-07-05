@@ -41,6 +41,12 @@ pub struct SecurityState {
     /// expanded, so a triggered capture matching the anomaly can offer its
     /// evidence file for download right in the drill-down.
     pub captures: Fetch<Vec<zensight_common::CaptureRecord>>,
+    /// The flow↔process join result for one pivot-flow row (#309): `(flow key,
+    /// fetched attribution)`. One in-flight join at a time.
+    pub attribution: Option<(
+        String,
+        Fetch<Option<crate::view::specialized::attribution::AttributedProcess>>,
+    )>,
 }
 
 /// Find a triggered capture matching this anomaly (#327): same detector slug,
@@ -395,7 +401,7 @@ fn render_by_detector<'a>(anomalies: &[&'a Alert], sec: &'a SecurityState) -> El
 }
 
 /// One anomaly row: clickable to toggle its evidence drill-down (#48).
-fn render_anomaly_row<'a>(a: &'a Alert, sec: &SecurityState) -> Element<'a, Message> {
+fn render_anomaly_row<'a>(a: &'a Alert, sec: &'a SecurityState) -> Element<'a, Message> {
     let key = a.alert_key();
     let expanded = sec.selected.as_deref() == Some(key.as_str());
     let sev: Severity = a.severity.into();
@@ -469,7 +475,7 @@ fn render_anomaly_row<'a>(a: &'a Alert, sec: &SecurityState) -> Element<'a, Mess
         detail = detail.push(pivot);
 
         if sec.flows_for.as_deref() == Some(key.as_str()) {
-            detail = detail.push(render_pivot_flows(&sec.flows));
+            detail = detail.push(render_pivot_flows(&sec.flows, sec));
         }
     }
 
@@ -509,8 +515,12 @@ fn render_anomaly_row<'a>(a: &'a Alert, sec: &SecurityState) -> Element<'a, Mess
         .into()
 }
 
-/// Render the flow-pivot result table for the expanded anomaly (#119).
-fn render_pivot_flows<'a>(flows: &Fetch<Vec<FlowRecord>>) -> Element<'a, Message> {
+/// Render the flow-pivot result table for the expanded anomaly (#119), with a
+/// per-row flow↔process join affordance (#309).
+fn render_pivot_flows<'a>(
+    flows: &'a Fetch<Vec<FlowRecord>>,
+    sec: &'a SecurityState,
+) -> Element<'a, Message> {
     if let Some(err) = flows.error() {
         return text(format!("flow fetch failed: {err}"))
             .size(font::CAPTION)
@@ -533,10 +543,21 @@ fn render_pivot_flows<'a>(flows: &Fetch<Vec<FlowRecord>>) -> Element<'a, Message
             text("proto").size(10).width(Length::Fixed(50.0)),
             text("bytes").size(10).width(Length::Fixed(80.0)),
             text("community_id").size(10).width(Length::Fixed(260.0)),
+            text("process").size(10).width(Length::Fixed(60.0)),
         ]
         .spacing(8),
     );
     for f in records.iter().take(100) {
+        // Flow ↔ process join (#309): "this beacon is curl run by uid 1000".
+        let who = button(text("who?").size(11))
+            .padding([1, 6])
+            .style(iced::widget::button::text)
+            .on_press(Message::FetchFlowAttribution {
+                target: crate::message::AttributionTarget::Security,
+                key: crate::view::specialized::attribution::flow_key(&f.src, &f.dst),
+                src: f.src.clone(),
+                dst: f.dst.clone(),
+            });
         list = list.push(
             row![
                 text(f.src.clone()).size(11).width(Length::Fixed(170.0)),
@@ -548,18 +569,45 @@ fn render_pivot_flows<'a>(flows: &Fetch<Vec<FlowRecord>>) -> Element<'a, Message
                 text(f.community_id.clone().unwrap_or_else(|| "-".into()))
                     .size(11)
                     .width(Length::Fixed(260.0)),
+                who,
             ]
-            .spacing(8),
+            .spacing(8)
+            .align_y(Alignment::Center),
         );
     }
-    column![
+    let mut colm = column![
         text(format!("{} flows for source", records.len()))
             .size(font::CAPTION)
             .style(dim),
         list,
     ]
-    .spacing(2)
-    .into()
+    .spacing(2);
+    // The last-asked row's attribution outcome, labelled with its source.
+    if let Some((key, fetch)) = &sec.attribution {
+        let line: Element<'a, Message> = match fetch {
+            Fetch::Idle | Fetch::Loading => text(format!("{key}: looking up owning process…"))
+                .size(11)
+                .style(dim)
+                .into(),
+            Fetch::Error(e) => text(format!("{key}: unattributed ({e})"))
+                .size(11)
+                .style(dim)
+                .into(),
+            Fetch::Ready(Some(a)) => {
+                text(format!("{key}: {} — endpoint {}", a.display(), a.endpoint))
+                    .size(11)
+                    .into()
+            }
+            Fetch::Ready(None) => text(format!(
+                "{key}: unattributed (no matching socket on any netlink host)"
+            ))
+            .size(11)
+            .style(dim)
+            .into(),
+        };
+        colm = colm.push(line);
+    }
+    colm.into()
 }
 
 fn evidence_line<'a>(k: &str, v: &str) -> Element<'a, Message> {

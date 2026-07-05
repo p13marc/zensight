@@ -191,7 +191,7 @@ as Zenoh selector params (e.g. `?top=20`, `?state=&port=`).
 | Sensor | `@/query/<topic>` | Reply |
 |--------|---|---|
 | sysinfo | `processes?sort=cpu\|mem\|io&top=N`, `latency`² | `Vec<ProcessRecord>` / `LatencyReport` |
-| netlink | `routes`, `neighbors`, `sockets?state=&port=`, `addresses`, `events`, `route_changes`, `tc`, `xfrm`, `nft`, `bandwidth?top=N`⁴, `retransmits`³, `connections`³ | `Vec<…Record>` |
+| netlink | `routes`, `neighbors`, `sockets?state=&port=&ip=`⁶, `addresses`, `events`, `route_changes`, `tc`, `xfrm`, `nft`, `bandwidth?top=N`⁴, `retransmits`³, `connections`³ | `Vec<…Record>` |
 | netring | `flows`, `tls`, `talkers?top=N`, `matrix?top=N`, `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`, `encrypted_dns`, `ja4h?top=N`¹, `assets`, `captures`⁵ | `Vec<…Record>` |
 | systemd | `units`, `failed`, `unit?name=<u>`, `timers`, `events`, `cgroups?path=<rel>` | `Vec<UnitRecord>` / `UnitDetail` / `Vec<TimerRecord>` / `Vec<EventRecord>` / `CgroupNode` |
 
@@ -228,6 +228,13 @@ serve TTL lives — the `artifact_id` to download the bytes through
 Companion telemetry: `capture/events` (lifecycle Text points) and
 `capture/disk/*` (mode, ring occupancy, retention usage, drop/eviction/trigger
 counters).
+
+⁶ `ip=` (#309) narrows the reply to sockets whose local **or** remote endpoint
+IP matches. The GUI flow↔process join queries both flow-endpoint IPs, collects
+**all** replies (every netlink sensor answers the shared key; only the host
+owning an endpoint can hold the matching socket), and matches the exact
+5-tuple in either direction. The `community_id` on `FlowRecord` is the same
+cross-tool flow key, so external Zeek/Suricata records can reuse this join.
 
 ---
 
