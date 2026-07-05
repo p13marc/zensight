@@ -47,6 +47,20 @@ pub type QueryEbpf = Option<crate::ebpf::EbpfState>;
 #[cfg(not(feature = "ebpf"))]
 pub type QueryEbpf = Option<std::convert::Infallible>;
 
+/// How often the per-process bandwidth tracker samples socket byte counters
+/// (#317). A short cadence keeps rates responsive without a `/proc` scan.
+const BANDWIDTH_SAMPLE_SECS: u64 = 2;
+/// Default `top=N` cap on the `@/query/bandwidth` reply size.
+const BANDWIDTH_DEFAULT_TOP: usize = 50;
+
+/// Parse the `top=<N>` selector parameter (`@/query/bandwidth?by=process&top=N`).
+fn parse_top(params: &str) -> Option<usize> {
+    params
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("top="))
+        .and_then(|v| v.parse().ok())
+}
+
 /// `key_prefix` is the sensor's telemetry prefix (e.g. `zensight/netlink`); the
 /// queryables live under `<key_prefix>/@/query/<topic>`. `events` is the shared
 /// real-time event ring (#8), served on `@/query/events`; `route_history` is the
@@ -58,6 +72,7 @@ pub type QueryEbpf = Option<std::convert::Infallible>;
 pub async fn run(
     session: Arc<zenoh::Session>,
     key_prefix: String,
+    source: String,
     events: EventState,
     route_history: RouteHistory,
     collect: CollectHandle,
@@ -83,6 +98,7 @@ pub async fn run(
     let tc_key = zensight_common::command::query_key(&key_prefix, "tc");
     let xfrm_key = zensight_common::command::query_key(&key_prefix, "xfrm");
     let nft_key = zensight_common::command::query_key(&key_prefix, "nft");
+    let bandwidth_key = zensight_common::command::query_key(&key_prefix, "bandwidth");
 
     let routes_q = match session.declare_queryable(&routes_key).await {
         Ok(q) => q,
@@ -147,6 +163,19 @@ pub async fn run(
             return;
         }
     };
+    let bandwidth_q = match session.declare_queryable(&bandwidth_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %bandwidth_key, "query: declare bandwidth failed");
+            return;
+        }
+    };
+    // Per-process TCP bandwidth (#317): a fixed-cadence sampler diffs `tcp_info`
+    // goodput bytes per socket cookie; the `@/query/bandwidth` handler joins the
+    // rates to processes at query time. Cheap sockdiag dumps, no `/proc` scan.
+    let mut bw_tracker = crate::bandwidth::BandwidthTracker::default();
+    let mut bw_tick = tokio::time::interval(std::time::Duration::from_secs(BANDWIDTH_SAMPLE_SECS));
+    bw_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tracing::info!(
         routes = %routes_key, neighbors = %neighbors_key, sockets = %sockets_key,
         addresses = %addresses_key, events = %events_key,
@@ -214,6 +243,57 @@ pub async fn run(
                 };
                 reply_json(&query, &records).await;
             }
+            // Per-process bandwidth sampler tick (#317): cheap cookie→bytes dump,
+            // no /proc scan. Idle no-op when the feature is toggled off.
+            _ = bw_tick.tick() => {
+                if let Some(sd) = &sockdiag
+                    && collect.snapshot().await.bandwidth
+                {
+                    let sample = sample_socket_bytes(sd).await;
+                    bw_tracker.update(sample, std::time::Instant::now());
+                }
+            }
+            q = bandwidth_q.recv_async() => {
+                let Ok(query) = q else { return };
+                let toggles = collect.snapshot().await;
+                // Attribute at query time (reusing the #304 /proc scan) and join
+                // each socket's cookie to its tracked goodput rate → per-process.
+                let out = if toggles.bandwidth {
+                    let top = parse_top(query.parameters().as_str()).unwrap_or(BANDWIDTH_DEFAULT_TOP);
+                    let sel = crate::map::SocketSelector::default();
+                    let records = match &sockdiag {
+                        Some(sd) => collect_sockets(sd, &sel, &toggles).await,
+                        None => Vec::new(),
+                    };
+                    crate::bandwidth::aggregate_by_process(&records, &bw_tracker, Some(&source), top)
+                } else {
+                    Vec::new()
+                };
+                reply_json(&query, &out).await;
+            }
+        }
+    }
+}
+
+/// Cheap all-TCP-sockets byte sample for the bandwidth tracker (#317): cookie +
+/// goodput counters only — no `/proc` attribution and no mem/congestion
+/// extensions (unlike [`collect_sockets`], which the query path uses).
+async fn sample_socket_bytes(conn: &Connection<SockDiag>) -> Vec<(u64, u64, u64)> {
+    let filter = SocketFilter::tcp().with_tcp_info().all_states().build();
+    match conn.query(&filter).await {
+        Ok(socks) => socks
+            .iter()
+            .filter_map(|s| {
+                let SocketInfo::Inet(inet) = s else {
+                    return None;
+                };
+                let ti = inet.tcp_info.as_ref()?;
+                Some((inet.cookie, ti.bytes_acked, ti.bytes_received))
+            })
+            .collect(),
+        Err(e) => {
+            tracing::debug!(error = %e, "bandwidth sample: sockdiag query failed");
+            Vec::new()
         }
     }
 }
@@ -625,6 +705,10 @@ async fn collect_sockets(
                 })
                 .unwrap_or(0);
             let bytes_retrans = ti.map(|t| t.bytes_retrans).unwrap_or(0);
+            // Goodput byte counters for per-process bandwidth (#317).
+            let bytes_acked = ti.map(|t| t.bytes_acked).unwrap_or(0);
+            let bytes_received = ti.map(|t| t.bytes_received).unwrap_or(0);
+            let bytes_sent = ti.map(|t| t.bytes_sent).unwrap_or(0);
             let total_retrans = ti.map(|t| t.total_retrans).unwrap_or(0);
             let rcv_rtt_us = ti.map(|t| t.rcv_rtt).unwrap_or(0);
             let lost = ti.map(|t| t.lost).unwrap_or(0);
@@ -651,6 +735,9 @@ async fn collect_sockets(
                 delivery_rate,
                 pacing_rate,
                 bytes_retrans,
+                bytes_acked,
+                bytes_received,
+                bytes_sent,
                 total_retrans,
                 rcv_rtt_us,
                 lost,
@@ -793,6 +880,50 @@ mod tests {
 
     use super::*;
 
+    /// Live kernel check (#317): the one thing unit tests can't cover — does
+    /// `nlink`'s `tcp_info` actually populate `bytes_acked`/`bytes_received` on
+    /// this kernel? Drives a loopback TCP transfer and asserts `sample_socket_bytes`
+    /// reports a socket with non-zero goodput. `#[ignore]` (needs a runtime + a
+    /// live sockdiag); run with `cargo test -p zensight-sensor-netlink --
+    /// --ignored sockdiag_reports_goodput`.
+    #[tokio::test]
+    #[ignore]
+    async fn sockdiag_reports_goodput() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Echo/drain server: read to EOF so the client's bytes get ACKed.
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 64 * 1024];
+            while let Ok(n) = sock.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+            }
+        });
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let payload = vec![0xABu8; 1 << 20]; // 1 MiB
+        client.write_all(&payload).await.unwrap();
+        client.flush().await.unwrap();
+        // Give the kernel a moment to ACK.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let conn = Connection::<SockDiag>::new().expect("open sockdiag");
+        let sample = sample_socket_bytes(&conn).await;
+        assert!(!sample.is_empty(), "sockdiag returned no TCP sockets");
+        let moved = sample
+            .iter()
+            .any(|(_cookie, acked, received)| *acked > 0 || *received > 0);
+        assert!(
+            moved,
+            "no socket reported non-zero bytes_acked/bytes_received — kernel/nlink \
+             did not populate tcp_info goodput counters"
+        );
+        drop(client);
+        let _ = server.await;
+    }
+
     /// A blank record with just the attribution inputs set.
     fn rec(inode: u32, cgroup_id: Option<u64>) -> SocketRecord {
         SocketRecord {
@@ -812,6 +943,9 @@ mod tests {
             delivery_rate: 0,
             pacing_rate: 0,
             bytes_retrans: 0,
+            bytes_acked: 0,
+            bytes_received: 0,
+            bytes_sent: 0,
             total_retrans: 0,
             rcv_rtt_us: 0,
             lost: 0,

@@ -202,7 +202,19 @@ expectations and alerts on deviation.
   routes, neighbors, sockets, plus ethtool/TC/xfrm depth metrics (gated by the
   `collect` config).
 - **On-demand detail** (`@/query/<topic>`): `routes`, `neighbors`,
-  `sockets?state=&port=`, `addresses`, `events`, `route_changes`, `tc`, `xfrm`, `nft`.
+  `sockets?state=&port=`, `addresses`, `events`, `route_changes`, `tc`, `xfrm`, `nft`,
+  `bandwidth?top=N`.
+- **Per-process bandwidth (#317, epic #320, `collect.bandwidth`, default on):** the
+  **unprivileged, TCP-only** bandwidth tier. A background sampler diffs each socket's
+  `tcp_info` goodput byte counters (`bytes_acked` = TX, `bytes_received` = RX) **per
+  cookie** (never the reusable inode) every couple of seconds; `@/query/bandwidth`
+  then runs the #304 `/proc` attribution and returns per-process `BandwidthRecord`s
+  (`bw.source=sock_diag`, `bw.semantics=app-goodput`, `bw.proto=tcp`), ranked by rate,
+  top-N. Hard limits are labelled, not hidden: **TCP only** (`udp_diag` exposes no
+  per-socket byte counters — per-process UDP needs the eBPF tier), **app-goodput**
+  (below wire — no headers/retransmits), and short flows opened+closed between samples
+  are missed. Sockets whose owner has exited fold into one explicit `unattributed`
+  bucket (`pid = -1`) rather than being dropped.
 - **Socket → process attribution (#304):** with `collect.socket_processes`
   (default on), each `sockets` `SocketRecord` is annotated — unprivileged — with
   `cookie` (stable socket id; prefer over the reusable inode), `cgroup_id`/`cgroup`
