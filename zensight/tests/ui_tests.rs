@@ -230,7 +230,7 @@ fn test_global_search_panel_results() {
     let hits: Vec<SearchHit> = search::search([&device].into_iter(), &state.query);
     assert_eq!(hits.len(), 1);
 
-    let mut ui = simulator(search::global_search_panel(&state, hits));
+    let mut ui = simulator(search::global_search_panel(&state, hits, Vec::new(), None));
     assert!(ui.find("Global Metric Search").is_ok());
     assert!(ui.find("Close").is_ok());
     assert!(ui.find("1 result(s)").is_ok());
@@ -3128,7 +3128,8 @@ fn test_inventory_view_renders_assets_and_fingerprints() {
         assets_responded: true,
     }));
 
-    let mut ui = simulator(inventory_view(&state));
+    let entities = zensight::entity::EntityStore::default();
+    let mut ui = simulator(inventory_view(&state, &entities, 0));
     assert!(ui.find("Inventory").is_ok());
     assert!(ui.find("AcmeCorp").is_ok(), "vendor must be rendered");
     assert!(ui.find("printer1").is_ok());

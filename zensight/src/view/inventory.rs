@@ -14,8 +14,9 @@
 use iced::widget::{Column, button, column, container, pick_list, row, scrollable, text};
 use iced::{Element, Length, Theme};
 
-use zensight_common::{AssetRecord, Ja4hRecord, QuicRecord, SshRecord, TlsRecord};
+use zensight_common::{AssetRecord, HostEntity, Ja4hRecord, QuicRecord, SshRecord, TlsRecord};
 
+use crate::entity::EntityStore;
 use crate::message::Message;
 use crate::view::components::{card, empty_state, section_header};
 use crate::view::formatting::format_timestamp;
@@ -307,8 +308,31 @@ pub fn merge_fingerprints(
     out
 }
 
-/// Render the top-level inventory view (#120).
-pub fn inventory_view(state: &InventoryState) -> Element<'_, Message> {
+/// Resolve a wire-observed asset to the host entity that claims it (#314):
+/// MAC first (the inventory's key), then any of its observed IPs. Pure.
+pub fn entity_for_asset<'e>(
+    entities: &'e EntityStore,
+    asset: &AssetRecord,
+) -> Option<&'e HostEntity> {
+    if let Some(e) = entities.entity_for_mac(&asset.mac) {
+        return Some(e);
+    }
+    asset
+        .ipv4
+        .iter()
+        .chain(asset.ipv6.iter())
+        .find_map(|ip| ip.parse().ok().and_then(|ip| entities.entity_for_ip(&ip)))
+}
+
+/// Render the top-level inventory view (#120). `entities`/`now_ms` drive the
+/// asset ⋈ entity join column (#314); an empty store degrades to the
+/// pre-correlation table (wire-only badges everywhere would be noise, so the
+/// entity column is simply absent).
+pub fn inventory_view<'a>(
+    state: &'a InventoryState,
+    entities: &'a EntityStore,
+    now_ms: i64,
+) -> Element<'a, Message> {
     let refresh = {
         let label = if state.loading {
             "Refreshing…"
@@ -329,7 +353,7 @@ pub fn inventory_view(state: &InventoryState) -> Element<'_, Message> {
     }
 
     content = content
-        .push(card(render_assets(state)))
+        .push(card(render_assets(state, entities, now_ms)))
         .push(card(render_fingerprints(state)));
 
     container(scrollable(content.padding(space::LG)))
@@ -338,7 +362,14 @@ pub fn inventory_view(state: &InventoryState) -> Element<'_, Message> {
         .into()
 }
 
-fn render_assets(state: &InventoryState) -> Element<'_, Message> {
+fn render_assets<'a>(
+    state: &'a InventoryState,
+    entities: &'a EntityStore,
+    now_ms: i64,
+) -> Element<'a, Message> {
+    // The entity column only appears when a correlator is on the bus (#314):
+    // with an empty store every asset would be a noisy "wire-only" badge.
+    let show_entities = !entities.is_empty();
     let sort_pick = pick_list(
         AssetSort::ALL.as_slice(),
         Some(state.asset_sort),
@@ -409,20 +440,22 @@ fn render_assets(state: &InventoryState) -> Element<'_, Message> {
             .into();
     }
 
-    let mut list = Column::new().spacing(3).push(
-        row![
-            cell("role", 90),
-            cell("mac", 150),
-            cell("ip", 150),
-            cell("hostname", 150),
-            cell("vendor", 150),
-            cell("fingerprint", 130),
-            cell("srcs", 50),
-            cell("first seen", 90),
-            cell("last seen", 90),
-        ]
-        .spacing(8),
-    );
+    let mut header_cells = row![
+        cell("role", 90),
+        cell("mac", 150),
+        cell("ip", 150),
+        cell("hostname", 150),
+        cell("vendor", 150),
+        cell("fingerprint", 130),
+        cell("srcs", 50),
+        cell("first seen", 90),
+        cell("last seen", 90),
+    ]
+    .spacing(8);
+    if show_entities {
+        header_cells = header_cells.push(cell("host entity", 170));
+    }
+    let mut list = Column::new().spacing(3).push(header_cells);
     for r in state.sorted_assets().into_iter().take(500) {
         let ip = r
             .ipv4
@@ -440,22 +473,66 @@ fn render_assets(state: &InventoryState) -> Element<'_, Message> {
             .or(r.p0f.as_deref())
             .unwrap_or("-");
         let role = if r.role.is_empty() { "-" } else { &r.role };
-        list = list.push(
-            row![
-                cell(role, 90),
-                cell(&r.mac, 150),
-                cell(ip, 150),
-                cell(r.hostname.as_deref().unwrap_or("-"), 150),
-                cell(r.vendor.as_deref().unwrap_or("-"), 150),
-                cell(fp, 130),
-                cell(&r.source_count.to_string(), 50),
-                cell(&format_timestamp(r.first_seen), 90),
-                cell(&format_timestamp(r.last_seen), 90),
-            ]
-            .spacing(8),
-        );
+        let mut row = row![
+            cell(role, 90),
+            cell(&r.mac, 150),
+            cell(ip, 150),
+            cell(r.hostname.as_deref().unwrap_or("-"), 150),
+            cell(r.vendor.as_deref().unwrap_or("-"), 150),
+            cell(fp, 130),
+            cell(&r.source_count.to_string(), 50),
+            cell(&format_timestamp(r.first_seen), 90),
+            cell(&format_timestamp(r.last_seen), 90),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+        if show_entities {
+            // Asset ⋈ entity join (#314): a sensor-backed asset links to its
+            // host; a wire-only asset stays a standalone row with a badge.
+            row = row.push(entity_cell(entities, r, now_ms));
+        }
+        list = list.push(row);
     }
     column![header, list].spacing(space::SM).into()
+}
+
+/// The asset's host-entity cell (#314): a link chip to the entity's first
+/// sensor facet (with a staleness note past the correlator re-emit bound), a
+/// plain hostname when no member maps to a known protocol, or a dim
+/// "wire-only" badge for passively-observed assets with no ZenSight sensor.
+fn entity_cell<'a>(
+    entities: &'a EntityStore,
+    asset: &AssetRecord,
+    now_ms: i64,
+) -> Element<'a, Message> {
+    match entity_for_asset(entities, asset) {
+        Some(e) => {
+            let mut label = e
+                .hostname
+                .clone()
+                .or_else(|| e.fqdn.clone())
+                .unwrap_or_else(|| e.entity_id.clone());
+            if EntityStore::is_stale(e, now_ms) {
+                label.push_str(" · stale");
+            }
+            match e.members.iter().find_map(crate::entity::member_device_id) {
+                Some(device) => container(
+                    button(text(label).size(12))
+                        .padding([2, 6])
+                        .style(iced::widget::button::text)
+                        .on_press(Message::SelectDevice(device)),
+                )
+                .width(Length::Fixed(170.0))
+                .into(),
+                None => cell(&label, 170),
+            }
+        }
+        None => text("wire-only")
+            .size(12)
+            .style(dim)
+            .width(Length::Fixed(170.0))
+            .into(),
+    }
 }
 
 fn render_fingerprints(state: &InventoryState) -> Element<'_, Message> {
@@ -681,6 +758,125 @@ mod tests {
         assert_eq!(fps[0].allowlist_host.as_deref(), Some("quic.example"));
         assert_eq!(fps[1].allowlist_host.as_deref(), Some("api.example"));
         assert!(fps.last().unwrap().allowlist_host.is_none());
+    }
+
+    // ── Asset ⋈ entity join (#314) ────────────────────────────────────────────
+
+    fn store_with_host() -> crate::entity::EntityStore {
+        use zensight_common::{HostEntity, MemberClaim};
+        let mut store = crate::entity::EntityStore::default();
+        store.upsert(HostEntity {
+            entity_id: "h_web".into(),
+            aliases: vec![],
+            host_id: None,
+            boot_id: None,
+            ips: vec!["10.0.0.5".into()],
+            macs: vec!["aa:bb:cc:dd:ee:ff".into()],
+            hostname: Some("web01".into()),
+            fqdn: None,
+            names: vec![],
+            vendor: None,
+            platform: None,
+            members: vec![MemberClaim {
+                sensor: "sysinfo".into(),
+                source: "web01".into(),
+                rule: "host_id".into(),
+                confidence: 1.0,
+                last_seen: 1,
+            }],
+            status: None,
+            last_updated: 1_000,
+        });
+        store
+    }
+
+    #[test]
+    fn entity_for_asset_resolves_mac_then_ip() {
+        let store = store_with_host();
+        // MAC hit (case-insensitive via the normalized index).
+        let by_mac = AssetRecord {
+            mac: "AA:BB:CC:DD:EE:FF".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            entity_for_asset(&store, &by_mac).unwrap().entity_id,
+            "h_web"
+        );
+        // MAC miss but observed IP claimed by the entity.
+        let by_ip = AssetRecord {
+            mac: "11:22:33:44:55:66".into(),
+            ipv4: vec!["10.0.0.5".into()],
+            ..Default::default()
+        };
+        assert_eq!(entity_for_asset(&store, &by_ip).unwrap().entity_id, "h_web");
+        // Neither → wire-only.
+        let wire_only = AssetRecord {
+            mac: "11:22:33:44:55:66".into(),
+            ipv4: vec!["192.0.2.9".into()],
+            ..Default::default()
+        };
+        assert!(entity_for_asset(&store, &wire_only).is_none());
+    }
+
+    #[test]
+    fn inventory_renders_entity_chip_and_wire_only_badge() {
+        use iced_test::simulator;
+        let store = store_with_host();
+        let state = InventoryState {
+            assets: vec![
+                AssetRecord {
+                    mac: "aa:bb:cc:dd:ee:ff".into(),
+                    last_seen: 2,
+                    ..Default::default()
+                },
+                AssetRecord {
+                    mac: "11:22:33:44:55:66".into(),
+                    last_seen: 1,
+                    ..Default::default()
+                },
+            ],
+            assets_responded: true,
+            ..Default::default()
+        };
+        let mut ui = simulator(inventory_view(&state, &store, 1_000));
+        // Sensor-backed asset links to its host; the wire-only one gets a badge.
+        assert!(ui.find("wire-only").is_ok());
+        assert!(ui.find("web01").is_ok());
+        assert!(ui.find("host entity").is_ok());
+        drop(ui);
+
+        // The chip itself emits the navigation (clicked in isolation — the full
+        // view's table sits below the simulator viewport inside a scrollable).
+        let asset = AssetRecord {
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            ..Default::default()
+        };
+        let mut ui = simulator(entity_cell(&store, &asset, 1_000));
+        let _ = ui.click("web01");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(msgs.iter().any(|m| matches!(
+            m,
+            Message::SelectDevice(d)
+                if d.source == "web01" && d.protocol == zensight_common::Protocol::Sysinfo
+        )));
+    }
+
+    #[test]
+    fn empty_entity_store_leaves_inventory_unchanged() {
+        use iced_test::simulator;
+        let state = InventoryState {
+            assets: vec![AssetRecord {
+                mac: "aa:bb:cc:dd:ee:ff".into(),
+                ..Default::default()
+            }],
+            assets_responded: true,
+            ..Default::default()
+        };
+        let store = crate::entity::EntityStore::default();
+        let mut ui = simulator(inventory_view(&state, &store, 1_000));
+        // Degraded path (#314): no correlator ⇒ no entity column, no badges.
+        assert!(ui.find("host entity").is_err());
+        assert!(ui.find("wire-only").is_err());
     }
 
     #[test]

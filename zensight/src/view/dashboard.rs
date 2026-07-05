@@ -1082,6 +1082,22 @@ fn render_host_card<'a>(
                 .size(11)
                 .style(move |_: &Theme| text::Style { color: Some(color) }),
         );
+        // Reverse wire affordance (#314): the correlator fused observed-asset
+        // evidence (vendor/platform from ARP/LLDP/CDP) into this entity — show
+        // what the wire says this host *is*.
+        let wire: Vec<&str> = [entity.vendor.as_deref(), entity.platform.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect();
+        if !wire.is_empty() {
+            card_content = card_content.push(
+                text(format!("seen on the wire as {}", wire.join(" · ")))
+                    .size(11)
+                    .style(|t: &Theme| text::Style {
+                        color: Some(crate::view::theme::colors(t).text_muted()),
+                    }),
+            );
+        }
     }
 
     if let Some(sparks) = sparks.filter(|s| !s.is_empty()) {
