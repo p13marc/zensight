@@ -15,6 +15,7 @@ mod journald;
 mod multiline;
 mod novelty;
 mod parser;
+mod query;
 mod receiver;
 mod template;
 
@@ -531,8 +532,16 @@ async fn main() -> Result<()> {
         tracing::info!("log novelty / rate-spike detection enabled");
     }
 
+    // Per-line event ring + on-demand query channel (#358): log lines are
+    // served from `@/query/events`, never streamed on the telemetry bus.
+    let (event_ring, event_ring_capacity) = query::new_ring(syslog_config.events_ring_capacity);
+    runner.spawn(query::run_events(
+        session.clone(),
+        key_prefix.clone(),
+        event_ring.clone(),
+    ));
+
     // Spawn the message processing task
-    let registry_clone = registry.clone();
     let publish_health = runner.health();
     let aggregator_loop = aggregator.clone();
     let template_loop = template_agg.clone();
@@ -609,29 +618,20 @@ async fn main() -> Result<()> {
                         }
                     }
 
-                    // Build key expression
-                    let key = receiver::build_key_expr(&key_prefix, &received, &uid);
-
-                    // Serialize and publish
-                    match encode(&point, format) {
-                        Ok(payload) => {
-                            if let Err(e) = registry_clone.put(&key, payload, zensight_common::QosClass::Telemetry).await {
-                                tracing::error!("Failed to publish to {}: {}", key, e);
-                            } else {
-                                // Count published telemetry so the Sensors view
-                                // reflects this sensor's throughput (#62).
-                                publish_health.record_metrics_published(1);
-                                tracing::debug!(
-                                    "Published: {} from {} [{}]",
-                                    key,
-                                    received.resolved_hostname,
-                                    received.message.severity.as_str()
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to serialize telemetry: {}", e);
-                        }
+                    // Ring, don't stream (#358): the per-line event goes into
+                    // the bounded `@/query/events` ring for on-demand pulls.
+                    // Only the derived rollups above ride the telemetry bus.
+                    if let Some(record) = zensight_common::LogRecord::from_point(&point) {
+                        query::push(&event_ring, event_ring_capacity, record);
+                        // Count ring-appended lines so the Sensors view still
+                        // reflects this sensor's throughput (#62).
+                        publish_health.record_metrics_published(1);
+                        tracing::trace!(
+                            "Ringed: events/{} from {} [{}]",
+                            uid,
+                            received.resolved_hostname,
+                            received.message.severity.as_str()
+                        );
                     }
                 }
                 else => break,

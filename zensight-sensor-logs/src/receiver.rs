@@ -573,6 +573,10 @@ pub fn make_log_uid(timestamp_ms: i64, seq: u64) -> String {
 /// is the message text, and the labels carry the OpenTelemetry logs data model
 /// (`severity_number` 1–24, `severity_text`, `log.record.uid`, and — when
 /// `include_raw` — `log.record.original`) alongside facility/severity/app/etc.
+///
+/// Since #358 the point is no longer published on the telemetry bus: it feeds
+/// the bounded `@/query/events` ring (via `LogRecord::from_point`), from which
+/// consumers pull on demand.
 pub fn to_telemetry_point(
     received: &ReceivedMessage,
     include_raw: bool,
@@ -643,11 +647,6 @@ pub fn to_telemetry_point(
         value: TelemetryValue::Text(msg.message.clone()),
         labels,
     }
-}
-
-/// Build the key expression for a per-line log event (#104): `<prefix>/<host>/events/<uid>`.
-pub fn build_key_expr(prefix: &str, received: &ReceivedMessage, uid: &str) -> String {
-    format!("{}/{}/events/{}", prefix, received.resolved_hostname, uid)
 }
 
 #[cfg(test)]
@@ -789,21 +788,6 @@ mod tests {
 
         assert_eq!(point.source, "localhost");
         assert_eq!(point.labels.get("source_type"), Some(&"unix".to_string()));
-    }
-
-    #[test]
-    fn test_build_key_expr() {
-        let addr: SocketAddr = "192.168.1.1:514".parse().unwrap();
-        let msg = parser::parse("<34>Jan  5 14:30:00 myhost sshd: test").unwrap();
-
-        let received = ReceivedMessage {
-            message: msg,
-            source: MessageSource::Network(addr),
-            resolved_hostname: "myhost".to_string(),
-        };
-
-        let key = build_key_expr("zensight/logs", &received, "0000000000123000000000045");
-        assert_eq!(key, "zensight/logs/myhost/events/0000000000123000000000045");
     }
 
     #[test]

@@ -38,6 +38,18 @@ fn endpoint_ip(endpoint: &str) -> String {
 /// Cap on the rolling log buffer feeding the top-level Logs view.
 const MAX_RECENT_LOGS: usize = 5000;
 
+/// Minimum gap between `@/query/events` fetches while a logs surface is open
+/// (#358). A log *viewer* cadence — not tail -f; tune here if needed.
+const LOG_REFRESH_SECS: i64 = 5;
+
+/// Fetch overlap subtracted from the newest-seen event timestamp when building
+/// the `since=` selector (#358): 2× the refresh period, so sensor/GUI clock
+/// skew or a slow tick never opens a gap. Overlapping records de-dup on merge.
+const LOG_FETCH_OVERLAP_MS: i64 = 10_000;
+
+/// Reply cap requested per `@/query/events` fetch (#358).
+const LOG_FETCH_MAX: usize = 500;
+
 /// Text input ID for dashboard search.
 pub static DASHBOARD_SEARCH_ID: LazyLock<Id> = LazyLock::new(|| Id::new("dashboard-search"));
 
@@ -133,6 +145,13 @@ pub struct ZenSight {
     /// Rolling buffer of recent log lines (all syslog/journald sources) for the
     /// top-level Logs view. Bounded to [`MAX_RECENT_LOGS`].
     recent_logs: std::collections::VecDeque<crate::view::specialized::SyslogMessage>,
+    /// Newest event timestamp seen from `@/query/events` (#358) — the `since=`
+    /// watermark for incremental fetches (minus [`LOG_FETCH_OVERLAP_MS`]).
+    last_log_event_ms: Option<i64>,
+    /// When the last `@/query/events` fetch was issued (#358) — cadence gate.
+    last_log_fetch_ms: Option<i64>,
+    /// An `@/query/events` fetch is in flight (#358) — never stack fetches.
+    log_fetch_inflight: bool,
     /// Current view.
     current_view: CurrentView,
     /// Stale threshold in milliseconds (devices not updated within this time are marked unhealthy).
@@ -320,6 +339,9 @@ impl ZenSight {
             },
             syslog_filter,
             recent_logs: std::collections::VecDeque::new(),
+            last_log_event_ms: None,
+            last_log_fetch_ms: None,
+            log_fetch_inflight: false,
             current_view,
             stale_threshold_ms,
             demo_mode,
@@ -1533,6 +1555,10 @@ impl ZenSight {
 
             Message::Tick => {
                 self.handle_tick();
+                // Log-events refresh (#358): while a logs surface is open, pull
+                // fresh per-line events on a slow cadence (piggybacked on the
+                // 1 Hz tick — no dedicated timer).
+                let log_fetch = self.maybe_refresh_logs();
                 // Periodically flush downsampled buckets to redb off the UI thread
                 // (every ~15 ticks ≈ 15s). Never block update()/view() on disk I/O.
                 self.ticks_since_flush += 1;
@@ -1559,7 +1585,7 @@ impl ZenSight {
                         let batch = metric_batch.map(|(_, b)| b).unwrap_or_default();
                         let logs = log_batch.map(|(_, l)| l).unwrap_or_default();
                         let now_ms = zensight_common::current_timestamp_millis();
-                        return Task::future(async move {
+                        let flush = Task::future(async move {
                             // Map redb's large error to a String inside the blocking
                             // closure so the future's payload stays small.
                             let res = tokio::task::spawn_blocking(move || {
@@ -1585,7 +1611,14 @@ impl ZenSight {
                             .and_then(|r| r);
                             Message::StoreFlushed(res)
                         });
+                        return match log_fetch {
+                            Some(fetch) => Task::batch([flush, fetch]),
+                            None => flush,
+                        };
                     }
+                }
+                if let Some(fetch) = log_fetch {
+                    return fetch;
                 }
             }
 
@@ -1618,13 +1651,14 @@ impl ZenSight {
 
             Message::OpenLogs => {
                 self.set_view(CurrentView::Logs);
+                let mut tasks: Vec<Task<Message>> = Vec::new();
                 // Search-back (#107, C9): pull persisted logs from the cold store
                 // off-thread so the Logs view opens with history that survived a
                 // restart, not just what's arrived this session.
                 if let Some(store) = self.store.persistent() {
                     let now_ms = zensight_common::current_timestamp_millis();
                     let from = now_ms - 24 * 3_600_000; // last 24h
-                    return Task::future(async move {
+                    tasks.push(Task::future(async move {
                         let logs = tokio::task::spawn_blocking(move || {
                             store
                                 .query_logs(from, now_ms, MAX_RECENT_LOGS)
@@ -1633,12 +1667,50 @@ impl ZenSight {
                         .await
                         .unwrap_or_default();
                         Message::LogHistoryLoaded(logs)
-                    });
+                    }));
+                }
+                // On-demand seed (#358): per-line events no longer stream, so
+                // pull the sensors' current rings immediately on open. The
+                // periodic tick refresh keeps the view live afterwards.
+                if !self.demo_mode && self.session.is_some() && !self.log_fetch_inflight {
+                    self.log_fetch_inflight = true;
+                    self.last_log_fetch_ms = Some(now_ms());
+                    tasks.push(self.query_log_events(None));
+                }
+                if !tasks.is_empty() {
+                    return Task::batch(tasks);
                 }
             }
 
             Message::LogHistoryLoaded(logs) => {
                 self.merge_log_history(logs);
+            }
+
+            Message::LogEventsLoaded(result) => {
+                self.log_fetch_inflight = false;
+                match result {
+                    Ok(records) => {
+                        let mut msgs = Vec::with_capacity(records.len());
+                        for rec in &records {
+                            self.last_log_event_ms = Some(
+                                self.last_log_event_ms
+                                    .map_or(rec.ts, |prev| prev.max(rec.ts)),
+                            );
+                            let point = rec.to_point();
+                            // Persist for search-back (#107): redb keys by uid,
+                            // so overlap-window re-fetches are idempotent.
+                            if let Some(log) = crate::store::StoredLog::from_point(&point) {
+                                self.store.record_log(log);
+                            }
+                            msgs.push(crate::view::specialized::syslog_message_from_point(
+                                &point,
+                                &point.source,
+                            ));
+                        }
+                        self.merge_log_messages(msgs);
+                    }
+                    Err(e) => tracing::debug!(error = %e, "log-events fetch failed"),
+                }
             }
 
             Message::OpenIncidents => {
@@ -4580,10 +4652,24 @@ impl ZenSight {
     }
 
     /// Merge cold-store search-back results (#107, C9) into the rolling log
-    /// buffer: drop records already present (by time+message), then keep the
-    /// newest [`MAX_RECENT_LOGS`] across the union, time-ordered.
+    /// buffer via the shared de-dup merge below.
     fn merge_log_history(&mut self, logs: Vec<crate::store::StoredLog>) {
-        if logs.is_empty() {
+        let msgs = logs
+            .into_iter()
+            .map(|log| {
+                let point = log.to_point();
+                crate::view::specialized::syslog_message_from_point(&point, &point.source)
+            })
+            .collect();
+        self.merge_log_messages(msgs);
+    }
+
+    /// Shared log-buffer merge (#107/#358): drop rows already present (by
+    /// time+message — also de-dups within the incoming batch, so overlapping
+    /// `since=` fetch windows are idempotent), then keep the newest
+    /// [`MAX_RECENT_LOGS`] across the union, time-ordered.
+    fn merge_log_messages(&mut self, msgs: Vec<crate::view::specialized::SyslogMessage>) {
+        if msgs.is_empty() {
             return;
         }
         use std::collections::HashSet;
@@ -4593,13 +4679,9 @@ impl ZenSight {
             .map(|m| (m.timestamp(), m.message().to_string()))
             .collect();
         let mut merged: Vec<crate::view::specialized::SyslogMessage> = Vec::new();
-        for log in logs {
-            if seen.insert((log.ts, log.message.clone())) {
-                let point = log.to_point();
-                merged.push(crate::view::specialized::syslog_message_from_point(
-                    &point,
-                    &point.source,
-                ));
+        for msg in msgs {
+            if seen.insert((msg.timestamp(), msg.message().to_string())) {
+                merged.push(msg);
             }
         }
         if merged.is_empty() {
@@ -4609,6 +4691,82 @@ impl ZenSight {
         merged.sort_by_key(|m| m.timestamp());
         let start = merged.len().saturating_sub(MAX_RECENT_LOGS);
         self.recent_logs = merged.split_off(start).into();
+    }
+
+    /// Whether the periodic log-events refresh should fire this tick (#358):
+    /// connected, not demo, no fetch in flight, a logs surface is actually on
+    /// screen, and the cadence gap has elapsed.
+    fn should_refresh_logs(&self, now_ms: i64) -> bool {
+        // (`query_log_events` itself degrades gracefully with no session, so
+        // `connected` is the only liveness gate needed here.)
+        if self.demo_mode || !self.dashboard.connected || self.log_fetch_inflight {
+            return false;
+        }
+        let viewing_logs = self.current_view == CurrentView::Logs
+            || (self.current_view == CurrentView::Device
+                && self
+                    .selected_device
+                    .as_ref()
+                    .is_some_and(|d| d.device_id.protocol == Protocol::Logs));
+        if !viewing_logs {
+            return false;
+        }
+        self.last_log_fetch_ms
+            .is_none_or(|t| now_ms - t >= LOG_REFRESH_SECS * 1000)
+    }
+
+    /// Fire an incremental `@/query/events` fetch when due (#358). The `since=`
+    /// selector trails the newest-seen event by [`LOG_FETCH_OVERLAP_MS`] so
+    /// clock skew never opens a gap; the merge de-dup absorbs the overlap.
+    fn maybe_refresh_logs(&mut self) -> Option<Task<Message>> {
+        let now = now_ms();
+        if !self.should_refresh_logs(now) {
+            return None;
+        }
+        self.log_fetch_inflight = true;
+        self.last_log_fetch_ms = Some(now);
+        let since = self.last_log_event_ms.map(|t| t - LOG_FETCH_OVERLAP_MS);
+        Some(self.query_log_events(since))
+    }
+
+    /// One `@/query/events` GET (#358): fans out to every logs sensor's
+    /// queryable, drains ALL replies (one per sensor — never first-reply-wins),
+    /// and concatenates the decoded records.
+    fn query_log_events(&self, since: Option<i64>) -> Task<Message> {
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::LogEventsLoaded(Err(
+                "Not connected to Zenoh".to_string()
+            )));
+        };
+        // NB: zenoh selector parameters are `;`-separated (`Parameters`), not
+        // `&` — the server reads them via `query.parameters().get(..)`.
+        let mut selector = format!("zensight/logs/@/query/events?max={LOG_FETCH_MAX}");
+        if let Some(since) = since {
+            selector.push_str(&format!(";since={since}"));
+        }
+        Task::future(async move {
+            match session
+                .get(&selector)
+                .timeout(std::time::Duration::from_secs(3))
+                .await
+            {
+                Ok(replies) => {
+                    let mut records: Vec<zensight_common::LogRecord> = Vec::new();
+                    while let Ok(reply) = replies.recv_async().await {
+                        if let Ok(sample) = reply.result()
+                            && let Ok(mut batch) =
+                                zensight_common::decode_auto::<Vec<zensight_common::LogRecord>>(
+                                    &sample.payload().to_bytes(),
+                                )
+                        {
+                            records.append(&mut batch);
+                        }
+                    }
+                    Message::LogEventsLoaded(Ok(records))
+                }
+                Err(e) => Message::LogEventsLoaded(Err(e.to_string())),
+            }
+        })
     }
 
     /// Handle incoming telemetry.
@@ -4635,6 +4793,11 @@ impl ZenSight {
         // Syslog/journald lines feed the rolling buffer behind the Logs view.
         // Unlike per-metric device state (which keeps only the latest point per
         // facility/severity), this preserves the full recent stream.
+        //
+        // Since #358 current sensors serve per-line events from `@/query/events`
+        // instead of streaming them, so live lines normally arrive via the
+        // periodic fetch (`LogEventsLoaded`). This ingest branch stays for demo
+        // mode (the mock stream) and pre-#358 sensors on the wire.
         //
         // Only actual per-line log events (a Text payload) belong here. The logs
         // sensor also streams derived rollup telemetry (`logs/by_severity/*`,
@@ -5308,6 +5471,92 @@ mod prefetch_tests {
             TelemetryValue::Text("Cisco IOS".to_string()),
         );
         assert!(!point_is_log_line(&snmp_text));
+    }
+}
+
+/// #358: per-line log events are pulled from `@/query/events`, not streamed.
+/// These tests pin the fetch gating, the watermark, and the overlap de-dup.
+#[cfg(test)]
+mod log_fetch_tests {
+    use super::*;
+
+    fn app() -> ZenSight {
+        ZenSight::boot(true).0
+    }
+
+    fn rec(uid: &str, ts: i64, message: &str) -> zensight_common::LogRecord {
+        zensight_common::LogRecord {
+            uid: uid.to_string(),
+            ts,
+            host: "web01".to_string(),
+            facility: "daemon".to_string(),
+            severity: "err".to_string(),
+            severity_number: 17,
+            app: None,
+            pid: None,
+            message: message.to_string(),
+            labels: Default::default(),
+        }
+    }
+
+    #[test]
+    fn refresh_gating() {
+        let mut a = app();
+        let now = 1_000_000_000_000;
+        // Demo mode never fetches (mock stream feeds the buffer directly).
+        assert!(!a.should_refresh_logs(now));
+
+        a.demo_mode = false;
+        a.dashboard.connected = true;
+        // Not on a logs surface → no fetch.
+        a.current_view = CurrentView::Dashboard;
+        assert!(!a.should_refresh_logs(now));
+        // Logs view + first fetch (no cadence history) → fetch.
+        a.current_view = CurrentView::Logs;
+        assert!(a.should_refresh_logs(now));
+        // Within the cadence window → no fetch.
+        a.last_log_fetch_ms = Some(now - (LOG_REFRESH_SECS * 1000 - 1));
+        assert!(!a.should_refresh_logs(now));
+        // Past the window → fetch again.
+        a.last_log_fetch_ms = Some(now - LOG_REFRESH_SECS * 1000);
+        assert!(a.should_refresh_logs(now));
+        // …unless one is already in flight.
+        a.log_fetch_inflight = true;
+        assert!(!a.should_refresh_logs(now));
+    }
+
+    #[test]
+    fn loaded_events_advance_watermark_and_merge() {
+        let mut a = app();
+        a.log_fetch_inflight = true;
+        let _ = a.update(Message::LogEventsLoaded(Ok(vec![
+            rec("u1", 1000, "first"),
+            rec("u2", 2000, "second"),
+        ])));
+        assert!(!a.log_fetch_inflight, "fetch completion clears the flag");
+        assert_eq!(a.last_log_event_ms, Some(2000));
+        assert_eq!(a.recent_logs.len(), 2);
+
+        // An overlapping refetch (same records + one new) merges without dupes.
+        a.log_fetch_inflight = true;
+        let _ = a.update(Message::LogEventsLoaded(Ok(vec![
+            rec("u2", 2000, "second"),
+            rec("u3", 3000, "third"),
+        ])));
+        assert_eq!(a.last_log_event_ms, Some(3000));
+        assert_eq!(a.recent_logs.len(), 3, "overlap de-dups by (ts, message)");
+        // Time-ordered after merge.
+        let ts: Vec<i64> = a.recent_logs.iter().map(|m| m.timestamp()).collect();
+        assert_eq!(ts, vec![1000, 2000, 3000]);
+    }
+
+    #[test]
+    fn fetch_error_clears_inflight() {
+        let mut a = app();
+        a.log_fetch_inflight = true;
+        let _ = a.update(Message::LogEventsLoaded(Err("timeout".to_string())));
+        assert!(!a.log_fetch_inflight);
+        assert!(a.recent_logs.is_empty());
     }
 }
 

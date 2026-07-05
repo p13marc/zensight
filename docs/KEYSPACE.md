@@ -62,17 +62,22 @@ zensight/systemd/host01/journal/disk_usage_bytes        # opt-in journal health 
 Payload: a serialized [`TelemetryPoint`] (JSON or CBOR per the sensor's
 `serialization` config). Built via [`KeyExprBuilder::build(source, metric)`].
 
-> **Logs are per-line events** (#104). The logs sensor keys every line under a
-> unique `events/<uid>` metric — `<uid>` is `<timestamp_ms><seq>` (zero-padded,
-> time-sortable). This replaced the old `<facility>/<severity>` metric, where
-> every key was overwritten by the next line of the same severity (last-writer-
-> wins lost all history). Facility/severity and the OpenTelemetry logs data model
-> (`severity_number` 1–24, `severity_text`, `log.record.uid`, and
-> `log.record.original` when raw is kept) now travel in **labels**, not the key.
-> Because each line is unique text, these points feed the GUI's rolling log buffer
-> only — they are excluded from per-metric device state, the numeric local store,
-> and the Prometheus exporter (cardinality), while the OTel exporter maps them to
-> log records.
+> **Log lines are served on demand, never streamed** (#358). Per-line log
+> events are high-cardinality detail, so — like flows/sockets/processes (P2) —
+> they live in a bounded in-memory ring inside the logs sensor and are pulled
+> from the `zensight/logs/@/query/events` queryable (`Vec<LogRecord>`, newest
+> first; selectors `since=<epoch_ms>` inclusive, `max=<n>` default 500,
+> `host=<name>`). Each record keeps the #104 identity: a unique `<uid>` =
+> `<timestamp_ms><seq>` (zero-padded, time-sortable) plus the OpenTelemetry
+> logs data model (`severity_number` 1–24, `severity_text`, `log.record.uid`,
+> `log.record.original` when raw is kept) — facility/severity travel as fields/
+> labels, not keys. Only the low-rate rollups (`logs/by_severity/*`,
+> `logs/by_unit/*`, `logs/ingest/*`, …) ride the telemetry bus for charts and
+> alerts. The GUI seeds its rolling buffer from the queryable on open and
+> refreshes on a slow tick; fetched lines persist to its local store for
+> search-back. (Pre-#358 sensors streamed each line as
+> `zensight/logs/<host>/events/<uid>` — the GUI still ingests that shape from
+> old sensors, and exporters already excluded it.)
 
 > **Published with a zenoh-ext `AdvancedPublisher`** (per-key cache + miss/
 > publisher detection), so it pairs with the GUI's `AdvancedSubscriber` on
@@ -190,6 +195,7 @@ as Zenoh selector params (e.g. `?top=20`, `?state=&port=`).
 
 | Sensor | `@/query/<topic>` | Reply |
 |--------|---|---|
+| logs | `events?since=<epoch_ms>;max=N;host=<name>` (#358, zenoh `;`-separated params) | `Vec<LogRecord>` (newest first, from the bounded per-line ring) |
 | sysinfo | `processes?sort=cpu\|mem\|io&top=N`, `latency`² | `Vec<ProcessRecord>` / `LatencyReport` |
 | netlink | `routes`, `neighbors`, `sockets?state=&port=&ip=`⁶, `addresses`, `events`, `route_changes`, `tc`, `xfrm`, `nft`, `bandwidth?top=N`⁴, `retransmits`³, `connections`³ | `Vec<…Record>` |
 | netring | `flows`, `tls`, `talkers?top=N`, `matrix?top=N`, `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`, `encrypted_dns`, `ja4h?top=N`¹, `assets`, `captures`⁵ | `Vec<…Record>` |

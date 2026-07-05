@@ -121,6 +121,13 @@ pub struct SyslogConfig {
     /// one record. journald is unaffected (already one record per entry).
     #[serde(default)]
     pub multiline: MultilineConfig,
+
+    /// Capacity of the in-memory per-line event ring served on demand at
+    /// `@/query/events` (#358). Per-line events no longer stream on the
+    /// telemetry bus — consumers pull them from this ring. Default 10 000
+    /// records (~3 MB), clamped to at least 100.
+    #[serde(default = "default_events_ring_capacity")]
+    pub events_ring_capacity: usize,
 }
 
 /// Multiline / stacktrace joining configuration (#107, C6).
@@ -235,6 +242,11 @@ fn default_derived_interval_secs() -> u64 {
 }
 fn default_top_units() -> usize {
     10
+}
+
+/// Default `@/query/events` ring capacity (#358): 10 000 records ≈ 3 MB.
+fn default_events_ring_capacity() -> usize {
+    10_000
 }
 
 /// Per-unit error-budget / SLO configuration (#105).
@@ -833,6 +845,7 @@ impl Default for SyslogConfig {
             novelty: NoveltyConfig::default(),
             ingest: IngestConfig::default(),
             multiline: MultilineConfig::default(),
+            events_ring_capacity: default_events_ring_capacity(),
         }
     }
 }

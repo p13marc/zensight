@@ -29,6 +29,11 @@ pub enum Message {
     /// records (newest-first) to merge into the rolling buffer on Logs-view open.
     LogHistoryLoaded(Vec<crate::store::StoredLog>),
 
+    /// On-demand `@/query/events` fetch finished (#358): per-line log events
+    /// pulled from the logs sensors' rings (all repliers concatenated), to
+    /// merge into the rolling buffer + persist for search-back.
+    LogEventsLoaded(Result<Vec<zensight_common::LogRecord>, String>),
+
     /// Sensor health snapshot received.
     HealthSnapshotReceived(HealthSnapshot),
 
