@@ -11,6 +11,7 @@
 pub mod capture;
 pub mod command;
 pub mod config;
+pub mod disk;
 pub mod evidence;
 pub mod exfil;
 pub mod lateral;

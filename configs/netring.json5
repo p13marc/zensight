@@ -227,6 +227,33 @@
         ttl_secs: 600,              // how long a finished capture stays fetchable
         chunk_size: 524288,         // 512 KiB blob-transfer chunk
       },
+
+      // Continuous capture-to-disk (#327). Off by default. `rotating` spools
+      // rotating pcap files to `dir` (local forensics; metadata only on the
+      // bus); `triggered` keeps a bounded in-memory pre-trigger ring and, when
+      // an anomaly at/above `trigger_min_severity` fires (or the GUI sends
+      // `capture_now`), writes the lead-up + `post_trigger_secs` of aftermath
+      // to a pcap served as a TTL'd blob artifact the GUI downloads.
+      // MEMORY COST: `ring_bytes` of raw frames stays resident while triggered
+      // mode is armed. A mode that is off at startup is not armed (no packet
+      // subscription); switching between armed modes is live via
+      // `@/commands/capture_disk`. Under systemd, add `ReadWritePaths=` for
+      // `dir` to the unit.
+      to_disk: {
+        mode: "off",                     // "off" | "rotating" | "triggered"
+        // dir: "/var/lib/zensight/captures",  // REQUIRED when mode != off
+        ring_bytes: 33554432,            // 32 MiB pre-trigger ring (triggered)
+        max_file_bytes: 67108864,        // 64 MiB per file (rotation / trigger cap)
+        rotate_secs: 0,                  // 0 = size-based rotation only (rotating)
+        max_files: 16,                   // retention: file count (oldest evicted)
+        max_total_bytes: 1073741824,     // retention: 1 GiB total
+        snaplen: 0,                      // 0 = full frames
+        trigger_min_severity: "warning", // "info" | "warning" | "critical"
+        trigger_kinds: [],               // detector slugs; empty = all anomalies
+        post_trigger_secs: 10,           // aftermath recorded after the trigger
+        compress: true,                  // zstd the finished trigger file
+        artifact_ttl_secs: 3600,         // how long the blob stays downloadable
+      },
     },
   },
 

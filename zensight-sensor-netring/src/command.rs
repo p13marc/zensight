@@ -31,6 +31,9 @@ pub const CAPTURE_FILTER_TOPIC: &str = "capture_filter";
 /// The threat-intel (IOC / YARA) hot-reload control topic (#328).
 pub const THREAT_INTEL_TOPIC: &str = "threat_intel";
 
+/// The capture-to-disk control topic (#327).
+pub const CAPTURE_DISK_TOPIC: &str = "capture_disk";
+
 /// A runtime capture-focus command (tagged JSON), applied to the reloadable
 /// packet-tier subscription via netring's `ReloadHandle::set_packet_filter`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -529,6 +532,137 @@ fn apply_ioc_reporting(
     format!("ok: {verb} applied {} indicators", *ioc_total)
 }
 
+/// A capture-to-disk command (tagged JSON) on `@/commands/capture_disk` (#327),
+/// applied to the disk engine via its [`crate::disk::CaptureDiskHandle`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CaptureDiskCommand {
+    /// Manual trigger: in `triggered` mode fire the pre-trigger ring now (with
+    /// an optional operator tag recorded on the capture); in `rotating` mode
+    /// finalize the current spool file.
+    CaptureNow {
+        #[serde(default)]
+        tag: Option<String>,
+    },
+    /// Hot-switch the live mode. Only effective when capture-to-disk was armed
+    /// at startup (`capture.to_disk.mode != off` — the packet subscription is a
+    /// build-time decision, like the detector registry).
+    SetCapture {
+        mode: crate::config::CaptureDiskMode,
+    },
+}
+
+/// The capture-to-disk status served on `@/status/capture_disk` (#327): the
+/// live mode, ring occupancy, retention usage and the last lifecycle event.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CaptureDiskStatus {
+    /// Whether capture-to-disk was armed at startup (a packet sub exists).
+    pub armed: bool,
+    /// Live mode: `off` / `rotating` / `triggered`.
+    pub mode: String,
+    /// True while a triggered capture streams its post-trigger window.
+    pub recording: bool,
+    /// Pre-trigger ring occupancy (triggered mode; zero otherwise).
+    pub ring_packets: u64,
+    pub ring_bytes: u64,
+    /// Retention usage vs the configured caps.
+    pub retained_files: u64,
+    pub retained_bytes: u64,
+    pub max_files: u64,
+    pub max_total_bytes: u64,
+    /// Frames dropped on the engine channel + files evicted by retention +
+    /// triggers accepted, since start.
+    pub dropped: u64,
+    pub evictions: u64,
+    pub triggers: u64,
+    /// Human-readable last lifecycle event (trigger fired / capture ready / …).
+    pub last_event: Option<String>,
+}
+
+/// Run the capture-to-disk command subscriber + status queryable (#327) until
+/// the session closes. Mirrors [`run_threat_intel`]: bad commands are logged
+/// (never a panic), the status reply always reflects the live engine state.
+pub async fn run_capture_disk(
+    session: Arc<zenoh::Session>,
+    key_prefix: String,
+    handle: crate::disk::CaptureDiskHandle,
+    max_files: u64,
+    max_total_bytes: u64,
+) {
+    use std::sync::atomic::Ordering;
+
+    let cmd_key = command_key(&key_prefix, CAPTURE_DISK_TOPIC);
+    let stat_key = status_key(&key_prefix, CAPTURE_DISK_TOPIC);
+
+    let subscriber = match session.declare_subscriber(&cmd_key).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, key = %cmd_key, "netring: failed to subscribe to capture-disk commands");
+            return;
+        }
+    };
+    let queryable = match session.declare_queryable(&stat_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %stat_key, "netring: failed to declare capture-disk status queryable");
+            return;
+        }
+    };
+    tracing::info!(commands = %cmd_key, status = %stat_key, "netring: capture-to-disk channel ready");
+
+    loop {
+        tokio::select! {
+            sample = subscriber.recv_async() => {
+                let Ok(sample) = sample else {
+                    tracing::warn!("netring: capture-disk command subscriber ended");
+                    return;
+                };
+                let payload = sample.payload().to_bytes();
+                match serde_json::from_slice::<CaptureDiskCommand>(&payload) {
+                    Ok(CaptureDiskCommand::CaptureNow { tag }) => handle.capture_now(tag),
+                    Ok(CaptureDiskCommand::SetCapture { mode }) => handle.set_mode(mode),
+                    Err(e) => tracing::warn!(error = %e, "netring: bad capture-disk command"),
+                }
+            }
+            query = queryable.recv_async() => {
+                let Ok(query) = query else {
+                    tracing::warn!("netring: capture-disk status queryable ended");
+                    return;
+                };
+                let stats = handle.stats();
+                let status = CaptureDiskStatus {
+                    armed: true,
+                    mode: match stats.mode() {
+                        crate::config::CaptureDiskMode::Off => "off",
+                        crate::config::CaptureDiskMode::Rotating => "rotating",
+                        crate::config::CaptureDiskMode::Triggered => "triggered",
+                    }
+                    .to_string(),
+                    recording: stats.recording.load(Ordering::Relaxed),
+                    ring_packets: stats.ring_packets.load(Ordering::Relaxed),
+                    ring_bytes: stats.ring_bytes.load(Ordering::Relaxed),
+                    retained_files: stats.retained_files.load(Ordering::Relaxed),
+                    retained_bytes: stats.retained_bytes.load(Ordering::Relaxed),
+                    max_files,
+                    max_total_bytes,
+                    dropped: stats.dropped.load(Ordering::Relaxed),
+                    evictions: stats.evictions.load(Ordering::Relaxed),
+                    triggers: stats.triggers.load(Ordering::Relaxed),
+                    last_event: stats.last_event.lock().ok().and_then(|l| l.clone()),
+                };
+                match serde_json::to_vec(&status) {
+                    Ok(payload) => {
+                        if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                            tracing::warn!(error = %e, "netring: failed to reply to capture-disk status query");
+                        }
+                    }
+                    Err(e) => tracing::warn!(error = %e, "netring: failed to serialize capture-disk status"),
+                }
+            }
+        }
+    }
+}
+
 #[cfg(feature = "yara")]
 fn threat_intel_yara_armed(reload: &netring::monitor::ReloadHandle) -> bool {
     reload.has_yara()
@@ -610,6 +744,61 @@ mod tests {
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(
             serde_json::from_str::<ThreatIntelStatus>(&json).unwrap(),
+            status
+        );
+    }
+
+    #[test]
+    fn capture_disk_command_wire_format() {
+        // Pin the JSON the GUI (#327) sends on @/commands/capture_disk.
+        let now: CaptureDiskCommand =
+            serde_json::from_str(r#"{"type":"capture_now","tag":"incident-42"}"#).unwrap();
+        assert_eq!(
+            now,
+            CaptureDiskCommand::CaptureNow {
+                tag: Some("incident-42".into())
+            }
+        );
+        let bare: CaptureDiskCommand = serde_json::from_str(r#"{"type":"capture_now"}"#).unwrap();
+        assert_eq!(bare, CaptureDiskCommand::CaptureNow { tag: None });
+        let set: CaptureDiskCommand =
+            serde_json::from_str(r#"{"type":"set_capture","mode":"triggered"}"#).unwrap();
+        assert_eq!(
+            set,
+            CaptureDiskCommand::SetCapture {
+                mode: crate::config::CaptureDiskMode::Triggered
+            }
+        );
+        let off: CaptureDiskCommand =
+            serde_json::from_str(r#"{"type":"set_capture","mode":"off"}"#).unwrap();
+        assert_eq!(
+            off,
+            CaptureDiskCommand::SetCapture {
+                mode: crate::config::CaptureDiskMode::Off
+            }
+        );
+    }
+
+    #[test]
+    fn capture_disk_status_roundtrips() {
+        let status = CaptureDiskStatus {
+            armed: true,
+            mode: "triggered".into(),
+            recording: false,
+            ring_packets: 1200,
+            ring_bytes: 4 * 1024 * 1024,
+            retained_files: 3,
+            retained_bytes: 90 * 1024 * 1024,
+            max_files: 16,
+            max_total_bytes: 1024 * 1024 * 1024,
+            dropped: 0,
+            evictions: 1,
+            triggers: 4,
+            last_event: Some("capture ready: x.pcap.zst · 812 pkts · 1.2 MiB".into()),
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(
+            serde_json::from_str::<CaptureDiskStatus>(&json).unwrap(),
             status
         );
     }

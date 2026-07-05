@@ -194,6 +194,87 @@ pub fn focus_points(sensor_id: &str, packets: u64, bytes: u64) -> Vec<TelemetryP
     ]
 }
 
+/// One `capture/events` lifecycle point (#327): a triggered/rotating capture
+/// event (trigger fired, capture ready, mode switch) as Text with an `event`
+/// label, so the GUI Capture tab shows a live event feed.
+pub fn capture_event_point(sensor_id: &str, event: &str, detail: &str) -> TelemetryPoint {
+    TelemetryPoint::new(
+        sensor_id,
+        Protocol::Netring,
+        "capture/events".to_string(),
+        TelemetryValue::Text(detail.to_string()),
+    )
+    .with_label("event", event)
+}
+
+/// The `capture/disk/*` family (#327): capture-to-disk mode, pre-trigger ring
+/// occupancy, retained files/bytes and drop/eviction/trigger counters — the
+/// health surface for "is the ring armed / is the disk filling".
+#[allow(clippy::too_many_arguments)]
+pub fn capture_disk_points(
+    sensor_id: &str,
+    mode: &str,
+    ring_packets: u64,
+    ring_bytes: u64,
+    retained_files: u64,
+    retained_bytes: u64,
+    dropped: u64,
+    evictions: u64,
+    triggers: u64,
+) -> Vec<TelemetryPoint> {
+    let pfx = "capture/disk";
+    vec![
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            format!("{pfx}/mode"),
+            TelemetryValue::Text(mode.to_string()),
+        ),
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            format!("{pfx}/ring_packets"),
+            TelemetryValue::Gauge(ring_packets as f64),
+        ),
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            format!("{pfx}/ring_bytes"),
+            TelemetryValue::Gauge(ring_bytes as f64),
+        ),
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            format!("{pfx}/retained_files"),
+            TelemetryValue::Gauge(retained_files as f64),
+        ),
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            format!("{pfx}/retained_bytes"),
+            TelemetryValue::Gauge(retained_bytes as f64),
+        ),
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            format!("{pfx}/dropped"),
+            TelemetryValue::Counter(dropped),
+        ),
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            format!("{pfx}/evictions"),
+            TelemetryValue::Counter(evictions),
+        ),
+        TelemetryPoint::new(
+            sensor_id,
+            Protocol::Netring,
+            format!("{pfx}/triggers"),
+            TelemetryValue::Counter(triggers),
+        ),
+    ]
+}
+
 /// One-shot `capture/backend` info point (#227): the resolved capture backend
 /// (or `pcap-replay`) as Text, so the GUI Sensors view can show what is live.
 pub fn backend_point(sensor_id: &str, label: &str) -> TelemetryPoint {

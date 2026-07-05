@@ -120,6 +120,7 @@ Per-sensor operational channels. All are derived from the sensor's `key_prefix`.
 | netring | `detectors` | runtime detection tuning: allowlist + per-detector mute/threshold |
 | netring | `capture_filter` | hot-swap the reloadable packet-tier BPF filter (capture focus) |
 | netring | `threat_intel` | hot-reload IOC indicators / YARA rules (set_ioc / reload_ioc_files / clear_ioc / set_yara) — armed by `threat.reload` or startup indicators |
+| netring | `capture_disk` | capture-to-disk control (#327): `capture_now {tag?}` fires the pre-trigger ring (or rotates the spool); `set_capture {mode}` hot-switches between the armed modes. Status reply: mode, ring occupancy, retention usage, last event |
 | systemd | `expectations` | hot-swap sentinel expectations (service/target/timer/restart-rate/forbid-failed) |
 | systemd | `action` | gated service control `{verb,unit}` (start/stop/restart/reload) — **default OFF**, allowlist + polkit |
 
@@ -191,7 +192,7 @@ as Zenoh selector params (e.g. `?top=20`, `?state=&port=`).
 |--------|---|---|
 | sysinfo | `processes?sort=cpu\|mem\|io&top=N`, `latency`² | `Vec<ProcessRecord>` / `LatencyReport` |
 | netlink | `routes`, `neighbors`, `sockets?state=&port=`, `addresses`, `events`, `route_changes`, `tc`, `xfrm`, `nft`, `bandwidth?top=N`⁴, `retransmits`³, `connections`³ | `Vec<…Record>` |
-| netring | `flows`, `tls`, `talkers?top=N`, `matrix?top=N`, `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`, `encrypted_dns`, `ja4h?top=N`¹, `assets` | `Vec<…Record>` |
+| netring | `flows`, `tls`, `talkers?top=N`, `matrix?top=N`, `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`, `encrypted_dns`, `ja4h?top=N`¹, `assets`, `captures`⁵ | `Vec<…Record>` |
 | systemd | `units`, `failed`, `unit?name=<u>`, `timers`, `events`, `cgroups?path=<rel>` | `Vec<UnitRecord>` / `UnitDetail` / `Vec<TimerRecord>` / `Vec<EventRecord>` / `CgroupNode` |
 
 Note: sysinfo's `@/query/*` keys carry the `<hostname>` segment
@@ -218,6 +219,15 @@ absent.
 (`zensight-common::bandwidth`), ranked by rate, top-N (default 50). **TCP-only,
 app-goodput** — every record carries `bw.source`/`bw.semantics`/`bw.proto` so the
 GUI never blends it with wire-L3 (systemd) or wire-L2 (capture) numbers.
+
+⁵ `captures` (capture-to-disk file index, #327) is served when
+`capture.to_disk.mode != off`. Replies `Vec<CaptureRecord>` (newest first):
+triggered captures carry the firing detector, packet counts and — while their
+serve TTL lives — the `artifact_id` to download the bytes through
+`@/artifact/blob/**`; rotating spool files are metadata-only (local disk).
+Companion telemetry: `capture/events` (lifecycle Text points) and
+`capture/disk/*` (mode, ring occupancy, retention usage, drop/eviction/trigger
+counters).
 
 ---
 

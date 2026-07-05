@@ -390,6 +390,34 @@ pub async fn run_ipfix(
     }
 }
 
+/// Run the capture-file index query channel (#327):
+/// `zensight/netring/@/query/captures` replies with the capture-to-disk file
+/// index (newest first) as JSON `Vec<CaptureRecord>` — triggered captures with
+/// their trigger/artifact metadata, or the rotating spool listing.
+pub async fn run_captures(
+    session: Arc<zenoh::Session>,
+    key_prefix: String,
+    index: crate::disk::CaptureIndex,
+) {
+    let key = zensight_common::command::query_key(&key_prefix, "captures");
+    let queryable = match session.declare_queryable(&key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %key, "query: declare captures failed");
+            return;
+        }
+    };
+    tracing::info!(key = %key, "on-demand capture-index query channel ready");
+
+    while let Ok(query) = queryable.recv_async().await {
+        let records: Vec<_> = match index.lock() {
+            Ok(idx) => idx.iter().cloned().collect(),
+            Err(_) => Vec::new(),
+        };
+        reply(&query, &records, "captures").await;
+    }
+}
+
 /// Serialize `records` to JSON and reply; logs (does not panic) on failure.
 async fn reply<T: serde::Serialize>(query: &zenoh::query::Query, records: &T, label: &str) {
     match serde_json::to_vec(records) {

@@ -243,6 +243,47 @@ pub struct ElephantRecord {
     pub packets_responder: u64,
 }
 
+/// One capture file written by the netring capture-to-disk engine (#327),
+/// served on demand from `@/query/captures`. A `triggered`-mode file carries the
+/// anomaly that fired it plus (while it lives) the artifact id to download the
+/// bytes through the `@/artifact/blob` path; a `rotating`-mode file is a local
+/// spool entry (metadata only — retrieval needs host filesystem access).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CaptureRecord {
+    /// File name (not the full host path — only metadata rides the bus).
+    pub filename: String,
+    /// On-disk size, bytes (compressed size when the file is zstd-compressed).
+    pub bytes: u64,
+    /// Packet records written (0 when unknown, e.g. rotating spool files).
+    #[serde(default)]
+    pub packets: u64,
+    /// Capture mode that produced the file: `"triggered"` or `"rotating"`.
+    pub mode: String,
+    /// Detector slug of the anomaly that fired the trigger (`"manual"` for a
+    /// `capture_now` command); `None` for rotating spool files.
+    #[serde(default)]
+    pub trigger_kind: Option<String>,
+    /// Operator tag from a manual `capture_now`, if any.
+    #[serde(default)]
+    pub tag: Option<String>,
+    /// First / last packet wall-clock time, epoch ms (0 when unknown).
+    #[serde(default)]
+    pub start_ms: i64,
+    #[serde(default)]
+    pub end_ms: i64,
+    /// Tier-1 blob id to download the file through `@/artifact/blob/**` while it
+    /// lives; `None` for rotating spool files or once the TTL reaped it.
+    #[serde(default)]
+    pub artifact_id: Option<String>,
+    /// When the served artifact expires (epoch ms); `None` when not served.
+    #[serde(default)]
+    pub expires_ms: Option<i64>,
+    /// True while the byte cap truncated the capture before its post-trigger
+    /// window elapsed.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
 /// One observed DNS second-level domain (netring), served on demand. Carries the
 /// query count and an NXDOMAIN tally — the high-cardinality detail behind the
 /// streamed DNS RED aggregates (top SLDs / top-NXDOMAIN).

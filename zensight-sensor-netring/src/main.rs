@@ -132,6 +132,90 @@ async fn main() -> Result<()> {
         ));
     }
 
+    // Capture-to-disk engine (#327): rotating spool or anomaly-triggered
+    // pre-trigger-ring capture. Armed iff the monitor registered the continuous
+    // packet feed (`capture.to_disk.mode != off`). Triggered files are served as
+    // TTL'd Tier-1 blobs on the engine's own BlobServer (same `@/artifact/blob`
+    // prefix as the artifact channel — servers ignore ids they don't own).
+    let mut capture_disk_trigger = None;
+    if let Some((disk_rx, disk_stats)) = channels.disk.take() {
+        use zensight_sensor_netring::{command, disk, query};
+        let to_disk = cfg.capture.to_disk.clone();
+        let (ctl_tx, ctl_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = disk::CaptureDiskHandle::new(ctl_tx, disk_stats.clone());
+        let index: disk::CaptureIndex =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let blob = zenoh_blob::BlobServer::new(
+            runner.session().clone(),
+            zensight_common::artifact_blob_prefix(&key_prefix),
+            zenoh_blob::Format::Json,
+        );
+        {
+            let blob = blob.clone();
+            runner.spawn(async move {
+                if let Err(e) = blob.run().await {
+                    tracing::error!(error = %e, "netring: capture blob server exited");
+                }
+            });
+        }
+        runner.spawn(disk::run_engine(
+            to_disk.clone(),
+            source.clone(),
+            disk_rx,
+            ctl_rx,
+            disk_stats.clone(),
+            index.clone(),
+            Some(blob),
+            keepalive.clone(),
+        ));
+        runner.spawn(command::run_capture_disk(
+            runner.session().clone(),
+            key_prefix.clone(),
+            handle.clone(),
+            to_disk.max_files as u64,
+            to_disk.max_total_bytes,
+        ));
+        runner.spawn(query::run_captures(
+            runner.session().clone(),
+            key_prefix.clone(),
+            index,
+        ));
+        // Periodic capture/disk/* telemetry (ring occupancy, retention usage).
+        {
+            let tx = keepalive.clone();
+            let stats = disk_stats;
+            let sensor_id = source.clone();
+            let period = cfg.bandwidth_period_secs.max(1);
+            runner.spawn(async move {
+                use std::sync::atomic::Ordering;
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(period));
+                loop {
+                    tick.tick().await;
+                    let mode = match stats.mode() {
+                        zensight_sensor_netring::config::CaptureDiskMode::Off => "off",
+                        zensight_sensor_netring::config::CaptureDiskMode::Rotating => "rotating",
+                        zensight_sensor_netring::config::CaptureDiskMode::Triggered => "triggered",
+                    };
+                    let pts = zensight_sensor_netring::map::capture_disk_points(
+                        &sensor_id,
+                        mode,
+                        stats.ring_packets.load(Ordering::Relaxed),
+                        stats.ring_bytes.load(Ordering::Relaxed),
+                        stats.retained_files.load(Ordering::Relaxed),
+                        stats.retained_bytes.load(Ordering::Relaxed),
+                        stats.dropped.load(Ordering::Relaxed),
+                        stats.evictions.load(Ordering::Relaxed),
+                        stats.triggers.load(Ordering::Relaxed),
+                    );
+                    if pts.into_iter().any(|p| tx.send(p).is_err()) {
+                        break; // telemetry pump gone
+                    }
+                }
+            });
+        }
+        capture_disk_trigger = Some((handle, to_disk));
+    }
+
     // On-demand query channels (P2): recent-flow ring, TLS asset inventory,
     // top-talkers, elephant flows, top DNS domains, top HTTP hosts.
     {
@@ -282,6 +366,7 @@ async fn main() -> Result<()> {
         reporter,
         flow_period,
         health,
+        capture_disk_trigger,
     ));
 
     // Monitor run loop: pcap replay (bounded) or live capture (until signal).

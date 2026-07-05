@@ -420,8 +420,24 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
   sees IP/L4 frames — non-IP traffic (ARP/LLDP) is not captured. Backpressure is
   drop-with-count (a lossy capture never stalls global telemetry; drops are
   surfaced in the progress line).
+- **Capture-to-disk (#327, opt-in):** `capture.to_disk.mode` arms a *continuous*
+  packet feed into an engine that either spools **rotating** pcap files to
+  `dir` (size/duration rotation + file-count / total-byte retention; local
+  forensics, metadata-only on the bus) or — **triggered** — buffers recent
+  frames in a bounded in-memory pre-trigger ring and, when an anomaly at/above
+  `trigger_min_severity` fires (optionally narrowed to `trigger_kinds` detector
+  slugs) or the GUI sends `capture_now`, flushes the lead-up plus
+  `post_trigger_secs` of aftermath to a `pcap[.zst]` served as a TTL'd Tier-1
+  blob (downloadable from the GUI Capture tab and the Security drill-down's
+  "capture available" pivot). Index on `@/query/captures`; control on
+  `@/commands/capture_disk`; health on `capture/disk/*` + `capture/events`.
+  **Memory cost:** `ring_bytes` (default 32 MiB) of raw frames stays resident
+  while triggered mode is armed. **Privilege:** no new capability beyond the
+  capture socket, but `dir` must be writable — under systemd add
+  `ReadWritePaths=` to the unit. A mode that is `off` at startup is not armed
+  (no packet subscription); switching between armed modes is live.
 - **Config:** `configs/netring.json5` (`collect.*`, `anomalies.*`, `threat.*`,
-  `capture.on_demand.*`, `pcap` for replay).
+  `capture.on_demand.*`, `capture.to_disk.*`, `pcap` for replay).
 - **GUI (#257):** the netring device screen is a tabbed, chart-driven view —
   **Overview** (RED hero + per-L4 donut + live anomaly strip) · **Flows** ·
   **Talkers & Matrix** · **DNS** (RED tiles + rcode bars + top-SLD table) ·

@@ -334,6 +334,25 @@ pub enum Message {
     FetchNetringHttp,
     /// A netring HTTP-detail reply: the decoded records, or an error message.
     NetringHttpReceived(Result<Vec<zensight_common::HttpHostRecord>, String>),
+    /// Fetch the on-demand netring capture-file index (#327).
+    FetchNetringCaptures,
+    /// A netring capture-index reply: the decoded records, or an error message.
+    NetringCapturesReceived(Result<Vec<zensight_common::CaptureRecord>, String>),
+    /// Manual capture trigger (#327): `capture_now` on `@/commands/capture_disk`
+    /// (fires the pre-trigger ring in triggered mode, rotates the spool in
+    /// rotating mode).
+    NetringCaptureNow,
+    /// Hot-switch the capture-to-disk mode (#327): `set_capture` on
+    /// `@/commands/capture_disk` (`"off"` / `"rotating"` / `"triggered"`).
+    NetringSetCaptureDiskMode(String),
+    /// Download a finished triggered capture by its blob id (#327). Unlike
+    /// `StartArtifact` there is no request/produce phase — the file is already
+    /// registered on the sensor's `@/artifact/blob` server.
+    DownloadCaptureBlob {
+        key_prefix: String,
+        artifact_id: String,
+        filename: String,
+    },
     /// Fetch the on-demand sysinfo process explorer for the selected host,
     /// sorted as requested (#47).
     FetchSysinfoProcesses(crate::view::specialized::sysinfo_detail::ProcessSort),
@@ -348,6 +367,9 @@ pub enum Message {
     },
     /// A flow-pivot reply for anomaly `key`: the filtered flows, or an error.
     AnomalyFlowsReceived(String, Result<Vec<zensight_common::FlowRecord>, String>),
+    /// The capture-to-disk index fetched for the Security drill-down (#327), so
+    /// an expanded anomaly can offer its matching triggered capture.
+    AnomalyCapturesReceived(Result<Vec<zensight_common::CaptureRecord>, String>),
 
     /// Open the security (network anomalies) view.
     OpenSecurity,
