@@ -433,6 +433,27 @@ pub struct ParsedKeyExpr<'a> {
 mod tests {
     use super::*;
 
+    /// #358 acceptance pin: per-line log events are served from the
+    /// `@`-verbatim query key, which the `zensight/**` telemetry firehose can
+    /// never match — so log lines no longer ride the streamed bus. The old
+    /// streamed key shape *did* intersect (that's exactly what moved).
+    #[test]
+    fn log_events_query_key_is_off_the_telemetry_bus() {
+        use zenoh::key_expr::KeyExpr;
+        let telemetry = KeyExpr::try_from(all_telemetry_wildcard()).unwrap();
+        let query_key = KeyExpr::try_from("zensight/logs/@/query/events").unwrap();
+        assert!(
+            !telemetry.intersects(&query_key),
+            "@/query/events must be invisible to the telemetry firehose"
+        );
+        let old_event_key =
+            KeyExpr::try_from("zensight/logs/web01/events/0000001719999000000000000042").unwrap();
+        assert!(
+            telemetry.intersects(&old_event_key),
+            "the pre-#358 streamed event keys were on the bus"
+        );
+    }
+
     #[test]
     fn test_key_builder() {
         let builder = KeyExprBuilder::new(Protocol::Snmp);

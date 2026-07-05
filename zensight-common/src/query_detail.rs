@@ -661,6 +661,123 @@ pub struct CgroupPid {
     pub comm: String,
 }
 
+/// One per-line log event, served on demand from the logs sensor's bounded
+/// ring at `zensight/logs/@/query/events` (#358). Replaces the old streamed
+/// `zensight/logs/<host>/events/<uid>` keys — per-line events are
+/// high-cardinality detail and ride the bus only as low-rate rollups.
+///
+/// Selector parameters: `since=<epoch_ms>` (inclusive lower bound),
+/// `max=<n>` (reply cap, default 500), `host=<name>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogRecord {
+    /// Time-sortable event uid: `<13-digit ts_ms><12-digit seq>` (#104).
+    pub uid: String,
+    /// Event time (Unix epoch ms).
+    pub ts: i64,
+    /// Originating host (the resolved hostname / telemetry `source`).
+    pub host: String,
+    /// Syslog facility slug (e.g. `auth`).
+    pub facility: String,
+    /// Syslog severity slug (e.g. `err`).
+    pub severity: String,
+    /// OTel severity number (1–24).
+    pub severity_number: u8,
+    /// Application / program name, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+    /// Process id string, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<String>,
+    /// The log message text.
+    pub message: String,
+    /// Every other label the event point carried (`sd.journald.*`,
+    /// `template_id`/`template`, `msgid`, `source_type`, `severity_text`,
+    /// `raw`/`log.record.original`, …) so structured drill-downs survive
+    /// the query hop losslessly.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub labels: std::collections::HashMap<String, String>,
+}
+
+/// The labels [`LogRecord`] lifts into typed fields; everything else spills
+/// into [`LogRecord::labels`].
+const LOG_RECORD_TYPED_LABELS: &[&str] = &[
+    "facility",
+    "severity",
+    "severity_number",
+    "app",
+    "pid",
+    "log.record.uid",
+];
+
+impl LogRecord {
+    /// Build a record from a per-line log-event [`TelemetryPoint`] (the
+    /// `events/<uid>` shape from #104). Returns `None` for anything that
+    /// isn't a `Protocol::Logs` Text event.
+    pub fn from_point(point: &crate::TelemetryPoint) -> Option<LogRecord> {
+        if point.protocol != crate::Protocol::Logs {
+            return None;
+        }
+        let crate::TelemetryValue::Text(message) = &point.value else {
+            return None;
+        };
+        let label = |k: &str| point.labels.get(k).cloned();
+        let uid = label("log.record.uid")
+            .or_else(|| point.metric.strip_prefix("events/").map(str::to_string))
+            .unwrap_or_else(|| point.metric.clone());
+        let severity_number = point
+            .labels
+            .get("severity_number")
+            .and_then(|s| s.parse::<u8>().ok())
+            .unwrap_or(9);
+        let labels = point
+            .labels
+            .iter()
+            .filter(|(k, _)| !LOG_RECORD_TYPED_LABELS.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        Some(LogRecord {
+            uid,
+            ts: point.timestamp,
+            host: point.source.clone(),
+            facility: label("facility").unwrap_or_else(|| "unknown".to_string()),
+            severity: label("severity").unwrap_or_else(|| "info".to_string()),
+            severity_number,
+            app: label("app"),
+            pid: label("pid"),
+            message: message.clone(),
+            labels,
+        })
+    }
+
+    /// Reconstruct the per-line event [`TelemetryPoint`] this record was built
+    /// from, so existing consumers (log-row decoding, cold-store persistence)
+    /// keep one code path. Inverse of [`LogRecord::from_point`].
+    pub fn to_point(&self) -> crate::TelemetryPoint {
+        let mut labels = self.labels.clone();
+        labels.insert("facility".to_string(), self.facility.clone());
+        labels.insert("severity".to_string(), self.severity.clone());
+        labels.insert(
+            "severity_number".to_string(),
+            self.severity_number.to_string(),
+        );
+        labels.insert("log.record.uid".to_string(), self.uid.clone());
+        if let Some(app) = &self.app {
+            labels.insert("app".to_string(), app.clone());
+        }
+        if let Some(pid) = &self.pid {
+            labels.insert("pid".to_string(), pid.clone());
+        }
+        crate::TelemetryPoint {
+            timestamp: self.ts,
+            source: self.host.clone(),
+            protocol: crate::Protocol::Logs,
+            metric: format!("events/{}", self.uid),
+            value: crate::TelemetryValue::Text(self.message.clone()),
+            labels,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -698,5 +815,77 @@ mod tests {
         };
         let json = serde_json::to_string(&rec).unwrap();
         assert_eq!(serde_json::from_str::<TalkerRecord>(&json).unwrap(), rec);
+    }
+
+    /// A `LogRecord` round-trips through its `TelemetryPoint` bridge without
+    /// losing typed fields or spillover labels (`sd.journald.*`, templates,
+    /// raw) — the losslessness contract behind `@/query/events` (#358).
+    #[test]
+    fn log_record_point_round_trip() {
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("facility".to_string(), "auth".to_string());
+        labels.insert("severity".to_string(), "err".to_string());
+        labels.insert("severity_number".to_string(), "17".to_string());
+        labels.insert("severity_text".to_string(), "ERROR".to_string());
+        labels.insert(
+            "log.record.uid".to_string(),
+            "0000001719999000000000000042".to_string(),
+        );
+        labels.insert("app".to_string(), "sshd".to_string());
+        labels.insert("pid".to_string(), "4242".to_string());
+        labels.insert("sd.journald.unit".to_string(), "sshd.service".to_string());
+        labels.insert("template_id".to_string(), "t-77".to_string());
+        labels.insert("raw".to_string(), "<38>raw line".to_string());
+        let point = crate::TelemetryPoint {
+            timestamp: 1_719_999_000_000,
+            source: "web01".to_string(),
+            protocol: crate::Protocol::Logs,
+            metric: "events/0000001719999000000000000042".to_string(),
+            value: crate::TelemetryValue::Text("Failed password for root".to_string()),
+            labels,
+        };
+
+        let rec = LogRecord::from_point(&point).expect("log line converts");
+        assert_eq!(rec.uid, "0000001719999000000000000042");
+        assert_eq!(rec.host, "web01");
+        assert_eq!(rec.severity_number, 17);
+        assert_eq!(rec.app.as_deref(), Some("sshd"));
+        assert_eq!(rec.pid.as_deref(), Some("4242"));
+        // Untyped labels spill over.
+        assert_eq!(
+            rec.labels.get("sd.journald.unit").map(String::as_str),
+            Some("sshd.service")
+        );
+        assert_eq!(
+            rec.labels.get("severity_text").map(String::as_str),
+            Some("ERROR")
+        );
+
+        // The bridge back reproduces the original point exactly.
+        // (TelemetryPoint doesn't derive PartialEq — compare field-wise.)
+        let back = rec.to_point();
+        assert_eq!(back.timestamp, point.timestamp);
+        assert_eq!(back.source, point.source);
+        assert_eq!(back.metric, point.metric);
+        assert_eq!(back.value, point.value);
+        assert_eq!(back.labels, point.labels);
+
+        // And the record itself round-trips as JSON.
+        let json = serde_json::to_string(&rec).unwrap();
+        assert_eq!(serde_json::from_str::<LogRecord>(&json).unwrap(), rec);
+    }
+
+    /// Rollup/derived points (non-Text payloads) are not log lines.
+    #[test]
+    fn log_record_rejects_rollups() {
+        let point = crate::TelemetryPoint {
+            timestamp: 1,
+            source: "web01".to_string(),
+            protocol: crate::Protocol::Logs,
+            metric: "logs/errors_total".to_string(),
+            value: crate::TelemetryValue::Counter(5),
+            labels: Default::default(),
+        };
+        assert!(LogRecord::from_point(&point).is_none());
     }
 }

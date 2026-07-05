@@ -64,7 +64,7 @@ pub use publisher_registry::PublisherRegistry;
 pub use qos::QosClass;
 pub use query_detail::{
     AssetRecord, CaptureRecord, CgroupNode, CgroupPid, DnsRecord, ElephantRecord,
-    EncryptedDnsRecord, FlowRecord, HttpHostRecord, Ja4hRecord, MatrixRecord, NameInfo,
+    EncryptedDnsRecord, FlowRecord, HttpHostRecord, Ja4hRecord, LogRecord, MatrixRecord, NameInfo,
     NeighborRecord, ProcessRecord, QuicRecord, RouteRecord, SocketRecord, SshRecord, TalkerRecord,
     TimerRecord, TlsRecord, UnitDetail, UnitRecord,
 };

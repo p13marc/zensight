@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING — per-line log events moved off the streamed bus (#358).** The logs
+  sensor no longer publishes each log line as
+  `zensight/logs/<host>/events/<uid>` telemetry; lines land in a bounded
+  in-memory ring (config `events_ring_capacity`, default 10 000) served on
+  demand from a new `zensight/logs/@/query/events` queryable
+  (`Vec<LogRecord>`, newest first; selectors `since=` inclusive / `max=` /
+  `host=`). On a constrained link the per-line stream could dominate the
+  telemetry bus — this brings logs in line with the "high-cardinality detail is
+  served on request, never streamed" keyspace principle that flows/sockets/
+  processes already follow. The low-rate rollups (`logs/by_severity/*`,
+  `logs/by_unit/*`, …) stay streamed for charts/alerts. The GUI seeds its Logs
+  view from the queryable on open and refreshes it on a slow (5 s) tick while a
+  logs surface is visible, persisting fetched lines to the local store for
+  search-back; it still ingests the old streamed shape from pre-#358 sensors.
+  Mixed-version note: a pre-#358 GUI shows no log lines from a post-#358 logs
+  sensor (upgrade both together).
+
 ### Added
 
 - **Frontend `link_profile` + subscription scope (#364)**: the GUI Settings →
