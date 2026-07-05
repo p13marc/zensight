@@ -374,6 +374,10 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
     `technique` label (T1046 / T1071 / T1071.004 / T1568 / …) and a Community ID.
     `anomalies.allowlist` (case-insensitive substring) suppresses noisy
     destinations/SLDs; all enables/thresholds hot-swap at runtime (see below).
+    Beaconing keys its state on the host-pair (src, dst, dst-port) and the port
+    scan on the source host, so activity that rotates its source port each
+    connection stays one series instead of fragmenting (#324); the alert still
+    carries the triggering flow's full 5-tuple + Community ID.
   - **Per-detector metric surfacing (#254):** each detector also publishes a
     monotonic `anomaly/<kind>/total` counter (e.g. `anomaly/RitaBeacon/total`,
     `anomaly/DnsTunnel/total`) — re-emitted each aggregate tick — so the GUI

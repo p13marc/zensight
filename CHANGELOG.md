@@ -234,6 +234,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **netring beacon / port-scan detectors were systematically under-detecting
+  source-port-rotating activity (#324).** The RITA/CV beacon detectors keyed
+  their state on the full 5-tuple, so a beacon that opens a fresh connection
+  (new ephemeral source port) for each ping fragmented into N one-flow series
+  that never accumulated enough samples to score; the port scanner keyed the
+  same way. They now key detector *state* on `HostPair` (src, dst, dst-port) and
+  `SrcHost` (scanner IP) respectively, collapsing rotating-port activity into one
+  series — the real curl-in-a-loop / C2 shape is now caught. Beacons also now
+  observe once per connection (`FlowEnded`) instead of per packet (the correct
+  ping granularity). The emitted alert still carries the triggering flow's full
+  5-tuple + Community ID, so the alert schema is unchanged. Pinned by a
+  regression test that shows the old 5-tuple keying misses the same series. The
+  hand-rolled Community-ID v1 hash was replaced by flowscope's (byte-identical).
+
 These are upstream bug fixes inherited with the bump; they change values on
 metrics ZenSight already publishes, so dashboards and alerts on these series
 will see a step:

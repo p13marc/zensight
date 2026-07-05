@@ -6,9 +6,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 
-use base64::Engine as _;
 use flowscope::dns::{NameClaim, Provenance};
-use sha1::{Digest as _, Sha1};
 use zensight_common::{
     Alert, AlertKind, AlertSeverity, FlowRecord, NameInfo, Protocol, TelemetryPoint, TelemetryValue,
 };
@@ -228,34 +226,11 @@ pub fn proto_number(name: &str) -> Option<u8> {
 /// correlation key emitted by Zeek, Suricata, Wireshark and Security Onion, so a
 /// ZenSight flow can be matched against any of their records by string compare.
 pub fn community_id_v1(a: SocketAddr, b: SocketAddr, proto: u8, seed: u16) -> String {
-    // Make the key directionless: sort the two endpoints by (ip, port).
-    let (sa, sp, da, dp) = if (a.ip(), a.port()) <= (b.ip(), b.port()) {
-        (a.ip(), a.port(), b.ip(), b.port())
-    } else {
-        (b.ip(), b.port(), a.ip(), a.port())
-    };
-
-    let mut buf = Vec::with_capacity(40);
-    buf.extend_from_slice(&seed.to_be_bytes());
-    push_ip(&mut buf, sa);
-    push_ip(&mut buf, da);
-    buf.push(proto);
-    buf.push(0u8); // padding byte (spec)
-    buf.extend_from_slice(&sp.to_be_bytes());
-    buf.extend_from_slice(&dp.to_be_bytes());
-
-    let digest = Sha1::digest(&buf);
-    format!(
-        "1:{}",
-        base64::engine::general_purpose::STANDARD.encode(digest)
-    )
-}
-
-fn push_ip(buf: &mut Vec<u8>, ip: IpAddr) {
-    match ip {
-        IpAddr::V4(v4) => buf.extend_from_slice(&v4.octets()),
-        IpAddr::V6(v6) => buf.extend_from_slice(&v6.octets()),
-    }
+    // Delegates to flowscope's canonical implementation (#324) — byte-identical
+    // (same endpoint ordering, SHA-1, base64, `"1:"` prefix), so this anomaly key
+    // stays in lockstep with `FlowRecord.community_id` / `Ctx::community_id()` and
+    // with external Zeek/Suricata/Wireshark records. Pinned by `community_id_v1_*`.
+    flowscope::community_id::community_id_v1(proto, a.ip(), a.port(), b.ip(), b.port(), seed)
 }
 
 /// Best-effort Community ID for an anomaly from its (`src`, `dst`, `proto`) labels.
