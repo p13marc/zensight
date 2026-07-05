@@ -113,6 +113,7 @@ zensight/                    # Workspace root
 │   │       ├── detection_tuning.rs # Runtime detector allowlist/threshold panel
 │   │       ├── expectations.rs # Sentinel expectations authoring UI
 │   │       ├── inventory.rs # Passive asset inventory + fingerprint explorer
+│   │       ├── bandwidth.rs # Bandwidth-by-process/service live monitor (#319/#320)
 │   │       ├── sensors.rs   # Sensor registry/health detail
 │   │       ├── settings.rs  # Settings page
 │   │       ├── palette.rs   # Command palette (Ctrl+P)
@@ -420,7 +421,7 @@ Each view has its own state struct:
 
 `CurrentView` (`zensight/src/app.rs`) enumerates the routable views: Dashboard,
 Device, Settings, Alerts, Topology, Expectations, Security, Sensors, Logs,
-Inventory, Incidents. A persistent app shell (`view/shell.rs`) wraps them with a
+Inventory, Bandwidth, Incidents. A persistent app shell (`view/shell.rs`) wraps them with a
 left nav rail + top bar; the command palette, fuzzy search, and help overlay are
 overlays rendered on top of the current view, not routable views.
 

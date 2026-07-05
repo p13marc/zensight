@@ -77,6 +77,7 @@ pub enum CurrentView {
     Logs,
     Inventory,
     Incidents,
+    Bandwidth,
 }
 
 /// Application theme.
@@ -170,6 +171,9 @@ pub struct ZenSight {
     inventory: crate::view::inventory::InventoryState,
     /// Incidents triage view state (#129): which incident is expanded.
     incidents: crate::view::incident::IncidentsState,
+    /// Bandwidth live-monitor state (#319, epic #320): per-process (queried) and
+    /// per-service (streamed) network rate.
+    bandwidth: crate::view::bandwidth::BandwidthState,
     /// Local tiered time-series store (hot ring + redb), Plan v3-04 §A / #22.
     /// Telemetry writes through it; charts read from it so trends survive restart.
     store: crate::store::MetricStore,
@@ -324,6 +328,7 @@ impl ZenSight {
             detection_tuning: crate::view::detection_tuning::DetectionTuningState::default(),
             inventory: crate::view::inventory::InventoryState::default(),
             incidents: crate::view::incident::IncidentsState::default(),
+            bandwidth: crate::view::bandwidth::BandwidthState::default(),
             // In demo mode keep history in-memory only (no disk churn / restart survival
             // for synthetic data); otherwise open the persistent tiered store.
             store: if demo_mode {
@@ -1510,6 +1515,48 @@ impl ZenSight {
             }
             Message::SetInventoryFpFilter(kind) => {
                 self.inventory.fp_filter = kind;
+            }
+
+            Message::OpenBandwidth => {
+                self.set_view(CurrentView::Bandwidth);
+                self.bandwidth.services = self.bandwidth_service_rows();
+                // Only the Processes mode needs a fetch; Services reads the stream.
+                if self.bandwidth.mode == crate::view::bandwidth::BandwidthMode::Processes {
+                    self.bandwidth.loading();
+                    return self.query_bandwidth();
+                }
+            }
+            Message::RefreshBandwidth => {
+                self.bandwidth.loading();
+                return self.query_bandwidth();
+            }
+            Message::BandwidthLoaded(result) => {
+                self.bandwidth.apply(result);
+            }
+            Message::SetBandwidthMode(mode) => {
+                self.bandwidth.mode = mode;
+                self.bandwidth.table = crate::view::components::TableState::default();
+                match mode {
+                    crate::view::bandwidth::BandwidthMode::Services => {
+                        self.bandwidth.services = self.bandwidth_service_rows();
+                    }
+                    // Fetch per-process rows the first time that mode is shown.
+                    crate::view::bandwidth::BandwidthMode::Processes => {
+                        if matches!(
+                            self.bandwidth.processes,
+                            crate::view::specialized::fetch::Fetch::Idle
+                        ) {
+                            self.bandwidth.loading();
+                            return self.query_bandwidth();
+                        }
+                    }
+                }
+            }
+            Message::BandwidthTableSort(col) => {
+                self.bandwidth.table.toggle_sort(col);
+            }
+            Message::BandwidthTableFilter(q) => {
+                self.bandwidth.table.set_filter(q);
             }
 
             Message::OpenSettings => {
@@ -3496,6 +3543,93 @@ impl ZenSight {
         })
     }
 
+    /// Fetch the per-process bandwidth table from the netlink sensor's
+    /// `@/query/bandwidth` channel (#319/epic #320). In demo mode (no session)
+    /// return synthetic rows so the Processes view is developable without sensors
+    /// — demo never serves queryables.
+    fn query_bandwidth(&self) -> Task<Message> {
+        if self.demo_mode {
+            return Task::done(Message::BandwidthLoaded(Ok(
+                crate::mock::bandwidth::processes(),
+            )));
+        }
+        use crate::view::specialized::netlink_detail::fetch_records;
+        let key = format!(
+            "{}?by=process&top=100",
+            zensight_common::bandwidth::bandwidth_query_key(zensight_common::Protocol::Netlink),
+        );
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::BandwidthLoaded(Err(
+                "Not connected to Zenoh".to_string()
+            )));
+        };
+        Task::future(async move {
+            let result = fetch_records::<zensight_common::BandwidthRecord>(session, key)
+                .await
+                .ok_or_else(|| "No netlink sensor responded".to_string());
+            Message::BandwidthLoaded(result)
+        })
+    }
+
+    /// Derive the per-service bandwidth rows (#319) from streamed systemd
+    /// `unit/<name>/{ip_ingress_bps,ip_egress_bps}` telemetry, with per-unit
+    /// sparkline history from the store. Ingress = rx, egress = tx.
+    fn bandwidth_service_rows(&self) -> Vec<crate::view::bandwidth::BwRow> {
+        use zensight_common::TelemetryValue;
+        use zensight_common::bandwidth::{
+            BandwidthKey, BandwidthRecord, BandwidthSource, ByteSemantics, ProtoScope,
+        };
+        let mut rows = Vec::new();
+        for dev in self.dashboard.devices.values() {
+            if dev.id.protocol != zensight_common::Protocol::Systemd {
+                continue;
+            }
+            let host = dev.id.source.clone();
+            // unit -> (tx = egress, rx = ingress)
+            let mut units: std::collections::HashMap<String, (f64, f64)> =
+                std::collections::HashMap::new();
+            for (metric, point) in &dev.metrics {
+                let v = if let TelemetryValue::Gauge(v) = &point.value {
+                    *v
+                } else {
+                    continue;
+                };
+                if let Some(unit) = metric
+                    .strip_prefix("unit/")
+                    .and_then(|m| m.strip_suffix("/ip_egress_bps"))
+                {
+                    units.entry(unit.to_string()).or_default().0 = v;
+                } else if let Some(unit) = metric
+                    .strip_prefix("unit/")
+                    .and_then(|m| m.strip_suffix("/ip_ingress_bps"))
+                {
+                    units.entry(unit.to_string()).or_default().1 = v;
+                }
+            }
+            for (unit, (tx, rx)) in units {
+                let spark = self
+                    .store
+                    .hot_samples(&format!("systemd/{host}|unit/{unit}/ip_ingress_bps"))
+                    .into_iter()
+                    .map(|s| s.value)
+                    .collect();
+                rows.push(crate::view::bandwidth::BwRow {
+                    record: BandwidthRecord {
+                        key: BandwidthKey::Service { unit },
+                        tx_bps: tx,
+                        rx_bps: rx,
+                        source: BandwidthSource::Systemd,
+                        semantics: ByteSemantics::WireL3,
+                        proto: ProtoScope::All,
+                        host: Some(host.clone()),
+                    },
+                    spark,
+                });
+            }
+        }
+        rows
+    }
+
     /// Handle Escape key - close dialogs or go back.
     fn handle_escape(&mut self) {
         // Transient overlays close first, before any view navigation.
@@ -3553,6 +3687,7 @@ impl ZenSight {
             | CurrentView::Sensors
             | CurrentView::Logs
             | CurrentView::Inventory
+            | CurrentView::Bandwidth
             | CurrentView::Incidents => {
                 self.set_view(CurrentView::Dashboard);
             }
@@ -3628,6 +3763,7 @@ impl ZenSight {
                 crate::view::specialized::logs_view(&logs, &self.syslog_filter)
             }
             CurrentView::Inventory => crate::view::inventory::inventory_view(&self.inventory),
+            CurrentView::Bandwidth => crate::view::bandwidth::bandwidth_view(&self.bandwidth),
             CurrentView::Incidents => {
                 crate::view::incident::incidents_view(&self.alerts, &self.incidents)
             }
@@ -3910,6 +4046,15 @@ impl ZenSight {
         // values only). Charts/trends read back from here so history survives restart.
         self.store.record(&point);
 
+        // Keep the bandwidth monitor's Services table live while it is open: a
+        // systemd `ip_*_bps` point changes the derived rows (#319). Recomputed at
+        // the tail, after this point has landed in the device-state map.
+        let bw_services_relevant = self.current_view == CurrentView::Bandwidth
+            && self.bandwidth.mode == crate::view::bandwidth::BandwidthMode::Services
+            && point.protocol == Protocol::Systemd
+            && (point.metric.ends_with("/ip_ingress_bps")
+                || point.metric.ends_with("/ip_egress_bps"));
+
         // Track the newest point for the global freshness verdict (#23).
         self.last_telemetry_ms = Some(
             self.last_telemetry_ms
@@ -3997,6 +4142,11 @@ impl ZenSight {
         if self.current_view == CurrentView::Topology {
             self.topology
                 .update_from_devices(&self.dashboard.devices, &self.entities);
+        }
+
+        // Recompute the bandwidth Services table now that the point has landed.
+        if bw_services_relevant {
+            self.bandwidth.services = self.bandwidth_service_rows();
         }
     }
 

@@ -2,6 +2,7 @@
 
 pub mod alerts;
 pub mod artifact_fetch;
+pub mod bandwidth;
 pub mod chart;
 pub mod components;
 pub mod dashboard;

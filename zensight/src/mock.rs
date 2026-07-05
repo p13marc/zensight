@@ -538,6 +538,44 @@ fn mock_entity(
     e
 }
 
+/// Mock per-process bandwidth records (#319, epic #320) for the Bandwidth view's
+/// Processes mode in `--demo`: demo never serves the `@/query/bandwidth`
+/// queryable, so the demo fetch branch returns these instead. Tagged sock_diag /
+/// app-goodput / TCP, including the explicit `unattributed` bucket the real
+/// aggregator emits.
+pub mod bandwidth {
+    use zensight_common::bandwidth::{
+        BandwidthKey, BandwidthRecord, BandwidthSource, ByteSemantics, ProtoScope,
+    };
+
+    fn proc_row(pid: i32, comm: &str, tx_bps: f64, rx_bps: f64) -> BandwidthRecord {
+        BandwidthRecord {
+            key: BandwidthKey::Process {
+                pid,
+                start_time: 1000 + pid.max(0) as u64,
+                comm: comm.to_string(),
+            },
+            tx_bps,
+            rx_bps,
+            source: BandwidthSource::SockDiag,
+            semantics: ByteSemantics::AppGoodput,
+            proto: ProtoScope::Tcp,
+            host: Some("server01".to_string()),
+        }
+    }
+
+    /// A ranked per-process snapshot.
+    pub fn processes() -> Vec<BandwidthRecord> {
+        vec![
+            proc_row(1421, "nginx", 1_800_000.0, 240_000.0),
+            proc_row(2210, "postgres", 90_000.0, 1_200_000.0),
+            proc_row(3312, "curl", 40_000.0, 2_400_000.0),
+            proc_row(880, "sshd", 12_000.0, 5_000.0),
+            proc_row(-1, "unattributed", 60_000.0, 30_000.0),
+        ]
+    }
+}
+
 /// Mock correlator host entities (#306), consistent with the sources emitted by
 /// [`mock_environment`]: server01 (sysinfo+logs+netlink) and server02
 /// (sysinfo+netlink) each merge into one host, and a wire-only entity models a
