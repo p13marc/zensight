@@ -1,10 +1,17 @@
-# ZenSight — build / configure / run the GUI + sensors (netring, netlink, sysinfo, logs, systemd)
+# ZenSight — build / configure / run the GUI + sensors + correlator
+#   (netring, netlink, sysinfo, logs, systemd + the identity correlator)
 #
 #   just run            # build, grant caps, configure, then launch everything
 #   just demo           # run the GUI in demo mode (simulated data, no sensors)
 #   just setup          # build + grant capabilities only
 #   just gui            # run just the GUI
-#   just <sensor>       # run a single sensor (netring | netlink | sysinfo | logs | systemd)
+#   just <name>         # run one piece (netring | netlink | sysinfo | logs | systemd | correlator)
+#
+# `just run` is the live demo: `configure` writes *demo-max* configs into .run/
+# with the opt-in collectors, anomaly detectors and on-demand artifacts (report /
+# snapshot / pcap capture) turned ON, and starts the correlator so the GUI shows
+# fused host identities. Build-feature-gated detectors (ja4plus/lateral/sigma/
+# snmp/ebpf) and privileged systemd unit control stay off.
 #
 # netring captures packets and needs CAP_NET_RAW (+CAP_IPC_LOCK for AF_XDP);
 # netlink's optional collectors (nftables/conntrack + the XFRM monitor) need
@@ -39,7 +46,7 @@ _default:
 
 # ── Build ────────────────────────────────────────────────────────────────────
 
-# Build the GUI + the sensors.
+# Build the GUI + the sensors + the identity correlator.
 build:
     cargo build {{relflag}} \
         -p zensight \
@@ -47,7 +54,8 @@ build:
         -p zensight-sensor-netlink \
         -p zensight-sensor-sysinfo \
         -p zensight-sensor-logs \
-        -p zensight-sensor-systemd
+        -p zensight-sensor-systemd \
+        -p zensight-correlator
 
 # ── Capabilities ─────────────────────────────────────────────────────────────
 
@@ -73,19 +81,47 @@ configure:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p {{rundir}}
-    # netring: point capture at the chosen interface.
-    sed -E 's#interfaces: \[[^]]*\]#interfaces: ["{{iface}}"]#' \
+    # This is a *demo* configure: it turns the opt-in collectors, detectors and
+    # on-demand artifacts (report / directory snapshot / pcap capture) ON so the
+    # whole feature surface is visible in the GUI. Only build-feature-gated bits
+    # (ja4plus / lateral / sigma / snmp / ebpf) and privileged unit control
+    # (systemd `actions`) stay off — see the notes inline.
+    #
+    # netring: point capture at the chosen interface + light up the L7 collectors
+    # (QUIC/SSH/encrypted-DNS), IP reassembly, the extra anomaly detectors, the
+    # on-demand pcap capture (@/artifact, needs CAP_NET_RAW) and the debug report.
+    sed -E \
+        -e 's#interfaces: \[[^]]*\]#interfaces: ["{{iface}}"]#' \
+        -e 's/quic: false/quic: true/' \
+        -e 's/ssh: false/ssh: true/' \
+        -e 's/encrypted_dns: false/encrypted_dns: true/' \
+        -e 's/ip_reassembly: false/ip_reassembly: true/' \
+        -e 's/encrypted_dns_bypass: false/encrypted_dns_bypass: true/' \
+        -e 's/rita_beacon_fqdn: false/rita_beacon_fqdn: true/' \
+        -e 's/data_exfil: false/data_exfil: true/' \
+        -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/' \
+        -e '/^      on_demand:/,/enabled:/ s/enabled: false/enabled: true/' \
         configs/netring.json5 > {{rundir}}/netring.json5
-    # netlink + logs configs are machine-agnostic (hostname auto-detected).
-    cp -f configs/netlink.json5 {{rundir}}/netlink.json5
-    cp -f configs/logs.json5 {{rundir}}/logs.json5
-    # sysinfo: enable a Tier-2 directory snapshot of the repo's docs/ so the
-    # feature is demoable from the GUI (Sensors → "Download docs"). Scoped sed
-    # over the snapshot block only (leaves the report block's enabled flag alone).
-    sed -E '/snapshot: \{/,/dirs: \[/ {
-        s/enabled: false/enabled: true/
-        s#dirs: \[#dirs: [ { name: "docs", path: "{{justfile_directory()}}/docs" },#
-    }' configs/sysinfo.json5 > {{rundir}}/sysinfo.json5
+    # netlink: baseline is already broad; add the IPsec/XFRM collector (needs
+    # CAP_NET_ADMIN, granted by `just caps`) + the on-demand debug report.
+    sed -E \
+        -e 's/xfrm: false/xfrm: true/' \
+        -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/' \
+        configs/netlink.json5 > {{rundir}}/netlink.json5
+    # logs: journald ingestion is already on; enable the on-demand debug report.
+    sed -E \
+        -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/' \
+        configs/logs.json5 > {{rundir}}/logs.json5
+    # sysinfo: enable a Tier-2 directory snapshot of the repo's docs/ (Sensors →
+    # "Download docs") + the on-demand debug report. Scoped seds so each block's
+    # own `enabled` flips, not the alert rules'.
+    sed -E \
+        -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/' \
+        -e '/snapshot: \{/,/dirs: \[/ { s/enabled: false/enabled: true/; s#dirs: \[#dirs: [ { name: "docs", path: "{{justfile_directory()}}/docs" },# }' \
+        configs/sysinfo.json5 > {{rundir}}/sysinfo.json5
+    # correlator: fuses the sensors' identity evidence into one HostEntity per
+    # host. Machine-agnostic; the example config already has every merge rule on.
+    cp -f configs/correlator.json5 {{rundir}}/correlator.json5
     # systemd: generate a demo config with (nearly) everything on. NOTE the
     # watchlist is deliberately a *curated* set, not `*.service` — the Units /
     # Timers / Sockets / cgroup tabs all populate from the on-demand @/query/*
@@ -134,7 +170,7 @@ configure:
       logging: { level: "info" },
     }
     JSON5
-    echo "Configured: netring iface='{{iface}}', logs=journald, sysinfo snapshot='docs/', systemd=full  (configs in {{rundir}}/)"
+    echo "Configured (demo-max): netring iface='{{iface}}' (L7+capture on), netlink (+xfrm), logs=journald, sysinfo snapshot='docs/', systemd=full, correlator  (configs in {{rundir}}/)"
 
 # ── Run (individual) ─────────────────────────────────────────────────────────
 
@@ -169,6 +205,10 @@ logs: build configure
 systemd: build configure
     ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-sensor-systemd --config {{rundir}}/systemd.json5
 
+# Run the identity correlator (fuses sensor evidence into one HostEntity per host).
+correlator: build configure
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-correlator --config {{rundir}}/correlator.json5
+
 # ── Run (everything) ─────────────────────────────────────────────────────────
 
 # Build + caps + configure, then launch the sensors + GUI (close GUI to stop all).
@@ -177,12 +217,15 @@ run: setup configure
     set -euo pipefail
     # Sensors connect to the GUI's loopback rendezvous (no multicast needed).
     export ZENSIGHT_ZENOH_CONNECT="{{hub}}"
-    echo "Starting sensors (logs in {{rundir}}/), connecting to {{hub}}…"
+    echo "Starting sensors + correlator (logs in {{rundir}}/), connecting to {{hub}}…"
     {{bindir}}/zensight-sensor-sysinfo --config {{rundir}}/sysinfo.json5 > {{rundir}}/sysinfo.log 2>&1 &
     {{bindir}}/zensight-sensor-netlink --config {{rundir}}/netlink.json5 > {{rundir}}/netlink.log 2>&1 &
     {{bindir}}/zensight-sensor-netring --config {{rundir}}/netring.json5 > {{rundir}}/netring.log 2>&1 &
     {{bindir}}/zensight-sensor-logs --config {{rundir}}/logs.json5 > {{rundir}}/logs.log 2>&1 &
     {{bindir}}/zensight-sensor-systemd --config {{rundir}}/systemd.json5 > {{rundir}}/systemd.log 2>&1 &
+    # The correlator fuses the sensors' identity evidence into HostEntity docs
+    # (needs no capabilities). netring/netlink evidence feeds are on by default.
+    {{bindir}}/zensight-correlator --config {{rundir}}/correlator.json5 > {{rundir}}/correlator.log 2>&1 &
     # Stop all sensors when the GUI exits (or on Ctrl-C).
     trap 'echo; echo "Stopping sensors…"; kill 0' EXIT
     sleep 1
@@ -195,9 +238,10 @@ run: setup configure
     export RUST_LOG="${RUST_LOG:-info}"
     ZENSIGHT_ZENOH_LISTEN="{{hub}}" {{bindir}}/zensight 2>&1 | tee {{rundir}}/gui.log
 
-# Stop any running sensors started by `just run`.
+# Stop any running sensors + correlator started by `just run`.
 stop:
     -pkill -f 'zensight-sensor-(netring|netlink|sysinfo|logs|systemd)' || true
+    -pkill -f 'zensight-correlator' || true
 
 # Remove generated run configs and logs.
 clean-run:
