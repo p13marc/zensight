@@ -2757,6 +2757,7 @@ fn test_netring_assets_section() {
         capabilities: vec!["switch".into(), "bridge".into()],
         seen_via: vec!["lldp".into()],
         last_seen: 1_700_000_000_000,
+        ..Default::default()
     }]));
 
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Assets;
@@ -3098,6 +3099,12 @@ fn test_inventory_view_renders_assets_and_fingerprints() {
             capabilities: vec!["router".into()],
             seen_via: vec!["lldp".into()],
             last_seen: 1,
+            // #329 enrichment: role classification + fingerprint pivot + first-seen.
+            role: "iot".into(),
+            first_seen: 1,
+            source_count: 3,
+            ja4: Some("t13d1516h2_assetja4_11".into()),
+            ..Default::default()
         }],
         tls: vec![TlsRecord {
             sni: Some("login.example".into()),
@@ -3125,6 +3132,13 @@ fn test_inventory_view_renders_assets_and_fingerprints() {
     assert!(ui.find("Inventory").is_ok());
     assert!(ui.find("AcmeCorp").is_ok(), "vendor must be rendered");
     assert!(ui.find("printer1").is_ok());
+    // #329: the classified role renders as a filter chip (and a table cell), and
+    // the asset's JA4 fingerprint pivot shows in the assets table.
+    assert!(ui.find("iot").is_ok(), "role chip/cell must render");
+    assert!(
+        ui.find("t13d1516h2_assetja4_11").is_ok(),
+        "asset fingerprint pivot"
+    );
     assert!(ui.find("t13d1516h2_abc_def").is_ok());
     assert!(
         ui.find("ge11nn05enus_ff01_aa02").is_ok(),

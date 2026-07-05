@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **netring passive-inventory enrichment from flowscope 0.22 (#329)**: the netring
+  asset inventory (`@/query/assets`) is widened with a classified device role
+  (router / switch / access-point / phone / iot / host), first-seen timestamp,
+  source-count confidence, the full hostname set, per-parser fingerprints (JA3 /
+  JA4 / HASSH / p0f), and — on `ja4plus` builds — x509 subject/SANs; the seen-via
+  decode gains the 0.22 TLS/SSH/p0f handshake sources. The GUI Inventory view adds
+  a role filter chip row, a first-seen sort, source-count + fingerprint-pivot
+  columns, and a `--demo` mock fleet so the enriched inventory is developable
+  without live capture. All wire additions are `#[serde(default)]`.
+
 - **netring encrypted-traffic frontier from netring 0.29 (#326)**: the netring
   sensor adopts netring 0.29's typed encrypted-traffic handlers. QUIC and SSH swap
   to `on_quic_fingerprint` / `on_ssh_fingerprint` (deleting the hand-rolled

@@ -49,15 +49,23 @@ pub enum AssetSort {
     Vendor,
     /// Alphabetical by hostname (blanks last).
     Hostname,
+    /// Most recently first-seen first — the new-asset lens (#329).
+    FirstSeen,
 }
 
 impl AssetSort {
-    pub const ALL: [AssetSort; 3] = [AssetSort::LastSeen, AssetSort::Vendor, AssetSort::Hostname];
+    pub const ALL: [AssetSort; 4] = [
+        AssetSort::LastSeen,
+        AssetSort::FirstSeen,
+        AssetSort::Vendor,
+        AssetSort::Hostname,
+    ];
     fn label(self) -> &'static str {
         match self {
             AssetSort::LastSeen => "last seen",
             AssetSort::Vendor => "vendor",
             AssetSort::Hostname => "hostname",
+            AssetSort::FirstSeen => "first seen",
         }
     }
 }
@@ -125,6 +133,8 @@ pub struct InventoryState {
     pub asset_sort: AssetSort,
     /// Active fingerprint-kind filter (`None` = all kinds).
     pub fp_filter: Option<FpKind>,
+    /// Active asset-role filter (`None` = all roles), e.g. `"iot"` (#329).
+    pub asset_role_filter: Option<String>,
 }
 
 impl InventoryState {
@@ -151,7 +161,24 @@ impl InventoryState {
 
     /// Assets in the active sort order (a sorted copy of references).
     pub fn sorted_assets(&self) -> Vec<&AssetRecord> {
-        sort_assets(&self.assets, self.asset_sort)
+        let mut out = sort_assets(&self.assets, self.asset_sort);
+        if let Some(role) = &self.asset_role_filter {
+            out.retain(|a| a.role.eq_ignore_ascii_case(role));
+        }
+        out
+    }
+
+    /// Distinct roles present in the inventory (sorted), for the role-filter chips.
+    pub fn asset_roles(&self) -> Vec<String> {
+        let mut roles: Vec<String> = self
+            .assets
+            .iter()
+            .map(|a| a.role.clone())
+            .filter(|r| !r.is_empty())
+            .collect();
+        roles.sort();
+        roles.dedup();
+        roles
     }
 
     /// Fingerprints filtered to the active kind (or all when `None`).
@@ -175,6 +202,7 @@ pub fn sort_assets(assets: &[AssetRecord], sort: AssetSort) -> Vec<&AssetRecord>
         AssetSort::Hostname => {
             out.sort_by(|a, b| blanks_last(a.hostname.as_deref(), b.hostname.as_deref()))
         }
+        AssetSort::FirstSeen => out.sort_by_key(|a| std::cmp::Reverse(a.first_seen)),
     }
     out
 }
@@ -318,13 +346,51 @@ fn render_assets(state: &InventoryState) -> Element<'_, Message> {
     )
     .width(Length::Fixed(130.0))
     .text_size(font::CAPTION);
-    let header = row![
+    let header_row = row![
         section_header(format!("Assets ({})", state.assets.len()), None),
         text("sort:").size(font::CAPTION).style(dim),
         sort_pick,
     ]
     .spacing(space::SM)
     .align_y(iced::Alignment::Center);
+
+    // Role filter chips (#329): "all" + one per discovered role — the top passive-
+    // inventory ask ("show me the IoT things"). Only shown once any asset carries a
+    // role, so old sensors (no role field) don't render an empty chip row.
+    let roles = state.asset_roles();
+    let chip = |label: &str, active: bool, msg: Message| {
+        button(text(label.to_string()).size(font::CAPTION))
+            .padding([2, 8])
+            .on_press(msg)
+            .style(if active {
+                iced::widget::button::primary
+            } else {
+                iced::widget::button::secondary
+            })
+    };
+    let header: Element<'_, Message> = if roles.is_empty() {
+        header_row.into()
+    } else {
+        let mut chips = row![
+            text("role:").size(font::CAPTION).style(dim),
+            chip(
+                "all",
+                state.asset_role_filter.is_none(),
+                Message::SetInventoryAssetRole(None)
+            ),
+        ]
+        .spacing(space::XS)
+        .align_y(iced::Alignment::Center);
+        for role in roles {
+            let active = state.asset_role_filter.as_deref() == Some(role.as_str());
+            chips = chips.push(chip(
+                &role,
+                active,
+                Message::SetInventoryAssetRole(Some(role.clone())),
+            ));
+        }
+        column![header_row, chips].spacing(space::XS).into()
+    };
 
     if state.assets.is_empty() {
         let hint = if state.loading {
@@ -345,13 +411,14 @@ fn render_assets(state: &InventoryState) -> Element<'_, Message> {
 
     let mut list = Column::new().spacing(3).push(
         row![
+            cell("role", 90),
             cell("mac", 150),
             cell("ip", 150),
             cell("hostname", 150),
-            cell("vendor", 160),
-            cell("platform", 150),
-            cell("caps", 120),
-            cell("seen via", 100),
+            cell("vendor", 150),
+            cell("fingerprint", 130),
+            cell("srcs", 50),
+            cell("first seen", 90),
             cell("last seen", 90),
         ]
         .spacing(8),
@@ -363,15 +430,26 @@ fn render_assets(state: &InventoryState) -> Element<'_, Message> {
             .or_else(|| r.ipv6.first())
             .map(String::as_str)
             .unwrap_or("-");
+        // Best fingerprint pivot: JA4 (TLS) > HASSH (SSH) > JA3 > p0f — the value
+        // that cross-links this asset to the fingerprint explorer (#329).
+        let fp = r
+            .ja4
+            .as_deref()
+            .or(r.hassh.as_deref())
+            .or(r.ja3.as_deref())
+            .or(r.p0f.as_deref())
+            .unwrap_or("-");
+        let role = if r.role.is_empty() { "-" } else { &r.role };
         list = list.push(
             row![
+                cell(role, 90),
                 cell(&r.mac, 150),
                 cell(ip, 150),
                 cell(r.hostname.as_deref().unwrap_or("-"), 150),
-                cell(r.vendor.as_deref().unwrap_or("-"), 160),
-                cell(r.platform.as_deref().unwrap_or("-"), 150),
-                cell(&join_or_dash(&r.capabilities), 120),
-                cell(&join_or_dash(&r.seen_via), 100),
+                cell(r.vendor.as_deref().unwrap_or("-"), 150),
+                cell(fp, 130),
+                cell(&r.source_count.to_string(), 50),
+                cell(&format_timestamp(r.first_seen), 90),
                 cell(&format_timestamp(r.last_seen), 90),
             ]
             .spacing(8),
@@ -474,18 +552,45 @@ fn dim(theme: &Theme) -> text::Style {
     }
 }
 
-/// Join a slug list with commas, or `"-"` when empty.
-fn join_or_dash(items: &[String]) -> String {
-    if items.is_empty() {
-        "-".to_string()
-    } else {
-        items.join(", ")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn asset_role_filter_and_first_seen_sort() {
+        let mut state = InventoryState {
+            assets: vec![
+                AssetRecord {
+                    mac: "a".into(),
+                    role: "iot".into(),
+                    first_seen: 100,
+                    last_seen: 200,
+                    ..Default::default()
+                },
+                AssetRecord {
+                    mac: "b".into(),
+                    role: "router".into(),
+                    first_seen: 300,
+                    last_seen: 150,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        // Distinct roles, sorted + deduped, for the filter chips.
+        assert_eq!(
+            state.asset_roles(),
+            vec!["iot".to_string(), "router".to_string()]
+        );
+        // FirstSeen sort → the most-recently first-seen asset (b=300) leads.
+        state.asset_sort = AssetSort::FirstSeen;
+        assert_eq!(state.sorted_assets()[0].mac, "b");
+        // Role filter narrows to just the IoT device.
+        state.asset_role_filter = Some("iot".into());
+        let filtered = state.sorted_assets();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].mac, "a");
+    }
 
     fn asset(mac: &str, vendor: Option<&str>, host: Option<&str>, last_seen: i64) -> AssetRecord {
         AssetRecord {
@@ -498,6 +603,7 @@ mod tests {
             capabilities: vec![],
             seen_via: vec![],
             last_seen,
+            ..Default::default()
         }
     }
 
