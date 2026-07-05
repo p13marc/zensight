@@ -53,6 +53,10 @@ pub struct ExpectationsConfig {
     /// Route-flap expectations (#113): default route changing too often in a window.
     #[serde(default)]
     pub route_flaps: Vec<RouteFlapExpectation>,
+    /// Policy-routing rule expectations (#323): forbid non-baseline `ip rule`
+    /// entries (traffic-diversion detection) or require a known rule to exist.
+    #[serde(default)]
+    pub rules: Vec<RuleExpectation>,
 }
 
 impl ExpectationsConfig {
@@ -65,6 +69,7 @@ impl ExpectationsConfig {
             && self.rates.is_empty()
             && self.delivery.is_empty()
             && self.route_flaps.is_empty()
+            && self.rules.is_empty()
     }
 }
 
@@ -256,6 +261,60 @@ pub struct RouteFlapExpectation {
     pub for_secs: Option<u64>,
 }
 
+/// Whether a rule expectation forbids or requires its matching rules (#323).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleSense {
+    /// Fire when a matching **non-baseline** policy rule exists — the
+    /// traffic-diversion guard ("table main not bypassed"). The kernel's three
+    /// baseline lookup rules (priority 0 / 32766 / 32767) never count.
+    #[default]
+    Forbid,
+    /// Fire when **no** matching policy rule exists — pins an expected rule
+    /// (e.g. a VPN/mark rule that must stay installed).
+    Require,
+}
+
+/// A policy-routing rule expectation (#323): forbid or require an `ip rule`
+/// entry, matched by priority and/or lookup table (an unset field matches any).
+/// An `ip rule add` that diverts traffic through another table re-evaluates this
+/// instantly via the event wake path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleExpectation {
+    /// Label for the rule slug `rules:<name>` (e.g. "no-diversion").
+    pub name: String,
+    /// Match rules with this priority (`None` = any priority).
+    #[serde(default)]
+    pub priority: Option<u32>,
+    /// Match rules looking up this table id (`None` = any table).
+    #[serde(default)]
+    pub table: Option<u32>,
+    /// Forbid (default) or require the matching rules.
+    #[serde(default)]
+    pub sense: RuleSense,
+    #[serde(default = "default_severity")]
+    pub severity: AlertSeverity,
+    #[serde(default)]
+    pub for_secs: Option<u64>,
+}
+
+/// One observed policy-routing rule, reduced to the facts the checks match on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuleFact {
+    pub priority: u32,
+    pub table: u32,
+    /// The rule's action name (`"lookup"` / `"blackhole"` / …).
+    pub action: String,
+    /// A kernel baseline lookup rule (priority 0 / 32766 / 32767).
+    pub is_default: bool,
+}
+
+/// Observed policy-routing rules (#323).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RuleObservation {
+    pub rules: Vec<RuleFact>,
+}
+
 /// Observed default-route facts.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RouteObservation {
@@ -442,6 +501,57 @@ pub fn check_route(exp: &RouteExpectation, obs: &RouteObservation) -> Vec<Violat
         }];
     }
     Vec::new()
+}
+
+/// Evaluate a policy-rule expectation against the observed rule set (#323).
+/// Violations carry the MITRE ATT&CK technique **T1599** (Network Boundary
+/// Bridging) — a policy-rule diversion moves traffic across a boundary the
+/// analyst believes is enforced.
+pub fn check_rules(exp: &RuleExpectation, obs: &RuleObservation) -> Vec<Violation> {
+    let matches = |r: &&RuleFact| {
+        exp.priority.is_none_or(|p| r.priority == p) && exp.table.is_none_or(|t| r.table == t)
+    };
+    match exp.sense {
+        RuleSense::Forbid => obs
+            .rules
+            .iter()
+            .filter(|r| !r.is_default)
+            .filter(matches)
+            .map(|r| Violation {
+                summary: format!(
+                    "{}: forbidden policy rule present (prio {} → {} table {})",
+                    exp.name, r.priority, r.action, r.table
+                ),
+                labels: vec![
+                    ("expected".into(), "no-policy-rule".into()),
+                    ("priority".into(), r.priority.to_string()),
+                    ("table".into(), r.table.to_string()),
+                    ("action".into(), r.action.clone()),
+                    ("technique".into(), "T1599".into()),
+                ],
+            })
+            .collect(),
+        RuleSense::Require => {
+            if obs.rules.iter().any(|r| matches(&r)) {
+                Vec::new()
+            } else {
+                let want = match (exp.priority, exp.table) {
+                    (Some(p), Some(t)) => format!("prio {p} table {t}"),
+                    (Some(p), None) => format!("prio {p}"),
+                    (None, Some(t)) => format!("table {t}"),
+                    (None, None) => "any".to_string(),
+                };
+                vec![Violation {
+                    summary: format!("{}: required policy rule missing ({want})", exp.name),
+                    labels: vec![
+                        ("expected".into(), format!("policy-rule {want}")),
+                        ("actual".into(), "absent".into()),
+                        ("technique".into(), "T1599".into()),
+                    ],
+                }]
+            }
+        }
+    }
 }
 
 /// Evaluate a metric-threshold expectation. `observed` is the metric's latest
@@ -641,9 +751,15 @@ impl SentinelHandle {
         c.route_flaps.retain(|e| e.name != exp.name);
         c.route_flaps.push(exp);
     }
+    /// Add (or replace by name) a policy-rule expectation (#323).
+    pub async fn add_rule(&self, exp: RuleExpectation) {
+        let mut c = self.expectations.write().await;
+        c.rules.retain(|e| e.name != exp.name);
+        c.rules.push(exp);
+    }
     /// Remove an expectation by rule slug (`socket:<name>` / `link:<iface>` /
     /// `neighbor:<ip>` / `route:<name>` / `metric:<name>` / `rate:<name>` /
-    /// `delivery:<name>` / `route_flap:<name>`).
+    /// `delivery:<name>` / `route_flap:<name>` / `rules:<name>`).
     pub async fn remove(&self, rule: &str) {
         let mut c = self.expectations.write().await;
         if let Some(name) = rule.strip_prefix("socket:") {
@@ -662,6 +778,11 @@ impl SentinelHandle {
             c.rates.retain(|e| e.name != name);
         } else if let Some(name) = rule.strip_prefix("delivery:") {
             c.delivery.retain(|e| e.name != name);
+        // `rules:` (#323) is checked after the longer `route*:` prefixes so
+        // slug matching stays unambiguous (no shared prefix, but keep the
+        // established longest-first discipline).
+        } else if let Some(name) = rule.strip_prefix("rules:") {
+            c.rules.retain(|e| e.name != name);
         }
     }
     /// Snapshot the current expectation set (for the status queryable).
@@ -841,6 +962,26 @@ impl Evaluator {
                     }
                 }
                 Err(e) => tracing::warn!(error = %e, "sentinel: route observation failed"),
+            }
+        }
+
+        // Policy-rule expectations (#323): dump the live rule table and match
+        // forbid/require selectors. Re-evaluated instantly on NewRule/DelRule
+        // via the event wake path (`is_sentinel_relevant`).
+        if !config.rules.is_empty()
+            && let Some(rt) = route
+        {
+            match observe_rules(rt).await {
+                Ok(obs) => {
+                    for exp in &config.rules {
+                        let rule = format!("rules:{}", exp.name);
+                        current_rules.insert(rule.clone());
+                        let violations = check_rules(exp, &obs);
+                        self.report(&rule, exp.severity, exp.for_secs, violations)
+                            .await;
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "sentinel: rule observation failed"),
             }
         }
 
@@ -1035,6 +1176,23 @@ async fn observe_neighbors(
             })
         })
         .collect())
+}
+
+/// Observe the policy-routing rule table from live netlink (#323), reduced to
+/// the `(priority, table, action)` facts the pure checks match on.
+async fn observe_rules(conn: &Connection<Route>) -> nlink::netlink::Result<RuleObservation> {
+    let rules = conn.get_rules().await?;
+    Ok(RuleObservation {
+        rules: rules
+            .iter()
+            .map(|r| RuleFact {
+                priority: r.priority(),
+                table: r.table(),
+                action: r.action().name().to_string(),
+                is_default: r.is_default(),
+            })
+            .collect(),
+    })
 }
 
 /// Observe the default-route state from live netlink.
@@ -1331,5 +1489,135 @@ mod tests {
             .len(),
             1
         );
+    }
+
+    // ---- policy-rule expectations (#323) ------------------------------------
+
+    fn fact(priority: u32, table: u32, is_default: bool) -> RuleFact {
+        RuleFact {
+            priority,
+            table,
+            action: "lookup".into(),
+            is_default,
+        }
+    }
+
+    /// The kernel's baseline lookup rules (0/32766/32767 → local/main/default).
+    fn baseline() -> Vec<RuleFact> {
+        vec![
+            fact(0, 255, true),
+            fact(32766, 254, true),
+            fact(32767, 253, true),
+        ]
+    }
+
+    #[test]
+    fn rule_expectations_forbid() {
+        let exp = RuleExpectation {
+            name: "no-diversion".into(),
+            priority: None,
+            table: None,
+            sense: RuleSense::Forbid,
+            severity: AlertSeverity::Critical,
+            for_secs: None,
+        };
+        // Only the baseline lookup rules → quiet.
+        let obs = RuleObservation { rules: baseline() };
+        assert!(check_rules(&exp, &obs).is_empty());
+        // An `ip rule add` diverting through table 200 → fire, tagged T1599.
+        let mut rules = baseline();
+        rules.push(fact(100, 200, false));
+        let v = check_rules(&exp, &RuleObservation { rules });
+        assert_eq!(v.len(), 1);
+        assert!(v[0].summary.contains("prio 100"));
+        assert!(v[0].summary.contains("table 200"));
+        assert!(
+            v[0].labels
+                .iter()
+                .any(|(k, val)| k == "technique" && val == "T1599")
+        );
+        // Two diversions → two violations (one alert per offending rule).
+        let mut rules = baseline();
+        rules.push(fact(100, 200, false));
+        rules.push(fact(110, 201, false));
+        assert_eq!(check_rules(&exp, &RuleObservation { rules }).len(), 2);
+    }
+
+    #[test]
+    fn rule_expectations_forbid_selectors_narrow() {
+        // Forbid only table 200; a rule into table 300 is someone else's problem.
+        let exp = RuleExpectation {
+            name: "no-table-200".into(),
+            priority: None,
+            table: Some(200),
+            sense: RuleSense::Forbid,
+            severity: AlertSeverity::Warning,
+            for_secs: None,
+        };
+        let mut rules = baseline();
+        rules.push(fact(50, 300, false));
+        assert!(check_rules(&exp, &RuleObservation { rules }).is_empty());
+        let mut rules = baseline();
+        rules.push(fact(50, 200, false));
+        assert_eq!(check_rules(&exp, &RuleObservation { rules }).len(), 1);
+    }
+
+    #[test]
+    fn rule_expectations_require() {
+        // Require the VPN rule (prio 100 → table 51820) to stay installed.
+        let exp = RuleExpectation {
+            name: "vpn-rule".into(),
+            priority: Some(100),
+            table: Some(51820),
+            sense: RuleSense::Require,
+            severity: AlertSeverity::Warning,
+            for_secs: None,
+        };
+        // Present → quiet.
+        let mut rules = baseline();
+        rules.push(fact(100, 51820, false));
+        assert!(check_rules(&exp, &RuleObservation { rules }).is_empty());
+        // Withdrawn → fire with the missing selector in the summary.
+        let v = check_rules(&exp, &RuleObservation { rules: baseline() });
+        assert_eq!(v.len(), 1);
+        assert!(v[0].summary.contains("prio 100 table 51820"));
+        // Wrong table under the required priority still counts as missing.
+        let mut rules = baseline();
+        rules.push(fact(100, 200, false));
+        assert_eq!(check_rules(&exp, &RuleObservation { rules }).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rules_config_roundtrips_and_handle_mutates() {
+        // SetExpectations round-trips the new field; add/remove by slug works.
+        let json = r#"{
+            "rules": [
+                { "name": "no-diversion", "sense": "forbid", "severity": "critical" }
+            ]
+        }"#;
+        let cfg: ExpectationsConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.rules.len(), 1);
+        assert_eq!(cfg.rules[0].sense, RuleSense::Forbid);
+        assert!(!cfg.is_empty());
+
+        let handle = SentinelHandle::new(cfg);
+        handle
+            .add_rule(RuleExpectation {
+                name: "vpn-rule".into(),
+                priority: Some(100),
+                table: Some(51820),
+                sense: RuleSense::Require,
+                severity: AlertSeverity::Warning,
+                for_secs: None,
+            })
+            .await;
+        assert_eq!(handle.snapshot().await.rules.len(), 2);
+        handle.remove("rules:no-diversion").await;
+        let snap = handle.snapshot().await;
+        assert_eq!(snap.rules.len(), 1);
+        assert_eq!(snap.rules[0].name, "vpn-rule");
+        // `rules:` removal must not disturb `route:`/`route_flap:` slugs.
+        handle.remove("route:default").await;
+        assert_eq!(handle.snapshot().await.rules.len(), 1);
     }
 }

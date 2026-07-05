@@ -257,6 +257,18 @@ expectations and alerts on deviation.
   soft/hard `ExpireSa`, `Acquire`, …) the periodic SA snapshot misses between
   ticks — as `events/ipsec/{added,changed,removed}_total` + timeline rows. Gated on
   `collect.events && collect.xfrm`; degrades cleanly where no IPsec is configured.
+- **Rule / nexthop / MDB / netns event families (#323, nlink 0.24):** the event
+  stream also folds **policy-routing rules** (`ip rule` add/del — the classic
+  "why is routing weird" incident *and* a traffic-redirect primitive), **nexthop
+  objects**, **bridge multicast-DB** entries and **netns ids** (container
+  lifecycle signal) into `events/{rule,nexthop,mdb,nsid}/*_total` + timeline rows
+  with human detail (rule: priority/selector/action/table). A `NewRule`/`DelRule`
+  re-evaluates the sentinel instantly. The sentinel gains a **`rules`
+  expectation kind** — `forbid` (default: fire on any non-baseline rule matching
+  the optional `priority`/`table` selectors; the kernel's 0/32766/32767 lookup
+  rules never count) or `require` (fire when the matching rule is missing).
+  Violations are tagged ATT&CK **T1599** (Network Boundary Bridging) and appear
+  in the GUI Security view's tactic lens.
 - **ethtool link health (nlink 0.23):** beyond speed/duplex/autoneg/rings/pause,
   per-interface **FEC** (`ethtool/<iface>/fec/{modes,auto}` — silent corruption on
   marginal optics) and **EEE** (`ethtool/<iface>/eee/{enabled,active}` — power-save

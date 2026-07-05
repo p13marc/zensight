@@ -13,8 +13,8 @@ use crate::collector::CollectHandle;
 use crate::config::CollectConfig;
 use crate::sentinel::{
     DeliveryFloorExpectation, ExpectationsConfig, LinkExpectation, MetricExpectation,
-    NeighborExpectation, RateExpectation, RouteExpectation, RouteFlapExpectation, SentinelHandle,
-    SocketExpectation,
+    NeighborExpectation, RateExpectation, RouteExpectation, RouteFlapExpectation, RuleExpectation,
+    SentinelHandle, SocketExpectation,
 };
 
 /// Topic for the expectations control surface.
@@ -138,6 +138,8 @@ pub enum ExpectationCommand {
     AddDelivery(DeliveryFloorExpectation),
     /// Add (or replace by name) a route-flap expectation.
     AddRouteFlap(RouteFlapExpectation),
+    /// Add (or replace by name) a policy-rule expectation (#323).
+    AddRule(RuleExpectation),
     /// Remove an expectation by rule slug.
     Remove { rule: String },
 }
@@ -180,6 +182,10 @@ pub async fn apply(handle: &SentinelHandle, cmd: ExpectationCommand) {
         ExpectationCommand::AddRouteFlap(exp) => {
             tracing::info!(name = %exp.name, metric = %exp.metric, "sentinel: add route-flap expectation");
             handle.add_route_flap(exp).await;
+        }
+        ExpectationCommand::AddRule(exp) => {
+            tracing::info!(name = %exp.name, "sentinel: add policy-rule expectation");
+            handle.add_rule(exp).await;
         }
         ExpectationCommand::Remove { rule } => {
             tracing::info!(rule = %rule, "sentinel: remove expectation");
@@ -309,6 +315,29 @@ mod tests {
         assert!(json.contains("add_socket"));
         let back: ExpectationCommand = serde_json::from_str(&json).unwrap();
         matches!(back, ExpectationCommand::AddSocket(_));
+    }
+
+    #[tokio::test]
+    async fn rule_expectation_command_roundtrip_and_apply() {
+        // Pin the JSON the GUI sends for the policy-rule kind (#323).
+        let cmd: ExpectationCommand = serde_json::from_str(
+            r#"{"type":"add_rule","name":"no-diversion","sense":"forbid","severity":"critical"}"#,
+        )
+        .unwrap();
+        let handle = SentinelHandle::new(ExpectationsConfig::default());
+        apply(&handle, cmd).await;
+        let snap = handle.snapshot().await;
+        assert_eq!(snap.rules.len(), 1);
+        assert_eq!(snap.rules[0].name, "no-diversion");
+        // Remove by the `rules:` slug.
+        apply(
+            &handle,
+            ExpectationCommand::Remove {
+                rule: "rules:no-diversion".into(),
+            },
+        )
+        .await;
+        assert!(handle.snapshot().await.rules.is_empty());
     }
 
     #[tokio::test]

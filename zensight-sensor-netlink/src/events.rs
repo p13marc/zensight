@@ -3,8 +3,8 @@
 //! The collector subscribes to RTNETLINK multicast groups and consumes
 //! `Connection::<Route>::events()` (a `Stream`) via `tokio::select!` against the
 //! poll tick. Each [`NetworkEvent`] is folded into:
-//! 1. bounded **counters** `events/{link,addr,route,neighbor}/{added,removed,
-//!    changed}_total` (streamed), and
+//! 1. bounded **counters** `events/{link,addr,route,neighbor,rule,nexthop,mdb,
+//!    nsid}/{added,removed,changed}_total` (streamed), and
 //! 2. a bounded **recent-events ring** served on demand via `@/query/events`.
 //!
 //! Relevant events (a `DelLink`, default-route withdrawal, gateway-neighbor
@@ -28,10 +28,11 @@ use nlink::netlink::neigh::State as NeighborState;
 
 use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-/// The event families we track for counting. The first four are RTNETLINK
-/// (link/addr/route/neighbor); [`EventFamily::Ipsec`] folds the XFRM monitor
-/// stream (SA/policy lifecycle, nlink 0.23 `Connection::<Xfrm>::events()`) onto
-/// the same control-plane timeline.
+/// The event families we track for counting. The RTNETLINK families
+/// (link/addr/route/neighbor + rule/nexthop/mdb/nsid, #323) come off the event
+/// stream; [`EventFamily::Ipsec`] folds the XFRM monitor stream (SA/policy
+/// lifecycle, nlink 0.23 `Connection::<Xfrm>::events()`) onto the same
+/// control-plane timeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventFamily {
     Link,
@@ -39,6 +40,18 @@ pub enum EventFamily {
     Route,
     Neighbor,
     Ipsec,
+    /// Policy-routing rules (`RTM_NEWRULE`/`DELRULE`, #323) — an `ip rule`
+    /// insertion that diverts traffic through another table is both the classic
+    /// "why is routing weird" incident and a traffic-redirect primitive.
+    Rule,
+    /// Nexthop objects (`RTM_NEWNEXTHOP`/`DELNEXTHOP`, #323).
+    Nexthop,
+    /// Bridge multicast DB entries (`RTM_NEWMDB`/`DELMDB`, #323).
+    Mdb,
+    /// Network-namespace ids (`RTM_NEWNSID`/`DELNSID`, #323) — a namespace
+    /// appearing/disappearing is a container-lifecycle signal (counter-first;
+    /// the detail is minimal).
+    NsId,
 }
 
 impl EventFamily {
@@ -50,6 +63,10 @@ impl EventFamily {
             EventFamily::Route => "route",
             EventFamily::Neighbor => "neighbor",
             EventFamily::Ipsec => "ipsec",
+            EventFamily::Rule => "rule",
+            EventFamily::Nexthop => "nexthop",
+            EventFamily::Mdb => "mdb",
+            EventFamily::NsId => "nsid",
         }
     }
 
@@ -60,15 +77,23 @@ impl EventFamily {
             EventFamily::Route => 2,
             EventFamily::Neighbor => 3,
             EventFamily::Ipsec => 4,
+            EventFamily::Rule => 5,
+            EventFamily::Nexthop => 6,
+            EventFamily::Mdb => 7,
+            EventFamily::NsId => 8,
         }
     }
 
-    const ALL: [EventFamily; 5] = [
+    const ALL: [EventFamily; 9] = [
         EventFamily::Link,
         EventFamily::Addr,
         EventFamily::Route,
         EventFamily::Neighbor,
         EventFamily::Ipsec,
+        EventFamily::Rule,
+        EventFamily::Nexthop,
+        EventFamily::Mdb,
+        EventFamily::NsId,
     ];
 }
 
@@ -116,14 +141,19 @@ pub struct EventClass {
 }
 
 /// Classify a [`NetworkEvent`] into its family + add/remove sense. Returns
-/// `None` for families we do not subscribe to in Wave 1 (FDB, TC).
+/// `None` for families we do not subscribe to (FDB, TC).
 pub fn classify_event(ev: &NetworkEvent) -> Option<EventClass> {
     let family = match ev {
         NetworkEvent::NewLink(_) | NetworkEvent::DelLink(_) => EventFamily::Link,
         NetworkEvent::NewAddress(_) | NetworkEvent::DelAddress(_) => EventFamily::Addr,
         NetworkEvent::NewRoute(_) | NetworkEvent::DelRoute(_) => EventFamily::Route,
         NetworkEvent::NewNeighbor(_) | NetworkEvent::DelNeighbor(_) => EventFamily::Neighbor,
-        // FDB / TC events are not subscribed in Wave 1.
+        // Policy-routing / nexthop / bridge-MDB / netns families (#323).
+        NetworkEvent::NewRule(_) | NetworkEvent::DelRule(_) => EventFamily::Rule,
+        NetworkEvent::NewNexthop(_) | NetworkEvent::DelNexthop(_) => EventFamily::Nexthop,
+        NetworkEvent::NewMdb(_) | NetworkEvent::DelMdb(_) => EventFamily::Mdb,
+        NetworkEvent::NewNsId(_) | NetworkEvent::DelNsId(_) => EventFamily::NsId,
+        // FDB / TC events are not subscribed.
         _ => return None,
     };
     Some(EventClass {
@@ -147,6 +177,11 @@ pub fn is_sentinel_relevant(ev: &NetworkEvent) -> bool {
         | NetworkEvent::DelAddress(_)
         | NetworkEvent::NewRoute(_)
         | NetworkEvent::DelRoute(_)
+        // Policy-rule changes (#323) must re-evaluate rule expectations
+        // instantly: an `ip rule add` can divert traffic through another table
+        // without any RTM_NEWROUTE.
+        | NetworkEvent::NewRule(_)
+        | NetworkEvent::DelRule(_)
         | NetworkEvent::DelNeighbor(_) => true,
         NetworkEvent::NewNeighbor(n) => {
             matches!(n.state(), NeighborState::Failed | NeighborState::Incomplete)
@@ -163,7 +198,8 @@ pub fn is_sentinel_relevant(ev: &NetworkEvent) -> bool {
 pub struct EventRecord {
     /// Wall-clock seconds since the Unix epoch when observed.
     pub ts_unix: u64,
-    /// `"link"` / `"addr"` / `"route"` / `"neighbor"` / `"ipsec"`.
+    /// `"link"` / `"addr"` / `"route"` / `"neighbor"` / `"ipsec"` / `"rule"` /
+    /// `"nexthop"` / `"mdb"` / `"nsid"`.
     pub family: String,
     /// `"added"` / `"removed"` / `"changed"`.
     pub action: String,
@@ -214,6 +250,75 @@ fn event_detail(ev: &NetworkEvent) -> String {
             .map(|d| d.to_string())
             .unwrap_or_else(|| format!("ifindex {}", nb.ifindex()));
     }
+    // Policy-routing rule (#323): priority + selector + action/table, e.g.
+    // `prio 100 from 10.0.0.0/8 iif eth0 fwmark 0x1 → lookup table 200`.
+    if let Some(rule) = ev.as_rule() {
+        let mut selector = Vec::new();
+        if let Some(src) = rule.source() {
+            selector.push(format!("from {}/{}", src, rule.src_len()));
+        }
+        if let Some(dst) = rule.destination() {
+            selector.push(format!("to {}/{}", dst, rule.dst_len()));
+        }
+        if let Some(iif) = rule.iifname() {
+            selector.push(format!("iif {iif}"));
+        }
+        if let Some(oif) = rule.oifname() {
+            selector.push(format!("oif {oif}"));
+        }
+        if let Some(mark) = rule.fwmark() {
+            selector.push(format!("fwmark {mark:#x}"));
+        }
+        let selector = if selector.is_empty() {
+            "all".to_string()
+        } else {
+            selector.join(" ")
+        };
+        return format!(
+            "prio {} {} → {} table {}",
+            rule.priority(),
+            selector,
+            rule.action().name(),
+            rule.table()
+        );
+    }
+    // Nexthop object (#323): id + gateway/oif, or its group/blackhole shape.
+    if let Some(nh) = ev.as_nexthop() {
+        let mut parts = vec![format!("id {}", nh.id())];
+        if nh.is_group() {
+            parts.push("group".to_string());
+        }
+        if nh.is_blackhole() {
+            parts.push("blackhole".to_string());
+        }
+        if let Some(gw) = nh.gateway() {
+            parts.push(format!("via {gw}"));
+        }
+        if let Some(oif) = nh.ifindex() {
+            parts.push(format!("oif {oif}"));
+        }
+        return parts.join(" ");
+    }
+    // Bridge multicast DB entry (#323): group + bridge/port + vlan.
+    if let Some(mdb) = ev.as_mdb() {
+        let mut s = format!(
+            "group {} bridge {} port {}",
+            mdb.group, mdb.bridge_ifindex, mdb.port_ifindex
+        );
+        if mdb.vid != 0 {
+            s.push_str(&format!(" vlan {}", mdb.vid));
+        }
+        return s;
+    }
+    // Network-namespace id (#323): counter-first; minimal detail.
+    if let Some(ns) = ev.as_nsid() {
+        return match (ns.nsid(), ns.pid()) {
+            (Some(id), Some(pid)) => format!("nsid {id} pid {pid}"),
+            (Some(id), None) => format!("nsid {id}"),
+            (None, Some(pid)) => format!("pid {pid}"),
+            (None, None) => "?".to_string(),
+        };
+    }
     "?".to_string()
 }
 
@@ -226,7 +331,7 @@ pub struct EventState {
 
 struct EventStateInner {
     /// `[family][action]` counters.
-    counters: [[AtomicU64; 3]; 5],
+    counters: [[AtomicU64; 3]; 9],
     /// Known link ifindexes, to tell an `add` from a `change` (`RTM_NEWLINK`).
     seen_links: Mutex<HashSet<u32>>,
     /// Most-recent events (drop-oldest), bounded by `capacity`.
@@ -499,5 +604,108 @@ mod tests {
             .state(NeighborState::Failed)
             .build();
         assert!(is_sentinel_relevant(&NetworkEvent::NewNeighbor(failed)));
+    }
+
+    // ---- #323: rule / nexthop / mdb / nsid families ------------------------
+    //
+    // `RuleMessage`/`NsIdMessage` are constructed via their public
+    // `new()`/`Default` (fields are pub(crate), so the synthetic events carry
+    // kernel-default values — enough to pin classification, counters and the
+    // detail shape); `MdbEntry` has public fields. `Nexthop` exposes neither a
+    // builder nor Default, so its (structurally identical) arm is covered by
+    // the classify match compiling against the same accessors.
+
+    use nlink::netlink::mdb::{MdbEntry, MdbGroup};
+    use nlink::netlink::messages::{NsIdMessage, RuleMessage};
+
+    fn mdb_entry() -> MdbEntry {
+        MdbEntry {
+            bridge_ifindex: 4,
+            port_ifindex: 7,
+            group: MdbGroup::Ip("239.1.2.3".parse().unwrap()),
+            vid: 10,
+            permanent: false,
+            flags: 0,
+        }
+    }
+
+    #[test]
+    fn classify_maps_new_families() {
+        let c = classify_event(&NetworkEvent::NewRule(RuleMessage::new())).unwrap();
+        assert_eq!(c.family, EventFamily::Rule);
+        assert!(c.is_new);
+        let c = classify_event(&NetworkEvent::DelRule(RuleMessage::new())).unwrap();
+        assert!(!c.is_new);
+        let c = classify_event(&NetworkEvent::NewMdb(mdb_entry())).unwrap();
+        assert_eq!(c.family, EventFamily::Mdb);
+        let c = classify_event(&NetworkEvent::NewNsId(NsIdMessage::default())).unwrap();
+        assert_eq!(c.family, EventFamily::NsId);
+    }
+
+    #[test]
+    fn rule_events_count_and_record() {
+        let st = EventState::new(8);
+        assert_eq!(
+            st.observe_at(&NetworkEvent::NewRule(RuleMessage::new()), 100),
+            Some(EventAction::Added)
+        );
+        assert_eq!(
+            st.observe_at(&NetworkEvent::DelRule(RuleMessage::new()), 101),
+            Some(EventAction::Removed)
+        );
+        let pts = st.counter_points("h");
+        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap().value.clone();
+        assert_eq!(find("events/rule/added_total"), TelemetryValue::Counter(1));
+        assert_eq!(
+            find("events/rule/removed_total"),
+            TelemetryValue::Counter(1)
+        );
+
+        let recent = st.recent();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].family, "rule");
+        assert_eq!(recent[0].action, "added");
+        // The rule detail carries priority + action + table (defaults here).
+        assert!(
+            recent[0].detail.contains("prio"),
+            "got {}",
+            recent[0].detail
+        );
+        assert!(
+            recent[0].detail.contains("table"),
+            "got {}",
+            recent[0].detail
+        );
+    }
+
+    #[test]
+    fn mdb_and_nsid_details_are_readable() {
+        let st = EventState::new(8);
+        st.observe_at(&NetworkEvent::NewMdb(mdb_entry()), 100);
+        st.observe_at(&NetworkEvent::NewNsId(NsIdMessage::default()), 101);
+        let recent = st.recent();
+        assert_eq!(recent[0].family, "mdb");
+        assert!(recent[0].detail.contains("group 239.1.2.3"));
+        assert!(recent[0].detail.contains("bridge 4"));
+        assert!(recent[0].detail.contains("vlan 10"));
+        // Mdb events carry the port ifindex.
+        assert_eq!(recent[0].ifindex, Some(7));
+        assert_eq!(recent[1].family, "nsid");
+    }
+
+    #[test]
+    fn rule_changes_wake_the_sentinel_but_mdb_does_not() {
+        // NewRule/DelRule must re-evaluate rule expectations instantly (#323);
+        // bridge-MDB churn must not cause sweep storms.
+        assert!(is_sentinel_relevant(&NetworkEvent::NewRule(
+            RuleMessage::new()
+        )));
+        assert!(is_sentinel_relevant(&NetworkEvent::DelRule(
+            RuleMessage::new()
+        )));
+        assert!(!is_sentinel_relevant(&NetworkEvent::NewMdb(mdb_entry())));
+        assert!(!is_sentinel_relevant(&NetworkEvent::NewNsId(
+            NsIdMessage::default()
+        )));
     }
 }

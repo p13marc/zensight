@@ -1182,6 +1182,12 @@ fn render_routing_tab(state: &DeviceDetailState) -> Column<'_, Message> {
     // Default-route flap section: count tile + flap timeline table.
     col = col.push(card(render_flap_section(state)));
 
+    // Policy-routing rule changes (#323): an `ip rule` add/del diverts traffic
+    // without any route change — count tile + pivot to the events timeline.
+    if let Some(section) = render_policy_rule_section(state) {
+        col = col.push(card(section));
+    }
+
     // Neighbor summary + state-breakdown donut.
     col = col.push(card(render_neighbors(state)));
     if state
@@ -1238,6 +1244,60 @@ fn render_routing_tab(state: &DeviceDetailState) -> Column<'_, Message> {
     )));
 
     col
+}
+
+/// Policy-routing rule changes (#323): total `ip rule` adds/removes off the
+/// `events/rule/*_total` counters, the most recent rule event's detail, and a
+/// pivot to the Events tab. `None` until the sensor has published the counters
+/// (pre-0.7 sensors / events disabled).
+fn render_policy_rule_section(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
+    let count = |m: &str| {
+        state
+            .metrics
+            .get(m)
+            .and_then(|p| tv_num(&p.value))
+            .unwrap_or(0.0)
+    };
+    state.metrics.get("events/rule/added_total")?;
+    let added = count("events/rule/added_total");
+    let removed = count("events/rule/removed_total");
+    let total = added + removed;
+
+    let tile = row![metric_tile(
+        state,
+        "policy-rule changes",
+        "events/rule/added_total",
+        Some(format!("{}", total as u64)),
+    )]
+    .spacing(space::MD);
+
+    // The most recent rule event's human detail, when the events table has one.
+    let last = state
+        .netlink_detail
+        .events
+        .ready()
+        .and_then(|evs| evs.iter().find(|e| e.family == "rule"))
+        .map(|e| format!("last: {} {}", e.action, e.detail));
+
+    let device_id = state.device_id.clone();
+    let pivot = button(text("View events timeline").size(font::CAPTION))
+        .padding([4, 10])
+        .on_press(Message::SelectSpecializedTab(
+            device_id,
+            crate::view::specialized::SpecializedTab::Events,
+        ));
+
+    let mut colm = column![
+        section_header("Policy-routing rules", None),
+        row![tile, pivot]
+            .spacing(space::MD)
+            .align_y(iced::Alignment::Center),
+    ]
+    .spacing(space::SM);
+    if let Some(last) = last {
+        colm = colm.push(text(last).size(font::CAPTION).style(dim));
+    }
+    Some(colm.into())
 }
 
 /// Default-route flap count tile + the flap timeline record table (#262).
@@ -1522,6 +1582,12 @@ fn family_color(family: &str) -> iced::Color {
         "route" => theme::ACCENT_GOLD,
         "neigh" | "neighbor" => theme::STATUS_DEGRADED,
         "ipsec" | "xfrm" => theme::SEVERITY_CRITICAL,
+        // Policy-routing / nexthop / bridge-MDB / netns families (#323). A rule
+        // change is the traffic-diversion signal — flag it like a warning.
+        "rule" => theme::SEVERITY_WARNING,
+        "nexthop" => theme::ACCENT_ANOMALY,
+        "mdb" => theme::ACCENT_STALE,
+        "nsid" => theme::SEVERITY_INFO,
         _ => theme::STATUS_UNKNOWN,
     }
 }

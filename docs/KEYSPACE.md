@@ -115,7 +115,7 @@ Per-sensor operational channels. All are derived from the sensor's `key_prefix`.
 | Sensor | `@/commands/<topic>` · `@/status/<topic>` | Purpose |
 |--------|---|---|
 | logs | `filter` | add/remove/clear dynamic message filters |
-| netlink | `expectations` | hot-swap sentinel expectations |
+| netlink | `expectations` | hot-swap sentinel expectations (sockets/links/neighbors/routes/metrics/rates/delivery/route-flaps + policy `rules` #323) |
 | netlink | `collection` | toggle collectors at runtime |
 | netring | `detectors` | runtime detection tuning: allowlist + per-detector mute/threshold |
 | netring | `capture_filter` | hot-swap the reloadable packet-tier BPF filter (capture focus) |

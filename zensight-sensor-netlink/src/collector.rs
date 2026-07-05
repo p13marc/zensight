@@ -338,6 +338,14 @@ impl Collector {
                         RtnetlinkGroup::Ipv4Route,
                         RtnetlinkGroup::Ipv6Route,
                         RtnetlinkGroup::Neigh,
+                        // Policy-rule / nexthop / bridge-MDB / netns-id events
+                        // (#323, nlink 0.24). Kept an explicit list (not
+                        // `subscribe_all()`, which would also pull in Tc).
+                        RtnetlinkGroup::Ipv4Rule,
+                        RtnetlinkGroup::Ipv6Rule,
+                        RtnetlinkGroup::Nexthop,
+                        RtnetlinkGroup::Mdb,
+                        RtnetlinkGroup::NsId,
                     ]) {
                         tracing::warn!(error = %e, "event subscribe failed; events disabled");
                     } else {
