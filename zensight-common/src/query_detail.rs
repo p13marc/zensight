@@ -289,7 +289,7 @@ pub struct HttpHostRecord {
 /// any active probing, so it covers hosts that emit no ZenSight telemetry of
 /// their own. The high-cardinality detail is pulled on demand (principle P2),
 /// never streamed; only an aggregate asset count rides the telemetry bus.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct AssetRecord {
     /// L2 address (the inventory's primary key), e.g. `"aa:bb:cc:dd:ee:ff"`.
     pub mac: String,
@@ -315,6 +315,39 @@ pub struct AssetRecord {
     pub seen_via: Vec<String>,
     /// Most-recent observation timestamp (Unix epoch milliseconds).
     pub last_seen: i64,
+    /// Classified device role (#329): `router` / `switch` / `access-point` /
+    /// `phone` / `iot` / `host` / `unknown`, derived by netring from capabilities +
+    /// discovery sources. Additive (`#[serde(default)]` for old records).
+    #[serde(default)]
+    pub role: String,
+    /// First observation timestamp (Unix epoch ms) — the new-asset signal. Additive.
+    #[serde(default)]
+    pub first_seen: i64,
+    /// How many distinct discovery parsers have contributed to this record — a
+    /// confidence signal (#329). Additive.
+    #[serde(default)]
+    pub source_count: u32,
+    /// Every distinct hostname ever bound to this MAC (bounded); `hostname` mirrors
+    /// the most-recent (#329). Additive.
+    #[serde(default)]
+    pub hostnames: Vec<String>,
+    /// Per-parser fingerprints for pivoting to the fingerprint explorer (#329):
+    /// JA3 / JA4 (TLS), HASSH (SSH), p0f (TCP/IP). Additive.
+    #[serde(default)]
+    pub ja3: Option<String>,
+    #[serde(default)]
+    pub ja4: Option<String>,
+    #[serde(default)]
+    pub hassh: Option<String>,
+    #[serde(default)]
+    pub p0f: Option<String>,
+    /// X.509 leaf-certificate subject CN + SAN DNS entries this asset presented as
+    /// a TLS server (#329) — a cert-based pivot. Populated only on `ja4plus` builds;
+    /// empty otherwise. Additive.
+    #[serde(default)]
+    pub x509_subject: Option<String>,
+    #[serde(default)]
+    pub x509_sans: Vec<String>,
 }
 
 /// One process row (sysinfo), served on demand sorted/filtered by the caller

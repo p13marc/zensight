@@ -1513,6 +1513,9 @@ impl ZenSight {
             Message::SetInventoryAssetSort(sort) => {
                 self.inventory.asset_sort = sort;
             }
+            Message::SetInventoryAssetRole(role) => {
+                self.inventory.asset_role_filter = role;
+            }
             Message::SetInventoryFpFilter(kind) => {
                 self.inventory.fp_filter = kind;
             }
@@ -3410,6 +3413,18 @@ impl ZenSight {
         use crate::view::specialized::netring_detail::{
             fetch_assets, fetch_ja4h, fetch_quic, fetch_ssh, fetch_tls,
         };
+        // Demo mode serves no queryables (session is None), so hand the inventory
+        // view a synthetic enriched fleet (#329) instead of an empty table.
+        if self.demo_mode {
+            return Task::done(Message::InventoryLoaded(Ok(InventoryData {
+                assets: crate::mock::netring::assets(),
+                assets_responded: true,
+                tls: Vec::new(),
+                quic: Vec::new(),
+                ssh: Vec::new(),
+                ja4h: Vec::new(),
+            })));
+        }
         let Some(session) = self.session.clone() else {
             return Task::done(Message::InventoryLoaded(Err(
                 "Not connected to Zenoh".to_string()

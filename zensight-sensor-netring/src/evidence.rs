@@ -273,6 +273,7 @@ mod tests {
             capabilities: vec![],
             seen_via: vec!["arp".into()],
             last_seen: 123,
+            ..Default::default()
         }
     }
 

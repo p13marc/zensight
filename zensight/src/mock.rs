@@ -316,6 +316,83 @@ pub mod netlink {
 pub mod netring {
     use super::*;
 
+    /// Mock enriched passive-asset inventory (#329) for `--demo`: a small fleet
+    /// spanning roles (router / iot / phone / host) with first-seen, source-count
+    /// confidence, and JA4 fingerprint pivots — so the enriched inventory view is
+    /// developable without live capture (per the demo/mock contract).
+    #[allow(clippy::too_many_arguments)]
+    pub fn assets() -> Vec<zensight_common::AssetRecord> {
+        use zensight_common::AssetRecord;
+        let row = |mac: &str,
+                   ip: &str,
+                   host: &str,
+                   vendor: &str,
+                   role: &str,
+                   srcs: u32,
+                   first: i64,
+                   last: i64,
+                   ja4: Option<&str>| AssetRecord {
+            mac: mac.into(),
+            ipv4: vec![ip.into()],
+            hostname: Some(host.into()),
+            hostnames: vec![host.into()],
+            vendor: Some(vendor.into()),
+            role: role.into(),
+            source_count: srcs,
+            first_seen: first,
+            last_seen: last,
+            seen_via: vec!["arp".into(), "lldp".into()],
+            ja4: ja4.map(Into::into),
+            ..Default::default()
+        };
+        vec![
+            row(
+                "aa:bb:cc:00:01:01",
+                "10.0.0.1",
+                "core-rtr",
+                "Cisco",
+                "router",
+                3,
+                1_700_000_000_000,
+                1_700_100_000_000,
+                None,
+            ),
+            row(
+                "aa:bb:cc:00:02:02",
+                "10.0.0.42",
+                "cam-lobby",
+                "Hikvision",
+                "iot",
+                2,
+                1_700_050_000_000,
+                1_700_100_000_000,
+                Some("t13d1516h2_8daaf6152771_deadbeef00"),
+            ),
+            row(
+                "aa:bb:cc:00:03:03",
+                "10.0.0.55",
+                "desk-phone",
+                "Polycom",
+                "phone",
+                2,
+                1_700_060_000_000,
+                1_700_100_000_000,
+                None,
+            ),
+            row(
+                "aa:bb:cc:00:04:04",
+                "10.0.0.101",
+                "workstation7",
+                "Dell",
+                "host",
+                4,
+                1_700_070_000_000,
+                1_700_100_000_000,
+                Some("t13d1516h2_8daaf6152771_cafebabe11"),
+            ),
+        ]
+    }
+
     /// Generate mock netring telemetry for a probe.
     pub fn probe(name: &str) -> Vec<TelemetryPoint> {
         let mut bw_labels = HashMap::new();

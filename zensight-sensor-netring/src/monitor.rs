@@ -554,6 +554,10 @@ fn source_names(set: flowscope::AssetSourceSet) -> Vec<String> {
         (S::SSDP, "ssdp"),
         (S::MDNS, "mdns"),
         (S::NBNS, "nbns"),
+        // 0.22 (#329) added handshake-derived sources.
+        (S::TLS, "tls"),
+        (S::SSH, "ssh"),
+        (S::P0F, "p0f"),
     ]
     .iter()
     .filter(|(bit, _)| set.contains(*bit))
@@ -575,6 +579,18 @@ fn asset_to_record(a: &flowscope::Asset) -> AssetRecord {
         capabilities: capability_names(a.capabilities),
         seen_via: source_names(a.seen_via),
         last_seen: (a.last_seen.to_unix_f64() * 1000.0) as i64,
+        // Enrichment (#329): role classification, first-seen + source-count
+        // confidence, the full hostname set, and fingerprint / x509 pivots.
+        role: a.role().as_str().to_string(),
+        first_seen: (a.first_seen.to_unix_f64() * 1000.0) as i64,
+        source_count: a.source_count(),
+        hostnames: a.hostnames.clone(),
+        ja3: a.fingerprints.ja3.clone(),
+        ja4: a.fingerprints.ja4.clone(),
+        hassh: a.fingerprints.hassh.clone(),
+        p0f: a.fingerprints.p0f.clone(),
+        x509_subject: a.x509_subject.clone(),
+        x509_sans: a.x509_sans.clone(),
     }
 }
 

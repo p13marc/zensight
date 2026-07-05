@@ -340,10 +340,16 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
   code (NOT OSI); the default build stays OSI-clean and the channel is absent.
   **JA4SSH is not yet available upstream** (flowscope 0.19 / netring 0.27
   fingerprint SSH via HASSH only), so the SSH side of #124 is deferred.
-- **Passive asset inventory (netring 0.27):** with `collect.assets`, discovers
-  hosts on the wire from ARP / NDP / LLDP (+ CDP via `collect.asset_cdp`) into a
-  MAC-keyed inventory (MAC / IP / hostname / platform / capabilities / seen-via),
-  served on `@/query/assets`. Covers hosts that emit no telemetry of their own.
+- **Passive asset inventory (netring 0.27, enriched 0.22/#329):** with
+  `collect.assets`, discovers hosts on the wire from ARP / NDP / LLDP (+ CDP via
+  `collect.asset_cdp`) into a MAC-keyed inventory served on `@/query/assets`.
+  Records carry MAC / IPs / hostname(s) / vendor / platform / capabilities /
+  seen-via plus (netring 0.29) a classified **role** (router / switch /
+  access-point / phone / iot / host), **first-seen** + **source-count** confidence,
+  the full **hostname set**, per-parser **fingerprints** (JA3 / JA4 / HASSH / p0f)
+  for cross-pivoting to the fingerprint explorer, and (on `ja4plus` builds) x509
+  subject/SANs. The GUI Inventory view adds a role filter, first-seen sort, and
+  fingerprint pivots. Covers hosts that emit no telemetry of their own.
 - **Passive DNS name resolution (#308):** with `collect.dns` + `names` (default
   on), DNS answers are parsed (flowscope `NameMap` — follows CNAME chains,
   glue-poisoning-safe, PTR-aware) into a client-scoped IP↔name cache. Flow and

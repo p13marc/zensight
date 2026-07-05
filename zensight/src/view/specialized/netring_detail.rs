@@ -405,6 +405,7 @@ mod tests {
             capabilities: vec!["switch".into()],
             seen_via: vec!["lldp".into()],
             last_seen: 1_700_000_000_000,
+            ..Default::default()
         }]));
         assert_eq!(s.assets.ready().map(|v| v.len()), Some(1));
         s.apply_assets(Err("no sensor".into()));

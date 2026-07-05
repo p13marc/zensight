@@ -166,6 +166,8 @@ pub enum Message {
     InventoryLoaded(Result<crate::view::inventory::InventoryData, String>),
     /// Set the inventory asset-table sort order.
     SetInventoryAssetSort(crate::view::inventory::AssetSort),
+    /// Filter the passive-asset inventory by role (`None` = all roles, #329).
+    SetInventoryAssetRole(Option<String>),
     /// Set the fingerprint-explorer kind filter (`None` = all kinds).
     SetInventoryFpFilter(Option<crate::view::inventory::FpKind>),
 
