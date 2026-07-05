@@ -52,6 +52,20 @@ pub struct BandwidthState {
     /// table can borrow them for the render's lifetime.
     pub services: Vec<BwRow>,
     pub table: TableState,
+    /// Host scope (#351): set when opened from a device view ("Open in
+    /// Bandwidth monitor"); rows from other hosts are hidden. Rows with no
+    /// host stamp are kept (single-host producers don't stamp it) — the host
+    /// column makes the distinction visible. Cleared by the chip or a plain
+    /// nav-rail open.
+    pub host_filter: Option<String>,
+}
+
+/// Whether a record passes the host scope: match, or no host stamp at all.
+fn host_scoped(record: &BandwidthRecord, host_filter: Option<&str>) -> bool {
+    match host_filter {
+        Some(host) => record.host.as_deref().is_none_or(|h| h == host),
+        None => true,
+    }
 }
 
 impl BandwidthState {
@@ -60,9 +74,25 @@ impl BandwidthState {
         self.processes = Fetch::Loading;
     }
 
-    /// Fold a completed per-process fetch into state.
+    /// Fold a completed per-process fetch into state, applying the host scope
+    /// at fold time (the table borrows rows for the render's lifetime, so
+    /// filtering happens on the data, not in the view).
     pub fn apply(&mut self, result: Result<Vec<BandwidthRecord>, String>) {
-        self.processes = Fetch::from_result(result);
+        let scoped = result.map(|records| {
+            records
+                .into_iter()
+                .filter(|r| host_scoped(r, self.host_filter.as_deref()))
+                .collect()
+        });
+        self.processes = Fetch::from_result(scoped);
+    }
+
+    /// Set the per-service rows, applying the host scope (#351).
+    pub fn set_services(&mut self, rows: Vec<BwRow>) {
+        self.services = rows
+            .into_iter()
+            .filter(|r| host_scoped(&r.record, self.host_filter.as_deref()))
+            .collect();
     }
 }
 
@@ -125,13 +155,26 @@ pub fn bandwidth_view(state: &BandwidthState) -> Element<'_, Message> {
 
     let body = match state.mode {
         BandwidthMode::Processes => render_processes(state),
-        BandwidthMode::Services => render_services(&state.services, &state.table),
+        BandwidthMode::Services => render_services(state),
     };
 
-    column![section_header("Bandwidth", None), toggle, legend, body]
+    let mut col = column![section_header("Bandwidth", None), toggle, legend]
         .spacing(space::SM)
-        .padding(space::MD)
-        .into()
+        .padding(space::MD);
+    // Host-scope chip (#351): shown when opened from a device view.
+    if let Some(host) = &state.host_filter {
+        col = col.push(
+            row![
+                text(format!("Host: {host}")).size(font::CAPTION),
+                button(text("clear").size(font::CAPTION))
+                    .padding([2, 8])
+                    .on_press(Message::ClearBandwidthHostFilter),
+            ]
+            .spacing(space::SM)
+            .align_y(iced::Alignment::Center),
+        );
+    }
+    col.push(body).into()
 }
 
 /// Per-process table over the `@/query/bandwidth` fetch (no sparkline — the query
@@ -203,7 +246,10 @@ fn render_processes(state: &BandwidthState) -> Element<'_, Message> {
 }
 
 /// Per-service table over the store-derived rows, with a streamed sparkline.
-fn render_services<'a>(services: &'a [BwRow], table: &'a TableState) -> Element<'a, Message> {
+/// Rows are already host-scoped by the app (see [`BandwidthState::host_filter`]).
+fn render_services(state: &BandwidthState) -> Element<'_, Message> {
+    let services = &state.services;
+    let table = &state.table;
     if services.is_empty() {
         return empty_state(
             "No systemd unit is publishing IPAccounting rates. Enable \
@@ -304,6 +350,21 @@ mod tests {
             row_name(&service_row("nginx.service", 0.0, 0.0).record),
             "nginx.service"
         );
+    }
+
+    /// #351: the host scope keeps matching rows and unstamped rows (a
+    /// single-host producer doesn't stamp `host`), and drops other hosts.
+    #[test]
+    fn host_scope_keeps_match_and_unstamped() {
+        let mine = service_row("nginx.service", 1.0, 1.0).record;
+        let mut other = mine.clone();
+        other.host = Some("elsewhere".into());
+        let mut unstamped = mine.clone();
+        unstamped.host = None;
+        assert!(host_scoped(&mine, Some("server01")));
+        assert!(!host_scoped(&other, Some("server01")));
+        assert!(host_scoped(&unstamped, Some("server01")));
+        assert!(host_scoped(&other, None));
     }
 
     #[test]

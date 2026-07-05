@@ -28,6 +28,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Contextual capture & bandwidth actions in the device view (#351)**: the
+  netring drill-down's Capture tab now hosts the real on-demand pcap capture
+  form (same shared state as the Sensors-page card — mirror, not move), gated
+  on the sensor advertising the Capture kind and carrying the in-flight
+  pause/resume/cancel controls; without the advert it stays health-only with
+  an honest caption. The tab is visible when capture telemetry OR the advert
+  is present, and selecting a netring device lazily discovers artifact kinds
+  so the form works without visiting the Sensors page first. The Bandwidth
+  tab gains an "Open in Bandwidth monitor" pivot that opens the global
+  process/service monitor pre-scoped to the host (scope chip + clear; rows
+  without a host stamp are kept visible, other hosts filtered at fold time).
+
 - **Drill-down vertical-space redesign (#350)**: drilling into a machine now
   leads with content instead of stacked always-expanded panels.
   - The host view's two header layers (identity panel + device nav header) are
