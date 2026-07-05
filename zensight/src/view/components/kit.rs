@@ -64,6 +64,23 @@ pub fn section_header<'a, Message: 'a>(
     }
 }
 
+/// A compact KPI tile: a big value over a muted caption, in a card. The shared
+/// form of the netring RED-header tile (#250), promoted for reuse by the logs
+/// stats block (#350) and any future KPI rows.
+pub fn metric_tile<'a, Message: 'a>(label: &str, value: String) -> Element<'a, Message> {
+    card(
+        iced::widget::column![
+            text(value).size(font::SECTION),
+            text(label.to_string())
+                .size(font::CAPTION)
+                .style(|theme: &Theme| text::Style {
+                    color: Some(theme::colors(theme).text_dimmed()),
+                }),
+        ]
+        .spacing(space::XS),
+    )
+}
+
 /// A status/severity badge: a colored dot **plus** a text label, so meaning is
 /// never carried by color alone (accessibility). `color` should come from a
 /// `theme::colors(..).status_*()` / `severity_*()` helper.

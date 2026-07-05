@@ -232,6 +232,12 @@ pub struct SyslogFilterState {
     pub frozen_at: Option<i64>,
     /// The expanded log row's content key, for the structured drill-down (#93).
     pub expanded_row: Option<String>,
+    /// Whether the "Log statistics" block (severity summary + rollups) is
+    /// expanded (#350). Collapsed by default so the log stream is visible
+    /// without scrolling; not persisted (per-session).
+    pub stats_open: bool,
+    /// Whether the by-unit rollup list shows every unit (vs. top-3) (#350).
+    pub stats_all_units: bool,
 }
 
 impl SyslogFilterState {
@@ -415,11 +421,33 @@ pub fn syslog_event_view<'a>(
     if filter_state.panel_open {
         content = content.push(card(render_filter_panel(messages, filter_state)));
     }
-    content = content.push(card(render_severity_summary(messages, filter_state)));
-    // Derived rollups (#63/#64): rendered when the logs sensor publishes them.
-    if state.metrics.keys().any(|k| k.starts_with("logs/")) {
-        content = content.push(card(render_logs_rollup(state)));
+    // Log statistics (#350): severity summary + derived rollups behind ONE
+    // collapsible header (default closed) so the log stream is on screen
+    // without scrolling. Collapsing loses nothing — expanding shows it all.
+    let caret = button(
+        text(if filter_state.stats_open {
+            "▾"
+        } else {
+            "▸"
+        })
+        .size(12),
+    )
+    .on_press(Message::ToggleLogStatsPanel)
+    .padding([2, 8])
+    .style(iced::widget::button::text);
+    let mut stats = column![crate::view::components::section_header(
+        "Log statistics",
+        Some(caret.into()),
+    )]
+    .spacing(space::SM);
+    if filter_state.stats_open {
+        stats = stats.push(render_severity_summary(messages, filter_state));
+        // Derived rollups (#63/#64): rendered when the sensor publishes them.
+        if state.metrics.keys().any(|k| k.starts_with("logs/")) {
+            stats = stats.push(render_logs_rollup(state, filter_state));
+        }
     }
+    content = content.push(card(stats));
     content = content.push(card(render_log_stream(messages, filter_state)));
 
     container(content)
@@ -428,10 +456,16 @@ pub fn syslog_event_view<'a>(
         .into()
 }
 
-/// Derived log-rollup panel (#64): consumes the sensor's `logs/*` metrics (#63)
-/// — error/warning totals, units-in-failure, per-severity volume, the noisiest
-/// units, and journald throughput — mirroring the netring RED card pattern.
-fn render_logs_rollup(state: &DeviceDetailState) -> Element<'_, Message> {
+/// Derived log-rollup panel (#64, compacted in #350): consumes the sensor's
+/// `logs/*` metrics (#63) as a KPI tile row (errors / warnings / units-in-
+/// failure / journald throughput) instead of one-per-line label rows, plus a
+/// top-3 noisiest-units list with a "show all" affordance.
+fn render_logs_rollup<'a>(
+    state: &'a DeviceDetailState,
+    filter_state: &'a SyslogFilterState,
+) -> Element<'a, Message> {
+    use crate::view::components::metric_tile;
+
     let num = |m: &str| -> String {
         match state.metrics.get(m).map(|p| &p.value) {
             Some(TelemetryValue::Counter(c)) => c.to_string(),
@@ -442,41 +476,38 @@ fn render_logs_rollup(state: &DeviceDetailState) -> Element<'_, Message> {
     let muted = |t: &Theme| text::Style {
         color: Some(theme::colors(t).text_muted()),
     };
-    let line = |label: &str, value: String| -> Element<'_, Message> {
-        row![
-            text(label.to_string()).size(12).width(Length::Fixed(220.0)),
-            text(value).size(12),
-        ]
-        .spacing(8)
-        .into()
-    };
 
-    let mut col = column![
-        row![icons::log(IconSize::Medium), text("Log Rollups").size(16)]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        line("errors (total)", num("logs/errors_total")),
-        line("warnings (total)", num("logs/warnings_total")),
-        line("units in failure", num("logs/units_in_failure")),
-    ]
-    .spacing(6);
-
-    // journald throughput, when present.
+    // KPI tiles in a single wrap-row (the netring/netlink tile pattern).
+    let mut tiles = vec![
+        metric_tile("errors (total)", num("logs/errors_total")),
+        metric_tile("warnings (total)", num("logs/warnings_total")),
+        metric_tile("units in failure", num("logs/units_in_failure")),
+    ];
     if state.metrics.contains_key("logs/journald/read_total") {
-        col = col
-            .push(text("journald throughput").size(12).style(muted))
-            .push(line("  read (total)", num("logs/journald/read_total")))
-            .push(line(
-                "  published (total)",
-                num("logs/journald/published_total"),
-            ))
-            .push(line(
-                "  dropped (total)",
-                num("logs/journald/dropped_total"),
-            ));
+        tiles.push(metric_tile(
+            "journald read",
+            num("logs/journald/read_total"),
+        ));
+        tiles.push(metric_tile(
+            "journald published",
+            num("logs/journald/published_total"),
+        ));
+        tiles.push(metric_tile(
+            "journald dropped",
+            num("logs/journald/dropped_total"),
+        ));
+    }
+    let mut col = column![].spacing(space::SM);
+    let mut tile_iter = tiles.into_iter().peekable();
+    while tile_iter.peek().is_some() {
+        let mut tile_row = row![].spacing(space::SM);
+        for tile in tile_iter.by_ref().take(4) {
+            tile_row = tile_row.push(container(tile).width(Length::FillPortion(1)));
+        }
+        col = col.push(tile_row);
     }
 
-    // Top noisiest units by message count (from the per-unit series).
+    // Top noisiest units by message count: top-3 by default, expandable (#350).
     let mut units: Vec<(String, u64)> = state
         .metrics
         .iter()
@@ -494,9 +525,36 @@ fn render_logs_rollup(state: &DeviceDetailState) -> Element<'_, Message> {
         .collect();
     if !units.is_empty() {
         units.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        let total = units.len();
+        let shown = if filter_state.stats_all_units {
+            total
+        } else {
+            3.min(total)
+        };
         col = col.push(text("by unit (top)").size(12).style(muted));
-        for (unit, n) in units.into_iter().take(10) {
-            col = col.push(line(&format!("  {unit}"), n.to_string()));
+        for (unit, n) in units.into_iter().take(shown) {
+            col = col.push(
+                row![
+                    text(format!("  {unit}"))
+                        .size(12)
+                        .width(Length::Fixed(220.0)),
+                    text(n.to_string()).size(12),
+                ]
+                .spacing(8),
+            );
+        }
+        if total > 3 {
+            let label = if filter_state.stats_all_units {
+                "Show top 3".to_string()
+            } else {
+                format!("Show all {total}")
+            };
+            col = col.push(
+                button(text(label).size(12))
+                    .on_press(Message::ToggleLogStatsAllUnits)
+                    .padding([2, 8])
+                    .style(iced::widget::button::text),
+            );
         }
     }
 
@@ -574,23 +632,15 @@ pub fn logs_view<'a>(
         .into()
 }
 
-/// Render the header with back button and host info.
+/// Render the logs-facet toolbar: message count + filter toggle. Navigation
+/// chrome (Back / protocol icon / host name) is owned by the shared device nav
+/// bar that wraps every device view — this used to duplicate it, stacking two
+/// Back buttons on the drill-down (#350).
 fn render_header<'a>(
-    state: &'a DeviceDetailState,
+    _state: &'a DeviceDetailState,
     filter_state: &'a SyslogFilterState,
     message_count: usize,
 ) -> Element<'a, Message> {
-    let back_button = button(
-        row![icons::arrow_left(IconSize::Medium), text("Back").size(14)]
-            .spacing(6)
-            .align_y(Alignment::Center),
-    )
-    .on_press(Message::ClearSelection)
-    .style(iced::widget::button::secondary);
-
-    let protocol_icon = icons::protocol_icon(state.device_id.protocol, IconSize::Large);
-    let host_name = text(&state.device_id.source).size(24);
-
     let count_text = text(format!("{} messages", message_count)).size(14);
 
     // Filter toggle button
@@ -615,16 +665,10 @@ fn render_header<'a>(
         })
     };
 
-    row![
-        back_button,
-        protocol_icon,
-        host_name,
-        count_text,
-        filter_button
-    ]
-    .spacing(15)
-    .align_y(Alignment::Center)
-    .into()
+    row![count_text, filter_button]
+        .spacing(15)
+        .align_y(Alignment::Center)
+        .into()
 }
 
 /// Render the filter panel.

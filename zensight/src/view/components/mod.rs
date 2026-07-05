@@ -13,7 +13,7 @@ pub mod tabs;
 
 pub use data_table::{Column, DataTable, SortKey, TableState};
 pub use gauge::{Gauge, GaugeStyle};
-pub use kit::{badge, card, empty_state, rgb, rgba, section_header};
+pub use kit::{badge, card, empty_state, metric_tile, rgb, rgba, section_header};
 pub use progress_bar::{ProgressBar, ProgressBarStyle};
 pub use sparkline::Sparkline;
 pub use status_led::{StatusLed, StatusLedState};

@@ -2023,16 +2023,10 @@ fn value_f64(v: &TelemetryValue) -> f64 {
     }
 }
 
-/// A compact RED/KPI tile: a big value over a muted caption, in a card. Used by
-/// the DNS/HTTP RED headers (#250).
+/// A compact RED/KPI tile — the shared kit form (#350), kept as a thin local
+/// alias so call sites stay short.
 fn metric_tile<'a>(label: &str, value: String) -> Element<'a, Message> {
-    card(
-        column![
-            text(value).size(font::SECTION),
-            text(label.to_string()).size(font::CAPTION).style(dim),
-        ]
-        .spacing(space::XS),
-    )
+    crate::view::components::metric_tile(label, value)
 }
 
 #[cfg(test)]
