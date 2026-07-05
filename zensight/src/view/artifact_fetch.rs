@@ -436,6 +436,44 @@ pub fn download_stream(
     }
 }
 
+/// Download an already-registered blob by id (#327: triggered captures listed on
+/// `@/query/captures`). Unlike [`download_stream`] there is no request/produce
+/// phase and no `Delivery` in hand — the `BlobClient` fetches the manifest by id
+/// itself. Pause/resume is not offered on this path (no stored delivery); cancel
+/// works through the token.
+pub fn download_blob_direct(
+    session: Arc<Session>,
+    blob_prefix: String,
+    id: String,
+    dest: PathBuf,
+    cancel: CancelToken,
+) -> impl Stream<Item = Message> {
+    async_stream::stream! {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Progress>();
+        let dl = tokio::spawn(async move {
+            struct Sink(tokio::sync::mpsc::UnboundedSender<Progress>);
+            impl ProgressSink for Sink {
+                fn emit(&self, p: Progress) {
+                    let _ = self.0.send(p);
+                }
+            }
+            let sink = Sink(tx);
+            let client = BlobClient::new(session, blob_prefix, Format::Json);
+            client.download_cancellable(&id, &dest, &sink, &cancel).await
+        });
+        while let Some(p) = rx.recv().await {
+            if let Progress::Chunk { received, total, .. } = p {
+                yield Message::ArtifactProgress { got: received as u64, total: total as u64 };
+            }
+        }
+        match dl.await {
+            Ok(Ok(path)) => yield Message::ArtifactDownloaded(Ok(path)),
+            Ok(Err(e)) => yield Message::ArtifactDownloaded(Err(e.to_string())),
+            Err(e) => yield Message::ArtifactDownloaded(Err(format!("download task failed: {e}"))),
+        }
+    }
+}
+
 fn caption_danger(theme: &iced::Theme) -> iced::widget::text::Style {
     iced::widget::text::Style {
         color: Some(theme::colors(theme).danger()),

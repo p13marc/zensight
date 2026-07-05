@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use zensight_common::{
-    AssetRecord, DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord, Ja4hRecord, MatrixRecord,
-    QuicRecord, SshRecord, TalkerRecord, TlsRecord,
+    AssetRecord, CaptureRecord, DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord, Ja4hRecord,
+    MatrixRecord, QuicRecord, SshRecord, TalkerRecord, TlsRecord,
 };
 
 use crate::view::components::TableState;
@@ -81,6 +81,11 @@ pub fn matrix_key() -> String {
     format!("zensight/netring/@/query/matrix?top={TOP_N}")
 }
 
+/// The capture-to-disk file-index key (#327).
+pub fn captures_key() -> String {
+    "zensight/netring/@/query/captures".to_string()
+}
+
 /// The per-SLD DNS detail key (`?top=N`).
 pub fn dns_key() -> String {
     format!("zensight/netring/@/query/dns?top={TOP_N}")
@@ -107,6 +112,9 @@ pub struct NetringDetailState {
     /// JA4H HTTP-client fingerprints (#256); served only by `ja4plus` sensor
     /// builds, so this is fetched manually rather than prefetched with the tab.
     pub ja4h: Fetch<Vec<Ja4hRecord>>,
+    /// Capture-to-disk file index (#327): triggered captures with their trigger
+    /// + artifact metadata, or the rotating spool listing.
+    pub captures: Fetch<Vec<CaptureRecord>>,
     /// Per-table sort/filter/limit state, addressed by [`NetringTable`] (#244).
     pub tables: HashMap<NetringTable, TableState>,
     /// Firing netring anomalies scoped to this device's source (#253), projected
@@ -240,6 +248,16 @@ impl NetringDetailState {
     pub fn apply_ja4h(&mut self, result: Result<Vec<Ja4hRecord>, String>) {
         self.ja4h = Fetch::from_result(result);
     }
+
+    /// Mark a capture-index fetch as in flight (#327).
+    pub fn loading_captures(&mut self) {
+        self.captures = Fetch::Loading;
+    }
+
+    /// Store the capture-index fetch outcome.
+    pub fn apply_captures(&mut self, result: Result<Vec<CaptureRecord>, String>) {
+        self.captures = Fetch::from_result(result);
+    }
 }
 
 /// Fetch + decode the recent-flow ring. Thin wrapper over the shared helper.
@@ -297,6 +315,11 @@ pub async fn fetch_http(session: Arc<zenoh::Session>) -> Option<Vec<HttpHostReco
     super::netlink_detail::fetch_records(session, http_key()).await
 }
 
+/// Fetch + decode the capture-to-disk file index (#327).
+pub async fn fetch_captures(session: Arc<zenoh::Session>) -> Option<Vec<CaptureRecord>> {
+    super::netlink_detail::fetch_records(session, captures_key()).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,6 +339,27 @@ mod tests {
         assert_eq!(http_key(), "zensight/netring/@/query/http?top=50");
         // Traffic-matrix / service-map channel (#122).
         assert_eq!(matrix_key(), "zensight/netring/@/query/matrix?top=50");
+        // Capture-to-disk index channel (#327).
+        assert_eq!(captures_key(), "zensight/netring/@/query/captures");
+    }
+
+    #[test]
+    fn apply_stores_captures() {
+        let mut s = NetringDetailState::default();
+        s.loading_captures();
+        assert!(s.captures.is_loading());
+        s.apply_captures(Ok(vec![CaptureRecord {
+            filename: "zensight-h1-trigger-RitaBeacon-1.pcap.zst".into(),
+            bytes: 1024,
+            packets: 42,
+            mode: "triggered".into(),
+            trigger_kind: Some("RitaBeacon".into()),
+            artifact_id: Some("01J0000000000000000000000".into()),
+            ..Default::default()
+        }]));
+        assert_eq!(s.captures.ready().map(|v| v.len()), Some(1));
+        s.apply_captures(Err("no sensor".into()));
+        assert_eq!(s.captures.error(), Some("no sensor"));
     }
 
     #[test]

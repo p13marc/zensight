@@ -124,7 +124,13 @@ fn netring_tab_content(state: &DeviceDetailState, tab: SpecializedTab) -> Elemen
         }
         Bandwidth => column![card(render_bandwidth(state))].spacing(space::MD),
         Assets => column![card(render_assets(state))].spacing(space::MD),
-        Capture => column![card(render_capture(state))].spacing(space::MD),
+        Capture => {
+            let mut c = column![card(render_capture(state))].spacing(space::MD);
+            if let Some(disk) = render_capture_to_disk(state) {
+                c = c.push(card(disk));
+            }
+            c
+        }
         Security => column![card(render_netring_security(state))].spacing(space::MD),
         // netlink-only tabs never reach a netring view (falls back to Overview).
         _ => column![].spacing(space::MD),
@@ -576,9 +582,11 @@ fn render_capture(state: &DeviceDetailState) -> Element<'_, Message> {
     for (metric, point) in &state.metrics {
         if let Some(rest) = metric.strip_prefix("capture/")
             && let Some((src, stat)) = rest.split_once('/')
-            // `capture/focus/*` is the reloadable-filter counter, not a NIC leg —
-            // surfaced separately below, so keep it out of the per-source table.
+            // `capture/focus/*` is the reloadable-filter counter and
+            // `capture/disk/*` is the capture-to-disk engine (#327), not NIC
+            // legs — both surfaced separately, so keep them out of the table.
             && src != "focus"
+            && src != "disk"
         {
             sources
                 .entry(src.to_string())
@@ -725,6 +733,188 @@ fn render_capture(state: &DeviceDetailState) -> Element<'_, Message> {
     }
     col = col.push(list);
     col.into()
+}
+
+/// Capture-to-disk section (#327): the engine's live mode + pre-trigger ring
+/// occupancy + retention usage (from the `capture/disk/*` telemetry), the
+/// `capture_now` / mode hot-switch controls, and the capture-file index from
+/// `@/query/captures` with a per-file download for served triggered captures.
+/// `None` when the sensor never published `capture/disk/*` (engine unarmed).
+fn render_capture_to_disk(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
+    let mode = match state.metrics.get("capture/disk/mode").map(|p| &p.value) {
+        Some(TelemetryValue::Text(m)) => m.clone(),
+        _ => return None,
+    };
+
+    let gauge = |m: &str| metric_f64(state, m).unwrap_or(0.0);
+    let ring_packets = gauge("capture/disk/ring_packets") as u64;
+    let ring_bytes = gauge("capture/disk/ring_bytes") as u64;
+    let retained_files = gauge("capture/disk/retained_files") as u64;
+    let retained_bytes = gauge("capture/disk/retained_bytes") as u64;
+    let dropped = gauge("capture/disk/dropped") as u64;
+    let evictions = gauge("capture/disk/evictions") as u64;
+    let triggers = gauge("capture/disk/triggers") as u64;
+
+    let mode_color = match mode.as_str() {
+        "triggered" => theme::ACCENT_ANOMALY,
+        "rotating" => theme::STATUS_ONLINE,
+        _ => theme::STATUS_UNKNOWN,
+    };
+    let capture_now = button(text("Capture now").size(font::CAPTION))
+        .padding([4, 10])
+        .on_press(Message::NetringCaptureNow);
+    let header = section_header(
+        "Capture to disk",
+        Some(
+            row![badge(mode_color, mode.clone()), capture_now]
+                .spacing(space::SM)
+                .align_y(iced::Alignment::Center)
+                .into(),
+        ),
+    );
+
+    let mut col = column![header].spacing(space::SM);
+
+    // Live engine counters: ring occupancy is the pre-trigger evidence window;
+    // retained files/bytes show retention pressure; dropped counts engine-channel
+    // overflow (honest loss, like the NIC-leg drops above).
+    col = col.push(
+        row![
+            cell("ring", 60),
+            cell(
+                &format!(
+                    "{} pkts · {}",
+                    format_count(ring_packets),
+                    format_bytes(ring_bytes as f64)
+                ),
+                200
+            ),
+            cell("retained", 70),
+            cell(
+                &format!(
+                    "{retained_files} files · {}",
+                    format_bytes(retained_bytes as f64)
+                ),
+                180
+            ),
+            cell("triggers", 70),
+            cell(&format_count(triggers), 70),
+        ]
+        .spacing(8),
+    );
+    if dropped > 0 || evictions > 0 {
+        col = col.push(
+            row![
+                cell_styled(&format!("dropped {}", format_count(dropped)), 140, warn),
+                cell(&format!("evicted {} files", format_count(evictions)), 160),
+            ]
+            .spacing(8),
+        );
+    }
+    // Last lifecycle event (trigger fired / capture ready / mode switch).
+    if let Some(TelemetryValue::Text(ev)) = state.metrics.get("capture/events").map(|p| &p.value) {
+        col = col.push(
+            text(format!("last event: {ev}"))
+                .size(font::CAPTION)
+                .style(dim),
+        );
+    }
+
+    // Mode hot-switch (live between the armed modes; off-at-startup needs a
+    // restart, same rule as the detector registry).
+    let mut modes = row![text("mode:").size(font::CAPTION).style(dim)]
+        .spacing(space::SM)
+        .align_y(iced::Alignment::Center);
+    for m in ["off", "rotating", "triggered"] {
+        let mut b = button(text(m).size(font::CAPTION)).padding([3, 9]);
+        if m != mode {
+            b = b.on_press(Message::NetringSetCaptureDiskMode(m.to_string()));
+        }
+        modes = modes.push(b);
+    }
+    col = col.push(modes);
+
+    // Capture-file index (`@/query/captures`): triggered captures download
+    // through the artifact blob path; rotating spool files are metadata-only.
+    let captures = &state.netring_detail.captures;
+    let loading = captures.is_loading();
+    let mut refresh =
+        button(text(if loading { "Fetching…" } else { "Refresh" }).size(font::CAPTION))
+            .padding([4, 10]);
+    if !loading {
+        refresh = refresh.on_press(Message::FetchNetringCaptures);
+    }
+    col = col.push(
+        row![text("Capture files").size(font::EMPHASIS), refresh,]
+            .spacing(space::SM)
+            .align_y(iced::Alignment::Center),
+    );
+
+    if let Some(err) = captures.error() {
+        col = col.push(text(err.to_string()).size(font::CAPTION).style(dim));
+    } else if let Some(records) = captures.ready() {
+        if records.is_empty() {
+            col = col.push(text("no capture files yet").size(font::CAPTION).style(dim));
+        } else {
+            let mut list = Column::new().spacing(3).push(
+                row![
+                    cell("file", 320),
+                    cell("trigger", 130),
+                    cell("packets", 80),
+                    cell("size", 90),
+                    cell("", 110),
+                ]
+                .spacing(8),
+            );
+            for rec in records.iter().take(50) {
+                let trigger = rec.trigger_kind.clone().unwrap_or_else(|| rec.mode.clone());
+                let size = format_bytes(rec.bytes as f64);
+                let action: Element<'_, Message> = match &rec.artifact_id {
+                    Some(id) => button(text("Download").size(font::CAPTION))
+                        .padding([3, 9])
+                        .on_press(Message::DownloadCaptureBlob {
+                            key_prefix: "zensight/netring".to_string(),
+                            artifact_id: id.clone(),
+                            filename: rec.filename.clone(),
+                        })
+                        .into(),
+                    None => text(if rec.mode == "rotating" {
+                        "on sensor disk"
+                    } else {
+                        "expired"
+                    })
+                    .size(font::CAPTION)
+                    .style(dim)
+                    .into(),
+                };
+                let name = if rec.truncated {
+                    format!("{} · truncated", rec.filename)
+                } else {
+                    rec.filename.clone()
+                };
+                list = list.push(
+                    row![
+                        cell(&name, 320),
+                        cell(&trigger, 130),
+                        cell(&format_count(rec.packets), 80),
+                        cell(&size, 90),
+                        action,
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                );
+            }
+            col = col.push(list);
+        }
+    } else if !loading {
+        col = col.push(
+            text("select Refresh to list capture files")
+                .size(font::CAPTION)
+                .style(dim),
+        );
+    }
+
+    Some(col.into())
 }
 
 fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
@@ -1823,5 +2013,90 @@ mod tests {
             Message::NetringPivotToFlows(d, ep)
                 if d.source == "host01" && ep == "10.0.0.42:443"
         )));
+    }
+
+    /// #327: seed a state with `capture/disk/*` telemetry + a fetched capture
+    /// index, then pin the Capture-to-disk section: capture-now emits the manual
+    /// trigger, a served file's Download emits the blob download, a mode button
+    /// emits the hot-switch.
+    fn capture_disk_state() -> DeviceDetailState {
+        use zensight_common::{CaptureRecord, TelemetryPoint};
+        let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Netring, "host01"));
+        for (metric, value) in [
+            (
+                "capture/disk/mode",
+                TelemetryValue::Text("triggered".into()),
+            ),
+            ("capture/disk/ring_packets", TelemetryValue::Gauge(1200.0)),
+            (
+                "capture/disk/ring_bytes",
+                TelemetryValue::Gauge(4.0 * 1024.0 * 1024.0),
+            ),
+            ("capture/disk/retained_files", TelemetryValue::Gauge(2.0)),
+            (
+                "capture/disk/retained_bytes",
+                TelemetryValue::Gauge(90.0 * 1024.0 * 1024.0),
+            ),
+            ("capture/disk/triggers", TelemetryValue::Counter(3)),
+        ] {
+            state.metrics.insert(
+                metric.to_string(),
+                TelemetryPoint::new("host01", Protocol::Netring, metric.to_string(), value),
+            );
+        }
+        state.netring_detail.captures = Fetch::Ready(vec![
+            CaptureRecord {
+                filename: "zensight-host01-trigger-RitaBeacon-1.pcap.zst".into(),
+                bytes: 2 * 1024 * 1024,
+                packets: 812,
+                mode: "triggered".into(),
+                trigger_kind: Some("RitaBeacon".into()),
+                artifact_id: Some("01J00000000000000000000000".into()),
+                ..Default::default()
+            },
+            CaptureRecord {
+                filename: "zensight-host01-trigger-PortScanTRW-0.pcap.zst".into(),
+                bytes: 1024,
+                packets: 5,
+                mode: "triggered".into(),
+                trigger_kind: Some("PortScanTRW".into()),
+                artifact_id: None, // TTL reaped — no download affordance
+                ..Default::default()
+            },
+        ]);
+        state
+    }
+
+    #[test]
+    fn capture_to_disk_section_renders_and_controls_emit() {
+        let state = capture_disk_state();
+        let section = render_capture_to_disk(&state).expect("disk telemetry present");
+        let mut ui = simulator(section);
+        assert!(ui.find("Capture to disk").is_ok());
+        assert!(ui.find("triggered").is_ok());
+        // The served file offers Download; the reaped one shows "expired".
+        assert!(ui.find("expired").is_ok());
+        let _ = ui.click("Capture now");
+        let _ = ui.click("Download");
+        let _ = ui.click("rotating");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(msgs.iter().any(|m| matches!(m, Message::NetringCaptureNow)));
+        assert!(msgs.iter().any(|m| matches!(
+            m,
+            Message::DownloadCaptureBlob { artifact_id, filename, .. }
+                if artifact_id == "01J00000000000000000000000"
+                    && filename.contains("RitaBeacon")
+        )));
+        assert!(
+            msgs.iter().any(
+                |m| matches!(m, Message::NetringSetCaptureDiskMode(mode) if mode == "rotating")
+            )
+        );
+    }
+
+    #[test]
+    fn capture_to_disk_hidden_without_disk_telemetry() {
+        let state = DeviceDetailState::new(DeviceId::new(Protocol::Netring, "host01"));
+        assert!(render_capture_to_disk(&state).is_none());
     }
 }

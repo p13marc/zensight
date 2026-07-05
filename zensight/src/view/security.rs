@@ -37,6 +37,27 @@ pub struct SecurityState {
     /// Which anomaly (`alert_key`) the fetched `flows` belong to, so the pivot
     /// table renders only under the anomaly it was requested from.
     pub flows_for: Option<String>,
+    /// The netring capture-to-disk file index (#327), fetched when an anomaly is
+    /// expanded, so a triggered capture matching the anomaly can offer its
+    /// evidence file for download right in the drill-down.
+    pub captures: Fetch<Vec<zensight_common::CaptureRecord>>,
+}
+
+/// Find a triggered capture matching this anomaly (#327): same detector slug,
+/// with the anomaly's timestamp inside (or near) the capture's packet window.
+/// The slack absorbs clock skew and the gap between the detector firing and the
+/// trigger flushing.
+pub fn matching_capture<'c>(
+    a: &Alert,
+    captures: Option<&'c Vec<zensight_common::CaptureRecord>>,
+) -> Option<&'c zensight_common::CaptureRecord> {
+    const SLACK_MS: i64 = 120_000;
+    captures?.iter().find(|c| {
+        c.mode == "triggered"
+            && c.trigger_kind.as_deref() == Some(a.rule.as_str())
+            && c.start_ms.saturating_sub(SLACK_MS) <= a.timestamp
+            && a.timestamp <= c.end_ms.saturating_add(SLACK_MS)
+    })
 }
 
 /// Labels shown elsewhere (summary/source), so we don't repeat them as evidence.
@@ -434,6 +455,37 @@ fn render_anomaly_row<'a>(a: &'a Alert, sec: &SecurityState) -> Element<'a, Mess
         }
     }
 
+    // Evidence-file pivot (#327): a triggered capture that fired on this
+    // detector around this time offers the packets for download.
+    if let Some(cap) = matching_capture(a, sec.captures.ready()) {
+        let size_mib = cap.bytes as f64 / (1024.0 * 1024.0);
+        let mut line = row![
+            text(format!(
+                "Capture available: {} · {} pkts · {size_mib:.1} MiB",
+                cap.filename, cap.packets
+            ))
+            .size(11)
+            .style(dim),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+        if let Some(id) = &cap.artifact_id {
+            line = line.push(
+                button(text("Download").size(11))
+                    .padding([3, 9])
+                    .style(iced::widget::button::secondary)
+                    .on_press(Message::DownloadCaptureBlob {
+                        key_prefix: "zensight/netring".to_string(),
+                        artifact_id: id.clone(),
+                        filename: cap.filename.clone(),
+                    }),
+            );
+        } else {
+            line = line.push(text("(expired — on sensor disk only)").size(10).style(dim));
+        }
+        detail = detail.push(line);
+    }
+
     column![toggle, container(detail).padding([4, 20]),]
         .spacing(2)
         .into()
@@ -517,4 +569,62 @@ pub fn anomaly_count(alerts: &AlertsState) -> usize {
         .values()
         .filter(|a| a.kind == AlertKind::Anomaly && a.severity != AlertSeverity::Info)
         .count()
+}
+
+#[cfg(test)]
+mod tests {
+    use zensight_common::{CaptureRecord, Protocol};
+
+    use super::*;
+
+    fn anomaly(rule: &str, ts: i64) -> Alert {
+        let mut a = Alert::new(
+            "host01",
+            Protocol::Netring,
+            AlertKind::Anomaly,
+            rule,
+            AlertSeverity::Warning,
+            "test",
+        );
+        a.timestamp = ts;
+        a
+    }
+
+    fn capture(kind: &str, start_ms: i64, end_ms: i64) -> CaptureRecord {
+        CaptureRecord {
+            filename: format!("zensight-trigger-{kind}.pcap.zst"),
+            mode: "triggered".into(),
+            trigger_kind: Some(kind.into()),
+            start_ms,
+            end_ms,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn matching_capture_joins_on_kind_and_window() {
+        let caps = vec![
+            capture("PortScanTRW", 1_000_000, 1_010_000),
+            capture("RitaBeacon", 2_000_000, 2_010_000),
+        ];
+        // Same kind, timestamp inside the window (+slack).
+        let hit = matching_capture(&anomaly("RitaBeacon", 2_005_000), Some(&caps));
+        assert_eq!(hit.unwrap().trigger_kind.as_deref(), Some("RitaBeacon"));
+        // Slack absorbs the detector-to-flush gap.
+        assert!(matching_capture(&anomaly("RitaBeacon", 1_950_000), Some(&caps)).is_some());
+        // Wrong kind → no match even in-window.
+        assert!(matching_capture(&anomaly("DgaScorer", 2_005_000), Some(&caps)).is_none());
+        // Way outside the window → no match.
+        assert!(matching_capture(&anomaly("RitaBeacon", 9_000_000), Some(&caps)).is_none());
+        // No captures fetched yet → graceful None.
+        assert!(matching_capture(&anomaly("RitaBeacon", 2_005_000), None).is_none());
+    }
+
+    #[test]
+    fn matching_capture_skips_rotating_spool_files() {
+        let mut c = capture("manual", 0, i64::MAX / 2);
+        c.mode = "rotating".into();
+        c.trigger_kind = None;
+        assert!(matching_capture(&anomaly("manual", 1000), Some(&vec![c])).is_none());
+    }
 }

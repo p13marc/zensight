@@ -63,10 +63,10 @@ pub use keyexpr::{
 pub use publisher_registry::PublisherRegistry;
 pub use qos::QosClass;
 pub use query_detail::{
-    AssetRecord, CgroupNode, CgroupPid, DnsRecord, ElephantRecord, EncryptedDnsRecord, FlowRecord,
-    HttpHostRecord, Ja4hRecord, MatrixRecord, NameInfo, NeighborRecord, ProcessRecord, QuicRecord,
-    RouteRecord, SocketRecord, SshRecord, TalkerRecord, TimerRecord, TlsRecord, UnitDetail,
-    UnitRecord,
+    AssetRecord, CaptureRecord, CgroupNode, CgroupPid, DnsRecord, ElephantRecord,
+    EncryptedDnsRecord, FlowRecord, HttpHostRecord, Ja4hRecord, MatrixRecord, NameInfo,
+    NeighborRecord, ProcessRecord, QuicRecord, RouteRecord, SocketRecord, SshRecord, TalkerRecord,
+    TimerRecord, TlsRecord, UnitDetail, UnitRecord,
 };
 pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;

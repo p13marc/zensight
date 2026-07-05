@@ -1100,6 +1100,35 @@ impl ZenSight {
                 }
                 return ControlFlow::Break(self.query_netring_http());
             }
+            Message::FetchNetringCaptures => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_captures();
+                }
+                return ControlFlow::Break(self.query_netring_captures());
+            }
+            Message::NetringCapturesReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_captures(result);
+                }
+            }
+            Message::NetringCaptureNow => {
+                let key = zensight_common::command_key("zensight/netring", "capture_disk");
+                let command = serde_json::json!({ "type": "capture_now" });
+                return ControlFlow::Break(self.send_command(
+                    key,
+                    &command,
+                    "Capture triggered".to_string(),
+                ));
+            }
+            Message::NetringSetCaptureDiskMode(mode) => {
+                let key = zensight_common::command_key("zensight/netring", "capture_disk");
+                let command = serde_json::json!({ "type": "set_capture", "mode": mode });
+                return ControlFlow::Break(self.send_command(
+                    key,
+                    &command,
+                    format!("Capture-to-disk mode → {mode}"),
+                ));
+            }
             Message::NetringHttpReceived(result) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netring_detail.apply_http(result);
@@ -1853,6 +1882,16 @@ impl ZenSight {
                 }
             }
 
+            Message::DownloadCaptureBlob {
+                key_prefix,
+                artifact_id,
+                filename,
+            } => {
+                if let Some(task) = self.download_capture_blob(key_prefix, artifact_id, filename) {
+                    return task;
+                }
+            }
+
             Message::ArtifactDestChosen {
                 key_prefix,
                 kind,
@@ -2408,7 +2447,27 @@ impl ZenSight {
                 self.security.hide_info = !self.security.hide_info;
             }
             Message::SelectAnomaly(key) => {
+                let expanded = key.is_some();
                 self.security.selected = key;
+                // Pull the capture index once (#327) so an expanded anomaly can
+                // offer its matching triggered capture for download.
+                if expanded
+                    && matches!(
+                        self.security.captures,
+                        crate::view::specialized::fetch::Fetch::Idle
+                    )
+                {
+                    self.security.captures = crate::view::specialized::fetch::Fetch::Loading;
+                    return self.query_anomaly_captures();
+                }
+            }
+            Message::AnomalyCapturesReceived(result) => {
+                // A missing index is the normal case (capture.to_disk off) — keep
+                // the drill-down quiet rather than surfacing an error line.
+                self.security.captures = match result {
+                    Ok(records) => crate::view::specialized::fetch::Fetch::Ready(records),
+                    Err(_) => crate::view::specialized::fetch::Fetch::Ready(Vec::new()),
+                };
             }
 
             Message::ClearSyslogFilters => {
@@ -2659,6 +2718,61 @@ impl ZenSight {
             .await;
             Message::ArtifactRequested(result)
         }))
+    }
+
+    /// Download an already-registered triggered-capture blob by id (#327). Skips
+    /// the request/produce phase entirely (the file exists on the sensor); the
+    /// stream reuses the shared ArtifactProgress/ArtifactDownloaded lifecycle so
+    /// the finished file goes through the normal Save-as dialog. Pause/resume is
+    /// not offered on this path (no `Delivery` is stored); Cancel works.
+    fn download_capture_blob(
+        &mut self,
+        key_prefix: String,
+        artifact_id: String,
+        filename: String,
+    ) -> Option<Task<Message>> {
+        if self.artifact_fetch.is_busy() {
+            self.toasts.push(
+                ToastSeverity::Info,
+                "Another artifact download is in flight".to_string(),
+            );
+            return None;
+        }
+        let Some(session) = self.session.clone() else {
+            self.toasts
+                .push(ToastSeverity::Error, "Not connected to Zenoh".to_string());
+            return None;
+        };
+        let dest = std::env::temp_dir().join("zensight-downloads");
+        let mut job = crate::view::artifact_fetch::ArtifactJob::new(
+            key_prefix.clone(),
+            zensight_common::ArtifactKind::Capture {
+                duration_secs: 0,
+                max_bytes: None,
+                filter: None,
+                snaplen: None,
+                compress: filename.ends_with(".zst"),
+            },
+            dest.clone(),
+        );
+        if let Ok(id) = artifact_id.parse::<ulid::Ulid>() {
+            job.id = id;
+        }
+        job.filename = Some(filename);
+        let cancel = job.cancel.clone();
+        self.artifact_job = Some(job);
+        self.artifact_fetch =
+            crate::view::artifact_fetch::ArtifactFetch::Downloading { got: 0, total: 0 };
+        let blob_prefix = zensight_common::artifact_blob_prefix(&key_prefix);
+        Some(Task::stream(
+            crate::view::artifact_fetch::download_blob_direct(
+                session,
+                blob_prefix,
+                artifact_id,
+                dest,
+                cancel,
+            ),
+        ))
     }
 
     /// Handle the `Ready`/error outcome of an artifact request and, on `Ready`,
@@ -3223,8 +3337,18 @@ impl ZenSight {
         use crate::view::specialized::fetch::Fetch;
 
         let nd = &self.selected_device.as_ref()?.netring_detail;
+        // The Capture tab's file index (#327) is its own on-demand channel.
+        if matches!(tab, T::Capture) {
+            if matches!(nd.captures, Fetch::Idle) {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_captures();
+                }
+                return Some(self.query_netring_captures());
+            }
+            return None;
+        }
         // Per-tab channel needs (flows, elephants, talkers, matrix, dns, http,
-        // tls, quic, ssh, assets); overview/bandwidth/security/capture stream.
+        // tls, quic, ssh, assets); overview/bandwidth/security stream.
         let (
             mut flows,
             mut elephants,
@@ -3625,6 +3749,27 @@ impl ZenSight {
             fetch_http,
             Message::NetringHttpReceived,
             "No HTTP data — is the netring sensor running with collect.http enabled?",
+        )
+    }
+
+    /// Fetch the capture-to-disk file index for the device Capture tab (#327).
+    fn query_netring_captures(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_captures;
+        self.query_channel(
+            fetch_captures,
+            Message::NetringCapturesReceived,
+            "No captures — is capture.to_disk enabled on the netring sensor?",
+        )
+    }
+
+    /// Fetch the capture-to-disk index for the Security drill-down (#327), so an
+    /// expanded anomaly can offer its matching triggered capture.
+    fn query_anomaly_captures(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_captures;
+        self.query_channel(
+            fetch_captures,
+            Message::AnomalyCapturesReceived,
+            "no capture index",
         )
     }
 

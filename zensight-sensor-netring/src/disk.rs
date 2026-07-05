@@ -765,7 +765,7 @@ async fn enforce_retention(
 /// Unregister blobs whose serve TTL elapsed (the file stays until retention
 /// evicts it); clear the download affordance from the served index.
 async fn reap_expired_artifacts(
-    retained: &mut Vec<RetainedFile>,
+    retained: &mut [RetainedFile],
     blob: &Option<BlobServer>,
     index: &CaptureIndex,
     stats: &CaptureDiskStats,
