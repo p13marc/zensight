@@ -1334,6 +1334,36 @@ impl ZenSight {
                 self.rederive_entities();
             }
 
+            Message::LookupNamesForIp(ip) => {
+                use crate::view::specialized::fetch::Fetch;
+                self.global_search.names_lookup = Some((ip.clone(), Fetch::Loading));
+                let Some(session) = self.session.clone() else {
+                    self.global_search.names_lookup =
+                        Some((ip, Fetch::Error("Not connected to Zenoh".into())));
+                    return Task::none();
+                };
+                return Task::future(async move {
+                    let key = format!("{}?ip={ip}", zensight_common::names_query_key());
+                    let result =
+                        crate::view::specialized::netlink_detail::fetch_records(session, key)
+                            .await
+                            .ok_or_else(|| "no correlator responded".to_string());
+                    Message::NamesLookupReceived(ip, result)
+                });
+            }
+            Message::NamesLookupReceived(ip, result) => {
+                use crate::view::specialized::fetch::Fetch;
+                // Ignore a stale reply if another IP was asked about since.
+                if self
+                    .global_search
+                    .names_lookup
+                    .as_ref()
+                    .is_some_and(|(cur, _)| *cur == ip)
+                {
+                    self.global_search.names_lookup = Some((ip, Fetch::from_result(result)));
+                }
+            }
+
             Message::Connecting => {
                 tracing::info!("Connecting to Zenoh...");
                 self.dashboard.connection_state =
@@ -4166,7 +4196,9 @@ impl ZenSight {
                 let logs: Vec<_> = self.recent_logs.iter().cloned().collect();
                 crate::view::specialized::logs_view(&logs, &self.syslog_filter)
             }
-            CurrentView::Inventory => crate::view::inventory::inventory_view(&self.inventory),
+            CurrentView::Inventory => {
+                crate::view::inventory::inventory_view(&self.inventory, &self.entities, now_ms())
+            }
             CurrentView::Bandwidth => crate::view::bandwidth::bandwidth_view(&self.bandwidth),
             CurrentView::Incidents => {
                 crate::view::incident::incidents_view(&self.alerts, &self.incidents)
@@ -4323,10 +4355,20 @@ impl ZenSight {
                 self.dashboard.devices.values(),
                 &self.global_search.query,
             );
+            // Entity hostname/IP results + the passive-DNS naming pivot (#314).
+            let entity_hits = crate::view::search::search_entities(
+                &self.entities,
+                &self.global_search.query,
+                now_ms(),
+            );
+            let ip_offer =
+                crate::view::search::ip_lookup_offer(&self.entities, &self.global_search.query);
             layers.push(
                 container(crate::view::search::global_search_panel(
                     &self.global_search,
                     hits,
+                    entity_hits,
+                    ip_offer,
                 ))
                 .width(Length::Fill)
                 .height(Length::Fill)

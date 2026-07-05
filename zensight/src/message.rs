@@ -69,6 +69,14 @@ pub enum Message {
     /// parsed from the last key chunk (#306).
     EntityRemoved(String),
 
+    /// Resolve passive-DNS names for an IP the entity store doesn't claim
+    /// (#314): GET the correlator's `_meta/query/names?ip=` from the global
+    /// search panel.
+    LookupNamesForIp(String),
+    /// The names-lookup reply for `ip` (#314): observed names with provenance,
+    /// or an error (no correlator on the bus).
+    NamesLookupReceived(String, Result<Vec<zensight_common::NameVal>, String>),
+
     /// Zenoh connection attempt started.
     Connecting,
 

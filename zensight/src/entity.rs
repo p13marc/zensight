@@ -48,8 +48,16 @@ pub struct EntityStore {
     pub by_device: HashMap<DeviceId, String>,
     /// Identifying `IpAddr` → owning `entity_id` (from each entity's `ips[]`).
     pub by_ip: HashMap<IpAddr, String>,
+    /// Normalized (lowercase) MAC → owning `entity_id` (from `macs[]`, #314) —
+    /// the inventory's MAC-keyed asset table joins through this.
+    pub by_mac: HashMap<String, String>,
     /// Prior/aliased `entity_id` → current `entity_id` (from `aliases[]`).
     pub aliases: HashMap<String, String>,
+}
+
+/// Normalize a MAC for index lookup: lowercase, `:`-separated (accepts `-`).
+pub fn normalize_mac(mac: &str) -> String {
+    mac.trim().to_ascii_lowercase().replace('-', ":")
 }
 
 impl EntityStore {
@@ -58,6 +66,7 @@ impl EntityStore {
     fn drop_indexes(&mut self, entity_id: &str) {
         self.by_device.retain(|_, v| v != entity_id);
         self.by_ip.retain(|_, v| v != entity_id);
+        self.by_mac.retain(|_, v| v != entity_id);
         self.aliases.retain(|_, v| v != entity_id);
     }
 
@@ -77,6 +86,9 @@ impl EntityStore {
                 self.by_ip.insert(addr, id.clone());
             }
         }
+        for mac in &e.macs {
+            self.by_mac.insert(normalize_mac(mac), id.clone());
+        }
         for alias in &e.aliases {
             self.aliases.insert(alias.clone(), id.clone());
         }
@@ -94,6 +106,7 @@ impl EntityStore {
         self.hosts.clear();
         self.by_device.clear();
         self.by_ip.clear();
+        self.by_mac.clear();
         self.aliases.clear();
         for e in v {
             self.upsert(e);
@@ -108,6 +121,14 @@ impl EntityStore {
     /// The entity that claims a given identifying IP, if any.
     pub fn entity_for_ip(&self, ip: &IpAddr) -> Option<&HostEntity> {
         self.by_ip.get(ip).and_then(|eid| self.hosts.get(eid))
+    }
+
+    /// The entity that claims a given MAC (#314), if any. Normalizes the input
+    /// so `AA-BB-…` inventory spellings match.
+    pub fn entity_for_mac(&self, mac: &str) -> Option<&HostEntity> {
+        self.by_mac
+            .get(&normalize_mac(mac))
+            .and_then(|eid| self.hosts.get(eid))
     }
 
     /// Resolve an aliased/old id to its current entity id (follows the alias
@@ -192,6 +213,33 @@ mod tests {
         }
         // Unknown sensor → no device id (forward-compat).
         assert!(member_device_id(&member("mystery", "host1")).is_none());
+    }
+
+    #[test]
+    fn mac_index_normalizes_and_follows_upsert() {
+        let mut store = EntityStore::default();
+        let mut e = entity("h_aaa", vec![member("netring", "sensor01")], vec![]);
+        e.macs = vec!["AA:BB:CC:DD:EE:FF".into()];
+        store.upsert(e);
+        // Case- and separator-insensitive lookup (#314).
+        assert_eq!(
+            store.entity_for_mac("aa:bb:cc:dd:ee:ff").unwrap().entity_id,
+            "h_aaa"
+        );
+        assert_eq!(
+            store.entity_for_mac("AA-BB-CC-DD-EE-FF").unwrap().entity_id,
+            "h_aaa"
+        );
+        assert!(store.entity_for_mac("00:11:22:33:44:55").is_none());
+        // Re-upsert with the MAC dropped → stale index entry cleared.
+        store.upsert(entity("h_aaa", vec![member("netring", "sensor01")], vec![]));
+        assert!(store.entity_for_mac("aa:bb:cc:dd:ee:ff").is_none());
+        // Remove clears the MAC index too.
+        let mut e = entity("h_bbb", vec![], vec![]);
+        e.macs = vec!["11:22:33:44:55:66".into()];
+        store.upsert(e);
+        store.remove("h_bbb");
+        assert!(store.entity_for_mac("11:22:33:44:55:66").is_none());
     }
 
     #[test]

@@ -48,6 +48,13 @@ pub struct GlobalSearchState {
     pub open: bool,
     /// Current query text.
     pub query: String,
+    /// An on-demand `_meta/query/names?ip=` lookup (#314): `(queried ip,
+    /// fetched names)`. Offered when an IP-shaped query hits no entity — the
+    /// correlator's passive-DNS store may still know names for it.
+    pub names_lookup: Option<(
+        String,
+        crate::view::specialized::fetch::Fetch<Vec<zensight_common::NameVal>>,
+    )>,
 }
 
 impl GlobalSearchState {
@@ -60,6 +67,7 @@ impl GlobalSearchState {
     pub fn close(&mut self) {
         self.open = false;
         self.query.clear();
+        self.names_lookup = None;
     }
 }
 
@@ -191,12 +199,97 @@ pub fn search<'a>(devices: impl Iterator<Item = &'a DeviceState>, query: &str) -
     scored.into_iter().map(|(_, hit)| hit).collect()
 }
 
+/// One "jump to host" hit from the entity store (#314).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntityHit {
+    /// Display name: hostname/fqdn, falling back to the entity id.
+    pub label: String,
+    /// What matched + provenance context (e.g. the matched passive-DNS name).
+    pub sublabel: String,
+    /// The facet device to jump to (`None` when no member maps to a known
+    /// protocol — rendered inert, never a dead button).
+    pub device: Option<DeviceId>,
+    /// The entity doc is older than the correlator's re-emit staleness bound.
+    pub stale: bool,
+}
+
+/// Search the entity store's hostnames / fqdn / passive-DNS names / IPs (#314)
+/// for "jump to host" results, ranked by [`match_score`]. Pure.
+pub fn search_entities(
+    entities: &crate::entity::EntityStore,
+    query: &str,
+    now_ms: i64,
+) -> Vec<EntityHit> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let mut scored: Vec<(i32, EntityHit)> = Vec::new();
+    for e in entities.hosts.values() {
+        // Candidate strings, most-authoritative first; the best score wins and
+        // names the match in the sublabel.
+        let mut best: Option<(i32, String)> = None;
+        let mut consider = |field: &str, value: &str| {
+            if let Some(s) = match_score(&value.to_lowercase(), &q)
+                && best.as_ref().is_none_or(|(b, _)| s > *b)
+            {
+                best = Some((s, format!("{field} {value}")));
+            }
+        };
+        if let Some(h) = &e.hostname {
+            consider("hostname", h);
+        }
+        if let Some(f) = &e.fqdn {
+            consider("fqdn", f);
+        }
+        for n in &e.names {
+            consider(&format!("name ({})", n.provenance), &n.name);
+        }
+        for ip in &e.ips {
+            consider("ip", ip);
+        }
+        if let Some((score, matched)) = best {
+            let label = e
+                .hostname
+                .clone()
+                .or_else(|| e.fqdn.clone())
+                .unwrap_or_else(|| e.entity_id.clone());
+            let device = e.members.iter().find_map(crate::entity::member_device_id);
+            scored.push((
+                score,
+                EntityHit {
+                    label,
+                    sublabel: matched,
+                    device,
+                    stale: crate::entity::EntityStore::is_stale(e, now_ms),
+                },
+            ));
+        }
+    }
+    scored.sort_by(|(sa, a), (sb, b)| sb.cmp(sa).then_with(|| a.label.cmp(&b.label)));
+    scored.truncate(20);
+    scored.into_iter().map(|(_, h)| h).collect()
+}
+
+/// When the query is an IP the entity store does **not** claim, offer the
+/// passive-DNS naming pivot (#314): `Some(ip)` renders a "resolve names…"
+/// action firing `_meta/query/names?ip=`.
+pub fn ip_lookup_offer(entities: &crate::entity::EntityStore, query: &str) -> Option<String> {
+    let ip: std::net::IpAddr = query.trim().parse().ok()?;
+    entities
+        .entity_for_ip(&ip)
+        .is_none()
+        .then(|| ip.to_string())
+}
+
 /// Render the global search panel: an input + a results list. Clicking a result
-/// selects its device. Built from a precomputed `hits` slice so the view stays
-/// pure of the device map's lifetime.
+/// selects its device. Built from precomputed `hits`/`entity_hits` slices so the
+/// view stays pure of the device map's lifetime.
 pub fn global_search_panel<'a>(
     state: &'a GlobalSearchState,
     hits: Vec<SearchHit>,
+    entity_hits: Vec<EntityHit>,
+    ip_offer: Option<String>,
 ) -> Element<'a, Message> {
     let input = text_input("Search metrics across all devices (fuzzy)…", &state.query)
         .id(GLOBAL_SEARCH_ID.clone())
@@ -224,6 +317,63 @@ pub fn global_search_panel<'a>(
     .size(font::CAPTION);
 
     let mut list = Column::new().spacing(2);
+
+    // "Jump to host" entity results (#314), above the metric hits.
+    if !entity_hits.is_empty() {
+        list = list.push(text("Hosts").size(font::CAPTION));
+        for hit in entity_hits {
+            let mut label = format!("host {} · {}", hit.label, hit.sublabel);
+            if hit.stale {
+                label.push_str(" · stale");
+            }
+            let element: Element<'_, Message> = match hit.device {
+                Some(device) => button(text(label).size(font::CAPTION))
+                    .on_press(Message::SelectDevice(device))
+                    .width(Length::Fill)
+                    .padding([space::XS, space::SM])
+                    .style(iced::widget::button::text)
+                    .into(),
+                // No known-protocol member → informational row, not a dead button.
+                None => text(label).size(font::CAPTION).into(),
+            };
+            list = list.push(element);
+        }
+    }
+
+    // IP-shaped query with no entity hit → offer the passive-DNS naming pivot
+    // (#314), and render its outcome inline.
+    if let Some(ip) = ip_offer {
+        list = list.push(
+            button(text(format!("resolve names for {ip}…")).size(font::CAPTION))
+                .on_press(Message::LookupNamesForIp(ip))
+                .width(Length::Fill)
+                .padding([space::XS, space::SM])
+                .style(iced::widget::button::text),
+        );
+    }
+    if let Some((ip, fetch)) = &state.names_lookup {
+        use crate::view::specialized::fetch::Fetch;
+        let line: Element<'_, Message> = match fetch {
+            Fetch::Idle | Fetch::Loading => {
+                text(format!("{ip}: resolving…")).size(font::CAPTION).into()
+            }
+            Fetch::Error(e) => text(format!("{ip}: {e}")).size(font::CAPTION).into(),
+            Fetch::Ready(names) if names.is_empty() => text(format!("{ip}: no names observed"))
+                .size(font::CAPTION)
+                .into(),
+            Fetch::Ready(names) => {
+                let joined = names
+                    .iter()
+                    .take(8)
+                    .map(|n| format!("{} ({})", n.name, n.provenance))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                text(format!("{ip}: {joined}")).size(font::CAPTION).into()
+            }
+        };
+        list = list.push(line);
+    }
+
     for hit in hits {
         let label = format!(
             "{}/{} · {} = {}",
@@ -377,6 +527,81 @@ mod tests {
         // Internal spaces are stripped to "cpuusage", which matches the path
         // "…/cpu/usage" as a fuzzy subsequence (the '/' blocks a substring).
         assert_eq!(search([&d].into_iter(), "cpu usage").len(), 1);
+    }
+
+    // ── Entity search + naming pivot (#314) ──────────────────────────────────
+
+    fn entity_store() -> crate::entity::EntityStore {
+        use zensight_common::{HostEntity, MemberClaim, NameVal};
+        let mut store = crate::entity::EntityStore::default();
+        store.upsert(HostEntity {
+            entity_id: "h_web".into(),
+            aliases: vec![],
+            host_id: None,
+            boot_id: None,
+            ips: vec!["10.0.0.5".into()],
+            macs: vec![],
+            hostname: Some("web01".into()),
+            fqdn: Some("web01.corp.example".into()),
+            names: vec![NameVal {
+                name: "intranet.corp.example".into(),
+                provenance: "dns_answer".into(),
+                last_seen: 1,
+            }],
+            vendor: None,
+            platform: None,
+            members: vec![MemberClaim {
+                sensor: "sysinfo".into(),
+                source: "web01".into(),
+                rule: "host_id".into(),
+                confidence: 1.0,
+                last_seen: 1,
+            }],
+            status: None,
+            last_updated: 1_000,
+        });
+        store
+    }
+
+    #[test]
+    fn entity_search_matches_hostname_names_and_ips() {
+        let store = entity_store();
+        // Hostname hit → jump target on the sysinfo facet.
+        let hits = search_entities(&store, "web01", 1_000);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].label, "web01");
+        assert_eq!(
+            hits[0].device,
+            Some(DeviceId::new(zensight_common::Protocol::Sysinfo, "web01"))
+        );
+        assert!(!hits[0].stale);
+        // Passive-DNS name hit, with provenance in the sublabel.
+        let hits = search_entities(&store, "intranet", 1_000);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].sublabel.contains("dns_answer"));
+        // IP hit.
+        assert_eq!(search_entities(&store, "10.0.0.5", 1_000).len(), 1);
+        // Miss + empty query.
+        assert!(search_entities(&store, "nomatch-zzz", 1_000).is_empty());
+        assert!(search_entities(&store, "  ", 1_000).is_empty());
+        // Stale entity flagged past the correlator re-emit bound.
+        let hits = search_entities(&store, "web01", 1_000 + crate::entity::ENTITY_STALE_MS + 1);
+        assert!(hits[0].stale);
+    }
+
+    #[test]
+    fn ip_lookup_offered_only_for_unclaimed_ips() {
+        let store = entity_store();
+        // Claimed IP → the entity hit covers it, no pivot.
+        assert!(ip_lookup_offer(&store, "10.0.0.5").is_none());
+        // Unclaimed IP → offer the passive-DNS naming pivot.
+        assert_eq!(
+            ip_lookup_offer(&store, "192.0.2.7").as_deref(),
+            Some("192.0.2.7")
+        );
+        // Non-IP queries never offer.
+        assert!(ip_lookup_offer(&store, "web01").is_none());
+        assert!(ip_lookup_offer(&store, "").is_none());
     }
 
     #[test]
