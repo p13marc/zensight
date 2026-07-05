@@ -30,7 +30,7 @@
     // source: "agent-host-01",
 
     // Serialization format: "json" or "cbor"
-    serialization: "json",
+    serialization: "cbor",
 
     // Target devices to subscribe to
     targets: [

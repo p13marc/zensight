@@ -409,7 +409,7 @@ mod tests {
 
         assert_eq!(config.zenoh.mode, "peer");
         assert!(config.zenoh.connect.is_empty());
-        assert_eq!(config.serialization, Format::Json);
+        assert_eq!(config.serialization, Format::Cbor);
         assert_eq!(config.logging.level, "info");
         assert_eq!(config.logging.format, LogFormat::Text);
     }

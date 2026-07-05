@@ -24,7 +24,7 @@ use config::SyslogSensorConfig;
 use events::EventDetector;
 use filter::FilterManager;
 use std::sync::Arc;
-use zensight_common::serialization::{Format, encode};
+use zensight_common::serialization::encode;
 use zensight_common::telemetry::Protocol;
 use zensight_sensor_core::{
     AlertReporter, SensorArgs, SensorConfig, SensorRunner, serve_alerts_query,
@@ -78,8 +78,8 @@ async fn main() -> Result<()> {
     let session = runner.session().clone();
     let syslog_config = runner.config().syslog.clone();
 
-    // Determine serialization format (default to JSON)
-    let format = Format::Json;
+    // Determine serialization format (from config; default CBOR)
+    let format = runner.config().serialization;
 
     // Create filter manager
     let filter_manager = Arc::new(

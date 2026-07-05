@@ -21,6 +21,9 @@ fn default_true() -> bool {
 pub struct NetlinkSensorConfig {
     #[serde(default)]
     pub zenoh: ZenohConfig,
+    /// Serialization format for telemetry.
+    #[serde(default)]
+    pub serialization: zensight_common::serialization::Format,
     #[serde(default)]
     pub logging: LoggingConfig,
     /// On-demand artifact channel (`@/artifact`) limits — report + snapshot.

@@ -12,6 +12,10 @@ pub struct SystemdSensorConfig {
     /// Zenoh connection settings.
     pub zenoh: ZenohConfig,
 
+    /// Serialization format for telemetry.
+    #[serde(default)]
+    pub serialization: zensight_common::serialization::Format,
+
     /// systemd-specific settings.
     #[serde(default)]
     pub systemd: SystemdConfig,

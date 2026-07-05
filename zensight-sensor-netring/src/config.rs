@@ -20,6 +20,9 @@ fn default_true() -> bool {
 pub struct NetringSensorConfig {
     #[serde(default)]
     pub zenoh: ZenohConfig,
+    /// Serialization format for telemetry.
+    #[serde(default)]
+    pub serialization: zensight_common::serialization::Format,
     #[serde(default)]
     pub logging: LoggingConfig,
     pub netring: NetringConfig,

@@ -396,12 +396,12 @@ pub async fn fetch_records<T: DeserializeOwned>(
             return None;
         }
     };
-    match serde_json::from_slice(&sample.payload().to_bytes()) {
+    match zensight_common::decode_auto(&sample.payload().to_bytes()) {
         Ok(records) => Some(records),
         Err(e) => {
             tracing::warn!(
                 key = %key, error = %e, bytes = sample.payload().len(),
-                "query reply failed to decode (JSON)"
+                "query reply failed to decode"
             );
             None
         }

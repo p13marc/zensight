@@ -152,8 +152,9 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
             {
                 while let Ok(reply) = replies.recv_async().await {
                     if let Ok(sample) = reply.result()
-                        && let Ok(alerts) =
-                            serde_json::from_slice::<Vec<Alert>>(&sample.payload().to_bytes())
+                        && let Ok(alerts) = zensight_common::decode_auto::<Vec<Alert>>(
+                            &sample.payload().to_bytes(),
+                        )
                     {
                         yield Message::AlertsSeed(alerts);
                     }
@@ -171,8 +172,9 @@ pub fn zenoh_subscription(config: ZenohConfig) -> Subscription<Message> {
             {
                 while let Ok(reply) = replies.recv_async().await {
                     if let Ok(sample) = reply.result()
-                        && let Ok(entities) =
-                            serde_json::from_slice::<Vec<HostEntity>>(&sample.payload().to_bytes())
+                        && let Ok(entities) = zensight_common::decode_auto::<Vec<HostEntity>>(
+                            &sample.payload().to_bytes(),
+                        )
                     {
                         yield Message::EntitySeed(entities);
                     }

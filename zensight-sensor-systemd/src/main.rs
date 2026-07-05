@@ -6,7 +6,7 @@
 //! crashes) on non-systemd hosts.
 
 use anyhow::Result;
-use zensight_sensor_core::{Format, Protocol, SensorArgs, SensorConfig, SensorRunner};
+use zensight_sensor_core::{Protocol, SensorArgs, SensorConfig, SensorRunner};
 
 use zensight_sensor_systemd::collector::SystemdCollector;
 use zensight_sensor_systemd::config::SystemdSensorConfig;
@@ -25,7 +25,8 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // Enable status publishing and pin JSON serialization.
-    let runner = runner.with_status_publishing().with_format(Format::Json);
+    let format = runner.config().serialization;
+    let runner = runner.with_status_publishing().with_format(format);
 
     // On-demand debug-report (`@/artifact`): bundle redacted config + health +
     // counters. No-op unless `report.enabled` is set in the config.
@@ -103,7 +104,7 @@ async fn main() -> Result<()> {
     let expectations = systemd_config.expectations.clone();
     let alerts_active = systemd_config.alerts.enabled || expectations.is_some();
     let reporter = alerts_active.then(|| {
-        let mut reporter = AlertReporter::new(runner.publisher(), Protocol::Systemd, Format::Json)
+        let mut reporter = AlertReporter::new(runner.publisher(), Protocol::Systemd, format)
             .with_debounce(Duration::from_secs(systemd_config.alerts.for_secs));
         if let Some(id) = runner.identity() {
             reporter = reporter.with_identity(id);

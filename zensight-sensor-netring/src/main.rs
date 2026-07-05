@@ -6,9 +6,7 @@ compile_error!("zensight-sensor-netring requires Linux (AF_PACKET/AF_XDP).");
 use std::sync::Arc;
 
 use anyhow::Result;
-use zensight_sensor_core::{
-    AlertReporter, Format, Protocol, SensorArgs, SensorConfig, SensorRunner,
-};
+use zensight_sensor_core::{AlertReporter, Protocol, SensorArgs, SensorConfig, SensorRunner};
 
 use zensight_sensor_netring::config::NetringSensorConfig;
 use zensight_sensor_netring::{monitor, publish};
@@ -23,7 +21,8 @@ async fn main() -> Result<()> {
     let runner = SensorRunner::new_with_args("netring", config, Some(&args))
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
-    let runner = runner.with_status_publishing().with_format(Format::Json);
+    let format = runner.config().serialization;
+    let runner = runner.with_status_publishing().with_format(format);
 
     // On-demand debug-report (`@/artifact`): bundle redacted config + health +
     // counters. No-op unless `report.enabled` is set in the config.
@@ -87,7 +86,7 @@ async fn main() -> Result<()> {
 
     let session = runner.session().clone();
 
-    let reporter = AlertReporter::new(runner.publisher(), Protocol::Netring, Format::Json);
+    let reporter = AlertReporter::new(runner.publisher(), Protocol::Netring, format);
     let reporter = Arc::new(match runner.identity() {
         Some(id) => reporter.with_identity(id),
         None => reporter,
@@ -224,7 +223,7 @@ async fn main() -> Result<()> {
         let ev_registry = Arc::new(AdvancedPublisherRegistry::new(
             runner.session().clone(),
             key_prefix.clone(),
-            Format::Json,
+            format,
             AdvancedPublisherConfig::cache_only(1),
         ));
         runner.spawn(zensight_sensor_netring::evidence::run_asset_evidence(
@@ -245,7 +244,7 @@ async fn main() -> Result<()> {
         let name_registry = Arc::new(AdvancedPublisherRegistry::new(
             runner.session().clone(),
             key_prefix.clone(),
-            Format::Json,
+            format,
             AdvancedPublisherConfig::cache_only(1),
         ));
         runner.spawn(zensight_sensor_netring::evidence::run_name_evidence(
@@ -261,7 +260,7 @@ async fn main() -> Result<()> {
         session,
         key_prefix,
         source,
-        Format::Json,
+        format,
         reporter,
         flow_period,
         health,

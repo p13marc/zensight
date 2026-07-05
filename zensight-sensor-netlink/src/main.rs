@@ -7,7 +7,7 @@
 compile_error!("zensight-sensor-netlink requires Linux (netlink).");
 
 use anyhow::Result;
-use zensight_sensor_core::{Format, SensorArgs, SensorConfig, SensorRunner};
+use zensight_sensor_core::{SensorArgs, SensorConfig, SensorRunner};
 
 use zensight_sensor_netlink::Collector;
 use zensight_sensor_netlink::config::NetlinkSensorConfig;
@@ -22,7 +22,8 @@ async fn main() -> Result<()> {
     let runner = SensorRunner::new_with_args("netlink", config, Some(&args))
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
-    let runner = runner.with_status_publishing().with_format(Format::Json);
+    let format = runner.config().serialization;
+    let runner = runner.with_status_publishing().with_format(format);
 
     // On-demand artifact channel (`@/artifact`): bundle redacted config + health +
     // counters (report) plus tier-2 directory snapshots. Each kind is a no-op
@@ -101,7 +102,7 @@ async fn main() -> Result<()> {
     use std::time::Duration;
     use zensight_sensor_core::{AlertReporter, Protocol};
     let exp_cfg = netlink_config.expectations.clone().unwrap_or_default();
-    let reporter = AlertReporter::new(runner.publisher(), Protocol::Netlink, Format::Json)
+    let reporter = AlertReporter::new(runner.publisher(), Protocol::Netlink, format)
         .with_debounce(Duration::from_secs(exp_cfg.default_for_secs));
     let reporter = match runner.identity() {
         Some(id) => reporter.with_identity(id),
@@ -109,13 +110,8 @@ async fn main() -> Result<()> {
     };
     let reporter = Arc::new(reporter);
 
-    let collector = Collector::new(
-        source.clone(),
-        netlink_config.clone(),
-        session,
-        Format::Json,
-    )
-    .with_health(runner.health());
+    let collector = Collector::new(source.clone(), netlink_config.clone(), session, format)
+        .with_health(runner.health());
     #[cfg(feature = "ebpf")]
     let collector = collector.with_ebpf(ebpf_state.clone());
     // wg-quick peer labels (#268): parse configured wg-quick files once at start.
