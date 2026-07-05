@@ -46,11 +46,11 @@ pub async fn run_drains(
     let ssh = channels.ssh.clone();
     let assets = channels.assets.clone();
 
-    // Take (and clear) the current window's flow durations for percentile points.
-    let drain_window = |buf: &std::sync::Mutex<Vec<u64>>| -> Vec<u64> {
-        buf.lock()
-            .map(|mut v| std::mem::take(&mut *v))
-            .unwrap_or_default()
+    // Read `[p50, p95, p99]` (ms) from a RED DDSketch and reset it for the next
+    // window (#325) — `None` on an empty/poisoned window so idle ticks keep the
+    // cached gauge instead of clobbering it to zero.
+    let drain_pcts = |buf: &std::sync::Mutex<crate::monitor::RedSketch>| -> Option<[f64; 3]> {
+        buf.lock().ok().and_then(|mut s| s.drain_pcts())
     };
 
     // Cached publishers so late-joining consumers get current values on connect.
@@ -75,12 +75,12 @@ pub async fn run_drains(
         let bytes = flow_bytes.load(Ordering::Relaxed);
         let pkts = flow_packets.load(Ordering::Relaxed);
         let retx = flow_retransmits.load(Ordering::Relaxed);
-        let mut durs = drain_window(&flow_durations);
+        let durs = drain_pcts(&flow_durations);
 
         let mut points: Vec<_> = map::flow_points(sensor_id, s, e, active)
             .into_iter()
             .chain(map::flow_volume_points(sensor_id, bytes, pkts, retx))
-            .chain(map::flow_latency_points(sensor_id, &mut durs))
+            .chain(map::flow_latency_points(sensor_id, durs))
             .chain(map::tcp_reset_points(sensor_id, resets, refused))
             // Per-L4 composition + connection-state breakdown (issue #16).
             .chain(map::flow_by_l4_points(
@@ -169,13 +169,13 @@ pub async fn run_drains(
 
         // DNS RED aggregates (issue #19).
         let (dns_queries, by_rcode, dns_unanswered) = dns_snapshot(&dns);
-        let mut rtt = drain_window(&dns.rtt_ms);
+        let rtt = drain_pcts(&dns.rtt_ms);
         points.extend(map::dns_points(
             sensor_id,
             dns_queries,
             &by_rcode,
             dns_unanswered,
-            &mut rtt,
+            rtt,
         ));
 
         // HTTP RED aggregates (issue #20).
@@ -184,7 +184,7 @@ pub async fn run_drains(
             .lock()
             .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
             .unwrap_or_default();
-        let mut lat = drain_window(&http.latency_ms);
+        let lat = drain_pcts(&http.latency_ms);
         points.extend(map::http_points(
             sensor_id,
             http.requests.load(Ordering::Relaxed),
@@ -193,7 +193,7 @@ pub async fn run_drains(
             http.status_4xx.load(Ordering::Relaxed),
             http.status_5xx.load(Ordering::Relaxed),
             &by_method,
-            &mut lat,
+            lat,
         ));
 
         points

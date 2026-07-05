@@ -234,6 +234,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **netring RED latency/duration percentiles used unbounded per-window sample
+  buffers (#325).** The DNS query-RTT, HTTP request→response latency and
+  flow-duration percentiles each accumulated every sample of the window into a
+  `Mutex<Vec<u64>>` (soft-capped at 100k–1M entries) and sorted it from scratch
+  each aggregate tick. They now feed a bounded DDSketch (`RedSketch`: ~512
+  log-spaced bins, 1% relative error, O(1) insert) that is read + reset each
+  tick — constant memory regardless of DNS/HTTP/flow rate, no per-tick sort. The
+  published `dns/query_rtt_p{50,95,99}_ms`, `http/latency_p{50,95}_ms` and
+  `flow/duration_p{50,95}_ms` keys are unchanged (values now approximate within
+  the sketch's 1% relative error). Adopting netring's rolling `red()` flow-RED
+  signal and the talkers/matrix `aggregate()` swap are deferred follow-ups on
+  #325 (additive / response-shape changes, not the memory bug).
+
 - **netring beacon / port-scan detectors were systematically under-detecting
   source-port-rotating activity (#324).** The RITA/CV beacon detectors keyed
   their state on the full 5-tuple, so a beacon that opens a fresh connection
