@@ -48,7 +48,8 @@ pub struct AdvancedPublisherConfig {
     pub miss_detection: bool,
 
     /// Heartbeat interval for miss detection.
-    /// Default: 500ms
+    /// Default: 5s (relaxed from 500ms — periodic telemetry is superseded by the next
+    /// sample, so a fast heartbeat mostly adds background traffic on a low-bandwidth link).
     pub heartbeat_interval: Duration,
 
     /// Enable publisher detection (allows subscribers to detect this publisher).
@@ -61,7 +62,7 @@ impl Default for AdvancedPublisherConfig {
         Self {
             cache_size: 10,
             miss_detection: true,
-            heartbeat_interval: Duration::from_millis(500),
+            heartbeat_interval: Duration::from_secs(5),
             publisher_detection: true,
         }
     }
@@ -165,16 +166,25 @@ impl AdvancedPublisherRegistry {
         // This avoids needing unsafe transmute since String -> KeyExpr<'_> produces
         // KeyExpr<'static> via TryFrom<String>.
         let owned_key = key.to_string();
-        let publisher: AdvancedPublisher<'static> = self
+        // Build conditionally so `cache_only` configs are genuinely cache-only: apply
+        // miss-detection (and its heartbeat) and publisher-detection only when enabled.
+        // Previously these were attached unconditionally, so every publisher — including
+        // cache-only identity/evidence publishers — emitted a heartbeat per key, a constant
+        // background stream a low-bandwidth link cannot shed.
+        let mut builder = self
             .session
             .declare_publisher(owned_key)
-            .cache(CacheConfig::default().max_samples(self.config.cache_size))
-            .sample_miss_detection(
+            .cache(CacheConfig::default().max_samples(self.config.cache_size));
+        if self.config.miss_detection {
+            builder = builder.sample_miss_detection(
                 MissDetectionConfig::default().heartbeat(self.config.heartbeat_interval),
-            )
-            .publisher_detection()
-            .await
-            .map_err(|e| SensorError::Publish {
+            );
+        }
+        if self.config.publisher_detection {
+            builder = builder.publisher_detection();
+        }
+        let publisher: AdvancedPublisher<'static> =
+            builder.await.map_err(|e| SensorError::Publish {
                 key: key.to_string(),
                 message: format!("Failed to create advanced publisher: {}", e),
             })?;
@@ -326,11 +336,14 @@ mod tests {
         assert_eq!(config.cache_size, 10);
         assert!(config.miss_detection);
         assert!(config.publisher_detection);
-        assert_eq!(config.heartbeat_interval, Duration::from_millis(500));
+        assert_eq!(config.heartbeat_interval, Duration::from_secs(5));
     }
 
     #[test]
     fn test_config_cache_only() {
+        // cache_only must disable miss-detection AND publisher-detection so
+        // `get_or_create_publisher` attaches neither the sample-miss listener nor the
+        // heartbeat — the builder now honors these flags (previously ignored).
         let config = AdvancedPublisherConfig::cache_only(50);
         assert_eq!(config.cache_size, 50);
         assert!(!config.miss_detection);

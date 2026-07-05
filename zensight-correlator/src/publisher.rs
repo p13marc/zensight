@@ -1,9 +1,10 @@
 //! Entity publisher.
 //!
 //! Drains the engine's [`EntityOp`] stream and materializes the entity keyspace:
-//! one cached [`AdvancedPublisher`] per `entity_key(id)` (cache = 1, so a late
-//! joiner seeds the latest doc immediately, mirroring how sensors seed alerts),
-//! and a tombstone (`delete`) on retire.
+//! one cached plain [`Publisher`] per `entity_key(id)`, and a tombstone (`delete`)
+//! on retire. Late joiners are seeded by the `entities_query_key()` queryable (see
+//! `query.rs`) — the sole consumer (the frontend) subscribes plainly and seeds from
+//! that queryable — so no AdvancedPublisher cache/recovery is needed here.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,17 +12,17 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 use zenoh::Session;
-use zenoh_ext::{AdvancedPublisher, AdvancedPublisherBuilderExt, CacheConfig, MissDetectionConfig};
+use zenoh::pubsub::Publisher;
 use zensight_common::serialization::Format;
 use zensight_common::{HostEntity, encode, entity_key};
 
 use crate::engine::EntityOp;
 
-/// Manages the per-entity cached publishers.
+/// Manages the per-entity plain declared publishers.
 struct EntityPublisher {
     session: Arc<Session>,
     format: Format,
-    publishers: HashMap<String, AdvancedPublisher<'static>>,
+    publishers: HashMap<String, Publisher<'static>>,
 }
 
 impl EntityPublisher {
@@ -33,22 +34,13 @@ impl EntityPublisher {
         }
     }
 
-    /// Get or create the cached publisher for an entity id.
-    async fn publisher_for(
-        &mut self,
-        entity_id: &str,
-    ) -> anyhow::Result<&AdvancedPublisher<'static>> {
+    /// Get or create the cached plain publisher for an entity id.
+    async fn publisher_for(&mut self, entity_id: &str) -> anyhow::Result<&Publisher<'static>> {
         if !self.publishers.contains_key(entity_id) {
             let key = entity_key(entity_id);
             let pubr = self
                 .session
                 .declare_publisher(key.clone())
-                .cache(CacheConfig::default().max_samples(1))
-                // Sequence-number miss-detection (like the sensors) — without it
-                // the cache defaults to `Sequencing::Timestamp`, which fails
-                // unless the Zenoh session has timestamping enabled.
-                .sample_miss_detection(MissDetectionConfig::default())
-                .publisher_detection()
                 .await
                 .map_err(|e| anyhow::anyhow!("failed to declare entity publisher {key}: {e}"))?;
             self.publishers.insert(entity_id.to_string(), pubr);
