@@ -560,7 +560,7 @@ fn allowlisted(host: &str, allowlist: &[String]) -> bool {
 /// Each file line is one indicator; a value that parses as an IP becomes a host
 /// indicator, otherwise it's treated as a domain. Blank lines and `#` comments
 /// are skipped; unreadable files are warned and skipped (not fatal).
-fn build_ioc_set(cfg: &IocConfig) -> IocSet {
+pub(crate) fn build_ioc_set(cfg: &IocConfig) -> IocSet {
     let mut set = IocSet::new();
     for ip in &cfg.ips {
         match ip.parse::<std::net::IpAddr>() {
@@ -2070,9 +2070,42 @@ pub fn build(
         tracing::info!("netring: flow-risk analysis enabled");
     }
     let ioc = build_ioc_set(&cfg.threat.ioc);
-    if !ioc.is_empty() {
-        tracing::info!("netring: IOC matching enabled");
+    // Arm IOC matching when there are startup indicators, or unconditionally when
+    // the runtime reload channel is armed (#328) so `set_ioc` isn't a no-op on an
+    // empty start. Membership of the matcher hooks is frozen at build.
+    if !ioc.is_empty() || cfg.threat.reload {
+        tracing::info!(reload = cfg.threat.reload, "netring: IOC matching enabled");
         b = b.ioc(ioc);
+    }
+    // YARA payload scanning (opt-in `--features yara`). Arm when a startup rules
+    // file is given, or unconditionally under `threat.reload` (seeded empty) so
+    // `@/commands/threat_intel set_yara` can hot-swap rules without a restart.
+    #[cfg(feature = "yara")]
+    if cfg.threat.yara.file.is_some() || cfg.threat.reload {
+        let source = match &cfg.threat.yara.file {
+            Some(path) => match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(path, error = %e, "netring: failed to read YARA rules file");
+                    String::new()
+                }
+            },
+            None => String::new(),
+        };
+        match netring::monitor::yara::YaraRules::compile(&source) {
+            Ok(rules) => {
+                b = b.yara(rules);
+                tracing::info!(
+                    file = ?cfg.threat.yara.file,
+                    "netring: YARA scanning enabled"
+                );
+            }
+            Err(e) => tracing::warn!(error = %e, "netring: failed to compile startup YARA rules"),
+        }
+    }
+    #[cfg(not(feature = "yara"))]
+    if cfg.threat.yara.file.is_some() {
+        tracing::warn!("netring: threat.yara.file is set but built without the `yara` feature");
     }
     if cfg.threat.sigma.enabled {
         #[cfg(feature = "sigma")]

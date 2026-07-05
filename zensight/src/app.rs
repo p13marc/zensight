@@ -2181,7 +2181,8 @@ impl ZenSight {
             Message::RefreshDetectorConfig => {
                 return self
                     .query_detector_status()
-                    .chain(self.query_capture_filter_status());
+                    .chain(self.query_capture_filter_status())
+                    .chain(self.query_threat_intel_status());
             }
             Message::DetectorConfigReceived(result) => match result {
                 Ok(json) => self.detection_tuning.apply_status(&json),
@@ -2307,6 +2308,79 @@ impl ZenSight {
                 }
                 Err(_) => {
                     self.detection_tuning.capture_filter = None;
+                }
+            },
+
+            // Netring threat-intel (#328): hot-swap IOC / YARA matchers. Sensor
+            // validates YARA; a compile error comes back as `last_reload` on
+            // `@/status/threat_intel`, surfaced inline + as a toast.
+            Message::SetThreatIocInput(value) => {
+                self.detection_tuning.threat_ioc_input = value;
+            }
+            Message::ApplyThreatIoc => {
+                let (ips, domains) = crate::view::detection_tuning::split_ioc_paste(
+                    &self.detection_tuning.threat_ioc_input,
+                );
+                if ips.is_empty() && domains.is_empty() {
+                    self.toasts
+                        .push(ToastSeverity::Error, "No indicators to apply");
+                    return Task::none();
+                }
+                let n = ips.len() + domains.len();
+                let command = serde_json::json!({
+                    "type": "set_ioc", "ips": ips, "domains": domains, "ja4": [], "ja3": [],
+                });
+                let key = zensight_common::command_key("zensight/netring", "threat_intel");
+                return self
+                    .send_command(key, &command, format!("Pushed {n} IOC indicators"))
+                    .chain(self.query_threat_intel_status());
+            }
+            Message::ReloadThreatIocFiles => {
+                let command = serde_json::json!({ "type": "reload_ioc_files" });
+                let key = zensight_common::command_key("zensight/netring", "threat_intel");
+                return self
+                    .send_command(key, &command, "Reloading indicator files".to_string())
+                    .chain(self.query_threat_intel_status());
+            }
+            Message::ClearThreatIoc => {
+                let command = serde_json::json!({ "type": "clear_ioc" });
+                let key = zensight_common::command_key("zensight/netring", "threat_intel");
+                return self
+                    .send_command(key, &command, "Cleared IOC indicators".to_string())
+                    .chain(self.query_threat_intel_status());
+            }
+            Message::SetThreatYaraInput(value) => {
+                self.detection_tuning.threat_yara_input = value;
+            }
+            Message::ApplyThreatYara => {
+                let rules = self.detection_tuning.threat_yara_input.trim().to_string();
+                if rules.is_empty() {
+                    self.toasts
+                        .push(ToastSeverity::Error, "YARA rules cannot be empty");
+                    return Task::none();
+                }
+                let command = serde_json::json!({ "type": "set_yara", "rules": rules });
+                let key = zensight_common::command_key("zensight/netring", "threat_intel");
+                return self
+                    .send_command(key, &command, "Applying YARA rules".to_string())
+                    .chain(self.query_threat_intel_status());
+            }
+            Message::ThreatIntelStatusReceived(result) => match result {
+                Ok(json) => {
+                    self.detection_tuning.apply_threat_intel_status(&json);
+                    // Surface a sensor-side reload error (e.g. bad YARA) as a toast.
+                    if let Some(last) = self
+                        .detection_tuning
+                        .threat_intel
+                        .as_ref()
+                        .and_then(|t| t.last_reload.clone())
+                        && last.starts_with("error")
+                    {
+                        self.toasts.push(ToastSeverity::Error, last);
+                    }
+                }
+                Err(_) => {
+                    self.detection_tuning.threat_intel = None;
                 }
             },
 
@@ -2948,6 +3022,36 @@ impl ZenSight {
                 }
                 Err(e) => {
                     Message::CaptureFilterStatusReceived(Err(format!("Status query failed: {e}")))
+                }
+            }
+        })
+    }
+
+    /// Query the netring sensor's live threat-intel status (`@/status/
+    /// threat_intel`). Routes to `ThreatIntelStatusReceived`.
+    fn query_threat_intel_status(&self) -> Task<Message> {
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::ThreatIntelStatusReceived(Err(
+                "Not connected to Zenoh".to_string(),
+            )));
+        };
+        let key = zensight_common::status_key("zensight/netring", "threat_intel");
+        Task::future(async move {
+            match session.get(&key).await {
+                Ok(replies) => {
+                    if let Ok(reply) = replies.recv_async().await
+                        && let Ok(sample) = reply.result()
+                    {
+                        let body =
+                            String::from_utf8_lossy(&sample.payload().to_bytes()).to_string();
+                        return Message::ThreatIntelStatusReceived(Ok(body));
+                    }
+                    Message::ThreatIntelStatusReceived(Err(
+                        "No netring sensor responded".to_string()
+                    ))
+                }
+                Err(e) => {
+                    Message::ThreatIntelStatusReceived(Err(format!("Status query failed: {e}")))
                 }
             }
         })

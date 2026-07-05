@@ -327,6 +327,7 @@ Build with `--features tester` and press F12 to:
 | `zensight-sensor-netring` | `ja4plus` | JA4/JA4H fingerprints — FoxIO License 1.1 (NOT OSI); default build stays OSI-clean |
 | `zensight-sensor-netring` | `lateral` | Lateral-movement detection (SMB/RDP/Kerberos parsers, ATT&CK T1021/T1558) |
 | `zensight-sensor-netring` | `sigma` | Sigma rule evaluation (`sigma-rust` via netring) |
+| `zensight-sensor-netring` | `yara` | YARA payload scanning (`yara-x` via netring); runtime rule hot-reload (#328) |
 | `zensight-sensor-netring` | `snmp` | Cleartext-SNMP community-string detection |
 
 All netring detector features are **off by default**; the distribution decision

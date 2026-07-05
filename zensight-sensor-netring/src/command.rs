@@ -20,13 +20,16 @@ use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use zensight_common::command::{command_key, status_key};
 
-use crate::config::AnomalyConfig;
+use crate::config::{AnomalyConfig, IocConfig};
 
 /// The control topic under `@/commands/` and `@/status/`.
 pub const DETECTORS_TOPIC: &str = "detectors";
 
 /// The capture-focus control topic (netring 0.28, issue #225).
 pub const CAPTURE_FILTER_TOPIC: &str = "capture_filter";
+
+/// The threat-intel (IOC / YARA) hot-reload control topic (#328).
+pub const THREAT_INTEL_TOPIC: &str = "threat_intel";
 
 /// A runtime capture-focus command (tagged JSON), applied to the reloadable
 /// packet-tier subscription via netring's `ReloadHandle::set_packet_filter`.
@@ -351,9 +354,265 @@ fn apply_filter(
     }
 }
 
+/// A runtime threat-intel command (tagged JSON) on `@/commands/threat_intel`
+/// (#328), applied to the monitor's live IOC / YARA matchers via `ReloadHandle`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ThreatIntelCommand {
+    /// Replace the inline IOC indicators (the configured indicator *files* are
+    /// kept and re-read on apply). A full replace of the inline lists.
+    SetIoc {
+        #[serde(default)]
+        ips: Vec<String>,
+        #[serde(default)]
+        domains: Vec<String>,
+        #[serde(default)]
+        ja4: Vec<String>,
+        #[serde(default)]
+        ja3: Vec<String>,
+    },
+    /// Re-read the configured indicator files and re-apply (external-feed refresh).
+    ReloadIocFiles,
+    /// Clear all live IOC indicators (apply an empty set).
+    ClearIoc,
+    /// Compile and hot-swap YARA rules (needs the `yara` build feature). A
+    /// compile error is returned in the status reply and the live rules stay put.
+    SetYara { rules: String },
+}
+
+/// The threat-intel status served on `@/status/threat_intel` (#328) so the GUI
+/// can show what is armed / loaded and surface a YARA compile error.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ThreatIntelStatus {
+    /// IOC reload is armed (monitor built with `ioc(..)` — needs `threat.reload`
+    /// or startup indicators). `set_ioc` is a no-op when false.
+    pub ioc_armed: bool,
+    /// Live IOC indicator count (all kinds) after the last apply.
+    pub ioc_total: usize,
+    /// The configured indicator files re-read by `reload_ioc_files`.
+    pub ioc_files: Vec<String>,
+    /// YARA reload is armed (built `--features yara` + `yara(..)`).
+    pub yara_armed: bool,
+    /// Outcome of the last reload attempt (`"ok: ..."` / `"error: ..."`), if any.
+    pub last_reload: Option<String>,
+}
+
+/// Runtime IOC / YARA hot-reload channel (#328): a `(subscriber + queryable)`
+/// loop that swaps the monitor's live matchers through its [`ReloadHandle`]
+/// without a capture restart. Mirrors [`run_capture_filter`]. A bad YARA source
+/// becomes a status error and the previous rules keep scanning — never a panic.
+pub async fn run_threat_intel(
+    session: Arc<zenoh::Session>,
+    key_prefix: String,
+    reload: netring::monitor::ReloadHandle,
+    startup_ioc: IocConfig,
+) {
+    let cmd_key = command_key(&key_prefix, THREAT_INTEL_TOPIC);
+    let stat_key = status_key(&key_prefix, THREAT_INTEL_TOPIC);
+
+    let subscriber = match session.declare_subscriber(&cmd_key).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, key = %cmd_key, "netring: failed to subscribe to threat-intel commands");
+            return;
+        }
+    };
+    let queryable = match session.declare_queryable(&stat_key).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::error!(error = %e, key = %stat_key, "netring: failed to declare threat-intel status queryable");
+            return;
+        }
+    };
+    tracing::info!(commands = %cmd_key, status = %stat_key, "netring: threat-intel reload channel ready");
+
+    // The live IOC config the loop mutates and re-applies; seeded from startup.
+    let mut live_ioc = startup_ioc;
+    let mut ioc_total = apply_ioc(&reload, &live_ioc);
+    let mut last_reload: Option<String> = None;
+
+    loop {
+        tokio::select! {
+            sample = subscriber.recv_async() => {
+                let Ok(sample) = sample else {
+                    tracing::warn!("netring: threat-intel command subscriber ended");
+                    return;
+                };
+                let payload = sample.payload().to_bytes();
+                match serde_json::from_slice::<ThreatIntelCommand>(&payload) {
+                    Ok(cmd) => {
+                        let outcome = apply_threat_intel(&reload, &mut live_ioc, &mut ioc_total, cmd);
+                        last_reload = Some(outcome);
+                    }
+                    Err(e) => tracing::warn!(error = %e, "netring: bad threat-intel command"),
+                }
+            }
+            query = queryable.recv_async() => {
+                let Ok(query) = query else {
+                    tracing::warn!("netring: threat-intel status queryable ended");
+                    return;
+                };
+                let status = ThreatIntelStatus {
+                    ioc_armed: reload.has_ioc(),
+                    ioc_total,
+                    ioc_files: live_ioc.files.clone(),
+                    yara_armed: threat_intel_yara_armed(&reload),
+                    last_reload: last_reload.clone(),
+                };
+                match serde_json::to_vec(&status) {
+                    Ok(payload) => {
+                        if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                            tracing::warn!(error = %e, "netring: failed to reply to threat-intel status query");
+                        }
+                    }
+                    Err(e) => tracing::warn!(error = %e, "netring: failed to serialize threat-intel status"),
+                }
+            }
+        }
+    }
+}
+
+/// Build `live_ioc` into an `IocSet` and swap it live. Returns the applied count
+/// (0 when the monitor wasn't armed with `ioc(..)`, i.e. `set_ioc` no-op).
+fn apply_ioc(reload: &netring::monitor::ReloadHandle, live_ioc: &IocConfig) -> usize {
+    let set = crate::monitor::build_ioc_set(live_ioc);
+    let total = set.len();
+    if reload.set_ioc(set) { total } else { 0 }
+}
+
+/// Apply a [`ThreatIntelCommand`], mutating `live_ioc`/`ioc_total` and returning a
+/// human-readable outcome for the status reply.
+fn apply_threat_intel(
+    reload: &netring::monitor::ReloadHandle,
+    live_ioc: &mut IocConfig,
+    ioc_total: &mut usize,
+    cmd: ThreatIntelCommand,
+) -> String {
+    match cmd {
+        ThreatIntelCommand::SetIoc {
+            ips,
+            domains,
+            ja4,
+            ja3,
+        } => {
+            live_ioc.ips = ips;
+            live_ioc.domains = domains;
+            live_ioc.ja4 = ja4;
+            live_ioc.ja3 = ja3;
+            apply_ioc_reporting(reload, live_ioc, ioc_total, "set_ioc")
+        }
+        ThreatIntelCommand::ReloadIocFiles => {
+            apply_ioc_reporting(reload, live_ioc, ioc_total, "reload_ioc_files")
+        }
+        ThreatIntelCommand::ClearIoc => {
+            *live_ioc = IocConfig::default();
+            apply_ioc_reporting(reload, live_ioc, ioc_total, "clear_ioc")
+        }
+        ThreatIntelCommand::SetYara { rules } => apply_yara(reload, &rules),
+    }
+}
+
+/// Shared apply+report for the three IOC verbs.
+fn apply_ioc_reporting(
+    reload: &netring::monitor::ReloadHandle,
+    live_ioc: &IocConfig,
+    ioc_total: &mut usize,
+    verb: &str,
+) -> String {
+    if !reload.has_ioc() {
+        return format!(
+            "error: {verb} ignored — IOC reload not armed (set threat.reload=true or provide startup indicators)"
+        );
+    }
+    *ioc_total = apply_ioc(reload, live_ioc);
+    tracing::info!(verb, count = *ioc_total, "netring: IOC set hot-reloaded");
+    format!("ok: {verb} applied {} indicators", *ioc_total)
+}
+
+#[cfg(feature = "yara")]
+fn threat_intel_yara_armed(reload: &netring::monitor::ReloadHandle) -> bool {
+    reload.has_yara()
+}
+
+#[cfg(not(feature = "yara"))]
+fn threat_intel_yara_armed(_reload: &netring::monitor::ReloadHandle) -> bool {
+    false
+}
+
+#[cfg(feature = "yara")]
+fn apply_yara(reload: &netring::monitor::ReloadHandle, rules: &str) -> String {
+    if !reload.has_yara() {
+        return "error: set_yara ignored — YARA reload not armed (set threat.reload=true or threat.yara.file)".to_string();
+    }
+    match netring::monitor::yara::YaraRules::compile(rules) {
+        Ok(compiled) => {
+            reload.set_yara(compiled);
+            tracing::info!("netring: YARA rules hot-reloaded");
+            "ok: yara rules compiled and applied".to_string()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "netring: rejected invalid YARA rules (kept previous)");
+            format!("error: yara compile failed: {e}")
+        }
+    }
+}
+
+#[cfg(not(feature = "yara"))]
+fn apply_yara(_reload: &netring::monitor::ReloadHandle, _rules: &str) -> String {
+    "error: set_yara ignored — sensor built without the `yara` feature".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn threat_intel_command_wire_format() {
+        // Pin the JSON the GUI (#328) sends on @/commands/threat_intel.
+        let set: ThreatIntelCommand = serde_json::from_str(
+            r#"{"type":"set_ioc","ips":["198.51.100.7"],"domains":["malware.test"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            set,
+            ThreatIntelCommand::SetIoc {
+                ips: vec!["198.51.100.7".into()],
+                domains: vec!["malware.test".into()],
+                ja4: vec![],
+                ja3: vec![],
+            }
+        );
+        let reload: ThreatIntelCommand =
+            serde_json::from_str(r#"{"type":"reload_ioc_files"}"#).unwrap();
+        assert_eq!(reload, ThreatIntelCommand::ReloadIocFiles);
+        let clear: ThreatIntelCommand = serde_json::from_str(r#"{"type":"clear_ioc"}"#).unwrap();
+        assert_eq!(clear, ThreatIntelCommand::ClearIoc);
+        let yara: ThreatIntelCommand =
+            serde_json::from_str(r#"{"type":"set_yara","rules":"rule r { condition: true }"}"#)
+                .unwrap();
+        assert_eq!(
+            yara,
+            ThreatIntelCommand::SetYara {
+                rules: "rule r { condition: true }".into()
+            }
+        );
+    }
+
+    #[test]
+    fn threat_intel_status_roundtrips() {
+        let status = ThreatIntelStatus {
+            ioc_armed: true,
+            ioc_total: 3,
+            ioc_files: vec!["/etc/zensight/iocs.txt".into()],
+            yara_armed: false,
+            last_reload: Some("ok: set_ioc applied 3 indicators".into()),
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ThreatIntelStatus>(&json).unwrap(),
+            status
+        );
+    }
 
     #[test]
     fn capture_filter_command_wire_format() {

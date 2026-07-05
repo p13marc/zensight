@@ -65,6 +65,22 @@ pub struct CaptureFilterView {
     pub last_error: Option<String>,
 }
 
+/// The netring sensor's live threat-intel (IOC / YARA) reload state (#328),
+/// parsed from `zensight/netring/@/status/threat_intel`.
+#[derive(Debug, Clone, Default)]
+pub struct ThreatIntelView {
+    /// IOC reload is armed (monitor built with `ioc(..)`).
+    pub ioc_armed: bool,
+    /// Live IOC indicator count after the last apply.
+    pub ioc_total: u64,
+    /// The configured indicator files re-read by "Reload files".
+    pub ioc_files: Vec<String>,
+    /// YARA reload is armed (built `--features yara`).
+    pub yara_armed: bool,
+    /// Outcome of the last reload attempt (`ok:` / `error:`), if any.
+    pub last_reload: Option<String>,
+}
+
 /// Frontend state for the detection-tuning panel.
 #[derive(Debug, Default, Clone)]
 pub struct DetectionTuningState {
@@ -79,6 +95,12 @@ pub struct DetectionTuningState {
     pub packet_filter_input: String,
     /// The sensor's live capture-filter status, once fetched.
     pub capture_filter: Option<CaptureFilterView>,
+    /// Paste box for IOC indicators (one per line; IP or domain inferred) (#328).
+    pub threat_ioc_input: String,
+    /// Paste box for YARA rules source (#328).
+    pub threat_yara_input: String,
+    /// The sensor's live threat-intel status, once fetched.
+    pub threat_intel: Option<ThreatIntelView>,
 }
 
 impl DetectionTuningState {
@@ -155,6 +177,53 @@ impl DetectionTuningState {
                 .map(str::to_string),
         });
     }
+
+    /// Parse the sensor's `ThreatIntelStatus` JSON into the threat-intel view.
+    /// Leaves the paste boxes alone (the operator may be mid-edit).
+    pub fn apply_threat_intel_status(&mut self, json: &str) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+            return;
+        };
+        let bool_field = |k: &str| value.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+        self.threat_intel = Some(ThreatIntelView {
+            ioc_armed: bool_field("ioc_armed"),
+            ioc_total: value.get("ioc_total").and_then(|v| v.as_u64()).unwrap_or(0),
+            ioc_files: value
+                .get("ioc_files")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|e| e.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            yara_armed: bool_field("yara_armed"),
+            last_reload: value
+                .get("last_reload")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        });
+    }
+}
+
+/// Split a pasted IOC block into (IPs, domains): one indicator per line, `#`
+/// comments and blanks skipped, an IP-parseable line → IP else domain (mirrors
+/// the sensor's indicator-file inference).
+pub fn split_ioc_paste(text: &str) -> (Vec<String>, Vec<String>) {
+    let mut ips = Vec::new();
+    let mut domains = Vec::new();
+    for line in text.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        if l.parse::<std::net::IpAddr>().is_ok() {
+            ips.push(l.to_string());
+        } else {
+            domains.push(l.to_string());
+        }
+    }
+    (ips, domains)
 }
 
 /// Format a threshold without trailing noise (e.g. `0.8`, `100`).
@@ -191,6 +260,7 @@ pub fn detection_tuning_panel(state: &DetectionTuningState) -> Element<'_, Messa
         return column![
             card(column![header, text(note).size(12).style(muted)].spacing(8)),
             capture_focus_card(state),
+            threat_intel_card(state),
         ]
         .spacing(12)
         .into();
@@ -279,6 +349,7 @@ pub fn detection_tuning_panel(state: &DetectionTuningState) -> Element<'_, Messa
             .spacing(10),
         ),
         capture_focus_card(state),
+        threat_intel_card(state),
     ]
     .spacing(12)
     .into()
@@ -348,6 +419,91 @@ fn capture_focus_card(state: &DetectionTuningState) -> Element<'_, Message> {
                 .push(text(format!("base: {}", cf.base)).size(11).style(muted));
             if let Some(err) = &cf.last_error {
                 body = body.push(text(format!("✕ rejected: {err}")).size(12).style(danger));
+            }
+        }
+    }
+
+    card(body)
+}
+
+/// Threat-intel (IOC / YARA) hot-reload card (#328): paste indicators or YARA
+/// rules and swap them into the live netring matchers via
+/// `@/commands/threat_intel`, with an armed/loaded readout and the last-reload
+/// outcome from `@/status/threat_intel`. No capture restart.
+fn threat_intel_card(state: &DetectionTuningState) -> Element<'_, Message> {
+    let muted = |t: &Theme| text::Style {
+        color: Some(theme::colors(t).text_muted()),
+    };
+    let danger = |t: &Theme| text::Style {
+        color: Some(theme::colors(t).danger()),
+    };
+
+    let ioc_row = row![
+        text_input("IOCs, one per line (IP or domain)", &state.threat_ioc_input)
+            .on_input(Message::SetThreatIocInput)
+            .size(12)
+            .padding(5)
+            .width(Length::Fixed(320.0)),
+        button(text("Apply IOCs").size(12))
+            .on_press(Message::ApplyThreatIoc)
+            .style(iced::widget::button::primary),
+        button(text("Reload files").size(12))
+            .on_press(Message::ReloadThreatIocFiles)
+            .style(iced::widget::button::secondary),
+        button(text("Clear").size(12))
+            .on_press(Message::ClearThreatIoc)
+            .style(iced::widget::button::secondary),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    let yara_row = row![
+        text_input("YARA rules source", &state.threat_yara_input)
+            .on_input(Message::SetThreatYaraInput)
+            .size(12)
+            .padding(5)
+            .width(Length::Fixed(320.0)),
+        button(text("Apply YARA").size(12))
+            .on_press(Message::ApplyThreatYara)
+            .style(iced::widget::button::primary),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    let mut body = column![text("Threat Intel (netring)").size(16), ioc_row, yara_row].spacing(8);
+
+    match &state.threat_intel {
+        None => {
+            body = body.push(
+                text("Refresh to load the live threat-intel status.")
+                    .size(12)
+                    .style(muted),
+            );
+        }
+        Some(ti) => {
+            let ioc_line = if ti.ioc_armed {
+                format!("IOC: armed — {} live indicators", ti.ioc_total)
+            } else {
+                "IOC: not armed (set threat.reload=true or provide startup indicators)".to_string()
+            };
+            body = body.push(text(ioc_line).size(12));
+            if !ti.ioc_files.is_empty() {
+                body = body.push(
+                    text(format!("files: {}", ti.ioc_files.join(", ")))
+                        .size(11)
+                        .style(muted),
+                );
+            }
+            let yara_line = if ti.yara_armed {
+                "YARA: armed"
+            } else {
+                "YARA: not armed (build --features yara + threat.reload/threat.yara.file)"
+            };
+            body = body.push(text(yara_line).size(12).style(muted));
+            if let Some(last) = &ti.last_reload {
+                let is_err = last.starts_with("error");
+                let line = text(format!("last: {last}")).size(11);
+                body = body.push(if is_err { line.style(danger) } else { line });
             }
         }
     }
@@ -431,5 +587,35 @@ mod tests {
         let mut state = DetectionTuningState::default();
         state.apply_capture_filter_status("not json");
         assert!(state.capture_filter.is_none());
+    }
+
+    #[test]
+    fn parses_threat_intel_status() {
+        let mut state = DetectionTuningState::default();
+        state.apply_threat_intel_status(
+            r#"{"ioc_armed":true,"ioc_total":3,"ioc_files":["/etc/iocs.txt"],"yara_armed":false,"last_reload":"error: yara compile failed: bad"}"#,
+        );
+        let ti = state.threat_intel.expect("parsed");
+        assert!(ti.ioc_armed);
+        assert_eq!(ti.ioc_total, 3);
+        assert_eq!(ti.ioc_files, vec!["/etc/iocs.txt"]);
+        assert!(!ti.yara_armed);
+        assert!(ti.last_reload.as_deref().unwrap().starts_with("error"));
+    }
+
+    #[test]
+    fn bad_threat_intel_json_leaves_state() {
+        let mut state = DetectionTuningState::default();
+        state.apply_threat_intel_status("not json");
+        assert!(state.threat_intel.is_none());
+    }
+
+    #[test]
+    fn split_ioc_paste_infers_ip_vs_domain() {
+        let (ips, domains) = split_ioc_paste(
+            "198.51.100.7\n# a comment\nmalware.test\n\n  2001:db8::1  \nevil.example\n",
+        );
+        assert_eq!(ips, vec!["198.51.100.7", "2001:db8::1"]);
+        assert_eq!(domains, vec!["malware.test", "evil.example"]);
     }
 }

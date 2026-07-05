@@ -120,6 +120,18 @@ async fn main() -> Result<()> {
         ));
     }
 
+    // Runtime threat-intel channel (#328): hot-swap the live IOC set / YARA rules
+    // without a capture restart. Spawned when the matchers are armed — either
+    // startup indicators/rules, or `threat.reload` (which arms them empty).
+    if cfg.threat.reload || mon.reload_handle().has_ioc() || cfg.threat.yara.file.is_some() {
+        runner.spawn(zensight_sensor_netring::command::run_threat_intel(
+            runner.session().clone(),
+            key_prefix.clone(),
+            mon.reload_handle(),
+            cfg.threat.ioc.clone(),
+        ));
+    }
+
     // On-demand query channels (P2): recent-flow ring, TLS asset inventory,
     // top-talkers, elephant flows, top DNS domains, top HTTP hosts.
     {
