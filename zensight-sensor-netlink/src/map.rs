@@ -1070,101 +1070,12 @@ pub struct XfrmSaRecord {
 // per-rule packet/byte counters that are the real value of nft telemetry (firewall
 // hit-rate). Full table/chain/rule inventory served via `@/query/nft`.
 //
-// The kernel exposes per-rule counters only as a `counter` *expression* inside the
-// raw `NFTA_RULE_EXPRESSIONS` blob (nlink's `RuleInfo::expression_bytes`), so #115
-// decodes that blob — see [`decode_nft_counter`] — rather than reporting counts
-// only.
+// Per-rule counters live only as a `counter` *expression* inside the rule's raw
+// `NFTA_RULE_EXPRESSIONS` blob. #115 used to hand-decode that TLV blob; nlink 0.24
+// decodes rule expressions natively, so #322 reads the counter via
+// `RuleInfo::counter() -> Option<(packets, bytes)>` (and `expressions()` for the
+// typed verdict/meta/cmp/payload set) — the hand-rolled parser is gone.
 // ---------------------------------------------------------------------------
-
-// netlink TLV / nftables UAPI constants used by the counter decoder (#115). These
-// are stable kernel ABI values; defined locally so the decode is self-contained.
-const NLA_TYPE_MASK: u16 = 0x3fff; // strip NLA_F_NESTED (0x8000) | NLA_F_NET_BYTEORDER (0x4000)
-const NFTA_LIST_ELEM: u16 = 1;
-const NFTA_EXPR_NAME: u16 = 1;
-const NFTA_EXPR_DATA: u16 = 2;
-const NFTA_COUNTER_BYTES: u16 = 1;
-const NFTA_COUNTER_PACKETS: u16 = 2;
-
-/// A decoded per-rule firewall counter (#115): cumulative packets/bytes matched.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct NftCounter {
-    pub packets: u64,
-    pub bytes: u64,
-}
-
-/// Iterate netlink TLV attributes in `buf`, yielding `(type & NLA_TYPE_MASK,
-/// payload)`. Header is host byte order (the kernel emits native-endian nla_len /
-/// nla_type); the payload is unpadded and the cursor advances on the 4-byte
-/// `NLA_ALIGNTO` boundary. Stops on any malformed/truncated attribute.
-fn nl_attrs(buf: &[u8]) -> impl Iterator<Item = (u16, &[u8])> {
-    let mut rest = buf;
-    std::iter::from_fn(move || {
-        if rest.len() < 4 {
-            return None;
-        }
-        let len = u16::from_ne_bytes([rest[0], rest[1]]) as usize;
-        let typ = u16::from_ne_bytes([rest[2], rest[3]]);
-        if len < 4 || len > rest.len() {
-            return None;
-        }
-        let payload = &rest[4..len];
-        let advance = (len + 3) & !3; // align to NLA_ALIGNTO
-        rest = if advance >= rest.len() {
-            &[]
-        } else {
-            &rest[advance..]
-        };
-        Some((typ & NLA_TYPE_MASK, payload))
-    })
-}
-
-/// Read a NUL-terminated netlink string attribute payload.
-fn nl_attr_str(payload: &[u8]) -> &str {
-    let end = payload
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(payload.len());
-    std::str::from_utf8(&payload[..end]).unwrap_or("")
-}
-
-/// Decode the `counter` expression from a rule's raw `NFTA_RULE_EXPRESSIONS`
-/// payload (#115). `expression_bytes` is a list of `NFTA_LIST_ELEM` attributes,
-/// one per expression; a counter expression carries `NFTA_COUNTER_{BYTES,PACKETS}`
-/// as big-endian `u64`s inside its `NFTA_EXPR_DATA`. Returns the summed counter
-/// (rules normally have at most one), or `None` if the rule has no counter
-/// statement — distinguishing "no counter" from "counter reading zero".
-pub fn decode_nft_counter(expression_bytes: &[u8]) -> Option<NftCounter> {
-    let mut found = false;
-    let mut acc = NftCounter::default();
-    for (etype, elem) in nl_attrs(expression_bytes) {
-        if etype != NFTA_LIST_ELEM {
-            continue;
-        }
-        let mut name = "";
-        let mut data: &[u8] = &[];
-        for (atype, payload) in nl_attrs(elem) {
-            match atype {
-                NFTA_EXPR_NAME => name = nl_attr_str(payload),
-                NFTA_EXPR_DATA => data = payload,
-                _ => {}
-            }
-        }
-        if name == "counter" {
-            for (ctype, payload) in nl_attrs(data) {
-                if payload.len() >= 8 {
-                    let v = u64::from_be_bytes(payload[..8].try_into().unwrap());
-                    match ctype {
-                        NFTA_COUNTER_BYTES => acc.bytes = acc.bytes.saturating_add(v),
-                        NFTA_COUNTER_PACKETS => acc.packets = acc.packets.saturating_add(v),
-                        _ => {}
-                    }
-                }
-            }
-            found = true;
-        }
-    }
-    found.then_some(acc)
-}
 
 /// One nftables table's shape + traffic (nlink-free), pure input to [`nft_points`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1752,6 +1663,8 @@ mod tests {
             retrans: 0,
             inode: 0,
             congestion: None,
+            bbr_bw_bps: None,
+            cc_min_rtt_us: None,
             snd_cwnd: 0,
             snd_buf: 0,
             rcv_buf: 0,
@@ -2112,52 +2025,9 @@ mod tests {
         );
     }
 
-    /// #115: encode a synthetic `NFTA_RULE_EXPRESSIONS` blob the way the kernel
-    /// would — a `counter` expression carrying big-endian packets/bytes nested in
-    /// a list element — and confirm the decoder recovers it. Rules with no counter
-    /// statement decode to `None`.
-    #[test]
-    fn decode_nft_counter_roundtrip() {
-        // Build a netlink attribute: (len u16 ne)(type u16 ne)(payload, 4-aligned).
-        fn attr(typ: u16, payload: &[u8]) -> Vec<u8> {
-            let len = 4 + payload.len();
-            let mut v = Vec::new();
-            v.extend_from_slice(&(len as u16).to_ne_bytes());
-            v.extend_from_slice(&typ.to_ne_bytes());
-            v.extend_from_slice(payload);
-            while v.len() % 4 != 0 {
-                v.push(0);
-            }
-            v
-        }
-
-        // counter data: BYTES then PACKETS, big-endian u64 (NET_BYTEORDER flag set).
-        let mut counter_data = Vec::new();
-        counter_data.extend(attr(NFTA_COUNTER_BYTES | 0x4000, &6400u64.to_be_bytes()));
-        counter_data.extend(attr(NFTA_COUNTER_PACKETS | 0x4000, &100u64.to_be_bytes()));
-
-        // one expression element: NAME="counter" + nested DATA.
-        let mut elem = Vec::new();
-        elem.extend(attr(NFTA_EXPR_NAME, b"counter\0"));
-        elem.extend(attr(NFTA_EXPR_DATA | 0x8000, &counter_data));
-
-        // the rule's expression list: a single nested LIST_ELEM.
-        let expr_bytes = attr(NFTA_LIST_ELEM | 0x8000, &elem);
-
-        let ctr = decode_nft_counter(&expr_bytes).expect("counter present");
-        assert_eq!(ctr.packets, 100);
-        assert_eq!(ctr.bytes, 6400);
-
-        // A non-counter expression (e.g. "accept" verdict) → no counter.
-        let mut other = Vec::new();
-        other.extend(attr(NFTA_EXPR_NAME, b"immediate\0"));
-        let other_bytes = attr(NFTA_LIST_ELEM | 0x8000, &other);
-        assert_eq!(decode_nft_counter(&other_bytes), None);
-
-        // Garbage / truncated input never panics.
-        assert_eq!(decode_nft_counter(&[0xff, 0x00, 0x01]), None);
-        assert_eq!(decode_nft_counter(&[]), None);
-    }
+    // #115's hand-rolled `decode_nft_counter` TLV parser + its roundtrip test were
+    // removed in #322: nlink 0.24 decodes rule expressions natively via
+    // `RuleInfo::counter()`, whose decoder is covered by nlink's own tests.
 
     // ---- eBPF module (#114) -----------------------------------------------
 

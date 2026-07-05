@@ -345,6 +345,13 @@ pub struct SocketRecord {
     /// TCP congestion-control algorithm in use (e.g. "cubic", "bbr"), if known.
     #[serde(default)]
     pub congestion: Option<String>,
+    /// BBR bottleneck-bandwidth estimate, bytes/sec (`INET_DIAG_BBRINFO`, #322).
+    /// `None` unless the socket runs BBR (cubic/reno report no CC info).
+    #[serde(default)]
+    pub bbr_bw_bps: Option<u64>,
+    /// BBR min-filtered RTT, µs (#322). `None` unless the socket runs BBR.
+    #[serde(default)]
+    pub cc_min_rtt_us: Option<u32>,
     /// Sender congestion window (packets), if known.
     #[serde(default)]
     pub snd_cwnd: u32,

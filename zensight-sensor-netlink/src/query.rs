@@ -21,7 +21,8 @@ use nlink::netlink::{
     xfrm::{IpsecProtocol, SecurityAssociation, XfrmMode},
 };
 use nlink::sockdiag::{
-    CgroupPathMap, SocketFilter, SocketInfo, SocketOwnerMap, SocketState, TcpState,
+    CcInfo, CgroupPathMap, FilterExpr, SocketFilter, SocketInfo, SocketOwnerMap, SocketState,
+    TcpState,
 };
 
 use crate::collector::CollectHandle;
@@ -423,17 +424,17 @@ async fn collect_nft(conn: &Connection<Nftables>) -> Vec<NftRuleRecord> {
         let family = nft_family_label(t.family);
         if let Ok(rules) = conn.list_rules(&t.name, t.family).await {
             for r in &rules {
-                // Decode the per-rule packet/byte counter (#115); absent counter
-                // statement → zeros.
-                let ctr = crate::map::decode_nft_counter(&r.expression_bytes).unwrap_or_default();
+                // Per-rule packet/byte counter (#115) via nlink's native decoder
+                // (#322); absent counter statement → zeros.
+                let (packets, bytes) = r.counter().unwrap_or((0, 0));
                 out.push(NftRuleRecord {
                     family: family.to_string(),
                     table: r.table.clone(),
                     chain: r.chain.clone(),
                     handle: r.handle,
                     comment: r.comment.clone(),
-                    packets: ctr.packets,
-                    bytes: ctr.bytes,
+                    packets,
+                    bytes,
                 });
             }
         }
@@ -645,6 +646,22 @@ fn apply_attribution(rec: &mut SocketRecord, owners: &SocketOwnerMap, cgroups: &
     }
 }
 
+/// Lower a [`SocketSelector`] into an ss-style `FilterExpr` string (#322) for
+/// kernel-side pre-filtering. Port matches either endpoint (`sport OR dport`);
+/// state uses the ss token (the selector already lowercased it). Returns `None`
+/// when there is nothing to push. The lowering is only ever an over-approximation
+/// of `SocketSelector::matches` (which still runs as a backstop), never narrower.
+fn selector_filter_string(sel: &SocketSelector) -> Option<String> {
+    let port = sel.port.map(|p| format!("(sport = :{p} or dport = :{p})"));
+    let state = sel.state.as_deref().map(|s| format!("state {s}"));
+    match (port, state) {
+        (Some(p), Some(s)) => Some(format!("{p} and {s}")),
+        (Some(p), None) => Some(p),
+        (None, Some(s)) => Some(s),
+        (None, None) => None,
+    }
+}
+
 async fn collect_sockets(
     conn: &Connection<SockDiag>,
     sel: &SocketSelector,
@@ -659,18 +676,29 @@ async fn collect_sockets(
     };
     // Mirror the streamed aggregate's extensions (#11) so the drill-down shows
     // congestion algorithm / window and per-socket buffer sizes.
-    // Mirror the streamed aggregate's extensions. When the selector names a
-    // state, push it into the kernel as a sockdiag state bitmask (nlink 0.23) so
-    // the kernel returns only matching sockets instead of dumping every socket
-    // for us to filter. The port match stays in user space: its "local OR
-    // remote" semantics doesn't map to sockdiag's `sport AND dport` bytecode.
     let builder = SocketFilter::tcp()
         .with_tcp_info()
         .with_mem_info()
-        .with_congestion();
-    let builder = match sel.state.as_deref().and_then(tcp_state_from_label) {
-        Some(st) => builder.states(&[st]),
-        None => builder.all_states(),
+        .with_congestion()
+        // Structured CC info (BBR/DCTCP/vegas, #322) — one extension bit; the algo
+        // name still rides in `congestion` from `with_congestion()` above.
+        .with_cc_info();
+    // Kernel-side filtering (#322): when a port is selected, push the port ("local
+    // OR remote" → `sport OR dport`) plus any state into `FilterExpr`; nlink
+    // compiles it to INET_DIAG bytecode + state hoisting so the kernel returns
+    // fewer rows. `SocketSelector::matches` still runs below as a client-side
+    // backstop, so an over-approximate lowering is safe; a parse failure falls
+    // back to the state-mask path. A state-only selector keeps the proven
+    // `states()` mask path unchanged.
+    let builder = if sel.port.is_some()
+        && let Some(expr) = selector_filter_string(sel).and_then(|s| FilterExpr::parse(&s).ok())
+    {
+        builder.all_states().filter_expr(expr)
+    } else {
+        match sel.state.as_deref().and_then(tcp_state_from_label) {
+            Some(st) => builder.states(&[st]),
+            None => builder.all_states(),
+        }
     };
     let filter = builder.build();
     let socks = match conn.query(&filter).await {
@@ -718,6 +746,12 @@ async fn collect_sockets(
                 .as_ref()
                 .map(|m| (m.sndbuf, m.rcvbuf))
                 .unwrap_or((0, 0));
+            // BBR bottleneck bandwidth + min-RTT when the socket runs BBR (#322);
+            // cubic/reno report no CC info struct.
+            let (bbr_bw_bps, cc_min_rtt_us) = match inet.cc_info {
+                Some(CcInfo::Bbr(b)) => (Some(b.bw), Some(b.min_rtt_us)),
+                _ => (None, None),
+            };
             let mut rec = SocketRecord {
                 local: inet.local.to_string(),
                 remote: inet.remote.to_string(),
@@ -729,6 +763,8 @@ async fn collect_sockets(
                 retrans,
                 inode: inet.inode,
                 congestion: inet.congestion.clone(),
+                bbr_bw_bps,
+                cc_min_rtt_us,
                 snd_cwnd,
                 snd_buf,
                 rcv_buf,
@@ -880,6 +916,85 @@ mod tests {
 
     use super::*;
 
+    /// Live kernel check (#322): `.with_cc_info()` requests don't error against a
+    /// real sockdiag, and a `filter_expr()` lowered from a port selector is applied
+    /// **kernel-side correctly** — every returned socket matches the port, and our
+    /// loopback connection is present. `#[ignore]` (needs a runtime + live
+    /// sockdiag); run with `cargo test -p zensight-sensor-netlink --
+    /// --ignored sockets_query_cc_info_and_kernel_filter`.
+    #[tokio::test]
+    #[ignore]
+    async fn sockets_query_cc_info_and_kernel_filter() {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut b = [0u8; 16];
+            let _ = s.read(&mut b).await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        });
+        let _client = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let conn = Connection::<SockDiag>::new().expect("sockdiag");
+        let sel = SocketSelector {
+            state: None,
+            port: Some(port),
+        };
+        let expr = FilterExpr::parse(&selector_filter_string(&sel).unwrap()).unwrap();
+        let filter = SocketFilter::tcp()
+            .with_tcp_info()
+            .with_cc_info()
+            .all_states()
+            .filter_expr(expr)
+            .build();
+        let socks = conn.query(&filter).await.expect("sockdiag query ok");
+        assert!(
+            !socks.is_empty(),
+            "kernel filter returned nothing for our loopback port"
+        );
+        for s in &socks {
+            if let SocketInfo::Inet(inet) = s {
+                assert!(
+                    inet.local.port() == port || inet.remote.port() == port,
+                    "kernel filter leaked a socket not matching port {port}"
+                );
+            }
+        }
+        drop(_client);
+        let _ = server.await;
+    }
+
+    /// #322: the kernel-filter lowering emits valid ss grammar (nlink's
+    /// `FilterExpr::parse` accepts it) for every selector shape, and `None` when
+    /// there is nothing to push.
+    #[test]
+    fn selector_filter_string_is_parseable() {
+        let mk = |state: Option<&str>, port: Option<u16>| SocketSelector {
+            state: state.map(|s| s.to_string()),
+            port,
+        };
+        // Nothing selected → no kernel filter.
+        assert!(selector_filter_string(&mk(None, None)).is_none());
+        // Every produced string must parse as a FilterExpr.
+        for sel in [
+            mk(Some("established"), Some(22)),
+            mk(None, Some(443)),
+            mk(Some("listen"), None),
+        ] {
+            let s = selector_filter_string(&sel).expect("some filter");
+            FilterExpr::parse(&s).unwrap_or_else(|e| panic!("parse {s:?} failed: {e}"));
+        }
+        // Port lowers to a local-OR-remote match, not sport-only.
+        assert_eq!(
+            selector_filter_string(&mk(None, Some(22))).unwrap(),
+            "(sport = :22 or dport = :22)"
+        );
+    }
+
     /// Live kernel check (#317): the one thing unit tests can't cover — does
     /// `nlink`'s `tcp_info` actually populate `bytes_acked`/`bytes_received` on
     /// this kernel? Drives a loopback TCP transfer and asserts `sample_socket_bytes`
@@ -937,6 +1052,8 @@ mod tests {
             retrans: 0,
             inode,
             congestion: None,
+            bbr_bw_bps: None,
+            cc_min_rtt_us: None,
             snd_cwnd: 0,
             snd_buf: 0,
             rcv_buf: 0,
