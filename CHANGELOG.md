@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **netring runtime threat-intel hot-reload (#328).** A new
+  `@/commands/threat_intel` channel (status on `@/status/threat_intel`) swaps the
+  live IOC set (`set_ioc` / `reload_ioc_files` / `clear_ioc`) and YARA rules
+  (`set_yara`, behind the new `--features yara` flag) into the running monitor via
+  its `ReloadHandle` — no capture restart. A bad YARA source is rejected with a
+  compile error in the status reply while the previous rules keep scanning. The
+  GUI Security view gains a *Threat Intel* panel (paste indicators / rules, reload
+  configured files, armed/loaded readout). New `threat.reload` config arms the
+  matchers even on an empty start so runtime reload works; `threat.yara.file`
+  compiles startup rules. Off by default (matchers armed only when config already
+  provides indicators).
+
 - **Zenoh-efficiency core for low-bandwidth / unreliable links (epic #352,
   `docs/ZENOH-EFFICIENCY.md`)**: a coherent "resilient links" pass across the bus.
   - **Per-traffic-class QoS** (`zensight_common::QosClass`, #353): telemetry and

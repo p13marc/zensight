@@ -118,6 +118,8 @@ Per-sensor operational channels. All are derived from the sensor's `key_prefix`.
 | netlink | `expectations` | hot-swap sentinel expectations |
 | netlink | `collection` | toggle collectors at runtime |
 | netring | `detectors` | runtime detection tuning: allowlist + per-detector mute/threshold |
+| netring | `capture_filter` | hot-swap the reloadable packet-tier BPF filter (capture focus) |
+| netring | `threat_intel` | hot-reload IOC indicators / YARA rules (set_ioc / reload_ioc_files / clear_ioc / set_yara) — armed by `threat.reload` or startup indicators |
 | systemd | `expectations` | hot-swap sentinel expectations (service/target/timer/restart-rate/forbid-failed) |
 | systemd | `action` | gated service control `{verb,unit}` (start/stop/restart/reload) — **default OFF**, allowlist + polkit |
 

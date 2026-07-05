@@ -393,7 +393,16 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
     `exfil_min_bytes` floor (T1048). Set `anomalies.data_exfil`.
   - **Threat-intel (netring 0.27):** flow-risk scoring (obsolete TLS, cleartext
     HTTP credentials), IOC matching (bad IPs/domains/JA3/JA4, from config lists
-    or indicator files), Sigma rules (build with `--features sigma`).
+    or indicator files), Sigma rules (build with `--features sigma`), and YARA
+    payload scanning (build with `--features yara`, `threat.yara.file`).
+- **Runtime threat-intel reload (#328):** the `@/commands/threat_intel` channel
+  (status on `@/status/threat_intel`) hot-swaps the live **IOC** set (`set_ioc` /
+  `reload_ioc_files` / `clear_ioc`) and **YARA** rules (`set_yara`, `--features
+  yara`) without a restart — surfaced in the GUI Security view's *Threat Intel*
+  panel. A bad YARA source is rejected with a compile error in the status reply
+  and the previous rules keep scanning. The matchers are frozen at build, so set
+  `threat.reload = true` (or provide startup indicators / a `threat.yara.file`) to
+  arm them; otherwise a reload of an unarmed matcher is a reported no-op.
 - **Runtime detection tuning (#121):** the `@/commands/detectors` channel (status
   on `@/status/detectors`) hot-swaps the allowlist and each detector's
   enable/threshold without a restart — surfaced in the GUI Security view's

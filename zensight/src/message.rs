@@ -155,6 +155,23 @@ pub enum Message {
     /// A capture-filter status reply (`CaptureFilterStatus` JSON), or an error.
     CaptureFilterStatusReceived(Result<String, String>),
 
+    // Netring threat-intel (IOC / YARA) hot-reload (#328): swap the live matchers
+    // without a capture restart via `@/commands/threat_intel`.
+    /// Edit the IOC paste box (indicators, one per line).
+    SetThreatIocInput(String),
+    /// Apply the pasted IOC indicators to the netring sensor's live set.
+    ApplyThreatIoc,
+    /// Re-read the sensor's configured indicator files and re-apply.
+    ReloadThreatIocFiles,
+    /// Clear all live IOC indicators.
+    ClearThreatIoc,
+    /// Edit the YARA rules paste box.
+    SetThreatYaraInput(String),
+    /// Compile + apply the pasted YARA rules (needs the sensor's `yara` feature).
+    ApplyThreatYara,
+    /// A threat-intel status reply (`ThreatIntelStatus` JSON), or an error.
+    ThreatIntelStatusReceived(Result<String, String>),
+
     /// Open the unified Incidents triage view (#129).
     OpenIncidents,
     /// Expand/collapse an incident by id (`None` collapses) (#129).

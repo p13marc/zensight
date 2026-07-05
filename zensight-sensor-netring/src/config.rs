@@ -441,6 +441,25 @@ pub struct ThreatConfig {
     /// Sigma rule evaluation (needs the `sigma` build feature).
     #[serde(default)]
     pub sigma: SigmaConfig,
+    /// YARA payload scanning (needs the `yara` build feature).
+    #[serde(default)]
+    pub yara: YaraConfig,
+    /// Arm the runtime threat-intel reload channel (#328): always build the IOC
+    /// (and YARA, when compiled `--features yara`) matchers into the monitor —
+    /// even if empty at startup — so `@/commands/threat_intel` can hot-swap
+    /// indicators / YARA rules without a restart. Off by default, in which case
+    /// the matchers are armed only when config already provides indicators.
+    #[serde(default)]
+    pub reload: bool,
+}
+
+/// YARA rule set config (needs the `yara` build feature).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct YaraConfig {
+    /// Path to a `.yar`/`.yara` rules file compiled at startup and scanned over
+    /// reassembled flow payloads. Runtime rules arrive via `@/commands/threat_intel`.
+    #[serde(default)]
+    pub file: Option<String>,
 }
 
 /// Indicator-of-compromise indicator set, from inline lists and/or files.

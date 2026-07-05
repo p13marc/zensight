@@ -17,6 +17,11 @@ path = "src/lib.rs"
 # Sigma rule evaluation (netring 0.27). Off by default — pulls the pure-Rust
 # `sigma-rust` parser via netring. Enable with `--features sigma`.
 sigma = ["netring/sigma"]
+# YARA payload scanning (#328). Off by default — pulls the `yara-x` engine via
+# `netring/yara`. Enable with `--features yara`, then set `threat.yara.file`
+# (startup rules) and/or `threat.reload` to hot-swap rules at runtime through
+# `@/commands/threat_intel`.
+yara = ["netring/yara"]
 # Cleartext-SNMP detection (netring 0.27, issue #72). Off by default — pulls the
 # SNMP parser via netring. Enable with `--features snmp`, then set
 # `collect.snmp_cleartext` to flag v1/v2c community strings as anomalies.
