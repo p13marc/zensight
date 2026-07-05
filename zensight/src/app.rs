@@ -108,8 +108,9 @@ impl AppTheme {
 
 /// The main ZenSight application.
 pub struct ZenSight {
-    /// Zenoh configuration.
-    zenoh_config: ZenohConfig,
+    /// Zenoh connection + subscription scope + link profile (#364). The live
+    /// subscription is keyed on this whole value, so any change restarts it.
+    link: crate::subscription::LinkConfig,
     /// Dashboard state.
     dashboard: DashboardState,
     /// Currently selected device (if any).
@@ -224,6 +225,11 @@ impl ZenSight {
             listen: persistent.zenoh_listen.clone(),
         }
         .with_env_overrides();
+        let link = crate::subscription::LinkConfig {
+            zenoh: zenoh_config,
+            scope: persistent.subscription_scope.clone(),
+            profile: persistent.link_profile,
+        };
 
         let stale_threshold_ms = (persistent.stale_threshold_secs * 1000) as i64;
 
@@ -295,7 +301,7 @@ impl ZenSight {
         let current_view = persistent.current_view;
 
         let app = Self {
-            zenoh_config,
+            link,
             dashboard,
             selected_device: None,
             settings,
@@ -1380,6 +1386,28 @@ impl ZenSight {
                 self.dashboard.connection_state =
                     crate::view::dashboard::ConnectionState::Connected;
                 self.dashboard.last_error = None;
+
+                // Constrained profile (#364): there is no AdvancedSubscriber
+                // history burst on (re)connect, so seed the logs buffer from
+                // the local redb store instead (same task as OpenLogs; the
+                // (ts, message) de-dup in merge_log_history makes double
+                // seeding harmless). Metric charts already read MetricStore.
+                if self.link.profile == zensight_common::LinkProfile::Constrained
+                    && let Some(store) = self.store.persistent()
+                {
+                    let now_ms = zensight_common::current_timestamp_millis();
+                    let from = now_ms - 24 * 3_600_000;
+                    return Task::future(async move {
+                        let logs = tokio::task::spawn_blocking(move || {
+                            store
+                                .query_logs(from, now_ms, MAX_RECENT_LOGS)
+                                .unwrap_or_default()
+                        })
+                        .await
+                        .unwrap_or_default();
+                        Message::LogHistoryLoaded(logs)
+                    });
+                }
             }
 
             Message::Disconnected(error) => {
@@ -1703,6 +1731,14 @@ impl ZenSight {
 
             Message::SetZenohListen(endpoints) => {
                 self.settings.set_listen(endpoints);
+            }
+
+            Message::SetLinkProfile(profile) => {
+                self.settings.set_link_profile(profile);
+            }
+
+            Message::SubscriptionScopeChanged(scope) => {
+                self.settings.set_subscription_scope(scope);
             }
 
             Message::SetStaleThreshold(threshold) => {
@@ -4235,7 +4271,7 @@ impl ZenSight {
             ])
         } else {
             Subscription::batch([
-                zenoh_subscription(self.zenoh_config.clone()),
+                zenoh_subscription(self.link.clone()),
                 tick_subscription(),
                 keyboard_subscription(),
             ])
@@ -4843,20 +4879,22 @@ impl ZenSight {
             device.set_max_history(self.settings.max_history_value());
         }
 
-        // Update the Zenoh config. The live subscription is keyed on this config
-        // (`Subscription::run_with(zenoh_config, …)`), so changing it makes Iced
-        // tear down the current session and reconnect with the new settings — no
-        // restart needed. We surface that to the user instead of doing it
-        // silently (#38).
-        let new_mode = self.settings.zenoh_mode.as_str().to_string();
-        let new_connect = self.settings.connect_endpoints();
-        let new_listen = self.settings.listen_endpoints();
-        let connection_changed = self.zenoh_config.mode != new_mode
-            || self.zenoh_config.connect != new_connect
-            || self.zenoh_config.listen != new_listen;
-        self.zenoh_config.mode = new_mode;
-        self.zenoh_config.connect = new_connect;
-        self.zenoh_config.listen = new_listen;
+        // Update the link config. The live subscription is keyed on this whole
+        // value (`Subscription::run_with(link, …)`), so changing connection,
+        // subscription scope, or link profile makes Iced tear down the current
+        // session and reconnect with the new settings — no restart needed. We
+        // surface that to the user instead of doing it silently (#38).
+        let new_link = crate::subscription::LinkConfig {
+            zenoh: ZenohConfig {
+                mode: self.settings.zenoh_mode.as_str().to_string(),
+                connect: self.settings.connect_endpoints(),
+                listen: self.settings.listen_endpoints(),
+            },
+            scope: self.settings.scope_entries(),
+            profile: self.settings.link_profile,
+        };
+        let connection_changed = self.link != new_link;
+        self.link = new_link;
 
         if connection_changed && !self.demo_mode {
             // Reflect the impending reconnect immediately; the restarted

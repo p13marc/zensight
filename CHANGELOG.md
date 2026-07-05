@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Frontend `link_profile` + subscription scope (#364)**: the GUI Settings →
+  Zenoh section gains a *Link profile* picker (`standard` | `constrained`) and a
+  *Subscription scope* field (comma-separated key expressions replacing the
+  `zensight/**` firehose; empty = everything). `constrained` declares **plain**
+  telemetry subscribers — no AdvancedSubscriber history burst or recovery traffic
+  on a lossy/slow link — and back-fills the Logs view from the local redb store
+  on connect instead. Scope/profile changes hot-restart the Zenoh session like
+  connection edits do. Control-plane subscriptions (health, alerts, entities)
+  are unaffected by scoping. Completes the R6 half deferred from #357.
+
 - **netring runtime threat-intel hot-reload (#328).** A new
   `@/commands/threat_intel` channel (status on `@/status/threat_intel`) swaps the
   live IOC set (`set_ioc` / `reload_ioc_files` / `clear_ioc`) and YARA rules

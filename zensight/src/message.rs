@@ -602,6 +602,12 @@ pub enum Message {
     /// Set Zenoh listen endpoints.
     SetZenohListen(String),
 
+    /// Set the link profile (#364): standard vs. constrained.
+    SetLinkProfile(zensight_common::LinkProfile),
+
+    /// Edit the telemetry subscription scope (#364), comma-separated.
+    SubscriptionScopeChanged(String),
+
     /// Set stale threshold.
     SetStaleThreshold(String),
 
