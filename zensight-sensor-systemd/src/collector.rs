@@ -128,6 +128,9 @@ pub struct SystemdCollector {
     /// Optional threshold-alert evaluator (#276), driven each tick.
     alerts: Option<crate::alerts::AlertEvaluator>,
     conn: Option<zbus::Connection>,
+    /// Per-unit IPAccounting rate baseline (#315): `unit → (ingress, egress, at)`
+    /// of the last sample, used to derive `ip_*_bps` from cumulative counters.
+    ip_rate: std::collections::HashMap<String, (u64, u64, std::time::Instant)>,
 }
 
 impl SystemdCollector {
@@ -148,6 +151,7 @@ impl SystemdCollector {
             events: None,
             alerts: None,
             conn: None,
+            ip_rate: std::collections::HashMap::new(),
         }
     }
 
@@ -283,6 +287,40 @@ impl SystemdCollector {
                 {
                     Ok(sample) => {
                         points.extend(crate::map::unit_points(&self.source, &sample));
+                        // Per-unit IP bandwidth rate (#315): derive `ip_*_bps` from
+                        // successive cumulative counters, and surface an explicit
+                        // "accounting off" state for active units (not a silent 0).
+                        if self.config.ip_io_accounting {
+                            let now = std::time::Instant::now();
+                            let (ing_bps, egr_bps) = match (
+                                sample.ip_ingress_bytes,
+                                sample.ip_egress_bytes,
+                                self.ip_rate.get(&sample.name).copied(),
+                            ) {
+                                (Some(ci), Some(ce), Some((pi, pe, at))) => {
+                                    let dt = now.duration_since(at).as_secs_f64();
+                                    (
+                                        crate::map::counter_bps(ci, pi, dt),
+                                        crate::map::counter_bps(ce, pe, dt),
+                                    )
+                                }
+                                _ => (None, None),
+                            };
+                            let accounting_off =
+                                sample.is_active() && sample.ip_ingress_bytes.is_none();
+                            points.extend(crate::map::ip_rate_points(
+                                &self.source,
+                                &sample.name,
+                                ing_bps,
+                                egr_bps,
+                                accounting_off,
+                            ));
+                            if let (Some(ci), Some(ce)) =
+                                (sample.ip_ingress_bytes, sample.ip_egress_bytes)
+                            {
+                                self.ip_rate.insert(sample.name.clone(), (ci, ce, now));
+                            }
+                        }
                         samples.push(sample);
                     }
                     Err(e) => {

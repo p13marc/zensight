@@ -398,6 +398,15 @@ unhealthy on `@/health`, retries — never crashes).
     `unit/<name>/{active,state,restarts_total,active_since_usec,mem_bytes,
     cpu_usec,tasks,exit_code}` (+ `ip/io_*_bytes` when `ip_io_accounting` and the
     unit enables accounting). Overflow → `other/units_total`.
+  - **Per-service bandwidth** (#315, the cheapest bandwidth-by-* tier — epic #320):
+    with `ip_io_accounting`, successive `IPIngressBytes`/`IPEgressBytes` deltas give
+    `unit/<name>/{ip_ingress_bps,ip_egress_bps}` (bytes/sec). These are
+    **wire-L3** (cgroup_skb: L3+ bytes incl. retransmits, no L2 framing) and carry
+    `bw.source=systemd`/`bw.semantics=wire-l3` labels so the GUI never blends them
+    with app-goodput (sock_diag/eBPF) or wire-L2 (capture) numbers. A unit restart
+    resets the counters → that tick is re-baselined (no negative spike). An *active*
+    unit with IPAccounting off emits `unit/<name>/ip_accounting=false` (an explicit
+    "off" state, not a silent zero).
   - **Timers/sockets** (#279): watched `.timer` units add `unit/<t>/{last_trigger_usec,
     next_trigger_usec}`; watched `.socket` units add `unit/<s>/{n_accepted,
     n_connections,n_refused}`.
