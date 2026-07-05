@@ -19,7 +19,9 @@ use crate::oid::{oid_starts_with, oid_to_string, parse_oid};
 /// SNMP poller for a single device.
 pub struct SnmpPoller {
     device: DeviceConfig,
-    zenoh: Arc<ZenohSession>,
+    /// Declared-publisher registry for the telemetry path (declare-on-first-use +
+    /// cache per key, drop QoS) — never a one-shot `session.put`.
+    registry: Arc<zensight_common::PublisherRegistry>,
     key_builder: KeyExprBuilder,
     mib_resolver: Arc<MibResolver>,
     format: Format,
@@ -47,7 +49,7 @@ impl SnmpPoller {
 
         Self {
             device,
-            zenoh,
+            registry: Arc::new(zensight_common::PublisherRegistry::new(zenoh)),
             key_builder,
             mib_resolver,
             format,
@@ -297,7 +299,11 @@ impl SnmpPoller {
 
         match encode(&point, self.format) {
             Ok(payload) => {
-                if let Err(e) = self.zenoh.put(&key, payload).await {
+                if let Err(e) = self
+                    .registry
+                    .put(&key, payload, zensight_common::QosClass::Telemetry)
+                    .await
+                {
                     tracing::error!(key = %key, error = %e, "Failed to publish to Zenoh");
                 } else {
                     tracing::trace!(key = %key, "Published telemetry");

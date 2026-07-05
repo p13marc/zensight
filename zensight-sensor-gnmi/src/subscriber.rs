@@ -40,6 +40,10 @@ impl GnmiSubscriber {
             self.target.name, self.target.address
         );
 
+        // Telemetry goes through declared publishers (declare-on-first-use + cache
+        // per key, drop QoS), never a one-shot `session.put`.
+        let registry = zensight_common::PublisherRegistry::new(session);
+
         let mut backoff = Duration::from_secs(5);
         let max_backoff = Duration::from_secs(300);
         let mut attempt = 0u64;
@@ -53,7 +57,7 @@ impl GnmiSubscriber {
                 "Connecting to gNMI target"
             );
 
-            match self.subscribe_loop(&session).await {
+            match self.subscribe_loop(&registry).await {
                 Ok(()) => {
                     info!("Subscription completed normally for {}", self.target.name);
                     // Reset on successful connection
@@ -77,7 +81,10 @@ impl GnmiSubscriber {
         }
     }
 
-    async fn subscribe_loop(&self, session: &Arc<zenoh::Session>) -> anyhow::Result<()> {
+    async fn subscribe_loop(
+        &self,
+        registry: &zensight_common::PublisherRegistry,
+    ) -> anyhow::Result<()> {
         let channel = self.connect().await?;
         let mut client = GNmiClient::new(channel);
 
@@ -104,7 +111,7 @@ impl GnmiSubscriber {
             if let Some(response) = msg.response {
                 match response {
                     gnmi::subscribe_response::Response::Update(notification) => {
-                        self.process_notification(session, notification).await?;
+                        self.process_notification(registry, notification).await?;
                     }
                     gnmi::subscribe_response::Response::SyncResponse(sync) => {
                         debug!("Received sync response: {}", sync);
@@ -238,7 +245,7 @@ impl GnmiSubscriber {
 
     async fn process_notification(
         &self,
-        session: &Arc<zenoh::Session>,
+        registry: &zensight_common::PublisherRegistry,
         notification: gnmi::Notification,
     ) -> anyhow::Result<()> {
         let timestamp = notification.timestamp.checked_div(1_000_000).unwrap_or(0); // Convert nanoseconds to milliseconds
@@ -274,8 +281,8 @@ impl GnmiSubscriber {
                     }
                 };
 
-                session
-                    .put(&key, payload)
+                registry
+                    .put(&key, payload, zensight_common::QosClass::Telemetry)
                     .await
                     .map_err(|e| anyhow::anyhow!("Zenoh put failed: {}", e))?;
                 debug!("Published telemetry to {}", key);

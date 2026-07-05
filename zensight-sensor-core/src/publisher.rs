@@ -27,6 +27,10 @@ pub struct Publisher {
     /// Shared advanced-publisher registry backing the telemetry path. Shared
     /// across clones so the per-key publisher cache persists.
     registry: Arc<AdvancedPublisherRegistry>,
+    /// Shared registry of declared plain publishers backing the control-plane
+    /// path (`publish_raw`/`publish_json`/`delete`) — declared, never one-shot
+    /// `session.put`, so `@/…` keys are interned + routing-optimized too.
+    control: Arc<zensight_common::PublisherRegistry>,
 }
 
 impl Publisher {
@@ -43,11 +47,13 @@ impl Publisher {
             format,
             AdvancedPublisherConfig::default(),
         ));
+        let control = Arc::new(zensight_common::PublisherRegistry::new(session.clone()));
         Self {
             session,
             key_prefix,
             format,
             registry,
+            control,
         }
     }
 
@@ -120,19 +126,13 @@ impl Publisher {
     /// (reliable+block) so a firing/resolved event is never dropped on a lossy
     /// link; health/liveness use [`QosClass::HealthLiveness`] (drop-friendly).
     pub async fn publish_raw(&self, key: &str, payload: Vec<u8>, qos: QosClass) -> Result<()> {
-        self.session
-            .put(key, payload)
-            .congestion_control(qos.congestion_control())
-            .priority(qos.priority())
-            .express(qos.express())
-            .reliability(qos.reliability())
+        self.control
+            .put(key, payload, qos)
             .await
             .map_err(|e| SensorError::Publish {
                 key: key.to_string(),
                 message: e.to_string(),
-            })?;
-
-        Ok(())
+            })
     }
 
     /// Publish a JSON value to a control-plane key with an explicit QoS class.
@@ -150,18 +150,13 @@ impl Publisher {
     /// lifecycle-managed state such as resolved alerts so late subscribers don't
     /// see stale values. Alert tombstones must arrive, so pass [`QosClass::Alert`].
     pub async fn delete(&self, key: &str, qos: QosClass) -> Result<()> {
-        self.session
-            .delete(key)
-            .congestion_control(qos.congestion_control())
-            .priority(qos.priority())
-            .express(qos.express())
-            .reliability(qos.reliability())
+        self.control
+            .delete(key, qos)
             .await
             .map_err(|e| SensorError::Publish {
                 key: key.to_string(),
                 message: e.to_string(),
-            })?;
-        Ok(())
+            })
     }
 }
 

@@ -319,6 +319,7 @@ pub async fn load_artifact_kinds(session: Arc<Session>, key_prefix: String) -> V
 /// `duration_secs`, so a long capture does not time out mid-flight.
 pub async fn request_and_await_ready(
     session: Arc<Session>,
+    registry: Arc<zensight_common::PublisherRegistry>,
     key_prefix: String,
     kind: ArtifactKind,
     id: Ulid,
@@ -334,8 +335,12 @@ pub async fn request_and_await_ready(
         opts: Default::default(),
     };
     let payload = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
-    session
-        .put(artifact_request_key(&key_prefix), payload)
+    registry
+        .put(
+            &artifact_request_key(&key_prefix),
+            payload,
+            zensight_common::QosClass::Command,
+        )
         .await
         .map_err(|e| format!("request failed: {e}"))?;
 

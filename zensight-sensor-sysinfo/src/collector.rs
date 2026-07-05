@@ -21,7 +21,9 @@ pub struct SystemCollector {
     source: String,
     key_prefix: String,
     config: SysinfoConfig,
-    session: Arc<Session>,
+    /// Declared-publisher registry for the telemetry path (declare-on-first-use +
+    /// cache per key, drop QoS) — never a one-shot `session.put`.
+    registry: Arc<zensight_common::PublisherRegistry>,
     format: Format,
     /// Previous network stats for calculating rates
     prev_network: HashMap<String, (u64, u64)>,
@@ -62,7 +64,7 @@ impl SystemCollector {
             key_prefix: config.key_prefix.clone(),
             source,
             config,
-            session,
+            registry: Arc::new(zensight_common::PublisherRegistry::new(session)),
             format,
             prev_network: HashMap::new(),
             #[cfg(target_os = "linux")]
@@ -1467,7 +1469,11 @@ impl SystemCollector {
 
         match encode(&point, self.format) {
             Ok(payload) => {
-                if let Err(e) = self.session.put(&key, payload).await {
+                if let Err(e) = self
+                    .registry
+                    .put(&key, payload, zensight_common::QosClass::Telemetry)
+                    .await
+                {
                     warn!("Failed to publish '{}': {}", key, e);
                 }
             }

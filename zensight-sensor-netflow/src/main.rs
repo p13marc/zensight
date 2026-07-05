@@ -78,8 +78,9 @@ async fn main() -> Result<()> {
         "publish_stats": netflow_config.publish_stats,
     });
 
-    // Spawn the flow processing task
-    let session_clone = session.clone();
+    // Spawn the flow processing task. Telemetry goes through declared publishers
+    // (declare-on-first-use + cache per key, drop QoS), never a one-shot put.
+    let registry = zensight_common::PublisherRegistry::new(session.clone());
     let mut runner = runner;
     runner.spawn(async move {
         let mut flow_count: u64 = 0;
@@ -98,7 +99,10 @@ async fn main() -> Result<()> {
                         // Serialize and publish
                         match encode(&point, format) {
                             Ok(payload) => {
-                                if let Err(e) = session_clone.put(&key, payload).await {
+                                if let Err(e) = registry
+                                    .put(&key, payload, zensight_common::QosClass::Telemetry)
+                                    .await
+                                {
                                     tracing::error!("Failed to publish to {}: {}", key, e);
                                 } else {
                                     tracing::trace!(
