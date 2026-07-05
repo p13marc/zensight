@@ -152,6 +152,9 @@ pub struct ZenSight {
     last_log_fetch_ms: Option<i64>,
     /// An `@/query/events` fetch is in flight (#358) — never stack fetches.
     log_fetch_inflight: bool,
+    /// Whether the host identity details (facts + resolution group) are
+    /// expanded in the merged host nav bar (#350). Persisted.
+    identity_expanded: bool,
     /// Current view.
     current_view: CurrentView,
     /// Stale threshold in milliseconds (devices not updated within this time are marked unhealthy).
@@ -342,6 +345,7 @@ impl ZenSight {
             last_log_event_ms: None,
             last_log_fetch_ms: None,
             log_fetch_inflight: false,
+            identity_expanded: persistent.identity_expanded,
             current_view,
             stale_threshold_ms,
             demo_mode,
@@ -753,6 +757,14 @@ impl ZenSight {
             // Syslog filter messages
             Message::ToggleSyslogFilterPanel => {
                 self.syslog_filter.panel_open = !self.syslog_filter.panel_open;
+            }
+
+            Message::ToggleLogStatsPanel => {
+                self.syslog_filter.stats_open = !self.syslog_filter.stats_open;
+            }
+
+            Message::ToggleLogStatsAllUnits => {
+                self.syslog_filter.stats_all_units = !self.syslog_filter.stats_all_units;
             }
 
             Message::SetSyslogMinSeverity(severity) => {
@@ -1551,6 +1563,11 @@ impl ZenSight {
             Message::ToggleGroupByHost => {
                 self.settings.group_by_host = !self.settings.group_by_host;
                 self.save_group_by_host();
+            }
+
+            Message::ToggleIdentityDetails => {
+                self.identity_expanded = !self.identity_expanded;
+                self.save_identity_expanded();
             }
 
             Message::Tick => {
@@ -2776,6 +2793,15 @@ impl ZenSight {
         persistent.group_by_host = self.settings.group_by_host;
         if let Err(e) = persistent.save() {
             tracing::error!("Failed to save group-by-host preference: {}", e);
+        }
+    }
+
+    /// Persist the identity-details expansion state (#350).
+    fn save_identity_expanded(&self) {
+        let mut persistent = PersistentSettings::load();
+        persistent.identity_expanded = self.identity_expanded;
+        if let Err(e) = persistent.save() {
+            tracing::error!("Failed to save identity-expanded preference: {}", e);
         }
     }
 
@@ -4470,13 +4496,14 @@ impl ZenSight {
                             });
                         }
                     }
-                    crate::view::device::host_detail_view(
-                        device_state,
-                        &self.syslog_filter,
-                        &host_logs,
-                        &facets,
+                    crate::view::device::host_detail_view(crate::view::device::DeviceViewCtx {
+                        state: device_state,
+                        syslog_filter: &self.syslog_filter,
+                        host_logs: &host_logs,
+                        facets: &facets,
                         entity,
-                    )
+                        identity_expanded: self.identity_expanded,
+                    })
                 } else {
                     dashboard_view(
                         &self.dashboard,

@@ -900,6 +900,16 @@ pub enum Message {
     /// Toggle syslog filter panel visibility.
     ToggleSyslogFilterPanel,
 
+    /// Collapse/expand the "Log statistics" block on the logs facet (#350).
+    ToggleLogStatsPanel,
+
+    /// Toggle the by-unit list between top-3 and all units (#350).
+    ToggleLogStatsAllUnits,
+
+    /// Collapse/expand the host identity details (facts + resolution group) in
+    /// the merged host nav bar (#350). Persisted.
+    ToggleIdentityDetails,
+
     /// Set minimum severity filter (None = all severities).
     SetSyslogMinSeverity(Option<u8>),
 

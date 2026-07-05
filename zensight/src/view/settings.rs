@@ -71,6 +71,10 @@ pub struct PersistentSettings {
     /// (plain subscribers, local-store back-fill) for low-bandwidth links.
     #[serde(default)]
     pub link_profile: LinkProfile,
+    /// Whether the host identity details (facts + resolution group) are
+    /// expanded in the host nav bar (#350). Collapsed by default.
+    #[serde(default)]
+    pub identity_expanded: bool,
 }
 
 fn default_group_by_host() -> bool {
@@ -114,6 +118,7 @@ impl Default for PersistentSettings {
             group_by_host: default_group_by_host(),
             subscription_scope: Vec::new(),
             link_profile: LinkProfile::default(),
+            identity_expanded: false,
         }
     }
 }
@@ -223,6 +228,7 @@ impl PersistentSettings {
             group_by_host: state.group_by_host,
             subscription_scope: state.scope_entries(),
             link_profile: state.link_profile,
+            identity_expanded: false,
         }
     }
 }
@@ -922,6 +928,7 @@ mod tests {
             group_by_host: true,
             subscription_scope: vec!["zensight/netring/**".to_string()],
             link_profile: LinkProfile::Constrained,
+            identity_expanded: true,
         };
 
         // Serialize to JSON
@@ -962,6 +969,7 @@ mod tests {
                 "zensight/sysinfo/**".to_string(),
             ],
             link_profile: LinkProfile::Constrained,
+            identity_expanded: false,
         };
 
         // Convert to UI state

@@ -707,82 +707,68 @@ fn facet_tab_strip(facets: &[FacetTab]) -> Option<Element<'static, Message>> {
     Some(container(tabs).padding([8, 20]).into())
 }
 
-/// Render the host-detail view (#133): the facet tab strip over the active facet's
-/// device detail. The protocol is a facet of the host, so switching tabs re-opens a
-/// sibling facet (`SelectDevice`). Falls back to the bare facet view for a host with
-/// a single sensor.
-pub fn host_detail_view<'a>(
+/// Everything the host-detail screen needs beyond [`DeviceDetailState`] (#350):
+/// one bundle so later additions (e.g. artifact context, #351) append a field
+/// instead of growing every signature on the path.
+/// `'a` is the app-state lifetime the returned element may borrow from;
+/// `'b` covers view-local slices (facets, filtered logs, entity lookup) that
+/// are cloned into the element rather than borrowed.
+pub struct DeviceViewCtx<'a, 'b> {
+    pub state: &'a DeviceDetailState,
+    pub syslog_filter: &'a specialized::SyslogFilterState,
+    pub host_logs: &'b [specialized::SyslogMessage],
+    pub facets: &'b [FacetTab],
+    pub entity: Option<&'b HostEntity>,
+    /// Whether the identity details (facts + resolution group) are expanded.
+    /// Persisted app-side (`PersistentSettings::identity_expanded`).
+    pub identity_expanded: bool,
+}
+
+/// Render the host-detail view (#133, single-bar since #350): ONE merged nav
+/// bar (Back / prev / next / identity summary / exports) over the facet tab
+/// strip over the active facet's nav-less content. The old layout stacked two
+/// header layers (an always-expanded identity panel + the device nav header)
+/// before any content — the identity facts + resolution group now live behind
+/// a ▾/▸ toggle in the bar.
+pub fn host_detail_view<'a>(ctx: DeviceViewCtx<'a, '_>) -> Element<'a, Message> {
+    let identity = ctx.entity.map(|e| (e, ctx.identity_expanded));
+    let mut col = column![container(render_header(ctx.state, identity)).padding([12, 20]),];
+    if ctx.identity_expanded
+        && let Some(entity) = ctx.entity
+    {
+        col = col.push(container(entity_identity_details(entity)).padding([0, 20]));
+    }
+    if let Some(strip) = facet_tab_strip(ctx.facets) {
+        col = col.push(strip);
+    }
+    col = col.push(rule::horizontal(1));
+    col = col.push(device_content(ctx.state, ctx.syslog_filter, ctx.host_logs));
+    col.width(Length::Fill).height(Length::Fill).into()
+}
+
+/// The active facet's body WITHOUT navigation chrome — the host shell above
+/// already renders the single merged bar (#350).
+fn device_content<'a>(
     state: &'a DeviceDetailState,
     syslog_filter: &'a specialized::SyslogFilterState,
     host_logs: &[specialized::SyslogMessage],
-    facets: &[FacetTab],
-    entity: Option<&HostEntity>,
 ) -> Element<'a, Message> {
-    let inner = device_view_with_syslog_filter(state, syslog_filter, host_logs);
-    let strip = facet_tab_strip(facets);
-    let identity = entity.map(entity_identity_panel);
-
-    match (identity, strip) {
-        (Some(id_panel), Some(strip)) => column![id_panel, strip, rule::horizontal(1), inner]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into(),
-        (Some(id_panel), None) => column![id_panel, rule::horizontal(1), inner]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into(),
-        (None, Some(strip)) => column![strip, rule::horizontal(1), inner]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into(),
-        (None, None) => inner,
+    if state.device_id.protocol == Protocol::Logs {
+        return specialized::syslog_view(state, syslog_filter, host_logs);
     }
+    if let Some(view) = specialized::specialized_view(state) {
+        return view;
+    }
+    generic_device_body(state)
 }
 
-/// The entity landing-page identity panel (#306): an identity header
-/// (hostname/fqdn, short `entity_id` chip, IPs/MACs, vendor/platform, staleness)
-/// over a "merged from N sources" resolution drill-down that lists each
-/// [`MemberClaim`] (`sensor/source · rule · confidence · last_seen`) — the
-/// wrong-merge diagnosis affordance.
-fn entity_identity_panel(entity: &HostEntity) -> Element<'static, Message> {
-    let name = entity
-        .hostname
-        .clone()
-        .or_else(|| entity.fqdn.clone())
-        .unwrap_or_else(|| entity.entity_id.clone());
+/// The expanded identity details (#306/#350): identity facts (IPs / MACs /
+/// vendor / platform / names) over the "Resolution group" drill-down that lists
+/// each [`MemberClaim`] (`sensor/source · rule · confidence`) — the wrong-merge
+/// diagnosis affordance. Rendered under the nav bar only when expanded.
+fn entity_identity_details(entity: &HostEntity) -> Element<'static, Message> {
+    let mut col = column![].spacing(6);
 
-    // Short entity-id chip.
-    let id_chip = container(text(entity.entity_id.clone()).size(11))
-        .padding([2, 8])
-        .style(container::rounded_box);
-
-    // Staleness indicator vs the correlator's re-emit cadence.
-    let now = current_timestamp();
-    let stale = now - entity.last_updated > crate::entity::ENTITY_STALE_MS;
-    let fresh_label = if stale { "stale" } else { "live" };
-    let fresh_color = if stale {
-        crate::view::theme::STATUS_UNKNOWN
-    } else {
-        crate::view::theme::STATUS_ONLINE
-    };
-    let freshness = text(fresh_label)
-        .size(11)
-        .style(move |_: &Theme| text::Style {
-            color: Some(fresh_color),
-        });
-
-    let header = row![
-        text(name).size(20),
-        id_chip,
-        freshness,
-        text(format!("merged from {} sources", entity.members.len())).size(12),
-    ]
-    .spacing(12)
-    .align_y(Alignment::Center);
-
-    let mut col = column![header].spacing(6);
-
-    // Identity facts row (IPs, MACs, vendor/platform, names).
     let mut facts: Vec<String> = Vec::new();
     if !entity.ips.is_empty() {
         facts.push(format!("IPs: {}", entity.ips.join(", ")));
@@ -819,7 +805,55 @@ fn entity_identity_panel(entity: &HostEntity) -> Element<'static, Message> {
         col = col.push(row);
     }
 
-    container(col).padding([12, 20]).into()
+    container(col).padding([4, 0]).into()
+}
+
+/// The compact identity summary fragment for the nav bar (#350): entity-id
+/// chip, live/stale freshness, "N sources · M IPs", and the ▾/▸ details toggle.
+fn entity_identity_summary(entity: &HostEntity, expanded: bool) -> Element<'static, Message> {
+    // Short entity-id chip.
+    let id_chip = container(text(entity.entity_id.clone()).size(11))
+        .padding([2, 8])
+        .style(container::rounded_box);
+
+    // Staleness indicator vs the correlator's re-emit cadence.
+    let now = current_timestamp();
+    let stale = now - entity.last_updated > crate::entity::ENTITY_STALE_MS;
+    let fresh_label = if stale { "stale" } else { "live" };
+    let fresh_color = if stale {
+        crate::view::theme::STATUS_UNKNOWN
+    } else {
+        crate::view::theme::STATUS_ONLINE
+    };
+    let freshness = text(fresh_label)
+        .size(11)
+        .style(move |_: &Theme| text::Style {
+            color: Some(fresh_color),
+        });
+
+    let summary = text(format!(
+        "{} sources · {} IPs",
+        entity.members.len(),
+        entity.ips.len()
+    ))
+    .size(12);
+
+    let toggle = button(
+        row![
+            text(if expanded { "▾" } else { "▸" }).size(11),
+            text("identity").size(11),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center),
+    )
+    .on_press(Message::ToggleIdentityDetails)
+    .padding([2, 8])
+    .style(iced::widget::button::text);
+
+    row![id_chip, freshness, summary, toggle]
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into()
 }
 
 pub fn device_view(state: &DeviceDetailState) -> Element<'_, Message> {
@@ -842,7 +876,7 @@ fn with_device_nav<'a>(
     content: Element<'a, Message>,
 ) -> Element<'a, Message> {
     column![
-        container(render_header(state)).padding([12, 20]),
+        container(render_header(state, None)).padding([12, 20]),
         rule::horizontal(1),
         content,
     ]
@@ -877,8 +911,21 @@ pub fn device_view_with_syslog_filter<'a>(
 
 /// Render the generic device detail view (fallback for protocols without specialized views).
 pub fn generic_device_view(state: &DeviceDetailState) -> Element<'_, Message> {
-    let header = render_header(state);
+    let header = render_header(state, None);
 
+    let content = column![header, rule::horizontal(1), generic_device_body(state)]
+        .spacing(10)
+        .padding(20);
+
+    container(content)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// The generic view's body (chart + metrics list) without navigation chrome —
+/// used directly by the host shell, which owns the single merged bar (#350).
+fn generic_device_body(state: &DeviceDetailState) -> Element<'_, Message> {
     // Show chart if a metric is selected (single) or in comparison mode (multi)
     let chart_section = if let Some(ref metric_name) = state.selected_metric {
         render_chart_section(state, Some(metric_name))
@@ -890,18 +937,19 @@ pub fn generic_device_view(state: &DeviceDetailState) -> Element<'_, Message> {
 
     let metrics = render_metrics_list(state);
 
-    let content = column![header, rule::horizontal(1), chart_section, metrics]
+    column![chart_section, metrics]
         .spacing(10)
-        .padding(20);
-
-    container(content)
-        .width(Length::Fill)
-        .height(Length::Fill)
+        .padding(20)
         .into()
 }
 
-/// Render the header with back button and device info.
-fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
+/// Render the shared nav header: Back / prev / next / protocol icon / name /
+/// metric count / exports — plus, on the host shell, the compact identity
+/// summary with its ▾/▸ details toggle (#350).
+fn render_header<'a>(
+    state: &'a DeviceDetailState,
+    identity: Option<(&HostEntity, bool)>,
+) -> Element<'a, Message> {
     let back_button = button(
         row![icons::arrow_left(IconSize::Medium), text("Back").size(14)]
             .spacing(6)
@@ -922,7 +970,14 @@ fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
         .style(iced::widget::button::secondary);
 
     let protocol_icon = icons::protocol_icon(state.device_id.protocol, IconSize::Large);
-    let device_name = text(&state.device_id.source).size(24);
+    // On the host shell, prefer the entity's resolved name over the raw
+    // per-sensor source id (#350).
+    let display_name: &str = identity
+        .and_then(|(e, _)| e.hostname.as_deref().or(e.fqdn.as_deref()))
+        .unwrap_or(&state.device_id.source);
+    let device_name = text(display_name.to_string()).size(24);
+    let identity_summary: Option<Element<'static, Message>> =
+        identity.map(|(entity, expanded)| entity_identity_summary(entity, expanded));
     let metric_count = text(format!("{} metrics", state.metrics.len())).size(14);
 
     let csv_button = button(
@@ -941,19 +996,22 @@ fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
     .on_press(Message::ExportToJson)
     .style(iced::widget::button::secondary);
 
-    row![
+    let mut bar = row![
         back_button,
         prev_button,
         next_button,
         protocol_icon,
         device_name,
-        metric_count,
-        csv_button,
-        json_button
     ]
     .spacing(15)
-    .align_y(Alignment::Center)
-    .into()
+    .align_y(Alignment::Center);
+    if let Some(summary) = identity_summary {
+        bar = bar.push(summary);
+    }
+    bar.push(metric_count)
+        .push(csv_button)
+        .push(json_button)
+        .into()
 }
 
 /// Render the chart section.

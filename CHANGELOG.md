@@ -28,6 +28,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Drill-down vertical-space redesign (#350)**: drilling into a machine now
+  leads with content instead of stacked always-expanded panels.
+  - The host view's two header layers (identity panel + device nav header) are
+    merged into **one nav bar**: Back / prev / next / protocol icon / entity
+    name / compact identity summary (`entity-id chip · live/stale · N sources ·
+    M IPs`) / metric count / exports. The identity facts + resolution-group
+    drill-down collapse behind a ▾/▸ "identity" toggle (persisted,
+    collapsed by default); expanding still shows every fact and member claim.
+  - The syslog drill-down no longer renders its own second Back button /
+    duplicate header — the facet body is a slim toolbar (message count +
+    filter toggle) under the shared bar.
+  - The logs facet's statistics (severity summary + rollups) sit behind one
+    collapsible **"Log statistics"** card (default closed); the rollup is a
+    compact KPI tile row (errors / warnings / units-in-failure / journald
+    throughput, via the shared `kit::metric_tile`) and the by-unit list shows
+    top-3 with a "Show all N" affordance instead of always 10.
+
 - **Frontend `link_profile` + subscription scope (#364)**: the GUI Settings →
   Zenoh section gains a *Link profile* picker (`standard` | `constrained`) and a
   *Subscription scope* field (comma-separated key expressions replacing the

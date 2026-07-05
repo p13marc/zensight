@@ -15,7 +15,7 @@ use zensight::message::{DeviceId, Message};
 use zensight::mock;
 use zensight::view::dashboard::{ConnectionState, DashboardState, DeviceState, dashboard_view};
 use zensight::view::device::{
-    DeviceDetailState, FacetTab, device_view_with_syslog_filter, host_detail_view,
+    DeviceDetailState, DeviceViewCtx, FacetTab, device_view_with_syslog_filter, host_detail_view,
 };
 use zensight::view::groups::GroupsState;
 use zensight::view::overview::OverviewState;
@@ -415,7 +415,14 @@ fn test_host_detail_facet_tabs() {
     ];
 
     let syslog_filter = SyslogFilterState::default();
-    let mut ui = simulator(host_detail_view(&state, &syslog_filter, &[], &facets, None));
+    let mut ui = simulator(host_detail_view(DeviceViewCtx {
+        state: &state,
+        syslog_filter: &syslog_filter,
+        host_logs: &[],
+        facets: &facets,
+        entity: None,
+        identity_expanded: false,
+    }));
 
     // Both sensor facets are shown as tabs.
     assert!(ui.find("Facets").is_ok());
@@ -453,7 +460,14 @@ fn test_host_detail_single_facet_has_no_strip() {
     }];
 
     let syslog_filter = SyslogFilterState::default();
-    let mut ui = simulator(host_detail_view(&state, &syslog_filter, &[], &facets, None));
+    let mut ui = simulator(host_detail_view(DeviceViewCtx {
+        state: &state,
+        syslog_filter: &syslog_filter,
+        host_logs: &[],
+        facets: &facets,
+        entity: None,
+        identity_expanded: false,
+    }));
 
     // No "Facets" strip for a lone sensor; the detail still renders.
     assert!(ui.find("Facets").is_err());
@@ -3035,11 +3049,79 @@ fn test_logs_rollup_panel_renders() {
         state.update(TelemetryPoint::new("host01", Protocol::Logs, m, v));
     }
 
+    // Collapsed by default (#350): the header renders, the rollup detail
+    // doesn't — the log stream is on screen without scrolling past stats.
     let filter = SyslogFilterState::default();
     let mut ui = simulator(syslog_event_view(&state, &filter, &[]));
-    assert!(ui.find("Log Rollups").is_ok());
+    assert!(ui.find("Log statistics").is_ok());
+    assert!(ui.find("errors (total)").is_err());
+    // The caret toggle dispatches the panel message.
+    let _ = ui.click("\u{25b8}");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::ToggleLogStatsPanel))
+    );
+
+    // Expanded: KPI tiles + the top-3 by-unit list appear.
+    let open = SyslogFilterState {
+        stats_open: true,
+        ..SyslogFilterState::default()
+    };
+    let mut ui = simulator(syslog_event_view(&state, &open, &[]));
     assert!(ui.find("errors (total)").is_ok());
     assert!(ui.find("by unit (top)").is_ok());
+}
+
+/// #350: with more than 3 noisy units the rollup shows top-3 plus a
+/// "Show all N" affordance that dispatches the expand message.
+#[test]
+fn test_logs_rollup_show_all_units() {
+    use zensight::view::device::DeviceDetailState;
+    use zensight::view::specialized::{SyslogFilterState, syslog_event_view};
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    let device_id = DeviceId::new(Protocol::Logs, "host01");
+    let mut state = DeviceDetailState::new(device_id);
+    for (unit, n) in [
+        ("nginx.service", 900),
+        ("sshd.service", 800),
+        ("cron.service", 700),
+        ("kernel", 600),
+        ("systemd-journald.service", 500),
+    ] {
+        state.update(TelemetryPoint::new(
+            "host01",
+            Protocol::Logs,
+            format!("logs/by_unit/{unit}/messages_total"),
+            TelemetryValue::Counter(n),
+        ));
+    }
+
+    let open = SyslogFilterState {
+        stats_open: true,
+        ..SyslogFilterState::default()
+    };
+    let mut ui = simulator(syslog_event_view(&state, &open, &[]));
+    // Top-3 shown, the 4th is behind "Show all".
+    assert!(ui.find("  nginx.service").is_ok());
+    assert!(ui.find("  kernel").is_err());
+    let _ = ui.click("Show all 5");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::ToggleLogStatsAllUnits))
+    );
+
+    // With the flag set, every unit renders and the toggle collapses back.
+    let all = SyslogFilterState {
+        stats_open: true,
+        stats_all_units: true,
+        ..SyslogFilterState::default()
+    };
+    let mut ui = simulator(syslog_event_view(&state, &all, &[]));
+    assert!(ui.find("  kernel").is_ok());
+    assert!(ui.find("Show top 3").is_ok());
 }
 
 /// The Logs view shows an explicit empty state when no logs have arrived yet
@@ -3549,13 +3631,14 @@ fn test_host_detail_resolution_group() {
     );
 
     let syslog_filter = SyslogFilterState::default();
-    let mut ui = simulator(host_detail_view(
-        &detail,
-        &syslog_filter,
-        &[],
-        &facets,
-        Some(&entity),
-    ));
+    let mut ui = simulator(host_detail_view(DeviceViewCtx {
+        state: &detail,
+        syslog_filter: &syslog_filter,
+        host_logs: &[],
+        facets: &facets,
+        entity: Some(&entity),
+        identity_expanded: true,
+    }));
 
     assert!(ui.find("Resolution group").is_ok());
     assert!(ui.find("web-01").is_ok());
@@ -3605,17 +3688,105 @@ fn test_host_detail_entity_facet_tabs() {
     );
 
     let syslog_filter = SyslogFilterState::default();
-    let mut ui = simulator(host_detail_view(
-        &detail,
-        &syslog_filter,
-        &[],
-        &facets,
-        Some(&entity),
-    ));
+    let mut ui = simulator(host_detail_view(DeviceViewCtx {
+        state: &detail,
+        syslog_filter: &syslog_filter,
+        host_logs: &[],
+        facets: &facets,
+        entity: Some(&entity),
+        identity_expanded: true,
+    }));
 
     assert!(ui.find("Facets").is_ok());
     assert!(ui.find("sysinfo").is_ok());
     assert!(ui.find("netlink").is_ok());
+}
+
+/// #350: the identity details are collapsed by default — one summary line in
+/// the nav bar, no fact/member rows — and the toggle dispatches
+/// `ToggleIdentityDetails`. Expanding shows everything (no data loss).
+#[test]
+fn test_host_identity_collapsed_by_default() {
+    let id = DeviceId {
+        protocol: Protocol::Sysinfo,
+        source: "server01".to_string(),
+    };
+    let mut detail = DeviceDetailState::new(id.clone());
+    for point in mock::sysinfo::host("server01") {
+        detail.update(point);
+    }
+    let facets = vec![FacetTab {
+        id,
+        protocol: Protocol::Sysinfo,
+        status: zensight_common::DeviceStatus::Online,
+        active: true,
+    }];
+    let entity = test_entity(
+        "h_web01",
+        "web-01",
+        &[("sysinfo", "server01"), ("netlink", "server01")],
+    );
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(host_detail_view(DeviceViewCtx {
+        state: &detail,
+        syslog_filter: &syslog_filter,
+        host_logs: &[],
+        facets: &facets,
+        entity: Some(&entity),
+        identity_expanded: false,
+    }));
+
+    // Summary present, details hidden.
+    assert!(ui.find("web-01").is_ok());
+    assert!(ui.find("2 sources \u{b7} 1 IPs").is_ok());
+    assert!(ui.find("Resolution group").is_err());
+
+    // The identity toggle dispatches the (persisted) expand message.
+    let _ = ui.click("identity");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::ToggleIdentityDetails))
+    );
+}
+
+/// #350: the syslog drill-down renders exactly one navigation layer — the
+/// facet body carries no Back button of its own (the shared nav bar owns it).
+#[test]
+fn test_syslog_drilldown_single_back() {
+    use zensight::view::specialized::syslog_event_view;
+
+    let id = DeviceId {
+        protocol: Protocol::Logs,
+        source: "server01".to_string(),
+    };
+    let detail = DeviceDetailState::new(id.clone());
+    let syslog_filter = SyslogFilterState::default();
+
+    // The facet body alone: no Back button.
+    let mut body = simulator(syslog_event_view(&detail, &syslog_filter, &[]));
+    assert!(body.find("Back").is_err());
+
+    // The host shell around it: exactly one nav layer with the Back button.
+    let facets = vec![FacetTab {
+        id,
+        protocol: Protocol::Logs,
+        status: zensight_common::DeviceStatus::Online,
+        active: true,
+    }];
+    let mut ui = simulator(host_detail_view(DeviceViewCtx {
+        state: &detail,
+        syslog_filter: &syslog_filter,
+        host_logs: &[],
+        facets: &facets,
+        entity: None,
+        identity_expanded: false,
+    }));
+    assert!(ui.find("Back").is_ok());
+    let _ = ui.click("Back");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(msgs.iter().any(|m| matches!(m, Message::ClearSelection)));
 }
 
 // ---------------------------------------------------------------------------
