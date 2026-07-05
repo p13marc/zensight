@@ -220,12 +220,15 @@ async fn main() -> Result<()> {
     // runs when the asset inventory is collected and the feed is enabled.
     if cfg.evidence.enabled && cfg.collect.assets {
         use zensight_sensor_core::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
-        let ev_registry = Arc::new(AdvancedPublisherRegistry::new(
-            runner.session().clone(),
-            key_prefix.clone(),
-            format,
-            AdvancedPublisherConfig::cache_only(1),
-        ));
+        let ev_registry = Arc::new(
+            AdvancedPublisherRegistry::new(
+                runner.session().clone(),
+                key_prefix.clone(),
+                format,
+                AdvancedPublisherConfig::cache_only(1),
+            )
+            .with_qos(zensight_common::QosClass::Evidence),
+        );
         runner.spawn(zensight_sensor_netring::evidence::run_asset_evidence(
             channels.assets.clone(),
             channels.asset_dirty.clone(),
@@ -241,12 +244,15 @@ async fn main() -> Result<()> {
         && let Some(name_obs_rx) = channels.name_obs_rx.take()
     {
         use zensight_sensor_core::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
-        let name_registry = Arc::new(AdvancedPublisherRegistry::new(
-            runner.session().clone(),
-            key_prefix.clone(),
-            format,
-            AdvancedPublisherConfig::cache_only(1),
-        ));
+        let name_registry = Arc::new(
+            AdvancedPublisherRegistry::new(
+                runner.session().clone(),
+                key_prefix.clone(),
+                format,
+                AdvancedPublisherConfig::cache_only(1),
+            )
+            .with_qos(zensight_common::QosClass::Evidence),
+        );
         runner.spawn(zensight_sensor_netring::evidence::run_name_evidence(
             name_obs_rx,
             name_registry,

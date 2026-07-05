@@ -166,7 +166,10 @@ impl AlertReporter {
         for alert in payloads {
             self.publish_state(&alert).await?;
             self.publisher
-                .delete(&self.alert_key_expr(&alert.alert_key()))
+                .delete(
+                    &self.alert_key_expr(&alert.alert_key()),
+                    zensight_common::QosClass::Alert,
+                )
                 .await?;
         }
         Ok(())
@@ -217,7 +220,10 @@ impl AlertReporter {
                 for alert in alerts {
                     self.publish_state(&alert).await?;
                     self.publisher
-                        .delete(&self.alert_key_expr(&alert.alert_key()))
+                        .delete(
+                            &self.alert_key_expr(&alert.alert_key()),
+                            zensight_common::QosClass::Alert,
+                        )
                         .await?;
                 }
                 Ok(())
@@ -229,7 +235,9 @@ impl AlertReporter {
         let key = self.alert_key_expr(&alert.alert_key());
         let payload = encode(alert, self.format)
             .map_err(|e| crate::error::SensorError::Serialization(e.to_string()))?;
-        self.publisher.publish_raw(&key, payload).await
+        self.publisher
+            .publish_raw(&key, payload, zensight_common::QosClass::Alert)
+            .await
     }
 }
 
