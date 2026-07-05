@@ -12,6 +12,10 @@ use crate::monitor::{MonitorChannels, dns_snapshot, to_view};
 
 /// Drain telemetry points and publish them. Also emits periodic flow aggregates
 /// from the shared counters.
+///
+/// `capture_disk` (#327) is the anomaly-triggered capture hook: when armed, a
+/// firing anomaly that passes the configured severity/kind gate fires the
+/// capture-to-disk trigger so the packets around the anomaly land in a pcap.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_drains(
     mut channels: MonitorChannels,
@@ -22,6 +26,10 @@ pub async fn run_drains(
     reporter: Arc<AlertReporter>,
     flow_period_secs: u64,
     health: Arc<zensight_sensor_core::SensorHealth>,
+    capture_disk: Option<(
+        crate::disk::CaptureDiskHandle,
+        crate::config::CaptureToDiskConfig,
+    )>,
 ) {
     // This sensor monitors one capture host (itself).
     health.set_devices_total(1);
@@ -254,6 +262,7 @@ pub async fn run_drains(
                 if let Some(a) = anomaly {
                     let view = to_view(&a);
                     *anomaly_counts.entry(view.kind.clone()).or_default() += 1;
+                    fire_capture_trigger(&capture_disk, &view.kind, view.severity);
                     let alert = map::anomaly_alert(&sensor_id, &view);
                     if let Err(e) = reporter.observe(alert, Some(Duration::ZERO)).await {
                         tracing::warn!(error = %e, "failed to publish anomaly alert");
@@ -266,6 +275,9 @@ pub async fn run_drains(
             alert = channels.alerts.recv() => {
                 if let Some(alert) = alert {
                     count_anomaly_alert(&mut anomaly_counts, &alert);
+                    if alert.kind == zensight_common::AlertKind::Anomaly && alert.is_firing() {
+                        fire_capture_trigger(&capture_disk, &alert.rule, alert.severity);
+                    }
                     if let Err(e) = drain_sensor_alert(&reporter, alert).await {
                         tracing::warn!(error = %e, "failed to publish sensor alert");
                     }
@@ -289,6 +301,24 @@ pub async fn run_drains(
                 health.record_device_success(&sensor_id);
             }
         }
+    }
+}
+
+/// Fire the capture-to-disk trigger for a firing anomaly that passes the
+/// configured severity/kind gate (#327). Cheap when unarmed: the handle itself
+/// no-ops unless the live mode is `triggered`.
+fn fire_capture_trigger(
+    capture_disk: &Option<(
+        crate::disk::CaptureDiskHandle,
+        crate::config::CaptureToDiskConfig,
+    )>,
+    kind: &str,
+    severity: zensight_common::AlertSeverity,
+) {
+    if let Some((handle, gate)) = capture_disk
+        && crate::disk::should_trigger(gate, kind, severity)
+    {
+        handle.trigger(kind, None);
     }
 }
 

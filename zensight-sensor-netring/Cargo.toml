@@ -73,13 +73,20 @@ arc-swap = "1"
 zstd = { workspace = true }
 # Object-safe async `ArtifactProducer` impl (the capture producer, #333).
 async-trait = { workspace = true }
+# Triggered-capture artifact serving (#327): the capture-to-disk engine registers
+# finished trigger files on its own Tier-1 `BlobServer` (same `@/artifact/blob`
+# prefix as the artifact channel) with TTL'd manifests.
+zenoh-blob = { workspace = true }
+# Artifact ids for triggered-capture blobs (#327).
+ulid = { workspace = true }
 
 [dev-dependencies]
 # Read produced captures back in the tap-loop unit tests (pin the pcap magic +
 # record count — the "wireshark-openable" check). Matches netring's pcap_file.
 pcap-file = "2"
-# `CancelToken` for building a `ProduceCtx` in capture unit tests.
-zenoh-blob = { workspace = true }
+# Paused-clock tests for the capture-to-disk engine (#327): advance past the
+# post-trigger deadline without sleeping wall-clock time.
+tokio = { workspace = true, features = ["full", "test-util"] }
 
 # =============================================================================
 # Package metadata for cargo-deb

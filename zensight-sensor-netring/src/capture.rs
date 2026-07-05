@@ -305,8 +305,8 @@ async fn capture_to_file(
 }
 
 /// zstd-compress `src` → `dst` (level 3), returning `dst`. Blocking; call under
-/// `spawn_blocking`.
-fn zstd_compress(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
+/// `spawn_blocking`. Shared with the capture-to-disk engine (#327).
+pub(crate) fn zstd_compress(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
     use std::fs::File;
     use std::io::BufReader;
     let reader = BufReader::new(File::open(src)?);

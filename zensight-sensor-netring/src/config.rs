@@ -90,14 +90,129 @@ pub struct NetringConfig {
     pub capture: CaptureConfig,
 }
 
-/// On-demand / triggered packet-capture config (#333). Nested so #327's
-/// `capture.triggered` can slot in later without disturbing the flat
-/// `capture_focus` filter section.
+/// On-demand / triggered packet-capture config (#333/#327). Nested so the
+/// capture surfaces stay together without disturbing the flat `capture_focus`
+/// filter section.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CaptureConfig {
     /// Operator-triggered capture over the `@/artifact` channel.
     #[serde(default)]
     pub on_demand: CaptureOnDemandConfig,
+    /// Continuous capture-to-disk: rotating spool or anomaly-triggered
+    /// pre-trigger ring (#327).
+    #[serde(default)]
+    pub to_disk: CaptureToDiskConfig,
+}
+
+/// Capture-to-disk mode (#327).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CaptureDiskMode {
+    /// No capture-to-disk (default): no packet subscription, zero cost.
+    #[default]
+    Off,
+    /// Continuously spool rotating pcap files to `dir` (size/duration rotation,
+    /// file-count / total-byte retention). Local forensics spool; files are
+    /// listed on `@/query/captures` but not served over the bus.
+    Rotating,
+    /// Buffer recent packets in a bounded in-memory ring; when an anomaly at or
+    /// above `trigger_min_severity` fires (or `capture_now` is commanded), flush
+    /// the lead-up plus `post_trigger_secs` of aftermath to a pcap file and
+    /// serve it as a TTL'd Tier-1 blob artifact.
+    Triggered,
+}
+
+fn d_disk_ring_bytes() -> u64 {
+    32 * 1024 * 1024
+}
+fn d_disk_max_file_bytes() -> u64 {
+    64 * 1024 * 1024
+}
+fn d_disk_max_files() -> usize {
+    16
+}
+fn d_disk_max_total_bytes() -> u64 {
+    1024 * 1024 * 1024
+}
+fn d_disk_post_trigger() -> u64 {
+    10
+}
+fn d_disk_artifact_ttl() -> u64 {
+    3600
+}
+
+/// Capture-to-disk config (#327). The pre-trigger ring buffers raw frames in
+/// memory — `ring_bytes` is a hard RSS cost while triggered mode is armed, so
+/// the default is a conservative 32 MiB.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureToDiskConfig {
+    /// `off` (default) | `rotating` | `triggered`.
+    #[serde(default)]
+    pub mode: CaptureDiskMode,
+    /// Directory the capture files are written to. Required when `mode` is not
+    /// `off`; must be writable by the sensor (systemd: `ReadWritePaths=`).
+    #[serde(default)]
+    pub dir: Option<String>,
+    /// Pre-trigger ring capacity, bytes of buffered packet payload (triggered
+    /// mode only). Default 32 MiB.
+    #[serde(default = "d_disk_ring_bytes")]
+    pub ring_bytes: u64,
+    /// Per-file byte cap: rotation trigger in `rotating` mode, hard stop
+    /// (truncation) for one triggered capture. Default 64 MiB.
+    #[serde(default = "d_disk_max_file_bytes")]
+    pub max_file_bytes: u64,
+    /// Rotate the current spool file after this many seconds (`rotating` mode);
+    /// `0` (default) disables duration-based rotation.
+    #[serde(default)]
+    pub rotate_secs: u64,
+    /// Retention: max capture files kept on disk (oldest evicted). Default 16.
+    #[serde(default = "d_disk_max_files")]
+    pub max_files: usize,
+    /// Retention: max total bytes kept on disk (oldest evicted). Default 1 GiB.
+    #[serde(default = "d_disk_max_total_bytes")]
+    pub max_total_bytes: u64,
+    /// Per-packet snap length, bytes; `0` (default) keeps full frames.
+    #[serde(default)]
+    pub snaplen: u32,
+    /// Fire the trigger only for anomalies at/above this severity (triggered
+    /// mode). Default `warning`.
+    #[serde(default)]
+    pub trigger_min_severity: zensight_common::AlertSeverity,
+    /// Detector-slug allowlist for the trigger (e.g. `["RitaBeacon",
+    /// "DataExfiltration"]`); empty (default) = every anomaly kind can fire.
+    #[serde(default)]
+    pub trigger_kinds: Vec<String>,
+    /// How long to keep recording after the trigger fires, seconds. Default 10.
+    #[serde(default = "d_disk_post_trigger")]
+    pub post_trigger_secs: u64,
+    /// zstd-compress finished triggered captures before serving. Default true.
+    #[serde(default = "default_true")]
+    pub compress: bool,
+    /// How long a finished triggered capture is served as a blob artifact
+    /// before it is unregistered (the file itself stays until retention evicts
+    /// it). Default 3600.
+    #[serde(default = "d_disk_artifact_ttl")]
+    pub artifact_ttl_secs: u64,
+}
+
+impl Default for CaptureToDiskConfig {
+    fn default() -> Self {
+        Self {
+            mode: CaptureDiskMode::Off,
+            dir: None,
+            ring_bytes: d_disk_ring_bytes(),
+            max_file_bytes: d_disk_max_file_bytes(),
+            rotate_secs: 0,
+            max_files: d_disk_max_files(),
+            max_total_bytes: d_disk_max_total_bytes(),
+            snaplen: 0,
+            trigger_min_severity: zensight_common::AlertSeverity::Warning,
+            trigger_kinds: Vec::new(),
+            post_trigger_secs: d_disk_post_trigger(),
+            compress: true,
+            artifact_ttl_secs: d_disk_artifact_ttl(),
+        }
+    }
 }
 
 fn d_capture_max_duration() -> u32 {
@@ -775,6 +890,14 @@ impl SensorConfig for NetringSensorConfig {
                 "netring: configure at least one interface, or set `pcap` for replay",
             ));
         }
+        let disk = &self.netring.capture.to_disk;
+        if disk.mode != CaptureDiskMode::Off
+            && disk.dir.as_deref().is_none_or(|d| d.trim().is_empty())
+        {
+            return Err(zensight_sensor_core::SensorError::config(
+                "netring: capture.to_disk.dir is required when capture.to_disk.mode is not \"off\"",
+            ));
+        }
         Ok(())
     }
 }
@@ -855,5 +978,58 @@ mod tests {
         let cfg: NetringSensorConfig =
             json5::from_str(r#"{ netring: { pcap: "/tmp/x.pcap" } }"#).unwrap();
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn capture_to_disk_defaults_off_with_documented_caps() {
+        let cfg: NetringSensorConfig =
+            json5::from_str(r#"{ netring: { interfaces: ["eth0"], capture: { to_disk: {} } } }"#)
+                .unwrap();
+        let d = &cfg.netring.capture.to_disk;
+        assert_eq!(d.mode, CaptureDiskMode::Off);
+        assert_eq!(d.ring_bytes, 32 * 1024 * 1024);
+        assert_eq!(d.max_file_bytes, 64 * 1024 * 1024);
+        assert_eq!(d.max_files, 16);
+        assert_eq!(d.max_total_bytes, 1024 * 1024 * 1024);
+        assert_eq!(d.post_trigger_secs, 10);
+        assert_eq!(d.artifact_ttl_secs, 3600);
+        assert!(d.compress);
+        assert!(d.trigger_kinds.is_empty());
+        assert_eq!(
+            d.trigger_min_severity,
+            zensight_common::AlertSeverity::Warning
+        );
+        // Present-but-empty must agree with omitted (derived Default).
+        let omitted: NetringSensorConfig =
+            json5::from_str(r#"{ netring: { interfaces: ["eth0"] } }"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(&omitted.netring.capture.to_disk).unwrap(),
+            serde_json::to_value(d).unwrap()
+        );
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn capture_to_disk_requires_dir_when_armed() {
+        let cfg: NetringSensorConfig = json5::from_str(
+            r#"{ netring: { interfaces: ["eth0"], capture: { to_disk: { mode: "triggered" } } } }"#,
+        )
+        .unwrap();
+        assert!(cfg.validate().is_err());
+        let cfg: NetringSensorConfig = json5::from_str(
+            r#"{ netring: { interfaces: ["eth0"], capture: { to_disk: {
+                mode: "triggered", dir: "/var/lib/zensight/captures",
+                trigger_min_severity: "critical", trigger_kinds: ["RitaBeacon"],
+            } } } }"#,
+        )
+        .unwrap();
+        assert!(cfg.validate().is_ok());
+        let d = &cfg.netring.capture.to_disk;
+        assert_eq!(d.mode, CaptureDiskMode::Triggered);
+        assert_eq!(
+            d.trigger_min_severity,
+            zensight_common::AlertSeverity::Critical
+        );
+        assert_eq!(d.trigger_kinds, vec!["RitaBeacon".to_string()]);
     }
 }

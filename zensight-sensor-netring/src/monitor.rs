@@ -306,6 +306,14 @@ pub struct MonitorChannels {
     /// drive the name-evidence publisher. Each item is a batch of newly-observed
     /// IP→name bindings republished as `NameObservation` evidence.
     pub name_obs_rx: Option<mpsc::UnboundedReceiver<Vec<NameObservation>>>,
+    /// Capture-to-disk feed (#327): `Some` iff `capture.to_disk.mode != off` and
+    /// its continuous packet subscription registered — the bounded frame channel
+    /// plus the shared stats (whose drop counter the subscription bumps). Taken
+    /// by `main` to drive the [`crate::disk`] engine.
+    pub disk: Option<(
+        mpsc::Receiver<crate::disk::DiskFrame>,
+        Arc<crate::disk::CaptureDiskStats>,
+    )>,
 }
 
 /// Flow exporter that captures netring's canonical `FlowRecord` into a bounded
@@ -1093,6 +1101,55 @@ pub fn build(
             }
             Err(e) => {
                 tracing::error!(error = %e, "netring: on-demand capture tap base_expr failed to parse; capture disabled");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Capture-to-disk feed (#327): a CONTINUOUS packet-tier subscription (unlike
+    // the on-demand tap, which only copies while a request is in flight) that
+    // forwards every matching frame into the disk engine's bounded channel —
+    // `try_send` + drop counter, never blocking the capture hot loop. Registered
+    // AFTER the on-demand tap so the tap's reload index stays as computed above;
+    // this subscription never calls `set_packet_filter`, so its own index is
+    // irrelevant (only the total packet-filter count check below needs it).
+    // Snaplen is applied at copy time to keep the per-frame allocation small.
+    let capture_disk = if cfg.capture.to_disk.mode != crate::config::CaptureDiskMode::Off {
+        use netring::monitor::subscription::builder::packet;
+        match packet().expr(crate::capture::CAPTURE_TAP_BASE_EXPR) {
+            Ok(sub) => {
+                let (disk_tx, disk_rx) =
+                    mpsc::channel::<crate::disk::DiskFrame>(crate::disk::DISK_CHANNEL_CAP);
+                let stats = Arc::new(crate::disk::CaptureDiskStats::new(cfg.capture.to_disk.mode));
+                let snaplen = cfg.capture.to_disk.snaplen as usize;
+                let s = stats.clone();
+                let sub = sub.to(move |pkt: &flowscope::PacketView<'_>, _ctx: &mut Ctx<'_>| {
+                    let cap = if snaplen > 0 {
+                        snaplen.min(pkt.frame.len())
+                    } else {
+                        pkt.frame.len()
+                    };
+                    let frame = crate::disk::DiskFrame {
+                        data: pkt.frame[..cap].to_vec(),
+                        ts: pkt.timestamp,
+                        original_len: pkt.frame.len(),
+                    };
+                    if disk_tx.try_send(frame).is_err() {
+                        s.dropped.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(())
+                });
+                b = b.subscribe(sub);
+                tracing::info!(
+                    mode = ?cfg.capture.to_disk.mode,
+                    "netring: capture-to-disk feed armed (continuous packet subscription)"
+                );
+                Some((disk_rx, stats))
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "netring: capture-to-disk base_expr failed to parse; capture-to-disk disabled");
                 None
             }
         }
@@ -2244,14 +2301,19 @@ pub fn build(
 
     let monitor = b.build()?;
     // Verify the capture-tap index against the *actual* registration order (#333):
-    // capture-focus (index 0, hard-coded in command.rs) then the tap. This is a
-    // runtime check (not a `debug_assert!` compiled out of release builds): on a
-    // mismatch, disable on-demand capture rather than risk `set_packet_filter`
-    // swapping the wrong subscription's filter at capture time.
+    // capture-focus (index 0, hard-coded in command.rs), then the tap, then the
+    // capture-to-disk feed (#327, never reload-targeted). This is a runtime check
+    // (not a `debug_assert!` compiled out of release builds): on a mismatch,
+    // disable on-demand capture rather than risk `set_packet_filter` swapping the
+    // wrong subscription's filter at capture time.
+    let expected_packet_subs = usize::from(capture_focus_registered)
+        + usize::from(capture_tap_index.is_some())
+        + usize::from(capture_disk.is_some());
     let capture_tap_index = match capture_tap_index {
-        Some(idx) if monitor.reload_handle().packet_filter_count() != idx + 1 => {
+        Some(idx) if monitor.reload_handle().packet_filter_count() != expected_packet_subs => {
             tracing::error!(
-                expected = idx + 1,
+                tap_index = idx,
+                expected = expected_packet_subs,
                 actual = monitor.reload_handle().packet_filter_count(),
                 "netring: capture-tap index inconsistent with packet-filter count; disabling on-demand capture"
             );
@@ -2295,6 +2357,7 @@ pub fn build(
             ipfix_records,
             name_map,
             name_obs_rx,
+            disk: capture_disk,
         },
         keepalive,
         detector_handle,
