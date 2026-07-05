@@ -303,7 +303,26 @@ control/metadata by filtering keys containing `/@/` or starting with
 `zensight/_meta/` — only true telemetry is exported. With `export_alerts` on
 (the default) each exporter **additionally** declares a second subscriber on
 `zensight/*/@/alerts/*` (`all_alerts_wildcard()`) to mirror firing alerts —
-necessary precisely because `zensight/**` does not cross the `@` chunk.
+necessary precisely because `zensight/**` does not cross the `@` chunk. Each
+exporter's telemetry subscription is narrowable via `filters.key_expr` (#357,
+default `zensight/**`) to drop unwanted protocols + `_meta/**` at the wire.
+
+## 5a. QoS & serialization (epic #352)
+
+Every publisher is **declared** (never a one-shot `session.put`; interned key +
+primed routing) and carries a fixed `zensight_common::QosClass`:
+
+| Class | Keys | Reliability | Congestion | Priority |
+|-------|------|-------------|------------|----------|
+| Telemetry | `zensight/<proto>/<source>/**` | best-effort | drop | data-low |
+| Health/liveness | `@/health`, `@/devices/*/liveness`, `@/errors` | best-effort | drop | data |
+| Alert / Command | `@/alerts/*`, `@/commands/*`, `@/status` | **reliable** | **block** | interactive-high |
+| Evidence / Entity | `_meta/evidence/**`, `_meta/entity/**` | **reliable** | **block** | data |
+
+Superseded streams (telemetry/health) drop under congestion; must-arrive control
+(alerts/commands/evidence/entities) blocks. Payloads default to **CBOR** (#355);
+consumers decode format-agnostically (`decode_auto`), so mixed JSON/CBOR fleets
+interoperate during a rolling upgrade.
 
 ---
 

@@ -79,8 +79,15 @@ async fn main() -> anyhow::Result<()> {
     // Create the OTEL exporter
     let exporter = Arc::new(OtelExporter::new(&config.opentelemetry, &config.filters).await?);
 
-    // Create Zenoh subscriber
-    let subscriber = TelemetrySubscriber::new(exporter.clone(), config.zenoh.clone());
+    // Create Zenoh subscriber. A configured `filters.key_expr` narrows the
+    // telemetry subscription (R6/#357) — default stays the broad `zensight/**`.
+    let subscriber = {
+        let s = TelemetrySubscriber::new(exporter.clone(), config.zenoh.clone());
+        match &config.filters.key_expr {
+            Some(ke) => s.with_key_expr(ke.clone()),
+            None => s,
+        }
+    };
 
     // Start subscriber
     let subscriber_shutdown = shutdown_rx.clone();
