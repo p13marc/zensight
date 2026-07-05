@@ -76,6 +76,10 @@ async fn main() -> Result<()> {
 
     // Get session and config for the receiver
     let session = runner.session().clone();
+    // Telemetry (log events) goes through declared publishers (declare-on-first-use
+    // + cache per key, drop QoS), never a one-shot `session.put`. Shared across the
+    // per-task clones so each key is declared once.
+    let registry = std::sync::Arc::new(zensight_common::PublisherRegistry::new(session.clone()));
     let syslog_config = runner.config().syslog.clone();
 
     // Determine serialization format (from config; default CBOR)
@@ -294,7 +298,7 @@ async fn main() -> Result<()> {
     if !syslog_config.listeners.is_empty() {
         let stats = ingest_stats.clone();
         let health = runner.health();
-        let session_tick = session.clone();
+        let registry_tick = registry.clone();
         let key_prefix_tick = key_prefix.clone();
         let interval_secs = syslog_config.derived_interval_secs.max(1);
         let drop_alert_ratio = syslog_config.ingest.drop_alert_ratio;
@@ -313,7 +317,10 @@ async fn main() -> Result<()> {
                     let key = format!("{}/{}/{}", key_prefix_tick, point.source, point.metric);
                     match encode(&point, format) {
                         Ok(payload) => {
-                            if let Err(e) = session_tick.put(&key, payload).await {
+                            if let Err(e) = registry_tick
+                                .put(&key, payload, zensight_common::QosClass::Telemetry)
+                                .await
+                            {
                                 tracing::warn!(error = %e, key, "failed to publish ingest metric");
                             }
                         }
@@ -372,7 +379,7 @@ async fn main() -> Result<()> {
         Arc::new(derived::LogAggregator::new(syslog_config.top_units).with_budget(budget))
     });
     if let Some(agg) = aggregator.clone() {
-        let session_tick = session.clone();
+        let registry_tick = registry.clone();
         let key_prefix_tick = key_prefix.clone();
         let interval_secs = syslog_config.derived_interval_secs.max(1);
         let stats_tick = journald_stats.clone();
@@ -412,7 +419,7 @@ async fn main() -> Result<()> {
                     let key = format!("{}/{}/{}", key_prefix_tick, point.source, point.metric);
                     match encode(&point, format) {
                         Ok(payload) => {
-                            if let Err(e) = session_tick.put(&key, payload).await {
+                            if let Err(e) = registry_tick.put(&key, payload, zensight_common::QosClass::Telemetry).await {
                                 tracing::warn!(error = %e, key, "failed to publish derived metric");
                             }
                         }
@@ -439,7 +446,7 @@ async fn main() -> Result<()> {
         Arc::new(template::TemplateAggregator::new(params, t.top_templates))
     });
     if let Some(tagg) = template_agg.clone() {
-        let session_tick = session.clone();
+        let registry_tick = registry.clone();
         let key_prefix_tick = key_prefix.clone();
         let interval_secs = syslog_config.derived_interval_secs.max(1);
         let source = source.clone();
@@ -452,7 +459,7 @@ async fn main() -> Result<()> {
                     let key = format!("{}/{}/{}", key_prefix_tick, point.source, point.metric);
                     match encode(&point, format) {
                         Ok(payload) => {
-                            if let Err(e) = session_tick.put(&key, payload).await {
+                            if let Err(e) = registry_tick.put(&key, payload, zensight_common::QosClass::Telemetry).await {
                                 tracing::warn!(error = %e, key, "failed to publish template metric");
                             }
                         }
@@ -525,7 +532,7 @@ async fn main() -> Result<()> {
     }
 
     // Spawn the message processing task
-    let session_clone = session.clone();
+    let registry_clone = registry.clone();
     let publish_health = runner.health();
     let aggregator_loop = aggregator.clone();
     let template_loop = template_agg.clone();
@@ -608,7 +615,7 @@ async fn main() -> Result<()> {
                     // Serialize and publish
                     match encode(&point, format) {
                         Ok(payload) => {
-                            if let Err(e) = session_clone.put(&key, payload).await {
+                            if let Err(e) = registry_clone.put(&key, payload, zensight_common::QosClass::Telemetry).await {
                                 tracing::error!("Failed to publish to {}: {}", key, e);
                             } else {
                                 // Count published telemetry so the Sensors view

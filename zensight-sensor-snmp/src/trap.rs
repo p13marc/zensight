@@ -87,7 +87,9 @@ pub struct VarBind {
 /// SNMP trap receiver.
 pub struct TrapReceiver {
     bind_addr: String,
-    zenoh: Arc<ZenohSession>,
+    /// Declared-publisher registry for the telemetry path (declare-on-first-use +
+    /// cache per key, drop QoS) — never a one-shot `session.put`.
+    registry: Arc<zensight_common::PublisherRegistry>,
     key_builder: KeyExprBuilder,
     mib_resolver: Arc<MibResolver>,
     format: Format,
@@ -104,7 +106,7 @@ impl TrapReceiver {
     ) -> Self {
         Self {
             bind_addr: bind_addr.to_string(),
-            zenoh,
+            registry: Arc::new(zensight_common::PublisherRegistry::new(zenoh)),
             key_builder: KeyExprBuilder::with_prefix(key_prefix, Protocol::Snmp),
             mib_resolver,
             format,
@@ -225,8 +227,8 @@ impl TrapReceiver {
         };
 
         let payload = encode(&point, self.format).context("Failed to encode trap")?;
-        self.zenoh
-            .put(&key, payload)
+        self.registry
+            .put(&key, payload, zensight_common::QosClass::Telemetry)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to publish trap: {}", e))?;
 
@@ -252,8 +254,12 @@ impl TrapReceiver {
 
             let varbind_payload =
                 encode(&varbind_point, self.format).context("Failed to encode varbind")?;
-            self.zenoh
-                .put(&varbind_key, varbind_payload)
+            self.registry
+                .put(
+                    &varbind_key,
+                    varbind_payload,
+                    zensight_common::QosClass::Telemetry,
+                )
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to publish varbind: {}", e))?;
 

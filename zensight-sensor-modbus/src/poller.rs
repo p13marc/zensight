@@ -31,7 +31,9 @@ pub struct ModbusPoller {
     registers: Vec<RegisterConfig>,
     key_prefix: String,
     register_names: HashMap<String, String>,
-    session: Arc<Session>,
+    /// Declared-publisher registry for the telemetry path (declare-on-first-use +
+    /// cache per key, drop QoS) — never a one-shot `session.put`.
+    registry: Arc<zensight_common::PublisherRegistry>,
     format: Format,
 }
 
@@ -50,7 +52,7 @@ impl ModbusPoller {
             registers,
             key_prefix: config.key_prefix.clone(),
             register_names: config.register_names.clone(),
-            session,
+            registry: Arc::new(zensight_common::PublisherRegistry::new(session)),
             format,
         }
     }
@@ -332,7 +334,11 @@ impl ModbusPoller {
 
         match encode(&point, self.format) {
             Ok(payload) => {
-                if let Err(e) = self.session.put(&key, payload).await {
+                if let Err(e) = self
+                    .registry
+                    .put(&key, payload, zensight_common::QosClass::Telemetry)
+                    .await
+                {
                     warn!("Failed to publish to '{}': {}", key, e);
                 } else {
                     debug!("Published: {} = {:?}", key, point.value);

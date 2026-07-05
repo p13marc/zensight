@@ -152,6 +152,10 @@ pub struct ZenSight {
     /// Live Zenoh session handle (set on connect) for sending commands to
     /// sensors. `None` while disconnected or in demo mode.
     session: Option<std::sync::Arc<zenoh::Session>>,
+    /// Declared-publisher registry for outbound commands (declare-on-first-use +
+    /// cache per key) — set on connect, so command sends never use a one-shot
+    /// `session.put`. `None` while disconnected or in demo mode.
+    command_registry: Option<std::sync::Arc<zensight_common::PublisherRegistry>>,
     /// In-flight artifact download state (report / snapshot / capture).
     artifact_fetch: crate::view::artifact_fetch::ArtifactFetch,
     /// The in-flight download's identity (key prefix, kind, id, delivery, dest).
@@ -319,6 +323,7 @@ impl ZenSight {
             known_sensors: std::collections::HashMap::new(),
             toasts: ToastState::default(),
             session: None,
+            command_registry: None,
             artifact_fetch: crate::view::artifact_fetch::ArtifactFetch::default(),
             artifact_job: None,
             artifact_kinds: std::collections::HashMap::new(),
@@ -1258,6 +1263,9 @@ impl ZenSight {
 
             Message::Connected(session) => {
                 tracing::info!("Connected to Zenoh");
+                self.command_registry = session.as_ref().map(|s| {
+                    std::sync::Arc::new(zensight_common::PublisherRegistry::new(s.clone()))
+                });
                 self.session = session;
                 self.dashboard.connected = true;
                 self.dashboard.connection_state =
@@ -1268,6 +1276,7 @@ impl ZenSight {
             Message::Disconnected(error) => {
                 tracing::warn!(error = %error, "Disconnected from Zenoh");
                 self.session = None;
+                self.command_registry = None;
                 self.dashboard.connected = false;
                 self.dashboard.connection_state =
                     crate::view::dashboard::ConnectionState::Disconnected;
@@ -2479,7 +2488,7 @@ impl ZenSight {
         body: &T,
         ok_message: String,
     ) -> Task<Message> {
-        let Some(session) = self.session.clone() else {
+        let Some(registry) = self.command_registry.clone() else {
             return Task::done(Message::CommandFeedback {
                 success: false,
                 message: "Not connected to Zenoh".to_string(),
@@ -2495,7 +2504,10 @@ impl ZenSight {
             }
         };
         Task::future(async move {
-            match session.put(&key, payload).await {
+            match registry
+                .put(&key, payload, zensight_common::QosClass::Command)
+                .await
+            {
                 Ok(()) => Message::CommandFeedback {
                     success: true,
                     message: ok_message,
@@ -2552,6 +2564,7 @@ impl ZenSight {
         dest: std::path::PathBuf,
     ) -> Option<Task<Message>> {
         let session = self.session.clone()?;
+        let registry = self.command_registry.clone()?;
         // A tree is reconstructed into a clearly-named subfolder of the picked dir.
         let dest = match &kind {
             zensight_common::ArtifactKind::Snapshot { dir } => {
@@ -2566,9 +2579,10 @@ impl ZenSight {
         self.artifact_job = Some(job);
         self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Requesting;
         Some(Task::future(async move {
-            let result =
-                crate::view::artifact_fetch::request_and_await_ready(session, key_prefix, kind, id)
-                    .await;
+            let result = crate::view::artifact_fetch::request_and_await_ready(
+                session, registry, key_prefix, kind, id,
+            )
+            .await;
             Message::ArtifactRequested(result)
         }))
     }

@@ -104,6 +104,25 @@ jobs:
             exit 1
           fi
 
+      # R5 (#356): every publication must go through a *declared* publisher —
+      # sensor-core's AdvancedPublisherRegistry / common's PublisherRegistry /
+      # a `session.declare_publisher(...)` — never a one-shot `session.put` /
+      # `session.delete` (declaring interns the key + primes router routing).
+      # Bans `<session-like>.put(` / `.delete(` outside the registry modules,
+      # tests, and zenoh-blob (an external-bound crate with its own transport).
+      - name: declared-publishers only (R5 guard)
+        run: |
+          hits=$(grep -rnE '(session[a-z_]*|zenoh)\.(put|delete)\(' \
+            zensight/src zensight-common/src zensight-correlator/src \
+            zensight-sensor-core/src zensight-sensor-*/src zensight-exporter-*/src \
+            --include='*.rs' \
+            | grep -vE 'publisher_registry\.rs|/tests/|_test\.rs|mod tests' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Raw session.put/delete — publish through a declared publisher (PublisherRegistry / AdvancedPublisherRegistry / declare_publisher):"
+            echo "$hits"
+            exit 1
+          fi
+
       # zenoh-blob is a generic crate meant to graduate to its own repo +
       # crates.io (#202). It must stay free of ZenSight types and path deps so
       # the switch to the published crate is a one-line change. Guard the
