@@ -100,6 +100,16 @@
       // links: [
       //   { iface: "eth0", up: true, severity: "critical" },
       // ],
+      // Policy-routing rule expectations (#323). `forbid` (default) fires on
+      // any non-baseline `ip rule` matching the optional priority/table
+      // selectors (the kernel's 0/32766/32767 lookup rules never count) —
+      // the traffic-diversion guard; `require` fires when the matching rule
+      // is missing (pin a VPN/mark rule). Re-evaluated instantly on
+      // NewRule/DelRule events; violations are tagged ATT&CK T1599.
+      // rules: [
+      //   { name: "no-diversion", sense: "forbid", severity: "critical" },
+      //   { name: "vpn-rule", sense: "require", priority: 100, table: 51820 },
+      // ],
     },
   },
 

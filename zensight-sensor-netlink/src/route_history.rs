@@ -12,6 +12,12 @@
 //! current default-v4 state; the first observation seeds the baseline without
 //! counting as a flap. Cloning is cheap (`Arc`); the ring is shared with the
 //! query channel.
+//!
+//! Deferred (#323): a policy-rule flip (`ip rule`) can move the *effective*
+//! default route without any `RTM_NEWROUTE`, so this ring won't record it. Rule
+//! changes are visible on the `events/rule/*` timeline and guarded by the
+//! sentinel's `rules` expectations; annotating this ring with a `rule_note`
+//! would need the rule-event stream threaded in from `collector::run_event_stream`.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

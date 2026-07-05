@@ -52,8 +52,11 @@ fn attack_meta(technique: &str) -> Option<(&'static str, String)> {
         "T1046" => "Discovery",
         "T1071" | "T1071.004" | "T1568" | "T1568.002" => "Command & Control",
         "T1021.001" | "T1021.002" => "Lateral Movement",
-        "T1499" => "Impact",
+        "T1499" | "T1565" => "Impact",
         "T1040" => "Credential Access",
+        // Network Boundary Bridging (#323): the netlink sentinel tags policy-
+        // routing rule expectation violations (traffic diversion) with T1599.
+        "T1599" => "Defense Evasion",
         _ => return None,
     };
     // Sub-techniques deep-link as /Txxxx/00n/.
@@ -111,7 +114,16 @@ fn detector_meta(rule: &str) -> (String, &'static str) {
             "Cleartext SNMP".into(),
             "SNMP v1/v2c community string sent in cleartext",
         ),
-        other => (other.to_string(), ""),
+        other => {
+            // Sentinel policy-rule expectations (#323) carry a `rules:<name>` slug.
+            if let Some(name) = other.strip_prefix("rules:") {
+                return (
+                    format!("Policy rule: {name}"),
+                    "Policy-routing rule forbidden/required by the netlink sentinel",
+                );
+            }
+            (other.to_string(), "")
+        }
     }
 }
 
@@ -121,10 +133,16 @@ pub fn security_view<'a>(
     sec: &'a SecurityState,
     tuning: &'a crate::view::detection_tuning::DetectionTuningState,
 ) -> Element<'a, Message> {
+    // Anomalies, plus sentinel Expectation violations that carry an ATT&CK
+    // technique label (#323: a policy-rule diversion is a security event, not
+    // just an operational deviation) — so they appear in the tactic lens.
     let mut anomalies: Vec<&Alert> = alerts
         .active_external()
         .into_iter()
-        .filter(|a| a.kind == AlertKind::Anomaly)
+        .filter(|a| {
+            a.kind == AlertKind::Anomaly
+                || (a.kind == AlertKind::Expectation && a.labels.contains_key("technique"))
+        })
         .filter(|a| !sec.hide_info || a.severity != AlertSeverity::Info)
         .collect();
     // Stable order: severity desc, then most recent.
