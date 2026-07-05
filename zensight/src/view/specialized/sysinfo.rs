@@ -15,7 +15,8 @@ use crate::view::components::{
 use crate::view::device::DeviceDetailState;
 use crate::view::formatting::format_timestamp;
 use crate::view::icons::{self, IconSize};
-use crate::view::specialized::sysinfo_detail::ProcessSort;
+use crate::view::specialized::sysinfo_detail::{PidVerdict, ProcessSort, pid_filter_verdict};
+use crate::view::specialized::systemd_detail::unit_from_cgroup;
 use crate::view::theme;
 use crate::view::tokens::space;
 
@@ -965,11 +966,62 @@ fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
 
     let mut col = column![section_header("Process Explorer", None), controls].spacing(space::SM);
 
+    // Pid pivot banner (#313): the explorer was opened from a unit MainPID or a
+    // socket owner — show the filter, its stale-generation verdict, and a way out.
+    if let Some(f) = &detail.pid_filter {
+        let clear = button(text("Clear").size(11))
+            .padding([3, 9])
+            .style(iced::widget::button::secondary)
+            .on_press(Message::ClearSysinfoPidFilter);
+        let verdict: Element<'_, Message> = match detail.processes.ready() {
+            Some(procs) => match pid_filter_verdict(procs, f) {
+                PidVerdict::Live => text("").size(11).into(),
+                PidVerdict::Reused => text("pid reused by another process — the original exited")
+                    .size(11)
+                    .style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).warning()),
+                    })
+                    .into(),
+                PidVerdict::Gone => text("not in the fetched table — exited (or below top-N)")
+                    .size(11)
+                    .style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).text_muted()),
+                    })
+                    .into(),
+            },
+            None => text("").size(11).into(),
+        };
+        col = col.push(
+            row![
+                text(format!("Filtered to pid {}", f.pid)).size(12),
+                verdict,
+                clear,
+            ]
+            .spacing(space::SM)
+            .align_y(Alignment::Center),
+        );
+    }
+
     if let Some(err) = detail.processes.error() {
         col = col.push(empty_state(format!("Fetch failed: {err}"), None));
     } else if let Some(procs) = detail.processes.ready() {
-        if procs.is_empty() {
-            col = col.push(empty_state("No processes returned", None));
+        // Apply the pid pivot; a reused pid is NOT shown as a match (#313).
+        let visible: Vec<&zensight_common::ProcessRecord> = match &detail.pid_filter {
+            Some(f) => match pid_filter_verdict(procs, f) {
+                PidVerdict::Live => procs.iter().filter(|p| p.pid == f.pid).collect(),
+                PidVerdict::Reused | PidVerdict::Gone => Vec::new(),
+            },
+            None => procs.iter().collect(),
+        };
+        if visible.is_empty() {
+            col = col.push(empty_state(
+                if detail.pid_filter.is_some() {
+                    "No matching live process."
+                } else {
+                    "No processes returned"
+                },
+                None,
+            ));
         } else {
             let mut list = Column::new().spacing(3).push(
                 row![
@@ -982,11 +1034,12 @@ fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
                     text("thr").size(10).width(50),
                     text("state").size(10).width(70),
                     text("io r/w").size(10).width(140),
+                    text("unit").size(10).width(150),
                     text("command").size(10).width(iced::Length::Fill),
                 ]
                 .spacing(8),
             );
-            for p in procs.iter().take(200) {
+            for p in visible.iter().take(200) {
                 // cmdline arrives scrubbed + capped from the sensor (#302);
                 // fall back to the bare name for kernel threads / stripped args.
                 let command = if p.cmdline.is_empty() {
@@ -994,6 +1047,24 @@ fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
                 } else {
                     p.cmdline.clone()
                 };
+                // Identity chip (#313): the process's cgroup resolves to a
+                // systemd unit → pivot to that unit's drill-down. Non-unit
+                // cgroups render as plain text (never a dead button).
+                let unit_cell: Element<'_, Message> =
+                    match p.cgroup.as_deref().and_then(unit_from_cgroup) {
+                        Some(unit) => iced::widget::container(
+                            button(text(unit.clone()).size(11))
+                                .padding([2, 6])
+                                .style(iced::widget::button::text)
+                                .on_press(Message::PivotToUnit {
+                                    host: state.device_id.source.clone(),
+                                    unit,
+                                }),
+                        )
+                        .width(150)
+                        .into(),
+                        None => text("—").size(11).width(150).into(),
+                    };
                 list = list.push(
                     row![
                         text(p.pid.to_string()).size(11).width(70),
@@ -1013,13 +1084,15 @@ fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
                         ))
                         .size(11)
                         .width(140),
+                        unit_cell,
                         text(command).size(11).width(iced::Length::Fill),
                     ]
-                    .spacing(8),
+                    .spacing(8)
+                    .align_y(Alignment::Center),
                 );
             }
             col = col
-                .push(text(format!("{} processes", procs.len())).size(12))
+                .push(text(format!("{} processes", visible.len())).size(12))
                 .push(list);
         }
     } else {
@@ -1132,5 +1205,90 @@ mod tests {
         let state = DeviceDetailState::new(device_id);
         // Just verify it doesn't panic
         let _view = sysinfo_host_view(&state);
+    }
+
+    // ── Identity pivots (#313) ────────────────────────────────────────────────
+
+    use crate::view::specialized::fetch::Fetch;
+    use crate::view::specialized::sysinfo_detail::PidFilter;
+    use iced_test::simulator;
+    use zensight_common::ProcessRecord;
+
+    fn proc(pid: i32, start_time: u64, cgroup: Option<&str>) -> ProcessRecord {
+        ProcessRecord {
+            pid,
+            name: "redis-server".into(),
+            cpu: 1.0,
+            rss: 1024,
+            vsz: 4096,
+            threads: None,
+            state: "S".into(),
+            io_read: 0,
+            io_write: 0,
+            uid: Some(1000),
+            cmdline: "redis-server *:6379".into(),
+            exe: None,
+            ppid: None,
+            cgroup: cgroup.map(String::from),
+            start_time,
+            user: Some("redis".into()),
+        }
+    }
+
+    #[test]
+    fn process_row_unit_chip_pivots_to_unit() {
+        let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Sysinfo, "server01"));
+        state.sysinfo_detail.processes = Fetch::Ready(vec![
+            proc(42, 100, Some("/system.slice/redis.service")),
+            proc(43, 100, Some("/sys/fs/cgroup")), // non-unit cgroup → plain "—"
+        ]);
+        let mut ui = simulator(render_process_explorer(&state));
+        assert!(ui.find("—").is_ok(), "non-unit cgroup renders inert text");
+        let _ = ui.click("redis.service");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(msgs.iter().any(|m| matches!(
+            m,
+            Message::PivotToUnit { host, unit }
+                if host == "server01" && unit == "redis.service"
+        )));
+    }
+
+    #[test]
+    fn pid_filter_banner_guards_stale_generations() {
+        let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Sysinfo, "server01"));
+        state.sysinfo_detail.processes = Fetch::Ready(vec![proc(42, 999, None)]);
+        // The pivot expected start_time 100 but pid 42 now has 999 → reused.
+        state.sysinfo_detail.pid_filter = Some(PidFilter {
+            pid: 42,
+            start_time: Some(100),
+        });
+        let mut ui = simulator(render_process_explorer(&state));
+        assert!(ui.find("Filtered to pid 42").is_ok());
+        assert!(
+            ui.find("pid reused by another process — the original exited")
+                .is_ok()
+        );
+        // The impostor row is NOT shown as a match.
+        assert!(ui.find("No matching live process.").is_ok());
+        // Clear emits the un-filter message.
+        let _ = ui.click("Clear");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, Message::ClearSysinfoPidFilter))
+        );
+    }
+
+    #[test]
+    fn pid_filter_live_match_shows_only_that_process() {
+        let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Sysinfo, "server01"));
+        state.sysinfo_detail.processes = Fetch::Ready(vec![proc(42, 100, None), proc(7, 5, None)]);
+        state.sysinfo_detail.pid_filter = Some(PidFilter {
+            pid: 42,
+            start_time: Some(100),
+        });
+        let mut ui = simulator(render_process_explorer(&state));
+        assert!(ui.find("42").is_ok());
+        assert!(ui.find("1 processes").is_ok());
     }
 }

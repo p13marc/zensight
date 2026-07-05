@@ -130,6 +130,12 @@ impl SyslogMessage {
         self.boot_id.as_deref()
     }
 
+    /// The journald invocation id (`_SYSTEMD_INVOCATION_ID`), if present —
+    /// the durable per-run identity joining `UnitDetail.invocation_id` (#313).
+    pub fn invocation_id(&self) -> Option<&str> {
+        self.structured.get("invocation_id").map(String::as_str)
+    }
+
     /// Event time (Unix epoch ms) — for ordering the merged buffer (#107, C9).
     pub fn timestamp(&self) -> i64 {
         self.timestamp
@@ -206,6 +212,9 @@ pub struct SyslogFilterState {
     pub selected_facilities: std::collections::HashSet<String>,
     /// systemd units to show (empty = all) — the journald unit lens (#64).
     pub selected_units: std::collections::HashSet<String>,
+    /// One unit *run* to show (journald invocation id) — the per-run lens
+    /// pivoted from the systemd unit drill-down (#313). `None` = all runs.
+    pub invocation_id: Option<String>,
     /// journald boots to show (empty = all) — the boot lens (#93).
     pub selected_boots: std::collections::HashSet<String>,
     /// App name filter pattern.
@@ -232,6 +241,7 @@ impl SyslogFilterState {
             || !self.selected_facilities.is_empty()
             || !self.selected_units.is_empty()
             || !self.selected_boots.is_empty()
+            || self.invocation_id.is_some()
             || !self.app_filter.is_empty()
             || !self.message_filter.is_empty()
     }
@@ -316,6 +326,7 @@ impl SyslogFilterState {
         self.selected_facilities.clear();
         self.selected_units.clear();
         self.selected_boots.clear();
+        self.invocation_id = None;
         self.app_filter.clear();
         self.message_filter.clear();
         self.modified = true;
@@ -535,6 +546,22 @@ pub fn logs_view<'a>(
     .align_y(Alignment::Center);
 
     let mut content = column![header].spacing(space::MD).padding(space::LG);
+    // Unit-run lens banner (#313): the Logs view was pivoted to one invocation
+    // from the systemd unit drill-down — say so, with a way out.
+    if let Some(inv) = &filter_state.invocation_id {
+        let short: String = inv.chars().take(12).collect();
+        content = content.push(card(
+            row![
+                text(format!("Showing one unit run · invocation {short}…")).size(12),
+                button(text("Clear run filter").size(11))
+                    .padding([3, 9])
+                    .style(iced::widget::button::secondary)
+                    .on_press(Message::ClearLogsInvocationFilter),
+            ]
+            .spacing(space::SM)
+            .align_y(Alignment::Center),
+        ));
+    }
     if filter_state.panel_open {
         content = content.push(card(render_filter_panel(messages, filter_state)));
     }
@@ -1118,7 +1145,31 @@ fn render_log_detail(msg: &SyslogMessage) -> Element<'static, Message> {
         col = col.push(line("pid".into(), pid.clone()));
     }
     if let Some(unit) = &msg.unit {
-        col = col.push(line("unit".into(), unit.clone()));
+        // Identity pivot (#313): a journald line resolves to its unit *run* —
+        // clicking opens the systemd unit drill-down for this host.
+        let chip = button(text(unit.clone()).size(11))
+            .padding([2, 8])
+            .style(iced::widget::button::secondary)
+            .on_press(Message::PivotToUnit {
+                host: msg.hostname.clone(),
+                unit: unit.clone(),
+            });
+        col = col.push(
+            row![
+                text("unit")
+                    .size(11)
+                    .width(Length::Fixed(150.0))
+                    .style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).text_muted()),
+                    }),
+                chip,
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        );
+    }
+    if let Some(inv) = msg.invocation_id() {
+        col = col.push(line("invocation".into(), inv.to_string()));
     }
     if let Some(boot) = &msg.boot_id {
         col = col.push(line("boot".into(), boot.clone()));
@@ -1311,6 +1362,13 @@ fn apply_local_filters(
                 return false;
             }
 
+            // Unit-run filter (#313): only lines from this invocation.
+            if let Some(inv) = &filter_state.invocation_id
+                && msg.invocation_id() != Some(inv.as_str())
+            {
+                return false;
+            }
+
             // Live-tail pause (#93): hide lines newer than the freeze instant.
             if let Some(ceiling) = filter_state.frozen_at
                 && msg.timestamp > ceiling
@@ -1374,6 +1432,36 @@ mod tests {
             boot_id: None,
             structured: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// #313: the unit-run lens keeps only lines from the exact invocation.
+    #[test]
+    fn invocation_filter_keeps_only_that_run() {
+        let with_inv = |inv: Option<&str>| {
+            let mut m = msg_at(1000);
+            m.unit = Some("redis.service".into());
+            if let Some(inv) = inv {
+                m.structured
+                    .insert("invocation_id".to_string(), inv.to_string());
+            }
+            m
+        };
+        let msgs = vec![
+            with_inv(Some("run-a")),
+            with_inv(Some("run-b")),
+            with_inv(None), // pre-restart / network line with no invocation
+        ];
+        let mut f = SyslogFilterState {
+            invocation_id: Some("run-a".into()),
+            ..Default::default()
+        };
+        let kept = apply_local_filters(&msgs, &f);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].invocation_id(), Some("run-a"));
+        assert!(f.has_active_filters());
+        // clear() also drops the run lens.
+        f.clear();
+        assert!(f.invocation_id.is_none());
     }
 
     /// #126: empty input and degenerate params yield an empty series.

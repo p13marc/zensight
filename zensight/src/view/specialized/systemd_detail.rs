@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use serde::Deserialize;
-use zensight_common::query_detail::{CgroupNode, TimerRecord, UnitRecord};
+use zensight_common::query_detail::{CgroupNode, TimerRecord, UnitDetail, UnitRecord};
 
 use super::fetch::Fetch;
 
@@ -80,6 +80,11 @@ pub struct SystemdDetailState {
     /// Armed (verb, unit) awaiting inline confirmation in the Units tab (#283).
     /// `Some` swaps that unit's action buttons for a confirm/cancel pair.
     pub pending_action: Option<(String, String)>,
+    /// The unit whose identity drill-down panel is open (#313).
+    pub selected_unit: Option<String>,
+    /// The drill-down's `@/query/unit?name=` reply (#313): control_group,
+    /// MainPID + start_time, invocation_id — the cross-view join keys.
+    pub unit_detail: Fetch<UnitDetail>,
 }
 
 impl SystemdDetailState {
@@ -114,6 +119,26 @@ impl SystemdDetailState {
     }
 }
 
+/// The single-unit detail key (#313), matching the sensor's
+/// `@/query/unit?name=<u>` queryable.
+pub fn unit_detail_key(unit: &str) -> String {
+    format!("zensight/systemd/@/query/unit?name={unit}")
+}
+
+/// Fetch + decode one unit's detail for the drill-down panel (#313).
+pub async fn fetch_unit_detail(session: Arc<zenoh::Session>, unit: String) -> Option<UnitDetail> {
+    fetch_one(session, unit_detail_key(&unit)).await
+}
+
+/// Extract the systemd unit name from a cgroup path (#313) — the
+/// `process.cgroup == unit.control_group` join, reduced to a clickable name:
+/// `/system.slice/redis.service` → `redis.service`. Only leaf `.service` /
+/// `.scope` segments resolve (slices are aggregates, not pivotable units).
+pub fn unit_from_cgroup(cgroup: &str) -> Option<String> {
+    let leaf = cgroup.rsplit('/').next()?.trim();
+    (leaf.ends_with(".service") || leaf.ends_with(".scope")).then(|| leaf.to_string())
+}
+
 /// Fetch + decode the first reply on `key` as a single `T` (for the cgroups tree,
 /// which replies one object rather than an array).
 pub async fn fetch_one<T: serde::de::DeserializeOwned>(
@@ -141,6 +166,27 @@ mod tests {
             "zensight/systemd/@/query/cgroups"
         );
         assert_eq!(SystemdDetailTopic::Timers.label(), "Timers");
+        // Single-unit detail key (#313) matches the sensor's queryable selector.
+        assert_eq!(
+            unit_detail_key("sshd.service"),
+            "zensight/systemd/@/query/unit?name=sshd.service"
+        );
+    }
+
+    #[test]
+    fn unit_from_cgroup_resolves_leaf_units_only() {
+        assert_eq!(
+            unit_from_cgroup("/system.slice/redis.service").as_deref(),
+            Some("redis.service")
+        );
+        assert_eq!(
+            unit_from_cgroup("/user.slice/user-1000.slice/session-2.scope").as_deref(),
+            Some("session-2.scope")
+        );
+        // Slices and non-unit paths are not pivotable.
+        assert_eq!(unit_from_cgroup("/system.slice"), None);
+        assert_eq!(unit_from_cgroup(""), None);
+        assert_eq!(unit_from_cgroup("/sys/fs/cgroup"), None);
     }
 
     #[test]

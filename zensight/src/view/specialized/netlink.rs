@@ -419,12 +419,30 @@ fn render_sockets_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
         .spacing(8),
     );
     for s in shown.iter().take(limit) {
+        // Identity chip (#313): an attributed socket pivots to its owning
+        // process in the sysinfo explorer, carrying the `(pid, start_time)`
+        // pair for the stale-generation guard. Unattributed stays plain text.
+        let process_cell: Element<'_, Message> = match s.pid {
+            Some(pid) => container(
+                button(text(socket_process_label(s)).size(font::CAPTION))
+                    .padding([2, 6])
+                    .style(iced::widget::button::text)
+                    .on_press(Message::PivotToProcess {
+                        host: state.device_id.source.clone(),
+                        pid,
+                        start_time: s.proc_start_time,
+                    }),
+            )
+            .width(120)
+            .into(),
+            None => cell(&socket_process_label(s), 120),
+        };
         list = list.push(
             row![
                 cell(&s.local, 180),
                 cell(&s.remote, 180),
                 cell(&s.state, 90),
-                cell(&socket_process_label(s), 120),
+                process_cell,
                 cell(&s.rtt_us.to_string(), 70),
                 cell(&s.rcv_rtt_us.to_string(), 70),
                 cell(&s.delivery_rate.to_string(), 90),

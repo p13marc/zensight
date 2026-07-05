@@ -358,6 +358,40 @@ pub enum Message {
     FetchSysinfoProcesses(crate::view::specialized::sysinfo_detail::ProcessSort),
     /// A sysinfo process-explorer reply: the decoded records, or an error.
     SysinfoProcessesReceived(Result<Vec<zensight_common::ProcessRecord>, String>),
+
+    // ── Cross-view identity pivots (#313) — host-local joins over already-
+    // published data; every pivot is a query-time read, no new bus traffic.
+    /// Open (`Some(unit)`) or close (`None`) the systemd unit drill-down: fetch
+    /// `@/query/unit?name=` and render the identity panel in the Units tab.
+    SystemdSelectUnit(Option<String>),
+    /// The single-unit detail reply for the drill-down panel.
+    SystemdUnitDetailReceived(Result<zensight_common::UnitDetail, String>),
+    /// Pivot to the systemd device for `host` with `unit`'s drill-down loading
+    /// (process cgroup chip, journald unit-run chip). Toast fallback when no
+    /// systemd device exists for the host.
+    PivotToUnit {
+        host: String,
+        unit: String,
+    },
+    /// Pivot to the sysinfo device for `host` with the process explorer
+    /// filtered to `pid`. `start_time` (the `(pid, start_time)` identity pair)
+    /// arms the stale-generation guard: a reused pid renders as "exited", never
+    /// as the wrong process. Toast fallback when no sysinfo device exists.
+    PivotToProcess {
+        host: String,
+        pid: i32,
+        start_time: Option<u64>,
+    },
+    /// Clear the process explorer's pivot pid filter.
+    ClearSysinfoPidFilter,
+    /// Pivot to the Logs view pre-filtered to one unit *run* (journald
+    /// `_SYSTEMD_INVOCATION_ID`), from the unit drill-down's "logs for this run".
+    OpenLogsForInvocation {
+        unit: String,
+        invocation_id: String,
+    },
+    /// Clear the Logs view's unit-run (invocation id) filter.
+    ClearLogsInvocationFilter,
     /// Pivot from a Security anomaly to its netring flows (#119): fetch
     /// `@/query/flows` and filter to the offending `src`. `key` is the anomaly's
     /// `alert_key` so the result renders under the right row.
