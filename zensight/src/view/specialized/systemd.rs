@@ -225,9 +225,19 @@ fn render_units_tab(state: &DeviceDetailState) -> Column<'_, Message> {
         ])]
         .spacing(2);
         for u in rows.iter().take(400) {
+            // The unit name is the identity drill-down chip (#313): clicking
+            // fetches `@/query/unit?name=` and opens the panel above the table.
+            let name_chip: Element<'_, Message> = iced::widget::container(
+                button(text(u.name.clone()).size(font::CAPTION))
+                    .padding([2, 6])
+                    .style(iced::widget::button::text)
+                    .on_press(Message::SystemdSelectUnit(Some(u.name.clone()))),
+            )
+            .width(Length::FillPortion(3))
+            .into();
             list = list.push(
                 row![
-                    cell(&u.name, 3),
+                    name_chip,
                     state_cell(&u.active_state, 1),
                     cell(&u.sub_state, 1),
                     cell(&u.load_state, 1),
@@ -243,7 +253,132 @@ fn render_units_tab(state: &DeviceDetailState) -> Column<'_, Message> {
             .into()
     });
 
-    column![card(column![header, filters, body].spacing(space::SM))].spacing(space::MD)
+    let mut col = column![].spacing(space::MD);
+    // Identity drill-down panel (#313): the selected unit's join keys
+    // (control group, MainPID, invocation id) rendered as pivot chips.
+    if let Some(unit) = &d.selected_unit {
+        col = col.push(card(render_unit_detail_panel(state, unit)));
+    }
+    col.push(card(column![header, filters, body].spacing(space::SM)))
+}
+
+/// The unit identity drill-down (#313): description/state plus the cross-view
+/// join keys — control group (the `process.cgroup` join), MainPID (a pivot chip
+/// into the process explorer, carrying the `(pid, start_time)` identity pair),
+/// and invocation id (a pivot chip into the Logs view for exactly this run).
+/// Unresolvable pivots render as plain text, never a dead button.
+fn render_unit_detail_panel<'a>(
+    state: &'a DeviceDetailState,
+    unit: &'a str,
+) -> Element<'a, Message> {
+    let d = &state.systemd_detail;
+    let host = &state.device_id.source;
+    let close = button(text("Close").size(font::CAPTION))
+        .padding([3, 9])
+        .style(iced::widget::button::secondary)
+        .on_press(Message::SystemdSelectUnit(None));
+    let header = row![
+        section_header("Unit identity", Some(close.into())),
+        text(unit.to_string()).size(font::EMPHASIS),
+    ]
+    .spacing(space::SM)
+    .align_y(iced::Alignment::Center);
+
+    let line = |label: &str, value: String| -> Element<'a, Message> {
+        row![
+            text(label.to_string())
+                .size(font::CAPTION)
+                .width(Length::Fixed(150.0))
+                .style(dim),
+            text(value).size(font::CAPTION),
+        ]
+        .spacing(space::SM)
+        .into()
+    };
+
+    let body: Element<'a, Message> = match &d.unit_detail {
+        Fetch::Idle | Fetch::Loading => text("Fetching unit detail…")
+            .size(font::CAPTION)
+            .style(dim)
+            .into(),
+        Fetch::Error(e) => text(format!("unit detail unavailable: {e}"))
+            .size(font::CAPTION)
+            .style(dim)
+            .into(),
+        Fetch::Ready(detail) => {
+            let mut colm = column![
+                line("description", detail.description.clone()),
+                line(
+                    "state",
+                    format!("{} ({})", detail.active_state, detail.sub_state),
+                ),
+            ]
+            .spacing(3);
+            if let Some(p) = &detail.fragment_path {
+                colm = colm.push(line("fragment", p.clone()));
+            }
+            colm = colm.push(line("restarts", detail.n_restarts.to_string()));
+            colm = colm.push(line(
+                "control group",
+                detail
+                    .control_group
+                    .clone()
+                    .unwrap_or_else(|| "—".to_string()),
+            ));
+
+            // MainPID → process explorer pivot, or plain text when not running.
+            let pid_row: Element<'a, Message> = match detail.main_pid {
+                Some(pid) => row![
+                    text("MainPID")
+                        .size(font::CAPTION)
+                        .width(Length::Fixed(150.0))
+                        .style(dim),
+                    button(text(format!("{pid} → process explorer")).size(font::CAPTION))
+                        .padding([2, 8])
+                        .style(iced::widget::button::secondary)
+                        .on_press(Message::PivotToProcess {
+                            host: host.clone(),
+                            pid: pid as i32,
+                            start_time: detail.main_pid_start_time,
+                        }),
+                ]
+                .spacing(space::SM)
+                .align_y(iced::Alignment::Center)
+                .into(),
+                None => line("MainPID", "— (not running)".to_string()),
+            };
+            colm = colm.push(pid_row);
+
+            // Invocation id → Logs-for-this-run pivot, or plain text.
+            let inv_row: Element<'a, Message> = match &detail.invocation_id {
+                Some(inv) => {
+                    let short: String = inv.chars().take(12).collect();
+                    row![
+                        text("invocation")
+                            .size(font::CAPTION)
+                            .width(Length::Fixed(150.0))
+                            .style(dim),
+                        text(format!("{short}…")).size(font::CAPTION),
+                        button(text("Logs for this run").size(font::CAPTION))
+                            .padding([2, 8])
+                            .style(iced::widget::button::secondary)
+                            .on_press(Message::OpenLogsForInvocation {
+                                unit: unit.to_string(),
+                                invocation_id: inv.clone(),
+                            }),
+                    ]
+                    .spacing(space::SM)
+                    .align_y(iced::Alignment::Center)
+                    .into()
+                }
+                None => line("invocation", "no active run".to_string()),
+            };
+            colm = colm.push(inv_row);
+            colm.into()
+        }
+    };
+
+    column![header, body].spacing(space::SM).into()
 }
 
 // ── Timers ────────────────────────────────────────────────────────────────────
@@ -678,5 +813,76 @@ mod tests {
     fn fmt_usec_handles_sentinels() {
         assert_eq!(fmt_usec(0), "—");
         assert_eq!(fmt_usec(u64::MAX), "—");
+    }
+
+    // ── Identity pivots (#313) ────────────────────────────────────────────────
+
+    use iced_test::simulator;
+    use zensight_common::query_detail::UnitDetail;
+
+    fn unit_detail(main_pid: Option<u32>, invocation: Option<&str>) -> UnitDetail {
+        UnitDetail {
+            name: "redis.service".into(),
+            description: "Redis".into(),
+            load_state: "loaded".into(),
+            active_state: "active".into(),
+            sub_state: "running".into(),
+            fragment_path: None,
+            active_enter_usec: 0,
+            n_restarts: 1,
+            mem_bytes: None,
+            cpu_usec: None,
+            tasks: None,
+            exec_main_status: 0,
+            requires: vec![],
+            wants: vec![],
+            after: vec![],
+            before: vec![],
+            recent_changes: vec![],
+            main_pid,
+            main_pid_start_time: main_pid.map(|_| 12345),
+            invocation_id: invocation.map(String::from),
+            control_group: Some("/system.slice/redis.service".into()),
+        }
+    }
+
+    #[test]
+    fn unit_detail_panel_pivots_carry_identity_keys() {
+        let mut s = state_with(&[]);
+        s.systemd_detail.selected_unit = Some("redis.service".into());
+        s.systemd_detail.unit_detail =
+            Fetch::Ready(unit_detail(Some(42), Some("deadbeefcafe12345678")));
+
+        let mut ui = simulator(render_unit_detail_panel(&s, "redis.service"));
+        let _ = ui.click("42 → process explorer");
+        let _ = ui.click("Logs for this run");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        // MainPID chip carries the (pid, start_time) identity pair + the host.
+        assert!(msgs.iter().any(|m| matches!(
+            m,
+            Message::PivotToProcess { host, pid: 42, start_time: Some(12345) }
+                if host == "server01"
+        )));
+        // The logs chip carries the exact unit run.
+        assert!(msgs.iter().any(|m| matches!(
+            m,
+            Message::OpenLogsForInvocation { unit, invocation_id }
+                if unit == "redis.service" && invocation_id == "deadbeefcafe12345678"
+        )));
+    }
+
+    #[test]
+    fn unit_detail_panel_unresolvable_pivots_render_inert_text() {
+        // No MainPID / no invocation id → plain text, never a dead button.
+        let mut s = state_with(&[]);
+        s.systemd_detail.selected_unit = Some("redis.service".into());
+        s.systemd_detail.unit_detail = Fetch::Ready(unit_detail(None, None));
+
+        let mut ui = simulator(render_unit_detail_panel(&s, "redis.service"));
+        assert!(ui.find("— (not running)").is_ok());
+        assert!(ui.find("no active run").is_ok());
+        assert!(ui.find("Logs for this run").is_err());
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(msgs.is_empty());
     }
 }

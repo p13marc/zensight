@@ -853,6 +853,56 @@ impl ZenSight {
                 }
             }
 
+            // ── Cross-view identity pivots (#313) ────────────────────────────
+            Message::SystemdSelectUnit(unit) => {
+                use crate::view::specialized::fetch::Fetch;
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.selected_unit = unit.clone();
+                    device.systemd_detail.unit_detail = match &unit {
+                        Some(_) => Fetch::Loading,
+                        None => Fetch::Idle,
+                    };
+                }
+                if let Some(unit) = unit {
+                    return ControlFlow::Break(self.query_systemd_unit_detail(unit));
+                }
+            }
+            Message::SystemdUnitDetailReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.systemd_detail.unit_detail =
+                        crate::view::specialized::fetch::Fetch::from_result(result);
+                }
+            }
+            Message::PivotToUnit { host, unit } => {
+                return ControlFlow::Break(self.pivot_to_unit(host, unit));
+            }
+            Message::PivotToProcess {
+                host,
+                pid,
+                start_time,
+            } => {
+                return ControlFlow::Break(self.pivot_to_process(host, pid, start_time));
+            }
+            Message::ClearSysinfoPidFilter => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.sysinfo_detail.pid_filter = None;
+                }
+            }
+            Message::OpenLogsForInvocation {
+                unit,
+                invocation_id,
+            } => {
+                // Pre-filter the Logs view to exactly this unit run, then open it
+                // through the normal path (cold-store search-back included).
+                self.syslog_filter.invocation_id = Some(invocation_id);
+                self.syslog_filter.selected_units.clear();
+                self.syslog_filter.selected_units.insert(unit);
+                return ControlFlow::Break(Task::done(Message::OpenLogs));
+            }
+            Message::ClearLogsInvocationFilter => {
+                self.syslog_filter.invocation_id = None;
+            }
+
             Message::FetchNetlinkDetail(topic) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netlink_detail.loading(topic);
@@ -3238,6 +3288,82 @@ impl ZenSight {
                 data.ok_or_else(|| format!("No systemd sensor responded for {}", topic.label()));
             Message::SystemdDetailReceived(topic, result)
         })
+    }
+
+    /// Fetch one unit's identity detail (`@/query/unit?name=`) for the systemd
+    /// drill-down panel (#313).
+    fn query_systemd_unit_detail(&self, unit: String) -> Task<Message> {
+        use crate::view::specialized::systemd_detail::fetch_unit_detail;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::SystemdUnitDetailReceived(Err(
+                "Not connected to Zenoh".to_string(),
+            )));
+        };
+        Task::future(async move {
+            let result = fetch_unit_detail(session, unit)
+                .await
+                .ok_or_else(|| "No systemd sensor responded".to_string());
+            Message::SystemdUnitDetailReceived(result)
+        })
+    }
+
+    /// Cross-view pivot (#313): open the systemd device for `host` on the Units
+    /// tab with `unit`'s drill-down loading. Toast fallback when the host runs
+    /// no systemd sensor (missing data is the normal case, never a dead end).
+    fn pivot_to_unit(&mut self, host: String, unit: String) -> Task<Message> {
+        use crate::view::specialized::fetch::Fetch;
+        let id = crate::message::DeviceId::new(zensight_common::Protocol::Systemd, &host);
+        if !self.dashboard.devices.contains_key(&id) {
+            self.toasts.push(
+                ToastSeverity::Info,
+                format!("No systemd sensor for host {host}"),
+            );
+            return Task::none();
+        }
+        let select = self.select_device(id);
+        if let Some(device) = self.selected_device.as_mut() {
+            device.specialized_tab = crate::view::specialized::SpecializedTab::Units;
+            device.systemd_detail.selected_unit = Some(unit.clone());
+            device.systemd_detail.unit_detail = Fetch::Loading;
+            device
+                .systemd_detail
+                .loading(crate::view::specialized::systemd_detail::SystemdDetailTopic::Units);
+        }
+        Task::batch([
+            select,
+            self.query_systemd_unit_detail(unit),
+            self.query_systemd_detail(
+                crate::view::specialized::systemd_detail::SystemdDetailTopic::Units,
+            ),
+        ])
+    }
+
+    /// Cross-view pivot (#313): open the sysinfo device for `host` with the
+    /// process explorer filtered to `pid` (`start_time` arms the
+    /// stale-generation guard). Toast fallback when the host runs no sysinfo
+    /// sensor.
+    fn pivot_to_process(
+        &mut self,
+        host: String,
+        pid: i32,
+        start_time: Option<u64>,
+    ) -> Task<Message> {
+        use crate::view::specialized::sysinfo_detail::PidFilter;
+        let id = crate::message::DeviceId::new(zensight_common::Protocol::Sysinfo, &host);
+        if !self.dashboard.devices.contains_key(&id) {
+            self.toasts.push(
+                ToastSeverity::Info,
+                format!("No sysinfo sensor for host {host}"),
+            );
+            return Task::none();
+        }
+        let select = self.select_device(id);
+        let sort = crate::view::specialized::sysinfo_detail::ProcessSort::default();
+        if let Some(device) = self.selected_device.as_mut() {
+            device.sysinfo_detail.pid_filter = Some(PidFilter { pid, start_time });
+            device.sysinfo_detail.loading(sort);
+        }
+        Task::batch([select, self.query_sysinfo_processes(host, sort)])
     }
 
     fn query_netlink_detail(
