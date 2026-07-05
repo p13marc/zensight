@@ -1,9 +1,15 @@
 # ZenSight Zenoh Efficiency — QoS, Advanced Pub/Sub, Declarations, Media & Keyspace
 
-*Analysis / design report for low-bandwidth & unreliable links. Recommendations are
-staged (Phase A–D + a Video track + optional R8); nothing is landed yet. Companion to
+*Analysis / design report for low-bandwidth & unreliable links. Companion to
 [`KEYSPACE.md`](KEYSPACE.md) (the key-expression contract), [`SENSORS.md`](SENSORS.md),
 and the parallax video-sensor report (`zensight-parallax-sensor.md`).*
+
+> **Status (0.7.0, epic #352):** the core is **SHIPPED** — R1 QoS (#353), R2
+> heartbeat + R3 correlator publisher (#354), R4 CBOR default (#355), R5
+> declare-all + `session.put` CI guard (#356), R6 exporter subscription scope
+> (#357). **Deferred:** R6 frontend `link_profile` (#364), R7 log-events keyspace
+> (#358), R9 media/video plane (#359), R8 (optional, wholesale advanced-pub
+> reconsideration).
 
 ## Context
 

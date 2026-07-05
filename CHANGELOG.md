@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Zenoh-efficiency core for low-bandwidth / unreliable links (epic #352,
+  `docs/ZENOH-EFFICIENCY.md`)**: a coherent "resilient links" pass across the bus.
+  - **Per-traffic-class QoS** (`zensight_common::QosClass`, #353): telemetry and
+    health are best-effort + drop + low priority (a lost sample is superseded);
+    alerts, commands, evidence and entities are **reliable + block** at higher
+    priority. `express` is off everywhere (batching beats latency on a constrained
+    link). **This fixes a correctness bug**: alerts previously published via a
+    plain drop `put`, so a firing/resolved event or its delete tombstone could be
+    silently dropped on a lossy link, stranding a live GUI in a stale state.
+  - **Declare every publisher; ban raw `session.put`** (#356): new
+    `zensight_common::PublisherRegistry` (declare-on-first-use + per-key cache +
+    QoS); all sensors, the control plane, and the frontend command/artifact path
+    publish through a declared publisher (interned key + primed routing). A CI
+    guard fails the build on any raw `session.put`/`session.delete` in-scope.
+  - **Right-sized AdvancedPublisher** (#354): `cache_only` registries no longer
+    attach sample-miss-detection or a 500 ms/key heartbeat (the builder now honors
+    its config bools; telemetry heartbeat default relaxed 500 ms → 5 s); the
+    correlator entity publisher downgraded to a plain declared publisher.
+  - **Configurable exporter subscription scope** (#357): `filters.key_expr` on
+    both exporters narrows the telemetry subscription (default `zensight/**`) so
+    unwanted protocols and the `_meta/**` control plane never reach the exporter
+    over the wire. (Frontend `link_profile` half split to #364.)
+
 - **netring passive-inventory enrichment from flowscope 0.22 (#329)**: the netring
   asset inventory (`@/query/assets`) is widened with a classified device role
   (router / switch / access-point / phone / iot / host), first-seen timestamp,
@@ -141,6 +164,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (efficiency, #355): default serialization is now CBOR.**
+  `Format::default()` flips JSON → CBOR, so every sensor/exporter/config that
+  didn't pin a format now encodes CBOR on the wire (smaller envelopes on a
+  constrained link). All on-bus consumers decode format-agnostically
+  (`decode_auto` sniffs JSON vs CBOR by first byte), so mixed-format fleets during
+  a rolling upgrade keep working; set `serialization: "json"` to opt back in.
+- **BREAKING (efficiency, #353): alert/command traffic is now reliable+block.**
+  Alerts, commands, evidence and entities publish with `QosClass` (reliable +
+  block); telemetry/health are best-effort + drop. See the Added section.
 - **BREAKING (identity, #301): host-id config unified to `source`.** The
   netlink `netlink.hostname`, netring `netring.sensor_id`, and sysinfo
   `sysinfo.hostname` config fields are renamed to `source` (same `"auto"` →
