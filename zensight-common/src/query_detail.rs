@@ -331,7 +331,7 @@ pub struct ProcessRecord {
 /// The richer fields (congestion control, congestion window, socket-memory
 /// buffers) are populated when the sensor requests the sockdiag mem/congestion
 /// extensions; they default to absent/zero for older producers (issue #11).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct SocketRecord {
     pub local: String,
     pub remote: String,
@@ -365,6 +365,19 @@ pub struct SocketRecord {
     /// Total bytes retransmitted on this socket (`tcp_info.bytes_retrans`, #108).
     #[serde(default)]
     pub bytes_retrans: u64,
+    /// Cumulative app-layer bytes ACKed by the peer (`tcp_info.bytes_acked`, #317)
+    /// — TX **goodput**. Deltas on the socket `cookie` give per-process TX
+    /// bandwidth (app-goodput, TCP-only). 0 when unknown.
+    #[serde(default)]
+    pub bytes_acked: u64,
+    /// Cumulative app-layer bytes received in-order (`tcp_info.bytes_received`,
+    /// #317) — RX **goodput**. 0 when unknown.
+    #[serde(default)]
+    pub bytes_received: u64,
+    /// Cumulative app-layer bytes handed to the transport (`tcp_info.bytes_sent`,
+    /// #317; includes retransmitted payload, so ≥ `bytes_acked`). 0 when unknown.
+    #[serde(default)]
+    pub bytes_sent: u64,
     /// Lifetime segment retransmits (`tcp_info.total_retrans`, #108) — distinct
     /// from `retrans` (the current/outstanding count).
     #[serde(default)]

@@ -235,6 +235,14 @@ pub struct CollectConfig {
     /// more than this many processes — a query-time cost ceiling (#304).
     #[serde(default = "default_socket_process_max_procs")]
     pub socket_process_max_procs: usize,
+    /// Per-process TCP bandwidth via sock_diag goodput deltas (#317, epic #320):
+    /// sample `tcp_info` byte counters on a cadence, diff per cookie, and serve
+    /// per-process rate on `@/query/bandwidth`. Unprivileged, **TCP-only**
+    /// (`udp_diag` has no per-socket byte counters). The pid join reuses
+    /// `socket_processes` (attribution off ⇒ everything folds into the
+    /// `unattributed` bucket). ON by default.
+    #[serde(default = "default_true")]
+    pub bandwidth: bool,
 }
 
 fn default_socket_process_max_procs() -> usize {
@@ -259,6 +267,7 @@ impl Default for CollectConfig {
             ebpf: false,
             socket_processes: true,
             socket_process_max_procs: default_socket_process_max_procs(),
+            bandwidth: true,
         }
     }
 }

@@ -7,6 +7,7 @@
 //!
 //! Reads are unprivileged (no `CAP_NET_ADMIN` needed). Linux only.
 
+pub mod bandwidth;
 pub mod collector;
 pub mod command;
 pub mod config;

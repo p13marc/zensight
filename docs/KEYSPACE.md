@@ -188,7 +188,7 @@ as Zenoh selector params (e.g. `?top=20`, `?state=&port=`).
 | Sensor | `@/query/<topic>` | Reply |
 |--------|---|---|
 | sysinfo | `processes?sort=cpu\|mem\|io&top=N`, `latency`² | `Vec<ProcessRecord>` / `LatencyReport` |
-| netlink | `routes`, `neighbors`, `sockets?state=&port=`, `addresses`, `events`, `route_changes`, `tc`, `xfrm`, `nft`, `retransmits`³, `connections`³ | `Vec<…Record>` |
+| netlink | `routes`, `neighbors`, `sockets?state=&port=`, `addresses`, `events`, `route_changes`, `tc`, `xfrm`, `nft`, `bandwidth?top=N`⁴, `retransmits`³, `connections`³ | `Vec<…Record>` |
 | netring | `flows`, `tls`, `talkers?top=N`, `matrix?top=N`, `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`, `ja4h?top=N`¹, `assets` | `Vec<…Record>` |
 | systemd | `units`, `failed`, `unit?name=<u>`, `timers`, `events`, `cgroups?path=<rel>` | `Vec<UnitRecord>` / `UnitDetail` / `Vec<TimerRecord>` / `Vec<EventRecord>` / `CgroupNode` |
 
@@ -210,6 +210,12 @@ and the process holds CAP_BPF/CAP_PERFMON; otherwise the reply is a
 served when the netlink sensor is built with `--features ebpf`, `collect.ebpf` is
 set, and the process holds CAP_BPF/CAP_NET_ADMIN; otherwise the channels are
 absent.
+
+⁴ `bandwidth` (per-process TCP goodput rate, #317/epic #320) is served when
+`collect.bandwidth` is on (default; unprivileged). Replies `Vec<BandwidthRecord>`
+(`zensight-common::bandwidth`), ranked by rate, top-N (default 50). **TCP-only,
+app-goodput** — every record carries `bw.source`/`bw.semantics`/`bw.proto` so the
+GUI never blends it with wire-L3 (systemd) or wire-L2 (capture) numbers.
 
 ---
 

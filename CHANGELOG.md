@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-process TCP bandwidth from sock_diag (#317, epic #320)**: the netlink
+  sensor derives per-process network rate from `tcp_info` goodput byte counters
+  (`bytes_acked`/`bytes_received`), sampled per socket **cookie** and served
+  query-only on `@/query/bandwidth?top=N` as ranked `BandwidthRecord`s — never as
+  high-cardinality streamed per-pid keys. Unprivileged and **TCP-only**
+  (`udp_diag` has no per-socket byte counters); records are tagged
+  `bw.source=sock_diag`/`bw.semantics=app-goodput`/`bw.proto=tcp` so the honest
+  limits (below-wire goodput, short-flow misses, TCP-only) travel with the data.
+  Unattributed sockets fold into one explicit bucket rather than being dropped.
+  `SocketRecord` gains `bytes_acked`/`bytes_received`/`bytes_sent`.
 - **Bandwidth-by-service from systemd IPAccounting (#315, epic #320)**: the systemd
   sensor derives per-unit network rate `unit/<name>/{ip_ingress_bps,ip_egress_bps}`
   from successive `IPIngressBytes`/`IPEgressBytes` deltas (the cheapest bandwidth-by-*
