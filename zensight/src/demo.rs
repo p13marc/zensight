@@ -477,7 +477,43 @@ impl DemoSimulator {
         points.extend(self.generate_netring(timestamp));
         points.extend(self.generate_netflow(timestamp));
         points.extend(self.generate_gnmi(timestamp));
+        points.extend(self.generate_bandwidth(timestamp));
 
+        points
+    }
+
+    /// Per-service bandwidth demo (#319, epic #320): a few systemd units publish
+    /// time-varying IPAccounting rates (`unit/<name>/ip_*_bps`, wire-L3) so the
+    /// Bandwidth view's Services mode + sparklines populate in `--demo`. The
+    /// Processes mode is fed separately by the demo query branch in `app.rs`
+    /// (demo never serves the `@/query/bandwidth` queryable).
+    fn generate_bandwidth(&mut self, timestamp: i64) -> Vec<TelemetryPoint> {
+        let mut points = Vec::new();
+        // (unit, rx_base bytes/s, tx_base bytes/s)
+        let units = [
+            ("nginx.service", 1_500_000.0, 220_000.0),
+            ("postgresql.service", 420_000.0, 810_000.0),
+            ("sshd.service", 22_000.0, 9_000.0),
+        ];
+        let phase = self.tick as f64 * 0.3;
+        for (unit, rx_base, tx_base) in units {
+            let rx = rx_base * (1.0 + 0.4 * phase.sin());
+            let tx = tx_base * (1.0 + 0.3 * (phase + 1.0).cos());
+            points.push(self.make_point(
+                Protocol::Systemd,
+                "server01",
+                &format!("unit/{unit}/ip_ingress_bps"),
+                TelemetryValue::Gauge(rx),
+                timestamp,
+            ));
+            points.push(self.make_point(
+                Protocol::Systemd,
+                "server01",
+                &format!("unit/{unit}/ip_egress_bps"),
+                TelemetryValue::Gauge(tx),
+                timestamp,
+            ));
+        }
         points
     }
 

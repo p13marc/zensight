@@ -169,6 +169,19 @@ pub enum Message {
     /// Set the fingerprint-explorer kind filter (`None` = all kinds).
     SetInventoryFpFilter(Option<crate::view::inventory::FpKind>),
 
+    /// Open the bandwidth live-monitor view (#319, epic #320) and fetch per-process rows.
+    OpenBandwidth,
+    /// Re-fetch the per-process bandwidth table (`@/query/bandwidth`).
+    RefreshBandwidth,
+    /// Per-process bandwidth fetch outcome.
+    BandwidthLoaded(Result<Vec<zensight_common::BandwidthRecord>, String>),
+    /// Switch the bandwidth monitor between Processes and Services modes.
+    SetBandwidthMode(crate::view::bandwidth::BandwidthMode),
+    /// Sort the bandwidth table by column index.
+    BandwidthTableSort(usize),
+    /// Filter the bandwidth table by name substring.
+    BandwidthTableFilter(String),
+
     /// Fetch an on-demand systemd detail channel (units/timers/events/cgroups) (#281).
     FetchSystemdDetail(crate::view::specialized::systemd_detail::SystemdDetailTopic),
     /// A systemd detail reply for a topic: the decoded payload, or an error message.

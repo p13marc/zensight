@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Bandwidth live monitor (#319, epic #320)**: a new bmon/nethogs-style
+  **Bandwidth** view (nav rail) with two modes — **Processes** (per-process rows
+  fetched from the netlink `@/query/bandwidth` channel) and **Services**
+  (per-service rows derived from streamed systemd `unit/<name>/ip_*_bps`, with a
+  live sparkline). Every row carries a **source/semantics badge** (e.g.
+  `sock_diag · goodput`, `systemd · wire-L3`) and a legend so app-goodput and
+  wire-L3 rates are never silently compared; the explicit `unattributed` bucket is
+  shown, not dropped. Sortable/filterable table; `--demo` populates both modes
+  (Services from the demo stream, Processes from a mock since demo serves no
+  queryables).
 - **Per-process TCP bandwidth from sock_diag (#317, epic #320)**: the netlink
   sensor derives per-process network rate from `tcp_info` goodput byte counters
   (`bytes_acked`/`bytes_received`), sampled per socket **cookie** and served
