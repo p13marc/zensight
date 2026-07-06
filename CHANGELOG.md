@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-06
+
+Identity & evidence release. Sensors now self-report a stable host identity and
+republish observed hosts/names; a new `zensight-correlator` service fuses that
+evidence into one `HostEntity` per physical host, and the GUI groups every
+per-protocol facet under a single host card. This release also lands the Zenoh
+low-bandwidth efficiency work (CBOR default, reliable alert/command traffic,
+detail-on-request keyspaces, a media plane), a unified on-demand artifact
+channel, container/cloud identity, durable storage tiers, and new export paths.
+It carries a batch of deliberate breaking changes — see **Changed (BREAKING)**
+and the per-entry mixed-version notes; upgrade sensors and frontend together.
+
 ### Changed (BREAKING)
 
 - **netring NDR detectors migrated onto flowscope 0.22's `DetectorRegistry` +
@@ -55,6 +67,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sensor (upgrade both together).
 
 ### Added
+
+- **Media plane enabler (#359)**: an opaque `@media` plane for live video /
+  imagery — `zensight/<proto>/<source>/@media/<stream>/…` carrying raw encoded
+  bytes (Zenoh `Encoding` + frame-metadata attachment), a **plain** (non-cached)
+  `Publisher::raw_media_publisher()` with a `matching_listener()` keyframe-on-
+  subscribe hook, `QosClass::LiveVideo` (best-effort · drop · interactive-high),
+  and stream control (`StreamControl`/`StreamDescriptor`/`StreamStatus` over
+  `@/commands/stream`, `@/query/streams`, `@/status/streams`). Adds
+  `Protocol::Parallax` and a frontend JPEG-preview stub. The `@media` chunk is
+  invisible to both `zensight/**` and `zensight/*/@/**`, and the exporters'
+  `is_telemetry_key` now rejects any `@`-prefixed chunk so media bytes never
+  reach the telemetry decoders. The H.264/parallax encoder daemon is out of
+  scope — this is the zenoh-side enabler.
+
+- **Container & cloud identity evidence (#311)**: `HostEvidence` gains
+  `container_id` (parsed from cgroup-v2 docker/containerd/`*.scope` paths) and
+  `cloud` (`CloudFacts`: provider / instance-id / region / account, from an
+  opt-in timeout-bounded IMDS probe for AWS/GCP/Azure, off by default).
+  `HostEntity` gains a `container_ids` union. The correlator adds a `cloud_instance`
+  merge rule (authoritative per provider, just below `host_id`) so cloned
+  machine-ids still fuse when the cloud instance-id matches; `container_id` is a
+  host-scoped qualifier, never a cross-host merge key. Both wire fields are
+  `#[serde(default)]` for back-compat.
+
+- **Prometheus remote-write + OTLP traces (#167)**: the Prometheus exporter gains
+  a remote-write push path (protobuf + snappy POST; `remote_write: {url,
+  interval, headers}`) alongside the pull endpoint. The OTel exporter gains an
+  OTLP traces signal — synthesized `alert:<rule>` spans from the firing→resolved
+  lifecycle with deterministic ids. Exemplars are deferred to a successor issue
+  (blocked on a histogram value type). One new dep (`snap`).
+
+- **Wire-level bandwidth-by-process tier for netring (#318, opt-in)**: joins
+  netring's live flow bandwidth against the kernel socket table in-process
+  (`with_flow_attribution` hook + sock_diag/`/proc` owner map refreshed off the
+  hot path) and serves `BandwidthRecord{source:Netring, semantics:WireL2}` on
+  `zensight/netring/@/query/bandwidth`, with an explicit `pid=-1` unattributed
+  bucket. Off by default (`bandwidth_attribution`, it does `/proc` scans); the
+  GUI bandwidth monitor merges it with netlink's socket-level tier. `nlink`
+  unified to 0.24 across the workspace.
+
+- **Durable storage tier + historical passive-DNS (#310)**: zenohd
+  storage-manager configs persist `_meta/evidence/**` and `_meta/entity/**` to a
+  `zenoh-backend-fs` volume (timestamped for mutable-key last-writer-wins), and a
+  new `@pdns` plane (`zensight/@pdns/<ip>`, `PdnsRecord`) published by the
+  correlator on each name-store update gives a historical IP↔name tier with a
+  documented `zenoh-backend-influxdb` storage example. See `docs/STORAGE.md`.
 
 - **Contextual capture & bandwidth actions in the device view (#351)**: the
   netring drill-down's Capture tab now hosts the real on-demand pcap capture
@@ -289,7 +347,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   firing/resolve pairs stay matched across identity refreshes. Alert keys for
   alerts without such labels are unchanged.
 
-- **BREAKING (large-data transfer): unified the `@/report` and `@/snapshot`
+- **BREAKING (large-data transfer, #332): unified the `@/report` and `@/snapshot`
   control-plane channels into one `@/artifact` channel.** Operator-facing
   migration note — anything that PUT report/snapshot requests or GET the bytes
   must move to the new keyspace and wire types:
@@ -326,9 +384,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `flowscope` 0.20 → 0.22 (netlink and netring sensors). Migrated the breaking
   surface: `MonitorBuilder::flow_risk()` → `flow_analysis()`, and our local
   `DetectorScore` impls (`RitaBeaconHit`, `FloodScore`) to the typed
-  `DetectorKind` (`DetectorKind::Other(...)`). Published anomaly kind slugs are
-  byte-identical, so alert keys, the detection-tuning panel, and the Security
-  view are unaffected.
+  `DetectorKind` (`DetectorKind::Other(...)`). Published anomaly kind slugs were
+  byte-identical at this step (later renamed by #369, above).
+- **BREAKING (metric value corrections, #321)**: the dependency adoption above
+  fixed several netlink/netring metrics that were emitting wrong values — zeroed
+  `tcp_info` fields, an interface-mask off-by-one, and mis-parsed ICMPv6 counters.
+  The keys are unchanged but the values change; dashboards/alerts calibrated
+  against the old (incorrect) numbers should be re-checked.
 
 ### Fixed
 
