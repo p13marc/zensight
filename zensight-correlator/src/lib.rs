@@ -21,6 +21,7 @@ pub mod demo;
 pub mod engine;
 pub mod guard;
 pub mod merge;
+pub mod pdns;
 pub mod publisher;
 pub mod query;
 pub mod store;

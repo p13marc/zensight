@@ -11,7 +11,7 @@ use zensight_common::config::LoggingConfig;
 use zensight_correlator::config::CorrelatorConfig;
 use zensight_correlator::engine::{CorrelatorState, Engine};
 use zensight_correlator::guard::{self, GuardOutcome};
-use zensight_correlator::{publisher, query, subscriber};
+use zensight_correlator::{pdns, publisher, query, subscriber};
 
 /// Cross-sensor identity correlation service for ZenSight.
 #[derive(Parser, Debug)]
@@ -65,12 +65,14 @@ async fn main() -> anyhow::Result<()> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (tx, rx) = mpsc::channel(ENGINE_CHANNEL_CAP);
     let (op_tx, op_rx) = mpsc::channel::<zensight_correlator::EntityOp>(ENGINE_CHANNEL_CAP);
+    // Durable historical passive-DNS records (@pdns, #310).
+    let (pdns_tx, pdns_rx) = mpsc::channel::<zensight_common::PdnsRecord>(ENGINE_CHANNEL_CAP);
 
     // Shared correlation state (engine mutates; queryables read).
     let state = Arc::new(Mutex::new(CorrelatorState::new(config.clone())));
 
     // Engine.
-    let engine = Engine::new(state.clone(), rx, op_tx);
+    let engine = Engine::new(state.clone(), rx, op_tx).with_pdns(pdns_tx);
     let engine_shutdown = shutdown_rx.clone();
     let engine_task = tokio::spawn(async move {
         if let Err(e) = engine.run(engine_shutdown).await {
@@ -87,6 +89,18 @@ async fn main() -> anyhow::Result<()> {
             error!(error = %e, "publisher error");
         }
     });
+
+    // Historical passive-DNS publisher: durable IP↔name records on @pdns (#310),
+    // meant to be captured by a router-hosted storage backend.
+    let pdns_task = {
+        let s = session.clone();
+        let sh = shutdown_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = pdns::run(s, serialization, pdns_rx, sh).await {
+                error!(error = %e, "pdns publisher error");
+            }
+        })
+    };
 
     // Late-joiner queryables (entities seed + on-demand names).
     let entities_task = {
@@ -139,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
         let _ = input_task.await;
         let _ = engine_task.await;
         let _ = publish_task.await;
+        let _ = pdns_task.await;
         let _ = entities_task.await;
         let _ = names_task.await;
     })

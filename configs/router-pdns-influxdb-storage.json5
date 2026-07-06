@@ -1,0 +1,89 @@
+// zenohd (router) configuration that captures the ZenSight historical
+// passive-DNS tier (`zensight/@pdns/**`, #310) into an InfluxDB time-series
+// bucket. The correlator publishes a PdnsRecord (an IP's full accumulated
+// name set) on `zensight/@pdns/<ip-slug>` every time it learns/updates names for
+// an IP; an InfluxDB-backed storage subscribed on that tier records each write
+// as a time-series point, giving a queryable IP↔name history ("what did
+// 10.0.0.9 resolve to last Tuesday?").
+//
+//   zenohd -c configs/router-pdns-influxdb-storage.json5
+//
+// Requires the storage-manager + InfluxDB-backend plugins:
+// zenoh-plugin-storage-manager, zenoh-backend-influxdb.
+//
+// ┌──────────────────────────────────────────────────────────────────────────┐
+// │ NOT LIVE-TESTED. There is no InfluxDB in the build/CI sandbox, so this     │
+// │ config is provided as a documented example only. The schema below follows  │
+// │ the InfluxDB **v1.8** backend (volume id `influxdb`, `db` = database),     │
+// │ which is the shape verified against a working zenoh-backend-influxdb        │
+// │ config. The InfluxDB **v2.x** variant (volume id `influxdb2`, org+token,   │
+// │ `db` = bucket) is sketched in comments — confirm exact keys against the     │
+// │ zenoh-backend-influxdb README for your backend version before use.         │
+// └──────────────────────────────────────────────────────────────────────────┘
+{
+  mode: "router",
+
+  listen: {
+    endpoints: ["tcp/0.0.0.0:7447"],
+  },
+
+  // Ensure every @pdns write carries a timestamp so InfluxDB points land at the
+  // correct instant (and a late/replayed sample doesn't misorder the series). A
+  // router timestamps by default; set explicitly for peer/client deployments.
+  timestamping: {
+    enabled: true,
+    drop_future_timestamp: false,
+  },
+
+  plugins_loading: { enabled: true },
+
+  plugins: {
+    storage_manager: {
+      volumes: {
+        // --- InfluxDB v1.8 backend (verified shape) ---
+        influxdb: {
+          // InfluxDB HTTP endpoint.
+          url: "http://localhost:8086",
+          // Optional admin credentials for create_db / on_closure:
+          // private: { username: "admin", password: "..." },
+        },
+
+        // --- InfluxDB v2.x backend (UNVERIFIED — confirm against README) ---
+        // influxdb2: {
+        //   url: "http://localhost:8086",
+        //   private: {
+        //     org_id: "<org>",
+        //     token:  "<all-access-or-org-token>",
+        //   },
+        // },
+      },
+      storages: {
+        // The whole historical passive-DNS tier. `strip_prefix` drops the common
+        // `zensight/@pdns` head so each IP's records key on just its ip-slug
+        // (the InfluxDB measurement/series), keeping the time series tidy.
+        "zensight-pdns": {
+          key_expr: "zensight/@pdns/**",
+          strip_prefix: "zensight/@pdns",
+          volume: {
+            id: "influxdb",
+            db: "zensight_pdns",
+            create_db: true,
+            // on_closure: "do_nothing", // keep history when the storage stops
+            // private: { username: "writer", password: "..." },
+          },
+        },
+
+        // --- v2.x storage variant (UNVERIFIED) ---
+        // "zensight-pdns": {
+        //   key_expr: "zensight/@pdns/**",
+        //   strip_prefix: "zensight/@pdns",
+        //   volume: {
+        //     id: "influxdb2",
+        //     db: "zensight_pdns",           // v2 bucket
+        //     private: { token: "<bucket-rw-token>" },
+        //   },
+        // },
+      },
+    },
+  },
+}

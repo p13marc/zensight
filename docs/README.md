@@ -9,6 +9,8 @@ current, factual documentation.)
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System overview, crate dependencies, data flow, runtime/lifecycle, health model, exporters, directory layout |
 | [SENSORS.md](SENSORS.md) | Per-sensor reference: sources, configuration, and the Zenoh keys each sensor publishes/serves |
 | [KEYSPACE.md](KEYSPACE.md) | Canonical Zenoh keyspace reference — telemetry, control-plane (`@/…`), metadata (`_meta/…`), wildcards, and the key-building helpers |
+| [STORAGE.md](STORAGE.md) | Durable router-hosted storages: evidence/entity fs durability + the historical passive-DNS (`@pdns`) tier, and the mutable-key/timestamping caveat (#310) |
+| [BLOB-ROUTER-STORAGE.md](BLOB-ROUTER-STORAGE.md) | Router-hosted Tier-2 content store for `zenoh-blob` large-data transfer (#201) |
 | [UI_TESTING.md](UI_TESTING.md) | Testing the Iced 0.14 frontend with the `iced_test` simulator |
 
 ## Quick start
