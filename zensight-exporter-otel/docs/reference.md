@@ -23,6 +23,19 @@ Two subscribers, same split as the Prometheus exporter:
 `include_protocols` / `exclude_protocols` / `include_sources` / `exclude_sources`
 apply as a post-receive filter.
 
+```mermaid
+flowchart LR
+    T["telemetry subscriber — zensight/**"] --> Filt
+    Al["alerts subscriber — zensight/*/@/alerts/*"] --> Filt
+
+    Filt{"post-receive filter — include/exclude protocol/source"} --> Map["map"]
+
+    Map --> Met["metrics — Counter/Gauge/Boolean"]
+    Map --> Log["logs — syslog severity to OTEL severity"]
+    Map --> AlLog["alerts as logs — zensight.alerts scope"]
+    Map --> Tr["traces (opt-in) — firing → resolved pair = one span"]
+```
+
 ## Metrics
 
 Emitted on the `zensight` meter scope. Metric names follow

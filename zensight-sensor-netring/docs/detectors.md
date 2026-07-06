@@ -89,6 +89,24 @@ construction and can't be muted. ZenSight wraps every stock detector in a
    `src:port` / `proto` / Community ID survive on the alert (the `HostPair` /
    `SrcHost` the detector state is keyed on has no source port).
 
+```mermaid
+flowchart LR
+    F["flow event (start / established / tick / end)"] --> S
+    Q["DNS query"] --> S
+
+    subgraph Tuned["Tuned<D> decorator"]
+        S["inner stock Detector (baked-in floor)"] --> P{"post-filter: mute / threshold / allowlist"}
+        L["LiveConfig snapshot"] -. "reads" .-> P
+    end
+
+    P -->|"dropped"| X["discarded"]
+    P -->|"kept, flow-driven"| K["re-key with full 5-tuple"]
+    P -->|"kept, DNS-driven"| N["keep stock source-only key"]
+    K --> A["map::anomaly_alert"]
+    N --> A
+    A --> Z["@/alerts/<alert_key>"]
+```
+
 Stock gates are constructed at the **lowest sensible floor** — below the runtime
 defaults — so a runtime command that *lowers* a threshold still lets
 sub-default-score events through (the stock detector must emit them for `Tuned`
