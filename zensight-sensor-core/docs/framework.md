@@ -30,6 +30,17 @@ loads config, builds a `SensorRunner`, spawns protocol workers that publish
    graceful path (offline status + alert tombstones). On signal it aborts tasks,
    publishes offline status, and closes the session.
 
+```mermaid
+stateDiagram-v2
+    [*] --> New : SensorRunner::new(name, config)
+    New --> Configured : with_status_publishing / with_liveliness / with_identity / with_artifacts / with_format
+    Configured --> Configured : spawn(future) / spawn_with_error(name, future)
+    Configured --> Running : run() / run_with_metadata(meta)
+    Running --> Running : publish running status, health task, identity task
+    Running --> ShuttingDown : SIGINT or SIGTERM
+    ShuttingDown --> [*] : abort tasks, publish offline status, close session
+```
+
 ### The identity envelope (`with_identity`)
 
 Enabling identity detects the local `HostIdentity`, stamps `host_id` onto health
