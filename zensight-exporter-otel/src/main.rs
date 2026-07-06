@@ -70,6 +70,8 @@ async fn main() -> anyhow::Result<()> {
         protocol = ?config.opentelemetry.protocol,
         export_metrics = config.opentelemetry.export_metrics,
         export_logs = config.opentelemetry.export_logs,
+        export_alerts = config.opentelemetry.export_alerts,
+        traces = config.opentelemetry.traces.enabled,
         "Configuration loaded"
     );
 

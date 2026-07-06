@@ -41,6 +41,16 @@ pub const REMOTE_WRITE_VERSION: &str = "0.1.0";
 // Field tags match `prompb/remote.proto` / `prompb/types.proto`. Only the
 // fields a 1.0 sender must produce are modelled; receivers ignore the absent
 // optional ones (metadata, exemplars, histograms).
+//
+// Exemplars assessment (#167 successor): `TimeSeries` has an `exemplars` field
+// (tag 3, `repeated Exemplar`) in the proto that we deliberately omit. Sending
+// exemplars would require (a) a histogram-shaped `TelemetryValue` so a bucketed
+// sample can carry a trace-linked exemplar — today `TelemetryValue` is only
+// Counter/Gauge/Text/Boolean/Binary, all scalar — and (b) a trace id to point
+// at, which the bus does not propagate (see the OTLP traces module: ids are
+// *synthesized*, not real spans an exemplar could link to). Both are the same
+// blockers as OTel exemplars; adding the proto field alone would emit empty
+// exemplars. Deferred to the successor issue behind a histogram value type.
 
 /// Top-level remote-write payload: a batch of time series.
 #[derive(Clone, PartialEq, Message)]
@@ -334,8 +344,18 @@ mod tests {
     #[test]
     fn build_from_collector_state_has_name_label_and_push_timestamp() {
         let collector = make_collector();
-        record(&collector, "router01", "sysUpTime", TelemetryValue::Counter(12345));
-        record(&collector, "router01", "cpu/load", TelemetryValue::Gauge(0.75));
+        record(
+            &collector,
+            "router01",
+            "sysUpTime",
+            TelemetryValue::Counter(12345),
+        );
+        record(
+            &collector,
+            "router01",
+            "cpu/load",
+            TelemetryValue::Gauge(0.75),
+        );
 
         let now_ms = 1_720_000_000_000;
         let req = build_write_request(&collector.snapshot_metrics(), now_ms);
@@ -409,10 +429,10 @@ mod tests {
     /// snappy-compressed protobuf `WriteRequest` with the spec headers set.
     #[tokio::test]
     async fn push_once_delivers_snappy_protobuf_to_receiver() {
+        use axum::Router;
         use axum::body::Bytes;
         use axum::http::{HeaderMap as AxumHeaderMap, StatusCode};
         use axum::routing::post;
-        use axum::Router;
 
         let (tx, rx) = tokio::sync::oneshot::channel::<(AxumHeaderMap, Bytes)>();
         let tx = Arc::new(parking_lot::Mutex::new(Some(tx)));
@@ -435,7 +455,12 @@ mod tests {
         });
 
         let collector = make_collector();
-        record(&collector, "router01", "sysUpTime", TelemetryValue::Counter(7));
+        record(
+            &collector,
+            "router01",
+            "sysUpTime",
+            TelemetryValue::Counter(7),
+        );
 
         let cfg = RemoteWriteConfig {
             enabled: true,
@@ -465,10 +490,7 @@ mod tests {
             headers.get("x-prometheus-remote-write-version").unwrap(),
             REMOTE_WRITE_VERSION
         );
-        assert_eq!(
-            headers.get("authorization").unwrap(),
-            "Bearer secret-token"
-        );
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer secret-token");
 
         // Body: snappy raw block -> protobuf WriteRequest.
         let raw = snap::raw::Decoder::new().decompress_vec(&body).unwrap();

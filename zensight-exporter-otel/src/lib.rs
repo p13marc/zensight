@@ -36,6 +36,7 @@ pub mod exporter;
 pub mod logs;
 pub mod metrics;
 pub mod subscriber;
+pub mod traces;
 
 pub use config::ExporterConfig;
 pub use exporter::{OtelExporter, SharedExporter};
