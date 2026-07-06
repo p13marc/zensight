@@ -37,9 +37,16 @@ channel drops a request whose `target_source` isn't its `source_id`.
 
 A request drives a per-kind state machine, surfaced in the status queryable:
 
-```
-Generating{detail, progress}  ──▶  Ready{delivery, expires_ms}  ──▶  Expired
-                              └──▶  Failed{reason}
+```mermaid
+stateDiagram-v2
+    [*] --> Generating : request accepted (accepts() ok, busy/cooldown gate passed)
+    [*] --> Failed : accepts() rejects, or busy/cooldown gate blocks
+    Generating --> Generating : ProgressUpdate (detail, progress)
+    Generating --> Ready : produce() succeeds → finalize (Delivery)
+    Generating --> Failed : produce() errors, or cancelled mid-flight
+    Ready --> Expired : TTL reaper, or cancel on a Ready artifact
+    Failed --> [*]
+    Expired --> [*]
 ```
 
 - On request the channel resolves the producer by kind slug, calls
@@ -51,6 +58,47 @@ Generating{detail, progress}  ──▶  Ready{delivery, expires_ms}  ──▶ 
   its TTL; a periodic reaper expires it, and `cancel` aborts an in-flight
   production or frees a `Ready` artifact early. Only one live artifact per kind is
   kept (a new one replaces the prior).
+
+### Request → produce → deliver → status
+
+```mermaid
+sequenceDiagram
+    participant Operator
+    participant Request as "@/artifact/request"
+    participant Channel as ArtifactChannel
+    participant Producer as ArtifactProducer
+    participant Status as "@/artifact/status"
+    participant Blob as "BlobServer / TreeServer"
+    participant Client
+
+    Operator->>Request: PUT ArtifactRequest{id, kind, opts}
+    Request->>Channel: handle_request
+    Channel->>Producer: accepts(kind)
+    alt rejected, or busy/cooldown gate blocks
+        Channel->>Channel: set_failed → Failed{reason}
+    else accepted
+        Channel->>Channel: mark busy, current = Generating
+        Channel->>Producer: produce(kind, ctx)
+        loop while generating
+            Producer-->>Channel: ProgressUpdate{detail, progress}
+            Channel->>Channel: current = Generating{detail, progress}
+        end
+        Producer-->>Channel: Produced::File or Produced::Dir
+        Channel->>Channel: finalize()
+        alt Produced::File (Tier-1)
+            Channel->>Blob: BlobServer.register(manifest)
+            Channel->>Channel: current = Ready{Delivery::Blob, expires_ms}
+        else Produced::Dir (Tier-2)
+            Channel->>Blob: TreeServer.register(index)
+            Channel->>Channel: current = Ready{Delivery::Tree, expires_ms}
+        end
+    end
+    Client->>Status: GET ArtifactStatus (per kind)
+    Status-->>Client: KindStatus{busy, current}
+    Client->>Blob: fetch via zenoh-blob
+    Blob-->>Client: manifest / tree chunks
+    Channel->>Channel: TTL reaper → Expired
+```
 
 ## The ArtifactProducer trait
 
