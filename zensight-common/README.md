@@ -1,300 +1,64 @@
 # zensight-common
 
-Shared library for the ZenSight observability platform. Provides the common data model, Zenoh helpers, and configuration utilities used by all sensors, exporters, and the frontend.
+The shared model library for the ZenSight observability platform. Every sensor,
+exporter, the correlator, and the frontend depend on it for a single source of
+truth: the wire types, the QoS profiles, and the key-expression contract they all
+speak.
 
-## Features
+## What's in here
 
-- **Telemetry Model** - Unified `TelemetryPoint` structure for all protocols
-- **Health Model** - Device status, liveness, and sensor health types
-- **Alert & Command Model** - `Alert{Kind,Severity,State}` + the sensor command/status channel
-- **Zenoh Integration** - Session management and connection helpers
-- **Key Expressions** - Builder utilities for consistent key expression format (see [`docs/KEYSPACE.md`](../docs/KEYSPACE.md))
-- **Serialization** - JSON and CBOR encoding/decoding
-- **Configuration** - JSON5 configuration loading
+- **Telemetry model** — `TelemetryPoint`, `Protocol`, `TelemetryValue`
+  (`Counter` / `Gauge` / `Text` / `Boolean` / `Binary`) with labels.
+- **Alert & command model** — `Alert{Kind,Severity,State}` + `alert_key`, and the
+  `@/commands` / `@/status` / `@/query` control channels.
+- **Identity, evidence & entities** — `HostEvidence`, `NameObservation`,
+  `HostEntity` / `MemberClaim` / `NameVal`: the sensor-published evidence that the
+  correlator fuses into one entity per physical host.
+- **Artifact channel** — `ArtifactRequest` / `ArtifactKind` / `ArtifactStatus` /
+  `Delivery` wire types for on-demand large-data transfer (report / snapshot /
+  capture) over `zenoh-blob`.
+- **QoS** — `QosClass`, the per-traffic-class Zenoh profile (telemetry drops,
+  control blocks) tuned for low-bandwidth / unreliable links.
+- **Keyspace helpers** — builders in `keyexpr.rs` for every telemetry, `@/`
+  control, `_meta` and `@`-verbatim (`@media` / `@pdns`) key.
+- **Serialization** — JSON / CBOR `encode` / `decode`, with first-byte-sniffing
+  `decode_auto` so JSON and CBOR senders interoperate on the wire.
+- **Config & session** — JSON5 `load_config`, `ZenohConfig`, and the `connect`
+  session helper.
 
-## Installation
+## Quick start
 
-Add to your `Cargo.toml`:
+This is a library crate — it has no binary. Add it as a path dependency:
 
 ```toml
 [dependencies]
 zensight-common = { path = "../zensight-common" }
 ```
 
-## Usage
-
-### Telemetry Model
-
 ```rust
 use zensight_common::{TelemetryPoint, TelemetryValue, Protocol};
-use std::collections::HashMap;
 
-let point = TelemetryPoint {
-    timestamp: 1703500800000,  // Unix epoch milliseconds
-    source: "router01".to_string(),
-    protocol: Protocol::Snmp,
-    metric: "system/sysUpTime".to_string(),
-    value: TelemetryValue::Counter(123456),
-    labels: HashMap::new(),
-};
-```
-
-### Telemetry Values
-
-```rust
-use zensight_common::TelemetryValue;
-
-// Counter - monotonically increasing value
-let counter = TelemetryValue::Counter(1000);
-
-// Gauge - value that can go up or down
-let gauge = TelemetryValue::Gauge(45.7);
-
-// Text - string value
-let text = TelemetryValue::Text("running".to_string());
-
-// Boolean - true/false
-let boolean = TelemetryValue::Boolean(true);
-
-// Binary - raw bytes
-let binary = TelemetryValue::Binary(vec![0x01, 0x02, 0x03]);
-```
-
-### Protocols
-
-```rust
-use zensight_common::Protocol;
-
-let protocols = [
+let point = TelemetryPoint::new(
+    "router01",
     Protocol::Snmp,
-    Protocol::Logs,
-    Protocol::Netflow,
-    Protocol::Modbus,
-    Protocol::Sysinfo,
-    Protocol::Gnmi,
-    Protocol::Netlink,
-    Protocol::Netring,
-    Protocol::Opcua,
-];
+    "system/sysUpTime",
+    TelemetryValue::Counter(123_456),
+)
+.with_label("oid", "1.3.6.1.2.1.1.3.0");
 ```
 
-### Key Expressions
-
-Build consistent Zenoh key expressions:
-
-```rust
-use zensight_common::keyexpr::KeyExprBuilder;
-
-// Build a specific key
-let key = KeyExprBuilder::new()
-    .protocol("snmp")
-    .source("router01")
-    .metric("system/sysUpTime")
-    .build();
-// Result: "zensight/snmp/router01/system/sysUpTime"
-
-// Wildcard for all sources of a protocol
-let wildcard = KeyExprBuilder::new()
-    .protocol("snmp")
-    .source_wildcard()
-    .build();
-// Result: "zensight/snmp/*/**"
-
-// Wildcard for all protocols
-let all = zensight_common::keyexpr::all_telemetry_wildcard();
-// Result: "zensight/**"
-```
-
-### Zenoh Session
-
-```rust
-use zensight_common::{ZenohConfig, connect};
-
-let config = ZenohConfig {
-    mode: "peer".to_string(),
-    connect: vec![],
-    listen: vec![],
-};
-
-let session = connect(&config).await?;
-```
-
-### Serialization
-
-```rust
-use zensight_common::serialization::{Format, encode, decode};
-
-let point = TelemetryPoint { /* ... */ };
-
-// Encode to JSON
-let json_bytes = encode(&point, Format::Json)?;
-
-// Encode to CBOR (more compact)
-let cbor_bytes = encode(&point, Format::Cbor)?;
-
-// Decode
-let decoded: TelemetryPoint = decode(&json_bytes, Format::Json)?;
-```
-
-### Configuration
-
-```rust
-use zensight_common::config::load_config;
-use serde::Deserialize;
-
-#[derive(Deserialize)]
-struct MyConfig {
-    zenoh: ZenohConfig,
-    // ... other fields
-}
-
-let config: MyConfig = load_config("config.json5")?;
-```
-
-### Health & Liveness
-
-```rust
-use zensight_common::{DeviceStatus, HealthSnapshot, HealthStatus, DeviceLiveness};
-
-// Device status (4-color model)
-let status = DeviceStatus::Online;    // Green - responding normally
-let status = DeviceStatus::Degraded;  // Orange - responding with issues
-let status = DeviceStatus::Offline;   // Red - not responding
-let status = DeviceStatus::Unknown;   // Gray - no data yet
-
-// Sensor health snapshot
-let health = HealthSnapshot {
-    sensor: "snmp".to_string(),
-    status: HealthStatus::Healthy,
-    uptime_secs: 3600,
-    devices_total: 10,
-    devices_responding: 9,
-    devices_failed: 1,
-    last_poll_duration_ms: 150,
-    errors_last_hour: 2,
-    metrics_published: 5000,
-};
-
-// Per-device liveness
-let liveness = DeviceLiveness {
-    device: "router01".to_string(),
-    status: DeviceStatus::Online,
-    last_seen: 1703500800000,
-    consecutive_failures: 0,
-    last_error: None,
-};
-```
-
-### Health Key Expressions
-
-```rust
-use zensight_common::{
-    all_health_wildcard,
-    all_liveness_wildcard,
-    all_errors_wildcard,
-    all_sensors_wildcard,
-    all_alerts_wildcard,
-    all_correlation_wildcard,
-};
-
-// Subscribe to all sensor health snapshots
-let health_key = all_health_wildcard();
-// Result: "zensight/*/@/health"
-
-// Subscribe to all device liveness updates
-let liveness_key = all_liveness_wildcard();
-// Result: "zensight/*/@/devices/*/liveness"
-
-// Subscribe to error reports
-let errors_key = all_errors_wildcard();
-// Result: "zensight/*/@/errors"
-```
-
-## Data Model
-
-### TelemetryPoint
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `timestamp` | `i64` | Unix epoch milliseconds |
-| `source` | `String` | Device/host identifier |
-| `protocol` | `Protocol` | Origin protocol |
-| `metric` | `String` | Metric name/path |
-| `value` | `TelemetryValue` | Typed value |
-| `labels` | `HashMap<String, String>` | Additional context |
-
-### Key Expression Format
-
-All ZenSight data uses the key expression format:
-
-```
-zensight/<protocol>/<source>/<metric>
-```
-
-Examples:
-- `zensight/snmp/router01/system/sysUpTime`
-- `zensight/logs/server01/events/0001700000000000000000042`
-- `zensight/sysinfo/host01/cpu/usage`
-
-### Control-plane & Metadata Key Expressions
-
-The control-plane and metadata use special key patterns (the full contract,
-including alerts/commands/query channels, is in [`docs/KEYSPACE.md`](../docs/KEYSPACE.md)):
-
-```
-zensight/<protocol>/@/health              # Sensor health snapshots
-zensight/<protocol>/@/devices/*/liveness  # Per-device liveness
-zensight/<protocol>/@/errors              # Error reports
-zensight/<protocol>/@/alerts/<key>        # Alerts (firing → resolved → tombstone)
-zensight/_meta/sensors/*                  # Sensor registration
-zensight/_meta/correlation/*              # Cross-sensor correlation
-```
-
-### DeviceStatus
-
-| Status | Description |
-|--------|-------------|
-| `Online` | Device responding normally |
-| `Degraded` | Device has issues (high latency, partial failures) |
-| `Offline` | Device not responding |
-| `Unknown` | No liveness data received |
-
-### HealthSnapshot
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `sensor` | `String` | Sensor identifier |
-| `status` | `HealthStatus` | `Healthy`, `Degraded`, or `Unhealthy` |
-| `uptime_secs` | `u64` | Sensor uptime in seconds |
-| `devices_total` | `u64` | Total configured devices |
-| `devices_responding` | `u64` | Devices responding |
-| `devices_failed` | `u64` | Devices not responding |
-| `last_poll_duration_ms` | `u64` | Last poll cycle duration |
-| `errors_last_hour` | `u64` | Error count in last hour |
-| `metrics_published` | `u64` | Total metrics published |
-
-### DeviceLiveness
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `device` | `String` | Device identifier |
-| `status` | `DeviceStatus` | Current status |
-| `last_seen` | `i64` | Last successful poll (epoch ms) |
-| `consecutive_failures` | `u32` | Failed poll attempts |
-| `last_error` | `Option<String>` | Most recent error message |
-
-## Testing
+Run the tests:
 
 ```bash
 cargo test -p zensight-common
 ```
 
-55 tests covering:
-- Telemetry model serialization
-- Key expression building
-- Alert / command model
-- Configuration parsing
-- Zenoh integration
+## Documentation
+
+- [Data model](docs/data-model.md) — telemetry, alerts, commands, serialization, QoS.
+- [Identity, evidence & entities](docs/identity-evidence.md) — the evidence → entity pipeline.
+- [Keyspace helpers](docs/keyspace-helpers.md) — index of the `keyexpr.rs` builders.
+- [`../docs/KEYSPACE.md`](../docs/KEYSPACE.md) — the authoritative, full key-expression contract.
 
 ## License
 
