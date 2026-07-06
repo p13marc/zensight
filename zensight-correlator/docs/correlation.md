@@ -47,6 +47,30 @@ Key safety properties, all pinned by tests in `merge.rs`:
 Bridges are sorted by a **content-derived** key (never input index), so the
 applied order — and the resulting partition — is independent of arrival order.
 
+```mermaid
+flowchart TD
+    Claims["HostEvidence claims, keyed by (sensor, source)"] --> Gen["generate_bridges: one candidate bridge per rule match"]
+    Downweight["observer down-weight: confidence x0.8 if either endpoint is third-party (observer.is_some)"] -.-> Gen
+    Gen -->|"host_id: 1.0"| Sort
+    Gen -->|"cloud_instance: 0.95"| Sort
+    Gen -->|"mac_ip: 0.8"| Sort
+    Gen -->|"fqdn: 0.5"| Sort
+    Gen -->|"hostname: 0.25"| Sort
+    Sort["sort strongest-first: rule rank desc, then confidence desc, then content key"] --> TryUnion
+    TryUnion{"try_union: host_id-conflict guard"}
+    TryUnion -->|"sets agree, or neither has a host_id yet"| Merge["merge sets, credit node_rule"]
+    TryUnion -->|"sets hold 2 distinct host_ids"| Reject["bridge dropped (conflict guard)"]
+    Merge --> Loop{"more bridges?"}
+    Reject --> Loop
+    Loop -->|yes| TryUnion
+    Loop -->|no| Sets["final union-find partition, one set per host"]
+    Sets --> EntityId["entity_id_for: host_id prefix, else best category (fqdn > mac > hostname > ip)"]
+    EntityId --> Build["build_entity: union ips/macs/container_ids, pick representative fields"]
+    Build --> Diff["diff vs last-published set (content hash, last_updated excluded)"]
+    Diff -->|"new or changed"| Upsert["EntityOp::Upsert"]
+    Diff -->|"vanished from the recomputed set"| Tombstone["EntityOp::Tombstone"]
+```
+
 ## host_id-conflict guard
 
 Two nodes with *different* `host_id`s must never land in one set, no matter what
