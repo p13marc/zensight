@@ -4237,10 +4237,19 @@ impl ZenSight {
                 crate::mock::bandwidth::processes(),
             )));
         }
-        use crate::view::specialized::netlink_detail::fetch_records;
-        let key = format!(
+        use crate::view::specialized::netlink_detail::fetch_records_all;
+        // Two per-process tiers answer on their own protocol key: the netlink
+        // sock_diag goodput tier and the netring wire-L2 attribution tier (#318).
+        // Fetch BOTH (every host on the mesh, per #309) and merge — each row is a
+        // `BandwidthRecord` self-tagged with its source/semantics badge, so the
+        // table renders them side by side; host-scoping is applied on `apply`.
+        let netlink_key = format!(
             "{}?by=process&top=100",
             zensight_common::bandwidth::bandwidth_query_key(zensight_common::Protocol::Netlink),
+        );
+        let netring_key = format!(
+            "{}?top=100",
+            zensight_common::bandwidth::bandwidth_query_key(zensight_common::Protocol::Netring),
         );
         let Some(session) = self.session.clone() else {
             return Task::done(Message::BandwidthLoaded(Err(
@@ -4248,9 +4257,19 @@ impl ZenSight {
             )));
         };
         Task::future(async move {
-            let result = fetch_records::<zensight_common::BandwidthRecord>(session, key)
-                .await
-                .ok_or_else(|| "No netlink sensor responded".to_string());
+            let netlink =
+                fetch_records_all::<zensight_common::BandwidthRecord>(session.clone(), netlink_key)
+                    .await;
+            let netring =
+                fetch_records_all::<zensight_common::BandwidthRecord>(session, netring_key).await;
+            let result = match (netlink, netring) {
+                (None, None) => Err("No netlink or netring sensor responded".to_string()),
+                (a, b) => {
+                    let mut rows = a.unwrap_or_default();
+                    rows.extend(b.unwrap_or_default());
+                    Ok(rows)
+                }
+            };
             Message::BandwidthLoaded(result)
         })
     }

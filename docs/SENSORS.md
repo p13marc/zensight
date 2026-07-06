@@ -421,6 +421,22 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
   *Detection Tuning* panel. A detector that was off at startup isn't built into
   the pipeline, so enabling it still needs a restart; tuning and mute/unmute of
   built detectors are immediate.
+- **Wire-level bandwidth-by-process (#318, epic #320, opt-in, off by default):**
+  with `bandwidth_attribution`, netring attributes its live per-flow **wire**
+  bandwidth to owning processes. On a fixed cadence (`bandwidth_period_secs`) a
+  sock_diag dump (TCP+UDP, v4+v6) plus a `/proc` fd scan build a flow→owner table
+  off the capture hot path (via nlink's `SocketOwnerMap`, the same
+  socket→process join the netlink sensor uses); netring's synchronous
+  `with_flow_attribution` hook then does a single allocation-free lookup per
+  flow, and `on_owner_bandwidth` reports per-owner rolling rates. Rows are served
+  **query-only** on `@/query/bandwidth` as `BandwidthRecord`s tagged
+  `bw.source = netring` / `bw.semantics = wire-l2` (full frame, undirected — the
+  whole rate is `tx_bps`) / `bw.proto = all`, so the GUI Bandwidth monitor shows
+  them next to the netlink sock_diag goodput tier without blending semantics.
+  **Best-effort:** a flow whose socket isn't in the current dump (or whose process
+  already exited) falls into an explicit unattributed bucket (`pid = -1`); netring
+  caches a flow's owner at first packet, so a later refresh doesn't retro-attribute
+  an in-flight flow. It does `/proc` walks (hence opt-in); reads are unprivileged.
 - **On-demand pcap capture (#333, opt-in):** with `capture.on_demand.enabled`, an
   operator can pull a bounded packet capture over the unified `@/artifact`
   channel (GUI *Capture* tab or any client). A dedicated reloadable packet-tier
@@ -449,7 +465,8 @@ capture engine (`flowscope` parsers). Live capture needs `CAP_NET_RAW`
   `ReadWritePaths=` to the unit. A mode that is `off` at startup is not armed
   (no packet subscription); switching between armed modes is live.
 - **Config:** `configs/netring.json5` (`collect.*`, `anomalies.*`, `threat.*`,
-  `capture.on_demand.*`, `capture.to_disk.*`, `pcap` for replay).
+  `capture.on_demand.*`, `capture.to_disk.*`, `bandwidth_attribution` for the
+  wire bandwidth-by-process tier, `pcap` for replay).
 - **GUI (#257):** the netring device screen is a tabbed, chart-driven view —
   **Overview** (RED hero + per-L4 donut + live anomaly strip) · **Flows** ·
   **Talkers & Matrix** · **DNS** (RED tiles + rcode bars + top-SLD table) ·

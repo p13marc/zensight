@@ -642,7 +642,26 @@ pub mod bandwidth {
         }
     }
 
-    /// A ranked per-process snapshot.
+    /// A netring wire-L2 row (#318): full-frame throughput is undirected, so the
+    /// whole rate sits in `tx_bps` behind the wire-L2 badge.
+    fn wire_row(pid: i32, comm: &str, tx_bps: f64) -> BandwidthRecord {
+        BandwidthRecord {
+            key: BandwidthKey::Process {
+                pid,
+                start_time: 1000 + pid.max(0) as u64,
+                comm: comm.to_string(),
+            },
+            tx_bps,
+            rx_bps: 0.0,
+            source: BandwidthSource::Netring,
+            semantics: ByteSemantics::WireL2,
+            proto: ProtoScope::All,
+            host: Some("server01".to_string()),
+        }
+    }
+
+    /// A ranked per-process snapshot mixing the netlink sock_diag goodput tier and
+    /// the netring wire-L2 attribution tier (#318) so the GUI shows both badges.
     pub fn processes() -> Vec<BandwidthRecord> {
         vec![
             proc_row(1421, "nginx", 1_800_000.0, 240_000.0),
@@ -650,6 +669,9 @@ pub mod bandwidth {
             proc_row(3312, "curl", 40_000.0, 2_400_000.0),
             proc_row(880, "sshd", 12_000.0, 5_000.0),
             proc_row(-1, "unattributed", 60_000.0, 30_000.0),
+            wire_row(1421, "nginx", 2_350_000.0),
+            wire_row(4102, "chrome", 980_000.0),
+            wire_row(-1, "unattributed", 145_000.0),
         ]
     }
 }

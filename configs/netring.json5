@@ -96,6 +96,16 @@
     },
     bandwidth_period_secs: 5,
 
+    // Wire-level bandwidth-by-process attribution (#318). OFF by default — this
+    // opt-in tier joins netring's live per-flow wire bandwidth against the kernel
+    // socket table via a periodic sock_diag dump + /proc fd scan, attributing
+    // full-frame (wire-L2) throughput to owning processes. Best-effort: flows
+    // whose socket isn't in the current dump land in an explicit `unattributed`
+    // bucket. When on, per-process rows are served query-only on
+    // `@/query/bandwidth` (refreshed every `bandwidth_period_secs`). Costs /proc
+    // walks; leave off unless you want per-process wire attribution.
+    bandwidth_attribution: false,
+
     // Passive-DNS name cache (#308). Observes DNS answers (CNAME-chain-resolved
     // A/AAAA claims under the queried name, PTR reverse claims, answer-TTL
     // expiry) into a bounded IP -> names map used to (a) enrich flow/talker

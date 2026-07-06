@@ -54,6 +54,14 @@ pub struct NetringConfig {
     pub collect: CollectConfig,
     #[serde(default = "default_bw_period")]
     pub bandwidth_period_secs: u64,
+    /// Wire-level bandwidth-by-process attribution (#318). **Off by default** —
+    /// this tier joins netring's live per-flow wire bandwidth against the kernel
+    /// socket table via a periodic sock_diag dump + `/proc` fd scan, so it costs
+    /// `/proc` walks (hence opt-in). When on, per-process wire-L2 rows are served
+    /// query-only on `@/query/bandwidth`. Best-effort: flows whose socket isn't in
+    /// the current dump fall into an explicit unattributed bucket.
+    #[serde(default)]
+    pub bandwidth_attribution: bool,
     #[serde(default)]
     pub anomalies: AnomalyConfig,
     /// Threat-intel detection (netring 0.27): flow-risk scoring, IOC matching,
