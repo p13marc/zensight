@@ -157,6 +157,12 @@ run: setup configure
     export RUST_LOG="${RUST_LOG:-info}"
     ZENSIGHT_ZENOH_LISTEN="{{hub}}" {{bindir}}/zensight 2>&1 | tee {{rundir}}/gui.log
 
+# ── Container image ──────────────────────────────────────────────────────────
+
+# Build the all-in-one sensors image (see docs/DEPLOYMENT.md for running it).
+image:
+    podman build -t zensight-sensors -f docker/Dockerfile.sensors .
+
 # Stop any running sensors + correlator started by `just run`.
 stop:
     -pkill -f 'zensight-sensor-(netring|netlink|sysinfo|logs|systemd)' || true

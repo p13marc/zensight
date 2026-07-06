@@ -59,9 +59,19 @@ cargo build --release --workspace
 # sysinfo, logs/journald). Close the GUI to stop everything.
 just run
 
+# Or split the two halves:
+just gui listen=tcp/0.0.0.0:7447     # just the GUI (non-loopback for remote sensors)
+just sensors                         # just the 5 sensors (Ctrl-C stops them)
+just sensors connect=tcp/<gui-host>:7447   # …feeding a GUI on another machine
+
 # One sensor at a time
 just netring   # | netlink | sysinfo | logs
 ```
+
+To monitor **multiple machines**, run the GUI (+ correlator) on one host and the
+all-in-one sensors container (`ghcr.io/p13marc/zensight-sensors`) on each of the
+others — the only configuration is `ZENSIGHT_ZENOH_CONNECT=tcp/<gui-host>:7447`.
+See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
 `just run` pins an explicit loopback rendezvous (the GUI listens on `tcp/127.0.0.1:7447`;
 sensors connect to it) so the pieces always find each other **without** relying on multicast

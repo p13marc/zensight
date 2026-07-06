@@ -1,0 +1,41 @@
+# All-in-one ZenSight sensors image, assembled from CI-prebuilt binaries
+# (release.yml `build-docker-binaries`, one native workspace build per arch
+# inside rust:<ver>-bookworm so the glibc matches this base). No Rust
+# compilation happens here — multi-arch builds only run the apt layer under
+# emulation. Mirrors Dockerfile.runtime; the image contents and contract are
+# identical to Dockerfile.sensors (the self-building local variant).
+#
+# Build context must contain the prebuilt binaries at
+#   docker-bins/docker-binaries-<targetarch>/<binary>
+# (the layout produced by actions/download-artifact with pattern matching).
+
+FROM debian:bookworm-slim
+
+ARG TARGETARCH
+
+# libsystemd0: logs (journald) + systemd (sd-bus) · libpcap0.8: netring
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libsystemd0 \
+    libpcap0.8 \
+    && rm -rf /var/lib/apt/lists/*
+
+# actions/upload-artifact does not preserve the exec bit, so restore it.
+COPY docker-bins/docker-binaries-${TARGETARCH}/zensight-sensor-sysinfo \
+    docker-bins/docker-binaries-${TARGETARCH}/zensight-sensor-netlink \
+    docker-bins/docker-binaries-${TARGETARCH}/zensight-sensor-netring \
+    docker-bins/docker-binaries-${TARGETARCH}/zensight-sensor-logs \
+    docker-bins/docker-binaries-${TARGETARCH}/zensight-sensor-systemd \
+    /usr/local/bin/
+RUN chmod 755 /usr/local/bin/zensight-sensor-*
+
+COPY configs/*.json5 /usr/share/zensight/configs/
+COPY scripts/gen-configs.sh scripts/run-sensors.sh docker/entrypoint-sensors.sh /usr/local/bin/
+RUN chmod 755 /usr/local/bin/gen-configs.sh /usr/local/bin/run-sensors.sh /usr/local/bin/entrypoint-sensors.sh
+
+RUN mkdir -p /run/zensight /var/lib/zensight
+
+# Root inside the container by design — see Dockerfile.sensors for rationale.
+WORKDIR /var/lib/zensight
+
+ENTRYPOINT ["/usr/local/bin/entrypoint-sensors.sh"]
