@@ -8,7 +8,8 @@ Prometheus metrics exporter for ZenSight telemetry. Subscribes to telemetry over
 - **Type mapping**: Counter, Gauge, Boolean values exported as Prometheus metrics
 - **Info metrics**: Text values exported as Prometheus info metrics
 - **Alert export**: sensor alerts mirrored to a `zensight_alert` gauge (Alertmanager-compatible)
-- **Filtering**: Filter by protocol, source, or metric patterns (glob)
+- **Remote-write (push)**: optional Prometheus remote-write 1.0 push for agent topologies (Mimir, Grafana Cloud, Thanos Receive, VictoriaMetrics)
+- **Filtering**: subscription `key_expr` plus protocol/source/metric glob filters
 - **Staleness handling**: Automatic expiry of stale metrics
 - **Memory protection**: Configurable max series limit
 - **Health endpoints**: `/health` and `/ready` for Kubernetes probes
@@ -135,6 +136,14 @@ The exporter also exposes internal metrics:
 - `zensight_exporter_points_received_total` - Total telemetry points received
 - `zensight_exporter_points_accepted_total` - Points that passed filters
 - `zensight_exporter_points_filtered_total` - Points rejected by filters
+
+## Documentation
+
+- [`docs/reference.md`](docs/reference.md) — full reference: TelemetryPoint →
+  Prometheus mapping, name/label sanitization, staleness + series bounding, the
+  `/metrics` pull endpoint, the remote-write push path, and alert export.
+- [`../../configs/prometheus-exporter.json5`](../../configs/prometheus-exporter.json5)
+  — annotated example configuration.
 
 ## License
 
