@@ -222,6 +222,8 @@ mod tests {
             macs: vec![],
             vendor: None,
             platform: None,
+            container_id: None,
+            cloud: None,
             last_updated: 1000,
         };
         s.upsert(fresh.clone());

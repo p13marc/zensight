@@ -76,6 +76,11 @@ pub struct HostEntity {
     /// Union of known MACs across members (sorted, deduped).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub macs: Vec<String>,
+    /// Containers the host's sensors run in (#311), unioned from member
+    /// evidence (sorted, deduped). Descriptive: container ids are host-scoped
+    /// and never a merge key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub container_ids: Vec<String>,
 
     // --- descriptive (display only) ---
     /// Representative hostname (self-report preferred over third-party claim).
@@ -107,9 +112,10 @@ pub struct HostEntity {
 }
 
 impl HostEntity {
-    /// Sort the multi-valued fields (`ips`, `macs`, `members`, `aliases`,
-    /// `names`) into a canonical order so two entities built from the same
-    /// evidence in different input orders serialize byte-identically.
+    /// Sort the multi-valued fields (`ips`, `macs`, `container_ids`,
+    /// `members`, `aliases`, `names`) into a canonical order so two entities
+    /// built from the same evidence in different input orders serialize
+    /// byte-identically.
     ///
     /// The correlator calls this before publishing; determinism tests pin it.
     pub fn canonicalize(&mut self) {
@@ -117,6 +123,8 @@ impl HostEntity {
         self.ips.dedup();
         self.macs.sort();
         self.macs.dedup();
+        self.container_ids.sort();
+        self.container_ids.dedup();
         self.aliases.sort();
         self.aliases.dedup();
         self.members.sort_by(|a, b| {
@@ -145,6 +153,7 @@ mod tests {
             boot_id: None,
             ips: vec!["10.0.0.5".into()],
             macs: vec![],
+            container_ids: vec![],
             hostname: Some("host1".into()),
             fqdn: None,
             names: vec![NameVal {
@@ -178,6 +187,7 @@ mod tests {
             boot_id: None,
             ips: vec![],
             macs: vec![],
+            container_ids: vec![],
             hostname: None,
             fqdn: None,
             names: vec![],
@@ -190,6 +200,7 @@ mod tests {
         let json = serde_json::to_string(&ent).unwrap();
         // Only entity_id + last_updated survive; everything else is skipped.
         assert!(!json.contains("aliases"));
+        assert!(!json.contains("container_ids"));
         assert!(!json.contains("host_id"));
         assert!(!json.contains("members"));
         assert!(!json.contains("status"));
@@ -208,6 +219,7 @@ mod tests {
             boot_id: None,
             ips: vec!["10.0.0.9".into(), "10.0.0.1".into(), "10.0.0.9".into()],
             macs: vec!["bb:bb".into(), "aa:aa".into()],
+            container_ids: vec!["cccc".into(), "aaaa".into(), "cccc".into()],
             hostname: None,
             fqdn: None,
             names: vec![],
@@ -235,6 +247,7 @@ mod tests {
         ent.canonicalize();
         assert_eq!(ent.ips, vec!["10.0.0.1", "10.0.0.9"]);
         assert_eq!(ent.macs, vec!["aa:aa", "bb:bb"]);
+        assert_eq!(ent.container_ids, vec!["aaaa", "cccc"]);
         assert_eq!(ent.members[0].source, "a");
         assert_eq!(ent.members[1].source, "b");
     }

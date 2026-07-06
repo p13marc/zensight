@@ -201,6 +201,7 @@ mod tests {
             boot_id: None,
             ips: vec![],
             macs: vec![],
+            container_ids: vec![],
             hostname: Some("web-01".into()),
             fqdn: None,
             names: vec![],

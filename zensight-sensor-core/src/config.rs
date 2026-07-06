@@ -64,6 +64,15 @@ pub trait SensorConfig: Sized + DeserializeOwned {
         ArtifactLimits::default()
     }
 
+    /// Identity-envelope options (`identity.*`, #311). The default keeps the
+    /// cloud-metadata (IMDS) probe **off** — it makes network requests, so a
+    /// sensor opts in by carrying an [`IdentityConfig`] in its config and
+    /// overriding this to return it. Container-id detection needs no knob (it
+    /// is a local file read, on by default with `with_identity`).
+    fn identity_config(&self) -> zensight_common::IdentityConfig {
+        zensight_common::IdentityConfig::default()
+    }
+
     /// Validate the configuration.
     ///
     /// Called automatically after loading. Override to add custom validation.

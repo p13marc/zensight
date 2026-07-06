@@ -180,6 +180,40 @@ impl Default for LoggingConfig {
     }
 }
 
+/// Host-identity envelope options (`identity.*` in a sensor config, #311).
+///
+/// Only the *extras* are configurable — the core identity (hashed machine-id,
+/// boot id, hostname, IPs, MACs) is always detected when a sensor enables
+/// `with_identity`, because it never leaves the local file system / interface
+/// table. The cloud probe is different: it makes network requests (link-local
+/// IMDS endpoints), so it is **opt-in** and off by default.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IdentityConfig {
+    /// Probe the cloud instance-metadata service (AWS/GCP/Azure, 169.254.169.254)
+    /// once at startup and attach the result to self-report evidence.
+    /// Default **false** — never make network requests unless asked.
+    #[serde(default)]
+    pub cloud_metadata: bool,
+
+    /// Per-request timeout for the IMDS probe, milliseconds. The endpoints are
+    /// link-local so anything slow means "not on that cloud"; keep this short.
+    #[serde(default = "default_cloud_timeout_ms")]
+    pub cloud_timeout_ms: u64,
+}
+
+fn default_cloud_timeout_ms() -> u64 {
+    1_000
+}
+
+impl Default for IdentityConfig {
+    fn default() -> Self {
+        Self {
+            cloud_metadata: false,
+            cloud_timeout_ms: default_cloud_timeout_ms(),
+        }
+    }
+}
+
 /// Base configuration shared by all sensors.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BaseConfig {

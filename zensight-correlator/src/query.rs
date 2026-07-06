@@ -113,6 +113,7 @@ mod tests {
             boot_id: None,
             ips: vec!["10.0.0.5".into()],
             macs: vec![],
+            container_ids: vec![],
             hostname: Some("host1".into()),
             fqdn: None,
             names: vec![],

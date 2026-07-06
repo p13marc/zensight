@@ -29,8 +29,11 @@ const ENTITY_NAMES_CAP: usize = 32;
 /// One decoded input to the engine, produced by the subscribers.
 #[derive(Debug, Clone)]
 pub enum EvidenceMsg {
-    /// A host-identity claim (`_meta/evidence/host/<sensor>/<source>`).
-    Host(HostEvidence),
+    /// A host-identity claim (`_meta/evidence/host/<sensor>/<source>`). Boxed:
+    /// `HostEvidence` is much larger than the other variants and this message
+    /// flows through a channel (keeps the enum from being fat — same reason
+    /// [`EntityOp::Upsert`] boxes its entity).
+    Host(Box<HostEvidence>),
     /// A passive-DNS name observation (`_meta/evidence/names/<sensor>/<ip>`).
     Name(NameObservation),
     /// A device-liveness update; `source` is the device id, `status` the
@@ -87,7 +90,7 @@ impl CorrelatorState {
     /// Apply one incoming message to the stores.
     pub fn apply(&mut self, msg: EvidenceMsg) {
         match msg {
-            EvidenceMsg::Host(ev) => self.evidence.upsert(ev),
+            EvidenceMsg::Host(ev) => self.evidence.upsert(*ev),
             EvidenceMsg::Name(obs) => self.names.upsert(obs),
             EvidenceMsg::Liveness { source, status } => {
                 self.liveness.insert(source, status);
@@ -385,6 +388,8 @@ mod tests {
             macs: vec![],
             vendor: None,
             platform: None,
+            container_id: None,
+            cloud: None,
             last_updated: 1000,
         }
     }
@@ -396,7 +401,11 @@ mod tests {
     #[test]
     fn recompute_emits_upsert_then_no_change() {
         let mut s = CorrelatorState::new(cfg());
-        s.apply(EvidenceMsg::Host(self_report("sysinfo", "host1", &hid(1))));
+        s.apply(EvidenceMsg::Host(Box::new(self_report(
+            "sysinfo",
+            "host1",
+            &hid(1),
+        ))));
         let ops = s.recompute(2000);
         assert_eq!(ops.len(), 1);
         assert!(matches!(ops[0], EntityOp::Upsert(_)));
@@ -408,7 +417,11 @@ mod tests {
     #[test]
     fn remove_host_tombstones_the_entity() {
         let mut s = CorrelatorState::new(cfg());
-        s.apply(EvidenceMsg::Host(self_report("sysinfo", "host1", &hid(7))));
+        s.apply(EvidenceMsg::Host(Box::new(self_report(
+            "sysinfo",
+            "host1",
+            &hid(7),
+        ))));
         let ops = s.recompute(2000);
         assert!(matches!(ops.as_slice(), [EntityOp::Upsert(_)]));
         // A tombstone on that evidence key drops the claim → the entity retires.
@@ -426,8 +439,16 @@ mod tests {
     #[test]
     fn two_sensor_self_report_merges_to_one_entity() {
         let mut s = CorrelatorState::new(cfg());
-        s.apply(EvidenceMsg::Host(self_report("sysinfo", "host1", &hid(2))));
-        s.apply(EvidenceMsg::Host(self_report("netlink", "host1", &hid(2))));
+        s.apply(EvidenceMsg::Host(Box::new(self_report(
+            "sysinfo",
+            "host1",
+            &hid(2),
+        ))));
+        s.apply(EvidenceMsg::Host(Box::new(self_report(
+            "netlink",
+            "host1",
+            &hid(2),
+        ))));
         let ops = s.recompute(2000);
         let upserts: Vec<_> = ops
             .iter()
@@ -443,7 +464,11 @@ mod tests {
     #[test]
     fn stale_evidence_tombstones_entity() {
         let mut s = CorrelatorState::new(cfg()); // ttl 900s
-        s.apply(EvidenceMsg::Host(self_report("sysinfo", "host1", &hid(3))));
+        s.apply(EvidenceMsg::Host(Box::new(self_report(
+            "sysinfo",
+            "host1",
+            &hid(3),
+        ))));
         let _ = s.recompute(2000);
         // Advance well past the TTL: evidence (last_updated 1000) ages out.
         let ops = s.recompute(1000 + 901_000 + 1);
@@ -454,7 +479,11 @@ mod tests {
     #[test]
     fn name_enrichment_populates_and_ranks() {
         let mut s = CorrelatorState::new(cfg());
-        s.apply(EvidenceMsg::Host(self_report("sysinfo", "host1", &hid(4))));
+        s.apply(EvidenceMsg::Host(Box::new(self_report(
+            "sysinfo",
+            "host1",
+            &hid(4),
+        ))));
         s.apply(EvidenceMsg::Name(NameObservation {
             observer: "netring".into(),
             ip: "10.0.0.5".into(),
@@ -487,7 +516,11 @@ mod tests {
     #[test]
     fn status_rolls_up_worst_of_members() {
         let mut s = CorrelatorState::new(cfg());
-        s.apply(EvidenceMsg::Host(self_report("sysinfo", "host1", &hid(5))));
+        s.apply(EvidenceMsg::Host(Box::new(self_report(
+            "sysinfo",
+            "host1",
+            &hid(5),
+        ))));
         s.apply(EvidenceMsg::Liveness {
             source: "host1".into(),
             status: "degraded".into(),
@@ -519,9 +552,11 @@ mod tests {
             macs: vec!["aa:bb:cc:dd:ee:ff".into()],
             vendor: None,
             platform: None,
+            container_id: None,
+            cloud: None,
             last_updated: 1000,
         };
-        s.apply(EvidenceMsg::Host(asset.clone()));
+        s.apply(EvidenceMsg::Host(Box::new(asset.clone())));
         let ops1 = s.recompute(2000);
         let old_id = ops1
             .iter()
@@ -546,11 +581,13 @@ mod tests {
             macs: vec!["aa:bb:cc:dd:ee:ff".into()],
             vendor: None,
             platform: None,
+            container_id: None,
+            cloud: None,
             last_updated: 1500,
         };
         asset.last_updated = 1500; // keep asset fresh
-        s.apply(EvidenceMsg::Host(asset));
-        s.apply(EvidenceMsg::Host(selfrep));
+        s.apply(EvidenceMsg::Host(Box::new(asset)));
+        s.apply(EvidenceMsg::Host(Box::new(selfrep)));
         let ops2 = s.recompute(2500);
 
         let new_entity = ops2

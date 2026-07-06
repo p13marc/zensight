@@ -16,12 +16,19 @@
 //!
 //! ## Rule table (a bridge links two evidence nodes)
 //!
-//! | rule      | condition                                                        | base confidence |
-//! |-----------|------------------------------------------------------------------|-----------------|
-//! | `host_id` | both have `host_id` AND equal                                    | 1.0             |
-//! | `mac_ip`  | share ≥1 MAC **AND** share ≥1 IP                                 | 0.8             |
-//! | `fqdn`    | both have non-empty `fqdn` AND equal (case-insensitive)          | 0.5             |
-//! | `hostname`| both have `hostname` AND equal (case-insensitive), if enabled    | 0.25            |
+//! | rule             | condition                                                 | base confidence |
+//! |------------------|-----------------------------------------------------------|-----------------|
+//! | `host_id`        | both have `host_id` AND equal                             | 1.0             |
+//! | `cloud_instance` | both have `cloud` AND equal `(provider, instance_id)`     | 0.95            |
+//! | `mac_ip`         | share ≥1 MAC **AND** share ≥1 IP                          | 0.8             |
+//! | `fqdn`           | both have non-empty `fqdn` AND equal (case-insensitive)   | 0.5             |
+//! | `hostname`       | both have `hostname` AND equal (case-insensitive), if enabled | 0.25        |
+//!
+//! - **`cloud_instance` is authoritative per provider** (#311): a cloud control
+//!   plane never hands out the same instance id twice, so it merges almost as
+//!   strongly as `host_id` — and still saves the day when a cloned image left
+//!   evidence without a machine-id. `container_id` is deliberately **not** a
+//!   rule: container ids are only unique per host runtime, never across hosts.
 //!
 //! - **IP alone is never a bridge** (DHCP/NAT reuse) — it is a hint only.
 //! - **MAC alone is never a bridge** (VMs clone MACs) — only MAC+IP together.
@@ -52,19 +59,21 @@ struct Bridge {
     confidence: f32,
 }
 
-/// The four merge rules, ordered strongest-first by their discriminant.
+/// The five merge rules, ordered strongest-first by their discriminant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Rule {
     Hostname = 0,
     Fqdn = 1,
     MacIp = 2,
-    HostId = 3,
+    CloudInstanceId = 3,
+    HostId = 4,
 }
 
 impl Rule {
     fn base_confidence(self) -> f32 {
         match self {
             Rule::HostId => 1.0,
+            Rule::CloudInstanceId => 0.95,
             Rule::MacIp => 0.8,
             Rule::Fqdn => 0.5,
             Rule::Hostname => 0.25,
@@ -74,6 +83,7 @@ impl Rule {
     fn as_str(self) -> &'static str {
         match self {
             Rule::HostId => "host_id",
+            Rule::CloudInstanceId => "cloud_instance",
             Rule::MacIp => "mac_ip",
             Rule::Fqdn => "fqdn",
             Rule::Hostname => "hostname",
@@ -222,6 +232,23 @@ fn generate_bridges(evidence: &[HostEvidence], rules: &RulesConfig) -> Vec<Bridg
             }
         }
         emit_bucket_bridges(&buckets, Rule::HostId, evidence, &mut bridges);
+    }
+
+    // cloud_instance: exact-equal `(provider, instance_id)` buckets (#311) —
+    // authoritative per provider, so it sits just below host_id.
+    if rules.cloud_instance {
+        let mut buckets: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, e) in evidence.iter().enumerate() {
+            if let Some(cloud) = &e.cloud
+                && !cloud.instance_id.is_empty()
+            {
+                buckets
+                    .entry(format!("{}\u{1f}{}", cloud.provider, cloud.instance_id))
+                    .or_default()
+                    .push(i);
+            }
+        }
+        emit_bucket_bridges(&buckets, Rule::CloudInstanceId, evidence, &mut bridges);
     }
 
     // mac_ip: bucket by MAC, then pair within a bucket only if IPs also overlap.
@@ -394,6 +421,15 @@ fn build_entity(
     macs.sort();
     macs.dedup();
 
+    // Containers the host's sensors run in (#311) — a descriptive union, never
+    // a merge key (container ids are only unique per host runtime).
+    let mut container_ids: Vec<String> = members
+        .iter()
+        .filter_map(|&i| evidence[i].container_id.clone())
+        .collect();
+    container_ids.sort();
+    container_ids.dedup();
+
     let hostname = representative(members.iter().map(|&i| {
         (
             evidence[i].observer.is_none(),
@@ -455,6 +491,7 @@ fn build_entity(
         boot_id,
         ips,
         macs,
+        container_ids,
         hostname,
         fqdn,
         names: Vec::new(),
@@ -551,6 +588,8 @@ mod tests {
             macs: vec![],
             vendor: None,
             platform: None,
+            container_id: None,
+            cloud: None,
             last_updated: 1000,
         }
     }
@@ -558,6 +597,15 @@ mod tests {
     fn hid(byte: u8) -> String {
         // 64-hex-char sha256-shaped host_id.
         format!("{:02x}", byte).repeat(32)
+    }
+
+    fn cloud(provider: &str, instance_id: &str) -> zensight_common::CloudFacts {
+        zensight_common::CloudFacts {
+            provider: provider.into(),
+            instance_id: instance_id.into(),
+            region: None,
+            account: None,
+        }
     }
 
     #[test]
@@ -571,6 +619,89 @@ mod tests {
         assert_eq!(ents[0].members.len(), 2);
         assert!(ents[0].members.iter().all(|m| m.rule == "host_id"));
         assert!((ents[0].members[0].confidence - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn cloud_instance_rule_bridges() {
+        // Same (provider, instance_id) merges even without any machine-id —
+        // the cloned-image case: evidence lacking host_id still binds.
+        let mut a = ev("sysinfo", "vm1");
+        a.cloud = Some(cloud("aws", "i-0abc"));
+        let mut b = ev("netlink", "vm1");
+        b.cloud = Some(cloud("aws", "i-0abc"));
+        let ents = correlate(&[a, b], &RulesConfig::default());
+        assert_eq!(ents.len(), 1);
+        assert!(ents[0].members.iter().all(|m| m.rule == "cloud_instance"));
+        assert!((ents[0].members[0].confidence - 0.95).abs() < 1e-5);
+    }
+
+    #[test]
+    fn cloud_instance_requires_same_provider() {
+        // Instance ids are provider-scoped: "12345" on aws ≠ "12345" on gcp.
+        let mut a = ev("sysinfo", "a");
+        a.cloud = Some(cloud("aws", "12345"));
+        let mut b = ev("sysinfo", "b");
+        b.cloud = Some(cloud("gcp", "12345"));
+        let ents = correlate(&[a, b], &RulesConfig::default());
+        assert_eq!(
+            ents.len(),
+            2,
+            "same instance id on different providers must NOT merge"
+        );
+    }
+
+    #[test]
+    fn cloud_instance_rule_disabled_makes_no_bridge() {
+        let mut a = ev("sysinfo", "a");
+        a.cloud = Some(cloud("aws", "i-0abc"));
+        let mut b = ev("netlink", "b");
+        b.cloud = Some(cloud("aws", "i-0abc"));
+        let rules = RulesConfig {
+            cloud_instance: false,
+            ..RulesConfig::default()
+        };
+        let ents = correlate(&[a, b], &rules);
+        assert_eq!(ents.len(), 2);
+    }
+
+    #[test]
+    fn host_id_conflict_guard_blocks_cloud_bridge() {
+        // Distinct host_ids stay separate even when a (mis)configured pair
+        // reports the same cloud instance — host_id remains the top authority.
+        let mut a = ev("sysinfo", "a");
+        a.host_id = Some(hid(0x11));
+        a.cloud = Some(cloud("aws", "i-0abc"));
+        let mut b = ev("sysinfo", "b");
+        b.host_id = Some(hid(0x22));
+        b.cloud = Some(cloud("aws", "i-0abc"));
+        let ents = correlate(&[a, b], &RulesConfig::default());
+        assert_eq!(ents.len(), 2);
+    }
+
+    #[test]
+    fn container_ids_unioned_onto_entity_but_never_merge() {
+        // Two hosts whose sensors run in the same-named container must NOT
+        // merge on it (container ids are host-scoped) ...
+        let mut a = ev("sysinfo", "a");
+        a.container_id = Some("c".repeat(64));
+        let mut b = ev("sysinfo", "b");
+        b.container_id = Some("c".repeat(64));
+        let ents = correlate(&[a, b], &RulesConfig::default());
+        assert_eq!(ents.len(), 2, "container_id must never be a merge key");
+
+        // ... but within one host, members' container ids union onto the entity.
+        let mut x = ev("sysinfo", "h");
+        x.host_id = Some(hid(0x55));
+        x.container_id = Some("a".repeat(64));
+        let mut y = ev("netlink", "h");
+        y.host_id = Some(hid(0x55));
+        y.container_id = Some("b".repeat(64));
+        let mut z = ev("netring", "h");
+        z.host_id = Some(hid(0x55));
+        z.container_id = Some("a".repeat(64)); // duplicate → deduped
+        let ents = correlate(&[x, y, z], &RulesConfig::default());
+        assert_eq!(ents.len(), 1);
+        assert_eq!(ents[0].container_ids, vec!["a".repeat(64), "b".repeat(64)]);
     }
 
     #[test]
