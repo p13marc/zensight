@@ -188,7 +188,7 @@ fn render_processes(state: &BandwidthState) -> Element<'_, Message> {
     }
     let Some(records) = state.processes.ready() else {
         return column![
-            text("Per-process TCP bandwidth from the netlink sensor (sock_diag).")
+            text("Per-process bandwidth: netlink sock_diag goodput + netring wire-L2.")
                 .size(font::CAPTION),
             button(text("Fetch").size(font::CAPTION))
                 .padding([4, 12])

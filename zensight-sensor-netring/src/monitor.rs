@@ -68,6 +68,9 @@ pub type FlowRedState = Arc<Mutex<Option<netring::monitor::red::RedSnapshot>>>;
 const AGGREGATE_SNAPSHOT_ROWS: usize = 256;
 /// How often the aggregate / RED callbacks refresh their shared snapshot.
 const AGGREGATE_REFRESH: Duration = Duration::from_secs(5);
+/// Top-N owners retained by the wire-level bandwidth report (#318). Matches the
+/// GUI's `?top=` default; the queryable trims further if asked.
+const OWNER_BW_TOP: usize = 100;
 /// Bounded ring of recent elephant (large) flows.
 pub type ElephantRing = Arc<Mutex<VecDeque<ElephantRecord>>>;
 /// Passive TLS fingerprint inventory: (sni, ja4) → record with a hit count.
@@ -78,6 +81,21 @@ pub type DnsInventory = Arc<Mutex<HashMap<String, (u64, u64)>>>;
 pub type HttpInventory = Arc<Mutex<HashMap<String, (u64, u64)>>>;
 /// Passive asset inventory: `mac -> AssetRecord` for `@/query/assets` (issue #70).
 pub type AssetInventory = Arc<Mutex<HashMap<String, AssetRecord>>>;
+
+/// Wire-level owner-bandwidth shared state (#318, opt-in). The
+/// [`with_flow_attribution`](netring::monitor::MonitorBuilder::with_flow_attribution)
+/// hook loads `table` (an `ArcSwap`, refreshed off-hook by the sock_diag+`/proc`
+/// scan) for its allocation-free slot lookup; the periodic
+/// [`on_owner_bandwidth`](netring::monitor::MonitorBuilder::on_owner_bandwidth)
+/// report writes the resolved per-owner rows into `records`, served on
+/// `@/query/bandwidth`. Present only when `bandwidth_attribution` is enabled.
+#[derive(Clone)]
+pub struct OwnerBandwidth {
+    /// Hot-swapped flow→owner lookup, consulted by the attribution hook.
+    pub table: Arc<arc_swap::ArcSwap<crate::owner_map::OwnerTable>>,
+    /// Latest emitted per-owner records (top owners + unattributed bucket).
+    pub records: Arc<Mutex<Vec<zensight_common::bandwidth::BandwidthRecord>>>,
+}
 
 /// Set of asset MACs that changed since the last host-evidence drain (#307).
 /// The `on_asset` closure inserts on every inventory event; the evidence feed
@@ -300,6 +318,10 @@ pub struct MonitorChannels {
         mpsc::Receiver<crate::disk::DiskFrame>,
         Arc<crate::disk::CaptureDiskStats>,
     )>,
+    /// Wire-level bandwidth-by-process attribution shared state (#318): `Some`
+    /// iff `bandwidth_attribution` is enabled. Taken by `main` to drive the
+    /// off-hook socket-table refresh and the `@/query/bandwidth` queryable.
+    pub owner_bandwidth: Option<OwnerBandwidth>,
 }
 
 /// Flow exporter that captures netring's canonical `FlowRecord` into a bounded
@@ -1911,6 +1933,50 @@ pub fn build(
         );
     }
 
+    // Wire-level bandwidth-by-process attribution (#318, opt-in). The
+    // attribution hook maps each live flow's 5-tuple to an owner slot via a
+    // single allocation-free `ArcSwap` load + map lookup; the socket table that
+    // backs it is refreshed OFF the hook (sock_diag + `/proc` scan) by a task in
+    // `main`. A periodic report resolves slots back to processes and writes the
+    // served rows. `with_flow_attribution` MUST precede `on_owner_bandwidth`.
+    let owner_bandwidth = if cfg.bandwidth_attribution {
+        use flowscope::correlate::Attribution;
+        let table = Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::owner_map::OwnerTable::empty(),
+        ));
+        let records: Arc<Mutex<Vec<zensight_common::bandwidth::BandwidthRecord>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let hook_table = table.clone();
+        b = b.with_flow_attribution(move |key: &netring::protocol::FlowKey| {
+            hook_table.load().slot_for(key).map(Attribution)
+        });
+        let rep_table = table.clone();
+        let rep_records = records.clone();
+        let host = cfg.source.clone();
+        let period = Duration::from_secs(cfg.bandwidth_period_secs.max(1));
+        b = b.on_owner_bandwidth(period, move |report| {
+            let guard = rep_table.load();
+            let top: Vec<(u64, f64)> = report
+                .top(OWNER_BW_TOP)
+                .into_iter()
+                .map(|(attr, bps)| (attr.0, bps))
+                .collect();
+            let recs =
+                crate::owner_map::owner_records(&top, report.unknown_rate(), &guard, Some(&host));
+            if let Ok(mut slot) = rep_records.lock() {
+                *slot = recs;
+            }
+            Ok(())
+        });
+        tracing::info!(
+            period_secs = cfg.bandwidth_period_secs.max(1),
+            "netring: wire-level bandwidth-by-process attribution armed (opt-in)"
+        );
+        Some(OwnerBandwidth { table, records })
+    } else {
+        None
+    };
+
     // Anomaly sink → channel → drain → AlertReporter.
     b = b.sink(ChannelSink::new(anom_tx));
 
@@ -1972,6 +2038,7 @@ pub fn build(
             name_map,
             name_obs_rx,
             disk: capture_disk,
+            owner_bandwidth,
         },
         keepalive,
         detector_handle,

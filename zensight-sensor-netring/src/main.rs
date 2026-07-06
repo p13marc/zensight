@@ -311,6 +311,22 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Wire-level bandwidth-by-process attribution (#318, opt-in). When armed, the
+    // monitor exposes the shared flow→owner table + per-owner record slot; drive
+    // the off-hook socket-table refresh and serve `@/query/bandwidth` here.
+    if let Some(owner_bw) = channels.owner_bandwidth.take() {
+        use zensight_sensor_netring::bandwidth;
+        runner.spawn(bandwidth::run_refresh(
+            owner_bw.table.clone(),
+            cfg.bandwidth_period_secs,
+        ));
+        runner.spawn(bandwidth::run_query(
+            runner.session().clone(),
+            key_prefix.clone(),
+            owner_bw,
+        ));
+    }
+
     // Host-evidence feed (#307): republish observed assets as third-party
     // identity evidence on `zensight/_meta/evidence/**` for the correlator.
     // Change-driven with a periodic liveness refresh, capped per tick. Only

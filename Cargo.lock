@@ -11015,6 +11015,7 @@ dependencies = [
  "hostname",
  "json5",
  "netring",
+ "nlink",
  "pcap-file",
  "serde",
  "serde_json",

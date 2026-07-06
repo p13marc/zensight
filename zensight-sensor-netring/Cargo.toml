@@ -52,6 +52,12 @@ zensight-sensor-core = { path = "../zensight-sensor-core" }
 netring = { version = "0.29", features = ["monitor", "pcap", "icmp"] }
 flowscope = "0.22"
 
+# Wire-level bandwidth-by-process attribution (#318, opt-in). sock_diag dumps the
+# kernel socket table (5-tuple + inode) and `SocketOwnerMap` scans `/proc` for the
+# inode→process join — same crate + version the netlink sensor pins, so the
+# workspace resolves ONE nlink. Reads are unprivileged.
+nlink = { version = "0.24", features = ["sockdiag"] }
+
 tokio = { workspace = true, features = ["full"] }
 zenoh.workspace = true
 serde = { workspace = true, features = ["derive"] }

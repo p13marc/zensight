@@ -199,7 +199,7 @@ as Zenoh selector params (e.g. `?top=20`, `?state=&port=`).
 | logs | `events?since=<epoch_ms>;max=N;host=<name>` (#358, zenoh `;`-separated params) | `Vec<LogRecord>` (newest first, from the bounded per-line ring) |
 | sysinfo | `processes?sort=cpu\|mem\|io&top=N`, `latency`² | `Vec<ProcessRecord>` / `LatencyReport` |
 | netlink | `routes`, `neighbors`, `sockets?state=&port=&ip=`⁶, `addresses`, `events`, `route_changes`, `tc`, `xfrm`, `nft`, `bandwidth?top=N`⁴, `retransmits`³, `connections`³ | `Vec<…Record>` |
-| netring | `flows`, `tls`, `talkers?top=N`, `matrix?top=N`, `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`, `encrypted_dns`, `ja4h?top=N`¹, `assets`, `captures`⁵ | `Vec<…Record>` |
+| netring | `flows`, `tls`, `talkers?top=N`, `matrix?top=N`, `elephant_flows`, `dns?top=N`, `http?top=N`, `quic`, `ssh`, `encrypted_dns`, `ja4h?top=N`¹, `assets`, `captures`⁵, `bandwidth?top=N`⁷ | `Vec<…Record>` |
 | systemd | `units`, `failed`, `unit?name=<u>`, `timers`, `events`, `cgroups?path=<rel>` | `Vec<UnitRecord>` / `UnitDetail` / `Vec<TimerRecord>` / `Vec<EventRecord>` / `CgroupNode` |
 
 Note: sysinfo's `@/query/*` keys carry the `<hostname>` segment
@@ -226,6 +226,17 @@ absent.
 (`zensight-common::bandwidth`), ranked by rate, top-N (default 50). **TCP-only,
 app-goodput** — every record carries `bw.source`/`bw.semantics`/`bw.proto` so the
 GUI never blends it with wire-L3 (systemd) or wire-L2 (capture) numbers.
+
+⁷ netring's `bandwidth` (wire-level bandwidth-by-process, #318/epic #320) is the
+**opt-in, best-effort** capture tier, served only when `bandwidth_attribution` is
+set. netring measures per-flow wire bandwidth on the capture path; a periodic
+sock_diag dump + `/proc` fd scan joins each live 5-tuple to its owning process
+off the hot path. Replies `Vec<BandwidthRecord>` tagged `bw.source = netring`,
+`bw.semantics = wire-l2` (full frame, undirected — the whole rate is reported as
+`tx_bps`), `bw.proto = all` (TCP+UDP), ranked, top-N (default 100). Flows whose
+socket isn't in the current dump fall into an explicit unattributed bucket
+(`pid = -1`). The GUI Bandwidth monitor fetches this alongside the netlink
+`bandwidth` key and renders both, each behind its own semantics badge.
 
 ⁵ `captures` (capture-to-disk file index, #327) is served when
 `capture.to_disk.mode != off`. Replies `Vec<CaptureRecord>` (newest first):
