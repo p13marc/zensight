@@ -15,8 +15,8 @@ flowchart LR
     Third["third-party observer (observer: Some(sensor))"] -->|"HostEvidence"| Evidence
     Third -->|"NameObservation"| Evidence
     Evidence --> Correlator["correlator (single writer)"]
-    Correlator -->|"HostEntity"| Entity["_meta/entity/host/<id>"]
-    Correlator -->|"PdnsRecord"| Pdns["@pdns/<ip-slug> (durable, #310)"]
+    Correlator -->|"HostEntity"| Entity["_meta/entity/host/&lt;id&gt;"]
+    Correlator -->|"PdnsRecord"| Pdns["@pdns/&lt;ip-slug&gt; (durable, #310)"]
 ```
 
 Evidence is a **claim, not a verdict**. Two provenance kinds, distinguished by the

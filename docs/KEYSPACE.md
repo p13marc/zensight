@@ -498,21 +498,21 @@ The four key-planes, visually:
 mindmap
   root(("zensight bus"))
     Telemetry
-      "zensight/<protocol>/<source>/<metric>"
+      "zensight/&lt;protocol&gt;/&lt;source&gt;/&lt;metric&gt;"
       TelemetryPoint
     "Control-plane (@/, verbatim)"
-      "zensight/<protocol>/@/**"
+      "zensight/&lt;protocol&gt;/@/**"
       "health, errors, status, alive"
-      "alerts/<alert_key>"
+      "alerts/&lt;alert_key&gt;"
       "commands, query, status, artifact/**"
     "Metadata (_meta/)"
-      "sensors/<name>/<source>"
+      "sensors/&lt;name&gt;/&lt;source&gt;"
       "evidence/host, evidence/names"
-      "entity/host/<entity_id>"
+      "entity/host/&lt;entity_id&gt;"
       "query/entities, query/names"
     "Verbatim media + pdns"
       "@media/** (video, preview, #359)"
-      "@pdns/<ip-slug> (PdnsRecord, #310)"
+      "@pdns/&lt;ip-slug&gt; (PdnsRecord, #310)"
 ```
 
 And the annotated tree, chunk by chunk:

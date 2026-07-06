@@ -16,10 +16,10 @@ flowchart TD
     end
 
     subgraph Sensors["Protocol Sensors"]
-        SnmpSensor["zenoh-sensor-snmp"]
+        SnmpSensor["zensight-sensor-snmp"]
         LogsSensor["zensight-sensor-logs"]
-        SysinfoSensor["zenoh-sensor-sysinfo"]
-        NetflowSensor["zenoh-sensor-netflow"]
+        SysinfoSensor["zensight-sensor-sysinfo"]
+        NetflowSensor["zensight-sensor-netflow"]
         OtherSensors["... modbus, gnmi, netlink,<br/>netring, systemd"]
     end
 
@@ -70,14 +70,14 @@ All sensors reuse `zensight-sensor-core` (`SensorRunner`, `Publisher`) and `zens
 flowchart BT
     subgraph Shared["Shared Libraries"]
         Common["zensight-common<br/>TelemetryPoint, TelemetryValue,<br/>Protocol, DeviceStatus, HealthSnapshot,<br/>KeyExprBuilder, config, serialization"]
-        Core["zensight-sensor-core<br/>SensorRunner, Publisher,<br/>LivelinessManager, HealthSnapshot publishing,<br/>CorrelationRegistry"]
+        Core["zensight-sensor-core<br/>SensorRunner, Publisher, health,<br/>AlertReporter, identity, artifacts"]
     end
 
     Core --> Common
 
     subgraph Apps["Applications"]
         Frontend["zensight (frontend)<br/>Iced 0.14 GUI"]
-        SensorApps["zensight-sensor-*<br/>snmp, syslog, sysinfo,<br/>netflow, modbus, gnmi"]
+        SensorApps["zensight-sensor-*<br/>snmp, logs, sysinfo, netflow,<br/>modbus, gnmi, netlink, netring, systemd"]
         PromExp["zensight-exporter-prometheus<br/>HTTP /metrics"]
         OtelExp["zensight-exporter-otel<br/>OTLP gRPC/HTTP"]
     end
@@ -94,7 +94,7 @@ flowchart BT
 ```mermaid
 flowchart LR
     subgraph Collection["1. Collection"]
-        SNMPAgent["SNMP Agent"] -- "poll (GET)" --> SnmpSensor["zenoh-sensor-snmp"]
+        SNMPAgent["SNMP Agent"] -- "poll (GET)" --> SnmpSensor["zensight-sensor-snmp"]
         SnmpSensor -- publish --> SnmpKey["zensight/snmp/router01/system/sysUpTime"]
 
         SyslogSource["Syslog Source"] -- "UDP/TCP 514" --> LogsSensor["zensight-sensor-logs"]
@@ -112,7 +112,7 @@ flowchart LR
         Bus["zensight/** subscribe"]
         Frontend["ZenSight Frontend<br/>Dashboard/Device views,<br/>health &amp; liveness, topology"]
         PromExp["Prometheus Exporter<br/>/metrics HTTP endpoint"]
-        OtelExp["OpenTelemetry Exporter<br/>metrics via OTLP,<br/>syslog to OTEL logs"]
+        OtelExp["OpenTelemetry Exporter<br/>metrics via OTLP,<br/>log records to OTEL logs"]
     end
 
     TP --> Bus
@@ -143,7 +143,7 @@ lives under `zensight/<protocol>/@/…`; cross-sensor metadata under
 
 ```
 zensight/
-├── <protocol>/                          # snmp, syslog, netflow, modbus, sysinfo, gnmi, netlink, netring
+├── <protocol>/                          # snmp, logs, netflow, modbus, sysinfo, gnmi, netlink, netring, systemd
 │   ├── <source>/<metric_path>           # telemetry — TelemetryPoint
 │   │       Example: zensight/snmp/router01/interfaces/eth0/ifInOctets
 │   └── @/                               # control-plane (verbatim @ — wildcards don't cross it)

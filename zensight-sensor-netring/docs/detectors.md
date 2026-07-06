@@ -94,7 +94,7 @@ flowchart LR
     F["flow event (start / established / tick / end)"] --> S
     Q["DNS query"] --> S
 
-    subgraph Tuned["Tuned<D> decorator"]
+    subgraph Tuned["Tuned&lt;D&gt; decorator"]
         S["inner stock Detector (baked-in floor)"] --> P{"post-filter: mute / threshold / allowlist"}
         L["LiveConfig snapshot"] -. "reads" .-> P
     end
@@ -104,7 +104,7 @@ flowchart LR
     P -->|"kept, DNS-driven"| N["keep stock source-only key"]
     K --> A["map::anomaly_alert"]
     N --> A
-    A --> Z["@/alerts/<alert_key>"]
+    A --> Z["@/alerts/&lt;alert_key&gt;"]
 ```
 
 Stock gates are constructed at the **lowest sensible floor** — below the runtime
