@@ -2204,6 +2204,7 @@ impl DemoSimulator {
                     metrics_published: metrics,
                     // Demo host identity arrives with the mock entities (#306).
                     host_id: None,
+                    source: Some("demo".to_string()),
                 }
             })
             .collect()

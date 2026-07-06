@@ -727,9 +727,10 @@ fn render_sensor_health_summary(
 
     let mut sensor_row = row![label].spacing(10).align_y(Alignment::Center);
 
-    // Sort sensors by name for consistent display
+    // Sort sensors by (name, source) for consistent display — one chip per
+    // sensor instance so multiple hosts running a protocol stay distinct.
     let mut sensors: Vec<_> = sensor_health.values().collect();
-    sensors.sort_by(|a, b| a.sensor.cmp(&b.sensor));
+    sensors.sort_by(|a, b| (&a.sensor, &a.source).cmp(&(&b.sensor, &b.source)));
 
     for snapshot in sensors {
         // Determine status color based on health
@@ -740,10 +741,16 @@ fn render_sensor_health_summary(
             _ => icons::status_unknown(IconSize::Small),
         };
 
+        // Chip label: `sensor@source` when the instance is host-scoped.
+        let label = match snapshot.source.as_deref() {
+            Some(source) => format!("{}@{}", snapshot.sensor, source),
+            None => snapshot.sensor.clone(),
+        };
+
         // Build tooltip with detailed health info
         let tooltip_content = format!(
             "{}\nStatus: {}\nDevices: {}/{}\nMetrics: {}\nErrors (1h): {}",
-            snapshot.sensor,
+            label,
             snapshot.status,
             snapshot.devices_responding,
             snapshot.devices_total,
@@ -752,7 +759,7 @@ fn render_sensor_health_summary(
         );
 
         let sensor_indicator = tooltip(
-            row![status_icon, text(&snapshot.sensor).size(11)]
+            row![status_icon, text(label).size(11)]
                 .spacing(4)
                 .align_y(Alignment::Center),
             container(text(tooltip_content).size(10))

@@ -40,8 +40,9 @@ pub enum Message {
     /// Device liveness update received.
     DeviceLivenessReceived(String, DeviceLiveness),
 
-    /// Sensor error report received (with the publishing sensor/protocol name).
-    ErrorReportReceived(String, ErrorReport),
+    /// Sensor error report received (with the publishing sensor/protocol name
+    /// and, on the host-scoped key shape, the instance's `<source>` segment).
+    ErrorReportReceived(String, Option<String>, ErrorReport),
 
     /// Sensor discovery/info received.
     SensorInfoReceived(SensorInfo),
@@ -444,11 +445,12 @@ pub enum Message {
     /// Expand/collapse an anomaly's evidence drill-down by alert_key (#48).
     SelectAnomaly(Option<String>),
 
-    /// Sensor came online (liveliness token appeared).
-    SensorOnline(String),
+    /// Sensor came online (liveliness token appeared). Carries the protocol
+    /// and, on the host-scoped key shape, the instance's `<source>` segment.
+    SensorOnline(String, Option<String>),
 
     /// Sensor went offline (liveliness token disappeared).
-    SensorOffline(String),
+    SensorOffline(String, Option<String>),
 
     /// Device came online (liveliness token appeared).
     DeviceOnline(String, String),
@@ -743,6 +745,9 @@ pub enum Message {
         key_prefix: String,
         /// What to produce (report / snapshot / capture).
         kind: zensight_common::ArtifactKind,
+        /// Target one sensor instance (`ArtifactRequest.opts.target_source`).
+        /// `None` fans out to every host running this protocol.
+        target_source: Option<String>,
     },
     /// The destination-folder picker resolved for a tree artifact (`None` = the
     /// user cancelled). Only tree kinds (snapshots) pick a folder first; blobs go
@@ -752,6 +757,8 @@ pub enum Message {
         key_prefix: String,
         /// What to produce.
         kind: zensight_common::ArtifactKind,
+        /// Target one sensor instance, threaded from `StartArtifact`.
+        target_source: Option<String>,
         /// Chosen destination folder, or `None` if cancelled.
         dest: Option<std::path::PathBuf>,
     },

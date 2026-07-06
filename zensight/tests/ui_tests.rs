@@ -1873,6 +1873,7 @@ fn test_sensors_view() {
             errors_last_hour: 3,
             metrics_published: 1234,
             host_id: None,
+            source: None,
         },
     );
     // ...with a recent error report.
@@ -1957,6 +1958,7 @@ fn test_sensors_snapshot_dirs() {
             errors_last_hour: 0,
             metrics_published: 10,
             host_id: None,
+            source: None,
         },
     );
 
@@ -1988,7 +1990,7 @@ fn test_sensors_snapshot_dirs() {
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(msgs.iter().any(|m| matches!(
         m,
-        Message::StartArtifact { key_prefix, kind: ArtifactKind::Snapshot { dir } }
+        Message::StartArtifact { key_prefix, kind: ArtifactKind::Snapshot { dir }, target_source: None }
             if key_prefix == "zensight/sysinfo" && dir == "etc"
     )));
 
@@ -3856,7 +3858,7 @@ fn netring_capture_tab_hosts_capture_form() {
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(messages.iter().any(|m| matches!(
         m,
-        Message::StartArtifact { key_prefix, kind: ArtifactKind::Capture { .. } }
+        Message::StartArtifact { key_prefix, kind: ArtifactKind::Capture { .. }, .. }
             if key_prefix == "zensight/netring"
     )));
 }
@@ -3940,6 +3942,7 @@ fn capture_form_renders_from_advert() {
     let mut ui = simulator(artifact_section(
         &ArtifactFetch::Idle,
         "zensight/netring",
+        None,
         &kinds,
         None,
         None,
@@ -3959,6 +3962,7 @@ fn capture_form_over_cap_duration_blocks_submit() {
     let mut ui = simulator(artifact_section(
         &ArtifactFetch::Idle,
         "zensight/netring",
+        None,
         &kinds,
         None,
         None,
@@ -3986,6 +3990,7 @@ fn capture_generating_progress_line_renders() {
     let mut ui = simulator(artifact_section(
         &fetch,
         "zensight/netring",
+        None,
         &kinds,
         Some("zensight/netring"),
         Some("capture"),
@@ -4009,6 +4014,7 @@ fn no_capture_advert_renders_no_form() {
     let mut ui = simulator(artifact_section(
         &ArtifactFetch::Idle,
         "zensight/netlink",
+        None,
         &kinds,
         None,
         None,

@@ -12,11 +12,19 @@ use zensight_common::{
 
 use crate::message::Message;
 
-/// Key expression for sensor liveliness tokens.
+/// Key expression for legacy (protocol-scoped) sensor liveliness tokens.
+/// Kept for one release so pre-host-scoping sensors stay visible.
 const SENSOR_LIVELINESS_EXPR: &str = "zensight/*/@/alive";
 
-/// Key expression for device liveliness tokens.
+/// Key expression for legacy (protocol-scoped) device liveliness tokens.
 const DEVICE_LIVELINESS_EXPR: &str = "zensight/*/@/devices/*/alive";
+
+/// Key expression for host-scoped sensor liveliness tokens
+/// (`zensight/<protocol>/<source>/@/alive`).
+const SENSOR_LIVELINESS_SCOPED_EXPR: &str = "zensight/*/*/@/alive";
+
+/// Key expression for host-scoped device liveliness tokens.
+const DEVICE_LIVELINESS_SCOPED_EXPR: &str = "zensight/*/*/@/devices/*/alive";
 
 /// Everything the telemetry subscription is keyed on (#364).
 ///
@@ -95,6 +103,22 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                 tracing::warn!("Failed to create control-plane subscriber (health/alerts)");
             }
 
+            // Host-scoped control plane: per-instance state keys carry the
+            // `<source>` segment (`zensight/<proto>/<source>/@/health` etc.) so
+            // machines never collide. The legacy `zensight/*/@/**` subscriber
+            // above can't match these (its second chunk is the verbatim `@`),
+            // and the pinned keyexpr tests in zensight-common prove the two
+            // subscribers never double-deliver a concrete key. It stays for the
+            // protocol-scoped alert keys + pre-host-scoping sensors.
+            let control_scoped = session
+                .declare_subscriber("zensight/*/*/@/**")
+                .with(flume::unbounded())
+                .await
+                .ok();
+            if control_scoped.is_none() {
+                tracing::warn!("Failed to create host-scoped control-plane subscriber");
+            }
+
             // Entity subscriber (#306): correlator host-entity docs live under
             // `zensight/_meta/entity/**`, which the telemetry `zensight/**` and
             // the control `zensight/*/@/**` subscribers both miss (second
@@ -135,37 +159,68 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                 }
             };
 
+            // Host-scoped liveliness tokens (`zensight/<proto>/<source>/@/…`).
+            // Declared alongside the legacy shape; the parsers accept both and
+            // the two key expressions never match the same concrete key.
+            let sensor_liveliness_scoped = match session
+                .liveliness()
+                .declare_subscriber(SENSOR_LIVELINESS_SCOPED_EXPR)
+                .await
+            {
+                Ok(sub) => Some(sub),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to create scoped sensor liveliness subscriber");
+                    None
+                }
+            };
+
+            let device_liveliness_scoped = match session
+                .liveliness()
+                .declare_subscriber(DEVICE_LIVELINESS_SCOPED_EXPR)
+                .await
+            {
+                Ok(sub) => Some(sub),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to create scoped device liveliness subscriber");
+                    None
+                }
+            };
+
             // Query existing liveliness tokens to get current state. The seed
             // queries are bounded to a short timeout: they run before telemetry
             // drains, so a dead/slow sensor must not hold up the whole GUI for
             // zenoh's default 10s.
             let seed_timeout = std::time::Duration::from_secs(3);
-            if let Ok(replies) = session
-                .liveliness()
-                .get(SENSOR_LIVELINESS_EXPR)
-                .timeout(seed_timeout)
-                .await
-            {
-                while let Ok(reply) = replies.recv_async().await {
-                    if let Ok(sample) = reply.result()
-                        && let Some(msg) = parse_sensor_liveliness(sample.key_expr().as_str(), true)
-                    {
-                        yield msg;
+            for expr in [SENSOR_LIVELINESS_EXPR, SENSOR_LIVELINESS_SCOPED_EXPR] {
+                if let Ok(replies) = session
+                    .liveliness()
+                    .get(expr)
+                    .timeout(seed_timeout)
+                    .await
+                {
+                    while let Ok(reply) = replies.recv_async().await {
+                        if let Ok(sample) = reply.result()
+                            && let Some(msg) = parse_sensor_liveliness(sample.key_expr().as_str(), true)
+                        {
+                            yield msg;
+                        }
                     }
                 }
             }
 
-            if let Ok(replies) = session
-                .liveliness()
-                .get(DEVICE_LIVELINESS_EXPR)
-                .timeout(seed_timeout)
-                .await
-            {
-                while let Ok(reply) = replies.recv_async().await {
-                    if let Ok(sample) = reply.result()
-                        && let Some(msg) = parse_device_liveliness(sample.key_expr().as_str(), true)
-                    {
-                        yield msg;
+            for expr in [DEVICE_LIVELINESS_EXPR, DEVICE_LIVELINESS_SCOPED_EXPR] {
+                if let Ok(replies) = session
+                    .liveliness()
+                    .get(expr)
+                    .timeout(seed_timeout)
+                    .await
+                {
+                    while let Ok(reply) = replies.recv_async().await {
+                        if let Ok(sample) = reply.result()
+                            && let Some(msg) = parse_device_liveliness(sample.key_expr().as_str(), true)
+                        {
+                            yield msg;
+                        }
                     }
                 }
             }
@@ -370,6 +425,36 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                         }
                     }
 
+                    // Host-scoped sensor liveliness subscription
+                    result = async {
+                        match &sensor_liveliness_scoped {
+                            Some(sub) => sub.recv_async().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Ok(sample) = result {
+                            let is_alive = sample.kind() == SampleKind::Put;
+                            if let Some(msg) = parse_sensor_liveliness(sample.key_expr().as_str(), is_alive) {
+                                yield msg;
+                            }
+                        }
+                    }
+
+                    // Host-scoped device liveliness subscription
+                    result = async {
+                        match &device_liveliness_scoped {
+                            Some(sub) => sub.recv_async().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Ok(sample) = result {
+                            let is_alive = sample.kind() == SampleKind::Put;
+                            if let Some(msg) = parse_device_liveliness(sample.key_expr().as_str(), is_alive) {
+                                yield msg;
+                            }
+                        }
+                    }
+
                     // Control plane (plain puts: health / errors / alerts /
                     // device liveness) — the AdvancedSubscriber doesn't deliver
                     // these, so they come through a plain subscriber here.
@@ -386,6 +471,25 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                                     yield msg;
                                 }
                             } else {
+                                let payload = sample.payload().to_bytes();
+                                if let Some(msg) = decode_sample(key, &payload) {
+                                    yield msg;
+                                }
+                            }
+                        }
+                    }
+
+                    // Host-scoped control plane: per-instance health / errors /
+                    // status / device liveness on `zensight/<proto>/<source>/@/…`.
+                    result = async {
+                        match &control_scoped {
+                            Some(sub) => sub.recv_async().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Ok(sample) = result {
+                            let key = sample.key_expr().as_str();
+                            if sample.kind() != SampleKind::Delete {
                                 let payload = sample.payload().to_bytes();
                                 if let Some(msg) = decode_sample(key, &payload) {
                                     yield msg;
@@ -447,34 +551,58 @@ fn push_sorted(msg: Message, telemetry: &mut Vec<TelemetryPoint>, others: &mut V
 
 /// Parse a sensor liveliness key expression.
 ///
-/// Key format: `zensight/<protocol>/@/alive`
-/// Returns the protocol name.
+/// Key formats: `zensight/<protocol>/<source>/@/alive` (host-scoped) or the
+/// legacy `zensight/<protocol>/@/alive`. Returns the protocol and, on the
+/// scoped shape, the instance's source.
 fn parse_sensor_liveliness(key: &str, is_alive: bool) -> Option<Message> {
-    // Parse without allocating a Vec: "zensight/<protocol>/@/alive"
+    // Parse without allocating a Vec.
     let rest = key.strip_prefix("zensight/")?;
     let (protocol, rest) = rest.split_once('/')?;
-    if rest != "@/alive" {
+    // The scoped wildcard also matches `zensight/_meta/correlator/@/alive`
+    // (the correlator's single-writer guard) — not a sensor.
+    if protocol == "_meta" {
         return None;
     }
+    let source = if rest == "@/alive" {
+        None
+    } else {
+        let (source, rest) = rest.split_once('/')?;
+        if rest != "@/alive" {
+            return None;
+        }
+        Some(source.to_string())
+    };
     let protocol = protocol.to_string();
     if is_alive {
-        tracing::info!(protocol = %protocol, "Sensor came online");
-        Some(Message::SensorOnline(protocol))
+        tracing::info!(protocol = %protocol, source = ?source, "Sensor came online");
+        Some(Message::SensorOnline(protocol, source))
     } else {
-        tracing::warn!(protocol = %protocol, "Sensor went offline");
-        Some(Message::SensorOffline(protocol))
+        tracing::warn!(protocol = %protocol, source = ?source, "Sensor went offline");
+        Some(Message::SensorOffline(protocol, source))
     }
 }
 
 /// Parse a device liveliness key expression.
 ///
-/// Key format: `zensight/<protocol>/@/devices/<device_id>/alive`
-/// Returns (protocol, device_id).
+/// Key formats: `zensight/<protocol>/<source>/@/devices/<device_id>/alive`
+/// (host-scoped) or the legacy shape without `<source>`. The GUI keys devices
+/// by `(protocol, device_id)` — the source segment only disambiguates the
+/// publishing instance, so it is parsed but not carried further.
 fn parse_device_liveliness(key: &str, is_alive: bool) -> Option<Message> {
-    // Parse without allocating a Vec: "zensight/<protocol>/@/devices/<device_id>/alive"
+    // Parse without allocating a Vec.
     let rest = key.strip_prefix("zensight/")?;
     let (protocol, rest) = rest.split_once('/')?;
-    let rest = rest.strip_prefix("@/devices/")?;
+    if protocol == "_meta" {
+        return None;
+    }
+    let rest = match rest.strip_prefix("@/devices/") {
+        Some(rest) => rest,
+        None => {
+            // Host-scoped: skip the `<source>` segment.
+            let (_source, rest) = rest.split_once('/')?;
+            rest.strip_prefix("@/devices/")?
+        }
+    };
     let (device_id, rest) = rest.split_once('/')?;
     if rest != "alive" {
         return None;
@@ -520,9 +648,12 @@ fn parse_entity_removed(key: &str) -> Option<Message> {
 /// Decode a sample based on its key expression pattern.
 ///
 /// Routes messages to the appropriate type based on the key structure:
-/// - `zensight/<protocol>/@/health` -> HealthSnapshot
-/// - `zensight/<protocol>/@/devices/<device>/liveness` -> DeviceLiveness
-/// - `zensight/<protocol>/@/errors` -> ErrorReport
+/// - `zensight/<protocol>/<source>/@/health` -> HealthSnapshot (host-scoped)
+/// - `zensight/<protocol>/<source>/@/devices/<device>/liveness` -> DeviceLiveness
+/// - `zensight/<protocol>/<source>/@/errors` -> ErrorReport
+/// - `zensight/<protocol>/@/{health,errors,devices/*/liveness}` — the legacy
+///   protocol-scoped shapes, kept for one release (source = None)
+/// - `zensight/<protocol>/@/alerts/<alert_key>` -> Alert (protocol-scoped by design)
 /// - `zensight/_meta/sensors/<name>/<source>` -> SensorInfo
 /// - `zensight/_meta/evidence/**` is correlator input, not decoded here
 /// - `zensight/<protocol>/<source>/<metric>` -> TelemetryPoint
@@ -575,7 +706,11 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
             };
         } else if segment3 == "errors" {
             return match decode_auto::<ErrorReport>(payload) {
-                Ok(report) => Some(Message::ErrorReportReceived(segment1.to_string(), report)),
+                Ok(report) => Some(Message::ErrorReportReceived(
+                    segment1.to_string(),
+                    None,
+                    report,
+                )),
                 Err(e) => {
                     tracing::warn!(error = %e, key = %key, "Failed to decode ErrorReport");
                     None
@@ -606,6 +741,58 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
                 }
             };
         }
+        return None;
+    }
+
+    // Host-scoped control plane: zensight/<protocol>/<source>/@/<channel>.
+    // segment2 is the instance's source; the key is authoritative for it (the
+    // payload's optional `source` field is only a fallback for store/demo
+    // paths). Must run BEFORE the telemetry fallback — these arrive on the
+    // scoped control subscriber, not on `zensight/**`.
+    if let Some(scoped) = rest_after_seg2.strip_prefix("@/") {
+        let source = segment2;
+        let (channel, rest_after_channel) = scoped.split_once('/').unwrap_or((scoped, ""));
+        if channel == "health" {
+            return match decode_auto::<HealthSnapshot>(payload) {
+                Ok(mut snapshot) => {
+                    snapshot.source = Some(source.to_string());
+                    Some(Message::HealthSnapshotReceived(snapshot))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, key = %key, "Failed to decode HealthSnapshot");
+                    None
+                }
+            };
+        } else if channel == "errors" {
+            return match decode_auto::<ErrorReport>(payload) {
+                Ok(report) => Some(Message::ErrorReportReceived(
+                    segment1.to_string(),
+                    Some(source.to_string()),
+                    report,
+                )),
+                Err(e) => {
+                    tracing::warn!(error = %e, key = %key, "Failed to decode ErrorReport");
+                    None
+                }
+            };
+        } else if channel == "devices"
+            && let Some((device, suffix)) = rest_after_channel.split_once('/')
+            && suffix == "liveness"
+        {
+            let protocol = segment1.to_string();
+            return match decode_auto::<DeviceLiveness>(payload) {
+                Ok(liveness) => Some(Message::DeviceLivenessReceived(protocol, liveness)),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e, key = %key, device = %device,
+                        "Failed to decode DeviceLiveness"
+                    );
+                    None
+                }
+            };
+        }
+        // Other scoped channels (`@/status`, `@/commands/*`, `@/query/*`, media
+        // stream control, …) are not consumed via this path.
         return None;
     }
 
@@ -808,16 +995,39 @@ mod tests {
 
     #[test]
     fn test_parse_sensor_liveliness_online() {
+        // Legacy protocol-scoped shape (compat pin, one release).
         let key = "zensight/snmp/@/alive";
         let msg = parse_sensor_liveliness(key, true);
-        assert!(matches!(msg, Some(Message::SensorOnline(ref p)) if p == "snmp"));
+        assert!(matches!(msg, Some(Message::SensorOnline(ref p, None)) if p == "snmp"));
+    }
+
+    #[test]
+    fn test_parse_sensor_liveliness_scoped() {
+        // Host-scoped shape: the source segment is carried through.
+        let msg = parse_sensor_liveliness("zensight/sysinfo/hostA/@/alive", true);
+        assert!(matches!(
+            msg,
+            Some(Message::SensorOnline(ref p, Some(ref s))) if p == "sysinfo" && s == "hostA"
+        ));
+        let msg = parse_sensor_liveliness("zensight/sysinfo/hostA/@/alive", false);
+        assert!(matches!(
+            msg,
+            Some(Message::SensorOffline(ref p, Some(ref s))) if p == "sysinfo" && s == "hostA"
+        ));
+    }
+
+    #[test]
+    fn test_parse_sensor_liveliness_ignores_correlator_token() {
+        // `zensight/*/*/@/alive` also matches the correlator's single-writer
+        // guard token — it is not a sensor and must not produce a message.
+        assert!(parse_sensor_liveliness("zensight/_meta/correlator/@/alive", true).is_none());
     }
 
     #[test]
     fn test_parse_sensor_liveliness_offline() {
         let key = "zensight/sysinfo/@/alive";
         let msg = parse_sensor_liveliness(key, false);
-        assert!(matches!(msg, Some(Message::SensorOffline(ref p)) if p == "sysinfo"));
+        assert!(matches!(msg, Some(Message::SensorOffline(ref p, None)) if p == "sysinfo"));
     }
 
     #[test]
@@ -833,6 +1043,16 @@ mod tests {
     #[test]
     fn test_parse_device_liveliness_online() {
         let key = "zensight/snmp/@/devices/router01/alive";
+        let msg = parse_device_liveliness(key, true);
+        assert!(
+            matches!(msg, Some(Message::DeviceOnline(ref p, ref d)) if p == "snmp" && d == "router01")
+        );
+    }
+
+    #[test]
+    fn test_parse_device_liveliness_scoped() {
+        // Host-scoped shape: devices stay keyed by (protocol, device_id).
+        let key = "zensight/snmp/poller01/@/devices/router01/alive";
         let msg = parse_device_liveliness(key, true);
         assert!(
             matches!(msg, Some(Message::DeviceOnline(ref p, ref d)) if p == "snmp" && d == "router01")
@@ -889,6 +1109,64 @@ mod tests {
         // Verify our constants match expected patterns
         assert_eq!(SENSOR_LIVELINESS_EXPR, "zensight/*/@/alive");
         assert_eq!(DEVICE_LIVELINESS_EXPR, "zensight/*/@/devices/*/alive");
+        assert_eq!(SENSOR_LIVELINESS_SCOPED_EXPR, "zensight/*/*/@/alive");
+        assert_eq!(
+            DEVICE_LIVELINESS_SCOPED_EXPR,
+            "zensight/*/*/@/devices/*/alive"
+        );
+    }
+
+    /// Host-scoped health keys route to HealthSnapshotReceived with the source
+    /// stamped from the KEY (authoritative), not the payload.
+    #[test]
+    fn test_decode_sample_scoped_health_stamps_source() {
+        let snapshot = HealthSnapshot {
+            sensor: "sysinfo".into(),
+            status: zensight_common::HealthStatus::Healthy,
+            uptime_secs: 1,
+            devices_total: 0,
+            devices_responding: 0,
+            devices_failed: 0,
+            last_poll_duration_ms: 0,
+            errors_last_hour: 0,
+            metrics_published: 0,
+            host_id: None,
+            source: None, // key wins even when the payload lacks it
+        };
+        let payload = zensight_common::encode(&snapshot, zensight_common::Format::Json).unwrap();
+        match decode_sample("zensight/sysinfo/hostA/@/health", &payload) {
+            Some(Message::HealthSnapshotReceived(s)) => {
+                assert_eq!(s.source.as_deref(), Some("hostA"));
+            }
+            other => panic!("expected HealthSnapshotReceived, got {other:?}"),
+        }
+    }
+
+    /// Host-scoped error keys carry the source; legacy keys carry None.
+    #[test]
+    fn test_decode_sample_scoped_errors() {
+        let report = ErrorReport {
+            timestamp: 0,
+            device: None,
+            error_type: zensight_common::ErrorType::Other,
+            message: "boom".into(),
+            retryable: true,
+        };
+        let payload = zensight_common::encode(&report, zensight_common::Format::Json).unwrap();
+        match decode_sample("zensight/netlink/hostA/@/errors", &payload) {
+            Some(Message::ErrorReportReceived(protocol, source, _)) => {
+                assert_eq!(protocol, "netlink");
+                assert_eq!(source.as_deref(), Some("hostA"));
+            }
+            other => panic!("expected ErrorReportReceived, got {other:?}"),
+        }
+        match decode_sample("zensight/netlink/@/errors", &payload) {
+            Some(Message::ErrorReportReceived(protocol, source, _)) => {
+                assert_eq!(protocol, "netlink");
+                assert_eq!(source, None);
+            }
+            other => panic!("expected ErrorReportReceived, got {other:?}"),
+        }
     }
 
     #[test]
