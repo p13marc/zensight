@@ -4,7 +4,7 @@
 #
 # This is the mechanical half of graduating zenoh-blob (#202). The remaining steps
 # — creating the GitHub repo, a crates.io account + API token, and running the
-# actual `cargo publish` — are yours; see docs/ZENOH-BLOB-GRADUATION.md.
+# actual `cargo publish` — are yours; see zenoh-blob/docs/graduation.md.
 #
 # Usage:
 #   scripts/extract-zenoh-blob.sh [OUTPUT_DIR]
@@ -75,7 +75,7 @@ cat <<EOF
 
 ==> Done. Standalone repo at: $OUT_DIR
 
-Next (manual) steps — see docs/ZENOH-BLOB-GRADUATION.md:
+Next (manual) steps — see zenoh-blob/docs/graduation.md:
   1. Create the GitHub repo (e.g. gh repo create p13marc/zenoh-blob --public).
   2. cd $OUT_DIR && git remote add origin git@github.com:p13marc/zenoh-blob.git && git push -u origin HEAD:main
   3. Create a crates.io API token, then: cargo login && cargo publish

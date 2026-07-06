@@ -2,7 +2,7 @@
 //! "not asked yet" / "loading" / "loaded" / "failed" instead of a bare
 //! `Option<T>` that makes a slow or failed fetch look identical to "no data".
 //!
-//! See docs/plans/gui/05-states-feedback-accessibility.md (L1).
+//! See zensight/docs/views.md (L1).
 
 /// The state of an on-demand fetch.
 #[derive(Debug, Clone, Default)]

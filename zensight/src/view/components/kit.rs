@@ -3,7 +3,7 @@
 //! dimensions from [`crate::view::tokens`], so views compose consistent chrome
 //! instead of hand-rolling containers with ad-hoc colors and spacing.
 //!
-//! See docs/plans/gui/03-design-system.md (D3).
+//! See zensight/docs/design-system.md (D3).
 
 use iced::widget::{container, row, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};

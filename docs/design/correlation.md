@@ -1,3 +1,7 @@
+> **Archived design doc.** Historical rationale, implemented in 0.7.0. For current
+> operator/reference documentation see [`zensight-correlator/`](../../zensight-correlator/)
+> and its `docs/`, plus the canonical [`docs/KEYSPACE.md`](../KEYSPACE.md).
+
 # Cross-Sensor Identity Correlation — Analysis, Architecture & Proposal
 
 *Status: implemented — 2026-07-04 (Part II design realized as `zensight-correlator`

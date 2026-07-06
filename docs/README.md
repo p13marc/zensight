@@ -1,31 +1,47 @@
 # ZenSight Documentation
 
-Reference documentation for the ZenSight observability platform. (Design plans
-and proposals are intentionally **not** kept here — this directory holds only
-current, factual documentation.)
+This directory holds **cross-cutting** references. Anything specific to one crate lives in
+that crate's own `README.md` + `docs/` directory (linked below).
+
+## Cross-cutting references
 
 | Document | What it covers |
 |----------|----------------|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | System overview, crate dependencies, data flow, runtime/lifecycle, health model, exporters, directory layout |
-| [SENSORS.md](SENSORS.md) | Per-sensor reference: sources, configuration, and the Zenoh keys each sensor publishes/serves |
-| [KEYSPACE.md](KEYSPACE.md) | Canonical Zenoh keyspace reference — telemetry, control-plane (`@/…`), metadata (`_meta/…`), wildcards, and the key-building helpers |
-| [STORAGE.md](STORAGE.md) | Durable router-hosted storages: evidence/entity fs durability + the historical passive-DNS (`@pdns`) tier, and the mutable-key/timestamping caveat (#310) |
-| [BLOB-ROUTER-STORAGE.md](BLOB-ROUTER-STORAGE.md) | Router-hosted Tier-2 content store for `zenoh-blob` large-data transfer (#201) |
-| [UI_TESTING.md](UI_TESTING.md) | Testing the Iced 0.14 frontend with the `iced_test` simulator |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | System overview, crate dependencies, data flow, runtime/lifecycle, health model |
+| [KEYSPACE.md](KEYSPACE.md) | **The canonical Zenoh keyspace contract** — telemetry, control-plane (`@/…`), metadata (`_meta/…`), media (`@media/…`, `@pdns/…`), wildcards, and the key-building helpers |
+| [design/](design/) | Archived design rationale (historical — implemented in 0.7.0): [correlation](design/correlation.md), [large-data-transfer](design/large-data-transfer.md), [zenoh-efficiency](design/zenoh-efficiency.md) |
+
+## Per-crate documentation
+
+Each crate is documented in its own directory. Start at the crate's `README.md`; deeper
+reference pages are under `<crate>/docs/`.
+
+| Crate | Docs |
+|-------|------|
+| [zensight](../zensight/) (frontend) | views · testing · design-system · local-store |
+| [zensight-common](../zensight-common/) | data-model · identity-evidence · keyspace-helpers |
+| [zensight-sensor-core](../zensight-sensor-core/) | framework · artifacts |
+| [zensight-sensor-snmp](../zensight-sensor-snmp/) | reference |
+| [zensight-sensor-logs](../zensight-sensor-logs/) | telemetry · filtering · configuration |
+| [zensight-sensor-netflow](../zensight-sensor-netflow/) | reference |
+| [zensight-sensor-modbus](../zensight-sensor-modbus/) | reference |
+| [zensight-sensor-sysinfo](../zensight-sensor-sysinfo/) | telemetry · collectors · configuration |
+| [zensight-sensor-gnmi](../zensight-sensor-gnmi/) | reference |
+| [zensight-sensor-netlink](../zensight-sensor-netlink/) | telemetry · sentinel · configuration |
+| [zensight-sensor-netring](../zensight-sensor-netring/) | telemetry · detectors · configuration |
+| [zensight-sensor-systemd](../zensight-sensor-systemd/) | telemetry · units-and-actions · configuration |
+| [zensight-correlator](../zensight-correlator/) | correlation · keyspace · storage |
+| [zensight-exporter-prometheus](../zensight-exporter-prometheus/) | reference |
+| [zensight-exporter-otel](../zensight-exporter-otel/) | reference |
+| [zenoh-blob](../zenoh-blob/) | router-storage · graduation |
 
 ## Quick start
 
 ```bash
-# Build everything (release)
 cargo build --release --workspace
-
-# Build + configure + run the GUI and all local sensors (netring, netlink,
-# sysinfo, logs/journald) — close the GUI to stop everything.
-just run
-
-# Run a single sensor
-just netring   # | netlink | sysinfo | logs
+just run          # GUI + local sensors (netring, netlink, sysinfo, logs/journald)
+just netring      # one sensor: netring | netlink | sysinfo | logs
 ```
 
-See the top-level `README.md` and `CLAUDE.md` for build/test/lint commands and
-the project overview.
+See the top-level [`README.md`](../README.md) and [`CLAUDE.md`](../CLAUDE.md) for the project
+overview and build/test/lint commands.

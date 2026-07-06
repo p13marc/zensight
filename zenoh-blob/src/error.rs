@@ -29,7 +29,7 @@ pub enum BlobError {
 
     /// A resume was attempted but the source's manifest id/hash changed since the
     /// partial download — splicing mismatched halves would corrupt the output
-    /// (see `docs/LARGE-DATA-TRANSFER.md` §5.8). The partial is discarded.
+    /// (see `docs/design/large-data-transfer.md` §5.8). The partial is discarded.
     #[error("resume: manifest id/hash changed since partial download")]
     ResumeMismatch,
 

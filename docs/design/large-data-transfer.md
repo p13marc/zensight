@@ -1,3 +1,7 @@
+> **Archived design doc.** Historical rationale, implemented in 0.7.0 as `zenoh-blob` +
+> the `@/artifact` channel. For current documentation see [`zenoh-blob/`](../../zenoh-blob/)
+> and [`docs/KEYSPACE.md`](../KEYSPACE.md).
+
 # ZenSight — Large-Data Transfer (debug reports) & a zenoh-fs evaluation
 
 > Status: **proposal / decision memo** · June 2026 · reviewer: @p13marc

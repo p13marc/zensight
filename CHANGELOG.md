@@ -166,7 +166,7 @@ and the per-entry mixed-version notes; upgrade sensors and frontend together.
   provides indicators).
 
 - **Zenoh-efficiency core for low-bandwidth / unreliable links (epic #352,
-  `docs/ZENOH-EFFICIENCY.md`)**: a coherent "resilient links" pass across the bus.
+  `docs/design/zenoh-efficiency.md`)**: a coherent "resilient links" pass across the bus.
   - **Per-traffic-class QoS** (`zensight_common::QosClass`, #353): telemetry and
     health are best-effort + drop + low priority (a lost sample is superseded);
     alerts, commands, evidence and entities are **reliable + block** at higher
@@ -376,7 +376,7 @@ and the per-entry mixed-version notes; upgrade sensors and frontend together.
     `ArtifactChannel` owns request/status/cancel + reaper (per-kind busy +
     cooldown, lazy `BlobServer`/`TreeServer`); producers implement the
     `ArtifactProducer` trait. See `docs/KEYSPACE.md` §3.1a and
-    `docs/LARGE-DATA-TRANSFER.md`.
+    `docs/design/large-data-transfer.md`.
   - **Frontend**: the `blob_fetch.rs` + `dir_fetch.rs` views merge into one
     `zensight/src/view/artifact_fetch.rs` whose `download_stream` matches on
     `Delivery`.

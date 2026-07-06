@@ -1,3 +1,7 @@
+> **Archived design doc.** Historical rationale; the core (QoS, CBOR default, declared
+> publishers, media plane) shipped in 0.7.0. For current documentation see
+> [`docs/KEYSPACE.md`](../KEYSPACE.md) and [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md).
+
 # ZenSight Zenoh Efficiency — QoS, Advanced Pub/Sub, Declarations, Media & Keyspace
 
 *Analysis / design report for low-bandwidth & unreliable links. Companion to

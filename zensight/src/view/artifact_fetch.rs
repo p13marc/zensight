@@ -3,7 +3,7 @@
 //! per-sensor UI. Subsumes the old Tier-1 debug-report (`blob_fetch`) and Tier-2
 //! directory-snapshot (`dir_fetch`) modules: they were the same lifecycle with
 //! different labels, so this unifies them and keys the wording off the artifact
-//! kind slug. See `docs/LARGE-DATA-TRANSFER.md` and `docs/KEYSPACE.md` §3.
+//! kind slug. See `docs/design/large-data-transfer.md` and `docs/KEYSPACE.md` §3.
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -14,7 +14,7 @@
 //! liveness   ──┘                              └── stores (evidence TTL, name map)
 //! ```
 //!
-//! See `docs/CORRELATION-ANALYSIS.md` §9.3 and `docs/KEYSPACE.md`.
+//! See `docs/design/correlation.md` §9.3 and `docs/KEYSPACE.md`.
 
 pub mod config;
 pub mod demo;

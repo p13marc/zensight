@@ -4,7 +4,7 @@
 //! dropped connection *or* a process restart can continue instead of restarting.
 //! The sidecar is bound to the blob's `id` + whole-blob `hash`, so a source that
 //! was regenerated between attempts can never splice mismatched halves
-//! (`docs/LARGE-DATA-TRANSFER.md` §5.8) — on any mismatch the partial is discarded
+//! (`docs/design/large-data-transfer.md` §5.8) — on any mismatch the partial is discarded
 //! and the download starts fresh.
 
 use std::path::{Path, PathBuf};

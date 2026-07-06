@@ -186,7 +186,7 @@ reaper, per-kind busy + cooldown, lazy `BlobServer`/`TreeServer`). Each supporte
 kind is an `ArtifactProducer` (the `Snapshot` producer advertises its allowlisted
 `dirs` via `KindAdvert::Snapshot { dirs }`; the GUI hides `KindAdvert::Unknown`
 kinds). The GUI surfaces available kinds/dirs for download in the Sensors view.
-See `docs/LARGE-DATA-TRANSFER.md`.
+See `docs/design/large-data-transfer.md`.
 
 ### 3.2 On-demand detail queries — `@/query/<topic>`
 

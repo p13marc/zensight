@@ -13,7 +13,7 @@
 //! `<prefix>/@/artifact/blob`, or a Tier-2 [`Delivery::Tree`] from the
 //! content-addressed chunk (`<prefix>/@/store/<algo>/<hash>`) + index
 //! (`<prefix>/@/tree/<id>`) queryables. See `docs/KEYSPACE.md` §3 and
-//! `docs/LARGE-DATA-TRANSFER.md`.
+//! `docs/design/large-data-transfer.md`.
 //!
 //! Typed [`ArtifactKind`] (rather than opaque JSON params) is deliberate: this is
 //! a single repo with small, stable param sets, so both ends get type safety.

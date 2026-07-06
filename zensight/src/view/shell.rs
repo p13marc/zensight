@@ -3,7 +3,7 @@
 //! `App::view`, so navigation chrome and global status are consistent on every
 //! page instead of each view rolling its own header.
 //!
-//! See docs/plans/gui/02-app-shell-and-navigation.md.
+//! See zensight/docs/views.md.
 
 use iced::widget::{button, column, container, row, text};
 use iced::{Alignment, Background, Border, Element, Length, Theme};
