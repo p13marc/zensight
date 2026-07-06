@@ -112,7 +112,7 @@ and the per-entry mixed-version notes; upgrade sensors and frontend together.
   `zenoh-backend-fs` volume (timestamped for mutable-key last-writer-wins), and a
   new `@pdns` plane (`zensight/@pdns/<ip>`, `PdnsRecord`) published by the
   correlator on each name-store update gives a historical IP↔name tier with a
-  documented `zenoh-backend-influxdb` storage example. See `docs/STORAGE.md`.
+  documented `zenoh-backend-influxdb` storage example. See `zensight-correlator/docs/storage.md`.
 
 - **Contextual capture & bandwidth actions in the device view (#351)**: the
   netring drill-down's Capture tab now hosts the real on-demand pcap capture
@@ -166,7 +166,7 @@ and the per-entry mixed-version notes; upgrade sensors and frontend together.
   provides indicators).
 
 - **Zenoh-efficiency core for low-bandwidth / unreliable links (epic #352,
-  `docs/ZENOH-EFFICIENCY.md`)**: a coherent "resilient links" pass across the bus.
+  `docs/design/zenoh-efficiency.md`)**: a coherent "resilient links" pass across the bus.
   - **Per-traffic-class QoS** (`zensight_common::QosClass`, #353): telemetry and
     health are best-effort + drop + low priority (a lost sample is superseded);
     alerts, commands, evidence and entities are **reliable + block** at higher
@@ -376,7 +376,7 @@ and the per-entry mixed-version notes; upgrade sensors and frontend together.
     `ArtifactChannel` owns request/status/cancel + reaper (per-kind busy +
     cooldown, lazy `BlobServer`/`TreeServer`); producers implement the
     `ArtifactProducer` trait. See `docs/KEYSPACE.md` §3.1a and
-    `docs/LARGE-DATA-TRANSFER.md`.
+    `docs/design/large-data-transfer.md`.
   - **Frontend**: the `blob_fetch.rs` + `dir_fetch.rs` views merge into one
     `zensight/src/view/artifact_fetch.rs` whose `download_stream` matches on
     `Delivery`.
@@ -471,7 +471,7 @@ will see a step:
 
 A large release: two new kernel/wire-level sensors, a unified logs sensor with
 journald, a full host/incident-centric frontend redesign with NDR, alert export
-to Prometheus/OTel, and OS packaging. See `docs/SENSORS.md`, `docs/KEYSPACE.md`,
+to Prometheus/OTel, and OS packaging. See `docs/README.md`, `docs/KEYSPACE.md`,
 and `docs/ARCHITECTURE.md` for the authoritative references.
 
 ### Added

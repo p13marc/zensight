@@ -1,22 +1,22 @@
 # Router-hosted Tier-2 chunk store
 
-This describes how to run a Zenoh **router** as the fleet-wide content store for
-`zenoh-blob` Tier-2 directory sync (epic #193, issue #201). It complements
-[`docs/LARGE-DATA-TRANSFER.md`](LARGE-DATA-TRANSFER.md) and the keyspace contract
-in [`docs/KEYSPACE.md`](KEYSPACE.md) §3.1a.
+How to run a Zenoh **router** as the fleet-wide content store for `zenoh-blob`
+Tier-2 directory sync. It complements the design rationale in
+[`../../docs/design/large-data-transfer.md`](../../docs/design/large-data-transfer.md)
+and the keyspace contract in [`../../docs/KEYSPACE.md`](../../docs/KEYSPACE.md).
 
 ## Why
 
 Tier-2's default model runs a `TreeServer` inside the producer (a sensor): the
-producer must stay alive for the whole transfer, each producer serves its own
-copy of every chunk, and identical chunks across producers are transferred more
-than once.
+producer must stay alive for the whole transfer, each producer serves its own copy
+of every chunk, and identical chunks across producers are transferred more than
+once.
 
-Pointing the store at a **router-hosted Zenoh storage** instead removes all
-three limits:
+Pointing the store at a **router-hosted Zenoh storage** instead removes all three
+limits:
 
 - **Serverless transfers.** A producer PUTs its chunks + tree index into the
-  storage and *exits*. The storage keeps serving them. No long-lived server.
+  storage and *exits*. The storage keeps serving them — no long-lived server.
 - **Fleet-wide dedup.** A chunk key is its content hash, so a chunk PUT by *any*
   producer is reused by *every* consumer (and every other producer). Common files
   across hosts/versions move once.
@@ -25,8 +25,9 @@ three limits:
 
 Because chunk keys are **immutable** (`<prefix>/<algo>/<hash>` only ever maps to
 one byte string), the storage's last-writer-wins reconciliation is a no-op and
-re-publishing is idempotent — there are no timestamp/conflict concerns that
-normally complicate mutable storages.
+re-publishing is idempotent — none of the timestamp/conflict concerns that
+complicate a mutable storage (contrast the identity stores in
+[`../../zensight-correlator/docs/storage.md`](../../zensight-correlator/docs/storage.md)).
 
 ## How it fits together
 
@@ -55,7 +56,7 @@ consumer only have to agree on the `store_prefix`, `tree_prefix`, and `Format`.
 zenohd -c configs/router-blob-storage.json5
 ```
 
-See [`configs/router-blob-storage.json5`](../configs/router-blob-storage.json5)
+See [`../../configs/router-blob-storage.json5`](../../configs/router-blob-storage.json5)
 for an annotated config. The essentials:
 
 - Requires the `zenoh-plugin-storage-manager` + filesystem backend

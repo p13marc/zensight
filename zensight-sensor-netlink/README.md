@@ -1,69 +1,51 @@
 # zensight-sensor-netlink
 
-A ZenSight sensor that streams **Linux kernel networking ground truth** as
-telemetry, built on [`nlink`](https://github.com/p13marc/nlink). Linux only.
+Streams **Linux kernel networking ground truth** as ZenSight telemetry, built on
+[`nlink`](https://github.com/p13marc/nlink). Linux only.
 
 Unlike SNMP, this needs no agent or daemon on the observed host — it reads the
-kernel directly via netlink, and the reads are **unprivileged** (no
-`CAP_NET_ADMIN`).
+kernel directly via **RTNETLINK + `sock_diag`**, and the baseline reads are
+**unprivileged** (no `CAP_NET_ADMIN`). It covers interfaces/addresses/routes/
+neighbors, enriched TCP socket state (`tcp_info` delivery/pacing/retrans/reorder,
+BBR congestion control), qdisc/bufferbloat health, ethtool link health, a
+real-time control-plane change timeline, and per-process TCP bandwidth.
 
-It also embeds a **sentinel** that asserts declared expectations (sockets/links/
-routes, rate-of-change, delivery floors) and raises alerts on deviation,
-hot-swappable at runtime via `@/commands/expectations`.
+Two extras sit on top of the raw telemetry:
 
-> The tables below are a representative subset. See
-> [`docs/SENSORS.md`](../docs/SENSORS.md) and
-> [`docs/KEYSPACE.md`](../docs/KEYSPACE.md) for the authoritative telemetry /
-> control-plane / `@/query` reference (enriched `tcp_info`, qdisc/bufferbloat
-> health, conntrack, WireGuard, nftables hit-rate, route-flap history,
-> control-plane change timeline, …).
+- **Socket → process attribution (#304):** each `@/query/sockets` row is joined —
+  unprivileged — to its owning process (`cookie`/`cgroup`/`pid`/`start_time`) via
+  a per-request `/proc` fd-scan.
+- **Embedded sentinel:** declared expectations over sockets/links/routes/rules
+  raise alerts on deviation, hot-swappable at runtime via `@/commands`.
+- **Optional eBPF tier (#114, off by default):** connection lifecycle + latency
+  the `sock_diag` snapshot cannot see (opt-in build, `--features ebpf`).
 
-## Telemetry
-
-Published under `zensight/netlink/<host>/...`:
-
-| Metric | Type | Notes |
-|---|---|---|
-| `iface/<name>/rx_bytes`, `tx_bytes`, `rx_packets`, `tx_packets`, `rx_errors`, `tx_errors`, `rx_dropped`, `tx_dropped` | Counter | per-interface, label `ifindex` |
-| `iface/<name>/up` | Boolean | admin/oper up |
-| `iface/<name>/carrier` | Boolean | physical carrier |
-| `iface/<name>/oper_state` | Text | `up`/`down`/`lowerlayerdown`/... |
-| `iface/<name>/mtu` | Gauge | |
-| `iface/<name>/info` | Text | MAC address (label `mac`) |
-| `sockets/tcp/established`, `listen`, `time_wait`, `syn_sent`, `close_wait` | Gauge | counts by TCP state |
-| `sockets/tcp/retransmits_total` | Counter | summed across sockets |
-| `sockets/tcp/max_rtt_us` | Gauge | worst RTT observed |
-
-## Run
+## Quick start
 
 ```bash
 cargo run -p zensight-sensor-netlink --release -- --config configs/netlink.json5
 ```
 
-## Configuration (JSON5)
+One-liner config: `{ zenoh: { mode: "peer" }, netlink: { source: "auto" } }` —
+everything under `collect.*` defaults on except `nftables`/`conntrack`/`ebpf`
+(which need extra privilege or an opt-in build).
 
-```json5
-{
-  zenoh: { mode: "peer" },
-  netlink: {
-    key_prefix: "zensight/netlink",
-    hostname: "auto",          // or a fixed name
-    poll_interval_secs: 5,
-    collect: { interfaces: true, sockets: true },
-    interfaces: {
-      include: [],             // empty = all
-      exclude: [],
-      exclude_loopback: false,
-      exclude_virtual: false,  // docker*, veth*, br-*, virbr*, vnet*, tap*
-    },
-  },
-  logging: { level: "info" },
-}
-```
+## Documentation
 
-## Reference
+- [Telemetry reference](docs/telemetry.md) — published keys + `@/query/*` detail.
+- [Sentinel](docs/sentinel.md) — expectations, alerts, hot-swap control.
+- [Configuration](docs/configuration.md) — every config block.
+- [../docs/KEYSPACE.md](../docs/KEYSPACE.md) — authoritative key-expression contract.
+- [docs/telemetry.md](docs/telemetry.md) — the canonical per-sensor reference.
 
-The example config above is a minimal subset — the real `configs/netlink.json5`
-has many more `collect.*` toggles and the `expectations` block. See
-[`docs/SENSORS.md#netlink`](../docs/SENSORS.md#netlink) for the full per-sensor
-reference.
+## Privilege summary
+
+| Capability | Feature |
+|---|---|
+| none (unprivileged) | interfaces, addresses, routes, neighbors, sockets, tcp_info, ethtool, TC, xfrm, socket→process, per-process TCP bandwidth |
+| `CAP_NET_ADMIN` | `collect.nftables`, `collect.conntrack`, full WireGuard peer data |
+| `CAP_BPF` + `CAP_NET_ADMIN` | `collect.ebpf` (also needs a `--features ebpf` build) |
+
+## License
+
+MIT OR Apache-2.0

@@ -1,8 +1,11 @@
+> **Archived design doc.** Historical rationale; the core (QoS, CBOR default, declared
+> publishers, media plane) shipped in 0.7.0. For current documentation see
+> [`docs/KEYSPACE.md`](../KEYSPACE.md) and [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md).
+
 # ZenSight Zenoh Efficiency — QoS, Advanced Pub/Sub, Declarations, Media & Keyspace
 
 *Analysis / design report for low-bandwidth & unreliable links. Companion to
-[`KEYSPACE.md`](KEYSPACE.md) (the key-expression contract), [`SENSORS.md`](SENSORS.md),
-and the parallax video-sensor report (`zensight-parallax-sensor.md`).*
+[`../KEYSPACE.md`](../KEYSPACE.md) (the key-expression contract) and the per-crate docs.*
 
 > **Status (0.7.0, epic #352):** the core is **SHIPPED** — R1 QoS (#353), R2
 > heartbeat + R3 correlator publisher (#354), R4 CBOR default (#355), R5

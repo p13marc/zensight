@@ -133,8 +133,8 @@ This document describes the high-level architecture and component relationships 
 │                                                          └──────────────────┘   │
 │                                                                                  │
 │     ┌───────────┐   UDP/TCP  ┌───────────────┐  publish  ┌──────────────────┐   │
-│     │  Syslog   │──────────▶│zenoh-sensor-  │──────────▶│ zensight/syslog/ │   │
-│     │  Source   │   514      │syslog         │           │ server01/...     │   │
+│     │  Syslog   │──────────▶│zensight-sensor│──────────▶│ zensight/logs/   │   │
+│     │  Source   │   514      │-logs          │           │ server01/...     │   │
 │     └───────────┘            └───────────────┘           └──────────────────┘   │
 │                                                                                  │
 │  2. COMMON DATA MODEL                                                            │
@@ -507,88 +507,31 @@ host-metrics semantic conventions via `zensight_common::semconv` (see
 
 ## Directory Structure
 
+Each crate carries its own `README.md` + `docs/` with the detailed layout and reference;
+this is only the top level.
+
 ```
 zensight/                            # Workspace root
-├── Cargo.toml                       # Workspace manifest
-├── CLAUDE.md                        # AI assistant guidance
-├── README.md                        # Project overview
-├── justfile                         # build / configure / run recipes
+├── Cargo.toml  CLAUDE.md  README.md  justfile
+├── docs/                            # cross-cutting references (this directory)
+│   ├── README.md                    # docs index / hub
+│   ├── ARCHITECTURE.md              # this file
+│   ├── KEYSPACE.md                  # canonical Zenoh keyspace contract
+│   └── design/                      # archived design rationale
 │
-├── docs/                            # Documentation (this directory)
-│   ├── README.md                    # Docs index
-│   ├── ARCHITECTURE.md              # This file
-│   ├── SENSORS.md                   # Per-sensor reference
-│   ├── KEYSPACE.md                  # Canonical Zenoh keyspace reference
-│   └── UI_TESTING.md                # Frontend testing guide
+├── zensight/                        # Iced frontend            (see zensight/docs/)
+├── zensight-common/                 # shared model             (see zensight-common/docs/)
+├── zensight-sensor-core/            # sensor framework         (see zensight-sensor-core/docs/)
+├── zensight-sensor-{snmp,logs,netflow,modbus,sysinfo,gnmi}/   # protocol sensors
+├── zensight-sensor-{netlink,netring,systemd}/                 # Linux / wire / systemd sensors
+├── zensight-sensor-{netlink,sysinfo}-ebpf{,-common}/          # opt-in eBPF programs
+├── zensight-correlator/             # identity correlator      (see zensight-correlator/docs/)
+├── zensight-exporter-{prometheus,otel}/   # exporters
+├── zenoh-blob/                      # large-data transfer      (see zenoh-blob/docs/)
 │
-├── zensight/                        # Frontend application
-│   ├── src/
-│   │   ├── main.rs                  # Binary entry
-│   │   ├── lib.rs                   # Library (for testing)
-│   │   ├── app.rs                   # Iced Application
-│   │   ├── message.rs               # Message enum
-│   │   ├── subscription.rs          # Zenoh subscription sensor
-│   │   ├── mock.rs                  # Mock data generators
-│   │   └── view/                    # UI components
-│   │       ├── dashboard.rs
-│   │       ├── device.rs
-│   │       ├── alerts.rs
-│   │       ├── settings.rs
-│   │       ├── topology/
-│   │       └── icons/
-│   └── tests/
-│       └── ui_tests.rs
-│
-├── zensight-common/                 # Shared library
-│   └── src/
-│       ├── lib.rs
-│       ├── telemetry.rs             # TelemetryPoint, Protocol
-│       ├── health.rs                # DeviceStatus, HealthSnapshot
-│       ├── config.rs                # Configuration loading
-│       ├── session.rs               # Zenoh session helpers
-│       ├── keyexpr.rs               # Key expression builders
-│       └── serialization.rs         # JSON/CBOR encoding
-│
-├── zensight-sensor-core/       # Sensor abstraction
-│   └── src/
-│       ├── lib.rs
-│       ├── runner.rs                # SensorRunner
-│       ├── publisher.rs             # Zenoh publisher
-│       └── liveliness.rs            # Presence management
-│
-├── zensight-sensor-snmp/               # SNMP sensor
-├── zensight-sensor-logs/             # Syslog + journald (logs) sensor
-├── zensight-sensor-sysinfo/            # System metrics sensor
-├── zensight-sensor-netflow/            # NetFlow sensor
-├── zensight-sensor-modbus/             # Modbus sensor
-├── zensight-sensor-gnmi/               # gNMI sensor
-├── zensight-sensor-netlink/            # Linux kernel networking sensor
-├── zensight-sensor-netring/            # Wire-level flow/L7/NDR sensor
-│
-├── zensight-exporter-prometheus/    # Prometheus exporter
-│   └── src/
-│       ├── config.rs
-│       ├── mapping.rs               # Type conversion
-│       ├── collector.rs             # Metric storage
-│       └── http.rs                  # /metrics endpoint
-│
-├── zensight-exporter-otel/          # OpenTelemetry exporter
-│   └── src/
-│       ├── config.rs
-│       ├── metrics.rs
-│       ├── logs.rs                  # Syslog → OTEL logs
-│       └── exporter.rs
-│
-└── configs/                         # Example configurations
-    ├── snmp.json5
-    ├── syslog.json5                 # network syslog listeners
-    ├── logs.json5                   # journald (used by `just run`)
-    ├── netlink.json5
-    ├── netring.json5
-    ├── sysinfo.json5
-    ├── prometheus.json5
-    └── otel.json5
+├── configs/                         # one example JSON5 config per crate
+└── packaging/                       # .deb/.rpm + hardened systemd units
 ```
 
-> For the full key tree see [KEYSPACE.md](KEYSPACE.md); for per-sensor details
-> see [SENSORS.md](SENSORS.md).
+> For the full key tree see [KEYSPACE.md](KEYSPACE.md); for per-crate details see each
+> crate's `README.md` + `docs/` (indexed in [README.md](README.md)).

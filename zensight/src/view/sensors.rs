@@ -2,7 +2,7 @@
 //! state (`sensor_health`) but never shown. One card per sensor with a health
 //! badge, device counts, last-poll latency, error rate, and throughput.
 //!
-//! See docs/plans/gui/04-features-and-stubs.md (F2).
+//! See zensight/docs/views.md (F2).
 
 use std::collections::{HashMap, VecDeque};
 

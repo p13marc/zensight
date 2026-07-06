@@ -110,7 +110,7 @@ mod zenoh_env_tests {
 /// Link profile for telemetry consumers on constrained links (#364).
 ///
 /// `Constrained` bundles the low-bandwidth behaviors documented in
-/// `docs/ZENOH-EFFICIENCY.md` §R6: scoped subscriptions instead of the
+/// `docs/design/zenoh-efficiency.md` §R6: scoped subscriptions instead of the
 /// `zensight/**` firehose and no AdvancedSubscriber `history()`/`recovery()`
 /// (late-join back-fill comes from the consumer's local store instead of a
 /// reconnect history burst). Serialization already defaults to CBOR

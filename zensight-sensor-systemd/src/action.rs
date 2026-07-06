@@ -10,7 +10,7 @@
 //! Authorization is handled by systemd/polkit, not here: run as root, or
 //! unprivileged with a scoped polkit rule granting
 //! `org.freedesktop.systemd1.manage-units` for the allowlisted units (see
-//! docs/SENSORS.md). The allowlist is defence-in-depth on top of polkit.
+//! docs/units-and-actions.md). The allowlist is defence-in-depth on top of polkit.
 
 use std::sync::Arc;
 

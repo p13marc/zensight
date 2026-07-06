@@ -3,7 +3,7 @@
 //! A small, self-contained library for downloading a large artifact (a file, a
 //! report bundle, a pcap) from one Zenoh peer to another with **progress**,
 //! **SHA-256 integrity**, **range resume**, and **bounded memory**. It carries no
-//! application-specific types — see `docs/LARGE-DATA-TRANSFER.md` for the design
+//! application-specific types — see `docs/design/large-data-transfer.md` for the design
 //! and the ZenSight adapter that wraps it.
 //!
 //! # Model

@@ -74,6 +74,14 @@ client.download_tree("snap-1", &dest, &content_store).await?;
 - **Pluggable** hashing (`Digest`), chunking (`Chunker`: fixed-size or FastCDC),
   and encoding (`Format`: JSON or CBOR).
 
+## Documentation
+
+- [`docs/router-storage.md`](docs/router-storage.md) — run a Zenoh router as the
+  fleet-wide Tier-2 chunk store: serverless transfers (the producer PUTs and
+  exits), fleet-wide dedup, and survival across sensor restart.
+- [`../docs/design/large-data-transfer.md`](../docs/design/large-data-transfer.md)
+  — the design rationale (two-tier model, resume, content addressing).
+
 ## Acknowledgements
 
 The design borrows ideas from prior art in the space: [casync] (content-addressed

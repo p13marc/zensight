@@ -179,14 +179,14 @@ in-flight or ready artifact early (the TTL is the backstop otherwise).
   fixed-size or content-defined (FastCDC, for cross-version dedup); the client
   never re-chunks (it fetches by hash). Chunks/index can also be PUT into a
   **router-hosted Zenoh storage** so a producer publishes and exits and chunks
-  dedup fleet-wide — see `docs/BLOB-ROUTER-STORAGE.md`.
+  dedup fleet-wide — see `../zenoh-blob/docs/router-storage.md`.
 
 **Producers.** sensor-core owns one `ArtifactChannel` (request/status/cancel +
 reaper, per-kind busy + cooldown, lazy `BlobServer`/`TreeServer`). Each supported
 kind is an `ArtifactProducer` (the `Snapshot` producer advertises its allowlisted
 `dirs` via `KindAdvert::Snapshot { dirs }`; the GUI hides `KindAdvert::Unknown`
 kinds). The GUI surfaces available kinds/dirs for download in the Sensors view.
-See `docs/LARGE-DATA-TRANSFER.md`.
+See `docs/design/large-data-transfer.md`.
 
 ### 3.2 On-demand detail queries — `@/query/<topic>`
 
@@ -405,7 +405,7 @@ dedicated plane:
   packet.
 - **Nothing consumes this on the live bus.** The tier exists to be captured by a
   router-hosted storage backend (`zenoh-backend-influxdb` into a time-series
-  bucket — see [`docs/STORAGE.md`](STORAGE.md) and
+  bucket — see [`../zensight-correlator/docs/storage.md`](../zensight-correlator/docs/storage.md) and
   [`configs/router-pdns-influxdb-storage.json5`](../configs/router-pdns-influxdb-storage.json5)),
   giving a queryable IP↔name history without loading the correlator.
 

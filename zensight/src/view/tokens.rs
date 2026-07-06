@@ -6,7 +6,7 @@
 //! of bare `.size(13)` / `.padding(10)` / `.spacing(15)` calls.
 //!
 //! Type scale (5 steps) and an 8pt spacing scale, per the GUI design-system plan
-//! (docs/plans/gui/03-design-system.md).
+//! (zensight/docs/design-system.md).
 
 /// Typographic scale (pixels). Five steps, used app-wide. `f32` so it feeds
 /// `text(..).size(..)` (Iced `Pixels`) directly.
