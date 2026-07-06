@@ -92,5 +92,5 @@ zensight/_meta/sensors/sysinfo/<source>  # SensorInfo registration
 ```
 
 The telemetry wildcard `zensight/sysinfo/**` does **not** match the `@/`-prefixed
-control plane. See [../docs/KEYSPACE.md](../docs/KEYSPACE.md) for the full
+control plane. See [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for the full
 contract.

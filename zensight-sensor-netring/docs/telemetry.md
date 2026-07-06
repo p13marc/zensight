@@ -11,7 +11,7 @@ Streamed series are bounded, closed sets (per-L4, per-rcode, per-status-class,
 per-detector); high-cardinality detail (individual flows, talkers, assets,
 per-process bandwidth) is **served on demand** from the `@/query/*` queryables in
 [§ On-demand detail](#on-demand-detail--query), never streamed. Sources: this
-crate's `src/map.rs`, `docs/SENSORS.md#netring`, and `docs/KEYSPACE.md`.
+crate's `src/map.rs`, `../../docs/KEYSPACE.md`, and `docs/KEYSPACE.md`.
 
 Collector gating is noted per family — a family is only published when its
 `collect.*` (or feature/config) switch is on. Defaults are in

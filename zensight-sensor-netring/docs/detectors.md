@@ -8,7 +8,7 @@ drain (`ChannelSink → to_view → map::anomaly_alert`), so they share the same
 lifecycle, labelling, and cardinality discipline.
 
 Sources: this crate's `src/detectors.rs` (the `Tuned` registry), `src/map.rs`
-(the anomaly→alert mapping and ATT&CK table), and `docs/SENSORS.md#netring`.
+(the anomaly→alert mapping and ATT&CK table), and `telemetry.md`.
 
 ---
 

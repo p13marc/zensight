@@ -203,7 +203,7 @@ services:
 - [`docs/reference.md`](docs/reference.md) — full reference: TelemetryPoint → OTLP
   metrics, syslog → OTLP logs (severity mapping), the synthesized traces signal,
   and alert export.
-- [`../../configs/otel-exporter.json5`](../../configs/otel-exporter.json5) —
+- [`../configs/otel-exporter.json5`](../configs/otel-exporter.json5) —
   annotated example configuration.
 
 ## License

@@ -9,7 +9,7 @@ originating hostname, network or journald). Two planes:
    charts and alerts.
 
 See [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for the authoritative
-contract and [../../docs/SENSORS.md#syslog--logs](../../docs/SENSORS.md#syslog--logs)
+contract and [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md)
 for the canonical reference.
 
 ## Per-line events — `@/query/events` (`Vec<LogRecord>`)

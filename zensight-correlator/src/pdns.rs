@@ -17,7 +17,7 @@
 //! Records are reliable + block ([`QosClass::Entity`]): a dropped `@pdns` PUT
 //! would be a gap in the historical record, so it back-pressures rather than
 //! drops. `last_writer_wins` reconciliation on the storage side keeps the newest
-//! accumulated name set per IP (see `docs/STORAGE.md`).
+//! accumulated name set per IP (see `docs/storage.md`).
 
 use std::sync::Arc;
 

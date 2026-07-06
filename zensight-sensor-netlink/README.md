@@ -36,7 +36,7 @@ everything under `collect.*` defaults on except `nftables`/`conntrack`/`ebpf`
 - [Sentinel](docs/sentinel.md) — expectations, alerts, hot-swap control.
 - [Configuration](docs/configuration.md) — every config block.
 - [../docs/KEYSPACE.md](../docs/KEYSPACE.md) — authoritative key-expression contract.
-- [../docs/SENSORS.md#netlink](../docs/SENSORS.md#netlink) — the canonical per-sensor reference.
+- [docs/telemetry.md](docs/telemetry.md) — the canonical per-sensor reference.
 
 ## Privilege summary
 

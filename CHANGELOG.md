@@ -112,7 +112,7 @@ and the per-entry mixed-version notes; upgrade sensors and frontend together.
   `zenoh-backend-fs` volume (timestamped for mutable-key last-writer-wins), and a
   new `@pdns` plane (`zensight/@pdns/<ip>`, `PdnsRecord`) published by the
   correlator on each name-store update gives a historical IP↔name tier with a
-  documented `zenoh-backend-influxdb` storage example. See `docs/STORAGE.md`.
+  documented `zenoh-backend-influxdb` storage example. See `zensight-correlator/docs/storage.md`.
 
 - **Contextual capture & bandwidth actions in the device view (#351)**: the
   netring drill-down's Capture tab now hosts the real on-demand pcap capture
@@ -471,7 +471,7 @@ will see a step:
 
 A large release: two new kernel/wire-level sensors, a unified logs sensor with
 journald, a full host/incident-centric frontend redesign with NDR, alert export
-to Prometheus/OTel, and OS packaging. See `docs/SENSORS.md`, `docs/KEYSPACE.md`,
+to Prometheus/OTel, and OS packaging. See `docs/README.md`, `docs/KEYSPACE.md`,
 and `docs/ARCHITECTURE.md` for the authoritative references.
 
 ### Added

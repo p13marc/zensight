@@ -142,7 +142,7 @@ The exporter also exposes internal metrics:
 - [`docs/reference.md`](docs/reference.md) — full reference: TelemetryPoint →
   Prometheus mapping, name/label sanitization, staleness + series bounding, the
   `/metrics` pull endpoint, the remote-write push path, and alert export.
-- [`../../configs/prometheus-exporter.json5`](../../configs/prometheus-exporter.json5)
+- [`../configs/prometheus-exporter.json5`](../configs/prometheus-exporter.json5)
   — annotated example configuration.
 
 ## License

@@ -7,7 +7,7 @@ sensor builds it off the poll/capture path, and the client fetches the bytes ove
 `zenoh-blob`. One channel (`artifact.rs`) subsumes what used to be separate
 `@/report` and `@/snapshot` surfaces and hosts new kinds as pluggable producers.
 
-See [`../../docs/LARGE-DATA-TRANSFER.md`](../../docs/LARGE-DATA-TRANSFER.md) for the
+See [`../../docs/design/large-data-transfer.md`](../../docs/design/large-data-transfer.md) for the
 transfer-tier rationale and [`../../docs/KEYSPACE.md`](../../docs/KEYSPACE.md) §3
 for the `@/artifact` / `@/store` / `@/tree` keys.
 

@@ -7,7 +7,7 @@ queryables (see below). Metric families are gated by the `collect.*` config
 toggles (see [configuration.md](configuration.md)).
 
 See [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for the authoritative
-key-expression contract and [../../docs/SENSORS.md#netlink](../../docs/SENSORS.md#netlink)
+key-expression contract and [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md)
 for the canonical reference this page summarizes.
 
 ## Streamed telemetry

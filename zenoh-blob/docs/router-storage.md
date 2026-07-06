@@ -27,7 +27,7 @@ Because chunk keys are **immutable** (`<prefix>/<algo>/<hash>` only ever maps to
 one byte string), the storage's last-writer-wins reconciliation is a no-op and
 re-publishing is idempotent — none of the timestamp/conflict concerns that
 complicate a mutable storage (contrast the identity stores in
-[`../../docs/STORAGE.md`](../../docs/STORAGE.md)).
+[`../../zensight-correlator/docs/storage.md`](../../zensight-correlator/docs/storage.md)).
 
 ## How it fits together
 

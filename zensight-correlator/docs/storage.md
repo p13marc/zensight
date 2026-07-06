@@ -10,7 +10,7 @@ Both tiers use the standard `zenohd` **storage-manager** plugin
 (`zenoh-plugin-storage-manager`) plus a backend volume. This page covers the two
 identity tiers; the (immutable, content-addressed) blob store is documented
 separately in [`../../zenoh-blob/docs/router-storage.md`](../../zenoh-blob/docs/router-storage.md).
-The fleet-wide overview is [`../../docs/STORAGE.md`](../../docs/STORAGE.md).
+The fleet-wide overview is [`../../docs/KEYSPACE.md`](../../docs/KEYSPACE.md).
 
 | Tier | Config | Backend | Keys | Mutability |
 |------|--------|---------|------|------------|

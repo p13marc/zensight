@@ -117,7 +117,7 @@ zensight/_meta/sensors/systemd/<source>       # SensorInfo registration
 ```
 
 The telemetry wildcard `zensight/systemd/**` does **not** match the
-`@/`-prefixed control plane. See [../docs/KEYSPACE.md](../docs/KEYSPACE.md) for
+`@/`-prefixed control plane. See [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for
 the full contract.
 
 ## Exporters (#282)

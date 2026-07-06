@@ -49,7 +49,7 @@ At least one listener **or** enabled journald is required.
 - [Filtering](docs/filtering.md) — static + dynamic message filters, journald matching.
 - [Configuration](docs/configuration.md) — listeners, journald, SLO/alert blocks.
 - [../docs/KEYSPACE.md](../docs/KEYSPACE.md) — authoritative key-expression contract.
-- [../docs/SENSORS.md#syslog--logs](../docs/SENSORS.md#syslog--logs) — the canonical per-sensor reference.
+- [docs/telemetry.md](docs/telemetry.md) — the canonical per-sensor reference.
 
 ## License
 
