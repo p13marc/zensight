@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, sleep_until};
 use tracing::{debug, info};
 use zensight_common::{
-    HostEntity, HostEvidence, NameObservation, NameVal, current_timestamp_millis,
+    HostEntity, HostEvidence, NameObservation, NameVal, PdnsRecord, current_timestamp_millis,
 };
 
 use crate::config::CorrelatorConfig;
@@ -283,6 +283,10 @@ pub struct Engine {
     state: SharedState,
     rx: mpsc::Receiver<EvidenceMsg>,
     out: mpsc::Sender<EntityOp>,
+    /// Optional sink for durable historical passive-DNS records (`@pdns`, #310).
+    /// Fed on every name-store update so a storage backend can capture the full
+    /// IP↔name history. `None` disables the historical tier.
+    pdns_out: Option<mpsc::Sender<PdnsRecord>>,
     debounce: Duration,
     reemit: Duration,
 }
@@ -306,9 +310,18 @@ impl Engine {
             state,
             rx,
             out,
+            pdns_out: None,
             debounce,
             reemit,
         }
+    }
+
+    /// Attach the durable historical passive-DNS sink (`@pdns`, #310). When set,
+    /// each name-store update emits a [`PdnsRecord`] with the IP's full
+    /// accumulated name set onto this channel for the `@pdns` publisher.
+    pub fn with_pdns(mut self, pdns_out: mpsc::Sender<PdnsRecord>) -> Self {
+        self.pdns_out = Some(pdns_out);
+        self
     }
 
     /// Run until the shutdown signal fires.
@@ -333,7 +346,33 @@ impl Engine {
                 msg = self.rx.recv() => {
                     match msg {
                         Some(msg) => {
-                            self.state.lock().unwrap().apply(msg);
+                            // A name observation updates the accumulated names for
+                            // its IP; after applying, emit the IP's full name set
+                            // as a durable historical `@pdns` record (#310). Cheap
+                            // and off the packet hot path — fires per name-store
+                            // update, not per packet.
+                            let pdns_ip = match &msg {
+                                EvidenceMsg::Name(obs) => Some(obs.ip.clone()),
+                                _ => None,
+                            };
+                            {
+                                let mut st = self.state.lock().unwrap();
+                                st.apply(msg);
+                                if let (Some(ip), Some(out)) = (&pdns_ip, &self.pdns_out) {
+                                    let names = st.names_for_ip(ip, MAX_NAMES_PER_IP);
+                                    let rec = PdnsRecord {
+                                        ip: ip.clone(),
+                                        names,
+                                        last_updated: current_timestamp_millis(),
+                                    };
+                                    // try_send: never block the engine loop on a
+                                    // full historical-tier channel — a dropped
+                                    // record is refreshed by the next observation.
+                                    if let Err(e) = out.try_send(rec) {
+                                        debug!(error = %e, ip = %ip, "pdns channel full/closed; skipping record");
+                                    }
+                                }
+                            }
                             deadline = Some(Instant::now() + self.debounce);
                         }
                         None => break, // subscribers gone
@@ -534,6 +573,52 @@ mod tests {
             })
             .unwrap();
         assert_eq!(e.status.as_deref(), Some("degraded"));
+    }
+
+    #[tokio::test]
+    async fn name_message_emits_historical_pdns_record() {
+        // #310: a passive-DNS name observation flowing through the engine emits a
+        // durable `@pdns` record carrying the IP's full accumulated name set.
+        let state = std::sync::Arc::new(std::sync::Mutex::new(CorrelatorState::new(cfg())));
+        let (tx, rx) = mpsc::channel(16);
+        let (op_tx, _op_rx) = mpsc::channel(16);
+        let (pdns_tx, mut pdns_rx) = mpsc::channel(16);
+        let engine = Engine::new(state, rx, op_tx).with_pdns(pdns_tx);
+        let (sh_tx, sh_rx) = watch::channel(false);
+        let handle = tokio::spawn(engine.run(sh_rx));
+
+        // Two names for the same IP accumulate into one record's name set.
+        for (name, prov, ts) in [
+            ("a.example.com", "dns_a", 400),
+            ("printer.example.com", "dns_ptr", 500),
+        ] {
+            tx.send(EvidenceMsg::Name(NameObservation {
+                observer: "netring".into(),
+                ip: "10.0.0.9".into(),
+                name: name.into(),
+                provenance: prov.into(),
+                last_seen: ts,
+            }))
+            .await
+            .unwrap();
+        }
+
+        // The most recent record reflects both accumulated names.
+        let mut last = None;
+        for _ in 0..2 {
+            let rec = tokio::time::timeout(Duration::from_secs(2), pdns_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(rec.ip, "10.0.0.9");
+            last = Some(rec);
+        }
+        let rec = last.unwrap();
+        assert_eq!(rec.names.len(), 2, "accumulated both names for the IP");
+
+        let _ = sh_tx.send(true);
+        drop(tx);
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
 
     #[test]

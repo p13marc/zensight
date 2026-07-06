@@ -364,6 +364,40 @@ blocks weaker bridges between two distinct machine-ids), and publishes one
   provides the join. So no sensor or exporter depends on the correlator: if it is
   down, entities go stale and consumers fall back to per-protocol devices.
 
+### 4.3 Historical passive-DNS tier — `zensight/@pdns/<ip>` (#310)
+
+The evidence/entity keyspace above is **live** state (TTL-swept; a restarted
+correlator rebuilds it, it holds no history). For a durable *historical* record
+of what an IP resolved to over time, the correlator emits a second stream on a
+dedicated plane:
+
+| Key | Payload | Emitted by |
+|-----|---------|------------|
+| `zensight/@pdns/<ip-slug>` | `PdnsRecord` (IP + full accumulated `Vec<NameVal>` + `last_updated`) | **correlator** (on every name-store update, #310) |
+
+- `@pdns` is an **`@`-verbatim chunk** — a sibling of the `@/` control plane and
+  the `@media` plane (#359), but a *different* chunk — so an `@pdns` key is
+  invisible to **both** the telemetry firehose (`zensight/**`) and the per-sensor
+  control wildcard (`zensight/*/@/**`). The exporters' `@`-chunk reject keeps
+  these off Prometheus/OTel. (Guard test: `keyexpr::pdns_tier_is_off_the_telemetry_and_control_buses`.)
+- `<ip-slug>` slugifies the IP (`.`/`:` → `-`), one chunk per IP — the same
+  convention as the `evidence/names/<ip-slug>` keys. The record payload keeps the
+  real (un-slugged) address.
+- Unlike the live wire `NameObservation` (one name per sample, last-writer-wins),
+  a `PdnsRecord` carries the correlator's **full accumulated name set** for the IP
+  (an A record, a PTR, a TLS SNI, …), so one key captures the complete IP↔name
+  binding at that instant.
+- Published with a **plain** `session.put` (not a per-IP declared publisher — the
+  IP set is unbounded) carrying `QosClass::Entity` (reliable · block): a dropped
+  `@pdns` PUT would be a gap in the historical record. The publish is **cheap and
+  off the packet hot path** — it fires per correlator name-store update, never per
+  packet.
+- **Nothing consumes this on the live bus.** The tier exists to be captured by a
+  router-hosted storage backend (`zenoh-backend-influxdb` into a time-series
+  bucket — see [`docs/STORAGE.md`](STORAGE.md) and
+  [`configs/router-pdns-influxdb-storage.json5`](../configs/router-pdns-influxdb-storage.json5)),
+  giving a queryable IP↔name history without loading the correlator.
+
 ---
 
 ## 5. Wildcards & subscriptions
@@ -382,6 +416,7 @@ blocks weaker bridges between two distinct machine-ids), and publishes one
 | `zensight/_meta/evidence/**` | correlator (#305) | host-identity claims + name observations |
 | `zensight/_meta/entity/**` | frontend (#306) | merged `HostEntity` docs + tombstones |
 | `zensight/_meta/query/entities` | frontend (GET at startup) | entity-set seed for late joiners |
+| `zensight/@pdns/**` | router-hosted storage backend (#310) | historical IP↔name `PdnsRecord`s (verbatim `@pdns` — off `zensight/**` and `zensight/*/@/**`) |
 
 Exporters (`prometheus`, `otel`) subscribe to `zensight/**` and **skip**
 control/metadata by rejecting any key with an `@`-prefixed chunk (`/@/…` control
@@ -469,8 +504,11 @@ zensight/
 │       │   └── blob/<id>/**            # Manifest + chunks — Blob delivery (zenoh-blob queryable)
 │       ├── store/<algo>/<hash>         # content-addressed chunks — Tree delivery (queryable)
 │       └── tree/<id>                   # TreeIndex — Tree delivery (queryable)
+├── @pdns/<ip-slug>                    # PdnsRecord — historical IP↔name (correlator, #310)
 └── _meta/
     ├── sensors/<name>/<source>         # SensorInfo (identity-stamped registration)
+    ├── entity/host/<entity_id>        # HostEntity (correlator output, #305)
+    ├── query/{entities,names}         # late-joiner queryables (#305)
     └── evidence/                       # host-identity claims (correlator input)
         ├── host/<sensor>/<source>      # HostEvidence (self-report / observed)
         └── names/<sensor>/<ip-slug>    # NameObservation (passive DNS)
@@ -499,7 +537,8 @@ enforced and a single change propagates everywhere.
 | `command::artifact_tree_prefix(prefix)` | `zensight-common/src/command.rs` | `…/@/tree` (kind-agnostic Tier-2 index queryable prefix; `Tree` delivery) |
 | `keyexpr::media_video_key(proto, source, stream, codec, profile)` | `zensight-common/src/keyexpr.rs` | `…/@media/<stream>/video/<codec>/<profile>` (#359) |
 | `keyexpr::media_preview_key(proto, source, stream)` | `zensight-common/src/keyexpr.rs` | `…/@media/<stream>/preview/jpeg` (#359) |
-| `all_*_wildcard()` | `zensight-common/src/keyexpr.rs` | the wildcards in §5 |
+| `keyexpr::pdns_key(ip)` | `zensight-common/src/keyexpr.rs` | `zensight/@pdns/<ip-slug>` (#310) |
+| `all_*_wildcard()` (incl. `all_pdns_wildcard()`) | `zensight-common/src/keyexpr.rs` | the wildcards in §5 |
 
 The control-plane keys for `health`, `errors`, `alive`, `devices/*`, `alerts/*`,
 and `artifact/*` + `store/*` + `tree/*` are produced inside `zensight-sensor-core`

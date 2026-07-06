@@ -30,6 +30,30 @@ pub struct NameVal {
     pub last_seen: i64,
 }
 
+/// A durable **historical** passive-DNS record, published by the
+/// **correlator** on `zensight/@pdns/<ip-slug>` (#310) whenever it learns or
+/// updates the names for an IP.
+///
+/// Unlike the live [`NameObservation`](crate::NameObservation) wire claim (one
+/// name per sample, last-writer-wins) this carries the correlator's *full
+/// accumulated* [`NameVal`] set for the IP, so a router-hosted storage backend
+/// (filesystem snapshot or InfluxDB time series) capturing the `zensight/@pdns/**`
+/// tier records the complete IP↔name history off a single key. The `@pdns`
+/// verbatim chunk keeps these off the telemetry (`zensight/**`) and per-sensor
+/// control (`zensight/*/@/**`) buses — see [`crate::keyexpr::pdns_key`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PdnsRecord {
+    /// The IP these names are bound to (canonical, *un*-slugified — the key is
+    /// slugged, the payload keeps the real address).
+    pub ip: String,
+    /// The accumulated provenance-tagged names for the IP, ranked
+    /// most-recent-first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<NameVal>,
+    /// Unix epoch millis this record was published.
+    pub last_updated: i64,
+}
+
 /// One reversible membership claim: an evidence `(sensor, source)` that the
 /// correlator merged into an entity, the rule that bound it, and how confident
 /// that binding is. Un-merging is dropping a claim — `DeviceId`s are never
@@ -176,6 +200,33 @@ mod tests {
         let json = serde_json::to_string(&ent).unwrap();
         let back: HostEntity = serde_json::from_str(&json).unwrap();
         assert_eq!(back, ent);
+    }
+
+    #[test]
+    fn pdns_record_roundtrips_and_skips_empty_names() {
+        let rec = PdnsRecord {
+            ip: "10.0.0.9".into(),
+            names: vec![NameVal {
+                name: "printer.example.com".into(),
+                provenance: "dns_ptr".into(),
+                last_seen: 123,
+            }],
+            last_updated: 1_700_000_000_000,
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        let back: PdnsRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, rec);
+
+        // An empty name set is elided on the wire and decodes back to empty.
+        let empty = PdnsRecord {
+            ip: "10.0.0.9".into(),
+            names: vec![],
+            last_updated: 1,
+        };
+        let json = serde_json::to_string(&empty).unwrap();
+        assert!(!json.contains("names"));
+        let back: PdnsRecord = serde_json::from_str(&json).unwrap();
+        assert!(back.names.is_empty());
     }
 
     #[test]

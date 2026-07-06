@@ -448,6 +448,52 @@ pub fn media_preview_key(protocol: Protocol, source: &str, stream: &str) -> Stri
     )
 }
 
+/// Slugify an IP address into a single key chunk: `.` and `:` (IPv4 / IPv6
+/// separators) become `-` so the address is one chunk with no embedded `/`.
+/// Mirrors the `<ip-slug>` convention the passive-DNS name-observation keys
+/// already use (#307).
+fn ip_slug(ip: &str) -> String {
+    ip.replace(['.', ':'], "-")
+}
+
+/// Build the durable historical passive-DNS key for one IP (#310):
+/// `zensight/@pdns/<ip-slug>`.
+///
+/// `@pdns` is an `@`-verbatim chunk — a sibling of the per-sensor `@/` control
+/// plane and the `@media` plane (#359), but a *different* chunk — so a durable
+/// IP↔name record is invisible to BOTH the telemetry firehose (`zensight/**`)
+/// and the per-sensor control-plane wildcard (`zensight/*/@/**`). These records
+/// are published by the **correlator** off its accumulated per-IP
+/// [`NameVal`](crate::NameVal) set (payload:
+/// [`PdnsRecord`](crate::PdnsRecord)) and are meant to be captured by a
+/// router-hosted storage backend (filesystem snapshot or InfluxDB time series)
+/// into a historical tier — never by the live telemetry/exporter/GUI path.
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::pdns_key;
+///
+/// assert_eq!(pdns_key("10.0.0.9"), "zensight/@pdns/10-0-0-9");
+/// assert_eq!(pdns_key("2001:db8::1"), "zensight/@pdns/2001-db8--1");
+/// ```
+pub fn pdns_key(ip: &str) -> String {
+    format!("{}/@pdns/{}", KEY_PREFIX, ip_slug(ip))
+}
+
+/// Build the wildcard key for the whole historical passive-DNS tier
+/// (`zensight/@pdns/**`) — what a router-hosted storage backend subscribes to
+/// to capture every IP↔name record (#310).
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::all_pdns_wildcard;
+///
+/// assert_eq!(all_pdns_wildcard(), "zensight/@pdns/**");
+/// ```
+pub fn all_pdns_wildcard() -> String {
+    format!("{}/@pdns/**", KEY_PREFIX)
+}
+
 /// Parse a key expression to extract protocol, source, and metric path.
 ///
 /// Returns a descriptive error if the key expression doesn't match the expected pattern.
@@ -557,6 +603,39 @@ mod tests {
         let same =
             KeyExpr::try_from(media_preview_key(Protocol::Netring, "host01", "cam0")).unwrap();
         assert!(exact.intersects(&same));
+    }
+
+    /// #310 acceptance pin: the historical passive-DNS tier rides `@pdns/<ip>` —
+    /// an `@`-verbatim chunk like `@/` and `@media`, but a *different* chunk — so
+    /// a concrete `@pdns` key is invisible to BOTH the telemetry firehose
+    /// (`zensight/**`) and the per-sensor control-plane wildcard
+    /// (`zensight/*/@/**`). The durable IP↔name records can never leak into
+    /// telemetry/exporter/GUI consumers; only a storage backend subscribed on the
+    /// explicit `zensight/@pdns/**` tier captures them.
+    #[test]
+    fn pdns_tier_is_off_the_telemetry_and_control_buses() {
+        use zenoh::key_expr::KeyExpr;
+        let telemetry = KeyExpr::try_from(all_telemetry_wildcard()).unwrap();
+        let control = KeyExpr::try_from("zensight/*/@/**").unwrap();
+        for ip in ["10.0.0.9", "2001:db8::1"] {
+            let k = pdns_key(ip);
+            let pdns = KeyExpr::try_from(k.clone()).unwrap();
+            assert!(
+                !telemetry.intersects(&pdns),
+                "zensight/** must not match {k}"
+            );
+            assert!(
+                !control.intersects(&pdns),
+                "zensight/*/@/** must not match {k} — @/ and @pdns are distinct verbatim chunks"
+            );
+        }
+        // The dedicated historical-tier subscriber DOES match a concrete record.
+        let tier = KeyExpr::try_from(all_pdns_wildcard()).unwrap();
+        let one = KeyExpr::try_from(pdns_key("10.0.0.9")).unwrap();
+        assert!(
+            tier.intersects(&one),
+            "zensight/@pdns/** must match a concrete @pdns record"
+        );
     }
 
     /// Stream control (#359) reuses the ordinary `@/` command/query/status
