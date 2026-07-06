@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (BREAKING)
+
+- **Per-sensor state keys are now host-scoped:
+  `zensight/<protocol>/<source>/@/{health,errors,status,alive,devices/**}`.**
+  Previously these lived at `zensight/<protocol>/@/…` with no `<source>`
+  segment, so N machines running the same sensor overwrote each other's
+  health/errors/status (last-writer-wins) and shared one liveliness token —
+  the GUI showed one flapping card per protocol instead of one card per host.
+  Sensors publish **only** the new shape; the GUI and correlator consume both
+  shapes for one release (mixed-fleet rolling upgrade; legacy ingestion drops
+  in 0.9). Third-party consumers of the old keys must move to
+  `zensight/*/*/@/…` wildcards. The protocol-scoped channels
+  (`@/alerts/*`, `@/commands/*`, `@/query/*`, `@/artifact/*`) are unchanged —
+  their sharing is deliberate (fan-in queries, alert keys hash `source` in);
+  see `docs/KEYSPACE.md` §3. `HealthSnapshot` gains an optional `source`
+  field; `SensorRunner::new`/`new_with_args` take the instance source at
+  construction (and `with_identity`/`with_artifacts` lost their now-redundant
+  `source` parameters); `KeyExprBuilder::status_key()` takes the source.
+  The GUI Sensors view now renders one card per instance (`sysinfo @ hostA`),
+  and its artifact downloads set `ArtifactRequest.opts.target_source` from the
+  card so only that host produces the artifact (aggregated views keep the
+  fan-out).
+
 ## [0.7.0] - 2026-07-06
 
 Identity & evidence release. Sensors now self-report a stable host identity and

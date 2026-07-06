@@ -21,7 +21,7 @@ The point `source` defaults to the local hostname unless `netflow.source` is set
 
 ### Control plane (via `zensight-sensor-core`)
 
-- `zensight/netflow/@/health` — sensor health snapshots
+- `zensight/netflow/<source>/@/health` — sensor health snapshots (host-scoped)
 - `zensight/netflow/@/errors` — error reports
 - `zensight/netflow/@/artifact/{request,status,cancel}` — on-demand debug report / snapshot (opt-in via `artifacts`)
 - `zensight/_meta/sensors/netflow/<source>` — sensor registration (`SensorInfo`)

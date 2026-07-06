@@ -25,16 +25,26 @@ Use `KeyExprBuilder::new(protocol)` (or `with_prefix`):
 | `all_telemetry_wildcard()` | `zensight/**` |
 | `parse_key_expr(key)` | `ParsedKeyExpr { protocol, source, metric }` (or `ParseError`) |
 
-## Per-sensor control plane — `zensight/<protocol>/@/…`
+## Per-sensor control plane
+
+State keys are **host-scoped** (`zensight/<protocol>/<source>/@/…` — one
+subtree per sensor instance, built off `sensor_control_prefix(protocol,
+source)`); alert/command/query/artifact channels are **protocol-scoped**
+(`zensight/<protocol>/@/…`, shared by every host running the protocol). See
+`docs/KEYSPACE.md` §3.
 
 Health/liveness/error wildcards (`keyexpr.rs`):
 
 | Helper | Result |
 |--------|--------|
-| `all_health_wildcard()` | `zensight/*/@/health` |
-| `all_liveness_wildcard()` | `zensight/*/@/devices/*/liveness` |
-| `all_errors_wildcard()` | `zensight/*/@/errors` |
-| `all_alerts_wildcard()` | `zensight/*/@/alerts/*` |
+| `sensor_control_prefix(protocol, source)` | `zensight/<protocol>/<source>` |
+| `all_health_wildcard()` | `zensight/*/*/@/health` |
+| `all_liveness_wildcard()` | `zensight/*/*/@/devices/*/liveness` |
+| `all_errors_wildcard()` | `zensight/*/*/@/errors` |
+| `all_control_wildcard()` | `zensight/*/*/@/**` (all host-scoped state) |
+| `all_sensor_alive_wildcard()` | `zensight/*/*/@/alive` |
+| `all_device_alive_wildcard()` | `zensight/*/*/@/devices/*/alive` |
+| `all_alerts_wildcard()` | `zensight/*/@/alerts/*` (protocol-scoped by design) |
 
 Command / status / query + artifact channels (`command.rs`), where `prefix` is
 `zensight/<protocol>`:

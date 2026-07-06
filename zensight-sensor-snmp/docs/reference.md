@@ -21,7 +21,7 @@ defaults to the local hostname unless `snmp.source` is set.
 
 Standard sensor metadata is published by the shared runner:
 
-- `zensight/snmp/@/health` — sensor health snapshots
+- `zensight/snmp/<source>/@/health` — sensor health snapshots (host-scoped)
 - `zensight/snmp/@/devices/*/liveness` — per-device liveness
 - `zensight/snmp/@/errors` — error reports
 - `zensight/snmp/@/artifact/{request,status,cancel}` — on-demand debug report / snapshot (opt-in via `artifacts`)

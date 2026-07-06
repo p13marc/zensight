@@ -13,12 +13,13 @@ lives entirely on the `_meta/**` control plane plus the `@pdns` verbatim tier.
 |-----|---------|-------|
 | `zensight/_meta/evidence/host/<sensor>/<source>` | `HostEvidence` | Self-report or observed host claim. `AdvancedSubscriber` with `history()` + late-publisher detection, so a fresh correlator immediately gets the sensors' cached claims. A `DELETE` on this key drops the claim (an evidence tombstone). |
 | `zensight/_meta/evidence/names/<sensor>/<ip-slug>` | `NameObservation` | Passive-DNS, one key per observed IP (`.`/`:` → `-`), last-writer-wins on the wire; accumulated in the name store. Own `AdvancedSubscriber`. |
-| `zensight/<protocol>/@/devices/*/liveness` | `DeviceLiveness` | Plain subscriber (no history). Rolled up onto `entity.status`. Gated by `status_from_liveness`; skipped entirely when off. |
+| `zensight/<protocol>/<source>/@/devices/*/liveness` | `DeviceLiveness` | Plain subscriber (no history). Rolled up onto `entity.status`. Gated by `status_from_liveness`; skipped entirely when off. The legacy protocol-scoped shape (`zensight/<protocol>/@/devices/*/liveness`, pre-0.8 sensors) gets a second subscriber for one release. |
 
 Wildcards used: `all_evidence_wildcard()` = `zensight/_meta/evidence/**` (the host
 subscriber skips the `/names/` subtree, handled by its own subscriber),
 `all_name_evidence_wildcard()` = `zensight/_meta/evidence/names/**`,
-`all_liveness_wildcard()`.
+`all_liveness_wildcard()` = `zensight/*/*/@/devices/*/liveness` (host-scoped; the
+legacy shape is subscribed literally during the transition).
 
 ## Produces (publications)
 

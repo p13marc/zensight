@@ -58,9 +58,9 @@ All sensors reuse `zensight-sensor-core` (`SensorRunner`, `Publisher`) and `zens
 (`TelemetryPoint`, config, serialization). The bus carries:
 
 - `zensight/<protocol>/<source>/<metric>` — telemetry data
-- `zensight/<protocol>/@/health` — sensor health
+- `zensight/<protocol>/<source>/@/health` — sensor health (host-scoped)
 - `zensight/<protocol>/@/devices/*/liveness` — device liveness
-- `zensight/<protocol>/@/errors` — error reports
+- `zensight/<protocol>/<source>/@/errors` — error reports (host-scoped)
 - `zensight/_meta/sensors/*` — sensor registration
 - `zensight/_meta/correlation/*` — device correlation (feeds the correlator, see below)
 
@@ -310,7 +310,7 @@ stateDiagram-v2
 
 The `Running` phase's protocol/health/liveliness tasks run concurrently, all feeding the same
 `Zenoh Publisher`, which emits `zensight/<protocol>/<source>/<metric>` → `TelemetryPoint`,
-`zensight/<protocol>/@/health` → `HealthSnapshot`, and `zensight/<protocol>/@/devices/*/...` →
+`zensight/<protocol>/<source>/@/health` → `HealthSnapshot`, and `zensight/<protocol>/<source>/@/devices/*/...` →
 `DeviceLiveness`.
 
 ## Device Health Model

@@ -148,8 +148,12 @@ explorer (JA3/JA4/JA4H/SNI/HASSH), joined against correlated host entities.
 object: related alerts grouped into one incident with a timeline and evidence
 pivots.
 
-**Sensors** (`view/sensors.rs`) — the sensor registry and per-sensor health
-detail (from `_meta/sensors/**` registrations and `@/health` snapshots).
+**Sensors** (`view/sensors.rs`) — the sensor registry and per-instance health
+detail (from `_meta/sensors/**` registrations and the host-scoped
+`<proto>/<source>/@/health` snapshots). One card per sensor **instance**
+(`sysinfo @ hostA`), keyed by `sensor@source`, so N machines running the same
+protocol each keep their own card; the card's artifact downloads set
+`target_source` so only that host produces the artifact.
 
 **Settings** (`view/settings.rs`) — Zenoh connection mode (peer/client/router),
 connect/listen endpoints, stale threshold, and theme; persisted to

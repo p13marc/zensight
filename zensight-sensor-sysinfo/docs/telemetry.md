@@ -84,7 +84,7 @@ no extra wiring). Rules: `oom`, `pressure` (PSI), `disk`, `inode`, `fd`,
 Standard sensor metadata is published alongside telemetry:
 
 ```
-zensight/sysinfo/@/health                # sensor health snapshots
+zensight/sysinfo/<host>/@/health         # sensor health snapshots (host-scoped)
 zensight/sysinfo/@/devices/*/liveness    # per-source liveness
 zensight/sysinfo/@/errors                # error reports
 zensight/sysinfo/@/alerts/<alert_key>    # threshold alerts
