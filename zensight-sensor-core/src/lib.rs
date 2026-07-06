@@ -35,7 +35,9 @@ mod advanced_publisher;
 mod alert;
 mod args;
 pub mod artifact;
+pub mod cloud;
 mod config;
+pub mod container;
 mod error;
 mod health;
 mod identity;
@@ -54,7 +56,9 @@ pub use artifact::{
     ArtifactChannel, ArtifactProducer, DeliveryKind, ProduceCtx, Produced, ProgressUpdate,
     ReportProducer, SnapshotProducer,
 };
+pub use cloud::detect_cloud;
 pub use config::SensorConfig;
+pub use container::{container_id_from_cgroup, container_id_from_path, detect_self_container_id};
 pub use error::{Result, SensorError};
 pub use health::{
     DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, SensorHealth,
@@ -70,6 +74,6 @@ pub use status::SensorStatus;
 // Re-export commonly used types from zensight-common
 pub use zensight_common::{
     Alert, AlertKind, AlertSeverity, AlertState, ArtifactLimits, ArtifactReportLimits,
-    ArtifactSnapshotLimits, CommonArtifactLimits, Format, LogFormat, LoggingConfig, Protocol,
-    SnapshotDir, TelemetryPoint, TelemetryValue, ZenohConfig,
+    ArtifactSnapshotLimits, CloudFacts, CommonArtifactLimits, Format, IdentityConfig, LogFormat,
+    LoggingConfig, Protocol, SnapshotDir, TelemetryPoint, TelemetryValue, ZenohConfig,
 };

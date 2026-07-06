@@ -45,11 +45,12 @@ pub use command::{
 pub use comparison::ComparisonOp;
 pub use config::{
     ArtifactLimits, ArtifactReportLimits, ArtifactSnapshotLimits, BaseConfig, CommonArtifactLimits,
-    LinkProfile, LogFormat, LoggingConfig, SnapshotDir, ZenohConfig, load_config, parse_config,
+    IdentityConfig, LinkProfile, LogFormat, LoggingConfig, SnapshotDir, ZenohConfig, load_config,
+    parse_config,
 };
 pub use entity::{HostEntity, MemberClaim, NameVal};
 pub use error::{Error, Result};
-pub use evidence::{HostEvidence, NameObservation};
+pub use evidence::{CloudFacts, HostEvidence, NameObservation};
 pub use health::{
     DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, HealthStatus, SensorInfo,
 };

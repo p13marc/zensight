@@ -50,6 +50,8 @@ pub fn synthetic() -> (Vec<HostEvidence>, Vec<NameObservation>) {
         macs: macs.iter().map(|s| s.to_string()).collect(),
         vendor: None,
         platform: None,
+        container_id: None,
+        cloud: None,
         last_updated: ts,
     };
 
@@ -151,7 +153,7 @@ pub async fn feed(tx: mpsc::Sender<EvidenceMsg>, mut shutdown: watch::Receiver<b
         let (evidence, names) = synthetic();
         for mut ev in evidence {
             ev.last_updated = now;
-            if tx.send(EvidenceMsg::Host(ev)).await.is_err() {
+            if tx.send(EvidenceMsg::Host(Box::new(ev))).await.is_err() {
                 return;
             }
         }
@@ -182,7 +184,7 @@ mod tests {
     ) -> Vec<zensight_common::HostEntity> {
         let mut state = CorrelatorState::new(CorrelatorConfig::default());
         for ev in evidence {
-            state.apply(EvidenceMsg::Host(ev.clone()));
+            state.apply(EvidenceMsg::Host(Box::new(ev.clone())));
         }
         for obs in names {
             state.apply(EvidenceMsg::Name(obs.clone()));
@@ -244,7 +246,7 @@ mod tests {
         let (evidence, names) = synthetic();
         let mut state = CorrelatorState::new(CorrelatorConfig::default());
         for ev in &evidence {
-            state.apply(EvidenceMsg::Host(ev.clone()));
+            state.apply(EvidenceMsg::Host(Box::new(ev.clone())));
         }
         for obs in &names {
             state.apply(EvidenceMsg::Name(obs.clone()));

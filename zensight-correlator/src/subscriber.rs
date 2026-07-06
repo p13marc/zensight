@@ -153,7 +153,7 @@ async fn handle_host(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
     }
     match decode::<HostEvidence>(&sample.payload().to_bytes()) {
         Some(ev) => {
-            let _ = tx.send(EvidenceMsg::Host(ev)).await;
+            let _ = tx.send(EvidenceMsg::Host(Box::new(ev))).await;
         }
         None => warn!(key = %key, "failed to decode HostEvidence"),
     }

@@ -3497,6 +3497,7 @@ fn test_entity(id: &str, hostname: &str, members: &[(&str, &str)]) -> HostEntity
         boot_id: None,
         ips: vec!["10.0.0.5".to_string()],
         macs: vec![],
+        container_ids: vec![],
         hostname: Some(hostname.to_string()),
         fqdn: None,
         names: vec![],

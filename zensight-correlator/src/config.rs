@@ -102,6 +102,10 @@ pub struct RulesConfig {
     /// Merge on equal hashed machine-id (certain). Default: true.
     #[serde(default = "default_true")]
     pub host_id: bool,
+    /// Merge on equal cloud `(provider, instance_id)` (authoritative per
+    /// provider, #311). Default: true.
+    #[serde(default = "default_true")]
+    pub cloud_instance: bool,
     /// Merge on a shared MAC *and* a shared IP (strong). Default: true.
     #[serde(default = "default_true")]
     pub mac_ip: bool,
@@ -121,6 +125,7 @@ impl Default for RulesConfig {
     fn default() -> Self {
         Self {
             host_id: true,
+            cloud_instance: true,
             mac_ip: true,
             fqdn: true,
             hostname_enabled: true,
@@ -173,6 +178,7 @@ mod tests {
         assert_eq!(config.reemit_secs, 60);
         assert!(config.status_from_liveness);
         assert!(config.rules.host_id);
+        assert!(config.rules.cloud_instance);
         assert!(config.rules.mac_ip);
         assert!(config.rules.fqdn);
         assert!(config.rules.hostname_enabled);

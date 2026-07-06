@@ -593,6 +593,7 @@ fn mock_entity(
         boot_id: None,
         ips: ips.iter().map(|s| s.to_string()).collect(),
         macs: macs.iter().map(|s| s.to_string()).collect(),
+        container_ids: vec![],
         hostname: Some(name.to_string()),
         fqdn: Some(format!("{name}.lab.example")),
         names: vec![],

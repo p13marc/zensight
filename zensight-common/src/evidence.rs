@@ -12,6 +12,26 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Cloud-provider identity facts from an instance-metadata service (#311).
+///
+/// `(provider, instance_id)` is **authoritative** for the correlator: cloned
+/// images/snapshots duplicate machine-ids, but a cloud control plane never
+/// hands out the same instance id twice, so this pair merges evidence almost
+/// as strongly as `host_id`. `region`/`account` are descriptive extras.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CloudFacts {
+    /// Provider slug: `"aws"`, `"gcp"`, `"azure"`.
+    pub provider: String,
+    /// Provider-scoped instance id (EC2 instance-id, GCE numeric id, Azure vmId).
+    pub instance_id: String,
+    /// Region/location, when the metadata service reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// Account/project/subscription id, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+}
+
 /// One host-identity claim, published on
 /// `zensight/_meta/evidence/host/<sensor>/<source>`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -48,6 +68,15 @@ pub struct HostEvidence {
     /// OS/platform hint, when observed (descriptive, display-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    /// Container the *reporting sensor process* runs in (#311) — a host-scoped
+    /// qualifier ("this sensor's view is from inside container X"), **never** a
+    /// cross-host merge key: container ids are only unique per host runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_id: Option<String>,
+    /// Cloud-provider identity from the instance-metadata service, when the
+    /// opt-in IMDS probe found one (#311). Authoritative for merging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<CloudFacts>,
     /// Unix epoch millis of the latest refresh. Claims older than the evidence
     /// TTL are ignored by merge rules.
     pub last_updated: i64,
@@ -108,12 +137,16 @@ mod tests {
             macs: vec![],
             vendor: None,
             platform: None,
+            container_id: None,
+            cloud: None,
             last_updated: 1_700_000_000_000,
         };
         let json = serde_json::to_string(&ev).unwrap();
         // Skipped-when-empty fields must not appear on the wire.
         assert!(!json.contains("observer"));
         assert!(!json.contains("macs"));
+        assert!(!json.contains("container_id"));
+        assert!(!json.contains("cloud"));
         let back: HostEvidence = serde_json::from_str(&json).unwrap();
         assert_eq!(back, ev);
 
@@ -124,5 +157,49 @@ mod tests {
         .unwrap();
         assert_eq!(sparse.observer, None);
         assert!(sparse.ips.is_empty());
+        assert_eq!(sparse.container_id, None);
+        assert_eq!(sparse.cloud, None);
+    }
+
+    #[test]
+    fn container_and_cloud_fields_roundtrip() {
+        // Additive #311 fields survive a wire round-trip, and CloudFacts skips
+        // its own empty optionals.
+        let ev = HostEvidence {
+            sensor: "sysinfo".into(),
+            source: "host1".into(),
+            observer: None,
+            host_id: Some("ab".repeat(32)),
+            boot_id: None,
+            hostname: None,
+            fqdn: None,
+            ips: vec![],
+            macs: vec![],
+            vendor: None,
+            platform: None,
+            container_id: Some("f".repeat(64)),
+            cloud: Some(CloudFacts {
+                provider: "aws".into(),
+                instance_id: "i-0abc123def456".into(),
+                region: Some("eu-west-1".into()),
+                account: None,
+            }),
+            last_updated: 1,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("container_id"));
+        assert!(json.contains(r#""provider":"aws""#));
+        assert!(!json.contains("account"));
+        let back: HostEvidence = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ev);
+    }
+
+    #[test]
+    fn cloud_facts_decode_from_minimal_doc() {
+        // Only provider + instance_id are required on the wire.
+        let facts: CloudFacts =
+            serde_json::from_str(r#"{"provider":"gcp","instance_id":"12345"}"#).unwrap();
+        assert_eq!(facts.region, None);
+        assert_eq!(facts.account, None);
     }
 }

@@ -375,7 +375,27 @@ impl<C: SensorConfig> SensorRunner<C> {
             let version = self.version.clone();
             let key_prefix = self.config.key_prefix().to_string();
             let health = self.health.clone();
+            let identity_cfg = self.config.identity_config();
             let task = tokio::spawn(async move {
+                // Opt-in cloud-metadata probe (#311): one shot before the first
+                // emit — an instance's cloud identity never changes while it
+                // runs, and refresh() preserves the result. Off by default
+                // (identity.cloud_metadata) because it makes network requests.
+                if identity_cfg.cloud_metadata {
+                    let timeout =
+                        std::time::Duration::from_millis(identity_cfg.cloud_timeout_ms.max(1));
+                    match crate::cloud::detect_cloud(timeout).await {
+                        Some(facts) => {
+                            tracing::info!(
+                                provider = %facts.provider,
+                                instance_id = %facts.instance_id,
+                                "cloud metadata detected"
+                            );
+                            identity.set_cloud(Some(facts));
+                        }
+                        None => tracing::debug!("cloud metadata probe: no provider found"),
+                    }
+                }
                 let info_key = zensight_common::sensor_info_key(&name, &source);
                 let evidence_key = zensight_common::host_evidence_key(&name, &source);
                 let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -414,6 +434,8 @@ impl<C: SensorConfig> SensorRunner<C> {
                         macs: id.macs,
                         vendor: None,
                         platform: None,
+                        container_id: id.container_id,
+                        cloud: id.cloud,
                         last_updated: now,
                     };
                     if let Err(e) = registry.publish_serializable(&info_key, &info).await {

@@ -33,6 +33,13 @@ pub struct HostIdentity {
     pub ips: Vec<String>,
     /// Non-loopback interface MAC addresses (sorted, deduplicated).
     pub macs: Vec<String>,
+    /// Container this sensor process runs in, when containerized (#311) —
+    /// parsed from `/proc/self/cgroup`. A host-scoped qualifier, not identity.
+    pub container_id: Option<String>,
+    /// Cloud-provider facts from the opt-in IMDS probe (#311). Not detected
+    /// here (file reads only) — the runner sets it via
+    /// [`SharedIdentity::set_cloud`] after the async probe.
+    pub cloud: Option<zensight_common::CloudFacts>,
 }
 
 impl HostIdentity {
@@ -42,14 +49,21 @@ impl HostIdentity {
             Path::new("/etc/machine-id"),
             Path::new("/proc/sys/kernel/random/boot_id"),
             Path::new("/sys/class/net"),
+            Path::new("/proc/self/cgroup"),
         );
         identity.ips = detect_ips();
         identity
     }
 
     /// File-based detection with injectable roots (fixture-testable). Live IP
-    /// enumeration is done separately in [`detect`](Self::detect).
-    fn detect_from(machine_id: &Path, boot_id: &Path, sys_class_net: &Path) -> Self {
+    /// enumeration is done separately in [`detect`](Self::detect); the cloud
+    /// probe (network) is the runner's job.
+    fn detect_from(
+        machine_id: &Path,
+        boot_id: &Path,
+        sys_class_net: &Path,
+        self_cgroup: &Path,
+    ) -> Self {
         let host_id = std::fs::read_to_string(machine_id)
             .ok()
             .and_then(|raw| hash_machine_id(&raw));
@@ -62,6 +76,11 @@ impl HostIdentity {
             .unwrap_or_else(|_| "unknown".to_string());
         let fqdn = hostname.contains('.').then(|| hostname.clone());
         let macs = detect_macs(sys_class_net);
+        // Not being containerized is the common case — None is expected, not
+        // an error (#311).
+        let container_id = std::fs::read_to_string(self_cgroup)
+            .ok()
+            .and_then(|c| crate::container::container_id_from_cgroup(&c));
         HostIdentity {
             host_id,
             boot_id,
@@ -69,6 +88,8 @@ impl HostIdentity {
             fqdn,
             ips: Vec::new(),
             macs,
+            container_id,
+            cloud: None,
         }
     }
 }
@@ -153,10 +174,20 @@ impl SharedIdentity {
         self.0.read().expect("identity lock poisoned").clone()
     }
 
-    /// Re-detect from the live system (DHCP churn refresh).
+    /// Re-detect from the live system (DHCP churn refresh). Cloud facts are
+    /// preserved: they come from the one-shot IMDS probe, not from files, and
+    /// an instance's identity never changes while it runs.
     pub fn refresh(&self) {
-        let fresh = HostIdentity::detect();
-        *self.0.write().expect("identity lock poisoned") = fresh;
+        let mut fresh = HostIdentity::detect();
+        let mut guard = self.0.write().expect("identity lock poisoned");
+        fresh.cloud = guard.cloud.take();
+        *guard = fresh;
+    }
+
+    /// Attach the IMDS probe result (#311). Called once by the runner when
+    /// `identity.cloud_metadata` is enabled and the probe found a provider.
+    pub fn set_cloud(&self, cloud: Option<zensight_common::CloudFacts>) {
+        self.0.write().expect("identity lock poisoned").cloud = cloud;
     }
 }
 
@@ -208,7 +239,16 @@ mod tests {
             std::fs::write(d.join("address"), format!("{addr}\n")).unwrap();
         }
 
-        let id = HostIdentity::detect_from(&machine_id, &boot_id, &net);
+        // Containerized fixture: a docker-scope cgroup path yields container_id.
+        let container_id_hex = "ab".repeat(32);
+        let cgroup = dir.path().join("cgroup");
+        std::fs::write(
+            &cgroup,
+            format!("0::/system.slice/docker-{container_id_hex}.scope\n"),
+        )
+        .unwrap();
+
+        let id = HostIdentity::detect_from(&machine_id, &boot_id, &net, &cgroup);
         assert_eq!(id.host_id.as_deref(), Some(FIXTURE_HOST_ID));
         assert_eq!(
             id.boot_id.as_deref(),
@@ -217,6 +257,9 @@ mod tests {
         // lo skipped by name; all-zero MACs skipped by value; lowercased + sorted.
         assert_eq!(id.macs, vec!["aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"]);
         assert!(!id.hostname.is_empty());
+        assert_eq!(id.container_id.as_deref(), Some(container_id_hex.as_str()));
+        // Cloud facts are never file-detected — the async probe sets them.
+        assert_eq!(id.cloud, None);
     }
 
     #[test]
@@ -226,9 +269,27 @@ mod tests {
             &dir.path().join("nope"),
             &dir.path().join("nope2"),
             &dir.path().join("nonet"),
+            &dir.path().join("nocgroup"),
         );
         assert_eq!(id.host_id, None);
         assert_eq!(id.boot_id, None);
         assert!(id.macs.is_empty());
+        assert_eq!(id.container_id, None);
+    }
+
+    #[test]
+    fn refresh_preserves_probed_cloud_facts() {
+        // set_cloud attaches the probe result; refresh (file re-detection)
+        // must not wipe it — the IMDS probe runs once, not per refresh.
+        let shared = SharedIdentity::from_identity(HostIdentity::default());
+        let facts = zensight_common::CloudFacts {
+            provider: "aws".into(),
+            instance_id: "i-0abc".into(),
+            region: None,
+            account: None,
+        };
+        shared.set_cloud(Some(facts.clone()));
+        shared.refresh();
+        assert_eq!(shared.get().cloud, Some(facts));
     }
 }

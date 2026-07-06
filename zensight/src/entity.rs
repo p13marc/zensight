@@ -182,6 +182,7 @@ mod tests {
             boot_id: None,
             ips: ips.into_iter().map(String::from).collect(),
             macs: vec![],
+            container_ids: vec![],
             hostname: None,
             fqdn: None,
             names: vec![],
