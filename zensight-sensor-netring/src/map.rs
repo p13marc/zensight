@@ -332,7 +332,9 @@ pub fn attack_technique(kind: &str) -> Option<&'static str> {
     let t = match kind {
         "PortScanTRW" => "T1046", // Network Service Discovery
         // Application Layer Protocol (C2)
-        "BeaconCv" | "BeaconDetector" | "RitaBeacon" | "RitaBeaconFqdn" => "T1071",
+        // #369: the RITA beacon now emits flowscope's upstream slug `BeaconRita`
+        // (was ZenSight's `RitaBeacon`); the FQDN-pivoted beacon keeps its slug.
+        "BeaconCv" | "BeaconDetector" | "BeaconRita" | "RitaBeaconFqdn" => "T1071",
         "DgaScorer" => "T1568.002",       // Dynamic Resolution: DGA
         "DnsTunnel" => "T1071.004",       // Application Layer Protocol: DNS
         "NewlyObservedDomain" => "T1568", // Dynamic Resolution
@@ -340,11 +342,12 @@ pub fn attack_technique(kind: &str) -> Option<&'static str> {
         "LateralSmb" => "T1021.002",      // SMB/Windows Admin Shares
         "LateralRdp" => "T1021.001",      // Remote Desktop Protocol
         "LateralKerberos" => "T1558",     // Steal or Forge Kerberos Tickets
-        "DataExfiltration" => "T1048",    // Exfiltration Over Alternative Protocol
+        // #369: flowscope's upstream slug is `DataExfil` (was `DataExfiltration`).
+        "DataExfil" => "T1048", // Exfiltration Over Alternative Protocol
         "cleartext_snmp" | "cleartext-snmp" => "T1040", // Network Sniffing
         "cleartext_http_credentials" => "T1040", // Network Sniffing
         "encrypted_dns_bypass" => "T1572", // Protocol Tunneling (DoH/DoT/DoQ bypass)
-        "ioc_match" => "T1071",           // C2 over app-layer protocol
+        "ioc_match" => "T1071", // C2 over app-layer protocol
         _ => return None,
     };
     Some(t)
@@ -532,23 +535,9 @@ pub fn lateral_view(
     }
 }
 
-/// Build the `DataExfiltration` [`AnomalyView`] (#123 → ATT&CK T1048). Warning
-/// severity: a single flow whose outbound volume from `src` exceeds its learned
-/// per-source baseline by `zscore` sigma. Bucketed by `(rule, src, dst)`.
-pub fn exfil_view(src: String, dst: String, bytes_out: u64, zscore: f64) -> AnomalyView {
-    AnomalyView {
-        kind: "DataExfiltration".into(),
-        severity: AlertSeverity::Warning,
-        src: Some(src),
-        dst: Some(dst),
-        proto: Some("tcp".into()),
-        observations: vec![],
-        metrics: vec![
-            ("bytes_out".into(), bytes_out as f64),
-            ("zscore".into(), zscore),
-        ],
-    }
-}
+// #369: data-exfil now rides flowscope's stock `DataExfilDetector` in the `Tuned`
+// registry → anomaly published through the sink → drain (`to_view` /
+// `anomaly_alert`), so the bespoke `exfil_view` helper is retired.
 
 /// The RITA composite score decomposition carried by an FQDN beacon anomaly
 /// (#308). Bundled so [`fqdn_beacon_view`] keeps a readable call site (the
@@ -658,17 +647,22 @@ pub fn flow_volume_points(
     ]
 }
 
-/// Flow-duration percentile points (RED: duration) over the durations of flows
-/// ended in the current window. `pcts` is `[p50, p95, p99]` (ms) read from the
-/// bounded DDSketch (#325), or `None` when no flows ended this window.
+/// Flow RED points (#369) from netring's `red()` per-flow state: request rate
+/// (flows/sec), error ratio (reset+parse-error share) and the p50/p95/p99 flow
+/// lifetime percentiles. Replaces the old `flow/duration_p*` gauges (which came
+/// from a bespoke DDSketch of flow durations); the RED sketch is netring's now.
 ///
-/// Returns an empty vec on `None` — we deliberately do NOT publish zeros, so the
-/// cached gauge keeps its last meaningful value instead of being clobbered to 0
-/// every idle tick.
-pub fn flow_latency_points(sensor_id: &str, pcts: Option<[f64; 3]>) -> Vec<TelemetryPoint> {
-    let Some([p50, p95, _p99]) = pcts else {
-        return Vec::new();
-    };
+/// `p50`/`p95`/`p99` are `None` when the window held no flows (netring returns no
+/// quantile), and those points are simply omitted so the cached gauge keeps its
+/// last meaningful value instead of being clobbered.
+pub fn flow_red_points(
+    sensor_id: &str,
+    rate: f64,
+    error_ratio: f64,
+    p50: Option<f64>,
+    p95: Option<f64>,
+    p99: Option<f64>,
+) -> Vec<TelemetryPoint> {
     let g = |metric: &str, v: f64| {
         TelemetryPoint::new(
             sensor_id,
@@ -677,10 +671,20 @@ pub fn flow_latency_points(sensor_id: &str, pcts: Option<[f64; 3]>) -> Vec<Telem
             TelemetryValue::Gauge(v),
         )
     };
-    vec![
-        g("flow/duration_p50_ms", p50),
-        g("flow/duration_p95_ms", p95),
-    ]
+    let mut pts = vec![
+        g("flow/red/rate", rate),
+        g("flow/red/error_ratio", error_ratio),
+    ];
+    if let Some(v) = p50 {
+        pts.push(g("flow/red/p50_ms", v));
+    }
+    if let Some(v) = p95 {
+        pts.push(g("flow/red/p95_ms", v));
+    }
+    if let Some(v) = p99 {
+        pts.push(g("flow/red/p99_ms", v));
+    }
+    pts
 }
 
 /// Per-source drop breakdown (netring 0.27 `DropBreakdown`), decomposed so the
@@ -1449,47 +1453,42 @@ pub fn top_ja4h(
 
 /// Rank a per-destination histogram byte-volume-first into the `@/query/talkers`
 /// reply (top-N talkers). Pure so the ranking is unit-testable.
-pub fn top_talkers(
-    hist: &std::collections::HashMap<String, (u64, u64, u64)>,
-    top: usize,
-) -> Vec<TalkerRecord> {
-    let mut v: Vec<TalkerRecord> = hist
+pub fn top_talkers(talkers: &[(String, f64)], top: usize) -> Vec<TalkerRecord> {
+    let mut v: Vec<TalkerRecord> = talkers
         .iter()
-        .map(|(dst, &(bytes, packets, flows))| TalkerRecord {
-            dst: dst.clone(),
-            bytes,
-            packets,
-            flows,
+        .map(|(src, rate)| TalkerRecord {
+            src: src.clone(),
+            bytes_per_sec: *rate,
             // Passive-DNS enrichment (#308) is attached at query time (the
             // talker channel peeks the name map per served row).
             names: Vec::new(),
         })
         .collect();
-    v.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.dst.cmp(&b.dst)));
+    v.sort_by(|a, b| {
+        b.bytes_per_sec
+            .total_cmp(&a.bytes_per_sec)
+            .then_with(|| a.src.cmp(&b.src))
+    });
     v.truncate(top);
     v
 }
 
-/// Rank the `(src,dst)` traffic-matrix histogram byte-volume-first into the
-/// `@/query/matrix` reply (top-N pairs / service map). Pure so the ranking is
-/// unit-testable (#122).
-pub fn traffic_matrix(
-    hist: &std::collections::HashMap<(String, String), (u64, u64, u64)>,
-    top: usize,
-) -> Vec<MatrixRecord> {
-    let mut v: Vec<MatrixRecord> = hist
+/// Rank the `(src,dst)` traffic-matrix pairs (netring `aggregate()`, #369)
+/// rate-first into the `@/query/matrix` reply (top-N / service map). Pure so the
+/// ranking is unit-testable (#122).
+pub fn traffic_matrix(pairs: &[(String, String, f64)], top: usize) -> Vec<MatrixRecord> {
+    let mut v: Vec<MatrixRecord> = pairs
         .iter()
-        .map(|((src, dst), &(bytes, packets, flows))| MatrixRecord {
+        .map(|(src, dst, rate)| MatrixRecord {
             src: src.clone(),
             dst: dst.clone(),
-            bytes,
-            packets,
-            flows,
+            bytes_per_sec: *rate,
+            names: Vec::new(),
         })
         .collect();
     v.sort_by(|a, b| {
-        b.bytes
-            .cmp(&a.bytes)
+        b.bytes_per_sec
+            .total_cmp(&a.bytes_per_sec)
             .then_with(|| a.src.cmp(&b.src))
             .then_with(|| a.dst.cmp(&b.dst))
     });
@@ -1732,16 +1731,20 @@ mod tests {
     }
 
     #[test]
-    fn flow_latency_points_shape() {
-        // p50/p95 are surfaced (p99 read but not published for flow duration).
-        let pts = flow_latency_points("s", Some([50.0, 100.0, 120.0]));
-        assert_eq!(pts.len(), 2);
-        assert_eq!(pts[0].metric, "flow/duration_p50_ms");
-        assert_eq!(pts[0].value, TelemetryValue::Gauge(50.0));
-        assert_eq!(pts[1].metric, "flow/duration_p95_ms");
-        assert_eq!(pts[1].value, TelemetryValue::Gauge(100.0));
-        // Empty window → no points (don't clobber the cached gauge to 0).
-        assert!(flow_latency_points("s", None).is_empty());
+    fn flow_red_points_shape() {
+        // #369: rate + error_ratio always published; present percentiles too.
+        let pts = flow_red_points("s", 12.5, 0.05, Some(50.0), Some(100.0), Some(120.0));
+        assert_eq!(pts.len(), 5);
+        assert_eq!(pts[0].metric, "flow/red/rate");
+        assert_eq!(pts[0].value, TelemetryValue::Gauge(12.5));
+        assert_eq!(pts[1].metric, "flow/red/error_ratio");
+        assert_eq!(pts[1].value, TelemetryValue::Gauge(0.05));
+        assert_eq!(pts[2].metric, "flow/red/p50_ms");
+        assert_eq!(pts[3].metric, "flow/red/p95_ms");
+        assert_eq!(pts[4].metric, "flow/red/p99_ms");
+        // Empty window → percentiles omitted, but rate/error_ratio still emit.
+        let idle = flow_red_points("s", 0.0, 0.0, None, None, None);
+        assert_eq!(idle.len(), 2);
     }
 
     #[test]
@@ -1862,7 +1865,10 @@ mod tests {
     fn attack_technique_mapping() {
         assert_eq!(attack_technique("PortScanTRW"), Some("T1046"));
         assert_eq!(attack_technique("DgaScorer"), Some("T1568.002"));
-        assert_eq!(attack_technique("RitaBeacon"), Some("T1071"));
+        // #369: upstream slug BeaconRita (was RitaBeacon) + DataExfil (was DataExfiltration).
+        assert_eq!(attack_technique("BeaconRita"), Some("T1071"));
+        assert_eq!(attack_technique("DataExfil"), Some("T1048"));
+        assert_eq!(attack_technique("RitaBeaconFqdn"), Some("T1071"));
         assert_eq!(attack_technique("UnknownDetector"), None);
     }
 
@@ -1998,10 +2004,10 @@ mod tests {
 
     #[test]
     fn rita_beacon_view_maps_kind_and_technique() {
-        // The RITA detector emits kind "RitaBeacon"; the mapping must carry it
-        // through to the alert with the C2 technique tag.
+        // #369: the RITA detector emits flowscope's upstream kind "BeaconRita";
+        // the mapping must carry it through to the alert with the C2 technique tag.
         let v = AnomalyView {
-            kind: "RitaBeacon".into(),
+            kind: "BeaconRita".into(),
             severity: AlertSeverity::Warning,
             src: Some("10.0.0.5:44321".into()),
             dst: Some("203.0.113.7:443".into()),
@@ -2010,7 +2016,7 @@ mod tests {
             metrics: vec![("score".into(), 0.94)],
         };
         let alert = anomaly_alert("s", &v);
-        assert_eq!(alert.rule, "RitaBeacon");
+        assert_eq!(alert.rule, "BeaconRita");
         assert_eq!(
             alert.labels.get("technique").map(String::as_str),
             Some("T1071")
@@ -2371,42 +2377,35 @@ mod tests {
     // ─── Top-talkers + elephant flows (issue #21) ────────────────────────────
 
     #[test]
-    fn top_talkers_ranks_by_bytes() {
-        let mut hist = std::collections::HashMap::new();
-        hist.insert("1.1.1.1".to_string(), (1000u64, 10u64, 2u64));
-        hist.insert("8.8.8.8".to_string(), (5000u64, 40u64, 6u64));
-        hist.insert("9.9.9.9".to_string(), (50u64, 1u64, 1u64));
-        let top = top_talkers(&hist, 2);
+    fn top_talkers_ranks_by_rate() {
+        // #369: src-keyed rolling bytes/sec from netring aggregate().
+        let talkers = vec![
+            ("1.1.1.1".to_string(), 1000.0),
+            ("8.8.8.8".to_string(), 5000.0),
+            ("9.9.9.9".to_string(), 50.0),
+        ];
+        let top = top_talkers(&talkers, 2);
         assert_eq!(top.len(), 2);
-        assert_eq!(top[0].dst, "8.8.8.8");
-        assert_eq!(top[0].bytes, 5000);
-        assert_eq!(top[1].dst, "1.1.1.1");
+        assert_eq!(top[0].src, "8.8.8.8");
+        assert_eq!(top[0].bytes_per_sec, 5000.0);
+        assert_eq!(top[1].src, "1.1.1.1");
     }
 
     #[test]
-    fn traffic_matrix_ranks_pairs_by_bytes() {
-        let mut hist = std::collections::HashMap::new();
-        hist.insert(
-            ("10.0.0.1".to_string(), "8.8.8.8".to_string()),
-            (5000u64, 40u64, 6u64),
-        );
-        hist.insert(
-            ("10.0.0.1".to_string(), "1.1.1.1".to_string()),
-            (1000u64, 10u64, 2u64),
-        );
-        hist.insert(
-            ("10.0.0.2".to_string(), "8.8.8.8".to_string()),
-            (50u64, 1u64, 1u64),
-        );
-        let top = traffic_matrix(&hist, 2);
+    fn traffic_matrix_ranks_pairs_by_rate() {
+        let pairs = vec![
+            ("10.0.0.1".to_string(), "8.8.8.8".to_string(), 5000.0),
+            ("10.0.0.1".to_string(), "1.1.1.1".to_string(), 1000.0),
+            ("10.0.0.2".to_string(), "8.8.8.8".to_string(), 50.0),
+        ];
+        let top = traffic_matrix(&pairs, 2);
         assert_eq!(top.len(), 2);
         // Heaviest src→dst pair leads; the matrix keeps both endpoints.
         assert_eq!(
             (top[0].src.as_str(), top[0].dst.as_str()),
             ("10.0.0.1", "8.8.8.8")
         );
-        assert_eq!(top[0].bytes, 5000);
-        assert_eq!(top[0].flows, 6);
+        assert_eq!(top[0].bytes_per_sec, 5000.0);
         assert_eq!(
             (top[1].src.as_str(), top[1].dst.as_str()),
             ("10.0.0.1", "1.1.1.1")
@@ -2443,8 +2442,8 @@ mod tests {
 
     #[test]
     fn anomaly_count_point_is_counter_with_slug_path() {
-        let p = anomaly_count_point("host01", "RitaBeacon", 7);
-        assert_eq!(p.metric, "anomaly/RitaBeacon/total");
+        let p = anomaly_count_point("host01", "BeaconRita", 7);
+        assert_eq!(p.metric, "anomaly/BeaconRita/total");
         assert_eq!(p.value, TelemetryValue::Counter(7));
         assert_eq!(p.source, "host01");
         assert_eq!(p.protocol, Protocol::Netring);

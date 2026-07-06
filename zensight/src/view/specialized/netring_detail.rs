@@ -356,11 +356,11 @@ mod tests {
         s.loading_captures();
         assert!(s.captures.is_loading());
         s.apply_captures(Ok(vec![CaptureRecord {
-            filename: "zensight-h1-trigger-RitaBeacon-1.pcap.zst".into(),
+            filename: "zensight-h1-trigger-BeaconRita-1.pcap.zst".into(),
             bytes: 1024,
             packets: 42,
             mode: "triggered".into(),
-            trigger_kind: Some("RitaBeacon".into()),
+            trigger_kind: Some("BeaconRita".into()),
             artifact_id: Some("01J0000000000000000000000".into()),
             ..Default::default()
         }]));
@@ -377,9 +377,8 @@ mod tests {
         s.apply_matrix(Ok(vec![MatrixRecord {
             src: "10.0.0.1".into(),
             dst: "8.8.8.8".into(),
-            bytes: 5000,
-            packets: 40,
-            flows: 6,
+            bytes_per_sec: 5000.0,
+            names: Vec::new(),
         }]));
         assert_eq!(s.matrix.ready().map(|v| v.len()), Some(1));
         s.apply_matrix(Err("no sensor".into()));
@@ -404,10 +403,8 @@ mod tests {
         }]));
         assert_eq!(s.http.ready().map(|v| v.len()), Some(1));
         s.apply_talkers(Ok(vec![TalkerRecord {
-            dst: "1.1.1.1".into(),
-            bytes: 1000,
-            packets: 10,
-            flows: 2,
+            src: "10.0.0.5".into(),
+            bytes_per_sec: 1000.0,
             names: Vec::new(),
         }]));
         assert_eq!(s.talkers.ready().map(|v| v.len()), Some(1));

@@ -883,17 +883,13 @@ mod tests {
     fn should_trigger_severity_floor_and_allowlist() {
         let mut c = CaptureToDiskConfig::default();
         // Default floor is warning: info is gated, warning/critical pass.
-        assert!(!should_trigger(&c, "RitaBeacon", AlertSeverity::Info));
-        assert!(should_trigger(&c, "RitaBeacon", AlertSeverity::Warning));
-        assert!(should_trigger(&c, "RitaBeacon", AlertSeverity::Critical));
+        assert!(!should_trigger(&c, "BeaconRita", AlertSeverity::Info));
+        assert!(should_trigger(&c, "BeaconRita", AlertSeverity::Warning));
+        assert!(should_trigger(&c, "BeaconRita", AlertSeverity::Critical));
         // Allowlist narrows by detector slug.
-        c.trigger_kinds = vec!["DataExfiltration".into()];
-        assert!(!should_trigger(&c, "RitaBeacon", AlertSeverity::Critical));
-        assert!(should_trigger(
-            &c,
-            "DataExfiltration",
-            AlertSeverity::Warning
-        ));
+        c.trigger_kinds = vec!["DataExfil".into()];
+        assert!(!should_trigger(&c, "BeaconRita", AlertSeverity::Critical));
+        assert!(should_trigger(&c, "DataExfil", AlertSeverity::Warning));
     }
 
     #[test]
@@ -924,14 +920,14 @@ mod tests {
         let stats = Arc::new(CaptureDiskStats::new(CaptureDiskMode::Rotating));
         let handle = CaptureDiskHandle::new(tx, stats.clone());
         // Anomaly-path trigger is a no-op outside triggered mode…
-        handle.trigger("RitaBeacon", None);
+        handle.trigger("BeaconRita", None);
         assert!(rx.try_recv().is_err());
         // …but fires once the live mode is triggered.
         stats.set_mode(CaptureDiskMode::Triggered);
-        handle.trigger("RitaBeacon", None);
+        handle.trigger("BeaconRita", None);
         assert!(matches!(
             rx.try_recv(),
-            Ok(DiskCtl::Trigger { ref kind, .. }) if kind == "RitaBeacon"
+            Ok(DiskCtl::Trigger { ref kind, .. }) if kind == "BeaconRita"
         ));
         // capture_now always reaches the engine (it dispatches on live mode).
         stats.set_mode(CaptureDiskMode::Rotating);
@@ -973,7 +969,7 @@ mod tests {
         }
         tokio::task::yield_now().await;
         let handle = CaptureDiskHandle::new(ctl_tx.clone(), stats.clone());
-        handle.trigger("RitaBeacon", None);
+        handle.trigger("BeaconRita", None);
         tokio::task::yield_now().await;
         // Two post-trigger frames stream straight through.
         for i in 10..12u32 {
@@ -993,7 +989,7 @@ mod tests {
         assert_eq!(idx.len(), 1, "one capture record expected");
         let rec = &idx[0];
         assert_eq!(rec.mode, "triggered");
-        assert_eq!(rec.trigger_kind.as_deref(), Some("RitaBeacon"));
+        assert_eq!(rec.trigger_kind.as_deref(), Some("BeaconRita"));
         assert_eq!(rec.packets, 5, "3 pre-trigger + 2 post-trigger");
         assert!(!rec.truncated);
         assert!(rec.artifact_id.is_none(), "no blob server armed");

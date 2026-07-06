@@ -178,8 +178,8 @@ pub struct CaptureToDiskConfig {
     /// mode). Default `warning`.
     #[serde(default)]
     pub trigger_min_severity: zensight_common::AlertSeverity,
-    /// Detector-slug allowlist for the trigger (e.g. `["RitaBeacon",
-    /// "DataExfiltration"]`); empty (default) = every anomaly kind can fire.
+    /// Detector-slug allowlist for the trigger (e.g. `["BeaconRita",
+    /// "DataExfil"]`); empty (default) = every anomaly kind can fire.
     #[serde(default)]
     pub trigger_kinds: Vec<String>,
     /// How long to keep recording after the trigger fires, seconds. Default 10.
@@ -1019,7 +1019,7 @@ mod tests {
         let cfg: NetringSensorConfig = json5::from_str(
             r#"{ netring: { interfaces: ["eth0"], capture: { to_disk: {
                 mode: "triggered", dir: "/var/lib/zensight/captures",
-                trigger_min_severity: "critical", trigger_kinds: ["RitaBeacon"],
+                trigger_min_severity: "critical", trigger_kinds: ["BeaconRita"],
             } } } }"#,
         )
         .unwrap();
@@ -1030,6 +1030,6 @@ mod tests {
             d.trigger_min_severity,
             zensight_common::AlertSeverity::Critical
         );
-        assert_eq!(d.trigger_kinds, vec!["RitaBeacon".to_string()]);
+        assert_eq!(d.trigger_kinds, vec!["BeaconRita".to_string()]);
     }
 }

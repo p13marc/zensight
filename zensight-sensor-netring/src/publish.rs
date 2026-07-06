@@ -39,7 +39,7 @@ pub async fn run_drains(
     let flow_bytes = channels.flow_bytes.clone();
     let flow_packets = channels.flow_packets.clone();
     let flow_retransmits = channels.flow_retransmits.clone();
-    let flow_durations = channels.flow_durations_ms.clone();
+    let flow_red = channels.flow_red.clone();
     let tcp_resets = channels.tcp_resets.clone();
     let tcp_refused = channels.tcp_refused.clone();
     let tls_handshakes = channels.tls_handshakes.clone();
@@ -83,12 +83,30 @@ pub async fn run_drains(
         let bytes = flow_bytes.load(Ordering::Relaxed);
         let pkts = flow_packets.load(Ordering::Relaxed);
         let retx = flow_retransmits.load(Ordering::Relaxed);
-        let durs = drain_pcts(&flow_durations);
+        // Flow RED (#369): rate / error-ratio / p50·p95·p99 from netring's
+        // `red()` snapshot (a fresh clone under a short-held lock). Only emit once
+        // a window has closed (the snapshot exists), so idle ticks keep the cached
+        // gauge instead of clobbering it.
+        let flow_red_pts = flow_red
+            .lock()
+            .ok()
+            .and_then(|s| s.clone())
+            .map(|r| {
+                map::flow_red_points(
+                    sensor_id,
+                    r.rate,
+                    r.error_ratio,
+                    r.p50_ms,
+                    r.p95_ms,
+                    r.p99_ms,
+                )
+            })
+            .unwrap_or_default();
 
         let mut points: Vec<_> = map::flow_points(sensor_id, s, e, active)
             .into_iter()
             .chain(map::flow_volume_points(sensor_id, bytes, pkts, retx))
-            .chain(map::flow_latency_points(sensor_id, durs))
+            .chain(flow_red_pts)
             .chain(map::tcp_reset_points(sensor_id, resets, refused))
             // Per-L4 composition + connection-state breakdown (issue #16).
             .chain(map::flow_by_l4_points(

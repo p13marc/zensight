@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (BREAKING)
+
+- **netring NDR detectors migrated onto flowscope 0.22's `DetectorRegistry` +
+  netring 0.29's `aggregate()`/`red()` (#369).** The hand-rolled
+  `pattern_detector!` blocks (port-scan, CV/RITA beacon, connection-flood, DGA,
+  DNS-tunnel, newly-observed-domain, data-exfil) are gone; the stock flowscope
+  detectors now run in one `DetectorRegistry<FlowKey>` driven by netring's own
+  flow + DNS stream. Runtime detector tuning (`@/commands/detectors`: allowlist /
+  mute / per-detector threshold, #121/#328) is preserved by a `Tuned<D>`
+  decorator that post-filters each stock anomaly against the live config. Three
+  wire contracts changed:
+
+  | Contract | Before | After |
+  |----------|--------|-------|
+  | Flow-lifetime telemetry | `flow/duration_p50_ms`, `flow/duration_p95_ms` | `flow/red/{rate,error_ratio,p50_ms,p95_ms,p99_ms}` (netring `red()`) |
+  | `@/query/talkers` | `TalkerRecord{dst,bytes,packets,flows,names}` (per-dest cumulative) | `TalkerRecord{src,bytes_per_sec,names}` (per-source rolling 60 s rate) |
+  | `@/query/matrix` | `MatrixRecord{src,dst,bytes,packets,flows}` (cumulative) | `MatrixRecord{src,dst,bytes_per_sec,names}` (rolling 60 s rate) |
+  | Anomaly slug | `RitaBeacon` | `BeaconRita` (flowscope upstream) |
+  | Anomaly slug | `DataExfiltration` | `DataExfil` (flowscope upstream) |
+
+  Talkers/matrix now rank by rolling **bytes/sec** (netring `aggregate()`) rather
+  than cumulative volume, and talkers are keyed by **source** IP; connection-flood
+  is now source-keyed (stock detector) rather than `(dst,port)`-keyed. The
+  `talkers?top=N` / `matrix?top=N` / `@/alerts` query keys themselves are
+  unchanged. A pre-#369 GUI mis-reads a post-#369 sensor's talker/matrix replies
+  and the renamed slugs — upgrade sensor + frontend together. See
+  `docs/KEYSPACE.md` for the full contract.
+
 ### Changed
 
 - **BREAKING — per-line log events moved off the streamed bus (#358).** The logs

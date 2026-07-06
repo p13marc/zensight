@@ -281,6 +281,26 @@ Stream *stats* (fps/kbps/drops) ride normal telemetry under
 for free. (The H.264/parallax encoder daemon that produces the frames is out of
 scope for #359 — this is the zenoh-side enabler only.)
 
+### netring detector-registry migration (#369, BREAKING)
+
+Adopting flowscope 0.22's `DetectorRegistry` + netring 0.29's `aggregate()` /
+`red()` changed three netring contracts:
+
+| Area | Before | After |
+|------|--------|-------|
+| Flow-lifetime telemetry | `flow/duration_p50_ms`, `flow/duration_p95_ms` (Gauges) | `flow/red/rate`, `flow/red/error_ratio`, `flow/red/p50_ms`, `flow/red/p95_ms`, `flow/red/p99_ms` (Gauges, from netring `red()`) |
+| `@/query/talkers` reply | `TalkerRecord { dst, bytes, packets, flows, names }` — per-**destination** cumulative | `TalkerRecord { src, bytes_per_sec, names }` — per-**source** rolling 60 s rate |
+| `@/query/matrix` reply | `MatrixRecord { src, dst, bytes, packets, flows }` — cumulative | `MatrixRecord { src, dst, bytes_per_sec, names }` — rolling 60 s rate |
+| Anomaly slug (`@/alerts` `rule`, `anomaly/<slug>/total`) | `RitaBeacon` | `BeaconRita` (flowscope upstream) |
+| Anomaly slug | `DataExfiltration` | `DataExfil` (flowscope upstream) |
+
+The `talkers?top=N` / `matrix?top=N` query keys are unchanged; only their reply
+record shapes and the ranking axis (rolling bytes/sec vs cumulative bytes) change.
+Detector semantics also shift with the stock detectors (e.g. connection-flood is
+now source-keyed, not `(dst,port)`-keyed). Runtime detector tuning
+(`@/commands/detectors`: allowlist / mute / threshold) is preserved via the
+`Tuned` decorator.
+
 ---
 
 ## 4. Metadata — `zensight/_meta/…`

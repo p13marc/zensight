@@ -1780,11 +1780,28 @@ impl DemoSimulator {
             TelemetryValue::Gauge(active),
             timestamp,
         ));
+        // Flow RED (#369): rate / error-ratio / p50·p95·p99 flow-lifetime.
+        let red_rate = self.rng.random_range(5.0..40.0);
+        points.push(self.make_point(
+            Protocol::Netring,
+            probe,
+            "flow/red/rate",
+            TelemetryValue::Gauge(red_rate),
+            timestamp,
+        ));
+        let red_err = self.rng.random_range(0.0..0.08);
+        points.push(self.make_point(
+            Protocol::Netring,
+            probe,
+            "flow/red/error_ratio",
+            TelemetryValue::Gauge(red_err),
+            timestamp,
+        ));
         let dur_p50 = self.rng.random_range(40.0..120.0);
         points.push(self.make_point(
             Protocol::Netring,
             probe,
-            "flow/duration_p50_ms",
+            "flow/red/p50_ms",
             TelemetryValue::Gauge(dur_p50),
             timestamp,
         ));
@@ -1792,8 +1809,16 @@ impl DemoSimulator {
         points.push(self.make_point(
             Protocol::Netring,
             probe,
-            "flow/duration_p95_ms",
+            "flow/red/p95_ms",
             TelemetryValue::Gauge(dur_p95),
+            timestamp,
+        ));
+        let dur_p99 = self.rng.random_range(1800.0..4000.0);
+        points.push(self.make_point(
+            Protocol::Netring,
+            probe,
+            "flow/red/p99_ms",
+            TelemetryValue::Gauge(dur_p99),
             timestamp,
         ));
 

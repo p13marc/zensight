@@ -671,19 +671,19 @@ mod tests {
     fn matching_capture_joins_on_kind_and_window() {
         let caps = vec![
             capture("PortScanTRW", 1_000_000, 1_010_000),
-            capture("RitaBeacon", 2_000_000, 2_010_000),
+            capture("BeaconRita", 2_000_000, 2_010_000),
         ];
         // Same kind, timestamp inside the window (+slack).
-        let hit = matching_capture(&anomaly("RitaBeacon", 2_005_000), Some(&caps));
-        assert_eq!(hit.unwrap().trigger_kind.as_deref(), Some("RitaBeacon"));
+        let hit = matching_capture(&anomaly("BeaconRita", 2_005_000), Some(&caps));
+        assert_eq!(hit.unwrap().trigger_kind.as_deref(), Some("BeaconRita"));
         // Slack absorbs the detector-to-flush gap.
-        assert!(matching_capture(&anomaly("RitaBeacon", 1_950_000), Some(&caps)).is_some());
+        assert!(matching_capture(&anomaly("BeaconRita", 1_950_000), Some(&caps)).is_some());
         // Wrong kind → no match even in-window.
         assert!(matching_capture(&anomaly("DgaScorer", 2_005_000), Some(&caps)).is_none());
         // Way outside the window → no match.
-        assert!(matching_capture(&anomaly("RitaBeacon", 9_000_000), Some(&caps)).is_none());
+        assert!(matching_capture(&anomaly("BeaconRita", 9_000_000), Some(&caps)).is_none());
         // No captures fetched yet → graceful None.
-        assert!(matching_capture(&anomaly("RitaBeacon", 2_005_000), None).is_none());
+        assert!(matching_capture(&anomaly("BeaconRita", 2_005_000), None).is_none());
     }
 
     #[test]
