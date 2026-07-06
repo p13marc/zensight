@@ -3,6 +3,10 @@
 This directory holds **cross-cutting** references. Anything specific to one crate lives in
 that crate's own `README.md` + `docs/` directory (linked below).
 
+> Diagrams use GitHub-native [Mermaid](https://mermaid.js.org/) fences (` ```mermaid `) —
+> they render inline on github.com with no tooling. Keep them theme-neutral (no hardcoded
+> colors) so they read in both light and dark mode.
+
 ## Cross-cutting references
 
 | Document | What it covers |

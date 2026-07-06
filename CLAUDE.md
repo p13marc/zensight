@@ -69,10 +69,13 @@ cargo clippy --workspace -- -D warnings
 
 ## Architecture (one screen)
 
-```
-sensors ──publish──▶  Zenoh bus (zensight/**, @/…, _meta/…, @media/…)  ──subscribe──▶ frontend
-                              │                                                    exporters
-                              └── _meta/evidence/** ──▶ correlator ──▶ _meta/entity/**
+```mermaid
+flowchart LR
+    S["sensors"] -- publish --> BUS["Zenoh bus<br/>zensight/** · @/… · _meta/… · @media/…"]
+    BUS -- subscribe --> FE["frontend"]
+    BUS -- subscribe --> EX["exporters<br/>(Prometheus / OTEL)"]
+    S -- "_meta/evidence/**" --> COR["correlator"]
+    COR -- "_meta/entity/**" --> FE
 ```
 
 - **Telemetry** rides `zensight/<protocol>/<source>/<metric>`; **control-plane** is `@/`-verbatim

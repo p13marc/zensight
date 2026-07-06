@@ -319,11 +319,21 @@ One `zensight/src/view/artifact_fetch.rs` state machine (which unified the earli
 **matches on the `Ready` state's `Delivery`** — `Blob` drives the Tier-1 path below, `Tree` drives the
 Tier-2 path (§5.7):
 
-```
-Idle → Requesting → Generating(progress?) → Downloading{got,total}
-                                              ├─(pause)→  Paused{got,total}  ─(resume)→ Downloading
-                                              ├─(cancel)→ Cancelled  (discard .part)
-                                              └─(done)→   Verifying → Saved(path) | Failed
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Requesting
+    Requesting --> Generating
+    Generating --> Downloading
+    Downloading --> Paused: pause
+    Paused --> Downloading: resume
+    Downloading --> Cancelled: cancel (discard .part)
+    Downloading --> Verifying: done
+    Verifying --> Saved
+    Verifying --> Failed
+    Cancelled --> [*]
+    Saved --> [*]
+    Failed --> [*]
 ```
 
 Reuses the `query_*` plumbing the redesign report proposes to unify (#126/#127). A progress bar with a
