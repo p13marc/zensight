@@ -6,15 +6,19 @@
 //!
 //! # Key Expressions
 //!
-//! - Sensor liveliness: `zensight/<protocol>/@/alive`
-//! - Device liveliness: `zensight/<protocol>/@/devices/<device_id>/alive`
+//! The manager takes the sensor instance's host-scoped control prefix
+//! (`zensight/<protocol>/<source>`), so two hosts running the same protocol
+//! hold distinct tokens:
+//!
+//! - Sensor liveliness: `zensight/<protocol>/<source>/@/alive`
+//! - Device liveliness: `zensight/<protocol>/<source>/@/devices/<device_id>/alive`
 //!
 //! # Example
 //!
 //! ```ignore
 //! use zensight_sensor_core::LivelinessManager;
 //!
-//! let manager = LivelinessManager::new(session.clone(), "zensight/snmp").await?;
+//! let manager = LivelinessManager::new(session.clone(), "zensight/snmp/poller01").await?;
 //!
 //! // Declare device as alive
 //! manager.declare_device_alive("router01").await?;
@@ -40,7 +44,7 @@ use crate::error::{Result, SensorError};
 pub struct LivelinessManager {
     /// Zenoh session.
     session: Arc<Session>,
-    /// Key prefix (e.g., "zensight/snmp").
+    /// Host-scoped control prefix (e.g., "zensight/snmp/poller01").
     key_prefix: String,
     /// Sensor-level liveliness token.
     /// Kept alive for the lifetime of the manager.
@@ -56,7 +60,7 @@ impl LivelinessManager {
     /// The sensor liveliness token is declared immediately at:
     /// `<key_prefix>/@/alive`
     ///
-    /// For example: `zensight/snmp/@/alive`
+    /// For example: `zensight/snmp/poller01/@/alive`
     pub async fn new(session: Arc<Session>, key_prefix: impl Into<String>) -> Result<Self> {
         let key_prefix = key_prefix.into();
         let sensor_key = format!("{}/@/alive", key_prefix);
@@ -166,12 +170,16 @@ mod tests {
 
     #[test]
     fn test_key_format() {
-        // Test the key format logic
-        let prefix = "zensight/snmp";
+        // The prefix is the host-scoped instance prefix, so tokens from two
+        // hosts running the same protocol never collide.
+        let prefix = "zensight/snmp/poller01";
         let sensor_key = format!("{}/@/alive", prefix);
-        assert_eq!(sensor_key, "zensight/snmp/@/alive");
+        assert_eq!(sensor_key, "zensight/snmp/poller01/@/alive");
 
         let device_key = format!("{}/@/devices/{}/alive", prefix, "router01");
-        assert_eq!(device_key, "zensight/snmp/@/devices/router01/alive");
+        assert_eq!(
+            device_key,
+            "zensight/snmp/poller01/@/devices/router01/alive"
+        );
     }
 }

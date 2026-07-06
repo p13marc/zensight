@@ -17,9 +17,10 @@ async fn main() -> Result<()> {
 
     // Load configuration
     let config = ModbusSensorConfig::load_from_file(&args.config)?;
+    let source = config.modbus.resolved_source();
 
     // Create the sensor runner
-    let runner = SensorRunner::new_with_args("modbus", config, Some(&args))
+    let runner = SensorRunner::new_with_args("modbus", source.clone(), config, Some(&args))
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -28,7 +29,6 @@ async fn main() -> Result<()> {
 
     // On-demand debug-report (`@/artifact`): bundle redacted config + health +
     // counters. No-op unless `report.enabled` is set in the config.
-    let source = runner.config().modbus.resolved_source();
     let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
         "modbus",
         source.clone(),
@@ -37,18 +37,15 @@ async fn main() -> Result<()> {
     ));
     // Tier-2 directory snapshots. No-op unless enabled in the config.
     let artifacts = runner.config().artifact_limits();
-    let mut runner = runner.with_identity(source.clone()).with_artifacts(
-        source,
-        vec![
-            std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
-                report_source,
-                &artifacts.report,
-            )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
-            std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
-                &artifacts.snapshot,
-            )),
-        ],
-    );
+    let mut runner = runner.with_identity().with_artifacts(vec![
+        std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
+            report_source,
+            &artifacts.report,
+        )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
+        std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
+            &artifacts.snapshot,
+        )),
+    ]);
 
     // Get session and config
     let session = runner.session().clone();

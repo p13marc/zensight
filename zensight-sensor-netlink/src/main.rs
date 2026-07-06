@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
 
     let source = config.netlink.resolved_source();
 
-    let runner = SensorRunner::new_with_args("netlink", config, Some(&args))
+    let runner = SensorRunner::new_with_args("netlink", source.clone(), config, Some(&args))
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
     let format = runner.config().serialization;
@@ -35,18 +35,15 @@ async fn main() -> Result<()> {
         runner.health(),
     ));
     let artifacts = runner.config().artifact_limits();
-    let runner = runner.with_identity(source.clone()).with_artifacts(
-        source.clone(),
-        vec![
-            std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
-                report_source,
-                &artifacts.report,
-            )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
-            std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
-                &artifacts.snapshot,
-            )),
-        ],
-    );
+    let runner = runner.with_identity().with_artifacts(vec![
+        std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
+            report_source,
+            &artifacts.report,
+        )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
+        std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
+            &artifacts.snapshot,
+        )),
+    ]);
 
     let netlink_config = runner.config().netlink.clone();
     let session = runner.session().clone();

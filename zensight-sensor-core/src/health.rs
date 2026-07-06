@@ -115,10 +115,41 @@ pub struct SensorHealth {
     device_liveness: Arc<RwLock<HashMap<String, DeviceState>>>,
     /// Hashed machine-id stamped onto snapshots (identity envelope, #301).
     host_id: RwLock<Option<String>>,
+    /// The instance's `<source>` key segment. When set, control-plane keys are
+    /// host-scoped (`{prefix}/{source}/@/…`); when unset, the legacy
+    /// protocol-scoped shape (`{prefix}/@/…`) is used.
+    source: Option<String>,
     /// Publisher for health metrics.
     publisher: Option<Publisher>,
     /// Liveliness manager for Zenoh presence tokens.
     liveliness_manager: Option<Arc<LivelinessManager>>,
+}
+
+/// Build the health key for one sensor instance:
+/// `{prefix}/{source}/@/health` (legacy `{prefix}/@/health` without a source).
+pub(crate) fn health_key(prefix: &str, source: Option<&str>) -> String {
+    match source {
+        Some(s) => format!("{}/{}/@/health", prefix, s),
+        None => format!("{}/@/health", prefix),
+    }
+}
+
+/// Build the errors key for one sensor instance:
+/// `{prefix}/{source}/@/errors` (legacy `{prefix}/@/errors` without a source).
+pub(crate) fn errors_key(prefix: &str, source: Option<&str>) -> String {
+    match source {
+        Some(s) => format!("{}/{}/@/errors", prefix, s),
+        None => format!("{}/@/errors", prefix),
+    }
+}
+
+/// Build the device-liveness key for one device of one sensor instance:
+/// `{prefix}/{source}/@/devices/{device}/liveness`.
+pub(crate) fn device_liveness_key(prefix: &str, source: Option<&str>, device: &str) -> String {
+    match source {
+        Some(s) => format!("{}/{}/@/devices/{}/liveness", prefix, s, device),
+        None => format!("{}/@/devices/{}/liveness", prefix, device),
+    }
 }
 
 /// Device state for liveness tracking.
@@ -186,6 +217,12 @@ pub struct HealthSnapshot {
     /// Hashed machine-id of the publishing host (identity envelope, #301).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_id: Option<String>,
+    /// The `<source>` key segment of this sensor instance — the same value
+    /// that host-scopes its control-plane keys
+    /// (`zensight/<protocol>/<source>/@/health`). Optional for
+    /// mixed-fleet/persisted payloads predating the host-scoped keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// Device liveness information for serialization.
@@ -257,6 +294,7 @@ impl SensorHealth {
             last_poll_duration_ms: AtomicU64::new(0),
             device_liveness: Arc::new(RwLock::new(HashMap::new())),
             host_id: RwLock::new(None),
+            source: None,
             publisher: None,
             liveliness_manager: None,
         }
@@ -265,6 +303,14 @@ impl SensorHealth {
     /// Stamp the host identity onto future snapshots (identity envelope, #301).
     pub fn set_host_id(&self, host_id: Option<String>) {
         *self.host_id.write().expect("host_id lock poisoned") = host_id;
+    }
+
+    /// Set the instance's `<source>` key segment, host-scoping the published
+    /// control-plane keys (`{prefix}/{source}/@/health` etc.) so two hosts
+    /// running the same protocol never collide. The runner always sets this.
+    pub fn with_source(mut self, source: impl Into<String>) -> Self {
+        self.source = Some(source.into());
+        self
     }
 
     /// Set the publisher for health metrics.
@@ -473,6 +519,7 @@ impl SensorHealth {
             errors_last_hour: self.errors_last_hour.count(),
             metrics_published: self.metrics_published.load(Ordering::SeqCst),
             host_id: self.host_id.read().expect("host_id lock poisoned").clone(),
+            source: self.source.clone(),
         }
     }
 
@@ -516,7 +563,7 @@ impl SensorHealth {
         };
 
         let snapshot = self.snapshot();
-        let key = format!("{}/@/health", publisher.key_prefix());
+        let key = health_key(publisher.key_prefix(), self.source.as_deref());
         publisher
             .publish_json(&key, &snapshot, zensight_common::QosClass::HealthLiveness)
             .await
@@ -529,11 +576,8 @@ impl SensorHealth {
         };
 
         if let Some(liveness) = self.device_liveness(device_id) {
-            let key = format!(
-                "{}/@/devices/{}/liveness",
-                publisher.key_prefix(),
-                device_id
-            );
+            let key =
+                device_liveness_key(publisher.key_prefix(), self.source.as_deref(), device_id);
             publisher
                 .publish_json(&key, &liveness, zensight_common::QosClass::HealthLiveness)
                 .await?;
@@ -548,7 +592,7 @@ impl SensorHealth {
             return Ok(());
         };
 
-        let key = format!("{}/@/errors", publisher.key_prefix());
+        let key = errors_key(publisher.key_prefix(), self.source.as_deref());
         publisher
             .publish_json(&key, report, zensight_common::QosClass::HealthLiveness)
             .await
@@ -713,5 +757,39 @@ mod tests {
         health.record_metrics_published(5);
 
         assert_eq!(health.snapshot().metrics_published, 15);
+    }
+
+    /// Multi-host pin: with a source the control-plane keys are host-scoped
+    /// (`{prefix}/{source}/@/…`); without one they keep the legacy
+    /// protocol-scoped shape for standalone/legacy uses.
+    #[test]
+    fn test_control_plane_keys_are_host_scoped() {
+        assert_eq!(
+            health_key("zensight/sysinfo", Some("hostA")),
+            "zensight/sysinfo/hostA/@/health"
+        );
+        assert_eq!(
+            health_key("zensight/sysinfo", None),
+            "zensight/sysinfo/@/health"
+        );
+        assert_eq!(
+            errors_key("zensight/sysinfo", Some("hostA")),
+            "zensight/sysinfo/hostA/@/errors"
+        );
+        assert_eq!(
+            device_liveness_key("zensight/snmp", Some("poller01"), "router01"),
+            "zensight/snmp/poller01/@/devices/router01/liveness"
+        );
+        assert_eq!(
+            device_liveness_key("zensight/snmp", None, "router01"),
+            "zensight/snmp/@/devices/router01/liveness"
+        );
+    }
+
+    #[test]
+    fn test_snapshot_carries_source() {
+        let health = SensorHealth::new("sysinfo").with_source("hostA");
+        assert_eq!(health.snapshot().source.as_deref(), Some("hostA"));
+        assert_eq!(SensorHealth::new("sysinfo").snapshot().source, None);
     }
 }

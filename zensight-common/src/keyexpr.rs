@@ -108,7 +108,10 @@ impl KeyExprBuilder {
         format!("{}/{}/**", self.prefix, self.protocol.as_str())
     }
 
-    /// Build a key expression for sensor status.
+    /// Build a key expression for one sensor instance's lifecycle status.
+    ///
+    /// Host-scoped: two hosts running the same protocol publish distinct
+    /// status keys (see `docs/KEYSPACE.md`).
     ///
     /// # Example
     /// ```
@@ -116,11 +119,16 @@ impl KeyExprBuilder {
     /// use zensight_common::telemetry::Protocol;
     ///
     /// let builder = KeyExprBuilder::new(Protocol::Snmp);
-    /// let key = builder.status_key();
-    /// assert_eq!(key, "zensight/snmp/@/status");
+    /// let key = builder.status_key("poller01");
+    /// assert_eq!(key, "zensight/snmp/poller01/@/status");
     /// ```
-    pub fn status_key(&self) -> String {
-        format!("{}/{}/@/status", self.prefix, self.protocol.as_str())
+    pub fn status_key(&self, source: &str) -> String {
+        format!(
+            "{}/{}/{}/@/status",
+            self.prefix,
+            self.protocol.as_str(),
+            source
+        )
     }
 
     /// Build a key expression for a single keyed alert.
@@ -160,46 +168,108 @@ pub fn all_telemetry_wildcard() -> String {
     format!("{}/**", KEY_PREFIX)
 }
 
+/// Build the control prefix for one sensor *instance*: `zensight/<protocol>/<source>`.
+///
+/// Every per-instance state channel (`@/health`, `@/errors`, `@/status`,
+/// `@/alive`, `@/devices/**`) hangs off this prefix, so two hosts running the
+/// same protocol never collide (they publish e.g.
+/// `zensight/sysinfo/hostA/@/health` vs `zensight/sysinfo/hostB/@/health`).
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::sensor_control_prefix;
+///
+/// assert_eq!(sensor_control_prefix("sysinfo", "host1"), "zensight/sysinfo/host1");
+/// ```
+pub fn sensor_control_prefix(protocol: &str, source: &str) -> String {
+    format!("{}/{}/{}", KEY_PREFIX, protocol, source)
+}
+
 /// Build a wildcard key expression for all sensor health data.
 ///
-/// Matches: `zensight/<protocol>/@/health`
+/// Matches: `zensight/<protocol>/<source>/@/health`
 ///
 /// # Example
 /// ```
 /// use zensight_common::keyexpr::all_health_wildcard;
 ///
-/// assert_eq!(all_health_wildcard(), "zensight/*/@/health");
+/// assert_eq!(all_health_wildcard(), "zensight/*/*/@/health");
 /// ```
 pub fn all_health_wildcard() -> String {
-    format!("{}/*/@/health", KEY_PREFIX)
+    format!("{}/*/*/@/health", KEY_PREFIX)
 }
 
 /// Build a wildcard key expression for all device liveness data.
 ///
-/// Matches: `zensight/<protocol>/@/devices/<device>/liveness`
+/// Matches: `zensight/<protocol>/<source>/@/devices/<device>/liveness`
 ///
 /// # Example
 /// ```
 /// use zensight_common::keyexpr::all_liveness_wildcard;
 ///
-/// assert_eq!(all_liveness_wildcard(), "zensight/*/@/devices/*/liveness");
+/// assert_eq!(all_liveness_wildcard(), "zensight/*/*/@/devices/*/liveness");
 /// ```
 pub fn all_liveness_wildcard() -> String {
-    format!("{}/*/@/devices/*/liveness", KEY_PREFIX)
+    format!("{}/*/*/@/devices/*/liveness", KEY_PREFIX)
 }
 
 /// Build a wildcard key expression for all sensor error reports.
 ///
-/// Matches: `zensight/<protocol>/@/errors`
+/// Matches: `zensight/<protocol>/<source>/@/errors`
 ///
 /// # Example
 /// ```
 /// use zensight_common::keyexpr::all_errors_wildcard;
 ///
-/// assert_eq!(all_errors_wildcard(), "zensight/*/@/errors");
+/// assert_eq!(all_errors_wildcard(), "zensight/*/*/@/errors");
 /// ```
 pub fn all_errors_wildcard() -> String {
-    format!("{}/*/@/errors", KEY_PREFIX)
+    format!("{}/*/*/@/errors", KEY_PREFIX)
+}
+
+/// Build a wildcard key expression for every host-scoped control-plane key
+/// (`@/health`, `@/errors`, `@/status`, `@/alive`, `@/devices/**`, …).
+///
+/// Matches: `zensight/<protocol>/<source>/@/**`. Does NOT match the
+/// protocol-scoped channels (`zensight/<protocol>/@/alerts/*`), the telemetry
+/// firehose, or the `@media`/`@pdns` planes — pinned by tests below.
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::all_control_wildcard;
+///
+/// assert_eq!(all_control_wildcard(), "zensight/*/*/@/**");
+/// ```
+pub fn all_control_wildcard() -> String {
+    format!("{}/*/*/@/**", KEY_PREFIX)
+}
+
+/// Build a wildcard key expression for all sensor-instance liveliness tokens.
+///
+/// Matches: `zensight/<protocol>/<source>/@/alive`
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::all_sensor_alive_wildcard;
+///
+/// assert_eq!(all_sensor_alive_wildcard(), "zensight/*/*/@/alive");
+/// ```
+pub fn all_sensor_alive_wildcard() -> String {
+    format!("{}/*/*/@/alive", KEY_PREFIX)
+}
+
+/// Build a wildcard key expression for all device liveliness tokens.
+///
+/// Matches: `zensight/<protocol>/<source>/@/devices/<device>/alive`
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::all_device_alive_wildcard;
+///
+/// assert_eq!(all_device_alive_wildcard(), "zensight/*/*/@/devices/*/alive");
+/// ```
+pub fn all_device_alive_wildcard() -> String {
+    format!("{}/*/*/@/devices/*/alive", KEY_PREFIX)
 }
 
 /// Build a wildcard key expression for all sensor discovery data.
@@ -658,6 +728,58 @@ mod tests {
         );
     }
 
+    /// Multi-host acceptance pin: the host-scoped control plane
+    /// (`zensight/<proto>/<source>/@/…`) must be (a) invisible to the telemetry
+    /// firehose, (b) matched by the scoped control wildcard, and (c) NOT
+    /// matched by the legacy protocol-scoped control wildcard — the GUI keeps a
+    /// subscriber on each shape (legacy for `@/alerts/*` + old sensors, scoped
+    /// for per-instance state), and this non-intersection is what guarantees a
+    /// concrete key is never double-delivered.
+    #[test]
+    fn scoped_control_plane_is_disjoint_from_telemetry_and_legacy_control() {
+        use zenoh::key_expr::KeyExpr;
+        let telemetry = KeyExpr::try_from(all_telemetry_wildcard()).unwrap();
+        let legacy_control = KeyExpr::try_from("zensight/*/@/**").unwrap();
+        let scoped_control = KeyExpr::try_from(all_control_wildcard()).unwrap();
+
+        for key in [
+            "zensight/sysinfo/host1/@/health",
+            "zensight/sysinfo/host1/@/errors",
+            "zensight/sysinfo/host1/@/status",
+            "zensight/sysinfo/host1/@/alive",
+            "zensight/snmp/poller01/@/devices/router01/liveness",
+            "zensight/snmp/poller01/@/devices/router01/alive",
+        ] {
+            let k = KeyExpr::try_from(key).unwrap();
+            assert!(
+                !telemetry.intersects(&k),
+                "zensight/** must not match {key}"
+            );
+            assert!(
+                scoped_control.intersects(&k),
+                "zensight/*/*/@/** must match {key}"
+            );
+            assert!(
+                !legacy_control.intersects(&k),
+                "legacy zensight/*/@/** must not match {key} — dual subscribers must never double-deliver"
+            );
+        }
+
+        // The scoped control wildcard must not stray onto the other planes.
+        for key in [
+            "zensight/sysinfo/host1/cpu/usage",                 // telemetry
+            "zensight/netlink/@/alerts/abcd1234",               // protocol-scoped alerts (deferred)
+            "zensight/netring/host01/@media/cam0/preview/jpeg", // media plane
+            "zensight/@pdns/10-0-0-9",                          // pdns plane
+        ] {
+            let k = KeyExpr::try_from(key).unwrap();
+            assert!(
+                !scoped_control.intersects(&k),
+                "zensight/*/*/@/** must not match {key}"
+            );
+        }
+    }
+
     #[test]
     fn test_key_builder() {
         let builder = KeyExprBuilder::new(Protocol::Snmp);
@@ -674,7 +796,18 @@ mod tests {
 
         assert_eq!(builder.protocol_wildcard(), "zensight/snmp/**");
 
-        assert_eq!(builder.status_key(), "zensight/snmp/@/status");
+        assert_eq!(
+            builder.status_key("poller01"),
+            "zensight/snmp/poller01/@/status"
+        );
+    }
+
+    #[test]
+    fn test_sensor_control_prefix() {
+        assert_eq!(
+            sensor_control_prefix("sysinfo", "host1"),
+            "zensight/sysinfo/host1"
+        );
     }
 
     #[test]

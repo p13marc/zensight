@@ -42,9 +42,10 @@ async fn main() -> Result<()> {
 
     // Load configuration
     let config = SyslogSensorConfig::load_from_file(&args.config)?;
+    let source = config.syslog.resolved_source();
 
     // Create the sensor runner
-    let runner = SensorRunner::new_with_args("logs", config, Some(&args))
+    let runner = SensorRunner::new_with_args("logs", source.clone(), config, Some(&args))
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -53,7 +54,6 @@ async fn main() -> Result<()> {
 
     // On-demand debug-report (`@/artifact`): bundle redacted config + health +
     // counters. No-op unless `report.enabled` is set in the config.
-    let source = runner.config().syslog.resolved_source();
     let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
         "logs",
         source.clone(),
@@ -62,18 +62,15 @@ async fn main() -> Result<()> {
     ));
     // Tier-2 directory snapshots (`@/artifact`). No-op unless `snapshot.enabled`.
     let artifacts = runner.config().artifact_limits();
-    let runner = runner.with_identity(source.clone()).with_artifacts(
-        source.clone(),
-        vec![
-            std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
-                report_source,
-                &artifacts.report,
-            )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
-            std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
-                &artifacts.snapshot,
-            )),
-        ],
-    );
+    let runner = runner.with_identity().with_artifacts(vec![
+        std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
+            report_source,
+            &artifacts.report,
+        )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
+        std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
+            &artifacts.snapshot,
+        )),
+    ]);
 
     // Get session and config for the receiver
     let session = runner.session().clone();

@@ -62,9 +62,11 @@ impl SensorStatus {
 
     /// Publish this status to Zenoh.
     ///
-    /// Publishes to `{key_prefix}/@/status`.
-    pub async fn publish(&self, publisher: &Publisher) -> Result<()> {
-        let key = format!("{}/@/status", publisher.key_prefix());
+    /// Publishes to `{control_prefix}/@/status`, where the control prefix is
+    /// the host-scoped instance prefix (`zensight/<protocol>/<source>`) so two
+    /// hosts running the same protocol never overwrite each other's status.
+    pub async fn publish(&self, publisher: &Publisher, control_prefix: &str) -> Result<()> {
+        let key = format!("{}/@/status", control_prefix);
         publisher
             .publish_json(&key, self, zensight_common::QosClass::Command)
             .await
@@ -74,6 +76,9 @@ impl SensorStatus {
 /// Helper to publish sensor status on startup and shutdown.
 pub struct StatusPublisher {
     publisher: Publisher,
+    /// Host-scoped instance prefix (`zensight/<protocol>/<source>`) the
+    /// `@/status` key hangs off.
+    control_prefix: String,
     sensor_name: String,
     version: String,
 }
@@ -82,11 +87,13 @@ impl StatusPublisher {
     /// Create a new status publisher.
     pub fn new(
         publisher: Publisher,
+        control_prefix: impl Into<String>,
         sensor_name: impl Into<String>,
         version: impl Into<String>,
     ) -> Self {
         Self {
             publisher,
+            control_prefix: control_prefix.into(),
             sensor_name: sensor_name.into(),
             version: version.into(),
         }
@@ -98,13 +105,13 @@ impl StatusPublisher {
         if let Some(meta) = metadata {
             status = status.with_metadata(meta);
         }
-        status.publish(&self.publisher).await
+        status.publish(&self.publisher, &self.control_prefix).await
     }
 
     /// Publish "offline" status.
     pub async fn publish_offline(&self) -> Result<()> {
         SensorStatus::offline(&self.sensor_name, &self.version)
-            .publish(&self.publisher)
+            .publish(&self.publisher, &self.control_prefix)
             .await
     }
 }

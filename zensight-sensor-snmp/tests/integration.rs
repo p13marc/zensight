@@ -111,10 +111,11 @@ fn test_interface_index_metrics() {
     }
 }
 
-/// Test that the sensor status key is correct.
+/// Test that the sensor status key is correct — host-scoped by the instance's
+/// `<source>` segment so two pollers never overwrite each other's status.
 #[test]
 fn test_sensor_status_key() {
     let builder = KeyExprBuilder::new(Protocol::Snmp);
-    let status_key = builder.status_key();
-    assert_eq!(status_key, "zensight/snmp/@/status");
+    let status_key = builder.status_key("poller01");
+    assert_eq!(status_key, "zensight/snmp/poller01/@/status");
 }
