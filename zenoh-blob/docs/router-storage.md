@@ -31,13 +31,31 @@ complicate a mutable storage (contrast the identity stores in
 
 ## How it fits together
 
-```
-producer (sensor)                 router (storage-manager)            consumer (GUI)
-  build_tree(dir)                   storage on                          TreeClient
-  publish_snapshot(...)  ──PUT──▶   zensight/_blob/store/**   ◀──GET──  .download_tree(id)
-     ├─ publish_chunks              zensight/_blob/tree/**                 ├─ fetch_index
-     └─ publish_index               (persisted to disk)                   ├─ missing = needed − have
-  (then exits)                                                            └─ fetch each missing by hash
+```mermaid
+flowchart LR
+    subgraph Producer["producer (sensor)"]
+        BT["build_tree(dir)"] --> PS["publish_snapshot(...)"]
+        PS --> PC["publish_chunks"]
+        PS --> PI["publish_index"]
+        PC --> EX["(then exits)"]
+        PI --> EX
+    end
+
+    subgraph Storage["router (storage-manager)"]
+        ST["zensight/_blob/store/** — chunks, persisted to disk"]
+        TR["zensight/_blob/tree/** — index, persisted to disk"]
+    end
+
+    subgraph Consumer["consumer (GUI)"]
+        DT["TreeClient.download_tree(id)"] --> FI["fetch_index"]
+        FI --> MI["missing = needed − have"]
+        MI --> FE["fetch each missing by hash"]
+    end
+
+    PC -->|"PUT"| ST
+    PI -->|"PUT"| TR
+    FI -->|"GET"| TR
+    FE -->|"GET"| ST
 ```
 
 `zenoh-blob` provides the producer side:

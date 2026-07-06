@@ -77,6 +77,14 @@ pub struct Alert {
   `Put(Firing)` to raise/update, a `Put(Resolved)` then a Zenoh `Delete`
   tombstone to clear.
 
+```mermaid
+stateDiagram-v2
+    [*] --> Firing : Put(Firing)
+    Firing --> Firing : Put(Firing) (refresh/update)
+    Firing --> Resolved : Put(Resolved)
+    Resolved --> [*] : Delete (tombstone)
+```
+
 ### alert_key
 
 `Alert::alert_key()` derives the stable key segment from `source` + `rule` +

@@ -9,12 +9,14 @@ evidence into one **entity** per host. This page describes the wire types in
 
 ## The pipeline
 
-```
-sensors ──HostEvidence / NameObservation──▶  _meta/evidence/**
-                                                    │
-                                            correlator (single writer)
-                                                    │
-                                     HostEntity ──▶ _meta/entity/host/<id>
+```mermaid
+flowchart LR
+    Self["self-report sensor (observer: None)"] -->|"HostEvidence"| Evidence["_meta/evidence/**"]
+    Third["third-party observer (observer: Some(sensor))"] -->|"HostEvidence"| Evidence
+    Third -->|"NameObservation"| Evidence
+    Evidence --> Correlator["correlator (single writer)"]
+    Correlator -->|"HostEntity"| Entity["_meta/entity/host/&lt;id&gt;"]
+    Correlator -->|"PdnsRecord"| Pdns["@pdns/&lt;ip-slug&gt; (durable, #310)"]
 ```
 
 Evidence is a **claim, not a verdict**. Two provenance kinds, distinguished by the

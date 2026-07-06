@@ -492,6 +492,31 @@ Values pass through unchanged (utilization stays the sensor's 0–100 percent, n
 
 ## 6. Full tree at a glance
 
+The four key-planes, visually:
+
+```mermaid
+mindmap
+  root(("zensight bus"))
+    Telemetry
+      "zensight/&lt;protocol&gt;/&lt;source&gt;/&lt;metric&gt;"
+      TelemetryPoint
+    "Control-plane (@/, verbatim)"
+      "zensight/&lt;protocol&gt;/@/**"
+      "health, errors, status, alive"
+      "alerts/&lt;alert_key&gt;"
+      "commands, query, status, artifact/**"
+    "Metadata (_meta/)"
+      "sensors/&lt;name&gt;/&lt;source&gt;"
+      "evidence/host, evidence/names"
+      "entity/host/&lt;entity_id&gt;"
+      "query/entities, query/names"
+    "Verbatim media + pdns"
+      "@media/** (video, preview, #359)"
+      "@pdns/&lt;ip-slug&gt; (PdnsRecord, #310)"
+```
+
+And the annotated tree, chunk by chunk:
+
 ```
 zensight/
 ├── <protocol>/

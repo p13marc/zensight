@@ -64,6 +64,39 @@ they are overlays, not `CurrentView` variants:
 
 Toast notifications (`view/toast.rs`) are a fourth transient overlay surface.
 
+```mermaid
+flowchart TB
+    subgraph Shell["persistent shell (view/shell.rs)"]
+        Nav["left nav rail"]
+        Top["top bar"]
+        subgraph Content["content region — one CurrentView variant at a time"]
+            V1["Dashboard"]
+            V2["Device"]
+            V3["Settings"]
+            V4["Alerts"]
+            V5["Topology"]
+            V6["Expectations"]
+            V7["Security"]
+            V8["Sensors"]
+            V9["Logs"]
+            V10["Inventory"]
+            V11["Incidents"]
+            V12["Bandwidth"]
+        end
+        Nav --> Content
+        Top --> Content
+    end
+
+    subgraph Overlays["overlays — render on top, not routable"]
+        O1["command palette — Ctrl+P"]
+        O2["fuzzy search — Ctrl+K"]
+        O3["help — ?"]
+        O4["toasts"]
+    end
+
+    Shell --> Overlays
+```
+
 ## View tour
 
 **Dashboard** (`view/dashboard.rs`) — the fleet overview and landing view. Host
