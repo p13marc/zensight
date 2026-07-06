@@ -28,6 +28,10 @@ pub struct ExporterConfig {
     #[serde(default)]
     pub prometheus: PrometheusConfig,
 
+    /// Prometheus remote-write (push) settings. Disabled by default.
+    #[serde(default)]
+    pub remote_write: RemoteWriteConfig,
+
     /// Metric aggregation settings.
     #[serde(default)]
     pub aggregation: AggregationConfig,
@@ -94,6 +98,48 @@ impl Default for PrometheusConfig {
             default_labels: HashMap::new(),
             prefix: default_prefix(),
             export_alerts: default_export_alerts(),
+        }
+    }
+}
+
+/// Prometheus remote-write (push) configuration.
+///
+/// When enabled the exporter periodically snapshots the collector's metric
+/// state and POSTs it to `url` as a snappy-compressed protobuf `WriteRequest`
+/// (Prometheus remote-write 1.0) — for push-based / agent topologies where the
+/// receiver (Grafana Cloud, Mimir, Thanos Receive, VictoriaMetrics, ...)
+/// cannot scrape the exporter. The pull `/metrics` endpoint keeps serving
+/// regardless.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteWriteConfig {
+    /// Enable the push path (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Remote-write endpoint, e.g. "http://mimir:9009/api/v1/push".
+    #[serde(default)]
+    pub url: String,
+
+    /// Push interval in seconds (default: 30).
+    #[serde(default = "default_remote_write_interval")]
+    pub interval_secs: u64,
+
+    /// Extra HTTP headers for each push (e.g. authentication).
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+}
+
+fn default_remote_write_interval() -> u64 {
+    30
+}
+
+impl Default for RemoteWriteConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: String::new(),
+            interval_secs: default_remote_write_interval(),
+            headers: HashMap::new(),
         }
     }
 }
@@ -263,6 +309,23 @@ impl ExporterConfig {
             ));
         }
 
+        // Validate remote-write settings (only when enabled).
+        if self.remote_write.enabled {
+            if !self.remote_write.url.starts_with("http://")
+                && !self.remote_write.url.starts_with("https://")
+            {
+                return Err(ConfigError::Validation(format!(
+                    "remote_write.url must be an http(s) URL, got: {:?}",
+                    self.remote_write.url
+                )));
+            }
+            if self.remote_write.interval_secs == 0 {
+                return Err(ConfigError::Validation(
+                    "remote_write.interval_secs must be > 0".to_string(),
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -377,6 +440,72 @@ mod tests {
 
         let result = ExporterConfig::parse(json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_remote_write_default_disabled() {
+        let config = ExporterConfig::parse("{}").unwrap();
+        assert!(!config.remote_write.enabled);
+        assert_eq!(config.remote_write.interval_secs, 30);
+        assert!(config.remote_write.url.is_empty());
+        assert!(config.remote_write.headers.is_empty());
+    }
+
+    #[test]
+    fn test_remote_write_full_config() {
+        let json = r#"{
+            remote_write: {
+                enabled: true,
+                url: "https://mimir.example.com/api/v1/push",
+                interval_secs: 15,
+                headers: {
+                    "Authorization": "Bearer token123",
+                }
+            }
+        }"#;
+        let config = ExporterConfig::parse(json).unwrap();
+        assert!(config.remote_write.enabled);
+        assert_eq!(
+            config.remote_write.url,
+            "https://mimir.example.com/api/v1/push"
+        );
+        assert_eq!(config.remote_write.interval_secs, 15);
+        assert_eq!(
+            config.remote_write.headers.get("Authorization"),
+            Some(&"Bearer token123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_remote_write_enabled_requires_http_url() {
+        // Missing URL.
+        let result = ExporterConfig::parse(r#"{ remote_write: { enabled: true } }"#);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("remote_write.url"));
+
+        // Non-http scheme.
+        let result = ExporterConfig::parse(
+            r#"{ remote_write: { enabled: true, url: "ftp://example.com" } }"#,
+        );
+        assert!(result.is_err());
+
+        // A bad URL is fine while disabled — validation only applies when on.
+        let result = ExporterConfig::parse(r#"{ remote_write: { url: "not-a-url" } }"#);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_remote_write_zero_interval_rejected() {
+        let result = ExporterConfig::parse(
+            r#"{ remote_write: { enabled: true, url: "http://x:9009/api/v1/push", interval_secs: 0 } }"#,
+        );
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("remote_write.interval_secs")
+        );
     }
 
     #[test]

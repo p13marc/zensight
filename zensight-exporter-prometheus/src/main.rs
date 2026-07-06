@@ -9,7 +9,7 @@ use tracing::{Level, error, info};
 use tracing_subscriber::EnvFilter;
 
 use zensight_exporter_prometheus::{
-    ExporterConfig, HttpServer, MetricCollector, TelemetrySubscriber,
+    ExporterConfig, HttpServer, MetricCollector, RemoteWriteClient, TelemetrySubscriber,
 };
 
 /// Prometheus exporter for ZenSight telemetry.
@@ -137,6 +137,19 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Start remote-write push loop (optional; default off)
+    let remote_write_task = if config.remote_write.enabled {
+        let client = RemoteWriteClient::new(collector.clone(), &config.remote_write)?;
+        let rw_shutdown = shutdown_rx.clone();
+        Some(tokio::spawn(async move {
+            if let Err(e) = client.run(rw_shutdown).await {
+                error!("Remote-write error: {}", e);
+            }
+        }))
+    } else {
+        None
+    };
+
     // Wait for shutdown signal
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
@@ -167,6 +180,9 @@ async fn main() -> anyhow::Result<()> {
         let _ = subscriber_task.await;
         let _ = http_task.await;
         let _ = cleanup_task.await;
+        if let Some(task) = remote_write_task {
+            let _ = task.await;
+        }
     })
     .await;
 

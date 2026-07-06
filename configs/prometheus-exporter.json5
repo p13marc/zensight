@@ -34,6 +34,29 @@
     },
   },
 
+  // Prometheus remote-write (push) — optional, disabled by default.
+  // For push-based / agent topologies where the receiver (Grafana Cloud,
+  // Mimir, Thanos Receive, VictoriaMetrics, ...) cannot scrape the exporter:
+  // every interval the collector's metric state is POSTed as a
+  // snappy-compressed protobuf WriteRequest (remote-write 1.0 protocol).
+  // The pull /metrics endpoint keeps serving regardless.
+  remote_write: {
+    // Enable the push path
+    enabled: false,
+
+    // Remote-write endpoint (required when enabled)
+    // url: "http://mimir:9009/api/v1/push",
+
+    // Push interval in seconds
+    interval_secs: 30,
+
+    // Extra HTTP headers, e.g. for authentication
+    headers: {
+      // "Authorization": "Bearer your-token-here",
+      // "X-Scope-OrgID": "tenant-1",
+    },
+  },
+
   // Metric aggregation settings
   aggregation: {
     // How long to keep metrics without updates before expiring (seconds)

@@ -43,6 +43,11 @@ prometheus-client = "0.25"
 axum = "0.8"
 tower-http = { version = "0.7", features = ["cors"] }
 
+# Remote-write push (protobuf WriteRequest + snappy block compression)
+prost = "0.14"
+snap = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
 # Utilities
 parking_lot = "0.12"
 glob = "0.3"
@@ -50,7 +55,6 @@ glob = "0.3"
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 # =============================================================================
 # Package metadata for cargo-deb

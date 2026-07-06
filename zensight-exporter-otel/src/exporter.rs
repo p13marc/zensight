@@ -2,15 +2,20 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use opentelemetry::logs::{LogRecord as _, Logger, LoggerProvider as _, Severity};
 use opentelemetry::metrics::{Meter, MeterProvider as _};
-use opentelemetry_otlp::{LogExporter, MetricExporter, WithExportConfig};
+use opentelemetry::trace::{SpanContext, SpanId, SpanKind, Status, TraceFlags, TraceId, TraceState};
+use opentelemetry::{InstrumentationScope, KeyValue};
+use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::logs::{SdkLogger, SdkLoggerProvider};
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
-use parking_lot::RwLock;
+use opentelemetry_sdk::trace::{
+    BatchConfig, BatchSpanProcessor, SpanData, SpanEvents, SpanLinks, SpanProcessor,
+};
+use parking_lot::{Mutex, RwLock};
 use tracing::{error, info, trace, warn};
 use zensight_common::alert::{Alert, AlertSeverity, AlertState};
 use zensight_common::telemetry::TelemetryPoint;
@@ -21,6 +26,7 @@ use crate::metrics::{
     OtelMetricType, build_metric_attributes, build_metric_name, build_resource_attributes,
     extract_value, is_log_exportable, is_metric_exportable,
 };
+use crate::traces::{AlertSpan, AlertSpanTracker};
 
 /// Filter for telemetry points.
 pub struct TelemetryFilter {
@@ -84,6 +90,7 @@ pub struct ExporterStats {
     pub metrics_failed: u64,
     pub logs_exported: u64,
     pub alerts_exported: u64,
+    pub spans_exported: u64,
     pub export_errors: u64,
 }
 
@@ -128,6 +135,17 @@ pub struct OtelExporter {
     logger: Option<SdkLogger>,
     /// Cached logger for sensor alerts (scope `zensight.alerts`).
     alert_logger: Option<SdkLogger>,
+    /// Span processor for synthesized alert-lifecycle spans (traces signal).
+    ///
+    /// Spans carry deterministic ids derived from the alert lifecycle, which
+    /// the SDK's tracer/`IdGenerator` path cannot express — so completed
+    /// [`AlertSpan`]s are converted to [`SpanData`] directly and handed to the
+    /// batch processor.
+    span_processor: Option<BatchSpanProcessor>,
+    /// Instrumentation scope stamped on synthesized spans.
+    span_scope: InstrumentationScope,
+    /// Alert lifecycle tracker feeding the traces signal.
+    alert_spans: Option<Mutex<AlertSpanTracker>>,
     /// Whether metrics export is enabled.
     export_metrics: bool,
     /// Whether logs export is enabled.
@@ -175,7 +193,14 @@ impl OtelExporter {
         // The logger pipeline backs both syslog logs and alert events, so
         // initialize it if either is enabled.
         let logger_provider = if otel_config.export_logs || otel_config.export_alerts {
-            Some(Self::init_logger_provider(otel_config, resource).await?)
+            Some(Self::init_logger_provider(otel_config, resource.clone()).await?)
+        } else {
+            None
+        };
+
+        // Initialize the span pipeline if the traces signal is enabled.
+        let span_processor = if otel_config.traces.enabled {
+            Some(Self::init_span_processor(otel_config, &resource)?)
         } else {
             None
         };
@@ -196,12 +221,20 @@ impl OtelExporter {
             None
         };
 
+        let alert_spans = otel_config
+            .traces
+            .enabled
+            .then(|| Mutex::new(AlertSpanTracker::new()));
+
         Ok(Self {
             meter_provider,
             meter,
             logger_provider,
             logger,
             alert_logger,
+            span_processor,
+            span_scope: InstrumentationScope::builder("zensight.alerts").build(),
+            alert_spans,
             export_metrics: otel_config.export_metrics,
             export_logs: otel_config.export_logs,
             export_alerts: otel_config.export_alerts,
