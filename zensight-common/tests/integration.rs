@@ -86,6 +86,7 @@ fn test_all_protocol_variants() {
         (Protocol::Opcua, "opcua"),
         (Protocol::Modbus, "modbus"),
         (Protocol::Systemd, "systemd"),
+        (Protocol::Parallax, "parallax"),
     ];
 
     for (protocol, expected_str) in protocols {

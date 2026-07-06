@@ -2,6 +2,9 @@
 
 use std::sync::Arc;
 
+use zenoh::bytes::{Encoding, ZBytes};
+use zenoh::handlers::DefaultHandler;
+use zenoh::matching::MatchingListenerBuilder;
 use zensight_common::{Format, QosClass, TelemetryPoint};
 
 use crate::advanced_publisher::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
@@ -155,6 +158,103 @@ impl Publisher {
             .await
             .map_err(|e| SensorError::Publish {
                 key: key.to_string(),
+                message: e.to_string(),
+            })
+    }
+
+    /// Declare a **plain** (NOT advanced) publisher for the opaque `@media` plane
+    /// (#359) at an absolute `key` (e.g. from
+    /// [`zensight_common::keyexpr::media_video_key`]).
+    ///
+    /// Unlike the telemetry path, media samples are raw encoded access units —
+    /// no `TelemetryPoint`/`Format` envelope, no zenoh-ext cache/recovery — so
+    /// this deliberately bypasses the [`AdvancedPublisherRegistry`]. The
+    /// publisher is declared with [`QosClass::LiveVideo`] (best-effort, drop,
+    /// interactive-high): a stale frame is worthless, and the encoder must never
+    /// block. Each [`RawMediaPublisher::put`] carries its own [`Encoding`]
+    /// (e.g. `video/h264`, `image/jpeg`) and a frame-metadata attachment; the
+    /// [`RawMediaPublisher::matching_listener`] fires when a viewer appears so
+    /// the sensor can force an immediate keyframe.
+    pub async fn raw_media_publisher(&self, key: impl Into<String>) -> Result<RawMediaPublisher> {
+        let key = key.into();
+        let qos = QosClass::LiveVideo;
+        let inner = self
+            .session
+            .declare_publisher(key.clone())
+            .congestion_control(qos.congestion_control())
+            .priority(qos.priority())
+            .express(qos.express())
+            .reliability(qos.reliability())
+            .await
+            .map_err(|e| SensorError::Publish {
+                key: key.clone(),
+                message: e.to_string(),
+            })?;
+        Ok(RawMediaPublisher { key, inner })
+    }
+}
+
+/// A plain Zenoh publisher for one media-plane key (#359).
+///
+/// Wraps a declared [`zenoh::pubsub::Publisher`] carrying raw, opaque encoded
+/// media (never a `TelemetryPoint`). Obtain one from
+/// [`Publisher::raw_media_publisher`].
+pub struct RawMediaPublisher {
+    key: String,
+    inner: zenoh::pubsub::Publisher<'static>,
+}
+
+impl std::fmt::Debug for RawMediaPublisher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawMediaPublisher")
+            .field("key", &self.key)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RawMediaPublisher {
+    /// The absolute key this publisher writes to.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// Publish one encoded access unit (opaque bytes) with its `encoding`
+    /// (e.g. `Encoding::VIDEO_H264`, `Encoding::IMAGE_JPEG`) and a frame-metadata
+    /// `attachment` (keyframe flag, PTS, sequence, …). No serialization envelope
+    /// — the payload is the wire bytes.
+    pub async fn put(
+        &self,
+        payload: Vec<u8>,
+        encoding: Encoding,
+        attachment: ZBytes,
+    ) -> Result<()> {
+        self.inner
+            .put(payload)
+            .encoding(encoding)
+            .attachment(attachment)
+            .await
+            .map_err(|e| SensorError::Publish {
+                key: self.key.clone(),
+                message: e.to_string(),
+            })
+    }
+
+    /// Return a builder for a matching listener that fires whenever this
+    /// publisher gains or loses matching subscribers. The sensor uses the
+    /// rising edge (a viewer appeared) to force a keyframe so late joiners get a
+    /// decodable picture immediately.
+    pub fn matching_listener(&self) -> MatchingListenerBuilder<'_, DefaultHandler> {
+        self.inner.matching_listener()
+    }
+
+    /// Whether this publisher currently has at least one matching subscriber.
+    pub async fn has_viewers(&self) -> Result<bool> {
+        self.inner
+            .matching_status()
+            .await
+            .map(|s| s.matching())
+            .map_err(|e| SensorError::Publish {
+                key: self.key.clone(),
                 message: e.to_string(),
             })
     }

@@ -48,7 +48,7 @@ default for the telemetry envelope, (d) **declaring every pub/sub and banning ra
 | **R5** | **Declare every pub/sub; ban raw `session.put()`/`session.delete()`** — route all publication through a declared-`Publisher` registry | Interns keyexpr → numeric id **and primes router routing tables**; no full-key-string-per-sample anywhere | M | Low |
 | **R6** | **Tame the firehose consumer-side**: exporters subscribe selectively; GUI gains protocol/source scoping + a low-bandwidth mode (no `history()/recovery()`) | The GUI + both exporters hard-wire `zensight/**` (+ a history burst at connect) | M | Med |
 | **R7** | **Move high-cardinality log events off the streamed bus** (`events/<uid>` → pull/queryable or an opt-out subtree) | Violates the KEYSPACE "detail served on request" rule; dominates a slow link | M | Med |
-| **R9** | **Media/video plane**: opaque `@media` keyspace, no serialization envelope, `BestEffort+Drop`, declared per-stream pub/sub, request-driven; frontend gains video display | Lets ZenSight carry/show video **without** the firehose ever touching telemetry consumers | L | Med |
+| **R9** ✅ *(enabler landed, #359)* | **Media/video plane**: opaque `@media` keyspace, no serialization envelope, `QosClass::LiveVideo` (`BestEffort+Drop+InteractiveHigh`), plain per-stream pub/sub with keyframe-on-subscribe, stream control on `@/commands\|query\|status/stream(s)`; frontend gains video display | Lets ZenSight carry/show video **without** the firehose ever touching telemetry consumers | L | Med |
 | **R8** | *(deeper, optional)* Reconsider AdvancedPublisher for telemetry entirely — serve GUI late-join history from the local store / a queryable | Removes per-key caches + recovery from hundreds of keys | L | Med–High |
 
 R1–R4 are the quick, safe, high-leverage wins. R5–R7 are the firehose + declarations. R9 is
@@ -250,6 +250,22 @@ opt-out subtree the GUI can exclude by default. The one telemetry-side keyspace 
 teeth.
 
 ### R9 — Media/video plane (opaque, request-driven; parallax)
+
+> **Status — zenoh-side enabler landed (#359).** Shipped: `media_video_key()` /
+> `media_preview_key()` on the `@media` verbatim sibling (guard tests pin that
+> `zensight/**` and `zensight/*/@/**` both miss it); `QosClass::LiveVideo`
+> (`BestEffort+Drop+InteractiveHigh`, express off); `Publisher::raw_media_publisher()`
+> → `RawMediaPublisher` (plain publisher; `put(bytes, Encoding, attachment)`;
+> `matching_listener()` for **keyframe-on-subscribe** — option (a) below); stream
+> control types (`StreamControl`/`StreamDescriptor`/`StreamStatus`) carried in
+> `Command<T>` on `@/commands/stream` + `@/query|status/streams`; both exporters'
+> `is_telemetry_key` now reject **any** `@`-prefixed chunk (regression-tested); an
+> e2e test drives catalogue-query → OpenStream → matching-listener keyframe. The
+> **frontend** gained the iced `image` feature (JPEG-only codec, no AVIF/ravif),
+> `Protocol::Parallax`, and `view/specialized/parallax.rs` (placeholder preview +
+> a `preview_handle_from_jpeg` decode seam). Still out of scope: the
+> H.264/parallax encoder daemon and the live media-subscription pipeline feeding
+> real frames into the GUI.
 
 ZenSight must carry and display video (the parallax sensor). Video is opaque, high-rate, and
 loss-tolerant — a different plane from telemetry. Add it as a first-class, invisible sibling

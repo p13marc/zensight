@@ -15,10 +15,13 @@ use crate::exporter::SharedExporter;
 /// Default key expression to subscribe to.
 pub const DEFAULT_KEY_EXPR: &str = "zensight/**";
 
-/// Whether a key carries a [`TelemetryPoint`]. Control/metadata channels
-/// (`.../@/...` and `zensight/_meta/...`) do not.
+/// Whether a key carries a [`TelemetryPoint`]. Control/metadata channels do
+/// not: any `@`-prefixed chunk (`.../@/...` control plane, but also the opaque
+/// `.../@media/...` plane, #359) and `zensight/_meta/...`. Rejecting every
+/// `@`-prefixed segment — not just the literal `/@/` — keeps raw media bytes
+/// from ever being fed to the TelemetryPoint decoder.
 pub(crate) fn is_telemetry_key(key: &str) -> bool {
-    !key.contains("/@/") && !key.starts_with("zensight/_meta/")
+    !key.starts_with("zensight/_meta/") && !key.split('/').any(|chunk| chunk.starts_with('@'))
 }
 
 /// Statistics for the subscriber.
@@ -270,6 +273,22 @@ mod tests {
         assert!(!is_telemetry_key("zensight/netlink/@/alerts/foo-00"));
         assert!(!is_telemetry_key("zensight/snmp/@/health"));
         assert!(!is_telemetry_key("zensight/_meta/sensors/snmp"));
+    }
+
+    /// #359 regression: the media plane rides `@media/...` chunks. The old
+    /// predicate only rejected the literal `/@/`, which would have let opaque
+    /// media samples through to the TelemetryPoint decoder if the subscription
+    /// ever covered them. Any `@`-prefixed chunk is non-telemetry.
+    #[test]
+    fn media_plane_keys_are_not_telemetry() {
+        assert!(!is_telemetry_key(
+            "zensight/netring/host01/@media/cam0/video/h264/main"
+        ));
+        assert!(!is_telemetry_key(
+            "zensight/netring/host01/@media/cam0/preview/jpeg"
+        ));
+        // ...while stream *stats* are ordinary telemetry.
+        assert!(is_telemetry_key("zensight/netring/host01/cam0/stats/fps"));
     }
 
     /// The telemetry wildcard `zensight/**` must NOT match `@/alerts/*` (Zenoh

@@ -9,7 +9,10 @@ repository.workspace = true
 [dependencies]
 # Workspace dependencies
 zensight-common = { workspace = true }
-zenoh = { workspace = true }
+# `internal` gates the per-publication `.encoding()` / `.attachment()` builder
+# methods used by the raw media-plane publisher (#359). zenoh-ext already pulls
+# it in; we depend on it explicitly rather than relying on feature unification.
+zenoh = { workspace = true, features = ["internal"] }
 zenoh-ext = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

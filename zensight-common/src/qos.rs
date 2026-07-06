@@ -40,13 +40,20 @@ pub enum QosClass {
     Entity,
     /// Queryable replies / on-demand bulk detail — reliable, but low priority (bulk).
     Query,
+    /// Live media (`@media` plane, #359): opaque access units, superseded by the
+    /// next frame. Drop-friendly but latency-sensitive — a stale frame is
+    /// worthless, so it rides ahead of telemetry at `InteractiveHigh` while still
+    /// dropping (never blocking the encoder) under congestion.
+    LiveVideo,
 }
 
 impl QosClass {
     /// Reliability: best-effort for superseded streams, reliable for must-arrive.
     pub fn reliability(self) -> Reliability {
         match self {
-            QosClass::Telemetry | QosClass::HealthLiveness => Reliability::BestEffort,
+            QosClass::Telemetry | QosClass::HealthLiveness | QosClass::LiveVideo => {
+                Reliability::BestEffort
+            }
             _ => Reliability::Reliable,
         }
     }
@@ -54,7 +61,9 @@ impl QosClass {
     /// Congestion control: drop the superseded, block (back-pressure) the must-arrive.
     pub fn congestion_control(self) -> CongestionControl {
         match self {
-            QosClass::Telemetry | QosClass::HealthLiveness => CongestionControl::Drop,
+            QosClass::Telemetry | QosClass::HealthLiveness | QosClass::LiveVideo => {
+                CongestionControl::Drop
+            }
             _ => CongestionControl::Block,
         }
     }
@@ -64,7 +73,7 @@ impl QosClass {
         match self {
             QosClass::Telemetry => Priority::DataLow,
             QosClass::HealthLiveness => Priority::Data,
-            QosClass::Alert | QosClass::Command => Priority::InteractiveHigh,
+            QosClass::Alert | QosClass::Command | QosClass::LiveVideo => Priority::InteractiveHigh,
             QosClass::Evidence | QosClass::Entity => Priority::Data,
             QosClass::Query => Priority::DataLow,
         }
@@ -104,6 +113,18 @@ mod tests {
             assert_eq!(q.congestion_control(), CongestionControl::Block);
             assert_eq!(q.reliability(), Reliability::Reliable);
         }
+    }
+
+    /// #359: live video is loss-tolerant (drop, best-effort — never block the
+    /// encoder) but latency-sensitive (interactive-high, ahead of telemetry).
+    /// Express stays off: batching still wins on a constrained link.
+    #[test]
+    fn live_video_is_drop_besteffort_interactive_high() {
+        let q = QosClass::LiveVideo;
+        assert_eq!(q.congestion_control(), CongestionControl::Drop);
+        assert_eq!(q.reliability(), Reliability::BestEffort);
+        assert_eq!(q.priority(), Priority::InteractiveHigh);
+        assert!(!q.express());
     }
 
     #[test]

@@ -254,6 +254,11 @@ pub fn protocol_systemd<Message: 'static>(size: IconSize) -> Element<'static, Me
     svg_icon(include_bytes!("protocol-systemd.svg"), size)
 }
 
+/// Parallax (live video / media plane, #359) protocol icon.
+pub fn protocol_parallax<Message: 'static>(size: IconSize) -> Element<'static, Message> {
+    svg_icon(include_bytes!("protocol-parallax.svg"), size)
+}
+
 /// Generic protocol icon (gray info circle).
 pub fn protocol_generic<Message: 'static>(size: IconSize) -> Element<'static, Message> {
     svg_icon(include_bytes!("protocol-generic.svg"), size)
@@ -275,6 +280,7 @@ pub fn protocol_icon<Message: 'static>(
         zensight_common::Protocol::Netlink => protocol_netlink(size),
         zensight_common::Protocol::Netring => protocol_netring(size),
         zensight_common::Protocol::Systemd => protocol_systemd(size),
+        zensight_common::Protocol::Parallax => protocol_parallax(size),
     }
 }
 

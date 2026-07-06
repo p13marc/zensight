@@ -120,6 +120,7 @@ pub fn overview_section<'a>(
             Protocol::Netring => netring::netring_overview(&protocol_devices),
             Protocol::Opcua => generic_overview(&protocol_devices, "OPC-UA nodes"),
             Protocol::Systemd => generic_overview(&protocol_devices, "systemd units"),
+            Protocol::Parallax => generic_overview(&protocol_devices, "video streams"),
         }
     } else {
         text("Select a protocol tab to view aggregated metrics")
@@ -262,6 +263,7 @@ fn protocol_short_name(protocol: Protocol) -> &'static str {
         Protocol::Netlink => "Netlink",
         Protocol::Netring => "Netring",
         Protocol::Systemd => "systemd",
+        Protocol::Parallax => "Parallax",
     }
 }
 
