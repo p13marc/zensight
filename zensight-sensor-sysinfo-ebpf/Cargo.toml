@@ -9,7 +9,7 @@
 # per-package profiles are ignored for non-root members, so none are set here.
 [package]
 name = "zensight-sensor-sysinfo-ebpf"
-version = "0.6.2"
+version = "0.7.0"
 edition = "2021"
 license = "Apache-2.0"
 publish = false
