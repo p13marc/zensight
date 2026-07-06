@@ -8,6 +8,7 @@ OpenTelemetry OTLP exporter for ZenSight telemetry. Subscribes to telemetry over
 - **Metrics**: Counter, Gauge, Boolean values exported as OTEL metrics
 - **Logs**: log text messages exported as OTEL log records
 - **Alerts**: sensor alerts exported as OTLP log records on the `zensight.alerts` scope
+- **Traces** (opt-in): alert lifecycles synthesized into OTLP spans (`alert:<rule>`)
 - **Severity mapping**: log severity properly mapped to OTEL severity levels
 - **Resource attributes**: Configurable service name, version, and custom attributes
 - **Filtering**: Filter by protocol or source
@@ -133,6 +134,14 @@ from the alert severity and `alert.*` attributes carry source, rule, and state.
 Because the telemetry wildcard `zensight/**` does not match `@/` keys, the
 exporter declares a dedicated subscriber for this channel.
 
+### Traces (opt-in)
+
+ZenSight sensors do not propagate trace context, so the exporter *synthesizes*
+spans from the alert lifecycle it already observes. With `traces: { enabled: true }`
+each firing → resolved transition becomes one span `alert:<rule>` whose duration is
+how long the condition was violated — making flap patterns and durations first-class
+in Tempo/Jaeger. Off by default. See [`docs/reference.md`](docs/reference.md#traces-synthesized-from-alert-lifecycles).
+
 ## OpenTelemetry Collector Configuration
 
 Example `otel-collector-config.yaml`:
@@ -188,6 +197,14 @@ services:
     volumes:
       - ./otel-collector-config.yaml:/etc/otelcol/config.yaml
 ```
+
+## Documentation
+
+- [`docs/reference.md`](docs/reference.md) — full reference: TelemetryPoint → OTLP
+  metrics, syslog → OTLP logs (severity mapping), the synthesized traces signal,
+  and alert export.
+- [`../../configs/otel-exporter.json5`](../../configs/otel-exporter.json5) —
+  annotated example configuration.
 
 ## License
 
