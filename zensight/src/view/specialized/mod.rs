@@ -12,6 +12,7 @@ pub mod netlink;
 pub mod netlink_detail;
 pub mod netring;
 pub mod netring_detail;
+pub mod parallax;
 pub mod snmp;
 pub mod sysinfo;
 pub mod sysinfo_detail;
@@ -141,6 +142,7 @@ pub fn specialized_view<'a>(
         Protocol::Netlink => Some(netlink::netlink_host_view(state)),
         Protocol::Netring => Some(netring::netring_sensor_view(state, artifact)),
         Protocol::Systemd => Some(systemd::systemd_host_view(state)),
+        Protocol::Parallax => Some(parallax::parallax_view(state)),
     }
 }
 

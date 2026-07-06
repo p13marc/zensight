@@ -33,6 +33,7 @@ The single root is `zensight/`. Everything below it is either **telemetry**
 | `netlink` | zensight-sensor-netlink | hostname |
 | `netring` | zensight-sensor-netring | sensor id |
 | `systemd` | zensight-sensor-systemd | hostname |
+| `parallax` | *(media source; parallax daemon out of scope, #359)* | source id |
 
 ---
 
@@ -242,6 +243,44 @@ owning an endpoint can hold the matching socket), and matches the exact
 5-tuple in either direction. The `community_id` on `FlowRecord` is the same
 cross-tool flow key, so external Zeek/Suricata records can reuse this join.
 
+### 3.3 Media plane — `zensight/<protocol>/<source>/@media/…` (#359)
+
+Live video / imagery rides its own **opaque** plane. `@media` is an
+`@`-verbatim chunk — a *sibling* of the `@/` control plane, a **different**
+chunk — so a media key is invisible to **both** the telemetry firehose
+(`zensight/**`) and the control-plane wildcard (`zensight/*/@/**`). Samples are
+raw encoded bytes with a Zenoh `Encoding` (`video/h264`, `image/jpeg`) + a
+frame-metadata attachment — **never** a `TelemetryPoint`/`Format` envelope, and
+never fed to the telemetry decoder (the exporters' `is_telemetry_key` rejects
+any `@`-prefixed chunk, not just `/@/`).
+
+| Key | Direction | Payload | Built by |
+|-----|-----------|---------|----------|
+| `@media/<stream>/video/<codec>/<profile>` | put (plain, per-stream publisher) | raw encoded access units + frame attachment | `media_video_key()` |
+| `@media/<stream>/preview/jpeg` | put (plain, per-stream publisher) | encoded JPEG preview frames | `media_preview_key()` |
+
+The media publisher is a **plain** `zenoh::pubsub::Publisher` (NOT an
+`AdvancedPublisher` — no cache/recovery/history for a superseded frame stream),
+carrying `QosClass::LiveVideo` (best-effort · drop · interactive-high · express
+off — a stale frame is worthless, and the encoder must never block).
+`zensight-sensor-core`'s `Publisher::raw_media_publisher()` returns a
+`RawMediaPublisher` whose `matching_listener()` fires when a viewer subscribes,
+so the sensor can force an immediate keyframe (late joiners get a decodable
+picture at once).
+
+**Stream control rides the ordinary `@/` channels** (§3), not `@media`:
+
+| Key | Direction | Payload | Topic |
+|-----|-----------|---------|-------|
+| `@/commands/stream` | subscribe | `Command<StreamControl>` (`OpenStream`/`CloseStream`/`RequestKeyframe`) | `stream` |
+| `@/query/streams` | queryable | `Vec<StreamDescriptor>` (advertised streams; late-joiner seed) | `streams` |
+| `@/status/streams` | queryable | `StreamStatus` (open? · viewers · active profile) | `streams` |
+
+Stream *stats* (fps/kbps/drops) ride normal telemetry under
+`zensight/<proto>/<source>/<stream>/stats/<metric>`, so existing charts light up
+for free. (The H.264/parallax encoder daemon that produces the frames is out of
+scope for #359 — this is the zenoh-side enabler only.)
+
 ---
 
 ## 4. Metadata — `zensight/_meta/…`
@@ -311,8 +350,9 @@ blocks weaker bridges between two distinct machine-ids), and publishes one
 
 | Wildcard | Used by | Catches |
 |----------|---------|---------|
-| `zensight/**` | frontend (history sub), exporters | all telemetry *and* `_meta` (but **not** `@/…`) |
-| `zensight/*/@/**` | frontend | all control-plane (health/errors/alerts/liveness) |
+| `zensight/**` | frontend (history sub), exporters | all telemetry *and* `_meta` (but **not** `@/…` nor `@media/…`) |
+| `zensight/*/@/**` | frontend | all control-plane (health/errors/alerts/liveness) — **not** `@media/…` (`@/` ≠ `@media`) |
+| `zensight/<proto>/<source>/@media/<stream>/**` | media viewer | one stream's opaque video/preview samples (#359; named explicitly) |
 | `zensight/*/@/alive` | frontend | sensor liveliness tokens |
 | `zensight/*/@/devices/*/alive` | frontend | device liveliness tokens |
 | `zensight/*/@/query/alerts` | frontend (GET at startup) | firing-set seed for late joiners |
@@ -324,8 +364,9 @@ blocks weaker bridges between two distinct machine-ids), and publishes one
 | `zensight/_meta/query/entities` | frontend (GET at startup) | entity-set seed for late joiners |
 
 Exporters (`prometheus`, `otel`) subscribe to `zensight/**` and **skip**
-control/metadata by filtering keys containing `/@/` or starting with
-`zensight/_meta/` — only true telemetry is exported. With `export_alerts` on
+control/metadata by rejecting any key with an `@`-prefixed chunk (`/@/…` control
+plane **and** the `@media/…` plane, #359) or starting with `zensight/_meta/` —
+only true telemetry is exported. With `export_alerts` on
 (the default) each exporter **additionally** declares a second subscriber on
 `zensight/*/@/alerts/*` (`all_alerts_wildcard()`) to mirror firing alerts —
 necessary precisely because `zensight/**` does not cross the `@` chunk. Each
@@ -343,6 +384,7 @@ primed routing) and carries a fixed `zensight_common::QosClass`:
 | Health/liveness | `@/health`, `@/devices/*/liveness`, `@/errors` | best-effort | drop | data |
 | Alert / Command | `@/alerts/*`, `@/commands/*`, `@/status` | **reliable** | **block** | interactive-high |
 | Evidence / Entity | `_meta/evidence/**`, `_meta/entity/**` | **reliable** | **block** | data |
+| LiveVideo (#359) | `@media/<stream>/**` | best-effort | drop | **interactive-high** |
 
 Superseded streams (telemetry/health) drop under congestion; must-arrive control
 (alerts/commands/evidence/entities) blocks. Payloads default to **CBOR** (#355);
@@ -435,6 +477,8 @@ enforced and a single change propagates everywhere.
 | `command::artifact_blob_prefix(prefix)` | `zensight-common/src/command.rs` | `…/@/artifact/blob` (zenoh-blob server prefix; `Blob` delivery) |
 | `command::artifact_store_prefix(prefix)` | `zensight-common/src/command.rs` | `…/@/store` (kind-agnostic Tier-2 chunk queryable prefix; `Tree` delivery) |
 | `command::artifact_tree_prefix(prefix)` | `zensight-common/src/command.rs` | `…/@/tree` (kind-agnostic Tier-2 index queryable prefix; `Tree` delivery) |
+| `keyexpr::media_video_key(proto, source, stream, codec, profile)` | `zensight-common/src/keyexpr.rs` | `…/@media/<stream>/video/<codec>/<profile>` (#359) |
+| `keyexpr::media_preview_key(proto, source, stream)` | `zensight-common/src/keyexpr.rs` | `…/@media/<stream>/preview/jpeg` (#359) |
 | `all_*_wildcard()` | `zensight-common/src/keyexpr.rs` | the wildcards in §5 |
 
 The control-plane keys for `health`, `errors`, `alive`, `devices/*`, `alerts/*`,

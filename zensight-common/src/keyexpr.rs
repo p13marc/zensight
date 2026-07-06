@@ -376,6 +376,78 @@ pub fn all_alerts_wildcard() -> String {
     format!("{}/*/@/alerts/*", KEY_PREFIX)
 }
 
+/// Build the media-plane key for one video stream profile (#359):
+/// `zensight/<protocol>/<source>/@media/<stream>/video/<codec>/<profile>`.
+///
+/// `@media` is an `@`-verbatim chunk — a sibling of the `@/` control plane —
+/// so the video firehose is invisible to both the telemetry wildcard
+/// (`zensight/**`) and the control wildcard (`zensight/*/@/**`). Samples on
+/// this key are **opaque**: raw encoded access units with a Zenoh `Encoding`
+/// (e.g. `video/h264`) + a frame-metadata attachment, never the
+/// `TelemetryPoint`/`Format` envelope.
+///
+/// Stream *control* stays on the ordinary `@/` channels — reuse
+/// [`crate::command::command_key`] / [`crate::command::query_key`] /
+/// [`crate::command::status_key`] with topics `stream` (commands:
+/// [`crate::stream::StreamControl`]) and `streams` (query: list of
+/// [`crate::stream::StreamDescriptor`]; status:
+/// [`crate::stream::StreamStatus`]).
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::media_video_key;
+/// use zensight_common::telemetry::Protocol;
+///
+/// assert_eq!(
+///     media_video_key(Protocol::Netring, "host01", "cam0", "h264", "main"),
+///     "zensight/netring/host01/@media/cam0/video/h264/main"
+/// );
+/// ```
+pub fn media_video_key(
+    protocol: Protocol,
+    source: &str,
+    stream: &str,
+    codec: &str,
+    profile: &str,
+) -> String {
+    format!(
+        "{}/{}/{}/@media/{}/video/{}/{}",
+        KEY_PREFIX,
+        protocol.as_str(),
+        source,
+        stream,
+        codec,
+        profile
+    )
+}
+
+/// Build the media-plane key for one stream's JPEG preview (#359):
+/// `zensight/<protocol>/<source>/@media/<stream>/preview/jpeg`.
+///
+/// Same opaque, `@`-verbatim plane as [`media_video_key`] (no serialization
+/// envelope, `QosClass::LiveVideo`); control rides the `@/` channels with
+/// topics `stream`/`streams` — see [`media_video_key`] for the contract.
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::media_preview_key;
+/// use zensight_common::telemetry::Protocol;
+///
+/// assert_eq!(
+///     media_preview_key(Protocol::Netring, "host01", "cam0"),
+///     "zensight/netring/host01/@media/cam0/preview/jpeg"
+/// );
+/// ```
+pub fn media_preview_key(protocol: Protocol, source: &str, stream: &str) -> String {
+    format!(
+        "{}/{}/{}/@media/{}/preview/jpeg",
+        KEY_PREFIX,
+        protocol.as_str(),
+        source,
+        stream
+    )
+}
+
 /// Parse a key expression to extract protocol, source, and metric path.
 ///
 /// Returns a descriptive error if the key expression doesn't match the expected pattern.
@@ -404,6 +476,7 @@ pub fn parse_key_expr(key: &str) -> Result<ParsedKeyExpr<'_>, ParseError> {
         "netlink" => Protocol::Netlink,
         "netring" => Protocol::Netring,
         "systemd" => Protocol::Systemd,
+        "parallax" => Protocol::Parallax,
         other => return Err(ParseError::UnknownProtocol(other.to_string())),
     };
 
@@ -451,6 +524,58 @@ mod tests {
         assert!(
             telemetry.intersects(&old_event_key),
             "the pre-#358 streamed event keys were on the bus"
+        );
+    }
+
+    /// #359 acceptance pin: the media plane rides `@media/…` — an `@`-verbatim
+    /// chunk like `@/`, but a *different* chunk — so a concrete media key is
+    /// invisible to BOTH the telemetry firehose (`zensight/**`) and the
+    /// control-plane wildcard (`zensight/*/@/**`). The video firehose can
+    /// never leak into telemetry/exporter/GUI consumers.
+    #[test]
+    fn media_plane_is_off_the_telemetry_and_control_buses() {
+        use zenoh::key_expr::KeyExpr;
+        let telemetry = KeyExpr::try_from(all_telemetry_wildcard()).unwrap();
+        let control = KeyExpr::try_from("zensight/*/@/**").unwrap();
+        for media_key in [
+            media_video_key(Protocol::Netring, "host01", "cam0", "h264", "main"),
+            media_preview_key(Protocol::Netring, "host01", "cam0"),
+        ] {
+            let media = KeyExpr::try_from(media_key.clone()).unwrap();
+            assert!(
+                !telemetry.intersects(&media),
+                "zensight/** must not match {media_key}"
+            );
+            assert!(
+                !control.intersects(&media),
+                "zensight/*/@/** must not match {media_key} — @/ and @media are distinct verbatim chunks"
+            );
+        }
+        // A subscriber declared on the exact concrete key does receive it.
+        let exact =
+            KeyExpr::try_from(media_preview_key(Protocol::Netring, "host01", "cam0")).unwrap();
+        let same =
+            KeyExpr::try_from(media_preview_key(Protocol::Netring, "host01", "cam0")).unwrap();
+        assert!(exact.intersects(&same));
+    }
+
+    /// Stream control (#359) reuses the ordinary `@/` command/query/status
+    /// channels with topics `stream`/`streams` — pin the concrete shapes.
+    #[test]
+    fn media_control_rides_the_command_channels() {
+        use crate::command::{command_key, query_key, status_key};
+        let prefix = "zensight/netring/host01";
+        assert_eq!(
+            command_key(prefix, "stream"),
+            "zensight/netring/host01/@/commands/stream"
+        );
+        assert_eq!(
+            query_key(prefix, "streams"),
+            "zensight/netring/host01/@/query/streams"
+        );
+        assert_eq!(
+            status_key(prefix, "streams"),
+            "zensight/netring/host01/@/status/streams"
         );
     }
 

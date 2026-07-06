@@ -146,6 +146,10 @@ pub enum Protocol {
     Netring,
     /// systemd unit/service state + resource accounting via the D-Bus Manager API.
     Systemd,
+    /// Live video / imagery streams on the opaque `@media` plane (#359). Carries
+    /// no `TelemetryPoint` firehose itself — only stream *stats* (fps/kbps) ride
+    /// ordinary telemetry; the pixels ride `@media/<stream>/…` as raw bytes.
+    Parallax,
 }
 
 impl Protocol {
@@ -162,6 +166,7 @@ impl Protocol {
             Protocol::Netlink => "netlink",
             Protocol::Netring => "netring",
             Protocol::Systemd => "systemd",
+            Protocol::Parallax => "parallax",
         }
     }
 
@@ -196,6 +201,7 @@ impl std::str::FromStr for Protocol {
             "netlink" => Ok(Protocol::Netlink),
             "netring" => Ok(Protocol::Netring),
             "systemd" => Ok(Protocol::Systemd),
+            "parallax" => Ok(Protocol::Parallax),
             _ => Err(()),
         }
     }

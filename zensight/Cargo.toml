@@ -31,8 +31,15 @@ serde_json.workspace = true
 json5.workspace = true
 
 # GUI
-iced = { version = "0.14", features = ["tokio", "canvas", "svg"] }
+# `image-without-codecs` enables the iced image widget WITHOUT pulling
+# `image/default` (which drags in AVIF/ravif → profiling-procmacros, unwanted +
+# heavy). We decode JPEG ourselves via the `image` crate below (jpeg codec
+# only) into RGBA, so no codec support is needed inside iced.
+iced = { version = "0.14", features = ["tokio", "canvas", "svg", "image-without-codecs"] }
 iced_anim = { version = "0.3", features = ["widgets", "derive"] }
+# JPEG-only decode for media-plane preview frames (#359); no default codecs so
+# AVIF/ravif never enter the graph. We decode to RGBA and hand iced a raw handle.
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 # Async utilities
 async-stream = "0.3"

@@ -26,6 +26,7 @@ pub mod query_detail;
 pub mod semconv;
 pub mod serialization;
 pub mod session;
+pub mod stream;
 pub mod telemetry;
 
 // Re-export commonly used types at the crate root
@@ -59,7 +60,8 @@ pub use keyexpr::{
     all_entity_wildcard, all_errors_wildcard, all_evidence_wildcard, all_health_wildcard,
     all_liveness_wildcard, all_name_evidence_wildcard, all_sensors_wildcard,
     all_telemetry_wildcard, correlator_alive_key, entities_query_key, entity_key,
-    host_evidence_key, name_observation_key, names_query_key, parse_key_expr, sensor_info_key,
+    host_evidence_key, media_preview_key, media_video_key, name_observation_key, names_query_key,
+    parse_key_expr, sensor_info_key,
 };
 pub use publisher_registry::PublisherRegistry;
 pub use qos::QosClass;
@@ -71,6 +73,7 @@ pub use query_detail::{
 };
 pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;
+pub use stream::{StreamControl, StreamDescriptor, StreamStatus};
 pub use telemetry::{Protocol, TelemetryPoint, TelemetryValue, current_timestamp_millis};
 
 /// Initialize tracing with the given configuration.

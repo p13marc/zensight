@@ -65,7 +65,7 @@ pub use health::{
 };
 pub use identity::{HostIdentity, SharedIdentity};
 pub use liveliness::LivelinessManager;
-pub use publisher::Publisher;
+pub use publisher::{Publisher, RawMediaPublisher};
 pub use report::{DebugBundleSource, SimpleBundleSource, redact};
 pub use runner::SensorRunner;
 pub use scrub::{ArgScrubber, CMDLINE_CAP_BYTES};
