@@ -29,9 +29,11 @@ pub mod collector;
 pub mod config;
 pub mod http;
 pub mod mapping;
+pub mod remote_write;
 pub mod subscriber;
 
 pub use collector::{MetricCollector, SharedCollector};
 pub use config::ExporterConfig;
 pub use http::HttpServer;
+pub use remote_write::RemoteWriteClient;
 pub use subscriber::TelemetrySubscriber;

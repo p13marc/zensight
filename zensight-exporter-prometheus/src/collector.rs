@@ -410,6 +410,12 @@ impl MetricCollector {
         self.metrics.read().len()
     }
 
+    /// Snapshot the current metric state (used by remote-write pushes to build
+    /// a `WriteRequest` from the same state `/metrics` renders).
+    pub fn snapshot_metrics(&self) -> Vec<StoredMetric> {
+        self.metrics.read().values().cloned().collect()
+    }
+
     /// Get collector statistics.
     pub fn stats(&self) -> CollectorStats {
         self.stats.read().clone()

@@ -78,6 +78,17 @@ pub struct OtelConfig {
     #[serde(default = "default_true")]
     pub export_alerts: bool,
 
+    /// Traces signal: synthesized spans (default: disabled).
+    ///
+    /// ZenSight has no distributed-tracing context propagation; spans are
+    /// *synthesized* from request/response-shaped events the exporter already
+    /// observes on the bus. Today that is the alert lifecycle: each
+    /// firing → resolved transition becomes one span (`alert:<rule>`) whose
+    /// duration is the time the alert was firing. Trace/span ids are derived
+    /// deterministically from the alert key + firing timestamp.
+    #[serde(default)]
+    pub traces: TracesConfig,
+
     /// Resource attributes to add to all telemetry.
     #[serde(default)]
     pub resource: HashMap<String, String>,
@@ -126,11 +137,24 @@ impl Default for OtelConfig {
             export_metrics: true,
             export_logs: true,
             export_alerts: true,
+            traces: TracesConfig::default(),
             resource: HashMap::new(),
             service_name: default_service_name(),
             service_version: None,
         }
     }
+}
+
+/// Traces signal configuration.
+///
+/// Off by default: span synthesis is opt-in, and artifact-transfer spans are
+/// not implemented (artifact status lives on `@/artifact/status`, which the
+/// exporter does not subscribe to — only `@/alerts/*` is observed).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TracesConfig {
+    /// Synthesize + export alert-lifecycle spans via OTLP (default: false).
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 impl OtelConfig {
@@ -258,9 +282,10 @@ impl ExporterConfig {
         if !self.opentelemetry.export_metrics
             && !self.opentelemetry.export_logs
             && !self.opentelemetry.export_alerts
+            && !self.opentelemetry.traces.enabled
         {
             return Err(ConfigError::Validation(
-                "At least one of export_metrics, export_logs or export_alerts must be enabled"
+                "At least one of export_metrics, export_logs, export_alerts or traces must be enabled"
                     .to_string(),
             ));
         }
@@ -393,6 +418,41 @@ mod tests {
         let result = ExporterConfig::parse(json);
         assert!(result.is_ok(), "alerts-only config should validate");
         assert!(result.unwrap().opentelemetry.export_alerts);
+    }
+
+    #[test]
+    fn test_traces_default_disabled() {
+        let config = ExporterConfig::parse("{}").unwrap();
+        assert!(
+            !config.opentelemetry.traces.enabled,
+            "traces must be opt-in"
+        );
+    }
+
+    #[test]
+    fn test_traces_enabled_via_config() {
+        let json = r#"{
+            opentelemetry: {
+                traces: { enabled: true }
+            }
+        }"#;
+        let config = ExporterConfig::parse(json).unwrap();
+        assert!(config.opentelemetry.traces.enabled);
+    }
+
+    #[test]
+    fn test_validate_traces_only_is_valid() {
+        // Traces are a first-class signal: enabling only traces is valid.
+        let json = r#"{
+            opentelemetry: {
+                export_metrics: false,
+                export_logs: false,
+                export_alerts: false,
+                traces: { enabled: true }
+            }
+        }"#;
+        let result = ExporterConfig::parse(json);
+        assert!(result.is_ok(), "traces-only config should validate");
     }
 
     #[test]

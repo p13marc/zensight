@@ -38,8 +38,8 @@ clap.workspace = true
 
 # OpenTelemetry
 opentelemetry = "0.32"
-opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "metrics"] }
-opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "metrics", "logs"] }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "metrics", "trace"] }
+opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "metrics", "logs", "trace"] }
 
 # Utilities
 parking_lot = "0.12"

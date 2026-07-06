@@ -2,15 +2,22 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use opentelemetry::logs::{LogRecord as _, Logger, LoggerProvider as _, Severity};
 use opentelemetry::metrics::{Meter, MeterProvider as _};
-use opentelemetry_otlp::{LogExporter, MetricExporter, WithExportConfig};
+use opentelemetry::trace::{
+    SpanContext, SpanId, SpanKind, Status, TraceFlags, TraceId, TraceState,
+};
+use opentelemetry::{InstrumentationScope, KeyValue};
+use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::logs::{SdkLogger, SdkLoggerProvider};
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
-use parking_lot::RwLock;
+use opentelemetry_sdk::trace::{
+    BatchSpanProcessor, SpanData, SpanEvents, SpanLinks, SpanProcessor,
+};
+use parking_lot::{Mutex, RwLock};
 use tracing::{error, info, trace, warn};
 use zensight_common::alert::{Alert, AlertSeverity, AlertState};
 use zensight_common::telemetry::TelemetryPoint;
@@ -21,6 +28,7 @@ use crate::metrics::{
     OtelMetricType, build_metric_attributes, build_metric_name, build_resource_attributes,
     extract_value, is_log_exportable, is_metric_exportable,
 };
+use crate::traces::{AlertSpan, AlertSpanTracker};
 
 /// Filter for telemetry points.
 pub struct TelemetryFilter {
@@ -84,6 +92,7 @@ pub struct ExporterStats {
     pub metrics_failed: u64,
     pub logs_exported: u64,
     pub alerts_exported: u64,
+    pub spans_exported: u64,
     pub export_errors: u64,
 }
 
@@ -97,6 +106,54 @@ fn build_gauge_key(metric_name: &str, attributes: &[opentelemetry::KeyValue]) ->
         .collect();
     sorted_attrs.sort();
     format!("{}\x00{}", metric_name, sorted_attrs.join("\x00"))
+}
+
+/// Convert a Unix-epoch-millis timestamp to a [`SystemTime`] (clamped at the
+/// epoch for the — not expected — negative case).
+fn ms_to_system_time(ms: i64) -> SystemTime {
+    if ms >= 0 {
+        SystemTime::UNIX_EPOCH + Duration::from_millis(ms as u64)
+    } else {
+        SystemTime::UNIX_EPOCH
+    }
+}
+
+/// Build OTel [`SpanData`] from a synthesized alert span.
+///
+/// The span is a leaf (`Internal`, no parent, no remote context): the ids are
+/// deterministic (alert key + firing time), the flags are `SAMPLED` so the
+/// backend keeps it, and `Status::Unset` — a fired-then-resolved alert is an
+/// observation, not a failed operation. Pure (no exporter state) so span
+/// construction is unit-testable without a live OTLP pipeline.
+fn build_span_data(span: AlertSpan, scope: &InstrumentationScope) -> SpanData {
+    let span_context = SpanContext::new(
+        TraceId::from_bytes(span.trace_id),
+        SpanId::from_bytes(span.span_id),
+        TraceFlags::SAMPLED,
+        false,
+        TraceState::NONE,
+    );
+    let attributes = span
+        .attributes
+        .into_iter()
+        .map(|(k, v)| KeyValue::new(k, v))
+        .collect();
+
+    SpanData {
+        span_context,
+        parent_span_id: SpanId::INVALID,
+        parent_span_is_remote: false,
+        span_kind: SpanKind::Internal,
+        name: span.name.into(),
+        start_time: ms_to_system_time(span.start_ms),
+        end_time: ms_to_system_time(span.end_ms),
+        attributes,
+        dropped_attributes_count: 0,
+        events: SpanEvents::default(),
+        links: SpanLinks::default(),
+        status: Status::Unset,
+        instrumentation_scope: scope.clone(),
+    }
 }
 
 /// Map a ZenSight alert severity onto an OTel log severity.
@@ -128,6 +185,17 @@ pub struct OtelExporter {
     logger: Option<SdkLogger>,
     /// Cached logger for sensor alerts (scope `zensight.alerts`).
     alert_logger: Option<SdkLogger>,
+    /// Span processor for synthesized alert-lifecycle spans (traces signal).
+    ///
+    /// Spans carry deterministic ids derived from the alert lifecycle, which
+    /// the SDK's tracer/`IdGenerator` path cannot express — so completed
+    /// [`AlertSpan`]s are converted to [`SpanData`] directly and handed to the
+    /// batch processor.
+    span_processor: Option<BatchSpanProcessor>,
+    /// Instrumentation scope stamped on synthesized spans.
+    span_scope: InstrumentationScope,
+    /// Alert lifecycle tracker feeding the traces signal.
+    alert_spans: Option<Mutex<AlertSpanTracker>>,
     /// Whether metrics export is enabled.
     export_metrics: bool,
     /// Whether logs export is enabled.
@@ -175,7 +243,14 @@ impl OtelExporter {
         // The logger pipeline backs both syslog logs and alert events, so
         // initialize it if either is enabled.
         let logger_provider = if otel_config.export_logs || otel_config.export_alerts {
-            Some(Self::init_logger_provider(otel_config, resource).await?)
+            Some(Self::init_logger_provider(otel_config, resource.clone()).await?)
+        } else {
+            None
+        };
+
+        // Initialize the span pipeline if the traces signal is enabled.
+        let span_processor = if otel_config.traces.enabled {
+            Some(Self::init_span_processor(otel_config, &resource)?)
         } else {
             None
         };
@@ -196,12 +271,20 @@ impl OtelExporter {
             None
         };
 
+        let alert_spans = otel_config
+            .traces
+            .enabled
+            .then(|| Mutex::new(AlertSpanTracker::new()));
+
         Ok(Self {
             meter_provider,
             meter,
             logger_provider,
             logger,
             alert_logger,
+            span_processor,
+            span_scope: InstrumentationScope::builder("zensight.alerts").build(),
+            alert_spans,
             export_metrics: otel_config.export_metrics,
             export_logs: otel_config.export_logs,
             export_alerts: otel_config.export_alerts,
@@ -270,6 +353,43 @@ impl OtelExporter {
 
         info!("Logger provider initialized");
         Ok(provider)
+    }
+
+    /// Initialize the OTLP span pipeline for the (synthesized) traces signal.
+    ///
+    /// We do not use an `SdkTracerProvider`/`SdkTracer`: those own trace/span id
+    /// generation via an `IdGenerator`, but our spans carry *deterministic* ids
+    /// derived from the alert lifecycle (see [`crate::traces`]). Instead we drive
+    /// a [`BatchSpanProcessor`] directly — building [`SpanData`] ourselves and
+    /// handing finished spans to [`SpanProcessor::on_end`]. The resource is set
+    /// on the processor explicitly (normally the provider would do this).
+    ///
+    /// Called from within the async `new` (so a tokio runtime is live for the
+    /// gRPC exporter); the builders themselves are synchronous.
+    fn init_span_processor(
+        config: &OtelConfig,
+        resource: &Resource,
+    ) -> anyhow::Result<BatchSpanProcessor> {
+        let exporter = match config.protocol {
+            OtlpProtocol::Grpc => SpanExporter::builder()
+                .with_tonic()
+                .with_endpoint(&config.endpoint)
+                .with_timeout(config.timeout())
+                .build()
+                .map_err(|e| anyhow::anyhow!("Failed to create gRPC span exporter: {}", e))?,
+            OtlpProtocol::Http => SpanExporter::builder()
+                .with_http()
+                .with_endpoint(&config.endpoint)
+                .with_timeout(config.timeout())
+                .build()
+                .map_err(|e| anyhow::anyhow!("Failed to create HTTP span exporter: {}", e))?,
+        };
+
+        let mut processor = BatchSpanProcessor::builder(exporter).build();
+        processor.set_resource(resource);
+
+        info!("Span processor initialized (traces signal)");
+        Ok(processor)
     }
 
     /// Record a telemetry point.
@@ -442,12 +562,33 @@ impl OtelExporter {
         self.export_alerts
     }
 
-    /// Emit a sensor alert as an OTLP log record on the `zensight.alerts` scope.
+    /// Whether the exporter needs the `@/alerts/*` stream at all — true if
+    /// either alert log export or the traces signal (which synthesizes spans
+    /// from the alert lifecycle) is enabled. The subscriber uses this to decide
+    /// whether to declare the alert subscriber.
+    pub fn wants_alert_stream(&self) -> bool {
+        self.export_alerts || self.alert_spans.is_some()
+    }
+
+    /// Record a sensor alert.
     ///
-    /// Each alert transition (firing/resolved) is one event — OTel logs are an
-    /// append-only stream, so unlike the Prometheus gauge there is no per-alert
-    /// state to clear; the `alert.state` attribute carries firing vs resolved.
+    /// Two independent sinks, each gated on its own config:
+    /// - **logs** (`export_alerts`): every transition (firing/resolved) is one
+    ///   OTLP log event on the `zensight.alerts` scope — an append-only stream,
+    ///   so unlike the Prometheus gauge there is no per-alert state to clear;
+    ///   the `alert.state` attribute carries firing vs resolved.
+    /// - **traces** (`traces.enabled`): the firing→resolved pair is folded into
+    ///   a single synthesized span whose duration is how long the alert fired
+    ///   (see [`crate::traces`]). Only the resolve transition emits a span.
     pub fn record_alert(&self, alert: &Alert) {
+        // Traces signal: fold the lifecycle into a span (independent of logs).
+        if let Some(tracker) = &self.alert_spans {
+            let completed = tracker.lock().on_alert(alert);
+            if let Some(span) = completed {
+                self.emit_alert_span(span);
+            }
+        }
+
         let Some(logger) = &self.alert_logger else {
             return;
         };
@@ -481,6 +622,21 @@ impl OtelExporter {
 
         let mut stats = self.stats.write();
         stats.alerts_exported += 1;
+    }
+
+    /// Convert a completed [`AlertSpan`] to OTel [`SpanData`] and hand it to the
+    /// batch span processor for OTLP export.
+    fn emit_alert_span(&self, span: AlertSpan) {
+        let Some(processor) = &self.span_processor else {
+            return;
+        };
+        let data = build_span_data(span, &self.span_scope);
+        // `on_end` enqueues onto the batch processor's channel — the OTLP export
+        // itself happens on the processor's worker, off this thread.
+        processor.on_end(data);
+
+        let mut stats = self.stats.write();
+        stats.spans_exported += 1;
     }
 
     /// Remove stale gauge entries that haven't been updated within the given duration.
@@ -521,6 +677,17 @@ impl OtelExporter {
             error!("Error shutting down logger provider: {:?}", e);
         }
 
+        // Flush + stop the span processor so any spans still batched in memory
+        // are exported before we exit.
+        if let Some(processor) = &self.span_processor {
+            if let Err(e) = processor.force_flush() {
+                error!("Error flushing span processor: {:?}", e);
+            }
+            if let Err(e) = processor.shutdown() {
+                error!("Error shutting down span processor: {:?}", e);
+            }
+        }
+
         info!("OpenTelemetry exporter shutdown complete");
         Ok(())
     }
@@ -532,7 +699,61 @@ pub type SharedExporter = Arc<OtelExporter>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traces::AlertSpan;
     use zensight_common::telemetry::{Protocol, TelemetryValue};
+
+    #[test]
+    fn build_span_data_maps_alert_span_faithfully() {
+        let scope = InstrumentationScope::builder("zensight.alerts").build();
+        let span = AlertSpan {
+            name: "alert:ssh-listening".to_string(),
+            trace_id: [7u8; 16],
+            span_id: [3u8; 8],
+            start_ms: 1_000,
+            end_ms: 5_000,
+            attributes: vec![
+                ("alert.source".to_string(), "host01".to_string()),
+                ("alert.severity".to_string(), "critical".to_string()),
+            ],
+        };
+
+        let data = build_span_data(span, &scope);
+
+        // Deterministic ids flow through verbatim.
+        assert_eq!(data.span_context.trace_id(), TraceId::from_bytes([7u8; 16]));
+        assert_eq!(data.span_context.span_id(), SpanId::from_bytes([3u8; 8]));
+        // Sampled leaf span, no parent.
+        assert!(data.span_context.trace_flags().is_sampled());
+        assert!(data.span_context.is_valid());
+        assert_eq!(data.parent_span_id, SpanId::INVALID);
+        assert!(matches!(data.span_kind, SpanKind::Internal));
+        assert!(matches!(data.status, Status::Unset));
+        assert_eq!(data.name, "alert:ssh-listening");
+
+        // Start/end map to wall-clock; end - start == firing duration.
+        assert_eq!(
+            data.start_time,
+            SystemTime::UNIX_EPOCH + Duration::from_millis(1_000)
+        );
+        assert_eq!(
+            data.end_time
+                .duration_since(data.start_time)
+                .unwrap()
+                .as_millis(),
+            4_000
+        );
+
+        // Attributes carried across as KeyValues.
+        let get = |k: &str| {
+            data.attributes
+                .iter()
+                .find(|kv| kv.key.as_str() == k)
+                .map(|kv| kv.value.as_str().to_string())
+        };
+        assert_eq!(get("alert.source").as_deref(), Some("host01"));
+        assert_eq!(get("alert.severity").as_deref(), Some("critical"));
+        assert_eq!(data.instrumentation_scope.name(), "zensight.alerts");
+    }
 
     #[test]
     fn alert_severity_maps_to_otel() {

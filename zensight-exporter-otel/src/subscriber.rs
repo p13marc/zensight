@@ -117,7 +117,7 @@ impl TelemetrySubscriber {
         // wildcard `zensight/**` does NOT match `@/`-prefixed chunks (Zenoh
         // treats a chunk starting with `@` as verbatim), so firing alerts need
         // their own subscriber on `zensight/*/@/alerts/*`.
-        let alert_subscriber = if self.exporter.export_alerts() {
+        let alert_subscriber = if self.exporter.wants_alert_stream() {
             let alerts_key = all_alerts_wildcard();
             info!(key_expr = %alerts_key, "Subscribing to sensor alerts");
             Some(
@@ -142,7 +142,8 @@ impl TelemetrySubscriber {
                 }
 
                 // Sensor alerts (`@/alerts/*`) are exported as OTLP log events
-                // (only polled when export_alerts is on). A Delete tombstone
+                // and/or synthesized trace spans (polled when either alert-log
+                // export or the traces signal is on). A Delete tombstone
                 // carries no payload — the prior Resolved Put already emitted the
                 // resolved event — so it's ignored.
                 sample = async { alert_subscriber.as_ref().unwrap().recv_async().await },

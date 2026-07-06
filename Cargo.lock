@@ -7108,6 +7108,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "snap"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
+
+[[package]]
 name = "snmp-parser"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10768,9 +10774,11 @@ dependencies = [
  "json5",
  "parking_lot",
  "prometheus-client",
+ "prost 0.14.4",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "snap",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
