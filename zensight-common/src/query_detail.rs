@@ -189,35 +189,38 @@ pub struct Ja4hRecord {
     pub count: u64,
 }
 
-/// One top-talker destination (netring), served on demand from a per-destination
-/// histogram updated as flows end. "Who are the major backends?" — bytes/packets/
-/// flows aggregated per remote endpoint, the operational view distinct from
-/// per-app bandwidth.
+/// One top-talker source host (netring), served on demand from netring's rolling
+/// `aggregate()` state (#369). **Breaking change:** talkers are now keyed by
+/// *source IP* with a rolling **bytes-per-second** rate over the last 60 s window
+/// (netring `BandwidthByKey`), replacing the old per-*destination* cumulative
+/// byte/packet/flow histogram. "Who is generating the most traffic right now?"
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TalkerRecord {
-    /// Remote endpoint (`ip` or `ip:port`, depending on aggregation key).
-    pub dst: String,
-    pub bytes: u64,
-    pub packets: u64,
-    pub flows: u64,
-    /// Names observed for `dst` on the wire (netring passive DNS, #308) —
+    /// Source host IP.
+    pub src: String,
+    /// Rolling throughput in bytes/second over netring's aggregate window.
+    pub bytes_per_sec: f64,
+    /// Names observed for `src` on the wire (netring passive DNS, #308) —
     /// best-ranked first, at most 3. Empty when the name cache is off / cold.
     /// Additive (`#[serde(default)]` for old records).
     #[serde(default)]
     pub names: Vec<NameInfo>,
 }
 
-/// One cell of the netring traffic matrix (#122): a directed `src → dst` pair with
-/// aggregated byte/packet/flow volume, served on demand from an `(src,dst)`-keyed
-/// histogram updated as flows end. This is the service-map data — "who talks to
-/// whom, and how much" — distinct from the per-destination [`TalkerRecord`].
+/// One cell of the netring traffic matrix (#122/#369): a directed `src → dst` pair
+/// with a rolling **bytes-per-second** rate, served on demand from netring's
+/// `aggregate()` pair state. This is the service-map data — "who talks to whom,
+/// and how fast" — distinct from the per-source [`TalkerRecord`]. **Breaking
+/// change (#369):** rate replaces the old cumulative byte/packet/flow counters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MatrixRecord {
     pub src: String,
     pub dst: String,
-    pub bytes: u64,
-    pub packets: u64,
-    pub flows: u64,
+    /// Rolling throughput in bytes/second for this `(src, dst)` pair.
+    pub bytes_per_sec: f64,
+    /// Names observed for `dst` on the wire (netring passive DNS, #308).
+    #[serde(default)]
+    pub names: Vec<NameInfo>,
 }
 
 /// One recent elephant (large) flow (netring), served on demand from a bounded
@@ -793,10 +796,8 @@ mod tests {
         .unwrap();
         assert!(flow.dst_names.is_empty());
 
-        let talker: TalkerRecord = serde_json::from_str(
-            r#"{"dst":"93.184.216.34:443","bytes":100,"packets":2,"flows":1}"#,
-        )
-        .unwrap();
+        let talker: TalkerRecord =
+            serde_json::from_str(r#"{"src":"10.0.0.5","bytes_per_sec":12345.0}"#).unwrap();
         assert!(talker.names.is_empty());
     }
 
@@ -804,10 +805,8 @@ mod tests {
     #[test]
     fn name_info_round_trips() {
         let rec = TalkerRecord {
-            dst: "93.184.216.34:443".into(),
-            bytes: 1,
-            packets: 1,
-            flows: 1,
+            src: "10.0.0.5".into(),
+            bytes_per_sec: 4096.0,
             names: vec![NameInfo {
                 name: "beacon.evil.example".into(),
                 provenance: "dns_a".into(),

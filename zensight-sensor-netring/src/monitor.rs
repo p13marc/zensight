@@ -37,36 +37,15 @@ const FLOW_RING_CAP: usize = 512;
 /// Max recent elephant flows retained for `@/query/elephant_flows`.
 const ELEPHANT_RING_CAP: usize = 128;
 
-/// Cardinality guards for the on-demand inventories (talkers / DNS / HTTP).
-const TALKER_CAP: usize = 8192;
+/// Cardinality guards for the on-demand inventories (DNS / HTTP). Talkers now
+/// come from netring's bounded `aggregate()` state (#369), not a local histogram.
 const DNS_INV_CAP: usize = 8192;
 const HTTP_INV_CAP: usize = 4096;
 
-/// LRU cap of the Newly-Observed-Domain seen-set (issue #118) — bounds the
-/// detector's memory to this many distinct second-level domains.
-const NOD_SEEN_CAP: usize = 131_072;
-
-/// Sliding-window parameters for the DNS-tunnel distinct-label set (issue #118):
-/// 60 s window, 5 s buckets, capped at this many tracked (src, SLD) keys.
-const DNS_TUNNEL_KEY_CAP: usize = 8192;
-
-/// EWMA smoothing factor for the per-source data-exfil baseline (#123): ~10-flow
-/// effective window, so a host's normal volume adapts but a single burst stands out.
-const EXFIL_EWMA_ALPHA: f64 = 0.2;
-
-use flowscope::EndReason;
-// #324: beacon detectors key their state on `HostPair` (src, dst, dst_port) and
-// the port-scan detector on `SrcHost` (scanner IP), so a beacon/scan that rotates
-// its source port each connection accumulates ONE series instead of fragmenting
-// into N one-flow series (the systematic under-detection the FiveTupleKey keying
-// caused). The emitted anomaly is still labelled with the triggering flow's full
-// 5-tuple (see the `*Hit` wrappers) so `src:port`/`proto`/Community-ID survive.
 use flowscope::correlate::DdSketch;
-use flowscope::detect::patterns::{
-    BeaconDetector, BeaconScore, DgaScore, DgaScorer, PortScanDetector, RitaBeaconDetector,
-    RitaBeaconScore, ScanScore, ScanVerdict,
-};
-use flowscope::detect::{HostPair, SrcHost};
+// The FQDN-pivoted beacon (#308) still keys a RITA detector on the resolved DNS
+// name; the flow/DNS-driven detectors moved to the `Tuned` registry (#369).
+use flowscope::detect::patterns::RitaBeaconDetector;
 use flowscope::dns::{NameMap, NameMapConfig};
 use flowscope::extract::FiveTupleKey;
 use netring::anomaly::shipped_sinks::ChannelSink;
@@ -77,11 +56,18 @@ use netring::protocol::event_typed::{FlowEnded, FlowPacket};
 use crate::config::{IocConfig, NetringConfig};
 use crate::map::{self, AnomalyView, DnsRcodeClass};
 
-/// Per-destination talker histogram: `dst -> (bytes, packets, flows)`.
-pub type TalkerHist = Arc<Mutex<HashMap<String, (u64, u64, u64)>>>;
-/// Traffic-matrix histogram (#122): `(src, dst) -> (bytes, packets, flows)` — the
-/// service-map data, "who talks to whom".
-pub type MatrixHist = Arc<Mutex<HashMap<(String, String), (u64, u64, u64)>>>;
+/// Latest netring `aggregate()` snapshot (#369): src-IP rolling talkers +
+/// `(src,dst)` pair rates, refreshed by the `on_aggregate` tick and served on
+/// `@/query/{talkers,matrix}`.
+pub type AggregateState = Arc<Mutex<netring::monitor::aggregate::AggregateSnapshot>>;
+/// Latest netring per-flow RED snapshot (#369): rate / error-ratio / p50·p95·p99
+/// flow-lifetime percentiles, refreshed by the `on_red` tick. `None` until the
+/// first window closes.
+pub type FlowRedState = Arc<Mutex<Option<netring::monitor::red::RedSnapshot>>>;
+/// How many top rows the aggregate snapshot retains (queries trim to `?top=N`).
+const AGGREGATE_SNAPSHOT_ROWS: usize = 256;
+/// How often the aggregate / RED callbacks refresh their shared snapshot.
+const AGGREGATE_REFRESH: Duration = Duration::from_secs(5);
 /// Bounded ring of recent elephant (large) flows.
 pub type ElephantRing = Arc<Mutex<VecDeque<ElephantRecord>>>;
 /// Passive TLS fingerprint inventory: (sni, ja4) → record with a hit count.
@@ -250,8 +236,9 @@ pub struct MonitorChannels {
     pub flow_bytes: Arc<AtomicU64>,
     pub flow_packets: Arc<AtomicU64>,
     pub flow_retransmits: Arc<AtomicU64>,
-    /// Bounded per-flow-duration DDSketch (ms) of flows ended since the last tick (#325).
-    pub flow_durations_ms: Arc<Mutex<RedSketch>>,
+    /// Latest per-flow RED snapshot from netring's `red()` (#369): rate /
+    /// error-ratio / p50·p95·p99 flow-lifetime percentiles.
+    pub flow_red: FlowRedState,
     /// Bounded ring of recent ended-flow detail records for `@/query/flows`.
     pub flow_records: FlowRing,
     /// TCP RST counters: total resets and the subset that are connection refusals.
@@ -274,10 +261,9 @@ pub struct MonitorChannels {
     pub dns: Arc<DnsState>,
     /// HTTP RED accumulators (issue #20).
     pub http: Arc<HttpState>,
-    /// Per-destination talker histogram (issue #21).
-    pub talkers: TalkerHist,
-    /// `(src,dst)` traffic-matrix histogram, served on `@/query/matrix` (#122).
-    pub matrix: MatrixHist,
+    /// Latest netring `aggregate()` snapshot (#369): src-IP rolling talkers +
+    /// `(src,dst)` pair rates, served on `@/query/{talkers,matrix}`.
+    pub aggregate: AggregateState,
     /// Recent elephant (large) flows ring (issue #21).
     pub elephants: ElephantRing,
     /// Passive QUIC SNI/ALPN inventory: served on `@/query/quic` (issue #72).
@@ -335,134 +321,6 @@ impl netring::export::FlowExporter for IpfixSink {
             r.push_back(record.clone());
         }
     }
-}
-
-/// Detector wrapper bridging `feed`→`verdict` for the TRW port-scan detector.
-/// State is keyed on [`SrcHost`] (the scanner IP) so a scanner fanning out from
-/// rotating source ports accumulates one TRW walk, not one-per-flow (#324); the
-/// emitted anomaly is still labelled with the triggering flow's 5-tuple.
-struct PortScan {
-    detector: PortScanDetector<SrcHost>,
-    cfg: LiveConfig,
-    last_score: Option<ScanScore<SrcHost>>,
-}
-
-/// Detector wrapper for the RITA-style beaconing detector (issue #17). Reads its
-/// threshold + allowlist live from `cfg` so they hot-swap at runtime (#121).
-/// State keyed on [`HostPair`] so each per-connection beacon ping lands in one
-/// series regardless of its ephemeral source port (#324); fed one observation per
-/// finished flow (`FlowEnded<Tcp>`) — a beacon ping is a connection, not a packet.
-struct Beacon {
-    detector: BeaconDetector<HostPair>,
-    cfg: LiveConfig,
-    last_score: Option<BeaconScore<HostPair>>,
-}
-
-/// Detector wrapper for the RITA-style ROBUST beaconing detector (issue #118):
-/// Bowley skewness + MAD, bit-faithful to RITA, catches jittered C2 the CV
-/// detector misses. Fed the same per-flow `FlowEnded<Tcp>` stream as `Beacon`,
-/// keyed on [`HostPair`] (#324).
-struct RitaBeacon {
-    detector: RitaBeaconDetector<HostPair>,
-    cfg: LiveConfig,
-    last_score: Option<RitaBeaconScore<HostPair>>,
-}
-
-/// `DetectorScore` for the CV beacon that labels the anomaly with the triggering
-/// flow's full 5-tuple (`.1`) rather than the `HostPair` the detector *state* is
-/// keyed on — preserving `src:port`/`proto`/Community-ID on the alert (#324).
-/// Metric schema is byte-identical to the built-in `BeaconScore` impl.
-struct BeaconCvHit(BeaconScore<HostPair>, FiveTupleKey);
-
-impl flowscope::DetectorScore for BeaconCvHit {
-    fn kind(&self) -> flowscope::DetectorKind {
-        flowscope::DetectorKind::BeaconCv
-    }
-    fn into_anomaly(self, ts: flowscope::Timestamp) -> flowscope::OwnedAnomaly {
-        let s = self.0;
-        flowscope::OwnedAnomaly::new(
-            flowscope::DetectorKind::BeaconCv,
-            flowscope::event::Severity::Warning,
-            ts,
-        )
-        .with_key(&self.1)
-        .with_metric("score", s.score)
-        .with_metric("cv_dt", s.cv_dt)
-        .with_metric("cv_bytes", s.cv_bytes)
-        .with_metric("mean_interval_secs", s.mean_interval.as_secs_f64())
-        .with_metric("n", s.n as f64)
-    }
-}
-
-/// Local detector-score wrapping a [`RitaBeaconScore`] so the published anomaly
-/// carries the ZenSight kind slug `"RitaBeacon"` (the built-in `DetectorScore`
-/// impl emits `"BeaconRita"`). `.1` is the triggering flow's 5-tuple; `with_key`
-/// attaches it so the drain's `anomaly_alert` derives src/dst labels + the
-/// cross-tool Community ID (the `HostPair` the detector state is keyed on has no
-/// source port, #324).
-struct RitaBeaconHit(RitaBeaconScore<HostPair>, FiveTupleKey);
-
-impl flowscope::DetectorScore for RitaBeaconHit {
-    fn kind(&self) -> flowscope::DetectorKind {
-        flowscope::DetectorKind::Other("RitaBeacon")
-    }
-    fn into_anomaly(self, ts: flowscope::Timestamp) -> flowscope::OwnedAnomaly {
-        let s = self.0;
-        flowscope::OwnedAnomaly::new(
-            flowscope::DetectorKind::Other("RitaBeacon"),
-            flowscope::event::Severity::Warning,
-            ts,
-        )
-        .with_key(&self.1)
-        .with_metric("score", s.score)
-        .with_metric("ts_score", s.ts_score)
-        .with_metric("ds_score", s.ds_score)
-        .with_metric("dur_score", s.dur_score)
-        .with_metric("mean_interval_secs", s.mean_interval.as_secs_f64())
-        .with_metric("n", s.n as f64)
-    }
-}
-
-/// `DetectorScore` for the TRW port scan labelled with the triggering flow's
-/// 5-tuple (`.1`); state is keyed on [`SrcHost`] (#324). Mirrors the built-in
-/// `ScanScore` anomaly (verdict observation + log-likelihood + observed count).
-struct PortScanHit(ScanScore<SrcHost>, FiveTupleKey);
-
-impl flowscope::DetectorScore for PortScanHit {
-    fn kind(&self) -> flowscope::DetectorKind {
-        flowscope::DetectorKind::PortScanTrw
-    }
-    fn into_anomaly(self, ts: flowscope::Timestamp) -> flowscope::OwnedAnomaly {
-        let s = self.0;
-        // Verdict is `Scanner` by the time we wrap (the verdict closure gates on
-        // it) → Warning severity, `"scanner"` slug.
-        flowscope::OwnedAnomaly::new(
-            flowscope::DetectorKind::PortScanTrw,
-            flowscope::event::Severity::Warning,
-            ts,
-        )
-        .with_key(&self.1)
-        .with_observation("verdict", "scanner")
-        .with_metric("log_likelihood", s.log_likelihood)
-        .with_metric("n_observed", s.n_observed as f64)
-    }
-}
-
-/// Detector wrapper for the DGA scorer over DNS query SLDs (issue #18). Reads
-/// its threshold + allowlist live from `cfg` (#121).
-struct Dga {
-    scorer: DgaScorer,
-    cfg: LiveConfig,
-    last_score: Option<DgaScore>,
-}
-
-/// Connection-flood detector (issue #18): counts TCP flow-starts per (dst,port)
-/// in a sliding window via a `TimeBucketedCounter`, flagging once a single
-/// (dst,port) crosses the threshold. Distinct from a port scan (many ports).
-struct Flood {
-    counter: TimeBucketedCounter<String>,
-    cfg: LiveConfig,
-    last_hit: Option<(String, u64)>,
 }
 
 /// Per-flow memo cap for the FQDN beacon's name resolution (#308) — bounds the
@@ -774,7 +632,7 @@ pub fn build(
     let flow_bytes = Arc::new(AtomicU64::new(0));
     let flow_packets = Arc::new(AtomicU64::new(0));
     let flow_retransmits = Arc::new(AtomicU64::new(0));
-    let flow_durations_ms = Arc::new(Mutex::new(RedSketch::default()));
+    let flow_red: FlowRedState = Arc::new(Mutex::new(None));
     let flow_records: FlowRing = Arc::new(Mutex::new(VecDeque::with_capacity(FLOW_RING_CAP)));
     #[cfg(feature = "ipfix")]
     let ipfix_records: IpfixRing = Arc::new(Mutex::new(VecDeque::with_capacity(FLOW_RING_CAP)));
@@ -793,8 +651,7 @@ pub fn build(
     let icmp = Arc::new(IcmpState::default());
     let dns = Arc::new(DnsState::default());
     let http = Arc::new(HttpState::default());
-    let talkers: TalkerHist = Arc::new(Mutex::new(HashMap::new()));
-    let matrix: MatrixHist = Arc::new(Mutex::new(HashMap::new()));
+    let aggregate: AggregateState = Arc::new(Mutex::new(Default::default()));
     let elephants: ElephantRing = Arc::new(Mutex::new(VecDeque::with_capacity(ELEPHANT_RING_CAP)));
     let quic: QuicInventory = Arc::new(Mutex::new(HashMap::new()));
     let ssh: SshInventory = Arc::new(Mutex::new(HashMap::new()));
@@ -901,26 +758,13 @@ pub fn build(
         let bytes = flow_bytes.clone();
         let packets = flow_packets.clone();
         let retransmits = flow_retransmits.clone();
-        let durations = flow_durations_ms.clone();
         let records = flow_records.clone();
         let l4_h = l4.clone();
-        let talkers_h = talkers.clone();
-        let matrix_h = matrix.clone();
         let elephants_h = elephants.clone();
         let collect_talkers = cfg.collect.talkers;
-        // Data-exfiltration baseline (#123) — built only when enabled at startup
-        // (the #121 detectors follow the same rule). The closure feeds outbound
-        // bytes per source and ships a finding on the typed alerts channel; sigma
-        // / floor / mute / allowlist are read LIVE from the tunable config.
-        let exfil = cfg.anomalies.data_exfil.then(|| {
-            Arc::new(Mutex::new(crate::exfil::ExfilDetector::new(
-                EXFIL_EWMA_ALPHA,
-            )))
-        });
-        let exfil_h = exfil.clone();
-        let exfil_alert_tx = alert_tx.clone();
-        let exfil_cfg = det_cfg.clone();
-        let exfil_sensor_id = cfg.source.clone();
+        // Data-exfiltration (#123) now rides the flowscope `DataExfilDetector` in
+        // the `Tuned` registry (#369) — driven by the Monitor's own flow-end
+        // stream, no bespoke feed here.
         let shed_fe = shed_ctl.clone();
         // Capture-leg asymmetry (#226): a flow whose two directions arrived on
         // legs that shouldn't pair (tap miswire / asymmetric routing). Sticky
@@ -953,26 +797,19 @@ pub fn build(
                 &bytes,
                 &packets,
                 &retransmits,
-                &durations,
                 &records,
                 &l4_h,
-                &talkers_h,
-                &matrix_h,
                 &elephants_h,
                 collect_talkers,
                 nm_flow.as_ref(),
             );
-            if let Some(exfil) = &exfil_h {
-                feed_exfil(exfil, e, &exfil_cfg, &exfil_alert_tx, &exfil_sensor_id);
-            }
             Ok(())
         });
 
-        // UDP + ICMP flow ends feed only the per-L4 composition (and talkers/matrix).
+        // UDP + ICMP flow ends feed only the per-L4 composition. Talkers / matrix
+        // now come from netring's rolling `aggregate()` (#369), which sees every
+        // L4 by itself, so no per-protocol histogram feeding here.
         let l4_udp = l4.clone();
-        let talkers_udp = talkers.clone();
-        let matrix_udp = matrix.clone();
-        let collect_talkers_udp = cfg.collect.talkers;
         b = b.protocol::<Udp>();
         let asym_tx_udp = alert_tx.clone();
         let asym_sensor_id_udp = cfg.source.clone();
@@ -989,17 +826,36 @@ pub fn build(
                     e.stats.source_idx_reverse,
                 ));
             }
-            if collect_talkers_udp {
-                // UDP has no handshake, so the initiator is the first-packet
-                // sender (best-effort); still order initiator → responder so the
-                // service map is directional (e.g. DNS client → resolver).
-                let (ini, resp) =
-                    map::initiator_responder(e.key.a, e.key.b, e.stats.initiator_orientation);
-                record_talker(&talkers_udp, &resp.to_string(), &e.stats);
-                record_matrix(&matrix_udp, &ini.to_string(), &resp.to_string(), &e.stats);
-            }
             Ok(())
         });
+    }
+
+    // Rolling traffic aggregate (#369): netring's `aggregate()` maintains 60 s
+    // bytes/sec by src IP (talkers) and by `(src,dst)` pair (matrix) across every
+    // L4. The `on_aggregate` tick snapshots it into the shared state served on
+    // `@/query/{talkers,matrix}`. Flow RED (`red()`) tracks per-flow lifetime
+    // rate / error-ratio / p50·p95·p99, snapshotted the same way (retires the
+    // bespoke duration DDSketch).
+    if cfg.collect.talkers || cfg.collect.flows {
+        if cfg.collect.talkers {
+            let agg = aggregate.clone();
+            b = b.on_aggregate(AGGREGATE_REFRESH, move |report| {
+                if let Ok(mut slot) = agg.lock() {
+                    *slot = report.to_snapshot(AGGREGATE_SNAPSHOT_ROWS);
+                }
+                Ok(())
+            });
+        }
+        if cfg.collect.flows {
+            let red = flow_red.clone();
+            b = b.on_red(AGGREGATE_REFRESH, move |report| {
+                use netring::monitor::red::RedProto;
+                if let Ok(mut slot) = red.lock() {
+                    *slot = Some(report.to_snapshot(RedProto::Flow));
+                }
+                Ok(())
+            });
+        }
     }
 
     // Canonical IPFIX export (#223): register a flow exporter that captures
@@ -1769,113 +1625,17 @@ pub fn build(
         );
     }
 
-    // Port-scan detector (Pillar A).
-    if cfg.anomalies.port_scan {
-        let scan = netring::pattern_detector! {
-            name: "PortScanTRW",
-            event: FlowEnded<Tcp>,
-            detector: PortScan { detector: PortScanDetector::new(), cfg: det_cfg.clone(), last_score: None },
-            feed: |evt, w| {
-                // State keyed on the scanner IP (#324) — a fan-out from rotating
-                // source ports is one TRW walk, not one per ephemeral flow.
-                if let Some(src) = SrcHost::from_key(&evt.key) {
-                    let success = matches!(evt.reason, EndReason::Fin | EndReason::IdleTimeout);
-                    w.last_score = Some(w.detector.observe(src, success));
-                }
-            },
-            verdict: |evt, w| {
-                // Muted at runtime? (#121)
-                if !w.cfg.load().port_scan {
-                    None
-                } else {
-                    w.last_score.as_ref().and_then(|s| {
-                        if matches!(s.verdict, ScanVerdict::Scanner) {
-                            // Label with the triggering flow's 5-tuple.
-                            Some(PortScanHit(s.clone(), evt.key))
-                        } else {
-                            None
-                        }
-                    })
-                }
-            },
-        };
-        b = b.detect(scan);
-    }
-
-    // RITA-style beaconing / C2 detector (issue #17).
-    if cfg.anomalies.beaconing {
-        let beacon = netring::pattern_detector! {
-            name: "BeaconCv",
-            event: FlowEnded<Tcp>,
-            detector: Beacon {
-                detector: BeaconDetector::new(),
-                cfg: det_cfg.clone(),
-                last_score: None,
-            },
-            feed: |evt, w| {
-                // One observation per finished flow, keyed by HostPair (#324): a
-                // beacon ping is a connection, not a packet, and its ephemeral
-                // source port no longer fragments the interval series.
-                if let Some(pair) = HostPair::from_key(&evt.key) {
-                    w.last_score =
-                        w.detector.observe(pair, evt.ts, evt.stats.bytes_initiator);
-                }
-            },
-            verdict: |evt, w| {
-                let c = w.cfg.load();
-                if !c.beaconing {
-                    None // muted at runtime (#121)
-                } else {
-                    w.last_score.as_ref().and_then(|s| {
-                        let dst = s.key.dst.to_string();
-                        if s.score >= c.beacon_threshold && !allowlisted(&dst, &c.allowlist) {
-                            Some(BeaconCvHit(s.clone(), evt.key))
-                        } else {
-                            None
-                        }
-                    })
-                }
-            },
-        };
-        b = b.detect(beacon);
-    }
-
-    // RITA robust beaconing detector (issue #118) — wired alongside the CV
-    // beacon, fed the identical FlowPacket (key, ts, len) stream. Bowley-skew +
-    // MAD survive jitter, so this catches periodic C2 the CV detector misses.
-    if cfg.anomalies.rita_beacon {
-        let rita = netring::pattern_detector! {
-            name: "RitaBeacon",
-            event: FlowEnded<Tcp>,
-            detector: RitaBeacon {
-                detector: RitaBeaconDetector::new(),
-                cfg: det_cfg.clone(),
-                last_score: None,
-            },
-            feed: |evt, w| {
-                // Per-flow observation keyed by HostPair (#324), same as the CV beacon.
-                if let Some(pair) = HostPair::from_key(&evt.key) {
-                    w.last_score =
-                        w.detector.observe(pair, evt.ts, evt.stats.bytes_initiator);
-                }
-            },
-            verdict: |evt, w| {
-                let c = w.cfg.load();
-                if !c.rita_beacon {
-                    None // muted at runtime (#121)
-                } else {
-                    w.last_score.as_ref().and_then(|s| {
-                        let dst = s.key.dst.to_string();
-                        if s.score >= c.rita_beacon_threshold && !allowlisted(&dst, &c.allowlist) {
-                            Some(RitaBeaconHit(s.clone(), evt.key))
-                        } else {
-                            None
-                        }
-                    })
-                }
-            },
-        };
-        b = b.detect(rita);
+    // NDR detectors (#369): flowscope 0.22 stock detectors — beacon (CV +
+    // RITA), port-scan (TRW), connection-flood, data-exfil, DGA, DNS-tunnel and
+    // newly-observed-domain — run in one `DetectorRegistry<FlowKey>`, each wrapped
+    // in `Tuned` so runtime mute / threshold / allowlist edits (#121/#328) still
+    // apply. netring drives the registry from its own flow + DNS query stream and
+    // publishes every emitted anomaly through the ChannelSink → drain →
+    // AlertReporter path (like the built-ins). Only detectors enabled at build are
+    // registered; DNS-driven ones additionally need `collect.dns`.
+    if let Some(registry) = crate::detectors::build_registry(cfg, &det_cfg) {
+        b = b.detectors(registry);
+        tracing::info!("netring: NDR detector registry armed");
     }
 
     // FQDN-pivoted RITA beaconing (#308): the same Bowley+MAD robust statistics
@@ -1967,151 +1727,6 @@ pub fn build(
                 "netring: anomalies.rita_beacon_fqdn needs collect.dns + names.enabled; detector disabled"
             );
         }
-    }
-
-    // Connection-flood detector (issue #18).
-    if cfg.anomalies.connection_flood {
-        use netring::protocol::event_typed::FlowStarted;
-        let flood = netring::pattern_detector! {
-            name: "ConnectionFlood",
-            event: FlowStarted<Tcp>,
-            detector: Flood {
-                counter: TimeBucketedCounter::new(Duration::from_secs(10), Duration::from_secs(1), 16_384),
-                cfg: det_cfg.clone(),
-                last_hit: None,
-            },
-            feed: |evt, w| {
-                // Key by destination (ip:port) — many conns to one port = flood.
-                let key = evt.key.b.to_string();
-                w.counter.bump(key.clone(), evt.ts);
-                let count = w.counter.count(&key, evt.ts);
-                w.last_hit = Some((key, count));
-            },
-            verdict: |_evt, w| {
-                let c = w.cfg.load();
-                if !c.connection_flood {
-                    None // muted at runtime (#121)
-                } else {
-                    w.last_hit.as_ref().and_then(|(dst, count)| {
-                        if *count >= c.flood_threshold {
-                            Some(FloodScore { dst: dst.clone(), count: *count })
-                        } else {
-                            None
-                        }
-                    })
-                }
-            },
-        };
-        b = b.detect(flood);
-    }
-
-    // DGA / DNS-tunneling scorer (issue #18) — requires DNS collection.
-    if cfg.anomalies.dga && cfg.collect.dns {
-        use flowscope::dns::DnsMessage;
-        let dga = netring::pattern_detector! {
-            name: "DgaScorer",
-            event: Dns,
-            detector: Dga {
-                scorer: DgaScorer::new(),
-                cfg: det_cfg.clone(),
-                last_score: None,
-            },
-            feed: |msg, w| {
-                w.last_score = None;
-                if let DnsMessage::Query(q) = msg
-                    && let Some(question) = q.questions.first()
-                    && let Some(sld) = map::dns_sld(&question.name)
-                    && !allowlisted(&sld, &w.cfg.load().allowlist)
-                {
-                    let sc = w.scorer.score(&sld);
-                    w.last_score = Some(sc);
-                }
-            },
-            verdict: |_msg, w| {
-                let c = w.cfg.load();
-                if !c.dga {
-                    None // muted at runtime (#121)
-                } else {
-                    w.last_score.as_ref().and_then(|s| {
-                        let fire = (s.log_likelihood as f64) < c.dga_threshold;
-                        if fire { Some(*s) } else { None }
-                    })
-                }
-            },
-        };
-        b = b.detect(dga);
-    }
-
-    // DNS tunneling + Newly-Observed-Domain detectors (issue #118) — both need
-    // DNS parsing (`collect.dns`) for the qname and the flow ctx for src/ts, so
-    // they ride a dedicated `on_ctx::<Dns>` handler (handlers append, so this
-    // coexists with the collect.dns RED handler and the DGA detector). Hits are
-    // emitted as anomaly alerts on the typed alerts channel via the shared
-    // `map::anomaly_alert` path (kind → ATT&CK technique, Community ID). Detector
-    // state lives behind a `Mutex` (on_ctx handlers are `Fn`), held briefly.
-    if (cfg.anomalies.dns_tunnel || cfg.anomalies.nod) && cfg.collect.dns {
-        use flowscope::dns::DnsMessage;
-        let alerts_h = alert_tx.clone();
-        let sensor_id = cfg.source.clone();
-        // Read allowlist + per-detector enables/thresholds live so they hot-swap
-        // at runtime (#121).
-        let det = det_cfg.clone();
-        let tunnel_set: Mutex<TimeBucketedSet<(String, String), String>> =
-            Mutex::new(TimeBucketedSet::new(
-                Duration::from_secs(60),
-                Duration::from_secs(5),
-                DNS_TUNNEL_KEY_CAP,
-            ));
-        let nod_seen: Mutex<map::SeenDomains> = Mutex::new(map::SeenDomains::new(NOD_SEEN_CAP));
-        b = b.on_ctx::<Dns>(move |msg: &DnsMessage, ctx: &mut Ctx<'_>| {
-            let DnsMessage::Query(q) = msg else {
-                return Ok(());
-            };
-            let Some(question) = q.questions.first() else {
-                return Ok(());
-            };
-            let Some(sld) = map::dns_sld(&question.name) else {
-                return Ok(());
-            };
-            let c = det.load();
-            if allowlisted(&sld, &c.allowlist) {
-                return Ok(());
-            }
-            // Source HOST IP only (no ephemeral port) → stable (rule, src) bucket.
-            let src = ctx.flow.map(|k| k.a.ip().to_string());
-
-            // NOD: emit once on the first sight of this SLD on the wire.
-            if c.nod
-                && let Ok(mut seen) = nod_seen.lock()
-                && seen.observe(&sld)
-            {
-                let view = map::nod_view(src.clone(), &sld);
-                let _ = alerts_h.send(map::anomaly_alert(&sensor_id, &view));
-            }
-
-            // DNS tunnel: distinct subdomain labels per (src, SLD) + qname length.
-            if c.dns_tunnel {
-                let qname = question.name.trim_end_matches('.').to_ascii_lowercase();
-                let key = (src.clone().unwrap_or_default(), sld.clone());
-                let distinct = if let Ok(mut set) = tunnel_set.lock() {
-                    set.insert(key.clone(), qname.clone(), ctx.ts);
-                    set.cardinality(&key, ctx.ts)
-                } else {
-                    0
-                };
-                if map::dns_tunnel_fires(
-                    distinct,
-                    qname.len(),
-                    c.dns_tunnel_distinct,
-                    c.dns_tunnel_qname_len,
-                ) {
-                    let view = map::dns_tunnel_view(src, &sld, distinct, qname.len());
-                    let _ = alerts_h.send(map::anomaly_alert(&sensor_id, &view));
-                }
-            }
-            Ok(())
-        });
-        tracing::info!("netring: DNS tunnel / newly-observed-domain detection enabled");
     }
 
     // Threat-intel detection (netring 0.27). flow-risk / IOC / Sigma hits are
@@ -2333,7 +1948,7 @@ pub fn build(
             flow_bytes,
             flow_packets,
             flow_retransmits,
-            flow_durations_ms,
+            flow_red,
             flow_records,
             tcp_resets,
             tcp_refused,
@@ -2345,8 +1960,7 @@ pub fn build(
             icmp,
             dns,
             http,
-            talkers,
-            matrix,
+            aggregate,
             elephants,
             quic,
             ssh,
@@ -2365,29 +1979,6 @@ pub fn build(
     ))
 }
 
-/// Local detector-score type for the connection-flood detector. Implements
-/// flowscope's `DetectorScore` so `pattern_detector!`'s `verdict` can return it
-/// and the macro publishes the resulting `OwnedAnomaly`.
-struct FloodScore {
-    dst: String,
-    count: u64,
-}
-
-impl flowscope::DetectorScore for FloodScore {
-    fn kind(&self) -> flowscope::DetectorKind {
-        flowscope::DetectorKind::Other("ConnectionFlood")
-    }
-    fn into_anomaly(self, ts: flowscope::Timestamp) -> flowscope::OwnedAnomaly {
-        flowscope::OwnedAnomaly::new(
-            flowscope::DetectorKind::Other("ConnectionFlood"),
-            flowscope::event::Severity::Warning,
-            ts,
-        )
-        .with_observation("dst", self.dst)
-        .with_metric("connections", self.count as f64)
-    }
-}
-
 /// Capture-path `FlowEnded<Tcp>` handler body — kept allocation-light: a handful
 /// of atomic adds plus short-held `Mutex` pushes. No formatting beyond the
 /// bounded detail rings, which are needed for the on-demand channels anyway.
@@ -2398,11 +1989,8 @@ fn on_flow_ended(
     bytes: &AtomicU64,
     packets: &AtomicU64,
     retransmits: &AtomicU64,
-    durations: &Mutex<RedSketch>,
     records: &FlowRing,
     l4: &L4State,
-    talkers: &TalkerHist,
-    matrix: &MatrixHist,
     elephants: &ElephantRing,
     collect_talkers: bool,
     name_map: Option<&SharedNameMap>,
@@ -2423,10 +2011,8 @@ fn on_flow_ended(
         "rst" => l4.closed_rst.fetch_add(1, Ordering::Relaxed),
         _ => l4.closed_idle.fetch_add(1, Ordering::Relaxed),
     };
-
-    if let Ok(mut d) = durations.lock() {
-        d.record(duration_ms);
-    }
+    // Flow-lifetime percentiles now come from netring's `red()` (#369), not a
+    // bespoke duration DDSketch fed here.
 
     let proto = e.l4.map(|p| p.canonical_name()).unwrap_or("tcp");
     let reason = e.reason.as_str();
@@ -2476,8 +2062,8 @@ fn on_flow_ended(
     }
 
     if collect_talkers {
-        record_talker(talkers, &resp_s, &e.stats);
-        record_matrix(matrix, &ini_s, &resp_s, &e.stats);
+        // Talkers / matrix come from netring's rolling `aggregate()` (#369); only
+        // the elephant ring is fed here.
         // Elephant ring: keep the largest recent flows (push, trim by size).
         if let Ok(mut ring) = elephants.lock() {
             let er = crate::map::elephant_record(
@@ -2500,47 +2086,6 @@ fn on_flow_ended(
     }
 }
 
-/// Feed a finished TCP flow's outbound volume into the data-exfil baseline (#123)
-/// and ship a `DataExfiltration` alert when it stands out. Reads the live tunable
-/// config so mute / sigma / floor / allowlist hot-swap at runtime (#121); the
-/// outbound direction is the initiator (client → server) byte count.
-fn feed_exfil(
-    exfil: &Arc<Mutex<crate::exfil::ExfilDetector>>,
-    e: &FlowEnded<Tcp>,
-    det_cfg: &LiveConfig,
-    alert_tx: &mpsc::UnboundedSender<Alert>,
-    sensor_id: &str,
-) {
-    let c = det_cfg.load();
-    if !c.data_exfil {
-        return;
-    }
-    // Attribute the exfil baseline to the resolved initiator (the host pushing
-    // bytes out), not the canonical key order (#122).
-    let (initiator, responder) =
-        map::initiator_responder(e.key.a, e.key.b, e.stats.initiator_orientation);
-    let src_ip = initiator.ip();
-    if allowlisted(&src_ip.to_string(), &c.allowlist) {
-        return;
-    }
-    let bytes_out = e.stats.bytes_for(flowscope::FlowSide::Initiator);
-    let finding = {
-        let Ok(mut d) = exfil.lock() else {
-            return;
-        };
-        d.observe(src_ip, bytes_out, c.exfil_sigma, c.exfil_min_bytes)
-    };
-    if let Some(f) = finding {
-        let view = map::exfil_view(
-            initiator.to_string(),
-            responder.to_string(),
-            f.bytes_out,
-            f.zscore,
-        );
-        let _ = alert_tx.send(map::anomaly_alert(sensor_id, &view));
-    }
-}
-
 /// Ship a lateral-movement [`LateralFinding`](crate::lateral::LateralFinding) as
 /// a `zensight` alert (#123), attributing src/dst from the flow key in `ctx`.
 #[cfg(feature = "lateral")]
@@ -2554,43 +2099,6 @@ fn emit_lateral(
     let dst = ctx.flow.map(|k| k.b.to_string());
     let view = map::lateral_view(f.kind, src, dst, f.severity, f.observations);
     let _ = alerts.send(map::anomaly_alert(sensor_id, &view));
-}
-
-/// Update the per-destination talker histogram (bounded by `TALKER_CAP`).
-fn record_talker(talkers: &TalkerHist, dst: &str, stats: &flowscope::FlowStats) {
-    if let Ok(mut t) = talkers.lock() {
-        if let Some(e) = t.get_mut(dst) {
-            e.0 += stats.total_bytes();
-            e.1 += stats.total_packets();
-            e.2 += 1;
-        } else if t.len() < TALKER_CAP {
-            t.insert(
-                dst.to_string(),
-                (stats.total_bytes(), stats.total_packets(), 1),
-            );
-        }
-    }
-}
-
-/// Update the `(src,dst)` traffic-matrix histogram (#122), bounded by `TALKER_CAP`
-/// like the talker map. Runs once per ended flow (not per packet), so building the
-/// owned `(src,dst)` key here is cheap; the lock is held only for the update.
-fn record_matrix(matrix: &MatrixHist, src: &str, dst: &str, stats: &flowscope::FlowStats) {
-    if let Ok(mut m) = matrix.lock() {
-        let key = (src.to_string(), dst.to_string());
-        match m.get_mut(&key) {
-            Some(e) => {
-                e.0 += stats.total_bytes();
-                e.1 += stats.total_packets();
-                e.2 += 1;
-            }
-            None => {
-                if m.len() < TALKER_CAP {
-                    m.insert(key, (stats.total_bytes(), stats.total_packets(), 1));
-                }
-            }
-        }
-    }
 }
 
 /// Snapshot the DNS RED accumulators into the per-rcode tuple list + headline
@@ -2829,6 +2337,8 @@ mod tests {
     #[test]
     fn hostpair_keying_catches_source_port_rotating_beacon() {
         use flowscope::Timestamp;
+        use flowscope::detect::HostPair;
+        use flowscope::detect::patterns::BeaconDetector;
         use flowscope::extractor::L4Proto;
 
         // A perfectly periodic C2 beacon: same client → server:443, 60 s apart,

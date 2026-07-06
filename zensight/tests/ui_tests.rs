@@ -2953,16 +2953,14 @@ fn test_netring_overview_chip_and_talkers_tab() {
     // Talkers & Matrix tab: ranked bar + table render from fetched talkers.
     state.netring_detail.talkers =
         zensight::view::specialized::fetch::Fetch::Ready(vec![TalkerRecord {
-            dst: "10.0.0.42:443".into(),
-            bytes: 4096,
-            packets: 12,
-            flows: 2,
+            src: "10.0.0.42".into(),
+            bytes_per_sec: 4096.0,
             names: Vec::new(),
         }]);
     state.specialized_tab = SpecializedTab::TalkersMatrix;
     {
         let mut ui = simulator(netring_sensor_view(&state, None));
-        assert!(ui.find("10.0.0.42:443").is_ok());
+        assert!(ui.find("10.0.0.42").is_ok());
         assert!(ui.find("showing 1 of 1 talkers").is_ok());
     }
 }

@@ -1334,37 +1334,29 @@ fn render_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
         if records.is_empty() {
             col = col.push(empty_state("No talkers", None));
         } else {
-            // Ranked bar chart of the heaviest destinations by bytes.
+            // Ranked bar chart of the busiest sources by rolling bytes/sec (#369).
             let bars: Vec<(String, f64)> = records
                 .iter()
                 .take(RANKED_BAR_ROWS)
-                .map(|r| (r.dst.clone(), r.bytes as f64))
+                .map(|r| (r.src.clone(), r.bytes_per_sec))
                 .collect();
-            col = col.push(chart::ranked_bar(&bars, format_bytes, RANKED_BAR_ROWS));
+            col = col.push(chart::ranked_bar(&bars, format_rate, RANKED_BAR_ROWS));
 
             let columns = vec![
-                TableColumn::fill("destination", 4, |r: &zensight_common::TalkerRecord| {
-                    pivot_button(state, &r.dst, &r.dst)
+                TableColumn::fill("source", 5, |r: &zensight_common::TalkerRecord| {
+                    pivot_button(state, &r.src, &r.src)
                 })
-                .sortable(|r: &zensight_common::TalkerRecord| SortKey::Text(r.dst.clone())),
-                TableColumn::fixed("bytes", 120.0, |r: &zensight_common::TalkerRecord| {
-                    text(format_bytes(r.bytes as f64))
+                .sortable(|r: &zensight_common::TalkerRecord| SortKey::Text(r.src.clone())),
+                TableColumn::fixed("rate", 130.0, |r: &zensight_common::TalkerRecord| {
+                    text(format_rate(r.bytes_per_sec))
                         .size(font::CAPTION)
                         .into()
                 })
-                .sortable(|r: &zensight_common::TalkerRecord| SortKey::Num(r.bytes as f64)),
-                TableColumn::fixed("packets", 100.0, |r: &zensight_common::TalkerRecord| {
-                    text(format_count(r.packets)).size(font::CAPTION).into()
-                })
-                .sortable(|r: &zensight_common::TalkerRecord| SortKey::Num(r.packets as f64)),
-                TableColumn::fixed("flows", 80.0, |r: &zensight_common::TalkerRecord| {
-                    text(r.flows.to_string()).size(font::CAPTION).into()
-                })
-                .sortable(|r: &zensight_common::TalkerRecord| SortKey::Num(r.flows as f64)),
+                .sortable(|r: &zensight_common::TalkerRecord| SortKey::Num(r.bytes_per_sec)),
             ];
             col = col.push(
                 DataTable::new(columns)
-                    .searchable(|r: &zensight_common::TalkerRecord| r.dst.clone())
+                    .searchable(|r: &zensight_common::TalkerRecord| r.src.clone())
                     .on_sort(|c| Message::NetringTableSort(NetringTable::Talkers, c))
                     .on_filter(|q| Message::NetringTableFilter(NetringTable::Talkers, q))
                     .on_more(Message::NetringTableMore(NetringTable::Talkers))
@@ -1415,20 +1407,12 @@ fn render_matrix(state: &DeviceDetailState) -> Element<'_, Message> {
                     pivot_button(state, &r.dst, &r.dst)
                 })
                 .sortable(|r: &zensight_common::MatrixRecord| SortKey::Text(r.dst.clone())),
-                TableColumn::fixed("bytes", 120.0, |r: &zensight_common::MatrixRecord| {
-                    text(format_bytes(r.bytes as f64))
+                TableColumn::fixed("rate", 130.0, |r: &zensight_common::MatrixRecord| {
+                    text(format_rate(r.bytes_per_sec))
                         .size(font::CAPTION)
                         .into()
                 })
-                .sortable(|r: &zensight_common::MatrixRecord| SortKey::Num(r.bytes as f64)),
-                TableColumn::fixed("packets", 100.0, |r: &zensight_common::MatrixRecord| {
-                    text(format_count(r.packets)).size(font::CAPTION).into()
-                })
-                .sortable(|r: &zensight_common::MatrixRecord| SortKey::Num(r.packets as f64)),
-                TableColumn::fixed("flows", 80.0, |r: &zensight_common::MatrixRecord| {
-                    text(r.flows.to_string()).size(font::CAPTION).into()
-                })
-                .sortable(|r: &zensight_common::MatrixRecord| SortKey::Num(r.flows as f64)),
+                .sortable(|r: &zensight_common::MatrixRecord| SortKey::Num(r.bytes_per_sec)),
             ];
             col = col.push(
                 DataTable::new(columns)
@@ -1467,7 +1451,7 @@ fn matrix_heatmap<'a>(records: &[zensight_common::MatrixRecord]) -> Option<Eleme
     let mut grid = vec![vec![0.0_f64; dst_idx.len()]; src_idx.len()];
     for r in records {
         if let (Some(&s), Some(&d)) = (src_idx.get(r.src.as_str()), dst_idx.get(r.dst.as_str())) {
-            grid[s][d] += r.bytes as f64;
+            grid[s][d] += r.bytes_per_sec;
         }
     }
     Some(chart::heatmap(&grid, 16.0))
@@ -2118,9 +2102,8 @@ mod tests {
         state.netring_detail.matrix = Fetch::Ready(vec![MatrixRecord {
             src: "10.0.0.1:5555".to_string(),
             dst: "10.0.0.42:443".to_string(),
-            bytes: 1234,
-            packets: 10,
-            flows: 3,
+            bytes_per_sec: 1234.0,
+            names: Vec::new(),
         }]);
         let mut ui = simulator(render_matrix(&state));
         let _ = ui.click("10.0.0.42:443");
@@ -2163,11 +2146,11 @@ mod tests {
         }
         state.netring_detail.captures = Fetch::Ready(vec![
             CaptureRecord {
-                filename: "zensight-host01-trigger-RitaBeacon-1.pcap.zst".into(),
+                filename: "zensight-host01-trigger-BeaconRita-1.pcap.zst".into(),
                 bytes: 2 * 1024 * 1024,
                 packets: 812,
                 mode: "triggered".into(),
-                trigger_kind: Some("RitaBeacon".into()),
+                trigger_kind: Some("BeaconRita".into()),
                 artifact_id: Some("01J00000000000000000000000".into()),
                 ..Default::default()
             },
@@ -2202,7 +2185,7 @@ mod tests {
             m,
             Message::DownloadCaptureBlob { artifact_id, filename, .. }
                 if artifact_id == "01J00000000000000000000000"
-                    && filename.contains("RitaBeacon")
+                    && filename.contains("BeaconRita")
         )));
         assert!(
             msgs.iter().any(

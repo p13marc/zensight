@@ -235,7 +235,7 @@ async fn main() -> Result<()> {
             runner.spawn(query::run_talkers(
                 s.clone(),
                 key_prefix.clone(),
-                channels.talkers.clone(),
+                channels.aggregate.clone(),
                 channels.name_map.clone(),
             ));
             runner.spawn(query::run_elephants(
@@ -247,7 +247,8 @@ async fn main() -> Result<()> {
             runner.spawn(query::run_matrix(
                 s.clone(),
                 key_prefix.clone(),
-                channels.matrix.clone(),
+                channels.aggregate.clone(),
+                channels.name_map.clone(),
             ));
         }
         if cfg.collect.dns {

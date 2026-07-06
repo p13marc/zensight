@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use crate::map;
 use crate::monitor::{
-    AssetInventory, DnsInventory, ElephantRing, FlowRing, HttpInventory, Ja4hInventory, MatrixHist,
-    QuicInventory, SshInventory, TalkerHist, TlsInventory,
+    AggregateState, AssetInventory, DnsInventory, ElephantRing, FlowRing, HttpInventory,
+    Ja4hInventory, QuicInventory, SshInventory, TlsInventory,
 };
 
 /// Default top-N for the talker / domain / host channels when no `?top=` query
@@ -195,16 +195,16 @@ pub async fn run_assets(
 }
 
 /// Run the top-talkers query channel: `zensight/netring/@/query/talkers?top=N`
-/// replies with the top-N destinations by byte volume as JSON `Vec<TalkerRecord>`.
+/// replies with the top-N **source hosts** by rolling bytes/sec (netring
+/// `aggregate()`, #369) as JSON `Vec<TalkerRecord>`.
 ///
 /// When the passive-DNS name map is available (#308), each served row is
-/// enriched with the names observed for its destination IP — resolved at query
-/// time via the non-promoting `peek_names` (a query must not perturb the LRU),
-/// ranked, top 3.
+/// enriched with the names observed for its source IP — resolved at query time
+/// via the non-promoting `peek_names` (a query must not perturb the LRU), ranked.
 pub async fn run_talkers(
     session: Arc<zenoh::Session>,
     key_prefix: String,
-    hist: TalkerHist,
+    aggregate: AggregateState,
     name_map: Option<crate::monitor::SharedNameMap>,
 ) {
     let key = zensight_common::command::query_key(&key_prefix, "talkers");
@@ -219,8 +219,8 @@ pub async fn run_talkers(
 
     while let Ok(query) = queryable.recv_async().await {
         let top = top_n(&query);
-        let mut records = match hist.lock() {
-            Ok(h) => map::top_talkers(&h, top),
+        let mut records = match aggregate.lock() {
+            Ok(snap) => map::top_talkers(&snap.talkers, top),
             Err(_) => Vec::new(),
         };
         // Name enrichment: one lock for the whole reply, top-N rows only. Uses
@@ -231,7 +231,7 @@ pub async fn run_talkers(
         {
             let now = flowscope::Timestamp::from_system_time(std::time::SystemTime::now());
             for rec in &mut records {
-                if let Some(ip) = map::endpoint_ip(&rec.dst) {
+                if let Some(ip) = map::endpoint_ip(&rec.src) {
                     rec.names = map::rank_names(names.peek_names(ip, now));
                 }
             }
@@ -240,10 +240,16 @@ pub async fn run_talkers(
     }
 }
 
-/// Run the traffic-matrix query channel (#122):
+/// Run the traffic-matrix query channel (#122/#369):
 /// `zensight/netring/@/query/matrix?top=N` replies with the top-N `(src,dst)` pairs
-/// by byte volume as JSON `Vec<MatrixRecord>` — the service-map data.
-pub async fn run_matrix(session: Arc<zenoh::Session>, key_prefix: String, hist: MatrixHist) {
+/// by rolling bytes/sec (netring `aggregate()`) as JSON `Vec<MatrixRecord>` — the
+/// service-map data. Destination rows are name-enriched from passive DNS (#308).
+pub async fn run_matrix(
+    session: Arc<zenoh::Session>,
+    key_prefix: String,
+    aggregate: AggregateState,
+    name_map: Option<crate::monitor::SharedNameMap>,
+) {
     let key = zensight_common::command::query_key(&key_prefix, "matrix");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
@@ -256,10 +262,20 @@ pub async fn run_matrix(session: Arc<zenoh::Session>, key_prefix: String, hist: 
 
     while let Ok(query) = queryable.recv_async().await {
         let top = top_n(&query);
-        let records = match hist.lock() {
-            Ok(h) => map::traffic_matrix(&h, top),
+        let mut records = match aggregate.lock() {
+            Ok(snap) => map::traffic_matrix(&snap.pairs, top),
             Err(_) => Vec::new(),
         };
+        if let Some(nm) = &name_map
+            && let Ok(names) = nm.lock()
+        {
+            let now = flowscope::Timestamp::from_system_time(std::time::SystemTime::now());
+            for rec in &mut records {
+                if let Some(ip) = map::endpoint_ip(&rec.dst) {
+                    rec.names = map::rank_names(names.peek_names(ip, now));
+                }
+            }
+        }
         reply(&query, &records, "matrix").await;
     }
 }
