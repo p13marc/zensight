@@ -154,8 +154,17 @@ meta-nodes with aggregated edges (click to expand, "Regroup" re-collapses);
 button, breadcrumb to exit); filters (hide idle / passive / external, flow
 top-N with an honest "showing top N of M flows" label); search supports
 `find:`/`hide:` with `role:`/`alert:`/`health:` predicates. Lens/grouping/
-label/filter prefs persist in settings.json5. Supports zoom, pan, manual node
-positioning, and per-node/per-edge info panels with "View Details" navigation.
+label/filter prefs persist in settings.json5. Supports zoom, pan, and manual
+node positioning.
+
+Details on demand (#393, `view/topology/panel.rs`): selecting a node or edge
+opens a 320 px side panel fetched on selection (never on tick, stale replies
+dropped). The node panel shows correlator identity/evidence (member claims
+with rule+confidence, passive-DNS names), vitals with a 1 h CPU sparkline,
+top talkers, and listen sockets; the edge panel shows per-direction rates,
+backing flows with per-flow process attribution (#309 join,
+`AttributionTarget::Topology`), and community-id copy. Both pivot to the
+netring flow table and device detail.
 
 **Logs** (`view/specialized/syslog.rs` and related) — structured log drill-down
 with a MESSAGE_ID catalog, follow/pause, and a boot lens. Seeds from the cold
