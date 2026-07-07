@@ -204,6 +204,66 @@ pub fn center_layout(state: &mut TopologyState) {
     state.cache.clear();
 }
 
+/// Arrange nodes in a ranked grid (#394): most interesting first — alert
+/// severity, then total edge rate, then label — reading left-to-right,
+/// top-to-bottom. Pinned nodes keep their manual positions.
+pub fn grid_positions(state: &mut TopologyState) {
+    use std::collections::HashMap;
+
+    // Total live rate per node id, from the current edge set.
+    let mut rates: HashMap<&str, f64> = HashMap::new();
+    for edge in &state.edges {
+        let rate = edge.rate + edge.reverse_rate;
+        *rates.entry(edge.from.as_str()).or_insert(0.0) += rate;
+        *rates.entry(edge.to.as_str()).or_insert(0.0) += rate;
+    }
+
+    let mut ids: Vec<&NodeId> = state.nodes.keys().collect();
+    ids.sort_by(|a, b| {
+        let (na, nb) = (&state.nodes[*a], &state.nodes[*b]);
+        // Alert severity first (Some > None, higher severity first)...
+        let sev = |n: &super::Node| n.alert.map(|s| s as i8).unwrap_or(-1);
+        sev(nb)
+            .cmp(&sev(na))
+            // ...then total live rate...
+            .then_with(|| {
+                let (ra, rb) = (
+                    rates.get(a.as_str()).copied().unwrap_or(0.0),
+                    rates.get(b.as_str()).copied().unwrap_or(0.0),
+                );
+                rb.partial_cmp(&ra).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            // ...then stable by label.
+            .then_with(|| na.label.cmp(&nb.label))
+    });
+
+    let count = ids.len();
+    if count == 0 {
+        return;
+    }
+    let columns = (count as f32).sqrt().ceil() as usize;
+    const SPACING: f32 = 260.0;
+    let width = (columns.saturating_sub(1)) as f32 * SPACING;
+    let rows = count.div_ceil(columns);
+    let height = (rows.saturating_sub(1)) as f32 * SPACING;
+
+    let ids: Vec<NodeId> = ids.into_iter().cloned().collect();
+    for (i, id) in ids.iter().enumerate() {
+        let node = state.nodes.get_mut(id).expect("id from keys");
+        if node.pinned {
+            continue;
+        }
+        let (col, row) = (i % columns, i / columns);
+        node.position = (
+            col as f32 * SPACING - width / 2.0,
+            row as f32 * SPACING - height / 2.0,
+        );
+        node.velocity = (0.0, 0.0);
+    }
+
+    state.cache.clear();
+}
+
 /// Arrange nodes in a circle (initial layout).
 pub fn arrange_circle(state: &mut TopologyState, radius: f32) {
     let count = state.nodes.len();
@@ -329,6 +389,43 @@ mod tests {
                 (node.position.0 * node.position.0 + node.position.1 * node.position.1).sqrt();
             assert!((dist - 100.0).abs() < 0.001);
         }
+    }
+
+    #[test]
+    fn test_grid_positions_ranks_and_spaces() {
+        use crate::view::topology::Edge;
+        use zensight_common::AlertSeverity;
+
+        let mut state = TopologyState::default();
+        for id in ["quiet", "loud", "alerting"] {
+            state
+                .nodes
+                .insert(id.to_string(), create_test_node(id, 0.0, 0.0));
+        }
+        state.nodes.get_mut("alerting").unwrap().alert = Some(AlertSeverity::Critical);
+        state.edges.push(Edge {
+            from: "loud".to_string(),
+            to: "quiet".to_string(),
+            rate: 9_000.0,
+            ..Default::default()
+        });
+
+        grid_positions(&mut state);
+
+        // 3 nodes → 2 columns; rank: alerting, loud, quiet. The alerting node
+        // takes the first cell (top-left).
+        let pos = |id: &str| state.nodes[id].position;
+        assert!(pos("alerting").0 < pos("loud").0 || pos("alerting").1 < pos("loud").1);
+        // All distinct positions.
+        assert_ne!(pos("alerting"), pos("loud"));
+        assert_ne!(pos("loud"), pos("quiet"));
+
+        // Pinned nodes stay put.
+        let mut pinned = create_test_node("pinned", 42.0, 43.0);
+        pinned.pinned = true;
+        state.nodes.insert("pinned".to_string(), pinned);
+        grid_positions(&mut state);
+        assert_eq!(state.nodes["pinned"].position, (42.0, 43.0));
     }
 
     #[test]

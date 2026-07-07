@@ -255,9 +255,19 @@ pub fn node_panel<'a>(
 
     // ── Actions ──
     items = items.push(rule::horizontal(1));
-    if node.pinned {
-        items = items.push(note("Position pinned".to_string()));
-    }
+    items = items.push(
+        button(
+            text(if node.pinned {
+                "Unpin position"
+            } else {
+                "Pin position"
+            })
+            .size(11),
+        )
+        .on_press(Message::TopologyTogglePin(node.id.clone()))
+        .style(iced::widget::button::secondary)
+        .width(Length::Fill),
+    );
     items = items.push(
         button(
             row![

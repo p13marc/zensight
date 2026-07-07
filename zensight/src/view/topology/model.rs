@@ -825,6 +825,35 @@ impl std::fmt::Display for GroupingMode {
     }
 }
 
+/// How nodes get their positions (#394).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LayoutMode {
+    /// Force-directed (default): repulsion + springs, animated at 1 Hz.
+    #[default]
+    Force,
+    /// Static grid ranked by alert severity then traffic (Grafana's
+    /// "most interesting first" overview).
+    Grid,
+    /// Static circle (deterministic).
+    Circular,
+}
+
+impl LayoutMode {
+    /// Every mode, in pick-list order.
+    pub const ALL: [LayoutMode; 3] = [LayoutMode::Force, LayoutMode::Grid, LayoutMode::Circular];
+}
+
+impl std::fmt::Display for LayoutMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            LayoutMode::Force => "Force layout",
+            LayoutMode::Grid => "Grid layout",
+            LayoutMode::Circular => "Circular layout",
+        })
+    }
+}
+
 /// Edge/node visibility filters (#392).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TopoFilters {
@@ -873,6 +902,7 @@ pub struct TopoPrefs {
     pub edge_label: EdgeLabelMode,
     pub grouping: GroupingMode,
     pub filters: TopoFilters,
+    pub layout: LayoutMode,
     pub focus: Option<FocusState>,
     pub expanded_groups: HashSet<String>,
 }

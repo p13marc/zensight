@@ -21,10 +21,10 @@ use crate::view::dashboard::DeviceState;
 use crate::view::icons::{self, IconSize};
 
 pub use graph::TopologyGraph;
-pub use layout::{LayoutConfig, arrange_circle, center_layout, layout_step};
+pub use layout::{LayoutConfig, arrange_circle, center_layout, grid_positions, layout_step};
 pub use model::{
-    Edge, EdgeKind, EdgeLabelMode, FocusState, GroupingMode, INTERNET_NODE_ID, Lens, Node,
-    NodeAlert, NodeHealth, NodeId, NodeRole, Provenance, RenderEdge, RenderGraph, RenderNode,
+    Edge, EdgeKind, EdgeLabelMode, FocusState, GroupingMode, INTERNET_NODE_ID, LayoutMode, Lens,
+    Node, NodeAlert, NodeHealth, NodeId, NodeRole, Provenance, RenderEdge, RenderGraph, RenderNode,
     RenderSource, TintSource, TopoFilters, TopoPrefs, counter_rate, edges_from_flows,
     edges_from_gateways, edges_from_matrix, edges_from_neighbors, endpoint_ip,
     external_edges_from_matrix, format_rate, gateway_from_metrics, is_public_ip, merge_flow_stats,
@@ -89,6 +89,11 @@ pub struct TopologyState {
     /// Details-on-demand data for the side panel (#393), fetched on selection
     /// (never on tick) and reset when the selection changes.
     pub panel: PanelData,
+    /// Persisted node positions (#394), applied when a node (re)appears so a
+    /// manual arrangement survives restarts.
+    pub saved_positions: HashMap<NodeId, (f32, f32)>,
+    /// Persisted pinned-node set (#394).
+    pub saved_pins: std::collections::HashSet<NodeId>,
 }
 
 /// On-demand side-panel data (#393).
@@ -132,6 +137,8 @@ impl Default for TopologyState {
             group_labels: HashMap::new(),
             render: RenderGraph::default(),
             panel: PanelData::default(),
+            saved_positions: HashMap::new(),
+            saved_pins: std::collections::HashSet::new(),
         }
     }
 }
@@ -227,12 +234,19 @@ impl TopologyState {
                 .unwrap_or_else(|| source.clone());
 
             if !self.nodes.contains_key(&node_id) {
-                // Create new node - position will be set by arrange_in_circle
+                // Create new node — a persisted position/pin (#394) wins over
+                // the arrange_in_circle seeding.
                 self.nodes.insert(
                     node_id.clone(),
                     Node {
                         id: node_id.clone(),
                         label: label.clone(),
+                        position: self
+                            .saved_positions
+                            .get(&node_id)
+                            .copied()
+                            .unwrap_or_default(),
+                        pinned: self.saved_pins.contains(&node_id),
                         ..Default::default()
                     },
                 );
@@ -787,6 +801,64 @@ impl TopologyState {
         }
     }
 
+    /// Switch the layout mode (#394): Force re-animates; Grid/Circular apply
+    /// a static arrangement (pinned nodes stay put).
+    pub fn set_layout(&mut self, mode: LayoutMode) {
+        if self.prefs.layout == mode {
+            return;
+        }
+        self.prefs.layout = mode;
+        match mode {
+            LayoutMode::Force => {
+                self.layout_stable = false;
+            }
+            LayoutMode::Grid => {
+                grid_positions(self);
+                self.layout_stable = true;
+            }
+            LayoutMode::Circular => {
+                arrange_circle(self, 400.0);
+                self.layout_stable = true;
+            }
+        }
+        self.cache.clear();
+    }
+
+    /// Toggle a node's pin (#394): pinned nodes ignore the layout.
+    pub fn toggle_pin(&mut self, node_id: &NodeId) {
+        if let Some(node) = self.nodes.get_mut(node_id) {
+            node.pinned = !node.pinned;
+            if !node.pinned && self.prefs.layout == LayoutMode::Force {
+                self.layout_stable = false;
+            }
+            self.cache.clear();
+        }
+    }
+
+    /// Apply a computed fit (#394): zoom/pan so the whole graph is visible.
+    pub fn apply_fit(&mut self, zoom: f32, pan: (f32, f32)) {
+        self.zoom = zoom.clamp(0.3, 3.0);
+        self.pan = pan;
+        self.cache.clear();
+    }
+
+    /// The persisted-layout payload (#394): every pinned node's position.
+    pub fn pinned_positions(&self) -> (Vec<NodeId>, HashMap<NodeId, (f32, f32)>) {
+        let pins: Vec<NodeId> = self
+            .nodes
+            .values()
+            .filter(|n| n.pinned)
+            .map(|n| n.id.clone())
+            .collect();
+        let positions = self
+            .nodes
+            .values()
+            .filter(|n| n.pinned)
+            .map(|n| (n.id.clone(), n.position))
+            .collect();
+        (pins, positions)
+    }
+
     /// Toggle auto-layout.
     pub fn toggle_auto_layout(&mut self) {
         self.auto_layout = !self.auto_layout;
@@ -799,6 +871,11 @@ impl TopologyState {
     /// Run layout iterations for smooth convergence.
     /// Returns true if the layout is stable.
     pub fn run_layout_step(&mut self) -> bool {
+        // Static layout modes (#394) never animate.
+        if self.prefs.layout != LayoutMode::Force {
+            self.layout_stable = true;
+            return true;
+        }
         // Run 3 iterations per frame - balance between speed and smoothness
         for _ in 0..3 {
             self.layout_stable = layout_step(self, &self.layout_config.clone());
@@ -1002,6 +1079,14 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
     .text_size(12)
     .padding(4);
     lens_row = lens_row.push(grouping_picker);
+    let layout_picker = iced::widget::pick_list(
+        LayoutMode::ALL,
+        Some(state.prefs.layout),
+        Message::TopologySetLayout,
+    )
+    .text_size(12)
+    .padding(4);
+    lens_row = lens_row.push(layout_picker);
     if !state.prefs.expanded_groups.is_empty() {
         lens_row = lens_row.push(
             button(text("Regroup").size(12))

@@ -55,7 +55,7 @@ impl<'a> canvas::Program<Message> for TopologyGraphProgram<'a> {
             canvas::Event::Mouse(mouse_event) => {
                 self.handle_mouse(interaction, mouse_event, bounds, cursor)
             }
-            canvas::Event::Keyboard(keyboard_event) => self.handle_keyboard(keyboard_event),
+            canvas::Event::Keyboard(keyboard_event) => self.handle_keyboard(keyboard_event, bounds),
             _ => None,
         }
     }
@@ -286,8 +286,28 @@ impl<'a> TopologyGraphProgram<'a> {
         None
     }
 
+    /// Compute and publish a zoom-to-fit (#394) for the current bounds.
+    fn fit_action(&self, bounds: Rectangle) -> Option<canvas::Action<Message>> {
+        let positions: Vec<(f32, f32)> = self
+            .state
+            .render
+            .nodes
+            .iter()
+            .map(|rnode| render_node_position(rnode, &self.state.nodes))
+            .collect();
+        let (zoom, pan) = fit_view(&positions, bounds.width, bounds.height)?;
+        Some(canvas::Action::publish(Message::TopologyFitApplied {
+            zoom,
+            pan,
+        }))
+    }
+
     /// Handle keyboard events.
-    fn handle_keyboard(&self, event: &iced::keyboard::Event) -> Option<canvas::Action<Message>> {
+    fn handle_keyboard(
+        &self,
+        event: &iced::keyboard::Event,
+        bounds: Rectangle,
+    ) -> Option<canvas::Action<Message>> {
         use iced::keyboard::{Event, Key, key::Named};
 
         if let Event::KeyPressed { key, .. } = event {
@@ -303,6 +323,9 @@ impl<'a> TopologyGraphProgram<'a> {
                 }
                 Key::Character(c) if c.as_str() == "0" => {
                     return Some(canvas::Action::publish(Message::TopologyZoomReset));
+                }
+                Key::Character(c) if c.as_str() == "f" => {
+                    return self.fit_action(bounds);
                 }
                 _ => {}
             }
@@ -822,6 +845,29 @@ pub fn find_render_edge_at_position(
     best.map(|(index, _)| index)
 }
 
+/// Zoom + pan that fit all `positions` into a viewport of `width` × `height`
+/// with a margin (#394). `None` when there is nothing to fit. Pure.
+pub fn fit_view(positions: &[(f32, f32)], width: f32, height: f32) -> Option<(f32, (f32, f32))> {
+    if positions.is_empty() || width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for (x, y) in positions {
+        min_x = min_x.min(*x);
+        min_y = min_y.min(*y);
+        max_x = max_x.max(*x);
+        max_y = max_y.max(*y);
+    }
+    const MARGIN: f32 = 120.0; // room for node radius + labels
+    let bbox_w = (max_x - min_x) + 2.0 * MARGIN;
+    let bbox_h = (max_y - min_y) + 2.0 * MARGIN;
+    let zoom = (width / bbox_w).min(height / bbox_h).clamp(0.3, 3.0);
+    // screen = center + (pos + pan) * zoom → centering the bbox means
+    // pan = -bbox_center.
+    let pan = (-(min_x + max_x) / 2.0, -(min_y + max_y) / 2.0);
+    Some((zoom, pan))
+}
+
 pub fn point_segment_distance(p: Point, a: Point, b: Point) -> f32 {
     let (abx, aby) = (b.x - a.x, b.y - a.y);
     let len_sq = abx * abx + aby * aby;
@@ -1040,6 +1086,21 @@ mod tests {
             position: (x, y),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_fit_view_centers_and_clamps() {
+        // Nodes spread 1000 wide, viewport 800x600 → zoom < 1, pan centers.
+        let positions = vec![(-500.0, -100.0), (500.0, 100.0)];
+        let (zoom, pan) = fit_view(&positions, 800.0, 600.0).unwrap();
+        assert!(zoom < 1.0 && zoom >= 0.3);
+        assert_eq!(pan, (0.0, 0.0));
+        // Offset cluster pans back to center.
+        let positions = vec![(190.0, 90.0), (210.0, 110.0)];
+        let (zoom, pan) = fit_view(&positions, 800.0, 600.0).unwrap();
+        assert_eq!(pan, (-200.0, -100.0));
+        assert_eq!(zoom, 3.0); // tiny extent clamps at max zoom
+        assert!(fit_view(&[], 800.0, 600.0).is_none());
     }
 
     #[test]

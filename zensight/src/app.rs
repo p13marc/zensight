@@ -327,6 +327,9 @@ impl ZenSight {
             t.prefs.grouping = persistent.topology_grouping;
             t.prefs.edge_label = persistent.topology_edge_label;
             t.prefs.filters = persistent.topology_filters;
+            t.prefs.layout = persistent.topology_layout;
+            t.saved_positions = persistent.topology_positions.clone();
+            t.saved_pins = persistent.topology_pinned.iter().cloned().collect();
             t
         };
 
@@ -757,7 +760,8 @@ impl ZenSight {
             }
 
             Message::TopologyDragNodeEnd(_node_id) => {
-                // Node stays pinned after drag
+                // Node stays pinned after drag; persist the arrangement (#394).
+                self.save_topology_prefs();
             }
 
             Message::TopologyPanUpdate(dx, dy) => {
@@ -889,6 +893,20 @@ impl ZenSight {
 
             Message::TopologyCopyText(text) => {
                 return ControlFlow::Break(iced::clipboard::write(text));
+            }
+
+            Message::TopologySetLayout(mode) => {
+                self.topology.set_layout(mode);
+                self.save_topology_prefs();
+            }
+
+            Message::TopologyTogglePin(node_id) => {
+                self.topology.toggle_pin(&node_id);
+                self.save_topology_prefs();
+            }
+
+            Message::TopologyFitApplied { zoom, pan } => {
+                self.topology.apply_fit(zoom, pan);
             }
 
             Message::TopologyOpenFlows => {
@@ -3049,6 +3067,11 @@ impl ZenSight {
         persistent.topology_grouping = self.topology.prefs.grouping;
         persistent.topology_edge_label = self.topology.prefs.edge_label;
         persistent.topology_filters = self.topology.prefs.filters;
+        persistent.topology_layout = self.topology.prefs.layout;
+        // Manual arrangement (#394): pinned nodes only, pruned to what exists.
+        let (pins, positions) = self.topology.pinned_positions();
+        persistent.topology_pinned = pins;
+        persistent.topology_positions = positions;
         if let Err(e) = persistent.save() {
             tracing::error!("Failed to save topology prefs: {}", e);
         }
@@ -5643,6 +5666,10 @@ impl ZenSight {
         persistent.topology_grouping = self.topology.prefs.grouping;
         persistent.topology_edge_label = self.topology.prefs.edge_label;
         persistent.topology_filters = self.topology.prefs.filters;
+        persistent.topology_layout = self.topology.prefs.layout;
+        let (pins, positions) = self.topology.pinned_positions();
+        persistent.topology_pinned = pins;
+        persistent.topology_positions = positions;
         if let Err(error) = persistent.save() {
             self.settings.set_error(error);
             return;
