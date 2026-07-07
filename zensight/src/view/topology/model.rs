@@ -1,0 +1,1234 @@
+//! Pure topology graph model: node/edge types and the derivation functions
+//! that build them from observed sensor data (flows, neighbor tables).
+//!
+//! Everything in this module is pure given its inputs — no iced types beyond
+//! what the data itself needs, no Zenoh, no app state — so the graph
+//! derivation logic is unit-testable in isolation. Stateful orchestration
+//! (caches, selection, layout) lives in [`super::TopologyState`].
+
+use std::collections::HashMap;
+
+/// Unique identifier for a topology node.
+pub type NodeId = String;
+
+/// A firing sensor alert attached to a node, for the info panel (#83).
+#[derive(Debug, Clone)]
+pub struct NodeAlert {
+    pub severity: zensight_common::AlertSeverity,
+    pub rule: String,
+    pub summary: String,
+}
+
+/// What kind of observation an edge represents (#391). Drives line style and
+/// which lenses show it (P2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EdgeKind {
+    /// Observed traffic (netring matrix/flows) — carries a rate when the
+    /// traffic matrix supplied one.
+    #[default]
+    Flow,
+    /// L2 adjacency from a netlink neighbor (ARP/NDP) table entry.
+    L2Adjacency,
+    /// Host → its default gateway, from the `routes/default_v4_gw` metric.
+    Gateway,
+}
+
+/// What a node *is* on the network (#391). From the netring passive-asset
+/// inventory (`AssetRecord.role`) when available, else inferred (neighbor
+/// `is_router`), else `Host`/`Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NodeRole {
+    /// An ordinary monitored host/VM.
+    #[default]
+    Host,
+    Router,
+    Switch,
+    AccessPoint,
+    Phone,
+    Iot,
+    /// The aggregate of off-subnet/public destinations (produced by the P2
+    /// external-aggregate grouping; the variant exists from P1 so match arms
+    /// don't churn).
+    Internet,
+    Unknown,
+}
+
+impl NodeRole {
+    /// Parse the netring `AssetRecord.role` vocabulary
+    /// (`router`/`switch`/`ap`/`phone`/`iot`/`host`/`unknown`, #329).
+    pub fn from_asset_role(s: &str) -> Self {
+        match s {
+            "router" => Self::Router,
+            "switch" => Self::Switch,
+            "ap" => Self::AccessPoint,
+            "phone" => Self::Phone,
+            "iot" => Self::Iot,
+            "host" => Self::Host,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Short glyph drawn inside non-host nodes on the canvas (monochrome in
+    /// P1; proper icons are P4 polish).
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Self::Host => "",
+            Self::Router => "R",
+            Self::Switch => "SW",
+            Self::AccessPoint => "AP",
+            Self::Phone => "Ph",
+            Self::Iot => "IoT",
+            Self::Internet => "@",
+            Self::Unknown => "?",
+        }
+    }
+
+    /// Human-readable role name for panels.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Host => "Host",
+            Self::Router => "Router",
+            Self::Switch => "Switch",
+            Self::AccessPoint => "Access point",
+            Self::Phone => "Phone",
+            Self::Iot => "IoT device",
+            Self::Internet => "Internet",
+            Self::Unknown => "Unknown",
+        }
+    }
+}
+
+/// How we know about a node (#391): from its own sensors, purely from the
+/// wire, or as an external aggregate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Provenance {
+    /// Has at least one live sensor facet reporting from the host itself.
+    #[default]
+    Monitored,
+    /// Wire-only (#306): a correlator entity observed purely on the wire
+    /// (netring/netlink), with no live sensor device of its own. Rendered
+    /// dimmed / dashed.
+    Passive,
+    /// Off-subnet/public aggregate (P2 external grouping).
+    External,
+}
+
+/// Node health (#391), replacing the old boolean: device liveness + host-scoped
+/// sensor health + entity staleness, worst wins. See [`node_health`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NodeHealth {
+    #[default]
+    Healthy,
+    /// Some facet is offline/degraded, or a sensor on the host reports trouble.
+    Degraded,
+    /// Every device facet is offline.
+    Down,
+    /// No fresh data: entity past its staleness window (previously invisible).
+    Stale,
+}
+
+/// A node in the topology graph.
+#[derive(Debug, Clone, Default)]
+pub struct Node {
+    /// Unique node identifier.
+    pub id: NodeId,
+    /// Display label.
+    pub label: String,
+    /// Position in graph coordinates.
+    pub position: (f32, f32),
+    /// Velocity for force-directed layout.
+    pub velocity: (f32, f32),
+    /// What the node is on the network (#391): router/switch/ap/iot/…
+    pub role: NodeRole,
+    /// How we know about it (#391): monitored / wire-only / external.
+    pub provenance: Provenance,
+    /// Node health (#391): liveness + sensor health + staleness, worst wins.
+    pub health: NodeHealth,
+    /// Hardware vendor, from the passive-asset inventory (#391).
+    pub vendor: Option<String>,
+    /// Which protocols' devices map to this host (#83). Drives the header icon
+    /// and the "covered by" badges in the info panel.
+    pub protocols: std::collections::BTreeSet<zensight_common::Protocol>,
+    /// CPU usage percentage (0-100). From sysinfo.
+    pub cpu_usage: Option<f64>,
+    /// Memory usage percentage (0-100). From sysinfo.
+    pub memory_usage: Option<f64>,
+    /// Cumulative network RX bytes (counter). From sysinfo.
+    pub network_rx: Option<u64>,
+    /// Cumulative network TX bytes (counter). From sysinfo.
+    pub network_tx: Option<u64>,
+    /// Live receive rate, bytes/sec, from hot-ring counter deltas (#391).
+    pub rx_rate: Option<f64>,
+    /// Live transmit rate, bytes/sec, from hot-ring counter deltas (#391).
+    pub tx_rate: Option<f64>,
+    /// Interfaces up / total, from netlink `iface/<n>/up` (#83).
+    pub iface_up: Option<u32>,
+    pub iface_total: Option<u32>,
+    /// TCP socket-state gauges, from netlink `sockets/tcp/*` (#83).
+    pub tcp_established: Option<f64>,
+    pub tcp_listen: Option<f64>,
+    /// Route / neighbor table sizes, from netlink (#83).
+    pub routes_total: Option<f64>,
+    pub neighbors_total: Option<f64>,
+    /// Whether the node position is pinned (not affected by layout).
+    pub pinned: bool,
+    /// Highest-severity firing sensor alert for this host, if any (overlay).
+    pub alert: Option<zensight_common::AlertSeverity>,
+    /// Firing sensor alerts for this host, listed in the info panel (#83).
+    pub alerts: Vec<NodeAlert>,
+    /// Number of sensors that have correlated this host (#25). `None` until a
+    /// correlation entry references it; surfaces the otherwise-dead correlations
+    /// map as a "seen by N sensors" node label.
+    pub sensor_count: Option<usize>,
+    /// Total telemetry metrics tracked across this host's facets (#83). A
+    /// protocol-agnostic signal so nodes whose protocol has no dedicated panel
+    /// section (netflow / snmp / modbus / gnmi) still show something useful.
+    pub metric_count: usize,
+}
+
+impl Node {
+    /// Whether the node is in the nominal health state.
+    pub fn is_healthy(&self) -> bool {
+        matches!(self.health, NodeHealth::Healthy)
+    }
+
+    /// Update node metrics from telemetry.
+    pub fn update_from_metrics(
+        &mut self,
+        metrics: &HashMap<String, zensight_common::TelemetryPoint>,
+    ) {
+        use zensight_common::TelemetryValue;
+
+        // Netlink interface inventory: `iface/<name>/up` booleans. Counted in a
+        // single pass since they're spread across many keys.
+        let mut iface_up = 0u32;
+        let mut iface_total = 0u32;
+        let mut saw_iface = false;
+
+        for (name, point) in metrics {
+            match name.as_str() {
+                // ── sysinfo ──
+                "cpu/usage" => {
+                    if let TelemetryValue::Gauge(v) = &point.value {
+                        self.cpu_usage = Some(*v);
+                    }
+                }
+                "memory/usage_percent" => {
+                    if let TelemetryValue::Gauge(v) = &point.value {
+                        self.memory_usage = Some(*v);
+                    }
+                }
+                // ── netlink (#83) ──
+                "sockets/tcp/established" => {
+                    if let TelemetryValue::Gauge(v) = &point.value {
+                        self.tcp_established = Some(*v);
+                    }
+                }
+                "sockets/tcp/listen" => {
+                    if let TelemetryValue::Gauge(v) = &point.value {
+                        self.tcp_listen = Some(*v);
+                    }
+                }
+                "routes/total" => {
+                    if let TelemetryValue::Gauge(v) = &point.value {
+                        self.routes_total = Some(*v);
+                    }
+                }
+                "neighbors/total" => {
+                    if let TelemetryValue::Gauge(v) = &point.value {
+                        self.neighbors_total = Some(*v);
+                    }
+                }
+                _ => {
+                    // sysinfo network counters
+                    if name.starts_with("network/") && name.ends_with("/rx_bytes") {
+                        if let TelemetryValue::Counter(v) = &point.value {
+                            self.network_rx = Some(*v);
+                        }
+                    } else if name.starts_with("network/")
+                        && name.ends_with("/tx_bytes")
+                        && let TelemetryValue::Counter(v) = &point.value
+                    {
+                        self.network_tx = Some(*v);
+                    } else if name.starts_with("iface/") && name.ends_with("/up") {
+                        // netlink per-interface up/down
+                        saw_iface = true;
+                        iface_total += 1;
+                        if let TelemetryValue::Boolean(true) = &point.value {
+                            iface_up += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if saw_iface {
+            self.iface_up = Some(iface_up);
+            self.iface_total = Some(iface_total);
+        }
+    }
+}
+
+/// An edge (connection) in the topology graph.
+#[derive(Debug, Clone, Default)]
+pub struct Edge {
+    /// Source node ID. For rated [`EdgeKind::Flow`] edges this is the heavier
+    /// direction's initiator; for [`EdgeKind::Gateway`] the host.
+    pub from: NodeId,
+    /// Destination node ID.
+    pub to: NodeId,
+    /// What kind of observation this link is (#391).
+    pub kind: EdgeKind,
+    /// Forward (`from` → `to`) rate in **bytes/sec**, from the netring traffic
+    /// matrix (#391). `0.0` when unrated (flow-fallback / L2 / gateway edges) —
+    /// direction is only drawn when a rate was actually observed.
+    pub rate: f64,
+    /// Reverse (`to` → `from`) rate in bytes/sec (#391).
+    pub reverse_rate: f64,
+    /// Cumulative bytes transferred (from flow records).
+    pub bytes: u64,
+    /// Cumulative packets transferred (from flow records).
+    pub packets: u64,
+    /// Protocol (TCP, UDP, etc.).
+    pub protocol: Option<String>,
+    /// Last seen timestamp.
+    pub last_seen: i64,
+    /// Per-link health (#49): the max alert severity of the two endpoint nodes,
+    /// so a link to/from a host in trouble is visually flagged. Set by
+    /// [`super::TopologyState::apply_alerts`].
+    pub alert: Option<zensight_common::AlertSeverity>,
+}
+
+/// Extract the bare IP from an `ip:port` endpoint string. Handles IPv6 in
+/// brackets (`[::1]:443`) and bare IPs (no port). Pure.
+pub fn endpoint_ip(endpoint: &str) -> &str {
+    if let Some(rest) = endpoint.strip_prefix('[') {
+        // `[v6]:port` -> the part before `]`.
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    // `v4:port` -> before the (single) colon; bare IPv6 has many colons, no port.
+    match endpoint.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') && port.chars().all(|c| c.is_ascii_digit()) => {
+            host
+        }
+        _ => endpoint,
+    }
+}
+
+/// Aggregate observed flows into topology edges (#25). One edge per unordered
+/// pair of *distinct* known nodes, summing bytes/packets; the protocol of the
+/// highest-volume contributing flow labels the edge. Flows touching an unknown
+/// IP or a self-loop are skipped. Pure — the unit of testing for edge derivation.
+pub fn edges_from_flows(
+    flows: &[zensight_common::FlowRecord],
+    ip_to_node: &HashMap<String, NodeId>,
+    now_ms: i64,
+) -> Vec<Edge> {
+    // Keyed by ordered node pair so (a,b) and (b,a) aggregate together.
+    let mut acc: HashMap<(NodeId, NodeId), (u64, u64, String, u64)> = HashMap::new();
+    for f in flows {
+        let src_node = ip_to_node.get(endpoint_ip(&f.src));
+        let dst_node = ip_to_node.get(endpoint_ip(&f.dst));
+        let (Some(a), Some(b)) = (src_node, dst_node) else {
+            continue;
+        };
+        if a == b {
+            continue; // self-loop: same host both ends
+        }
+        let key = if a <= b {
+            (a.clone(), b.clone())
+        } else {
+            (b.clone(), a.clone())
+        };
+        let entry = acc.entry(key).or_insert((0, 0, f.proto.clone(), 0));
+        entry.0 += f.bytes;
+        entry.1 += f.packets;
+        // Label the edge with the protocol of its largest single flow.
+        if f.bytes > entry.3 {
+            entry.2 = f.proto.clone();
+            entry.3 = f.bytes;
+        }
+    }
+    let mut edges: Vec<Edge> = acc
+        .into_iter()
+        .map(|((from, to), (bytes, packets, protocol, _))| Edge {
+            from,
+            to,
+            kind: EdgeKind::Flow,
+            bytes,
+            packets,
+            protocol: Some(protocol),
+            last_seen: now_ms,
+            ..Default::default()
+        })
+        .collect();
+    // Stable order: heaviest edges first, then by endpoints.
+    edges.sort_by(|a, b| {
+        b.bytes
+            .cmp(&a.bytes)
+            .then_with(|| (a.from.clone(), a.to.clone()).cmp(&(b.from.clone(), b.to.clone())))
+    });
+    edges
+}
+
+/// Directed rate edges from the netring traffic matrix (#391). The matrix is
+/// the primary edge source: pre-aggregated, top-N-capped server-side, and
+/// carrying a rolling **bytes/sec** rate per `src → dst` pair. Rows whose
+/// endpoints collapse to the same unordered node pair merge into one edge:
+/// `from` is the heavier direction's source (lexicographic tiebreak on equal
+/// rates), `rate` the forward and `reverse_rate` the responder bytes/sec.
+/// Rows touching an unknown IP or a self-loop are dropped. Pure.
+pub fn edges_from_matrix(
+    matrix: &[zensight_common::MatrixRecord],
+    ip_to_node: &HashMap<String, NodeId>,
+    now_ms: i64,
+) -> Vec<Edge> {
+    // Per unordered pair: rate in pair-order direction, rate in reverse.
+    let mut acc: HashMap<(NodeId, NodeId), (f64, f64)> = HashMap::new();
+    for rec in matrix {
+        let src_node = ip_to_node.get(endpoint_ip(&rec.src));
+        let dst_node = ip_to_node.get(endpoint_ip(&rec.dst));
+        let (Some(a), Some(b)) = (src_node, dst_node) else {
+            continue;
+        };
+        if a == b {
+            continue; // self-loop: same host both ends
+        }
+        let key = ordered_pair(a, b);
+        let forward = *a == key.0; // does this row run in pair order?
+        let entry = acc.entry(key).or_insert((0.0, 0.0));
+        if forward {
+            entry.0 += rec.bytes_per_sec;
+        } else {
+            entry.1 += rec.bytes_per_sec;
+        }
+    }
+    let mut edges: Vec<Edge> = acc
+        .into_iter()
+        .map(|((a, b), (ab, ba))| {
+            // `from` = the heavier direction's source; ties keep pair order.
+            let (from, to, rate, reverse_rate) = if ab >= ba {
+                (a, b, ab, ba)
+            } else {
+                (b, a, ba, ab)
+            };
+            Edge {
+                from,
+                to,
+                kind: EdgeKind::Flow,
+                rate,
+                reverse_rate,
+                last_seen: now_ms,
+                ..Default::default()
+            }
+        })
+        .collect();
+    // Stable order: fastest links first, then by endpoints.
+    edges.sort_by(|x, y| {
+        let (rx, ry) = (x.rate + x.reverse_rate, y.rate + y.reverse_rate);
+        ry.partial_cmp(&rx)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| (x.from.clone(), x.to.clone()).cmp(&(y.from.clone(), y.to.clone())))
+    });
+    edges
+}
+
+/// Merge cumulative flow statistics into rate edges (#391): matrix edges gain
+/// bytes/packets/protocol from the flow edge covering the same unordered pair,
+/// and flow-only pairs (outside the matrix top-N) are appended so observed
+/// links never vanish when the matrix arrives. Pure.
+pub fn merge_flow_stats(mut rate_edges: Vec<Edge>, flow_edges: Vec<Edge>) -> Vec<Edge> {
+    let mut by_pair: HashMap<(NodeId, NodeId), Edge> = flow_edges
+        .into_iter()
+        .map(|e| (ordered_pair(&e.from, &e.to), e))
+        .collect();
+    for edge in &mut rate_edges {
+        if let Some(f) = by_pair.remove(&ordered_pair(&edge.from, &edge.to)) {
+            edge.bytes = f.bytes;
+            edge.packets = f.packets;
+            edge.protocol = f.protocol;
+        }
+    }
+    // Remaining flow edges cover pairs the matrix didn't (unrated).
+    let mut rest: Vec<Edge> = by_pair.into_values().collect();
+    rest.sort_by(|a, b| {
+        b.bytes
+            .cmp(&a.bytes)
+            .then_with(|| (a.from.clone(), a.to.clone()).cmp(&(b.from.clone(), b.to.clone())))
+    });
+    rate_edges.extend(rest);
+    rate_edges
+}
+
+/// Extract a host's default IPv4 gateway from its netlink telemetry (#391):
+/// the `routes/default_v4_gw` Text metric, honored only while
+/// `routes/default_v4_present` is true (the sensor keeps publishing the last
+/// gateway string across a flap). Pure.
+pub fn gateway_from_metrics(
+    metrics: &HashMap<String, zensight_common::TelemetryPoint>,
+) -> Option<String> {
+    use zensight_common::TelemetryValue;
+    let present = matches!(
+        metrics.get("routes/default_v4_present").map(|p| &p.value),
+        Some(TelemetryValue::Boolean(true))
+    );
+    if !present {
+        return None;
+    }
+    match metrics.get("routes/default_v4_gw").map(|p| &p.value) {
+        Some(TelemetryValue::Text(gw)) if !gw.is_empty() => Some(gw.clone()),
+        _ => None,
+    }
+}
+
+/// Derive host → default-gateway edges (#391). The gateway resolves through
+/// `ip_to_node` (an entity may own the address); unresolved gateway IPs are
+/// returned so the caller can create wire-only router nodes for them, and
+/// their edges target the bare IP as node id. Deterministic order. Pure.
+pub fn edges_from_gateways(
+    gateways: &HashMap<NodeId, String>,
+    ip_to_node: &HashMap<String, NodeId>,
+    now_ms: i64,
+) -> (Vec<Edge>, Vec<String>) {
+    use std::collections::BTreeSet;
+    let mut missing: BTreeSet<String> = BTreeSet::new();
+    let mut sorted: Vec<(&NodeId, &String)> = gateways.iter().collect();
+    sorted.sort();
+    let mut edges = Vec::new();
+    for (host, gw_ip) in sorted {
+        let target = match ip_to_node.get(gw_ip.as_str()) {
+            Some(t) => t.clone(),
+            None => {
+                missing.insert(gw_ip.clone());
+                gw_ip.clone()
+            }
+        };
+        if &target == host {
+            continue; // the host is its own gateway (or NATs for itself)
+        }
+        edges.push(Edge {
+            from: host.clone(),
+            to: target,
+            kind: EdgeKind::Gateway,
+            last_seen: now_ms,
+            ..Default::default()
+        });
+    }
+    (edges, missing.into_iter().collect())
+}
+
+/// Join the netring passive-asset inventory onto topology nodes (#391):
+/// MAC-keyed assets resolve via `mac_to_node` (normalized MACs) first, then
+/// via their IPv4/IPv6 addresses through `ip_to_node`. Returns per node the
+/// asset role (possibly `Unknown` — the caller must not let that clobber
+/// stronger evidence) and the vendor string. Deterministic (assets processed
+/// in MAC order; first resolution wins per node, non-Unknown roles preferred).
+/// Pure.
+pub fn roles_from_assets(
+    assets: &[zensight_common::AssetRecord],
+    mac_to_node: &HashMap<String, NodeId>,
+    ip_to_node: &HashMap<String, NodeId>,
+) -> HashMap<NodeId, (NodeRole, Option<String>)> {
+    let mut sorted: Vec<&zensight_common::AssetRecord> = assets.iter().collect();
+    sorted.sort_by(|a, b| a.mac.cmp(&b.mac));
+    let mut out: HashMap<NodeId, (NodeRole, Option<String>)> = HashMap::new();
+    for asset in sorted {
+        let node_id = mac_to_node
+            .get(&crate::entity::normalize_mac(&asset.mac))
+            .or_else(|| {
+                asset
+                    .ipv4
+                    .iter()
+                    .chain(asset.ipv6.iter())
+                    .find_map(|ip| ip_to_node.get(ip.as_str()))
+            });
+        let Some(node_id) = node_id else { continue };
+        let role = NodeRole::from_asset_role(&asset.role);
+        let vendor = asset.vendor.clone();
+        match out.entry(node_id.clone()) {
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert((role, vendor));
+            }
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                let (cur_role, cur_vendor) = e.get_mut();
+                if *cur_role == NodeRole::Unknown && role != NodeRole::Unknown {
+                    *cur_role = role;
+                }
+                if cur_vendor.is_none() {
+                    *cur_vendor = vendor;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Compute a node's health (#391) from its facets' liveness, host-scoped
+/// sensor health snapshots, and entity staleness. `facets` pairs each device
+/// facet's liveness status with whether its telemetry is fresh. Precedence:
+///
+/// 1. **Down** — every facet's liveness says `Offline`.
+/// 2. **Stale** — nothing fresh and no liveness verdict to the contrary: a
+///    facet-less (passive) node whose entity went stale, or every facet
+///    `Unknown` with quiet telemetry / a stale entity.
+/// 3. **Degraded** — any facet `Offline`/`Degraded` or quiet, or any sensor
+///    on the host reporting trouble (a sensor that publishes an Unhealthy
+///    snapshot proves the host is up — sensor trouble degrades, never downs).
+/// 4. **Healthy** — otherwise.
+///
+/// Pure.
+pub fn node_health(
+    facets: &[(zensight_common::DeviceStatus, bool)],
+    sensor_statuses: &[zensight_common::HealthStatus],
+    entity_stale: bool,
+) -> NodeHealth {
+    use zensight_common::{DeviceStatus, HealthStatus};
+
+    let has_facets = !facets.is_empty();
+    if has_facets && facets.iter().all(|(s, _)| *s == DeviceStatus::Offline) {
+        return NodeHealth::Down;
+    }
+
+    let all_unknown = facets.iter().all(|(s, _)| *s == DeviceStatus::Unknown);
+    let none_fresh = facets.iter().all(|(_, fresh)| !fresh);
+    if (!has_facets && entity_stale) || (has_facets && all_unknown && (none_fresh || entity_stale))
+    {
+        return NodeHealth::Stale;
+    }
+
+    let facet_trouble = facets
+        .iter()
+        .any(|(s, fresh)| matches!(s, DeviceStatus::Offline | DeviceStatus::Degraded) || !fresh);
+    let sensor_trouble = sensor_statuses.iter().any(|s| {
+        matches!(
+            s,
+            HealthStatus::Degraded
+                | HealthStatus::Unhealthy
+                | HealthStatus::Error
+                | HealthStatus::Starting
+        )
+    });
+    if facet_trouble || sensor_trouble {
+        return NodeHealth::Degraded;
+    }
+    NodeHealth::Healthy
+}
+
+/// Bytes/sec from the last two samples of a monotonic counter series (#391).
+/// `None` on short series, non-advancing clocks, or counter resets (negative
+/// delta) — a reset yields one missing reading, not a bogus spike. Pure.
+pub fn counter_rate(samples: &[crate::store::Sample]) -> Option<f64> {
+    let [.., prev, last] = samples else {
+        return None;
+    };
+    let dt_ms = last.ts - prev.ts;
+    if dt_ms <= 0 {
+        return None;
+    }
+    let dv = last.value - prev.value;
+    if dv < 0.0 {
+        return None; // counter reset
+    }
+    Some(dv / (dt_ms as f64 / 1000.0))
+}
+
+/// Format a bytes/sec rate for display ("2.1 MB/s"). Pure.
+pub fn format_rate(bytes_per_sec: f64) -> String {
+    if bytes_per_sec >= 1_000_000_000.0 {
+        format!("{:.1} GB/s", bytes_per_sec / 1_000_000_000.0)
+    } else if bytes_per_sec >= 1_000_000.0 {
+        format!("{:.1} MB/s", bytes_per_sec / 1_000_000.0)
+    } else if bytes_per_sec >= 1_000.0 {
+        format!("{:.1} KB/s", bytes_per_sec / 1_000.0)
+    } else {
+        format!("{bytes_per_sec:.0} B/s")
+    }
+}
+
+/// Order a node pair canonically so `(a,b)` and `(b,a)` compare equal. Pure.
+pub(crate) fn ordered_pair(a: &NodeId, b: &NodeId) -> (NodeId, NodeId) {
+    if a <= b {
+        (a.clone(), b.clone())
+    } else {
+        (b.clone(), a.clone())
+    }
+}
+
+/// Derive adjacency edges from a netlink host's neighbor (ARP/NDP) table (#49).
+/// Each neighbor whose IP resolves (via `ip_to_node`) to a *distinct* known node
+/// becomes a zero-bandwidth link from its owning `host_nodes` entry — so a host
+/// and its directly-attached gateway/peer connect even when netring observes no
+/// flow between them. Neighbors flagged `is_router` are returned as the set of
+/// node ids to classify [`NodeRole::Router`]. Pure — the unit of testing.
+pub fn edges_from_neighbors(
+    host_nodes: &[NodeId],
+    neighbors: &[zensight_common::NeighborRecord],
+    ip_to_node: &HashMap<String, NodeId>,
+    now_ms: i64,
+) -> (Vec<Edge>, std::collections::BTreeSet<NodeId>) {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut pairs: BTreeSet<(NodeId, NodeId)> = BTreeSet::new();
+    let mut routers: BTreeSet<NodeId> = BTreeSet::new();
+    // Deterministic order: BTreeMap keyed by ordered pair.
+    let mut acc: BTreeMap<(NodeId, NodeId), ()> = BTreeMap::new();
+    for host in host_nodes {
+        for nb in neighbors {
+            let Some(ip) = nb.ip.as_deref() else { continue };
+            let Some(target) = ip_to_node.get(ip) else {
+                continue;
+            };
+            if target == host {
+                continue; // the host's own address
+            }
+            if nb.is_router {
+                routers.insert(target.clone());
+            }
+            let key = ordered_pair(host, target);
+            if pairs.insert(key.clone()) {
+                acc.insert(key, ());
+            }
+        }
+    }
+    let edges = acc
+        .into_keys()
+        .map(|(from, to)| Edge {
+            from,
+            to,
+            kind: EdgeKind::L2Adjacency,
+            last_seen: now_ms,
+            ..Default::default()
+        })
+        .collect();
+    (edges, routers)
+}
+
+/// Whether a protocol's `source` represents a physical host/device that should be
+/// a topology node (#83). sysinfo/netlink hosts, netflow exporters, and
+/// gNMI/SNMP/Modbus network gear are nodes; syslog (log overlay) and netring (flow
+/// overlay that supplies the *edges*) annotate existing nodes rather than adding
+/// their own.
+pub(crate) fn is_node_protocol(p: zensight_common::Protocol) -> bool {
+    use zensight_common::Protocol;
+    matches!(
+        p,
+        Protocol::Sysinfo
+            | Protocol::Netlink
+            | Protocol::Netflow
+            | Protocol::Gnmi
+            | Protocol::Snmp
+            | Protocol::Modbus
+    )
+}
+
+/// Display label for an entity-backed node: hostname > fqdn > short entity id.
+pub(crate) fn entity_node_label(e: &zensight_common::HostEntity) -> String {
+    e.hostname
+        .clone()
+        .or_else(|| e.fqdn.clone())
+        .unwrap_or_else(|| e.entity_id.clone())
+}
+
+/// Pick the icon protocol for a node: prefer sysinfo (the host identity), then
+/// netlink, otherwise the first protocol that covers the host (#83).
+pub(crate) fn primary_protocol(node: &Node) -> zensight_common::Protocol {
+    use zensight_common::Protocol;
+    if node.protocols.contains(&Protocol::Sysinfo) {
+        Protocol::Sysinfo
+    } else if node.protocols.contains(&Protocol::Netlink) {
+        Protocol::Netlink
+    } else {
+        node.protocols
+            .iter()
+            .next()
+            .copied()
+            .unwrap_or(Protocol::Sysinfo)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn flow(
+        src: &str,
+        dst: &str,
+        bytes: u64,
+        packets: u64,
+        proto: &str,
+    ) -> zensight_common::FlowRecord {
+        zensight_common::FlowRecord {
+            src: src.to_string(),
+            dst: dst.to_string(),
+            proto: proto.to_string(),
+            bytes,
+            packets,
+            duration_ms: 0,
+            reason: "fin".to_string(),
+            community_id: None,
+            directed: true,
+            bytes_initiator: bytes / 2,
+            bytes_responder: bytes - bytes / 2,
+            packets_initiator: packets / 2,
+            packets_responder: packets - packets / 2,
+            dst_names: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn endpoint_ip_parses_v4_v6_bare() {
+        assert_eq!(endpoint_ip("10.0.0.1:443"), "10.0.0.1");
+        assert_eq!(endpoint_ip("[2001:db8::1]:80"), "2001:db8::1");
+        assert_eq!(endpoint_ip("10.0.0.2"), "10.0.0.2"); // no port
+        assert_eq!(endpoint_ip("::1"), "::1"); // bare v6, no port
+    }
+
+    #[test]
+    fn edges_from_flows_aggregates_known_pairs() {
+        let mut map = HashMap::new();
+        map.insert("10.0.0.1".to_string(), "hostA".to_string());
+        map.insert("10.0.0.2".to_string(), "hostB".to_string());
+        let flows = vec![
+            flow("10.0.0.1:5000", "10.0.0.2:443", 1000, 10, "tcp"),
+            // Reverse direction aggregates into the same unordered pair.
+            flow("10.0.0.2:443", "10.0.0.1:5000", 500, 5, "tcp"),
+            // Touches an unknown IP -> skipped.
+            flow("10.0.0.1:5001", "8.8.8.8:53", 999, 9, "udp"),
+        ];
+        let edges = edges_from_flows(&flows, &map, 42);
+        assert_eq!(edges.len(), 1);
+        let e = &edges[0];
+        assert_eq!((e.from.as_str(), e.to.as_str()), ("hostA", "hostB"));
+        assert_eq!(e.bytes, 1500);
+        assert_eq!(e.packets, 15);
+        assert_eq!(e.last_seen, 42);
+        assert_eq!(e.protocol.as_deref(), Some("tcp"));
+    }
+
+    #[test]
+    fn edges_from_flows_skips_self_loops_and_unknown() {
+        let mut map = HashMap::new();
+        map.insert("10.0.0.1".to_string(), "hostA".to_string());
+        let flows = vec![
+            // self-loop (same node both ends) -> skipped
+            flow("10.0.0.1:1", "10.0.0.1:2", 100, 1, "tcp"),
+            // both unknown -> skipped
+            flow("1.1.1.1:1", "2.2.2.2:2", 100, 1, "tcp"),
+        ];
+        assert!(edges_from_flows(&flows, &map, 0).is_empty());
+    }
+
+    #[test]
+    fn edges_sorted_heaviest_first() {
+        let mut map = HashMap::new();
+        map.insert("a".to_string(), "a".to_string());
+        map.insert("b".to_string(), "b".to_string());
+        map.insert("c".to_string(), "c".to_string());
+        let flows = vec![
+            flow("a:1", "b:2", 100, 1, "tcp"),
+            flow("a:1", "c:2", 5000, 1, "tcp"),
+        ];
+        let edges = edges_from_flows(&flows, &map, 0);
+        assert_eq!(edges[0].bytes, 5000);
+        assert_eq!(edges[1].bytes, 100);
+    }
+
+    fn neighbor(ip: &str, is_router: bool) -> zensight_common::NeighborRecord {
+        zensight_common::NeighborRecord {
+            family: 2,
+            ip: Some(ip.to_string()),
+            mac: Some("aa:bb:cc:dd:ee:ff".to_string()),
+            ifindex: 2,
+            state: "reachable".to_string(),
+            is_router,
+        }
+    }
+
+    #[test]
+    fn edges_from_neighbors_builds_adjacency_and_routers() {
+        let mut map = HashMap::new();
+        map.insert("10.0.0.1".to_string(), "hostA".to_string()); // the netlink host
+        map.insert("10.0.0.254".to_string(), "gw".to_string());
+        map.insert("10.0.0.2".to_string(), "hostB".to_string());
+        let hosts = vec!["hostA".to_string()];
+        let neighbors = vec![
+            neighbor("10.0.0.254", true), // gateway -> Router + edge
+            neighbor("10.0.0.2", false),  // peer -> edge
+            neighbor("10.0.0.1", false),  // host's own addr -> skipped
+            neighbor("8.8.8.8", true),    // unknown node -> skipped
+        ];
+        let (edges, routers) = edges_from_neighbors(&hosts, &neighbors, &map, 7);
+        assert_eq!(edges.len(), 2);
+        assert!(edges.iter().all(|e| e.bytes == 0 && e.last_seen == 7));
+        let pairs: std::collections::BTreeSet<_> =
+            edges.iter().map(|e| ordered_pair(&e.from, &e.to)).collect();
+        assert!(pairs.contains(&("gw".to_string(), "hostA".to_string())));
+        assert!(pairs.contains(&("hostA".to_string(), "hostB".to_string())));
+        assert_eq!(
+            routers,
+            std::collections::BTreeSet::from(["gw".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_node_extracts_netlink_summary() {
+        use std::collections::HashMap;
+        use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+        let mk = |metric: &str, v: TelemetryValue| TelemetryPoint {
+            timestamp: 0,
+            source: "h".to_string(),
+            protocol: Protocol::Netlink,
+            metric: metric.to_string(),
+            value: v,
+            labels: HashMap::new(),
+        };
+        let mut m = HashMap::new();
+        for (k, v) in [
+            ("iface/eth0/up", TelemetryValue::Boolean(true)),
+            ("iface/lo/up", TelemetryValue::Boolean(true)),
+            ("iface/eth1/up", TelemetryValue::Boolean(false)),
+            ("sockets/tcp/established", TelemetryValue::Gauge(120.0)),
+            ("sockets/tcp/listen", TelemetryValue::Gauge(12.0)),
+            ("routes/total", TelemetryValue::Gauge(20.0)),
+            ("neighbors/total", TelemetryValue::Gauge(18.0)),
+        ] {
+            m.insert(k.to_string(), mk(k, v));
+        }
+
+        let mut node = Node {
+            id: "h".to_string(),
+            label: "h".to_string(),
+            ..Default::default()
+        };
+        node.update_from_metrics(&m);
+
+        assert_eq!(node.iface_up, Some(2));
+        assert_eq!(node.iface_total, Some(3));
+        assert_eq!(node.tcp_established, Some(120.0));
+        assert_eq!(node.tcp_listen, Some(12.0));
+        assert_eq!(node.routes_total, Some(20.0));
+        assert_eq!(node.neighbors_total, Some(18.0));
+    }
+
+    fn matrix(src: &str, dst: &str, rate: f64) -> zensight_common::MatrixRecord {
+        zensight_common::MatrixRecord {
+            src: src.to_string(),
+            dst: dst.to_string(),
+            bytes_per_sec: rate,
+            names: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn edges_from_matrix_merges_directions() {
+        let mut map = HashMap::new();
+        map.insert("10.0.0.1".to_string(), "hostA".to_string());
+        map.insert("10.0.0.2".to_string(), "hostB".to_string());
+        let records = vec![
+            matrix("10.0.0.1", "10.0.0.2", 500.0),
+            matrix("10.0.0.2", "10.0.0.1", 2000.0), // heavier: B → A
+            matrix("10.0.0.1", "8.8.8.8", 999.0),   // unknown dst -> dropped
+            matrix("10.0.0.1", "10.0.0.1", 1.0),    // self-loop -> dropped
+        ];
+        let edges = edges_from_matrix(&records, &map, 42);
+        assert_eq!(edges.len(), 1);
+        let e = &edges[0];
+        // Forward = the heavier direction (B → A).
+        assert_eq!((e.from.as_str(), e.to.as_str()), ("hostB", "hostA"));
+        assert_eq!(e.rate, 2000.0);
+        assert_eq!(e.reverse_rate, 500.0);
+        assert_eq!(e.kind, EdgeKind::Flow);
+        assert_eq!(e.last_seen, 42);
+    }
+
+    #[test]
+    fn edges_from_matrix_sums_multiple_ips_per_node() {
+        // Two source IPs of the same host aggregate into one direction.
+        let mut map = HashMap::new();
+        map.insert("10.0.0.1".to_string(), "hostA".to_string());
+        map.insert("192.168.1.1".to_string(), "hostA".to_string());
+        map.insert("10.0.0.2".to_string(), "hostB".to_string());
+        let records = vec![
+            matrix("10.0.0.1", "10.0.0.2", 100.0),
+            matrix("192.168.1.1", "10.0.0.2", 50.0),
+        ];
+        let edges = edges_from_matrix(&records, &map, 0);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].rate, 150.0);
+        assert_eq!(edges[0].reverse_rate, 0.0);
+    }
+
+    #[test]
+    fn edges_from_matrix_tiebreak_keeps_pair_order() {
+        let mut map = HashMap::new();
+        map.insert("b-host".to_string(), "b-host".to_string());
+        map.insert("a-host".to_string(), "a-host".to_string());
+        let records = vec![
+            matrix("b-host", "a-host", 100.0),
+            matrix("a-host", "b-host", 100.0),
+        ];
+        let edges = edges_from_matrix(&records, &map, 0);
+        // Equal rates: pair (lexicographic) order wins.
+        assert_eq!(edges[0].from, "a-host");
+        assert_eq!(edges[0].to, "b-host");
+    }
+
+    #[test]
+    fn merge_flow_stats_enriches_and_appends() {
+        let mut map = HashMap::new();
+        for ip_host in [("1.1.1.1", "a"), ("2.2.2.2", "b"), ("3.3.3.3", "c")] {
+            map.insert(ip_host.0.to_string(), ip_host.1.to_string());
+        }
+        let rate_edges = edges_from_matrix(&[matrix("1.1.1.1", "2.2.2.2", 100.0)], &map, 0);
+        let flow_edges = edges_from_flows(
+            &[
+                flow("2.2.2.2:1", "1.1.1.1:2", 5000, 50, "tcp"), // covers the a<->b pair
+                flow("1.1.1.1:1", "3.3.3.3:2", 700, 7, "udp"),   // a<->c: matrix missed it
+            ],
+            &map,
+            0,
+        );
+        let merged = merge_flow_stats(rate_edges, flow_edges);
+        assert_eq!(merged.len(), 2);
+        // Rated edge enriched with the pair's cumulative flow stats.
+        assert_eq!(merged[0].rate, 100.0);
+        assert_eq!(merged[0].bytes, 5000);
+        assert_eq!(merged[0].protocol.as_deref(), Some("tcp"));
+        // Flow-only pair appended, unrated.
+        assert_eq!(merged[1].bytes, 700);
+        assert_eq!(merged[1].rate, 0.0);
+    }
+
+    #[test]
+    fn gateway_from_metrics_needs_present_flag() {
+        use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+        let mk = |metric: &str, v: TelemetryValue| TelemetryPoint {
+            timestamp: 0,
+            source: "h".to_string(),
+            protocol: Protocol::Netlink,
+            metric: metric.to_string(),
+            value: v,
+            labels: HashMap::new(),
+        };
+        let mut m = HashMap::new();
+        m.insert(
+            "routes/default_v4_gw".to_string(),
+            mk(
+                "routes/default_v4_gw",
+                TelemetryValue::Text("10.0.0.254".into()),
+            ),
+        );
+        // Gateway string alone is not enough — the present flag gates it.
+        assert_eq!(gateway_from_metrics(&m), None);
+        m.insert(
+            "routes/default_v4_present".to_string(),
+            mk("routes/default_v4_present", TelemetryValue::Boolean(true)),
+        );
+        assert_eq!(gateway_from_metrics(&m), Some("10.0.0.254".to_string()));
+        m.insert(
+            "routes/default_v4_present".to_string(),
+            mk("routes/default_v4_present", TelemetryValue::Boolean(false)),
+        );
+        assert_eq!(gateway_from_metrics(&m), None);
+    }
+
+    #[test]
+    fn edges_from_gateways_resolves_and_reports_missing() {
+        let mut gateways = HashMap::new();
+        gateways.insert("hostA".to_string(), "10.0.0.254".to_string());
+        gateways.insert("hostB".to_string(), "192.168.1.1".to_string());
+        gateways.insert("gw-self".to_string(), "10.0.0.254".to_string());
+        let mut map = HashMap::new();
+        map.insert("10.0.0.254".to_string(), "gw-self".to_string()); // entity-owned
+        let (edges, missing) = edges_from_gateways(&gateways, &map, 9);
+
+        // hostA → resolved node; hostB → the bare IP (reported missing);
+        // gw-self skipped (it is its own gateway).
+        assert_eq!(edges.len(), 2);
+        assert!(
+            edges
+                .iter()
+                .all(|e| e.kind == EdgeKind::Gateway && e.last_seen == 9)
+        );
+        assert!(edges.iter().any(|e| e.from == "hostA" && e.to == "gw-self"));
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.from == "hostB" && e.to == "192.168.1.1")
+        );
+        assert_eq!(missing, vec!["192.168.1.1".to_string()]);
+    }
+
+    #[test]
+    fn roles_from_assets_joins_mac_then_ip() {
+        use zensight_common::AssetRecord;
+        let assets = vec![
+            AssetRecord {
+                mac: "AA:BB:CC:00:01:01".to_string(), // MAC join (case-insensitive)
+                role: "router".to_string(),
+                vendor: Some("Cisco".to_string()),
+                ..Default::default()
+            },
+            AssetRecord {
+                mac: "aa:bb:cc:00:02:02".to_string(), // unknown MAC → IP join
+                ipv4: vec!["10.0.0.42".to_string()],
+                role: "iot".to_string(),
+                vendor: Some("Hikvision".to_string()),
+                ..Default::default()
+            },
+            AssetRecord {
+                mac: "aa:bb:cc:00:03:03".to_string(), // resolves nowhere → dropped
+                ipv4: vec!["203.0.113.9".to_string()],
+                role: "phone".to_string(),
+                ..Default::default()
+            },
+        ];
+        let mut mac_to_node = HashMap::new();
+        mac_to_node.insert("aa:bb:cc:00:01:01".to_string(), "gw".to_string());
+        let mut ip_to_node = HashMap::new();
+        ip_to_node.insert("10.0.0.42".to_string(), "cam".to_string());
+
+        let roles = roles_from_assets(&assets, &mac_to_node, &ip_to_node);
+        assert_eq!(roles.len(), 2);
+        assert_eq!(roles["gw"], (NodeRole::Router, Some("Cisco".to_string())));
+        assert_eq!(roles["cam"], (NodeRole::Iot, Some("Hikvision".to_string())));
+    }
+
+    #[test]
+    fn roles_from_assets_prefers_known_role_per_node() {
+        use zensight_common::AssetRecord;
+        // Two assets resolve to the same node; the unknown-role one sorts
+        // first but must not shadow the router claim.
+        let assets = vec![
+            AssetRecord {
+                mac: "aa:00:00:00:00:01".to_string(),
+                ipv4: vec!["10.0.0.1".to_string()],
+                role: "unknown".to_string(),
+                ..Default::default()
+            },
+            AssetRecord {
+                mac: "aa:00:00:00:00:02".to_string(),
+                ipv4: vec!["10.0.0.1".to_string()],
+                role: "router".to_string(),
+                vendor: Some("MikroTik".to_string()),
+                ..Default::default()
+            },
+        ];
+        let mut ip_to_node = HashMap::new();
+        ip_to_node.insert("10.0.0.1".to_string(), "gw".to_string());
+        let roles = roles_from_assets(&assets, &HashMap::new(), &ip_to_node);
+        assert_eq!(roles["gw"].0, NodeRole::Router);
+        assert_eq!(roles["gw"].1, Some("MikroTik".to_string()));
+    }
+
+    #[test]
+    fn node_health_precedence_rungs() {
+        use zensight_common::{DeviceStatus as D, HealthStatus as H};
+
+        // Down: all facets offline.
+        assert_eq!(
+            node_health(&[(D::Offline, false), (D::Offline, false)], &[], false),
+            NodeHealth::Down
+        );
+        // Not Down while any facet is alive — degraded instead.
+        assert_eq!(
+            node_health(&[(D::Offline, false), (D::Online, true)], &[], false),
+            NodeHealth::Degraded
+        );
+        // Stale: passive node (no facets) with a stale entity.
+        assert_eq!(node_health(&[], &[], true), NodeHealth::Stale);
+        // Stale: no liveness verdict and telemetry quiet.
+        assert_eq!(
+            node_health(&[(D::Unknown, false)], &[], false),
+            NodeHealth::Stale
+        );
+        // Degraded: liveness fine but a host sensor reports trouble.
+        assert_eq!(
+            node_health(&[(D::Online, true)], &[H::Unhealthy], false),
+            NodeHealth::Degraded
+        );
+        // Degraded: liveness Online but telemetry quiet.
+        assert_eq!(
+            node_health(&[(D::Online, false)], &[], false),
+            NodeHealth::Degraded
+        );
+        // Healthy: fresh facets, quiet sensors, live entity.
+        assert_eq!(
+            node_health(&[(D::Online, true)], &[H::Healthy], false),
+            NodeHealth::Healthy
+        );
+        // Passive node with a live entity is healthy, not stale.
+        assert_eq!(node_health(&[], &[], false), NodeHealth::Healthy);
+    }
+
+    #[test]
+    fn counter_rate_deltas_and_resets() {
+        use crate::store::Sample;
+        let s = |ts, value| Sample { ts, value };
+        // 1000 bytes over 2 s → 500 B/s (uses the last two samples).
+        assert_eq!(
+            counter_rate(&[s(0, 0.0), s(1_000, 100.0), s(3_000, 1_100.0)]),
+            Some(500.0)
+        );
+        // Counter reset → None, not a negative spike.
+        assert_eq!(counter_rate(&[s(0, 5_000.0), s(1_000, 10.0)]), None);
+        // Too short / non-advancing clock.
+        assert_eq!(counter_rate(&[s(0, 1.0)]), None);
+        assert_eq!(counter_rate(&[]), None);
+        assert_eq!(counter_rate(&[s(5, 1.0), s(5, 2.0)]), None);
+    }
+
+    #[test]
+    fn format_rate_scales_units() {
+        assert_eq!(format_rate(500.0), "500 B/s");
+        assert_eq!(format_rate(1_500.0), "1.5 KB/s");
+        assert_eq!(format_rate(2_100_000.0), "2.1 MB/s");
+        assert_eq!(format_rate(1_500_000_000.0), "1.5 GB/s");
+    }
+
+    #[test]
+    fn edges_carry_their_kind() {
+        let mut map = HashMap::new();
+        map.insert("10.0.0.1".to_string(), "a".to_string());
+        map.insert("10.0.0.2".to_string(), "b".to_string());
+        let flows = vec![flow("10.0.0.1:1", "10.0.0.2:2", 10, 1, "tcp")];
+        assert_eq!(edges_from_flows(&flows, &map, 0)[0].kind, EdgeKind::Flow);
+
+        let hosts = vec!["a".to_string()];
+        let (edges, _) = edges_from_neighbors(&hosts, &[neighbor("10.0.0.2", false)], &map, 0);
+        assert_eq!(edges[0].kind, EdgeKind::L2Adjacency);
+    }
+
+    #[test]
+    fn node_role_parses_asset_vocabulary() {
+        assert_eq!(NodeRole::from_asset_role("router"), NodeRole::Router);
+        assert_eq!(NodeRole::from_asset_role("switch"), NodeRole::Switch);
+        assert_eq!(NodeRole::from_asset_role("ap"), NodeRole::AccessPoint);
+        assert_eq!(NodeRole::from_asset_role("phone"), NodeRole::Phone);
+        assert_eq!(NodeRole::from_asset_role("iot"), NodeRole::Iot);
+        assert_eq!(NodeRole::from_asset_role("host"), NodeRole::Host);
+        assert_eq!(NodeRole::from_asset_role("unknown"), NodeRole::Unknown);
+        assert_eq!(NodeRole::from_asset_role("gibberish"), NodeRole::Unknown);
+    }
+
+    #[test]
+    fn node_health_default_is_healthy() {
+        let n = Node::default();
+        assert_eq!(n.health, NodeHealth::Healthy);
+        assert!(n.is_healthy());
+        assert_eq!(n.role, NodeRole::Host);
+        assert_eq!(n.provenance, Provenance::Monitored);
+    }
+
+    #[test]
+    fn test_primary_protocol_prefers_sysinfo_then_netlink() {
+        use zensight_common::Protocol;
+        let mut n = Node::default();
+        assert_eq!(primary_protocol(&n), Protocol::Sysinfo); // empty -> fallback
+        n.protocols.insert(Protocol::Netlink);
+        assert_eq!(primary_protocol(&n), Protocol::Netlink);
+        n.protocols.insert(Protocol::Sysinfo);
+        assert_eq!(primary_protocol(&n), Protocol::Sysinfo);
+    }
+}

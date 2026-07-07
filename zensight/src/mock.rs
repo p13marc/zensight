@@ -302,6 +302,20 @@ pub mod netlink {
                 "routes/total",
                 TelemetryValue::Gauge(20.0),
             ),
+            // Default gateway (#391): drives the topology's Gateway edges +
+            // wire-only router node in --demo.
+            telemetry_point(
+                Protocol::Netlink,
+                name,
+                "routes/default_v4_present",
+                TelemetryValue::Boolean(true),
+            ),
+            telemetry_point(
+                Protocol::Netlink,
+                name,
+                "routes/default_v4_gw",
+                TelemetryValue::Text("10.0.0.254".to_string()),
+            ),
             telemetry_point(
                 Protocol::Netlink,
                 name,
@@ -390,6 +404,37 @@ pub mod netring {
                 1_700_100_000_000,
                 Some("t13d1516h2_8daaf6152771_cafebabe11"),
             ),
+            // Matches the wire-only demo entity (host_entities: 10.0.0.200) so
+            // the topology's passive node picks up an asset role in --demo.
+            row(
+                "aa:bb:cc:00:05:05",
+                "10.0.0.200",
+                "wire-host-a",
+                "Hikvision",
+                "iot",
+                2,
+                1_700_080_000_000,
+                1_700_100_000_000,
+                None,
+            ),
+        ]
+    }
+
+    /// Mock netring traffic matrix (#391) for `--demo`: directed bytes/sec
+    /// between the demo entities' IPs (host_entities: server01 = 10.0.0.11,
+    /// server02 = 10.0.0.12, wire-host-a = 10.0.0.200), so the topology shows
+    /// rated, direction-arrowed edges without live capture.
+    pub fn matrix() -> Vec<zensight_common::MatrixRecord> {
+        let row = |src: &str, dst: &str, rate: f64| zensight_common::MatrixRecord {
+            src: src.into(),
+            dst: dst.into(),
+            bytes_per_sec: rate,
+            names: Vec::new(),
+        };
+        vec![
+            row("10.0.0.11", "10.0.0.12", 830_000.0),
+            row("10.0.0.12", "10.0.0.11", 145_000.0),
+            row("10.0.0.200", "10.0.0.11", 42_000.0),
         ]
     }
 

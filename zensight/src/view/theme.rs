@@ -271,6 +271,56 @@ impl<'a> ThemeColors<'a> {
         }
     }
 
+    /// Observed-traffic (flow) edge — the primary, rate-weighted link kind (#391).
+    pub fn topology_edge_flow(&self) -> Color {
+        if self.is_dark() {
+            Color::from_rgb(0.45, 0.65, 0.85)
+        } else {
+            Color::from_rgb(0.3, 0.5, 0.75)
+        }
+    }
+
+    /// L2 adjacency (ARP/NDP neighbor) edge — faint, structural (#391).
+    pub fn topology_edge_l2(&self) -> Color {
+        if self.is_dark() {
+            Color::from_rgb(0.35, 0.4, 0.45)
+        } else {
+            Color::from_rgb(0.6, 0.65, 0.7)
+        }
+    }
+
+    /// Default-gateway edge (host → gw) — structural, dashed (#391).
+    pub fn topology_edge_gateway(&self) -> Color {
+        if self.is_dark() {
+            Color::from_rgb(0.55, 0.5, 0.35)
+        } else {
+            Color::from_rgb(0.65, 0.55, 0.35)
+        }
+    }
+
+    /// Degraded-health node ring (#391) — amber, theme-independent like the
+    /// severity palette so health reads the same in both themes.
+    pub fn topology_node_degraded(&self) -> Color {
+        Color::from_rgb(0.95, 0.6, 0.1)
+    }
+
+    /// Stale node ring (#391): entity/liveness data has gone quiet.
+    pub fn topology_node_stale(&self) -> Color {
+        Color::from_rgb(0.55, 0.55, 0.58)
+    }
+
+    /// Node health → ring color (#391): Healthy blends in (same hue as the
+    /// healthy fill), trouble states pop.
+    pub fn topology_health(&self, health: crate::view::topology::NodeHealth) -> Color {
+        use crate::view::topology::NodeHealth;
+        match health {
+            NodeHealth::Healthy => self.topology_node_healthy(),
+            NodeHealth::Degraded => self.topology_node_degraded(),
+            NodeHealth::Down => self.topology_node_unhealthy(),
+            NodeHealth::Stale => self.topology_node_stale(),
+        }
+    }
+
     /// Vivid alert-severity tint for graph overlays (node/edge), theme-
     /// independent so severity reads the same in both light and dark. Shared so
     /// every severity→color mapping resolves identically (see [`SEVERITY_INFO`]).

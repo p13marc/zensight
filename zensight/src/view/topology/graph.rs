@@ -4,7 +4,7 @@ use iced::mouse;
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke, Text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Theme};
 
-use super::{NodeType, TopologyState};
+use super::{EdgeKind, NodeHealth, NodeRole, Provenance, TopologyState};
 use crate::message::Message;
 use crate::view::theme;
 
@@ -122,10 +122,6 @@ impl<'a> TopologyGraphProgram<'a> {
         theme::colors(&self.theme()).topology_node_healthy()
     }
 
-    fn node_host_unhealthy_color(&self) -> Color {
-        theme::colors(&self.theme()).topology_node_unhealthy()
-    }
-
     fn node_router_color(&self) -> Color {
         theme::colors(&self.theme()).topology_node_router()
     }
@@ -154,8 +150,18 @@ impl<'a> TopologyGraphProgram<'a> {
         theme::colors(&self.theme()).text()
     }
 
-    fn edge_default_color(&self) -> Color {
-        theme::colors(&self.theme()).topology_edge()
+    fn edge_kind_color(&self, kind: EdgeKind) -> Color {
+        let theme = self.theme();
+        let colors = theme::colors(&theme);
+        match kind {
+            EdgeKind::Flow => colors.topology_edge_flow(),
+            EdgeKind::L2Adjacency => colors.topology_edge_l2(),
+            EdgeKind::Gateway => colors.topology_edge_gateway(),
+        }
+    }
+
+    fn health_ring_color(&self, health: NodeHealth) -> Color {
+        theme::colors(&self.theme()).topology_health(health)
     }
 
     fn edge_label_color(&self) -> Color {
@@ -186,6 +192,18 @@ impl<'a> TopologyGraphProgram<'a> {
                         return Some(canvas::Action::publish(Message::TopologySelectNode(
                             node_id,
                         )));
+                    }
+
+                    // Then an edge (#391): nodes draw on top, so they win ties.
+                    // Tolerance is in graph units — widen as the view zooms out.
+                    let tolerance = 8.0 / self.state.zoom.max(0.1);
+                    if let Some(index) = find_edge_at_position(
+                        &self.state.edges,
+                        &self.state.nodes,
+                        graph_pos,
+                        tolerance,
+                    ) {
+                        return Some(canvas::Action::publish(Message::TopologySelectEdge(index)));
                     }
 
                     // Otherwise, start panning
@@ -279,8 +297,8 @@ impl<'a> TopologyGraphProgram<'a> {
         );
 
         // Draw edges first (behind nodes)
-        for edge in &self.state.edges {
-            self.draw_edge(frame, edge, center);
+        for (index, edge) in self.state.edges.iter().enumerate() {
+            self.draw_edge(frame, edge, index, center);
         }
 
         // Draw nodes
@@ -319,23 +337,28 @@ impl<'a> TopologyGraphProgram<'a> {
         // Node radius scales with zoom but has a minimum size
         let radius = (25.0 * self.state.zoom).max(15.0);
 
-        // Node color based on type and health, overridden by a firing alert.
+        // Fill is role-keyed (#391); a firing alert overrides it, and health
+        // is a ring stroke rather than a fill change so both read at once.
         let base_color = match node.alert {
             Some(sev) => theme::colors(&self.theme()).alert_severity(sev),
-            None => match node.node_type {
-                NodeType::Host => {
-                    if node.is_healthy {
-                        self.node_host_healthy_color()
-                    } else {
-                        self.node_host_unhealthy_color()
-                    }
+            None => match node.role {
+                NodeRole::Host => self.node_host_healthy_color(),
+                NodeRole::Router => self.node_router_color(),
+                NodeRole::Switch | NodeRole::AccessPoint => self.node_switch_color(),
+                NodeRole::Phone | NodeRole::Iot | NodeRole::Internet | NodeRole::Unknown => {
+                    self.node_unknown_color()
                 }
-                NodeType::Router => self.node_router_color(),
-                NodeType::Switch => self.node_switch_color(),
-                // Passive wire-only hosts (#306) render dimmed like unknowns.
-                NodeType::Passive => self.node_unknown_color(),
-                NodeType::Unknown => self.node_unknown_color(),
             },
+        };
+        // Stale nodes ghost out (#391): data has gone quiet.
+        let is_stale = node.health == NodeHealth::Stale;
+        let base_color = if is_stale {
+            Color {
+                a: base_color.a * 0.4,
+                ..base_color
+            }
+        } else {
+            base_color
         };
 
         // Highlight if selected
@@ -368,7 +391,7 @@ impl<'a> TopologyGraphProgram<'a> {
         // Draw node circle. Passive wire-only nodes (#306) get a dashed outline
         // to read as "observed, not directly sensed".
         let circle = Path::circle(pos, radius);
-        if node.node_type == NodeType::Passive {
+        if node.provenance == Provenance::Passive {
             let mut stroke = Stroke::default().with_color(base_color).with_width(2.0);
             stroke.line_dash = iced::widget::canvas::LineDash {
                 segments: &[4.0, 4.0],
@@ -379,6 +402,18 @@ impl<'a> TopologyGraphProgram<'a> {
             frame.fill(&circle, base_color);
         }
 
+        // Health ring (#391): trouble states get a colored stroke; Healthy
+        // blends into the fill so the nominal case stays quiet.
+        if node.health != NodeHealth::Healthy {
+            let ring = Path::circle(pos, radius + 2.0);
+            frame.stroke(
+                &ring,
+                Stroke::default()
+                    .with_color(self.health_ring_color(node.health))
+                    .with_width(2.5),
+            );
+        }
+
         // Draw pinned indicator
         if node.pinned {
             let pin = Path::circle(Point::new(pos.x + radius * 0.7, pos.y - radius * 0.7), 5.0);
@@ -386,15 +421,40 @@ impl<'a> TopologyGraphProgram<'a> {
         }
 
         // Draw label
+        let label_color = if is_stale {
+            let c = self.node_label_color();
+            Color { a: c.a * 0.4, ..c }
+        } else {
+            self.node_label_color()
+        };
         let label = Text {
             content: node.label.clone(),
             position: Point::new(pos.x, pos.y + radius + 14.0),
-            color: self.node_label_color(),
+            color: label_color,
             size: (14.0 * self.state.zoom).max(11.0).into(),
             align_x: iced::alignment::Horizontal::Center.into(),
             ..Text::default()
         };
         frame.fill_text(label);
+
+        // Non-host roles show their glyph in the node instead of host stats
+        // (#391); proper icons are P4 polish.
+        if node.role != NodeRole::Host && self.state.zoom >= 0.6 {
+            let glyph = node.role.glyph();
+            if !glyph.is_empty() {
+                let glyph_text = Text {
+                    content: glyph.to_string(),
+                    position: pos,
+                    color: label_color,
+                    size: (12.0 * self.state.zoom).max(10.0).into(),
+                    align_x: iced::alignment::Horizontal::Center.into(),
+                    align_y: iced::alignment::Vertical::Center,
+                    ..Text::default()
+                };
+                frame.fill_text(glyph_text);
+            }
+            return;
+        }
 
         // Draw CPU/Memory mini-stats if available (only when zoomed in enough)
         if self.state.zoom >= 0.6 {
@@ -421,11 +481,24 @@ impl<'a> TopologyGraphProgram<'a> {
                 };
                 frame.fill_text(mem_text);
             }
+
+            // Live NIC rates (#391), below CPU/Mem.
+            if let (Some(rx), Some(tx)) = (node.rx_rate, node.tx_rate) {
+                let rate_text = Text {
+                    content: format!("↓{} ↑{}", super::format_rate(rx), super::format_rate(tx)),
+                    position: Point::new(pos.x, pos.y + 15.0),
+                    color: self.node_label_color(),
+                    size: (9.0 * self.state.zoom).max(8.0).into(),
+                    align_x: iced::alignment::Horizontal::Center.into(),
+                    ..Text::default()
+                };
+                frame.fill_text(rate_text);
+            }
         }
     }
 
     /// Draw an edge between two nodes.
-    fn draw_edge(&self, frame: &mut Frame, edge: &super::Edge, center: Point) {
+    fn draw_edge(&self, frame: &mut Frame, edge: &super::Edge, index: usize, center: Point) {
         let from_node = match self.state.nodes.get(&edge.from) {
             Some(n) => n,
             None => return,
@@ -438,21 +511,17 @@ impl<'a> TopologyGraphProgram<'a> {
         let from_pos = self.apply_transform(from_node.position, center);
         let to_pos = self.apply_transform(to_node.position, center);
 
-        // Edge width based on bandwidth
-        let base_width = 2.0;
-        let max_width = 10.0;
-        let bandwidth_factor = (edge.bytes as f32 / 1_000_000.0).clamp(0.0, 1.0);
-        let width = base_width + bandwidth_factor * (max_width - base_width);
+        // Edge width based on live rate (log-scaled) or cumulative bytes;
+        // structural kinds stay thin (#391).
+        let width = match edge.kind {
+            EdgeKind::L2Adjacency => 1.0,
+            EdgeKind::Gateway => 1.2,
+            EdgeKind::Flow => edge_width(edge.rate + edge.reverse_rate, edge.bytes),
+        };
 
-        // Edge color
-        let is_selected = self.state.selected_edge
-            == Some(
-                self.state
-                    .edges
-                    .iter()
-                    .position(|e| e.from == edge.from && e.to == edge.to)
-                    .unwrap_or(usize::MAX),
-            );
+        // Edge color: selection compares the stored index, not a rescan of
+        // (from, to) — duplicate pairs can exist across kinds (#391).
+        let is_selected = self.state.selected_edge == Some(index);
 
         let color = if is_selected {
             self.selection_ring_color()
@@ -461,27 +530,59 @@ impl<'a> TopologyGraphProgram<'a> {
             // tinted by that severity.
             theme::colors(&self.theme()).alert_severity(sev)
         } else {
-            self.edge_default_color()
+            self.edge_kind_color(edge.kind)
         };
 
-        // Draw edge line
+        // Draw edge line; structural kinds are dashed/dotted (#391).
         let mut path = canvas::path::Builder::new();
         path.move_to(from_pos);
         path.line_to(to_pos);
         let edge_path = path.build();
 
-        frame.stroke(
-            &edge_path,
-            Stroke::default()
-                .with_color(color)
-                .with_width(width * self.state.zoom),
-        );
+        let mut stroke = Stroke::default()
+            .with_color(color)
+            .with_width(width * self.state.zoom);
+        match edge.kind {
+            EdgeKind::L2Adjacency => {
+                stroke.line_dash = iced::widget::canvas::LineDash {
+                    segments: &[2.0, 4.0],
+                    offset: 0,
+                };
+            }
+            EdgeKind::Gateway => {
+                stroke.line_dash = iced::widget::canvas::LineDash {
+                    segments: &[6.0, 4.0],
+                    offset: 0,
+                };
+            }
+            EdgeKind::Flow => {}
+        }
+        frame.stroke(&edge_path, stroke);
 
-        // Draw bandwidth label at midpoint
-        if edge.bytes > 0 {
+        // Direction arrowheads (#391): only drawn when a rate was actually
+        // observed — unrated fallback edges stay honest and directionless.
+        let arrow_size = (8.0 * self.state.zoom).clamp(6.0, 14.0);
+        if edge.rate > 0.0 {
+            let head = arrow_head(from_pos, to_pos, 2.0 / 3.0, arrow_size);
+            self.fill_triangle(frame, head, color);
+        }
+        if edge.reverse_rate > 0.0 {
+            let head = arrow_head(to_pos, from_pos, 2.0 / 3.0, arrow_size);
+            self.fill_triangle(frame, head, color);
+        }
+
+        // Label at midpoint: live rate when rated, else cumulative bytes.
+        let label_text = if edge.rate + edge.reverse_rate > 0.0 {
+            Some(super::format_rate(edge.rate + edge.reverse_rate))
+        } else if edge.bytes > 0 {
+            Some(format_bytes(edge.bytes))
+        } else {
+            None
+        };
+        if let Some(content) = label_text {
             let mid = Point::new((from_pos.x + to_pos.x) / 2.0, (from_pos.y + to_pos.y) / 2.0);
             let label = Text {
-                content: format_bytes(edge.bytes),
+                content,
                 position: Point::new(mid.x, mid.y - 8.0),
                 color: self.edge_label_color(),
                 size: (10.0 * self.state.zoom).max(8.0).into(),
@@ -490,6 +591,16 @@ impl<'a> TopologyGraphProgram<'a> {
             };
             frame.fill_text(label);
         }
+    }
+
+    /// Fill a small triangle (arrowhead).
+    fn fill_triangle(&self, frame: &mut Frame, points: [Point; 3], color: Color) {
+        let mut path = canvas::path::Builder::new();
+        path.move_to(points[0]);
+        path.line_to(points[1]);
+        path.line_to(points[2]);
+        path.close();
+        frame.fill(&path.build(), color);
     }
 
     /// Apply zoom and pan transform to a graph position.
@@ -523,6 +634,38 @@ pub fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+/// Edge stroke width from a live rate (log-scaled) or, unrated, from
+/// cumulative bytes (legacy linear ramp). Pure.
+pub fn edge_width(rate_bytes_per_sec: f64, bytes: u64) -> f32 {
+    if rate_bytes_per_sec > 0.0 {
+        (2.0 + rate_bytes_per_sec.max(1.0).log10() as f32 * 0.8).clamp(1.0, 8.0)
+    } else {
+        let bandwidth_factor = (bytes as f32 / 1_000_000.0).clamp(0.0, 1.0);
+        2.0 + bandwidth_factor * 8.0
+    }
+}
+
+/// Triangle arrowhead on segment `from → to`, tip at parameter `t` (0..1),
+/// pointing toward `to`. Degenerate (zero-length) segments collapse to the
+/// tip point. Pure.
+pub fn arrow_head(from: Point, to: Point, t: f32, size: f32) -> [Point; 3] {
+    let (dx, dy) = (to.x - from.x, to.y - from.y);
+    let len = (dx * dx + dy * dy).sqrt();
+    let tip = Point::new(from.x + dx * t, from.y + dy * t);
+    if len < 1.0 {
+        return [tip, tip, tip];
+    }
+    let (ux, uy) = (dx / len, dy / len); // unit direction
+    let base = Point::new(tip.x - ux * size, tip.y - uy * size);
+    let (px, py) = (-uy, ux); // unit perpendicular
+    let half = size * 0.45;
+    [
+        tip,
+        Point::new(base.x + px * half, base.y + py * half),
+        Point::new(base.x - px * half, base.y - py * half),
+    ]
 }
 
 /// Convert screen coordinates to graph coordinates.
@@ -570,10 +713,51 @@ pub fn find_node_at_position(
     None
 }
 
+/// Distance from point `p` to the segment `a`–`b`. Degenerate segments
+/// collapse to point distance. Pure.
+pub fn point_segment_distance(p: Point, a: Point, b: Point) -> f32 {
+    let (abx, aby) = (b.x - a.x, b.y - a.y);
+    let len_sq = abx * abx + aby * aby;
+    let t = if len_sq <= f32::EPSILON {
+        0.0
+    } else {
+        (((p.x - a.x) * abx + (p.y - a.y) * aby) / len_sq).clamp(0.0, 1.0)
+    };
+    let (cx, cy) = (a.x + abx * t, a.y + aby * t);
+    let (dx, dy) = (p.x - cx, p.y - cy);
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// Find the edge nearest to `pos` within `tolerance` (graph units), by
+/// point-to-segment distance between its endpoint node positions. Returns the
+/// closest match's index so overlapping edges resolve deterministically. Pure.
+pub fn find_edge_at_position(
+    edges: &[super::Edge],
+    nodes: &std::collections::HashMap<super::NodeId, super::Node>,
+    pos: Point,
+    tolerance: f32,
+) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (index, edge) in edges.iter().enumerate() {
+        let (Some(from), Some(to)) = (nodes.get(&edge.from), nodes.get(&edge.to)) else {
+            continue;
+        };
+        let d = point_segment_distance(
+            pos,
+            Point::new(from.position.0, from.position.1),
+            Point::new(to.position.0, to.position.1),
+        );
+        if d <= tolerance && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+            best = Some((index, d));
+        }
+    }
+    best.map(|(index, _)| index)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::view::topology::{Node, NodeType};
+    use crate::view::topology::Node;
     use std::collections::HashMap;
 
     #[test]
@@ -587,6 +771,38 @@ mod tests {
     // ========================================================================
     // Coordinate conversion tests
     // ========================================================================
+
+    #[test]
+    fn test_edge_width_scales_log_with_rate() {
+        // Unrated: legacy bytes ramp.
+        assert_eq!(edge_width(0.0, 0), 2.0);
+        assert_eq!(edge_width(0.0, 2_000_000), 10.0); // clamped factor
+        // Rated: log-scaled, monotonic, clamped.
+        let slow = edge_width(1_000.0, 0);
+        let fast = edge_width(1_000_000_000.0, 0);
+        assert!(slow < fast);
+        assert!(fast <= 8.0);
+        assert!(edge_width(0.5, 0) >= 1.0); // sub-1 B/s clamps via max(1.0)
+    }
+
+    #[test]
+    fn test_arrow_head_points_toward_target() {
+        let head = arrow_head(Point::new(0.0, 0.0), Point::new(90.0, 0.0), 2.0 / 3.0, 9.0);
+        // Tip at 2/3 along the segment.
+        assert!((head[0].x - 60.0).abs() < 0.001);
+        assert!((head[0].y).abs() < 0.001);
+        // Base corners behind the tip (toward `from`), straddling the axis.
+        assert!(head[1].x < head[0].x && head[2].x < head[0].x);
+        assert!(head[1].y * head[2].y < 0.0);
+    }
+
+    #[test]
+    fn test_arrow_head_degenerate_segment() {
+        let p = Point::new(5.0, 5.0);
+        let head = arrow_head(p, p, 0.5, 8.0);
+        assert_eq!(head[0], head[1]);
+        assert_eq!(head[1], head[2]);
+    }
 
     #[test]
     fn test_screen_to_graph_center_click() {
@@ -715,18 +931,74 @@ mod tests {
             id: id.to_string(),
             label: id.to_string(),
             position: (x, y),
-            velocity: (0.0, 0.0),
-            node_type: NodeType::Host,
-            cpu_usage: None,
-            memory_usage: None,
-            network_rx: None,
-            network_tx: None,
-            is_healthy: true,
-            pinned: false,
-            alert: None,
-            sensor_count: None,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_point_segment_distance() {
+        let a = Point::new(0.0, 0.0);
+        let b = Point::new(100.0, 0.0);
+        // Perpendicular from the middle.
+        assert!((point_segment_distance(Point::new(50.0, 30.0), a, b) - 30.0).abs() < 0.001);
+        // On the segment.
+        assert!(point_segment_distance(Point::new(25.0, 0.0), a, b) < 0.001);
+        // Beyond an endpoint: distance to the endpoint, not the infinite line.
+        assert!((point_segment_distance(Point::new(130.0, 40.0), a, b) - 50.0).abs() < 0.001);
+        // Degenerate segment.
+        assert!((point_segment_distance(Point::new(3.0, 4.0), a, a) - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_find_edge_at_position_hit_and_miss() {
+        let mut nodes = HashMap::new();
+        nodes.insert("a".to_string(), create_test_node("a", 0.0, 0.0));
+        nodes.insert("b".to_string(), create_test_node("b", 200.0, 0.0));
+        nodes.insert("c".to_string(), create_test_node("c", 0.0, 200.0));
+        let edges = vec![
+            crate::view::topology::Edge {
+                from: "a".to_string(),
+                to: "b".to_string(),
+                ..Default::default()
+            },
+            crate::view::topology::Edge {
+                from: "a".to_string(),
+                to: "c".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        // Near the a-b segment midpoint.
+        assert_eq!(
+            find_edge_at_position(&edges, &nodes, Point::new(100.0, 5.0), 8.0),
+            Some(0)
+        );
+        // Near the a-c segment.
+        assert_eq!(
+            find_edge_at_position(&edges, &nodes, Point::new(4.0, 100.0), 8.0),
+            Some(1)
+        );
+        // Far from both.
+        assert_eq!(
+            find_edge_at_position(&edges, &nodes, Point::new(150.0, 150.0), 8.0),
+            None
+        );
+        // Closest wins where both are in tolerance (near their shared corner,
+        // slightly toward a-b).
+        assert_eq!(
+            find_edge_at_position(&edges, &nodes, Point::new(30.0, 3.0), 20.0),
+            Some(0)
+        );
+        // Edge with a missing endpoint node is skipped.
+        let dangling = vec![crate::view::topology::Edge {
+            from: "a".to_string(),
+            to: "ghost".to_string(),
+            ..Default::default()
+        }];
+        assert_eq!(
+            find_edge_at_position(&dangling, &nodes, Point::new(0.0, 0.0), 50.0),
+            None
+        );
     }
 
     #[test]

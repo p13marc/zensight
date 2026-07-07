@@ -16,6 +16,11 @@ use zensight_common::{
 /// Flush the metric store to redb every this many 1s ticks (#22).
 const STORE_FLUSH_EVERY_TICKS: u32 = 15;
 
+/// Re-issue the topology edge/asset queries every N ticks (~seconds) while the
+/// topology view is open (#391), so edge rates stay live instead of freezing
+/// at whatever the view-open fetch saw.
+const TOPOLOGY_REFRESH_TICKS: u8 = 10;
+
 /// Evict aged-out buckets every this many flushes (~10 min at 15s/flush, #131).
 /// Pruning scans the whole table, so it runs far less often than flushing.
 const STORE_PRUNE_EVERY_FLUSHES: u32 = 40;
@@ -206,6 +211,8 @@ pub struct ZenSight {
     store: crate::store::MetricStore,
     /// Ticks counted toward the next periodic store flush (flush every N ticks).
     ticks_since_flush: u32,
+    /// Ticks since the last topology query refresh (#391).
+    topology_refresh_ticks: u8,
     /// Flushes counted toward the next store prune (#131).
     flushes_since_prune: u32,
     /// Timestamp (epoch ms) of the most recently received telemetry point, for
@@ -374,6 +381,7 @@ impl ZenSight {
                 crate::store::MetricStore::with_default_persistence()
             },
             ticks_since_flush: 0,
+            topology_refresh_ticks: 0,
             flushes_since_prune: 0,
             // Demo mode pre-loads mock points; treat the feed as fresh on boot.
             last_telemetry_ms: if demo_mode { Some(now_ms()) } else { None },
@@ -680,6 +688,29 @@ impl ZenSight {
                 }
                 Err(e) => {
                     tracing::debug!(error = %e, "No netlink neighbors for topology edges");
+                }
+            },
+
+            Message::TopologyMatrixReceived(result) => match result {
+                Ok(matrix) => {
+                    let ip_to_node = self.topology_ip_to_node();
+                    self.topology
+                        .apply_matrix_edges(&matrix, &ip_to_node, now_ms());
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "No netring matrix for topology edges");
+                }
+            },
+
+            Message::TopologyAssetsReceived(result) => match result {
+                Ok(assets) => {
+                    let ip_to_node = self.topology_ip_to_node();
+                    let mac_to_node = self.topology_mac_to_node();
+                    self.topology
+                        .apply_assets(&assets, &mac_to_node, &ip_to_node, now_ms());
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "No netring assets for topology roles");
                 }
             },
 
@@ -1054,8 +1085,7 @@ impl ZenSight {
             Message::NetringAssetToTopology { ip, hostname } => {
                 // Asset → topology node (#252). Seed the graph the same way
                 // OpenTopology does so the lookup sees current nodes.
-                self.topology
-                    .update_from_devices(&self.dashboard.devices, &self.entities);
+                self.refresh_topology_nodes();
                 self.topology.apply_alerts(&self.alerts.external);
                 let node = hostname
                     .filter(|h| self.topology.nodes.contains_key(h))
@@ -1064,10 +1094,7 @@ impl ZenSight {
                     self.topology.select_node(node_id);
                     self.set_view(CurrentView::Topology);
                     self.save_current_view();
-                    return ControlFlow::Break(Task::batch([
-                        self.query_topology_flows(),
-                        self.query_topology_neighbors(),
-                    ]));
+                    return ControlFlow::Break(self.query_topology_batch());
                 }
                 self.toasts.push(
                     ToastSeverity::Info,
@@ -1576,6 +1603,14 @@ impl ZenSight {
                 // fresh per-line events on a slow cadence (piggybacked on the
                 // 1 Hz tick — no dedicated timer).
                 let log_fetch = self.maybe_refresh_logs();
+                // Topology refresh (#391): while the map is open, re-pull
+                // matrix/flows/neighbors every ~10 s so edge rates stay live.
+                let topo_fetch = self.maybe_refresh_topology();
+                let log_fetch = match (log_fetch, topo_fetch) {
+                    (Some(a), Some(b)) => Some(Task::batch([a, b])),
+                    (Some(a), None) | (None, Some(a)) => Some(a),
+                    (None, None) => None,
+                };
                 // Periodically flush downsampled buckets to redb off the UI thread
                 // (every ~15 ticks ≈ 15s). Never block update()/view() on disk I/O.
                 self.ticks_since_flush += 1;
@@ -2243,14 +2278,13 @@ impl ZenSight {
             // Topology messages
             Message::OpenTopology => {
                 // Update topology from current device data before showing
-                self.topology
-                    .update_from_devices(&self.dashboard.devices, &self.entities);
+                self.refresh_topology_nodes();
                 self.topology.apply_alerts(&self.alerts.external);
                 self.set_view(CurrentView::Topology);
                 self.save_current_view();
                 // Derive real edges from observed flows (#25) and netlink
                 // neighbor adjacency (#49); edges are merged as replies arrive.
-                return Task::batch([self.query_topology_flows(), self.query_topology_neighbors()]);
+                return self.query_topology_batch();
             }
 
             Message::CommandFeedback { success, message } => {
@@ -3918,6 +3952,76 @@ impl ZenSight {
         })
     }
 
+    /// Fetch the netring traffic matrix (directed bytes/sec per talker pair,
+    /// #391) — the topology's primary edge source. Silent when disconnected.
+    fn query_topology_matrix(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_matrix;
+        let Some(session) = self.session.clone() else {
+            return Task::none();
+        };
+        Task::future(async move {
+            let result = fetch_matrix(session)
+                .await
+                .ok_or_else(|| "No netring sensor responded".to_string());
+            Message::TopologyMatrixReceived(result)
+        })
+    }
+
+    /// Fetch the netring passive-asset inventory for topology node roles +
+    /// vendors (#391). Silent when disconnected.
+    fn query_topology_assets(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_assets;
+        let Some(session) = self.session.clone() else {
+            return Task::none();
+        };
+        Task::future(async move {
+            let result = fetch_assets(session)
+                .await
+                .ok_or_else(|| "No netring sensor responded".to_string());
+            Message::TopologyAssetsReceived(result)
+        })
+    }
+
+    /// The full topology data-refresh batch (#391): flows + neighbors +
+    /// matrix + assets. Issued on view entry and re-issued periodically while
+    /// the view is open. Demo serves no queryables (session is None), so the
+    /// demo branch feeds the synthetic matrix + asset fleet instead — the
+    /// same wire contracts, per the demo/mock contract.
+    fn query_topology_batch(&self) -> Task<Message> {
+        if self.demo_mode {
+            return Task::batch([
+                Task::done(Message::TopologyMatrixReceived(Ok(
+                    crate::mock::netring::matrix(),
+                ))),
+                Task::done(Message::TopologyAssetsReceived(Ok(
+                    crate::mock::netring::assets(),
+                ))),
+            ]);
+        }
+        Task::batch([
+            self.query_topology_flows(),
+            self.query_topology_neighbors(),
+            self.query_topology_matrix(),
+            self.query_topology_assets(),
+        ])
+    }
+
+    /// Piggybacked on the 1 Hz tick: while the topology view is open, re-issue
+    /// the topology queries every [`TOPOLOGY_REFRESH_TICKS`] seconds so edge
+    /// rates stay live (#391).
+    fn maybe_refresh_topology(&mut self) -> Option<Task<Message>> {
+        if self.current_view != CurrentView::Topology {
+            self.topology_refresh_ticks = 0;
+            return None;
+        }
+        self.topology_refresh_ticks = self.topology_refresh_ticks.saturating_add(1);
+        if self.topology_refresh_ticks < TOPOLOGY_REFRESH_TICKS {
+            return None;
+        }
+        self.topology_refresh_ticks = 0;
+        Some(self.query_topology_batch())
+    }
+
     /// Build a map from endpoint IP to topology node id (#25/#306). A node whose
     /// `source` is itself an IP maps directly; and each correlator entity's
     /// identifying IPs map to that entity's node (or a member device's node),
@@ -3948,12 +4052,100 @@ impl ZenSight {
         map
     }
 
+    /// Build a map from normalized MAC to topology node id (#391), mirroring
+    /// [`Self::topology_ip_to_node`] — the join key for the MAC-keyed netring
+    /// asset inventory.
+    fn topology_mac_to_node(&self) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        for entity in self.entities.hosts.values() {
+            let node_id = if self.topology.nodes.contains_key(&entity.entity_id) {
+                Some(entity.entity_id.clone())
+            } else {
+                entity.members.iter().find_map(|m| {
+                    let src = &m.source;
+                    self.topology.nodes.contains_key(src).then(|| src.clone())
+                })
+            };
+            if let Some(node_id) = node_id {
+                for mac in &entity.macs {
+                    map.entry(crate::entity::normalize_mac(mac))
+                        .or_insert_with(|| node_id.clone());
+                }
+            }
+        }
+        map
+    }
+
     /// Re-derive entity-dependent view models after the [`EntityStore`] changes
     /// (#306). Currently refreshes the topology; the dashboard/host views read
     /// the store live at render time.
     fn rederive_entities(&mut self) {
-        self.topology
-            .update_from_devices(&self.dashboard.devices, &self.entities);
+        self.refresh_topology_nodes();
+    }
+
+    /// Refresh topology nodes from device/entity state, then apply any changed
+    /// default-gateway edges (#391). Gateway application is change-gated inside
+    /// [`TopologyState::apply_gateway_edges`], so calling this at 1 Hz is cheap.
+    fn refresh_topology_nodes(&mut self) {
+        self.topology.update_from_devices(
+            &self.dashboard.devices,
+            &self.entities,
+            &self.sensor_health,
+            now_ms(),
+        );
+        let ip_to_node = self.topology_ip_to_node();
+        self.topology.apply_gateway_edges(&ip_to_node, now_ms());
+        // Live node rx/tx rates from hot-ring counter deltas (#391) — only
+        // worth the store scan while the map is on screen.
+        if self.current_view == CurrentView::Topology {
+            let rates = self.topology_rates();
+            self.topology.apply_rates(&rates);
+        }
+    }
+
+    /// Sum per-interface `network/*/{rx,tx}_bytes` counter deltas from the hot
+    /// ring into a bytes/sec pair per topology node (#391). Sysinfo facets
+    /// only — the canonical per-host NIC counters.
+    fn topology_rates(&self) -> std::collections::HashMap<String, (f64, f64)> {
+        use zensight_common::Protocol;
+        let mut rates: std::collections::HashMap<String, (f64, f64)> =
+            std::collections::HashMap::new();
+        for (device_id, device_state) in &self.dashboard.devices {
+            if device_id.protocol != Protocol::Sysinfo {
+                continue;
+            }
+            let node_id = match self.entities.by_device.get(device_id) {
+                Some(eid) => self.entities.resolve_alias(eid).to_string(),
+                None => device_id.source.clone(),
+            };
+            let mut rx = 0.0f64;
+            let mut tx = 0.0f64;
+            let mut saw = false;
+            for metric in device_state.metrics.keys() {
+                let is_rx = metric.starts_with("network/") && metric.ends_with("/rx_bytes");
+                let is_tx = metric.starts_with("network/") && metric.ends_with("/tx_bytes");
+                if !is_rx && !is_tx {
+                    continue;
+                }
+                let key = format!("{}/{}|{}", device_id.protocol, device_id.source, metric);
+                if let Some(rate) =
+                    crate::view::topology::counter_rate(&self.store.hot_samples(&key))
+                {
+                    saw = true;
+                    if is_rx {
+                        rx += rate;
+                    } else {
+                        tx += rate;
+                    }
+                }
+            }
+            if saw {
+                let entry = rates.entry(node_id).or_insert((0.0, 0.0));
+                entry.0 += rx;
+                entry.1 += tx;
+            }
+        }
+        rates
     }
 
     /// Fetch the on-demand netring TLS asset inventory.
@@ -4957,8 +5149,7 @@ impl ZenSight {
 
         // Update topology if we're viewing it
         if self.current_view == CurrentView::Topology {
-            self.topology
-                .update_from_devices(&self.dashboard.devices, &self.entities);
+            self.refresh_topology_nodes();
         }
 
         // Recompute the bandwidth Services table now that the point has landed.
@@ -5293,8 +5484,7 @@ impl ZenSight {
 
         // Update topology when viewing it
         if self.current_view == CurrentView::Topology {
-            self.topology
-                .update_from_devices(&self.dashboard.devices, &self.entities);
+            self.refresh_topology_nodes();
             // Run layout algorithm if not stable
             if !self.topology.layout_stable {
                 self.topology.run_layout_step();
