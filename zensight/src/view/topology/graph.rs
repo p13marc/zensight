@@ -486,16 +486,12 @@ impl<'a> TopologyGraphProgram<'a> {
         let from_pos = self.apply_transform(from_node.position, center);
         let to_pos = self.apply_transform(to_node.position, center);
 
-        // Edge width based on bandwidth; structural kinds stay thin (#391).
+        // Edge width based on live rate (log-scaled) or cumulative bytes;
+        // structural kinds stay thin (#391).
         let width = match edge.kind {
             EdgeKind::L2Adjacency => 1.0,
             EdgeKind::Gateway => 1.2,
-            EdgeKind::Flow => {
-                let base_width = 2.0;
-                let max_width = 10.0;
-                let bandwidth_factor = (edge.bytes as f32 / 1_000_000.0).clamp(0.0, 1.0);
-                base_width + bandwidth_factor * (max_width - base_width)
-            }
+            EdgeKind::Flow => edge_width(edge.rate + edge.reverse_rate, edge.bytes),
         };
 
         // Edge color
@@ -544,11 +540,30 @@ impl<'a> TopologyGraphProgram<'a> {
         }
         frame.stroke(&edge_path, stroke);
 
-        // Draw bandwidth label at midpoint
-        if edge.bytes > 0 {
+        // Direction arrowheads (#391): only drawn when a rate was actually
+        // observed — unrated fallback edges stay honest and directionless.
+        let arrow_size = (8.0 * self.state.zoom).clamp(6.0, 14.0);
+        if edge.rate > 0.0 {
+            let head = arrow_head(from_pos, to_pos, 2.0 / 3.0, arrow_size);
+            self.fill_triangle(frame, head, color);
+        }
+        if edge.reverse_rate > 0.0 {
+            let head = arrow_head(to_pos, from_pos, 2.0 / 3.0, arrow_size);
+            self.fill_triangle(frame, head, color);
+        }
+
+        // Label at midpoint: live rate when rated, else cumulative bytes.
+        let label_text = if edge.rate + edge.reverse_rate > 0.0 {
+            Some(super::format_rate(edge.rate + edge.reverse_rate))
+        } else if edge.bytes > 0 {
+            Some(format_bytes(edge.bytes))
+        } else {
+            None
+        };
+        if let Some(content) = label_text {
             let mid = Point::new((from_pos.x + to_pos.x) / 2.0, (from_pos.y + to_pos.y) / 2.0);
             let label = Text {
-                content: format_bytes(edge.bytes),
+                content,
                 position: Point::new(mid.x, mid.y - 8.0),
                 color: self.edge_label_color(),
                 size: (10.0 * self.state.zoom).max(8.0).into(),
@@ -557,6 +572,16 @@ impl<'a> TopologyGraphProgram<'a> {
             };
             frame.fill_text(label);
         }
+    }
+
+    /// Fill a small triangle (arrowhead).
+    fn fill_triangle(&self, frame: &mut Frame, points: [Point; 3], color: Color) {
+        let mut path = canvas::path::Builder::new();
+        path.move_to(points[0]);
+        path.line_to(points[1]);
+        path.line_to(points[2]);
+        path.close();
+        frame.fill(&path.build(), color);
     }
 
     /// Apply zoom and pan transform to a graph position.
@@ -590,6 +615,38 @@ pub fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+/// Edge stroke width from a live rate (log-scaled) or, unrated, from
+/// cumulative bytes (legacy linear ramp). Pure.
+pub fn edge_width(rate_bytes_per_sec: f64, bytes: u64) -> f32 {
+    if rate_bytes_per_sec > 0.0 {
+        (2.0 + rate_bytes_per_sec.max(1.0).log10() as f32 * 0.8).clamp(1.0, 8.0)
+    } else {
+        let bandwidth_factor = (bytes as f32 / 1_000_000.0).clamp(0.0, 1.0);
+        2.0 + bandwidth_factor * 8.0
+    }
+}
+
+/// Triangle arrowhead on segment `from → to`, tip at parameter `t` (0..1),
+/// pointing toward `to`. Degenerate (zero-length) segments collapse to the
+/// tip point. Pure.
+pub fn arrow_head(from: Point, to: Point, t: f32, size: f32) -> [Point; 3] {
+    let (dx, dy) = (to.x - from.x, to.y - from.y);
+    let len = (dx * dx + dy * dy).sqrt();
+    let tip = Point::new(from.x + dx * t, from.y + dy * t);
+    if len < 1.0 {
+        return [tip, tip, tip];
+    }
+    let (ux, uy) = (dx / len, dy / len); // unit direction
+    let base = Point::new(tip.x - ux * size, tip.y - uy * size);
+    let (px, py) = (-uy, ux); // unit perpendicular
+    let half = size * 0.45;
+    [
+        tip,
+        Point::new(base.x + px * half, base.y + py * half),
+        Point::new(base.x - px * half, base.y - py * half),
+    ]
 }
 
 /// Convert screen coordinates to graph coordinates.
@@ -654,6 +711,38 @@ mod tests {
     // ========================================================================
     // Coordinate conversion tests
     // ========================================================================
+
+    #[test]
+    fn test_edge_width_scales_log_with_rate() {
+        // Unrated: legacy bytes ramp.
+        assert_eq!(edge_width(0.0, 0), 2.0);
+        assert_eq!(edge_width(0.0, 2_000_000), 10.0); // clamped factor
+        // Rated: log-scaled, monotonic, clamped.
+        let slow = edge_width(1_000.0, 0);
+        let fast = edge_width(1_000_000_000.0, 0);
+        assert!(slow < fast);
+        assert!(fast <= 8.0);
+        assert!(edge_width(0.5, 0) >= 1.0); // sub-1 B/s clamps via max(1.0)
+    }
+
+    #[test]
+    fn test_arrow_head_points_toward_target() {
+        let head = arrow_head(Point::new(0.0, 0.0), Point::new(90.0, 0.0), 2.0 / 3.0, 9.0);
+        // Tip at 2/3 along the segment.
+        assert!((head[0].x - 60.0).abs() < 0.001);
+        assert!((head[0].y).abs() < 0.001);
+        // Base corners behind the tip (toward `from`), straddling the axis.
+        assert!(head[1].x < head[0].x && head[2].x < head[0].x);
+        assert!(head[1].y * head[2].y < 0.0);
+    }
+
+    #[test]
+    fn test_arrow_head_degenerate_segment() {
+        let p = Point::new(5.0, 5.0);
+        let head = arrow_head(p, p, 0.5, 8.0);
+        assert_eq!(head[0], head[1]);
+        assert_eq!(head[1], head[2]);
+    }
 
     #[test]
     fn test_screen_to_graph_center_click() {

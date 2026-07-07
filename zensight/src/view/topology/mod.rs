@@ -23,7 +23,7 @@ pub use graph::TopologyGraph;
 pub use layout::{LayoutConfig, arrange_circle, center_layout, layout_step};
 pub use model::{
     Edge, EdgeKind, Node, NodeAlert, NodeHealth, NodeId, NodeRole, Provenance, edges_from_flows,
-    edges_from_neighbors, endpoint_ip,
+    edges_from_matrix, edges_from_neighbors, endpoint_ip, format_rate, merge_flow_stats,
 };
 
 use model::{entity_node_label, is_node_protocol, ordered_pair, primary_protocol};
@@ -59,6 +59,9 @@ pub struct TopologyState {
     /// Last netlink neighbor (ARP/NDP) table fetched, merged into the edge set
     /// as adjacency links (#49).
     last_neighbors: Vec<zensight_common::NeighborRecord>,
+    /// Last netring traffic matrix fetched (#391): the primary, rate-weighted
+    /// edge source. Flows remain the fallback + cumulative-stat enrichment.
+    last_matrix: Vec<zensight_common::MatrixRecord>,
 }
 
 impl Default for TopologyState {
@@ -77,6 +80,7 @@ impl Default for TopologyState {
             layout_stable: true,
             last_flows: Vec::new(),
             last_neighbors: Vec::new(),
+            last_matrix: Vec::new(),
         }
     }
 }
@@ -254,6 +258,20 @@ impl TopologyState {
         self.rebuild_edges(ip_to_node, now_ms);
     }
 
+    /// Merge the netring traffic matrix into the topology (#391): remembers it
+    /// and rebuilds the edge set so links carry a live, directed bytes/sec
+    /// rate. When present the matrix is the primary edge source; remembered
+    /// flows enrich it with cumulative bytes/packets/protocol.
+    pub fn apply_matrix_edges(
+        &mut self,
+        matrix: &[zensight_common::MatrixRecord],
+        ip_to_node: &HashMap<String, NodeId>,
+        now_ms: i64,
+    ) {
+        self.last_matrix = matrix.to_vec();
+        self.rebuild_edges(ip_to_node, now_ms);
+    }
+
     /// Merge the netlink neighbor (ARP/NDP) table into the topology (#49):
     /// remembers it and rebuilds the edge set so direct L2/L3 adjacencies appear
     /// as links even when netring sees no traffic, and `is_router` neighbors are
@@ -268,16 +286,27 @@ impl TopologyState {
         self.rebuild_edges(ip_to_node, now_ms);
     }
 
-    /// Rebuild the edge set from the remembered flow + neighbor inputs (#25/#49).
-    /// Flow edges (with real bandwidth) take precedence; neighbor adjacencies add
-    /// zero-bandwidth links for node pairs no flow covered. Router classification
-    /// from `is_router` neighbors is reset and reapplied each pass so it tracks
-    /// the live table. Pure given its remembered inputs + `ip_to_node`.
+    /// Rebuild the edge set from the remembered matrix + flow + neighbor inputs
+    /// (#25/#49/#391). The rate-weighted matrix is the primary source, enriched
+    /// with cumulative flow stats (and flows alone are the fallback when no
+    /// matrix has arrived — older netring, queryable absent). Neighbor
+    /// adjacencies add zero-bandwidth links for node pairs nothing covered.
+    /// Router classification from `is_router` neighbors is reset and reapplied
+    /// each pass so it tracks the live table. Pure given its remembered inputs
+    /// + `ip_to_node`.
     fn rebuild_edges(&mut self, ip_to_node: &HashMap<String, NodeId>, now_ms: i64) {
         use std::collections::BTreeSet;
         use zensight_common::Protocol;
 
-        let mut edges = edges_from_flows(&self.last_flows, ip_to_node, now_ms);
+        let flow_edges = edges_from_flows(&self.last_flows, ip_to_node, now_ms);
+        let mut edges = if self.last_matrix.is_empty() {
+            flow_edges
+        } else {
+            merge_flow_stats(
+                edges_from_matrix(&self.last_matrix, ip_to_node, now_ms),
+                flow_edges,
+            )
+        };
         let mut pairs: BTreeSet<(NodeId, NodeId)> =
             edges.iter().map(|e| ordered_pair(&e.from, &e.to)).collect();
 
@@ -899,6 +928,57 @@ mod tests {
         // The is_router gateway is classified Router; plain hosts stay Host.
         assert_eq!(state.nodes["gw"].role, NodeRole::Router);
         assert_eq!(state.nodes["hostA"].role, NodeRole::Host);
+    }
+
+    #[test]
+    fn rebuild_edges_matrix_takes_precedence_over_flows() {
+        let mut state = TopologyState::default();
+        for id in ["a", "b", "c"] {
+            state.nodes.insert(
+                id.to_string(),
+                Node {
+                    id: id.to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        let mut map = HashMap::new();
+        for id in ["a", "b", "c"] {
+            map.insert(id.to_string(), id.to_string());
+        }
+
+        // Flows first: a<->b with cumulative stats.
+        state.apply_flow_edges(&[flow("a:1", "b:2", 4000, 40, "tcp")], &map, 1);
+        assert_eq!(state.edges.len(), 1);
+        assert_eq!(state.edges[0].rate, 0.0);
+
+        // Matrix arrives: a->b rated + b->c (a pair flows never saw).
+        let matrix = vec![
+            zensight_common::MatrixRecord {
+                src: "a".to_string(),
+                dst: "b".to_string(),
+                bytes_per_sec: 1234.0,
+                names: Vec::new(),
+            },
+            zensight_common::MatrixRecord {
+                src: "b".to_string(),
+                dst: "c".to_string(),
+                bytes_per_sec: 10.0,
+                names: Vec::new(),
+            },
+        ];
+        state.apply_matrix_edges(&matrix, &map, 2);
+
+        assert_eq!(state.edges.len(), 2);
+        let ab = state
+            .edges
+            .iter()
+            .find(|e| ordered_pair(&e.from, &e.to) == ("a".to_string(), "b".to_string()))
+            .unwrap();
+        // Rated by the matrix, enriched with the flow pair's cumulative stats.
+        assert_eq!(ab.rate, 1234.0);
+        assert_eq!(ab.bytes, 4000);
+        assert_eq!(ab.protocol.as_deref(), Some("tcp"));
     }
 
     #[test]

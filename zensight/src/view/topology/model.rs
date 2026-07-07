@@ -371,6 +371,108 @@ pub fn edges_from_flows(
     edges
 }
 
+/// Directed rate edges from the netring traffic matrix (#391). The matrix is
+/// the primary edge source: pre-aggregated, top-N-capped server-side, and
+/// carrying a rolling **bytes/sec** rate per `src → dst` pair. Rows whose
+/// endpoints collapse to the same unordered node pair merge into one edge:
+/// `from` is the heavier direction's source (lexicographic tiebreak on equal
+/// rates), `rate` the forward and `reverse_rate` the responder bytes/sec.
+/// Rows touching an unknown IP or a self-loop are dropped. Pure.
+pub fn edges_from_matrix(
+    matrix: &[zensight_common::MatrixRecord],
+    ip_to_node: &HashMap<String, NodeId>,
+    now_ms: i64,
+) -> Vec<Edge> {
+    // Per unordered pair: rate in pair-order direction, rate in reverse.
+    let mut acc: HashMap<(NodeId, NodeId), (f64, f64)> = HashMap::new();
+    for rec in matrix {
+        let src_node = ip_to_node.get(endpoint_ip(&rec.src));
+        let dst_node = ip_to_node.get(endpoint_ip(&rec.dst));
+        let (Some(a), Some(b)) = (src_node, dst_node) else {
+            continue;
+        };
+        if a == b {
+            continue; // self-loop: same host both ends
+        }
+        let key = ordered_pair(a, b);
+        let forward = *a == key.0; // does this row run in pair order?
+        let entry = acc.entry(key).or_insert((0.0, 0.0));
+        if forward {
+            entry.0 += rec.bytes_per_sec;
+        } else {
+            entry.1 += rec.bytes_per_sec;
+        }
+    }
+    let mut edges: Vec<Edge> = acc
+        .into_iter()
+        .map(|((a, b), (ab, ba))| {
+            // `from` = the heavier direction's source; ties keep pair order.
+            let (from, to, rate, reverse_rate) = if ab >= ba {
+                (a, b, ab, ba)
+            } else {
+                (b, a, ba, ab)
+            };
+            Edge {
+                from,
+                to,
+                kind: EdgeKind::Flow,
+                rate,
+                reverse_rate,
+                last_seen: now_ms,
+                ..Default::default()
+            }
+        })
+        .collect();
+    // Stable order: fastest links first, then by endpoints.
+    edges.sort_by(|x, y| {
+        let (rx, ry) = (x.rate + x.reverse_rate, y.rate + y.reverse_rate);
+        ry.partial_cmp(&rx)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| (x.from.clone(), x.to.clone()).cmp(&(y.from.clone(), y.to.clone())))
+    });
+    edges
+}
+
+/// Merge cumulative flow statistics into rate edges (#391): matrix edges gain
+/// bytes/packets/protocol from the flow edge covering the same unordered pair,
+/// and flow-only pairs (outside the matrix top-N) are appended so observed
+/// links never vanish when the matrix arrives. Pure.
+pub fn merge_flow_stats(mut rate_edges: Vec<Edge>, flow_edges: Vec<Edge>) -> Vec<Edge> {
+    let mut by_pair: HashMap<(NodeId, NodeId), Edge> = flow_edges
+        .into_iter()
+        .map(|e| (ordered_pair(&e.from, &e.to), e))
+        .collect();
+    for edge in &mut rate_edges {
+        if let Some(f) = by_pair.remove(&ordered_pair(&edge.from, &edge.to)) {
+            edge.bytes = f.bytes;
+            edge.packets = f.packets;
+            edge.protocol = f.protocol;
+        }
+    }
+    // Remaining flow edges cover pairs the matrix didn't (unrated).
+    let mut rest: Vec<Edge> = by_pair.into_values().collect();
+    rest.sort_by(|a, b| {
+        b.bytes
+            .cmp(&a.bytes)
+            .then_with(|| (a.from.clone(), a.to.clone()).cmp(&(b.from.clone(), b.to.clone())))
+    });
+    rate_edges.extend(rest);
+    rate_edges
+}
+
+/// Format a bytes/sec rate for display ("2.1 MB/s"). Pure.
+pub fn format_rate(bytes_per_sec: f64) -> String {
+    if bytes_per_sec >= 1_000_000_000.0 {
+        format!("{:.1} GB/s", bytes_per_sec / 1_000_000_000.0)
+    } else if bytes_per_sec >= 1_000_000.0 {
+        format!("{:.1} MB/s", bytes_per_sec / 1_000_000.0)
+    } else if bytes_per_sec >= 1_000.0 {
+        format!("{:.1} KB/s", bytes_per_sec / 1_000.0)
+    } else {
+        format!("{bytes_per_sec:.0} B/s")
+    }
+}
+
 /// Order a node pair canonically so `(a,b)` and `(b,a)` compare equal. Pure.
 pub(crate) fn ordered_pair(a: &NodeId, b: &NodeId) -> (NodeId, NodeId) {
     if a <= b {
@@ -635,6 +737,103 @@ mod tests {
         assert_eq!(node.tcp_listen, Some(12.0));
         assert_eq!(node.routes_total, Some(20.0));
         assert_eq!(node.neighbors_total, Some(18.0));
+    }
+
+    fn matrix(src: &str, dst: &str, rate: f64) -> zensight_common::MatrixRecord {
+        zensight_common::MatrixRecord {
+            src: src.to_string(),
+            dst: dst.to_string(),
+            bytes_per_sec: rate,
+            names: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn edges_from_matrix_merges_directions() {
+        let mut map = HashMap::new();
+        map.insert("10.0.0.1".to_string(), "hostA".to_string());
+        map.insert("10.0.0.2".to_string(), "hostB".to_string());
+        let records = vec![
+            matrix("10.0.0.1", "10.0.0.2", 500.0),
+            matrix("10.0.0.2", "10.0.0.1", 2000.0), // heavier: B → A
+            matrix("10.0.0.1", "8.8.8.8", 999.0),   // unknown dst -> dropped
+            matrix("10.0.0.1", "10.0.0.1", 1.0),    // self-loop -> dropped
+        ];
+        let edges = edges_from_matrix(&records, &map, 42);
+        assert_eq!(edges.len(), 1);
+        let e = &edges[0];
+        // Forward = the heavier direction (B → A).
+        assert_eq!((e.from.as_str(), e.to.as_str()), ("hostB", "hostA"));
+        assert_eq!(e.rate, 2000.0);
+        assert_eq!(e.reverse_rate, 500.0);
+        assert_eq!(e.kind, EdgeKind::Flow);
+        assert_eq!(e.last_seen, 42);
+    }
+
+    #[test]
+    fn edges_from_matrix_sums_multiple_ips_per_node() {
+        // Two source IPs of the same host aggregate into one direction.
+        let mut map = HashMap::new();
+        map.insert("10.0.0.1".to_string(), "hostA".to_string());
+        map.insert("192.168.1.1".to_string(), "hostA".to_string());
+        map.insert("10.0.0.2".to_string(), "hostB".to_string());
+        let records = vec![
+            matrix("10.0.0.1", "10.0.0.2", 100.0),
+            matrix("192.168.1.1", "10.0.0.2", 50.0),
+        ];
+        let edges = edges_from_matrix(&records, &map, 0);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].rate, 150.0);
+        assert_eq!(edges[0].reverse_rate, 0.0);
+    }
+
+    #[test]
+    fn edges_from_matrix_tiebreak_keeps_pair_order() {
+        let mut map = HashMap::new();
+        map.insert("b-host".to_string(), "b-host".to_string());
+        map.insert("a-host".to_string(), "a-host".to_string());
+        let records = vec![
+            matrix("b-host", "a-host", 100.0),
+            matrix("a-host", "b-host", 100.0),
+        ];
+        let edges = edges_from_matrix(&records, &map, 0);
+        // Equal rates: pair (lexicographic) order wins.
+        assert_eq!(edges[0].from, "a-host");
+        assert_eq!(edges[0].to, "b-host");
+    }
+
+    #[test]
+    fn merge_flow_stats_enriches_and_appends() {
+        let mut map = HashMap::new();
+        for ip_host in [("1.1.1.1", "a"), ("2.2.2.2", "b"), ("3.3.3.3", "c")] {
+            map.insert(ip_host.0.to_string(), ip_host.1.to_string());
+        }
+        let rate_edges = edges_from_matrix(&[matrix("1.1.1.1", "2.2.2.2", 100.0)], &map, 0);
+        let flow_edges = edges_from_flows(
+            &[
+                flow("2.2.2.2:1", "1.1.1.1:2", 5000, 50, "tcp"), // covers the a<->b pair
+                flow("1.1.1.1:1", "3.3.3.3:2", 700, 7, "udp"),   // a<->c: matrix missed it
+            ],
+            &map,
+            0,
+        );
+        let merged = merge_flow_stats(rate_edges, flow_edges);
+        assert_eq!(merged.len(), 2);
+        // Rated edge enriched with the pair's cumulative flow stats.
+        assert_eq!(merged[0].rate, 100.0);
+        assert_eq!(merged[0].bytes, 5000);
+        assert_eq!(merged[0].protocol.as_deref(), Some("tcp"));
+        // Flow-only pair appended, unrated.
+        assert_eq!(merged[1].bytes, 700);
+        assert_eq!(merged[1].rate, 0.0);
+    }
+
+    #[test]
+    fn format_rate_scales_units() {
+        assert_eq!(format_rate(500.0), "500 B/s");
+        assert_eq!(format_rate(1_500.0), "1.5 KB/s");
+        assert_eq!(format_rate(2_100_000.0), "2.1 MB/s");
+        assert_eq!(format_rate(1_500_000_000.0), "1.5 GB/s");
     }
 
     #[test]

@@ -306,6 +306,9 @@ pub enum Message {
     /// (#49). Merged with flow edges so directly-attached gateways/peers appear
     /// even without observed traffic; `is_router` entries classify Router nodes.
     TopologyNeighborsReceived(Result<Vec<zensight_common::NeighborRecord>, String>),
+    /// Netring traffic matrix fetched for the topology (#391): directed
+    /// bytes/sec rates, the primary edge source when present.
+    TopologyMatrixReceived(Result<Vec<zensight_common::MatrixRecord>, String>),
     /// Fetch the on-demand netring TLS asset inventory.
     FetchNetringTls,
     /// A netring TLS-inventory reply: the decoded records, or an error message.

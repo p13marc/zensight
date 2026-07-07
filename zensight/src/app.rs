@@ -16,6 +16,11 @@ use zensight_common::{
 /// Flush the metric store to redb every this many 1s ticks (#22).
 const STORE_FLUSH_EVERY_TICKS: u32 = 15;
 
+/// Re-issue the topology edge/asset queries every N ticks (~seconds) while the
+/// topology view is open (#391), so edge rates stay live instead of freezing
+/// at whatever the view-open fetch saw.
+const TOPOLOGY_REFRESH_TICKS: u8 = 10;
+
 /// Evict aged-out buckets every this many flushes (~10 min at 15s/flush, #131).
 /// Pruning scans the whole table, so it runs far less often than flushing.
 const STORE_PRUNE_EVERY_FLUSHES: u32 = 40;
@@ -206,6 +211,8 @@ pub struct ZenSight {
     store: crate::store::MetricStore,
     /// Ticks counted toward the next periodic store flush (flush every N ticks).
     ticks_since_flush: u32,
+    /// Ticks since the last topology query refresh (#391).
+    topology_refresh_ticks: u8,
     /// Flushes counted toward the next store prune (#131).
     flushes_since_prune: u32,
     /// Timestamp (epoch ms) of the most recently received telemetry point, for
@@ -374,6 +381,7 @@ impl ZenSight {
                 crate::store::MetricStore::with_default_persistence()
             },
             ticks_since_flush: 0,
+            topology_refresh_ticks: 0,
             flushes_since_prune: 0,
             // Demo mode pre-loads mock points; treat the feed as fresh on boot.
             last_telemetry_ms: if demo_mode { Some(now_ms()) } else { None },
@@ -680,6 +688,17 @@ impl ZenSight {
                 }
                 Err(e) => {
                     tracing::debug!(error = %e, "No netlink neighbors for topology edges");
+                }
+            },
+
+            Message::TopologyMatrixReceived(result) => match result {
+                Ok(matrix) => {
+                    let ip_to_node = self.topology_ip_to_node();
+                    self.topology
+                        .apply_matrix_edges(&matrix, &ip_to_node, now_ms());
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "No netring matrix for topology edges");
                 }
             },
 
@@ -1064,10 +1083,7 @@ impl ZenSight {
                     self.topology.select_node(node_id);
                     self.set_view(CurrentView::Topology);
                     self.save_current_view();
-                    return ControlFlow::Break(Task::batch([
-                        self.query_topology_flows(),
-                        self.query_topology_neighbors(),
-                    ]));
+                    return ControlFlow::Break(self.query_topology_batch());
                 }
                 self.toasts.push(
                     ToastSeverity::Info,
@@ -1576,6 +1592,14 @@ impl ZenSight {
                 // fresh per-line events on a slow cadence (piggybacked on the
                 // 1 Hz tick — no dedicated timer).
                 let log_fetch = self.maybe_refresh_logs();
+                // Topology refresh (#391): while the map is open, re-pull
+                // matrix/flows/neighbors every ~10 s so edge rates stay live.
+                let topo_fetch = self.maybe_refresh_topology();
+                let log_fetch = match (log_fetch, topo_fetch) {
+                    (Some(a), Some(b)) => Some(Task::batch([a, b])),
+                    (Some(a), None) | (None, Some(a)) => Some(a),
+                    (None, None) => None,
+                };
                 // Periodically flush downsampled buckets to redb off the UI thread
                 // (every ~15 ticks ≈ 15s). Never block update()/view() on disk I/O.
                 self.ticks_since_flush += 1;
@@ -2250,7 +2274,7 @@ impl ZenSight {
                 self.save_current_view();
                 // Derive real edges from observed flows (#25) and netlink
                 // neighbor adjacency (#49); edges are merged as replies arrive.
-                return Task::batch([self.query_topology_flows(), self.query_topology_neighbors()]);
+                return self.query_topology_batch();
             }
 
             Message::CommandFeedback { success, message } => {
@@ -3916,6 +3940,47 @@ impl ZenSight {
                 .ok_or_else(|| "No netlink sensor responded".to_string());
             Message::TopologyNeighborsReceived(result)
         })
+    }
+
+    /// Fetch the netring traffic matrix (directed bytes/sec per talker pair,
+    /// #391) — the topology's primary edge source. Silent when disconnected.
+    fn query_topology_matrix(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_matrix;
+        let Some(session) = self.session.clone() else {
+            return Task::none();
+        };
+        Task::future(async move {
+            let result = fetch_matrix(session)
+                .await
+                .ok_or_else(|| "No netring sensor responded".to_string());
+            Message::TopologyMatrixReceived(result)
+        })
+    }
+
+    /// The full topology data-refresh batch (#391): flows + neighbors + matrix.
+    /// Issued on view entry and re-issued periodically while the view is open.
+    fn query_topology_batch(&self) -> Task<Message> {
+        Task::batch([
+            self.query_topology_flows(),
+            self.query_topology_neighbors(),
+            self.query_topology_matrix(),
+        ])
+    }
+
+    /// Piggybacked on the 1 Hz tick: while the topology view is open, re-issue
+    /// the topology queries every [`TOPOLOGY_REFRESH_TICKS`] seconds so edge
+    /// rates stay live (#391).
+    fn maybe_refresh_topology(&mut self) -> Option<Task<Message>> {
+        if self.current_view != CurrentView::Topology {
+            self.topology_refresh_ticks = 0;
+            return None;
+        }
+        self.topology_refresh_ticks = self.topology_refresh_ticks.saturating_add(1);
+        if self.topology_refresh_ticks < TOPOLOGY_REFRESH_TICKS {
+            return None;
+        }
+        self.topology_refresh_ticks = 0;
+        Some(self.query_topology_batch())
     }
 
     /// Build a map from endpoint IP to topology node id (#25/#306). A node whose
