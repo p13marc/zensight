@@ -154,8 +154,12 @@ meta-nodes with aggregated edges (click to expand, "Regroup" re-collapses);
 button, breadcrumb to exit); filters (hide idle / passive / external, flow
 top-N with an honest "showing top N of M flows" label); search supports
 `find:`/`hide:` with `role:`/`alert:`/`health:` predicates. Lens/grouping/
-label/filter prefs persist in settings.json5. Supports zoom, pan, and manual
-node positioning.
+label/filter prefs persist in settings.json5. Supports zoom, pan (+ `f`
+zoom-to-fit), and manual node positioning — pinned positions persist across
+restarts. Polish (#394): hovering a node dims everything outside its 1-hop
+neighborhood; active flow edges animate a marching dash (uncached overlay,
+double-gated subscription); a toggleable legend explains the active lens;
+layout modes force / ranked grid / circular.
 
 Details on demand (#393, `view/topology/panel.rs`): selecting a node or edge
 opens a 320 px side panel fetched on selection (never on tick, stale replies
