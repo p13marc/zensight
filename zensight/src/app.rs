@@ -4087,10 +4087,65 @@ impl ZenSight {
     /// default-gateway edges (#391). Gateway application is change-gated inside
     /// [`TopologyState::apply_gateway_edges`], so calling this at 1 Hz is cheap.
     fn refresh_topology_nodes(&mut self) {
-        self.topology
-            .update_from_devices(&self.dashboard.devices, &self.entities);
+        self.topology.update_from_devices(
+            &self.dashboard.devices,
+            &self.entities,
+            &self.sensor_health,
+            now_ms(),
+        );
         let ip_to_node = self.topology_ip_to_node();
         self.topology.apply_gateway_edges(&ip_to_node, now_ms());
+        // Live node rx/tx rates from hot-ring counter deltas (#391) — only
+        // worth the store scan while the map is on screen.
+        if self.current_view == CurrentView::Topology {
+            let rates = self.topology_rates();
+            self.topology.apply_rates(&rates);
+        }
+    }
+
+    /// Sum per-interface `network/*/{rx,tx}_bytes` counter deltas from the hot
+    /// ring into a bytes/sec pair per topology node (#391). Sysinfo facets
+    /// only — the canonical per-host NIC counters.
+    fn topology_rates(&self) -> std::collections::HashMap<String, (f64, f64)> {
+        use zensight_common::Protocol;
+        let mut rates: std::collections::HashMap<String, (f64, f64)> =
+            std::collections::HashMap::new();
+        for (device_id, device_state) in &self.dashboard.devices {
+            if device_id.protocol != Protocol::Sysinfo {
+                continue;
+            }
+            let node_id = match self.entities.by_device.get(device_id) {
+                Some(eid) => self.entities.resolve_alias(eid).to_string(),
+                None => device_id.source.clone(),
+            };
+            let mut rx = 0.0f64;
+            let mut tx = 0.0f64;
+            let mut saw = false;
+            for metric in device_state.metrics.keys() {
+                let is_rx = metric.starts_with("network/") && metric.ends_with("/rx_bytes");
+                let is_tx = metric.starts_with("network/") && metric.ends_with("/tx_bytes");
+                if !is_rx && !is_tx {
+                    continue;
+                }
+                let key = format!("{}/{}|{}", device_id.protocol, device_id.source, metric);
+                if let Some(rate) =
+                    crate::view::topology::counter_rate(&self.store.hot_samples(&key))
+                {
+                    saw = true;
+                    if is_rx {
+                        rx += rate;
+                    } else {
+                        tx += rate;
+                    }
+                }
+            }
+            if saw {
+                let entry = rates.entry(node_id).or_insert((0.0, 0.0));
+                entry.0 += rx;
+                entry.1 += tx;
+            }
+        }
+        rates
     }
 
     /// Fetch the on-demand netring TLS asset inventory.

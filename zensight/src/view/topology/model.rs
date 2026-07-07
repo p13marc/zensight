@@ -563,6 +563,75 @@ pub fn roles_from_assets(
     out
 }
 
+/// Compute a node's health (#391) from its facets' liveness, host-scoped
+/// sensor health snapshots, and entity staleness. `facets` pairs each device
+/// facet's liveness status with whether its telemetry is fresh. Precedence:
+///
+/// 1. **Down** — every facet's liveness says `Offline`.
+/// 2. **Stale** — nothing fresh and no liveness verdict to the contrary: a
+///    facet-less (passive) node whose entity went stale, or every facet
+///    `Unknown` with quiet telemetry / a stale entity.
+/// 3. **Degraded** — any facet `Offline`/`Degraded` or quiet, or any sensor
+///    on the host reporting trouble (a sensor that publishes an Unhealthy
+///    snapshot proves the host is up — sensor trouble degrades, never downs).
+/// 4. **Healthy** — otherwise.
+///
+/// Pure.
+pub fn node_health(
+    facets: &[(zensight_common::DeviceStatus, bool)],
+    sensor_statuses: &[zensight_common::HealthStatus],
+    entity_stale: bool,
+) -> NodeHealth {
+    use zensight_common::{DeviceStatus, HealthStatus};
+
+    let has_facets = !facets.is_empty();
+    if has_facets && facets.iter().all(|(s, _)| *s == DeviceStatus::Offline) {
+        return NodeHealth::Down;
+    }
+
+    let all_unknown = facets.iter().all(|(s, _)| *s == DeviceStatus::Unknown);
+    let none_fresh = facets.iter().all(|(_, fresh)| !fresh);
+    if (!has_facets && entity_stale) || (has_facets && all_unknown && (none_fresh || entity_stale))
+    {
+        return NodeHealth::Stale;
+    }
+
+    let facet_trouble = facets
+        .iter()
+        .any(|(s, fresh)| matches!(s, DeviceStatus::Offline | DeviceStatus::Degraded) || !fresh);
+    let sensor_trouble = sensor_statuses.iter().any(|s| {
+        matches!(
+            s,
+            HealthStatus::Degraded
+                | HealthStatus::Unhealthy
+                | HealthStatus::Error
+                | HealthStatus::Starting
+        )
+    });
+    if facet_trouble || sensor_trouble {
+        return NodeHealth::Degraded;
+    }
+    NodeHealth::Healthy
+}
+
+/// Bytes/sec from the last two samples of a monotonic counter series (#391).
+/// `None` on short series, non-advancing clocks, or counter resets (negative
+/// delta) — a reset yields one missing reading, not a bogus spike. Pure.
+pub fn counter_rate(samples: &[crate::store::Sample]) -> Option<f64> {
+    let [.., prev, last] = samples else {
+        return None;
+    };
+    let dt_ms = last.ts - prev.ts;
+    if dt_ms <= 0 {
+        return None;
+    }
+    let dv = last.value - prev.value;
+    if dv < 0.0 {
+        return None; // counter reset
+    }
+    Some(dv / (dt_ms as f64 / 1000.0))
+}
+
 /// Format a bytes/sec rate for display ("2.1 MB/s"). Pure.
 pub fn format_rate(bytes_per_sec: f64) -> String {
     if bytes_per_sec >= 1_000_000_000.0 {
@@ -1051,6 +1120,63 @@ mod tests {
         let roles = roles_from_assets(&assets, &HashMap::new(), &ip_to_node);
         assert_eq!(roles["gw"].0, NodeRole::Router);
         assert_eq!(roles["gw"].1, Some("MikroTik".to_string()));
+    }
+
+    #[test]
+    fn node_health_precedence_rungs() {
+        use zensight_common::{DeviceStatus as D, HealthStatus as H};
+
+        // Down: all facets offline.
+        assert_eq!(
+            node_health(&[(D::Offline, false), (D::Offline, false)], &[], false),
+            NodeHealth::Down
+        );
+        // Not Down while any facet is alive — degraded instead.
+        assert_eq!(
+            node_health(&[(D::Offline, false), (D::Online, true)], &[], false),
+            NodeHealth::Degraded
+        );
+        // Stale: passive node (no facets) with a stale entity.
+        assert_eq!(node_health(&[], &[], true), NodeHealth::Stale);
+        // Stale: no liveness verdict and telemetry quiet.
+        assert_eq!(
+            node_health(&[(D::Unknown, false)], &[], false),
+            NodeHealth::Stale
+        );
+        // Degraded: liveness fine but a host sensor reports trouble.
+        assert_eq!(
+            node_health(&[(D::Online, true)], &[H::Unhealthy], false),
+            NodeHealth::Degraded
+        );
+        // Degraded: liveness Online but telemetry quiet.
+        assert_eq!(
+            node_health(&[(D::Online, false)], &[], false),
+            NodeHealth::Degraded
+        );
+        // Healthy: fresh facets, quiet sensors, live entity.
+        assert_eq!(
+            node_health(&[(D::Online, true)], &[H::Healthy], false),
+            NodeHealth::Healthy
+        );
+        // Passive node with a live entity is healthy, not stale.
+        assert_eq!(node_health(&[], &[], false), NodeHealth::Healthy);
+    }
+
+    #[test]
+    fn counter_rate_deltas_and_resets() {
+        use crate::store::Sample;
+        let s = |ts, value| Sample { ts, value };
+        // 1000 bytes over 2 s → 500 B/s (uses the last two samples).
+        assert_eq!(
+            counter_rate(&[s(0, 0.0), s(1_000, 100.0), s(3_000, 1_100.0)]),
+            Some(500.0)
+        );
+        // Counter reset → None, not a negative spike.
+        assert_eq!(counter_rate(&[s(0, 5_000.0), s(1_000, 10.0)]), None);
+        // Too short / non-advancing clock.
+        assert_eq!(counter_rate(&[s(0, 1.0)]), None);
+        assert_eq!(counter_rate(&[]), None);
+        assert_eq!(counter_rate(&[s(5, 1.0), s(5, 2.0)]), None);
     }
 
     #[test]

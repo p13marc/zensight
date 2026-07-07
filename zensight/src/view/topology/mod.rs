@@ -22,9 +22,9 @@ use crate::view::icons::{self, IconSize};
 pub use graph::TopologyGraph;
 pub use layout::{LayoutConfig, arrange_circle, center_layout, layout_step};
 pub use model::{
-    Edge, EdgeKind, Node, NodeAlert, NodeHealth, NodeId, NodeRole, Provenance, edges_from_flows,
-    edges_from_gateways, edges_from_matrix, edges_from_neighbors, endpoint_ip, format_rate,
-    gateway_from_metrics, merge_flow_stats, roles_from_assets,
+    Edge, EdgeKind, Node, NodeAlert, NodeHealth, NodeId, NodeRole, Provenance, counter_rate,
+    edges_from_flows, edges_from_gateways, edges_from_matrix, edges_from_neighbors, endpoint_ip,
+    format_rate, gateway_from_metrics, merge_flow_stats, node_health, roles_from_assets,
 };
 
 use model::{entity_node_label, is_node_protocol, ordered_pair, primary_protocol};
@@ -99,11 +99,15 @@ impl Default for TopologyState {
 }
 
 impl TopologyState {
-    /// Update topology from dashboard device states.
+    /// Update topology from dashboard device states. `sensor_health` is the
+    /// per-sensor `@/health` snapshot map (host-scoped via `host_id`, #391);
+    /// `now_ms` drives entity staleness.
     pub fn update_from_devices(
         &mut self,
         devices: &HashMap<DeviceId, DeviceState>,
         entities: &crate::entity::EntityStore,
+        sensor_health: &HashMap<String, zensight_common::HealthSnapshot>,
+        now_ms: i64,
     ) {
         let initial_count = self.nodes.len();
 
@@ -118,6 +122,11 @@ impl TopologyState {
         // as Gateway edges by `apply_gateway_edges` once the caller has an
         // ip_to_node map in hand.
         let mut gateways: HashMap<NodeId, String> = HashMap::new();
+
+        // Per-node facet health inputs (#391): each device facet contributes
+        // its liveness status + whether its telemetry is fresh.
+        let mut facet_health: HashMap<NodeId, Vec<(zensight_common::DeviceStatus, bool)>> =
+            HashMap::new();
 
         // A node per physical host (#83/#306): keyed by the correlator entity id
         // when the device maps into one, else by `source`. Widened beyond
@@ -175,16 +184,14 @@ impl TopologyState {
                 gateways.insert(node_id.clone(), gw);
             }
 
+            facet_health
+                .entry(node_id.clone())
+                .or_default()
+                .push((device_state.sensor_status, device_state.is_healthy));
+
             // Update node metrics from telemetry
             if let Some(node) = self.nodes.get_mut(&node_id) {
                 node.label = label;
-                // Interim liveness→health mapping; the full liveness +
-                // sensor-health + staleness precedence lands with #391.
-                node.health = if device_state.is_healthy {
-                    NodeHealth::Healthy
-                } else {
-                    NodeHealth::Down
-                };
                 node.provenance = Provenance::Monitored;
                 node.protocols.insert(device_id.protocol);
                 node.metric_count += device_state.metric_count;
@@ -196,6 +203,28 @@ impl TopologyState {
 
         // Entity-derived overlays: passive wire-only nodes + sensor-count badge.
         self.apply_entities(entities);
+
+        // Health pass (#391): liveness + host-scoped sensor health + entity
+        // staleness, worst wins. Sensor snapshots join a node only when their
+        // host_id matches the entity's (pre-#389 sensors publish none and
+        // contribute nothing — device liveness still covers those hosts).
+        for (id, node) in self.nodes.iter_mut() {
+            let facets = facet_health.get(id).map(Vec::as_slice).unwrap_or(&[]);
+            let entity = entities.hosts.get(id);
+            let entity_stale = entity
+                .map(|e| crate::entity::EntityStore::is_stale(e, now_ms))
+                .unwrap_or(false);
+            let sensor_statuses: Vec<zensight_common::HealthStatus> =
+                match entity.and_then(|e| e.host_id.as_deref()) {
+                    Some(host_id) => sensor_health
+                        .values()
+                        .filter(|s| s.host_id.as_deref() == Some(host_id))
+                        .map(|s| s.status)
+                        .collect(),
+                    None => Vec::new(),
+                };
+            node.health = node_health(facets, &sensor_statuses, entity_stale);
+        }
 
         // If new nodes were added, arrange in circle and trigger layout
         if self.nodes.len() > initial_count {
@@ -296,6 +325,26 @@ impl TopologyState {
     ) {
         self.last_matrix = matrix.to_vec();
         self.rebuild_edges(ip_to_node, now_ms);
+    }
+
+    /// Apply live rx/tx rates (bytes/sec, from hot-ring counter deltas) onto
+    /// nodes (#391). Change-gated cache clear: this runs on the 1 Hz tick.
+    pub fn apply_rates(&mut self, rates: &HashMap<NodeId, (f64, f64)>) {
+        let mut changed = false;
+        for (id, node) in self.nodes.iter_mut() {
+            let (rx, tx) = match rates.get(id).copied() {
+                Some((rx, tx)) => (Some(rx), Some(tx)),
+                None => (None, None),
+            };
+            if node.rx_rate != rx || node.tx_rate != tx {
+                node.rx_rate = rx;
+                node.tx_rate = tx;
+                changed = true;
+            }
+        }
+        if changed {
+            self.cache.clear();
+        }
     }
 
     /// Join the netring passive-asset inventory onto the node set (#391):
@@ -631,24 +680,34 @@ fn render_node_info_panel(node: &Node) -> Element<'_, Message> {
     .spacing(10)
     .align_y(Alignment::Center);
 
-    // Status indicator
-    let status = if node.is_healthy() {
-        row![
+    // Status indicator (#391): the four health states.
+    let status = match node.health {
+        NodeHealth::Healthy => row![
             icons::status_healthy(IconSize::Small),
             text("Healthy - receiving data").size(11)
-        ]
-        .spacing(5)
-        .align_y(Alignment::Center)
-    } else {
-        row![
+        ],
+        NodeHealth::Degraded => row![
+            icons::status_warning(IconSize::Small),
+            text("Degraded - partial data or sensor trouble").size(11)
+        ],
+        NodeHealth::Down => row![
+            icons::status_warning(IconSize::Small),
+            text("Down - all sensors report offline").size(11)
+        ],
+        NodeHealth::Stale => row![
             icons::status_warning(IconSize::Small),
             text("Stale - no recent data").size(11)
-        ]
-        .spacing(5)
-        .align_y(Alignment::Center)
-    };
+        ],
+    }
+    .spacing(5)
+    .align_y(Alignment::Center);
 
     let mut info_items = column![header, status, rule::horizontal(1)].spacing(8);
+
+    // Hardware vendor from the passive-asset inventory (#391).
+    if let Some(ref vendor) = node.vendor {
+        info_items = info_items.push(text(format!("Vendor: {vendor}")).size(11));
+    }
 
     // Cross-sensor correlation: "seen by N sensors" (#25).
     if let Some(n) = node.sensor_count {
@@ -695,6 +754,11 @@ fn render_node_info_panel(node: &Node) -> Element<'_, Message> {
         info_items = info_items.push(rule::horizontal(1));
         info_items = info_items.push(text("Network I/O").size(12));
 
+        // Live rates first (#391), cumulative counters after.
+        if let (Some(rx), Some(tx)) = (node.rx_rate, node.tx_rate) {
+            info_items = info_items
+                .push(text(format!("  ↓ {}  ↑ {}", format_rate(rx), format_rate(tx))).size(11));
+        }
         if let Some(rx) = node.network_rx {
             info_items =
                 info_items.push(text(format!("  RX: {}", graph::format_bytes(rx))).size(11));
@@ -1248,7 +1312,12 @@ mod tests {
         add(Protocol::Netring, "sensor01", 99);
 
         let mut state = TopologyState::default();
-        state.update_from_devices(&devices, &crate::entity::EntityStore::default());
+        state.update_from_devices(
+            &devices,
+            &crate::entity::EntityStore::default(),
+            &HashMap::new(),
+            0,
+        );
 
         // 5 distinct hosts (server01 merged), no syslog/netring nodes.
         assert_eq!(state.nodes.len(), 5);
@@ -1266,7 +1335,12 @@ mod tests {
         assert_eq!(server.metric_count, 15);
 
         // Re-running doesn't double-count the per-host metric tally.
-        state.update_from_devices(&devices, &crate::entity::EntityStore::default());
+        state.update_from_devices(
+            &devices,
+            &crate::entity::EntityStore::default(),
+            &HashMap::new(),
+            0,
+        );
         assert_eq!(state.nodes.get("server01").unwrap().metric_count, 15);
         assert_eq!(state.nodes.len(), 5);
     }

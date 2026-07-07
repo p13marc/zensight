@@ -481,6 +481,19 @@ impl<'a> TopologyGraphProgram<'a> {
                 };
                 frame.fill_text(mem_text);
             }
+
+            // Live NIC rates (#391), below CPU/Mem.
+            if let (Some(rx), Some(tx)) = (node.rx_rate, node.tx_rate) {
+                let rate_text = Text {
+                    content: format!("↓{} ↑{}", super::format_rate(rx), super::format_rate(tx)),
+                    position: Point::new(pos.x, pos.y + 15.0),
+                    color: self.node_label_color(),
+                    size: (9.0 * self.state.zoom).max(8.0).into(),
+                    align_x: iced::alignment::Horizontal::Center.into(),
+                    ..Text::default()
+                };
+                frame.fill_text(rate_text);
+            }
         }
     }
 
