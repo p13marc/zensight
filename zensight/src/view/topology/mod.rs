@@ -22,9 +22,10 @@ use crate::view::icons::{self, IconSize};
 pub use graph::TopologyGraph;
 pub use layout::{LayoutConfig, arrange_circle, center_layout, layout_step};
 pub use model::{
-    Edge, EdgeKind, Node, NodeAlert, NodeHealth, NodeId, NodeRole, Provenance, counter_rate,
-    edges_from_flows, edges_from_gateways, edges_from_matrix, edges_from_neighbors, endpoint_ip,
-    format_rate, gateway_from_metrics, merge_flow_stats, node_health, roles_from_assets,
+    Edge, EdgeKind, INTERNET_NODE_ID, Node, NodeAlert, NodeHealth, NodeId, NodeRole, Provenance,
+    counter_rate, edges_from_flows, edges_from_gateways, edges_from_matrix, edges_from_neighbors,
+    endpoint_ip, external_edges_from_matrix, format_rate, gateway_from_metrics, is_public_ip,
+    merge_flow_stats, node_health, roles_from_assets,
 };
 
 use model::{entity_node_label, is_node_protocol, ordered_pair, primary_protocol};
@@ -193,6 +194,13 @@ impl TopologyState {
             if let Some(node) = self.nodes.get_mut(&node_id) {
                 node.label = label;
                 node.provenance = Provenance::Monitored;
+                node.ips = match entities.hosts.get(&node_id) {
+                    Some(e) => e.ips.clone(),
+                    None if node_id.parse::<std::net::IpAddr>().is_ok() => {
+                        vec![node_id.clone()]
+                    }
+                    None => Vec::new(),
+                };
                 node.protocols.insert(device_id.protocol);
                 node.metric_count += device_state.metric_count;
                 node.update_from_metrics(&device_state.metrics);
@@ -249,6 +257,7 @@ impl TopologyState {
             if let Some(node) = self.nodes.get_mut(id) {
                 // Live entity node: badge it with the merged member count.
                 node.sensor_count = Some(entity.members.len());
+                node.ips = entity.ips.clone();
             } else if !entity.members.is_empty() {
                 // Wire-only: no live device-backed node for this entity.
                 self.nodes.insert(
@@ -259,6 +268,7 @@ impl TopologyState {
                         provenance: Provenance::Passive,
                         role: NodeRole::Unknown,
                         sensor_count: Some(entity.members.len()),
+                        ips: entity.ips.clone(),
                         ..Default::default()
                     },
                 );
@@ -457,6 +467,37 @@ impl TopologyState {
             }
         }
 
+        // North–south rollup (#392): matrix rows to unmapped public addresses
+        // aggregate into one Internet pseudo-node instead of vanishing. The
+        // node exists only while external traffic does.
+        let external_edges = external_edges_from_matrix(&self.last_matrix, ip_to_node, now_ms);
+        if external_edges.is_empty() {
+            if self.nodes.remove(INTERNET_NODE_ID).is_some()
+                && self.selected_node.as_deref() == Some(INTERNET_NODE_ID)
+            {
+                self.selected_node = None;
+            }
+        } else {
+            if !self.nodes.contains_key(INTERNET_NODE_ID) {
+                self.nodes.insert(
+                    INTERNET_NODE_ID.to_string(),
+                    Node {
+                        id: INTERNET_NODE_ID.to_string(),
+                        label: "Internet".to_string(),
+                        role: NodeRole::Internet,
+                        provenance: Provenance::External,
+                        ..Default::default()
+                    },
+                );
+                self.layout_stable = false;
+            }
+            for edge in external_edges {
+                if pairs.insert(ordered_pair(&edge.from, &edge.to)) {
+                    edges.push(edge);
+                }
+            }
+        }
+
         // Reset then reapply role classification so it follows the live
         // table. Monitored hosts default to Host, wire-only nodes to Unknown;
         // `is_router` neighbors become routers regardless of provenance (a
@@ -464,7 +505,9 @@ impl TopologyState {
         for node in self.nodes.values_mut() {
             node.role = match node.provenance {
                 Provenance::Monitored => NodeRole::Host,
-                Provenance::Passive | Provenance::External => NodeRole::Unknown,
+                Provenance::Passive => NodeRole::Unknown,
+                // The Internet aggregate's role is intrinsic (#392).
+                Provenance::External => NodeRole::Internet,
             };
         }
         for id in &routers {

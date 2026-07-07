@@ -146,6 +146,9 @@ pub struct Node {
     pub health: NodeHealth,
     /// Hardware vendor, from the passive-asset inventory (#391).
     pub vendor: Option<String>,
+    /// The host's identifying IPs (from its correlator entity, or the node id
+    /// itself when it is an IP). Drives subnet grouping (#392).
+    pub ips: Vec<String>,
     /// Which protocols' devices map to this host (#83). Drives the header icon
     /// and the "covered by" badges in the info panel.
     pub protocols: std::collections::BTreeSet<zensight_common::Protocol>,
@@ -561,6 +564,97 @@ pub fn roles_from_assets(
         }
     }
     out
+}
+
+/// The synthetic node id aggregating off-LAN (public) traffic (#392): the
+/// NDR-style north–south rollup. `@` keeps it out of any hostname/entity-id
+/// namespace.
+pub const INTERNET_NODE_ID: &str = "@internet";
+
+/// Whether an IP string is a public (globally routable) address (#392).
+/// Private/link-local/loopback/CGNAT/ULA/multicast/unspecified are all
+/// non-public; unparseable strings are non-public (never aggregate garbage
+/// into the Internet node). Pure.
+pub fn is_public_ip(ip: &str) -> bool {
+    match ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => {
+            let o = v4.octets();
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+                || v4.is_documentation()
+                // CGNAT 100.64.0.0/10 — carrier-side, not global.
+                || (o[0] == 100 && (o[1] & 0xc0) == 64))
+        }
+        Ok(std::net::IpAddr::V6(v6)) => {
+            let s = v6.segments();
+            !(v6.is_loopback()
+                || v6.is_multicast()
+                || v6.is_unspecified()
+                // fe80::/10 link-local, fc00::/7 unique-local.
+                || (s[0] & 0xffc0) == 0xfe80
+                || (s[0] & 0xfe00) == 0xfc00)
+        }
+        Err(_) => false,
+    }
+}
+
+/// Aggregate matrix rows between a known node and an unmapped **public**
+/// address into rated edges to the [`INTERNET_NODE_ID`] pseudo-node (#392) —
+/// the NDR north–south rollup. Rows between two unmapped or two mapped
+/// endpoints are not this function's business (see [`edges_from_matrix`]);
+/// unmapped *private* endpoints stay dropped (unknown LAN noise, not
+/// "the Internet"). Pure.
+pub fn external_edges_from_matrix(
+    matrix: &[zensight_common::MatrixRecord],
+    ip_to_node: &HashMap<String, NodeId>,
+    now_ms: i64,
+) -> Vec<Edge> {
+    // Per known node: (outbound to internet, inbound from internet) bytes/sec.
+    let mut acc: HashMap<NodeId, (f64, f64)> = HashMap::new();
+    for rec in matrix {
+        let src_ip = endpoint_ip(&rec.src);
+        let dst_ip = endpoint_ip(&rec.dst);
+        match (ip_to_node.get(src_ip), ip_to_node.get(dst_ip)) {
+            (Some(node), None) if is_public_ip(dst_ip) => {
+                acc.entry(node.clone()).or_insert((0.0, 0.0)).0 += rec.bytes_per_sec;
+            }
+            (None, Some(node)) if is_public_ip(src_ip) => {
+                acc.entry(node.clone()).or_insert((0.0, 0.0)).1 += rec.bytes_per_sec;
+            }
+            _ => {}
+        }
+    }
+    let mut edges: Vec<Edge> = acc
+        .into_iter()
+        .map(|(node, (out_rate, in_rate))| {
+            // `from` = the heavier direction's source, like edges_from_matrix.
+            let (from, to, rate, reverse_rate) = if out_rate >= in_rate {
+                (node, INTERNET_NODE_ID.to_string(), out_rate, in_rate)
+            } else {
+                (INTERNET_NODE_ID.to_string(), node, in_rate, out_rate)
+            };
+            Edge {
+                from,
+                to,
+                kind: EdgeKind::Flow,
+                rate,
+                reverse_rate,
+                last_seen: now_ms,
+                ..Default::default()
+            }
+        })
+        .collect();
+    edges.sort_by(|x, y| {
+        let (rx, ry) = (x.rate + x.reverse_rate, y.rate + y.reverse_rate);
+        ry.partial_cmp(&rx)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| (x.from.clone(), x.to.clone()).cmp(&(y.from.clone(), y.to.clone())))
+    });
+    edges
 }
 
 /// Compute a node's health (#391) from its facets' liveness, host-scoped
@@ -1177,6 +1271,56 @@ mod tests {
         assert_eq!(counter_rate(&[s(0, 1.0)]), None);
         assert_eq!(counter_rate(&[]), None);
         assert_eq!(counter_rate(&[s(5, 1.0), s(5, 2.0)]), None);
+    }
+
+    #[test]
+    fn is_public_ip_classification() {
+        for private in [
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "127.0.0.1",
+            "169.254.1.1",
+            "100.64.0.1",
+            "0.0.0.0",
+            "fe80::1",
+            "fd00::1",
+            "::1",
+            "ff02::1",
+            "not-an-ip",
+        ] {
+            assert!(!is_public_ip(private), "{private} should be non-public");
+        }
+        for public in [
+            "8.8.8.8",
+            "1.1.1.1",
+            "142.250.74.110",
+            "2001:4860:4860::8888",
+        ] {
+            assert!(is_public_ip(public), "{public} should be public");
+        }
+    }
+
+    #[test]
+    fn external_edges_aggregate_public_only() {
+        let mut map = HashMap::new();
+        map.insert("10.0.0.11".to_string(), "server01".to_string());
+        let records = vec![
+            matrix("10.0.0.11", "142.250.74.110", 900.0), // out to public
+            matrix("10.0.0.11", "1.1.1.1", 100.0),        // out to public
+            matrix("8.8.8.8", "10.0.0.11", 5_000.0),      // in from public (heavier)
+            matrix("10.0.0.11", "192.168.99.1", 777.0),   // unmapped PRIVATE -> dropped
+            matrix("10.0.0.11", "10.0.0.12", 50.0),       // unmapped private -> dropped
+        ];
+        let edges = external_edges_from_matrix(&records, &map, 3);
+        assert_eq!(edges.len(), 1);
+        let e = &edges[0];
+        // Inbound outweighs outbound: internet -> server01.
+        assert_eq!(e.from, INTERNET_NODE_ID);
+        assert_eq!(e.to, "server01");
+        assert_eq!(e.rate, 5_000.0);
+        assert_eq!(e.reverse_rate, 1_000.0);
+        assert_eq!(e.last_seen, 3);
     }
 
     #[test]
