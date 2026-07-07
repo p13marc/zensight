@@ -309,6 +309,9 @@ pub enum Message {
     /// Netring traffic matrix fetched for the topology (#391): directed
     /// bytes/sec rates, the primary edge source when present.
     TopologyMatrixReceived(Result<Vec<zensight_common::MatrixRecord>, String>),
+    /// Netring passive-asset inventory fetched for the topology (#391): device
+    /// roles (router/switch/ap/phone/iot) + vendor join onto nodes.
+    TopologyAssetsReceived(Result<Vec<zensight_common::AssetRecord>, String>),
     /// Fetch the on-demand netring TLS asset inventory.
     FetchNetringTls,
     /// A netring TLS-inventory reply: the decoded records, or an error message.

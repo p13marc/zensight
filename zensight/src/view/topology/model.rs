@@ -517,6 +517,52 @@ pub fn edges_from_gateways(
     (edges, missing.into_iter().collect())
 }
 
+/// Join the netring passive-asset inventory onto topology nodes (#391):
+/// MAC-keyed assets resolve via `mac_to_node` (normalized MACs) first, then
+/// via their IPv4/IPv6 addresses through `ip_to_node`. Returns per node the
+/// asset role (possibly `Unknown` — the caller must not let that clobber
+/// stronger evidence) and the vendor string. Deterministic (assets processed
+/// in MAC order; first resolution wins per node, non-Unknown roles preferred).
+/// Pure.
+pub fn roles_from_assets(
+    assets: &[zensight_common::AssetRecord],
+    mac_to_node: &HashMap<String, NodeId>,
+    ip_to_node: &HashMap<String, NodeId>,
+) -> HashMap<NodeId, (NodeRole, Option<String>)> {
+    let mut sorted: Vec<&zensight_common::AssetRecord> = assets.iter().collect();
+    sorted.sort_by(|a, b| a.mac.cmp(&b.mac));
+    let mut out: HashMap<NodeId, (NodeRole, Option<String>)> = HashMap::new();
+    for asset in sorted {
+        let node_id = mac_to_node
+            .get(&crate::entity::normalize_mac(&asset.mac))
+            .or_else(|| {
+                asset
+                    .ipv4
+                    .iter()
+                    .chain(asset.ipv6.iter())
+                    .find_map(|ip| ip_to_node.get(ip.as_str()))
+            });
+        let Some(node_id) = node_id else { continue };
+        let role = NodeRole::from_asset_role(&asset.role);
+        let vendor = asset.vendor.clone();
+        match out.entry(node_id.clone()) {
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert((role, vendor));
+            }
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                let (cur_role, cur_vendor) = e.get_mut();
+                if *cur_role == NodeRole::Unknown && role != NodeRole::Unknown {
+                    *cur_role = role;
+                }
+                if cur_vendor.is_none() {
+                    *cur_vendor = vendor;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Format a bytes/sec rate for display ("2.1 MB/s"). Pure.
 pub fn format_rate(bytes_per_sec: f64) -> String {
     if bytes_per_sec >= 1_000_000_000.0 {
@@ -943,6 +989,68 @@ mod tests {
                 .any(|e| e.from == "hostB" && e.to == "192.168.1.1")
         );
         assert_eq!(missing, vec!["192.168.1.1".to_string()]);
+    }
+
+    #[test]
+    fn roles_from_assets_joins_mac_then_ip() {
+        use zensight_common::AssetRecord;
+        let assets = vec![
+            AssetRecord {
+                mac: "AA:BB:CC:00:01:01".to_string(), // MAC join (case-insensitive)
+                role: "router".to_string(),
+                vendor: Some("Cisco".to_string()),
+                ..Default::default()
+            },
+            AssetRecord {
+                mac: "aa:bb:cc:00:02:02".to_string(), // unknown MAC → IP join
+                ipv4: vec!["10.0.0.42".to_string()],
+                role: "iot".to_string(),
+                vendor: Some("Hikvision".to_string()),
+                ..Default::default()
+            },
+            AssetRecord {
+                mac: "aa:bb:cc:00:03:03".to_string(), // resolves nowhere → dropped
+                ipv4: vec!["203.0.113.9".to_string()],
+                role: "phone".to_string(),
+                ..Default::default()
+            },
+        ];
+        let mut mac_to_node = HashMap::new();
+        mac_to_node.insert("aa:bb:cc:00:01:01".to_string(), "gw".to_string());
+        let mut ip_to_node = HashMap::new();
+        ip_to_node.insert("10.0.0.42".to_string(), "cam".to_string());
+
+        let roles = roles_from_assets(&assets, &mac_to_node, &ip_to_node);
+        assert_eq!(roles.len(), 2);
+        assert_eq!(roles["gw"], (NodeRole::Router, Some("Cisco".to_string())));
+        assert_eq!(roles["cam"], (NodeRole::Iot, Some("Hikvision".to_string())));
+    }
+
+    #[test]
+    fn roles_from_assets_prefers_known_role_per_node() {
+        use zensight_common::AssetRecord;
+        // Two assets resolve to the same node; the unknown-role one sorts
+        // first but must not shadow the router claim.
+        let assets = vec![
+            AssetRecord {
+                mac: "aa:00:00:00:00:01".to_string(),
+                ipv4: vec!["10.0.0.1".to_string()],
+                role: "unknown".to_string(),
+                ..Default::default()
+            },
+            AssetRecord {
+                mac: "aa:00:00:00:00:02".to_string(),
+                ipv4: vec!["10.0.0.1".to_string()],
+                role: "router".to_string(),
+                vendor: Some("MikroTik".to_string()),
+                ..Default::default()
+            },
+        ];
+        let mut ip_to_node = HashMap::new();
+        ip_to_node.insert("10.0.0.1".to_string(), "gw".to_string());
+        let roles = roles_from_assets(&assets, &HashMap::new(), &ip_to_node);
+        assert_eq!(roles["gw"].0, NodeRole::Router);
+        assert_eq!(roles["gw"].1, Some("MikroTik".to_string()));
     }
 
     #[test]

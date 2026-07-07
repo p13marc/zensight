@@ -24,7 +24,7 @@ pub use layout::{LayoutConfig, arrange_circle, center_layout, layout_step};
 pub use model::{
     Edge, EdgeKind, Node, NodeAlert, NodeHealth, NodeId, NodeRole, Provenance, edges_from_flows,
     edges_from_gateways, edges_from_matrix, edges_from_neighbors, endpoint_ip, format_rate,
-    gateway_from_metrics, merge_flow_stats,
+    gateway_from_metrics, merge_flow_stats, roles_from_assets,
 };
 
 use model::{entity_node_label, is_node_protocol, ordered_pair, primary_protocol};
@@ -69,6 +69,9 @@ pub struct TopologyState {
     /// The gateway map the current edge set was built from (#391); compared
     /// against `pending_gateways` so rebuilds only happen on change.
     last_gateways: HashMap<NodeId, String>,
+    /// Asset-derived role + vendor per node (#391), from the netring passive
+    /// inventory; reapplied on every edge rebuild (strongest role evidence).
+    asset_roles: HashMap<NodeId, (NodeRole, Option<String>)>,
 }
 
 impl Default for TopologyState {
@@ -90,6 +93,7 @@ impl Default for TopologyState {
             last_matrix: Vec::new(),
             pending_gateways: HashMap::new(),
             last_gateways: HashMap::new(),
+            asset_roles: HashMap::new(),
         }
     }
 }
@@ -294,6 +298,21 @@ impl TopologyState {
         self.rebuild_edges(ip_to_node, now_ms);
     }
 
+    /// Join the netring passive-asset inventory onto the node set (#391):
+    /// remembers the per-node role/vendor map and rebuilds so roles and
+    /// vendor labels apply. Asset roles are the strongest role evidence and
+    /// win over neighbor/gateway router inference on every rebuild.
+    pub fn apply_assets(
+        &mut self,
+        assets: &[zensight_common::AssetRecord],
+        mac_to_node: &HashMap<String, NodeId>,
+        ip_to_node: &HashMap<String, NodeId>,
+        now_ms: i64,
+    ) {
+        self.asset_roles = roles_from_assets(assets, mac_to_node, ip_to_node);
+        self.rebuild_edges(ip_to_node, now_ms);
+    }
+
     /// Apply the gateway map collected by the last [`Self::update_from_devices`]
     /// pass (#391), rebuilding edges only when it actually changed — this runs
     /// on the 1 Hz tick, and an unconditional rebuild would clear the canvas
@@ -402,6 +421,19 @@ impl TopologyState {
         for id in &routers {
             if let Some(node) = self.nodes.get_mut(id) {
                 node.role = NodeRole::Router;
+            }
+        }
+        // Asset inventory (#391) is the strongest role evidence: a device the
+        // wire says is a switch/ap/iot stays that way even if it also routes.
+        // Unknown asset roles never clobber the inferences above.
+        for (id, (role, vendor)) in &self.asset_roles {
+            if let Some(node) = self.nodes.get_mut(id) {
+                if *role != NodeRole::Unknown {
+                    node.role = *role;
+                }
+                if vendor.is_some() {
+                    node.vendor = vendor.clone();
+                }
             }
         }
 

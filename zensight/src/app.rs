@@ -702,6 +702,18 @@ impl ZenSight {
                 }
             },
 
+            Message::TopologyAssetsReceived(result) => match result {
+                Ok(assets) => {
+                    let ip_to_node = self.topology_ip_to_node();
+                    let mac_to_node = self.topology_mac_to_node();
+                    self.topology
+                        .apply_assets(&assets, &mac_to_node, &ip_to_node, now_ms());
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "No netring assets for topology roles");
+                }
+            },
+
             Message::CloseTopology => {
                 self.set_view(CurrentView::Dashboard);
                 self.save_current_view();
@@ -3955,13 +3967,42 @@ impl ZenSight {
         })
     }
 
-    /// The full topology data-refresh batch (#391): flows + neighbors + matrix.
-    /// Issued on view entry and re-issued periodically while the view is open.
+    /// Fetch the netring passive-asset inventory for topology node roles +
+    /// vendors (#391). Silent when disconnected.
+    fn query_topology_assets(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_assets;
+        let Some(session) = self.session.clone() else {
+            return Task::none();
+        };
+        Task::future(async move {
+            let result = fetch_assets(session)
+                .await
+                .ok_or_else(|| "No netring sensor responded".to_string());
+            Message::TopologyAssetsReceived(result)
+        })
+    }
+
+    /// The full topology data-refresh batch (#391): flows + neighbors +
+    /// matrix + assets. Issued on view entry and re-issued periodically while
+    /// the view is open. Demo serves no queryables (session is None), so the
+    /// demo branch feeds the synthetic matrix + asset fleet instead — the
+    /// same wire contracts, per the demo/mock contract.
     fn query_topology_batch(&self) -> Task<Message> {
+        if self.demo_mode {
+            return Task::batch([
+                Task::done(Message::TopologyMatrixReceived(Ok(
+                    crate::mock::netring::matrix(),
+                ))),
+                Task::done(Message::TopologyAssetsReceived(Ok(
+                    crate::mock::netring::assets(),
+                ))),
+            ]);
+        }
         Task::batch([
             self.query_topology_flows(),
             self.query_topology_neighbors(),
             self.query_topology_matrix(),
+            self.query_topology_assets(),
         ])
     }
 
@@ -4005,6 +4046,30 @@ impl ZenSight {
             if let Some(node_id) = node_id {
                 for ip in &entity.ips {
                     map.entry(ip.clone()).or_insert_with(|| node_id.clone());
+                }
+            }
+        }
+        map
+    }
+
+    /// Build a map from normalized MAC to topology node id (#391), mirroring
+    /// [`Self::topology_ip_to_node`] — the join key for the MAC-keyed netring
+    /// asset inventory.
+    fn topology_mac_to_node(&self) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        for entity in self.entities.hosts.values() {
+            let node_id = if self.topology.nodes.contains_key(&entity.entity_id) {
+                Some(entity.entity_id.clone())
+            } else {
+                entity.members.iter().find_map(|m| {
+                    let src = &m.source;
+                    self.topology.nodes.contains_key(src).then(|| src.clone())
+                })
+            };
+            if let Some(node_id) = node_id {
+                for mac in &entity.macs {
+                    map.entry(crate::entity::normalize_mac(mac))
+                        .or_insert_with(|| node_id.clone());
                 }
             }
         }
