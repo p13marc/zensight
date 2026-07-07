@@ -460,6 +460,63 @@ pub fn merge_flow_stats(mut rate_edges: Vec<Edge>, flow_edges: Vec<Edge>) -> Vec
     rate_edges
 }
 
+/// Extract a host's default IPv4 gateway from its netlink telemetry (#391):
+/// the `routes/default_v4_gw` Text metric, honored only while
+/// `routes/default_v4_present` is true (the sensor keeps publishing the last
+/// gateway string across a flap). Pure.
+pub fn gateway_from_metrics(
+    metrics: &HashMap<String, zensight_common::TelemetryPoint>,
+) -> Option<String> {
+    use zensight_common::TelemetryValue;
+    let present = matches!(
+        metrics.get("routes/default_v4_present").map(|p| &p.value),
+        Some(TelemetryValue::Boolean(true))
+    );
+    if !present {
+        return None;
+    }
+    match metrics.get("routes/default_v4_gw").map(|p| &p.value) {
+        Some(TelemetryValue::Text(gw)) if !gw.is_empty() => Some(gw.clone()),
+        _ => None,
+    }
+}
+
+/// Derive host → default-gateway edges (#391). The gateway resolves through
+/// `ip_to_node` (an entity may own the address); unresolved gateway IPs are
+/// returned so the caller can create wire-only router nodes for them, and
+/// their edges target the bare IP as node id. Deterministic order. Pure.
+pub fn edges_from_gateways(
+    gateways: &HashMap<NodeId, String>,
+    ip_to_node: &HashMap<String, NodeId>,
+    now_ms: i64,
+) -> (Vec<Edge>, Vec<String>) {
+    use std::collections::BTreeSet;
+    let mut missing: BTreeSet<String> = BTreeSet::new();
+    let mut sorted: Vec<(&NodeId, &String)> = gateways.iter().collect();
+    sorted.sort();
+    let mut edges = Vec::new();
+    for (host, gw_ip) in sorted {
+        let target = match ip_to_node.get(gw_ip.as_str()) {
+            Some(t) => t.clone(),
+            None => {
+                missing.insert(gw_ip.clone());
+                gw_ip.clone()
+            }
+        };
+        if &target == host {
+            continue; // the host is its own gateway (or NATs for itself)
+        }
+        edges.push(Edge {
+            from: host.clone(),
+            to: target,
+            kind: EdgeKind::Gateway,
+            last_seen: now_ms,
+            ..Default::default()
+        });
+    }
+    (edges, missing.into_iter().collect())
+}
+
 /// Format a bytes/sec rate for display ("2.1 MB/s"). Pure.
 pub fn format_rate(bytes_per_sec: f64) -> String {
     if bytes_per_sec >= 1_000_000_000.0 {
@@ -826,6 +883,66 @@ mod tests {
         // Flow-only pair appended, unrated.
         assert_eq!(merged[1].bytes, 700);
         assert_eq!(merged[1].rate, 0.0);
+    }
+
+    #[test]
+    fn gateway_from_metrics_needs_present_flag() {
+        use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+        let mk = |metric: &str, v: TelemetryValue| TelemetryPoint {
+            timestamp: 0,
+            source: "h".to_string(),
+            protocol: Protocol::Netlink,
+            metric: metric.to_string(),
+            value: v,
+            labels: HashMap::new(),
+        };
+        let mut m = HashMap::new();
+        m.insert(
+            "routes/default_v4_gw".to_string(),
+            mk(
+                "routes/default_v4_gw",
+                TelemetryValue::Text("10.0.0.254".into()),
+            ),
+        );
+        // Gateway string alone is not enough — the present flag gates it.
+        assert_eq!(gateway_from_metrics(&m), None);
+        m.insert(
+            "routes/default_v4_present".to_string(),
+            mk("routes/default_v4_present", TelemetryValue::Boolean(true)),
+        );
+        assert_eq!(gateway_from_metrics(&m), Some("10.0.0.254".to_string()));
+        m.insert(
+            "routes/default_v4_present".to_string(),
+            mk("routes/default_v4_present", TelemetryValue::Boolean(false)),
+        );
+        assert_eq!(gateway_from_metrics(&m), None);
+    }
+
+    #[test]
+    fn edges_from_gateways_resolves_and_reports_missing() {
+        let mut gateways = HashMap::new();
+        gateways.insert("hostA".to_string(), "10.0.0.254".to_string());
+        gateways.insert("hostB".to_string(), "192.168.1.1".to_string());
+        gateways.insert("gw-self".to_string(), "10.0.0.254".to_string());
+        let mut map = HashMap::new();
+        map.insert("10.0.0.254".to_string(), "gw-self".to_string()); // entity-owned
+        let (edges, missing) = edges_from_gateways(&gateways, &map, 9);
+
+        // hostA → resolved node; hostB → the bare IP (reported missing);
+        // gw-self skipped (it is its own gateway).
+        assert_eq!(edges.len(), 2);
+        assert!(
+            edges
+                .iter()
+                .all(|e| e.kind == EdgeKind::Gateway && e.last_seen == 9)
+        );
+        assert!(edges.iter().any(|e| e.from == "hostA" && e.to == "gw-self"));
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.from == "hostB" && e.to == "192.168.1.1")
+        );
+        assert_eq!(missing, vec!["192.168.1.1".to_string()]);
     }
 
     #[test]

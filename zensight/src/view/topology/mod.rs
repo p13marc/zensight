@@ -23,7 +23,8 @@ pub use graph::TopologyGraph;
 pub use layout::{LayoutConfig, arrange_circle, center_layout, layout_step};
 pub use model::{
     Edge, EdgeKind, Node, NodeAlert, NodeHealth, NodeId, NodeRole, Provenance, edges_from_flows,
-    edges_from_matrix, edges_from_neighbors, endpoint_ip, format_rate, merge_flow_stats,
+    edges_from_gateways, edges_from_matrix, edges_from_neighbors, endpoint_ip, format_rate,
+    gateway_from_metrics, merge_flow_stats,
 };
 
 use model::{entity_node_label, is_node_protocol, ordered_pair, primary_protocol};
@@ -62,6 +63,12 @@ pub struct TopologyState {
     /// Last netring traffic matrix fetched (#391): the primary, rate-weighted
     /// edge source. Flows remain the fallback + cumulative-stat enrichment.
     last_matrix: Vec<zensight_common::MatrixRecord>,
+    /// Default gateway per node (#391), freshly collected from netlink
+    /// telemetry on every [`Self::update_from_devices`] pass.
+    pending_gateways: HashMap<NodeId, String>,
+    /// The gateway map the current edge set was built from (#391); compared
+    /// against `pending_gateways` so rebuilds only happen on change.
+    last_gateways: HashMap<NodeId, String>,
 }
 
 impl Default for TopologyState {
@@ -81,6 +88,8 @@ impl Default for TopologyState {
             last_flows: Vec::new(),
             last_neighbors: Vec::new(),
             last_matrix: Vec::new(),
+            pending_gateways: HashMap::new(),
+            last_gateways: HashMap::new(),
         }
     }
 }
@@ -100,6 +109,11 @@ impl TopologyState {
         for node in self.nodes.values_mut() {
             node.metric_count = 0;
         }
+
+        // Freshly collect each netlink host's default gateway (#391); applied
+        // as Gateway edges by `apply_gateway_edges` once the caller has an
+        // ip_to_node map in hand.
+        let mut gateways: HashMap<NodeId, String> = HashMap::new();
 
         // A node per physical host (#83/#306): keyed by the correlator entity id
         // when the device maps into one, else by `source`. Widened beyond
@@ -151,6 +165,12 @@ impl TopologyState {
                 );
             }
 
+            if device_id.protocol == zensight_common::Protocol::Netlink
+                && let Some(gw) = model::gateway_from_metrics(&device_state.metrics)
+            {
+                gateways.insert(node_id.clone(), gw);
+            }
+
             // Update node metrics from telemetry
             if let Some(node) = self.nodes.get_mut(&node_id) {
                 node.label = label;
@@ -167,6 +187,8 @@ impl TopologyState {
                 node.update_from_metrics(&device_state.metrics);
             }
         }
+
+        self.pending_gateways = gateways;
 
         // Entity-derived overlays: passive wire-only nodes + sensor-count badge.
         self.apply_entities(entities);
@@ -272,6 +294,18 @@ impl TopologyState {
         self.rebuild_edges(ip_to_node, now_ms);
     }
 
+    /// Apply the gateway map collected by the last [`Self::update_from_devices`]
+    /// pass (#391), rebuilding edges only when it actually changed — this runs
+    /// on the 1 Hz tick, and an unconditional rebuild would clear the canvas
+    /// cache and drop the edge selection every second.
+    pub fn apply_gateway_edges(&mut self, ip_to_node: &HashMap<String, NodeId>, now_ms: i64) {
+        if self.pending_gateways == self.last_gateways {
+            return;
+        }
+        self.last_gateways = self.pending_gateways.clone();
+        self.rebuild_edges(ip_to_node, now_ms);
+    }
+
     /// Merge the netlink neighbor (ARP/NDP) table into the topology (#49):
     /// remembers it and rebuilds the edge set so direct L2/L3 adjacencies appear
     /// as links even when netring sees no traffic, and `is_router` neighbors are
@@ -319,9 +353,37 @@ impl TopologyState {
             .filter(|(_, n)| n.protocols.contains(&Protocol::Netlink))
             .map(|(id, _)| id.clone())
             .collect();
-        let (neighbor_edges, routers) =
+        let (neighbor_edges, mut routers) =
             edges_from_neighbors(&host_nodes, &self.last_neighbors, ip_to_node, now_ms);
         for edge in neighbor_edges {
+            if pairs.insert(ordered_pair(&edge.from, &edge.to)) {
+                edges.push(edge);
+            }
+        }
+
+        // Gateway edges (#391): host → default gw for pairs nothing covered.
+        // Unresolved gateway addresses get a wire-only router node so the
+        // physical topology reads even on quiet networks. Being somebody's
+        // default gateway is router evidence, resolved or not.
+        let (gateway_edges, missing_gws) =
+            edges_from_gateways(&self.last_gateways, ip_to_node, now_ms);
+        for gw_ip in missing_gws {
+            if !self.nodes.contains_key(&gw_ip) {
+                self.nodes.insert(
+                    gw_ip.clone(),
+                    Node {
+                        id: gw_ip.clone(),
+                        label: gw_ip.clone(),
+                        role: NodeRole::Router,
+                        provenance: Provenance::Passive,
+                        ..Default::default()
+                    },
+                );
+                self.layout_stable = false;
+            }
+        }
+        for edge in gateway_edges {
+            routers.insert(edge.to.clone());
             if pairs.insert(ordered_pair(&edge.from, &edge.to)) {
                 edges.push(edge);
             }

@@ -1073,8 +1073,7 @@ impl ZenSight {
             Message::NetringAssetToTopology { ip, hostname } => {
                 // Asset → topology node (#252). Seed the graph the same way
                 // OpenTopology does so the lookup sees current nodes.
-                self.topology
-                    .update_from_devices(&self.dashboard.devices, &self.entities);
+                self.refresh_topology_nodes();
                 self.topology.apply_alerts(&self.alerts.external);
                 let node = hostname
                     .filter(|h| self.topology.nodes.contains_key(h))
@@ -2267,8 +2266,7 @@ impl ZenSight {
             // Topology messages
             Message::OpenTopology => {
                 // Update topology from current device data before showing
-                self.topology
-                    .update_from_devices(&self.dashboard.devices, &self.entities);
+                self.refresh_topology_nodes();
                 self.topology.apply_alerts(&self.alerts.external);
                 self.set_view(CurrentView::Topology);
                 self.save_current_view();
@@ -4017,8 +4015,17 @@ impl ZenSight {
     /// (#306). Currently refreshes the topology; the dashboard/host views read
     /// the store live at render time.
     fn rederive_entities(&mut self) {
+        self.refresh_topology_nodes();
+    }
+
+    /// Refresh topology nodes from device/entity state, then apply any changed
+    /// default-gateway edges (#391). Gateway application is change-gated inside
+    /// [`TopologyState::apply_gateway_edges`], so calling this at 1 Hz is cheap.
+    fn refresh_topology_nodes(&mut self) {
         self.topology
             .update_from_devices(&self.dashboard.devices, &self.entities);
+        let ip_to_node = self.topology_ip_to_node();
+        self.topology.apply_gateway_edges(&ip_to_node, now_ms());
     }
 
     /// Fetch the on-demand netring TLS asset inventory.
@@ -5022,8 +5029,7 @@ impl ZenSight {
 
         // Update topology if we're viewing it
         if self.current_view == CurrentView::Topology {
-            self.topology
-                .update_from_devices(&self.dashboard.devices, &self.entities);
+            self.refresh_topology_nodes();
         }
 
         // Recompute the bandwidth Services table now that the point has landed.
@@ -5358,8 +5364,7 @@ impl ZenSight {
 
         // Update topology when viewing it
         if self.current_view == CurrentView::Topology {
-            self.topology
-                .update_from_devices(&self.dashboard.devices, &self.entities);
+            self.refresh_topology_nodes();
             // Run layout algorithm if not stable
             if !self.topology.layout_stable {
                 self.topology.run_layout_step();
