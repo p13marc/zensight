@@ -1,0 +1,80 @@
+# All-in-one ZenSight sensors image (self-building variant).
+#
+# Bundles the 5 host sensors that `just run` spawns — sysinfo, netlink,
+# netring, logs, systemd — with the demo-max configs generated at container
+# start (scripts/gen-configs.sh, the same profile `just configure` uses).
+# The identity correlator is NOT included: it must run exactly once per
+# deployment, next to the GUI (`just correlator`).
+#
+# The only supported configuration is the Zenoh endpoint:
+#   -e ZENSIGHT_ZENOH_CONNECT=tcp/<gui-host>:7447
+#
+# Build:  podman build -t zensight-sensors -f docker/Dockerfile.sensors .
+# Run:    see docs/DEPLOYMENT.md for the full invocation (host namespaces,
+#         capabilities, and read-only mounts it needs to observe the host).
+#
+# CI builds the same image from prebuilt binaries via Dockerfile.sensors-runtime.
+
+# =============================================================================
+# Stage 1: Build the sensor binaries
+# =============================================================================
+FROM rust:1.95-bookworm AS builder
+
+# libsystemd-dev: logs (journald) + systemd (sd-bus) · libpcap-dev: netring
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libsystemd-dev \
+    libpcap-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy the whole workspace — cargo needs every member's manifest to resolve it.
+# `.dockerignore` keeps the context small (target/, .git/, …).
+COPY . .
+
+RUN cargo build --release \
+    -p zensight-sensor-sysinfo \
+    -p zensight-sensor-netlink \
+    -p zensight-sensor-netring \
+    -p zensight-sensor-logs \
+    -p zensight-sensor-systemd
+
+# =============================================================================
+# Stage 2: Minimal runtime image
+# =============================================================================
+FROM debian:bookworm-slim
+
+# libsystemd0: logs (journald) + systemd (sd-bus) · libpcap0.8: netring
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libsystemd0 \
+    libpcap0.8 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder \
+    /build/target/release/zensight-sensor-sysinfo \
+    /build/target/release/zensight-sensor-netlink \
+    /build/target/release/zensight-sensor-netring \
+    /build/target/release/zensight-sensor-logs \
+    /build/target/release/zensight-sensor-systemd \
+    /usr/local/bin/
+
+# The committed example configs — transformed into demo-max run configs at
+# container start (so netring's capture iface is detected in the HOST netns).
+COPY configs/*.json5 /usr/share/zensight/configs/
+COPY scripts/gen-configs.sh scripts/run-sensors.sh docker/entrypoint-sensors.sh /usr/local/bin/
+RUN chmod 755 /usr/local/bin/gen-configs.sh /usr/local/bin/run-sensors.sh /usr/local/bin/entrypoint-sensors.sh
+
+# Generated configs live in /run/zensight; /var/lib/zensight is the writable
+# CWD for on-demand report/pcap staging (continuous capture-to-disk is off in
+# the demo-max profile, so no volume is needed).
+RUN mkdir -p /run/zensight /var/lib/zensight
+
+# Deliberately root inside the container: these are host-observing agents
+# (AF_PACKET capture, journal files, system D-Bus) whose privileges come from
+# the `podman run` flags (--cap-add, host namespaces, ro mounts) — file caps +
+# a non-root user + ambient-cap juggling is strictly more fragile here.
+WORKDIR /var/lib/zensight
+
+ENTRYPOINT ["/usr/local/bin/entrypoint-sensors.sh"]
