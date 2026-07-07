@@ -336,6 +336,16 @@ pub enum Message {
     TopologyToggleHideExternal,
     /// Cap the number of topology flow edges shown (0 = unlimited, #392).
     TopologySetTopN(usize),
+    /// Listen sockets fetched for the selected topology node (#393). Carries
+    /// the node id so stale replies (selection moved on) are dropped.
+    TopologyListenSocketsReceived(String, Result<Vec<zensight_common::SocketRecord>, String>),
+    /// Recent flows fetched for the selected topology edge (#393). Carries
+    /// the edge index for the same staleness guard.
+    TopologyEdgeFlowsReceived(usize, Result<Vec<zensight_common::FlowRecord>, String>),
+    /// Copy a string (community_id etc.) to the clipboard (#393).
+    TopologyCopyText(String),
+    /// Pivot from the topology to the netring flow table (#393).
+    TopologyOpenFlows,
     /// Fetch the on-demand netring TLS asset inventory.
     FetchNetringTls,
     /// A netring TLS-inventory reply: the decoded records, or an error message.
@@ -1000,6 +1010,8 @@ pub struct SyslogFilterStatus {
 pub enum AttributionTarget {
     Device,
     Security,
+    /// The topology edge panel (#393).
+    Topology,
 }
 
 /// Unique identifier for a device (protocol + source name).
