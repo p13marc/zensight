@@ -210,8 +210,11 @@ impl<'a> TopologyGraphProgram<'a> {
                                 node_id,
                             )));
                         }
-                        Some(RenderSource::Group(_)) => {
-                            return None; // expand-on-click lands with grouping
+                        Some(RenderSource::Group(gid)) => {
+                            // Clicking a collapsed group expands it (#392).
+                            return Some(canvas::Action::publish(Message::TopologyExpandGroup(
+                                gid.clone(),
+                            )));
                         }
                         None => {}
                     }

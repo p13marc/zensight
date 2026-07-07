@@ -1215,6 +1215,66 @@ fn test_topology_lens_selector() {
     );
 }
 
+/// Filter checkboxes and the grouping picker render and emit toggles (#392).
+#[test]
+fn test_topology_filter_controls() {
+    let state = TopologyState::default();
+    let mut ui = simulator(topology_view(&state, AppTheme::Dark));
+    for label in ["Hide idle", "Hide passive", "Hide external", "Flows:"] {
+        assert!(ui.find(label).is_ok(), "missing control {label}");
+    }
+    let _ = ui.click("Hide idle");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::TopologyToggleHideIdle))
+    );
+}
+
+/// Focus mode: the node panel's Focus button enters, the breadcrumb exits
+/// (#392).
+#[test]
+fn test_topology_focus_flow() {
+    use zensight::view::topology::{FocusState, Node};
+
+    // A selected node shows the Focus button.
+    let mut state = TopologyState::default();
+    state.nodes.insert(
+        "web1".to_string(),
+        Node {
+            id: "web1".to_string(),
+            label: "web1".to_string(),
+            ..Default::default()
+        },
+    );
+    state.selected_node = Some("web1".to_string());
+    let mut ui = simulator(topology_view(&state, AppTheme::Dark));
+    let _ = ui.click("Focus");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::TopologyFocusNode(id) if id == "web1"))
+    );
+
+    // Active focus renders the breadcrumb with hop buttons + exit.
+    let mut state = TopologyState::default();
+    state.prefs.focus = Some(FocusState {
+        root: "web1".to_string(),
+        hops: 1,
+    });
+    let mut ui = simulator(topology_view(&state, AppTheme::Dark));
+    assert!(ui.find("Focus: web1").is_ok());
+    let _ = ui.click("Exit focus");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::TopologyExitFocus))
+    );
+}
+
 /// The active lens button is inert; the edge-label picker is present (#392).
 #[test]
 fn test_topology_lens_active_inert() {

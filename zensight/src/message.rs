@@ -316,6 +316,26 @@ pub enum Message {
     TopologySetLens(crate::view::topology::Lens),
     /// Switch what topology edge labels show (#392).
     TopologySetEdgeLabel(crate::view::topology::EdgeLabelMode),
+    /// Switch the topology grouping mode (#392).
+    TopologySetGrouping(crate::view::topology::GroupingMode),
+    /// Expand a collapsed topology group (clicking its meta-node, #392).
+    TopologyExpandGroup(String),
+    /// Re-collapse all expanded topology groups (#392).
+    TopologyRegroup,
+    /// Enter topology focus mode on a node (#392).
+    TopologyFocusNode(String),
+    /// Change the topology focus radius (#392).
+    TopologySetFocusHops(u8),
+    /// Leave topology focus mode (#392).
+    TopologyExitFocus,
+    /// Toggle the topology idle-edge filter (#392).
+    TopologyToggleHideIdle,
+    /// Toggle the topology passive-node filter (#392).
+    TopologyToggleHidePassive,
+    /// Toggle the topology external-aggregate filter (#392).
+    TopologyToggleHideExternal,
+    /// Cap the number of topology flow edges shown (0 = unlimited, #392).
+    TopologySetTopN(usize),
     /// Fetch the on-demand netring TLS asset inventory.
     FetchNetringTls,
     /// A netring TLS-inventory reply: the decoded records, or an error message.

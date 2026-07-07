@@ -78,6 +78,9 @@ pub struct TopologyState {
     /// Presentation preferences (#392): lens, edge labels, grouping, filters,
     /// focus. Mutate through the setters so the render graph stays fresh.
     pub prefs: TopoPrefs,
+    /// Device-group label per node (#392), resolved by the app from the
+    /// settings' group assignments; drives GroupingMode::DeviceGroup.
+    pub group_labels: HashMap<NodeId, String>,
     /// The resolved graph the canvas draws (#392): filters/search/focus (and
     /// later grouping/lens) applied. Rebuilt by [`Self::invalidate`] on
     /// structural or pref changes — never per frame.
@@ -105,6 +108,7 @@ impl Default for TopologyState {
             last_gateways: HashMap::new(),
             asset_roles: HashMap::new(),
             prefs: TopoPrefs::default(),
+            group_labels: HashMap::new(),
             render: RenderGraph::default(),
         }
     }
@@ -120,6 +124,7 @@ impl TopologyState {
             &self.nodes,
             &self.edges,
             &self.prefs,
+            &self.group_labels,
             &self.search_query,
             zensight_common::current_timestamp_millis(),
         );
@@ -671,6 +676,80 @@ impl TopologyState {
         }
     }
 
+    /// Switch the grouping mode (#392); switching resets expansions.
+    pub fn set_grouping(&mut self, mode: GroupingMode) {
+        if self.prefs.grouping != mode {
+            self.prefs.grouping = mode;
+            self.prefs.expanded_groups.clear();
+            self.invalidate();
+        }
+    }
+
+    /// Expand a collapsed group (#392) — clicking a meta-node.
+    pub fn expand_group(&mut self, group_id: String) {
+        if self.prefs.expanded_groups.insert(group_id) {
+            self.invalidate();
+        }
+    }
+
+    /// Re-collapse every expanded group (#392).
+    pub fn regroup(&mut self) {
+        if !self.prefs.expanded_groups.is_empty() {
+            self.prefs.expanded_groups.clear();
+            self.invalidate();
+        }
+    }
+
+    /// Enter focus mode on a node (#392), 1 hop by default.
+    pub fn focus_node(&mut self, root: NodeId) {
+        self.prefs.focus = Some(FocusState { root, hops: 1 });
+        self.invalidate();
+    }
+
+    /// Change the focus radius (#392); clamped to 1..=3.
+    pub fn set_focus_hops(&mut self, hops: u8) {
+        if let Some(ref mut focus) = self.prefs.focus {
+            let hops = hops.clamp(1, 3);
+            if focus.hops != hops {
+                focus.hops = hops;
+                self.invalidate();
+            }
+        }
+    }
+
+    /// Leave focus mode (#392).
+    pub fn exit_focus(&mut self) {
+        if self.prefs.focus.take().is_some() {
+            self.invalidate();
+        }
+    }
+
+    /// Toggle the idle-edge filter (#392).
+    pub fn toggle_hide_idle(&mut self) {
+        self.prefs.filters.hide_idle = !self.prefs.filters.hide_idle;
+        self.invalidate();
+    }
+
+    /// Toggle the passive-node filter (#392).
+    pub fn toggle_hide_passive(&mut self) {
+        self.prefs.filters.hide_passive = !self.prefs.filters.hide_passive;
+        self.invalidate();
+    }
+
+    /// Toggle the external-aggregate filter (#392).
+    pub fn toggle_hide_external(&mut self) {
+        self.prefs.filters.hide_external = !self.prefs.filters.hide_external;
+        self.invalidate();
+    }
+
+    /// Cap the number of flow edges shown (`0` = unlimited, #392).
+    pub fn set_top_n(&mut self, top_n: usize) {
+        if self.prefs.filters.top_n != top_n {
+            self.prefs.filters.top_n = top_n;
+            self.invalidate();
+        }
+    }
+
     /// Toggle auto-layout.
     pub fn toggle_auto_layout(&mut self) {
         self.auto_layout = !self.auto_layout;
@@ -937,6 +1016,13 @@ fn render_node_info_panel(node: &Node) -> Element<'_, Message> {
     .width(Length::Fill);
     info_items = info_items.push(view_btn);
 
+    // Focus mode (#392): isolate this node's neighborhood.
+    let focus_btn = button(text("Focus").size(11))
+        .on_press(Message::TopologyFocusNode(node.id.clone()))
+        .style(iced::widget::button::secondary)
+        .width(Length::Fill);
+    info_items = info_items.push(focus_btn);
+
     let clear_btn = button(text("Clear Selection").size(11))
         .on_press(Message::TopologyClearSelection)
         .style(iced::widget::button::secondary)
@@ -1118,7 +1204,154 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
         .push(text("Edge labels:").size(12))
         .push(label_picker);
 
+    // Grouping + filters (#392).
+    let grouping_picker = iced::widget::pick_list(
+        GroupingMode::ALL,
+        Some(state.prefs.grouping),
+        Message::TopologySetGrouping,
+    )
+    .text_size(12)
+    .padding(4);
+    lens_row = lens_row.push(grouping_picker);
+    if !state.prefs.expanded_groups.is_empty() {
+        lens_row = lens_row.push(
+            button(text("Regroup").size(12))
+                .on_press(Message::TopologyRegroup)
+                .style(iced::widget::button::secondary),
+        );
+    }
+
+    lens_row = lens_row
+        .push(
+            iced::widget::checkbox(state.prefs.filters.hide_idle)
+                .label("Hide idle")
+                .on_toggle(|_| Message::TopologyToggleHideIdle)
+                .size(14)
+                .text_size(12),
+        )
+        .push(
+            iced::widget::checkbox(state.prefs.filters.hide_passive)
+                .label("Hide passive")
+                .on_toggle(|_| Message::TopologyToggleHidePassive)
+                .size(14)
+                .text_size(12),
+        )
+        .push(
+            iced::widget::checkbox(state.prefs.filters.hide_external)
+                .label("Hide external")
+                .on_toggle(|_| Message::TopologyToggleHideExternal)
+                .size(14)
+                .text_size(12),
+        );
+
+    // Flow-edge cap with an honest truncation label (#392): never silently
+    // pretend the capped view is the whole picture.
+    let top_n_picker = iced::widget::pick_list(
+        TopNChoice::ALL,
+        Some(TopNChoice::from_value(state.prefs.filters.top_n)),
+        |choice: TopNChoice| Message::TopologySetTopN(choice.value()),
+    )
+    .text_size(12)
+    .padding(4);
+    lens_row = lens_row.push(text("Flows:").size(12)).push(top_n_picker);
+    let flows_shown = state
+        .render
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Flow)
+        .count();
+    if flows_shown < state.render.total_flow_edges {
+        lens_row = lens_row.push(
+            text(format!(
+                "showing top {flows_shown} of {} flows",
+                state.render.total_flow_edges
+            ))
+            .size(10),
+        );
+    }
+
+    // Focus breadcrumb (#392).
+    if let Some(ref focus) = state.prefs.focus {
+        let root_label = state
+            .nodes
+            .get(&focus.root)
+            .map(|n| n.label.clone())
+            .unwrap_or_else(|| focus.root.clone());
+        let mut focus_row = row![
+            text(format!("Focus: {root_label}")).size(12),
+            text("hops:").size(11),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        for hops in 1..=3u8 {
+            let btn = button(text(format!("{hops}")).size(11)).style(if focus.hops == hops {
+                iced::widget::button::primary
+            } else {
+                iced::widget::button::secondary
+            });
+            let btn = if focus.hops == hops {
+                btn
+            } else {
+                btn.on_press(Message::TopologySetFocusHops(hops))
+            };
+            focus_row = focus_row.push(btn);
+        }
+        focus_row = focus_row.push(
+            button(text("Exit focus").size(11))
+                .on_press(Message::TopologyExitFocus)
+                .style(iced::widget::button::secondary),
+        );
+        return column![header, lens_row, focus_row].spacing(8).into();
+    }
+
     column![header, lens_row].spacing(8).into()
+}
+
+/// Flow-cap choices for the pick list (#392).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TopNChoice {
+    N25,
+    N50,
+    N100,
+    All,
+}
+
+impl TopNChoice {
+    const ALL: [TopNChoice; 4] = [
+        TopNChoice::N25,
+        TopNChoice::N50,
+        TopNChoice::N100,
+        TopNChoice::All,
+    ];
+
+    fn value(self) -> usize {
+        match self {
+            TopNChoice::N25 => 25,
+            TopNChoice::N50 => 50,
+            TopNChoice::N100 => 100,
+            TopNChoice::All => 0,
+        }
+    }
+
+    fn from_value(v: usize) -> Self {
+        match v {
+            25 => TopNChoice::N25,
+            100 => TopNChoice::N100,
+            0 => TopNChoice::All,
+            _ => TopNChoice::N50,
+        }
+    }
+}
+
+impl std::fmt::Display for TopNChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            TopNChoice::N25 => "top 25",
+            TopNChoice::N50 => "top 50",
+            TopNChoice::N100 => "top 100",
+            TopNChoice::All => "all",
+        })
+    }
 }
 
 #[cfg(test)]

@@ -782,6 +782,46 @@ impl ZenSight {
             Message::TopologySetEdgeLabel(mode) => {
                 self.topology.set_edge_label(mode);
             }
+
+            Message::TopologySetGrouping(mode) => {
+                self.topology.set_grouping(mode);
+            }
+
+            Message::TopologyExpandGroup(group_id) => {
+                self.topology.expand_group(group_id);
+            }
+
+            Message::TopologyRegroup => {
+                self.topology.regroup();
+            }
+
+            Message::TopologyFocusNode(node_id) => {
+                self.topology.focus_node(node_id);
+            }
+
+            Message::TopologySetFocusHops(hops) => {
+                self.topology.set_focus_hops(hops);
+            }
+
+            Message::TopologyExitFocus => {
+                self.topology.exit_focus();
+            }
+
+            Message::TopologyToggleHideIdle => {
+                self.topology.toggle_hide_idle();
+            }
+
+            Message::TopologyToggleHidePassive => {
+                self.topology.toggle_hide_passive();
+            }
+
+            Message::TopologyToggleHideExternal => {
+                self.topology.toggle_hide_external();
+            }
+
+            Message::TopologySetTopN(n) => {
+                self.topology.set_top_n(n);
+            }
             other => return ControlFlow::Continue(other),
         }
         ControlFlow::Break(Task::none())
@@ -4095,6 +4135,26 @@ impl ZenSight {
     /// default-gateway edges (#391). Gateway application is change-gated inside
     /// [`TopologyState::apply_gateway_edges`], so calling this at 1 Hz is cheap.
     fn refresh_topology_nodes(&mut self) {
+        // Device-group labels per node (#392): first assigned group wins,
+        // resolved through the same device→entity mapping as node keying.
+        let mut group_labels = std::collections::HashMap::new();
+        for device_id in self.dashboard.devices.keys() {
+            let groups = self.groups.device_groups(device_id);
+            let Some(group) = groups.first() else {
+                continue;
+            };
+            let node_id = match self.entities.by_device.get(device_id) {
+                Some(eid) => self.entities.resolve_alias(eid).to_string(),
+                None => device_id.source.clone(),
+            };
+            group_labels
+                .entry(node_id)
+                .or_insert_with(|| group.name.clone());
+        }
+        if self.topology.group_labels != group_labels {
+            self.topology.group_labels = group_labels;
+            self.topology.invalidate();
+        }
         self.topology.update_from_devices(
             &self.dashboard.devices,
             &self.entities,
