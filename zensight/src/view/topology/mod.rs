@@ -22,9 +22,12 @@ use crate::view::icons::{self, IconSize};
 pub use graph::TopologyGraph;
 pub use layout::{LayoutConfig, arrange_circle, center_layout, layout_step};
 pub use model::{
-    Edge, EdgeKind, Node, NodeAlert, NodeHealth, NodeId, NodeRole, Provenance, counter_rate,
-    edges_from_flows, edges_from_gateways, edges_from_matrix, edges_from_neighbors, endpoint_ip,
-    format_rate, gateway_from_metrics, merge_flow_stats, node_health, roles_from_assets,
+    Edge, EdgeKind, EdgeLabelMode, FocusState, GroupingMode, INTERNET_NODE_ID, Lens, Node,
+    NodeAlert, NodeHealth, NodeId, NodeRole, Provenance, RenderEdge, RenderGraph, RenderNode,
+    RenderSource, TintSource, TopoFilters, TopoPrefs, counter_rate, edges_from_flows,
+    edges_from_gateways, edges_from_matrix, edges_from_neighbors, endpoint_ip,
+    external_edges_from_matrix, format_rate, gateway_from_metrics, is_public_ip, merge_flow_stats,
+    node_health, render_node_position, roles_from_assets,
 };
 
 use model::{entity_node_label, is_node_protocol, ordered_pair, primary_protocol};
@@ -72,6 +75,16 @@ pub struct TopologyState {
     /// Asset-derived role + vendor per node (#391), from the netring passive
     /// inventory; reapplied on every edge rebuild (strongest role evidence).
     asset_roles: HashMap<NodeId, (NodeRole, Option<String>)>,
+    /// Presentation preferences (#392): lens, edge labels, grouping, filters,
+    /// focus. Mutate through the setters so the render graph stays fresh.
+    pub prefs: TopoPrefs,
+    /// Device-group label per node (#392), resolved by the app from the
+    /// settings' group assignments; drives GroupingMode::DeviceGroup.
+    pub group_labels: HashMap<NodeId, String>,
+    /// The resolved graph the canvas draws (#392): filters/search/focus (and
+    /// later grouping/lens) applied. Rebuilt by [`Self::invalidate`] on
+    /// structural or pref changes — never per frame.
+    pub render: RenderGraph,
 }
 
 impl Default for TopologyState {
@@ -94,11 +107,30 @@ impl Default for TopologyState {
             pending_gateways: HashMap::new(),
             last_gateways: HashMap::new(),
             asset_roles: HashMap::new(),
+            prefs: TopoPrefs::default(),
+            group_labels: HashMap::new(),
+            render: RenderGraph::default(),
         }
     }
 }
 
 impl TopologyState {
+    /// Recompute the render graph and clear the canvas cache (#392). Call
+    /// after any change that affects what is drawn: node/edge structure,
+    /// alerts, rates, search, prefs. Selection/zoom/pan/drag only need
+    /// `cache.clear()` — they resolve at draw time.
+    pub(crate) fn invalidate(&mut self) {
+        self.render = model::build_render_graph(
+            &self.nodes,
+            &self.edges,
+            &self.prefs,
+            &self.group_labels,
+            &self.search_query,
+            zensight_common::current_timestamp_millis(),
+        );
+        self.cache.clear();
+    }
+
     /// Update topology from dashboard device states. `sensor_health` is the
     /// per-sensor `@/health` snapshot map (host-scoped via `host_id`, #391);
     /// `now_ms` drives entity staleness.
@@ -193,6 +225,16 @@ impl TopologyState {
             if let Some(node) = self.nodes.get_mut(&node_id) {
                 node.label = label;
                 node.provenance = Provenance::Monitored;
+                match entities.hosts.get(&node_id) {
+                    Some(e) => {
+                        node.ips = e.ips.clone();
+                        node.macs = e.macs.clone();
+                    }
+                    None if node_id.parse::<std::net::IpAddr>().is_ok() => {
+                        node.ips = vec![node_id.clone()];
+                    }
+                    None => node.ips = Vec::new(),
+                }
                 node.protocols.insert(device_id.protocol);
                 node.metric_count += device_state.metric_count;
                 node.update_from_metrics(&device_state.metrics);
@@ -230,8 +272,8 @@ impl TopologyState {
         if self.nodes.len() > initial_count {
             self.arrange_in_circle(400.0);
             self.layout_stable = false;
-            self.cache.clear();
         }
+        self.invalidate();
 
         // NB: edges are derived from *observed* flow/neighbor data via
         // `apply_flow_edges` (#25), not fabricated here. We no longer synthesize a
@@ -249,6 +291,8 @@ impl TopologyState {
             if let Some(node) = self.nodes.get_mut(id) {
                 // Live entity node: badge it with the merged member count.
                 node.sensor_count = Some(entity.members.len());
+                node.ips = entity.ips.clone();
+                node.macs = entity.macs.clone();
             } else if !entity.members.is_empty() {
                 // Wire-only: no live device-backed node for this entity.
                 self.nodes.insert(
@@ -259,6 +303,8 @@ impl TopologyState {
                         provenance: Provenance::Passive,
                         role: NodeRole::Unknown,
                         sensor_count: Some(entity.members.len()),
+                        ips: entity.ips.clone(),
+                        macs: entity.macs.clone(),
                         ..Default::default()
                     },
                 );
@@ -294,7 +340,7 @@ impl TopologyState {
         }
         // Per-link health (#49): tint each edge by the worst of its endpoints.
         self.recompute_edge_health();
-        self.cache.clear();
+        self.invalidate();
     }
 
     /// Replace the edge set with edges derived from *observed* netring flow
@@ -343,7 +389,7 @@ impl TopologyState {
             }
         }
         if changed {
-            self.cache.clear();
+            self.invalidate();
         }
     }
 
@@ -457,6 +503,37 @@ impl TopologyState {
             }
         }
 
+        // North–south rollup (#392): matrix rows to unmapped public addresses
+        // aggregate into one Internet pseudo-node instead of vanishing. The
+        // node exists only while external traffic does.
+        let external_edges = external_edges_from_matrix(&self.last_matrix, ip_to_node, now_ms);
+        if external_edges.is_empty() {
+            if self.nodes.remove(INTERNET_NODE_ID).is_some()
+                && self.selected_node.as_deref() == Some(INTERNET_NODE_ID)
+            {
+                self.selected_node = None;
+            }
+        } else {
+            if !self.nodes.contains_key(INTERNET_NODE_ID) {
+                self.nodes.insert(
+                    INTERNET_NODE_ID.to_string(),
+                    Node {
+                        id: INTERNET_NODE_ID.to_string(),
+                        label: "Internet".to_string(),
+                        role: NodeRole::Internet,
+                        provenance: Provenance::External,
+                        ..Default::default()
+                    },
+                );
+                self.layout_stable = false;
+            }
+            for edge in external_edges {
+                if pairs.insert(ordered_pair(&edge.from, &edge.to)) {
+                    edges.push(edge);
+                }
+            }
+        }
+
         // Reset then reapply role classification so it follows the live
         // table. Monitored hosts default to Host, wire-only nodes to Unknown;
         // `is_router` neighbors become routers regardless of provenance (a
@@ -464,7 +541,9 @@ impl TopologyState {
         for node in self.nodes.values_mut() {
             node.role = match node.provenance {
                 Provenance::Monitored => NodeRole::Host,
-                Provenance::Passive | Provenance::External => NodeRole::Unknown,
+                Provenance::Passive => NodeRole::Unknown,
+                // The Internet aggregate's role is intrinsic (#392).
+                Provenance::External => NodeRole::Internet,
             };
         }
         for id in &routers {
@@ -489,7 +568,7 @@ impl TopologyState {
         self.edges = edges;
         self.selected_edge = None;
         self.recompute_edge_health();
-        self.cache.clear();
+        self.invalidate();
     }
 
     /// Tint each edge by the worst alert severity of its two endpoint nodes
@@ -574,10 +653,101 @@ impl TopologyState {
         self.cache.clear();
     }
 
-    /// Set search query.
+    /// Set search query (#392): plain text / `find:` highlights, `hide:`
+    /// removes — so the render graph must rebuild.
     pub fn set_search(&mut self, query: String) {
         self.search_query = query;
-        self.cache.clear();
+        self.invalidate();
+    }
+
+    /// Switch the presentation lens (#392).
+    pub fn set_lens(&mut self, lens: Lens) {
+        if self.prefs.lens != lens {
+            self.prefs.lens = lens;
+            self.invalidate();
+        }
+    }
+
+    /// Switch what edge labels show (#392).
+    pub fn set_edge_label(&mut self, mode: EdgeLabelMode) {
+        if self.prefs.edge_label != mode {
+            self.prefs.edge_label = mode;
+            self.invalidate();
+        }
+    }
+
+    /// Switch the grouping mode (#392); switching resets expansions.
+    pub fn set_grouping(&mut self, mode: GroupingMode) {
+        if self.prefs.grouping != mode {
+            self.prefs.grouping = mode;
+            self.prefs.expanded_groups.clear();
+            self.invalidate();
+        }
+    }
+
+    /// Expand a collapsed group (#392) — clicking a meta-node.
+    pub fn expand_group(&mut self, group_id: String) {
+        if self.prefs.expanded_groups.insert(group_id) {
+            self.invalidate();
+        }
+    }
+
+    /// Re-collapse every expanded group (#392).
+    pub fn regroup(&mut self) {
+        if !self.prefs.expanded_groups.is_empty() {
+            self.prefs.expanded_groups.clear();
+            self.invalidate();
+        }
+    }
+
+    /// Enter focus mode on a node (#392), 1 hop by default.
+    pub fn focus_node(&mut self, root: NodeId) {
+        self.prefs.focus = Some(FocusState { root, hops: 1 });
+        self.invalidate();
+    }
+
+    /// Change the focus radius (#392); clamped to 1..=3.
+    pub fn set_focus_hops(&mut self, hops: u8) {
+        if let Some(ref mut focus) = self.prefs.focus {
+            let hops = hops.clamp(1, 3);
+            if focus.hops != hops {
+                focus.hops = hops;
+                self.invalidate();
+            }
+        }
+    }
+
+    /// Leave focus mode (#392).
+    pub fn exit_focus(&mut self) {
+        if self.prefs.focus.take().is_some() {
+            self.invalidate();
+        }
+    }
+
+    /// Toggle the idle-edge filter (#392).
+    pub fn toggle_hide_idle(&mut self) {
+        self.prefs.filters.hide_idle = !self.prefs.filters.hide_idle;
+        self.invalidate();
+    }
+
+    /// Toggle the passive-node filter (#392).
+    pub fn toggle_hide_passive(&mut self) {
+        self.prefs.filters.hide_passive = !self.prefs.filters.hide_passive;
+        self.invalidate();
+    }
+
+    /// Toggle the external-aggregate filter (#392).
+    pub fn toggle_hide_external(&mut self) {
+        self.prefs.filters.hide_external = !self.prefs.filters.hide_external;
+        self.invalidate();
+    }
+
+    /// Cap the number of flow edges shown (`0` = unlimited, #392).
+    pub fn set_top_n(&mut self, top_n: usize) {
+        if self.prefs.filters.top_n != top_n {
+            self.prefs.filters.top_n = top_n;
+            self.invalidate();
+        }
     }
 
     /// Toggle auto-layout.
@@ -846,6 +1016,13 @@ fn render_node_info_panel(node: &Node) -> Element<'_, Message> {
     .width(Length::Fill);
     info_items = info_items.push(view_btn);
 
+    // Focus mode (#392): isolate this node's neighborhood.
+    let focus_btn = button(text("Focus").size(11))
+        .on_press(Message::TopologyFocusNode(node.id.clone()))
+        .style(iced::widget::button::secondary)
+        .width(Length::Fill);
+    info_items = info_items.push(focus_btn);
+
     let clear_btn = button(text("Clear Selection").size(11))
         .on_press(Message::TopologyClearSelection)
         .style(iced::widget::button::secondary)
@@ -924,18 +1101,15 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
         text("Layout: Adjusting...").size(10)
     };
 
-    // Show search match count if searching
+    // Show search match count if searching (#392): highlight mode counts
+    // matches in the rendered graph; hide mode reports what's shown.
     let search_matches = if !state.search_query.is_empty() {
-        let matches = state
-            .nodes
-            .values()
-            .filter(|n| {
-                n.label
-                    .to_lowercase()
-                    .contains(&state.search_query.to_lowercase())
-            })
-            .count();
-        Some(text(format!("{} matches", matches)).size(10))
+        let highlighted = state.render.nodes.iter().filter(|n| n.highlighted).count();
+        let label = match model::parse_search(&state.search_query) {
+            model::SearchAction::Hide(_) => format!("{} shown", state.render.nodes.len()),
+            _ => format!("{} matches", highlighted),
+        };
+        Some(text(label).size(10))
     } else {
         None
     };
@@ -1001,7 +1175,183 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
         .push(reset_btn)
         .push(auto_layout_btn);
 
-    header.into()
+    // Second control row (#392): lens selector + edge-label mode.
+    let mut lens_row = row![text("Lens:").size(12)]
+        .spacing(8)
+        .align_y(Alignment::Center);
+    for lens in Lens::ALL {
+        let btn = button(text(lens.label()).size(12)).style(if state.prefs.lens == lens {
+            iced::widget::button::primary
+        } else {
+            iced::widget::button::secondary
+        });
+        let btn = if state.prefs.lens == lens {
+            btn
+        } else {
+            btn.on_press(Message::TopologySetLens(lens))
+        };
+        lens_row = lens_row.push(btn);
+    }
+
+    let label_picker = iced::widget::pick_list(
+        EdgeLabelMode::ALL,
+        Some(state.prefs.edge_label),
+        Message::TopologySetEdgeLabel,
+    )
+    .text_size(12)
+    .padding(4);
+    lens_row = lens_row
+        .push(text("Edge labels:").size(12))
+        .push(label_picker);
+
+    // Grouping + filters (#392).
+    let grouping_picker = iced::widget::pick_list(
+        GroupingMode::ALL,
+        Some(state.prefs.grouping),
+        Message::TopologySetGrouping,
+    )
+    .text_size(12)
+    .padding(4);
+    lens_row = lens_row.push(grouping_picker);
+    if !state.prefs.expanded_groups.is_empty() {
+        lens_row = lens_row.push(
+            button(text("Regroup").size(12))
+                .on_press(Message::TopologyRegroup)
+                .style(iced::widget::button::secondary),
+        );
+    }
+
+    lens_row = lens_row
+        .push(
+            iced::widget::checkbox(state.prefs.filters.hide_idle)
+                .label("Hide idle")
+                .on_toggle(|_| Message::TopologyToggleHideIdle)
+                .size(14)
+                .text_size(12),
+        )
+        .push(
+            iced::widget::checkbox(state.prefs.filters.hide_passive)
+                .label("Hide passive")
+                .on_toggle(|_| Message::TopologyToggleHidePassive)
+                .size(14)
+                .text_size(12),
+        )
+        .push(
+            iced::widget::checkbox(state.prefs.filters.hide_external)
+                .label("Hide external")
+                .on_toggle(|_| Message::TopologyToggleHideExternal)
+                .size(14)
+                .text_size(12),
+        );
+
+    // Flow-edge cap with an honest truncation label (#392): never silently
+    // pretend the capped view is the whole picture.
+    let top_n_picker = iced::widget::pick_list(
+        TopNChoice::ALL,
+        Some(TopNChoice::from_value(state.prefs.filters.top_n)),
+        |choice: TopNChoice| Message::TopologySetTopN(choice.value()),
+    )
+    .text_size(12)
+    .padding(4);
+    lens_row = lens_row.push(text("Flows:").size(12)).push(top_n_picker);
+    let flows_shown = state
+        .render
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Flow)
+        .count();
+    if flows_shown < state.render.total_flow_edges {
+        lens_row = lens_row.push(
+            text(format!(
+                "showing top {flows_shown} of {} flows",
+                state.render.total_flow_edges
+            ))
+            .size(10),
+        );
+    }
+
+    // Focus breadcrumb (#392).
+    if let Some(ref focus) = state.prefs.focus {
+        let root_label = state
+            .nodes
+            .get(&focus.root)
+            .map(|n| n.label.clone())
+            .unwrap_or_else(|| focus.root.clone());
+        let mut focus_row = row![
+            text(format!("Focus: {root_label}")).size(12),
+            text("hops:").size(11),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        for hops in 1..=3u8 {
+            let btn = button(text(format!("{hops}")).size(11)).style(if focus.hops == hops {
+                iced::widget::button::primary
+            } else {
+                iced::widget::button::secondary
+            });
+            let btn = if focus.hops == hops {
+                btn
+            } else {
+                btn.on_press(Message::TopologySetFocusHops(hops))
+            };
+            focus_row = focus_row.push(btn);
+        }
+        focus_row = focus_row.push(
+            button(text("Exit focus").size(11))
+                .on_press(Message::TopologyExitFocus)
+                .style(iced::widget::button::secondary),
+        );
+        return column![header, lens_row, focus_row].spacing(8).into();
+    }
+
+    column![header, lens_row].spacing(8).into()
+}
+
+/// Flow-cap choices for the pick list (#392).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TopNChoice {
+    N25,
+    N50,
+    N100,
+    All,
+}
+
+impl TopNChoice {
+    const ALL: [TopNChoice; 4] = [
+        TopNChoice::N25,
+        TopNChoice::N50,
+        TopNChoice::N100,
+        TopNChoice::All,
+    ];
+
+    fn value(self) -> usize {
+        match self {
+            TopNChoice::N25 => 25,
+            TopNChoice::N50 => 50,
+            TopNChoice::N100 => 100,
+            TopNChoice::All => 0,
+        }
+    }
+
+    fn from_value(v: usize) -> Self {
+        match v {
+            25 => TopNChoice::N25,
+            100 => TopNChoice::N100,
+            0 => TopNChoice::All,
+            _ => TopNChoice::N50,
+        }
+    }
+}
+
+impl std::fmt::Display for TopNChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            TopNChoice::N25 => "top 25",
+            TopNChoice::N50 => "top 50",
+            TopNChoice::N100 => "top 100",
+            TopNChoice::All => "all",
+        })
+    }
 }
 
 #[cfg(test)]

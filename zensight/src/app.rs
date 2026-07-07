@@ -320,8 +320,15 @@ impl ZenSight {
             expanded: persistent.overview_expanded,
         };
 
-        // Initialize topology state
-        let topology = TopologyState::default();
+        // Initialize topology state with persisted presentation prefs (#392).
+        let topology = {
+            let mut t = TopologyState::default();
+            t.prefs.lens = persistent.topology_lens;
+            t.prefs.grouping = persistent.topology_grouping;
+            t.prefs.edge_label = persistent.topology_edge_label;
+            t.prefs.filters = persistent.topology_filters;
+            t
+        };
 
         // Initialize syslog filter state
         let syslog_filter = SyslogFilterState::default();
@@ -773,6 +780,61 @@ impl ZenSight {
 
             Message::TopologySetSearch(query) => {
                 self.topology.set_search(query);
+            }
+
+            Message::TopologySetLens(lens) => {
+                self.topology.set_lens(lens);
+                self.save_topology_prefs();
+            }
+
+            Message::TopologySetEdgeLabel(mode) => {
+                self.topology.set_edge_label(mode);
+                self.save_topology_prefs();
+            }
+
+            Message::TopologySetGrouping(mode) => {
+                self.topology.set_grouping(mode);
+                self.save_topology_prefs();
+            }
+
+            Message::TopologyExpandGroup(group_id) => {
+                self.topology.expand_group(group_id);
+            }
+
+            Message::TopologyRegroup => {
+                self.topology.regroup();
+            }
+
+            Message::TopologyFocusNode(node_id) => {
+                self.topology.focus_node(node_id);
+            }
+
+            Message::TopologySetFocusHops(hops) => {
+                self.topology.set_focus_hops(hops);
+            }
+
+            Message::TopologyExitFocus => {
+                self.topology.exit_focus();
+            }
+
+            Message::TopologyToggleHideIdle => {
+                self.topology.toggle_hide_idle();
+                self.save_topology_prefs();
+            }
+
+            Message::TopologyToggleHidePassive => {
+                self.topology.toggle_hide_passive();
+                self.save_topology_prefs();
+            }
+
+            Message::TopologyToggleHideExternal => {
+                self.topology.toggle_hide_external();
+                self.save_topology_prefs();
+            }
+
+            Message::TopologySetTopN(n) => {
+                self.topology.set_top_n(n);
+                self.save_topology_prefs();
             }
             other => return ControlFlow::Continue(other),
         }
@@ -2895,6 +2957,21 @@ impl ZenSight {
     }
 
     /// Save current view to persistent settings.
+    /// Persist the topology presentation prefs (#392): lens, grouping, edge
+    /// labels, filters. Load-modify-save so unrelated settings are untouched
+    /// (same pattern as [`Self::save_current_view`]). Focus and group
+    /// expansions are session-transient by design.
+    fn save_topology_prefs(&self) {
+        let mut persistent = PersistentSettings::load();
+        persistent.topology_lens = self.topology.prefs.lens;
+        persistent.topology_grouping = self.topology.prefs.grouping;
+        persistent.topology_edge_label = self.topology.prefs.edge_label;
+        persistent.topology_filters = self.topology.prefs.filters;
+        if let Err(e) = persistent.save() {
+            tracing::error!("Failed to save topology prefs: {}", e);
+        }
+    }
+
     fn save_current_view(&self) {
         let mut persistent = PersistentSettings::load();
         persistent.current_view = self.current_view;
@@ -4087,6 +4164,26 @@ impl ZenSight {
     /// default-gateway edges (#391). Gateway application is change-gated inside
     /// [`TopologyState::apply_gateway_edges`], so calling this at 1 Hz is cheap.
     fn refresh_topology_nodes(&mut self) {
+        // Device-group labels per node (#392): first assigned group wins,
+        // resolved through the same device→entity mapping as node keying.
+        let mut group_labels = std::collections::HashMap::new();
+        for device_id in self.dashboard.devices.keys() {
+            let groups = self.groups.device_groups(device_id);
+            let Some(group) = groups.first() else {
+                continue;
+            };
+            let node_id = match self.entities.by_device.get(device_id) {
+                Some(eid) => self.entities.resolve_alias(eid).to_string(),
+                None => device_id.source.clone(),
+            };
+            group_labels
+                .entry(node_id)
+                .or_insert_with(|| group.name.clone());
+        }
+        if self.topology.group_labels != group_labels {
+            self.topology.group_labels = group_labels;
+            self.topology.invalidate();
+        }
         self.topology.update_from_devices(
             &self.dashboard.devices,
             &self.entities,
@@ -5366,6 +5463,10 @@ impl ZenSight {
         persistent.favorite_metrics = self.favorites.iter().cloned().collect();
         persistent.overview_selected_protocol = self.overview.selected_protocol;
         persistent.overview_expanded = self.overview.expanded;
+        persistent.topology_lens = self.topology.prefs.lens;
+        persistent.topology_grouping = self.topology.prefs.grouping;
+        persistent.topology_edge_label = self.topology.prefs.edge_label;
+        persistent.topology_filters = self.topology.prefs.filters;
         if let Err(error) = persistent.save() {
             self.settings.set_error(error);
             return;
