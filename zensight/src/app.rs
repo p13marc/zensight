@@ -909,6 +909,18 @@ impl ZenSight {
                 self.topology.apply_fit(zoom, pan);
             }
 
+            Message::TopologyHover(node_id) => {
+                self.topology.set_hover(node_id);
+            }
+
+            Message::TopologyAnimTick => {
+                self.topology.advance_animation();
+            }
+
+            Message::TopologyToggleLegend => {
+                self.topology.toggle_legend();
+            }
+
             Message::TopologyOpenFlows => {
                 // Pivot to the netring flow table (#393): the first netring
                 // device's detail view, Flows tab.
@@ -4892,20 +4904,30 @@ impl ZenSight {
 
     /// Create subscriptions for Zenoh telemetry and periodic updates.
     pub fn subscription(&self) -> Subscription<Message> {
-        if self.demo_mode {
+        let mut subs = if self.demo_mode {
             // In demo mode, use mock data generator instead of Zenoh
-            Subscription::batch([
+            vec![
                 demo_subscription(),
                 tick_subscription(),
                 keyboard_subscription(),
-            ])
+            ]
         } else {
-            Subscription::batch([
+            vec![
                 zenoh_subscription(self.link.clone()),
                 tick_subscription(),
                 keyboard_subscription(),
-            ])
+            ]
+        };
+        // Flow-dash animation (#394): only while the map is open AND traffic
+        // is actually flowing — an idle network burns no frames. 10 fps is
+        // plenty for a dash march and an order cheaper than window::frames.
+        if self.current_view == CurrentView::Topology && self.topology.has_animated_edges() {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(100))
+                    .map(|_| Message::TopologyAnimTick),
+            );
         }
+        Subscription::batch(subs)
     }
 
     /// Render the view.

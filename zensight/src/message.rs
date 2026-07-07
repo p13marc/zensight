@@ -355,6 +355,13 @@ pub enum Message {
         zoom: f32,
         pan: (f32, f32),
     },
+    /// Hover moved onto (or off) a topology node (#394); emitted on change
+    /// only.
+    TopologyHover(Option<String>),
+    /// Advance the topology flow-dash animation (#394); gated subscription.
+    TopologyAnimTick,
+    /// Toggle the topology lens legend (#394).
+    TopologyToggleLegend,
     /// Fetch the on-demand netring TLS asset inventory.
     FetchNetringTls,
     /// A netring TLS-inventory reply: the decoded records, or an error message.

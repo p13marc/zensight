@@ -33,6 +33,9 @@ pub use model::{
 
 use model::{entity_node_label, is_node_protocol, ordered_pair, primary_protocol};
 
+/// Flow edges slower than this (bytes/sec) don't animate (#394).
+pub const ANIMATED_EDGE_MIN_RATE: f64 = 1_000.0;
+
 /// State for the topology view.
 #[derive(Debug)]
 pub struct TopologyState {
@@ -94,6 +97,16 @@ pub struct TopologyState {
     pub saved_positions: HashMap<NodeId, (f32, f32)>,
     /// Persisted pinned-node set (#394).
     pub saved_pins: std::collections::HashSet<NodeId>,
+    /// Hovered node id (#394): its 1-hop neighborhood stays bright, the rest
+    /// dims. Session-transient.
+    pub hovered: Option<NodeId>,
+    /// The hovered node's neighborhood (hovered + direct peers).
+    pub hover_set: std::collections::HashSet<NodeId>,
+    /// Dash-march offset for animated flow edges (#394); advanced by the
+    /// gated animation tick, drawn in the uncached overlay layer.
+    pub anim_offset: u32,
+    /// Whether the lens legend is shown (#394). Session-transient.
+    pub show_legend: bool,
 }
 
 /// On-demand side-panel data (#393).
@@ -139,6 +152,10 @@ impl Default for TopologyState {
             panel: PanelData::default(),
             saved_positions: HashMap::new(),
             saved_pins: std::collections::HashSet::new(),
+            hovered: None,
+            hover_set: std::collections::HashSet::new(),
+            anim_offset: 0,
+            show_legend: false,
         }
     }
 }
@@ -859,6 +876,41 @@ impl TopologyState {
         (pins, positions)
     }
 
+    /// Set the hovered node (#394): its 1-hop neighborhood stays bright.
+    /// No-op when unchanged — the canvas emits only on transitions, and the
+    /// cache clears only here.
+    pub fn set_hover(&mut self, node_id: Option<NodeId>) {
+        if self.hovered == node_id {
+            return;
+        }
+        self.hover_set = match &node_id {
+            Some(id) => model::focus_neighborhood(&self.edges, id, 1),
+            None => std::collections::HashSet::new(),
+        };
+        self.hovered = node_id;
+        self.cache.clear();
+    }
+
+    /// Advance the flow-dash animation (#394). Does NOT clear the canvas
+    /// cache — animated dashes draw in the uncached overlay layer.
+    pub fn advance_animation(&mut self) {
+        self.anim_offset = self.anim_offset.wrapping_add(2);
+    }
+
+    /// Whether any rendered edge is worth animating (#394): gates the
+    /// animation subscription so idle networks burn no frames.
+    pub fn has_animated_edges(&self) -> bool {
+        self.render
+            .edges
+            .iter()
+            .any(|e| e.rate + e.reverse_rate >= ANIMATED_EDGE_MIN_RATE)
+    }
+
+    /// Toggle the lens legend (#394).
+    pub fn toggle_legend(&mut self) {
+        self.show_legend = !self.show_legend;
+    }
+
     /// Toggle auto-layout.
     pub fn toggle_auto_layout(&mut self) {
         self.auto_layout = !self.auto_layout;
@@ -1069,6 +1121,15 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
     lens_row = lens_row
         .push(text("Edge labels:").size(12))
         .push(label_picker);
+    lens_row = lens_row.push(
+        button(text("Legend").size(12))
+            .on_press(Message::TopologyToggleLegend)
+            .style(if state.show_legend {
+                iced::widget::button::primary
+            } else {
+                iced::widget::button::secondary
+            }),
+    );
 
     // Grouping + filters (#392).
     let grouping_picker = iced::widget::pick_list(
@@ -1144,6 +1205,13 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
         );
     }
 
+    let mut rows = column![header, lens_row].spacing(8);
+
+    // Lens legend (#394): what the current lens encodes.
+    if state.show_legend {
+        rows = rows.push(render_legend(state.prefs.lens));
+    }
+
     // Focus breadcrumb (#392).
     if let Some(ref focus) = state.prefs.focus {
         let root_label = state
@@ -1175,10 +1243,33 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
                 .on_press(Message::TopologyExitFocus)
                 .style(iced::widget::button::secondary),
         );
-        return column![header, lens_row, focus_row].spacing(8).into();
+        rows = rows.push(focus_row);
     }
 
-    column![header, lens_row].spacing(8).into()
+    rows.into()
+}
+
+/// The lens legend (#394): a compact stack of lines explaining the active
+/// lens's encodings.
+fn render_legend(lens: Lens) -> Element<'static, Message> {
+    let entries: &[&str] = match lens {
+        Lens::Traffic => &[
+            "fill = role (blue host · green router · amber switch/AP · grey other)",
+            "ring = health · arrows = observed direction · width = rate",
+            "solid = traffic · dotted = L2 · dashed = gateway",
+        ],
+        Lens::Security => &[
+            "fill = alert severity (red critical · amber warning · blue info)",
+            "bright = alerting or wire-only unknown · faded = quiet",
+        ],
+        Lens::L2 => &["labels = vendor/MAC · dotted = ARP/NDP adjacency · dashed = gateway"],
+        Lens::Health => &["fill = health (blue healthy · amber degraded · red down · grey stale)"],
+    };
+    let mut legend = iced::widget::Column::new().spacing(2);
+    for entry in entries {
+        legend = legend.push(text(*entry).size(10));
+    }
+    container(legend).padding(8).into()
 }
 
 /// Flow-cap choices for the pick list (#392).
@@ -1361,6 +1452,34 @@ mod tests {
         assert_eq!(ab.rate, 1234.0);
         assert_eq!(ab.bytes, 4000);
         assert_eq!(ab.protocol.as_deref(), Some("tcp"));
+    }
+
+    #[test]
+    fn hover_tracks_neighborhood_and_change_gates() {
+        let mut state = TopologyState::default();
+        for id in ["a", "b", "c"] {
+            state.nodes.insert(
+                id.to_string(),
+                Node {
+                    id: id.to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        state.edges.push(Edge {
+            from: "a".to_string(),
+            to: "b".to_string(),
+            ..Default::default()
+        });
+
+        state.set_hover(Some("a".to_string()));
+        assert!(state.hover_set.contains("a"));
+        assert!(state.hover_set.contains("b"));
+        assert!(!state.hover_set.contains("c"));
+
+        state.set_hover(None);
+        assert!(state.hover_set.is_empty());
+        assert_eq!(state.hovered, None);
     }
 
     #[test]
