@@ -139,9 +139,22 @@ observed; flows are the fallback + cumulative-stat enrichment), **L2Adjacency**
 edges come from netlink neighbor tables (dotted), and **Gateway** edges from
 the `routes/default_v4_gw` metric (dashed; unresolved gateways become wire-only
 router nodes). `layout.rs` positions nodes; `graph.rs` renders on a canvas with
-node/edge hit-testing. Nodes show live ↓rx/↑tx rates (hot-ring counter deltas),
+node/edge hit-testing, drawing a pure `RenderGraph` derived by
+`build_render_graph`. Nodes show live ↓rx/↑tx rates (hot-ring counter deltas),
 a health ring, a role glyph, and alert-severity tint; queries re-issue every
-~10 s while the view is open. Supports zoom, pan, search, manual node
+~10 s while the view is open. Off-LAN traffic aggregates into an "Internet"
+pseudo-node (public unmapped matrix endpoints).
+
+Presentation (#392): **lenses** (Traffic / Security / L2 / Health) switch
+emphasis via a `LensSpec` table — edge kinds shown, tint source, passive
+emphasis, dimming; an edge-label mode picker (rate / packets / protocol /
+none); **grouping** (subnet /24, role, device group) collapses buckets into
+meta-nodes with aggregated edges (click to expand, "Regroup" re-collapses);
+**focus mode** isolates a node's 1–3-hop neighborhood (node panel "Focus"
+button, breadcrumb to exit); filters (hide idle / passive / external, flow
+top-N with an honest "showing top N of M flows" label); search supports
+`find:`/`hide:` with `role:`/`alert:`/`health:` predicates. Lens/grouping/
+label/filter prefs persist in settings.json5. Supports zoom, pan, manual node
 positioning, and per-node/per-edge info panels with "View Details" navigation.
 
 **Logs** (`view/specialized/syslog.rs` and related) — structured log drill-down
