@@ -4,7 +4,10 @@ use iced::mouse;
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke, Text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Theme};
 
-use super::{EdgeKind, NodeHealth, NodeRole, Provenance, TopologyState};
+use super::{
+    EdgeKind, NodeHealth, NodeRole, Provenance, RenderEdge, RenderNode, RenderSource,
+    TopologyState, render_node_position,
+};
 use crate::message::Message;
 use crate::view::theme;
 
@@ -84,7 +87,7 @@ impl<'a> canvas::Program<Message> for TopologyGraphProgram<'a> {
             // Check if hovering over a node
             if let Some(pos) = cursor.position() {
                 let graph_pos = self.screen_to_graph(pos, bounds);
-                if self.find_node_at(graph_pos).is_some() {
+                if self.find_render_node_at(graph_pos).is_some() {
                     return mouse::Interaction::Pointer;
                 }
             }
@@ -185,20 +188,28 @@ impl<'a> TopologyGraphProgram<'a> {
 
                     let graph_pos = self.screen_to_graph(pos, bounds);
 
-                    // Check if clicking on a node
-                    if let Some(node_id) = self.find_node_at(graph_pos) {
-                        interaction.dragging_node = Some(node_id.clone());
-                        interaction.last_pos = Some(pos);
-                        return Some(canvas::Action::publish(Message::TopologySelectNode(
-                            node_id,
-                        )));
+                    // Check if clicking on a rendered node (#392): plain
+                    // nodes select + drag, collapsed groups expand (P2.4).
+                    match self.find_render_node_at(graph_pos) {
+                        Some(RenderSource::Node(id)) => {
+                            let node_id = id.clone();
+                            interaction.dragging_node = Some(node_id.clone());
+                            interaction.last_pos = Some(pos);
+                            return Some(canvas::Action::publish(Message::TopologySelectNode(
+                                node_id,
+                            )));
+                        }
+                        Some(RenderSource::Group(_)) => {
+                            return None; // expand-on-click lands with grouping
+                        }
+                        None => {}
                     }
 
                     // Then an edge (#391): nodes draw on top, so they win ties.
                     // Tolerance is in graph units — widen as the view zooms out.
                     let tolerance = 8.0 / self.state.zoom.max(0.1);
-                    if let Some(index) = find_edge_at_position(
-                        &self.state.edges,
+                    if let Some(index) = find_render_edge_at_position(
+                        &self.state.render,
                         &self.state.nodes,
                         graph_pos,
                         tolerance,
@@ -297,17 +308,17 @@ impl<'a> TopologyGraphProgram<'a> {
         );
 
         // Draw edges first (behind nodes)
-        for (index, edge) in self.state.edges.iter().enumerate() {
-            self.draw_edge(frame, edge, index, center);
+        for redge in &self.state.render.edges {
+            self.draw_edge(frame, redge, center);
         }
 
         // Draw nodes
-        for node in self.state.nodes.values() {
-            self.draw_node(frame, node, center);
+        for rnode in &self.state.render.nodes {
+            self.draw_node(frame, rnode, center);
         }
 
         // Draw "empty state" message if no nodes
-        if self.state.nodes.is_empty() {
+        if self.state.render.nodes.is_empty() {
             let text = Text {
                 content: "No hosts detected. Waiting for sysinfo telemetry...".to_string(),
                 position: center,
@@ -331,11 +342,19 @@ impl<'a> TopologyGraphProgram<'a> {
         frame.fill_text(zoom_text);
     }
 
-    /// Draw a single node.
-    fn draw_node(&self, frame: &mut Frame, node: &super::Node, center: Point) {
-        let pos = self.apply_transform(node.position, center);
-        // Node radius scales with zoom but has a minimum size
-        let radius = (25.0 * self.state.zoom).max(15.0);
+    /// Draw a single rendered node (#392): plain host, meta-group, or the
+    /// Internet aggregate.
+    fn draw_node(&self, frame: &mut Frame, node: &RenderNode, center: Point) {
+        let world = render_node_position(node, &self.state.nodes);
+        let pos = self.apply_transform(world, center);
+        // Node radius scales with zoom but has a minimum size; collapsed
+        // groups render larger.
+        let base_radius = if matches!(node.source, RenderSource::Group(_)) {
+            32.0
+        } else {
+            25.0
+        };
+        let radius = (base_radius * self.state.zoom).max(15.0);
 
         // Fill is role-keyed (#391); a firing alert overrides it, and health
         // is a ring stroke rather than a fill change so both read at once.
@@ -350,24 +369,20 @@ impl<'a> TopologyGraphProgram<'a> {
                 }
             },
         };
-        // Stale nodes ghost out (#391): data has gone quiet.
+        // Stale nodes ghost out (#391); lens/search dimming stacks (#392).
         let is_stale = node.health == NodeHealth::Stale;
-        let base_color = if is_stale {
-            Color {
-                a: base_color.a * 0.4,
-                ..base_color
-            }
-        } else {
-            base_color
+        let alpha = if is_stale { 0.4 } else { 1.0 } * if node.dimmed { 0.35 } else { 1.0 };
+        let base_color = Color {
+            a: base_color.a * alpha,
+            ..base_color
         };
 
-        // Highlight if selected
-        let is_selected = self.state.selected_node.as_ref() == Some(&node.id);
-        let is_highlighted = !self.state.search_query.is_empty()
-            && node
-                .label
-                .to_lowercase()
-                .contains(&self.state.search_query.to_lowercase());
+        // Highlight if selected (groups are not selectable; they expand).
+        let is_selected = matches!(
+            node.source,
+            RenderSource::Node(ref id) if self.state.selected_node.as_ref() == Some(id)
+        );
+        let is_highlighted = node.highlighted;
 
         // Draw selection ring
         if is_selected {
@@ -420,8 +435,22 @@ impl<'a> TopologyGraphProgram<'a> {
             frame.fill(&pin, self.pinned_indicator_color());
         }
 
+        // Collapsed groups show their member count inside (#392).
+        if let RenderSource::Group(_) = node.source {
+            let count_text = Text {
+                content: format!("{}", node.members.len()),
+                position: pos,
+                color: self.node_label_color(),
+                size: (14.0 * self.state.zoom).max(11.0).into(),
+                align_x: iced::alignment::Horizontal::Center.into(),
+                align_y: iced::alignment::Vertical::Center,
+                ..Text::default()
+            };
+            frame.fill_text(count_text);
+        }
+
         // Draw label
-        let label_color = if is_stale {
+        let label_color = if is_stale || node.dimmed {
             let c = self.node_label_color();
             Color { a: c.a * 0.4, ..c }
         } else {
@@ -438,7 +467,10 @@ impl<'a> TopologyGraphProgram<'a> {
         frame.fill_text(label);
 
         // Non-host roles show their glyph in the node instead of host stats
-        // (#391); proper icons are P4 polish.
+        // (#391); proper icons are P4 polish. Groups show their count instead.
+        if matches!(node.source, RenderSource::Group(_)) {
+            return;
+        }
         if node.role != NodeRole::Host && self.state.zoom >= 0.6 {
             let glyph = node.role.glyph();
             if !glyph.is_empty() {
@@ -497,19 +529,18 @@ impl<'a> TopologyGraphProgram<'a> {
         }
     }
 
-    /// Draw an edge between two nodes.
-    fn draw_edge(&self, frame: &mut Frame, edge: &super::Edge, index: usize, center: Point) {
-        let from_node = match self.state.nodes.get(&edge.from) {
-            Some(n) => n,
-            None => return,
-        };
-        let to_node = match self.state.nodes.get(&edge.to) {
-            Some(n) => n,
-            None => return,
+    /// Draw a rendered edge (#392) between two rendered endpoints.
+    fn draw_edge(&self, frame: &mut Frame, edge: &RenderEdge, center: Point) {
+        let (Some(from_node), Some(to_node)) = (
+            self.state.render.nodes.get(edge.from),
+            self.state.render.nodes.get(edge.to),
+        ) else {
+            return;
         };
 
-        let from_pos = self.apply_transform(from_node.position, center);
-        let to_pos = self.apply_transform(to_node.position, center);
+        let from_pos =
+            self.apply_transform(render_node_position(from_node, &self.state.nodes), center);
+        let to_pos = self.apply_transform(render_node_position(to_node, &self.state.nodes), center);
 
         // Edge width based on live rate (log-scaled) or cumulative bytes;
         // structural kinds stay thin (#391).
@@ -519,9 +550,10 @@ impl<'a> TopologyGraphProgram<'a> {
             EdgeKind::Flow => edge_width(edge.rate + edge.reverse_rate, edge.bytes),
         };
 
-        // Edge color: selection compares the stored index, not a rescan of
-        // (from, to) — duplicate pairs can exist across kinds (#391).
-        let is_selected = self.state.selected_edge == Some(index);
+        // Edge color: selection compares the backing edge index (#391);
+        // group-aggregated edges (source_index None) are unselectable.
+        let is_selected =
+            edge.source_index.is_some() && self.state.selected_edge == edge.source_index;
 
         let color = if is_selected {
             self.selection_ring_color()
@@ -531,6 +563,14 @@ impl<'a> TopologyGraphProgram<'a> {
             theme::colors(&self.theme()).alert_severity(sev)
         } else {
             self.edge_kind_color(edge.kind)
+        };
+        let color = if edge.dimmed {
+            Color {
+                a: color.a * 0.3,
+                ..color
+            }
+        } else {
+            color
         };
 
         // Draw edge line; structural kinds are dashed/dotted (#391).
@@ -616,10 +656,10 @@ impl<'a> TopologyGraphProgram<'a> {
         screen_to_graph_coords(screen_pos, bounds, self.state.zoom, self.state.pan)
     }
 
-    /// Find the node at the given graph position.
-    fn find_node_at(&self, pos: Point) -> Option<String> {
+    /// Find the rendered node at the given graph position (#392).
+    fn find_render_node_at(&self, pos: Point) -> Option<&RenderSource> {
         const HIT_RADIUS: f32 = 25.0; // Same as node radius
-        find_node_at_position(pos, &self.state.nodes, HIT_RADIUS)
+        find_render_node_at_position(pos, &self.state.render.nodes, &self.state.nodes, HIT_RADIUS)
     }
 }
 
@@ -715,6 +755,52 @@ pub fn find_node_at_position(
 
 /// Distance from point `p` to the segment `a`–`b`. Degenerate segments
 /// collapse to point distance. Pure.
+/// Find the rendered node at `pos` (#392): groups resolve at their member
+/// centroid. Deterministic (render order). Pure.
+pub fn find_render_node_at_position<'a>(
+    pos: Point,
+    render_nodes: &'a [RenderNode],
+    nodes: &std::collections::HashMap<super::NodeId, super::Node>,
+    hit_radius: f32,
+) -> Option<&'a RenderSource> {
+    for rnode in render_nodes {
+        let (x, y) = render_node_position(rnode, nodes);
+        let (dx, dy) = (pos.x - x, pos.y - y);
+        if (dx * dx + dy * dy).sqrt() <= hit_radius {
+            return Some(&rnode.source);
+        }
+    }
+    None
+}
+
+/// Find the *backing* edge index of the rendered edge nearest to `pos` within
+/// `tolerance` (#392). Group-aggregated edges (no backing index) are skipped;
+/// they have no selection identity. Pure.
+pub fn find_render_edge_at_position(
+    render: &super::RenderGraph,
+    nodes: &std::collections::HashMap<super::NodeId, super::Node>,
+    pos: Point,
+    tolerance: f32,
+) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for redge in &render.edges {
+        let Some(source_index) = redge.source_index else {
+            continue;
+        };
+        let (Some(from), Some(to)) = (render.nodes.get(redge.from), render.nodes.get(redge.to))
+        else {
+            continue;
+        };
+        let (fx, fy) = render_node_position(from, nodes);
+        let (tx, ty) = render_node_position(to, nodes);
+        let d = point_segment_distance(pos, Point::new(fx, fy), Point::new(tx, ty));
+        if d <= tolerance && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+            best = Some((source_index, d));
+        }
+    }
+    best.map(|(index, _)| index)
+}
+
 pub fn point_segment_distance(p: Point, a: Point, b: Point) -> f32 {
     let (abx, aby) = (b.x - a.x, b.y - a.y);
     let len_sq = abx * abx + aby * aby;

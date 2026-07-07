@@ -6,7 +6,9 @@
 //! derivation logic is unit-testable in isolation. Stateful orchestration
 //! (caches, selection, layout) lives in [`super::TopologyState`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+use serde::{Deserialize, Serialize};
 
 /// Unique identifier for a topology node.
 pub type NodeId = String;
@@ -655,6 +657,421 @@ pub fn external_edges_from_matrix(
             .then_with(|| (x.from.clone(), x.to.clone()).cmp(&(y.from.clone(), y.to.clone())))
     });
     edges
+}
+
+/// Which question the map is answering (#392): the Kiali-style lens. A lens
+/// changes emphasis (edge kinds shown, node tint source, what labels say) —
+/// never the underlying data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Lens {
+    /// Who talks to whom, how fast (default).
+    #[default]
+    Traffic,
+    /// Alerts and anomalies; unknown/passive devices emphasized.
+    Security,
+    /// Physical structure: adjacency + gateways, MAC/vendor labels.
+    L2,
+    /// Sensor/liveness health tint.
+    Health,
+}
+
+/// What edge midpoint labels show (#392).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EdgeLabelMode {
+    /// Live rate when rated, cumulative bytes otherwise (default).
+    #[default]
+    Rate,
+    Packets,
+    Protocol,
+    /// No edge labels.
+    Hidden,
+}
+
+/// How nodes collapse into meta-nodes (#392).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupingMode {
+    /// One node per host (default).
+    #[default]
+    None,
+    /// Collapse by IPv4 /24 (via each node's identifying IPs).
+    Subnet,
+    /// Collapse by [`NodeRole`].
+    Role,
+    /// Collapse by the user's device groups (settings).
+    DeviceGroup,
+}
+
+/// Edge/node visibility filters (#392).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TopoFilters {
+    /// Hide wire-only (passive) nodes.
+    #[serde(default)]
+    pub hide_passive: bool,
+    /// Hide edges not seen for [`IDLE_EDGE_MS`].
+    #[serde(default)]
+    pub hide_idle: bool,
+    /// Hide the Internet external aggregate.
+    #[serde(default)]
+    pub hide_external: bool,
+    /// Keep only the N fastest flow edges (structural L2/gateway edges are
+    /// never truncated). `0` = unlimited.
+    #[serde(default = "default_top_n")]
+    pub top_n: usize,
+}
+
+fn default_top_n() -> usize {
+    50
+}
+
+impl Default for TopoFilters {
+    fn default() -> Self {
+        Self {
+            hide_passive: false,
+            hide_idle: false,
+            hide_external: false,
+            top_n: default_top_n(),
+        }
+    }
+}
+
+/// Focus mode (#392): restrict the map to a node's N-hop neighborhood.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FocusState {
+    pub root: NodeId,
+    pub hops: u8,
+}
+
+/// The topology view's presentation preferences (#392). `focus` and
+/// `expanded_groups` are session-transient; the rest persists.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TopoPrefs {
+    pub lens: Lens,
+    pub edge_label: EdgeLabelMode,
+    pub grouping: GroupingMode,
+    pub filters: TopoFilters,
+    pub focus: Option<FocusState>,
+    pub expanded_groups: HashSet<String>,
+}
+
+/// An edge older than this with no live rate is "idle" (#392).
+pub const IDLE_EDGE_MS: i64 = 5 * 60 * 1000;
+
+/// A search-box action (#392): plain text (or `find:`) highlights matches,
+/// `hide:` removes them.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SearchAction {
+    None,
+    Highlight(SearchPred),
+    Hide(SearchPred),
+}
+
+/// A node predicate for find/hide (#392).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SearchPred {
+    /// Case-insensitive label substring.
+    Text(String),
+    /// `role:router` etc. (asset-role vocabulary + "internet"/"unknown").
+    Role(NodeRole),
+    /// `alert:critical|warning|info` or `alert:any`.
+    Alert(Option<zensight_common::AlertSeverity>),
+    /// `health:healthy|degraded|down|stale`.
+    Health(NodeHealth),
+}
+
+impl SearchPred {
+    /// Does `node` match this predicate?
+    pub fn matches(&self, node: &Node) -> bool {
+        match self {
+            Self::Text(needle) => node.label.to_lowercase().contains(needle),
+            Self::Role(role) => node.role == *role,
+            Self::Alert(None) => node.alert.is_some(),
+            Self::Alert(Some(sev)) => node.alert == Some(*sev),
+            Self::Health(h) => node.health == *h,
+        }
+    }
+}
+
+/// Parse the search box (#392): `hide:<pred>` removes, `find:<pred>` (or bare
+/// text) highlights. Predicates: `role:<r>`, `alert:<sev|any>`,
+/// `health:<state>`, else label substring. Unparseable structured predicates
+/// fall back to substring so typing never breaks. Pure.
+pub fn parse_search(query: &str) -> SearchAction {
+    let q = query.trim();
+    if q.is_empty() {
+        return SearchAction::None;
+    }
+    let (hide, rest) = match q.strip_prefix("hide:") {
+        Some(rest) => (true, rest.trim()),
+        None => (false, q.strip_prefix("find:").unwrap_or(q).trim()),
+    };
+    if rest.is_empty() {
+        return SearchAction::None;
+    }
+    let pred = parse_pred(rest);
+    if hide {
+        SearchAction::Hide(pred)
+    } else {
+        SearchAction::Highlight(pred)
+    }
+}
+
+fn parse_pred(s: &str) -> SearchPred {
+    use zensight_common::AlertSeverity;
+    let lower = s.to_lowercase();
+    if let Some(role) = lower.strip_prefix("role:") {
+        let role = match role.trim() {
+            "internet" => NodeRole::Internet,
+            "unknown" => NodeRole::Unknown,
+            other => NodeRole::from_asset_role(other),
+        };
+        return SearchPred::Role(role);
+    }
+    if let Some(sev) = lower.strip_prefix("alert:") {
+        return match sev.trim() {
+            "critical" => SearchPred::Alert(Some(AlertSeverity::Critical)),
+            "warning" => SearchPred::Alert(Some(AlertSeverity::Warning)),
+            "info" => SearchPred::Alert(Some(AlertSeverity::Info)),
+            _ => SearchPred::Alert(None), // "any" and friends
+        };
+    }
+    if let Some(h) = lower.strip_prefix("health:") {
+        return match h.trim() {
+            "healthy" => SearchPred::Health(NodeHealth::Healthy),
+            "degraded" => SearchPred::Health(NodeHealth::Degraded),
+            "down" => SearchPred::Health(NodeHealth::Down),
+            "stale" => SearchPred::Health(NodeHealth::Stale),
+            other => SearchPred::Text(other.to_string()),
+        };
+    }
+    SearchPred::Text(lower)
+}
+
+/// The N-hop undirected neighborhood of `root` over `edges` (#392). Always
+/// contains `root`. Pure.
+pub fn focus_neighborhood(edges: &[Edge], root: &NodeId, hops: u8) -> HashSet<NodeId> {
+    let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
+    for e in edges {
+        adjacency.entry(&e.from).or_default().push(&e.to);
+        adjacency.entry(&e.to).or_default().push(&e.from);
+    }
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    seen.insert(root.clone());
+    let mut frontier: Vec<&str> = vec![root.as_str()];
+    for _ in 0..hops {
+        let mut next = Vec::new();
+        for id in frontier {
+            for neighbor in adjacency.get(id).into_iter().flatten() {
+                if seen.insert((*neighbor).to_string()) {
+                    next.push(*neighbor);
+                }
+            }
+        }
+        frontier = next;
+    }
+    seen
+}
+
+/// What a rendered element stands for (#392).
+#[derive(Debug, Clone, PartialEq)]
+pub enum RenderSource {
+    /// A real topology node (selectable, draggable).
+    Node(NodeId),
+    /// A collapsed group meta-node (click to expand).
+    Group(String),
+}
+
+/// A fully-resolved node ready to draw (#392). Positions are *not* cached
+/// here — they resolve live via [`render_node_position`] so the 1 Hz layout
+/// and drags don't force a render-graph rebuild.
+#[derive(Debug, Clone)]
+pub struct RenderNode {
+    pub source: RenderSource,
+    pub label: String,
+    pub role: NodeRole,
+    pub provenance: Provenance,
+    pub health: NodeHealth,
+    pub alert: Option<zensight_common::AlertSeverity>,
+    pub alert_count: usize,
+    pub pinned: bool,
+    pub dimmed: bool,
+    pub highlighted: bool,
+    /// Members of a collapsed group (empty for plain nodes).
+    pub members: Vec<NodeId>,
+    pub cpu_usage: Option<f64>,
+    pub memory_usage: Option<f64>,
+    pub rx_rate: Option<f64>,
+    pub tx_rate: Option<f64>,
+}
+
+/// A fully-resolved edge ready to draw (#392): endpoints are indices into
+/// [`RenderGraph::nodes`].
+#[derive(Debug, Clone)]
+pub struct RenderEdge {
+    pub from: usize,
+    pub to: usize,
+    pub kind: EdgeKind,
+    pub rate: f64,
+    pub reverse_rate: f64,
+    pub bytes: u64,
+    pub packets: u64,
+    pub protocol: Option<String>,
+    pub alert: Option<zensight_common::AlertSeverity>,
+    /// Index into the state's edge list when this renders exactly one edge
+    /// (drives selection); `None` for group-aggregated edges.
+    pub source_index: Option<usize>,
+    pub dimmed: bool,
+}
+
+/// The resolved, filtered, (later: grouped and lens-tinted) graph the canvas
+/// draws (#392). Rebuilt on structural/pref changes, not per frame.
+#[derive(Debug, Clone, Default)]
+pub struct RenderGraph {
+    pub nodes: Vec<RenderNode>,
+    pub edges: Vec<RenderEdge>,
+    /// Eligible flow-edge count before top-N truncation — drives the honest
+    /// "showing top N of M" label.
+    pub total_flow_edges: usize,
+    /// Render key (node id / group id) → index into `nodes`.
+    pub id_to_index: HashMap<String, usize>,
+}
+
+/// Resolve a rendered node's position: plain nodes read their backing node,
+/// groups sit at their members' centroid. Pure.
+pub fn render_node_position(rnode: &RenderNode, nodes: &HashMap<NodeId, Node>) -> (f32, f32) {
+    match &rnode.source {
+        RenderSource::Node(id) => nodes.get(id).map(|n| n.position).unwrap_or((0.0, 0.0)),
+        RenderSource::Group(_) => {
+            let mut x = 0.0;
+            let mut y = 0.0;
+            let mut count = 0.0;
+            for id in &rnode.members {
+                if let Some(n) = nodes.get(id) {
+                    x += n.position.0;
+                    y += n.position.1;
+                    count += 1.0;
+                }
+            }
+            if count > 0.0 {
+                (x / count, y / count)
+            } else {
+                (0.0, 0.0)
+            }
+        }
+    }
+}
+
+/// Build the render graph (#392): apply focus, search find/hide, and
+/// visibility filters over the model, then remap edges onto the surviving
+/// nodes and truncate flow edges to the top N by rate (structural edges are
+/// never truncated). Deterministic. Pure.
+pub fn build_render_graph(
+    nodes: &HashMap<NodeId, Node>,
+    edges: &[Edge],
+    prefs: &TopoPrefs,
+    search: &str,
+    now_ms: i64,
+) -> RenderGraph {
+    let action = parse_search(search);
+    let focus: Option<HashSet<NodeId>> = prefs
+        .focus
+        .as_ref()
+        .map(|f| focus_neighborhood(edges, &f.root, f.hops));
+
+    // Deterministic node order.
+    let mut ids: Vec<&NodeId> = nodes.keys().collect();
+    ids.sort();
+
+    let mut out = RenderGraph::default();
+    for id in ids {
+        let node = &nodes[id];
+        if prefs.filters.hide_passive && node.provenance == Provenance::Passive {
+            continue;
+        }
+        if prefs.filters.hide_external && node.provenance == Provenance::External {
+            continue;
+        }
+        if let Some(ref keep) = focus
+            && !keep.contains(id)
+        {
+            continue;
+        }
+        if let SearchAction::Hide(ref pred) = action
+            && pred.matches(node)
+        {
+            continue;
+        }
+        let highlighted = matches!(action, SearchAction::Highlight(ref pred) if pred.matches(node));
+        out.id_to_index.insert(id.clone(), out.nodes.len());
+        out.nodes.push(RenderNode {
+            source: RenderSource::Node(id.clone()),
+            label: node.label.clone(),
+            role: node.role,
+            provenance: node.provenance,
+            health: node.health,
+            alert: node.alert,
+            alert_count: node.alerts.len(),
+            pinned: node.pinned,
+            dimmed: false,
+            highlighted,
+            members: Vec::new(),
+            cpu_usage: node.cpu_usage,
+            memory_usage: node.memory_usage,
+            rx_rate: node.rx_rate,
+            tx_rate: node.tx_rate,
+        });
+    }
+
+    // Edges over surviving nodes, idle filter, then flow top-N.
+    let mut flow_edges: Vec<RenderEdge> = Vec::new();
+    for (index, edge) in edges.iter().enumerate() {
+        let (Some(&from), Some(&to)) = (
+            out.id_to_index.get(edge.from.as_str()),
+            out.id_to_index.get(edge.to.as_str()),
+        ) else {
+            continue;
+        };
+        if prefs.filters.hide_idle
+            && edge.rate + edge.reverse_rate == 0.0
+            && now_ms - edge.last_seen > IDLE_EDGE_MS
+        {
+            continue;
+        }
+        let redge = RenderEdge {
+            from,
+            to,
+            kind: edge.kind,
+            rate: edge.rate,
+            reverse_rate: edge.reverse_rate,
+            bytes: edge.bytes,
+            packets: edge.packets,
+            protocol: edge.protocol.clone(),
+            alert: edge.alert,
+            source_index: Some(index),
+            dimmed: false,
+        };
+        if edge.kind == EdgeKind::Flow {
+            flow_edges.push(redge);
+        } else {
+            out.edges.push(redge);
+        }
+    }
+    out.total_flow_edges = flow_edges.len();
+    // Fastest first; cumulative bytes break rate ties (unrated fallbacks).
+    flow_edges.sort_by(|a, b| {
+        let (ra, rb) = (a.rate + a.reverse_rate, b.rate + b.reverse_rate);
+        rb.partial_cmp(&ra)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.bytes.cmp(&a.bytes))
+            .then_with(|| a.source_index.cmp(&b.source_index))
+    });
+    if prefs.filters.top_n > 0 {
+        flow_edges.truncate(prefs.filters.top_n);
+    }
+    out.edges.extend(flow_edges);
+    out
 }
 
 /// Compute a node's health (#391) from its facets' liveness, host-scoped
@@ -1321,6 +1738,245 @@ mod tests {
         assert_eq!(e.rate, 5_000.0);
         assert_eq!(e.reverse_rate, 1_000.0);
         assert_eq!(e.last_seen, 3);
+    }
+
+    #[test]
+    fn parse_search_predicates() {
+        use zensight_common::AlertSeverity;
+        assert_eq!(parse_search(""), SearchAction::None);
+        assert_eq!(parse_search("  "), SearchAction::None);
+        assert_eq!(
+            parse_search("web"),
+            SearchAction::Highlight(SearchPred::Text("web".into()))
+        );
+        assert_eq!(
+            parse_search("find:role:iot"),
+            SearchAction::Highlight(SearchPred::Role(NodeRole::Iot))
+        );
+        assert_eq!(
+            parse_search("hide:role:router"),
+            SearchAction::Hide(SearchPred::Role(NodeRole::Router))
+        );
+        assert_eq!(
+            parse_search("alert:critical"),
+            SearchAction::Highlight(SearchPred::Alert(Some(AlertSeverity::Critical)))
+        );
+        assert_eq!(
+            parse_search("alert:any"),
+            SearchAction::Highlight(SearchPred::Alert(None))
+        );
+        assert_eq!(
+            parse_search("health:stale"),
+            SearchAction::Highlight(SearchPred::Health(NodeHealth::Stale))
+        );
+        // Unparseable structured predicate falls back to substring.
+        assert_eq!(
+            parse_search("health:gibberish"),
+            SearchAction::Highlight(SearchPred::Text("gibberish".into()))
+        );
+    }
+
+    #[test]
+    fn focus_neighborhood_bfs_hops() {
+        let edge = |a: &str, b: &str| Edge {
+            from: a.to_string(),
+            to: b.to_string(),
+            ..Default::default()
+        };
+        // a - b - c - d chain plus isolated e.
+        let edges = vec![edge("a", "b"), edge("b", "c"), edge("c", "d")];
+        let hop1 = focus_neighborhood(&edges, &"b".to_string(), 1);
+        assert_eq!(
+            hop1,
+            ["a", "b", "c"].iter().map(|s| s.to_string()).collect()
+        );
+        let hop2 = focus_neighborhood(&edges, &"a".to_string(), 2);
+        assert_eq!(
+            hop2,
+            ["a", "b", "c"].iter().map(|s| s.to_string()).collect()
+        );
+        // Root always present, even with no edges.
+        let lonely = focus_neighborhood(&[], &"e".to_string(), 3);
+        assert_eq!(lonely, ["e".to_string()].into_iter().collect());
+    }
+
+    fn render_fixture() -> (HashMap<NodeId, Node>, Vec<Edge>) {
+        let mut nodes = HashMap::new();
+        let mut add = |id: &str, provenance: Provenance, role: NodeRole| {
+            nodes.insert(
+                id.to_string(),
+                Node {
+                    id: id.to_string(),
+                    label: id.to_string(),
+                    provenance,
+                    role,
+                    ..Default::default()
+                },
+            );
+        };
+        add("alpha", Provenance::Monitored, NodeRole::Host);
+        add("beta", Provenance::Monitored, NodeRole::Host);
+        add("ghost", Provenance::Passive, NodeRole::Unknown);
+        add(INTERNET_NODE_ID, Provenance::External, NodeRole::Internet);
+        let mk_edge = |a: &str, b: &str, kind: EdgeKind, rate: f64, last_seen: i64| Edge {
+            from: a.to_string(),
+            to: b.to_string(),
+            kind,
+            rate,
+            last_seen,
+            ..Default::default()
+        };
+        let edges = vec![
+            mk_edge("alpha", "beta", EdgeKind::Flow, 1000.0, 0),
+            mk_edge("alpha", "ghost", EdgeKind::L2Adjacency, 0.0, 0),
+            mk_edge("alpha", INTERNET_NODE_ID, EdgeKind::Flow, 50.0, 0),
+        ];
+        (nodes, edges)
+    }
+
+    #[test]
+    fn render_graph_passthrough_at_defaults() {
+        let (nodes, edges) = render_fixture();
+        let render = build_render_graph(&nodes, &edges, &TopoPrefs::default(), "", 0);
+        assert_eq!(render.nodes.len(), 4);
+        assert_eq!(render.edges.len(), 3);
+        assert_eq!(render.total_flow_edges, 2);
+        // Edge endpoints resolve through id_to_index.
+        for e in &render.edges {
+            assert!(e.from < render.nodes.len() && e.to < render.nodes.len());
+            assert!(e.source_index.is_some());
+        }
+    }
+
+    #[test]
+    fn render_graph_filters_and_search() {
+        let (nodes, edges) = render_fixture();
+
+        // hide_passive drops ghost and its L2 edge.
+        let prefs = TopoPrefs {
+            filters: TopoFilters {
+                hide_passive: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let render = build_render_graph(&nodes, &edges, &prefs, "", 0);
+        assert!(!render.id_to_index.contains_key("ghost"));
+        assert_eq!(render.edges.len(), 2);
+
+        // hide_external drops the internet aggregate.
+        let prefs = TopoPrefs {
+            filters: TopoFilters {
+                hide_external: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let render = build_render_graph(&nodes, &edges, &prefs, "", 0);
+        assert!(!render.id_to_index.contains_key(INTERNET_NODE_ID));
+
+        // hide: search removes; bare text highlights.
+        let render = build_render_graph(&nodes, &edges, &TopoPrefs::default(), "hide:alpha", 0);
+        assert!(!render.id_to_index.contains_key("alpha"));
+        assert!(render.edges.is_empty()); // every edge touched alpha
+        let render = build_render_graph(&nodes, &edges, &TopoPrefs::default(), "beta", 0);
+        let beta = &render.nodes[render.id_to_index["beta"]];
+        assert!(beta.highlighted);
+        assert!(!render.nodes[render.id_to_index["alpha"]].highlighted);
+    }
+
+    #[test]
+    fn render_graph_focus_idle_and_top_n() {
+        let (nodes, mut edges) = render_fixture();
+        // Focus on ghost, 1 hop: alpha + ghost only.
+        let prefs = TopoPrefs {
+            focus: Some(FocusState {
+                root: "ghost".to_string(),
+                hops: 1,
+            }),
+            ..Default::default()
+        };
+        let render = build_render_graph(&nodes, &edges, &prefs, "", 0);
+        assert_eq!(render.nodes.len(), 2);
+        assert!(render.id_to_index.contains_key("alpha"));
+        assert!(render.id_to_index.contains_key("ghost"));
+
+        // Idle filter: an unrated old flow edge disappears; structural L2
+        // edges refresh their last_seen so they survive.
+        edges.push(Edge {
+            from: "alpha".to_string(),
+            to: "beta".to_string(),
+            kind: EdgeKind::Flow,
+            bytes: 5,
+            last_seen: 0,
+            ..Default::default()
+        });
+        let prefs = TopoPrefs {
+            filters: TopoFilters {
+                hide_idle: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let now = IDLE_EDGE_MS + 1;
+        // Rated edges keep last_seen=0 but have live rates -> kept.
+        let render = build_render_graph(&nodes, &edges, &prefs, "", now);
+        assert!(
+            render
+                .edges
+                .iter()
+                .all(|e| e.rate > 0.0 || e.kind != EdgeKind::Flow)
+        );
+
+        // top_n = 1 keeps only the fastest flow edge but never the L2 edge.
+        let prefs = TopoPrefs {
+            filters: TopoFilters {
+                top_n: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let render = build_render_graph(&nodes, &edges, &prefs, "", 0);
+        assert_eq!(render.total_flow_edges, 3);
+        let flows: Vec<_> = render
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Flow)
+            .collect();
+        assert_eq!(flows.len(), 1);
+        assert_eq!(flows[0].rate, 1000.0);
+        assert!(render.edges.iter().any(|e| e.kind == EdgeKind::L2Adjacency));
+    }
+
+    #[test]
+    fn render_node_position_group_centroid() {
+        let (mut nodes, _) = render_fixture();
+        nodes.get_mut("alpha").unwrap().position = (0.0, 0.0);
+        nodes.get_mut("beta").unwrap().position = (100.0, 40.0);
+        let group = RenderNode {
+            source: RenderSource::Group("group:test".to_string()),
+            label: "test".to_string(),
+            role: NodeRole::Unknown,
+            provenance: Provenance::Monitored,
+            health: NodeHealth::Healthy,
+            alert: None,
+            alert_count: 0,
+            pinned: false,
+            dimmed: false,
+            highlighted: false,
+            members: vec!["alpha".to_string(), "beta".to_string()],
+            cpu_usage: None,
+            memory_usage: None,
+            rx_rate: None,
+            tx_rate: None,
+        };
+        assert_eq!(render_node_position(&group, &nodes), (50.0, 20.0));
+        let plain = RenderNode {
+            source: RenderSource::Node("beta".to_string()),
+            members: Vec::new(),
+            ..group
+        };
+        assert_eq!(render_node_position(&plain, &nodes), (100.0, 40.0));
     }
 
     #[test]

@@ -22,10 +22,12 @@ use crate::view::icons::{self, IconSize};
 pub use graph::TopologyGraph;
 pub use layout::{LayoutConfig, arrange_circle, center_layout, layout_step};
 pub use model::{
-    Edge, EdgeKind, INTERNET_NODE_ID, Node, NodeAlert, NodeHealth, NodeId, NodeRole, Provenance,
-    counter_rate, edges_from_flows, edges_from_gateways, edges_from_matrix, edges_from_neighbors,
-    endpoint_ip, external_edges_from_matrix, format_rate, gateway_from_metrics, is_public_ip,
-    merge_flow_stats, node_health, roles_from_assets,
+    Edge, EdgeKind, EdgeLabelMode, FocusState, GroupingMode, INTERNET_NODE_ID, Lens, Node,
+    NodeAlert, NodeHealth, NodeId, NodeRole, Provenance, RenderEdge, RenderGraph, RenderNode,
+    RenderSource, TopoFilters, TopoPrefs, counter_rate, edges_from_flows, edges_from_gateways,
+    edges_from_matrix, edges_from_neighbors, endpoint_ip, external_edges_from_matrix, format_rate,
+    gateway_from_metrics, is_public_ip, merge_flow_stats, node_health, render_node_position,
+    roles_from_assets,
 };
 
 use model::{entity_node_label, is_node_protocol, ordered_pair, primary_protocol};
@@ -73,6 +75,13 @@ pub struct TopologyState {
     /// Asset-derived role + vendor per node (#391), from the netring passive
     /// inventory; reapplied on every edge rebuild (strongest role evidence).
     asset_roles: HashMap<NodeId, (NodeRole, Option<String>)>,
+    /// Presentation preferences (#392): lens, edge labels, grouping, filters,
+    /// focus. Mutate through the setters so the render graph stays fresh.
+    pub prefs: TopoPrefs,
+    /// The resolved graph the canvas draws (#392): filters/search/focus (and
+    /// later grouping/lens) applied. Rebuilt by [`Self::invalidate`] on
+    /// structural or pref changes — never per frame.
+    pub render: RenderGraph,
 }
 
 impl Default for TopologyState {
@@ -95,11 +104,28 @@ impl Default for TopologyState {
             pending_gateways: HashMap::new(),
             last_gateways: HashMap::new(),
             asset_roles: HashMap::new(),
+            prefs: TopoPrefs::default(),
+            render: RenderGraph::default(),
         }
     }
 }
 
 impl TopologyState {
+    /// Recompute the render graph and clear the canvas cache (#392). Call
+    /// after any change that affects what is drawn: node/edge structure,
+    /// alerts, rates, search, prefs. Selection/zoom/pan/drag only need
+    /// `cache.clear()` — they resolve at draw time.
+    pub(crate) fn invalidate(&mut self) {
+        self.render = model::build_render_graph(
+            &self.nodes,
+            &self.edges,
+            &self.prefs,
+            &self.search_query,
+            zensight_common::current_timestamp_millis(),
+        );
+        self.cache.clear();
+    }
+
     /// Update topology from dashboard device states. `sensor_health` is the
     /// per-sensor `@/health` snapshot map (host-scoped via `host_id`, #391);
     /// `now_ms` drives entity staleness.
@@ -238,8 +264,8 @@ impl TopologyState {
         if self.nodes.len() > initial_count {
             self.arrange_in_circle(400.0);
             self.layout_stable = false;
-            self.cache.clear();
         }
+        self.invalidate();
 
         // NB: edges are derived from *observed* flow/neighbor data via
         // `apply_flow_edges` (#25), not fabricated here. We no longer synthesize a
@@ -304,7 +330,7 @@ impl TopologyState {
         }
         // Per-link health (#49): tint each edge by the worst of its endpoints.
         self.recompute_edge_health();
-        self.cache.clear();
+        self.invalidate();
     }
 
     /// Replace the edge set with edges derived from *observed* netring flow
@@ -353,7 +379,7 @@ impl TopologyState {
             }
         }
         if changed {
-            self.cache.clear();
+            self.invalidate();
         }
     }
 
@@ -532,7 +558,7 @@ impl TopologyState {
         self.edges = edges;
         self.selected_edge = None;
         self.recompute_edge_health();
-        self.cache.clear();
+        self.invalidate();
     }
 
     /// Tint each edge by the worst alert severity of its two endpoint nodes
@@ -617,10 +643,11 @@ impl TopologyState {
         self.cache.clear();
     }
 
-    /// Set search query.
+    /// Set search query (#392): plain text / `find:` highlights, `hide:`
+    /// removes — so the render graph must rebuild.
     pub fn set_search(&mut self, query: String) {
         self.search_query = query;
-        self.cache.clear();
+        self.invalidate();
     }
 
     /// Toggle auto-layout.
