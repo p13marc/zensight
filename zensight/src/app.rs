@@ -320,8 +320,15 @@ impl ZenSight {
             expanded: persistent.overview_expanded,
         };
 
-        // Initialize topology state
-        let topology = TopologyState::default();
+        // Initialize topology state with persisted presentation prefs (#392).
+        let topology = {
+            let mut t = TopologyState::default();
+            t.prefs.lens = persistent.topology_lens;
+            t.prefs.grouping = persistent.topology_grouping;
+            t.prefs.edge_label = persistent.topology_edge_label;
+            t.prefs.filters = persistent.topology_filters;
+            t
+        };
 
         // Initialize syslog filter state
         let syslog_filter = SyslogFilterState::default();
@@ -777,14 +784,17 @@ impl ZenSight {
 
             Message::TopologySetLens(lens) => {
                 self.topology.set_lens(lens);
+                self.save_topology_prefs();
             }
 
             Message::TopologySetEdgeLabel(mode) => {
                 self.topology.set_edge_label(mode);
+                self.save_topology_prefs();
             }
 
             Message::TopologySetGrouping(mode) => {
                 self.topology.set_grouping(mode);
+                self.save_topology_prefs();
             }
 
             Message::TopologyExpandGroup(group_id) => {
@@ -809,18 +819,22 @@ impl ZenSight {
 
             Message::TopologyToggleHideIdle => {
                 self.topology.toggle_hide_idle();
+                self.save_topology_prefs();
             }
 
             Message::TopologyToggleHidePassive => {
                 self.topology.toggle_hide_passive();
+                self.save_topology_prefs();
             }
 
             Message::TopologyToggleHideExternal => {
                 self.topology.toggle_hide_external();
+                self.save_topology_prefs();
             }
 
             Message::TopologySetTopN(n) => {
                 self.topology.set_top_n(n);
+                self.save_topology_prefs();
             }
             other => return ControlFlow::Continue(other),
         }
@@ -2943,6 +2957,21 @@ impl ZenSight {
     }
 
     /// Save current view to persistent settings.
+    /// Persist the topology presentation prefs (#392): lens, grouping, edge
+    /// labels, filters. Load-modify-save so unrelated settings are untouched
+    /// (same pattern as [`Self::save_current_view`]). Focus and group
+    /// expansions are session-transient by design.
+    fn save_topology_prefs(&self) {
+        let mut persistent = PersistentSettings::load();
+        persistent.topology_lens = self.topology.prefs.lens;
+        persistent.topology_grouping = self.topology.prefs.grouping;
+        persistent.topology_edge_label = self.topology.prefs.edge_label;
+        persistent.topology_filters = self.topology.prefs.filters;
+        if let Err(e) = persistent.save() {
+            tracing::error!("Failed to save topology prefs: {}", e);
+        }
+    }
+
     fn save_current_view(&self) {
         let mut persistent = PersistentSettings::load();
         persistent.current_view = self.current_view;
@@ -5434,6 +5463,10 @@ impl ZenSight {
         persistent.favorite_metrics = self.favorites.iter().cloned().collect();
         persistent.overview_selected_protocol = self.overview.selected_protocol;
         persistent.overview_expanded = self.overview.expanded;
+        persistent.topology_lens = self.topology.prefs.lens;
+        persistent.topology_grouping = self.topology.prefs.grouping;
+        persistent.topology_edge_label = self.topology.prefs.edge_label;
+        persistent.topology_filters = self.topology.prefs.filters;
         if let Err(error) = persistent.save() {
             self.settings.set_error(error);
             return;

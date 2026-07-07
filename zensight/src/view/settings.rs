@@ -75,6 +75,18 @@ pub struct PersistentSettings {
     /// expanded in the host nav bar (#350). Collapsed by default.
     #[serde(default)]
     pub identity_expanded: bool,
+    /// Topology presentation lens (#392).
+    #[serde(default)]
+    pub topology_lens: crate::view::topology::Lens,
+    /// Topology grouping mode (#392).
+    #[serde(default)]
+    pub topology_grouping: crate::view::topology::GroupingMode,
+    /// Topology edge-label mode (#392).
+    #[serde(default)]
+    pub topology_edge_label: crate::view::topology::EdgeLabelMode,
+    /// Topology visibility filters (#392).
+    #[serde(default)]
+    pub topology_filters: crate::view::topology::TopoFilters,
 }
 
 fn default_group_by_host() -> bool {
@@ -119,6 +131,10 @@ impl Default for PersistentSettings {
             subscription_scope: Vec::new(),
             link_profile: LinkProfile::default(),
             identity_expanded: false,
+            topology_lens: Default::default(),
+            topology_grouping: Default::default(),
+            topology_edge_label: Default::default(),
+            topology_filters: Default::default(),
         }
     }
 }
@@ -229,6 +245,10 @@ impl PersistentSettings {
             subscription_scope: state.scope_entries(),
             link_profile: state.link_profile,
             identity_expanded: false,
+            topology_lens: Default::default(),
+            topology_grouping: Default::default(),
+            topology_edge_label: Default::default(),
+            topology_filters: Default::default(),
         }
     }
 }
@@ -929,6 +949,10 @@ mod tests {
             subscription_scope: vec!["zensight/netring/**".to_string()],
             link_profile: LinkProfile::Constrained,
             identity_expanded: true,
+            topology_lens: Default::default(),
+            topology_grouping: Default::default(),
+            topology_edge_label: Default::default(),
+            topology_filters: Default::default(),
         };
 
         // Serialize to JSON
@@ -970,6 +994,10 @@ mod tests {
             ],
             link_profile: LinkProfile::Constrained,
             identity_expanded: false,
+            topology_lens: Default::default(),
+            topology_grouping: Default::default(),
+            topology_edge_label: Default::default(),
+            topology_filters: Default::default(),
         };
 
         // Convert to UI state
