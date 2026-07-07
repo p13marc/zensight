@@ -1387,6 +1387,29 @@ fn test_topology_edge_panel_flows() {
     );
 }
 
+/// The legend toggles per lens (#394).
+#[test]
+fn test_topology_legend_toggle() {
+    let state = TopologyState::default();
+    let mut ui = simulator(topo_view(&state, AppTheme::Dark));
+    let _ = ui.click("Legend");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::TopologyToggleLegend))
+    );
+
+    let mut state = TopologyState::default();
+    state.show_legend = true;
+    let mut ui = simulator(topo_view(&state, AppTheme::Dark));
+    // Traffic-lens legend content is visible.
+    assert!(
+        ui.find("solid = traffic · dotted = L2 · dashed = gateway")
+            .is_ok()
+    );
+}
+
 /// The active lens button is inert; the edge-label picker is present (#392).
 #[test]
 fn test_topology_lens_active_inert() {

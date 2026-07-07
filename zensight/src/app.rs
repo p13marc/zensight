@@ -327,6 +327,9 @@ impl ZenSight {
             t.prefs.grouping = persistent.topology_grouping;
             t.prefs.edge_label = persistent.topology_edge_label;
             t.prefs.filters = persistent.topology_filters;
+            t.prefs.layout = persistent.topology_layout;
+            t.saved_positions = persistent.topology_positions.clone();
+            t.saved_pins = persistent.topology_pinned.iter().cloned().collect();
             t
         };
 
@@ -757,7 +760,8 @@ impl ZenSight {
             }
 
             Message::TopologyDragNodeEnd(_node_id) => {
-                // Node stays pinned after drag
+                // Node stays pinned after drag; persist the arrangement (#394).
+                self.save_topology_prefs();
             }
 
             Message::TopologyPanUpdate(dx, dy) => {
@@ -889,6 +893,32 @@ impl ZenSight {
 
             Message::TopologyCopyText(text) => {
                 return ControlFlow::Break(iced::clipboard::write(text));
+            }
+
+            Message::TopologySetLayout(mode) => {
+                self.topology.set_layout(mode);
+                self.save_topology_prefs();
+            }
+
+            Message::TopologyTogglePin(node_id) => {
+                self.topology.toggle_pin(&node_id);
+                self.save_topology_prefs();
+            }
+
+            Message::TopologyFitApplied { zoom, pan } => {
+                self.topology.apply_fit(zoom, pan);
+            }
+
+            Message::TopologyHover(node_id) => {
+                self.topology.set_hover(node_id);
+            }
+
+            Message::TopologyAnimTick => {
+                self.topology.advance_animation();
+            }
+
+            Message::TopologyToggleLegend => {
+                self.topology.toggle_legend();
             }
 
             Message::TopologyOpenFlows => {
@@ -3049,6 +3079,11 @@ impl ZenSight {
         persistent.topology_grouping = self.topology.prefs.grouping;
         persistent.topology_edge_label = self.topology.prefs.edge_label;
         persistent.topology_filters = self.topology.prefs.filters;
+        persistent.topology_layout = self.topology.prefs.layout;
+        // Manual arrangement (#394): pinned nodes only, pruned to what exists.
+        let (pins, positions) = self.topology.pinned_positions();
+        persistent.topology_pinned = pins;
+        persistent.topology_positions = positions;
         if let Err(e) = persistent.save() {
             tracing::error!("Failed to save topology prefs: {}", e);
         }
@@ -4869,20 +4904,30 @@ impl ZenSight {
 
     /// Create subscriptions for Zenoh telemetry and periodic updates.
     pub fn subscription(&self) -> Subscription<Message> {
-        if self.demo_mode {
+        let mut subs = if self.demo_mode {
             // In demo mode, use mock data generator instead of Zenoh
-            Subscription::batch([
+            vec![
                 demo_subscription(),
                 tick_subscription(),
                 keyboard_subscription(),
-            ])
+            ]
         } else {
-            Subscription::batch([
+            vec![
                 zenoh_subscription(self.link.clone()),
                 tick_subscription(),
                 keyboard_subscription(),
-            ])
+            ]
+        };
+        // Flow-dash animation (#394): only while the map is open AND traffic
+        // is actually flowing — an idle network burns no frames. 10 fps is
+        // plenty for a dash march and an order cheaper than window::frames.
+        if self.current_view == CurrentView::Topology && self.topology.has_animated_edges() {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(100))
+                    .map(|_| Message::TopologyAnimTick),
+            );
         }
+        Subscription::batch(subs)
     }
 
     /// Render the view.
@@ -5643,6 +5688,10 @@ impl ZenSight {
         persistent.topology_grouping = self.topology.prefs.grouping;
         persistent.topology_edge_label = self.topology.prefs.edge_label;
         persistent.topology_filters = self.topology.prefs.filters;
+        persistent.topology_layout = self.topology.prefs.layout;
+        let (pins, positions) = self.topology.pinned_positions();
+        persistent.topology_pinned = pins;
+        persistent.topology_positions = positions;
         if let Err(error) = persistent.save() {
             self.settings.set_error(error);
             return;

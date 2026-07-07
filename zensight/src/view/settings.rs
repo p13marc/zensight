@@ -87,6 +87,15 @@ pub struct PersistentSettings {
     /// Topology visibility filters (#392).
     #[serde(default)]
     pub topology_filters: crate::view::topology::TopoFilters,
+    /// Topology layout mode (#394).
+    #[serde(default)]
+    pub topology_layout: crate::view::topology::LayoutMode,
+    /// Pinned topology nodes (#394).
+    #[serde(default)]
+    pub topology_pinned: Vec<String>,
+    /// Persisted topology node positions (#394), pinned nodes only.
+    #[serde(default)]
+    pub topology_positions: std::collections::HashMap<String, (f32, f32)>,
 }
 
 fn default_group_by_host() -> bool {
@@ -135,6 +144,9 @@ impl Default for PersistentSettings {
             topology_grouping: Default::default(),
             topology_edge_label: Default::default(),
             topology_filters: Default::default(),
+            topology_layout: Default::default(),
+            topology_pinned: Vec::new(),
+            topology_positions: Default::default(),
         }
     }
 }
@@ -249,6 +261,9 @@ impl PersistentSettings {
             topology_grouping: Default::default(),
             topology_edge_label: Default::default(),
             topology_filters: Default::default(),
+            topology_layout: Default::default(),
+            topology_pinned: Vec::new(),
+            topology_positions: Default::default(),
         }
     }
 }
@@ -953,6 +968,9 @@ mod tests {
             topology_grouping: Default::default(),
             topology_edge_label: Default::default(),
             topology_filters: Default::default(),
+            topology_layout: Default::default(),
+            topology_pinned: Vec::new(),
+            topology_positions: Default::default(),
         };
 
         // Serialize to JSON
@@ -998,6 +1016,9 @@ mod tests {
             topology_grouping: Default::default(),
             topology_edge_label: Default::default(),
             topology_filters: Default::default(),
+            topology_layout: Default::default(),
+            topology_pinned: Vec::new(),
+            topology_positions: Default::default(),
         };
 
         // Convert to UI state

@@ -55,7 +55,7 @@ impl<'a> canvas::Program<Message> for TopologyGraphProgram<'a> {
             canvas::Event::Mouse(mouse_event) => {
                 self.handle_mouse(interaction, mouse_event, bounds, cursor)
             }
-            canvas::Event::Keyboard(keyboard_event) => self.handle_keyboard(keyboard_event),
+            canvas::Event::Keyboard(keyboard_event) => self.handle_keyboard(keyboard_event, bounds),
             _ => None,
         }
     }
@@ -72,7 +72,48 @@ impl<'a> canvas::Program<Message> for TopologyGraphProgram<'a> {
             self.draw_graph(frame, bounds);
         });
 
-        vec![geometry]
+        // Animated flow dashes live in an uncached overlay (#394) so the
+        // 10 fps animation tick never invalidates the cached base geometry.
+        let animated: Vec<&RenderEdge> = self
+            .state
+            .render
+            .edges
+            .iter()
+            .filter(|e| {
+                e.kind == EdgeKind::Flow
+                    && !e.dimmed
+                    && e.rate + e.reverse_rate >= super::ANIMATED_EDGE_MIN_RATE
+            })
+            .collect();
+        if animated.is_empty() {
+            return vec![geometry];
+        }
+        let mut frame = Frame::new(renderer, bounds.size());
+        let center = Point::new(bounds.width / 2.0, bounds.height / 2.0);
+        for edge in animated {
+            let (Some(from_node), Some(to_node)) = (
+                self.state.render.nodes.get(edge.from),
+                self.state.render.nodes.get(edge.to),
+            ) else {
+                continue;
+            };
+            let from_pos =
+                self.apply_transform(render_node_position(from_node, &self.state.nodes), center);
+            let to_pos =
+                self.apply_transform(render_node_position(to_node, &self.state.nodes), center);
+            let mut path = canvas::path::Builder::new();
+            path.move_to(from_pos);
+            path.line_to(to_pos);
+            let mut stroke = Stroke::default()
+                .with_color(self.edge_kind_color(EdgeKind::Flow))
+                .with_width((1.6 * self.state.zoom).max(1.0));
+            stroke.line_dash = iced::widget::canvas::LineDash {
+                segments: &[4.0, 10.0],
+                offset: self.state.anim_offset as usize,
+            };
+            frame.stroke(&path.build(), stroke);
+        }
+        vec![geometry, frame.into_geometry()]
     }
 
     fn mouse_interaction(
@@ -167,6 +208,21 @@ impl<'a> TopologyGraphProgram<'a> {
         theme::colors(&self.theme()).topology_health(health)
     }
 
+    /// Whether hover-dimming applies to this rendered node (#394): with an
+    /// active hover, everything outside the hovered 1-hop neighborhood fades.
+    fn hover_dims(&self, node: &RenderNode) -> bool {
+        if self.state.hover_set.is_empty() {
+            return false;
+        }
+        match &node.source {
+            RenderSource::Node(id) => !self.state.hover_set.contains(id),
+            RenderSource::Group(_) => !node
+                .members
+                .iter()
+                .any(|m| self.state.hover_set.contains(m)),
+        }
+    }
+
     fn role_color(&self, role: NodeRole) -> Color {
         match role {
             NodeRole::Host => self.node_host_healthy_color(),
@@ -259,6 +315,21 @@ impl<'a> TopologyGraphProgram<'a> {
                     }
                 }
                 interaction.last_pos = Some(*position);
+
+                // Hover tracking (#394): emit only on transitions so mouse
+                // motion inside one node costs nothing.
+                if cursor.is_over(bounds) {
+                    let graph_pos = self.screen_to_graph(*position, bounds);
+                    let hovered = match self.find_render_node_at(graph_pos) {
+                        Some(RenderSource::Node(id)) => Some(id.clone()),
+                        _ => None,
+                    };
+                    if hovered != self.state.hovered {
+                        return Some(canvas::Action::publish(Message::TopologyHover(hovered)));
+                    }
+                } else if self.state.hovered.is_some() {
+                    return Some(canvas::Action::publish(Message::TopologyHover(None)));
+                }
             }
             mouse::Event::ButtonReleased(mouse::Button::Left) => {
                 if let Some(ref node_id) = interaction.dragging_node.take() {
@@ -286,8 +357,28 @@ impl<'a> TopologyGraphProgram<'a> {
         None
     }
 
+    /// Compute and publish a zoom-to-fit (#394) for the current bounds.
+    fn fit_action(&self, bounds: Rectangle) -> Option<canvas::Action<Message>> {
+        let positions: Vec<(f32, f32)> = self
+            .state
+            .render
+            .nodes
+            .iter()
+            .map(|rnode| render_node_position(rnode, &self.state.nodes))
+            .collect();
+        let (zoom, pan) = fit_view(&positions, bounds.width, bounds.height)?;
+        Some(canvas::Action::publish(Message::TopologyFitApplied {
+            zoom,
+            pan,
+        }))
+    }
+
     /// Handle keyboard events.
-    fn handle_keyboard(&self, event: &iced::keyboard::Event) -> Option<canvas::Action<Message>> {
+    fn handle_keyboard(
+        &self,
+        event: &iced::keyboard::Event,
+        bounds: Rectangle,
+    ) -> Option<canvas::Action<Message>> {
         use iced::keyboard::{Event, Key, key::Named};
 
         if let Event::KeyPressed { key, .. } = event {
@@ -303,6 +394,9 @@ impl<'a> TopologyGraphProgram<'a> {
                 }
                 Key::Character(c) if c.as_str() == "0" => {
                     return Some(canvas::Action::publish(Message::TopologyZoomReset));
+                }
+                Key::Character(c) if c.as_str() == "f" => {
+                    return self.fit_action(bounds);
                 }
                 _ => {}
             }
@@ -383,9 +477,13 @@ impl<'a> TopologyGraphProgram<'a> {
             },
             TintSource::Health => self.health_ring_color(node.health),
         };
-        // Stale nodes ghost out (#391); lens/search dimming stacks (#392).
+        // Stale nodes ghost out (#391); lens/search dimming stacks (#392);
+        // hover fades everything outside the hovered neighborhood (#394).
         let is_stale = node.health == NodeHealth::Stale;
-        let alpha = if is_stale { 0.4 } else { 1.0 } * if node.dimmed { 0.35 } else { 1.0 };
+        let hover_dim = self.hover_dims(node);
+        let alpha = if is_stale { 0.4 } else { 1.0 }
+            * if node.dimmed { 0.35 } else { 1.0 }
+            * if hover_dim { 0.3 } else { 1.0 };
         let base_color = Color {
             a: base_color.a * alpha,
             ..base_color
@@ -464,7 +562,7 @@ impl<'a> TopologyGraphProgram<'a> {
         }
 
         // Draw label
-        let label_color = if is_stale || node.dimmed {
+        let label_color = if is_stale || node.dimmed || hover_dim {
             let c = self.node_label_color();
             Color { a: c.a * 0.4, ..c }
         } else {
@@ -578,7 +676,8 @@ impl<'a> TopologyGraphProgram<'a> {
         } else {
             self.edge_kind_color(edge.kind)
         };
-        let color = if edge.dimmed {
+        let hover_dim = self.hover_dims(from_node) || self.hover_dims(to_node);
+        let color = if edge.dimmed || hover_dim {
             Color {
                 a: color.a * 0.3,
                 ..color
@@ -822,6 +921,29 @@ pub fn find_render_edge_at_position(
     best.map(|(index, _)| index)
 }
 
+/// Zoom + pan that fit all `positions` into a viewport of `width` × `height`
+/// with a margin (#394). `None` when there is nothing to fit. Pure.
+pub fn fit_view(positions: &[(f32, f32)], width: f32, height: f32) -> Option<(f32, (f32, f32))> {
+    if positions.is_empty() || width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for (x, y) in positions {
+        min_x = min_x.min(*x);
+        min_y = min_y.min(*y);
+        max_x = max_x.max(*x);
+        max_y = max_y.max(*y);
+    }
+    const MARGIN: f32 = 120.0; // room for node radius + labels
+    let bbox_w = (max_x - min_x) + 2.0 * MARGIN;
+    let bbox_h = (max_y - min_y) + 2.0 * MARGIN;
+    let zoom = (width / bbox_w).min(height / bbox_h).clamp(0.3, 3.0);
+    // screen = center + (pos + pan) * zoom → centering the bbox means
+    // pan = -bbox_center.
+    let pan = (-(min_x + max_x) / 2.0, -(min_y + max_y) / 2.0);
+    Some((zoom, pan))
+}
+
 pub fn point_segment_distance(p: Point, a: Point, b: Point) -> f32 {
     let (abx, aby) = (b.x - a.x, b.y - a.y);
     let len_sq = abx * abx + aby * aby;
@@ -1040,6 +1162,25 @@ mod tests {
             position: (x, y),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_fit_view_centers_and_clamps() {
+        // Nodes spread 1000 wide, viewport 800x600 → zoom < 1, pan centers.
+        let positions = vec![(-500.0, -100.0), (500.0, 100.0)];
+        let (zoom, pan) = fit_view(&positions, 800.0, 600.0).unwrap();
+        assert!((0.3..1.0).contains(&zoom));
+        assert_eq!(pan, (0.0, 0.0));
+        // Offset cluster pans back to center; small extents zoom in
+        // (bounded by the label margin and the 3.0 clamp).
+        let positions = vec![(190.0, 90.0), (210.0, 110.0)];
+        let (zoom, pan) = fit_view(&positions, 800.0, 600.0).unwrap();
+        assert_eq!(pan, (-200.0, -100.0));
+        assert!((1.0..=3.0).contains(&zoom));
+        // A single point clamps at max zoom.
+        let (zoom, _) = fit_view(&[(0.0, 0.0)], 2000.0, 2000.0).unwrap();
+        assert_eq!(zoom, 3.0);
+        assert!(fit_view(&[], 800.0, 600.0).is_none());
     }
 
     #[test]

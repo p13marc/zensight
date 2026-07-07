@@ -346,6 +346,22 @@ pub enum Message {
     TopologyCopyText(String),
     /// Pivot from the topology to the netring flow table (#393).
     TopologyOpenFlows,
+    /// Switch the topology layout mode (#394).
+    TopologySetLayout(crate::view::topology::LayoutMode),
+    /// Toggle a topology node's pin (#394).
+    TopologyTogglePin(String),
+    /// Apply a canvas-computed zoom-to-fit (#394).
+    TopologyFitApplied {
+        zoom: f32,
+        pan: (f32, f32),
+    },
+    /// Hover moved onto (or off) a topology node (#394); emitted on change
+    /// only.
+    TopologyHover(Option<String>),
+    /// Advance the topology flow-dash animation (#394); gated subscription.
+    TopologyAnimTick,
+    /// Toggle the topology lens legend (#394).
+    TopologyToggleLegend,
     /// Fetch the on-demand netring TLS asset inventory.
     FetchNetringTls,
     /// A netring TLS-inventory reply: the decoded records, or an error message.
