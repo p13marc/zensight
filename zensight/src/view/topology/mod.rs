@@ -6,6 +6,7 @@
 pub mod graph;
 pub mod layout;
 pub mod model;
+pub mod panel;
 
 use std::collections::HashMap;
 
@@ -85,6 +86,26 @@ pub struct TopologyState {
     /// later grouping/lens) applied. Rebuilt by [`Self::invalidate`] on
     /// structural or pref changes — never per frame.
     pub render: RenderGraph,
+    /// Details-on-demand data for the side panel (#393), fetched on selection
+    /// (never on tick) and reset when the selection changes.
+    pub panel: PanelData,
+}
+
+/// On-demand side-panel data (#393).
+#[derive(Debug, Default)]
+pub struct PanelData {
+    /// Listen sockets for the selected node.
+    pub listen: crate::view::specialized::fetch::Fetch<Vec<zensight_common::SocketRecord>>,
+    /// Recent flows between the selected edge's endpoints.
+    pub edge_flows: crate::view::specialized::fetch::Fetch<Vec<zensight_common::FlowRecord>>,
+    /// One in-flight flow→process join for the edge panel (#309 reuse):
+    /// `(flow key, fetched attribution)`.
+    pub attribution: Option<(
+        String,
+        crate::view::specialized::fetch::Fetch<
+            Option<crate::view::specialized::attribution::AttributedProcess>,
+        >,
+    )>,
 }
 
 impl Default for TopologyState {
@@ -110,11 +131,18 @@ impl Default for TopologyState {
             prefs: TopoPrefs::default(),
             group_labels: HashMap::new(),
             render: RenderGraph::default(),
+            panel: PanelData::default(),
         }
     }
 }
 
 impl TopologyState {
+    /// The remembered traffic matrix (#393): read by the side panel's
+    /// top-talkers section.
+    pub(crate) fn matrix(&self) -> &[zensight_common::MatrixRecord] {
+        &self.last_matrix
+    }
+
     /// Recompute the render graph and clear the canvas cache (#392). Call
     /// after any change that affects what is drawn: node/edge structure,
     /// alerts, rates, search, prefs. Selection/zoom/pan/drag only need
@@ -585,15 +613,23 @@ impl TopologyState {
         }
     }
 
-    /// Select a node by ID.
+    /// Select a node by ID. Panel data resets; the app triggers the
+    /// on-demand fetches (#393).
     pub fn select_node(&mut self, node_id: NodeId) {
+        if self.selected_node.as_ref() != Some(&node_id) {
+            self.panel = PanelData::default();
+        }
         self.selected_node = Some(node_id);
         self.selected_edge = None;
         self.cache.clear();
     }
 
-    /// Select an edge by index.
+    /// Select an edge by index. Panel data resets; the app triggers the
+    /// on-demand fetches (#393).
     pub fn select_edge(&mut self, edge_index: usize) {
+        if self.selected_edge != Some(edge_index) {
+            self.panel = PanelData::default();
+        }
         self.selected_edge = Some(edge_index);
         self.selected_node = None;
         self.cache.clear();
@@ -603,6 +639,7 @@ impl TopologyState {
     pub fn clear_selection(&mut self) {
         self.selected_node = None;
         self.selected_edge = None;
+        self.panel = PanelData::default();
         self.cache.clear();
     }
 
@@ -794,22 +831,28 @@ impl TopologyState {
     }
 }
 
-/// Render the topology view.
-pub fn topology_view<'a>(state: &'a TopologyState, theme: AppTheme) -> Element<'a, Message> {
+/// Render the topology view. `entities` and `store` feed the side panel's
+/// identity/evidence and sparkline sections (#393).
+pub fn topology_view<'a>(
+    state: &'a TopologyState,
+    entities: &'a crate::entity::EntityStore,
+    store: &'a crate::store::MetricStore,
+    theme: AppTheme,
+) -> Element<'a, Message> {
     let is_dark = matches!(theme, AppTheme::Dark);
     let header = render_header(state);
     let graph = TopologyGraph::view(state, is_dark);
 
-    // Show the node panel, or the edge detail panel (#25), beside the graph.
+    // Show the node panel, or the edge detail panel (#25/#393), beside the graph.
     let main_content: Element<'a, Message> = if let Some(ref node_id) = state.selected_node {
         if let Some(node) = state.nodes.get(node_id) {
-            let panel = render_node_info_panel(node);
+            let panel = panel::node_panel(state, entities, store, node);
             row![graph, panel].spacing(10).into()
         } else {
             graph
         }
     } else if let Some(edge) = state.selected_edge.and_then(|i| state.edges.get(i)) {
-        let panel = render_edge_info_panel(edge);
+        let panel = panel::edge_panel(state, edge);
         row![graph, panel].spacing(10).into()
     } else {
         graph
@@ -820,260 +863,6 @@ pub fn topology_view<'a>(state: &'a TopologyState, theme: AppTheme) -> Element<'
     container(content)
         .width(Length::Fill)
         .height(Length::Fill)
-        .into()
-}
-
-/// Generate a simple text-based progress bar.
-fn progress_bar(percentage: f64, width: usize) -> String {
-    let filled = ((percentage / 100.0) * width as f64).round() as usize;
-    let empty = width.saturating_sub(filled);
-    format!("[{}{}]", "=".repeat(filled), " ".repeat(empty))
-}
-
-/// Render the node info panel (shown when a node is selected).
-fn render_node_info_panel(node: &Node) -> Element<'_, Message> {
-    use iced::widget::rule;
-
-    // Header with a protocol-aware icon and name (#83).
-    let header = row![
-        icons::protocol_icon(primary_protocol(node), IconSize::Large),
-        column![
-            text(&node.label).size(16),
-            text(match node.provenance {
-                Provenance::Passive => format!("{} · wire-only", node.role.label()),
-                _ => node.role.label().to_string(),
-            })
-            .size(10),
-        ]
-        .spacing(2)
-    ]
-    .spacing(10)
-    .align_y(Alignment::Center);
-
-    // Status indicator (#391): the four health states.
-    let status = match node.health {
-        NodeHealth::Healthy => row![
-            icons::status_healthy(IconSize::Small),
-            text("Healthy - receiving data").size(11)
-        ],
-        NodeHealth::Degraded => row![
-            icons::status_warning(IconSize::Small),
-            text("Degraded - partial data or sensor trouble").size(11)
-        ],
-        NodeHealth::Down => row![
-            icons::status_warning(IconSize::Small),
-            text("Down - all sensors report offline").size(11)
-        ],
-        NodeHealth::Stale => row![
-            icons::status_warning(IconSize::Small),
-            text("Stale - no recent data").size(11)
-        ],
-    }
-    .spacing(5)
-    .align_y(Alignment::Center);
-
-    let mut info_items = column![header, status, rule::horizontal(1)].spacing(8);
-
-    // Hardware vendor from the passive-asset inventory (#391).
-    if let Some(ref vendor) = node.vendor {
-        info_items = info_items.push(text(format!("Vendor: {vendor}")).size(11));
-    }
-
-    // Cross-sensor correlation: "seen by N sensors" (#25).
-    if let Some(n) = node.sensor_count {
-        info_items = info_items.push(text(format!("Seen by {n} sensor(s)")).size(11));
-    }
-
-    // Which protocols cover this host (#83).
-    if !node.protocols.is_empty() {
-        let names: Vec<String> = node
-            .protocols
-            .iter()
-            .map(|p| format!("{p:?}").to_lowercase())
-            .collect();
-        info_items = info_items.push(text(format!("Covered by: {}", names.join(" · "))).size(11));
-    }
-
-    // Protocol-agnostic signal (#83): how many metrics this host is tracked by.
-    // Keeps netflow/snmp/modbus/gnmi nodes — which have no dedicated section
-    // below — from showing a near-empty panel.
-    if node.metric_count > 0 {
-        info_items =
-            info_items.push(text(format!("Metrics tracked: {}", node.metric_count)).size(11));
-    }
-
-    // System resources section
-    let has_system_metrics = node.cpu_usage.is_some() || node.memory_usage.is_some();
-    if has_system_metrics {
-        info_items = info_items.push(text("System Resources").size(12));
-
-        if let Some(cpu) = node.cpu_usage {
-            let cpu_bar = format!("CPU: {:.1}% {}", cpu, progress_bar(cpu, 20));
-            info_items = info_items.push(text(cpu_bar).size(11));
-        }
-
-        if let Some(mem) = node.memory_usage {
-            let mem_bar = format!("Mem: {:.1}% {}", mem, progress_bar(mem, 20));
-            info_items = info_items.push(text(mem_bar).size(11));
-        }
-    }
-
-    // Network section
-    let has_network = node.network_rx.is_some() || node.network_tx.is_some();
-    if has_network {
-        info_items = info_items.push(rule::horizontal(1));
-        info_items = info_items.push(text("Network I/O").size(12));
-
-        // Live rates first (#391), cumulative counters after.
-        if let (Some(rx), Some(tx)) = (node.rx_rate, node.tx_rate) {
-            info_items = info_items
-                .push(text(format!("  ↓ {}  ↑ {}", format_rate(rx), format_rate(tx))).size(11));
-        }
-        if let Some(rx) = node.network_rx {
-            info_items =
-                info_items.push(text(format!("  RX: {}", graph::format_bytes(rx))).size(11));
-        }
-        if let Some(tx) = node.network_tx {
-            info_items =
-                info_items.push(text(format!("  TX: {}", graph::format_bytes(tx))).size(11));
-        }
-        // Total
-        let total = node.network_rx.unwrap_or(0) + node.network_tx.unwrap_or(0);
-        if total > 0 {
-            info_items =
-                info_items.push(text(format!("  Total: {}", graph::format_bytes(total))).size(11));
-        }
-    }
-
-    // Netlink section: kernel networking summary (#83).
-    let has_netlink = node.iface_total.is_some()
-        || node.tcp_established.is_some()
-        || node.tcp_listen.is_some()
-        || node.routes_total.is_some()
-        || node.neighbors_total.is_some();
-    if has_netlink {
-        info_items = info_items.push(rule::horizontal(1));
-        info_items = info_items.push(text("Kernel Networking").size(12));
-
-        if let (Some(up), Some(total)) = (node.iface_up, node.iface_total) {
-            info_items = info_items.push(text(format!("  Interfaces: {up}/{total} up")).size(11));
-        }
-        if let (Some(est), Some(lis)) = (node.tcp_established, node.tcp_listen) {
-            info_items = info_items
-                .push(text(format!("  TCP: {est:.0} established, {lis:.0} listening")).size(11));
-        } else if let Some(est) = node.tcp_established {
-            info_items = info_items.push(text(format!("  TCP established: {est:.0}")).size(11));
-        }
-        if let Some(routes) = node.routes_total {
-            info_items = info_items.push(text(format!("  Routes: {routes:.0}")).size(11));
-        }
-        if let Some(nbrs) = node.neighbors_total {
-            info_items = info_items.push(text(format!("  Neighbors: {nbrs:.0}")).size(11));
-        }
-    }
-
-    // Firing alerts for this host (#83).
-    if !node.alerts.is_empty() {
-        use crate::view::alerts::Severity;
-        info_items = info_items.push(rule::horizontal(1));
-        info_items = info_items.push(text(format!("Alerts ({})", node.alerts.len())).size(12));
-        for a in &node.alerts {
-            let color = Severity::from(a.severity).color();
-            info_items = info_items.push(
-                text(format!("  ● [{}] {} — {}", a.severity, a.rule, a.summary))
-                    .size(11)
-                    .style(move |_: &iced::Theme| iced::widget::text::Style { color: Some(color) }),
-            );
-        }
-    }
-
-    // Layout info
-    info_items = info_items.push(rule::horizontal(1));
-    if node.pinned {
-        info_items = info_items.push(
-            row![
-                icons::status_warning(IconSize::Small),
-                text("Position pinned").size(10)
-            ]
-            .spacing(4)
-            .align_y(Alignment::Center),
-        );
-    }
-
-    // Action buttons
-    info_items = info_items.push(rule::horizontal(1));
-
-    let view_btn = button(
-        row![
-            icons::arrow_right(IconSize::Small),
-            text("View Device Details").size(11)
-        ]
-        .spacing(5)
-        .align_y(Alignment::Center),
-    )
-    .on_press(Message::TopologyViewDeviceDetail(node.id.clone()))
-    .style(iced::widget::button::primary)
-    .width(Length::Fill);
-    info_items = info_items.push(view_btn);
-
-    // Focus mode (#392): isolate this node's neighborhood.
-    let focus_btn = button(text("Focus").size(11))
-        .on_press(Message::TopologyFocusNode(node.id.clone()))
-        .style(iced::widget::button::secondary)
-        .width(Length::Fill);
-    info_items = info_items.push(focus_btn);
-
-    let clear_btn = button(text("Clear Selection").size(11))
-        .on_press(Message::TopologyClearSelection)
-        .style(iced::widget::button::secondary)
-        .width(Length::Fill);
-    info_items = info_items.push(clear_btn);
-
-    container(info_items)
-        .padding(15)
-        .width(Length::Fixed(200.0))
-        .style(container::rounded_box)
-        .into()
-}
-
-/// Render the edge detail panel (#25): src→dst, protocol, observed bytes/packets,
-/// and when last seen. Shown when an edge is selected.
-fn render_edge_info_panel(edge: &Edge) -> Element<'_, Message> {
-    use crate::view::formatting::format_timestamp;
-    use crate::view::topology::graph::format_bytes;
-    use iced::widget::rule;
-
-    let header = row![
-        icons::network(IconSize::Large),
-        text(format!("{} → {}", edge.from, edge.to)).size(15),
-    ]
-    .spacing(10)
-    .align_y(Alignment::Center);
-
-    let proto = edge.protocol.as_deref().unwrap_or("?");
-    let mut items = column![
-        header,
-        rule::horizontal(1),
-        text("Observed flow").size(12),
-        text(format!("Protocol: {proto}")).size(11),
-        text(format!("Bytes: {}", format_bytes(edge.bytes))).size(11),
-        text(format!("Packets: {}", edge.packets)).size(11),
-        text(format!("Last seen: {}", format_timestamp(edge.last_seen))).size(11),
-    ]
-    .spacing(8);
-
-    items = items.push(rule::horizontal(1));
-    items = items.push(
-        button(text("Clear Selection").size(11))
-            .on_press(Message::TopologyClearSelection)
-            .style(iced::widget::button::secondary)
-            .width(Length::Fill),
-    );
-
-    container(items)
-        .padding(15)
-        .width(Length::Fixed(220.0))
-        .style(container::rounded_box)
         .into()
 }
 

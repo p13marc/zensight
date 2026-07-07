@@ -23,6 +23,27 @@ use zensight::view::settings::{SettingsState, settings_view};
 use zensight::view::specialized::SyslogFilterState;
 use zensight::view::topology::{TopologyState, topology_view};
 
+/// Render the topology view with empty panel context (#393).
+fn topo_view(state: &TopologyState, theme: AppTheme) -> iced::Element<'_, Message> {
+    thread_local! {
+        static ENTITIES: std::cell::OnceCell<&'static zensight::entity::EntityStore> =
+            const { std::cell::OnceCell::new() };
+        static STORE: std::cell::OnceCell<&'static zensight::store::MetricStore> =
+            const { std::cell::OnceCell::new() };
+    }
+    let entities = ENTITIES
+        .with(|c| *c.get_or_init(|| Box::leak(Box::new(zensight::entity::EntityStore::default()))));
+    let store = STORE.with(|c| {
+        *c.get_or_init(|| {
+            Box::leak(Box::new(zensight::store::MetricStore::new(
+                zensight::store::DEFAULT_HOT_CAPACITY,
+                None,
+            )))
+        })
+    });
+    topology_view(state, entities, store, theme)
+}
+
 use std::collections::HashMap;
 use zensight_common::Protocol;
 
@@ -1130,7 +1151,7 @@ fn test_overview_collapse_toggle() {
 #[test]
 fn test_topology_view_empty() {
     let state = TopologyState::default();
-    let mut ui = simulator(topology_view(&state, AppTheme::Dark));
+    let mut ui = simulator(topo_view(&state, AppTheme::Dark));
 
     // Should show the title
     assert!(ui.find("Network Topology").is_ok());
@@ -1146,7 +1167,7 @@ fn test_topology_view_empty() {
 #[test]
 fn test_topology_back_button() {
     let state = TopologyState::default();
-    let mut ui = simulator(topology_view(&state, AppTheme::Dark));
+    let mut ui = simulator(topo_view(&state, AppTheme::Dark));
 
     // Click Back button
     let _ = ui.click("Back");
@@ -1160,7 +1181,7 @@ fn test_topology_back_button() {
 #[test]
 fn test_topology_zoom_controls() {
     let state = TopologyState::default();
-    let mut ui = simulator(topology_view(&state, AppTheme::Dark));
+    let mut ui = simulator(topo_view(&state, AppTheme::Dark));
 
     // Click zoom in button
     let _ = ui.click("+");
@@ -1186,7 +1207,7 @@ fn test_shell_topology_button() {
 #[test]
 fn test_topology_search_input() {
     let state = TopologyState::default();
-    let mut ui = simulator(topology_view(&state, AppTheme::Dark));
+    let mut ui = simulator(topo_view(&state, AppTheme::Dark));
 
     // Should show search placeholder
     assert!(ui.find("Search nodes...").is_ok());
@@ -1198,7 +1219,7 @@ fn test_topology_lens_selector() {
     use zensight::view::topology::Lens;
 
     let state = TopologyState::default();
-    let mut ui = simulator(topology_view(&state, AppTheme::Dark));
+    let mut ui = simulator(topo_view(&state, AppTheme::Dark));
 
     // All four lenses render in the control row.
     for label in ["Traffic", "Security", "L2", "Health"] {
@@ -1219,7 +1240,7 @@ fn test_topology_lens_selector() {
 #[test]
 fn test_topology_filter_controls() {
     let state = TopologyState::default();
-    let mut ui = simulator(topology_view(&state, AppTheme::Dark));
+    let mut ui = simulator(topo_view(&state, AppTheme::Dark));
     for label in ["Hide idle", "Hide passive", "Hide external", "Flows:"] {
         assert!(ui.find(label).is_ok(), "missing control {label}");
     }
@@ -1249,7 +1270,7 @@ fn test_topology_focus_flow() {
         },
     );
     state.selected_node = Some("web1".to_string());
-    let mut ui = simulator(topology_view(&state, AppTheme::Dark));
+    let mut ui = simulator(topo_view(&state, AppTheme::Dark));
     let _ = ui.click("Focus");
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(
@@ -1264,7 +1285,7 @@ fn test_topology_focus_flow() {
         root: "web1".to_string(),
         hops: 1,
     });
-    let mut ui = simulator(topology_view(&state, AppTheme::Dark));
+    let mut ui = simulator(topo_view(&state, AppTheme::Dark));
     assert!(ui.find("Focus: web1").is_ok());
     let _ = ui.click("Exit focus");
     let messages: Vec<Message> = ui.into_messages().collect();
@@ -1275,11 +1296,102 @@ fn test_topology_focus_flow() {
     );
 }
 
+/// The node panel shows identity, listening sockets, and pivots (#393).
+#[test]
+fn test_topology_node_panel_sections() {
+    use zensight::view::specialized::fetch::Fetch;
+    use zensight::view::topology::Node;
+    use zensight_common::{Protocol, SocketRecord};
+
+    let mut state = TopologyState::default();
+    let mut node = Node {
+        id: "web1".to_string(),
+        label: "web1".to_string(),
+        ips: vec!["10.0.0.11".to_string()],
+        cpu_usage: Some(34.0),
+        ..Default::default()
+    };
+    node.protocols.insert(Protocol::Netlink);
+    state.nodes.insert("web1".to_string(), node);
+    state.selected_node = Some("web1".to_string());
+    state.panel.listen = Fetch::Ready(vec![SocketRecord {
+        local: "0.0.0.0:22".to_string(),
+        state: "listen".to_string(),
+        process: Some("sshd".to_string()),
+        ..Default::default()
+    }]);
+
+    let mut ui = simulator(topo_view(&state, AppTheme::Dark));
+    assert!(ui.find("Identity").is_ok());
+    assert!(ui.find("Listening").is_ok());
+    assert!(ui.find(":22 · sshd").is_ok());
+    assert!(ui.find("View Device Details").is_ok());
+    assert!(ui.find("Focus").is_ok());
+}
+
+/// The edge panel lists backing flows with attribution + community-id copy
+/// (#393).
+#[test]
+fn test_topology_edge_panel_flows() {
+    use zensight::view::specialized::fetch::Fetch;
+    use zensight::view::topology::{Edge, EdgeKind, Node};
+    use zensight_common::FlowRecord;
+
+    let mut state = TopologyState::default();
+    for id in ["a", "b"] {
+        state.nodes.insert(
+            id.to_string(),
+            Node {
+                id: id.to_string(),
+                label: id.to_string(),
+                ..Default::default()
+            },
+        );
+    }
+    state.edges.push(Edge {
+        from: "a".to_string(),
+        to: "b".to_string(),
+        kind: EdgeKind::Flow,
+        rate: 1000.0,
+        reverse_rate: 200.0,
+        ..Default::default()
+    });
+    state.selected_edge = Some(0);
+    state.panel.edge_flows = Fetch::Ready(vec![FlowRecord {
+        src: "10.0.0.1:1234".to_string(),
+        dst: "10.0.0.2:443".to_string(),
+        proto: "tcp".to_string(),
+        bytes: 4096,
+        packets: 12,
+        duration_ms: 350,
+        reason: "fin".to_string(),
+        community_id: Some("1:abcdef".to_string()),
+        directed: true,
+        bytes_initiator: 2048,
+        bytes_responder: 2048,
+        packets_initiator: 6,
+        packets_responder: 6,
+        dst_names: Vec::new(),
+    }]);
+
+    let mut ui = simulator(topo_view(&state, AppTheme::Dark));
+    assert!(ui.find("Flows").is_ok());
+    assert!(ui.find("attr").is_ok());
+    // Copying the community id emits the clipboard message.
+    let _ = ui.click("copy");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::TopologyCopyText(cid) if cid == "1:abcdef"))
+    );
+}
+
 /// The active lens button is inert; the edge-label picker is present (#392).
 #[test]
 fn test_topology_lens_active_inert() {
     let state = TopologyState::default(); // default lens = Traffic
-    let mut ui = simulator(topology_view(&state, AppTheme::Dark));
+    let mut ui = simulator(topo_view(&state, AppTheme::Dark));
     let _ = ui.click("Traffic");
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(
@@ -1289,7 +1401,7 @@ fn test_topology_lens_active_inert() {
     );
 
     let state = TopologyState::default();
-    let mut ui = simulator(topology_view(&state, AppTheme::Dark));
+    let mut ui = simulator(topo_view(&state, AppTheme::Dark));
     assert!(ui.find("Edge labels:").is_ok());
 }
 
