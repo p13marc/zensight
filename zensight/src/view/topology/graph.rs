@@ -194,6 +194,18 @@ impl<'a> TopologyGraphProgram<'a> {
                         )));
                     }
 
+                    // Then an edge (#391): nodes draw on top, so they win ties.
+                    // Tolerance is in graph units — widen as the view zooms out.
+                    let tolerance = 8.0 / self.state.zoom.max(0.1);
+                    if let Some(index) = find_edge_at_position(
+                        &self.state.edges,
+                        &self.state.nodes,
+                        graph_pos,
+                        tolerance,
+                    ) {
+                        return Some(canvas::Action::publish(Message::TopologySelectEdge(index)));
+                    }
+
                     // Otherwise, start panning
                     interaction.panning = true;
                     interaction.last_pos = Some(pos);
@@ -285,8 +297,8 @@ impl<'a> TopologyGraphProgram<'a> {
         );
 
         // Draw edges first (behind nodes)
-        for edge in &self.state.edges {
-            self.draw_edge(frame, edge, center);
+        for (index, edge) in self.state.edges.iter().enumerate() {
+            self.draw_edge(frame, edge, index, center);
         }
 
         // Draw nodes
@@ -473,7 +485,7 @@ impl<'a> TopologyGraphProgram<'a> {
     }
 
     /// Draw an edge between two nodes.
-    fn draw_edge(&self, frame: &mut Frame, edge: &super::Edge, center: Point) {
+    fn draw_edge(&self, frame: &mut Frame, edge: &super::Edge, index: usize, center: Point) {
         let from_node = match self.state.nodes.get(&edge.from) {
             Some(n) => n,
             None => return,
@@ -494,15 +506,9 @@ impl<'a> TopologyGraphProgram<'a> {
             EdgeKind::Flow => edge_width(edge.rate + edge.reverse_rate, edge.bytes),
         };
 
-        // Edge color
-        let is_selected = self.state.selected_edge
-            == Some(
-                self.state
-                    .edges
-                    .iter()
-                    .position(|e| e.from == edge.from && e.to == edge.to)
-                    .unwrap_or(usize::MAX),
-            );
+        // Edge color: selection compares the stored index, not a rescan of
+        // (from, to) — duplicate pairs can exist across kinds (#391).
+        let is_selected = self.state.selected_edge == Some(index);
 
         let color = if is_selected {
             self.selection_ring_color()
@@ -694,6 +700,47 @@ pub fn find_node_at_position(
     None
 }
 
+/// Distance from point `p` to the segment `a`–`b`. Degenerate segments
+/// collapse to point distance. Pure.
+pub fn point_segment_distance(p: Point, a: Point, b: Point) -> f32 {
+    let (abx, aby) = (b.x - a.x, b.y - a.y);
+    let len_sq = abx * abx + aby * aby;
+    let t = if len_sq <= f32::EPSILON {
+        0.0
+    } else {
+        (((p.x - a.x) * abx + (p.y - a.y) * aby) / len_sq).clamp(0.0, 1.0)
+    };
+    let (cx, cy) = (a.x + abx * t, a.y + aby * t);
+    let (dx, dy) = (p.x - cx, p.y - cy);
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// Find the edge nearest to `pos` within `tolerance` (graph units), by
+/// point-to-segment distance between its endpoint node positions. Returns the
+/// closest match's index so overlapping edges resolve deterministically. Pure.
+pub fn find_edge_at_position(
+    edges: &[super::Edge],
+    nodes: &std::collections::HashMap<super::NodeId, super::Node>,
+    pos: Point,
+    tolerance: f32,
+) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (index, edge) in edges.iter().enumerate() {
+        let (Some(from), Some(to)) = (nodes.get(&edge.from), nodes.get(&edge.to)) else {
+            continue;
+        };
+        let d = point_segment_distance(
+            pos,
+            Point::new(from.position.0, from.position.1),
+            Point::new(to.position.0, to.position.1),
+        );
+        if d <= tolerance && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+            best = Some((index, d));
+        }
+    }
+    best.map(|(index, _)| index)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -873,6 +920,72 @@ mod tests {
             position: (x, y),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_point_segment_distance() {
+        let a = Point::new(0.0, 0.0);
+        let b = Point::new(100.0, 0.0);
+        // Perpendicular from the middle.
+        assert!((point_segment_distance(Point::new(50.0, 30.0), a, b) - 30.0).abs() < 0.001);
+        // On the segment.
+        assert!(point_segment_distance(Point::new(25.0, 0.0), a, b) < 0.001);
+        // Beyond an endpoint: distance to the endpoint, not the infinite line.
+        assert!((point_segment_distance(Point::new(130.0, 40.0), a, b) - 50.0).abs() < 0.001);
+        // Degenerate segment.
+        assert!((point_segment_distance(Point::new(3.0, 4.0), a, a) - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_find_edge_at_position_hit_and_miss() {
+        let mut nodes = HashMap::new();
+        nodes.insert("a".to_string(), create_test_node("a", 0.0, 0.0));
+        nodes.insert("b".to_string(), create_test_node("b", 200.0, 0.0));
+        nodes.insert("c".to_string(), create_test_node("c", 0.0, 200.0));
+        let edges = vec![
+            crate::view::topology::Edge {
+                from: "a".to_string(),
+                to: "b".to_string(),
+                ..Default::default()
+            },
+            crate::view::topology::Edge {
+                from: "a".to_string(),
+                to: "c".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        // Near the a-b segment midpoint.
+        assert_eq!(
+            find_edge_at_position(&edges, &nodes, Point::new(100.0, 5.0), 8.0),
+            Some(0)
+        );
+        // Near the a-c segment.
+        assert_eq!(
+            find_edge_at_position(&edges, &nodes, Point::new(4.0, 100.0), 8.0),
+            Some(1)
+        );
+        // Far from both.
+        assert_eq!(
+            find_edge_at_position(&edges, &nodes, Point::new(150.0, 150.0), 8.0),
+            None
+        );
+        // Closest wins where both are in tolerance (near their shared corner,
+        // slightly toward a-b).
+        assert_eq!(
+            find_edge_at_position(&edges, &nodes, Point::new(30.0, 3.0), 20.0),
+            Some(0)
+        );
+        // Edge with a missing endpoint node is skipped.
+        let dangling = vec![crate::view::topology::Edge {
+            from: "a".to_string(),
+            to: "ghost".to_string(),
+            ..Default::default()
+        }];
+        assert_eq!(
+            find_edge_at_position(&dangling, &nodes, Point::new(0.0, 0.0), 50.0),
+            None
+        );
     }
 
     #[test]
