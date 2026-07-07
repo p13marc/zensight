@@ -5,8 +5,8 @@ use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke, Text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Theme};
 
 use super::{
-    EdgeKind, NodeHealth, NodeRole, Provenance, RenderEdge, RenderNode, RenderSource,
-    TopologyState, render_node_position,
+    EdgeKind, EdgeLabelMode, NodeHealth, NodeRole, Provenance, RenderEdge, RenderNode,
+    RenderSource, TintSource, TopologyState, render_node_position,
 };
 use crate::message::Message;
 use crate::view::theme;
@@ -165,6 +165,17 @@ impl<'a> TopologyGraphProgram<'a> {
 
     fn health_ring_color(&self, health: NodeHealth) -> Color {
         theme::colors(&self.theme()).topology_health(health)
+    }
+
+    fn role_color(&self, role: NodeRole) -> Color {
+        match role {
+            NodeRole::Host => self.node_host_healthy_color(),
+            NodeRole::Router => self.node_router_color(),
+            NodeRole::Switch | NodeRole::AccessPoint => self.node_switch_color(),
+            NodeRole::Phone | NodeRole::Iot | NodeRole::Internet | NodeRole::Unknown => {
+                self.node_unknown_color()
+            }
+        }
     }
 
     fn edge_label_color(&self) -> Color {
@@ -356,18 +367,18 @@ impl<'a> TopologyGraphProgram<'a> {
         };
         let radius = (base_radius * self.state.zoom).max(15.0);
 
-        // Fill is role-keyed (#391); a firing alert overrides it, and health
-        // is a ring stroke rather than a fill change so both read at once.
-        let base_color = match node.alert {
-            Some(sev) => theme::colors(&self.theme()).alert_severity(sev),
-            None => match node.role {
-                NodeRole::Host => self.node_host_healthy_color(),
-                NodeRole::Router => self.node_router_color(),
-                NodeRole::Switch | NodeRole::AccessPoint => self.node_switch_color(),
-                NodeRole::Phone | NodeRole::Iot | NodeRole::Internet | NodeRole::Unknown => {
-                    self.node_unknown_color()
-                }
+        // Fill per the lens's tint source (#392). Role tint keeps the alert
+        // override (#391); health stays a ring stroke so both read at once.
+        let base_color = match node.tint {
+            TintSource::Role => match node.alert {
+                Some(sev) => theme::colors(&self.theme()).alert_severity(sev),
+                None => self.role_color(node.role),
             },
+            TintSource::Alert => match node.alert {
+                Some(sev) => theme::colors(&self.theme()).alert_severity(sev),
+                None => self.node_unknown_color(),
+            },
+            TintSource::Health => self.health_ring_color(node.health),
         };
         // Stale nodes ghost out (#391); lens/search dimming stacks (#392).
         let is_stale = node.health == NodeHealth::Stale;
@@ -611,13 +622,20 @@ impl<'a> TopologyGraphProgram<'a> {
             self.fill_triangle(frame, head, color);
         }
 
-        // Label at midpoint: live rate when rated, else cumulative bytes.
-        let label_text = if edge.rate + edge.reverse_rate > 0.0 {
-            Some(super::format_rate(edge.rate + edge.reverse_rate))
-        } else if edge.bytes > 0 {
-            Some(format_bytes(edge.bytes))
-        } else {
-            None
+        // Label at midpoint per the edge-label mode (#392).
+        let label_text = match self.state.prefs.edge_label {
+            EdgeLabelMode::Hidden => None,
+            EdgeLabelMode::Packets => (edge.packets > 0).then(|| format!("{} pkts", edge.packets)),
+            EdgeLabelMode::Protocol => edge.protocol.clone(),
+            EdgeLabelMode::Rate => {
+                if edge.rate + edge.reverse_rate > 0.0 {
+                    Some(super::format_rate(edge.rate + edge.reverse_rate))
+                } else if edge.bytes > 0 {
+                    Some(format_bytes(edge.bytes))
+                } else {
+                    None
+                }
+            }
         };
         if let Some(content) = label_text {
             let mid = Point::new((from_pos.x + to_pos.x) / 2.0, (from_pos.y + to_pos.y) / 2.0);

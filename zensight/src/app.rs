@@ -774,6 +774,14 @@ impl ZenSight {
             Message::TopologySetSearch(query) => {
                 self.topology.set_search(query);
             }
+
+            Message::TopologySetLens(lens) => {
+                self.topology.set_lens(lens);
+            }
+
+            Message::TopologySetEdgeLabel(mode) => {
+                self.topology.set_edge_label(mode);
+            }
             other => return ControlFlow::Continue(other),
         }
         ControlFlow::Break(Task::none())

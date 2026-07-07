@@ -151,6 +151,9 @@ pub struct Node {
     /// The host's identifying IPs (from its correlator entity, or the node id
     /// itself when it is an IP). Drives subnet grouping (#392).
     pub ips: Vec<String>,
+    /// The host's identifying MACs (from its correlator entity). Shown by the
+    /// L2 lens (#392).
+    pub macs: Vec<String>,
     /// Which protocols' devices map to this host (#83). Drives the header icon
     /// and the "covered by" badges in the info panel.
     pub protocols: std::collections::BTreeSet<zensight_common::Protocol>,
@@ -676,6 +679,82 @@ pub enum Lens {
     Health,
 }
 
+impl Lens {
+    /// Every lens, in display order.
+    pub const ALL: [Lens; 4] = [Lens::Traffic, Lens::Security, Lens::L2, Lens::Health];
+
+    /// Button label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Lens::Traffic => "Traffic",
+            Lens::Security => "Security",
+            Lens::L2 => "L2",
+            Lens::Health => "Health",
+        }
+    }
+
+    /// The lens's presentation rules — data interpreted by one draw path,
+    /// not four draw paths.
+    pub fn spec(self) -> LensSpec {
+        match self {
+            Lens::Traffic => LensSpec {
+                edge_kinds: &[EdgeKind::Flow, EdgeKind::L2Adjacency, EdgeKind::Gateway],
+                tint: TintSource::Role,
+                emphasize_passive: false,
+                dim_unalerted: false,
+                l2_labels: false,
+            },
+            Lens::Security => LensSpec {
+                edge_kinds: &[EdgeKind::Flow, EdgeKind::L2Adjacency, EdgeKind::Gateway],
+                tint: TintSource::Alert,
+                emphasize_passive: true,
+                dim_unalerted: true,
+                l2_labels: false,
+            },
+            Lens::L2 => LensSpec {
+                edge_kinds: &[EdgeKind::L2Adjacency, EdgeKind::Gateway],
+                tint: TintSource::Role,
+                emphasize_passive: false,
+                dim_unalerted: false,
+                l2_labels: true,
+            },
+            Lens::Health => LensSpec {
+                edge_kinds: &[EdgeKind::Flow, EdgeKind::L2Adjacency, EdgeKind::Gateway],
+                tint: TintSource::Health,
+                emphasize_passive: false,
+                dim_unalerted: false,
+                l2_labels: false,
+            },
+        }
+    }
+}
+
+/// A lens's presentation rules (#392).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LensSpec {
+    /// Edge kinds this lens shows.
+    pub edge_kinds: &'static [EdgeKind],
+    /// What tints node fills.
+    pub tint: TintSource,
+    /// Wire-only nodes are the interesting ones (Security): don't dim them.
+    pub emphasize_passive: bool,
+    /// Dim nodes/edges with no firing alert (Security).
+    pub dim_unalerted: bool,
+    /// Label nodes with vendor/MAC (L2).
+    pub l2_labels: bool,
+}
+
+/// What drives a node's fill color under a lens (#392).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TintSource {
+    /// Role palette; a firing alert overrides the fill (default).
+    Role,
+    /// Alert severity; alert-less nodes render neutral.
+    Alert,
+    /// Health palette on the fill (not just the ring).
+    Health,
+}
+
 /// What edge midpoint labels show (#392).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -687,6 +766,27 @@ pub enum EdgeLabelMode {
     Protocol,
     /// No edge labels.
     Hidden,
+}
+
+impl EdgeLabelMode {
+    /// Every mode, in pick-list order.
+    pub const ALL: [EdgeLabelMode; 4] = [
+        EdgeLabelMode::Rate,
+        EdgeLabelMode::Packets,
+        EdgeLabelMode::Protocol,
+        EdgeLabelMode::Hidden,
+    ];
+}
+
+impl std::fmt::Display for EdgeLabelMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            EdgeLabelMode::Rate => "Rate",
+            EdgeLabelMode::Packets => "Packets",
+            EdgeLabelMode::Protocol => "Protocol",
+            EdgeLabelMode::Hidden => "None",
+        })
+    }
 }
 
 /// How nodes collapse into meta-nodes (#392).
@@ -898,6 +998,8 @@ pub struct RenderNode {
     pub pinned: bool,
     pub dimmed: bool,
     pub highlighted: bool,
+    /// What drives the fill color (per the active lens, #392).
+    pub tint: TintSource,
     /// Members of a collapsed group (empty for plain nodes).
     pub members: Vec<NodeId>,
     pub cpu_usage: Option<f64>,
@@ -975,6 +1077,7 @@ pub fn build_render_graph(
     now_ms: i64,
 ) -> RenderGraph {
     let action = parse_search(search);
+    let spec = prefs.lens.spec();
     let focus: Option<HashSet<NodeId>> = prefs
         .focus
         .as_ref()
@@ -1004,18 +1107,34 @@ pub fn build_render_graph(
             continue;
         }
         let highlighted = matches!(action, SearchAction::Highlight(ref pred) if pred.matches(node));
+        // Security lens (#392): alert-less monitored nodes fade; wire-only
+        // unknowns are exactly what that lens is for.
+        let dimmed = spec.dim_unalerted
+            && node.alert.is_none()
+            && !(spec.emphasize_passive && node.provenance == Provenance::Passive);
+        // L2 lens labels lead with hardware identity (#392).
+        let label = if spec.l2_labels {
+            match (&node.vendor, node.macs.first()) {
+                (Some(vendor), _) => format!("{} · {}", node.label, vendor),
+                (None, Some(mac)) => format!("{} · {}", node.label, mac),
+                (None, None) => node.label.clone(),
+            }
+        } else {
+            node.label.clone()
+        };
         out.id_to_index.insert(id.clone(), out.nodes.len());
         out.nodes.push(RenderNode {
             source: RenderSource::Node(id.clone()),
-            label: node.label.clone(),
+            label,
             role: node.role,
             provenance: node.provenance,
             health: node.health,
             alert: node.alert,
             alert_count: node.alerts.len(),
             pinned: node.pinned,
-            dimmed: false,
+            dimmed,
             highlighted,
+            tint: spec.tint,
             members: Vec::new(),
             cpu_usage: node.cpu_usage,
             memory_usage: node.memory_usage,
@@ -1027,6 +1146,9 @@ pub fn build_render_graph(
     // Edges over surviving nodes, idle filter, then flow top-N.
     let mut flow_edges: Vec<RenderEdge> = Vec::new();
     for (index, edge) in edges.iter().enumerate() {
+        if !spec.edge_kinds.contains(&edge.kind) {
+            continue;
+        }
         let (Some(&from), Some(&to)) = (
             out.id_to_index.get(edge.from.as_str()),
             out.id_to_index.get(edge.to.as_str()),
@@ -1050,7 +1172,7 @@ pub fn build_render_graph(
             protocol: edge.protocol.clone(),
             alert: edge.alert,
             source_index: Some(index),
-            dimmed: false,
+            dimmed: spec.dim_unalerted && edge.alert.is_none(),
         };
         if edge.kind == EdgeKind::Flow {
             flow_edges.push(redge);
@@ -1949,6 +2071,47 @@ mod tests {
     }
 
     #[test]
+    fn lenses_filter_edge_kinds_and_dim() {
+        let (mut nodes, edges) = render_fixture();
+        nodes.get_mut("ghost").unwrap().alert = None;
+        nodes.get_mut("alpha").unwrap().alert = Some(zensight_common::AlertSeverity::Critical);
+
+        // L2 lens: flow edges disappear, structural stay.
+        let prefs = TopoPrefs {
+            lens: Lens::L2,
+            ..Default::default()
+        };
+        let render = build_render_graph(&nodes, &edges, &prefs, "", 0);
+        assert!(render.edges.iter().all(|e| e.kind != EdgeKind::Flow));
+        assert_eq!(render.edges.len(), 1);
+
+        // Security lens: alert-less monitored nodes dim, passive ones don't,
+        // alerted ones don't; tint source is Alert.
+        let prefs = TopoPrefs {
+            lens: Lens::Security,
+            ..Default::default()
+        };
+        let render = build_render_graph(&nodes, &edges, &prefs, "", 0);
+        let by = |id: &str| &render.nodes[render.id_to_index[id]];
+        assert!(!by("alpha").dimmed); // has an alert
+        assert!(by("beta").dimmed); // monitored, no alert
+        assert!(!by("ghost").dimmed); // passive = emphasized
+        assert_eq!(by("beta").tint, TintSource::Alert);
+
+        // L2 labels lead with vendor when known.
+        nodes.get_mut("beta").unwrap().vendor = Some("Dell".to_string());
+        let prefs = TopoPrefs {
+            lens: Lens::L2,
+            ..Default::default()
+        };
+        let render = build_render_graph(&nodes, &edges, &prefs, "", 0);
+        assert_eq!(
+            render.nodes[render.id_to_index["beta"]].label,
+            "beta · Dell"
+        );
+    }
+
+    #[test]
     fn render_node_position_group_centroid() {
         let (mut nodes, _) = render_fixture();
         nodes.get_mut("alpha").unwrap().position = (0.0, 0.0);
@@ -1964,6 +2127,7 @@ mod tests {
             pinned: false,
             dimmed: false,
             highlighted: false,
+            tint: TintSource::Role,
             members: vec!["alpha".to_string(), "beta".to_string()],
             cpu_usage: None,
             memory_usage: None,

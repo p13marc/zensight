@@ -1192,6 +1192,47 @@ fn test_topology_search_input() {
     assert!(ui.find("Search nodes...").is_ok());
 }
 
+/// The topology lens selector switches presentation lenses (#392).
+#[test]
+fn test_topology_lens_selector() {
+    use zensight::view::topology::Lens;
+
+    let state = TopologyState::default();
+    let mut ui = simulator(topology_view(&state, AppTheme::Dark));
+
+    // All four lenses render in the control row.
+    for label in ["Traffic", "Security", "L2", "Health"] {
+        assert!(ui.find(label).is_ok(), "missing lens button {label}");
+    }
+
+    // Clicking an inactive lens emits TopologySetLens.
+    let _ = ui.click("Security");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::TopologySetLens(Lens::Security)))
+    );
+}
+
+/// The active lens button is inert; the edge-label picker is present (#392).
+#[test]
+fn test_topology_lens_active_inert() {
+    let state = TopologyState::default(); // default lens = Traffic
+    let mut ui = simulator(topology_view(&state, AppTheme::Dark));
+    let _ = ui.click("Traffic");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        !messages
+            .iter()
+            .any(|m| matches!(m, Message::TopologySetLens(_)))
+    );
+
+    let state = TopologyState::default();
+    let mut ui = simulator(topology_view(&state, AppTheme::Dark));
+    assert!(ui.find("Edge labels:").is_ok());
+}
+
 /// The security view lists network anomalies (not expectation alerts).
 #[test]
 fn test_security_view() {

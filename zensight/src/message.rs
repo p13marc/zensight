@@ -312,6 +312,10 @@ pub enum Message {
     /// Netring passive-asset inventory fetched for the topology (#391): device
     /// roles (router/switch/ap/phone/iot) + vendor join onto nodes.
     TopologyAssetsReceived(Result<Vec<zensight_common::AssetRecord>, String>),
+    /// Switch the topology presentation lens (#392).
+    TopologySetLens(crate::view::topology::Lens),
+    /// Switch what topology edge labels show (#392).
+    TopologySetEdgeLabel(crate::view::topology::EdgeLabelMode),
     /// Fetch the on-demand netring TLS asset inventory.
     FetchNetringTls,
     /// A netring TLS-inventory reply: the decoded records, or an error message.

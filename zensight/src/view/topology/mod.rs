@@ -24,10 +24,10 @@ pub use layout::{LayoutConfig, arrange_circle, center_layout, layout_step};
 pub use model::{
     Edge, EdgeKind, EdgeLabelMode, FocusState, GroupingMode, INTERNET_NODE_ID, Lens, Node,
     NodeAlert, NodeHealth, NodeId, NodeRole, Provenance, RenderEdge, RenderGraph, RenderNode,
-    RenderSource, TopoFilters, TopoPrefs, counter_rate, edges_from_flows, edges_from_gateways,
-    edges_from_matrix, edges_from_neighbors, endpoint_ip, external_edges_from_matrix, format_rate,
-    gateway_from_metrics, is_public_ip, merge_flow_stats, node_health, render_node_position,
-    roles_from_assets,
+    RenderSource, TintSource, TopoFilters, TopoPrefs, counter_rate, edges_from_flows,
+    edges_from_gateways, edges_from_matrix, edges_from_neighbors, endpoint_ip,
+    external_edges_from_matrix, format_rate, gateway_from_metrics, is_public_ip, merge_flow_stats,
+    node_health, render_node_position, roles_from_assets,
 };
 
 use model::{entity_node_label, is_node_protocol, ordered_pair, primary_protocol};
@@ -220,13 +220,16 @@ impl TopologyState {
             if let Some(node) = self.nodes.get_mut(&node_id) {
                 node.label = label;
                 node.provenance = Provenance::Monitored;
-                node.ips = match entities.hosts.get(&node_id) {
-                    Some(e) => e.ips.clone(),
-                    None if node_id.parse::<std::net::IpAddr>().is_ok() => {
-                        vec![node_id.clone()]
+                match entities.hosts.get(&node_id) {
+                    Some(e) => {
+                        node.ips = e.ips.clone();
+                        node.macs = e.macs.clone();
                     }
-                    None => Vec::new(),
-                };
+                    None if node_id.parse::<std::net::IpAddr>().is_ok() => {
+                        node.ips = vec![node_id.clone()];
+                    }
+                    None => node.ips = Vec::new(),
+                }
                 node.protocols.insert(device_id.protocol);
                 node.metric_count += device_state.metric_count;
                 node.update_from_metrics(&device_state.metrics);
@@ -284,6 +287,7 @@ impl TopologyState {
                 // Live entity node: badge it with the merged member count.
                 node.sensor_count = Some(entity.members.len());
                 node.ips = entity.ips.clone();
+                node.macs = entity.macs.clone();
             } else if !entity.members.is_empty() {
                 // Wire-only: no live device-backed node for this entity.
                 self.nodes.insert(
@@ -295,6 +299,7 @@ impl TopologyState {
                         role: NodeRole::Unknown,
                         sensor_count: Some(entity.members.len()),
                         ips: entity.ips.clone(),
+                        macs: entity.macs.clone(),
                         ..Default::default()
                     },
                 );
@@ -650,6 +655,22 @@ impl TopologyState {
         self.invalidate();
     }
 
+    /// Switch the presentation lens (#392).
+    pub fn set_lens(&mut self, lens: Lens) {
+        if self.prefs.lens != lens {
+            self.prefs.lens = lens;
+            self.invalidate();
+        }
+    }
+
+    /// Switch what edge labels show (#392).
+    pub fn set_edge_label(&mut self, mode: EdgeLabelMode) {
+        if self.prefs.edge_label != mode {
+            self.prefs.edge_label = mode;
+            self.invalidate();
+        }
+    }
+
     /// Toggle auto-layout.
     pub fn toggle_auto_layout(&mut self) {
         self.auto_layout = !self.auto_layout;
@@ -994,18 +1015,15 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
         text("Layout: Adjusting...").size(10)
     };
 
-    // Show search match count if searching
+    // Show search match count if searching (#392): highlight mode counts
+    // matches in the rendered graph; hide mode reports what's shown.
     let search_matches = if !state.search_query.is_empty() {
-        let matches = state
-            .nodes
-            .values()
-            .filter(|n| {
-                n.label
-                    .to_lowercase()
-                    .contains(&state.search_query.to_lowercase())
-            })
-            .count();
-        Some(text(format!("{} matches", matches)).size(10))
+        let highlighted = state.render.nodes.iter().filter(|n| n.highlighted).count();
+        let label = match model::parse_search(&state.search_query) {
+            model::SearchAction::Hide(_) => format!("{} shown", state.render.nodes.len()),
+            _ => format!("{} matches", highlighted),
+        };
+        Some(text(label).size(10))
     } else {
         None
     };
@@ -1071,7 +1089,36 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
         .push(reset_btn)
         .push(auto_layout_btn);
 
-    header.into()
+    // Second control row (#392): lens selector + edge-label mode.
+    let mut lens_row = row![text("Lens:").size(12)]
+        .spacing(8)
+        .align_y(Alignment::Center);
+    for lens in Lens::ALL {
+        let btn = button(text(lens.label()).size(12)).style(if state.prefs.lens == lens {
+            iced::widget::button::primary
+        } else {
+            iced::widget::button::secondary
+        });
+        let btn = if state.prefs.lens == lens {
+            btn
+        } else {
+            btn.on_press(Message::TopologySetLens(lens))
+        };
+        lens_row = lens_row.push(btn);
+    }
+
+    let label_picker = iced::widget::pick_list(
+        EdgeLabelMode::ALL,
+        Some(state.prefs.edge_label),
+        Message::TopologySetEdgeLabel,
+    )
+    .text_size(12)
+    .padding(4);
+    lens_row = lens_row
+        .push(text("Edge labels:").size(12))
+        .push(label_picker);
+
+    column![header, lens_row].spacing(8).into()
 }
 
 #[cfg(test)]
