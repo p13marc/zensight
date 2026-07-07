@@ -226,23 +226,13 @@ pub fn arrange_circle(state: &mut TopologyState, radius: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::view::topology::{Node, NodeType};
+    use crate::view::topology::Node;
 
     fn create_test_node(id: &str, x: f32, y: f32) -> Node {
         Node {
             id: id.to_string(),
             label: id.to_string(),
             position: (x, y),
-            velocity: (0.0, 0.0),
-            node_type: NodeType::Host,
-            cpu_usage: None,
-            memory_usage: None,
-            network_rx: None,
-            network_tx: None,
-            is_healthy: true,
-            pinned: false,
-            alert: None,
-            sensor_count: None,
             ..Default::default()
         }
     }

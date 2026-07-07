@@ -4,7 +4,7 @@ use iced::mouse;
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke, Text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Theme};
 
-use super::{NodeType, TopologyState};
+use super::{EdgeKind, NodeHealth, NodeRole, Provenance, TopologyState};
 use crate::message::Message;
 use crate::view::theme;
 
@@ -122,10 +122,6 @@ impl<'a> TopologyGraphProgram<'a> {
         theme::colors(&self.theme()).topology_node_healthy()
     }
 
-    fn node_host_unhealthy_color(&self) -> Color {
-        theme::colors(&self.theme()).topology_node_unhealthy()
-    }
-
     fn node_router_color(&self) -> Color {
         theme::colors(&self.theme()).topology_node_router()
     }
@@ -154,8 +150,18 @@ impl<'a> TopologyGraphProgram<'a> {
         theme::colors(&self.theme()).text()
     }
 
-    fn edge_default_color(&self) -> Color {
-        theme::colors(&self.theme()).topology_edge()
+    fn edge_kind_color(&self, kind: EdgeKind) -> Color {
+        let theme = self.theme();
+        let colors = theme::colors(&theme);
+        match kind {
+            EdgeKind::Flow => colors.topology_edge_flow(),
+            EdgeKind::L2Adjacency => colors.topology_edge_l2(),
+            EdgeKind::Gateway => colors.topology_edge_gateway(),
+        }
+    }
+
+    fn health_ring_color(&self, health: NodeHealth) -> Color {
+        theme::colors(&self.theme()).topology_health(health)
     }
 
     fn edge_label_color(&self) -> Color {
@@ -319,23 +325,28 @@ impl<'a> TopologyGraphProgram<'a> {
         // Node radius scales with zoom but has a minimum size
         let radius = (25.0 * self.state.zoom).max(15.0);
 
-        // Node color based on type and health, overridden by a firing alert.
+        // Fill is role-keyed (#391); a firing alert overrides it, and health
+        // is a ring stroke rather than a fill change so both read at once.
         let base_color = match node.alert {
             Some(sev) => theme::colors(&self.theme()).alert_severity(sev),
-            None => match node.node_type {
-                NodeType::Host => {
-                    if node.is_healthy {
-                        self.node_host_healthy_color()
-                    } else {
-                        self.node_host_unhealthy_color()
-                    }
+            None => match node.role {
+                NodeRole::Host => self.node_host_healthy_color(),
+                NodeRole::Router => self.node_router_color(),
+                NodeRole::Switch | NodeRole::AccessPoint => self.node_switch_color(),
+                NodeRole::Phone | NodeRole::Iot | NodeRole::Internet | NodeRole::Unknown => {
+                    self.node_unknown_color()
                 }
-                NodeType::Router => self.node_router_color(),
-                NodeType::Switch => self.node_switch_color(),
-                // Passive wire-only hosts (#306) render dimmed like unknowns.
-                NodeType::Passive => self.node_unknown_color(),
-                NodeType::Unknown => self.node_unknown_color(),
             },
+        };
+        // Stale nodes ghost out (#391): data has gone quiet.
+        let is_stale = node.health == NodeHealth::Stale;
+        let base_color = if is_stale {
+            Color {
+                a: base_color.a * 0.4,
+                ..base_color
+            }
+        } else {
+            base_color
         };
 
         // Highlight if selected
@@ -368,7 +379,7 @@ impl<'a> TopologyGraphProgram<'a> {
         // Draw node circle. Passive wire-only nodes (#306) get a dashed outline
         // to read as "observed, not directly sensed".
         let circle = Path::circle(pos, radius);
-        if node.node_type == NodeType::Passive {
+        if node.provenance == Provenance::Passive {
             let mut stroke = Stroke::default().with_color(base_color).with_width(2.0);
             stroke.line_dash = iced::widget::canvas::LineDash {
                 segments: &[4.0, 4.0],
@@ -379,6 +390,18 @@ impl<'a> TopologyGraphProgram<'a> {
             frame.fill(&circle, base_color);
         }
 
+        // Health ring (#391): trouble states get a colored stroke; Healthy
+        // blends into the fill so the nominal case stays quiet.
+        if node.health != NodeHealth::Healthy {
+            let ring = Path::circle(pos, radius + 2.0);
+            frame.stroke(
+                &ring,
+                Stroke::default()
+                    .with_color(self.health_ring_color(node.health))
+                    .with_width(2.5),
+            );
+        }
+
         // Draw pinned indicator
         if node.pinned {
             let pin = Path::circle(Point::new(pos.x + radius * 0.7, pos.y - radius * 0.7), 5.0);
@@ -386,15 +409,40 @@ impl<'a> TopologyGraphProgram<'a> {
         }
 
         // Draw label
+        let label_color = if is_stale {
+            let c = self.node_label_color();
+            Color { a: c.a * 0.4, ..c }
+        } else {
+            self.node_label_color()
+        };
         let label = Text {
             content: node.label.clone(),
             position: Point::new(pos.x, pos.y + radius + 14.0),
-            color: self.node_label_color(),
+            color: label_color,
             size: (14.0 * self.state.zoom).max(11.0).into(),
             align_x: iced::alignment::Horizontal::Center.into(),
             ..Text::default()
         };
         frame.fill_text(label);
+
+        // Non-host roles show their glyph in the node instead of host stats
+        // (#391); proper icons are P4 polish.
+        if node.role != NodeRole::Host && self.state.zoom >= 0.6 {
+            let glyph = node.role.glyph();
+            if !glyph.is_empty() {
+                let glyph_text = Text {
+                    content: glyph.to_string(),
+                    position: pos,
+                    color: label_color,
+                    size: (12.0 * self.state.zoom).max(10.0).into(),
+                    align_x: iced::alignment::Horizontal::Center.into(),
+                    align_y: iced::alignment::Vertical::Center,
+                    ..Text::default()
+                };
+                frame.fill_text(glyph_text);
+            }
+            return;
+        }
 
         // Draw CPU/Memory mini-stats if available (only when zoomed in enough)
         if self.state.zoom >= 0.6 {
@@ -438,11 +486,17 @@ impl<'a> TopologyGraphProgram<'a> {
         let from_pos = self.apply_transform(from_node.position, center);
         let to_pos = self.apply_transform(to_node.position, center);
 
-        // Edge width based on bandwidth
-        let base_width = 2.0;
-        let max_width = 10.0;
-        let bandwidth_factor = (edge.bytes as f32 / 1_000_000.0).clamp(0.0, 1.0);
-        let width = base_width + bandwidth_factor * (max_width - base_width);
+        // Edge width based on bandwidth; structural kinds stay thin (#391).
+        let width = match edge.kind {
+            EdgeKind::L2Adjacency => 1.0,
+            EdgeKind::Gateway => 1.2,
+            EdgeKind::Flow => {
+                let base_width = 2.0;
+                let max_width = 10.0;
+                let bandwidth_factor = (edge.bytes as f32 / 1_000_000.0).clamp(0.0, 1.0);
+                base_width + bandwidth_factor * (max_width - base_width)
+            }
+        };
 
         // Edge color
         let is_selected = self.state.selected_edge
@@ -461,21 +515,34 @@ impl<'a> TopologyGraphProgram<'a> {
             // tinted by that severity.
             theme::colors(&self.theme()).alert_severity(sev)
         } else {
-            self.edge_default_color()
+            self.edge_kind_color(edge.kind)
         };
 
-        // Draw edge line
+        // Draw edge line; structural kinds are dashed/dotted (#391).
         let mut path = canvas::path::Builder::new();
         path.move_to(from_pos);
         path.line_to(to_pos);
         let edge_path = path.build();
 
-        frame.stroke(
-            &edge_path,
-            Stroke::default()
-                .with_color(color)
-                .with_width(width * self.state.zoom),
-        );
+        let mut stroke = Stroke::default()
+            .with_color(color)
+            .with_width(width * self.state.zoom);
+        match edge.kind {
+            EdgeKind::L2Adjacency => {
+                stroke.line_dash = iced::widget::canvas::LineDash {
+                    segments: &[2.0, 4.0],
+                    offset: 0,
+                };
+            }
+            EdgeKind::Gateway => {
+                stroke.line_dash = iced::widget::canvas::LineDash {
+                    segments: &[6.0, 4.0],
+                    offset: 0,
+                };
+            }
+            EdgeKind::Flow => {}
+        }
+        frame.stroke(&edge_path, stroke);
 
         // Draw bandwidth label at midpoint
         if edge.bytes > 0 {
@@ -573,7 +640,7 @@ pub fn find_node_at_position(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::view::topology::{Node, NodeType};
+    use crate::view::topology::Node;
     use std::collections::HashMap;
 
     #[test]
@@ -715,16 +782,6 @@ mod tests {
             id: id.to_string(),
             label: id.to_string(),
             position: (x, y),
-            velocity: (0.0, 0.0),
-            node_type: NodeType::Host,
-            cpu_usage: None,
-            memory_usage: None,
-            network_rx: None,
-            network_tx: None,
-            is_healthy: true,
-            pinned: false,
-            alert: None,
-            sensor_count: None,
             ..Default::default()
         }
     }

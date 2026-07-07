@@ -22,7 +22,8 @@ use crate::view::icons::{self, IconSize};
 pub use graph::TopologyGraph;
 pub use layout::{LayoutConfig, arrange_circle, center_layout, layout_step};
 pub use model::{
-    Edge, Node, NodeAlert, NodeId, NodeType, edges_from_flows, edges_from_neighbors, endpoint_ip,
+    Edge, EdgeKind, Node, NodeAlert, NodeHealth, NodeId, NodeRole, Provenance, edges_from_flows,
+    edges_from_neighbors, endpoint_ip,
 };
 
 use model::{entity_node_label, is_node_protocol, ordered_pair, primary_protocol};
@@ -141,7 +142,6 @@ impl TopologyState {
                     Node {
                         id: node_id.clone(),
                         label: label.clone(),
-                        is_healthy: device_state.is_healthy,
                         ..Default::default()
                     },
                 );
@@ -150,7 +150,14 @@ impl TopologyState {
             // Update node metrics from telemetry
             if let Some(node) = self.nodes.get_mut(&node_id) {
                 node.label = label;
-                node.is_healthy = device_state.is_healthy;
+                // Interim liveness→health mapping; the full liveness +
+                // sensor-health + staleness precedence lands with #391.
+                node.health = if device_state.is_healthy {
+                    NodeHealth::Healthy
+                } else {
+                    NodeHealth::Down
+                };
+                node.provenance = Provenance::Monitored;
                 node.protocols.insert(device_id.protocol);
                 node.metric_count += device_state.metric_count;
                 node.update_from_metrics(&device_state.metrics);
@@ -175,7 +182,7 @@ impl TopologyState {
     /// Overlay correlator entity data onto the node set (#306):
     /// - entity-backed nodes get a `sensor_count` badge (members merged),
     /// - entities whose members map to **no** live device node become passive
-    ///   wire-only nodes ([`NodeType::Passive`]) so pure netring/netlink
+    ///   wire-only nodes ([`Provenance::Passive`]) so pure netring/netlink
     ///   observations still appear on the map.
     pub fn apply_entities(&mut self, entities: &crate::entity::EntityStore) {
         for entity in entities.hosts.values() {
@@ -190,8 +197,8 @@ impl TopologyState {
                     Node {
                         id: id.to_string(),
                         label: entity_node_label(entity),
-                        node_type: NodeType::Passive,
-                        is_healthy: true,
+                        provenance: Provenance::Passive,
+                        role: NodeRole::Unknown,
                         sensor_count: Some(entity.members.len()),
                         ..Default::default()
                     },
@@ -250,7 +257,7 @@ impl TopologyState {
     /// Merge the netlink neighbor (ARP/NDP) table into the topology (#49):
     /// remembers it and rebuilds the edge set so direct L2/L3 adjacencies appear
     /// as links even when netring sees no traffic, and `is_router` neighbors are
-    /// classified as [`NodeType::Router`].
+    /// classified as [`NodeRole::Router`].
     pub fn apply_neighbor_edges(
         &mut self,
         neighbors: &[zensight_common::NeighborRecord],
@@ -291,16 +298,19 @@ impl TopologyState {
             }
         }
 
-        // Reset then reapply Router classification so it follows the live table.
-        // Passive wire-only nodes (#306) keep their type.
+        // Reset then reapply role classification so it follows the live
+        // table. Monitored hosts default to Host, wire-only nodes to Unknown;
+        // `is_router` neighbors become routers regardless of provenance (a
+        // passive gateway keeps its dashed ring but reads as a router).
         for node in self.nodes.values_mut() {
-            if node.node_type != NodeType::Passive {
-                node.node_type = NodeType::Host;
-            }
+            node.role = match node.provenance {
+                Provenance::Monitored => NodeRole::Host,
+                Provenance::Passive | Provenance::External => NodeRole::Unknown,
+            };
         }
         for id in &routers {
             if let Some(node) = self.nodes.get_mut(id) {
-                node.node_type = NodeType::Router;
+                node.role = NodeRole::Router;
             }
         }
 
@@ -487,7 +497,11 @@ fn render_node_info_panel(node: &Node) -> Element<'_, Message> {
         icons::protocol_icon(primary_protocol(node), IconSize::Large),
         column![
             text(&node.label).size(16),
-            text(format!("{:?}", node.node_type)).size(10),
+            text(match node.provenance {
+                Provenance::Passive => format!("{} · wire-only", node.role.label()),
+                _ => node.role.label().to_string(),
+            })
+            .size(10),
         ]
         .spacing(2)
     ]
@@ -495,7 +509,7 @@ fn render_node_info_panel(node: &Node) -> Element<'_, Message> {
     .align_y(Alignment::Center);
 
     // Status indicator
-    let status = if node.is_healthy {
+    let status = if node.is_healthy() {
         row![
             icons::status_healthy(IconSize::Small),
             text("Healthy - receiving data").size(11)
@@ -883,8 +897,8 @@ mod tests {
                 .any(|e| ordered_pair(&e.from, &e.to) == ("gw".to_string(), "hostA".to_string()))
         );
         // The is_router gateway is classified Router; plain hosts stay Host.
-        assert_eq!(state.nodes["gw"].node_type, NodeType::Router);
-        assert_eq!(state.nodes["hostA"].node_type, NodeType::Host);
+        assert_eq!(state.nodes["gw"].role, NodeRole::Router);
+        assert_eq!(state.nodes["hostA"].role, NodeRole::Host);
     }
 
     #[test]
@@ -924,12 +938,10 @@ mod tests {
                 label: "Node 1".to_string(),
                 position: (100.0, 100.0),
                 velocity: (0.0, 0.0),
-                node_type: NodeType::Host,
                 cpu_usage: None,
                 memory_usage: None,
                 network_rx: None,
                 network_tx: None,
-                is_healthy: true,
                 pinned: false,
                 alert: None,
                 sensor_count: None,
@@ -957,12 +969,10 @@ mod tests {
                 label: "host1".to_string(),
                 position: (0.0, 0.0),
                 velocity: (0.0, 0.0),
-                node_type: NodeType::Host,
                 cpu_usage: None,
                 memory_usage: None,
                 network_rx: None,
                 network_tx: None,
-                is_healthy: true,
                 pinned: false,
                 alert: None,
                 sensor_count: None,
@@ -1007,17 +1017,6 @@ mod tests {
         let node = |id: &str| Node {
             id: id.to_string(),
             label: id.to_string(),
-            position: (0.0, 0.0),
-            velocity: (0.0, 0.0),
-            node_type: NodeType::Host,
-            cpu_usage: None,
-            memory_usage: None,
-            network_rx: None,
-            network_tx: None,
-            is_healthy: true,
-            pinned: false,
-            alert: None,
-            sensor_count: None,
             ..Default::default()
         };
 
@@ -1029,9 +1028,7 @@ mod tests {
             to: "b".to_string(),
             bytes: 10,
             packets: 1,
-            protocol: None,
-            last_seen: 0,
-            alert: None,
+            ..Default::default()
         });
 
         let mut external = HashMap::new();

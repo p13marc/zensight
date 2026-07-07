@@ -19,6 +19,114 @@ pub struct NodeAlert {
     pub summary: String,
 }
 
+/// What kind of observation an edge represents (#391). Drives line style and
+/// which lenses show it (P2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EdgeKind {
+    /// Observed traffic (netring matrix/flows) — carries a rate when the
+    /// traffic matrix supplied one.
+    #[default]
+    Flow,
+    /// L2 adjacency from a netlink neighbor (ARP/NDP) table entry.
+    L2Adjacency,
+    /// Host → its default gateway, from the `routes/default_v4_gw` metric.
+    Gateway,
+}
+
+/// What a node *is* on the network (#391). From the netring passive-asset
+/// inventory (`AssetRecord.role`) when available, else inferred (neighbor
+/// `is_router`), else `Host`/`Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NodeRole {
+    /// An ordinary monitored host/VM.
+    #[default]
+    Host,
+    Router,
+    Switch,
+    AccessPoint,
+    Phone,
+    Iot,
+    /// The aggregate of off-subnet/public destinations (produced by the P2
+    /// external-aggregate grouping; the variant exists from P1 so match arms
+    /// don't churn).
+    Internet,
+    Unknown,
+}
+
+impl NodeRole {
+    /// Parse the netring `AssetRecord.role` vocabulary
+    /// (`router`/`switch`/`ap`/`phone`/`iot`/`host`/`unknown`, #329).
+    pub fn from_asset_role(s: &str) -> Self {
+        match s {
+            "router" => Self::Router,
+            "switch" => Self::Switch,
+            "ap" => Self::AccessPoint,
+            "phone" => Self::Phone,
+            "iot" => Self::Iot,
+            "host" => Self::Host,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Short glyph drawn inside non-host nodes on the canvas (monochrome in
+    /// P1; proper icons are P4 polish).
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Self::Host => "",
+            Self::Router => "R",
+            Self::Switch => "SW",
+            Self::AccessPoint => "AP",
+            Self::Phone => "Ph",
+            Self::Iot => "IoT",
+            Self::Internet => "@",
+            Self::Unknown => "?",
+        }
+    }
+
+    /// Human-readable role name for panels.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Host => "Host",
+            Self::Router => "Router",
+            Self::Switch => "Switch",
+            Self::AccessPoint => "Access point",
+            Self::Phone => "Phone",
+            Self::Iot => "IoT device",
+            Self::Internet => "Internet",
+            Self::Unknown => "Unknown",
+        }
+    }
+}
+
+/// How we know about a node (#391): from its own sensors, purely from the
+/// wire, or as an external aggregate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Provenance {
+    /// Has at least one live sensor facet reporting from the host itself.
+    #[default]
+    Monitored,
+    /// Wire-only (#306): a correlator entity observed purely on the wire
+    /// (netring/netlink), with no live sensor device of its own. Rendered
+    /// dimmed / dashed.
+    Passive,
+    /// Off-subnet/public aggregate (P2 external grouping).
+    External,
+}
+
+/// Node health (#391), replacing the old boolean: device liveness + host-scoped
+/// sensor health + entity staleness, worst wins. See [`node_health`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NodeHealth {
+    #[default]
+    Healthy,
+    /// Some facet is offline/degraded, or a sensor on the host reports trouble.
+    Degraded,
+    /// Every device facet is offline.
+    Down,
+    /// No fresh data: entity past its staleness window (previously invisible).
+    Stale,
+}
+
 /// A node in the topology graph.
 #[derive(Debug, Clone, Default)]
 pub struct Node {
@@ -30,8 +138,14 @@ pub struct Node {
     pub position: (f32, f32),
     /// Velocity for force-directed layout.
     pub velocity: (f32, f32),
-    /// Type of node.
-    pub node_type: NodeType,
+    /// What the node is on the network (#391): router/switch/ap/iot/…
+    pub role: NodeRole,
+    /// How we know about it (#391): monitored / wire-only / external.
+    pub provenance: Provenance,
+    /// Node health (#391): liveness + sensor health + staleness, worst wins.
+    pub health: NodeHealth,
+    /// Hardware vendor, from the passive-asset inventory (#391).
+    pub vendor: Option<String>,
     /// Which protocols' devices map to this host (#83). Drives the header icon
     /// and the "covered by" badges in the info panel.
     pub protocols: std::collections::BTreeSet<zensight_common::Protocol>,
@@ -39,10 +153,14 @@ pub struct Node {
     pub cpu_usage: Option<f64>,
     /// Memory usage percentage (0-100). From sysinfo.
     pub memory_usage: Option<f64>,
-    /// Network RX bytes/sec. From sysinfo.
+    /// Cumulative network RX bytes (counter). From sysinfo.
     pub network_rx: Option<u64>,
-    /// Network TX bytes/sec. From sysinfo.
+    /// Cumulative network TX bytes (counter). From sysinfo.
     pub network_tx: Option<u64>,
+    /// Live receive rate, bytes/sec, from hot-ring counter deltas (#391).
+    pub rx_rate: Option<f64>,
+    /// Live transmit rate, bytes/sec, from hot-ring counter deltas (#391).
+    pub tx_rate: Option<f64>,
     /// Interfaces up / total, from netlink `iface/<n>/up` (#83).
     pub iface_up: Option<u32>,
     pub iface_total: Option<u32>,
@@ -52,8 +170,6 @@ pub struct Node {
     /// Route / neighbor table sizes, from netlink (#83).
     pub routes_total: Option<f64>,
     pub neighbors_total: Option<f64>,
-    /// Whether the node is healthy.
-    pub is_healthy: bool,
     /// Whether the node position is pinned (not affected by layout).
     pub pinned: bool,
     /// Highest-severity firing sensor alert for this host, if any (overlay).
@@ -71,6 +187,11 @@ pub struct Node {
 }
 
 impl Node {
+    /// Whether the node is in the nominal health state.
+    pub fn is_healthy(&self) -> bool {
+        matches!(self.health, NodeHealth::Healthy)
+    }
+
     /// Update node metrics from telemetry.
     pub fn update_from_metrics(
         &mut self,
@@ -148,34 +269,25 @@ impl Node {
     }
 }
 
-/// Type of topology node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum NodeType {
-    /// A host/VM.
-    #[default]
-    Host,
-    /// A network router.
-    Router,
-    /// A network switch.
-    Switch,
-    /// A passive, wire-only host (#306): a correlator entity observed purely on
-    /// the wire (netring/netlink), with no live sensor device of its own.
-    /// Rendered dimmed / dashed.
-    Passive,
-    /// Unknown device type.
-    Unknown,
-}
-
 /// An edge (connection) in the topology graph.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Edge {
-    /// Source node ID.
+    /// Source node ID. For rated [`EdgeKind::Flow`] edges this is the heavier
+    /// direction's initiator; for [`EdgeKind::Gateway`] the host.
     pub from: NodeId,
     /// Destination node ID.
     pub to: NodeId,
-    /// Bytes transferred.
+    /// What kind of observation this link is (#391).
+    pub kind: EdgeKind,
+    /// Forward (`from` → `to`) rate in **bytes/sec**, from the netring traffic
+    /// matrix (#391). `0.0` when unrated (flow-fallback / L2 / gateway edges) —
+    /// direction is only drawn when a rate was actually observed.
+    pub rate: f64,
+    /// Reverse (`to` → `from`) rate in bytes/sec (#391).
+    pub reverse_rate: f64,
+    /// Cumulative bytes transferred (from flow records).
     pub bytes: u64,
-    /// Packets transferred.
+    /// Cumulative packets transferred (from flow records).
     pub packets: u64,
     /// Protocol (TCP, UDP, etc.).
     pub protocol: Option<String>,
@@ -242,11 +354,12 @@ pub fn edges_from_flows(
         .map(|((from, to), (bytes, packets, protocol, _))| Edge {
             from,
             to,
+            kind: EdgeKind::Flow,
             bytes,
             packets,
             protocol: Some(protocol),
             last_seen: now_ms,
-            alert: None,
+            ..Default::default()
         })
         .collect();
     // Stable order: heaviest edges first, then by endpoints.
@@ -272,7 +385,7 @@ pub(crate) fn ordered_pair(a: &NodeId, b: &NodeId) -> (NodeId, NodeId) {
 /// becomes a zero-bandwidth link from its owning `host_nodes` entry — so a host
 /// and its directly-attached gateway/peer connect even when netring observes no
 /// flow between them. Neighbors flagged `is_router` are returned as the set of
-/// node ids to classify [`NodeType::Router`]. Pure — the unit of testing.
+/// node ids to classify [`NodeRole::Router`]. Pure — the unit of testing.
 pub fn edges_from_neighbors(
     host_nodes: &[NodeId],
     neighbors: &[zensight_common::NeighborRecord],
@@ -308,11 +421,9 @@ pub fn edges_from_neighbors(
         .map(|(from, to)| Edge {
             from,
             to,
-            bytes: 0,
-            packets: 0,
-            protocol: None,
+            kind: EdgeKind::L2Adjacency,
             last_seen: now_ms,
-            alert: None,
+            ..Default::default()
         })
         .collect();
     (edges, routers)
@@ -524,6 +635,40 @@ mod tests {
         assert_eq!(node.tcp_listen, Some(12.0));
         assert_eq!(node.routes_total, Some(20.0));
         assert_eq!(node.neighbors_total, Some(18.0));
+    }
+
+    #[test]
+    fn edges_carry_their_kind() {
+        let mut map = HashMap::new();
+        map.insert("10.0.0.1".to_string(), "a".to_string());
+        map.insert("10.0.0.2".to_string(), "b".to_string());
+        let flows = vec![flow("10.0.0.1:1", "10.0.0.2:2", 10, 1, "tcp")];
+        assert_eq!(edges_from_flows(&flows, &map, 0)[0].kind, EdgeKind::Flow);
+
+        let hosts = vec!["a".to_string()];
+        let (edges, _) = edges_from_neighbors(&hosts, &[neighbor("10.0.0.2", false)], &map, 0);
+        assert_eq!(edges[0].kind, EdgeKind::L2Adjacency);
+    }
+
+    #[test]
+    fn node_role_parses_asset_vocabulary() {
+        assert_eq!(NodeRole::from_asset_role("router"), NodeRole::Router);
+        assert_eq!(NodeRole::from_asset_role("switch"), NodeRole::Switch);
+        assert_eq!(NodeRole::from_asset_role("ap"), NodeRole::AccessPoint);
+        assert_eq!(NodeRole::from_asset_role("phone"), NodeRole::Phone);
+        assert_eq!(NodeRole::from_asset_role("iot"), NodeRole::Iot);
+        assert_eq!(NodeRole::from_asset_role("host"), NodeRole::Host);
+        assert_eq!(NodeRole::from_asset_role("unknown"), NodeRole::Unknown);
+        assert_eq!(NodeRole::from_asset_role("gibberish"), NodeRole::Unknown);
+    }
+
+    #[test]
+    fn node_health_default_is_healthy() {
+        let n = Node::default();
+        assert_eq!(n.health, NodeHealth::Healthy);
+        assert!(n.is_healthy());
+        assert_eq!(n.role, NodeRole::Host);
+        assert_eq!(n.provenance, Provenance::Monitored);
     }
 
     #[test]
