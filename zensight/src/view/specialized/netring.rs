@@ -682,9 +682,13 @@ fn render_capture<'a>(
         .unwrap_or_default();
     match artifact {
         Some(ctx) if !capture_kinds.is_empty() => {
+            // No target_source: this aggregated view spans every netring host,
+            // so a capture request here keeps the historical fan-out (the
+            // per-instance Sensors cards target a single host).
             col = col.push(crate::view::artifact_fetch::artifact_section(
                 ctx.fetch,
                 &prefix,
+                None,
                 &capture_kinds,
                 ctx.active_prefix,
                 ctx.active_kind,

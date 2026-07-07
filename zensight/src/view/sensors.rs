@@ -41,13 +41,17 @@ pub fn sensors_view<'a>(
             .into();
     }
 
-    // Stable order by sensor name.
+    // Stable order by (sensor, source) — one card per sensor INSTANCE, so N
+    // hosts running the same protocol each get their own card.
     let mut sensors: Vec<&HealthSnapshot> = sensor_health.values().collect();
-    sensors.sort_by(|a, b| a.sensor.cmp(&b.sensor));
+    sensors.sort_by(|a, b| (&a.sensor, &a.source).cmp(&(&b.sensor, &b.source)));
 
     let mut list = column![title].spacing(space::MD).padding(space::LG);
     for snap in sensors {
-        let errors = recent_errors.get(&snap.sensor);
+        let errors = recent_errors.get(&crate::app::sensor_instance_key(
+            &snap.sensor,
+            snap.source.as_deref(),
+        ));
         list = list.push(card(sensor_card(
             snap,
             errors,
@@ -75,7 +79,13 @@ fn sensor_card<'a>(
     artifact_kinds: &'a HashMap<String, Vec<KindStatus>>,
     capture_forms: &'a HashMap<String, CaptureForm>,
 ) -> Element<'a, Message> {
-    let header = section_header(snap.sensor.clone(), Some(health_badge(snap.status)));
+    // Instance-labelled header: `sysinfo @ hostA` (bare name for legacy
+    // snapshots that predate host-scoped keys and carry no source).
+    let header_label = match snap.source.as_deref() {
+        Some(source) => format!("{} @ {}", snap.sensor, source),
+        None => snap.sensor.clone(),
+    };
+    let header = section_header(header_label, Some(health_badge(snap.status)));
 
     let stats = row![
         stat("Devices", format!("{}", snap.devices_total)),
@@ -92,11 +102,14 @@ fn sensor_card<'a>(
     let mut col = column![header, stats].spacing(space::SM);
 
     // Unified artifact download controls (report / snapshot / capture) driven by
-    // the sensor's advertised kinds. The key prefix is `zensight/<sensor>`.
+    // the sensor's advertised kinds. The key prefix is `zensight/<sensor>`
+    // (protocol-scoped by design); the card's source becomes the request's
+    // `target_source` so only THIS host produces the artifact.
     let key_prefix = format!("zensight/{}", snap.sensor);
     col = col.push(artifact_section(
         artifact_fetch,
         &key_prefix,
+        snap.source.as_deref(),
         artifact_kinds
             .get(&key_prefix)
             .map(|v| v.as_slice())

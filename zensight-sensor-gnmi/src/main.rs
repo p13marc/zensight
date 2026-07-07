@@ -14,9 +14,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Load configuration
     let config = GnmiConfig::load_from_file(&args.config)?;
+    let source = config.gnmi.resolved_source();
 
     // Create the sensor runner
-    let runner = SensorRunner::new_with_args("gnmi", config, Some(&args))
+    let runner = SensorRunner::new_with_args("gnmi", source.clone(), config, Some(&args))
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -27,7 +28,6 @@ async fn main() -> anyhow::Result<()> {
     // counters. No-op unless `report.enabled` is set in the config. Target
     // `password` is redacted by default; add `redact_extra: ["username"]` in the
     // config if target usernames are sensitive.
-    let source = runner.config().gnmi.resolved_source();
     let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
         "gnmi",
         source.clone(),
@@ -36,18 +36,15 @@ async fn main() -> anyhow::Result<()> {
     ));
     // Tier-2 directory snapshots (`@/artifact`). No-op unless `snapshot.enabled`.
     let artifacts = runner.config().artifact_limits();
-    let mut runner = runner.with_identity(source.clone()).with_artifacts(
-        source,
-        vec![
-            std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
-                report_source,
-                &artifacts.report,
-            )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
-            std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
-                &artifacts.snapshot,
-            )),
-        ],
-    );
+    let mut runner = runner.with_identity().with_artifacts(vec![
+        std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
+            report_source,
+            &artifacts.report,
+        )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
+        std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
+            &artifacts.snapshot,
+        )),
+    ]);
 
     // Get session and config
     let session = runner.session().clone();

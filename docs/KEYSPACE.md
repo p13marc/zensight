@@ -6,8 +6,9 @@ build keys through the shared helpers listed in [§7](#7-key-building-helpers)
 rather than ad-hoc `format!()`.
 
 The single root is `zensight/`. Everything below it is either **telemetry**
-(`zensight/<protocol>/<source>/…`), **control-plane** for one sensor
-(`zensight/<protocol>/@/…`), or cross-sensor **metadata** (`zensight/_meta/…`).
+(`zensight/<protocol>/<source>/…`), **control-plane** for one sensor instance
+(host-scoped `zensight/<protocol>/<source>/@/…`) or one protocol (shared
+`zensight/<protocol>/@/…`), or cross-sensor **metadata** (`zensight/_meta/…`).
 
 > **`@` is special in Zenoh.** A key chunk starting with `@` is matched
 > *verbatim*: the wildcards `*` and `**` do **not** cross into it. So
@@ -88,18 +89,45 @@ Payload: a serialized [`TelemetryPoint`] (JSON or CBOR per the sensor's
 
 ---
 
-## 3. Control-plane — `zensight/<protocol>/@/…`
+## 3. Control-plane
 
-Per-sensor operational channels. All are derived from the sensor's `key_prefix`.
+Per-sensor operational channels, in **two scopes**:
+
+- **Host-scoped state** — `zensight/<protocol>/<source>/@/…`, one subtree per
+  sensor *instance*. These are last-writer-wins state keys, so they carry the
+  instance's `<source>` segment (the same value as its telemetry subtree):
+  two machines running sysinfo publish `zensight/sysinfo/hostA/@/health` and
+  `zensight/sysinfo/hostB/@/health`, never colliding. The instance control
+  prefix is `{key_prefix}/{source}` ([`sensor_control_prefix`], §7).
+- **Protocol-scoped channels** — `zensight/<protocol>/@/…`, shared by every
+  host running that protocol. These are *deliberately* shared: alert keys
+  already disambiguate by hashing `source` in, and the query/command/artifact
+  channels rely on the shared key for fan-in/fan-out (a GET on
+  `zensight/netlink/@/query/sockets` collects replies from **every** host —
+  exactly what the flow↔process join wants).
+
+### Host-scoped state — `zensight/<protocol>/<source>/@/…`
 
 | Key | Direction | Payload | Emitted by |
 |-----|-----------|---------|------------|
-| `@/health` | put | `HealthSnapshot` | every sensor (`SensorRunner`) |
+| `@/health` | put | `HealthSnapshot` (carries `source`) | every sensor (`SensorRunner`) |
 | `@/errors` | put | `ErrorReport` | every sensor (`HealthReporter`) |
-| `@/status` | queryable | status JSON | every sensor (`StatusPublisher`) |
+| `@/status` | put | status JSON (running/offline) | every sensor (`StatusPublisher`) |
 | `@/alive` | liveliness token | — | every sensor (`LivelinessManager`) |
 | `@/devices/<device>/liveness` | put | `DeviceLiveness` | sensors with per-device tracking |
 | `@/devices/<device>/alive` | liveliness token | — | sensors with per-device tracking |
+
+> **Compat.** Before release 0.8 these lived directly under
+> `zensight/<protocol>/@/…` with no `<source>` segment — N machines running
+> the same sensor overwrote each other (last-writer-wins) and shared one
+> liveliness token. Sensors now publish **only** the host-scoped shape; the
+> GUI and correlator keep consuming the legacy shape for one release
+> (mixed-fleet rolling upgrade), to be dropped in 0.9.
+
+### Protocol-scoped channels — `zensight/<protocol>/@/…`
+
+| Key | Direction | Payload | Emitted by |
+|-----|-----------|---------|------------|
 | `@/alerts/<alert_key>` | put / delete | `Alert` (firing → resolved → tombstone) | snmp, logs, netlink, netring |
 | `@/query/alerts` | queryable | `Vec<Alert>` (current firing set) | sensors with alerts (late-joiner seed) |
 | `@/commands/<topic>` | subscribe | topic command | sensors with runtime control |
@@ -115,6 +143,18 @@ Per-sensor operational channels. All are derived from the sensor's `key_prefix`.
 `<alert_key>` is a stable hash of `source + rule + sorted-labels`
 ([`Alert::alert_key`]) so the same logical alert always maps to the same key
 (firing and resolving are state transitions on one key, not new keys).
+
+> **Multi-host targeting.** Because these channels are shared, a PUT to
+> `@/commands/<topic>` or `@/artifact/request` reaches **every** host running
+> that protocol. The artifact channel already targets one instance via
+> `ArtifactRequest.opts.target_source` (each sensor filters requests against
+> its own source), and the GUI sets it from the per-instance Sensors card.
+> Commands have no such field yet — a `set_capture` or systemd `action`
+> command fans out to all hosts (mitigated for systemd `action` by the
+> per-host allowlist + polkit). Planned follow-up: an optional
+> `target_source` on the `Command<T>` envelope, mirroring the artifact
+> precedent — targeting via payload, not key, preserves the fan-in query
+> pattern.
 
 ### 3.1 Control topics in use
 
@@ -416,10 +456,13 @@ dedicated plane:
 | Wildcard | Used by | Catches |
 |----------|---------|---------|
 | `zensight/**` | frontend (history sub), exporters | all telemetry *and* `_meta` (but **not** `@/…` nor `@media/…`) |
-| `zensight/*/@/**` | frontend | all control-plane (health/errors/alerts/liveness) — **not** `@media/…` (`@/` ≠ `@media`) |
+| `zensight/*/*/@/**` | frontend | all **host-scoped** control-plane (health/errors/status/liveness) — never intersects `zensight/*/@/**`, telemetry, `@media`, or `@pdns` (pinned in `zensight-common` tests) |
+| `zensight/*/@/**` | frontend | all **protocol-scoped** control-plane (alerts) + legacy pre-0.8 state keys |
 | `zensight/<proto>/<source>/@media/<stream>/**` | media viewer | one stream's opaque video/preview samples (#359; named explicitly) |
-| `zensight/*/@/alive` | frontend | sensor liveliness tokens |
-| `zensight/*/@/devices/*/alive` | frontend | device liveliness tokens |
+| `zensight/*/*/@/alive` | frontend | sensor liveliness tokens (host-scoped) |
+| `zensight/*/*/@/devices/*/alive` | frontend | device liveliness tokens (host-scoped) |
+| `zensight/*/@/alive` | frontend | legacy sensor liveliness tokens (pre-0.8 sensors) |
+| `zensight/*/@/devices/*/alive` | frontend, correlator | legacy device liveliness tokens |
 | `zensight/*/@/query/alerts` | frontend (GET at startup) | firing-set seed for late joiners |
 | `zensight/<protocol>/@/alerts/**` | any alert consumer | one sensor's alerts (note explicit `@`) |
 | `zensight/*/@/alerts/*` | exporters (`export_alerts`) | all sensors' alerts, mirrored to Prometheus/OTel |
@@ -501,8 +544,9 @@ mindmap
       "zensight/&lt;protocol&gt;/&lt;source&gt;/&lt;metric&gt;"
       TelemetryPoint
     "Control-plane (@/, verbatim)"
-      "zensight/&lt;protocol&gt;/@/**"
-      "health, errors, status, alive"
+      "zensight/&lt;protocol&gt;/&lt;source&gt;/@/** (host-scoped)"
+      "health, errors, status, alive, devices/**"
+      "zensight/&lt;protocol&gt;/@/** (protocol-scoped)"
       "alerts/&lt;alert_key&gt;"
       "commands, query, status, artifact/**"
     "Metadata (_meta/)"
@@ -521,13 +565,14 @@ And the annotated tree, chunk by chunk:
 zensight/
 ├── <protocol>/
 │   ├── <source>/<metric…>              # telemetry  (TelemetryPoint)
-│   └── @/
-│       ├── health                      # HealthSnapshot
-│       ├── errors                      # ErrorReport
-│       ├── status                      # queryable
-│       ├── alive                       # liveliness token
-│       ├── devices/<device>/liveness   # DeviceLiveness
-│       ├── devices/<device>/alive      # liveliness token
+│   ├── <source>/@/                     # HOST-SCOPED state (one per instance)
+│   │   ├── health                      # HealthSnapshot
+│   │   ├── errors                      # ErrorReport
+│   │   ├── status                      # running/offline status
+│   │   ├── alive                       # liveliness token
+│   │   ├── devices/<device>/liveness   # DeviceLiveness
+│   │   └── devices/<device>/alive      # liveliness token
+│   └── @/                              # PROTOCOL-SCOPED (shared by all hosts)
 │       ├── alerts/<alert_key>          # Alert (firing/resolved)
 │       ├── query/alerts                # firing-set seed (queryable)
 │       ├── query/<topic>               # on-demand detail (queryable)
@@ -560,7 +605,8 @@ enforced and a single change propagates everywhere.
 | Helper | Location | Produces |
 |--------|----------|----------|
 | `KeyExprBuilder::build(source, metric)` | `zensight-common/src/keyexpr.rs` | `zensight/<proto>/<source>/<metric>` |
-| `KeyExprBuilder::status_key()` | `zensight-common/src/keyexpr.rs` | `…/@/status` |
+| `keyexpr::sensor_control_prefix(proto, source)` | `zensight-common/src/keyexpr.rs` | `zensight/<proto>/<source>` (the instance control prefix) |
+| `KeyExprBuilder::status_key(source)` | `zensight-common/src/keyexpr.rs` | `…/<source>/@/status` |
 | `KeyExprBuilder::alert_key_expr(key)` | `zensight-common/src/keyexpr.rs` | `…/@/alerts/<key>` |
 | `command::command_key(prefix, topic)` | `zensight-common/src/command.rs` | `…/@/commands/<topic>` |
 | `command::status_key(prefix, topic)` | `zensight-common/src/command.rs` | `…/@/status/<topic>` |

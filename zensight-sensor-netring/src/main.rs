@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
 
     let source = config.netring.resolved_source();
 
-    let runner = SensorRunner::new_with_args("netring", config, Some(&args))
+    let runner = SensorRunner::new_with_args("netring", source.clone(), config, Some(&args))
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
     let format = runner.config().serialization;
@@ -80,9 +80,7 @@ async fn main() -> Result<()> {
         ));
     }
 
-    let runner = runner
-        .with_identity(source.clone())
-        .with_artifacts(source.clone(), producers);
+    let runner = runner.with_identity().with_artifacts(producers);
 
     let session = runner.session().clone();
 

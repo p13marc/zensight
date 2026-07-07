@@ -341,16 +341,20 @@ pub async fn request_and_await_ready(
     key_prefix: String,
     kind: ArtifactKind,
     id: Ulid,
+    target_source: Option<String>,
 ) -> Result<ArtifactState, String> {
     let slug = kind.slug().to_string();
     let extra_secs = match &kind {
         ArtifactKind::Capture { duration_secs, .. } => *duration_secs as u64,
         _ => 0,
     };
+    // The artifact channel key is protocol-scoped, so every host running this
+    // sensor sees the request; `target_source` makes exactly one produce it.
+    // `None` preserves the fan-out (all hosts produce).
     let req = ArtifactRequest {
         id,
         kind,
-        opts: Default::default(),
+        opts: zensight_common::ArtifactOptions { target_source },
     };
     let payload = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
     registry
@@ -506,6 +510,7 @@ fn caption_danger(theme: &iced::Theme) -> iced::widget::text::Style {
 pub fn capture_form_view<'a>(
     form: &CaptureForm,
     key_prefix: &str,
+    target_source: Option<&str>,
     advert: &KindAdvert,
     ks: &KindStatus,
     disabled: bool,
@@ -584,6 +589,7 @@ pub fn capture_form_view<'a>(
         submit = submit.on_press(Message::StartArtifact {
             key_prefix: kp.clone(),
             kind: kind.clone(),
+            target_source: target_source.map(str::to_string),
         });
     }
 
@@ -604,9 +610,14 @@ pub fn capture_form_view<'a>(
 /// `active_prefix`/`active_kind` identify the one in-flight job (if any), so only
 /// the matching card shows progress + the job controls. `capture_form` supplies
 /// the shared capture form for the `Capture` kind (None hides it).
+/// `target_source` restricts the request to one sensor instance
+/// (`ArtifactRequest.opts.target_source`); `None` fans out to every host
+/// running this protocol.
+#[allow(clippy::too_many_arguments)]
 pub fn artifact_section<'a>(
     fetch: &ArtifactFetch,
     this_prefix: &str,
+    target_source: Option<&str>,
     kinds: &[KindStatus],
     active_prefix: Option<&str>,
     active_kind: Option<&str>,
@@ -653,6 +664,7 @@ pub fn artifact_section<'a>(
                     btn = btn.on_press(Message::StartArtifact {
                         key_prefix: this_prefix.to_string(),
                         kind: ArtifactKind::Report {},
+                        target_source: target_source.map(str::to_string),
                     });
                 }
                 col = col.push(btn);
@@ -667,6 +679,7 @@ pub fn artifact_section<'a>(
                         b = b.on_press(Message::StartArtifact {
                             key_prefix: this_prefix.to_string(),
                             kind: ArtifactKind::Snapshot { dir: d.clone() },
+                            target_source: target_source.map(str::to_string),
                         });
                     }
                     btns = btns.push(b);
@@ -679,6 +692,7 @@ pub fn artifact_section<'a>(
                     col = col.push(capture_form_view(
                         form,
                         this_prefix,
+                        target_source,
                         &ks.advert,
                         ks,
                         other_busy,

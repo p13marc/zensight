@@ -45,6 +45,15 @@ pub async fn connect(config: &ZenohConfig) -> Result<Session> {
             .map_err(|e| Error::Config(format!("Failed to set listen endpoints: {}", e)))?;
     }
 
+    // zenoh-ext AdvancedPublisher caches sequence by timestamp, which requires
+    // session timestamping — zenoh enables it by default only for routers, so
+    // without this every peer/client-mode sensor fails to create its cached
+    // identity/evidence/registration publishers ("the 'timestamping' setting
+    // must be enabled") and the correlator never receives evidence.
+    zenoh_config
+        .insert_json5("timestamping/enabled", "true")
+        .map_err(|e| Error::Config(format!("Failed to enable timestamping: {}", e)))?;
+
     tracing::info!(
         mode = %config.mode,
         connect = ?config.connect,

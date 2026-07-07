@@ -21,7 +21,7 @@ async fn main() -> Result<()> {
     let source = config.resolved_source();
 
     // Create the sensor runner
-    let runner = SensorRunner::new_with_args("sysinfo", config, Some(&args))
+    let runner = SensorRunner::new_with_args("sysinfo", source.clone(), config, Some(&args))
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -38,19 +38,16 @@ async fn main() -> Result<()> {
         runner.health(),
     ));
     let artifacts = runner.config().artifact_limits();
-    let runner = runner.with_identity(source.clone());
-    let runner = runner.with_artifacts(
-        source.clone(),
-        vec![
-            std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
-                report_source,
-                &artifacts.report,
-            )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
-            std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
-                &artifacts.snapshot,
-            )),
-        ],
-    );
+    let runner = runner.with_identity();
+    let runner = runner.with_artifacts(vec![
+        std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
+            report_source,
+            &artifacts.report,
+        )) as std::sync::Arc<dyn zensight_sensor_core::ArtifactProducer>,
+        std::sync::Arc::new(zensight_sensor_core::SnapshotProducer::new(
+            &artifacts.snapshot,
+        )),
+    ]);
 
     // Get the config and publisher for the collector
     let sysinfo_config = runner.config().sysinfo.clone();

@@ -20,8 +20,9 @@
 //! async fn main() -> anyhow::Result<()> {
 //!     let args = SensorArgs::parse("mysensor.json5");
 //!     let config = MySensorConfig::load(&args.config)?;
+//!     let source = config.resolved_source();
 //!
-//!     let runner = SensorRunner::new("mysensor", config).await?;
+//!     let runner = SensorRunner::new("mysensor", source, config).await?;
 //!
 //!     // Spawn protocol-specific workers
 //!     runner.spawn(my_worker(runner.publisher()));

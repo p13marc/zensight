@@ -122,7 +122,7 @@ re-identify every host) fails loudly.
 ## Health reporting
 
 `health.rs` — `SensorHealth` tracks device counts, poll durations, and errors,
-publishing `HealthSnapshot` JSON to `<prefix>/@/health` (the runner does this
+publishing `HealthSnapshot` JSON to the host-scoped `<prefix>/<source>/@/health` (the runner does this
 every 5 s so the GUI's Sensors view / health bar populate). Errors feed a
 **rolling one-hour window** of 60 one-minute buckets, so `errors_last_hour` is a
 true sliding count that ages out old failures.
@@ -148,7 +148,7 @@ and publishes firing/resolved transitions to
 ## Liveness
 
 `liveliness.rs` — `LivelinessManager` declares Zenoh liveliness tokens for
-instant presence detection: a sensor token (`zensight/<protocol>/@/alive`,
+instant presence detection: a sensor token (`zensight/<protocol>/<source>/@/alive`,
 declared on creation, undeclared on drop) and per-device tokens
 (`declare_device_alive` / `undeclare_device` at
 `zensight/<protocol>/@/devices/<id>/alive`).

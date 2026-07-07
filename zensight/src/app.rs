@@ -1473,24 +1473,29 @@ impl ZenSight {
             }
 
             Message::HealthSnapshotReceived(snapshot) => {
-                self.sensor_health.insert(snapshot.sensor.clone(), snapshot);
+                // One entry per sensor INSTANCE (`sensor@source`), not per
+                // protocol — N hosts running the same sensor each keep a card.
+                let key = sensor_instance_key(&snapshot.sensor, snapshot.source.as_deref());
+                self.sensor_health.insert(key, snapshot);
             }
 
             Message::DeviceLivenessReceived(protocol, liveness) => {
                 self.handle_device_liveness(&protocol, liveness);
             }
 
-            Message::ErrorReportReceived(sensor, report) => {
+            Message::ErrorReportReceived(sensor, source, report) => {
                 tracing::warn!(
                     sensor = %sensor,
+                    source = ?source,
                     device = ?report.device,
                     error_type = ?report.error_type,
                     message = %report.message,
                     "Sensor error report received"
                 );
-                // Keep a bounded ring of recent errors per sensor for the
-                // Sensors view (newest at the back).
-                let ring = self.recent_errors.entry(sensor).or_default();
+                // Keep a bounded ring of recent errors per sensor instance for
+                // the Sensors view (newest at the back).
+                let key = sensor_instance_key(&sensor, source.as_deref());
+                let ring = self.recent_errors.entry(key).or_default();
                 ring.push_back(report);
                 while ring.len() > 20 {
                     ring.pop_front();
@@ -1652,15 +1657,15 @@ impl ZenSight {
                 self.last_telemetry_ms = None;
             }
 
-            Message::SensorOnline(protocol) => {
-                tracing::info!(protocol = %protocol, "Sensor online (liveliness)");
+            Message::SensorOnline(protocol, source) => {
+                tracing::info!(protocol = %protocol, source = ?source, "Sensor online (liveliness)");
                 // Sensor liveliness is informational - the sensor health system
                 // already tracks sensor status via HealthSnapshot messages.
                 // This provides instant notification when sensors appear.
             }
 
-            Message::SensorOffline(protocol) => {
-                tracing::warn!(protocol = %protocol, "Sensor offline (liveliness)");
+            Message::SensorOffline(protocol, source) => {
+                tracing::warn!(protocol = %protocol, source = ?source, "Sensor offline (liveliness)");
                 // Mark all devices from this protocol as potentially offline.
                 // The health system will update their status on the next poll.
             }
@@ -2311,8 +2316,12 @@ impl ZenSight {
                 }
             }
 
-            Message::StartArtifact { key_prefix, kind } => {
-                if let Some(task) = self.start_artifact(key_prefix, kind) {
+            Message::StartArtifact {
+                key_prefix,
+                kind,
+                target_source,
+            } => {
+                if let Some(task) = self.start_artifact(key_prefix, kind, target_source) {
                     return task;
                 }
             }
@@ -2330,10 +2339,12 @@ impl ZenSight {
             Message::ArtifactDestChosen {
                 key_prefix,
                 kind,
+                target_source,
                 dest,
             } => {
                 if let Some(dest) = dest
-                    && let Some(task) = self.start_artifact_with_dest(key_prefix, kind, dest)
+                    && let Some(task) =
+                        self.start_artifact_with_dest(key_prefix, kind, target_source, dest)
                 {
                     return task;
                 }
@@ -3171,6 +3182,7 @@ impl ZenSight {
         &mut self,
         key_prefix: String,
         kind: zensight_common::ArtifactKind,
+        target_source: Option<String>,
     ) -> Option<Task<Message>> {
         if self.session.is_none() {
             self.toasts
@@ -3188,13 +3200,14 @@ impl ZenSight {
                     Message::ArtifactDestChosen {
                         key_prefix,
                         kind,
+                        target_source,
                         dest,
                     }
                 }))
             }
             _ => {
                 let dest = std::env::temp_dir().join("zensight-downloads");
-                self.start_artifact_with_dest(key_prefix, kind, dest)
+                self.start_artifact_with_dest(key_prefix, kind, target_source, dest)
             }
         }
     }
@@ -3205,6 +3218,7 @@ impl ZenSight {
         &mut self,
         key_prefix: String,
         kind: zensight_common::ArtifactKind,
+        target_source: Option<String>,
         dest: std::path::PathBuf,
     ) -> Option<Task<Message>> {
         let session = self.session.clone()?;
@@ -3224,7 +3238,12 @@ impl ZenSight {
         self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Requesting;
         Some(Task::future(async move {
             let result = crate::view::artifact_fetch::request_and_await_ready(
-                session, registry, key_prefix, kind, id,
+                session,
+                registry,
+                key_prefix,
+                kind,
+                id,
+                target_source,
             )
             .await;
             Message::ArtifactRequested(result)
@@ -3457,10 +3476,15 @@ impl ZenSight {
     /// result per key prefix so the Sensors view renders the right affordances.
     fn load_artifact_kinds(&self) -> Option<Task<Message>> {
         let session = self.session.clone()?;
+        // Artifact channels are protocol-scoped (`zensight/<sensor>/@/artifact`),
+        // so derive prefixes from the snapshots' sensor names — the map keys are
+        // per-instance (`sensor@source`) and would produce bogus prefixes.
         let prefixes: Vec<String> = self
             .sensor_health
-            .keys()
-            .map(|s| format!("zensight/{s}"))
+            .values()
+            .map(|snap| format!("zensight/{}", snap.sensor))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
             .collect();
         if prefixes.is_empty() {
             return None;
@@ -5816,6 +5840,16 @@ impl ZenSight {
                 self.topology.run_layout_step();
             }
         }
+    }
+}
+
+/// The per-instance key for `sensor_health`/`recent_errors`: `sensor@source`
+/// (bare `sensor` for legacy snapshots without a source). Deliberately matches
+/// the `known_sensors` `<name>@<source>` convention so the two maps line up.
+pub(crate) fn sensor_instance_key(sensor: &str, source: Option<&str>) -> String {
+    match source {
+        Some(s) => format!("{sensor}@{s}"),
+        None => sensor.to_string(),
     }
 }
 

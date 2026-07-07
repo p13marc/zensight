@@ -34,8 +34,9 @@ use crate::status::StatusPublisher;
 /// async fn main() -> anyhow::Result<()> {
 ///     let args = SensorArgs::parse_with_default("mysensor.json5");
 ///     let config = MySensorConfig::load(&args.config)?;
+///     let source = config.resolved_source();
 ///
-///     let runner = SensorRunner::new("mysensor", config).await?;
+///     let runner = SensorRunner::new("mysensor", source, config).await?;
 ///
 ///     // Spawn workers using the publisher
 ///     let publisher = runner.publisher();
@@ -49,6 +50,10 @@ use crate::status::StatusPublisher;
 pub struct SensorRunner<C: SensorConfig> {
     /// Sensor name for logging and status.
     name: String,
+    /// The instance's `<source>` key segment (hostname / device-poller id).
+    /// Host-scopes the control-plane keys (`{key_prefix}/{source}/@/…`) and
+    /// feeds the identity/artifact channels.
+    source: String,
     /// Sensor version.
     version: String,
     /// The loaded configuration.
@@ -61,14 +66,15 @@ pub struct SensorRunner<C: SensorConfig> {
     status_publisher: Option<StatusPublisher>,
     /// Liveliness manager for presence detection.
     liveliness: Option<LivelinessManager>,
-    /// Sensor health tracker, published periodically to `<prefix>/@/health` so
+    /// Sensor health tracker, published periodically to the host-scoped
+    /// `<prefix>/<source>/@/health` so
     /// the frontend's Sensors view / health bar populate. Sensors may update it
     /// (device counts, poll durations) via [`Self::health`].
     health: Arc<crate::health::SensorHealth>,
-    /// Host identity envelope + the unified `source` id (identity envelope, #301).
-    /// Set via [`Self::with_identity`]; drives the `_meta/sensors` +
-    /// `_meta/evidence` publication task.
-    identity: Option<(String, crate::identity::SharedIdentity)>,
+    /// Host identity envelope (identity envelope, #301). Set via
+    /// [`Self::with_identity`]; drives the `_meta/sensors` +
+    /// `_meta/evidence` publication task (keyed by [`Self::source`]).
+    identity: Option<crate::identity::SharedIdentity>,
     /// Spawned tasks.
     tasks: Vec<JoinHandle<()>>,
 }
@@ -76,21 +82,32 @@ pub struct SensorRunner<C: SensorConfig> {
 impl<C: SensorConfig> SensorRunner<C> {
     /// Create a new sensor runner.
     ///
+    /// `source` is the instance's `<source>` key segment (typically the
+    /// sensor config's `resolved_source()`): it host-scopes the control-plane
+    /// keys (`{key_prefix}/{source}/@/health` etc.) and feeds the
+    /// identity/artifact channels.
+    ///
     /// This will:
     /// 1. Initialize logging based on config (with optional CLI override)
     /// 2. Connect to Zenoh
     /// 3. Create the publisher
-    pub async fn new(name: impl Into<String>, config: C) -> Result<Self> {
-        Self::new_with_args(name, config, None).await
+    pub async fn new(
+        name: impl Into<String>,
+        source: impl Into<String>,
+        config: C,
+    ) -> Result<Self> {
+        Self::new_with_args(name, source, config, None).await
     }
 
     /// Create a new sensor runner with CLI args for log level override.
     pub async fn new_with_args(
         name: impl Into<String>,
+        source: impl Into<String>,
         config: C,
         args: Option<&SensorArgs>,
     ) -> Result<Self> {
         let name = name.into();
+        let source = source.into();
         let version = env!("CARGO_PKG_VERSION").to_string();
 
         // Initialize logging with optional CLI override
@@ -110,7 +127,7 @@ impl<C: SensorConfig> SensorRunner<C> {
 
         init_tracing(&log_config).map_err(|e| SensorError::config(e.to_string()))?;
 
-        tracing::info!(sensor = %name, version = %version, "Starting sensor");
+        tracing::info!(sensor = %name, source = %source, version = %version, "Starting sensor");
 
         // Connect to Zenoh
         let session = Arc::new(
@@ -128,15 +145,19 @@ impl<C: SensorConfig> SensorRunner<C> {
             Format::Json, // Default to JSON, can be overridden
         );
 
-        // Health tracker publishes JSON to `<prefix>/@/health` (publish_health
-        // ignores the publisher's format, so the initial publisher is fine even
-        // if `with_format` later changes telemetry encoding).
+        // Health tracker publishes JSON to the host-scoped
+        // `<prefix>/<source>/@/health` (publish_health ignores the publisher's
+        // format, so the initial publisher is fine even if `with_format` later
+        // changes telemetry encoding).
         let health = Arc::new(
-            crate::health::SensorHealth::new(name.clone()).with_publisher(publisher.clone()),
+            crate::health::SensorHealth::new(name.clone())
+                .with_publisher(publisher.clone())
+                .with_source(source.clone()),
         );
 
         Ok(Self {
             name,
+            source,
             version,
             config,
             session,
@@ -149,12 +170,21 @@ impl<C: SensorConfig> SensorRunner<C> {
         })
     }
 
+    /// The host-scoped control prefix for this instance:
+    /// `{key_prefix}/{source}` (e.g. `zensight/sysinfo/hostA`). All per-instance
+    /// state channels (`@/health`, `@/errors`, `@/status`, `@/alive`,
+    /// `@/devices/**`) hang off it.
+    fn control_prefix(&self) -> String {
+        format!("{}/{}", self.config.key_prefix(), self.source)
+    }
+
     /// Enable status publishing.
     ///
     /// When enabled, the runner will publish status messages on startup and shutdown.
     pub fn with_status_publishing(mut self) -> Self {
         self.status_publisher = Some(StatusPublisher::new(
             self.publisher.clone(),
+            self.control_prefix(),
             &self.name,
             &self.version,
         ));
@@ -171,7 +201,7 @@ impl<C: SensorConfig> SensorRunner<C> {
     /// via [`LivelinessManager::declare_device_alive`].
     pub async fn with_liveliness(mut self) -> Result<Self> {
         let liveliness =
-            LivelinessManager::new(self.session.clone(), self.config.key_prefix()).await?;
+            LivelinessManager::new(self.session.clone(), self.control_prefix()).await?;
         self.liveliness = Some(liveliness);
         Ok(self)
     }
@@ -183,17 +213,16 @@ impl<C: SensorConfig> SensorRunner<C> {
     /// directory snapshots, or a sensor-specific capture producer). A no-op unless
     /// at least one producer is enabled in the sensor's `artifacts.*` config; when
     /// enabled, spawns one [`ArtifactChannel`](crate::ArtifactChannel) as a tracked
-    /// worker. `source_id` is this host's id (for a request's `target_source`
-    /// filter).
+    /// worker. The runner's `source` is this host's id (for a request's
+    /// `target_source` filter).
     pub fn with_artifacts(
         mut self,
-        source_id: impl Into<String>,
         producers: Vec<Arc<dyn crate::artifact::ArtifactProducer>>,
     ) -> Self {
         if let Some(channel) = crate::artifact::ArtifactChannel::new(
             self.session.clone(),
             self.config.key_prefix().to_string(),
-            source_id,
+            self.source.clone(),
             producers,
         ) {
             self.spawn(channel.run());
@@ -211,22 +240,17 @@ impl<C: SensorConfig> SensorRunner<C> {
     /// evidence (`zensight/_meta/evidence/host/<name>/<source>`) every 60 s via
     /// cached publishers, re-detecting on a slow timer for DHCP churn.
     ///
-    /// `source` is the sensor's unified host id — the same value used as the
-    /// telemetry `<source>` segment and passed to
-    /// [`with_artifacts`](Self::with_artifacts).
-    pub fn with_identity(self, source: impl Into<String>) -> Self {
+    /// The keys use the runner's `source` — the same value that host-scopes
+    /// the control-plane keys and the telemetry `<source>` segment.
+    pub fn with_identity(self) -> Self {
         let identity = crate::identity::SharedIdentity::detect();
-        self.with_shared_identity(source, identity)
+        self.with_shared_identity(identity)
     }
 
     /// [`with_identity`](Self::with_identity) with a pre-built identity (tests).
-    pub fn with_shared_identity(
-        mut self,
-        source: impl Into<String>,
-        identity: crate::identity::SharedIdentity,
-    ) -> Self {
+    pub fn with_shared_identity(mut self, identity: crate::identity::SharedIdentity) -> Self {
         self.health.set_host_id(identity.get().host_id.clone());
-        self.identity = Some((source.into(), identity));
+        self.identity = Some(identity);
         self
     }
 
@@ -234,16 +258,18 @@ impl<C: SensorConfig> SensorRunner<C> {
     /// was enabled — for stamping alerts via
     /// [`AlertReporter::with_identity`](crate::AlertReporter::with_identity).
     pub fn identity(&self) -> Option<crate::identity::SharedIdentity> {
-        self.identity.as_ref().map(|(_, id)| id.clone())
+        self.identity.clone()
     }
 
     /// Set a custom serialization format for the publisher.
     pub fn with_format(mut self, format: Format) -> Self {
         self.publisher = Publisher::new(self.session.clone(), self.config.key_prefix(), format);
-        // Recreate status publisher with new publisher
+        // Recreate status publisher with new publisher (control prefix survives
+        // the rebuild — it derives from config + source, not the publisher).
         if self.status_publisher.is_some() {
             self.status_publisher = Some(StatusPublisher::new(
                 self.publisher.clone(),
+                self.control_prefix(),
                 &self.name,
                 &self.version,
             ));
@@ -254,6 +280,11 @@ impl<C: SensorConfig> SensorRunner<C> {
     /// Get the sensor name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Get the instance's `<source>` key segment.
+    pub fn source(&self) -> &str {
+        &self.source
     }
 
     /// Get the sensor version.
@@ -342,7 +373,7 @@ impl<C: SensorConfig> SensorRunner<C> {
             tracing::warn!(error = %e, "Failed to publish running status");
         }
 
-        // Periodically publish sensor health to `<prefix>/@/health` so the
+        // Periodically publish sensor health to `<prefix>/<source>/@/health` so the
         // frontend's Sensors view and dashboard health bar populate. The first
         // tick fires immediately, then every 10s.
         {
@@ -363,7 +394,8 @@ impl<C: SensorConfig> SensorRunner<C> {
         // host evidence every 60 s via cached publishers (late-joiner seed), and
         // re-detect the identity every 5th tick so DHCP address churn is
         // eventually reflected (health host_id refreshes alongside).
-        if let Some((source, identity)) = self.identity.clone() {
+        if let Some(identity) = self.identity.clone() {
+            let source = self.source.clone();
             let registry = crate::advanced_publisher::AdvancedPublisherRegistry::new(
                 self.session.clone(),
                 self.config.key_prefix().to_string(),

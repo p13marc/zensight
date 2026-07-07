@@ -19,7 +19,7 @@ local hostname unless `modbus.source` is set.
 
 ### Control plane (via `zensight-sensor-core`)
 
-- `zensight/modbus/@/health` — sensor health snapshots
+- `zensight/modbus/<source>/@/health` — sensor health snapshots (host-scoped)
 - `zensight/modbus/@/devices/*/liveness` — per-device liveness
 - `zensight/modbus/@/errors` — error reports
 - `zensight/modbus/@/artifact/{request,status,cancel}` — on-demand debug report / snapshot (opt-in via `artifacts`)

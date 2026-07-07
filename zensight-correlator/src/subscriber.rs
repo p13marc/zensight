@@ -83,6 +83,28 @@ pub async fn run(
         None
     };
 
+    // Legacy (protocol-scoped) device-liveness shape, kept for one release so
+    // pre-host-scoping sensors still feed entity status. The two wildcards
+    // never match the same concrete key (pinned in zensight-common), and
+    // `handle_liveness` decodes the payload only — no key parsing to fork.
+    let liveness_legacy_sub = if status_from_liveness {
+        let key = "zensight/*/@/devices/*/liveness";
+        info!(key = %key, "subscribing to device liveness (legacy shape)");
+        match session
+            .declare_subscriber(key)
+            .with(flume::unbounded())
+            .await
+        {
+            Ok(s) => Some(s),
+            Err(e) => {
+                warn!(error = %e, "failed to declare legacy liveness subscriber");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     info!("evidence subscribers ready");
 
     loop {
@@ -111,6 +133,14 @@ pub async fn run(
                 match sample {
                     Ok(sample) => handle_liveness(&sample, &tx).await,
                     Err(e) => warn!(error = %e, "liveness recv error"),
+                }
+            }
+            sample = async { liveness_legacy_sub.as_ref().unwrap().recv_async().await },
+                if liveness_legacy_sub.is_some() =>
+            {
+                match sample {
+                    Ok(sample) => handle_liveness(&sample, &tx).await,
+                    Err(e) => warn!(error = %e, "legacy liveness recv error"),
                 }
             }
         }

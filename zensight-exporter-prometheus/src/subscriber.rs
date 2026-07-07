@@ -300,6 +300,10 @@ mod tests {
         ));
         assert!(!is_telemetry_key("zensight/netlink/@/alerts/foo-00"));
         assert!(!is_telemetry_key("zensight/snmp/@/health"));
+        // Host-scoped control plane: the `@` chunk moves one level deeper but
+        // stays excluded (any `@`-prefixed chunk is non-telemetry).
+        assert!(!is_telemetry_key("zensight/sysinfo/host1/@/health"));
+        assert!(!is_telemetry_key("zensight/sysinfo/host1/@/errors"));
         assert!(!is_telemetry_key("zensight/_meta/sensors/snmp"));
     }
 

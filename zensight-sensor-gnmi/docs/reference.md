@@ -17,7 +17,7 @@ the `path` label. The point `source` defaults to the local hostname unless
 
 ### Control plane (via `zensight-sensor-core`)
 
-- `zensight/gnmi/@/health` — sensor health snapshots
+- `zensight/gnmi/<source>/@/health` — sensor health snapshots (host-scoped)
 - `zensight/gnmi/@/devices/*/liveness` — per-device liveness
 - `zensight/gnmi/@/errors` — error reports
 - `zensight/gnmi/@/artifact/{request,status,cancel}` — on-demand debug report / snapshot (opt-in via `artifacts`)
