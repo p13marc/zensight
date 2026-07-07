@@ -1093,13 +1093,17 @@ mod tests {
         // Nodes spread 1000 wide, viewport 800x600 → zoom < 1, pan centers.
         let positions = vec![(-500.0, -100.0), (500.0, 100.0)];
         let (zoom, pan) = fit_view(&positions, 800.0, 600.0).unwrap();
-        assert!(zoom < 1.0 && zoom >= 0.3);
+        assert!((0.3..1.0).contains(&zoom));
         assert_eq!(pan, (0.0, 0.0));
-        // Offset cluster pans back to center.
+        // Offset cluster pans back to center; small extents zoom in
+        // (bounded by the label margin and the 3.0 clamp).
         let positions = vec![(190.0, 90.0), (210.0, 110.0)];
         let (zoom, pan) = fit_view(&positions, 800.0, 600.0).unwrap();
         assert_eq!(pan, (-200.0, -100.0));
-        assert_eq!(zoom, 3.0); // tiny extent clamps at max zoom
+        assert!((1.0..=3.0).contains(&zoom));
+        // A single point clamps at max zoom.
+        let (zoom, _) = fit_view(&[(0.0, 0.0)], 2000.0, 2000.0).unwrap();
+        assert_eq!(zoom, 3.0);
         assert!(fit_view(&[], 800.0, 600.0).is_none());
     }
 
