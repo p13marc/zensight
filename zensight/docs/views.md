@@ -126,12 +126,23 @@ sockets/links/routes) and pushes them to the netlink sensor at runtime via the
 `@/commands` channel; the sensor hot-swaps its evaluator and replies on
 `@/status`.
 
-**Topology** (`view/topology/`) — an interactive force-directed graph of
-sysinfo/netlink hosts. `layout.rs` positions nodes automatically; `graph.rs`
-renders on a canvas; edges are network connections with bandwidth-based
-thickness. Nodes are tinted by the highest firing alert severity. Supports zoom,
-pan, search, manual node positioning, and a per-node info panel with
-"View Details" navigation.
+**Topology** (`view/topology/`) — an interactive force-directed graph of the
+monitored network (redesign epic #395; design report
+[`docs/TOPOLOGY-REDESIGN.md`](../../docs/TOPOLOGY-REDESIGN.md)). `model.rs` is
+the pure, unit-tested graph model: typed nodes
+(`NodeRole` router/switch/ap/phone/iot from the netring asset inventory,
+`Provenance` monitored/wire-only, `NodeHealth` healthy/degraded/down/stale from
+liveness + host-scoped `@/health` + entity staleness) and typed edges
+(`EdgeKind`): **Flow** edges are directed and rate-weighted from the netring
+traffic matrix (`@/query/matrix`, bytes/sec; arrowheads only where a rate was
+observed; flows are the fallback + cumulative-stat enrichment), **L2Adjacency**
+edges come from netlink neighbor tables (dotted), and **Gateway** edges from
+the `routes/default_v4_gw` metric (dashed; unresolved gateways become wire-only
+router nodes). `layout.rs` positions nodes; `graph.rs` renders on a canvas with
+node/edge hit-testing. Nodes show live ↓rx/↑tx rates (hot-ring counter deltas),
+a health ring, a role glyph, and alert-severity tint; queries re-issue every
+~10 s while the view is open. Supports zoom, pan, search, manual node
+positioning, and per-node/per-edge info panels with "View Details" navigation.
 
 **Logs** (`view/specialized/syslog.rs` and related) — structured log drill-down
 with a MESSAGE_ID catalog, follow/pause, and a boot lens. Seeds from the cold
