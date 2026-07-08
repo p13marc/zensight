@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-08
+
+Identity & evidence release. Sensors now self-report a stable host identity and
+republish observed hosts/names; a new `zensight-correlator` service fuses that
+evidence into one `HostEntity` per physical host, and the GUI groups every
+per-protocol facet under a single host card. This release also lands the Zenoh
+low-bandwidth efficiency work (CBOR default, reliable alert/command traffic,
+detail-on-request keyspaces, a media plane), a unified on-demand artifact
+channel, container/cloud identity, durable storage tiers, new export paths, a
+fully redesigned topology view (epic #395), and first-class multi-machine
+deployment (host-scoped state keys, a sensors-only container image, and
+`docs/DEPLOYMENT.md`). It carries a batch of deliberate breaking changes — see
+**Changed (BREAKING)** and the per-entry mixed-version notes; upgrade sensors
+and frontend together.
+
 ### Changed (BREAKING)
 
 - **Per-sensor state keys are now host-scoped:
@@ -29,20 +44,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and its artifact downloads set `ArtifactRequest.opts.target_source` from the
   card so only that host produces the artifact (aggregated views keep the
   fan-out).
-
-## [0.7.0] - 2026-07-06
-
-Identity & evidence release. Sensors now self-report a stable host identity and
-republish observed hosts/names; a new `zensight-correlator` service fuses that
-evidence into one `HostEntity` per physical host, and the GUI groups every
-per-protocol facet under a single host card. This release also lands the Zenoh
-low-bandwidth efficiency work (CBOR default, reliable alert/command traffic,
-detail-on-request keyspaces, a media plane), a unified on-demand artifact
-channel, container/cloud identity, durable storage tiers, and new export paths.
-It carries a batch of deliberate breaking changes — see **Changed (BREAKING)**
-and the per-entry mixed-version notes; upgrade sensors and frontend together.
-
-### Changed (BREAKING)
 
 - **netring NDR detectors migrated onto flowscope 0.22's `DetectorRegistry` +
   netring 0.29's `aggregate()`/`red()` (#369).** The hand-rolled
@@ -90,6 +91,40 @@ and the per-entry mixed-version notes; upgrade sensors and frontend together.
   sensor (upgrade both together).
 
 ### Added
+
+- **Topology view redesigned (epic #395; design report
+  `docs/TOPOLOGY-REDESIGN.md`).** The map is now a typed, directed,
+  rate-weighted graph derived from data already on the bus: flow edges carry
+  live bytes/sec from the netring traffic matrix (arrowheads only where a
+  direction was observed), netlink neighbor tables draw dotted L2 adjacency,
+  and each host links to its default gateway (dashed) so quiet networks still
+  read. Nodes are typed by the passive asset inventory (router / switch / AP /
+  phone / IoT glyphs + vendor), carry real health states (liveness +
+  host-scoped `@/health` + entity staleness — stale hosts ghost out), and show
+  live ↓rx/↑tx NIC rates. Presentation is organized as **lenses**
+  (Traffic / Security / L2 / Health), with subnet/role/device-group
+  **collapse into meta-nodes**, an **Internet** aggregate for off-LAN traffic,
+  focus mode (1–3-hop neighborhood), find:/hide: search predicates, and
+  visibility filters with an honest "showing top N of M flows" label.
+  Selecting a node or edge opens a **details-on-demand side panel**:
+  correlator identity evidence (member claims with rule + confidence,
+  passive-DNS names), a 1 h CPU sparkline, top talkers, listen sockets,
+  per-direction edge rates, backing flows with per-flow **process
+  attribution** ("nginx on web1 → postgres on db1"), and community-ID copy.
+  Polish: hover dims everything outside the hovered neighborhood, active
+  flows animate a marching dash (gated so idle networks burn no frames), a
+  per-lens legend, force / ranked-grid / circular layouts, `f` zoom-to-fit,
+  and pinned node positions that survive restarts.
+
+- **Sensors split from the GUI + all-in-one sensors container image (#390).**
+  `just sensors [connect=…]` and `just gui [listen=…]` replace the monolithic
+  `just run` for multi-machine setups; `just image` builds a single
+  `zensight-sensors` container (every sensor, correlator excluded — it stays
+  the single writer of `_meta/entity/**`) whose only required knob is
+  `ZENSIGHT_ZENOH_CONNECT`. Ships `scripts/gen-configs.sh` /
+  `scripts/run-sensors.sh`, `docker/Dockerfile.sensors{,-runtime}`, a
+  `build-docker-sensors-bundle` release job, and `docs/DEPLOYMENT.md`
+  (rootful podman, host namespaces, identity mounts, quadlet units).
 
 - **Media plane enabler (#359)**: an opaque `@media` plane for live video /
   imagery — `zensight/<proto>/<source>/@media/<stream>/…` carrying raw encoded
