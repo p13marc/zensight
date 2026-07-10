@@ -14,8 +14,9 @@ loads config, builds a `SensorRunner`, spawns protocol workers that publish
    `SensorHealth` tracker.
 2. Optional builders layer on capabilities:
    - `.with_status_publishing()` — publishes running/offline status.
-   - `.with_liveliness().await?` — declares a sensor liveliness token for instant
-     online/offline detection.
+   - `.with_liveliness().await?` — declares the sensor liveliness token *early*.
+     `run()` declares it automatically, so this is only needed to reach the
+     `LivelinessManager` before `run()` (e.g. for device-level tokens).
    - `.with_identity(source)` — enables the identity envelope (see below).
    - `.with_artifacts(source_id, producers)` — enables the `@/artifact` channel
      ([artifacts.md](artifacts.md)).
@@ -152,6 +153,12 @@ instant presence detection: a sensor token (`zensight/<protocol>/<source>/@/aliv
 declared on creation, undeclared on drop) and per-device tokens
 (`declare_device_alive` / `undeclare_device` at
 `zensight/<protocol>/@/devices/<id>/alive`).
+
+The sensor token is **not optional**: `run()` declares it automatically if no
+builder did, because the frontend flips the sensor's card to **Offline** when
+the token disappears (clean shutdown deletes it; a crash drops the session and
+the DELETE propagates on transport loss or lease expiry). Without a token a
+dead sensor would keep its last reported health forever.
 
 ## Process identity & scrubbing
 

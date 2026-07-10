@@ -157,6 +157,7 @@ fn health_badge<'a>(status: HealthStatus) -> Element<'a, Message> {
         HealthStatus::Unhealthy => "Unhealthy",
         HealthStatus::Starting => "Starting",
         HealthStatus::Error => "Error",
+        HealthStatus::Offline => "Offline",
     };
     let dot = container(text(""))
         .width(10)
@@ -167,7 +168,7 @@ fn health_badge<'a>(status: HealthStatus) -> Element<'a, Message> {
                 HealthStatus::Healthy => c.status_healthy(),
                 HealthStatus::Degraded => c.status_degraded(),
                 HealthStatus::Unhealthy | HealthStatus::Error => c.status_error(),
-                HealthStatus::Starting => c.status_unknown(),
+                HealthStatus::Starting | HealthStatus::Offline => c.status_unknown(),
             };
             container::Style {
                 background: Some(Background::Color(color)),

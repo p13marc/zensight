@@ -20,6 +20,10 @@ pub enum HealthStatus {
     Starting,
     /// Sensor encountered a fatal error.
     Error,
+    /// Sensor is gone: its liveliness token disappeared (clean shutdown or
+    /// lease expiry after a crash). Set by the frontend, never published by
+    /// sensors themselves.
+    Offline,
 }
 
 impl std::fmt::Display for HealthStatus {
@@ -30,6 +34,7 @@ impl std::fmt::Display for HealthStatus {
             HealthStatus::Unhealthy => write!(f, "unhealthy"),
             HealthStatus::Starting => write!(f, "starting"),
             HealthStatus::Error => write!(f, "error"),
+            HealthStatus::Offline => write!(f, "offline"),
         }
     }
 }
