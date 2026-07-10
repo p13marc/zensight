@@ -818,6 +818,15 @@ pub enum Message {
         /// Chosen destination folder, or `None` if cancelled.
         dest: Option<std::path::PathBuf>,
     },
+    /// The sensor reported production progress (streamed from the status poll
+    /// while the request is in flight): an optional human-readable line (e.g.
+    /// `"capturing 12s/30s"`) and an optional fraction in `0.0..=1.0`.
+    ArtifactGenerating {
+        /// Producer-reported progress line, if any.
+        detail: Option<String>,
+        /// Producer-reported fraction in `0.0..=1.0`, if any.
+        progress: Option<f32>,
+    },
     /// The artifact request resolved: a `Ready` state to download, or an error.
     ArtifactRequested(Result<zensight_common::ArtifactState, String>),
     /// Streaming download progress (units resolved / total).
