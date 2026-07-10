@@ -23,6 +23,7 @@ use zensight_common::{
 };
 
 use crate::message::Message;
+use crate::view::components::fraction_bar;
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
@@ -35,11 +36,14 @@ pub enum ArtifactFetch {
     Idle,
     /// The request was PUT; awaiting the sensor's status.
     Requesting,
-    /// The sensor is producing the artifact. `detail` carries an optional
-    /// producer-reported progress line (e.g. `"capturing 12s/30s"`).
+    /// The sensor is producing the artifact. `detail`/`progress` carry the
+    /// producer-reported progress (e.g. `"capturing 12s/30s"`, `0.4`), streamed
+    /// from the status queryable while the request poll runs.
     Generating {
         /// Optional human-readable progress line from the sensor.
         detail: Option<String>,
+        /// Optional producer-reported fraction in `0.0..=1.0`.
+        progress: Option<f32>,
     },
     /// Streaming units (`got`/`total`: chunks for a blob, distinct chunks for a tree).
     Downloading {
@@ -82,9 +86,12 @@ impl ArtifactFetch {
         self.is_active() || matches!(self, ArtifactFetch::Paused { .. })
     }
 
-    /// Download fraction `[0,1]`, if known.
+    /// Progress fraction `[0,1]`, if known: the producer-reported fraction while
+    /// generating (e.g. capture elapsed/duration), chunks received while
+    /// downloading or paused.
     pub fn progress_frac(&self) -> Option<f32> {
         match self {
+            ArtifactFetch::Generating { progress, .. } => progress.map(|f| f.clamp(0.0, 1.0)),
             ArtifactFetch::Downloading { got, total } | ArtifactFetch::Paused { got, total }
                 if *total > 0 =>
             {
@@ -105,7 +112,7 @@ impl ArtifactFetch {
                 "capture" => "Requesting capture…".into(),
                 _ => "Requesting report…".into(),
             },
-            ArtifactFetch::Generating { detail } => {
+            ArtifactFetch::Generating { detail, .. } => {
                 if let Some(d) = detail {
                     return d.clone();
                 }
@@ -332,55 +339,81 @@ pub async fn load_artifact_kinds(session: Arc<Session>, key_prefix: String) -> V
 }
 
 /// PUT an `ArtifactRequest` for `kind`/`id`, then poll the status queryable until
-/// the artifact is `Ready` (returns that state) or `Failed`/`Expired`/timeout.
+/// the artifact is `Ready` or `Failed`/`Expired`/timeout — the outcome lands as a
+/// final [`Message::ArtifactRequested`]. While the sensor is producing, each
+/// observed `Generating` state is yielded as [`Message::ArtifactGenerating`] so
+/// the UI shows the producer's own progress (a capture's `"capturing 12s/30s"`
+/// line + elapsed/duration fraction) instead of sitting on "Requesting…".
 /// The timeout scales with the request: a 60s baseline plus a Capture's
 /// `duration_secs`, so a long capture does not time out mid-flight.
-pub async fn request_and_await_ready(
+pub fn request_and_stream_ready(
     session: Arc<Session>,
     registry: Arc<zensight_common::PublisherRegistry>,
     key_prefix: String,
     kind: ArtifactKind,
     id: Ulid,
     target_source: Option<String>,
-) -> Result<ArtifactState, String> {
-    let slug = kind.slug().to_string();
-    let extra_secs = match &kind {
-        ArtifactKind::Capture { duration_secs, .. } => *duration_secs as u64,
-        _ => 0,
-    };
-    // The artifact channel key is protocol-scoped, so every host running this
-    // sensor sees the request; `target_source` makes exactly one produce it.
-    // `None` preserves the fan-out (all hosts produce).
-    let req = ArtifactRequest {
-        id,
-        kind,
-        opts: zensight_common::ArtifactOptions { target_source },
-    };
-    let payload = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
-    registry
-        .put(
-            &artifact_request_key(&key_prefix),
-            payload,
-            zensight_common::QosClass::Command,
-        )
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
-
-    let status_key = artifact_status_key(&key_prefix);
-    // Poll every 500ms for a scaled window (2 iters/sec).
-    let iters = (60 + extra_secs) * 2;
-    for _ in 0..iters {
-        if let Some(state) = poll_status(&session, &status_key, &slug, id).await {
-            match state {
-                ArtifactState::Ready { .. } => return Ok(state),
-                ArtifactState::Failed { reason, .. } => return Err(reason),
-                ArtifactState::Expired { .. } => return Err("artifact expired".into()),
-                ArtifactState::Generating { .. } => {}
+) -> impl Stream<Item = Message> {
+    async_stream::stream! {
+        let slug = kind.slug().to_string();
+        let extra_secs = match &kind {
+            ArtifactKind::Capture { duration_secs, .. } => *duration_secs as u64,
+            _ => 0,
+        };
+        // The artifact channel key is protocol-scoped, so every host running this
+        // sensor sees the request; `target_source` makes exactly one produce it.
+        // `None` preserves the fan-out (all hosts produce).
+        let req = ArtifactRequest {
+            id,
+            kind,
+            opts: zensight_common::ArtifactOptions { target_source },
+        };
+        let payload = match serde_json::to_vec(&req) {
+            Ok(p) => p,
+            Err(e) => {
+                yield Message::ArtifactRequested(Err(e.to_string()));
+                return;
             }
+        };
+        if let Err(e) = registry
+            .put(
+                &artifact_request_key(&key_prefix),
+                payload,
+                zensight_common::QosClass::Command,
+            )
+            .await
+        {
+            yield Message::ArtifactRequested(Err(format!("request failed: {e}")));
+            return;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let status_key = artifact_status_key(&key_prefix);
+        // Poll every 500ms for a scaled window (2 iters/sec).
+        let iters = (60 + extra_secs) * 2;
+        for _ in 0..iters {
+            if let Some(state) = poll_status(&session, &status_key, &slug, id).await {
+                match state {
+                    ArtifactState::Ready { .. } => {
+                        yield Message::ArtifactRequested(Ok(state));
+                        return;
+                    }
+                    ArtifactState::Failed { reason, .. } => {
+                        yield Message::ArtifactRequested(Err(reason));
+                        return;
+                    }
+                    ArtifactState::Expired { .. } => {
+                        yield Message::ArtifactRequested(Err("artifact expired".into()));
+                        return;
+                    }
+                    ArtifactState::Generating { detail, progress, .. } => {
+                        yield Message::ArtifactGenerating { detail, progress };
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        yield Message::ArtifactRequested(Err("timed out waiting for artifact".into()));
     }
-    Err("timed out waiting for artifact".into())
 }
 
 /// GET the status queryable and return the current state iff it is for this
@@ -626,7 +659,8 @@ pub fn artifact_section<'a>(
     let is_this = active_prefix == Some(this_prefix);
 
     // Active or paused: show the in-flight job's status + controls, worded for the
-    // job's kind.
+    // job's kind, with a progress bar whenever a fraction is known (producer
+    // progress while generating, chunk counts while downloading/paused).
     if is_this && fetch.is_busy() {
         let kind = active_kind.unwrap_or("report");
         let mut controls = row![text(fetch.label(kind)).size(font::CAPTION)]
@@ -647,7 +681,11 @@ pub fn artifact_section<'a>(
         }
         controls = controls
             .push(button(text("Cancel").size(font::CAPTION)).on_press(Message::CancelArtifact));
-        return controls.into();
+        let mut job = column![controls].spacing(space::XS);
+        if let Some(frac) = fetch.progress_frac() {
+            job = job.push(fraction_bar(frac));
+        }
+        return job.into();
     }
 
     // Idle / finished: a request affordance per advertised kind, disabled while
@@ -827,7 +865,13 @@ mod tests {
     fn active_states() {
         assert!(!ArtifactFetch::Idle.is_active());
         assert!(ArtifactFetch::Requesting.is_active());
-        assert!(ArtifactFetch::Generating { detail: None }.is_active());
+        assert!(
+            ArtifactFetch::Generating {
+                detail: None,
+                progress: None
+            }
+            .is_active()
+        );
         assert!(ArtifactFetch::Downloading { got: 1, total: 4 }.is_active());
         assert!(!ArtifactFetch::Saved("x".into()).is_active());
         assert!(!ArtifactFetch::Failed("x".into()).is_active());
@@ -853,6 +897,31 @@ mod tests {
             None
         );
         assert_eq!(ArtifactFetch::Idle.progress_frac(), None);
+        // Producer-reported fraction while generating, clamped to [0,1].
+        assert_eq!(
+            ArtifactFetch::Generating {
+                detail: None,
+                progress: Some(0.4)
+            }
+            .progress_frac(),
+            Some(0.4)
+        );
+        assert_eq!(
+            ArtifactFetch::Generating {
+                detail: None,
+                progress: Some(1.5)
+            }
+            .progress_frac(),
+            Some(1.0)
+        );
+        assert_eq!(
+            ArtifactFetch::Generating {
+                detail: None,
+                progress: None
+            }
+            .progress_frac(),
+            None
+        );
     }
 
     #[test]
@@ -874,13 +943,18 @@ mod tests {
             "Requesting snapshot…"
         );
         assert_eq!(
-            ArtifactFetch::Generating { detail: None }.label("snapshot"),
+            ArtifactFetch::Generating {
+                detail: None,
+                progress: None
+            }
+            .label("snapshot"),
             "Building snapshot…"
         );
         // A producer-supplied detail line overrides the default wording.
         assert_eq!(
             ArtifactFetch::Generating {
-                detail: Some("capturing 12s/30s".into())
+                detail: Some("capturing 12s/30s".into()),
+                progress: Some(0.4),
             }
             .label("capture"),
             "capturing 12s/30s"

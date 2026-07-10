@@ -4222,6 +4222,7 @@ fn capture_generating_progress_line_renders() {
     let form = CaptureForm::default();
     let fetch = ArtifactFetch::Generating {
         detail: Some("capturing 12s/30s · 3.1 MiB · 42 pkts".into()),
+        progress: Some(0.4),
     };
     let mut ui = simulator(artifact_section(
         &fetch,

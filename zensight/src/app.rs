@@ -2356,6 +2356,19 @@ impl ZenSight {
                 }
             }
 
+            Message::ArtifactGenerating { detail, progress } => {
+                // Only update while the produce phase is running (ignore a stale
+                // poll landing after Ready flipped the state to Downloading).
+                if matches!(
+                    self.artifact_fetch,
+                    crate::view::artifact_fetch::ArtifactFetch::Requesting
+                        | crate::view::artifact_fetch::ArtifactFetch::Generating { .. }
+                ) {
+                    self.artifact_fetch =
+                        crate::view::artifact_fetch::ArtifactFetch::Generating { detail, progress };
+                }
+            }
+
             Message::ArtifactProgress { got, total } => {
                 // Only update while actively downloading (ignore stale progress
                 // from a paused/cancelled job).
@@ -3213,7 +3226,8 @@ impl ZenSight {
     }
 
     /// Build the job with the resolved `dest`, set Requesting, and spawn the
-    /// request/poll-to-`Ready` future.
+    /// request/poll-to-`Ready` stream (produce-phase progress arrives as
+    /// `ArtifactGenerating`, the outcome as `ArtifactRequested`).
     fn start_artifact_with_dest(
         &mut self,
         key_prefix: String,
@@ -3236,18 +3250,16 @@ impl ZenSight {
         let id = job.id;
         self.artifact_job = Some(job);
         self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Requesting;
-        Some(Task::future(async move {
-            let result = crate::view::artifact_fetch::request_and_await_ready(
+        Some(Task::stream(
+            crate::view::artifact_fetch::request_and_stream_ready(
                 session,
                 registry,
                 key_prefix,
                 kind,
                 id,
                 target_source,
-            )
-            .await;
-            Message::ArtifactRequested(result)
-        }))
+            ),
+        ))
     }
 
     /// Download an already-registered triggered-capture blob by id (#327). Skips

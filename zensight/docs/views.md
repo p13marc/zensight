@@ -192,6 +192,14 @@ detail (from `_meta/sensors/**` registrations and the host-scoped
 protocol each keep their own card; the card's artifact downloads set
 `target_source` so only that host produces the artifact.
 
+An in-flight artifact job shows two-phase progress under its status line
+(`view/artifact_fetch.rs`): while the sensor is **producing**, the request poll
+streams the producer's own `Generating` updates (a capture's
+`"capturing 12s/30s · … MiB · … pkts"` line plus its elapsed/duration
+fraction); while **downloading**, `zenoh-blob` chunk counts drive the same bar
+(`components::fraction_bar`). Both surfaces that render the shared job state —
+the Sensors-page card and the netring Capture tab — get the bar.
+
 **Settings** (`view/settings.rs`) — Zenoh connection mode (peer/client/router),
 connect/listen endpoints, stale threshold, and theme; persisted to
 `~/.config/zensight/settings.json5`.

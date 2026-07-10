@@ -5,6 +5,38 @@ use iced::{Alignment, Element, Length, Theme};
 
 use crate::view::theme;
 
+/// A slim, unlabeled determinate bar for job progress (artifact captures /
+/// downloads): a primary-colored fill over the row background, no thresholds —
+/// unlike [`ProgressBar`], nearing 100% is success here, not danger.
+pub fn fraction_bar<'a, Message: 'a>(frac: f32) -> Element<'a, Message> {
+    let ratio = frac.clamp(0.0, 1.0);
+    let filled = container(text(""))
+        .width(Length::FillPortion((ratio * 100.0) as u16))
+        .height(Length::Fixed(6.0))
+        .style(|t: &Theme| container::Style {
+            background: Some(iced::Background::Color(theme::colors(t).primary())),
+            ..Default::default()
+        });
+    let empty = container(text(""))
+        .width(Length::FillPortion(((1.0 - ratio) * 100.0) as u16))
+        .height(Length::Fixed(6.0))
+        .style(|t: &Theme| container::Style {
+            background: Some(iced::Background::Color(theme::colors(t).row_background())),
+            ..Default::default()
+        });
+    container(row![filled, empty].width(Length::Fill))
+        .width(Length::Fill)
+        .style(|t: &Theme| container::Style {
+            border: iced::Border {
+                color: theme::colors(t).border_subtle(),
+                width: 1.0,
+                radius: 3.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
 /// Style configuration for a progress bar.
 #[derive(Debug, Clone, Copy)]
 pub struct ProgressBarStyle {
