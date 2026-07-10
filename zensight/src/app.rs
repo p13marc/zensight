@@ -10,7 +10,8 @@ use std::ops::ControlFlow;
 use std::sync::LazyLock;
 
 use zensight_common::{
-    ErrorReport, HealthSnapshot, Protocol, SensorInfo, TelemetryPoint, TelemetryValue, ZenohConfig,
+    ErrorReport, HealthSnapshot, HealthStatus, Protocol, SensorInfo, TelemetryPoint,
+    TelemetryValue, ZenohConfig,
 };
 
 /// Flush the metric store to redb every this many 1s ticks (#22).
@@ -1659,15 +1660,19 @@ impl ZenSight {
 
             Message::SensorOnline(protocol, source) => {
                 tracing::info!(protocol = %protocol, source = ?source, "Sensor online (liveliness)");
-                // Sensor liveliness is informational - the sensor health system
-                // already tracks sensor status via HealthSnapshot messages.
-                // This provides instant notification when sensors appear.
+                // A fresh HealthSnapshot follows shortly; meanwhile lift any
+                // Offline badge left from a previous run so the card doesn't
+                // read dead while the sensor is already back.
+                self.set_sensor_liveliness(&protocol, source.as_deref(), true);
             }
 
             Message::SensorOffline(protocol, source) => {
                 tracing::warn!(protocol = %protocol, source = ?source, "Sensor offline (liveliness)");
-                // Mark all devices from this protocol as potentially offline.
-                // The health system will update their status on the next poll.
+                // A dead sensor publishes no further HealthSnapshots, so its
+                // last snapshot would sit at "Healthy" forever — flip it here.
+                // Its devices carry their own liveliness tokens and get their
+                // DeviceOffline events independently.
+                self.set_sensor_liveliness(&protocol, source.as_deref(), false);
             }
 
             Message::DeviceOnline(protocol, device_id) => {
@@ -5280,6 +5285,32 @@ impl ZenSight {
         // They should be created when telemetry arrives
     }
 
+    /// Apply a sensor-level liveliness transition to the health cards.
+    ///
+    /// Liveliness tokens carry `(protocol, source)`; `sensor_health` is keyed
+    /// `sensor@source`, and the sensor name is the protocol segment, so the
+    /// two line up. Legacy (non-host-scoped) tokens have no source and match
+    /// every instance of the protocol — the legacy token shape can't
+    /// distinguish hosts anyway.
+    fn set_sensor_liveliness(&mut self, protocol: &str, source: Option<&str>, alive: bool) {
+        for (key, snap) in self.sensor_health.iter_mut() {
+            if !sensor_liveliness_matches(key, protocol, source) {
+                continue;
+            }
+            if alive {
+                // Only lift an Offline badge; a live sensor's real status
+                // comes from its own HealthSnapshots.
+                if snap.status == HealthStatus::Offline {
+                    tracing::info!(sensor = %key, "Sensor card lifted Offline → Starting (liveliness token reappeared)");
+                    snap.status = HealthStatus::Starting;
+                }
+            } else {
+                tracing::info!(sensor = %key, was = %snap.status, "Sensor card marked Offline (liveliness token gone)");
+                snap.status = HealthStatus::Offline;
+            }
+        }
+    }
+
     /// Merge cold-store search-back results (#107, C9) into the rolling log
     /// buffer via the shared de-dup merge below.
     fn merge_log_history(&mut self, logs: Vec<crate::store::StoredLog>) {
@@ -5865,6 +5896,19 @@ pub(crate) fn sensor_instance_key(sensor: &str, source: Option<&str>) -> String 
     }
 }
 
+/// Whether a `sensor_health` instance key belongs to the sensor a liveliness
+/// token identifies. Host-scoped tokens carry a `<source>` and match exactly
+/// one instance; legacy tokens carry none and match every instance of the
+/// protocol (the legacy key shape can't distinguish hosts).
+fn sensor_liveliness_matches(key: &str, protocol: &str, source: Option<&str>) -> bool {
+    match source {
+        Some(_) => key == sensor_instance_key(protocol, source),
+        None => {
+            key == protocol || (key.starts_with(protocol) && key[protocol.len()..].starts_with('@'))
+        }
+    }
+}
+
 /// Current wall-clock time in epoch milliseconds.
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -6279,5 +6323,126 @@ mod update_routing_tests {
         let was_dark = matches!(a.theme, AppTheme::Dark);
         let _ = a.update(Message::ToggleTheme);
         assert_ne!(was_dark, matches!(a.theme, AppTheme::Dark));
+    }
+}
+
+#[cfg(test)]
+mod sensor_liveliness_tests {
+    use super::*;
+
+    fn app() -> ZenSight {
+        ZenSight::boot(true).0
+    }
+
+    fn snapshot(sensor: &str, source: Option<&str>, status: HealthStatus) -> HealthSnapshot {
+        HealthSnapshot {
+            sensor: sensor.to_string(),
+            status,
+            uptime_secs: 60,
+            devices_total: 1,
+            devices_responding: 1,
+            devices_failed: 0,
+            last_poll_duration_ms: 10,
+            errors_last_hour: 0,
+            metrics_published: 100,
+            host_id: None,
+            source: source.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn liveliness_match_host_scoped_is_exact() {
+        assert!(sensor_liveliness_matches(
+            "netlink@hostA",
+            "netlink",
+            Some("hostA")
+        ));
+        assert!(!sensor_liveliness_matches(
+            "netlink@hostB",
+            "netlink",
+            Some("hostA")
+        ));
+        assert!(!sensor_liveliness_matches(
+            "netring@hostA",
+            "netlink",
+            Some("hostA")
+        ));
+    }
+
+    #[test]
+    fn liveliness_match_legacy_covers_protocol_not_lookalikes() {
+        // A legacy token (no source) matches the bare key and every host
+        // instance of that protocol...
+        assert!(sensor_liveliness_matches("snmp", "snmp", None));
+        assert!(sensor_liveliness_matches("snmp@h1", "snmp", None));
+        // ...but not protocols that merely share a prefix.
+        assert!(!sensor_liveliness_matches("snmpx@h1", "snmp", None));
+        assert!(!sensor_liveliness_matches("sysinfo@h1", "snmp", None));
+    }
+
+    #[test]
+    fn sensor_offline_marks_its_health_card_offline() {
+        let mut a = app();
+        let _ = a.update(Message::HealthSnapshotReceived(snapshot(
+            "netlink",
+            Some("hostA"),
+            HealthStatus::Healthy,
+        )));
+        let _ = a.update(Message::HealthSnapshotReceived(snapshot(
+            "netlink",
+            Some("hostB"),
+            HealthStatus::Healthy,
+        )));
+
+        let _ = a.update(Message::SensorOffline(
+            "netlink".into(),
+            Some("hostA".into()),
+        ));
+
+        // Only hostA's card flips; hostB's instance is untouched.
+        assert_eq!(
+            a.sensor_health["netlink@hostA"].status,
+            HealthStatus::Offline
+        );
+        assert_eq!(
+            a.sensor_health["netlink@hostB"].status,
+            HealthStatus::Healthy
+        );
+    }
+
+    #[test]
+    fn sensor_online_lifts_offline_but_never_overrides_real_health() {
+        let mut a = app();
+        let _ = a.update(Message::HealthSnapshotReceived(snapshot(
+            "sysinfo",
+            Some("hostA"),
+            HealthStatus::Degraded,
+        )));
+        let _ = a.update(Message::HealthSnapshotReceived(snapshot(
+            "sysinfo",
+            Some("hostB"),
+            HealthStatus::Offline,
+        )));
+
+        let _ = a.update(Message::SensorOnline(
+            "sysinfo".into(),
+            Some("hostA".into()),
+        ));
+        let _ = a.update(Message::SensorOnline(
+            "sysinfo".into(),
+            Some("hostB".into()),
+        ));
+
+        // A live sensor's real status comes from its own snapshots — Degraded
+        // stays Degraded; only an Offline badge is lifted (to Starting, until
+        // the next snapshot arrives).
+        assert_eq!(
+            a.sensor_health["sysinfo@hostA"].status,
+            HealthStatus::Degraded
+        );
+        assert_eq!(
+            a.sensor_health["sysinfo@hostB"].status,
+            HealthStatus::Starting
+        );
     }
 }

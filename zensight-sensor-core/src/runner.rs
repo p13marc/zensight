@@ -191,14 +191,12 @@ impl<C: SensorConfig> SensorRunner<C> {
         self
     }
 
-    /// Enable liveliness tokens for presence detection.
+    /// Declare the sensor-level liveliness token now instead of at [`Self::run`].
     ///
-    /// When enabled, the runner will declare a sensor-level liveliness token
-    /// that allows the frontend to instantly detect when this sensor comes
-    /// online or goes offline.
-    ///
-    /// The liveliness manager can also be used to declare device-level tokens
-    /// via [`LivelinessManager::declare_device_alive`].
+    /// The runner declares the token automatically when it starts, so most
+    /// sensors never call this. Call it only to get the [`LivelinessManager`]
+    /// early (via [`Self::liveliness`]) — e.g. to declare device-level tokens
+    /// with [`LivelinessManager::declare_device_alive`] before `run()`.
     pub async fn with_liveliness(mut self) -> Result<Self> {
         let liveliness =
             LivelinessManager::new(self.session.clone(), self.control_prefix()).await?;
@@ -315,7 +313,8 @@ impl<C: SensorConfig> SensorRunner<C> {
 
     /// Get a reference to the liveliness manager.
     ///
-    /// Returns `None` if liveliness was not enabled via [`Self::with_liveliness`].
+    /// Returns `None` before [`Self::run`] unless [`Self::with_liveliness`]
+    /// declared it early.
     pub fn liveliness(&self) -> Option<&LivelinessManager> {
         self.liveliness.as_ref()
     }
@@ -366,6 +365,19 @@ impl<C: SensorConfig> SensorRunner<C> {
 
     /// Run the sensor with custom status metadata.
     pub async fn run_with_metadata(mut self, metadata: Option<serde_json::Value>) -> Result<()> {
+        // Presence is not optional: declare the sensor-level liveliness token
+        // (`<prefix>/<source>/@/alive`) unless [`Self::with_liveliness`] already
+        // did. The frontend flips this sensor's card Offline when the token
+        // vanishes (clean close or lease expiry), so a sensor without a token
+        // would read as its last health forever. Declaration failure is only a
+        // warning — a broken liveliness path must never stop telemetry.
+        if self.liveliness.is_none() {
+            match LivelinessManager::new(self.session.clone(), self.control_prefix()).await {
+                Ok(manager) => self.liveliness = Some(manager),
+                Err(e) => tracing::warn!(error = %e, "Failed to declare liveliness token"),
+            }
+        }
+
         // Publish running status
         if let Some(ref status_pub) = self.status_publisher
             && let Err(e) = status_pub.publish_running(metadata).await

@@ -200,6 +200,15 @@ fraction); while **downloading**, `zenoh-blob` chunk counts drive the same bar
 (`components::fraction_bar`). Both surfaces that render the shared job state —
 the Sensors-page card and the netring Capture tab — get the bar.
 
+Card status follows Zenoh liveliness, not just snapshots: when a sensor's
+`<proto>/<source>/@/alive` token disappears (clean shutdown, or lease expiry
+after a crash), its card flips to **Offline** — a dead sensor publishes no
+further snapshots, so without this the last-reported status would stick
+forever. When the token reappears, an Offline card lifts to **Starting** until
+the next real `@/health` snapshot lands; liveliness never overrides a live
+sensor's own reported status. Legacy (non-host-scoped) `<proto>/@/alive`
+tokens can't distinguish hosts and flip every instance of that protocol.
+
 **Settings** (`view/settings.rs`) — Zenoh connection mode (peer/client/router),
 connect/listen endpoints, stale threshold, and theme; persisted to
 `~/.config/zensight/settings.json5`.

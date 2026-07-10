@@ -551,7 +551,17 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fetch_records_decodes_live_queryable() {
         let key = "zensight/netlink/@/query/sockets";
-        let session = Arc::new(zenoh::open(zenoh::Config::default()).await.unwrap());
+        // Scouting off: with the default config this session joins any real
+        // ZenSight mesh on the host, and a live netlink sensor's queryable
+        // answers with real sockets instead of the single mock record.
+        let mut config = zenoh::Config::default();
+        config
+            .insert_json5("scouting/multicast/enabled", "false")
+            .unwrap();
+        config
+            .insert_json5("scouting/gossip/enabled", "false")
+            .unwrap();
+        let session = Arc::new(zenoh::open(config).await.unwrap());
 
         let records = vec![SocketRecord {
             local: "10.0.0.1:5555".into(),
