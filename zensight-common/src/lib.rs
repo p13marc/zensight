@@ -73,7 +73,7 @@ pub use query_detail::{
 };
 pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;
-pub use stream::{StreamControl, StreamDescriptor, StreamStatus};
+pub use stream::{FrameMeta, StreamControl, StreamDescriptor, StreamStatus};
 pub use telemetry::{Protocol, TelemetryPoint, TelemetryValue, current_timestamp_millis};
 
 /// Initialize tracing with the given configuration.

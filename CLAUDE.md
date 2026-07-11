@@ -25,6 +25,7 @@ design rationale lives in [`docs/design/`](docs/design/).
 | `zensight-sensor-netlink/` | kernel net telemetry (RTNETLINK/sock_diag) + sentinel + optional eBPF |
 | `zensight-sensor-netring/` | wire-level flow/L7/NDR (AF_PACKET/AF_XDP/pcap) + detectors + threat-intel |
 | `zensight-sensor-systemd/` | systemd unit/boot telemetry (D-Bus) + sentinel + gated actions |
+| `zensight-sensor-parallax/` | live video (V4L2/RTSP/test) → H.264 + JPEG previews on `@media` (parallax pipeline) |
 | `zensight-correlator/` | fuses identity evidence → one `HostEntity` per host |
 | `zensight-exporter-{prometheus,otel}/` | forward telemetry/alerts to external systems |
 | `zenoh-blob/` | resumable content-addressed large-data transfer |
@@ -97,6 +98,7 @@ flowchart LR
 | Crate | Feature | Purpose |
 |-------|---------|---------|
 | `zensight` | `tester` | F12 UI recorder (iced/tester) |
+| `zensight` | `h264` | opt-in H.264 live view for parallax streams (pulls openh264, a C++ build from source; default GUI stays JPEG-preview-only) |
 | `zensight-sensor-netring` | `lateral` / `sigma` / `yara` / `snmp` | opt-in NDR detectors (off by default) |
 | `zensight-sensor-netring` | `ja4plus` | JA4/JA4H fingerprints — FoxIO License 1.1 (NOT OSI); default build stays OSI-clean |
 | `zensight-sensor-{netlink,sysinfo}` | `ebpf` | opt-in eBPF collectors (need host validation) |

@@ -2155,19 +2155,31 @@ mod tests {
         };
         // a - b - c - d chain plus isolated e.
         let edges = vec![edge("a", "b"), edge("b", "c"), edge("c", "d")];
+        // Explicit HashSet<String> annotations: extra FromIterator/PartialEq
+        // impls from optional-feature deps (smol_str/rkyv via the `h264`
+        // feature) would otherwise make inference ambiguous.
         let hop1 = focus_neighborhood(&edges, &"b".to_string(), 1);
         assert_eq!(
             hop1,
-            ["a", "b", "c"].iter().map(|s| s.to_string()).collect()
+            ["a", "b", "c"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<HashSet<String>>()
         );
         let hop2 = focus_neighborhood(&edges, &"a".to_string(), 2);
         assert_eq!(
             hop2,
-            ["a", "b", "c"].iter().map(|s| s.to_string()).collect()
+            ["a", "b", "c"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<HashSet<String>>()
         );
         // Root always present, even with no edges.
         let lonely = focus_neighborhood(&[], &"e".to_string(), 3);
-        assert_eq!(lonely, ["e".to_string()].into_iter().collect());
+        assert_eq!(
+            lonely,
+            ["e".to_string()].into_iter().collect::<HashSet<String>>()
+        );
     }
 
     fn render_fixture() -> (HashMap<NodeId, Node>, Vec<Edge>) {

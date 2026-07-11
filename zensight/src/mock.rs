@@ -569,7 +569,68 @@ pub mod gnmi {
     }
 }
 
-/// Mock modbus data.
+/// Mock parallax (live media) data.
+pub mod parallax {
+    use super::*;
+    use zensight_common::StreamDescriptor;
+
+    /// Mock stream catalogue — mirrors the real `@/query/streams` reply
+    /// shape (demo mirrors the wire contract).
+    pub fn streams() -> Vec<StreamDescriptor> {
+        vec![
+            StreamDescriptor {
+                stream: "video0".to_string(),
+                codecs: vec!["h264".to_string(), "mjpeg".to_string()],
+                active: false,
+                description: Some("Integrated Webcam".to_string()),
+            },
+            StreamDescriptor {
+                stream: "door".to_string(),
+                codecs: vec!["h264".to_string(), "mjpeg".to_string()],
+                active: true,
+                description: Some("front door (rtsp)".to_string()),
+            },
+            StreamDescriptor {
+                stream: "test0".to_string(),
+                codecs: vec!["h264".to_string(), "mjpeg".to_string()],
+                active: false,
+                description: Some("test pattern smpte 640x360@15".to_string()),
+            },
+        ]
+    }
+
+    /// Mock per-stream stats telemetry so a parallax device card appears in
+    /// demo mode (mirrors the sensor's stats ticker keys).
+    pub fn host(name: &str) -> Vec<TelemetryPoint> {
+        vec![
+            telemetry_point(
+                Protocol::Parallax,
+                name,
+                "streams/advertised",
+                TelemetryValue::Gauge(3.0),
+            ),
+            telemetry_point(
+                Protocol::Parallax,
+                name,
+                "door/stats/fps",
+                TelemetryValue::Gauge(15.2),
+            ),
+            telemetry_point(
+                Protocol::Parallax,
+                name,
+                "door/stats/kbps",
+                TelemetryValue::Gauge(1850.0),
+            ),
+            telemetry_point(
+                Protocol::Parallax,
+                name,
+                "door/stats/viewers",
+                TelemetryValue::Gauge(1.0),
+            ),
+        ]
+    }
+}
+
 pub mod modbus {
     use super::*;
 
@@ -791,6 +852,11 @@ pub fn mock_environment() -> Vec<TelemetryPoint> {
     // Industrial devices
     points.extend(modbus::plc("plc01"));
 
+    // Live media (parallax): stats telemetry makes the camera host's device
+    // card appear, so the stream catalogue + tile views are reachable in
+    // demo (demo mirrors the wire contract).
+    points.extend(parallax::host("camhost01"));
+
     points
 }
 
@@ -813,6 +879,7 @@ mod tests {
         assert!(protocols.contains(&Protocol::Netring));
         assert!(protocols.contains(&Protocol::Netflow));
         assert!(protocols.contains(&Protocol::Gnmi));
+        assert!(protocols.contains(&Protocol::Parallax));
     }
 
     #[test]

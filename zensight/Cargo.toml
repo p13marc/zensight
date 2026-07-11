@@ -60,10 +60,19 @@ chrono = "0.4"
 # Local tiered time-series store (Plan v3-04 §A): pure-Rust, ACID, zero-copy.
 redb = "4"
 
+# H.264 decode for the opt-in live view (#409); `h264` feature only.
+parallax-pipeline = { version = "0.1.1", default-features = false, features = [
+    "h264",
+], optional = true }
+
 [features]
 default = []
 # Enable the tester developer tool (F12 to record/play tests)
 tester = ["iced/tester"]
+# Opt-in H.264 live view for parallax streams (#409). Default OFF: it pulls
+# openh264 (a C++ build from source), unacceptable unconditionally on
+# GUI/CI/flatpak builds. `cargo build -p zensight --features h264`.
+h264 = ["dep:parallax-pipeline"]
 
 [dev-dependencies]
 iced_test = "0.14"

@@ -4260,3 +4260,71 @@ fn no_capture_advert_renders_no_form() {
     assert!(ui.find("Start capture").is_err());
     assert!(ui.find("Download debug report").is_ok());
 }
+
+/// #408: the parallax view renders the catalogue with Open/Close controls,
+/// clicking Open/Close dispatches the tile messages, an open tile renders a
+/// waiting caption, and the empty state shows the no-previews placeholder.
+#[test]
+fn test_parallax_catalogue_and_tiles() {
+    use zensight::view::specialized::parallax::parallax_view;
+
+    let device_id = DeviceId {
+        protocol: Protocol::Parallax,
+        source: "hostA".to_string(),
+    };
+    let mut state = DeviceDetailState::new(device_id);
+
+    // Idle catalogue → load affordance + empty-tiles placeholder.
+    {
+        let mut ui = simulator(parallax_view(&state));
+        assert!(ui.find("Live media — hostA").is_ok());
+        assert!(ui.find("Load streams").is_ok());
+        assert!(
+            ui.find("No previews open — open a stream above to watch its live preview.")
+                .is_ok()
+        );
+    }
+
+    // Ready catalogue renders one row per stream (with the active badge) and
+    // Open dispatches ParallaxOpenTile.
+    state.parallax_detail.apply(Ok(mock::parallax::streams()));
+    {
+        let mut ui = simulator(parallax_view(&state));
+        assert!(ui.find("video0").is_ok());
+        assert!(ui.find("door").is_ok());
+        assert!(ui.find("test pattern smpte 640x360@15").is_ok());
+        assert!(ui.find("live").is_ok(), "door is advertised active");
+        let _ = ui.click("Open");
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, Message::ParallaxOpenTile { .. })),
+            "clicking Open must dispatch ParallaxOpenTile"
+        );
+    }
+
+    // An open tile renders its waiting caption; Close dispatches
+    // ParallaxCloseTile.
+    let generation = state.parallax_detail.allocate_generation();
+    state.parallax_detail.open_tile("video0", generation, None);
+    {
+        let mut ui = simulator(parallax_view(&state));
+        assert!(ui.find("video0 · waiting for frames…").is_ok());
+        let _ = ui.click("Close");
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, Message::ParallaxCloseTile { .. })),
+            "clicking Close must dispatch ParallaxCloseTile"
+        );
+    }
+
+    // A tile whose stream ended shows the reason instead of a frame.
+    state
+        .parallax_detail
+        .end_tile("video0", generation, Some("stream ended".into()));
+    let mut ui = simulator(parallax_view(&state));
+    assert!(ui.find("video0 — stream ended").is_ok());
+}

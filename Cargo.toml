@@ -15,6 +15,7 @@ members = [
     "zensight-sensor-gnmi",
     "zensight-sensor-netlink",
     "zensight-sensor-netring",
+    "zensight-sensor-parallax",
     "zensight-sensor-systemd",
     # EVALUATION ONLY (epic #415): Rerun visualization adapter prototype.
     # publish = false, nothing depends on it; may be removed wholesale if the
