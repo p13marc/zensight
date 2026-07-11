@@ -46,6 +46,14 @@ impl<'a> ThemeColors<'a> {
         self.palette().background.strongest.color
     }
 
+    /// Dimming scrim behind fullscreen overlays (expanded media tiles):
+    /// the base background at high opacity, so the view underneath stays
+    /// faintly visible in both light and dark themes.
+    pub fn scrim(&self) -> Color {
+        let base = self.background();
+        Color::from_rgba(base.r, base.g, base.b, 0.85)
+    }
+
     // ========================================================================
     // Text Colors
     // ========================================================================

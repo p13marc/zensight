@@ -8,8 +8,8 @@
 //! [`iced::widget::image`] with a seq/fps caption. Closing (or leaving the
 //! view) aborts the subscriber and sends `close_stream`.
 
-use iced::widget::{Space, button, column, container, image, row, text};
-use iced::{Element, Length, Theme};
+use iced::widget::{Space, button, column, container, image, mouse_area, row, text};
+use iced::{ContentFit, Element, Length, Theme};
 
 use crate::message::Message;
 use crate::view::device::DeviceDetailState;
@@ -124,8 +124,9 @@ fn catalogue_row<'a>(
 }
 
 /// One live preview tile: frame (or placeholder / end reason) + caption.
+/// Clicking the frame expands the tile to the near-fullscreen overlay (#436).
 fn tile<'a>(name: &'a str, tile: &'a TileState) -> Element<'a, Message> {
-    let frame: Element<'a, Message> = match (&tile.frame, &tile.ended) {
+    let picture: Element<'a, Message> = match (&tile.frame, &tile.ended) {
         (Some(handle), _) => preview_frame(handle.clone()),
         (None, Some(reason)) => container(text(reason.as_str()).size(12).style(muted))
             .width(Length::Fixed(PREVIEW_W as f32))
@@ -134,6 +135,12 @@ fn tile<'a>(name: &'a str, tile: &'a TileState) -> Element<'a, Message> {
             .into(),
         (None, None) => preview_frame(placeholder_frame()),
     };
+    let frame: Element<'a, Message> = mouse_area(picture)
+        .on_press(Message::ParallaxExpandTile {
+            stream: name.to_string(),
+        })
+        .interaction(iced::mouse::Interaction::Pointer)
+        .into();
     let caption = if let Some(reason) = &tile.ended {
         format!("{name} — {reason}")
     } else if tile.frame.is_some() {
@@ -156,6 +163,67 @@ fn tile<'a>(name: &'a str, tile: &'a TileState) -> Element<'a, Message> {
     ]
     .spacing(space::XS)
     .into()
+}
+
+/// The near-fullscreen expanded-tile overlay (#436): a dimming scrim (click
+/// outside to dismiss) around the stream's latest frame scaled up, with a
+/// caption + Close button. `None` while nothing is expanded — and a closed
+/// or torn-down tile dismisses the overlay implicitly (`expanded_tile`).
+pub fn expanded_overlay(detail: &ParallaxDetailState) -> Option<Element<'_, Message>> {
+    let (name, tile) = detail.expanded_tile()?;
+    let picture: Element<'_, Message> = image(tile.frame.clone().unwrap_or_else(placeholder_frame))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .content_fit(ContentFit::Contain)
+        .into();
+    let profile = if tile.video { "H.264" } else { "preview" };
+    let caption = if let Some(reason) = &tile.ended {
+        format!("{name} · {profile} — {reason}")
+    } else if tile.frame.is_some() {
+        format!(
+            "{name} · {profile} · seq {} · {:.1} fps",
+            tile.last_seq, tile.fps
+        )
+    } else {
+        format!("{name} · {profile} · waiting for frames…")
+    };
+    let header = row![
+        text(caption).size(14),
+        Space::new().width(Length::Fill),
+        button(text("Close").size(12)).on_press(Message::ParallaxCollapseTile),
+    ]
+    .spacing(space::SM)
+    .align_y(iced::Alignment::Center);
+    let card = container(
+        column![header, picture]
+            .spacing(space::SM)
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .padding(space::MD)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(|t: &Theme| iced::widget::container::Style {
+        background: Some(theme::colors(t).background_strongest().into()),
+        ..iced::widget::container::rounded_box(t)
+    });
+    // The scrim ring around the card is the click-outside surface; the card
+    // itself is opaque, so clicks on it (Close, the picture) never fall
+    // through to the dismissing mouse_area.
+    Some(
+        mouse_area(
+            container(iced::widget::opaque(card))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding(space::XL)
+                .style(|t: &Theme| iced::widget::container::Style {
+                    background: Some(theme::colors(t).scrim().into()),
+                    ..Default::default()
+                }),
+        )
+        .on_press(Message::ParallaxCollapseTile)
+        .into(),
+    )
 }
 
 /// Specialized view for a Parallax media source: stream catalogue + live
@@ -257,6 +325,34 @@ mod tests {
     #[test]
     fn rejects_non_jpeg_bytes() {
         assert!(preview_handle_from_jpeg(b"definitely not a jpeg").is_none());
+    }
+
+    #[test]
+    fn expanded_overlay_renders_caption_and_close() {
+        use iced_test::simulator;
+
+        let mut detail = ParallaxDetailState::default();
+        let generation = detail.allocate_generation();
+        detail.open_tile("cam0", generation, None, true);
+        assert!(
+            expanded_overlay(&detail).is_none(),
+            "no overlay while nothing is expanded"
+        );
+
+        detail.expand("cam0");
+        let overlay = expanded_overlay(&detail).expect("overlay for the expanded tile");
+        let mut ui = simulator(overlay);
+        assert!(
+            ui.find("cam0 · H.264 · waiting for frames…").is_ok(),
+            "caption names the stream + profile"
+        );
+        let _ = ui.click("Close");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, Message::ParallaxCollapseTile)),
+            "Close dismisses the overlay"
+        );
     }
 
     #[test]

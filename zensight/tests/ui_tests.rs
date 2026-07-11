@@ -4463,7 +4463,9 @@ fn test_parallax_catalogue_and_tiles() {
     // An open tile renders its waiting caption; Close dispatches
     // ParallaxCloseTile.
     let generation = state.parallax_detail.allocate_generation();
-    state.parallax_detail.open_tile("video0", generation, None);
+    state
+        .parallax_detail
+        .open_tile("video0", generation, None, false);
     {
         let mut ui = simulator(parallax_view(&state));
         assert!(ui.find("video0 · waiting for frames…").is_ok());

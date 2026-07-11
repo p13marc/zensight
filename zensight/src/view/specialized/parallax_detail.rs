@@ -46,8 +46,25 @@ pub struct ParallaxDetailState {
     pub catalogue: Fetch<Vec<StreamDescriptor>>,
     /// Open preview tiles, keyed by stream name (BTreeMap: stable grid order).
     pub tiles: BTreeMap<String, TileState>,
+    /// The tile currently shown in the near-fullscreen overlay (#436).
+    /// Lives on this state (not the app) so every existing teardown choke
+    /// point that clears the tiles also dismisses the overlay.
+    pub expanded: Option<ExpandedTile>,
     /// Generation source for [`Self::allocate_generation`].
     next_generation: u64,
+}
+
+/// The expanded-tile overlay (#436): which stream fills the screen, and what
+/// profile the tile ran *before* expanding — collapsing restores it, so the
+/// sensor-side refcounts return to their pre-expand state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpandedTile {
+    /// Stream name (tile key).
+    pub stream: String,
+    /// Whether the tile was already on the H.264 video profile when it was
+    /// expanded (`false` = preview tile that expand upgraded, collapse
+    /// downgrades back).
+    pub was_video: bool,
 }
 
 /// One live preview tile.
@@ -73,10 +90,14 @@ pub struct TileState {
     /// Set when the stream ended (subscriber task finished); the tile shows
     /// the reason instead of a frame.
     pub ended: Option<String>,
+    /// Whether this tile runs the H.264 video profile (`false` = JPEG
+    /// preview). Set at open; the expand overlay uses it to decide whether
+    /// to upgrade and what to restore on collapse (#436).
+    pub video: bool,
 }
 
 impl TileState {
-    fn new(generation: u64, abort: Option<iced::task::Handle>) -> Self {
+    fn new(generation: u64, abort: Option<iced::task::Handle>, video: bool) -> Self {
         Self {
             generation,
             frame: None,
@@ -85,6 +106,7 @@ impl TileState {
             last_frame_at: None,
             abort,
             ended: None,
+            video,
         }
     }
 }
@@ -115,10 +137,45 @@ impl ParallaxDetailState {
     }
 
     /// Register an opened tile (replacing — and thereby aborting — any
-    /// previous tile for the stream).
-    pub fn open_tile(&mut self, stream: &str, generation: u64, abort: Option<iced::task::Handle>) {
+    /// previous tile for the stream). `video` records the profile
+    /// (H.264 video vs JPEG preview) for the expand overlay (#436).
+    pub fn open_tile(
+        &mut self,
+        stream: &str,
+        generation: u64,
+        abort: Option<iced::task::Handle>,
+        video: bool,
+    ) {
         self.tiles
-            .insert(stream.to_string(), TileState::new(generation, abort));
+            .insert(stream.to_string(), TileState::new(generation, abort, video));
+    }
+
+    /// Expand `stream`'s tile into the near-fullscreen overlay (#436),
+    /// recording its current profile so collapse can restore it. No-op for
+    /// unknown tiles. Returns whether the tile still runs the preview
+    /// profile (i.e. the caller should upgrade it to video).
+    pub fn expand(&mut self, stream: &str) -> Option<bool> {
+        let tile = self.tiles.get(stream)?;
+        let was_video = tile.video;
+        self.expanded = Some(ExpandedTile {
+            stream: stream.to_string(),
+            was_video,
+        });
+        Some(!was_video)
+    }
+
+    /// Dismiss the expanded-tile overlay, handing back what was expanded so
+    /// the caller can restore the pre-expand profile.
+    pub fn collapse(&mut self) -> Option<ExpandedTile> {
+        self.expanded.take()
+    }
+
+    /// The expanded tile's state, if the overlay is up AND the tile still
+    /// exists (a closed/torn-down tile dismisses the overlay implicitly).
+    pub fn expanded_tile(&self) -> Option<(&str, &TileState)> {
+        let expanded = self.expanded.as_ref()?;
+        let tile = self.tiles.get(&expanded.stream)?;
+        Some((expanded.stream.as_str(), tile))
     }
 
     /// Fold a decoded frame in. Returns `false` (frame ignored) when the
@@ -193,8 +250,16 @@ impl ParallaxDetailState {
         }
     }
 
-    /// Close one tile: abort its subscriber task and drop it.
+    /// Close one tile: abort its subscriber task and drop it. Dismisses the
+    /// expanded overlay if it was showing this stream.
     pub fn close_tile(&mut self, stream: &str) {
+        if self
+            .expanded
+            .as_ref()
+            .is_some_and(|expanded| expanded.stream == stream)
+        {
+            self.expanded = None;
+        }
         if let Some(tile) = self.tiles.remove(stream)
             && let Some(abort) = tile.abort
         {
@@ -203,9 +268,11 @@ impl ParallaxDetailState {
     }
 
     /// Tear every tile down (device deselected / disconnected): abort all
-    /// subscriber tasks, clear the map, and return the stream names so the
-    /// caller can batch `close_stream` commands.
+    /// subscriber tasks, clear the map (and the expanded overlay with it),
+    /// and return the stream names so the caller can batch `close_stream`
+    /// commands.
     pub fn teardown(&mut self) -> Vec<String> {
+        self.expanded = None;
         let streams: Vec<String> = self.tiles.keys().cloned().collect();
         for (_, tile) in std::mem::take(&mut self.tiles) {
             if let Some(abort) = tile.abort {
@@ -311,7 +378,7 @@ mod tests {
     fn frames_replace_and_stale_sequences_drop() {
         let mut state = ParallaxDetailState::default();
         let generation = state.allocate_generation();
-        state.open_tile("cam0", generation, None);
+        state.open_tile("cam0", generation, None, false);
 
         assert!(state.apply_frame("cam0", generation, 5, dummy_handle()));
         assert_eq!(state.tiles["cam0"].last_seq, 5);
@@ -332,14 +399,14 @@ mod tests {
     fn stale_generation_frames_are_ignored() {
         let mut state = ParallaxDetailState::default();
         let old = state.allocate_generation();
-        state.open_tile("cam0", old, None);
+        state.open_tile("cam0", old, None, false);
         assert!(state.apply_frame("cam0", old, 500, dummy_handle()));
 
         // Replace the tile (e.g. preview → video switch): a leftover frame
         // from the old subscriber must not land on the new tile — its
         // sequence domain (500…) would freeze the new tile at seq 0….
         let new = state.allocate_generation();
-        state.open_tile("cam0", new, None);
+        state.open_tile("cam0", new, None, false);
         assert!(!state.apply_frame("cam0", old, 501, dummy_handle()));
         assert!(state.tiles["cam0"].frame.is_none());
 
@@ -352,7 +419,7 @@ mod tests {
     fn restart_regression_reanchors_within_a_generation() {
         let mut state = ParallaxDetailState::default();
         let generation = state.allocate_generation();
-        state.open_tile("cam0", generation, None);
+        state.open_tile("cam0", generation, None, false);
         assert!(state.apply_frame("cam0", generation, 5_000, dummy_handle()));
 
         // A small regression is reordering: dropped.
@@ -370,9 +437,9 @@ mod tests {
     fn stale_tile_ended_does_not_kill_the_new_tile() {
         let mut state = ParallaxDetailState::default();
         let old = state.allocate_generation();
-        state.open_tile("cam0", old, None);
+        state.open_tile("cam0", old, None, false);
         let new = state.allocate_generation();
-        state.open_tile("cam0", new, None);
+        state.open_tile("cam0", new, None, false);
 
         // The replaced (aborted) subscriber's end report arrives late: it
         // must neither clear the new tile's abort handle nor mark it ended.
@@ -389,7 +456,7 @@ mod tests {
         use zensight_common::stream::StreamStatus;
         let mut state = ParallaxDetailState::default();
         let generation = state.allocate_generation();
-        state.open_tile("cam0", generation, None);
+        state.open_tile("cam0", generation, None, false);
 
         // open: true transitions never touch the tile.
         state.apply_stream_status(&StreamStatus {
@@ -430,9 +497,9 @@ mod tests {
     fn end_and_close_lifecycle() {
         let mut state = ParallaxDetailState::default();
         let g0 = state.allocate_generation();
-        state.open_tile("cam0", g0, None);
+        state.open_tile("cam0", g0, None, false);
         let g1 = state.allocate_generation();
-        state.open_tile("cam1", g1, None);
+        state.open_tile("cam1", g1, None, false);
         assert!(state.is_open("cam0"));
 
         state.end_tile("cam0", g0, Some("boom".into()));
@@ -444,6 +511,67 @@ mod tests {
         let torn = state.teardown();
         assert_eq!(torn, vec!["cam1".to_string()]);
         assert!(state.tiles.is_empty());
+    }
+
+    #[test]
+    fn expand_collapse_lifecycle() {
+        let mut state = ParallaxDetailState::default();
+        let generation = state.allocate_generation();
+        state.open_tile("cam0", generation, None, false);
+
+        // Expanding an unknown tile is a no-op.
+        assert!(state.expand("nope").is_none());
+        assert!(state.expanded.is_none());
+
+        // Expanding a preview tile asks the caller to upgrade to video.
+        assert_eq!(state.expand("cam0"), Some(true));
+        assert_eq!(
+            state.expanded_tile().map(|(name, _)| name),
+            Some("cam0"),
+            "overlay shows the expanded tile"
+        );
+
+        // The upgrade replaces the tile with a video incarnation; the
+        // expansion (keyed by stream) survives and remembers the pre-expand
+        // profile.
+        let upgraded = state.allocate_generation();
+        state.open_tile("cam0", upgraded, None, true);
+        assert!(state.expanded_tile().is_some_and(|(_, tile)| tile.video));
+
+        // Collapse hands the expansion back so the caller can restore.
+        let expanded = state.collapse().expect("was expanded");
+        assert_eq!(expanded.stream, "cam0");
+        assert!(!expanded.was_video, "tile ran preview before expand");
+        assert!(state.expanded.is_none());
+        assert!(state.collapse().is_none(), "second collapse is a no-op");
+
+        // A tile already on video expands without an upgrade request.
+        assert_eq!(state.expand("cam0"), Some(false));
+    }
+
+    #[test]
+    fn close_and_teardown_dismiss_the_expansion() {
+        let mut state = ParallaxDetailState::default();
+        let g0 = state.allocate_generation();
+        state.open_tile("cam0", g0, None, true);
+        let g1 = state.allocate_generation();
+        state.open_tile("cam1", g1, None, false);
+
+        // Closing an unrelated tile keeps the overlay up…
+        state.expand("cam0");
+        state.close_tile("cam1");
+        assert!(state.expanded_tile().is_some());
+        // …closing the expanded tile dismisses it.
+        state.close_tile("cam0");
+        assert!(state.expanded.is_none());
+
+        // Teardown (device/view switch, disconnect) always dismisses.
+        let g2 = state.allocate_generation();
+        state.open_tile("cam0", g2, None, false);
+        state.expand("cam0");
+        state.teardown();
+        assert!(state.expanded.is_none());
+        assert!(state.expanded_tile().is_none());
     }
 
     #[test]
