@@ -300,19 +300,11 @@ pub enum Message {
     FetchNetringFlows,
     /// A netring flow-detail reply: the decoded flows, or an error message.
     NetringFlowsReceived(Result<Vec<zensight_common::FlowRecord>, String>),
-    /// Netring flows fetched for deriving real topology edges (#25). Distinct
-    /// from NetringFlowsReceived so it doesn't disturb the device flow panel.
-    TopologyFlowsReceived(Result<Vec<zensight_common::FlowRecord>, String>),
-    /// Netlink neighbor (ARP/NDP) table fetched for deriving adjacency edges
-    /// (#49). Merged with flow edges so directly-attached gateways/peers appear
-    /// even without observed traffic; `is_router` entries classify Router nodes.
-    TopologyNeighborsReceived(Result<Vec<zensight_common::NeighborRecord>, String>),
-    /// Netring traffic matrix fetched for the topology (#391): directed
-    /// bytes/sec rates, the primary edge source when present.
-    TopologyMatrixReceived(Result<Vec<zensight_common::MatrixRecord>, String>),
-    /// Netring passive-asset inventory fetched for the topology (#391): device
-    /// roles (router/switch/ap/phone/iot) + vendor join onto nodes.
-    TopologyAssetsReceived(Result<Vec<zensight_common::AssetRecord>, String>),
+    /// One topology data-refresh reply set (#440): flows (#25) + neighbors
+    /// (#49) + matrix + assets (#391), fetched concurrently and landed as a
+    /// single message so the edge set rebuilds once per batch instead of
+    /// four times back-to-back. `None` = that queryable didn't answer.
+    TopologyBatchReceived(crate::view::topology::TopologyBatch),
     /// Switch the topology presentation lens (#392).
     TopologySetLens(crate::view::topology::Lens),
     /// Switch what topology edge labels show (#392).

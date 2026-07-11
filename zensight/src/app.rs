@@ -214,6 +214,9 @@ pub struct ZenSight {
     ticks_since_flush: u32,
     /// Ticks since the last topology query refresh (#391).
     topology_refresh_ticks: u8,
+    /// Topology prefs changed but not yet written to settings.json5 (#440):
+    /// flushed by the 1 Hz tick / on leaving the view, never per interaction.
+    topology_prefs_dirty: bool,
     /// Flushes counted toward the next store prune (#131).
     flushes_since_prune: u32,
     /// Timestamp (epoch ms) of the most recently received telemetry point, for
@@ -393,6 +396,7 @@ impl ZenSight {
             },
             ticks_since_flush: 0,
             topology_refresh_ticks: 0,
+            topology_prefs_dirty: false,
             flushes_since_prune: 0,
             // Demo mode pre-loads mock points; treat the feed as fresh on boot.
             last_telemetry_ms: if demo_mode { Some(now_ms()) } else { None },
@@ -680,52 +684,26 @@ impl ZenSight {
     /// can fall through to the next handler.
     fn update_topology_msg(&mut self, message: Message) -> ControlFlow<Task<Message>, Message> {
         match message {
-            Message::TopologyFlowsReceived(result) => match result {
-                Ok(flows) => {
-                    let ip_to_node = self.topology_ip_to_node();
-                    self.topology
-                        .apply_flow_edges(&flows, &ip_to_node, now_ms());
-                }
-                Err(e) => {
-                    tracing::debug!(error = %e, "No netring flows for topology edges");
-                }
-            },
-
-            Message::TopologyNeighborsReceived(result) => match result {
-                Ok(neighbors) => {
-                    let ip_to_node = self.topology_ip_to_node();
-                    self.topology
-                        .apply_neighbor_edges(&neighbors, &ip_to_node, now_ms());
-                }
-                Err(e) => {
-                    tracing::debug!(error = %e, "No netlink neighbors for topology edges");
-                }
-            },
-
-            Message::TopologyMatrixReceived(result) => match result {
-                Ok(matrix) => {
-                    let ip_to_node = self.topology_ip_to_node();
-                    self.topology
-                        .apply_matrix_edges(&matrix, &ip_to_node, now_ms());
-                }
-                Err(e) => {
-                    tracing::debug!(error = %e, "No netring matrix for topology edges");
-                }
-            },
-
-            Message::TopologyAssetsReceived(result) => match result {
-                Ok(assets) => {
-                    let ip_to_node = self.topology_ip_to_node();
-                    let mac_to_node = self.topology_mac_to_node();
-                    self.topology
-                        .apply_assets(&assets, &mac_to_node, &ip_to_node, now_ms());
-                }
-                Err(e) => {
-                    tracing::debug!(error = %e, "No netring assets for topology roles");
-                }
-            },
+            Message::TopologyBatchReceived(batch) => {
+                // One reply set → one edge rebuild + one redraw (#440); the
+                // four sources used to land as separate messages, each
+                // clearing the canvas cache in turn.
+                tracing::debug!(
+                    flows = batch.flows.is_some(),
+                    neighbors = batch.neighbors.is_some(),
+                    matrix = batch.matrix.is_some(),
+                    assets = batch.assets.is_some(),
+                    "Topology batch received"
+                );
+                let ip_to_node = self.topology_ip_to_node();
+                let mac_to_node = self.topology_mac_to_node();
+                self.topology
+                    .apply_batch(batch, &mac_to_node, &ip_to_node, now_ms());
+            }
 
             Message::CloseTopology => {
+                // Leaving the view: land any debounced pref changes now (#440).
+                self.flush_topology_prefs();
                 self.set_view(CurrentView::Dashboard);
                 self.save_current_view();
             }
@@ -3212,12 +3190,28 @@ impl ZenSight {
         }
     }
 
-    /// Save current view to persistent settings.
+    /// Mark the topology prefs dirty (#440). The actual settings.json5
+    /// load-modify-save is synchronous disk I/O on the UI thread, so it's
+    /// debounced: the 1 Hz tick flushes at most once per second (and
+    /// [`Message::CloseTopology`] flushes eagerly) instead of writing on
+    /// every drag-end and toggle.
+    fn save_topology_prefs(&mut self) {
+        self.topology_prefs_dirty = true;
+    }
+
+    /// Flush pending topology-pref changes to disk, if any (#440).
+    fn flush_topology_prefs(&mut self) {
+        if self.topology_prefs_dirty {
+            self.topology_prefs_dirty = false;
+            self.write_topology_prefs();
+        }
+    }
+
     /// Persist the topology presentation prefs (#392): lens, grouping, edge
     /// labels, filters. Load-modify-save so unrelated settings are untouched
     /// (same pattern as [`Self::save_current_view`]). Focus and group
     /// expansions are session-transient by design.
-    fn save_topology_prefs(&self) {
+    fn write_topology_prefs(&self) {
         let mut persistent = PersistentSettings::load();
         persistent.topology_lens = self.topology.prefs.lens;
         persistent.topology_grouping = self.topology.prefs.grouping;
@@ -4271,69 +4265,6 @@ impl ZenSight {
         )
     }
 
-    /// Fetch netring flows for deriving real topology edges (#25). Routes to
-    /// `TopologyFlowsReceived` so the device flow panel is untouched.
-    fn query_topology_flows(&self) -> Task<Message> {
-        use crate::view::specialized::netring_detail::fetch_flows;
-        let Some(session) = self.session.clone() else {
-            // Not connected (or demo): leave edges as-is, no error toast.
-            return Task::none();
-        };
-        Task::future(async move {
-            let result = fetch_flows(session)
-                .await
-                .ok_or_else(|| "No netring sensor responded".to_string());
-            Message::TopologyFlowsReceived(result)
-        })
-    }
-
-    /// Fetch the netlink neighbor (ARP/NDP) table for deriving topology
-    /// adjacency edges (#49). Routes to `TopologyNeighborsReceived`; leaves the
-    /// device netlink panel untouched. Silent when disconnected (or demo).
-    fn query_topology_neighbors(&self) -> Task<Message> {
-        use crate::view::specialized::netlink_detail::fetch_records;
-        let Some(session) = self.session.clone() else {
-            return Task::none();
-        };
-        let key = zensight_common::command::query_key("zensight/netlink", "neighbors");
-        Task::future(async move {
-            let result = fetch_records::<zensight_common::NeighborRecord>(session, key)
-                .await
-                .ok_or_else(|| "No netlink sensor responded".to_string());
-            Message::TopologyNeighborsReceived(result)
-        })
-    }
-
-    /// Fetch the netring traffic matrix (directed bytes/sec per talker pair,
-    /// #391) — the topology's primary edge source. Silent when disconnected.
-    fn query_topology_matrix(&self) -> Task<Message> {
-        use crate::view::specialized::netring_detail::fetch_matrix;
-        let Some(session) = self.session.clone() else {
-            return Task::none();
-        };
-        Task::future(async move {
-            let result = fetch_matrix(session)
-                .await
-                .ok_or_else(|| "No netring sensor responded".to_string());
-            Message::TopologyMatrixReceived(result)
-        })
-    }
-
-    /// Fetch the netring passive-asset inventory for topology node roles +
-    /// vendors (#391). Silent when disconnected.
-    fn query_topology_assets(&self) -> Task<Message> {
-        use crate::view::specialized::netring_detail::fetch_assets;
-        let Some(session) = self.session.clone() else {
-            return Task::none();
-        };
-        Task::future(async move {
-            let result = fetch_assets(session)
-                .await
-                .ok_or_else(|| "No netring sensor responded".to_string());
-            Message::TopologyAssetsReceived(result)
-        })
-    }
-
     /// Fetch the mesh-wide listen-socket table for the selected topology node
     /// (#393): every netlink sensor replies; rows are filtered to the node's
     /// addresses (plus wildcard listeners) on receipt. Fetched on selection,
@@ -4427,27 +4358,42 @@ impl ZenSight {
     }
 
     /// The full topology data-refresh batch (#391): flows + neighbors +
-    /// matrix + assets. Issued on view entry and re-issued periodically while
-    /// the view is open. Demo serves no queryables (session is None), so the
+    /// matrix + assets, fetched concurrently and landed as ONE
+    /// `TopologyBatchReceived` so the edge set rebuilds once per batch
+    /// (#440). Issued on view entry and re-issued periodically while the
+    /// view is open. Demo serves no queryables (session is None), so the
     /// demo branch feeds the synthetic matrix + asset fleet instead — the
     /// same wire contracts, per the demo/mock contract.
     fn query_topology_batch(&self) -> Task<Message> {
+        use crate::view::topology::TopologyBatch;
         if self.demo_mode {
-            return Task::batch([
-                Task::done(Message::TopologyMatrixReceived(Ok(
-                    crate::mock::netring::matrix(),
-                ))),
-                Task::done(Message::TopologyAssetsReceived(Ok(
-                    crate::mock::netring::assets(),
-                ))),
-            ]);
+            return Task::done(Message::TopologyBatchReceived(TopologyBatch {
+                matrix: Some(crate::mock::netring::matrix()),
+                assets: Some(crate::mock::netring::assets()),
+                ..Default::default()
+            }));
         }
-        Task::batch([
-            self.query_topology_flows(),
-            self.query_topology_neighbors(),
-            self.query_topology_matrix(),
-            self.query_topology_assets(),
-        ])
+        use crate::view::specialized::netlink_detail::fetch_records;
+        use crate::view::specialized::netring_detail::{fetch_assets, fetch_flows, fetch_matrix};
+        let Some(session) = self.session.clone() else {
+            // Not connected: leave edges as-is, no error toast.
+            return Task::none();
+        };
+        let neighbors_key = zensight_common::command::query_key("zensight/netlink", "neighbors");
+        Task::future(async move {
+            let (flows, neighbors, matrix, assets) = tokio::join!(
+                fetch_flows(session.clone()),
+                fetch_records::<zensight_common::NeighborRecord>(session.clone(), neighbors_key),
+                fetch_matrix(session.clone()),
+                fetch_assets(session),
+            );
+            Message::TopologyBatchReceived(TopologyBatch {
+                flows,
+                neighbors,
+                matrix,
+                assets,
+            })
+        })
     }
 
     /// Piggybacked on the 1 Hz tick: while the topology view is open, re-issue
@@ -6390,6 +6336,10 @@ impl ZenSight {
                 self.topology.run_layout_step();
             }
         }
+
+        // Land any debounced topology-pref changes (#440): at most one
+        // settings.json5 write per second, off the interaction path.
+        self.flush_topology_prefs();
     }
 }
 

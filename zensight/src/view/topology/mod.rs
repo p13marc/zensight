@@ -21,7 +21,9 @@ use crate::view::dashboard::DeviceState;
 use crate::view::icons::{self, IconSize};
 
 pub use graph::TopologyGraph;
-pub use layout::{LayoutConfig, arrange_circle, center_layout, grid_positions, layout_step};
+pub use layout::{
+    LayoutConfig, arrange_circle, center_layout, grid_positions, layout_step, seed_position,
+};
 pub use model::{
     Edge, EdgeKind, EdgeLabelMode, FocusState, GroupingMode, INTERNET_NODE_ID, LayoutMode, Lens,
     Node, NodeAlert, NodeHealth, NodeId, NodeRole, Provenance, RenderEdge, RenderGraph, RenderNode,
@@ -109,6 +111,16 @@ pub struct TopologyState {
     pub show_legend: bool,
 }
 
+/// One topology data-refresh reply set (#440): whichever of the four
+/// queryables answered. `None` keeps the remembered input for that source.
+#[derive(Debug, Clone, Default)]
+pub struct TopologyBatch {
+    pub flows: Option<Vec<zensight_common::FlowRecord>>,
+    pub neighbors: Option<Vec<zensight_common::NeighborRecord>>,
+    pub matrix: Option<Vec<zensight_common::MatrixRecord>>,
+    pub assets: Option<Vec<zensight_common::AssetRecord>>,
+}
+
 /// On-demand side-panel data (#393).
 #[derive(Debug, Default)]
 pub struct PanelData {
@@ -167,20 +179,31 @@ impl TopologyState {
         &self.last_matrix
     }
 
-    /// Recompute the render graph and clear the canvas cache (#392). Call
-    /// after any change that affects what is drawn: node/edge structure,
-    /// alerts, rates, search, prefs. Selection/zoom/pan/drag only need
-    /// `cache.clear()` — they resolve at draw time.
+    /// Recompute the render graph (#392). Call after any change that affects
+    /// what is drawn: node/edge structure, alerts, rates, search, prefs.
+    /// Selection/zoom/pan/drag only need `cache.clear()` — they resolve at
+    /// draw time.
+    ///
+    /// Change-gated (#440): this runs on the 1 Hz tick via
+    /// [`Self::update_from_devices`], so the expensive part — the canvas
+    /// cache clear and full re-tessellation — happens only when the rebuilt
+    /// graph actually differs. The timestamp is quantized so the `hide_idle`
+    /// cutoff can't make every rebuild compare unequal.
     pub(crate) fn invalidate(&mut self) {
-        self.render = model::build_render_graph(
+        const NOW_QUANTUM_MS: i64 = 30_000;
+        let now_ms = zensight_common::current_timestamp_millis() / NOW_QUANTUM_MS * NOW_QUANTUM_MS;
+        let render = model::build_render_graph(
             &self.nodes,
             &self.edges,
             &self.prefs,
             &self.group_labels,
             &self.search_query,
-            zensight_common::current_timestamp_millis(),
+            now_ms,
         );
-        self.cache.clear();
+        if render != self.render {
+            self.render = render;
+            self.cache.clear();
+        }
     }
 
     /// Update topology from dashboard device states. `sensor_health` is the
@@ -252,7 +275,7 @@ impl TopologyState {
 
             if !self.nodes.contains_key(&node_id) {
                 // Create new node — a persisted position/pin (#394) wins over
-                // the arrange_in_circle seeding.
+                // the deterministic ring seeding (#440).
                 self.nodes.insert(
                     node_id.clone(),
                     Node {
@@ -262,7 +285,7 @@ impl TopologyState {
                             .saved_positions
                             .get(&node_id)
                             .copied()
-                            .unwrap_or_default(),
+                            .unwrap_or_else(|| seed_position(&node_id)),
                         pinned: self.saved_pins.contains(&node_id),
                         ..Default::default()
                     },
@@ -327,9 +350,10 @@ impl TopologyState {
             node.health = node_health(facets, &sensor_statuses, entity_stale);
         }
 
-        // If new nodes were added, arrange in circle and trigger layout
+        // If new nodes were added, wake the layout so it absorbs just the
+        // newcomers — the old whole-graph `arrange_in_circle` reseed made
+        // every unpinned node jump whenever anything appeared (#440).
         if self.nodes.len() > initial_count {
-            self.arrange_in_circle(400.0);
             self.layout_stable = false;
         }
         self.invalidate();
@@ -433,7 +457,9 @@ impl TopologyState {
     }
 
     /// Apply live rx/tx rates (bytes/sec, from hot-ring counter deltas) onto
-    /// nodes (#391). Change-gated cache clear: this runs on the 1 Hz tick.
+    /// nodes (#391). Change-gated: this runs on the 1 Hz tick, and rates
+    /// fluctuate constantly on an active network, so a change patches the
+    /// already-built render graph in place (#440) — a redraw, never a rebuild.
     pub fn apply_rates(&mut self, rates: &HashMap<NodeId, (f64, f64)>) {
         let mut changed = false;
         for (id, node) in self.nodes.iter_mut() {
@@ -448,8 +474,23 @@ impl TopologyState {
             }
         }
         if changed {
-            self.invalidate();
+            self.refresh_render_rates();
         }
+    }
+
+    /// Refresh live rx/tx rates on the already-built render graph (#440):
+    /// rates change every tick, structure doesn't, so patch the rendered
+    /// nodes and redraw without a full [`Self::invalidate`] rebuild.
+    fn refresh_render_rates(&mut self) {
+        for rnode in &mut self.render.nodes {
+            if let RenderSource::Node(id) = &rnode.source
+                && let Some(node) = self.nodes.get(id)
+            {
+                rnode.rx_rate = node.rx_rate;
+                rnode.tx_rate = node.tx_rate;
+            }
+        }
+        self.cache.clear();
     }
 
     /// Join the netring passive-asset inventory onto the node set (#391):
@@ -490,6 +531,32 @@ impl TopologyState {
         now_ms: i64,
     ) {
         self.last_neighbors = neighbors.to_vec();
+        self.rebuild_edges(ip_to_node, now_ms);
+    }
+
+    /// Apply one topology data-refresh batch (#440): store every reply that
+    /// arrived, then rebuild the edge set exactly **once** — the batch used
+    /// to land as four separate messages, each triggering its own full
+    /// rebuild + canvas cache clear back-to-back.
+    pub fn apply_batch(
+        &mut self,
+        batch: TopologyBatch,
+        mac_to_node: &HashMap<String, NodeId>,
+        ip_to_node: &HashMap<String, NodeId>,
+        now_ms: i64,
+    ) {
+        if let Some(flows) = batch.flows {
+            self.last_flows = flows;
+        }
+        if let Some(neighbors) = batch.neighbors {
+            self.last_neighbors = neighbors;
+        }
+        if let Some(matrix) = batch.matrix {
+            self.last_matrix = matrix;
+        }
+        if let Some(assets) = batch.assets {
+            self.asset_roles = roles_from_assets(&assets, mac_to_node, ip_to_node);
+        }
         self.rebuild_edges(ip_to_node, now_ms);
     }
 
@@ -549,6 +616,7 @@ impl TopologyState {
                         label: gw_ip.clone(),
                         role: NodeRole::Router,
                         provenance: Provenance::Passive,
+                        position: seed_position(&gw_ip),
                         ..Default::default()
                     },
                 );
@@ -581,6 +649,7 @@ impl TopologyState {
                         label: "Internet".to_string(),
                         role: NodeRole::Internet,
                         provenance: Provenance::External,
+                        position: seed_position(INTERNET_NODE_ID),
                         ..Default::default()
                     },
                 );
@@ -736,11 +805,13 @@ impl TopologyState {
         }
     }
 
-    /// Switch what edge labels show (#392).
+    /// Switch what edge labels show (#392). The label mode is read at draw
+    /// time (not baked into the render graph), so force a redraw even though
+    /// the change-gated [`Self::invalidate`] sees an identical graph (#440).
     pub fn set_edge_label(&mut self, mode: EdgeLabelMode) {
         if self.prefs.edge_label != mode {
             self.prefs.edge_label = mode;
-            self.invalidate();
+            self.cache.clear();
         }
     }
 
@@ -1480,6 +1551,156 @@ mod tests {
         state.set_hover(None);
         assert!(state.hover_set.is_empty());
         assert_eq!(state.hovered, None);
+    }
+
+    #[test]
+    fn apply_batch_rebuilds_once_and_matches_sequential_applies() {
+        let mut map = HashMap::new();
+        for id in ["a", "b", "gw"] {
+            map.insert(id.to_string(), id.to_string());
+        }
+        let make_state = || {
+            let mut state = TopologyState::default();
+            for id in ["a", "b", "gw"] {
+                let mut node = Node {
+                    id: id.to_string(),
+                    ..Default::default()
+                };
+                if id == "a" {
+                    // The neighbor table is attributed to netlink hosts.
+                    node.protocols.insert(zensight_common::Protocol::Netlink);
+                }
+                state.nodes.insert(id.to_string(), node);
+            }
+            state
+        };
+        let flows = vec![flow("a:1", "b:2", 1000, 10, "tcp")];
+        let neighbors = vec![neighbor("gw", true)];
+        let matrix = vec![zensight_common::MatrixRecord {
+            src: "a".to_string(),
+            dst: "b".to_string(),
+            bytes_per_sec: 500.0,
+            names: Vec::new(),
+        }];
+
+        let mut sequential = make_state();
+        sequential.apply_flow_edges(&flows, &map, 1);
+        sequential.apply_neighbor_edges(&neighbors, &map, 1);
+        sequential.apply_matrix_edges(&matrix, &map, 1);
+
+        let mut batched = make_state();
+        batched.apply_batch(
+            TopologyBatch {
+                flows: Some(flows),
+                neighbors: Some(neighbors),
+                matrix: Some(matrix),
+                assets: None,
+            },
+            &HashMap::new(),
+            &map,
+            1,
+        );
+
+        assert_eq!(batched.edges.len(), sequential.edges.len());
+        for edge in &sequential.edges {
+            assert!(
+                batched.edges.iter().any(|e| ordered_pair(&e.from, &e.to)
+                    == ordered_pair(&edge.from, &edge.to)
+                    && e.rate == edge.rate
+                    && e.bytes == edge.bytes),
+                "batched edge set missing {:?}→{:?}",
+                edge.from,
+                edge.to
+            );
+        }
+        assert_eq!(batched.nodes["gw"].role, NodeRole::Router);
+        // A partial batch keeps the remembered inputs: dropping the matrix
+        // reply must not wipe the rated edges.
+        batched.apply_batch(TopologyBatch::default(), &HashMap::new(), &map, 2);
+        assert!(batched.edges.iter().any(|e| e.rate == 500.0));
+    }
+
+    #[test]
+    fn new_node_does_not_reshuffle_existing_layout() {
+        use zensight_common::Protocol;
+
+        let device = |source: &str| {
+            let id = DeviceId::new(Protocol::Sysinfo, source);
+            (id.clone(), DeviceState::new(id))
+        };
+        let mut devices: HashMap<DeviceId, DeviceState> = [device("host-a")].into();
+
+        let mut state = TopologyState::default();
+        let entities = crate::entity::EntityStore::default();
+        state.update_from_devices(&devices, &entities, &HashMap::new(), 0);
+        let seeded = state.nodes["host-a"].position;
+        assert_ne!(seeded, (0.0, 0.0), "new nodes seed off-origin");
+
+        // Simulate the settled layout, then a second host appearing.
+        state.nodes.get_mut("host-a").unwrap().position = (123.0, -45.0);
+        let (id, dev) = device("host-b");
+        devices.insert(id, dev);
+        state.update_from_devices(&devices, &entities, &HashMap::new(), 0);
+
+        // The existing (unpinned) node stays put; only the newcomer is seeded.
+        assert_eq!(state.nodes["host-a"].position, (123.0, -45.0));
+        assert_ne!(state.nodes["host-b"].position, (0.0, 0.0));
+        assert!(!state.layout_stable, "layout wakes to absorb the newcomer");
+    }
+
+    #[test]
+    fn apply_rates_patches_render_without_rebuild() {
+        let mut state = TopologyState::default();
+        state.nodes.insert(
+            "a".to_string(),
+            Node {
+                id: "a".to_string(),
+                ..Default::default()
+            },
+        );
+        state.invalidate();
+        let before = state.render.clone();
+
+        let mut rates = HashMap::new();
+        rates.insert("a".to_string(), (100.0, 200.0));
+        state.apply_rates(&rates);
+
+        assert_eq!(state.render.nodes[0].rx_rate, Some(100.0));
+        assert_eq!(state.render.nodes[0].tx_rate, Some(200.0));
+        // Everything except the patched rates is identical — no rebuild ran.
+        assert_eq!(state.render.nodes.len(), before.nodes.len());
+        assert_eq!(state.render.edges, before.edges);
+
+        // Unchanged rates are a no-op (change gate).
+        let snapshot = state.render.clone();
+        state.apply_rates(&rates);
+        assert_eq!(state.render, snapshot);
+    }
+
+    #[test]
+    fn render_graph_rebuild_is_deterministic() {
+        let mut state = TopologyState::default();
+        for id in ["a", "b", "c"] {
+            state.nodes.insert(
+                id.to_string(),
+                Node {
+                    id: id.to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        state.edges.push(Edge {
+            from: "a".to_string(),
+            to: "b".to_string(),
+            rate: 42.0,
+            ..Default::default()
+        });
+        state.invalidate();
+        let first = state.render.clone();
+        state.invalidate();
+        // Same inputs ⇒ identical render graph — the PartialEq change gate
+        // in `invalidate` is meaningful.
+        assert_eq!(state.render, first);
     }
 
     #[test]
