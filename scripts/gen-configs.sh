@@ -83,6 +83,13 @@ else
         "$configs_dir/sysinfo.json5" > "$outdir/sysinfo.json5"
 fi
 
+# parallax: the committed config already streams the synthetic test pattern
+# (test0) on any machine — camera or not — and advertises local /dev/video*
+# cameras in the catalogue; demo-max just adds the on-demand debug report.
+sed -E \
+    -e '/^    report:/,/enabled:/ s/enabled: false/enabled: true/' \
+    "$configs_dir/parallax.json5" > "$outdir/parallax.json5"
+
 # correlator: fuses the sensors' identity evidence into one HostEntity per
 # host. Machine-agnostic; the example config already has every merge rule on.
 cp -f "$configs_dir/correlator.json5" "$outdir/correlator.json5"
@@ -136,4 +143,4 @@ cat > "$outdir/systemd.json5" <<'JSON5'
 }
 JSON5
 
-echo "Configured (demo-max): netring iface='$iface' (L7+capture on), netlink (+xfrm), logs=journald, sysinfo${snapshot_dir:+ snapshot='$snapshot_dir'}, systemd=full, correlator  (configs in $outdir/)"
+echo "Configured (demo-max): netring iface='$iface' (L7+capture on), netlink (+xfrm), logs=journald, sysinfo${snapshot_dir:+ snapshot='$snapshot_dir'}, systemd=full, parallax=test-pattern, correlator  (configs in $outdir/)"

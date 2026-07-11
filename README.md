@@ -56,16 +56,17 @@ zensight/<protocol>/<source>/<metric>
 cargo build --release --workspace
 
 # Build + configure + launch the GUI with the local sensors (netring, netlink,
-# sysinfo, logs/journald). Close the GUI to stop everything.
+# sysinfo, logs/journald, systemd, parallax live video). Close the GUI to stop
+# everything.
 just run
 
 # Or split the two halves:
 just gui listen=tcp/0.0.0.0:7447     # just the GUI (non-loopback for remote sensors)
-just sensors                         # just the 5 sensors (Ctrl-C stops them)
+just sensors                         # just the 6 sensors (Ctrl-C stops them)
 just sensors connect=tcp/<gui-host>:7447   # …feeding a GUI on another machine
 
 # One sensor at a time
-just netring   # | netlink | sysinfo | logs
+just netring   # | netlink | sysinfo | logs | systemd | parallax
 ```
 
 To monitor **multiple machines**, run the GUI (+ correlator) on one host and the
