@@ -17,6 +17,10 @@ members = [
     "zensight-sensor-netring",
     "zensight-sensor-parallax",
     "zensight-sensor-systemd",
+    # EVALUATION ONLY (epic #415): Rerun visualization adapter prototype.
+    # publish = false, nothing depends on it; may be removed wholesale if the
+    # evaluation concludes "do not adopt" (docs/plans/rerun/).
+    "zensight-rerun",
     "zenoh-blob",
     # no_std types shared between the opt-in eBPF kernel programs and userspace.
     # Plain libs — build fine on stable; harmless in `cargo build --workspace`.

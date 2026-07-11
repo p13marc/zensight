@@ -1,0 +1,58 @@
+[package]
+name = "zensight-rerun"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "EVALUATION-ONLY Rerun visualization adapter for ZenSight telemetry (epic #415)"
+# Never published: this crate exists to evaluate Rerun as an optional viz/replay
+# backend (docs/plans/rerun/). No other crate may depend on it.
+publish = false
+# rerun 0.34.1 requires rust 1.92 (crates.io metadata, 2026-07-11). This is the
+# only crate in the workspace with an MSRV pin — a deliberate reject-signal
+# tracker for the evaluation (see docs/plans/rerun/01-capabilities.md §1).
+rust-version = "1.92"
+
+[dependencies]
+# Internal crates
+zensight-common = { path = "../zensight-common" }
+
+# Zenoh
+zenoh.workspace = true
+
+# Async runtime
+tokio.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Configuration
+json5.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# CLI
+clap.workspace = true
+
+# Rerun SDK — exact-pinned (the whole evaluation is against this version; see
+# docs/plans/rerun/01-capabilities.md). default-features = false keeps the
+# viewer (egui/wgpu), analytics, dataframe, and server stacks out of the build;
+# `sdk` alone provides save() (.rrd) and connect_grpc() (dep-hygiene gate:
+# cargo tree must show no re_viewer/wgpu/egui/re_analytics/re_renderer).
+rerun = { version = "=0.34.1", default-features = false, features = ["sdk"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+# e2e decode pass on the produced .rrd (already in the rerun dep tree, so this
+# adds no meaningful build cost; exact-pinned alongside `rerun`).
+re_log_encoding = "=0.34.1"
+re_log_types = "=0.34.1"
+

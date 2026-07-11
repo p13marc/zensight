@@ -14,6 +14,7 @@ that crate's own `README.md` + `docs/` directory (linked below).
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System overview, crate dependencies, data flow, runtime/lifecycle, health model |
 | [KEYSPACE.md](KEYSPACE.md) | **The canonical Zenoh keyspace contract** — telemetry, control-plane (`@/…`), metadata (`_meta/…`), media (`@media/…`, `@pdns/…`), wildcards, and the key-building helpers |
 | [design/](design/) | Archived design rationale (historical — implemented in 0.7.0): [correlation](design/correlation.md), [large-data-transfer](design/large-data-transfer.md), [zenoh-efficiency](design/zenoh-efficiency.md) |
+| [plans/](plans/) | **Plans & evaluations** (live working notes for in-flight epics — unlike `design/`, nothing here is implemented-and-archived): [rerun](plans/rerun/README.md) (epic #415 — Rerun as an optional viz/replay backend) |
 
 ## Per-crate documentation
 
