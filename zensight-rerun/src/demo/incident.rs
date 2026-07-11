@@ -25,10 +25,14 @@ pub const DURATION_SECS: u64 = 65;
 /// A discrete scripted step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
+    /// The gateway peer over wlan0 stops answering (topology edge drops).
+    LinkDown,
     /// The kernel fails the default route over to the LTE backup.
     RouteChange,
     /// The sentinel decides the path is down: Critical, correlated.
     AlertFiring,
+    /// The gateway peer is reachable again (topology edge returns).
+    LinkUp,
     /// Recovery confirmed; the alert clears.
     AlertResolved,
 }
@@ -36,8 +40,10 @@ pub enum Step {
 /// The discrete script: `(offset_secs, step)`. The continuous series ramp
 /// around these (see [`series_at`]).
 pub const SCRIPT: &[(u64, Step)] = &[
+    (26, Step::LinkDown),
     (28, Step::RouteChange),
     (30, Step::AlertFiring),
+    (55, Step::LinkUp),
     (60, Step::AlertResolved),
 ];
 
@@ -105,6 +111,29 @@ pub fn series_at(base_ts: i64, sec: u64) -> Vec<TelemetryPoint> {
             TelemetryValue::Gauge(rtt),
         ),
     ]
+}
+
+/// The scripted gateway link transition (peer_up/peer_down event — drives
+/// the topology graph's edge state, docs/plans/rerun/09-topology.md).
+pub fn link_event(base_ts: i64, offset_secs: u64, up: bool) -> TelemetryPoint {
+    let (kind, message) = if up {
+        ("peer_up", "gateway 10.0.0.1 reachable again via wlan0")
+    } else {
+        (
+            "peer_down",
+            "gateway 10.0.0.1 unreachable via wlan0 (3 probes lost)",
+        )
+    };
+    let mut p = TelemetryPoint::new(
+        SOURCE,
+        Protocol::Netlink,
+        format!("events/{kind}/gateway"),
+        TelemetryValue::Text(message.into()),
+    );
+    p.timestamp = base_ts + (offset_secs * 1000) as i64;
+    p.with_label("peer", "10.0.0.1")
+        .with_label("iface", "wlan0")
+        .with_label("correlation_id", correlation_id(base_ts))
 }
 
 /// The scripted route-change event.
@@ -187,6 +216,14 @@ pub async fn run(
         for (offset, step) in SCRIPT {
             if *offset == sec {
                 match step {
+                    Step::LinkDown => {
+                        ctx.publish_point(&link_event(base_ts, sec, false)).await?;
+                        events += 1;
+                    }
+                    Step::LinkUp => {
+                        ctx.publish_point(&link_event(base_ts, sec, true)).await?;
+                        events += 1;
+                    }
                     Step::RouteChange => {
                         ctx.publish_point(&route_change_event(base_ts, sec)).await?;
                         events += 1;

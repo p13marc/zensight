@@ -17,6 +17,7 @@ pub mod rerun_sink;
 pub mod session;
 pub mod sink;
 pub mod subscriber;
+pub mod topology;
 
 pub use config::{
     ConfigError, CounterPolicy, FilterConfig, RerunConfig, RerunMode, SamplingConfig,

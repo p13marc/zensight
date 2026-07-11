@@ -19,6 +19,7 @@ use crate::events::NormalizedEvent;
 use crate::mapping::{
     Class, EntityIndex, RateConverter, Sampler, classify, event_entity_path, metric_entity_path,
 };
+use crate::topology::{Topology, TopologyBuilder};
 
 /// Telemetry channel capacity (drop-newest when full — a lost sample is
 /// superseded by the next one; the subscriber must never block on the sink).
@@ -57,6 +58,9 @@ pub trait VisualizationSink: Send {
     /// One (re)computed host entity.
     fn publish_entity(&mut self, entity: &HostEntity) -> anyhow::Result<()>;
 
+    /// The topology graph after a change, stamped at the causing timestamp.
+    fn publish_topology(&mut self, topology: &Topology, timestamp: i64) -> anyhow::Result<()>;
+
     /// Flush any buffered data (blocking is acceptable; called on shutdown).
     fn flush(&mut self) -> anyhow::Result<()>;
 }
@@ -74,6 +78,8 @@ pub struct WorkerStats {
     pub sampled_out: u64,
     /// Counter samples absorbed by the rate converter (first sample / reset).
     pub rate_absorbed: u64,
+    /// Topology graph re-publications (entity/link changes).
+    pub topology_published: u64,
     /// Sink calls that returned an error (logged, not fatal).
     pub sink_errors: u64,
 }
@@ -89,6 +95,7 @@ pub struct SinkWorker {
     counters: CounterPolicy,
     rates: RateConverter,
     sampler: Sampler,
+    topology: TopologyBuilder,
     stats: WorkerStats,
 }
 
@@ -109,6 +116,7 @@ impl SinkWorker {
             counters,
             rates: RateConverter::default(),
             sampler: Sampler::new(sampling),
+            topology: TopologyBuilder::default(),
             stats: WorkerStats::default(),
         }
     }
@@ -201,6 +209,9 @@ impl SinkWorker {
                     .map(str::to_string);
                 let event = crate::events::normalize_point(&point, kind, entity_id);
                 self.publish_event(&event, &path);
+                if self.topology.apply_event(&event) {
+                    self.publish_topology(event.timestamp);
+                }
             }
         }
     }
@@ -214,6 +225,9 @@ impl SinkWorker {
                     self.stats.sink_errors += 1;
                 } else {
                     self.stats.entities_published += 1;
+                }
+                if self.topology.upsert_entity(&entity) {
+                    self.publish_topology(entity.last_updated);
                 }
             }
             ControlItem::Alert(alert) => {
@@ -250,6 +264,16 @@ impl SinkWorker {
         }
     }
 
+    fn publish_topology(&mut self, timestamp: i64) {
+        let topology = self.topology.build();
+        if let Err(e) = self.sink.publish_topology(&topology, timestamp) {
+            warn!("sink topology publish failed: {e}");
+            self.stats.sink_errors += 1;
+        } else {
+            self.stats.topology_published += 1;
+        }
+    }
+
     fn publish_event(&mut self, event: &NormalizedEvent, path: &str) {
         if let Err(e) = self.sink.publish_event(event, path) {
             warn!(path, "sink event publish failed: {e}");
@@ -267,6 +291,7 @@ pub struct TestSink {
     pub events: Vec<(String, NormalizedEvent)>,
     pub alerts: Vec<(String, Alert)>,
     pub entities: Vec<HostEntity>,
+    pub topologies: Vec<(i64, Topology)>,
     pub flushes: u32,
 }
 
@@ -294,6 +319,11 @@ impl VisualizationSink for TestSink {
 
     fn publish_entity(&mut self, entity: &HostEntity) -> anyhow::Result<()> {
         self.entities.push(entity.clone());
+        Ok(())
+    }
+
+    fn publish_topology(&mut self, topology: &Topology, timestamp: i64) -> anyhow::Result<()> {
+        self.topologies.push((timestamp, topology.clone()));
         Ok(())
     }
 
@@ -332,6 +362,9 @@ mod tests {
         }
         fn publish_entity(&mut self, entity: &HostEntity) -> anyhow::Result<()> {
             self.0.lock().unwrap().publish_entity(entity)
+        }
+        fn publish_topology(&mut self, topology: &Topology, timestamp: i64) -> anyhow::Result<()> {
+            self.0.lock().unwrap().publish_topology(topology, timestamp)
         }
         fn flush(&mut self) -> anyhow::Result<()> {
             self.0.lock().unwrap().flush()

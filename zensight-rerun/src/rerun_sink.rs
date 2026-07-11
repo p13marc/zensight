@@ -15,6 +15,7 @@ use crate::config::{RerunMode, RerunSinkConfig};
 use crate::events::{EventSeverity, NormalizedEvent};
 use crate::mapping::{severity_from_alert, severity_weight};
 use crate::sink::VisualizationSink;
+use crate::topology::{NodeStatus, Topology};
 
 /// The domain timeline: ZenSight epoch-millisecond timestamps. Every log call
 /// stamps this; Rerun's auto `log_time` (receive time) stays diagnostic-only.
@@ -225,6 +226,45 @@ impl VisualizationSink for RerunSink {
             fields.push(("status", status));
         }
         self.rec.log_static(path, &Self::any_values(fields))?;
+        Ok(())
+    }
+
+    fn publish_topology(&mut self, topology: &Topology, timestamp: i64) -> anyhow::Result<()> {
+        self.set_time(timestamp);
+
+        let ids: Vec<&str> = topology.nodes.iter().map(|n| n.id.as_str()).collect();
+        let labels: Vec<&str> = topology.nodes.iter().map(|n| n.label.as_str()).collect();
+        // Status colors (severity palette shared with the alert lanes). The
+        // frontend's D2 color guard scopes to zensight/src — data colors for
+        // the Rerun graph live here by design.
+        let colors: Vec<rerun::Color> = topology
+            .nodes
+            .iter()
+            .map(|n| match n.status {
+                NodeStatus::Up => rerun::Color::from_rgb(0x4c, 0xaf, 0x50),
+                NodeStatus::Degraded => rerun::Color::from_rgb(0xff, 0xb3, 0x00),
+                NodeStatus::Down => rerun::Color::from_rgb(0xef, 0x53, 0x50),
+                NodeStatus::Unknown => rerun::Color::from_rgb(0x9e, 0x9e, 0x9e),
+            })
+            .collect();
+        let nodes = rerun::archetypes::GraphNodes::new(ids)
+            .with_labels(labels)
+            .with_colors(colors);
+
+        // GraphEdges in 0.34 has no per-edge styling — a downed link is
+        // rendered by *omitting* the edge (the peer node stays, colored Down),
+        // so scrubbing over a link-down event makes the edge disappear.
+        // Recorded as an expressiveness gap in 09-topology.md.
+        let up_edges: Vec<(&str, &str)> = topology
+            .edges
+            .iter()
+            .filter(|e| e.up)
+            .map(|e| (e.from.as_str(), e.to.as_str()))
+            .collect();
+        let edges = rerun::archetypes::GraphEdges::new(up_edges).with_directed_edges();
+
+        let both: [&dyn rerun::AsComponents; 2] = [&nodes, &edges];
+        self.rec.log("topology/hosts", &both)?;
         Ok(())
     }
 
