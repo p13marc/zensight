@@ -677,6 +677,9 @@ fn facet_tab_strip(facets: &[FacetTab]) -> Option<Element<'static, Message>> {
     }
     let mut tabs = Row::new().spacing(8).align_y(Alignment::Center);
     tabs = tabs.push(text("Facets").size(13));
+    // Same protocol on several facets (different sources correlated into one
+    // host) → append the source so the tabs stay distinguishable.
+    let dup_protocols = crate::view::host::duplicated_protocols(facets.iter().map(|f| f.protocol));
     for f in facets {
         // Copy out the data the widgets need so the strip owns it (Element<'static>)
         // and doesn't borrow `facets`.
@@ -689,13 +692,22 @@ fn facet_tab_strip(facets: &[FacetTab]) -> Option<Element<'static, Message>> {
                 border: iced::Border::default().rounded(4.0),
                 ..Default::default()
             });
-        let label = row![
+        let mut label = row![
             dot,
             icons::protocol_icon::<Message>(f.protocol, IconSize::Small),
             text(f.protocol.display_name()).size(13),
         ]
         .spacing(5)
         .align_y(Alignment::Center);
+        if dup_protocols.contains(&f.protocol) {
+            label = label.push(
+                text(format!("· {}", f.id.source))
+                    .size(13)
+                    .style(|t: &Theme| text::Style {
+                        color: Some(crate::view::theme::colors(t).text_muted()),
+                    }),
+            );
+        }
         let tab = if f.active {
             button(label)
                 .padding([4, 10])
@@ -740,7 +752,10 @@ pub struct DeviceViewCtx<'a, 'b> {
 /// a ▾/▸ toggle in the bar.
 pub fn host_detail_view<'a>(ctx: DeviceViewCtx<'a, '_>) -> Element<'a, Message> {
     let identity = ctx.entity.map(|e| (e, ctx.identity_expanded));
-    let mut col = column![container(render_header(ctx.state, identity)).padding([12, 20]),];
+    // The active facet's status gates the "Forget" affordance in the bar.
+    let facet_status = ctx.facets.iter().find(|f| f.active).map(|f| f.status);
+    let mut col =
+        column![container(render_header(ctx.state, identity, facet_status)).padding([12, 20]),];
     if ctx.identity_expanded
         && let Some(entity) = ctx.entity
     {
@@ -891,7 +906,7 @@ fn with_device_nav<'a>(
     content: Element<'a, Message>,
 ) -> Element<'a, Message> {
     column![
-        container(render_header(state, None)).padding([12, 20]),
+        container(render_header(state, None, None)).padding([12, 20]),
         rule::horizontal(1),
         content,
     ]
@@ -926,7 +941,7 @@ pub fn device_view_with_syslog_filter<'a>(
 
 /// Render the generic device detail view (fallback for protocols without specialized views).
 pub fn generic_device_view(state: &DeviceDetailState) -> Element<'_, Message> {
-    let header = render_header(state, None);
+    let header = render_header(state, None, None);
 
     let content = column![header, rule::horizontal(1), generic_device_body(state)]
         .spacing(10)
@@ -964,6 +979,7 @@ fn generic_device_body(state: &DeviceDetailState) -> Element<'_, Message> {
 fn render_header<'a>(
     state: &'a DeviceDetailState,
     identity: Option<(&HostEntity, bool)>,
+    facet_status: Option<DeviceStatus>,
 ) -> Element<'a, Message> {
     let back_button = button(
         row![icons::arrow_left(IconSize::Medium), text("Back").size(14)]
@@ -1011,6 +1027,27 @@ fn render_header<'a>(
     .on_press(Message::ExportToJson)
     .style(iced::widget::button::secondary);
 
+    // An Offline facet is likely stale (e.g. a one-off sensor run that will
+    // never come back) — offer to drop it from the in-memory device map. It
+    // reappears automatically if telemetry resumes.
+    let forget_button: Option<Element<'a, Message>> = (facet_status == Some(DeviceStatus::Offline))
+        .then(|| {
+            let btn = button(text("Forget").size(12))
+                .on_press(Message::ForgetDevice(state.device_id.clone()))
+                .padding([2, 8])
+                .style(iced::widget::button::text);
+            tooltip(
+                btn,
+                container(
+                    text("Remove this stale facet; it returns if telemetry resumes.").size(11),
+                )
+                .padding(6)
+                .style(container::rounded_box),
+                tooltip::Position::Bottom,
+            )
+            .into()
+        });
+
     let mut bar = row![
         back_button,
         prev_button,
@@ -1023,10 +1060,11 @@ fn render_header<'a>(
     if let Some(summary) = identity_summary {
         bar = bar.push(summary);
     }
-    bar.push(metric_count)
-        .push(csv_button)
-        .push(json_button)
-        .into()
+    bar = bar.push(metric_count).push(csv_button).push(json_button);
+    if let Some(forget) = forget_button {
+        bar = bar.push(forget);
+    }
+    bar.into()
 }
 
 /// Render the chart section.

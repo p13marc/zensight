@@ -12,7 +12,7 @@
 //! reproduces the pre-correlation behavior **bit-for-bit** when the store is
 //! empty (the degraded path).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use zensight_common::{DeviceStatus, HostEntity, Protocol};
 
@@ -55,6 +55,22 @@ pub fn protocol_priority(p: Protocol) -> u8 {
         Protocol::Logs => 3,
         _ => 4,
     }
+}
+
+/// Protocols appearing on two or more facets of the same host (e.g. a
+/// toolbox-run sysinfo sensor with source "toolbx" correlated into the same
+/// host as the host-run one). Callers use this to disambiguate same-protocol
+/// facet badges/tabs by appending the facet's `source`. Pure over any protocol
+/// iterator so both the dashboard cards and the facet tab strip share it.
+pub fn duplicated_protocols(protocols: impl Iterator<Item = Protocol>) -> HashSet<Protocol> {
+    let mut counts: HashMap<Protocol, usize> = HashMap::new();
+    for p in protocols {
+        *counts.entry(p).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .filter_map(|(p, n)| (n >= 2).then_some(p))
+        .collect()
 }
 
 /// Best display name for an entity: hostname > fqdn > short entity id.
@@ -266,6 +282,24 @@ mod tests {
         assert_eq!(hosts.len(), 1);
         // The device maps to h_new directly (by_device points at the current id).
         assert_eq!(hosts[0].key, HostKey::Entity("h_new".into()));
+    }
+
+    #[test]
+    fn duplicated_protocols_flags_only_repeats() {
+        let protos = [
+            Protocol::Sysinfo,
+            Protocol::Sysinfo,
+            Protocol::Netlink,
+            Protocol::Sysinfo,
+        ];
+        let dups = duplicated_protocols(protos.into_iter());
+        assert_eq!(dups.len(), 1);
+        assert!(dups.contains(&Protocol::Sysinfo));
+        assert!(!dups.contains(&Protocol::Netlink));
+
+        // No repeats (or nothing at all) → empty set.
+        assert!(duplicated_protocols([Protocol::Snmp, Protocol::Logs].into_iter()).is_empty());
+        assert!(duplicated_protocols(std::iter::empty()).is_empty());
     }
 
     #[test]

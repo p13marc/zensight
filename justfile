@@ -56,10 +56,14 @@ _default:
 
 # ── Build ────────────────────────────────────────────────────────────────────
 
+# The GUI is built with the parallax H.264 live view (compiles openh264 from
+# source — needs a C++ toolchain); drop the flag for a JPEG-preview-only,
+# C++-free GUI.
+
 # Build the GUI + the sensors + the identity correlator.
 build:
     cargo build {{relflag}} \
-        -p zensight \
+        -p zensight --features zensight/h264 \
         -p zensight-sensor-netring \
         -p zensight-sensor-netlink \
         -p zensight-sensor-sysinfo \

@@ -568,6 +568,11 @@ pub enum Message {
     /// User selected a device from the dashboard.
     SelectDevice(DeviceId),
 
+    /// User dismissed a stale facet: drop it from the in-memory device map.
+    /// Facets are not persisted, so this is a pure view-model removal — the
+    /// facet reappears if its telemetry resumes.
+    ForgetDevice(DeviceId),
+
     /// Jump from an alert straight to the offending device, pre-selecting the
     /// metric (if known) so its chart opens immediately (#35 triage loop).
     InvestigateAlert {

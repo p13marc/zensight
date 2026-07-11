@@ -69,6 +69,10 @@ just sensors connect=tcp/<gui-host>:7447   # …feeding a GUI on another machine
 just netring   # | netlink | sysinfo | logs | systemd | parallax
 ```
 
+`just run` / `just gui` build the GUI with H.264 live video for parallax streams
+(openh264 compiled from source → a C++ compiler is required); a plain
+`cargo build --workspace` stays codec-free (JPEG previews only).
+
 To monitor **multiple machines**, run the GUI (+ correlator) on one host and the
 all-in-one sensors container (`ghcr.io/p13marc/zensight-sensors`) on each of the
 others — the only configuration is `ZENSIGHT_ZENOH_CONNECT=tcp/<gui-host>:7447`.

@@ -98,7 +98,7 @@ flowchart LR
 | Crate | Feature | Purpose |
 |-------|---------|---------|
 | `zensight` | `tester` | F12 UI recorder (iced/tester) |
-| `zensight` | `h264` | opt-in H.264 live view for parallax streams (pulls openh264, a C++ build from source; default GUI stays JPEG-preview-only) |
+| `zensight` | `h264` | opt-in H.264 live view for parallax streams (pulls openh264, a C++ build from source; default GUI stays JPEG-preview-only) (enabled by the justfile build) |
 | `zensight-sensor-netring` | `lateral` / `sigma` / `yara` / `snmp` | opt-in NDR detectors (off by default) |
 | `zensight-sensor-netring` | `ja4plus` | JA4/JA4H fingerprints — FoxIO License 1.1 (NOT OSI); default build stays OSI-clean |
 | `zensight-sensor-{netlink,sysinfo}` | `ebpf` | opt-in eBPF collectors (need host validation) |
