@@ -897,7 +897,11 @@ impl ZenSight {
             }
 
             Message::TopologyLayoutFrame => {
-                self.topology.run_layout_step();
+                if self.topology.tween_active() {
+                    self.topology.step_tween(now_ms());
+                } else {
+                    self.topology.run_layout_step();
+                }
             }
 
             Message::TopologyToggleLegend => {
@@ -5405,14 +5409,15 @@ impl ZenSight {
                     .map(|_| Message::TopologyAnimTick),
             );
         }
-        // Force-layout stepping (#441): ~30 fps while the simulation is
-        // actually settling, self-terminating via `layout_stable` — the same
-        // gating pattern as the dash animation. A stable graph burns no
-        // frames; the 1 Hz tick only refreshes data.
-        if self.current_view == CurrentView::Topology
-            && self.topology.prefs.layout == crate::view::topology::LayoutMode::Force
+        // Layout animation (#441/#442): ~30 fps while the force simulation
+        // is actually settling or a tiered-position tween is in flight —
+        // self-terminating, the same gating pattern as the dash animation.
+        // A settled graph burns no frames; the 1 Hz tick only refreshes data.
+        let force_settling = self.topology.prefs.layout == crate::view::topology::LayoutMode::Force
             && self.topology.auto_layout
-            && !self.topology.layout_stable
+            && !self.topology.layout_stable;
+        if self.current_view == CurrentView::Topology
+            && (force_settling || self.topology.tween_active())
         {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(33))

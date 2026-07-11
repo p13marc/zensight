@@ -87,8 +87,12 @@ pub struct PersistentSettings {
     /// Topology visibility filters (#392).
     #[serde(default)]
     pub topology_filters: crate::view::topology::TopoFilters,
-    /// Topology layout mode (#394).
-    #[serde(default)]
+    /// Topology layout mode (#394/#442). Persisted under a `_v2` key on
+    /// purpose: every pref save used to write the old `topology_layout` key
+    /// back implicitly, so honoring it would pin every existing install to
+    /// the pre-#442 default instead of the new tiered layout. One explicit
+    /// layout pick persists here and sticks; the stale legacy key is ignored.
+    #[serde(default, rename = "topology_layout_v2")]
     pub topology_layout: crate::view::topology::LayoutMode,
     /// Pinned topology nodes (#394).
     #[serde(default)]

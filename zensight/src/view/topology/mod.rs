@@ -7,6 +7,7 @@ pub mod graph;
 pub mod layout;
 pub mod model;
 pub mod panel;
+pub mod tiered;
 
 use std::collections::HashMap;
 
@@ -34,6 +35,7 @@ pub use model::{
 };
 
 use model::{entity_node_label, is_node_protocol, ordered_pair, primary_protocol};
+pub use tiered::{PositionTween, TierBand, TieredLayout, tiered_layout, tween_at};
 
 /// Flow edges slower than this (bytes/sec) don't animate (#394).
 pub const ANIMATED_EDGE_MIN_RATE: f64 = 1_000.0;
@@ -113,6 +115,15 @@ pub struct TopologyState {
     pub anim_offset: u32,
     /// Whether the lens legend is shown (#394). Session-transient.
     pub show_legend: bool,
+    /// The tier/subnet bands of the current tiered layout (#442), for the
+    /// canvas captions. Empty outside Tiered mode.
+    pub tier_bands: Vec<TierBand>,
+    /// In-flight animated transition to freshly computed tiered positions
+    /// (#442). Stepped by the layout-frame subscription; `None` when parked.
+    tween: Option<PositionTween>,
+    /// The last computed tiered layout (#442): the change gate — recomputing
+    /// an identical layout is a no-op, so the 1 Hz refresh stays free.
+    last_tiered: TieredLayout,
 }
 
 /// One topology data-refresh reply set (#440): whichever of the four
@@ -173,6 +184,9 @@ impl Default for TopologyState {
             hover_set: std::collections::HashSet::new(),
             anim_offset: 0,
             show_legend: false,
+            tier_bands: Vec::new(),
+            tween: None,
+            last_tiered: TieredLayout::default(),
         }
     }
 }
@@ -362,6 +376,9 @@ impl TopologyState {
             self.wake_layout();
         }
         self.invalidate();
+        // Newcomers/identity changes may need a fresh tier slot (#442);
+        // change-gated, so the 1 Hz refresh stays free.
+        self.apply_tiered_layout(true);
 
         // NB: edges are derived from *observed* flow/neighbor data via
         // `apply_flow_edges` (#25), not fabricated here. We no longer synthesize a
@@ -702,6 +719,9 @@ impl TopologyState {
         self.selected_edge = None;
         self.recompute_edge_health();
         self.invalidate();
+        // Structure/roles may have moved nodes between tiers (#442);
+        // change-gated, so identical layouts are free.
+        self.apply_tiered_layout(true);
     }
 
     /// Tint each edge by the worst alert severity of its two endpoint nodes
@@ -771,6 +791,12 @@ impl TopologyState {
     pub fn start_node_drag(&mut self, node_id: &NodeId) {
         if let Some(node) = self.nodes.get_mut(node_id) {
             node.pinned = true;
+        }
+        // The drag wins over an in-flight tween (#442): drop the node from
+        // both endpoints so the animation can't fight the pointer.
+        if let Some(tween) = &mut self.tween {
+            tween.from.remove(node_id);
+            tween.to.remove(node_id);
         }
     }
 
@@ -894,14 +920,23 @@ impl TopologyState {
         }
     }
 
-    /// Switch the layout mode (#394): Force re-animates; Grid/Circular apply
-    /// a static arrangement (pinned nodes stay put).
+    /// Switch the layout mode (#394): Tiered tweens to the hierarchy (#442),
+    /// Force re-animates, Grid/Circular apply a static arrangement (pinned
+    /// nodes stay put throughout).
     pub fn set_layout(&mut self, mode: LayoutMode) {
         if self.prefs.layout == mode {
             return;
         }
         self.prefs.layout = mode;
+        // Leaving/entering Tiered always resets its state: the change gate
+        // must not skip a re-apply after another layout moved the nodes.
+        self.tween = None;
+        self.tier_bands.clear();
+        self.last_tiered = TieredLayout::default();
         match mode {
+            LayoutMode::Tiered => {
+                self.apply_tiered_layout(true);
+            }
             LayoutMode::Force => {
                 self.wake_layout();
             }
@@ -1003,6 +1038,76 @@ impl TopologyState {
         self.layout_stable = false;
     }
 
+    /// Recompute the tiered layout (#442) and move unpinned nodes there —
+    /// tweened when `animate`, else immediately. Change-gated: identical
+    /// targets are a no-op, so calling this on every data refresh is free.
+    pub fn apply_tiered_layout(&mut self, animate: bool) {
+        if self.prefs.layout != LayoutMode::Tiered {
+            return;
+        }
+        let layout = tiered_layout(&self.nodes, &self.edges);
+        if layout == self.last_tiered {
+            return;
+        }
+        self.tier_bands = layout.bands.clone();
+        let targets: HashMap<NodeId, (f32, f32)> = layout
+            .positions
+            .iter()
+            .filter(|(id, _)| self.nodes.get(*id).is_some_and(|n| !n.pinned))
+            .map(|(id, pos)| (id.clone(), *pos))
+            .collect();
+        if animate && !targets.is_empty() {
+            // A fresh tween replaces any in-flight one, starting from the
+            // current (possibly mid-animation) positions — no rubber-banding.
+            let from = targets
+                .keys()
+                .filter_map(|id| self.nodes.get(id).map(|n| (id.clone(), n.position)))
+                .collect();
+            self.tween = Some(PositionTween {
+                from,
+                to: targets,
+                started_ms: zensight_common::current_timestamp_millis(),
+                duration_ms: 400,
+            });
+        } else {
+            for (id, pos) in &targets {
+                if let Some(node) = self.nodes.get_mut(id) {
+                    node.position = *pos;
+                    node.velocity = (0.0, 0.0);
+                }
+            }
+            self.cache.clear();
+        }
+        self.last_tiered = layout;
+        self.layout_stable = true;
+    }
+
+    /// Whether a position tween is in flight (#442): gates the layout-frame
+    /// subscription alongside the force simulation.
+    pub fn tween_active(&self) -> bool {
+        self.tween.is_some()
+    }
+
+    /// Advance the in-flight position tween (#442): writes the interpolation
+    /// into the live node positions — the canvas resolves them at draw time,
+    /// so this is a cheap redraw, never a render-graph rebuild.
+    pub fn step_tween(&mut self, now_ms: i64) {
+        let Some(tween) = &self.tween else { return };
+        let (positions, finished) = tween_at(tween, now_ms);
+        for (id, pos) in positions {
+            if let Some(node) = self.nodes.get_mut(&id)
+                && !node.pinned
+            {
+                node.position = pos;
+                node.velocity = (0.0, 0.0);
+            }
+        }
+        if finished {
+            self.tween = None;
+        }
+        self.cache.clear();
+    }
+
     /// Run layout iterations for smooth convergence. Driven by the gated
     /// ~30 fps `TopologyLayoutFrame` subscription while unstable (#441) —
     /// a few iterations per frame reads as continuous motion, and the time
@@ -1097,8 +1202,13 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
     let node_count = text(format!("{} nodes", state.nodes.len())).size(14);
     let edge_count = text(format!("{} connections", state.edges.len())).size(14);
 
-    // Show layout status
-    let layout_status = if !state.auto_layout {
+    // Show layout status. "Manual"/"Adjusting" only describe the force
+    // simulation; the deterministic layouts are simply what they are (#442).
+    let layout_status = if state.tween_active() {
+        text("Layout: animating…").size(10)
+    } else if state.prefs.layout != LayoutMode::Force {
+        text("Layout: Stable").size(10)
+    } else if !state.auto_layout {
         text("Layout: Manual").size(10)
     } else if state.layout_stable {
         text("Layout: Stable").size(10)
@@ -1133,19 +1243,23 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
         .on_press(Message::TopologyZoomReset)
         .style(iced::widget::button::secondary);
 
-    let auto_layout_btn = button(
-        text(if state.auto_layout {
-            "Auto Layout: ON"
+    // Auto-layout only governs the force simulation (#442): hidden for the
+    // deterministic layouts, where it would be a no-op.
+    let auto_layout_btn = (state.prefs.layout == LayoutMode::Force).then(|| {
+        button(
+            text(if state.auto_layout {
+                "Auto Layout: ON"
+            } else {
+                "Auto Layout: OFF"
+            })
+            .size(12),
+        )
+        .on_press(Message::TopologyToggleAutoLayout)
+        .style(if state.auto_layout {
+            iced::widget::button::primary
         } else {
-            "Auto Layout: OFF"
+            iced::widget::button::secondary
         })
-        .size(12),
-    )
-    .on_press(Message::TopologyToggleAutoLayout)
-    .style(if state.auto_layout {
-        iced::widget::button::primary
-    } else {
-        iced::widget::button::secondary
     });
 
     // Search input
@@ -1177,8 +1291,10 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
         .push(zoom_out_btn)
         .push(zoom_label)
         .push(zoom_in_btn)
-        .push(reset_btn)
-        .push(auto_layout_btn);
+        .push(reset_btn);
+    if let Some(btn) = auto_layout_btn {
+        header = header.push(btn);
+    }
 
     // Second control row (#392): lens selector + edge-label mode.
     let mut lens_row = row![text("Lens:").size(12)]
@@ -1647,6 +1763,9 @@ mod tests {
         let mut devices: HashMap<DeviceId, DeviceState> = [device("host-a")].into();
 
         let mut state = TopologyState::default();
+        // Force mode: this test pins down the force-layout contract (the
+        // tiered default assigns positions itself, #442).
+        state.prefs.layout = LayoutMode::Force;
         let entities = crate::entity::EntityStore::default();
         state.update_from_devices(&devices, &entities, &HashMap::new(), 0);
         let seeded = state.nodes["host-a"].position;
@@ -1662,6 +1781,65 @@ mod tests {
         assert_eq!(state.nodes["host-a"].position, (123.0, -45.0));
         assert_ne!(state.nodes["host-b"].position, (0.0, 0.0));
         assert!(!state.layout_stable, "layout wakes to absorb the newcomer");
+    }
+
+    #[test]
+    fn tiered_default_applies_positions_and_change_gates() {
+        assert_eq!(LayoutMode::default(), LayoutMode::Tiered);
+
+        let mut state = TopologyState::default();
+        for (id, role, ip) in [
+            ("gw", NodeRole::Router, "10.0.0.1"),
+            ("host-a", NodeRole::Host, "10.0.0.2"),
+            ("host-b", NodeRole::Host, "10.0.0.3"),
+        ] {
+            state.nodes.insert(
+                id.to_string(),
+                Node {
+                    id: id.to_string(),
+                    label: id.to_string(),
+                    role,
+                    ips: vec![ip.to_string()],
+                    ..Default::default()
+                },
+            );
+        }
+        state.nodes.get_mut("host-b").unwrap().pinned = true;
+        state.nodes.get_mut("host-b").unwrap().position = (7.0, 7.0);
+
+        // Immediate application: unpinned nodes take their tier slots,
+        // pinned ones stay put, bands are published.
+        state.apply_tiered_layout(false);
+        assert!(!state.tier_bands.is_empty());
+        assert!(state.layout_stable);
+        let gw_y = state.nodes["gw"].position.1;
+        let host_y = state.nodes["host-a"].position.1;
+        assert!(gw_y < host_y, "router tier above hosts tier");
+        assert_eq!(state.nodes["host-b"].position, (7.0, 7.0), "pin wins");
+
+        // Identical recompute is a no-op: no tween spawned.
+        state.apply_tiered_layout(true);
+        assert!(!state.tween_active(), "change gate skips identical layouts");
+
+        // A structural change (new node) starts a tween; stepping it past
+        // its duration lands the node and parks the tween.
+        state.nodes.insert(
+            "host-c".to_string(),
+            Node {
+                id: "host-c".to_string(),
+                label: "host-c".to_string(),
+                ips: vec!["10.0.0.4".to_string()],
+                ..Default::default()
+            },
+        );
+        state.apply_tiered_layout(true);
+        assert!(state.tween_active());
+        let now = zensight_common::current_timestamp_millis();
+        state.step_tween(now + 10_000);
+        assert!(!state.tween_active(), "tween finishes and parks");
+        let c = state.nodes["host-c"].position;
+        assert!(c != (0.0, 0.0), "tween landed the newcomer on its slot");
+        assert!(c.1 > gw_y, "newcomer landed below the router tier");
     }
 
     #[test]
