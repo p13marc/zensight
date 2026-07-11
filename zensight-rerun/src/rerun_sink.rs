@@ -68,6 +68,18 @@ impl RerunSink {
             .set_timestamp_nanos_since_epoch(TIMELINE, timestamp_ms.saturating_mul(1_000_000));
     }
 
+    /// Bundle string fields into an [`rerun::AnyValues`] (each field becomes a
+    /// `Text`-typed component column named after the key). Logged on the same
+    /// path/timepoint as the `TextLog`, so the selection panel and dataframe
+    /// queries see structured columns next to the prose lane.
+    fn any_values<'a>(fields: impl IntoIterator<Item = (&'a str, &'a str)>) -> rerun::AnyValues {
+        fields
+            .into_iter()
+            .fold(rerun::AnyValues::default(), |acc, (key, value)| {
+                acc.with_component::<rerun::components::Text>(key, [value.to_string()])
+            })
+    }
+
     fn level(severity: EventSeverity) -> rerun::TextLogLevel {
         // The TextLogLevel associated constants are `&'static str` in 0.34.
         match severity {
@@ -110,6 +122,38 @@ impl VisualizationSink for RerunSink {
             &rerun::archetypes::TextLog::new(event.message.clone())
                 .with_level(Self::level(event.severity)),
         )?;
+
+        // Structured lane: typed fields + attributes as queryable columns.
+        // Two log calls per event is a Rerun-modeling wart, not a choice —
+        // see docs/plans/rerun/05-events.md §2.
+        let protocol = event.protocol.map(|p| p.as_str().to_string());
+        let mut fields: Vec<(&str, &str)> = vec![
+            ("kind", event.kind.as_str()),
+            ("severity", event.severity.as_str()),
+            ("event_source", event.source.as_str()),
+        ];
+        if let Some(protocol) = protocol.as_deref() {
+            fields.push(("protocol", protocol));
+        }
+        if let Some(target) = event.target.as_deref() {
+            fields.push(("target", target));
+        }
+        if let Some(interface) = event.interface.as_deref() {
+            fields.push(("interface", interface));
+        }
+        if let Some(entity_id) = event.entity_id.as_deref() {
+            fields.push(("entity_id", entity_id));
+        }
+        if let Some(correlation_id) = event.correlation_id.as_deref() {
+            fields.push(("correlation_id", correlation_id));
+        }
+        fields.extend(
+            event
+                .attributes
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str())),
+        );
+        self.rec.log(path, &Self::any_values(fields))?;
         Ok(())
     }
 
@@ -136,12 +180,51 @@ impl VisualizationSink for RerunSink {
             format!("{path}/state"),
             &rerun::archetypes::Scalars::single(weight),
         )?;
+
+        // Structured lane (alert identity + context labels).
+        let alert_key = alert.alert_key();
+        let state = match alert.state {
+            AlertState::Firing => "firing",
+            AlertState::Resolved => "resolved",
+        };
+        let protocol = alert.protocol.as_str();
+        let mut fields: Vec<(&str, &str)> = vec![
+            ("alert_key", alert_key.as_str()),
+            ("rule", alert.rule.as_str()),
+            ("state", state),
+            ("severity", alert.severity.as_str()),
+            ("kind", alert.kind.as_str()),
+            ("alert_source", alert.source.as_str()),
+            ("protocol", protocol),
+        ];
+        fields.extend(alert.labels.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        self.rec.log(path, &Self::any_values(fields))?;
         Ok(())
     }
 
-    fn publish_entity(&mut self, _entity: &HostEntity) -> anyhow::Result<()> {
-        // #421 adds the static AnyValues identity card at hosts/<entity_id>;
-        // until then entities only feed the (Rerun-free) EntityIndex.
+    fn publish_entity(&mut self, entity: &HostEntity) -> anyhow::Result<()> {
+        // Static identity card at the host root: selecting the host in the
+        // viewer shows who it is next to its metric/event lanes.
+        let path = format!("hosts/{}", entity.entity_id);
+        let ips = entity.ips.join(",");
+        let macs = entity.macs.join(",");
+        let members = entity.members.len().to_string();
+        let mut fields: Vec<(&str, &str)> = vec![
+            ("entity_id", entity.entity_id.as_str()),
+            ("ips", ips.as_str()),
+            ("macs", macs.as_str()),
+            ("member_count", members.as_str()),
+        ];
+        if let Some(hostname) = entity.hostname.as_deref() {
+            fields.push(("hostname", hostname));
+        }
+        if let Some(fqdn) = entity.fqdn.as_deref() {
+            fields.push(("fqdn", fqdn));
+        }
+        if let Some(status) = entity.status.as_deref() {
+            fields.push(("status", status));
+        }
+        self.rec.log_static(path, &Self::any_values(fields))?;
         Ok(())
     }
 

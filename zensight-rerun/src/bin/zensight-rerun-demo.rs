@@ -35,6 +35,13 @@ enum Scenario {
         #[arg(long, default_value_t = 500)]
         interval_ms: u64,
     },
+    /// Discrete events (route/peer/reset/anomaly), a health degradation, an
+    /// alert firing->resolved pair, then a same-second event burst.
+    Events {
+        /// Number of events in the closing burst.
+        #[arg(long, default_value_t = 50)]
+        burst: u64,
+    },
 }
 
 #[tokio::main]
@@ -60,6 +67,11 @@ async fn main() -> anyhow::Result<()> {
             info!(duration_secs, interval_ms, "Running metrics scenario");
             let published = demo::metrics::run(&ctx, duration_secs, interval_ms).await?;
             info!(published, "Metrics scenario complete");
+        }
+        Scenario::Events { burst } => {
+            info!(burst, "Running events scenario");
+            let (events, alerts, health) = demo::events::run(&ctx, burst).await?;
+            info!(events, alerts, health, "Events scenario complete");
         }
     }
 

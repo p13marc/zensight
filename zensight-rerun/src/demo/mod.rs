@@ -7,6 +7,7 @@
 //! explicit connect endpoint): a live sensor fleet must not contaminate a
 //! demo recording, and vice versa (docs/plans/rerun/08-multi-process.md §5).
 
+pub mod events;
 pub mod metrics;
 
 use std::sync::Arc;
@@ -15,7 +16,8 @@ use zensight_common::PublisherRegistry;
 use zensight_common::alert::Alert;
 use zensight_common::config::ZenohConfig;
 use zensight_common::entity::HostEntity;
-use zensight_common::keyexpr::{KeyExprBuilder, entity_key};
+use zensight_common::health::HealthSnapshot;
+use zensight_common::keyexpr::{KeyExprBuilder, entity_key, sensor_control_prefix};
 use zensight_common::qos::QosClass;
 use zensight_common::serialization::Format;
 use zensight_common::telemetry::TelemetryPoint;
@@ -61,6 +63,21 @@ impl DemoContext {
         let key = KeyExprBuilder::new(alert.protocol).alert_key_expr(&alert.alert_key());
         self.registry
             .put_serializable(&key, alert, Format::Cbor, QosClass::Alert)
+            .await?;
+        Ok(())
+    }
+
+    /// Publish one health snapshot on the sensor's host-scoped `@/health`
+    /// channel (`sensor_control_prefix` + the canonical `@/health` suffix,
+    /// the same shape sensor-core publishes on — docs/KEYSPACE.md).
+    pub async fn publish_health(&self, snapshot: &HealthSnapshot) -> anyhow::Result<()> {
+        let source = snapshot.source.as_deref().unwrap_or("unknown");
+        let key = format!(
+            "{}/@/health",
+            sensor_control_prefix(&snapshot.sensor, source)
+        );
+        self.registry
+            .put_serializable(&key, snapshot, Format::Cbor, QosClass::HealthLiveness)
             .await?;
         Ok(())
     }
