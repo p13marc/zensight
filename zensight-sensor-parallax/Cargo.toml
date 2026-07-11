@@ -1,0 +1,42 @@
+[package]
+name = "zensight-sensor-parallax"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Zenoh sensor for live video: cameras / RTSP / test patterns encoded to H.264 + JPEG previews on the @media plane"
+license.workspace = true
+
+[[bin]]
+name = "zensight-sensor-parallax"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+zensight-common = { path = "../zensight-common" }
+zensight-sensor-core = { path = "../zensight-sensor-core" }
+
+# The video pipeline engine (lib name `parallax`). Default features are empty;
+# we opt into exactly what the sensor needs: openh264 encode/decode (builds the
+# C++ codec from source), V4L2 cameras, RTSP/retina clients, and the pure-Rust
+# JPEG codecs for the preview profile. libcamera is deliberately skipped (heavy
+# system dependency; V4L2 covers webcams).
+parallax-pipeline = { version = "0.1.1", default-features = false, features = [
+    "h264",
+    "v4l2",
+    "rtsp",
+    "image-jpeg",
+] }
+
+tokio = { workspace = true, features = ["full"] }
+zenoh.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+json5.workspace = true
+clap = { workspace = true, features = ["derive"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+anyhow.workspace = true
+thiserror.workspace = true
+hostname = { workspace = true }
