@@ -141,6 +141,16 @@ struct ProfileSession {
     idle_since: Option<Instant>,
 }
 
+impl Drop for ProfileSession {
+    fn drop(&mut self) {
+        // Belt-and-braces: however this session dies (explicit teardown,
+        // actor shutdown, panic unwind, runtime teardown), the source's EOS
+        // switch MUST flip — its loop runs on a blocking thread that nothing
+        // else can stop, and tokio's shutdown would wait on it forever.
+        self.stop.stop();
+    }
+}
+
 impl ProfileSession {
     fn teardown(mut self) {
         // Order matters: flip the source's EOS switch first (the source loop

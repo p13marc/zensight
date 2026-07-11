@@ -210,9 +210,9 @@ async fn open_preview_streams_jpeg_frames_at_config_fps() {
     .await;
 
     // Collect frames; the preview runs at 4 fps so 6 frames ≈ 1.5 s.
-    let mut arrivals: Vec<Instant> = Vec::new();
     let mut sequences: Vec<u64> = Vec::new();
-    while arrivals.len() < 6 {
+    let mut pts: Vec<u64> = Vec::new();
+    while sequences.len() < 6 {
         let sample = tokio::time::timeout(Duration::from_secs(5), sub.recv_async())
             .await
             .expect("preview frame timed out")
@@ -228,8 +228,8 @@ async fn open_preview_streams_jpeg_frames_at_config_fps() {
         let meta: FrameMeta = decode(&att.to_bytes(), Format::Cbor).expect("decode FrameMeta");
         assert!(meta.keyframe, "every JPEG preview frame is a keyframe");
         assert_eq!((meta.width, meta.height), (160, 120));
-        arrivals.push(Instant::now());
         sequences.push(meta.sequence);
+        pts.push(meta.pts_ns.expect("test-source frames carry pts"));
     }
 
     // Sequence numbers are strictly monotonic.
@@ -238,12 +238,17 @@ async fn open_preview_streams_jpeg_frames_at_config_fps() {
         "sequences {sequences:?}"
     );
 
-    // Frame cadence ≈ preview fps (4 fps → 250 ms nominal; be generous).
-    let spans: Vec<Duration> = arrivals.windows(2).map(|w| w[1] - w[0]).collect();
-    let avg = spans.iter().sum::<Duration>() / spans.len() as u32;
+    // Frame cadence ≈ preview fps: judge by the SOURCE's pts (stamped at the
+    // configured 4 fps → 250 ms per frame), not by delivery timing — network
+    // arrival bursts and loaded-machine scheduling make wall-clock gaps
+    // meaningless in a parallel test run. Sequence gaps (dropped frames under
+    // load) scale the expected span, so only the per-frame rate is pinned.
+    let frames_spanned = sequences.last().unwrap() - sequences.first().unwrap();
+    let pts_span_ns = pts.last().unwrap() - pts.first().unwrap();
+    let per_frame_ms = pts_span_ns as f64 / frames_spanned as f64 / 1e6;
     assert!(
-        avg >= Duration::from_millis(125) && avg <= Duration::from_millis(750),
-        "average inter-frame gap {avg:?} not ≈ 250 ms"
+        (per_frame_ms - 250.0).abs() < 50.0,
+        "per-frame pts spacing {per_frame_ms:.1} ms not ≈ 250 ms (4 fps)"
     );
 
     // The catalogue now reports the stream active.
