@@ -829,9 +829,13 @@ impl std::fmt::Display for GroupingMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LayoutMode {
-    /// Force-directed (default): repulsion + springs, stepped at ~30 fps
-    /// with alpha cooling while settling (#441).
+    /// Deterministic tiered hierarchy (default, #442): Internet → gateways/
+    /// infrastructure → hosts banded by subnet → discovered devices. The
+    /// layout every readable network map uses; positions never shuffle.
     #[default]
+    Tiered,
+    /// Force-directed: repulsion + springs, stepped at ~30 fps with alpha
+    /// cooling while settling (#441). Organic, but positions are arbitrary.
     Force,
     /// Static grid ranked by alert severity then traffic (Grafana's
     /// "most interesting first" overview).
@@ -842,12 +846,18 @@ pub enum LayoutMode {
 
 impl LayoutMode {
     /// Every mode, in pick-list order.
-    pub const ALL: [LayoutMode; 3] = [LayoutMode::Force, LayoutMode::Grid, LayoutMode::Circular];
+    pub const ALL: [LayoutMode; 4] = [
+        LayoutMode::Tiered,
+        LayoutMode::Force,
+        LayoutMode::Grid,
+        LayoutMode::Circular,
+    ];
 }
 
 impl std::fmt::Display for LayoutMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            LayoutMode::Tiered => "Tiered layout",
             LayoutMode::Force => "Force layout",
             LayoutMode::Grid => "Grid layout",
             LayoutMode::Circular => "Circular layout",
@@ -1129,6 +1139,19 @@ fn health_rank(h: NodeHealth) -> u8 {
     }
 }
 
+/// The /24 bucket of a node's first usable IPv4 (#392/#442), e.g.
+/// `"192.168.1.0/24"`. Shared by subnet grouping and the tiered layout's
+/// host banding. Pure.
+pub fn subnet24(node: &Node) -> Option<String> {
+    let v4 = node.ips.iter().find_map(|ip| {
+        ip.parse::<std::net::Ipv4Addr>()
+            .ok()
+            .filter(|a| !a.is_loopback() && !a.is_link_local() && !a.is_unspecified())
+    })?;
+    let o = v4.octets();
+    Some(format!("{}.{}.{}.0/24", o[0], o[1], o[2]))
+}
+
 /// The grouping bucket for a node under `mode` (#392). `None` = ungrouped
 /// (renders as a plain node). The Internet aggregate is never grouped.
 /// Group ids are namespaced (`group:<mode>:<key>`) so they can't collide with
@@ -1144,13 +1167,7 @@ pub fn group_key(
     match mode {
         GroupingMode::None => None,
         GroupingMode::Subnet => {
-            let v4 = node.ips.iter().find_map(|ip| {
-                ip.parse::<std::net::Ipv4Addr>()
-                    .ok()
-                    .filter(|a| !a.is_loopback() && !a.is_link_local() && !a.is_unspecified())
-            })?;
-            let o = v4.octets();
-            let label = format!("{}.{}.{}.0/24", o[0], o[1], o[2]);
+            let label = subnet24(node)?;
             Some((format!("group:subnet:{label}"), label))
         }
         GroupingMode::Role => {
