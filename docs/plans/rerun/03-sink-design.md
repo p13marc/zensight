@@ -43,10 +43,10 @@ follow-up with three real consumers to generalize from; if "reject", nothing lea
 
 ```text
 zenoh subscribers (subscriber.rs)          SinkWorker (sink.rs)                sink
-  telemetry  zensight/**      ──┐
-  alerts     zensight/*/@/alerts/*  ──┤→ tx_control   (mpsc 1024, blocking)  ──→ classify/convert ──→ VisualizationSink
-  health     zensight/*/*/@/health  ──┤                                            (mapping.rs, events.rs)
-  entities   _meta/entity/** + seed ──┘→ tx_telemetry (mpsc 4096, drop-newest)
+  telemetry  zensight/**          ──────→ tx_telemetry (mpsc 4096, drop-newest) ─┐
+  alerts     zensight/*/@/alerts/*  ──┐                                          ├→ classify/convert ──→ VisualizationSink
+  health     zensight/*/*/@/health  ──┤→ tx_control   (mpsc 1024, blocking)    ──┘    (mapping.rs, events.rs)
+  entities   _meta/entity/** + seed ──┘
 ```
 
 - **Two bounded channels**, mirroring the bus QoS philosophy (`zensight-common/src/qos.rs`):

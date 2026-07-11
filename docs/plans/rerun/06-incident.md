@@ -18,15 +18,20 @@ steps live in `const SCRIPT: &[(u64, Step)]`.
 | 15–22 | `netring … path/gateway/loss_percent` | ramps 0 → **8 %** |
 | 18 | `netlink … sockets/tcp/retransmits` (counter) | accelerates 1/s → **50/s** |
 | 22–30 | `netring … path/gateway/rtt_ms` | ramps 20 → **400 ms** |
+| 26 | `events/peer_down/gateway` | **PeerDown**: gateway unreachable via wlan0 (topology edge drops) |
 | 28 | `events/route/replace` | **RouteChange**: default via lte0 (was wlan0) |
 | 30 | `@/alerts` | **Critical firing** `wan-path-degraded`, `correlation_id=inc-<base_ts>` |
 | 50–60 | all | recovery ramps back to baseline |
+| 55 | `events/peer_up/gateway` | **PeerUp**: gateway reachable again (topology edge returns) |
 | 60 | `@/alerts` | **Resolved** (same `alert_key`) |
 
 The `correlation_id` (`inc-<base_ts>`) is stamped on the route-change event *and* both alert
 transitions — the cross-lane join a viewer/dataframe query can pull on. A demo `HostEntity`
 (`h_deadbeef0042`) binds the netlink/netring/sysinfo sources to one host, so every lane lands
-under `hosts/h_deadbeef0042/…` plus `alerts/netlink/wan-path-degraded`.
+under `hosts/h_deadbeef0042/…` plus the identity-scoped alert lane
+`alerts/netlink/demo-host/<alert_key>` (02-mapping.md §5; with `--base-ts 1752192000000`
+the key is `wan-path-degraded-fb8bf27584652448` — the hash covers the labels, which include
+`correlation_id=inc-<base_ts>`).
 
 Causality reads bottom-up in the timeline: RSSI leads loss by 5 s, loss leads retransmits,
 retransmits lead RTT, and the alert fires 20 s after the first physical-layer sign — exactly
@@ -61,15 +66,17 @@ ls -l /tmp/incident.rrd && head -c 4 /tmp/incident.rrd   # RRF2
 loopback session:
 
 ```text
-demo:    points=264 (66 s x 4 series)  events=1  alerts=2   (~1.4 s wall at 20 ms pace)
-adapter: metrics=263  events=1  alerts=2  entities=1  sink_errors=0
+demo:    points=264 (66 s x 4 series)  events=3  alerts=2   (~1.5 s wall at 20 ms pace)
+adapter: metrics=263  events=3  alerts=2  entities=1  sink_errors=0
          # 263 = 264 - 1: the retransmit counter's first sample, absorbed by the rate converter
-incident.rrd: 95424 bytes, magic RRF2
+         # events = link-down + route-change + link-up
+incident.rrd: 116841 bytes, magic RRF2
 ```
 
 - Every lane landed under `hosts/h_deadbeef0042/…` (the entity doc was published before the
-  series — the `EntityIndex` join worked live), plus `alerts/netlink/wan-path-degraded`
-  (+`/state`) and the route-change event on the host's events lane.
+  series — the `EntityIndex` join worked live), plus
+  `alerts/netlink/demo-host/wan-path-degraded-fb8bf27584652448` (+`/state`) and the
+  link/route events on the host's events lane.
 - Fast-forwarding at 20 ms pace produced the identical scripted timeline (domain timestamps
   are computed from `base_ts`, never from wall clock) — the whole 65 s incident records in
   under two seconds, which makes CI-able scenario recordings practical.
@@ -80,7 +87,8 @@ incident.rrd: 95424 bytes, magic RRF2
 
 - [ ] One blueprint-free load shows the four ramps + the event + the alert lanes under one
       host subtree; timeline scrub tells the story without manual view setup.
-- [ ] The `alerts/netlink/wan-path-degraded/state` step lane visually brackets t+30..t+60.
+- [ ] The `alerts/netlink/demo-host/wan-path-degraded-…/state` step lane visually brackets
+      t+30..t+60.
 - [ ] Filtering the dataframe view on `correlation_id == inc-<base_ts>` pulls exactly the
       route change + two alert transitions.
 - [ ] Time-cursor correlation across `hosts/...` and `alerts/...` roots (different subtrees —

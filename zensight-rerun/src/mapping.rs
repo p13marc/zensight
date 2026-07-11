@@ -77,7 +77,7 @@ pub fn severity_from_alert(severity: AlertSeverity) -> EventSeverity {
 }
 
 /// The step-series weight of a firing alert (0.0 = resolved) — the
-/// `alerts/<proto>/<rule>/state` lane (02-mapping.md §5).
+/// `alerts/<proto>/<source>/<alert_key>/state` lane (02-mapping.md §5).
 pub fn severity_weight(severity: AlertSeverity) -> f64 {
     match severity {
         AlertSeverity::Info => 1.0,
@@ -138,7 +138,9 @@ impl EntityIndex {
 /// - the first sample of a series (nothing to differentiate against),
 /// - a reset (`value < previous`: restart or wrap) — re-arms on the new
 ///   baseline, one silently absorbed gap instead of a huge negative spike,
-/// - a non-advancing clock (`timestamp <= previous`).
+/// - an out-of-order / non-advancing clock (`timestamp <= previous`) —
+///   absorbed WITHOUT touching the baseline, so a late sample can't shrink
+///   the next delta's window and spike the rate.
 #[derive(Debug, Default)]
 pub struct RateConverter {
     last: HashMap<String, (i64, u64)>,
@@ -148,14 +150,29 @@ impl RateConverter {
     /// Feed one counter sample; get the per-second rate if computable.
     /// `timestamp_ms` is epoch milliseconds (rates come out per second).
     pub fn rate(&mut self, series: &str, timestamp_ms: i64, value: u64) -> Option<f64> {
-        match self.last.insert(series.to_string(), (timestamp_ms, value)) {
-            None => None,
+        match self.last.get(series).copied() {
+            None => {
+                // First sample: becomes the baseline, nothing to plot yet.
+                self.last.insert(series.to_string(), (timestamp_ms, value));
+                None
+            }
+            Some((t0, _)) if timestamp_ms <= t0 => {
+                // Out-of-order / non-advancing clock: absorb WITHOUT touching
+                // the baseline — a late sample must not regress it, or the
+                // next in-order delta computes over a shrunken window and
+                // spikes. (Checked before reset detection: a stale sample
+                // with a lower value is out-of-order, not a reset.)
+                None
+            }
+            Some((_, v0)) if value < v0 => {
+                // Reset (restart or wrap): re-arm on the new baseline — one
+                // silently absorbed gap instead of a huge negative spike.
+                self.last.insert(series.to_string(), (timestamp_ms, value));
+                None
+            }
             Some((t0, v0)) => {
-                if value < v0 || timestamp_ms <= t0 {
-                    None
-                } else {
-                    Some((value - v0) as f64 * 1000.0 / (timestamp_ms - t0) as f64)
-                }
+                self.last.insert(series.to_string(), (timestamp_ms, value));
+                Some((value - v0) as f64 * 1000.0 / (timestamp_ms - t0) as f64)
             }
         }
     }
@@ -197,7 +214,14 @@ impl Sampler {
         };
         let min_interval_ms = (1000.0 / hz) as i64;
         match self.last_emit.get(series) {
-            // Out-of-order or too-soon samples are suppressed.
+            // Domain clock stepped backwards (NTP): accept and re-anchor the
+            // high-water mark, otherwise the series stays suppressed until
+            // time re-passes the old mark.
+            Some(&last) if timestamp_ms < last => {
+                self.last_emit.insert(series.to_string(), timestamp_ms);
+                true
+            }
+            // Too-soon samples are suppressed.
             Some(&last) if timestamp_ms - last < min_interval_ms => false,
             _ => {
                 self.last_emit.insert(series.to_string(), timestamp_ms);
@@ -220,10 +244,32 @@ pub fn metric_entity_path(point: &TelemetryPoint, index: &EntityIndex) -> String
 
 /// Build the Rerun entity path for a source's discrete-event lane.
 pub fn event_entity_path(protocol: &str, source: &str, index: &EntityIndex) -> String {
-    match index.resolve(protocol, source) {
+    event_entity_path_resolved(protocol, source, index.resolve(protocol, source))
+}
+
+/// [`event_entity_path`] with the entity-index lookup already done — lets a
+/// caller that also needs the `entity_id` resolve once and derive both.
+pub fn event_entity_path_resolved(protocol: &str, source: &str, entity_id: Option<&str>) -> String {
+    match entity_id {
         Some(entity_id) => format!("hosts/{entity_id}/events"),
         None => format!("sensors/{protocol}/{source}/events"),
     }
+}
+
+/// Build the Rerun entity path for an alert's lifecycle lane:
+/// `alerts/<protocol>/<source>/<alert_key>` (02-mapping.md §5).
+///
+/// The `alert_key` (FNV-1a over source+rule+identity labels, prefixed with the
+/// sanitized rule name) is the alert's *identity*: two hosts firing the same
+/// rule must not share a lane, or one host's Resolved (state weight 0.0)
+/// would visually resolve the other's still-firing alert.
+pub fn alert_entity_path(alert: &zensight_common::alert::Alert) -> String {
+    format!(
+        "alerts/{}/{}/{}",
+        alert.protocol.as_str(),
+        alert.source,
+        alert.alert_key()
+    )
 }
 
 #[cfg(test)]
@@ -360,6 +406,68 @@ mod tests {
         // Independent series don't cross-contaminate.
         assert_eq!(rc.rate("other", 10_000, 5), None);
         assert_eq!(rc.rate("other", 11_000, 10), Some(5.0));
+    }
+
+    #[test]
+    fn rate_converter_out_of_order_keeps_baseline() {
+        let mut rc = RateConverter::default();
+        assert_eq!(rc.rate("s", 1_000, 1_000), None); // baseline (1000, 1000)
+        assert_eq!(rc.rate("s", 2_000, 2_000), Some(1_000.0)); // baseline (2000, 2000)
+        // A late (out-of-order) sample is absorbed WITHOUT regressing the
+        // baseline — even when its lower value looks like a reset.
+        assert_eq!(rc.rate("s", 1_500, 500), None);
+        // The next in-order sample differentiates against (2000, 2000):
+        // (2500 - 2000) / 1s = 500/s — not the 1333/s spike a regressed
+        // (1500, 500) baseline would produce.
+        assert_eq!(rc.rate("s", 3_000, 2_500), Some(500.0));
+        // Same for a late sample with a *higher* value.
+        assert_eq!(rc.rate("s", 2_500, 10_000), None);
+        assert_eq!(rc.rate("s", 4_000, 3_500), Some(1_000.0));
+    }
+
+    #[test]
+    fn sampler_recovers_from_backwards_clock_step() {
+        use crate::config::SamplingConfig;
+
+        // 2 Hz → min interval 500 ms.
+        let mut s = Sampler::new(SamplingConfig {
+            max_hz_per_series: Some(2.0),
+            per_prefix: HashMap::new(),
+        });
+        assert!(s.allow("a", "cpu/usage", 10_000));
+        // Domain clock steps backwards (NTP): the sample is accepted and the
+        // high-water mark re-anchors — the series must not go dark until
+        // time re-passes 10_000.
+        assert!(s.allow("a", "cpu/usage", 1_000));
+        // Rate limiting continues from the new anchor.
+        assert!(!s.allow("a", "cpu/usage", 1_200));
+        assert!(s.allow("a", "cpu/usage", 1_500));
+    }
+
+    #[test]
+    fn alert_paths_include_identity() {
+        use zensight_common::alert::{Alert, AlertKind, AlertSeverity};
+
+        let alert = |source: &str| {
+            Alert::new(
+                source,
+                Protocol::Netlink,
+                AlertKind::Expectation,
+                "ssh-listening",
+                AlertSeverity::Critical,
+                "sshd not listening",
+            )
+        };
+        let a = alert("host-a");
+        let b = alert("host-b");
+        assert_eq!(
+            alert_entity_path(&a),
+            format!("alerts/netlink/host-a/{}", a.alert_key())
+        );
+        // Two hosts firing the same rule get distinct lanes...
+        assert_ne!(alert_entity_path(&a), alert_entity_path(&b));
+        // ...while firing and resolved transitions of one alert share theirs.
+        assert_eq!(alert_entity_path(&a), alert_entity_path(&a.resolved()));
     }
 
     #[test]

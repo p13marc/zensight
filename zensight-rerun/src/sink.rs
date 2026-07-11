@@ -17,7 +17,8 @@ use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 use crate::config::{CounterPolicy, SamplingConfig};
 use crate::events::NormalizedEvent;
 use crate::mapping::{
-    Class, EntityIndex, RateConverter, Sampler, classify, event_entity_path, metric_entity_path,
+    Class, EntityIndex, RateConverter, Sampler, alert_entity_path, classify,
+    event_entity_path_resolved, metric_entity_path,
 };
 use crate::topology::{Topology, TopologyBuilder};
 
@@ -128,11 +129,14 @@ impl SinkWorker {
                 // Control items (rare, must-arrive) drain ahead of telemetry.
                 biased;
 
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        break;
-                    }
-                }
+                changed = shutdown.changed() => match changed {
+                    // A dropped sender (Err) is a shutdown too: treating it as
+                    // a no-op would leave this permanently-ready arm starving
+                    // the channel arms at 100% CPU.
+                    Err(_) => break,
+                    Ok(()) if *shutdown.borrow() => break,
+                    Ok(()) => {}
+                },
 
                 item = self.rx_control.recv() => match item {
                     Some(item) => self.handle_control(item),
@@ -146,11 +150,17 @@ impl SinkWorker {
             }
         }
 
-        // Drain whatever is already queued before flushing.
-        while let Ok(item) = self.rx_control.try_recv() {
+        // Shutdown drain: keep *receiving* (not try_recv) until both channels
+        // return None. The subscriber observes the same shutdown signal,
+        // finishes forwarding, and drops its senders — so this terminates,
+        // and a control item still in flight at the shutdown flip (e.g. the
+        // final Resolved transition) is never lost. Control first: mpsc
+        // receivers keep yielding queued items after senders drop, and
+        // re-polling a closed+empty receiver just returns None again.
+        while let Some(item) = self.rx_control.recv().await {
             self.handle_control(item);
         }
-        while let Ok(point) = self.rx_telemetry.try_recv() {
+        while let Some(point) = self.rx_telemetry.recv().await {
             self.handle_point(point);
         }
 
@@ -202,11 +212,24 @@ impl SinkWorker {
                 }
             }
             Class::Event(kind) => {
-                let path = event_entity_path(point.protocol.as_str(), &point.source, &self.index);
+                let protocol = point.protocol.as_str();
                 let entity_id = self
                     .index
-                    .resolve(point.protocol.as_str(), &point.source)
+                    .resolve(protocol, &point.source)
                     .map(str::to_string);
+                let path =
+                    event_entity_path_resolved(protocol, &point.source, entity_id.as_deref());
+                // Telemetry-derived events (Text values, `events/...` paths)
+                // can arrive at full poll rate per host, so they honor the
+                // sampling config too. The lane is shared per source, so the
+                // sampler keys on path+metric to keep distinct event kinds
+                // independent. Alerts/health transitions are NOT sampled —
+                // they arrive on the control channel, not through here.
+                let series = format!("{path}/{}", point.metric);
+                if !self.sampler.allow(&series, &point.metric, point.timestamp) {
+                    self.stats.sampled_out += 1;
+                    return;
+                }
                 let event = crate::events::normalize_point(&point, kind, entity_id);
                 self.publish_event(&event, &path);
                 if self.topology.apply_event(&event) {
@@ -231,7 +254,9 @@ impl SinkWorker {
                 }
             }
             ControlItem::Alert(alert) => {
-                let path = format!("alerts/{}/{}", alert.protocol.as_str(), alert.rule);
+                // Identity-scoped path: two hosts firing the same rule must
+                // not share a lane (see mapping::alert_entity_path).
+                let path = alert_entity_path(&alert);
                 if let Err(e) = self.sink.publish_alert(&alert, &path) {
                     warn!(rule = %alert.rule, "sink alert publish failed: {e}");
                     self.stats.sink_errors += 1;
@@ -240,15 +265,17 @@ impl SinkWorker {
                 }
             }
             ControlItem::Health(snapshot) => {
-                let source = snapshot.source.clone().unwrap_or_default();
-                let key = (snapshot.sensor.clone(), source);
+                // Same "unknown" fallback for the transition-map key and the
+                // path (and events::normalize_health) — a source-less snapshot
+                // must not track under "" but render under "unknown".
+                let source = snapshot
+                    .source
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+                let key = (snapshot.sensor.clone(), source.clone());
                 let previous = self.health.insert(key, snapshot.status);
                 if let Some(event) = crate::events::normalize_health(&snapshot, previous) {
-                    let path = format!(
-                        "health/{}/{}",
-                        snapshot.sensor,
-                        snapshot.source.as_deref().unwrap_or("unknown")
-                    );
+                    let path = format!("health/{}/{source}", snapshot.sensor);
                     self.publish_event(&event, &path);
                 }
             }
@@ -491,6 +518,168 @@ mod tests {
         let times: Vec<_> = sink.metrics.iter().map(|(_, ts, _)| *ts).collect();
         assert_eq!(times, vec![0, 500]);
         assert_eq!(stats.sampled_out, 8);
+    }
+
+    fn event_text(metric: &str, ts: i64) -> TelemetryPoint {
+        let mut p = TelemetryPoint::new(
+            "host1",
+            Protocol::Netlink,
+            metric,
+            TelemetryValue::Text("something happened".into()),
+        );
+        p.timestamp = ts;
+        p
+    }
+
+    fn warning_alert(source: &str) -> zensight_common::alert::Alert {
+        use zensight_common::alert::{Alert, AlertKind, AlertSeverity};
+        Alert::new(
+            source,
+            Protocol::Netlink,
+            AlertKind::Anomaly,
+            "port-scan",
+            AlertSeverity::Warning,
+            "scan detected",
+        )
+    }
+
+    /// Finding: dropped watch sender must read as shutdown, not busy-spin —
+    /// and items queued (or still being sent) at shutdown must all arrive.
+    #[tokio::test]
+    async fn dropped_shutdown_sender_terminates_worker() {
+        let sink = SharedSink::default();
+        let captured = sink.0.clone();
+        let (tx_t, rx_t) = mpsc::channel(64);
+        let (tx_c, rx_c) = mpsc::channel(64);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let worker = SinkWorker::new(
+            rx_t,
+            rx_c,
+            Box::new(sink),
+            CounterPolicy::Rate,
+            SamplingConfig::default(),
+        );
+        let handle = tokio::spawn(worker.run(shutdown_rx));
+
+        // Drop the sender WITHOUT sending true: the worker must treat the
+        // Err from changed() as shutdown and enter the drain, not spin.
+        drop(shutdown_tx);
+
+        // Everything sent before the senders drop must still be handled.
+        tx_c.send(ControlItem::Alert(warning_alert("host1")))
+            .await
+            .unwrap();
+        tx_t.send(gauge("cpu/usage", 1_000, 1.0)).await.unwrap();
+        drop(tx_t);
+        drop(tx_c);
+
+        let stats = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("worker must terminate after the watch sender drops")
+            .unwrap();
+        assert_eq!(stats.alerts_published, 1);
+        assert_eq!(stats.metrics_published, 1);
+        assert_eq!(captured.lock().unwrap().flushes, 1);
+    }
+
+    /// Finding: the shutdown flip must not race must-arrive control items —
+    /// a Resolved transition forwarded after the flip still lands.
+    #[tokio::test]
+    async fn control_items_in_flight_at_shutdown_are_not_lost() {
+        let sink = SharedSink::default();
+        let captured = sink.0.clone();
+        let (tx_t, rx_t) = mpsc::channel(64);
+        let (tx_c, rx_c) = mpsc::channel(64);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let worker = SinkWorker::new(
+            rx_t,
+            rx_c,
+            Box::new(sink),
+            CounterPolicy::Rate,
+            SamplingConfig::default(),
+        );
+        let handle = tokio::spawn(worker.run(shutdown_rx));
+
+        let firing = warning_alert("host1");
+        tx_c.send(ControlItem::Alert(firing.clone())).await.unwrap();
+
+        // Flip shutdown, give the worker time to observe it and enter the
+        // drain, THEN forward the final Resolved (the subscriber may still be
+        // doing exactly this when the flip lands).
+        shutdown_tx.send(true).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tx_c.send(ControlItem::Alert(firing.resolved()))
+            .await
+            .unwrap();
+        drop(tx_t);
+        drop(tx_c);
+
+        let stats = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("worker must terminate once the senders drop")
+            .unwrap();
+        assert_eq!(
+            stats.alerts_published, 2,
+            "the Resolved transition is must-arrive"
+        );
+        let sink = captured.lock().unwrap();
+        assert_eq!(sink.alerts.len(), 2);
+        // Firing and Resolved share one identity-scoped lane.
+        assert_eq!(sink.alerts[0].0, sink.alerts[1].0);
+    }
+
+    /// Finding: alert paths must carry the alert's identity — two hosts
+    /// firing the same rule get distinct lanes.
+    #[tokio::test]
+    async fn alert_paths_are_identity_scoped() {
+        let a = warning_alert("host-a");
+        let b = warning_alert("host-b");
+        let (sink, stats) = run_worker(
+            vec![],
+            vec![ControlItem::Alert(a.clone()), ControlItem::Alert(b.clone())],
+            CounterPolicy::Rate,
+            SamplingConfig::default(),
+        )
+        .await;
+        assert_eq!(stats.alerts_published, 2);
+        let sink = sink.lock().unwrap();
+        assert_eq!(
+            sink.alerts[0].0,
+            format!("alerts/netlink/host-a/{}", a.alert_key())
+        );
+        assert_eq!(
+            sink.alerts[1].0,
+            format!("alerts/netlink/host-b/{}", b.alert_key())
+        );
+        assert_ne!(sink.alerts[0].0, sink.alerts[1].0);
+    }
+
+    /// Finding: telemetry-derived events honor the sampler; control-plane
+    /// alerts never do.
+    #[tokio::test]
+    async fn events_are_sampled_but_alerts_are_not() {
+        let points = (0..10)
+            .map(|i| event_text("events/tcp_reset/burst", i * 100))
+            .collect();
+        let control = (0..3)
+            .map(|_| ControlItem::Alert(warning_alert("host1")))
+            .collect();
+        let (sink, stats) = run_worker(
+            points,
+            control,
+            CounterPolicy::Rate,
+            SamplingConfig {
+                max_hz_per_series: Some(2.0), // min interval 500 ms
+                per_prefix: std::collections::HashMap::new(),
+            },
+        )
+        .await;
+        // 10 events at 10 Hz through a 2 Hz sampler: t=0 and t=500 pass.
+        assert_eq!(stats.events_published, 2, "{stats:?}");
+        assert_eq!(stats.sampled_out, 8, "{stats:?}");
+        // Alerts bypass the sampler entirely (must-arrive).
+        assert_eq!(stats.alerts_published, 3, "{stats:?}");
+        assert_eq!(sink.lock().unwrap().events.len(), 2);
     }
 
     #[tokio::test]

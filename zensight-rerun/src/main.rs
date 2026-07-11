@@ -74,7 +74,10 @@ async fn main() -> anyhow::Result<()> {
     config.validate()?;
 
     // Honor ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN} explicitly (the launcher's
-    // rendezvous pins) — kept out of open_session so tests stay hermetic.
+    // rendezvous pins). The isolated session path reads no env itself (so
+    // tests/demos stay hermetic) — applying the overrides up front covers it;
+    // the non-isolated path re-applies them inside the common connect helper
+    // (idempotent).
     config.zenoh = config.zenoh.with_env_overrides();
 
     // Initialize logging.
@@ -123,9 +126,9 @@ async fn main() -> anyhow::Result<()> {
         config.rerun.counters,
         config.sampling.clone(),
     );
-    let worker_task = tokio::spawn(worker.run(shutdown_rx.clone()));
+    let mut worker_task = tokio::spawn(worker.run(shutdown_rx.clone()));
 
-    let subscriber_task = tokio::spawn(zensight_rerun::subscriber::run_with_session(
+    let mut subscriber_task = tokio::spawn(zensight_rerun::subscriber::run_with_session(
         session,
         config.filters.clone(),
         tx_telemetry,
@@ -133,7 +136,12 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx,
     ));
 
-    // Wait for Ctrl+C / SIGTERM.
+    // Wait for Ctrl+C / SIGTERM — or either task exiting early (e.g. a bad
+    // filters.key_expr failing declare_subscriber). Ignoring task exits here
+    // would leave a zombie process and mask the real cause behind a
+    // shutdown-channel send error.
+    let mut subscriber_result = None;
+    let mut worker_result = None;
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             info!("Received Ctrl+C, shutting down...");
@@ -153,12 +161,34 @@ async fn main() -> anyhow::Result<()> {
         } => {
             info!("Received SIGTERM, shutting down...");
         }
+        result = &mut subscriber_task => {
+            error!("Subscriber task exited unexpectedly, shutting down...");
+            subscriber_result = Some(result);
+        }
+        result = &mut worker_task => {
+            error!("Worker task exited unexpectedly, shutting down...");
+            worker_result = Some(result);
+        }
     }
 
-    shutdown_tx.send(true)?;
+    // Non-fatal: if both tasks already exited, the receivers are gone and
+    // send fails — the interesting error is in the join results below.
+    if shutdown_tx.send(true).is_err() {
+        info!("Shutdown receivers already gone");
+    }
 
-    match tokio::time::timeout(Duration::from_secs(5), subscriber_task).await {
-        Ok(Ok(Ok(stats))) => info!(
+    // Join the subscriber (unless the select above already did) and remember
+    // its error so the process exits non-zero on an early failure.
+    let mut exit_error: Option<anyhow::Error> = None;
+    let subscriber_result = match subscriber_result {
+        Some(result) => Some(result),
+        None => tokio::time::timeout(Duration::from_secs(5), &mut subscriber_task)
+            .await
+            .map_err(|_| error!("Subscriber shutdown timed out"))
+            .ok(),
+    };
+    match subscriber_result {
+        Some(Ok(Ok(stats))) => info!(
             telemetry_received = stats
                 .telemetry_received
                 .load(std::sync::atomic::Ordering::Relaxed),
@@ -167,14 +197,27 @@ async fn main() -> anyhow::Result<()> {
                 .load(std::sync::atomic::Ordering::Relaxed),
             "Subscriber finished"
         ),
-        Ok(Ok(Err(e))) => error!("Subscriber error: {e}"),
-        Ok(Err(e)) => error!("Subscriber task panicked: {e}"),
-        Err(_) => error!("Subscriber shutdown timed out"),
+        Some(Ok(Err(e))) => {
+            error!("Subscriber error: {e}");
+            exit_error = Some(e);
+        }
+        Some(Err(e)) => {
+            error!("Subscriber task panicked: {e}");
+            exit_error = Some(e.into());
+        }
+        None => {}
     }
 
     // The worker flushes the Rerun stream on exit.
-    match tokio::time::timeout(Duration::from_secs(10), worker_task).await {
-        Ok(Ok(stats)) => info!(
+    let worker_result = match worker_result {
+        Some(result) => Some(result),
+        None => tokio::time::timeout(Duration::from_secs(10), &mut worker_task)
+            .await
+            .map_err(|_| error!("Worker shutdown timed out"))
+            .ok(),
+    };
+    match worker_result {
+        Some(Ok(stats)) => info!(
             metrics = stats.metrics_published,
             events = stats.events_published,
             alerts = stats.alerts_published,
@@ -183,10 +226,20 @@ async fn main() -> anyhow::Result<()> {
             sink_errors = stats.sink_errors,
             "Final statistics"
         ),
-        Ok(Err(e)) => error!("Worker task panicked: {e}"),
-        Err(_) => error!("Worker shutdown timed out"),
+        Some(Err(e)) => {
+            error!("Worker task panicked: {e}");
+            if exit_error.is_none() {
+                exit_error = Some(e.into());
+            }
+        }
+        None => {}
     }
 
-    info!("Adapter stopped");
-    Ok(())
+    match exit_error {
+        Some(e) => Err(e),
+        None => {
+            info!("Adapter stopped");
+            Ok(())
+        }
+    }
 }

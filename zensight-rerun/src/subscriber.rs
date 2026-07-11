@@ -6,7 +6,8 @@
 //!   `@`-verbatim chunks, so alerts need their own subscriber (pinned below),
 //! - health `zensight/*/*/@/health`,
 //! - entities `zensight/_meta/entity/**`, seeded by a one-shot GET on the
-//!   correlator's `zensight/_meta/query/entities` queryable.
+//!   correlator's `zensight/_meta/query/entities` queryable (concurrent with
+//!   the drain loop — all subscribers are declared before it starts).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -65,43 +66,15 @@ pub async fn run_with_session(
 ) -> anyhow::Result<Arc<SubscriberStats>> {
     let stats = Arc::new(SubscriberStats::default());
 
-    // Entities: subscribe first, then seed — no gap; the worker's upsert is
-    // idempotent so a doc seen twice is harmless.
+    // Declare ALL subscribers before the entity-seed GET: the GET can block
+    // up to ENTITY_SEED_TIMEOUT when no correlator is running (the common
+    // case), and plain subscribers have no history — anything published
+    // before they exist is lost. Entities: subscribe first, then seed — no
+    // gap; the worker's upsert is idempotent so a doc seen twice is harmless.
     let entity_sub = session
         .declare_subscriber(&all_entity_wildcard())
         .await
         .map_err(|e| anyhow::anyhow!("failed to create entity subscriber: {e}"))?;
-
-    match session
-        .get(entities_query_key())
-        .timeout(ENTITY_SEED_TIMEOUT)
-        .await
-    {
-        Ok(replies) => {
-            let mut seeded = 0usize;
-            while let Ok(reply) = replies.recv_async().await {
-                if let Ok(sample) = reply.result()
-                    && let Ok(entities) =
-                        decode_auto::<Vec<HostEntity>>(&sample.payload().to_bytes())
-                {
-                    seeded += entities.len();
-                    for entity in entities {
-                        // Seeding happens before the drain loop: awaiting the
-                        // (blocking) control channel here is safe and correct.
-                        if tx_control
-                            .send(ControlItem::Entity(Box::new(entity)))
-                            .await
-                            .is_err()
-                        {
-                            anyhow::bail!("control channel closed during entity seed");
-                        }
-                    }
-                }
-            }
-            info!(seeded, "Entity seed complete");
-        }
-        Err(e) => debug!("entity seed query failed (no correlator?): {e}"),
-    }
 
     let telemetry_key = filters
         .key_expr
@@ -127,16 +100,33 @@ pub async fn run_with_session(
         .await
         .map_err(|e| anyhow::anyhow!("failed to create health subscriber: {e}"))?;
 
+    // Late-joiner entity seed, concurrent with the drain loop: the GET can
+    // stall up to ENTITY_SEED_TIMEOUT when no correlator answers, and neither
+    // the subscribers (already declared) nor the loop below should wait on
+    // it. Runtime is bounded by the GET timeout; the clone of `tx_control` it
+    // holds is dropped when it finishes, so the worker's shutdown drain still
+    // terminates.
+    let seed_task = tokio::spawn(seed_entities(session.clone(), tx_control.clone()));
+
     info!("Subscriber started, waiting for samples...");
 
     loop {
         tokio::select! {
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() {
+            changed = shutdown.changed() => match changed {
+                // A dropped sender (Err) is a shutdown too — treating it as a
+                // no-op would busy-spin this permanently-ready arm. Exiting
+                // also drops tx_telemetry/tx_control, which is what lets the
+                // worker's shutdown drain terminate.
+                Err(_) => {
+                    info!("Shutdown channel closed, stopping subscriber");
+                    break;
+                }
+                Ok(()) if *shutdown.borrow() => {
                     info!("Shutdown signal received, stopping subscriber");
                     break;
                 }
-            }
+                Ok(()) => {}
+            },
 
             sample = alert_sub.recv_async() => match sample {
                 // A Delete tombstone carries no payload — the prior Resolved
@@ -180,6 +170,9 @@ pub async fn run_with_session(
         }
     }
 
+    // Shutting down: a still-running seed GET has nothing left to seed.
+    seed_task.abort();
+
     let dropped = stats.telemetry_dropped.load(Ordering::Relaxed);
     if dropped > 0 {
         warn!(dropped, "telemetry samples dropped on a full worker queue");
@@ -204,6 +197,45 @@ pub async fn run_with_session(
 
     info!("Subscriber stopped");
     Ok(stats)
+}
+
+/// One-shot late-joiner entity seed: GET the correlator's
+/// `zensight/_meta/query/entities` queryable and forward the docs as control
+/// items. Best-effort — no correlator (the common case) is a debug, not an
+/// error.
+async fn seed_entities(session: Arc<Session>, tx_control: mpsc::Sender<ControlItem>) {
+    match session
+        .get(entities_query_key())
+        .timeout(ENTITY_SEED_TIMEOUT)
+        .await
+    {
+        Ok(replies) => {
+            let mut seeded = 0usize;
+            while let Ok(reply) = replies.recv_async().await {
+                if let Ok(sample) = reply.result()
+                    && let Ok(entities) =
+                        decode_auto::<Vec<HostEntity>>(&sample.payload().to_bytes())
+                {
+                    seeded += entities.len();
+                    for entity in entities {
+                        // Must-arrive: blocking send (worker upserts are
+                        // idempotent, so racing the live subscription is
+                        // harmless).
+                        if tx_control
+                            .send(ControlItem::Entity(Box::new(entity)))
+                            .await
+                            .is_err()
+                        {
+                            warn!("control channel closed during entity seed");
+                            return;
+                        }
+                    }
+                }
+            }
+            info!(seeded, "Entity seed complete");
+        }
+        Err(e) => debug!("entity seed query failed (no correlator?): {e}"),
+    }
 }
 
 /// Decode + forward one must-arrive control sample (blocking send).

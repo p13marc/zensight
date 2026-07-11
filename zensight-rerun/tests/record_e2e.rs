@@ -96,10 +96,12 @@ async fn record_mode_produces_a_valid_rrd() {
         shutdown_rx,
     ));
 
-    // Let the subscriber finish its entity-seed GET (up to 3 s against a
-    // non-existent queryable) and declare all four subscribers before
-    // publishing — plain subscribers have no history/cache.
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Let the subscriber declare all four subscribers before publishing —
+    // plain subscribers have no history/cache. Declarations are in-process
+    // awaits on the same lone session and the entity-seed GET runs
+    // concurrently (it no longer gates the drain loop), so a short grace
+    // period suffices.
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Publish through the same lone session, via the real bus contract.
     let ctx = DemoContext::over(session.clone());

@@ -53,7 +53,7 @@ correlated-incident script are documented in
 |---|---|
 | `zensight/<proto>/<source>/<metric>` (correlated) | `hosts/<entity_id>/<proto>/<metric>` |
 | `zensight/<proto>/<source>/<metric>` (uncorrelated) | `sensors/<proto>/<source>/<metric>` |
-| `zensight/<proto>/@/alerts/<key>` | `alerts/<proto>/<rule>` (+ `/state` lane) |
+| `zensight/<proto>/@/alerts/<key>` | `alerts/<proto>/<source>/<alert_key>` (+ `/state` lane) |
 | health transitions | `health/<sensor>/<source>` |
 
 Full mapping: [`docs/plans/rerun/02-mapping.md`](../docs/plans/rerun/02-mapping.md).

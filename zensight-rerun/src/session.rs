@@ -2,15 +2,19 @@
 
 use zensight_common::config::ZenohConfig;
 
-/// Build the Zenoh config for the adapter.
+/// Build the Zenoh config for an ISOLATED adapter session: scouting
+/// (multicast + gossip) disabled, so the session only ever talks to the
+/// explicit `connect`/`listen` endpoints. A live sensor fleet on the same
+/// host joins any default-scouting session — isolation is what keeps demo
+/// recordings and tests deterministic.
 ///
-/// Mirrors `zensight_common::session::connect` (mode/connect/listen +
-/// timestamping) but adds `isolate`: with it set, scouting (multicast +
-/// gossip) is disabled so the session only ever talks to the explicit
-/// `connect`/`listen` endpoints. A live sensor fleet on the same host joins
-/// any default-scouting session — isolation is what keeps demo recordings
-/// and tests deterministic.
-pub fn build_zenoh_config(config: &ZenohConfig, isolate: bool) -> anyhow::Result<zenoh::Config> {
+/// The mode/connect/listen/timestamping half necessarily mirrors
+/// `zensight_common::session::connect` (zensight-common/src/session.rs):
+/// that helper builds its `zenoh::Config` internally and opens the session
+/// in one call, so there is no seam to inject the scouting knobs without
+/// modifying zensight-common. The non-isolated path delegates to the common
+/// helper (see [`open_session`]); only this isolate delta is kept local.
+pub fn build_isolated_zenoh_config(config: &ZenohConfig) -> anyhow::Result<zenoh::Config> {
     let mut zenoh_config = zenoh::Config::default();
 
     match config.mode.as_str() {
@@ -44,21 +48,31 @@ pub fn build_zenoh_config(config: &ZenohConfig, isolate: bool) -> anyhow::Result
         .insert_json5("timestamping/enabled", "true")
         .map_err(|e| anyhow::anyhow!("failed to enable timestamping: {e}"))?;
 
-    if isolate {
-        zenoh_config
-            .insert_json5("scouting/multicast/enabled", "false")
-            .map_err(|e| anyhow::anyhow!("failed to disable multicast scouting: {e}"))?;
-        zenoh_config
-            .insert_json5("scouting/gossip/enabled", "false")
-            .map_err(|e| anyhow::anyhow!("failed to disable gossip scouting: {e}"))?;
-    }
+    zenoh_config
+        .insert_json5("scouting/multicast/enabled", "false")
+        .map_err(|e| anyhow::anyhow!("failed to disable multicast scouting: {e}"))?;
+    zenoh_config
+        .insert_json5("scouting/gossip/enabled", "false")
+        .map_err(|e| anyhow::anyhow!("failed to disable gossip scouting: {e}"))?;
 
     Ok(zenoh_config)
 }
 
 /// Open the adapter's Zenoh session.
+///
+/// Non-isolated sessions go through `zensight_common::session::connect` —
+/// the shared mode/connect/listen validation + timestamping workaround (it
+/// also re-applies `ZENSIGHT_ZENOH_*` env overrides; idempotent with the
+/// overrides main.rs applies up front). Isolated sessions use the local
+/// scouting-off builder, which reads no env — demos/tests stay hermetic.
 pub async fn open_session(config: &ZenohConfig, isolate: bool) -> anyhow::Result<zenoh::Session> {
-    let zenoh_config = build_zenoh_config(config, isolate)?;
+    if !isolate {
+        return zensight_common::session::connect(config)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to open Zenoh session: {e}"));
+    }
+
+    let zenoh_config = build_isolated_zenoh_config(config)?;
     tracing::info!(
         mode = %config.mode,
         connect = ?config.connect,
@@ -84,20 +98,18 @@ mod tests {
             connect: vec![],
             listen: vec![],
         };
-        assert!(build_zenoh_config(&config, false).is_err());
+        assert!(build_isolated_zenoh_config(&config).is_err());
     }
 
     #[test]
-    fn isolate_disables_scouting() {
+    fn isolated_config_disables_scouting_and_enables_timestamping() {
         let config = ZenohConfig::default();
-        let zc = build_zenoh_config(&config, true).unwrap();
-        // zenoh::Config renders as JSON; pin that both scouting knobs are off.
+        let zc = build_isolated_zenoh_config(&config).unwrap();
+        // zenoh::Config renders as JSON; pin that both scouting knobs are off
+        // and the timestamping workaround is applied.
         let json: serde_json::Value = serde_json::from_str(&zc.to_string()).unwrap();
         assert_eq!(json["scouting"]["multicast"]["enabled"], false);
         assert_eq!(json["scouting"]["gossip"]["enabled"], false);
-        // ...and that the non-isolated session leaves them at default (null).
-        let default = build_zenoh_config(&config, false).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&default.to_string()).unwrap();
-        assert!(json["scouting"]["multicast"]["enabled"].is_null());
+        assert_eq!(json["timestamping"]["enabled"], true);
     }
 }

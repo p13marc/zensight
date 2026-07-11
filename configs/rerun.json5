@@ -56,8 +56,10 @@
     // Global ceiling, samples/second per series
     // max_hz_per_series: 2.0,
 
-    // Per-metric-prefix overrides (longest prefix wins)
-    // per_prefix: { "iface": 10.0 },
+    // Per-metric-prefix overrides (longest prefix wins). Prefixes match the
+    // METRIC path only — the part after zensight/<protocol>/<source>/ — so
+    // "iface" matches iface/eth0/rx_bytes; "netlink/iface" would match nothing.
+    // per_prefix: { "iface": 10.0, "sockets/tcp": 0.2 },
   },
 
   // Isolated Zenoh session: scouting (multicast + gossip) off, explicit

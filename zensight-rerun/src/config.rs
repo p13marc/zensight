@@ -195,8 +195,9 @@ pub struct SamplingConfig {
     #[serde(default)]
     pub max_hz_per_series: Option<f64>,
 
-    /// Per-prefix overrides on the *metric* path (longest prefix wins), e.g.
-    /// `{ "netlink/sockets": 0.2 }`.
+    /// Per-prefix overrides matched against the *metric* path — the part
+    /// after `zensight/<protocol>/<source>/`, with no protocol/source in it —
+    /// longest prefix wins. E.g. `{ "sockets/tcp": 0.2, "iface": 10.0 }`.
     #[serde(default)]
     pub per_prefix: HashMap<String, f64>,
 }

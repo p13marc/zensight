@@ -14,7 +14,7 @@ Rerun entity paths are the viewer's tree; they carry the correlation story.
 | Telemetry, source correlated to a host | `hosts/<entity_id>/<protocol>/<metric...>` |
 | Telemetry, source not (yet) correlated | `sensors/<protocol>/<source>/<metric...>` |
 | Normalized event (per host) | `hosts/<entity_id>/events` (fallback `sensors/<protocol>/<source>/events`) |
-| Alert lifecycle | `alerts/<protocol>/<rule>` |
+| Alert lifecycle | `alerts/<protocol>/<source>/<alert_key>` |
 | Sensor health transitions | `health/<sensor>/<source>` |
 | Topology graph | `topology/hosts` (nodes+edges, see [09-topology.md](09-topology.md)) |
 
@@ -66,7 +66,9 @@ Raw monotonic counters plot as ever-growing ramps — useless next to gauges. Po
   - First sample of a series: **no emission** (nothing to differentiate against).
   - **Reset detection** (`v1 < v0`, e.g. process restart or counter wrap): no emission,
     re-arm on the new baseline — one silently absorbed gap instead of a huge negative spike.
-  - Non-advancing clock (`t1 <= t0`): no emission (avoids div-by-zero / nonsense spikes).
+  - Out-of-order / non-advancing clock (`t1 <= t0`): no emission, and the baseline is
+    **left untouched** — a late sample must not regress it, or the next in-order delta
+    computes over a shrunken window and spikes (also avoids div-by-zero).
 - `raw`: emit the counter value as-is (debugging).
 - `both`: `.../<metric>` gets the rate, `.../<metric>/raw` the raw value.
 
@@ -105,12 +107,17 @@ ZenSight alerts (`zensight-common/src/alert.rs`) are keyed state machines:
 Rerun has no retract/delete of previously logged rows (Clear exists for entity *visualization*
 state, not for time-series history) — so alerts map to **transition events + a level series**:
 
-- `alerts/<protocol>/<rule>`: `TextLog` per transition —
+- `alerts/<protocol>/<source>/<alert_key>`: `TextLog` per transition —
   `Firing`: `"[FIRING] <summary>"` at severity level; `Resolved`: `"[RESOLVED] <summary>"`
-  at `INFO`. Attributes carry `alert_key`, `source`, `kind`, labels, correlation id.
-- `alerts/<protocol>/<rule>/state`: `Scalars` step series — severity weight while firing
-  (info 1, warning 2, critical 3), `0.0` on resolve. This gives a timeline lane where firing
-  windows are visible as plateaus, the closest Rerun analogue to the frontend's alert rows.
+  at `INFO`. Attributes carry `alert_key`, `rule`, `source`, `kind`, labels, correlation id.
+  The path segment is the alert's **identity** — `alert_key()` hashes source+rule+labels
+  (prefixed with the sanitized rule name, so lanes stay readable). A rule-only path would
+  collapse distinct alerts: two hosts firing the same rule would share one lane, and one
+  host's Resolved (state weight 0.0) would visually resolve the other's still-firing alert.
+- `alerts/<protocol>/<source>/<alert_key>/state`: `Scalars` step series — severity weight
+  while firing (info 1, warning 2, critical 3), `0.0` on resolve. This gives a timeline lane
+  where firing windows are visible as plateaus, the closest Rerun analogue to the frontend's
+  alert rows.
 - **Delete-tombstone note**: the Zenoh `Delete` carries no payload; the prior `Resolved` Put
   already produced the resolved event, so tombstones are ignored (same as the OTel exporter,
   `zensight-exporter-otel/src/subscriber.rs`). Consequence: an alert that is *tombstoned
