@@ -14,8 +14,11 @@ use zensight_common::entity::HostEntity;
 use zensight_common::health::{HealthSnapshot, HealthStatus};
 use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 
+use crate::config::{CounterPolicy, SamplingConfig};
 use crate::events::NormalizedEvent;
-use crate::mapping::{Class, EntityIndex, classify, event_entity_path, metric_entity_path};
+use crate::mapping::{
+    Class, EntityIndex, RateConverter, Sampler, classify, event_entity_path, metric_entity_path,
+};
 
 /// Telemetry channel capacity (drop-newest when full — a lost sample is
 /// superseded by the next one; the subscriber must never block on the sink).
@@ -83,6 +86,9 @@ pub struct SinkWorker {
     index: EntityIndex,
     /// Last seen health status per (sensor, source) — transition detection.
     health: HashMap<(String, String), HealthStatus>,
+    counters: CounterPolicy,
+    rates: RateConverter,
+    sampler: Sampler,
     stats: WorkerStats,
 }
 
@@ -91,6 +97,8 @@ impl SinkWorker {
         rx_telemetry: mpsc::Receiver<TelemetryPoint>,
         rx_control: mpsc::Receiver<ControlItem>,
         sink: Box<dyn VisualizationSink>,
+        counters: CounterPolicy,
+        sampling: SamplingConfig,
     ) -> Self {
         Self {
             rx_telemetry,
@@ -98,6 +106,9 @@ impl SinkWorker {
             sink,
             index: EntityIndex::default(),
             health: HashMap::new(),
+            counters,
+            rates: RateConverter::default(),
+            sampler: Sampler::new(sampling),
             stats: WorkerStats::default(),
         }
     }
@@ -148,22 +159,39 @@ impl SinkWorker {
             Class::Ignore => self.stats.ignored_binary += 1,
             Class::Metric => {
                 let path = metric_entity_path(&point, &self.index);
-                // NOTE: counter policy (rate conversion) and sampling land in
-                // #420; until then counters plot raw.
-                let value = match &point.value {
-                    TelemetryValue::Gauge(v) => *v,
-                    TelemetryValue::Counter(v) => *v as f64,
+                // Sampler first, rate converter after: a sub-sampled counter
+                // series still differentiates the samples that pass, so rates
+                // stay correct over the longer window (04-live-metrics.md).
+                if !self.sampler.allow(&path, &point.metric, point.timestamp) {
+                    self.stats.sampled_out += 1;
+                    return;
+                }
+                match &point.value {
+                    TelemetryValue::Gauge(v) => self.publish_metric(&point, &path, *v),
                     TelemetryValue::Boolean(b) => {
-                        if *b {
-                            1.0
-                        } else {
-                            0.0
+                        let v = if *b { 1.0 } else { 0.0 };
+                        self.publish_metric(&point, &path, v);
+                    }
+                    TelemetryValue::Counter(v) => {
+                        let v = *v;
+                        if matches!(self.counters, CounterPolicy::Rate | CounterPolicy::Both) {
+                            match self.rates.rate(&path, point.timestamp, v) {
+                                Some(rate) => self.publish_metric(&point, &path, rate),
+                                // First sample / reset / stale clock: absorbed.
+                                None => self.stats.rate_absorbed += 1,
+                            }
+                        }
+                        if matches!(self.counters, CounterPolicy::Raw | CounterPolicy::Both) {
+                            let raw_path = match self.counters {
+                                CounterPolicy::Both => format!("{path}/raw"),
+                                _ => path.clone(),
+                            };
+                            self.publish_metric(&point, &raw_path, v as f64);
                         }
                     }
                     // classify() never routes Text/Binary here.
-                    TelemetryValue::Text(_) | TelemetryValue::Binary(_) => return,
-                };
-                self.publish_metric(&point, &path, value);
+                    TelemetryValue::Text(_) | TelemetryValue::Binary(_) => {}
+                }
             }
             Class::Event(kind) => {
                 let path = event_entity_path(point.protocol.as_str(), &point.source, &self.index);
@@ -272,5 +300,202 @@ impl VisualizationSink for TestSink {
     fn flush(&mut self) -> anyhow::Result<()> {
         self.flushes += 1;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+
+    use super::*;
+
+    /// A [`TestSink`] that stays inspectable after the worker consumed it.
+    #[derive(Clone, Default)]
+    struct SharedSink(Arc<Mutex<TestSink>>);
+
+    impl VisualizationSink for SharedSink {
+        fn publish_metric(
+            &mut self,
+            point: &TelemetryPoint,
+            path: &str,
+            value: f64,
+        ) -> anyhow::Result<()> {
+            self.0.lock().unwrap().publish_metric(point, path, value)
+        }
+        fn publish_event(&mut self, event: &NormalizedEvent, path: &str) -> anyhow::Result<()> {
+            self.0.lock().unwrap().publish_event(event, path)
+        }
+        fn publish_alert(&mut self, alert: &Alert, path: &str) -> anyhow::Result<()> {
+            self.0.lock().unwrap().publish_alert(alert, path)
+        }
+        fn publish_entity(&mut self, entity: &HostEntity) -> anyhow::Result<()> {
+            self.0.lock().unwrap().publish_entity(entity)
+        }
+        fn flush(&mut self) -> anyhow::Result<()> {
+            self.0.lock().unwrap().flush()
+        }
+    }
+
+    async fn run_worker(
+        points: Vec<TelemetryPoint>,
+        control: Vec<ControlItem>,
+        counters: CounterPolicy,
+        sampling: SamplingConfig,
+    ) -> (Arc<Mutex<TestSink>>, WorkerStats) {
+        let sink = SharedSink::default();
+        let captured = sink.0.clone();
+        let (tx_t, rx_t) = mpsc::channel(64);
+        let (tx_c, rx_c) = mpsc::channel(64);
+        // Control first so entity docs land before the telemetry that joins
+        // on them (mirrors the seed-before-subscribe ordering).
+        for item in control {
+            tx_c.send(item).await.unwrap();
+        }
+        for point in points {
+            tx_t.send(point).await.unwrap();
+        }
+        drop(tx_t);
+        drop(tx_c);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let worker = SinkWorker::new(rx_t, rx_c, Box::new(sink), counters, sampling);
+        let stats = worker.run(shutdown_rx).await;
+        (captured, stats)
+    }
+
+    fn gauge(metric: &str, ts: i64, v: f64) -> TelemetryPoint {
+        let mut p =
+            TelemetryPoint::new("host1", Protocol::Sysinfo, metric, TelemetryValue::Gauge(v));
+        p.timestamp = ts;
+        p
+    }
+
+    fn counter(metric: &str, ts: i64, v: u64) -> TelemetryPoint {
+        let mut p = TelemetryPoint::new(
+            "host1",
+            Protocol::Netlink,
+            metric,
+            TelemetryValue::Counter(v),
+        );
+        p.timestamp = ts;
+        p
+    }
+
+    #[tokio::test]
+    async fn counter_rate_policy_end_to_end() {
+        let points = vec![
+            counter("iface/eth0/rx_bytes", 1_000, 0),
+            counter("iface/eth0/rx_bytes", 2_000, 1_000),
+            counter("iface/eth0/rx_bytes", 3_000, 3_000),
+            counter("iface/eth0/rx_bytes", 4_000, 100), // reset
+            counter("iface/eth0/rx_bytes", 5_000, 600),
+        ];
+        let (sink, stats) = run_worker(
+            points,
+            vec![],
+            CounterPolicy::Rate,
+            SamplingConfig::default(),
+        )
+        .await;
+        let sink = sink.lock().unwrap();
+        let series: Vec<_> = sink.metrics.iter().map(|(_, ts, v)| (*ts, *v)).collect();
+        // First sample and the reset are absorbed; three rates emitted.
+        assert_eq!(
+            series,
+            vec![(2_000, 1_000.0), (3_000, 2_000.0), (5_000, 500.0)]
+        );
+        assert_eq!(stats.rate_absorbed, 2);
+        assert_eq!(stats.metrics_published, 3);
+        assert_eq!(
+            sink.metrics[0].0,
+            "sensors/netlink/host1/iface/eth0/rx_bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn counter_both_policy_emits_two_lanes() {
+        let points = vec![
+            counter("iface/eth0/rx_bytes", 1_000, 0),
+            counter("iface/eth0/rx_bytes", 2_000, 500),
+        ];
+        let (sink, _) = run_worker(
+            points,
+            vec![],
+            CounterPolicy::Both,
+            SamplingConfig::default(),
+        )
+        .await;
+        let sink = sink.lock().unwrap();
+        let paths: Vec<_> = sink.metrics.iter().map(|(p, _, _)| p.as_str()).collect();
+        // t=1000: raw only (rate absorbed); t=2000: rate + raw.
+        assert_eq!(
+            paths,
+            vec![
+                "sensors/netlink/host1/iface/eth0/rx_bytes/raw",
+                "sensors/netlink/host1/iface/eth0/rx_bytes",
+                "sensors/netlink/host1/iface/eth0/rx_bytes/raw",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sampler_suppresses_and_counts() {
+        let points = (0..10)
+            .map(|i| gauge("cpu/usage", i * 100, i as f64))
+            .collect();
+        let (sink, stats) = run_worker(
+            points,
+            vec![],
+            CounterPolicy::Rate,
+            SamplingConfig {
+                max_hz_per_series: Some(2.0), // min interval 500 ms
+                per_prefix: std::collections::HashMap::new(),
+            },
+        )
+        .await;
+        let sink = sink.lock().unwrap();
+        let times: Vec<_> = sink.metrics.iter().map(|(_, ts, _)| *ts).collect();
+        assert_eq!(times, vec![0, 500]);
+        assert_eq!(stats.sampled_out, 8);
+    }
+
+    #[tokio::test]
+    async fn entity_arrival_moves_series_to_host_path() {
+        use zensight_common::entity::{HostEntity, MemberClaim};
+        let entity = HostEntity {
+            entity_id: "h_0123456789ab".into(),
+            aliases: vec![],
+            host_id: None,
+            boot_id: None,
+            ips: vec![],
+            macs: vec![],
+            container_ids: vec![],
+            hostname: Some("host1".into()),
+            fqdn: None,
+            names: vec![],
+            vendor: None,
+            platform: None,
+            members: vec![MemberClaim {
+                sensor: "sysinfo".into(),
+                source: "host1".into(),
+                rule: "host_id".into(),
+                confidence: 1.0,
+                last_seen: 1,
+            }],
+            status: None,
+            last_updated: 1,
+        };
+        let (sink, stats) = run_worker(
+            vec![gauge("cpu/usage", 1_000, 42.0)],
+            vec![ControlItem::Entity(Box::new(entity))],
+            CounterPolicy::Rate,
+            SamplingConfig::default(),
+        )
+        .await;
+        let sink = sink.lock().unwrap();
+        assert_eq!(sink.metrics[0].0, "hosts/h_0123456789ab/sysinfo/cpu/usage");
+        assert_eq!(stats.entities_published, 1);
+        assert_eq!(sink.flushes, 1);
     }
 }

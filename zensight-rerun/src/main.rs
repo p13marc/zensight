@@ -116,7 +116,13 @@ async fn main() -> anyhow::Result<()> {
     let (tx_telemetry, rx_telemetry) = mpsc::channel(zensight_rerun::sink::TELEMETRY_QUEUE);
     let (tx_control, rx_control) = mpsc::channel(zensight_rerun::sink::CONTROL_QUEUE);
 
-    let worker = SinkWorker::new(rx_telemetry, rx_control, Box::new(sink));
+    let worker = SinkWorker::new(
+        rx_telemetry,
+        rx_control,
+        Box::new(sink),
+        config.rerun.counters,
+        config.sampling.clone(),
+    );
     let worker_task = tokio::spawn(worker.run(shutdown_rx.clone()));
 
     let subscriber_task = tokio::spawn(zensight_rerun::subscriber::run_with_session(

@@ -10,6 +10,7 @@
 //! dependency, via the [`sink::VisualizationSink`] seam.
 
 pub mod config;
+pub mod demo;
 pub mod events;
 pub mod mapping;
 pub mod rerun_sink;

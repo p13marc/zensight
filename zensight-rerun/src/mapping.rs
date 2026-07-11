@@ -131,6 +131,82 @@ impl EntityIndex {
     }
 }
 
+/// Per-series counter→per-second-rate conversion (02-mapping.md §2).
+///
+/// Keyed by the concrete series (entity path) so two hosts' `rx_bytes` never
+/// cross-contaminate. Returns `None` — absorb, don't plot — for:
+/// - the first sample of a series (nothing to differentiate against),
+/// - a reset (`value < previous`: restart or wrap) — re-arms on the new
+///   baseline, one silently absorbed gap instead of a huge negative spike,
+/// - a non-advancing clock (`timestamp <= previous`).
+#[derive(Debug, Default)]
+pub struct RateConverter {
+    last: HashMap<String, (i64, u64)>,
+}
+
+impl RateConverter {
+    /// Feed one counter sample; get the per-second rate if computable.
+    /// `timestamp_ms` is epoch milliseconds (rates come out per second).
+    pub fn rate(&mut self, series: &str, timestamp_ms: i64, value: u64) -> Option<f64> {
+        match self.last.insert(series.to_string(), (timestamp_ms, value)) {
+            None => None,
+            Some((t0, v0)) => {
+                if value < v0 || timestamp_ms <= t0 {
+                    None
+                } else {
+                    Some((value - v0) as f64 * 1000.0 / (timestamp_ms - t0) as f64)
+                }
+            }
+        }
+    }
+}
+
+/// Per-series sample-rate limiter (03-sink-design.md §4). Runs *before* the
+/// [`RateConverter`], so sub-sampled counters still yield correct rates over
+/// the longer window.
+#[derive(Debug)]
+pub struct Sampler {
+    config: crate::config::SamplingConfig,
+    last_emit: HashMap<String, i64>,
+}
+
+impl Sampler {
+    pub fn new(config: crate::config::SamplingConfig) -> Self {
+        Self {
+            config,
+            last_emit: HashMap::new(),
+        }
+    }
+
+    /// The ceiling (Hz) for a metric path: longest matching `per_prefix`
+    /// entry wins, else the global `max_hz_per_series`, else unlimited.
+    fn limit_for(&self, metric: &str) -> Option<f64> {
+        self.config
+            .per_prefix
+            .iter()
+            .filter(|(prefix, _)| metric.starts_with(prefix.as_str()))
+            .max_by_key(|(prefix, _)| prefix.len())
+            .map(|(_, hz)| *hz)
+            .or(self.config.max_hz_per_series)
+    }
+
+    /// Whether a sample on `series` (limits chosen by `metric`) may pass now.
+    pub fn allow(&mut self, series: &str, metric: &str, timestamp_ms: i64) -> bool {
+        let Some(hz) = self.limit_for(metric) else {
+            return true;
+        };
+        let min_interval_ms = (1000.0 / hz) as i64;
+        match self.last_emit.get(series) {
+            // Out-of-order or too-soon samples are suppressed.
+            Some(&last) if timestamp_ms - last < min_interval_ms => false,
+            _ => {
+                self.last_emit.insert(series.to_string(), timestamp_ms);
+                true
+            }
+        }
+    }
+}
+
 /// Build the Rerun entity path for a metric series: correlated sources land
 /// under `hosts/<entity_id>/…`, everything else under `sensors/…`
 /// (02-mapping.md §1).
@@ -264,6 +340,60 @@ mod tests {
         assert_eq!(index.resolve("netlink", "hostA"), Some("h_bbbbbbbbbbbb"));
         assert_eq!(index.resolve("sysinfo", "hostA"), Some("h_bbbbbbbbbbbb"));
         assert_eq!(index.len(), 2);
+    }
+
+    #[test]
+    fn rate_converter_first_reset_and_clock() {
+        let mut rc = RateConverter::default();
+        // First sample: absorbed.
+        assert_eq!(rc.rate("s", 1_000, 1_000), None);
+        // 1000 bytes over 1s → 1000/s; ms→s scaling.
+        assert_eq!(rc.rate("s", 2_000, 2_000), Some(1_000.0));
+        // 500 over 500ms → 1000/s.
+        assert_eq!(rc.rate("s", 2_500, 2_500), Some(1_000.0));
+        // Reset (value drops): absorbed, re-armed on the new baseline...
+        assert_eq!(rc.rate("s", 3_000, 100), None);
+        // ...and the next delta differentiates against the new baseline.
+        assert_eq!(rc.rate("s", 4_000, 1_100), Some(1_000.0));
+        // Non-advancing clock: absorbed.
+        assert_eq!(rc.rate("s", 4_000, 2_000), None);
+        // Independent series don't cross-contaminate.
+        assert_eq!(rc.rate("other", 10_000, 5), None);
+        assert_eq!(rc.rate("other", 11_000, 10), Some(5.0));
+    }
+
+    #[test]
+    fn sampler_global_and_prefix_limits() {
+        use crate::config::SamplingConfig;
+
+        // Unlimited by default.
+        let mut s = Sampler::new(SamplingConfig::default());
+        assert!(s.allow("a", "cpu/usage", 0));
+        assert!(s.allow("a", "cpu/usage", 1));
+
+        // Global 2 Hz → min interval 500 ms, per series.
+        let mut s = Sampler::new(SamplingConfig {
+            max_hz_per_series: Some(2.0),
+            per_prefix: HashMap::new(),
+        });
+        assert!(s.allow("a", "cpu/usage", 0));
+        assert!(!s.allow("a", "cpu/usage", 100));
+        assert!(s.allow("b", "cpu/usage", 100)); // other series unaffected
+        assert!(s.allow("a", "cpu/usage", 500));
+
+        // Longest-prefix override wins over the global limit.
+        let mut per_prefix = HashMap::new();
+        per_prefix.insert("iface".to_string(), 0.5); // one per 2s
+        per_prefix.insert("iface/eth0".to_string(), 10.0); // one per 100ms
+        let mut s = Sampler::new(SamplingConfig {
+            max_hz_per_series: Some(2.0),
+            per_prefix,
+        });
+        assert!(s.allow("x", "iface/eth1/rx_bytes", 0));
+        assert!(!s.allow("x", "iface/eth1/rx_bytes", 1_000)); // 0.5 Hz
+        assert!(s.allow("x", "iface/eth1/rx_bytes", 2_000));
+        assert!(s.allow("y", "iface/eth0/rx_bytes", 0));
+        assert!(s.allow("y", "iface/eth0/rx_bytes", 100)); // 10 Hz
     }
 
     #[test]
