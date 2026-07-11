@@ -1,13 +1,14 @@
 # ZenSight — build / configure / run the GUI + sensors + correlator
-#   (netring, netlink, sysinfo, logs, systemd + the identity correlator)
+#   (netring, netlink, sysinfo, logs, systemd, parallax + the identity correlator)
 #
 #   just run            # build, grant caps, configure, then launch everything
 #   just demo           # run the GUI in demo mode (simulated data, no sensors)
 #   just setup          # build + grant capabilities only
 #   just gui            # run just the GUI    (just gui listen=tcp/0.0.0.0:7447 for remote sensors)
-#   just sensors        # run just the 5 sensors, no GUI/correlator (Ctrl-C stops them)
+#   just sensors        # run just the 6 sensors, no GUI/correlator (Ctrl-C stops them)
 #                       # (just sensors connect=tcp/<gui-host>:7447 to feed a remote GUI)
-#   just <name>         # run one piece (netring | netlink | sysinfo | logs | systemd | correlator)
+#   just <name>         # run one piece (netring | netlink | sysinfo | logs | systemd | parallax | correlator)
+#   just rerun          # optional Rerun sidecar (evaluation, epic #415) — see the recipe
 #
 # `just run` is the live demo: `configure` writes *demo-max* configs into .run/
 # (via scripts/gen-configs.sh — also used by the sensors container image) with
@@ -22,6 +23,9 @@
 # netring captures packets and needs CAP_NET_RAW (+CAP_IPC_LOCK for AF_XDP);
 # netlink's optional collectors (nftables/conntrack + the XFRM monitor) need
 # CAP_NET_ADMIN. `just caps` grants both via sudo. sysinfo is unprivileged.
+# parallax is unprivileged for the demo: it streams a synthetic test pattern
+# (video tiles in the GUI's parallax device view) on any machine; real
+# /dev/video* cameras additionally need your user in the `video` group.
 # logs ingests the systemd journal (journald); reading the *system* journal needs
 # journal-read access — add your user to the `systemd-journal` group if it can't.
 # systemd reads the org.freedesktop.systemd1 D-Bus (system bus) read-only and is
@@ -61,6 +65,7 @@ build:
         -p zensight-sensor-sysinfo \
         -p zensight-sensor-logs \
         -p zensight-sensor-systemd \
+        -p zensight-sensor-parallax \
         -p zensight-correlator
 
 # ── Capabilities ─────────────────────────────────────────────────────────────
@@ -75,7 +80,7 @@ caps: build
     sudo setcap 'cap_net_raw,cap_ipc_lock=+ep' {{bindir}}/zensight-sensor-netring
     @echo "Granting CAP_NET_ADMIN to {{bindir}}/zensight-sensor-netlink (sudo)…"
     sudo setcap 'cap_net_admin=+ep' {{bindir}}/zensight-sensor-netlink
-    @echo "sysinfo + logs need no capabilities."
+    @echo "sysinfo + logs + parallax need no capabilities."
 
 # Build + grant capabilities.
 setup: build caps
@@ -125,13 +130,29 @@ logs: build configure
 systemd: build configure
     ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-sensor-systemd --config {{rundir}}/systemd.json5
 
+# Run the parallax sensor (live video: synthetic test pattern + local cameras).
+# Open the parallax device in the GUI and "Load streams" → preview tiles.
+parallax: build configure
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-sensor-parallax --config {{rundir}}/parallax.json5
+
 # Run the identity correlator (fuses sensor evidence into one HostEntity per host).
 correlator: build configure
     ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-correlator --config {{rundir}}/correlator.json5
 
+# Optional Rerun sidecar (evaluation prototype, epic #415) — NOT part of `just run`.
+# Feeds the live bus into Rerun; built on demand (pulls the arrow/tonic stack).
+#   just rerun                # live → viewer at rerun+http://127.0.0.1:9876/proxy
+#                             #   (start the viewer first: `rerun`)
+#   just rerun mode=record    # headless → {{rundir}}/zensight.rrd (replay later)
+rerun mode="live":
+    cargo build {{relflag}} -p zensight-rerun
+    mkdir -p {{rundir}}
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-rerun --config configs/rerun.json5 \
+        --mode {{mode}} --rrd-path {{rundir}}/zensight.rrd
+
 # ── Run (everything) ─────────────────────────────────────────────────────────
 
-# Run the 5 sensors in the foreground, no GUI/correlator (Ctrl-C stops them).
+# Run the 6 sensors in the foreground, no GUI/correlator (Ctrl-C stops them).
 # Point them at a remote GUI with: just sensors connect=tcp/<gui-host>:7447
 sensors connect=hub: setup configure
     BINDIR="{{bindir}}" CONFDIR="{{rundir}}" LOGDIR="{{rundir}}" \
@@ -165,8 +186,9 @@ image:
 
 # Stop any running sensors + correlator started by `just run`.
 stop:
-    -pkill -f 'zensight-sensor-(netring|netlink|sysinfo|logs|systemd)' || true
+    -pkill -f 'zensight-sensor-(netring|netlink|sysinfo|logs|systemd|parallax)' || true
     -pkill -f 'zensight-correlator' || true
+    -pkill -f 'zensight-rerun' || true
 
 # Remove generated run configs and logs.
 clean-run:

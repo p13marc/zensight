@@ -2,10 +2,10 @@
 # run-sensors.sh — spawn and supervise the local sensor set.
 #
 # The single spawner behind `just sensors`, `just run`, and the all-in-one
-# sensors container image (docker/entrypoint-sensors.sh). Starts the 5 host
-# sensors (sysinfo, netlink, netring, logs, systemd) and optionally the
-# identity correlator, anchors them to this process, and tears them all down
-# on TERM/INT/EXIT.
+# sensors container image (docker/entrypoint-sensors.sh). Starts the host
+# sensors (sysinfo, netlink, netring, logs, systemd — plus parallax where the
+# binary exists) and optionally the identity correlator, anchors them to this
+# process, and tears them all down on TERM/INT/EXIT.
 #
 # Parameterized by environment (all with local-dev defaults):
 #   BINDIR           where the binaries live            (default target/release)
@@ -57,6 +57,12 @@ spawn zensight-sensor-netlink netlink.json5
 spawn zensight-sensor-netring netring.json5
 spawn zensight-sensor-logs    logs.json5
 spawn zensight-sensor-systemd systemd.json5
+# parallax (live video: synthetic test pattern + local cameras) ships in local
+# builds but not (yet) in the sensors container image — spawn it only when the
+# binary exists so the image keeps working unchanged.
+if [[ -x "$BINDIR/zensight-sensor-parallax" ]]; then
+    spawn zensight-sensor-parallax parallax.json5
+fi
 if [[ "$WITH_CORRELATOR" == 1 ]]; then
     # The correlator fuses the sensors' identity evidence into HostEntity docs
     # (needs no capabilities). netring/netlink evidence feeds are on by default.
