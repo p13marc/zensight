@@ -85,6 +85,36 @@ task would run forever. Every source the sensor builds is wrapped in a
 whole pipeline then unwinds cleanly within one frame period. Teardown always
 triggers the stop handle first.
 
+## Stats, health, alerts
+
+Per-stream stats ride ordinary telemetry under
+`zensight/parallax/<source>/<stream>/stats/<metric>` every
+`stats_interval_secs`, **aggregated over the stream's open profiles**:
+
+| Metric | Kind | Meaning |
+|--------|------|---------|
+| `fps` | gauge | frames published per second (video + preview combined) |
+| `kbps` | gauge | total media bandwidth published for the stream |
+| `drops` | counter | frames lost between encoder and egress (video-profile sequence gaps; intentional preview throttling is never counted) |
+| `viewers` | gauge | profiles with matching subscribers (0–2) |
+| `encode_ms` | gauge | average wall time per encoder `process()` call (omitted when no encoder ran) |
+
+`streams/advertised` (catalogue size) is published every tick regardless of
+open streams, so a parallax host appears on the dashboard before anything is
+opened.
+
+Health: each successful profile open records a device success for the
+stream; pipeline build failures and egress errors record failures (3
+consecutive → the stream's device flips Offline).
+
+Alert rules on `@/alerts/*` (auto-resolve on recovery):
+
+- `camera_disappeared` — an advertised V4L2 device vanished from periodic
+  re-enumeration.
+- `rtsp_connect_failed` — an `open_stream` could not reach the RTSP camera.
+- `encoder_overrun` — average `encode_ms` above the strictest open profile's
+  per-frame budget (1000 / fps).
+
 ## Limitations
 
 - **V4L2 double-open**: video + preview profiles on the same camera open the

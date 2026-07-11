@@ -99,6 +99,49 @@ async fn main() -> Result<()> {
     }
     let reporter = Arc::new(reporter);
     runner.spawn(zensight_sensor_core::serve_alerts_query(reporter.clone()));
+    let alerts = Arc::new(zensight_sensor_parallax::alerts::ParallaxAlerts::new(
+        reporter.clone(),
+        source.clone(),
+    ));
+
+    // Per-stream stats counters + the telemetry ticker
+    // (`<stream>/stats/{fps,kbps,drops,viewers,encode_ms}` + the always-on
+    // `streams/advertised` presence gauge).
+    let stats = zensight_sensor_parallax::stats::StatsRegistry::default();
+    {
+        let t_publisher = runner.publisher();
+        let t_source = source.clone();
+        let t_stats = stats.clone();
+        let t_alerts = alerts.clone();
+        let advertised = catalog.entries().len();
+        let interval = std::time::Duration::from_secs(parallax_config.stats_interval_secs);
+        runner.spawn(async move {
+            zensight_sensor_parallax::stats::run_ticker(
+                t_publisher,
+                t_source,
+                t_stats,
+                advertised,
+                interval,
+                Some(t_alerts),
+            )
+            .await;
+        });
+    }
+
+    // Camera-presence watcher: re-enumerate V4L2 devices and drive the
+    // camera_disappeared rule. No-op without local cameras.
+    {
+        let w_catalog = catalog.clone();
+        let w_alerts = alerts.clone();
+        runner.spawn(async move {
+            zensight_sensor_parallax::alerts::watch_cameras(
+                w_catalog,
+                w_alerts,
+                std::time::Duration::from_secs(30),
+            )
+            .await;
+        });
+    }
 
     // The stream-session actor: owns every open pipeline, driven by commands.
     let session_handle = SessionManager::spawn(
@@ -106,6 +149,9 @@ async fn main() -> Result<()> {
         parallax_config.clone(),
         source.clone(),
         runner.publisher(),
+        stats.clone(),
+        Some(runner.health()),
+        Some(alerts.clone()),
     );
 
     // Stream control channel (`@/commands/stream` + `@/status/streams`).

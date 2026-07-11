@@ -14,8 +14,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
+use parallax::buffer::Buffer;
 use parallax::converters::PixelFormat as ConvFormat;
-use parallax::element::{ProduceContext, ProduceResult, Source};
+use parallax::element::{Element, ProduceContext, ProduceResult, Source};
 use parallax::elements::codec::KeyframeHandle;
 use parallax::elements::transform::VideoConvertElement;
 use parallax::elements::{
@@ -26,6 +27,7 @@ use parallax::pipeline::{Executor, Pipeline, UnifiedExecutorConfig};
 
 use crate::catalog::SourceKind;
 use crate::config::{PreviewConfig, VideoConfig};
+use crate::stats::StreamStats;
 
 /// How many encoded frames an AppSink may queue before dropping the oldest.
 /// Live media: a slow egress must never block the encoder.
@@ -129,6 +131,56 @@ impl<S: Source> Source for StoppableSource<S> {
     }
 }
 
+/// Wraps an encoder [`Element`] to time each `process()` call into the
+/// stream's stats (`encode_ms` telemetry + the encoder-overrun rule).
+struct TimedElement<E: Element> {
+    inner: E,
+    stats: Arc<StreamStats>,
+}
+
+impl<E: Element> TimedElement<E> {
+    fn new(inner: E, stats: Arc<StreamStats>) -> Self {
+        Self { inner, stats }
+    }
+}
+
+impl<E: Element> Element for TimedElement<E> {
+    fn process(&mut self, buffer: Buffer) -> parallax::error::Result<Option<Buffer>> {
+        let start = std::time::Instant::now();
+        let out = self.inner.process(buffer);
+        self.stats.record_encode(start.elapsed().as_nanos() as u64);
+        out
+    }
+
+    fn flush(&mut self) -> parallax::error::Result<Option<Buffer>> {
+        self.inner.flush()
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn input_caps(&self) -> parallax::format::Caps {
+        self.inner.input_caps()
+    }
+
+    fn output_caps(&self) -> parallax::format::Caps {
+        self.inner.output_caps()
+    }
+
+    fn input_media_caps(&self) -> parallax::format::ElementMediaCaps {
+        self.inner.input_media_caps()
+    }
+
+    fn output_media_caps(&self) -> parallax::format::ElementMediaCaps {
+        self.inner.output_media_caps()
+    }
+
+    fn execution_hints(&self) -> parallax::element::ExecutionHints {
+        self.inner.execution_hints()
+    }
+}
+
 /// A constructed (not yet started) profile pipeline.
 pub struct BuiltPipeline {
     pub pipeline: Pipeline,
@@ -162,6 +214,7 @@ pub fn build_video(
     kind: &SourceKind,
     video: &VideoConfig,
     max_height: Option<u32>,
+    stats: &Arc<StreamStats>,
 ) -> Result<BuiltPipeline> {
     match kind {
         SourceKind::Test {
@@ -194,6 +247,7 @@ pub fn build_video(
             // Clone BEFORE the encoder moves into the pipeline.
             let keyframe = encoder.keyframe_handle();
 
+            stats.tighten_budget(1_000_000_000 / (*fps).max(1) as u64);
             let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
             let sink_handle = sink.handle();
             let (src, stop) = StoppableSource::new(src);
@@ -201,7 +255,8 @@ pub fn build_video(
             let mut pipeline = Pipeline::new();
             let src_id = pipeline.add_source("test-src", src);
             let conv_id = pipeline.add_filter("convert-i420", convert);
-            let enc_id = pipeline.add_filter("h264-encoder", encoder);
+            let enc_id =
+                pipeline.add_filter("h264-encoder", TimedElement::new(encoder, stats.clone()));
             let sink_id = pipeline.add_sink("app-sink", sink);
             pipeline.link(src_id, conv_id).context("link src→convert")?;
             pipeline
@@ -246,13 +301,15 @@ pub fn build_video(
             .context("create H.264 encoder")?;
             let keyframe = encoder.keyframe_handle();
 
+            stats.tighten_budget((1e9 / f64::from(fps.max(1.0))) as u64);
             let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
             let sink_handle = sink.handle();
             let (src, stop) = StoppableSource::new(src);
 
             let mut pipeline = Pipeline::new();
             let src_id = pipeline.add_source("v4l2-src", src);
-            let enc_id = pipeline.add_filter("h264-encoder", encoder);
+            let enc_id =
+                pipeline.add_filter("h264-encoder", TimedElement::new(encoder, stats.clone()));
             let sink_id = pipeline.add_sink("app-sink", sink);
             // The camera negotiates MJPG first, YUYV as fallback; both paths
             // end in I420 for the encoder.
@@ -350,6 +407,7 @@ pub fn build_rtsp_preview(
     width: u32,
     height: u32,
     preview: &PreviewConfig,
+    stats: &Arc<StreamStats>,
 ) -> Result<BuiltPipeline> {
     let src = AppSrc::with_max_buffers(FEED_QUEUE);
     let feed = src.handle();
@@ -362,6 +420,7 @@ pub fn build_rtsp_preview(
         .with_output_format(ConvFormat::Rgb24)
         .with_size(width, height);
     let encoder = JpegEncoder::new(width, height, ColorType::Rgb).with_quality(preview.quality);
+    stats.tighten_budget(1_000_000_000 / preview.fps.max(1) as u64);
     let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
     let sink_handle = sink.handle();
     let (src, stop) = StoppableSource::new(src);
@@ -371,7 +430,7 @@ pub fn build_rtsp_preview(
     let dec_id = pipeline.add_filter("h264-decoder", decoder);
     let thr_id = pipeline.add_filter("preview-throttle", throttle);
     let conv_id = pipeline.add_filter("convert-rgb", convert);
-    let enc_id = pipeline.add_filter("jpeg-encoder", encoder);
+    let enc_id = pipeline.add_filter("jpeg-encoder", TimedElement::new(encoder, stats.clone()));
     let sink_id = pipeline.add_sink("app-sink", sink);
     pipeline.link(src_id, dec_id).context("link feed→decoder")?;
     pipeline
@@ -399,7 +458,11 @@ pub fn build_rtsp_preview(
 }
 
 /// Build the JPEG preview-profile pipeline for one source.
-pub fn build_preview(kind: &SourceKind, preview: &PreviewConfig) -> Result<BuiltPipeline> {
+pub fn build_preview(
+    kind: &SourceKind,
+    preview: &PreviewConfig,
+    stats: &Arc<StreamStats>,
+) -> Result<BuiltPipeline> {
     match kind {
         SourceKind::Test {
             pattern,
@@ -417,6 +480,7 @@ pub fn build_preview(kind: &SourceKind, preview: &PreviewConfig) -> Result<Built
 
             let encoder =
                 JpegEncoder::new(*width, *height, ColorType::Rgb).with_quality(preview.quality);
+            stats.tighten_budget(1_000_000_000 / preview.fps.max(1) as u64);
 
             let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
             let sink_handle = sink.handle();
@@ -424,7 +488,8 @@ pub fn build_preview(kind: &SourceKind, preview: &PreviewConfig) -> Result<Built
 
             let mut pipeline = Pipeline::new();
             let src_id = pipeline.add_source("test-src", src);
-            let enc_id = pipeline.add_filter("jpeg-encoder", encoder);
+            let enc_id =
+                pipeline.add_filter("jpeg-encoder", TimedElement::new(encoder, stats.clone()));
             let sink_id = pipeline.add_sink("app-sink", sink);
             pipeline.link(src_id, enc_id).context("link src→encoder")?;
             pipeline
@@ -474,9 +539,13 @@ pub fn build_preview(kind: &SourceKind, preview: &PreviewConfig) -> Result<Built
                             .with_output_format(ConvFormat::Rgb24)
                             .with_size(w, h),
                     );
+                    stats.tighten_budget(1_000_000_000 / preview.fps.max(1) as u64);
                     let enc_id = pipeline.add_filter(
                         "jpeg-encoder",
-                        JpegEncoder::new(w, h, ColorType::Rgb).with_quality(preview.quality),
+                        TimedElement::new(
+                            JpegEncoder::new(w, h, ColorType::Rgb).with_quality(preview.quality),
+                            stats.clone(),
+                        ),
                     );
                     pipeline
                         .link(thr_id, conv_id)
@@ -623,6 +692,7 @@ mod tests {
                 fps: 10,
                 quality: 75,
             },
+            &Arc::default(),
         )
         .expect("build preview");
         assert!(built.keyframe.is_none());
@@ -640,8 +710,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_video_pipeline_emits_h264_with_keyframe() {
-        let built =
-            build_video(&test_kind(30), &VideoConfig::default(), None).expect("build video");
+        let stats: Arc<StreamStats> = Arc::default();
+        let built = build_video(&test_kind(30), &VideoConfig::default(), None, &stats)
+            .expect("build video");
         let keyframe = built.keyframe.clone();
         assert!(keyframe.is_some());
 
@@ -652,6 +723,16 @@ mod tests {
         // Sequence numbers are monotonic.
         let seqs: Vec<u64> = frames.iter().map(|f| f.sequence).collect();
         assert!(seqs.windows(2).all(|w| w[1] > w[0]), "sequence {seqs:?}");
+
+        // The timed encoder fed the stats counters and set a frame budget.
+        use std::sync::atomic::Ordering;
+        assert!(stats.encoded_frames.load(Ordering::Relaxed) >= 3);
+        assert!(stats.encode_ns.load(Ordering::Relaxed) > 0);
+        assert_eq!(
+            stats.budget_ns.load(Ordering::Relaxed),
+            1_000_000_000 / 30,
+            "budget derives from the source fps"
+        );
     }
 
     #[test]
@@ -665,6 +746,7 @@ mod tests {
             },
             &VideoConfig::default(),
             Some(180),
+            &Arc::default(),
         )
         .expect("build capped video");
         assert_eq!((built.width, built.height), (320, 180));
@@ -684,8 +766,8 @@ mod tests {
         let v4l2 = SourceKind::V4l2 {
             device: "/dev/video-does-not-exist".into(),
         };
-        assert!(build_video(&v4l2, &VideoConfig::default(), None).is_err());
-        assert!(build_preview(&v4l2, &PreviewConfig::default()).is_err());
+        assert!(build_video(&v4l2, &VideoConfig::default(), None, &Arc::default()).is_err());
+        assert!(build_preview(&v4l2, &PreviewConfig::default(), &Arc::default()).is_err());
     }
 
     #[test]
@@ -695,8 +777,8 @@ mod tests {
             username: None,
             password: None,
         };
-        assert!(build_video(&rtsp, &VideoConfig::default(), None).is_err());
-        assert!(build_preview(&rtsp, &PreviewConfig::default()).is_err());
+        assert!(build_video(&rtsp, &VideoConfig::default(), None, &Arc::default()).is_err());
+        assert!(build_preview(&rtsp, &PreviewConfig::default(), &Arc::default()).is_err());
     }
 
     #[test]
@@ -709,7 +791,8 @@ mod tests {
         let unknown = build_rtsp_video_passthrough(None).expect("passthrough w/o dims");
         assert_eq!((unknown.width, unknown.height), (0, 0), "0 = unknown");
 
-        let p = build_rtsp_preview(640, 360, &PreviewConfig::default()).expect("preview");
+        let p = build_rtsp_preview(640, 360, &PreviewConfig::default(), &Arc::default())
+            .expect("preview");
         assert!(p.keyframe.is_none());
         assert!(p.feed.is_some());
         assert_eq!((p.width, p.height), (640, 360));

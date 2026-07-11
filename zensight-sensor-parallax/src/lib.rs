@@ -14,6 +14,7 @@
 //! - media:     `@media/<stream>/video/h264/<profile>` + `@media/<stream>/preview/jpeg`
 //! - stats:     `<stream>/stats/<metric>` (ordinary telemetry)
 
+pub mod alerts;
 pub mod catalog;
 pub mod command;
 pub mod config;
@@ -21,3 +22,4 @@ pub mod egress;
 pub mod pipeline;
 pub mod query;
 pub mod session;
+pub mod stats;

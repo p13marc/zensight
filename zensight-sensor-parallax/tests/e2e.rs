@@ -19,7 +19,8 @@ use zensight_sensor_core::Publisher;
 use zensight_sensor_parallax::catalog::Catalog;
 use zensight_sensor_parallax::config::ParallaxConfig;
 use zensight_sensor_parallax::session::SessionManager;
-use zensight_sensor_parallax::{command, query};
+use zensight_sensor_parallax::stats::StatsRegistry;
+use zensight_sensor_parallax::{command, query, stats};
 
 /// Scouting off so concurrent tests (and live sensors on the host) can't
 /// cross-contaminate; the two peers are wired together with an explicit
@@ -100,7 +101,7 @@ fn test_parallax_config() -> ParallaxConfig {
 }
 
 /// Wire the sensor side up exactly like `main.rs`: catalogue + actor +
-/// command loop + streams queryable.
+/// command loop + streams queryable + a fast (1 s) stats ticker.
 async fn spawn_sensor(
     session: Arc<zenoh::Session>,
     source: &str,
@@ -109,7 +110,24 @@ async fn spawn_sensor(
     let catalog = Arc::new(Catalog::build(&config));
     let publisher = Publisher::new(session.clone(), config.key_prefix.clone(), Format::Json);
     let host_prefix = format!("{}/{}", config.key_prefix, source);
-    let handle = SessionManager::spawn(catalog.clone(), config, source.to_string(), publisher);
+    let registry = StatsRegistry::default();
+    tokio::spawn(stats::run_ticker(
+        publisher.clone(),
+        source.to_string(),
+        registry.clone(),
+        catalog.entries().len(),
+        Duration::from_secs(1),
+        None,
+    ));
+    let handle = SessionManager::spawn(
+        catalog.clone(),
+        config,
+        source.to_string(),
+        publisher,
+        registry,
+        None,
+        None,
+    );
     tokio::spawn(command::run(
         session.clone(),
         host_prefix.clone(),
@@ -379,6 +397,74 @@ async fn open_h264_video_streams_with_keyframe_control() {
     )
     .await;
     drop(sub);
+    wait_until_closed(&handle).await;
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stats_ticker_publishes_fps_telemetry() {
+    let (sensor, viewer) = isolated_pair().await;
+    let source = "e2e-stats";
+    let host_prefix = format!("zensight/parallax/{source}");
+    let handle = spawn_sensor(sensor.clone(), source).await;
+
+    // Watch the stream's stats subtree (ordinary telemetry keys).
+    let stats_sub = viewer
+        .declare_subscriber(format!("zensight/parallax/{source}/test0/stats/**"))
+        .await
+        .expect("declare stats subscriber");
+
+    // Keep a media viewer subscribed so the 1 s idle reaper never fires.
+    let preview_key = media_preview_key(Protocol::Parallax, source, "test0");
+    let media_sub = viewer
+        .declare_subscriber(&preview_key)
+        .await
+        .expect("declare preview subscriber");
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::OpenStream {
+            stream: "test0".into(),
+            codec: Some("mjpeg".into()),
+            max_height: None,
+        },
+    )
+    .await;
+
+    // An fps point must arrive within two ticker intervals (1 s each; be
+    // generous on a loaded machine).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut saw_fps = false;
+    while Instant::now() < deadline {
+        let Ok(Ok(sample)) =
+            tokio::time::timeout(Duration::from_secs(5), stats_sub.recv_async()).await
+        else {
+            break;
+        };
+        let point: zensight_common::TelemetryPoint =
+            zensight_common::decode_auto(&sample.payload().to_bytes()).expect("decode stats point");
+        assert_eq!(point.source, source);
+        assert!(point.metric.starts_with("test0/stats/"), "{}", point.metric);
+        if point.metric == "test0/stats/fps" {
+            saw_fps = true;
+            break;
+        }
+    }
+    assert!(saw_fps, "no fps stats point within two intervals");
+
+    // Teardown before the runtime drops.
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::CloseStream {
+            stream: "test0".into(),
+        },
+    )
+    .await;
+    drop(media_sub);
     wait_until_closed(&handle).await;
 
     viewer.close().await.unwrap();

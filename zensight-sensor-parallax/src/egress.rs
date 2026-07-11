@@ -17,6 +17,8 @@ use zensight_common::stream::FrameMeta;
 use zensight_common::{Format, encode};
 use zensight_sensor_core::RawMediaPublisher;
 
+use crate::stats::StreamStats;
+
 /// How long one blocking pull waits before re-checking for EOS/abort.
 const PULL_TIMEOUT: Duration = Duration::from_millis(100);
 
@@ -46,7 +48,9 @@ fn clock_ns(t: ClockTime) -> Option<u64> {
     if t.is_none() { None } else { Some(t.nanos()) }
 }
 
-/// Pump `sink` into `publisher` until EOS or error.
+/// Pump `sink` into `publisher` until EOS or error, feeding the stream's
+/// stats counters (frames/bytes; on the video path, sequence gaps count as
+/// drops — preview throttling is intentional and never counted).
 ///
 /// Returns `Ok(())` on clean end-of-stream, `Err(reason)` otherwise.
 pub async fn run(
@@ -56,7 +60,9 @@ pub async fn run(
     width: u32,
     height: u32,
     preview: bool,
+    stats: Arc<StreamStats>,
 ) -> Result<(), String> {
+    let mut last_sequence: Option<u64> = None;
     loop {
         let pull_sink = sink.clone();
         let pulled =
@@ -76,14 +82,20 @@ pub async fn run(
         };
 
         let frame_meta = metadata_to_frame_meta(buffer.metadata(), width, height, preview);
+        if !preview {
+            if let Some(prev) = last_sequence
+                && frame_meta.sequence > prev + 1
+            {
+                stats.record_drops(frame_meta.sequence - prev - 1);
+            }
+            last_sequence = Some(frame_meta.sequence);
+        }
         let attachment =
             encode(&frame_meta, Format::Cbor).map_err(|e| format!("encode FrameMeta: {e}"))?;
+        let payload = buffer.as_bytes().to_vec();
+        stats.record_frame(payload.len());
         publisher
-            .put(
-                buffer.as_bytes().to_vec(),
-                encoding.clone(),
-                ZBytes::from(attachment),
-            )
+            .put(payload, encoding.clone(), ZBytes::from(attachment))
             .await
             .map_err(|e| format!("media publish failed: {e}"))?;
     }

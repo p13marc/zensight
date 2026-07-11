@@ -28,10 +28,12 @@ use zensight_common::command::status_key;
 use zensight_common::keyexpr::{media_preview_key, media_video_key};
 use zensight_common::stream::{StreamControl, StreamStatus};
 use zensight_common::{Protocol, QosClass};
-use zensight_sensor_core::{Publisher, RawMediaPublisher};
+use zensight_sensor_core::{Publisher, RawMediaPublisher, SensorHealth};
 
+use crate::alerts::ParallaxAlerts;
 use crate::catalog::{Catalog, SourceKind};
 use crate::config::ParallaxConfig;
+use crate::stats::StatsRegistry;
 use crate::{egress, pipeline};
 
 /// Capacity of the actor's command channel.
@@ -185,6 +187,12 @@ pub struct SessionManager {
     status_key: String,
     sessions: HashMap<String, StreamSession>,
     tx: mpsc::Sender<SessionMsg>,
+    /// Per-stream stats counters (fed by egress/encoders, read by the ticker).
+    stats: StatsRegistry,
+    /// Per-stream health (device liveness / consecutive-failure tracking).
+    health: Option<Arc<SensorHealth>>,
+    /// Alert rules (rtsp_connect_failed fires from the open path).
+    alerts: Option<Arc<ParallaxAlerts>>,
 }
 
 impl SessionManager {
@@ -194,6 +202,9 @@ impl SessionManager {
         config: ParallaxConfig,
         source: String,
         publisher: Publisher,
+        stats: StatsRegistry,
+        health: Option<Arc<SensorHealth>>,
+        alerts: Option<Arc<ParallaxAlerts>>,
     ) -> SessionHandle {
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
         let host_prefix = format!("{}/{}", config.key_prefix, source);
@@ -205,6 +216,9 @@ impl SessionManager {
             status_key: status_key(&host_prefix, "streams"),
             sessions: HashMap::new(),
             tx: tx.clone(),
+            stats,
+            health,
+            alerts,
         };
         tokio::spawn(manager.run(rx));
         SessionHandle(tx)
@@ -302,6 +316,7 @@ impl SessionManager {
         // built synchronously; RTSP connects first (bounded by the connect
         // timeout — this briefly serializes the actor, accepted for now) and
         // gets an AppSrc-fed pipeline plus a feeder task.
+        let stream_stats = self.stats.handle(stream);
         let (built, rtsp) = match &kind {
             SourceKind::Rtsp {
                 url,
@@ -309,13 +324,19 @@ impl SessionManager {
                 password,
             } => match connect_rtsp(url, username.as_deref(), password.as_deref()).await {
                 Ok(rtsp) => {
+                    if let Some(alerts) = &self.alerts {
+                        alerts.rtsp_connect(stream, None).await;
+                    }
                     let dims = rtsp_video_dimensions(&rtsp);
                     let built = match profile {
                         Profile::Video => pipeline::build_rtsp_video_passthrough(dims),
                         Profile::Preview => match dims {
-                            Some((w, h)) => {
-                                pipeline::build_rtsp_preview(w, h, &self.config.preview)
-                            }
+                            Some((w, h)) => pipeline::build_rtsp_preview(
+                                w,
+                                h,
+                                &self.config.preview,
+                                &stream_stats,
+                            ),
                             None => Err(anyhow::anyhow!(
                                 "rtsp stream advertises no dimensions; preview needs the SDP size"
                             )),
@@ -323,12 +344,21 @@ impl SessionManager {
                     };
                     (built, Some(rtsp))
                 }
-                Err(e) => (Err(e), None),
+                Err(e) => {
+                    if let Some(alerts) = &self.alerts {
+                        alerts.rtsp_connect(stream, Some(&e.to_string())).await;
+                    }
+                    (Err(e), None)
+                }
             },
             _ => {
                 let built = match profile {
-                    Profile::Video => pipeline::build_video(&kind, &self.config.video, max_height),
-                    Profile::Preview => pipeline::build_preview(&kind, &self.config.preview),
+                    Profile::Video => {
+                        pipeline::build_video(&kind, &self.config.video, max_height, &stream_stats)
+                    }
+                    Profile::Preview => {
+                        pipeline::build_preview(&kind, &self.config.preview, &stream_stats)
+                    }
                 };
                 (built, None)
             }
@@ -338,6 +368,10 @@ impl SessionManager {
             Err(e) => {
                 tracing::warn!(stream = %stream, profile = profile.as_str(), error = %e,
                     "open_stream: failed to build pipeline");
+                if let Some(health) = &self.health {
+                    health.record_device_failure(stream, &e.to_string());
+                }
+                self.remove_stats_if_closed(stream);
                 return;
             }
         };
@@ -412,8 +446,10 @@ impl SessionManager {
                 Profile::Video => (Encoding::VIDEO_H264, false),
                 Profile::Preview => (Encoding::IMAGE_JPEG, true),
             };
+            let egress_stats = stream_stats.clone();
             tokio::spawn(async move {
-                let result = egress::run(sink, media, encoding, width, height, preview).await;
+                let result =
+                    egress::run(sink, media, encoding, width, height, preview, egress_stats).await;
                 let _ = tx
                     .send(SessionMsg::EgressEnded {
                         stream,
@@ -444,6 +480,9 @@ impl SessionManager {
         // a rising edge (and the idle reaper would kill a watched stream).
         let viewers = media.has_viewers().await.unwrap_or(false);
 
+        if let Some(health) = &self.health {
+            health.record_device_success(stream);
+        }
         tracing::info!(stream = %stream, profile = profile.as_str(), key = %key, viewers,
             "stream profile opened");
         *self
@@ -531,12 +570,30 @@ impl SessionManager {
             p.idle_since = Some(Instant::now());
             tracing::debug!(stream = %stream, profile = profile.as_str(), "last viewer left");
         }
+
+        // Refresh the viewers gauge (profiles with matching subscribers).
+        if let Some(session) = self.sessions.get_mut(stream) {
+            let viewers = [&session.video, &session.preview]
+                .into_iter()
+                .flatten()
+                .filter(|p| p.viewers)
+                .count() as u64;
+            self.stats
+                .handle(stream)
+                .viewers
+                .store(viewers, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     async fn handle_egress_ended(&mut self, stream: &str, profile: Profile, error: Option<String>) {
         match &error {
-            Some(e) => tracing::warn!(stream = %stream, profile = profile.as_str(), error = %e,
-                "stream profile ended with error"),
+            Some(e) => {
+                tracing::warn!(stream = %stream, profile = profile.as_str(), error = %e,
+                    "stream profile ended with error");
+                if let Some(health) = &self.health {
+                    health.record_device_failure(stream, e);
+                }
+            }
             None => tracing::info!(stream = %stream, profile = profile.as_str(),
                 "stream profile reached end of stream"),
         }
@@ -577,6 +634,15 @@ impl SessionManager {
         }
         if session.is_empty() {
             self.sessions.remove(stream);
+        }
+        self.remove_stats_if_closed(stream);
+    }
+
+    /// Drop the stream's stats entry once no profile remains open (the
+    /// ticker stops publishing its points).
+    fn remove_stats_if_closed(&mut self, stream: &str) {
+        if !self.sessions.contains_key(stream) {
+            self.stats.remove(stream);
         }
     }
 
