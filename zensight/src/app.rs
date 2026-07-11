@@ -1494,6 +1494,12 @@ impl ZenSight {
             Message::ParallaxRequestKeyframe { stream } => {
                 return ControlFlow::Break(self.request_parallax_keyframe(stream));
             }
+            Message::ParallaxExpandTile { stream } => {
+                return ControlFlow::Break(self.expand_parallax_tile(stream));
+            }
+            Message::ParallaxCollapseTile => {
+                return ControlFlow::Break(self.collapse_parallax_tile());
+            }
             other => return ControlFlow::Continue(other),
         }
         ControlFlow::Break(Task::none())
@@ -4919,7 +4925,9 @@ impl ZenSight {
             // the tile renders its placeholder frame.
             if let Some(device) = self.selected_device.as_mut() {
                 let generation = device.parallax_detail.allocate_generation();
-                device.parallax_detail.open_tile(&stream, generation, None);
+                device
+                    .parallax_detail
+                    .open_tile(&stream, generation, None, false);
             }
             return Task::none();
         }
@@ -4928,6 +4936,14 @@ impl ZenSight {
                 .push(ToastSeverity::Error, "Not connected to Zenoh".to_string());
             return Task::none();
         };
+        // Switching an open video tile back to preview (collapse restoring
+        // the pre-expand profile, #436) replaces the tile state, so the
+        // earlier `open_stream` must be balanced with a `close_stream` —
+        // same ordering rationale as the preview→video switch below.
+        let was_open = self
+            .selected_device
+            .as_ref()
+            .is_some_and(|d| d.parallax_detail.is_open(&stream));
         let Some(generation) = self
             .selected_device
             .as_mut()
@@ -4943,21 +4959,36 @@ impl ZenSight {
         ))
         .abortable();
         if let Some(device) = self.selected_device.as_mut() {
-            device
-                .parallax_detail
-                .open_tile(&stream, generation, Some(handle.abort_on_drop()));
+            device.parallax_detail.open_tile(
+                &stream,
+                generation,
+                Some(handle.abort_on_drop()),
+                false,
+            );
         }
+        let cmd_key =
+            zensight_common::command_key(&parallax_detail::host_prefix(&source), "stream");
         let open =
             zensight_common::command::Command::new(zensight_common::StreamControl::OpenStream {
                 stream: stream.clone(),
                 codec: Some("mjpeg".to_string()),
                 max_height: None,
             });
-        let send = self.send_command(
-            zensight_common::command_key(&parallax_detail::host_prefix(&source), "stream"),
+        let mut send = self.send_command(
+            cmd_key.clone(),
             &open,
             format!("Opened preview for {stream}"),
         );
+        if was_open {
+            let close = zensight_common::command::Command::new(
+                zensight_common::StreamControl::CloseStream {
+                    stream: stream.clone(),
+                },
+            );
+            send = self
+                .send_command(cmd_key, &close, format!("Closed video for {stream}"))
+                .chain(send);
+        }
         Task::batch([send, frames])
     }
 
@@ -5008,7 +5039,9 @@ impl ZenSight {
         if self.demo_mode {
             if let Some(device) = self.selected_device.as_mut() {
                 let generation = device.parallax_detail.allocate_generation();
-                device.parallax_detail.open_tile(&stream, generation, None);
+                device
+                    .parallax_detail
+                    .open_tile(&stream, generation, None, true);
             }
             return Task::none();
         }
@@ -5046,9 +5079,12 @@ impl ZenSight {
         ))
         .abortable();
         if let Some(device) = self.selected_device.as_mut() {
-            device
-                .parallax_detail
-                .open_tile(&stream, generation, Some(handle.abort_on_drop()));
+            device.parallax_detail.open_tile(
+                &stream,
+                generation,
+                Some(handle.abort_on_drop()),
+                true,
+            );
         }
         let cmd_key =
             zensight_common::command_key(&parallax_detail::host_prefix(&source), "stream");
@@ -5112,6 +5148,63 @@ impl ZenSight {
             &request,
             String::new(),
         )
+    }
+
+    /// Expand a tile into the near-fullscreen overlay (#436). A preview
+    /// tile is upgraded to the H.264 video profile when the build carries
+    /// the decoder and the stream advertises the codec — the same
+    /// refcount-balanced switch as the catalogue's Video button. Demo mode
+    /// just shows the (placeholder) frame large.
+    fn expand_parallax_tile(&mut self, stream: String) -> Task<Message> {
+        use crate::view::specialized::parallax_h264;
+        let Some(device) = self
+            .selected_device
+            .as_mut()
+            .filter(|d| d.device_id.protocol == zensight_common::Protocol::Parallax)
+        else {
+            return Task::none();
+        };
+        let Some(needs_video) = device.parallax_detail.expand(&stream) else {
+            return Task::none();
+        };
+        let advertises_h264 = device
+            .parallax_detail
+            .catalogue
+            .ready()
+            .is_some_and(|streams| {
+                streams
+                    .iter()
+                    .any(|s| s.stream == stream && s.codecs.iter().any(|c| c == "h264"))
+            });
+        if needs_video && parallax_h264::AVAILABLE && advertises_h264 && !self.demo_mode {
+            return self.open_parallax_video_tile(stream);
+        }
+        Task::none()
+    }
+
+    /// Dismiss the expanded-tile overlay (#436), switching the tile back to
+    /// the preview profile when expand had upgraded it — the sensor-side
+    /// refcounts return to their pre-expand state.
+    fn collapse_parallax_tile(&mut self) -> Task<Message> {
+        let Some(device) = self
+            .selected_device
+            .as_mut()
+            .filter(|d| d.device_id.protocol == zensight_common::Protocol::Parallax)
+        else {
+            return Task::none();
+        };
+        let Some(expanded) = device.parallax_detail.collapse() else {
+            return Task::none();
+        };
+        let tile_is_video = device
+            .parallax_detail
+            .tiles
+            .get(&expanded.stream)
+            .is_some_and(|tile| tile.video);
+        if !expanded.was_video && tile_is_video && !self.demo_mode {
+            return self.open_parallax_tile(expanded.stream);
+        }
+        Task::none()
     }
 
     /// Abort every open parallax preview tile and batch the `close_stream`
@@ -5269,6 +5362,15 @@ impl ZenSight {
         if self.global_search.open {
             self.global_search.close();
             return Task::none();
+        }
+        // The expanded parallax tile is an overlay too: Escape collapses it
+        // (restoring the pre-expand profile) before leaving the device view.
+        if self
+            .selected_device
+            .as_ref()
+            .is_some_and(|d| d.parallax_detail.expanded.is_some())
+        {
+            return self.collapse_parallax_tile();
         }
         match self.current_view {
             CurrentView::Settings => {
@@ -5564,6 +5666,21 @@ impl ZenSight {
         // Keeping base_view at index 0 lets Iced reconcile (not rebuild) its
         // subtree, so scroll position survives. (#alerts-scroll)
         let mut layers: Vec<Element<'_, Message>> = vec![base_view];
+
+        // Expanded parallax tile (#436): a near-fullscreen live view over the
+        // device view. Renders only while the device view shows a parallax
+        // source with an expanded tile — every teardown choke point clears
+        // the tile state (and the expansion with it).
+        if self.current_view == CurrentView::Device
+            && let Some(device) = self
+                .selected_device
+                .as_ref()
+                .filter(|d| d.device_id.protocol == zensight_common::Protocol::Parallax)
+            && let Some(overlay) =
+                crate::view::specialized::parallax::expanded_overlay(&device.parallax_detail)
+        {
+            layers.push(overlay);
+        }
 
         // Global metric search overlay (#27), centered over the current view.
         if self.global_search.open {

@@ -479,6 +479,15 @@ pub enum Message {
     ParallaxRequestKeyframe {
         stream: String,
     },
+    /// Expand a tile to the near-fullscreen overlay (#436). A preview tile
+    /// is upgraded to the H.264 video profile when the build and the stream
+    /// support it (same refcount-balanced switch as the Video button).
+    ParallaxExpandTile {
+        stream: String,
+    },
+    /// Dismiss the expanded-tile overlay (Esc / backdrop click / Close),
+    /// restoring the tile's pre-expand profile.
+    ParallaxCollapseTile,
 
     // ── Cross-view identity pivots (#313) — host-local joins over already-
     // published data; every pivot is a query-time read, no new bus traffic.

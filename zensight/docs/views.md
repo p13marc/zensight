@@ -195,7 +195,14 @@ disconnect, session replacement) aborts the subscriber tasks and batches
 itself kill the subscribers, which is the sensor's falling-edge teardown
 backstop. Switching a preview tile to video sends `close_stream` **before**
 `open_stream(h264)` (ordered on one publisher) so the preview refcount never
-leaks.
+leaks. Clicking a tile's frame **expands** it into a near-fullscreen overlay
+(#436): a scrim layer in the root `Stack` showing the tile's newest frame
+scaled (`ContentFit::Contain`) with a caption + Close button. Expand upgrades
+a preview tile to the video profile when the build and the stream support it
+(same balanced switch); Escape / backdrop click / Close collapses and
+restores the pre-expand profile. The expansion lives on
+`ParallaxDetailState` (`expanded`), so every teardown choke point above
+dismisses it with the tiles.
 
 **Logs** (`view/specialized/syslog.rs` and related) — structured log drill-down
 with a MESSAGE_ID catalog, follow/pause, and a boot lens. Seeds from the cold
