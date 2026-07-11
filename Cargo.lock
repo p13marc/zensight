@@ -11378,6 +11378,7 @@ dependencies = [
  "image",
  "json5",
  "notify-rust",
+ "parallax-pipeline",
  "rand 0.9.4",
  "redb",
  "rfd 0.15.4",

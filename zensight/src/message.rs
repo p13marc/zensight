@@ -455,6 +455,17 @@ pub enum Message {
         stream: String,
         error: Option<String>,
     },
+    /// Open a live H.264 video tile (#409): sends `open_stream` (codec
+    /// `h264`) and spawns the decoding subscriber task. Only functional on
+    /// builds with the `h264` feature; otherwise it toasts the build hint.
+    ParallaxOpenVideoTile {
+        stream: String,
+    },
+    /// Ask the sensor for a fresh IDR (`request_keyframe`) — fired by the
+    /// H.264 tile decoder on a sequence discontinuity (#409).
+    ParallaxRequestKeyframe {
+        stream: String,
+    },
 
     // ── Cross-view identity pivots (#313) — host-local joins over already-
     // published data; every pivot is a query-time read, no new bus traffic.

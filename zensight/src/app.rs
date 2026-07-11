@@ -1470,6 +1470,12 @@ impl ZenSight {
                     device.parallax_detail.end_tile(&stream, error);
                 }
             }
+            Message::ParallaxOpenVideoTile { stream } => {
+                return ControlFlow::Break(self.open_parallax_video_tile(stream));
+            }
+            Message::ParallaxRequestKeyframe { stream } => {
+                return ControlFlow::Break(self.request_parallax_keyframe(stream));
+            }
             other => return ControlFlow::Continue(other),
         }
         ControlFlow::Break(Task::none())
@@ -4911,6 +4917,95 @@ impl ZenSight {
             zensight_common::command_key(&parallax_detail::host_prefix(&source), "stream"),
             &close,
             format!("Closed preview for {stream}"),
+        )
+    }
+
+    /// Open a live H.264 video tile (#409). Only functional on builds with
+    /// the `h264` feature — otherwise toast the build hint. The tile shares
+    /// the preview-tile state machine (one tile per stream; opening video
+    /// replaces an open preview tile and aborts its subscriber).
+    #[cfg(feature = "h264")]
+    fn open_parallax_video_tile(&mut self, stream: String) -> Task<Message> {
+        use crate::view::specialized::{parallax_detail, parallax_h264};
+        let Some(source) = self
+            .selected_device
+            .as_ref()
+            .filter(|d| d.device_id.protocol == zensight_common::Protocol::Parallax)
+            .map(|d| d.device_id.source.clone())
+        else {
+            return Task::none();
+        };
+        if self.demo_mode {
+            if let Some(device) = self.selected_device.as_mut() {
+                device.parallax_detail.open_tile(&stream, None);
+            }
+            return Task::none();
+        }
+        let Some(session) = self.session.clone() else {
+            self.toasts
+                .push(ToastSeverity::Error, "Not connected to Zenoh".to_string());
+            return Task::none();
+        };
+        let (frames, handle) = Task::stream(parallax_h264::h264_tile_stream(
+            session,
+            source.clone(),
+            stream.clone(),
+        ))
+        .abortable();
+        if let Some(device) = self.selected_device.as_mut() {
+            device
+                .parallax_detail
+                .open_tile(&stream, Some(handle.abort_on_drop()));
+        }
+        let open =
+            zensight_common::command::Command::new(zensight_common::StreamControl::OpenStream {
+                stream: stream.clone(),
+                codec: Some("h264".to_string()),
+                max_height: None,
+            });
+        let send = self.send_command(
+            zensight_common::command_key(&parallax_detail::host_prefix(&source), "stream"),
+            &open,
+            format!("Opened video for {stream}"),
+        );
+        Task::batch([send, frames])
+    }
+
+    /// Without the `h264` feature the video tile is a stub: explain how to
+    /// get it instead of failing silently (#409).
+    #[cfg(not(feature = "h264"))]
+    fn open_parallax_video_tile(&mut self, _stream: String) -> Task<Message> {
+        self.toasts.push(
+            ToastSeverity::Info,
+            crate::view::specialized::parallax_h264::UNAVAILABLE_HINT.to_string(),
+        );
+        Task::none()
+    }
+
+    /// Relay the H.264 tile decoder's discontinuity recovery: ask the sensor
+    /// for a fresh IDR (`request_keyframe`) on the stream's command channel.
+    fn request_parallax_keyframe(&mut self, stream: String) -> Task<Message> {
+        use crate::view::specialized::parallax_detail;
+        let Some(source) = self
+            .selected_device
+            .as_ref()
+            .filter(|d| d.device_id.protocol == zensight_common::Protocol::Parallax)
+            .map(|d| d.device_id.source.clone())
+        else {
+            return Task::none();
+        };
+        if self.demo_mode || self.command_registry.is_none() {
+            return Task::none();
+        }
+        let request = zensight_common::command::Command::new(
+            zensight_common::StreamControl::RequestKeyframe {
+                stream: stream.clone(),
+            },
+        );
+        self.send_command(
+            zensight_common::command_key(&parallax_detail::host_prefix(&source), "stream"),
+            &request,
+            format!("Requested keyframe for {stream}"),
         )
     }
 

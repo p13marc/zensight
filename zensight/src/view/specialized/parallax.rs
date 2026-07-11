@@ -16,6 +16,7 @@ use crate::view::device::DeviceDetailState;
 use crate::view::icons::{self, IconSize};
 use crate::view::specialized::fetch::Fetch;
 use crate::view::specialized::parallax_detail::{ParallaxDetailState, TileState};
+use crate::view::specialized::parallax_h264;
 use crate::view::theme;
 use crate::view::tokens::space;
 
@@ -77,14 +78,29 @@ fn catalogue_row<'a>(
     stream: &'a zensight_common::StreamDescriptor,
 ) -> Element<'a, Message> {
     let open = detail.is_open(&stream.stream);
-    let toggle = if open {
-        button(text("Close").size(12)).on_press(Message::ParallaxCloseTile {
-            stream: stream.stream.clone(),
-        })
+    let toggle: Element<'a, Message> = if open {
+        button(text("Close").size(12))
+            .on_press(Message::ParallaxCloseTile {
+                stream: stream.stream.clone(),
+            })
+            .into()
     } else {
-        button(text("Open").size(12)).on_press(Message::ParallaxOpenTile {
-            stream: stream.stream.clone(),
-        })
+        let mut buttons = row![
+            button(text("Open").size(12)).on_press(Message::ParallaxOpenTile {
+                stream: stream.stream.clone(),
+            })
+        ]
+        .spacing(space::XS);
+        // The H.264 live view exists only on `--features h264` builds (#409);
+        // without it the section header carries the build hint instead.
+        if parallax_h264::AVAILABLE {
+            buttons = buttons.push(button(text("Video").size(12)).on_press(
+                Message::ParallaxOpenVideoTile {
+                    stream: stream.stream.clone(),
+                },
+            ));
+        }
+        buttons.into()
     };
     let mut cells = row![
         text(&stream.stream).size(14).width(Length::Fixed(140.0)),
@@ -159,6 +175,9 @@ pub fn parallax_view(state: &DeviceDetailState) -> Element<'_, Message> {
 
     // Stream catalogue.
     content = content.push(text("Streams").size(14));
+    if !parallax_h264::AVAILABLE {
+        content = content.push(text(parallax_h264::UNAVAILABLE_HINT).size(11).style(muted));
+    }
     match &detail.catalogue {
         Fetch::Idle => {
             content = content.push(
