@@ -51,3 +51,8 @@ rerun = { version = "=0.34.1", default-features = false, features = ["sdk"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+# e2e decode pass on the produced .rrd (already in the rerun dep tree, so this
+# adds no meaningful build cost; exact-pinned alongside `rerun`).
+re_log_encoding = "=0.34.1"
+re_log_types = "=0.34.1"
+

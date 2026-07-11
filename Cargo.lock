@@ -12894,6 +12894,8 @@ dependencies = [
  "anyhow",
  "clap",
  "json5",
+ "re_log_encoding",
+ "re_log_types",
  "rerun",
  "serde",
  "serde_json",
