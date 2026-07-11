@@ -15,6 +15,7 @@ members = [
     "zensight-sensor-gnmi",
     "zensight-sensor-netlink",
     "zensight-sensor-netring",
+    "zensight-sensor-parallax",
     "zensight-sensor-systemd",
     "zenoh-blob",
     # no_std types shared between the opt-in eBPF kernel programs and userspace.

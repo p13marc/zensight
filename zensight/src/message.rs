@@ -428,6 +428,57 @@ pub enum Message {
     FetchSysinfoProcesses(crate::view::specialized::sysinfo_detail::ProcessSort),
     /// A sysinfo process-explorer reply: the decoded records, or an error.
     SysinfoProcessesReceived(Result<Vec<zensight_common::ProcessRecord>, String>),
+    /// Fetch the parallax stream catalogue (`@/query/streams`) for the
+    /// selected host (#408).
+    FetchParallaxStreams,
+    /// A parallax catalogue reply: the advertised streams, or an error.
+    ParallaxStreamsReceived(Result<Vec<zensight_common::StreamDescriptor>, String>),
+    /// Open a live JPEG preview tile: sends `open_stream` (codec `mjpeg`) and
+    /// spawns the abortable per-tile subscriber task (#408).
+    ParallaxOpenTile {
+        stream: String,
+    },
+    /// Close a preview tile: aborts its subscriber task and sends
+    /// `close_stream`.
+    ParallaxCloseTile {
+        stream: String,
+    },
+    /// A decoded preview frame from a tile's subscriber task. `generation`
+    /// identifies the tile incarnation the task was opened for (frames from
+    /// a replaced task are dropped); stale `seq`s within an incarnation are
+    /// dropped too (latest frame wins).
+    ParallaxFrame {
+        stream: String,
+        generation: u64,
+        seq: u64,
+        handle: iced::widget::image::Handle,
+    },
+    /// A tile's subscriber task finished (session closed or subscribe
+    /// error). Carries the tile incarnation so a replaced task's late end
+    /// report cannot clear the new tile's abort handle.
+    ParallaxTileEnded {
+        stream: String,
+        generation: u64,
+        error: Option<String>,
+    },
+    /// A parallax `StreamStatus` transition from `@/status/streams` (arrives
+    /// on the host-scoped control-plane subscriber): a definitive
+    /// `open: false` marks a still-waiting tile as failed.
+    ParallaxStreamStatus {
+        source: String,
+        status: zensight_common::stream::StreamStatus,
+    },
+    /// Open a live H.264 video tile (#409): sends `open_stream` (codec
+    /// `h264`) and spawns the decoding subscriber task. Only functional on
+    /// builds with the `h264` feature; otherwise it toasts the build hint.
+    ParallaxOpenVideoTile {
+        stream: String,
+    },
+    /// Ask the sensor for a fresh IDR (`request_keyframe`) — fired by the
+    /// H.264 tile decoder on a sequence discontinuity (#409).
+    ParallaxRequestKeyframe {
+        stream: String,
+    },
 
     // ── Cross-view identity pivots (#313) — host-local joins over already-
     // published data; every pivot is a query-time read, no new bus traffic.

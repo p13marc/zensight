@@ -34,7 +34,7 @@ The single root is `zensight/`. Everything below it is either **telemetry**
 | `netlink` | zensight-sensor-netlink | hostname |
 | `netring` | zensight-sensor-netring | sensor id |
 | `systemd` | zensight-sensor-systemd | hostname |
-| `parallax` | *(media source; parallax daemon out of scope, #359)* | source id |
+| `parallax` | zensight-sensor-parallax (live video → `@media`, #402) | hostname |
 
 ---
 
@@ -301,14 +301,26 @@ Live video / imagery rides its own **opaque** plane. `@media` is an
 chunk — so a media key is invisible to **both** the telemetry firehose
 (`zensight/**`) and the control-plane wildcard (`zensight/*/@/**`). Samples are
 raw encoded bytes with a Zenoh `Encoding` (`video/h264`, `image/jpeg`) + a
-frame-metadata attachment — **never** a `TelemetryPoint`/`Format` envelope, and
-never fed to the telemetry decoder (the exporters' `is_telemetry_key` rejects
-any `@`-prefixed chunk, not just `/@/`).
+**CBOR `FrameMeta` attachment** (`zensight-common/src/stream.rs`: keyframe
+flag, optional pts/dts/duration ns, sequence, width, height) — **never** a
+`TelemetryPoint`/`Format` envelope, and never fed to the telemetry decoder
+(the exporters' `is_telemetry_key` rejects any `@`-prefixed chunk, not just
+`/@/`).
 
 | Key | Direction | Payload | Built by |
 |-----|-----------|---------|----------|
-| `@media/<stream>/video/<codec>/<profile>` | put (plain, per-stream publisher) | raw encoded access units + frame attachment | `media_video_key()` |
-| `@media/<stream>/preview/jpeg` | put (plain, per-stream publisher) | encoded JPEG preview frames | `media_preview_key()` |
+| `@media/<stream>/video/<codec>/<profile>` | put (plain, per-stream publisher) | raw encoded access units + CBOR `FrameMeta` attachment | `media_video_key()` |
+| `@media/<stream>/preview/jpeg` | put (plain, per-stream publisher) | encoded JPEG preview frames + CBOR `FrameMeta` attachment | `media_preview_key()` |
+
+**Viewer subscription pattern**: a preview viewer subscribes to the exact
+`@media/<stream>/preview/jpeg` key; a video viewer subscribes with the
+`<profile>` chunk as a **single-chunk wildcard** —
+`…/@media/<stream>/video/<codec>/*` — because the profile chunk is the
+*sensor's* configuration (e.g. parallax `video.profile`, default `main`) and
+the catalogue does not advertise it. The key stays scoped to exactly one
+stream and one codec, so the "no wildcard firehose" rule's intent holds; the
+publisher's matching listener fires for the wildcard subscriber all the same
+(zenoh matching is intersection-based — pinned in the parallax sensor e2e).
 
 The media publisher is a **plain** `zenoh::pubsub::Publisher` (NOT an
 `AdvancedPublisher` — no cache/recovery/history for a superseded frame stream),
@@ -319,18 +331,31 @@ off — a stale frame is worthless, and the encoder must never block).
 so the sensor can force an immediate keyframe (late joiners get a decodable
 picture at once).
 
-**Stream control rides the ordinary `@/` channels** (§3), not `@media`:
+**Stream control rides the ordinary `@/` channels** (§3), not `@media` —
+and, like the media keys themselves, it is **host-scoped**: the prefix is
+`zensight/<protocol>/<source>` (e.g.
+`zensight/parallax/hostA/@/commands/stream`), so commands reach exactly one
+host's sensor and its catalogue/status answer for that host only:
 
-| Key | Direction | Payload | Topic |
+| Key (under `zensight/<proto>/<source>`) | Direction | Payload | Topic |
 |-----|-----------|---------|-------|
 | `@/commands/stream` | subscribe | `Command<StreamControl>` (`OpenStream`/`CloseStream`/`RequestKeyframe`) | `stream` |
 | `@/query/streams` | queryable | `Vec<StreamDescriptor>` (advertised streams; late-joiner seed) | `streams` |
-| `@/status/streams` | queryable | `StreamStatus` (open? · viewers · active profile) | `streams` |
+| `@/status/streams` | queryable **and** declared-publisher transitions | `Vec<StreamStatus>` reply / one `StreamStatus` per transition (open? · viewers · active profile) | `streams` |
 
-Stream *stats* (fps/kbps/drops) ride normal telemetry under
+**BREAKING** (#402): the `@/status/streams` *queryable reply* changed in-place
+from a single `StreamStatus` to `Vec<StreamStatus>` (one entry per currently
+open stream). Migration: decode the reply as a JSON array and pick your stream
+by the `stream` field; the *published transitions* on the same key are
+unchanged (still one `StreamStatus` per transition). A failed `open_stream`
+now also publishes a definitive `open: false` transition.
+
+Stream *stats* (fps/kbps/drops/viewers/encode_ms) ride normal telemetry under
 `zensight/<proto>/<source>/<stream>/stats/<metric>`, so existing charts light up
-for free. (The H.264/parallax encoder daemon that produces the frames is out of
-scope for #359 — this is the zenoh-side enabler only.)
+for free. The concrete producer is **`zensight-sensor-parallax`** (#402): V4L2
+cameras, RTSP cameras, and synthetic test patterns, encoded on demand
+(open_stream/close_stream) to H.264 + JPEG previews — see that crate's
+`docs/streams.md`; the GUI's viewer is `zensight/src/view/specialized/parallax*.rs`.
 
 ### netring detector-registry migration (#369, BREAKING)
 
@@ -458,7 +483,7 @@ dedicated plane:
 | `zensight/**` | frontend (history sub), exporters | all telemetry *and* `_meta` (but **not** `@/…` nor `@media/…`) |
 | `zensight/*/*/@/**` | frontend | all **host-scoped** control-plane (health/errors/status/liveness) — never intersects `zensight/*/@/**`, telemetry, `@media`, or `@pdns` (pinned in `zensight-common` tests) |
 | `zensight/*/@/**` | frontend | all **protocol-scoped** control-plane (alerts) + legacy pre-0.8 state keys |
-| `zensight/<proto>/<source>/@media/<stream>/**` | media viewer | one stream's opaque video/preview samples (#359; named explicitly) |
+| `zensight/<proto>/<source>/@media/<stream>/…` | media viewer | one stream's opaque samples: the exact `preview/jpeg` key, or `video/<codec>/*` (single-chunk wildcard over the sensor-configured profile — see §3.3) |
 | `zensight/*/*/@/alive` | frontend | sensor liveliness tokens (host-scoped) |
 | `zensight/*/*/@/devices/*/alive` | frontend | device liveliness tokens (host-scoped) |
 | `zensight/*/@/alive` | frontend | legacy sensor liveliness tokens (pre-0.8 sensors) |

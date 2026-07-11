@@ -1,0 +1,70 @@
+{
+  // Zenoh connection settings
+  zenoh: {
+    mode: "peer",
+  },
+
+  // On-demand artifact channel (@/artifact) — opt-in per kind. When enabled,
+  // an operator can download a redacted tar.zst debug bundle from the GUI.
+  artifacts: {
+    report: {
+      enabled: false,        // set true to allow report downloads from this sensor
+      max_bytes: 67108864,   // 64 MiB cap on the (uncompressed) bundle
+      cooldown_secs: 30,     // min gap between generations
+      ttl_secs: 600,         // how long a generated bundle stays downloadable
+      chunk_size: 524288,    // 512 KiB transfer chunk (clamped 256 KiB–1 MiB)
+    },
+  },
+
+  // Parallax video sensor settings
+  parallax: {
+    key_prefix: "zensight/parallax",
+    source: "auto",       // host id used as the `source` key chunk; "auto" detects the hostname
+
+    // Advertise local V4L2 cameras (/dev/video*) in the stream catalogue.
+    // Headless hosts simply contribute nothing.
+    enumerate_v4l2: true,
+
+    // Remote RTSP cameras. Each entry becomes one catalogue stream.
+    rtsp: [
+      // { name: "door", url: "rtsp://cam.local:554/stream1",
+      //   username: "viewer", password: "secret", description: "front door" },
+    ],
+
+    // Synthetic test-pattern sources — same catalogue/command/encode/egress
+    // path as real cameras (demo mirrors the contract). The default entry
+    // lets the sensor stream on any machine, camera or not.
+    // Patterns: smpte / checkerboard / ball / gradient / snow / solid /
+    // black / white.
+    test_sources: [
+      { name: "test0", pattern: "smpte", width: 640, height: 360, fps: 15 },
+    ],
+
+    // JPEG preview profile (@media/<stream>/preview/jpeg): low-fps thumbnails
+    // for the GUI tile grid.
+    preview: {
+      fps: 2,        // preview frame rate (thumbnails, not video)
+      quality: 75,   // JPEG quality 1-100
+    },
+
+    // H.264 video profile (@media/<stream>/video/h264/main): full-rate live view.
+    video: {
+      bitrate_kbps: 2000,  // target bitrate
+      gop_frames: 60,      // keyframe (IDR) interval in frames
+      profile: "main",     // profile name used in the media key chunk
+    },
+
+    // Tear an open profile down after this many seconds with no viewers and
+    // no explicit opens (crash backstop for GUIs that die without CloseStream).
+    idle_timeout_secs: 30,
+
+    // Interval between per-stream stats telemetry points (fps/kbps/drops/viewers).
+    stats_interval_secs: 5,
+  },
+
+  // Logging configuration
+  logging: {
+    level: "info",     // trace, debug, info, warn, error
+    format: "text",    // text or json
+  },
+}

@@ -13,6 +13,8 @@ pub mod netlink_detail;
 pub mod netring;
 pub mod netring_detail;
 pub mod parallax;
+pub mod parallax_detail;
+pub mod parallax_h264;
 pub mod snmp;
 pub mod sysinfo;
 pub mod sysinfo_detail;
