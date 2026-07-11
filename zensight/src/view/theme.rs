@@ -230,6 +230,16 @@ impl<'a> ThemeColors<'a> {
         }
     }
 
+    /// Tier-band backdrop for the tiered layout (#443): a whisper above the
+    /// canvas background, just enough to read the rows as rows.
+    pub fn topology_tier_band(&self) -> Color {
+        if self.is_dark() {
+            Color::from_rgba(1.0, 1.0, 1.0, 0.04)
+        } else {
+            Color::from_rgba(0.0, 0.0, 0.0, 0.04)
+        }
+    }
+
     /// Healthy host node.
     pub fn topology_node_healthy(&self) -> Color {
         Color::from_rgb(0.3, 0.6, 0.9)

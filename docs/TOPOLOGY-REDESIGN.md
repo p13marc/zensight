@@ -389,6 +389,32 @@ Each phase is independently shippable and demoable; later phases don't rework ea
 - Hover-dim neighborhood; dashed-flow animation on active edges (rate-gated); legend card;
   grid + circular layout modes; zoom-to-fit; persist pins/positions; group-seeded layout.
 
+## Addendum — epic #439 (2026-07): tiered default + performance overhaul
+
+Field experience after this redesign shipped: the force graph still *felt* slow and its layout
+still didn't communicate the network. Epic #439 (PRs for #440–#443) supersedes two statements
+above:
+
+- **"Layout stays on the 1 Hz tick" (§6)** — no longer true. The force simulation now steps on a
+  gated ~30 fps frame subscription with d3-style alpha cooling (self-terminating via
+  `layout_stable`; a settled graph burns no frames), and `layout_step` is alloc-free. 3
+  iterations/second was why settling looked like once-a-second lurches. Independently, the render
+  graph and canvas cache became change-gated, node rx/tx rates patch the render graph in place,
+  the four topology queries land as one batched message (one edge rebuild per batch), and prefs
+  saves are debounced off the interaction path.
+- **"Force (default, current algorithm)" (§6 layout modes)** — the default is now the **tiered
+  hierarchy** (`view/topology/tiered.rs`, pure): Internet → gateways/infrastructure
+  (barycenter-ordered over the subnets they serve) → hosts banded by /24 → discovered passive
+  devices. Deterministic within-band ordering (role/label/id — never rates), 400 ms ease-out
+  position tween on structural changes, captioned band backdrops. This is the "layered (default)"
+  direction §4 pointed at, realized without new dependencies. Force/grid/circular remain as
+  opt-in modes; the layout pref persists under a new `topology_layout_v2` settings key (the old
+  key was implicitly rewritten by every pref save, so honoring it would have pinned existing
+  installs to the old default).
+
+The non-goals hold: still no petgraph/fdg, no Barnes–Hut (revisit threshold documented in
+`layout.rs`), no geo/time-scrubbing.
+
 ## 7. Sources
 
 - [Shneiderman — Visual Information-Seeking Mantra](https://infovis-wiki.net/wiki/Visual_Information-Seeking_Mantra)

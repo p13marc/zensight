@@ -47,6 +47,9 @@ pub struct TierBand {
     pub y: f32,
     /// Horizontal extent of the band, graph coordinates.
     pub x_range: (f32, f32),
+    /// Vertical extent of the band's node rows (0 for a single row), so the
+    /// caption backdrop can cover wrapped rows (#443).
+    pub height: f32,
 }
 
 /// The computed layout: a target position per node plus the band metadata.
@@ -142,6 +145,7 @@ fn place_tier(
             label: band.label.clone(),
             y: tier_top,
             x_range: (cursor - NODE_GAP_X / 2.0, cursor + width + NODE_GAP_X / 2.0),
+            height: (rows.saturating_sub(1)) as f32 * ROW_GAP_Y,
         });
         cursor += width + BAND_GAP_X;
     }
