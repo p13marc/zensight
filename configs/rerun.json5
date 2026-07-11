@@ -1,0 +1,73 @@
+// ZenSight Rerun adapter (EVALUATION — epic #415, docs/plans/rerun/).
+{
+  // Zenoh connection settings (overridable via ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN})
+  zenoh: {
+    // Mode: "client", "peer", or "router"
+    mode: "peer",
+
+    // Endpoints to connect to
+    // connect: ["tcp/localhost:7447"],
+
+    // Endpoints to listen on (for peer/router mode)
+    // listen: [],
+  },
+
+  // Rerun sink settings
+  rerun: {
+    // "live"   — stream to a running Rerun viewer/proxy over gRPC
+    // "record" — write a .rrd file (headless-friendly; replay later)
+    // "both"   — both at once
+    mode: "live",
+
+    // Viewer/proxy gRPC URL (live/both). NOTE: the endpoint is
+    // unauthenticated and unencrypted — keep it loopback or on an
+    // operator-controlled network.
+    viewer_url: "rerun+http://127.0.0.1:9876/proxy",
+
+    // Output .rrd path (required for record/both)
+    // rrd_path: "/var/lib/zensight/zensight.rrd",
+
+    // Rerun application id (viewer grouping + blueprint scope)
+    application_id: "zensight",
+
+    // Explicit recording id: producers sharing an id merge into one logical
+    // recording in the viewer. Default: random per process.
+    // recording_id: "zensight-lab",
+
+    // Counter rendering: "rate" (per-second, default), "raw", or "both"
+    counters: "rate",
+  },
+
+  // Telemetry filtering (optional)
+  filters: {
+    // Narrow the telemetry subscription (default "zensight/**"). The
+    // alert/health/entity subscribers are separate and unaffected.
+    // key_expr: "zensight/sysinfo/**",
+
+    // Only include these protocols (empty = all)
+    // include_protocols: ["sysinfo", "netlink", "netring"],
+
+    // Exclude these protocols
+    // exclude_protocols: ["logs"],
+  },
+
+  // Per-series sampling (optional; applied before rate conversion)
+  sampling: {
+    // Global ceiling, samples/second per series
+    // max_hz_per_series: 2.0,
+
+    // Per-metric-prefix overrides (longest prefix wins)
+    // per_prefix: { "iface": 10.0 },
+  },
+
+  // Isolated Zenoh session: scouting (multicast + gossip) off, explicit
+  // endpoints only. Use for demos/recordings on hosts with a live sensor
+  // fleet, so ambient traffic doesn't contaminate the recording.
+  isolate: false,
+
+  // Logging
+  logging: {
+    level: "info",
+    format: "text",
+  },
+}

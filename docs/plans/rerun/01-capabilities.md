@@ -213,5 +213,60 @@ dataframe ingestion. Combined with the fast MSRV ratchet (1.92 today):
 
 ## Appendix: dependency & build evidence (commit 4)
 
-*Appended at commit 4 (#419) after the adapter crate first builds — `cargo tree` hygiene gate
-output and target-dir cost measurements land here.*
+Measured 2026-07-11 on the evaluation worktree (rustc 1.95.0, debug profile), with
+`rerun = { version = "=0.34.1", default-features = false, features = ["sdk"] }`.
+
+### Viewer/render hygiene — CLEAN
+
+```console
+$ cargo tree -p zensight-rerun | grep -Ei "re_viewer|wgpu|egui|re_renderer"
+(empty)
+```
+
+No viewer, no render stack, no GUI toolkit. The `sdk`-only claim holds for the entire
+egui/wgpu surface.
+
+### Analytics — DISCREPANCY vs the feature analysis in §1
+
+```console
+$ cargo tree -p zensight-rerun -i re_analytics
+re_analytics v0.34.1
+└── re_auth v0.34.1
+    └── re_redap_client v0.34.1
+        └── rerun v0.34.1
+            └── zensight-rerun v0.7.0
+```
+
+**`re_analytics` is compiled even in an sdk-only build.** The `analytics` cargo feature only
+gates the top-level hooks (`dep:re_analytics` on the facade); but the facade has a
+**mandatory** `re_redap_client` dependency (Rerun Data Platform client,
+[`crates/top/rerun/Cargo.toml` line 153](https://github.com/rerun-io/rerun/blob/0.34.1/crates/top/rerun/Cargo.toml)),
+whose `re_auth` depends on `re_analytics` unconditionally (used in its `oauth.rs`).
+`re_sdk` itself does *not* depend on it — the facade is what drags it in.
+
+Assessment: dormant in our code paths (we never touch redap/OAuth; analytics submission
+requires explicit instantiation), but the crate — including an HTTP client (`ehttp`) — is in
+the binary and on the supply-chain surface of an "offline-clean" build. §1's
+"analytics-free by construction" is therefore **wrong at the dependency level** and corrected
+here; it holds only at the behavior level. Reject-signal nuance for air-gapped deployments;
+depending on `re_sdk`/`re_sdk_types` directly (not the facade) would avoid it at the cost of
+diverging from the documented `rerun::` API surface.
+
+### Dependency weight
+
+- `cargo tree -p zensight-rerun`: **532 distinct crates** (42 in the `re_*`/`rerun` family);
+  includes `arrow v58.3.0`, `tonic v0.14.6`, `prost v0.14.4`.
+- Target-dir cost (debug, full workspace incl. test artifacts): **23 GiB before** the adapter,
+  **28 GiB after** first `build -p` + `test -p` + `clippy -p` → **≈ +5 GiB**.
+- First cold build of the rerun dependency stack (this machine, debug): minutes-scale
+  (~4 min wall in this environment), dominated by arrow/tonic. Subsequent incremental builds
+  of the adapter itself: seconds.
+
+### API pins that only a build could verify — all confirmed
+
+Compiling against 0.34.1 confirmed: `connect_grpc_opts(String)`, `save(path)`,
+`set_sinks((rerun::sink::GrpcSink, rerun::sink::FileSink))` (so "both" mode is real),
+`set_timestamp_nanos_since_epoch`, `Scalars::single`, `SeriesLines::new().with_names([...])`,
+`TextLog::new(...).with_level(...)`, `flush_blocking() -> Result`. One surprise:
+**`TextLogLevel`'s associated constants (`INFO`, …) are `&'static str`**, not `TextLogLevel`
+values — call sites need `.into()`.
