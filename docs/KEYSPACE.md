@@ -301,14 +301,16 @@ Live video / imagery rides its own **opaque** plane. `@media` is an
 chunk — so a media key is invisible to **both** the telemetry firehose
 (`zensight/**`) and the control-plane wildcard (`zensight/*/@/**`). Samples are
 raw encoded bytes with a Zenoh `Encoding` (`video/h264`, `image/jpeg`) + a
-frame-metadata attachment — **never** a `TelemetryPoint`/`Format` envelope, and
-never fed to the telemetry decoder (the exporters' `is_telemetry_key` rejects
-any `@`-prefixed chunk, not just `/@/`).
+**CBOR `FrameMeta` attachment** (`zensight-common/src/stream.rs`: keyframe
+flag, optional pts/dts/duration ns, sequence, width, height) — **never** a
+`TelemetryPoint`/`Format` envelope, and never fed to the telemetry decoder
+(the exporters' `is_telemetry_key` rejects any `@`-prefixed chunk, not just
+`/@/`).
 
 | Key | Direction | Payload | Built by |
 |-----|-----------|---------|----------|
-| `@media/<stream>/video/<codec>/<profile>` | put (plain, per-stream publisher) | raw encoded access units + frame attachment | `media_video_key()` |
-| `@media/<stream>/preview/jpeg` | put (plain, per-stream publisher) | encoded JPEG preview frames | `media_preview_key()` |
+| `@media/<stream>/video/<codec>/<profile>` | put (plain, per-stream publisher) | raw encoded access units + CBOR `FrameMeta` attachment | `media_video_key()` |
+| `@media/<stream>/preview/jpeg` | put (plain, per-stream publisher) | encoded JPEG preview frames + CBOR `FrameMeta` attachment | `media_preview_key()` |
 
 The media publisher is a **plain** `zenoh::pubsub::Publisher` (NOT an
 `AdvancedPublisher` — no cache/recovery/history for a superseded frame stream),

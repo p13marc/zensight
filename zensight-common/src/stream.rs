@@ -53,6 +53,36 @@ pub enum StreamControl {
     },
 }
 
+/// Per-frame metadata riding as the Zenoh **attachment** on every `@media`
+/// sample (#403). The payload stays opaque encoded bytes; this sidecar is what
+/// lets a viewer gate on keyframes, detect gaps, and time frames without
+/// parsing the bitstream.
+///
+/// Encoded with [`crate::serialization::encode`] as **CBOR** — it is *not* a
+/// telemetry envelope (`TelemetryPoint`/`Format` never appear on `@media`),
+/// just a small struct serialized compactly. `None` timing fields are omitted
+/// on the wire (the encoder had no clock for them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FrameMeta {
+    /// Whether this frame is independently decodable (H.264 IDR / any JPEG).
+    pub keyframe: bool,
+    /// Presentation timestamp in nanoseconds, if the pipeline stamped one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pts_ns: Option<u64>,
+    /// Decode timestamp in nanoseconds, if distinct from `pts_ns`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dts_ns: Option<u64>,
+    /// Frame duration in nanoseconds, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ns: Option<u64>,
+    /// Monotonic per-stream sequence number (gap ⇒ dropped frames).
+    pub sequence: u64,
+    /// Encoded frame width in pixels.
+    pub width: u32,
+    /// Encoded frame height in pixels.
+    pub height: u32,
+}
+
 /// One advertised media stream, served from the `streams` query topic.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamDescriptor {
@@ -156,6 +186,58 @@ mod tests {
         let bytes = encode(&status, Format::Json).unwrap();
         let back: StreamStatus = decode(&bytes, Format::Json).unwrap();
         assert_eq!(back, status);
+    }
+
+    #[test]
+    fn frame_meta_roundtrip_both_formats() {
+        for meta in [
+            FrameMeta {
+                keyframe: true,
+                pts_ns: Some(1_000_000_000),
+                dts_ns: Some(999_000_000),
+                duration_ns: Some(33_333_333),
+                sequence: 42,
+                width: 1280,
+                height: 720,
+            },
+            FrameMeta {
+                keyframe: false,
+                pts_ns: None,
+                dts_ns: None,
+                duration_ns: None,
+                sequence: 0,
+                width: 320,
+                height: 240,
+            },
+        ] {
+            for format in [Format::Json, Format::Cbor] {
+                let bytes = encode(&meta, format).unwrap();
+                let back: FrameMeta = decode(&bytes, format).unwrap();
+                assert_eq!(back, meta);
+            }
+        }
+    }
+
+    #[test]
+    fn frame_meta_none_timing_fields_are_omitted() {
+        // Pin the wire shape: absent timing must not serialize as nulls.
+        let json = serde_json::to_value(FrameMeta {
+            keyframe: true,
+            pts_ns: None,
+            dts_ns: None,
+            duration_ns: None,
+            sequence: 7,
+            width: 640,
+            height: 360,
+        })
+        .unwrap();
+        assert_eq!(json["keyframe"], true);
+        assert_eq!(json["sequence"], 7);
+        assert_eq!(json["width"], 640);
+        assert_eq!(json["height"], 360);
+        assert!(json.get("pts_ns").is_none(), "None fields are omitted");
+        assert!(json.get("dts_ns").is_none());
+        assert!(json.get("duration_ns").is_none());
     }
 
     #[test]
