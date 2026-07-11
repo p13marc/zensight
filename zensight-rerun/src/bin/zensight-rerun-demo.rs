@@ -42,6 +42,18 @@ enum Scenario {
         #[arg(long, default_value_t = 50)]
         burst: u64,
     },
+    /// Deterministic correlated incident: RSSI/loss/retransmit/latency ramps,
+    /// route failover event, Critical alert firing->resolved (65 s script).
+    Incident {
+        /// Pin the script's base timestamp (epoch ms) for reproducible .rrd
+        /// timelines. Default: now.
+        #[arg(long)]
+        base_ts: Option<i64>,
+        /// Wall-clock delay per scripted second, ms (1000 = real time; small
+        /// values fast-forward a recording).
+        #[arg(long, default_value_t = 1000)]
+        pace_ms: u64,
+    },
 }
 
 #[tokio::main]
@@ -72,6 +84,11 @@ async fn main() -> anyhow::Result<()> {
             info!(burst, "Running events scenario");
             let (events, alerts, health) = demo::events::run(&ctx, burst).await?;
             info!(events, alerts, health, "Events scenario complete");
+        }
+        Scenario::Incident { base_ts, pace_ms } => {
+            info!(?base_ts, pace_ms, "Running incident scenario");
+            let (points, events, alerts) = demo::incident::run(&ctx, base_ts, pace_ms).await?;
+            info!(points, events, alerts, "Incident scenario complete");
         }
     }
 

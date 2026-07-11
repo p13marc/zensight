@@ -8,6 +8,7 @@
 //! demo recording, and vice versa (docs/plans/rerun/08-multi-process.md §5).
 
 pub mod events;
+pub mod incident;
 pub mod metrics;
 
 use std::sync::Arc;
