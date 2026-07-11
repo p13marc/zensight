@@ -24,6 +24,11 @@ matching listener forces a keyframe the instant a subscriber appears.
   `video/h264`) and `@media/<stream>/preview/jpeg` (encoding `image/jpeg`),
   every sample carrying a CBOR `FrameMeta` attachment (keyframe flag,
   pts/dts/duration, sequence, dimensions). Never a telemetry envelope.
+  On the h264 path the keyframe flag is derived from the bitstream (IDR
+  present) and every keyframe access unit is published self-contained —
+  cached SPS/PPS are prepended when missing — so a fresh decoder can start
+  at any advertised keyframe (`docs/streams.md`, "Self-contained
+  keyframes").
   Video viewers subscribe with the profile chunk as a single-chunk wildcard
   (`…/video/h264/*`) — `video.profile` is sensor config the catalogue does
   not carry (see `docs/KEYSPACE.md` §3.3).

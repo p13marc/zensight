@@ -17,6 +17,7 @@ use zensight_common::stream::FrameMeta;
 use zensight_common::{Format, encode};
 use zensight_sensor_core::RawMediaPublisher;
 
+use crate::annexb;
 use crate::stats::StreamStats;
 
 /// How long one blocking pull waits before re-checking for EOS/abort.
@@ -97,6 +98,14 @@ async fn run_with_watchdog(
     let mut last_sequence: Option<u64> = None;
     let started = Instant::now();
     let mut produced_any = false;
+    // H.264 hardening (#435): the published keyframe flag is derived from
+    // the bitstream itself (IDR present) rather than upstream metadata, and
+    // every keyframe AU is made a self-contained decoder entry point by
+    // prepending the stream's cached SPS/PPS when the AU arrived without
+    // its own (e.g. RTSP cameras announcing parameter sets only
+    // out-of-band in the SDP).
+    let h264 = !preview && encoding == Encoding::VIDEO_H264;
+    let mut param_sets: Option<Vec<u8>> = None;
     loop {
         let pull_sink = sink.clone();
         let pulled =
@@ -122,7 +131,7 @@ async fn run_with_watchdog(
         };
         produced_any = true;
 
-        let frame_meta = metadata_to_frame_meta(buffer.metadata(), width, height, preview);
+        let mut frame_meta = metadata_to_frame_meta(buffer.metadata(), width, height, preview);
         if !preview {
             if let Some(prev) = last_sequence
                 && frame_meta.sequence > prev + 1
@@ -131,9 +140,19 @@ async fn run_with_watchdog(
             }
             last_sequence = Some(frame_meta.sequence);
         }
+        let mut payload = buffer.as_bytes().to_vec();
+        if h264 {
+            frame_meta.keyframe = annexb::has_idr(&payload);
+            if let Some(fresh) = annexb::extract_param_sets(&payload) {
+                param_sets = Some(fresh);
+            } else if frame_meta.keyframe
+                && let Some(cached) = &param_sets
+            {
+                payload = annexb::prepend_param_sets(cached, &payload);
+            }
+        }
         let attachment =
             encode(&frame_meta, Format::Cbor).map_err(|e| format!("encode FrameMeta: {e}"))?;
-        let payload = buffer.as_bytes().to_vec();
         stats.record_frame(payload.len());
         publisher
             .put(payload, encoding.clone(), ZBytes::from(attachment))
