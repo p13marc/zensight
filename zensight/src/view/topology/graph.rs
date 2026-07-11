@@ -415,6 +415,14 @@ impl<'a> TopologyGraphProgram<'a> {
             self.background_color(),
         );
 
+        // Tier bands (#443): captioned backdrops behind the tiered layout's
+        // rows, so the hierarchy explains itself.
+        if self.state.prefs.layout == super::LayoutMode::Tiered {
+            for band in &self.state.tier_bands {
+                self.draw_tier_band(frame, band, center);
+            }
+        }
+
         // Draw edges first (behind nodes)
         for redge in &self.state.render.edges {
             self.draw_edge(frame, redge, center);
@@ -448,6 +456,40 @@ impl<'a> TopologyGraphProgram<'a> {
             ..Text::default()
         };
         frame.fill_text(zoom_text);
+    }
+
+    /// Draw one tier band (#443): a rounded whisper-tint backdrop covering
+    /// the band's node rows, with its caption above the top-left corner.
+    /// Everything transforms with pan/zoom so the bands travel with their
+    /// nodes.
+    fn draw_tier_band(&self, frame: &mut Frame, band: &super::TierBand, center: Point) {
+        // Padding around the node slots, in graph units (nodes are ~30 px
+        // radius plus a label underneath).
+        const PAD_X: f32 = 0.0; // x_range is already node-slot padded
+        const PAD_TOP: f32 = 70.0;
+        const PAD_BOTTOM: f32 = 95.0; // room for the node labels
+        let top_left = self.apply_transform((band.x_range.0 - PAD_X, band.y - PAD_TOP), center);
+        let bottom_right = self.apply_transform(
+            (band.x_range.1 + PAD_X, band.y + band.height + PAD_BOTTOM),
+            center,
+        );
+        let size = iced::Size::new(
+            (bottom_right.x - top_left.x).max(0.0),
+            (bottom_right.y - top_left.y).max(0.0),
+        );
+        let theme = self.theme();
+        let colors = theme::colors(&theme);
+        frame.fill(
+            &Path::rounded_rectangle(top_left, size, (12.0 * self.state.zoom).into()),
+            colors.topology_tier_band(),
+        );
+        frame.fill_text(Text {
+            content: band.label.clone(),
+            position: Point::new(top_left.x + 8.0, top_left.y - 16.0),
+            color: colors.text_dimmed(),
+            size: 12.0.into(),
+            ..Text::default()
+        });
     }
 
     /// Draw a single rendered node (#392): plain host, meta-group, or the

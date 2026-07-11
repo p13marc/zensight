@@ -1412,7 +1412,7 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
 
     // Lens legend (#394): what the current lens encodes.
     if state.show_legend {
-        rows = rows.push(render_legend(state.prefs.lens));
+        rows = rows.push(render_legend(state.prefs.lens, state.prefs.layout));
     }
 
     // Focus breadcrumb (#392).
@@ -1453,8 +1453,9 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
 }
 
 /// The lens legend (#394): a compact stack of lines explaining the active
-/// lens's encodings.
-fn render_legend(lens: Lens) -> Element<'static, Message> {
+/// lens's encodings, plus the tier order when the tiered layout is active
+/// (#443).
+fn render_legend(lens: Lens, layout: LayoutMode) -> Element<'static, Message> {
     let entries: &[&str] = match lens {
         Lens::Traffic => &[
             "fill = role (blue host · green router · amber switch/AP · grey other)",
@@ -1469,6 +1470,12 @@ fn render_legend(lens: Lens) -> Element<'static, Message> {
         Lens::Health => &["fill = health (blue healthy · amber degraded · red down · grey stale)"],
     };
     let mut legend = iced::widget::Column::new().spacing(2);
+    if layout == LayoutMode::Tiered {
+        legend = legend.push(
+            text("rows: Internet → gateways & infrastructure → hosts by subnet → discovered")
+                .size(10),
+        );
+    }
     for entry in entries {
         legend = legend.push(text(*entry).size(10));
     }

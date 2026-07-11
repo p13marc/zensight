@@ -1564,6 +1564,32 @@ fn test_topology_legend_toggle() {
         ui.find("solid = traffic · dotted = L2 · dashed = gateway")
             .is_ok()
     );
+    // The tiered layout is the default, so the legend leads with the tier
+    // order (#443).
+    assert!(
+        ui.find("rows: Internet → gateways & infrastructure → hosts by subnet → discovered")
+            .is_ok()
+    );
+}
+
+/// The tiered layout is the default and the header adapts to it (#442/#443).
+#[test]
+fn test_topology_tiered_default_header() {
+    use zensight::view::topology::LayoutMode;
+
+    let state = TopologyState::default();
+    assert_eq!(state.prefs.layout, LayoutMode::Tiered);
+    let mut ui = simulator(topo_view(&state, AppTheme::Dark));
+    // Auto-layout only governs the force simulation — hidden by default.
+    assert!(ui.find("Auto Layout: ON").is_err());
+    // Deterministic layouts read as stable, never "adjusting".
+    assert!(ui.find("Layout: Stable").is_ok());
+
+    // Under Force the auto-layout toggle comes back.
+    let mut state = TopologyState::default();
+    state.prefs.layout = LayoutMode::Force;
+    let mut ui = simulator(topo_view(&state, AppTheme::Dark));
+    assert!(ui.find("Auto Layout: ON").is_ok());
 }
 
 /// The active lens button is inert; the edge-label picker is present (#392).

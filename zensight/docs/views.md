@@ -126,10 +126,17 @@ sockets/links/routes) and pushes them to the netlink sensor at runtime via the
 `@/commands` channel; the sensor hot-swaps its evaluator and replies on
 `@/status`.
 
-**Topology** (`view/topology/`) — an interactive force-directed graph of the
-monitored network (redesign epic #395; design report
-[`docs/TOPOLOGY-REDESIGN.md`](../../docs/TOPOLOGY-REDESIGN.md)). `model.rs` is
-the pure, unit-tested graph model: typed nodes
+**Topology** (`view/topology/`) — an interactive map of the monitored network
+(redesign epic #395, layout/performance overhaul epic #439; design report
+[`docs/TOPOLOGY-REDESIGN.md`](../../docs/TOPOLOGY-REDESIGN.md)). The default
+arrangement is the **tiered hierarchy** (`tiered.rs`, pure and unit-tested):
+Internet aggregate on top, then gateways/infrastructure (barycenter-ordered so
+each gateway sits above the subnet it serves), then hosts banded by /24 subnet,
+then unclassified passively-discovered devices at the bottom — deterministic
+(within-band order by role/label/id, never by rates), so the map reads like a
+network diagram and never shuffles between refreshes or sessions. Structural
+changes tween nodes to their new slots over 400 ms; captioned band backdrops
+name each row. `model.rs` is the pure, unit-tested graph model: typed nodes
 (`NodeRole` router/switch/ap/phone/iot from the netring asset inventory,
 `Provenance` monitored/wire-only, `NodeHealth` healthy/degraded/down/stale from
 liveness + host-scoped `@/health` + entity staleness) and typed edges
@@ -138,12 +145,17 @@ traffic matrix (`@/query/matrix`, bytes/sec; arrowheads only where a rate was
 observed; flows are the fallback + cumulative-stat enrichment), **L2Adjacency**
 edges come from netlink neighbor tables (dotted), and **Gateway** edges from
 the `routes/default_v4_gw` metric (dashed; unresolved gateways become wire-only
-router nodes). `layout.rs` positions nodes; `graph.rs` renders on a canvas with
-node/edge hit-testing, drawing a pure `RenderGraph` derived by
-`build_render_graph`. Nodes show live ↓rx/↑tx rates (hot-ring counter deltas),
-a health ring, a role glyph, and alert-severity tint; queries re-issue every
-~10 s while the view is open. Off-LAN traffic aggregates into an "Internet"
-pseudo-node (public unmapped matrix endpoints).
+router nodes). `layout.rs` holds the optional force-directed mode: stepped on
+a gated ~30 fps frame subscription with d3-style alpha cooling while settling
+(self-terminating — a settled graph burns no frames), alloc-free O(n²) core.
+`graph.rs` renders on a canvas with node/edge hit-testing, drawing a pure
+`RenderGraph` derived by `build_render_graph`; the render graph and canvas
+cache are change-gated, so idle seconds cost no rebuilds or redraws. Nodes
+show live ↓rx/↑tx rates (hot-ring counter deltas, patched into the render
+graph in place), a health ring, a role glyph, and alert-severity tint; the
+four topology queries re-issue every ~10 s while the view is open and land as
+one batched message (one edge rebuild per batch). Off-LAN traffic aggregates
+into an "Internet" pseudo-node (public unmapped matrix endpoints).
 
 Presentation (#392): **lenses** (Traffic / Security / L2 / Health) switch
 emphasis via a `LensSpec` table — edge kinds shown, tint source, passive
@@ -158,8 +170,10 @@ label/filter prefs persist in settings.json5. Supports zoom, pan (+ `f`
 zoom-to-fit), and manual node positioning — pinned positions persist across
 restarts. Polish (#394): hovering a node dims everything outside its 1-hop
 neighborhood; active flow edges animate a marching dash (uncached overlay,
-double-gated subscription); a toggleable legend explains the active lens;
-layout modes force / ranked grid / circular.
+double-gated subscription); a toggleable legend explains the active lens (and
+the tier order under the tiered layout); layout modes tiered (default) /
+force / ranked grid / circular, persisted under the `topology_layout_v2`
+settings key.
 
 Details on demand (#393, `view/topology/panel.rs`): selecting a node or edge
 opens a 320 px side panel fetched on selection (never on tick, stale replies
