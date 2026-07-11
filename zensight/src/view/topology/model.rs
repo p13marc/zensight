@@ -1037,7 +1037,7 @@ pub enum RenderSource {
 /// A fully-resolved node ready to draw (#392). Positions are *not* cached
 /// here — they resolve live via [`render_node_position`] so the 1 Hz layout
 /// and drags don't force a render-graph rebuild.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RenderNode {
     pub source: RenderSource,
     pub label: String,
@@ -1061,7 +1061,7 @@ pub struct RenderNode {
 
 /// A fully-resolved edge ready to draw (#392): endpoints are indices into
 /// [`RenderGraph::nodes`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RenderEdge {
     pub from: usize,
     pub to: usize,
@@ -1079,8 +1079,10 @@ pub struct RenderEdge {
 }
 
 /// The resolved, filtered, (later: grouped and lens-tinted) graph the canvas
-/// draws (#392). Rebuilt on structural/pref changes, not per frame.
-#[derive(Debug, Clone, Default)]
+/// draws (#392). Rebuilt on structural/pref changes, not per frame — and
+/// [`super::TopologyState::invalidate`] change-gates on `PartialEq` so an
+/// identical rebuild never clears the canvas cache.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RenderGraph {
     pub nodes: Vec<RenderNode>,
     pub edges: Vec<RenderEdge>,

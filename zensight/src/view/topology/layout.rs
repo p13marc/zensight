@@ -176,6 +176,24 @@ pub fn layout_step(state: &mut TopologyState, config: &LayoutConfig) -> bool {
     is_stable
 }
 
+/// Deterministic seed position for a newly discovered node (#440): an
+/// FNV-1a hash of the id picks an angle (plus a small radial jitter) on a
+/// ring around the origin. New nodes never stack at (0,0) — coincident
+/// nodes have a zero-direction repulsion force and would never separate —
+/// and, unlike the old whole-graph `arrange_in_circle` reseed, nothing else
+/// moves when a node appears. Pure.
+pub fn seed_position(id: &str) -> (f32, f32) {
+    const RING_RADIUS: f32 = 400.0;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in id.bytes() {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let angle = (hash % 3600) as f32 / 3600.0 * std::f32::consts::TAU;
+    let radius = RING_RADIUS + ((hash >> 32) % 120) as f32;
+    (radius * angle.cos(), radius * angle.sin())
+}
+
 /// Center the layout around the origin.
 pub fn center_layout(state: &mut TopologyState) {
     if state.nodes.is_empty() {
@@ -426,6 +444,19 @@ mod tests {
         state.nodes.insert("pinned".to_string(), pinned);
         grid_positions(&mut state);
         assert_eq!(state.nodes["pinned"].position, (42.0, 43.0));
+    }
+
+    #[test]
+    fn test_seed_position_deterministic_and_off_origin() {
+        let a = seed_position("host-a");
+        assert_eq!(a, seed_position("host-a"), "same id ⇒ same seed");
+        assert!(
+            (a.0 * a.0 + a.1 * a.1).sqrt() > 100.0,
+            "seed sits on the ring, not at the origin"
+        );
+        // Different ids land apart, so stacked spawns can't zero out the
+        // repulsion direction.
+        assert_ne!(a, seed_position("host-b"));
     }
 
     #[test]
