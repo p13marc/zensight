@@ -93,6 +93,9 @@ pub struct DeviceDetailState {
     /// On-demand netring flow detail, fetched lazily from `@/query/flows`.
     pub netring_detail: crate::view::specialized::netring_detail::NetringDetailState,
     pub systemd_detail: crate::view::specialized::systemd_detail::SystemdDetailState,
+    /// Parallax stream catalogue + live preview tiles, fetched/opened on
+    /// demand from the sensor's stream-control channels (#408).
+    pub parallax_detail: crate::view::specialized::parallax_detail::ParallaxDetailState,
     /// On-demand sysinfo process explorer, fetched lazily from
     /// `@/query/processes` (#47).
     pub sysinfo_detail: crate::view::specialized::sysinfo_detail::SysinfoDetailState,
@@ -135,6 +138,7 @@ impl DeviceDetailState {
             netlink_detail: Default::default(),
             netring_detail: Default::default(),
             systemd_detail: Default::default(),
+            parallax_detail: Default::default(),
             sysinfo_detail: Default::default(),
             chart_expanded: false,
             chart_custom_input: String::new(),

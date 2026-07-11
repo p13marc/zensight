@@ -170,6 +170,20 @@ backing flows with per-flow process attribution (#309 join,
 `AttributionTarget::Topology`), and community-id copy. Both pivot to the
 netring flow table and device detail.
 
+**Parallax live video** (`view/specialized/parallax.rs` +
+`parallax_detail.rs`, #408) — the media-plane viewer for a parallax device.
+The stream catalogue is fetched on open from the host-scoped
+`@/query/streams` queryable (`Fetch` lifecycle, mock-served in demo mode);
+Open sends `open_stream` (codec `mjpeg`) and spawns one **abortable**
+`Task::stream` per tile — a plain subscriber on the exact
+`@media/<stream>/preview/jpeg` key, latest-frame-wins, CBOR `FrameMeta`
+attachment, JPEG→RGBA decoded off the UI thread. Tiles render newest-frame
+images with a seq/fps caption. Close (and every way of leaving the device
+view: deselect, Escape, dashboard, disconnect, session replacement) aborts
+the subscriber tasks and batches `close_stream` commands; the stored
+`abort_on_drop` handles make dropping the state itself kill the subscribers,
+which is the sensor's falling-edge teardown backstop.
+
 **Logs** (`view/specialized/syslog.rs` and related) — structured log drill-down
 with a MESSAGE_ID catalog, follow/pause, and a boot lens. Seeds from the cold
 store on open (`Message::LogHistoryLoaded`; see [`local-store.md`](local-store.md)).

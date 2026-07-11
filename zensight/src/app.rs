@@ -1434,6 +1434,42 @@ impl ZenSight {
                     device.sysinfo_detail.apply(result);
                 }
             }
+            Message::FetchParallaxStreams => {
+                let host = self.selected_device.as_mut().and_then(|device| {
+                    (device.device_id.protocol == zensight_common::Protocol::Parallax).then(|| {
+                        device.parallax_detail.loading();
+                        device.device_id.source.clone()
+                    })
+                });
+                if let Some(host) = host {
+                    return ControlFlow::Break(self.query_parallax_streams(host));
+                }
+            }
+            Message::ParallaxStreamsReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.parallax_detail.apply(result);
+                }
+            }
+            Message::ParallaxOpenTile { stream } => {
+                return ControlFlow::Break(self.open_parallax_tile(stream));
+            }
+            Message::ParallaxCloseTile { stream } => {
+                return ControlFlow::Break(self.close_parallax_tile(stream));
+            }
+            Message::ParallaxFrame {
+                stream,
+                seq,
+                handle,
+            } => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.parallax_detail.apply_frame(&stream, seq, handle);
+                }
+            }
+            Message::ParallaxTileEnded { stream, error } => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.parallax_detail.end_tile(&stream, error);
+                }
+            }
             other => return ControlFlow::Continue(other),
         }
         ControlFlow::Break(Task::none())
@@ -1613,6 +1649,9 @@ impl ZenSight {
 
             Message::Connected(session) => {
                 tracing::info!("Connected to Zenoh");
+                // Preview tiles ride the old session's subscribers — abort
+                // them; the sensor's matching listener reaps their streams.
+                let _ = self.teardown_parallax_tiles();
                 self.command_registry = session.as_ref().map(|s| {
                     std::sync::Arc::new(zensight_common::PublisherRegistry::new(s.clone()))
                 });
@@ -1647,6 +1686,7 @@ impl ZenSight {
 
             Message::Disconnected(error) => {
                 tracing::warn!(error = %error, "Disconnected from Zenoh");
+                let _ = self.teardown_parallax_tiles();
                 self.session = None;
                 self.command_registry = None;
                 self.dashboard.connected = false;
@@ -1733,8 +1773,10 @@ impl ZenSight {
             }
 
             Message::ClearSelection => {
+                let teardown = self.teardown_parallax_tiles();
                 self.selected_device = None;
                 self.set_view(CurrentView::Dashboard);
+                return teardown;
             }
 
             Message::ToggleProtocolFilter(protocol) => {
@@ -1867,8 +1909,10 @@ impl ZenSight {
 
             // Settings messages
             Message::OpenDashboard => {
+                let teardown = self.teardown_parallax_tiles();
                 self.selected_device = None;
                 self.set_view(CurrentView::Dashboard);
+                return teardown;
             }
 
             Message::OpenSensors => {
@@ -2458,7 +2502,7 @@ impl ZenSight {
             }
 
             Message::EscapePressed => {
-                self.handle_escape();
+                return self.handle_escape();
             }
 
             // Overview messages
@@ -4766,6 +4810,144 @@ impl ZenSight {
         })
     }
 
+    /// Fetch the parallax stream catalogue for `host` (#408). Demo mode
+    /// serves the mock catalogue (demo mirrors the wire contract; demo never
+    /// serves queryables).
+    fn query_parallax_streams(&self, host: String) -> Task<Message> {
+        if self.demo_mode {
+            return Task::done(Message::ParallaxStreamsReceived(Ok(
+                crate::mock::parallax::streams(),
+            )));
+        }
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::ParallaxStreamsReceived(Err(
+                "Not connected to Zenoh".to_string(),
+            )));
+        };
+        Task::future(async move {
+            let result = crate::view::specialized::parallax_detail::fetch_streams(session, host)
+                .await
+                .ok_or_else(|| "No parallax sensor responded".to_string());
+            Message::ParallaxStreamsReceived(result)
+        })
+    }
+
+    /// Open a live preview tile (#408): send `open_stream` (codec `mjpeg`)
+    /// and spawn the abortable per-tile subscriber task. The abort handle is
+    /// stored on the tile via `abort_on_drop()` so dropping the tile state
+    /// always kills the subscriber (which is the sensor's falling-edge
+    /// teardown signal).
+    fn open_parallax_tile(&mut self, stream: String) -> Task<Message> {
+        use crate::view::specialized::parallax_detail;
+        let Some(source) = self
+            .selected_device
+            .as_ref()
+            .filter(|d| d.device_id.protocol == zensight_common::Protocol::Parallax)
+            .map(|d| d.device_id.source.clone())
+        else {
+            return Task::none();
+        };
+        if self.demo_mode {
+            // Demo: contract-shaped tile state without a live subscriber —
+            // the tile renders its placeholder frame.
+            if let Some(device) = self.selected_device.as_mut() {
+                device.parallax_detail.open_tile(&stream, None);
+            }
+            return Task::none();
+        }
+        let Some(session) = self.session.clone() else {
+            self.toasts
+                .push(ToastSeverity::Error, "Not connected to Zenoh".to_string());
+            return Task::none();
+        };
+        let (frames, handle) = Task::stream(parallax_detail::preview_tile_stream(
+            session,
+            source.clone(),
+            stream.clone(),
+        ))
+        .abortable();
+        if let Some(device) = self.selected_device.as_mut() {
+            device
+                .parallax_detail
+                .open_tile(&stream, Some(handle.abort_on_drop()));
+        }
+        let open =
+            zensight_common::command::Command::new(zensight_common::StreamControl::OpenStream {
+                stream: stream.clone(),
+                codec: Some("mjpeg".to_string()),
+                max_height: None,
+            });
+        let send = self.send_command(
+            zensight_common::command_key(&parallax_detail::host_prefix(&source), "stream"),
+            &open,
+            format!("Opened preview for {stream}"),
+        );
+        Task::batch([send, frames])
+    }
+
+    /// Close a preview tile (#408): abort its subscriber task, drop it, and
+    /// send `close_stream` so the sensor reaps without the idle timeout.
+    fn close_parallax_tile(&mut self, stream: String) -> Task<Message> {
+        use crate::view::specialized::parallax_detail;
+        let Some(source) = self
+            .selected_device
+            .as_ref()
+            .filter(|d| d.device_id.protocol == zensight_common::Protocol::Parallax)
+            .map(|d| d.device_id.source.clone())
+        else {
+            return Task::none();
+        };
+        if let Some(device) = self.selected_device.as_mut() {
+            device.parallax_detail.close_tile(&stream);
+        }
+        if self.demo_mode || self.command_registry.is_none() {
+            return Task::none();
+        }
+        let close =
+            zensight_common::command::Command::new(zensight_common::StreamControl::CloseStream {
+                stream: stream.clone(),
+            });
+        self.send_command(
+            zensight_common::command_key(&parallax_detail::host_prefix(&source), "stream"),
+            &close,
+            format!("Closed preview for {stream}"),
+        )
+    }
+
+    /// Abort every open parallax preview tile and batch the `close_stream`
+    /// sends (#408). Called whenever the device view goes away — deselect,
+    /// disconnect, session replacement. `abort_on_drop` already kills the
+    /// subscribers (the sensor's crash backstop); the explicit close makes
+    /// the sensor reap immediately instead of after the idle timeout.
+    fn teardown_parallax_tiles(&mut self) -> Task<Message> {
+        use crate::view::specialized::parallax_detail;
+        let Some(device) = self.selected_device.as_mut() else {
+            return Task::none();
+        };
+        if device.device_id.protocol != zensight_common::Protocol::Parallax {
+            return Task::none();
+        }
+        let source = device.device_id.source.clone();
+        let streams = device.parallax_detail.teardown();
+        if streams.is_empty() || self.demo_mode || self.command_registry.is_none() {
+            return Task::none();
+        }
+        let cmd_key =
+            zensight_common::command_key(&parallax_detail::host_prefix(&source), "stream");
+        Task::batch(streams.into_iter().map(|stream| {
+            let close = zensight_common::command::Command::new(
+                zensight_common::StreamControl::CloseStream {
+                    stream: stream.clone(),
+                },
+            );
+            self.send_command(
+                cmd_key.clone(),
+                &close,
+                format!("Closed preview for {stream}"),
+            )
+        }))
+    }
+
     /// Fetch the per-process bandwidth table from the netlink sensor's
     /// `@/query/bandwidth` channel (#319/epic #320). In demo mode (no session)
     /// return synthetic rows so the Processes view is developable without sensors
@@ -4873,20 +5055,20 @@ impl ZenSight {
     }
 
     /// Handle Escape key - close dialogs or go back.
-    fn handle_escape(&mut self) {
+    fn handle_escape(&mut self) -> Task<Message> {
         // Transient overlays close first, before any view navigation.
         if self.command_palette.open {
             self.command_palette.close();
-            return;
+            return Task::none();
         }
         if self.help_open {
             self.help_open = false;
-            return;
+            return Task::none();
         }
         // The global search overlay takes priority: Escape closes it first (#27).
         if self.global_search.open {
             self.global_search.close();
-            return;
+            return Task::none();
         }
         match self.current_view {
             CurrentView::Settings => {
@@ -4919,8 +5101,10 @@ impl ZenSight {
                     if device.selected_metric.is_some() {
                         device.clear_chart_selection();
                     } else {
+                        let teardown = self.teardown_parallax_tiles();
                         self.selected_device = None;
                         self.set_view(CurrentView::Dashboard);
+                        return teardown;
                     }
                 }
             }
@@ -4941,6 +5125,7 @@ impl ZenSight {
                 }
             }
         }
+        Task::none()
     }
 
     /// Create subscriptions for Zenoh telemetry and periodic updates.
@@ -5948,6 +6133,7 @@ fn prefetch_channels(protocol: zensight_common::Protocol) -> Vec<Message> {
         ],
         Protocol::Netring => vec![Message::FetchNetringFlows],
         Protocol::Sysinfo => vec![Message::FetchSysinfoProcesses(ProcessSort::default())],
+        Protocol::Parallax => vec![Message::FetchParallaxStreams],
         _ => Vec::new(),
     }
 }
@@ -6131,6 +6317,12 @@ mod prefetch_tests {
         assert!(matches!(
             prefetch_channels(Protocol::Sysinfo).as_slice(),
             [Message::FetchSysinfoProcesses(_)]
+        ));
+
+        // Parallax prefetches the stream catalogue (#408).
+        assert!(matches!(
+            prefetch_channels(Protocol::Parallax).as_slice(),
+            [Message::FetchParallaxStreams]
         ));
 
         // Protocols without queryable detail channels prefetch nothing.

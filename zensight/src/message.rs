@@ -428,6 +428,33 @@ pub enum Message {
     FetchSysinfoProcesses(crate::view::specialized::sysinfo_detail::ProcessSort),
     /// A sysinfo process-explorer reply: the decoded records, or an error.
     SysinfoProcessesReceived(Result<Vec<zensight_common::ProcessRecord>, String>),
+    /// Fetch the parallax stream catalogue (`@/query/streams`) for the
+    /// selected host (#408).
+    FetchParallaxStreams,
+    /// A parallax catalogue reply: the advertised streams, or an error.
+    ParallaxStreamsReceived(Result<Vec<zensight_common::StreamDescriptor>, String>),
+    /// Open a live JPEG preview tile: sends `open_stream` (codec `mjpeg`) and
+    /// spawns the abortable per-tile subscriber task (#408).
+    ParallaxOpenTile {
+        stream: String,
+    },
+    /// Close a preview tile: aborts its subscriber task and sends
+    /// `close_stream`.
+    ParallaxCloseTile {
+        stream: String,
+    },
+    /// A decoded preview frame from a tile's subscriber task. Stale `seq`s
+    /// are dropped (latest frame wins).
+    ParallaxFrame {
+        stream: String,
+        seq: u64,
+        handle: iced::widget::image::Handle,
+    },
+    /// A tile's subscriber task finished (session closed or subscribe error).
+    ParallaxTileEnded {
+        stream: String,
+        error: Option<String>,
+    },
 
     // ── Cross-view identity pivots (#313) — host-local joins over already-
     // published data; every pivot is a query-time read, no new bus traffic.
