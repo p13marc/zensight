@@ -67,10 +67,23 @@ dropped frames (LiveVideo QoS is best-effort by design).
 ## Teardown
 
 `close_stream` decrements the profile refcount; at 0 the profile enters the
-idle countdown (unless a viewer is still subscribed). The idle reaper aborts
-the pipeline, the egress task, and the matching-listener task, and undeclares
+idle countdown (unless a viewer is still subscribed). The idle reaper stops
+the pipeline, aborts the egress and matching-listener tasks, and undeclares
 the publisher. Closing the last profile marks the stream inactive in the
 catalogue and publishes a `StreamStatus{open: false}` transition.
+
+A profile that was opened but never gets (or loses) its viewer is reaped by
+the same countdown even if its refcount is non-zero — the matching listener
+is the crash backstop for GUIs that die without `close_stream`, and an opener
+that never subscribes is a zombie.
+
+**Stopping a live pipeline** (parallax 0.1.1 gotcha): the unified executor
+runs source loops on blocking threads and ignores downstream channel closure,
+so `PipelineHandle::abort()` alone cannot end a live source — the blocking
+task would run forever. Every source the sensor builds is wrapped in a
+`StoppableSource` whose `StopHandle` flips the next `produce()` to EOS; the
+whole pipeline then unwinds cleanly within one frame period. Teardown always
+triggers the stop handle first.
 
 ## Limitations
 

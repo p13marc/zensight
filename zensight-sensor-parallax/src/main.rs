@@ -11,7 +11,8 @@ use zensight_sensor_core::{Format, Protocol, SensorArgs, SensorConfig, SensorRun
 
 use zensight_sensor_parallax::catalog::Catalog;
 use zensight_sensor_parallax::config::ParallaxSensorConfig;
-use zensight_sensor_parallax::query;
+use zensight_sensor_parallax::session::SessionManager;
+use zensight_sensor_parallax::{command, query};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -99,13 +100,32 @@ async fn main() -> Result<()> {
     let reporter = Arc::new(reporter);
     runner.spawn(zensight_sensor_core::serve_alerts_query(reporter.clone()));
 
+    // The stream-session actor: owns every open pipeline, driven by commands.
+    let session_handle = SessionManager::spawn(
+        catalog.clone(),
+        parallax_config.clone(),
+        source.clone(),
+        runner.publisher(),
+    );
+
+    // Stream control channel (`@/commands/stream` + `@/status/streams`).
+    {
+        let c_session = session.clone();
+        let c_prefix = host_prefix.clone();
+        let c_handle = session_handle.clone();
+        runner.spawn(async move {
+            command::run(c_session, c_prefix, c_handle).await;
+        });
+    }
+
     // Serve the stream catalogue on `@/query/streams`.
     {
         let q_session = session.clone();
         let q_prefix = host_prefix.clone();
         let q_catalog = catalog.clone();
+        let q_handle = session_handle.clone();
         runner.spawn(async move {
-            query::run(q_session, q_prefix, q_catalog).await;
+            query::run(q_session, q_prefix, q_catalog, q_handle).await;
         });
     }
 

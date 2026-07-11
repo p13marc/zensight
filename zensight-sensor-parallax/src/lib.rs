@@ -15,5 +15,9 @@
 //! - stats:     `<stream>/stats/<metric>` (ordinary telemetry)
 
 pub mod catalog;
+pub mod command;
 pub mod config;
+pub mod egress;
+pub mod pipeline;
 pub mod query;
+pub mod session;
