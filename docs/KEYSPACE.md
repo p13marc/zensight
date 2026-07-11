@@ -34,7 +34,7 @@ The single root is `zensight/`. Everything below it is either **telemetry**
 | `netlink` | zensight-sensor-netlink | hostname |
 | `netring` | zensight-sensor-netring | sensor id |
 | `systemd` | zensight-sensor-systemd | hostname |
-| `parallax` | *(media source; parallax daemon out of scope, #359)* | source id |
+| `parallax` | zensight-sensor-parallax (live video → `@media`, #402) | hostname |
 
 ---
 
@@ -333,10 +333,12 @@ host's sensor and its catalogue/status answer for that host only:
 | `@/query/streams` | queryable | `Vec<StreamDescriptor>` (advertised streams; late-joiner seed) | `streams` |
 | `@/status/streams` | queryable **and** declared-publisher transitions | `Vec<StreamStatus>` reply / one `StreamStatus` per transition (open? · viewers · active profile) | `streams` |
 
-Stream *stats* (fps/kbps/drops) ride normal telemetry under
+Stream *stats* (fps/kbps/drops/viewers/encode_ms) ride normal telemetry under
 `zensight/<proto>/<source>/<stream>/stats/<metric>`, so existing charts light up
-for free. (The H.264/parallax encoder daemon that produces the frames is out of
-scope for #359 — this is the zenoh-side enabler only.)
+for free. The concrete producer is **`zensight-sensor-parallax`** (#402): V4L2
+cameras, RTSP cameras, and synthetic test patterns, encoded on demand
+(open_stream/close_stream) to H.264 + JPEG previews — see that crate's
+`docs/streams.md`; the GUI's viewer is `zensight/src/view/specialized/parallax*.rs`.
 
 ### netring detector-registry migration (#369, BREAKING)
 

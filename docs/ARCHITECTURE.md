@@ -20,7 +20,7 @@ flowchart TD
         LogsSensor["zensight-sensor-logs"]
         SysinfoSensor["zensight-sensor-sysinfo"]
         NetflowSensor["zensight-sensor-netflow"]
-        OtherSensors["... modbus, gnmi, netlink,<br/>netring, systemd"]
+        OtherSensors["... modbus, gnmi, netlink,<br/>netring, systemd, parallax"]
     end
 
     SNMPDev --> SnmpSensor
@@ -63,6 +63,9 @@ All sensors reuse `zensight-sensor-core` (`SensorRunner`, `Publisher`) and `zens
 - `zensight/<protocol>/<source>/@/errors` — error reports (host-scoped)
 - `zensight/_meta/sensors/*` — sensor registration
 - `zensight/_meta/correlation/*` — device correlation (feeds the correlator, see below)
+- `zensight/<protocol>/<source>/@media/<stream>/…` — opaque live media (H.264 +
+  JPEG previews with CBOR `FrameMeta` attachments; produced on demand by
+  `zensight-sensor-parallax`, viewed in the GUI — KEYSPACE.md §3.3)
 
 ## Crate Dependencies
 
@@ -77,7 +80,7 @@ flowchart BT
 
     subgraph Apps["Applications"]
         Frontend["zensight (frontend)<br/>Iced 0.14 GUI"]
-        SensorApps["zensight-sensor-*<br/>snmp, logs, sysinfo, netflow,<br/>modbus, gnmi, netlink, netring, systemd"]
+        SensorApps["zensight-sensor-*<br/>snmp, logs, sysinfo, netflow, modbus,<br/>gnmi, netlink, netring, systemd, parallax"]
         PromExp["zensight-exporter-prometheus<br/>HTTP /metrics"]
         OtelExp["zensight-exporter-otel<br/>OTLP gRPC/HTTP"]
     end

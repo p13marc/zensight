@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`zensight-sensor-parallax` — live video onto the media plane** (epic #402,
+  phases 0–2). A new sensor built on the `parallax` pipeline engine advertises
+  V4L2 cameras, RTSP cameras, and synthetic test patterns as a stream
+  catalogue (`@/query/streams`), opens/closes encode pipelines on
+  `@/commands/stream`, and publishes opaque H.264 access units
+  (`@media/<stream>/video/h264/<profile>`) and low-fps JPEG previews
+  (`@media/<stream>/preview/jpeg`) with a typed CBOR `FrameMeta` attachment
+  per frame (#403). Streams are refcounted per open, torn down on close or
+  after an idle window without viewers, and force a keyframe the instant a
+  subscriber appears (#404–#406). Per-stream stats
+  (`<stream>/stats/{fps,kbps,drops,viewers,encode_ms}`), per-stream device
+  health, and auto-resolving alert rules (`camera_disappeared`,
+  `rtsp_connect_failed`, `encoder_overrun`) ride the normal channels (#407).
+- **GUI: parallax stream catalogue + live JPEG preview tiles** (#408). The
+  parallax device view fetches the catalogue on open and renders abortable
+  live preview tiles (exact-key media subscriber, latest-frame-wins, CBOR
+  `FrameMeta`, JPEG decode off the UI thread) with seq/fps captions; every
+  way of leaving the view tears the tiles down and closes the streams.
+- **GUI: opt-in H.264 live view** behind the new `zensight` `h264` cargo
+  feature (#409; default OFF — openh264 is a C++ build from source). Decodes
+  the video profile keyframe-gated, rebuilds the decoder and requests a fresh
+  IDR on sequence discontinuities; default builds show a build hint instead.
+
 ## [0.7.0] - 2026-07-08
 
 Identity & evidence release. Sensors now self-report a stable host identity and
