@@ -1043,22 +1043,32 @@ fn render_host_card<'a>(
     let header = header.push(metric_count).push(group_tags);
 
     // One clickable badge per facet — protocol icon + per-facet status dot —
-    // pivoting to that sensor's device view.
+    // pivoting to that sensor's device view. When the same protocol appears on
+    // several facets (different sources correlated into one host), append the
+    // facet's source so the badges stay distinguishable.
+    let dup_protocols =
+        crate::view::host::duplicated_protocols(host.facets.iter().map(|f| f.id.protocol));
     let mut facet_row = iced::widget::Row::new().spacing(6);
     for facet in &host.facets {
         let fstatus = facet.effective_status();
-        let chip = button(
-            row![
-                animated_status_indicator(fstatus, 8.0),
-                icons::protocol_icon::<Message>(facet.id.protocol, IconSize::Small),
-                text(facet.id.protocol.display_name()).size(11),
-            ]
-            .spacing(4)
-            .align_y(Alignment::Center),
-        )
-        .on_press(Message::SelectDevice(facet.id.clone()))
-        .padding([2, 6])
-        .style(iced::widget::button::secondary);
+        let mut chip_label = row![
+            animated_status_indicator(fstatus, 8.0),
+            icons::protocol_icon::<Message>(facet.id.protocol, IconSize::Small),
+            text(facet.id.protocol.display_name()).size(11),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center);
+        if dup_protocols.contains(&facet.id.protocol) {
+            chip_label = chip_label.push(text(format!("· {}", facet.id.source)).size(11).style(
+                |t: &Theme| text::Style {
+                    color: Some(crate::view::theme::colors(t).text_muted()),
+                },
+            ));
+        }
+        let chip = button(chip_label)
+            .on_press(Message::SelectDevice(facet.id.clone()))
+            .padding([2, 6])
+            .style(iced::widget::button::secondary);
         facet_row = facet_row.push(tooltip(
             chip,
             container(text(format!("{} metrics", facet.metric_count)).size(11))

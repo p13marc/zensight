@@ -497,6 +497,162 @@ fn test_host_detail_single_facet_has_no_strip() {
     assert!(ui.find("server01").is_ok());
 }
 
+/// Two same-protocol facets with different sources (e.g. a toolbox-run sensor
+/// correlated into the same host as the host-run one) get a muted "· <source>"
+/// suffix on their host-card chips; a lone facet per protocol does not.
+#[test]
+fn test_host_card_disambiguates_same_protocol_facets() {
+    use zensight_common::{HostEntity, MemberClaim};
+
+    fn member(sensor: &str, source: &str) -> MemberClaim {
+        MemberClaim {
+            sensor: sensor.into(),
+            source: source.into(),
+            rule: "host_id".into(),
+            confidence: 1.0,
+            last_seen: 1,
+        }
+    }
+
+    fn dashboard(sources: &[&str]) -> (DashboardState, zensight::entity::EntityStore) {
+        let mut state = DashboardState::default();
+        state.connected = true;
+        state.connection_state = ConnectionState::Connected;
+        for source in sources {
+            let id = DeviceId::new(Protocol::Sysinfo, *source);
+            let mut device = DeviceState::new(id.clone());
+            device.metric_count = 3;
+            device.is_healthy = true;
+            state.devices.insert(id, device);
+        }
+        let mut entities = zensight::entity::EntityStore::default();
+        entities.upsert(HostEntity {
+            entity_id: "h_web01".into(),
+            aliases: vec![],
+            host_id: None,
+            boot_id: None,
+            ips: vec![],
+            macs: vec![],
+            container_ids: vec![],
+            hostname: Some("web-01".into()),
+            fqdn: None,
+            names: vec![],
+            vendor: None,
+            platform: None,
+            members: sources.iter().map(|s| member("sysinfo", s)).collect(),
+            status: None,
+            last_updated: 1_000,
+        });
+        (state, entities)
+    }
+
+    let groups = GroupsState::default();
+    let overview = OverviewState::default();
+    let sensor_health = HashMap::new();
+    let firing: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    // Duplicated protocol → both chips carry their source suffix.
+    let (state, entities) = dashboard(&["host-a", "toolbx"]);
+    let mut ui = simulator(dashboard_view(
+        &state,
+        AppTheme::Dark,
+        0,
+        &groups,
+        &overview,
+        &sensor_health,
+        zensight::view::trend::DeviceSparks::new(),
+        &entities,
+        &firing,
+        true,
+    ));
+    assert!(ui.find("· toolbx").is_ok());
+    assert!(ui.find("· host-a").is_ok());
+
+    // Single facet for the protocol → no suffix.
+    let (state, entities) = dashboard(&["toolbx"]);
+    let mut ui = simulator(dashboard_view(
+        &state,
+        AppTheme::Dark,
+        0,
+        &groups,
+        &overview,
+        &sensor_health,
+        zensight::view::trend::DeviceSparks::new(),
+        &entities,
+        &firing,
+        true,
+    ));
+    assert!(ui.find("· toolbx").is_err());
+}
+
+/// The "Forget" affordance renders only for an Offline facet, and clicking it
+/// emits `ForgetDevice` for that facet. (The map-entry removal itself is
+/// asserted update-level in `app::forget_device_tests`.) Also pins the facet
+/// tab strip's "· <source>" disambiguation for duplicated protocols.
+#[test]
+fn test_forget_button_only_for_offline_facet() {
+    use zensight_common::DeviceStatus;
+
+    fn view_for(status: DeviceStatus) -> (DeviceId, Vec<FacetTab>, DeviceDetailState) {
+        let active = DeviceId::new(Protocol::Sysinfo, "toolbx");
+        let other = DeviceId::new(Protocol::Sysinfo, "host-a");
+        let facets = vec![
+            FacetTab {
+                id: active.clone(),
+                protocol: Protocol::Sysinfo,
+                status,
+                active: true,
+            },
+            FacetTab {
+                id: other,
+                protocol: Protocol::Sysinfo,
+                status: DeviceStatus::Online,
+                active: false,
+            },
+        ];
+        let state = DeviceDetailState::new(active.clone());
+        (active, facets, state)
+    }
+
+    let syslog_filter = SyslogFilterState::default();
+
+    // Offline active facet → Forget is present and emits ForgetDevice.
+    let (active, facets, state) = view_for(DeviceStatus::Offline);
+    let mut ui = simulator(host_detail_view(DeviceViewCtx {
+        state: &state,
+        syslog_filter: &syslog_filter,
+        host_logs: &[],
+        facets: &facets,
+        entity: None,
+        identity_expanded: false,
+        artifact: None,
+    }));
+    assert!(ui.find("Forget").is_ok());
+    // Duplicated-protocol tabs carry their source suffix.
+    assert!(ui.find("· toolbx").is_ok());
+    let _ = ui.click("Forget");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::ForgetDevice(id) if *id == active)),
+        "expected ForgetDevice for the active facet, got {messages:?}"
+    );
+
+    // Online active facet → no Forget affordance.
+    let (_, facets, state) = view_for(DeviceStatus::Online);
+    let mut ui = simulator(host_detail_view(DeviceViewCtx {
+        state: &state,
+        syslog_filter: &syslog_filter,
+        host_logs: &[],
+        facets: &facets,
+        entity: None,
+        identity_expanded: false,
+        artifact: None,
+    }));
+    assert!(ui.find("Forget").is_err());
+}
+
 /// Test clicking Back button in device view.
 #[test]
 fn test_device_back_button() {

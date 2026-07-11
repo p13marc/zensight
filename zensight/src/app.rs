@@ -1819,6 +1819,26 @@ impl ZenSight {
                 return teardown;
             }
 
+            Message::ForgetDevice(id) => {
+                // Facets are in-memory only — removal is a pure view-model
+                // operation; the device reappears if telemetry resumes.
+                if self.dashboard.devices.remove(&id).is_some() {
+                    self.toasts.push(
+                        ToastSeverity::Info,
+                        format!("Forgot {} · {}", id.protocol.display_name(), id.source),
+                    );
+                }
+                if self
+                    .selected_device
+                    .as_ref()
+                    .is_some_and(|d| d.device_id == id)
+                {
+                    // Reuse the back-to-dashboard choke point (parallax tile
+                    // teardown etc.) instead of duplicating its logic.
+                    return self.update(Message::ClearSelection);
+                }
+            }
+
             Message::ToggleProtocolFilter(protocol) => {
                 self.dashboard.toggle_filter(protocol);
             }
@@ -6811,5 +6831,56 @@ mod sensor_liveliness_tests {
             a.sensor_health["sysinfo@hostB"].status,
             HealthStatus::Starting
         );
+    }
+}
+
+/// Forget-device (#stale facets): dropping a facet removes its map entry, and
+/// forgetting the open device reuses the back-to-dashboard path.
+#[cfg(test)]
+mod forget_device_tests {
+    use super::*;
+    use zensight_common::Protocol;
+
+    #[test]
+    fn forget_device_removes_map_entry() {
+        let mut a = ZenSight::boot(true).0;
+        let id = DeviceId::new(Protocol::Snmp, "router01");
+        a.dashboard
+            .devices
+            .insert(id.clone(), DeviceState::new(id.clone()));
+
+        let _ = a.update(Message::ForgetDevice(id.clone()));
+        assert!(!a.dashboard.devices.contains_key(&id));
+    }
+
+    #[test]
+    fn forget_selected_device_clears_selection() {
+        let mut a = ZenSight::boot(true).0;
+        let id = DeviceId::new(Protocol::Snmp, "router01");
+        a.dashboard
+            .devices
+            .insert(id.clone(), DeviceState::new(id.clone()));
+        a.selected_device = Some(DeviceDetailState::new(id.clone()));
+        a.current_view = CurrentView::Device;
+
+        let _ = a.update(Message::ForgetDevice(id.clone()));
+        assert!(!a.dashboard.devices.contains_key(&id));
+        assert!(a.selected_device.is_none(), "selection cleared");
+        assert!(matches!(a.current_view, CurrentView::Dashboard));
+
+        // Forgetting some *other* device must not touch the open selection.
+        let open = DeviceId::new(Protocol::Sysinfo, "server01");
+        let gone = DeviceId::new(Protocol::Sysinfo, "toolbx");
+        a.dashboard
+            .devices
+            .insert(open.clone(), DeviceState::new(open.clone()));
+        a.dashboard
+            .devices
+            .insert(gone.clone(), DeviceState::new(gone.clone()));
+        a.selected_device = Some(DeviceDetailState::new(open.clone()));
+        let _ = a.update(Message::ForgetDevice(gone.clone()));
+        assert!(!a.dashboard.devices.contains_key(&gone));
+        assert!(a.dashboard.devices.contains_key(&open));
+        assert!(a.selected_device.is_some());
     }
 }
