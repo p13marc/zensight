@@ -321,13 +321,17 @@ off — a stale frame is worthless, and the encoder must never block).
 so the sensor can force an immediate keyframe (late joiners get a decodable
 picture at once).
 
-**Stream control rides the ordinary `@/` channels** (§3), not `@media`:
+**Stream control rides the ordinary `@/` channels** (§3), not `@media` —
+and, like the media keys themselves, it is **host-scoped**: the prefix is
+`zensight/<protocol>/<source>` (e.g.
+`zensight/parallax/hostA/@/commands/stream`), so commands reach exactly one
+host's sensor and its catalogue/status answer for that host only:
 
-| Key | Direction | Payload | Topic |
+| Key (under `zensight/<proto>/<source>`) | Direction | Payload | Topic |
 |-----|-----------|---------|-------|
 | `@/commands/stream` | subscribe | `Command<StreamControl>` (`OpenStream`/`CloseStream`/`RequestKeyframe`) | `stream` |
 | `@/query/streams` | queryable | `Vec<StreamDescriptor>` (advertised streams; late-joiner seed) | `streams` |
-| `@/status/streams` | queryable | `StreamStatus` (open? · viewers · active profile) | `streams` |
+| `@/status/streams` | queryable **and** declared-publisher transitions | `Vec<StreamStatus>` reply / one `StreamStatus` per transition (open? · viewers · active profile) | `streams` |
 
 Stream *stats* (fps/kbps/drops) ride normal telemetry under
 `zensight/<proto>/<source>/<stream>/stats/<metric>`, so existing charts light up

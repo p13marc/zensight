@@ -19,8 +19,8 @@ use parallax::element::{ProduceContext, ProduceResult, Source};
 use parallax::elements::codec::KeyframeHandle;
 use parallax::elements::transform::VideoConvertElement;
 use parallax::elements::{
-    AppSink, AppSinkHandle, ColorType, H264Encoder, H264EncoderConfig, JpegEncoder, VideoPattern,
-    VideoTestSrc,
+    AppSink, AppSinkHandle, AppSrc, AppSrcHandle, ColorType, H264Decoder, H264Encoder,
+    H264EncoderConfig, JpegDecoder, JpegEncoder, Throttle, V4l2Src, VideoPattern, VideoTestSrc,
 };
 use parallax::pipeline::{Executor, Pipeline, UnifiedExecutorConfig};
 
@@ -140,10 +140,19 @@ pub struct BuiltPipeline {
     /// Cooperative source stop — MUST be triggered at teardown (see
     /// [`StopHandle`]); `PipelineHandle::abort()` alone leaks the source.
     pub stop: StopHandle,
-    /// Encoded frame dimensions (stamped into every `FrameMeta`).
+    /// Push side of an `AppSrc`-fed pipeline (RTSP): the caller must run a
+    /// feeder task that pushes buffers and calls `end_stream()` on source
+    /// loss. `None` for self-driving sources (test pattern, V4L2).
+    pub feed: Option<AppSrcHandle>,
+    /// Encoded frame dimensions (stamped into every `FrameMeta`;
+    /// `0` = unknown, e.g. RTSP passthrough without SDP dimensions).
     pub width: u32,
     pub height: u32,
 }
+
+/// How many buffers an RTSP feeder may queue in the `AppSrc` before frames
+/// are shed (live video: never let the feeder back up).
+const FEED_QUEUE: usize = 8;
 
 /// Build the H.264 video-profile pipeline for one source.
 ///
@@ -207,15 +216,186 @@ pub fn build_video(
                 sink: sink_handle,
                 keyframe: Some(keyframe),
                 stop,
+                feed: None,
                 width: w,
                 height: h,
             })
         }
-        SourceKind::V4l2 { .. } | SourceKind::Rtsp { .. } => {
-            // Landing with the camera/RTSP video profile (#406).
-            bail!("h264 video profile for this source kind is not implemented yet")
+        SourceKind::V4l2 { device } => {
+            let src = V4l2Src::new(device)
+                .map_err(|e| anyhow::anyhow!("open v4l2 device {device}: {e}"))?;
+            let (w, h) = (src.width(), src.height());
+            let fourcc = *src.fourcc();
+            let fps = src
+                .framerate()
+                .map(|(num, den)| num as f32 / den.max(1) as f32)
+                .unwrap_or(30.0);
+            if max_height.is_some_and(|mh| mh < h) {
+                // In-pipeline rescale is not wired yet; encode at the
+                // camera's negotiated size rather than fail the open.
+                tracing::warn!(device = %device, native = h, requested = ?max_height,
+                    "max_height below camera resolution ignored (no rescale element yet)");
+            }
+
+            let encoder = H264Encoder::new(
+                H264EncoderConfig::new(w, h)
+                    .bitrate(video.bitrate_kbps.saturating_mul(1000))
+                    .frame_rate(fps)
+                    .keyframe_interval(video.gop_frames),
+            )
+            .context("create H.264 encoder")?;
+            let keyframe = encoder.keyframe_handle();
+
+            let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
+            let sink_handle = sink.handle();
+            let (src, stop) = StoppableSource::new(src);
+
+            let mut pipeline = Pipeline::new();
+            let src_id = pipeline.add_source("v4l2-src", src);
+            let enc_id = pipeline.add_filter("h264-encoder", encoder);
+            let sink_id = pipeline.add_sink("app-sink", sink);
+            // The camera negotiates MJPG first, YUYV as fallback; both paths
+            // end in I420 for the encoder.
+            let to_i420 = match &fourcc {
+                b"MJPG" => {
+                    // JpegDecoder emits packed RGB (metadata-described).
+                    let dec_id = pipeline.add_filter("mjpg-decoder", JpegDecoder::new());
+                    let conv_id = pipeline.add_filter(
+                        "convert-i420",
+                        VideoConvertElement::new()
+                            .with_input_format(ConvFormat::Rgb24)
+                            .with_output_format(ConvFormat::I420)
+                            .with_size(w, h),
+                    );
+                    pipeline.link(src_id, dec_id).context("link src→decoder")?;
+                    pipeline
+                        .link(dec_id, conv_id)
+                        .context("link decoder→convert")?;
+                    conv_id
+                }
+                b"YUYV" => {
+                    let conv_id = pipeline.add_filter(
+                        "convert-i420",
+                        VideoConvertElement::new()
+                            .with_input_format(ConvFormat::Yuyv)
+                            .with_output_format(ConvFormat::I420)
+                            .with_size(w, h),
+                    );
+                    pipeline.link(src_id, conv_id).context("link src→convert")?;
+                    conv_id
+                }
+                other => bail!(
+                    "unsupported v4l2 pixel format {:?} on {device}",
+                    String::from_utf8_lossy(other)
+                ),
+            };
+            pipeline
+                .link(to_i420, enc_id)
+                .context("link convert→encoder")?;
+            pipeline
+                .link(enc_id, sink_id)
+                .context("link encoder→sink")?;
+
+            Ok(BuiltPipeline {
+                pipeline,
+                sink: sink_handle,
+                keyframe: Some(keyframe),
+                stop,
+                feed: None,
+                width: w,
+                height: h,
+            })
+        }
+        SourceKind::Rtsp { .. } => {
+            // RTSP needs an async connect first — the session actor calls
+            // [`build_rtsp_video_passthrough`] with the SDP info instead.
+            bail!("rtsp pipelines are built via the rtsp-specific builders")
         }
     }
+}
+
+/// Build the RTSP video-profile pipeline: pure **passthrough** (`AppSrc` →
+/// `AppSink`), no re-encode — the camera's H.264 access units are forwarded
+/// as-is, so there is no keyframe handle (`request_keyframe` is a no-op) and
+/// bitrate/GOP config does not apply. `dimensions` come from the SDP when
+/// known (`None` → 0x0 = unknown in `FrameMeta`).
+pub fn build_rtsp_video_passthrough(dimensions: Option<(u32, u32)>) -> Result<BuiltPipeline> {
+    let src = AppSrc::with_max_buffers(FEED_QUEUE);
+    let feed = src.handle();
+    let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
+    let sink_handle = sink.handle();
+    let (src, stop) = StoppableSource::new(src);
+
+    let mut pipeline = Pipeline::new();
+    let src_id = pipeline.add_source("rtsp-feed", src);
+    let sink_id = pipeline.add_sink("app-sink", sink);
+    pipeline.link(src_id, sink_id).context("link feed→sink")?;
+
+    let (width, height) = dimensions.unwrap_or((0, 0));
+    Ok(BuiltPipeline {
+        pipeline,
+        sink: sink_handle,
+        keyframe: None,
+        stop,
+        feed: Some(feed),
+        width,
+        height,
+    })
+}
+
+/// Build the RTSP preview-profile pipeline: decode the camera's H.264,
+/// throttle to the preview fps, convert to RGB, and JPEG-encode. Needs the
+/// stream dimensions (from the SDP) to size the JPEG encoder.
+pub fn build_rtsp_preview(
+    width: u32,
+    height: u32,
+    preview: &PreviewConfig,
+) -> Result<BuiltPipeline> {
+    let src = AppSrc::with_max_buffers(FEED_QUEUE);
+    let feed = src.handle();
+    let decoder = H264Decoder::new().context("create H.264 decoder")?;
+    // Decode everything (delta frames need their references), THEN drop down
+    // to the preview rate before the expensive convert+encode.
+    let throttle = Throttle::rate(preview.fps as f64);
+    let convert = VideoConvertElement::new()
+        .with_input_format(ConvFormat::I420)
+        .with_output_format(ConvFormat::Rgb24)
+        .with_size(width, height);
+    let encoder = JpegEncoder::new(width, height, ColorType::Rgb).with_quality(preview.quality);
+    let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
+    let sink_handle = sink.handle();
+    let (src, stop) = StoppableSource::new(src);
+
+    let mut pipeline = Pipeline::new();
+    let src_id = pipeline.add_source("rtsp-feed", src);
+    let dec_id = pipeline.add_filter("h264-decoder", decoder);
+    let thr_id = pipeline.add_filter("preview-throttle", throttle);
+    let conv_id = pipeline.add_filter("convert-rgb", convert);
+    let enc_id = pipeline.add_filter("jpeg-encoder", encoder);
+    let sink_id = pipeline.add_sink("app-sink", sink);
+    pipeline.link(src_id, dec_id).context("link feed→decoder")?;
+    pipeline
+        .link(dec_id, thr_id)
+        .context("link decoder→throttle")?;
+    pipeline
+        .link(thr_id, conv_id)
+        .context("link throttle→convert")?;
+    pipeline
+        .link(conv_id, enc_id)
+        .context("link convert→encoder")?;
+    pipeline
+        .link(enc_id, sink_id)
+        .context("link encoder→sink")?;
+
+    Ok(BuiltPipeline {
+        pipeline,
+        sink: sink_handle,
+        keyframe: None,
+        stop,
+        feed: Some(feed),
+        width,
+        height,
+    })
 }
 
 /// Build the JPEG preview-profile pipeline for one source.
@@ -256,13 +436,78 @@ pub fn build_preview(kind: &SourceKind, preview: &PreviewConfig) -> Result<Built
                 sink: sink_handle,
                 keyframe: None,
                 stop,
+                feed: None,
                 width: *width,
                 height: *height,
             })
         }
-        SourceKind::V4l2 { .. } | SourceKind::Rtsp { .. } => {
-            // Landing with the camera/RTSP profiles (#406).
-            bail!("jpeg preview for this source kind is not implemented yet")
+        SourceKind::V4l2 { device } => {
+            let src = V4l2Src::new(device)
+                .map_err(|e| anyhow::anyhow!("open v4l2 device {device}: {e}"))?;
+            let (w, h) = (src.width(), src.height());
+            let fourcc = *src.fourcc();
+            // Drop frames down to the preview fps right at the source; only
+            // then pay for any decode/convert/encode.
+            let throttle = Throttle::rate(preview.fps as f64);
+
+            let sink = AppSink::with_max_buffers(SINK_QUEUE).drop_on_full(true);
+            let sink_handle = sink.handle();
+            let (src, stop) = StoppableSource::new(src);
+
+            let mut pipeline = Pipeline::new();
+            let src_id = pipeline.add_source("v4l2-src", src);
+            let thr_id = pipeline.add_filter("preview-throttle", throttle);
+            let sink_id = pipeline.add_sink("app-sink", sink);
+            pipeline.link(src_id, thr_id).context("link src→throttle")?;
+            match &fourcc {
+                // Camera already produces JPEG frames: pure passthrough.
+                b"MJPG" => {
+                    pipeline
+                        .link(thr_id, sink_id)
+                        .context("link throttle→sink")?;
+                }
+                b"YUYV" => {
+                    let conv_id = pipeline.add_filter(
+                        "convert-rgb",
+                        VideoConvertElement::new()
+                            .with_input_format(ConvFormat::Yuyv)
+                            .with_output_format(ConvFormat::Rgb24)
+                            .with_size(w, h),
+                    );
+                    let enc_id = pipeline.add_filter(
+                        "jpeg-encoder",
+                        JpegEncoder::new(w, h, ColorType::Rgb).with_quality(preview.quality),
+                    );
+                    pipeline
+                        .link(thr_id, conv_id)
+                        .context("link throttle→convert")?;
+                    pipeline
+                        .link(conv_id, enc_id)
+                        .context("link convert→encoder")?;
+                    pipeline
+                        .link(enc_id, sink_id)
+                        .context("link encoder→sink")?;
+                }
+                other => bail!(
+                    "unsupported v4l2 pixel format {:?} on {device}",
+                    String::from_utf8_lossy(other)
+                ),
+            }
+
+            Ok(BuiltPipeline {
+                pipeline,
+                sink: sink_handle,
+                keyframe: None,
+                stop,
+                feed: None,
+                width: w,
+                height: h,
+            })
+        }
+        SourceKind::Rtsp { .. } => {
+            // RTSP needs an async connect first — the session actor calls
+            // [`build_rtsp_preview`] with the SDP dimensions instead.
+            bail!("rtsp pipelines are built via the rtsp-specific builders")
         }
     }
 }
@@ -434,11 +679,110 @@ mod tests {
     }
 
     #[test]
-    fn unimplemented_kinds_fail_cleanly() {
+    fn missing_camera_fails_cleanly() {
+        // No such device on this machine: the builders must error, not panic.
         let v4l2 = SourceKind::V4l2 {
-            device: "/dev/video0".into(),
+            device: "/dev/video-does-not-exist".into(),
         };
         assert!(build_video(&v4l2, &VideoConfig::default(), None).is_err());
         assert!(build_preview(&v4l2, &PreviewConfig::default()).is_err());
+    }
+
+    #[test]
+    fn rtsp_kind_requires_the_rtsp_builders() {
+        let rtsp = SourceKind::Rtsp {
+            url: "rtsp://cam.local/1".into(),
+            username: None,
+            password: None,
+        };
+        assert!(build_video(&rtsp, &VideoConfig::default(), None).is_err());
+        assert!(build_preview(&rtsp, &PreviewConfig::default()).is_err());
+    }
+
+    #[test]
+    fn rtsp_builders_construct() {
+        let v = build_rtsp_video_passthrough(Some((1280, 720))).expect("passthrough");
+        assert!(v.keyframe.is_none(), "passthrough cannot force keyframes");
+        assert!(v.feed.is_some(), "rtsp pipelines are AppSrc-fed");
+        assert_eq!((v.width, v.height), (1280, 720));
+
+        let unknown = build_rtsp_video_passthrough(None).expect("passthrough w/o dims");
+        assert_eq!((unknown.width, unknown.height), (0, 0), "0 = unknown");
+
+        let p = build_rtsp_preview(640, 360, &PreviewConfig::default()).expect("preview");
+        assert!(p.keyframe.is_none());
+        assert!(p.feed.is_some());
+        assert_eq!((p.width, p.height), (640, 360));
+    }
+
+    /// Feed canned "access units" through the RTSP passthrough pipeline and
+    /// require them to come out unaltered, then a clean EOS unwind.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rtsp_passthrough_forwards_bytes_and_ends_cleanly() {
+        use parallax::buffer::{Buffer, MemoryHandle};
+        use parallax::memory::SharedArena;
+        use parallax::metadata::{BufferFlags, Metadata};
+
+        let mut built = build_rtsp_video_passthrough(Some((320, 240))).expect("build");
+        let feed = built.feed.take().expect("feed handle");
+        let sink = built.sink.clone();
+        let handle = executor()
+            .start(&mut built.pipeline)
+            .expect("start pipeline");
+
+        // Push three fake NAL payloads, first flagged as a keyframe.
+        let arena = SharedArena::new(64, 8).expect("arena");
+        for seq in 0..3u64 {
+            let payload = [0x00, 0x00, 0x00, 0x01, 0x65, seq as u8];
+            let mut slot = arena.acquire().expect("slot");
+            slot.data_mut()[..payload.len()].copy_from_slice(&payload);
+            let mut metadata = Metadata::from_sequence(seq);
+            if seq == 0 {
+                metadata.flags |= BufferFlags::SYNC_POINT;
+            }
+            feed.push_buffer(Buffer::new(
+                MemoryHandle::with_len(slot, payload.len()),
+                metadata,
+            ))
+            .expect("push");
+        }
+        feed.end_stream();
+
+        let frames = tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            for _ in 0..100 {
+                match sink.pull_buffer_timeout(Some(Duration::from_millis(200))) {
+                    Ok(Some(buf)) => out.push((
+                        buf.as_bytes().to_vec(),
+                        buf.metadata().is_keyframe(),
+                        buf.metadata().sequence,
+                    )),
+                    Ok(None) => {
+                        if sink.is_eos() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            out
+        })
+        .await
+        .expect("pull task");
+
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0].0, vec![0x00, 0x00, 0x00, 0x01, 0x65, 0]);
+        assert!(frames[0].1, "keyframe flag survives passthrough");
+        assert!(!frames[1].1);
+        assert_eq!(
+            frames.iter().map(|f| f.2).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+
+        // end_stream → source EOS → the whole pipeline unwinds cleanly.
+        tokio::time::timeout(Duration::from_secs(10), handle.wait())
+            .await
+            .expect("pipeline must end after end_stream")
+            .expect("pipeline tasks must end without error");
     }
 }

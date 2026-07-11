@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use parallax::elements::{AppSrcHandle, MediaType as RtspMediaType, RtspSession, RtspSrc};
 use parallax::pipeline::UnifiedPipelineHandle as PipelineHandle;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -29,7 +30,7 @@ use zensight_common::stream::{StreamControl, StreamStatus};
 use zensight_common::{Protocol, QosClass};
 use zensight_sensor_core::{Publisher, RawMediaPublisher};
 
-use crate::catalog::Catalog;
+use crate::catalog::{Catalog, SourceKind};
 use crate::config::ParallaxConfig;
 use crate::{egress, pipeline};
 
@@ -123,6 +124,9 @@ struct ProfileSession {
     keyframe: Option<parallax::elements::codec::KeyframeHandle>,
     egress: JoinHandle<()>,
     matcher: JoinHandle<()>,
+    /// RTSP feeder task (pushes camera frames into the pipeline's AppSrc);
+    /// `None` for self-driving sources.
+    feeder: Option<JoinHandle<()>>,
     /// Kept so the declared media publisher lives exactly as long as the
     /// profile (undeclared on drop).
     #[allow(dead_code)]
@@ -141,6 +145,9 @@ impl ProfileSession {
         // runs on a blocking thread that abort() cannot cancel), then abort
         // the async plumbing.
         self.stop.stop();
+        if let Some(feeder) = self.feeder.take() {
+            feeder.abort();
+        }
         self.egress.abort();
         self.matcher.abort();
         if let Some(handle) = self.handle.take() {
@@ -269,6 +276,7 @@ impl SessionManager {
             tracing::warn!(stream = %stream, "open_stream: unknown stream");
             return;
         };
+        let kind = entry.kind.clone();
 
         // Already open: bump the refcount, refresh the idle countdown, and
         // hand the (re)opener a fresh IDR.
@@ -290,10 +298,40 @@ impl SessionManager {
             return;
         }
 
-        // Build the profile pipeline (pure, synchronous).
-        let built = match profile {
-            Profile::Video => pipeline::build_video(&entry.kind, &self.config.video, max_height),
-            Profile::Preview => pipeline::build_preview(&entry.kind, &self.config.preview),
+        // Build the profile pipeline. Test/V4L2 sources are self-driving and
+        // built synchronously; RTSP connects first (bounded by the connect
+        // timeout — this briefly serializes the actor, accepted for now) and
+        // gets an AppSrc-fed pipeline plus a feeder task.
+        let (built, rtsp) = match &kind {
+            SourceKind::Rtsp {
+                url,
+                username,
+                password,
+            } => match connect_rtsp(url, username.as_deref(), password.as_deref()).await {
+                Ok(rtsp) => {
+                    let dims = rtsp_video_dimensions(&rtsp);
+                    let built = match profile {
+                        Profile::Video => pipeline::build_rtsp_video_passthrough(dims),
+                        Profile::Preview => match dims {
+                            Some((w, h)) => {
+                                pipeline::build_rtsp_preview(w, h, &self.config.preview)
+                            }
+                            None => Err(anyhow::anyhow!(
+                                "rtsp stream advertises no dimensions; preview needs the SDP size"
+                            )),
+                        },
+                    };
+                    (built, Some(rtsp))
+                }
+                Err(e) => (Err(e), None),
+            },
+            _ => {
+                let built = match profile {
+                    Profile::Video => pipeline::build_video(&kind, &self.config.video, max_height),
+                    Profile::Preview => pipeline::build_preview(&kind, &self.config.preview),
+                };
+                (built, None)
+            }
         };
         let mut built = match built {
             Ok(b) => b,
@@ -386,6 +424,16 @@ impl SessionManager {
             })
         };
 
+        // RTSP: pump the camera session into the pipeline's AppSrc.
+        let feeder = rtsp.map(|rtsp_session| {
+            let feed = built
+                .feed
+                .take()
+                .expect("rtsp pipelines always carry a feed handle");
+            let stream = stream.to_string();
+            tokio::spawn(rtsp_feed(rtsp_session, feed, stream))
+        });
+
         // First IDR right away so an already-waiting viewer decodes at once.
         if let Some(k) = &built.keyframe {
             k.request();
@@ -408,6 +456,7 @@ impl SessionManager {
             keyframe: built.keyframe,
             egress,
             matcher,
+            feeder,
             publisher: media,
             refcount: 1,
             viewers,
@@ -580,6 +629,67 @@ impl SessionManager {
             tracing::warn!(error = %e, "failed to publish stream status");
         }
     }
+}
+
+/// How long an RTSP connect may take before the open fails.
+const RTSP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Connect to an RTSP camera (video track only, bounded).
+async fn connect_rtsp(
+    url: &str,
+    username: Option<&str>,
+    password: Option<&str>,
+) -> anyhow::Result<RtspSession> {
+    let mut src = RtspSrc::new(url)
+        .video_only()
+        .with_timeout(RTSP_CONNECT_TIMEOUT);
+    if let (Some(user), Some(pass)) = (username, password) {
+        src = src.with_credentials(user, pass);
+    }
+    tokio::time::timeout(RTSP_CONNECT_TIMEOUT + Duration::from_secs(1), src.connect())
+        .await
+        .map_err(|_| anyhow::anyhow!("rtsp connect to {url} timed out"))?
+        .map_err(|e| anyhow::anyhow!("rtsp connect to {url} failed: {e}"))
+}
+
+/// The video track's SDP dimensions, if advertised.
+fn rtsp_video_dimensions(session: &RtspSession) -> Option<(u32, u32)> {
+    session
+        .streams()
+        .iter()
+        .find(|s| s.media_type == RtspMediaType::Video)
+        .and_then(|s| s.dimensions)
+}
+
+/// Pump RTSP frames into the pipeline's `AppSrc` until the camera ends or
+/// errors, shedding frames when the pipeline is busy (live video must never
+/// back the network reader up). Ends the app stream on exit so the pipeline
+/// unwinds and the egress task reports `EgressEnded`.
+async fn rtsp_feed(mut rtsp: RtspSession, feed: AppSrcHandle, stream: String) {
+    loop {
+        match rtsp.produce().await {
+            Ok(Some(buffer)) => {
+                if feed.is_full() {
+                    continue; // shed the frame
+                }
+                if feed
+                    .push_buffer_timeout(buffer, Some(Duration::from_millis(50)))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(None) => {
+                tracing::info!(stream = %stream, "rtsp source reached end of stream");
+                break;
+            }
+            Err(e) => {
+                tracing::warn!(stream = %stream, error = %e, "rtsp source failed");
+                break;
+            }
+        }
+    }
+    feed.end_stream();
 }
 
 /// Map a requested codec onto a profile (`None` = sensor default = video).

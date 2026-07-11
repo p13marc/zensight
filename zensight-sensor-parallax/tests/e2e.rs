@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use zensight_common::command::{Command, command_key, query_key, status_key};
-use zensight_common::keyexpr::media_preview_key;
+use zensight_common::keyexpr::{media_preview_key, media_video_key};
 use zensight_common::stream::{FrameMeta, StreamControl, StreamDescriptor, StreamStatus};
 use zensight_common::{Format, Protocol, decode};
 use zensight_sensor_core::Publisher;
@@ -249,6 +249,127 @@ async fn open_preview_streams_jpeg_frames_at_config_fps() {
 
     // Tear the stream down before the runtime drops: a live pipeline keeps a
     // blocking source task alive, and tokio's shutdown would wait forever.
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::CloseStream {
+            stream: "test0".into(),
+        },
+    )
+    .await;
+    drop(sub);
+    wait_until_closed(&handle).await;
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn open_h264_video_streams_with_keyframe_control() {
+    let (sensor, viewer) = isolated_pair().await;
+    let source = "e2e-h264";
+    let host_prefix = format!("zensight/parallax/{source}");
+    let handle = spawn_sensor(sensor.clone(), source).await;
+
+    // Subscribe FIRST so the initial IDR is observed.
+    let video_key = media_video_key(Protocol::Parallax, source, "test0", "h264", "main");
+    let sub = viewer
+        .declare_subscriber(&video_key)
+        .await
+        .expect("declare video subscriber");
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::OpenStream {
+            stream: "test0".into(),
+            codec: Some("h264".into()),
+            max_height: None,
+        },
+    )
+    .await;
+
+    async fn next_meta(
+        sub: &zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
+    ) -> FrameMeta {
+        let sample = tokio::time::timeout(Duration::from_secs(5), sub.recv_async())
+            .await
+            .expect("video frame timed out")
+            .expect("video subscriber closed");
+        assert!(
+            sample.encoding().to_string().starts_with("video/h264"),
+            "video must carry video/h264, got {}",
+            sample.encoding()
+        );
+        let att = sample.attachment().expect("frame has FrameMeta attachment");
+        decode(&att.to_bytes(), Format::Cbor).expect("decode FrameMeta")
+    }
+
+    // A keyframe must arrive within the first few access units (the sensor
+    // forces an IDR at open, and openh264 starts on one anyway).
+    let mut sequences: Vec<u64> = Vec::new();
+    let mut first_keyframe_at = None;
+    for i in 0..5 {
+        let meta = next_meta(&sub).await;
+        assert_eq!((meta.width, meta.height), (160, 120));
+        sequences.push(meta.sequence);
+        if meta.keyframe {
+            first_keyframe_at = Some(i);
+            break;
+        }
+    }
+    assert!(
+        first_keyframe_at.is_some(),
+        "no keyframe within the first 5 access units"
+    );
+
+    // Consume a few delta frames (GOP is 60 at 8 fps — no natural IDR soon).
+    for _ in 0..5 {
+        let meta = next_meta(&sub).await;
+        sequences.push(meta.sequence);
+    }
+
+    // Explicit RequestKeyframe → an IDR within the next few frames, long
+    // before the natural GOP boundary.
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::RequestKeyframe {
+            stream: "test0".into(),
+        },
+    )
+    .await;
+    let mut forced = false;
+    for _ in 0..10 {
+        let meta = next_meta(&sub).await;
+        sequences.push(meta.sequence);
+        if meta.keyframe {
+            forced = true;
+            break;
+        }
+    }
+    assert!(forced, "RequestKeyframe must force an IDR within 10 frames");
+
+    // Sequence numbers are strictly monotonic across the whole run.
+    assert!(
+        sequences.windows(2).all(|w| w[1] > w[0]),
+        "sequences {sequences:?}"
+    );
+
+    // The status queryable reports the h264 profile.
+    let replies = viewer
+        .get(status_key(&host_prefix, "streams"))
+        .await
+        .expect("query status");
+    let reply = tokio::time::timeout(Duration::from_secs(5), replies.recv_async())
+        .await
+        .expect("status query timed out")
+        .expect("status reply channel closed");
+    let statuses: Vec<StreamStatus> =
+        serde_json::from_slice(&reply.result().unwrap().payload().to_bytes()).unwrap();
+    assert_eq!(statuses[0].profile.as_deref(), Some("h264/main"));
+
+    // Teardown before the runtime drops (blocking source task).
     send_control(
         &viewer,
         &host_prefix,

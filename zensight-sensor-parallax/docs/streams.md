@@ -92,6 +92,15 @@ triggers the stop handle first.
   second profile then fails with an error status — close one profile first.
   (A shared-capture tee is a possible future enhancement.)
 - **RTSP is H.264-only** and passthrough: bitrate/GOP config does not apply,
-  and `max_height` is ignored for the video profile.
+  and `max_height` is ignored for the video profile. Each open profile makes
+  its own RTSP connection (two when video + preview are both open). The
+  connect happens inside the session actor (bounded by a 5 s timeout), so an
+  unreachable camera briefly serializes stream commands. If the SDP carries
+  no video dimensions, `FrameMeta.width/height` are `0` (= unknown) on the
+  video profile and the JPEG preview cannot be opened (the encoder needs a
+  size).
 - `open_stream.max_height` caps the encoded height for encoder-backed video
-  profiles only (aspect preserved); previews always use the source size.
+  profiles only (aspect preserved) and only where the sensor generates the
+  frames (test patterns). For V4L2 the camera's negotiated size is used and
+  a too-small `max_height` is logged and ignored (no in-pipeline rescale
+  yet). Previews always use the source size.
