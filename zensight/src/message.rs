@@ -353,6 +353,10 @@ pub enum Message {
     TopologyHover(Option<String>),
     /// Advance the topology flow-dash animation (#394); gated subscription.
     TopologyAnimTick,
+    /// ~30 fps layout tick (#441): advances the force simulation while it's
+    /// unstable. The subscription is gated (view open, Force mode, auto
+    /// layout, not stable) so a settled graph burns no frames.
+    TopologyLayoutFrame,
     /// Toggle the topology lens legend (#394).
     TopologyToggleLegend,
     /// Fetch the on-demand netring TLS asset inventory.

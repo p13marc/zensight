@@ -896,6 +896,10 @@ impl ZenSight {
                 self.topology.advance_animation();
             }
 
+            Message::TopologyLayoutFrame => {
+                self.topology.run_layout_step();
+            }
+
             Message::TopologyToggleLegend => {
                 self.topology.toggle_legend();
             }
@@ -5401,6 +5405,20 @@ impl ZenSight {
                     .map(|_| Message::TopologyAnimTick),
             );
         }
+        // Force-layout stepping (#441): ~30 fps while the simulation is
+        // actually settling, self-terminating via `layout_stable` — the same
+        // gating pattern as the dash animation. A stable graph burns no
+        // frames; the 1 Hz tick only refreshes data.
+        if self.current_view == CurrentView::Topology
+            && self.topology.prefs.layout == crate::view::topology::LayoutMode::Force
+            && self.topology.auto_layout
+            && !self.topology.layout_stable
+        {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(33))
+                    .map(|_| Message::TopologyLayoutFrame),
+            );
+        }
         Subscription::batch(subs)
     }
 
@@ -6328,13 +6346,11 @@ impl ZenSight {
         // Clean up expired toasts
         self.toasts.cleanup_expired();
 
-        // Update topology when viewing it
+        // Update topology data when viewing it. Layout stepping moved to the
+        // gated ~30 fps `TopologyLayoutFrame` subscription (#441) — at 1 Hz
+        // the force simulation settled in visible once-a-second lurches.
         if self.current_view == CurrentView::Topology {
             self.refresh_topology_nodes();
-            // Run layout algorithm if not stable
-            if !self.topology.layout_stable {
-                self.topology.run_layout_step();
-            }
         }
 
         // Land any debounced topology-pref changes (#440): at most one

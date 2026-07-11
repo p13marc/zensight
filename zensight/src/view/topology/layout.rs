@@ -4,8 +4,23 @@
 //! - Nodes repel each other (like charged particles)
 //! - Edges attract connected nodes (like springs)
 //! - Damping prevents oscillation
+//! - A d3-style cooling `alpha` scales the applied motion and decays every
+//!   iteration (#441), so the simulation eases out and is *guaranteed* to
+//!   converge even if velocities micro-oscillate above the threshold.
+//!
+//! The all-pairs repulsion is O(n²) with no spatial index. At the target
+//! scale (LAN: tens of nodes, worst case a few hundred passive assets) a
+//! step is tens of microseconds; revisit Barnes–Hut only if profiling shows
+//! a step above ~1 ms.
 
 use super::{NodeId, TopologyState};
+
+/// Alpha below which the simulation counts as fully cooled (#441).
+pub const ALPHA_MIN: f32 = 0.02;
+/// Per-iteration alpha decay (#441): ~150 iterations from 1.0 to
+/// [`ALPHA_MIN`], i.e. a couple of seconds of smooth motion at the frame
+/// cadence [`super::TopologyState::run_layout_step`] drives.
+pub const ALPHA_DECAY: f32 = 0.975;
 
 /// Configuration for the force-directed layout.
 #[derive(Debug, Clone)]
@@ -45,135 +60,108 @@ impl Default for LayoutConfig {
 
 /// Run one iteration of the force-directed layout algorithm.
 ///
-/// Returns true if the layout is stable (all velocities below threshold).
+/// Returns true if the layout is stable: every velocity below the threshold,
+/// or the cooling alpha fully decayed (#441).
 pub fn layout_step(state: &mut TopologyState, config: &LayoutConfig) -> bool {
     if !state.auto_layout || state.nodes.len() < 2 {
         return true;
     }
-
-    // Collect node IDs for iteration
-    let node_ids: Vec<NodeId> = state.nodes.keys().cloned().collect();
-
-    // Calculate forces for each node
-    let mut forces: std::collections::HashMap<NodeId, (f32, f32)> =
-        std::collections::HashMap::new();
-
-    for id in &node_ids {
-        forces.insert(id.clone(), (0.0, 0.0));
+    let alpha = state.layout_alpha;
+    if alpha < ALPHA_MIN {
+        return true;
     }
 
-    // Repulsion forces between all node pairs
-    for (i, id1) in node_ids.iter().enumerate() {
-        for id2 in node_ids.iter().skip(i + 1) {
-            let node1 = &state.nodes[id1];
-            let node2 = &state.nodes[id2];
+    // Snapshot positions into index-addressable buffers (#441): the O(n²)
+    // pair loop below runs on plain Vecs — no String clones and no HashMap
+    // lookups in the hot path.
+    let n = state.nodes.len();
+    let mut pos: Vec<(f32, f32)> = Vec::with_capacity(n);
+    let mut index: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::with_capacity(n);
+    for (i, (id, node)) in state.nodes.iter().enumerate() {
+        index.insert(id.as_str(), i);
+        pos.push(node.position);
+    }
+    let mut force: Vec<(f32, f32)> = vec![(0.0, 0.0); n];
 
-            let dx = node1.position.0 - node2.position.0;
-            let dy = node1.position.1 - node2.position.1;
+    // Repulsion forces between all node pairs (Coulomb's law: F = k / d²).
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let dx = pos[i].0 - pos[j].0;
+            let dy = pos[i].1 - pos[j].1;
             let distance = (dx * dx + dy * dy).sqrt().max(config.min_distance);
-
-            // Coulomb's law: F = k / d^2
-            let force = config.repulsion / (distance * distance);
-
-            // Normalize direction
-            let fx = (dx / distance) * force;
-            let fy = (dy / distance) * force;
-
-            // Apply forces (equal and opposite)
-            if let Some(f) = forces.get_mut(id1) {
-                f.0 += fx;
-                f.1 += fy;
-            }
-            if let Some(f) = forces.get_mut(id2) {
-                f.0 -= fx;
-                f.1 -= fy;
-            }
+            let f = config.repulsion / (distance * distance);
+            let fx = (dx / distance) * f;
+            let fy = (dy / distance) * f;
+            force[i].0 += fx;
+            force[i].1 += fy;
+            force[j].0 -= fx;
+            force[j].1 -= fy;
         }
     }
 
-    // Attraction forces along edges (spring toward ideal distance)
+    // Attraction forces along edges (spring toward ideal distance).
     for edge in &state.edges {
-        if let (Some(from_node), Some(to_node)) =
-            (state.nodes.get(&edge.from), state.nodes.get(&edge.to))
-        {
-            let dx = to_node.position.0 - from_node.position.0;
-            let dy = to_node.position.1 - from_node.position.1;
-            let distance = (dx * dx + dy * dy).sqrt().max(1.0);
-
-            // Spring force toward ideal distance
-            let displacement = distance - config.ideal_distance;
-            let force = config.attraction * displacement;
-
-            let fx = (dx / distance) * force;
-            let fy = (dy / distance) * force;
-
-            if let Some(f) = forces.get_mut(&edge.from) {
-                f.0 += fx;
-                f.1 += fy;
-            }
-            if let Some(f) = forces.get_mut(&edge.to) {
-                f.0 -= fx;
-                f.1 -= fy;
-            }
-        }
+        let (Some(&i), Some(&j)) = (index.get(edge.from.as_str()), index.get(edge.to.as_str()))
+        else {
+            continue;
+        };
+        let dx = pos[j].0 - pos[i].0;
+        let dy = pos[j].1 - pos[i].1;
+        let distance = (dx * dx + dy * dy).sqrt().max(1.0);
+        let displacement = distance - config.ideal_distance;
+        let f = config.attraction * displacement;
+        let fx = (dx / distance) * f;
+        let fy = (dy / distance) * f;
+        force[i].0 += fx;
+        force[i].1 += fy;
+        force[j].0 -= fx;
+        force[j].1 -= fy;
     }
 
-    // Centering force - pull all nodes toward origin
-    for id in &node_ids {
-        if let Some(node) = state.nodes.get(id) {
-            let dx = -node.position.0;
-            let dy = -node.position.1;
-
-            if let Some(f) = forces.get_mut(id) {
-                f.0 += dx * config.centering;
-                f.1 += dy * config.centering;
-            }
-        }
+    // Centering force — pull all nodes toward origin.
+    for i in 0..n {
+        force[i].0 -= pos[i].0 * config.centering;
+        force[i].1 -= pos[i].1 * config.centering;
     }
 
-    // Apply forces to update velocities and positions
+    drop(index); // release the borrow of the node keys before writing back
+
+    // Integrate: damped velocities, applied motion scaled by the cooling
+    // alpha. Write-back iterates the same (unmodified) map as the snapshot,
+    // so the enumeration order matches.
     let mut is_stable = true;
-
-    for id in &node_ids {
-        if let Some(node) = state.nodes.get_mut(id) {
-            // Skip pinned nodes
-            if node.pinned {
-                node.velocity = (0.0, 0.0);
-                continue;
-            }
-
-            if let Some(&(fx, fy)) = forces.get(id) {
-                // Update velocity with damping
-                node.velocity.0 = (node.velocity.0 + fx) * config.damping;
-                node.velocity.1 = (node.velocity.1 + fy) * config.damping;
-
-                // Clamp velocity
-                let speed =
-                    (node.velocity.0 * node.velocity.0 + node.velocity.1 * node.velocity.1).sqrt();
-                if speed > config.max_velocity {
-                    let scale = config.max_velocity / speed;
-                    node.velocity.0 *= scale;
-                    node.velocity.1 *= scale;
-                }
-
-                // Check stability
-                if speed > config.stability_threshold {
-                    is_stable = false;
-                }
-
-                // Update position
-                node.position.0 += node.velocity.0;
-                node.position.1 += node.velocity.1;
-            }
+    for (i, node) in state.nodes.values_mut().enumerate() {
+        if node.pinned {
+            node.velocity = (0.0, 0.0);
+            continue;
         }
+        let (fx, fy) = force[i];
+        node.velocity.0 = (node.velocity.0 + fx) * config.damping;
+        node.velocity.1 = (node.velocity.1 + fy) * config.damping;
+
+        let speed = (node.velocity.0 * node.velocity.0 + node.velocity.1 * node.velocity.1).sqrt();
+        if speed > config.max_velocity {
+            let scale = config.max_velocity / speed;
+            node.velocity.0 *= scale;
+            node.velocity.1 *= scale;
+        }
+        if speed > config.stability_threshold {
+            is_stable = false;
+        }
+
+        node.position.0 += node.velocity.0 * alpha;
+        node.position.1 += node.velocity.1 * alpha;
     }
 
-    // Clear cache if layout changed
-    if !is_stable {
-        state.cache.clear();
-    }
+    // Cool down (#441): the decay guarantees convergence and gives the
+    // settle a natural ease-out.
+    state.layout_alpha = alpha * ALPHA_DECAY;
 
-    is_stable
+    // Positions moved: redraw.
+    state.cache.clear();
+
+    is_stable || state.layout_alpha < ALPHA_MIN
 }
 
 /// Deterministic seed position for a newly discovered node (#440): an
@@ -444,6 +432,38 @@ mod tests {
         state.nodes.insert("pinned".to_string(), pinned);
         grid_positions(&mut state);
         assert_eq!(state.nodes["pinned"].position, (42.0, 43.0));
+    }
+
+    #[test]
+    fn test_layout_step_converges_within_alpha_budget() {
+        use crate::view::topology::Edge;
+
+        // A small connected graph settles: either velocities drop below the
+        // threshold or the cooling alpha fully decays — never an endless
+        // micro-oscillation (#441).
+        let mut state = TopologyState::default();
+        for (i, id) in ["a", "b", "c", "d"].iter().enumerate() {
+            state
+                .nodes
+                .insert(id.to_string(), create_test_node(id, i as f32 * 10.0, 0.0));
+        }
+        state.edges.push(Edge {
+            from: "a".to_string(),
+            to: "b".to_string(),
+            ..Default::default()
+        });
+        state.edges.push(Edge {
+            from: "c".to_string(),
+            to: "d".to_string(),
+            ..Default::default()
+        });
+
+        let config = LayoutConfig::default();
+        let max_iterations = 400; // alpha decays past ALPHA_MIN well before this
+        let converged = (0..max_iterations).any(|_| layout_step(&mut state, &config));
+        assert!(converged, "layout must converge within the alpha budget");
+        // Once stable, further steps stay stable (alpha floor).
+        assert!(layout_step(&mut state, &config));
     }
 
     #[test]
