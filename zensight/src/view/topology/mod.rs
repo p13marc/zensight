@@ -63,6 +63,10 @@ pub struct TopologyState {
     pub layout_config: LayoutConfig,
     /// Whether the layout is currently stable.
     pub layout_stable: bool,
+    /// d3-style cooling alpha (#441): scales the force simulation's applied
+    /// motion and decays each iteration, so the settle eases out and always
+    /// converges. Reset to 1.0 by [`Self::wake_layout`].
+    pub layout_alpha: f32,
     /// Last netring flows fetched, kept so the edge set can be rebuilt when the
     /// netlink neighbor table arrives separately (#49).
     last_flows: Vec<zensight_common::FlowRecord>,
@@ -152,6 +156,7 @@ impl Default for TopologyState {
             search_query: String::new(),
             layout_config: LayoutConfig::default(),
             layout_stable: true,
+            layout_alpha: 1.0,
             last_flows: Vec::new(),
             last_neighbors: Vec::new(),
             last_matrix: Vec::new(),
@@ -354,7 +359,7 @@ impl TopologyState {
         // newcomers — the old whole-graph `arrange_in_circle` reseed made
         // every unpinned node jump whenever anything appeared (#440).
         if self.nodes.len() > initial_count {
-            self.layout_stable = false;
+            self.wake_layout();
         }
         self.invalidate();
 
@@ -620,7 +625,7 @@ impl TopologyState {
                         ..Default::default()
                     },
                 );
-                self.layout_stable = false;
+                self.wake_layout();
             }
         }
         for edge in gateway_edges {
@@ -653,7 +658,7 @@ impl TopologyState {
                         ..Default::default()
                     },
                 );
-                self.layout_stable = false;
+                self.wake_layout();
             }
             for edge in external_edges {
                 if pairs.insert(ordered_pair(&edge.from, &edge.to)) {
@@ -898,7 +903,7 @@ impl TopologyState {
         self.prefs.layout = mode;
         match mode {
             LayoutMode::Force => {
-                self.layout_stable = false;
+                self.wake_layout();
             }
             LayoutMode::Grid => {
                 grid_positions(self);
@@ -917,7 +922,7 @@ impl TopologyState {
         if let Some(node) = self.nodes.get_mut(node_id) {
             node.pinned = !node.pinned;
             if !node.pinned && self.prefs.layout == LayoutMode::Force {
-                self.layout_stable = false;
+                self.wake_layout();
             }
             self.cache.clear();
         }
@@ -986,12 +991,22 @@ impl TopologyState {
     pub fn toggle_auto_layout(&mut self) {
         self.auto_layout = !self.auto_layout;
         if self.auto_layout {
-            // Reset layout stability when re-enabling
-            self.layout_stable = false;
+            // Re-enabling re-animates from a fresh cooling alpha.
+            self.wake_layout();
         }
     }
 
-    /// Run layout iterations for smooth convergence.
+    /// Wake the force simulation (#441): full cooling alpha, not stable.
+    /// Call whenever the graph structure changes under Force layout.
+    pub fn wake_layout(&mut self) {
+        self.layout_alpha = 1.0;
+        self.layout_stable = false;
+    }
+
+    /// Run layout iterations for smooth convergence. Driven by the gated
+    /// ~30 fps `TopologyLayoutFrame` subscription while unstable (#441) —
+    /// a few iterations per frame reads as continuous motion, and the time
+    /// budget caps the cost on unexpectedly large graphs.
     /// Returns true if the layout is stable.
     pub fn run_layout_step(&mut self) -> bool {
         // Static layout modes (#394) never animate.
@@ -999,10 +1014,11 @@ impl TopologyState {
             self.layout_stable = true;
             return true;
         }
-        // Run 3 iterations per frame - balance between speed and smoothness
+        let config = self.layout_config.clone();
+        let start = std::time::Instant::now();
         for _ in 0..3 {
-            self.layout_stable = layout_step(self, &self.layout_config.clone());
-            if self.layout_stable {
+            self.layout_stable = layout_step(self, &config);
+            if self.layout_stable || start.elapsed() >= std::time::Duration::from_millis(4) {
                 break;
             }
         }
@@ -1012,7 +1028,7 @@ impl TopologyState {
     /// Arrange nodes in a circle (useful for initial layout).
     pub fn arrange_in_circle(&mut self, radius: f32) {
         arrange_circle(self, radius);
-        self.layout_stable = false;
+        self.wake_layout();
     }
 
     /// Center the layout around the origin.

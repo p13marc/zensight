@@ -829,7 +829,8 @@ impl std::fmt::Display for GroupingMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LayoutMode {
-    /// Force-directed (default): repulsion + springs, animated at 1 Hz.
+    /// Force-directed (default): repulsion + springs, stepped at ~30 fps
+    /// with alpha cooling while settling (#441).
     #[default]
     Force,
     /// Static grid ranked by alert severity then traffic (Grafana's
