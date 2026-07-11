@@ -4306,7 +4306,8 @@ fn test_parallax_catalogue_and_tiles() {
 
     // An open tile renders its waiting caption; Close dispatches
     // ParallaxCloseTile.
-    state.parallax_detail.open_tile("video0", None);
+    let generation = state.parallax_detail.allocate_generation();
+    state.parallax_detail.open_tile("video0", generation, None);
     {
         let mut ui = simulator(parallax_view(&state));
         assert!(ui.find("video0 · waiting for frames…").is_ok());
@@ -4323,7 +4324,7 @@ fn test_parallax_catalogue_and_tiles() {
     // A tile whose stream ended shows the reason instead of a frame.
     state
         .parallax_detail
-        .end_tile("video0", Some("stream ended".into()));
+        .end_tile("video0", generation, Some("stream ended".into()));
     let mut ui = simulator(parallax_view(&state));
     assert!(ui.find("video0 — stream ended").is_ok());
 }

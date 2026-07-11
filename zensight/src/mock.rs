@@ -569,7 +569,7 @@ pub mod gnmi {
     }
 }
 
-/// Mock modbus data.
+/// Mock parallax (live media) data.
 pub mod parallax {
     use super::*;
     use zensight_common::StreamDescriptor;
@@ -852,6 +852,11 @@ pub fn mock_environment() -> Vec<TelemetryPoint> {
     // Industrial devices
     points.extend(modbus::plc("plc01"));
 
+    // Live media (parallax): stats telemetry makes the camera host's device
+    // card appear, so the stream catalogue + tile views are reachable in
+    // demo (demo mirrors the wire contract).
+    points.extend(parallax::host("camhost01"));
+
     points
 }
 
@@ -874,6 +879,7 @@ mod tests {
         assert!(protocols.contains(&Protocol::Netring));
         assert!(protocols.contains(&Protocol::Netflow));
         assert!(protocols.contains(&Protocol::Gnmi));
+        assert!(protocols.contains(&Protocol::Parallax));
     }
 
     #[test]

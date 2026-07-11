@@ -3,8 +3,12 @@
 //! Default builds ship WITHOUT this (openh264 is a C++ build from source —
 //! unacceptable unconditionally on GUI/CI/flatpak): [`AVAILABLE`] is `false`
 //! and the parallax view renders a "build with `--features h264`" hint. With
-//! the feature, [`h264_tile_stream`] subscribes to the exact
-//! `@media/<stream>/video/h264/main` key and decodes access units directly
+//! the feature, [`h264_tile_stream`] subscribes to
+//! `@media/<stream>/video/h264/*` — the profile chunk is a single-chunk
+//! wildcard because the sensor publishes on its **configurable**
+//! `video.profile` chunk, which the catalogue does not carry; the key stays
+//! scoped to exactly one stream and one codec (see `docs/KEYSPACE.md` §3.3)
+//! — and decodes access units directly
 //! (no parallax pipeline/executor — a leaked live-source blocking task in
 //! the GUI process would hang shutdown, see the sensor's `StoppableSource`
 //! notes): gate on the first `FrameMeta.keyframe`, decode → I420 → RGBA →
@@ -94,21 +98,29 @@ mod real {
     /// The per-tile H.264 subscriber stream: decoded video frames as
     /// [`image::Handle`]s. Ends with [`Message::ParallaxTileEnded`]; aborting
     /// the wrapping task drops the future and undeclares the subscriber.
+    /// Every yielded message carries the tile `generation` it was opened with.
     pub fn h264_tile_stream(
         session: Arc<Session>,
         source: String,
         stream: String,
+        generation: u64,
     ) -> impl Stream<Item = Message> {
         async_stream::stream! {
-            // The sensor's default video profile chunk is `main` (the
-            // catalogue carries no profile; see zensight-sensor-parallax
-            // docs/streams.md).
-            let key = media_video_key(Protocol::Parallax, &source, &stream, "h264", "main");
+            // The profile chunk is a SINGLE-CHUNK wildcard: the sensor
+            // publishes on its configurable `video.profile` chunk (default
+            // `main`), which the catalogue does not carry — a hardcoded
+            // chunk broke every non-default profile silently. The key is
+            // still scoped to one stream + one codec, so the "no wildcard
+            // firehose" rule's intent holds; zenoh matching is
+            // intersection-based, so the sensor's matching listener sees
+            // this subscriber (pinned in the sensor e2e).
+            let key = media_video_key(Protocol::Parallax, &source, &stream, "h264", "*");
             let subscriber = match session.declare_subscriber(&key).await {
                 Ok(s) => s,
                 Err(e) => {
                     yield Message::ParallaxTileEnded {
                         stream,
+                        generation,
                         error: Some(format!("subscribe failed: {e}")),
                     };
                     return;
@@ -117,7 +129,7 @@ mod real {
             let mut dec = match H264TileDecoder::new() {
                 Ok(d) => d,
                 Err(e) => {
-                    yield Message::ParallaxTileEnded { stream, error: Some(e) };
+                    yield Message::ParallaxTileEnded { stream, generation, error: Some(e) };
                     return;
                 }
             };
@@ -165,6 +177,7 @@ mod real {
                 else {
                     yield Message::ParallaxTileEnded {
                         stream,
+                        generation,
                         error: Some("decode task panicked".to_string()),
                     };
                     return;
@@ -174,6 +187,7 @@ mod real {
                     Ok(Some((w, h, rgba))) => {
                         yield Message::ParallaxFrame {
                             stream: stream.clone(),
+                            generation,
                             seq: meta.sequence,
                             handle: image::Handle::from_rgba(w, h, rgba),
                         };
@@ -191,6 +205,7 @@ mod real {
             }
             yield Message::ParallaxTileEnded {
                 stream,
+                generation,
                 error: None,
             };
         }

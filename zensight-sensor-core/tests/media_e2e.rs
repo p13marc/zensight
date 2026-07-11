@@ -21,7 +21,7 @@ use zenoh::bytes::{Encoding, ZBytes};
 use zensight_common::command::{Command, command_key, query_key};
 use zensight_common::keyexpr::media_preview_key;
 use zensight_common::stream::{FrameMeta, StreamControl, StreamDescriptor};
-use zensight_common::{Format, Protocol, decode, encode};
+use zensight_common::{Format, Protocol, decode_auto, encode};
 use zensight_sensor_core::Publisher;
 
 /// One-pixel-ish canned JPEG stand-in (opaque bytes; the test only cares that
@@ -260,9 +260,16 @@ async fn media_plane_e2e_stream_control_and_keyframe() {
                     "opaque JPEG bytes must survive the media plane unchanged"
                 );
                 saw_jpeg = true;
-                let att = sample.attachment().expect("media sample has an attachment");
-                let meta: FrameMeta =
-                    decode(&att.to_bytes(), Format::Cbor).expect("decode FrameMeta attachment");
+                // Tolerate samples without a decodable FrameMeta (other media
+                // producers on an intersecting key may omit or re-encode the
+                // attachment; decode_auto honors the CBOR/JSON first-byte
+                // sniff convention) — but stay strict on the ones we accept.
+                let Some(meta) = sample
+                    .attachment()
+                    .and_then(|att| decode_auto::<FrameMeta>(&att.to_bytes()).ok())
+                else {
+                    continue;
+                };
                 assert_eq!((meta.width, meta.height), (320, 240));
                 if meta.keyframe {
                     saw_keyframe = true;

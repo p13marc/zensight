@@ -312,6 +312,16 @@ flag, optional pts/dts/duration ns, sequence, width, height) — **never** a
 | `@media/<stream>/video/<codec>/<profile>` | put (plain, per-stream publisher) | raw encoded access units + CBOR `FrameMeta` attachment | `media_video_key()` |
 | `@media/<stream>/preview/jpeg` | put (plain, per-stream publisher) | encoded JPEG preview frames + CBOR `FrameMeta` attachment | `media_preview_key()` |
 
+**Viewer subscription pattern**: a preview viewer subscribes to the exact
+`@media/<stream>/preview/jpeg` key; a video viewer subscribes with the
+`<profile>` chunk as a **single-chunk wildcard** —
+`…/@media/<stream>/video/<codec>/*` — because the profile chunk is the
+*sensor's* configuration (e.g. parallax `video.profile`, default `main`) and
+the catalogue does not advertise it. The key stays scoped to exactly one
+stream and one codec, so the "no wildcard firehose" rule's intent holds; the
+publisher's matching listener fires for the wildcard subscriber all the same
+(zenoh matching is intersection-based — pinned in the parallax sensor e2e).
+
 The media publisher is a **plain** `zenoh::pubsub::Publisher` (NOT an
 `AdvancedPublisher` — no cache/recovery/history for a superseded frame stream),
 carrying `QosClass::LiveVideo` (best-effort · drop · interactive-high · express
@@ -332,6 +342,13 @@ host's sensor and its catalogue/status answer for that host only:
 | `@/commands/stream` | subscribe | `Command<StreamControl>` (`OpenStream`/`CloseStream`/`RequestKeyframe`) | `stream` |
 | `@/query/streams` | queryable | `Vec<StreamDescriptor>` (advertised streams; late-joiner seed) | `streams` |
 | `@/status/streams` | queryable **and** declared-publisher transitions | `Vec<StreamStatus>` reply / one `StreamStatus` per transition (open? · viewers · active profile) | `streams` |
+
+**BREAKING** (#402): the `@/status/streams` *queryable reply* changed in-place
+from a single `StreamStatus` to `Vec<StreamStatus>` (one entry per currently
+open stream). Migration: decode the reply as a JSON array and pick your stream
+by the `stream` field; the *published transitions* on the same key are
+unchanged (still one `StreamStatus` per transition). A failed `open_stream`
+now also publishes a definitive `open: false` transition.
 
 Stream *stats* (fps/kbps/drops/viewers/encode_ms) ride normal telemetry under
 `zensight/<proto>/<source>/<stream>/stats/<metric>`, so existing charts light up
@@ -466,7 +483,7 @@ dedicated plane:
 | `zensight/**` | frontend (history sub), exporters | all telemetry *and* `_meta` (but **not** `@/…` nor `@media/…`) |
 | `zensight/*/*/@/**` | frontend | all **host-scoped** control-plane (health/errors/status/liveness) — never intersects `zensight/*/@/**`, telemetry, `@media`, or `@pdns` (pinned in `zensight-common` tests) |
 | `zensight/*/@/**` | frontend | all **protocol-scoped** control-plane (alerts) + legacy pre-0.8 state keys |
-| `zensight/<proto>/<source>/@media/<stream>/**` | media viewer | one stream's opaque video/preview samples (#359; named explicitly) |
+| `zensight/<proto>/<source>/@media/<stream>/…` | media viewer | one stream's opaque samples: the exact `preview/jpeg` key, or `video/<codec>/*` (single-chunk wildcard over the sensor-configured profile — see §3.3) |
 | `zensight/*/*/@/alive` | frontend | sensor liveliness tokens (host-scoped) |
 | `zensight/*/*/@/devices/*/alive` | frontend | device liveliness tokens (host-scoped) |
 | `zensight/*/@/alive` | frontend | legacy sensor liveliness tokens (pre-0.8 sensors) |

@@ -33,7 +33,7 @@ use zensight_sensor_core::{Publisher, RawMediaPublisher, SensorHealth};
 use crate::alerts::ParallaxAlerts;
 use crate::catalog::{Catalog, SourceKind};
 use crate::config::ParallaxConfig;
-use crate::stats::StatsRegistry;
+use crate::stats::{StatsRegistry, StreamStats};
 use crate::{egress, pipeline};
 
 /// Capacity of the actor's command channel.
@@ -58,7 +58,6 @@ impl Profile {
 }
 
 /// Messages into the session actor.
-#[derive(Debug)]
 pub enum SessionMsg {
     /// A decoded stream-control command.
     Control(StreamControl),
@@ -68,11 +67,22 @@ pub enum SessionMsg {
         profile: Profile,
         matching: bool,
     },
-    /// A profile's egress loop ended (pipeline EOS or error).
+    /// A profile's egress loop ended (pipeline EOS or error). `epoch`
+    /// identifies WHICH incarnation of the profile ended: a dead profile
+    /// that `open()` already tore down and replaced leaves its `EgressEnded`
+    /// queued, and acting on the stale one would kill the replacement.
     EgressEnded {
         stream: String,
         profile: Profile,
+        epoch: u64,
         error: Option<String>,
+    },
+    /// An off-actor RTSP connect finished; `Ok` carries the live camera
+    /// session for the pending profile slot.
+    RtspConnected {
+        stream: String,
+        profile: Profile,
+        result: Result<Box<RtspSession>, String>,
     },
     /// Snapshot request: one `StreamStatus` per currently open stream.
     StatusQuery {
@@ -117,6 +127,26 @@ impl SessionHandle {
     }
 }
 
+/// One profile slot: either an off-actor RTSP connect still in flight, or a
+/// running pipeline.
+enum ProfileSlot {
+    /// The RTSP connect runs in its own task (never inside the actor — an
+    /// unreachable camera would stall every stream command and status /
+    /// catalogue reply for up to the connect timeout). The reservation
+    /// refcounts opens/closes that race the connect; `RtspConnected`
+    /// resolves it into `Open` or clears it.
+    Pending(PendingOpen),
+    Open(Box<ProfileSession>),
+}
+
+/// Bookkeeping for a profile whose RTSP connect is still in flight.
+struct PendingOpen {
+    /// Explicit `open_stream` minus `close_stream` received while pending;
+    /// 0 by the time the connect resolves = every opener left, so the
+    /// camera session is discarded instead of installed.
+    refcount: u32,
+}
+
 /// One running profile pipeline + its egress/matcher tasks.
 struct ProfileSession {
     handle: Option<PipelineHandle>,
@@ -135,6 +165,10 @@ struct ProfileSession {
     publisher: Arc<RawMediaPublisher>,
     /// Explicit `open_stream` minus `close_stream` count.
     refcount: u32,
+    /// Incarnation number (monotonic across the actor): stamps this
+    /// profile's `EgressEnded` so a stale end report from a torn-down
+    /// predecessor cannot kill its replacement.
+    epoch: u64,
     /// Whether the media publisher currently has matching subscribers.
     viewers: bool,
     /// Set while unwatched (no viewers); reaped after `idle_timeout`.
@@ -168,19 +202,53 @@ impl ProfileSession {
     }
 }
 
-/// Per-stream pair of optional profile sessions.
+/// Per-stream pair of optional profile slots.
 #[derive(Default)]
 struct StreamSession {
-    video: Option<ProfileSession>,
-    preview: Option<ProfileSession>,
+    video: Option<ProfileSlot>,
+    preview: Option<ProfileSlot>,
 }
 
 impl StreamSession {
-    fn profile(&mut self, profile: Profile) -> &mut Option<ProfileSession> {
+    fn slot(&mut self, profile: Profile) -> &mut Option<ProfileSlot> {
         match profile {
             Profile::Video => &mut self.video,
             Profile::Preview => &mut self.preview,
         }
+    }
+
+    fn slot_ref(&self, profile: Profile) -> Option<&ProfileSlot> {
+        match profile {
+            Profile::Video => self.video.as_ref(),
+            Profile::Preview => self.preview.as_ref(),
+        }
+    }
+
+    /// The occupied profile slots, in fixed (video, preview) order.
+    fn profiles(&self) -> impl Iterator<Item = (Profile, &ProfileSlot)> {
+        [
+            (Profile::Video, self.video.as_ref()),
+            (Profile::Preview, self.preview.as_ref()),
+        ]
+        .into_iter()
+        .filter_map(|(profile, slot)| slot.map(|s| (profile, s)))
+    }
+
+    /// Mutable variant of [`Self::profiles`].
+    fn profiles_mut(&mut self) -> impl Iterator<Item = (Profile, &mut ProfileSlot)> {
+        [
+            (Profile::Video, self.video.as_mut()),
+            (Profile::Preview, self.preview.as_mut()),
+        ]
+        .into_iter()
+        .filter_map(|(profile, slot)| slot.map(|s| (profile, s)))
+    }
+
+    /// Open profiles with matching subscribers (pending slots have none).
+    fn viewers(&self) -> u32 {
+        self.profiles()
+            .filter(|(_, slot)| matches!(slot, ProfileSlot::Open(p) if p.viewers))
+            .count() as u32
     }
 
     fn is_empty(&self) -> bool {
@@ -203,6 +271,8 @@ pub struct SessionManager {
     health: Option<Arc<SensorHealth>>,
     /// Alert rules (rtsp_connect_failed fires from the open path).
     alerts: Option<Arc<ParallaxAlerts>>,
+    /// Next `ProfileSession::epoch` (monotonic across all profiles).
+    next_epoch: u64,
 }
 
 impl SessionManager {
@@ -229,6 +299,7 @@ impl SessionManager {
             stats,
             health,
             alerts,
+            next_epoch: 0,
         };
         tokio::spawn(manager.run(rx));
         SessionHandle(tx)
@@ -246,13 +317,16 @@ impl SessionManager {
                 _ = reap_tick.tick() => self.reap_idle().await,
             }
         }
-        // Actor shutdown: tear every remaining profile down.
+        // Actor shutdown: tear every remaining profile down (pending
+        // reservations have nothing running; dropping them is enough).
         for (_, mut session) in self.sessions.drain() {
-            if let Some(p) = session.video.take() {
-                p.teardown();
-            }
-            if let Some(p) = session.preview.take() {
-                p.teardown();
+            for slot in [session.video.take(), session.preview.take()]
+                .into_iter()
+                .flatten()
+            {
+                if let ProfileSlot::Open(p) = slot {
+                    p.teardown();
+                }
             }
         }
         tracing::info!("session actor stopped");
@@ -269,8 +343,17 @@ impl SessionManager {
             SessionMsg::EgressEnded {
                 stream,
                 profile,
+                epoch,
                 error,
-            } => self.handle_egress_ended(&stream, profile, error).await,
+            } => {
+                self.handle_egress_ended(&stream, profile, epoch, error)
+                    .await
+            }
+            SessionMsg::RtspConnected {
+                stream,
+                profile,
+                result,
+            } => self.handle_rtsp_connected(&stream, profile, result).await,
             SessionMsg::StatusQuery { reply } => {
                 let _ = reply.send(self.statuses());
             }
@@ -302,65 +385,94 @@ impl SessionManager {
         };
         let kind = entry.kind.clone();
 
-        // Already open: bump the refcount, refresh the idle countdown, and
-        // hand the (re)opener a fresh IDR.
-        if let Some(existing) = self
+        // Reuse (or clear) an existing slot for the profile.
+        enum Existing {
+            None,
+            Reused,
+            Dead,
+        }
+        let existing = match self
             .sessions
             .get_mut(stream)
-            .and_then(|s| s.profile(profile).as_mut())
+            .and_then(|s| s.slot(profile).as_mut())
         {
-            existing.refcount = existing.refcount.saturating_add(1);
-            if !existing.viewers {
-                existing.idle_since = Some(Instant::now());
+            None => Existing::None,
+            Some(ProfileSlot::Pending(pending)) => {
+                // An RTSP connect is already in flight: count the opener in.
+                pending.refcount = pending.refcount.saturating_add(1);
+                tracing::debug!(stream = %stream, profile = profile.as_str(),
+                    refcount = pending.refcount, "open_stream: open already in flight");
+                Existing::Reused
             }
-            if let Some(k) = &existing.keyframe {
-                k.request();
+            Some(ProfileSlot::Open(existing)) if existing.egress.is_finished() => {
+                // The egress already ended but its EgressEnded is still
+                // queued behind this OpenStream: the pipeline is dead and
+                // would never feed this opener. Tear it down and rebuild.
+                Existing::Dead
             }
-            tracing::debug!(stream = %stream, profile = profile.as_str(),
-                refcount = existing.refcount, "open_stream: profile already open");
-            self.publish_status(stream).await;
-            return;
+            Some(ProfileSlot::Open(existing)) => {
+                // Healthy and open: bump the refcount, refresh the idle
+                // countdown, and hand the (re)opener a fresh IDR.
+                existing.refcount = existing.refcount.saturating_add(1);
+                if !existing.viewers {
+                    existing.idle_since = Some(Instant::now());
+                }
+                if let Some(k) = &existing.keyframe {
+                    k.request();
+                }
+                tracing::debug!(stream = %stream, profile = profile.as_str(),
+                    refcount = existing.refcount, "open_stream: profile already open");
+                Existing::Reused
+            }
+        };
+        match existing {
+            Existing::Reused => {
+                self.publish_status(stream).await;
+                return;
+            }
+            Existing::Dead => {
+                tracing::info!(stream = %stream, profile = profile.as_str(),
+                    "open_stream: replacing a dead profile (egress already ended)");
+                self.teardown_profile(stream, profile);
+            }
+            Existing::None => {}
         }
 
         // Build the profile pipeline. Test/V4L2 sources are self-driving and
-        // built synchronously; RTSP connects first (bounded by the connect
-        // timeout — this briefly serializes the actor, accepted for now) and
-        // gets an AppSrc-fed pipeline plus a feeder task.
+        // built synchronously; RTSP must connect first, which is NEVER done
+        // inside the actor (an unreachable camera would stall every stream
+        // command and status/catalogue reply for the connect timeout): the
+        // slot is reserved as Pending and `RtspConnected` resolves it.
         let stream_stats = self.stats.handle(stream);
-        let (built, rtsp) = match &kind {
+        match &kind {
             SourceKind::Rtsp {
                 url,
                 username,
                 password,
-            } => match connect_rtsp(url, username.as_deref(), password.as_deref()).await {
-                Ok(rtsp) => {
-                    if let Some(alerts) = &self.alerts {
-                        alerts.rtsp_connect(stream, None).await;
-                    }
-                    let dims = rtsp_video_dimensions(&rtsp);
-                    let built = match profile {
-                        Profile::Video => pipeline::build_rtsp_video_passthrough(dims),
-                        Profile::Preview => match dims {
-                            Some((w, h)) => pipeline::build_rtsp_preview(
-                                w,
-                                h,
-                                &self.config.preview,
-                                &stream_stats,
-                            ),
-                            None => Err(anyhow::anyhow!(
-                                "rtsp stream advertises no dimensions; preview needs the SDP size"
-                            )),
-                        },
-                    };
-                    (built, Some(rtsp))
-                }
-                Err(e) => {
-                    if let Some(alerts) = &self.alerts {
-                        alerts.rtsp_connect(stream, Some(&e.to_string())).await;
-                    }
-                    (Err(e), None)
-                }
-            },
+            } => {
+                *self
+                    .sessions
+                    .entry(stream.to_string())
+                    .or_default()
+                    .slot(profile) = Some(ProfileSlot::Pending(PendingOpen { refcount: 1 }));
+                let tx = self.tx.clone();
+                let (url, username, password) = (url.clone(), username.clone(), password.clone());
+                let task_stream = stream.to_string();
+                tokio::spawn(async move {
+                    let result = connect_rtsp(&url, username.as_deref(), password.as_deref())
+                        .await
+                        .map(Box::new)
+                        .map_err(|e| e.to_string());
+                    let _ = tx
+                        .send(SessionMsg::RtspConnected {
+                            stream: task_stream,
+                            profile,
+                            result,
+                        })
+                        .await;
+                });
+                self.publish_status(stream).await;
+            }
             _ => {
                 let built = match profile {
                     Profile::Video => {
@@ -370,18 +482,89 @@ impl SessionManager {
                         pipeline::build_preview(&kind, &self.config.preview, &stream_stats)
                     }
                 };
-                (built, None)
+                self.finish_open(stream, profile, built, None, stream_stats, 1)
+                    .await;
+            }
+        }
+    }
+
+    /// An off-actor RTSP connect resolved: install the profile (or clean the
+    /// pending reservation up).
+    async fn handle_rtsp_connected(
+        &mut self,
+        stream: &str,
+        profile: Profile,
+        result: Result<Box<RtspSession>, String>,
+    ) {
+        let refcount = match self.sessions.get(stream).and_then(|s| s.slot_ref(profile)) {
+            Some(ProfileSlot::Pending(p)) => p.refcount,
+            _ => {
+                // The reservation is gone (torn down meanwhile): dropping an
+                // Ok result hangs the camera session up, nothing else to do.
+                tracing::debug!(stream = %stream, profile = profile.as_str(),
+                    "rtsp connect resolved for a slot that is no longer pending; dropped");
+                return;
             }
         };
+        if let Some(alerts) = &self.alerts {
+            alerts
+                .rtsp_connect(stream, result.as_ref().err().map(String::as_str))
+                .await;
+        }
+        let rtsp = match result {
+            Ok(rtsp) => rtsp,
+            Err(e) => {
+                self.fail_open(stream, profile, &e).await;
+                return;
+            }
+        };
+        if refcount == 0 {
+            // Every opener closed while we were connecting: don't start a
+            // pipeline nobody wants (dropping the RtspSession hangs up).
+            tracing::debug!(stream = %stream, profile = profile.as_str(),
+                "rtsp connected but every opener closed meanwhile; discarding");
+            self.clear_pending_slot(stream, profile);
+            self.remove_stats_if_closed(stream);
+            self.publish_status(stream).await;
+            return;
+        }
+        let dims = rtsp_video_dimensions(&rtsp);
+        let stream_stats = self.stats.handle(stream);
+        let built = match profile {
+            Profile::Video => pipeline::build_rtsp_video_passthrough(dims),
+            Profile::Preview => match dims {
+                Some((w, h)) => {
+                    pipeline::build_rtsp_preview(w, h, &self.config.preview, &stream_stats)
+                }
+                None => Err(anyhow::anyhow!(
+                    "rtsp stream advertises no dimensions; preview needs the SDP size"
+                )),
+            },
+        };
+        self.finish_open(stream, profile, built, Some(*rtsp), stream_stats, refcount)
+            .await;
+    }
+
+    /// Complete an open with a constructed pipeline: declare the media
+    /// publisher and matching listener, start the pipeline, spawn the egress
+    /// (and RTSP feeder), install the `ProfileSession`, and publish the
+    /// status transition. EVERY failure funnels through [`Self::fail_open`]
+    /// — a late failure that skipped cleanup used to leak the stream's stats
+    /// entry (phantom zero-valued stats telemetry forever).
+    async fn finish_open(
+        &mut self,
+        stream: &str,
+        profile: Profile,
+        built: anyhow::Result<pipeline::BuiltPipeline>,
+        rtsp: Option<RtspSession>,
+        stream_stats: Arc<StreamStats>,
+        refcount: u32,
+    ) {
         let mut built = match built {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!(stream = %stream, profile = profile.as_str(), error = %e,
-                    "open_stream: failed to build pipeline");
-                if let Some(health) = &self.health {
-                    health.record_device_failure(stream, &e.to_string());
-                }
-                self.remove_stats_if_closed(stream);
+                self.fail_open(stream, profile, &format!("failed to build pipeline: {e}"))
+                    .await;
                 return;
             }
         };
@@ -401,8 +584,12 @@ impl SessionManager {
             Ok(p) => Arc::new(p),
             Err(e) => {
                 built.stop.stop();
-                tracing::warn!(stream = %stream, key = %key, error = %e,
-                    "open_stream: failed to declare media publisher");
+                self.fail_open(
+                    stream,
+                    profile,
+                    &format!("failed to declare media publisher on {key}: {e}"),
+                )
+                .await;
                 return;
             }
         };
@@ -413,8 +600,12 @@ impl SessionManager {
                 Ok(l) => l,
                 Err(e) => {
                     built.stop.stop();
-                    tracing::warn!(stream = %stream, error = %e,
-                        "open_stream: failed to declare matching listener");
+                    self.fail_open(
+                        stream,
+                        profile,
+                        &format!("failed to declare matching listener: {e}"),
+                    )
+                    .await;
                     return;
                 }
             };
@@ -439,13 +630,16 @@ impl SessionManager {
             Err(e) => {
                 built.stop.stop();
                 matcher.abort();
-                tracing::warn!(stream = %stream, profile = profile.as_str(), error = %e,
-                    "open_stream: failed to start pipeline");
+                self.fail_open(stream, profile, &format!("failed to start pipeline: {e}"))
+                    .await;
                 return;
             }
         };
 
-        // Egress task: pump the sink into the publisher, report the end.
+        // Egress task: pump the sink into the publisher, report the end
+        // (stamped with this incarnation's epoch — see `EgressEnded`).
+        let epoch = self.next_epoch;
+        self.next_epoch += 1;
         let egress = {
             let sink = built.sink.clone();
             let media = media.clone();
@@ -464,6 +658,7 @@ impl SessionManager {
                     .send(SessionMsg::EgressEnded {
                         stream,
                         profile,
+                        epoch,
                         error: result.err(),
                     })
                     .await;
@@ -499,7 +694,7 @@ impl SessionManager {
             .sessions
             .entry(stream.to_string())
             .or_default()
-            .profile(profile) = Some(ProfileSession {
+            .slot(profile) = Some(ProfileSlot::Open(Box::new(ProfileSession {
             handle: Some(handle),
             stop: built.stop,
             keyframe: built.keyframe,
@@ -507,13 +702,44 @@ impl SessionManager {
             matcher,
             feeder,
             publisher: media,
-            refcount: 1,
+            refcount,
+            epoch,
             viewers,
             // Unwatched until a viewer actually subscribes: give the opener
             // one idle window to show up, then reap (zombie-open backstop).
             idle_since: if viewers { None } else { Some(Instant::now()) },
-        });
+        })));
         self.publish_status(stream).await;
+    }
+
+    /// Single failure exit for every open path: log, record the device
+    /// failure, drop any pending slot reservation, drop the stream's stats
+    /// entry when nothing else is open (a leaked entry publishes phantom
+    /// zero stats forever), and publish the `open: false` transition so a
+    /// waiting viewer learns the open died (the GUI surfaces it on the tile).
+    async fn fail_open(&mut self, stream: &str, profile: Profile, error: &str) {
+        tracing::warn!(stream = %stream, profile = profile.as_str(), error = %error,
+            "open_stream failed");
+        if let Some(health) = &self.health {
+            health.record_device_failure(stream, error);
+        }
+        self.clear_pending_slot(stream, profile);
+        self.remove_stats_if_closed(stream);
+        self.publish_status(stream).await;
+    }
+
+    /// Remove a pending reservation (never an `Open` slot — those must go
+    /// through [`Self::teardown_profile`] so the pipeline's stop switch
+    /// flips), dropping the stream entry when both slots are empty.
+    fn clear_pending_slot(&mut self, stream: &str, profile: Profile) {
+        if let Some(session) = self.sessions.get_mut(stream) {
+            if matches!(session.slot(profile), Some(ProfileSlot::Pending(_))) {
+                *session.slot(profile) = None;
+            }
+            if session.is_empty() {
+                self.sessions.remove(stream);
+            }
+        }
     }
 
     /// `close_stream` carries no codec: decrement every open profile of the
@@ -523,14 +749,23 @@ impl SessionManager {
             tracing::debug!(stream = %stream, "close_stream: not open");
             return;
         };
-        for profile in [Profile::Video, Profile::Preview] {
-            if let Some(p) = session.profile(profile).as_mut() {
-                p.refcount = p.refcount.saturating_sub(1);
-                if p.refcount == 0 && !p.viewers && p.idle_since.is_none() {
-                    p.idle_since = Some(Instant::now());
+        for (profile, slot) in session.profiles_mut() {
+            match slot {
+                ProfileSlot::Pending(p) => {
+                    // Still connecting: `RtspConnected` discards the camera
+                    // session if the refcount is 0 by the time it resolves.
+                    p.refcount = p.refcount.saturating_sub(1);
+                    tracing::debug!(stream = %stream, profile = profile.as_str(),
+                        refcount = p.refcount, "close_stream: pending refcount decremented");
                 }
-                tracing::debug!(stream = %stream, profile = profile.as_str(),
-                    refcount = p.refcount, "close_stream: refcount decremented");
+                ProfileSlot::Open(p) => {
+                    p.refcount = p.refcount.saturating_sub(1);
+                    if p.refcount == 0 && !p.viewers && p.idle_since.is_none() {
+                        p.idle_since = Some(Instant::now());
+                    }
+                    tracing::debug!(stream = %stream, profile = profile.as_str(),
+                        refcount = p.refcount, "close_stream: refcount decremented");
+                }
             }
         }
         self.publish_status(stream).await;
@@ -539,8 +774,11 @@ impl SessionManager {
     fn request_keyframe(&mut self, stream: &str) {
         let keyframe = self
             .sessions
-            .get_mut(stream)
-            .and_then(|s| s.video.as_ref())
+            .get(stream)
+            .and_then(|s| match &s.video {
+                Some(ProfileSlot::Open(p)) => Some(p),
+                _ => None,
+            })
             .and_then(|p| p.keyframe.as_ref());
         match keyframe {
             Some(k) => {
@@ -555,11 +793,10 @@ impl SessionManager {
     }
 
     fn handle_viewers(&mut self, stream: &str, profile: Profile, matching: bool) {
-        let Some(p) = self
-            .sessions
-            .get_mut(stream)
-            .and_then(|s| s.profile(profile).as_mut())
-        else {
+        let Some(session) = self.sessions.get_mut(stream) else {
+            return;
+        };
+        let Some(ProfileSlot::Open(p)) = session.slot(profile).as_mut() else {
             return;
         };
         let was = p.viewers;
@@ -582,20 +819,32 @@ impl SessionManager {
         }
 
         // Refresh the viewers gauge (profiles with matching subscribers).
-        if let Some(session) = self.sessions.get_mut(stream) {
-            let viewers = [&session.video, &session.preview]
-                .into_iter()
-                .flatten()
-                .filter(|p| p.viewers)
-                .count() as u64;
-            self.stats
-                .handle(stream)
-                .viewers
-                .store(viewers, std::sync::atomic::Ordering::Relaxed);
-        }
+        let viewers = u64::from(session.viewers());
+        self.stats
+            .handle(stream)
+            .viewers
+            .store(viewers, std::sync::atomic::Ordering::Relaxed);
     }
 
-    async fn handle_egress_ended(&mut self, stream: &str, profile: Profile, error: Option<String>) {
+    async fn handle_egress_ended(
+        &mut self,
+        stream: &str,
+        profile: Profile,
+        epoch: u64,
+        error: Option<String>,
+    ) {
+        // Stale end report: `open()` already tore this incarnation down (and
+        // possibly installed a replacement) — acting on it would kill the
+        // replacement, so only the current epoch's report counts.
+        let is_current = matches!(
+            self.sessions.get(stream).and_then(|s| s.slot_ref(profile)),
+            Some(ProfileSlot::Open(p)) if p.epoch == epoch
+        );
+        if !is_current {
+            tracing::debug!(stream = %stream, profile = profile.as_str(), epoch,
+                "stale egress-ended for a replaced profile; ignored");
+            return;
+        }
         match &error {
             Some(e) => {
                 tracing::warn!(stream = %stream, profile = profile.as_str(), error = %e,
@@ -615,11 +864,10 @@ impl SessionManager {
         let timeout = Duration::from_secs(self.config.idle_timeout_secs);
         let mut reap: Vec<(String, Profile)> = Vec::new();
         for (stream, session) in &self.sessions {
-            for (profile, slot) in [
-                (Profile::Video, &session.video),
-                (Profile::Preview, &session.preview),
-            ] {
-                if let Some(p) = slot
+            for (profile, slot) in session.profiles() {
+                // Pending slots never idle out here: the bounded RTSP
+                // connect always resolves them via `RtspConnected`.
+                if let ProfileSlot::Open(p) = slot
                     && !p.viewers
                     && p.idle_since.is_some_and(|t| t.elapsed() >= timeout)
                 {
@@ -639,8 +887,13 @@ impl SessionManager {
         let Some(session) = self.sessions.get_mut(stream) else {
             return;
         };
-        if let Some(p) = session.profile(profile).take() {
-            p.teardown();
+        if let Some(slot) = session.slot(profile).take() {
+            match slot {
+                ProfileSlot::Open(p) => p.teardown(),
+                // A pending reservation has nothing running; dropping it
+                // makes the eventual `RtspConnected` a no-op.
+                ProfileSlot::Pending(_) => {}
+            }
         }
         if session.is_empty() {
             self.sessions.remove(stream);
@@ -664,12 +917,10 @@ impl SessionManager {
     }
 
     fn status_for(&self, stream: &str, session: &StreamSession) -> StreamStatus {
-        let viewers = [&session.video, &session.preview]
-            .into_iter()
-            .flatten()
-            .filter(|p| p.viewers)
-            .count() as u32;
-        // Active profile string: the video profile wins if open.
+        let viewers = session.viewers();
+        // Active profile string: the video profile wins if open. A pending
+        // RTSP connect counts as open (in progress) — only a resolved
+        // failure publishes the definitive `open: false` transition.
         let profile = if session.video.is_some() {
             Some(format!("h264/{}", self.config.video.profile))
         } else if session.preview.is_some() {

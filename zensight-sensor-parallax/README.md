@@ -24,10 +24,14 @@ matching listener forces a keyframe the instant a subscriber appears.
   `video/h264`) and `@media/<stream>/preview/jpeg` (encoding `image/jpeg`),
   every sample carrying a CBOR `FrameMeta` attachment (keyframe flag,
   pts/dts/duration, sequence, dimensions). Never a telemetry envelope.
+  Video viewers subscribe with the profile chunk as a single-chunk wildcard
+  (`…/video/h264/*`) — `video.profile` is sensor config the catalogue does
+  not carry (see `docs/KEYSPACE.md` §3.3).
 - **Status + stats** — `StreamStatus` transitions on `@/status/streams`
-  (declared publisher) and per-stream telemetry under
-  `<stream>/stats/{fps,kbps,drops,viewers,encode_ms}` so existing charts
-  light up for free.
+  (declared publisher; failed opens publish a definitive `open: false`), a
+  queryable on the same key replying `Vec<StreamStatus>`, and per-stream
+  telemetry under `<stream>/stats/{fps,kbps,drops,viewers,encode_ms}` so
+  existing charts light up for free.
 - **Liveliness + health + alerts** — one `@/devices/<stream>/alive` token per
   catalogue entry; per-stream health tracking; alert rules for disappeared
   cameras, RTSP connect failures, and encoder overrun on `@/alerts/*`.

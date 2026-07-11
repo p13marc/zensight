@@ -443,17 +443,30 @@ pub enum Message {
     ParallaxCloseTile {
         stream: String,
     },
-    /// A decoded preview frame from a tile's subscriber task. Stale `seq`s
-    /// are dropped (latest frame wins).
+    /// A decoded preview frame from a tile's subscriber task. `generation`
+    /// identifies the tile incarnation the task was opened for (frames from
+    /// a replaced task are dropped); stale `seq`s within an incarnation are
+    /// dropped too (latest frame wins).
     ParallaxFrame {
         stream: String,
+        generation: u64,
         seq: u64,
         handle: iced::widget::image::Handle,
     },
-    /// A tile's subscriber task finished (session closed or subscribe error).
+    /// A tile's subscriber task finished (session closed or subscribe
+    /// error). Carries the tile incarnation so a replaced task's late end
+    /// report cannot clear the new tile's abort handle.
     ParallaxTileEnded {
         stream: String,
+        generation: u64,
         error: Option<String>,
+    },
+    /// A parallax `StreamStatus` transition from `@/status/streams` (arrives
+    /// on the host-scoped control-plane subscriber): a definitive
+    /// `open: false` marks a still-waiting tile as failed.
+    ParallaxStreamStatus {
+        source: String,
+        status: zensight_common::stream::StreamStatus,
     },
     /// Open a live H.264 video tile (#409): sends `open_stream` (codec
     /// `h264`) and spawns the decoding subscriber task. Only functional on

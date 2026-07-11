@@ -106,7 +106,21 @@ async fn spawn_sensor(
     session: Arc<zenoh::Session>,
     source: &str,
 ) -> zensight_sensor_parallax::session::SessionHandle {
-    let config = test_parallax_config();
+    spawn_sensor_with_config(session, source, test_parallax_config())
+        .await
+        .0
+}
+
+/// [`spawn_sensor`] with a caller-chosen config; also hands the stats
+/// registry back so tests can assert open/failure cleanup.
+async fn spawn_sensor_with_config(
+    session: Arc<zenoh::Session>,
+    source: &str,
+    config: ParallaxConfig,
+) -> (
+    zensight_sensor_parallax::session::SessionHandle,
+    StatsRegistry,
+) {
     let catalog = Arc::new(Catalog::build(&config));
     let publisher = Publisher::new(session.clone(), config.key_prefix.clone(), Format::Json);
     let host_prefix = format!("{}/{}", config.key_prefix, source);
@@ -124,7 +138,7 @@ async fn spawn_sensor(
         config,
         source.to_string(),
         publisher,
-        registry,
+        registry.clone(),
         None,
         None,
     );
@@ -136,7 +150,7 @@ async fn spawn_sensor(
     tokio::spawn(query::run(session, host_prefix, catalog, handle.clone()));
     // Let the subscriber + queryables propagate.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    handle
+    (handle, registry)
 }
 
 async fn query_catalogue(viewer: &zenoh::Session, host_prefix: &str) -> Vec<StreamDescriptor> {
@@ -294,8 +308,12 @@ async fn open_h264_video_streams_with_keyframe_control() {
     let host_prefix = format!("zensight/parallax/{source}");
     let handle = spawn_sensor(sensor.clone(), source).await;
 
-    // Subscribe FIRST so the initial IDR is observed.
-    let video_key = media_video_key(Protocol::Parallax, source, "test0", "h264", "main");
+    // Subscribe FIRST so the initial IDR is observed. The profile chunk is
+    // the GUI's single-chunk wildcard (the sensor's `video.profile` is
+    // configurable and the catalogue doesn't carry it) — zenoh matching is
+    // intersection-based, so the sensor's matching listener must see this
+    // subscriber as a viewer (asserted below via the status queryable).
+    let video_key = media_video_key(Protocol::Parallax, source, "test0", "h264", "*");
     let sub = viewer
         .declare_subscriber(&video_key)
         .await
@@ -391,6 +409,13 @@ async fn open_h264_video_streams_with_keyframe_control() {
     let statuses: Vec<StreamStatus> =
         serde_json::from_slice(&reply.result().unwrap().payload().to_bytes()).unwrap();
     assert_eq!(statuses[0].profile.as_deref(), Some("h264/main"));
+    // The wildcard-profile subscriber registered as a viewer: the sensor's
+    // matching listener fired on it (this also proves the idle reaper —
+    // idle_timeout_secs: 1, and we streamed well past that — saw a viewer).
+    assert!(
+        statuses[0].viewers >= 1,
+        "matching listener must count the wildcard-profile subscriber as a viewer"
+    );
 
     // Teardown before the runtime drops (blocking source task).
     send_control(
@@ -541,6 +566,153 @@ async fn close_and_idle_reaper_tear_stream_down() {
     // And the catalogue is inactive again.
     let got = query_catalogue(&viewer, &host_prefix).await;
     assert!(!got[0].active, "stream must be inactive after teardown");
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
+/// One unreachable RTSP camera (connection refused fast on loopback) plus
+/// the usual test source, short idle timeout.
+fn rtsp_parallax_config(url: &str) -> ParallaxConfig {
+    json5::from_str(&format!(
+        r#"{{
+            enumerate_v4l2: false,
+            rtsp: [ {{ name: "deadcam", url: "{url}" }} ],
+            test_sources: [
+                {{ name: "test0", pattern: "smpte", width: 160, height: 120, fps: 8 }},
+            ],
+            preview: {{ fps: 4, quality: 70 }},
+            idle_timeout_secs: 1,
+        }}"#
+    ))
+    .unwrap()
+}
+
+/// A failed open must (a) publish a definitive `open: false` StreamStatus
+/// transition (the GUI flags the waiting tile with it), and (b) leave no
+/// entry in the stats registry — a leaked entry means phantom zero-valued
+/// stats telemetry forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_open_publishes_closed_status_and_leaks_no_stats() {
+    let (sensor, viewer) = isolated_pair().await;
+    let source = "e2e-failed-open";
+    let host_prefix = format!("zensight/parallax/{source}");
+    // Loopback port 1: nothing listens there, the connect is refused fast.
+    let (handle, registry) = spawn_sensor_with_config(
+        sensor.clone(),
+        source,
+        rtsp_parallax_config("rtsp://127.0.0.1:1/dead"),
+    )
+    .await;
+
+    // Watch the status transitions BEFORE opening.
+    let status_sub = viewer
+        .declare_subscriber(status_key(&host_prefix, "streams"))
+        .await
+        .expect("declare status subscriber");
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::OpenStream {
+            stream: "deadcam".into(),
+            codec: Some("mjpeg".into()),
+            max_height: None,
+        },
+    )
+    .await;
+
+    // Transitions: `open: true` while the connect is pending, then the
+    // definitive `open: false` when it fails. Bounded well above the RTSP
+    // connect timeout (5 s + 1 s grace).
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut saw_closed = false;
+    while Instant::now() < deadline {
+        let Ok(Ok(sample)) =
+            tokio::time::timeout(Duration::from_secs(10), status_sub.recv_async()).await
+        else {
+            break;
+        };
+        let status: StreamStatus =
+            serde_json::from_slice(&sample.payload().to_bytes()).expect("decode StreamStatus");
+        assert_eq!(status.stream, "deadcam");
+        if !status.open {
+            saw_closed = true;
+            break;
+        }
+    }
+    assert!(
+        saw_closed,
+        "a failed open must publish an open: false StreamStatus transition"
+    );
+
+    // No session left open, and — the leak this test pins — no stats entry.
+    assert!(handle.open_streams().await.is_empty());
+    assert!(
+        registry.snapshot().is_empty(),
+        "a failed open must remove the stream's stats entry"
+    );
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
+/// An in-flight RTSP connect must not stall the actor: catalogue and status
+/// queries answer immediately while the connect is pending off-actor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rtsp_connect_does_not_block_stream_queries() {
+    let (sensor, viewer) = isolated_pair().await;
+    let source = "e2e-nonblocking";
+    let host_prefix = format!("zensight/parallax/{source}");
+    // TEST-NET-3 address: blackholed on any sane network, so the connect
+    // hangs until the 5 s timeout (if the local network answers fast the
+    // test still passes — it just exercises less waiting).
+    let (handle, _registry) = spawn_sensor_with_config(
+        sensor.clone(),
+        source,
+        rtsp_parallax_config("rtsp://203.0.113.1:554/blackhole"),
+    )
+    .await;
+
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::OpenStream {
+            stream: "deadcam".into(),
+            codec: Some("h264".into()),
+            max_height: None,
+        },
+    )
+    .await;
+
+    // While the connect is (very likely still) pending, the catalogue must
+    // answer well within the RTSP connect timeout.
+    let started = Instant::now();
+    let got = tokio::time::timeout(
+        Duration::from_secs(3),
+        query_catalogue(&viewer, &host_prefix),
+    )
+    .await
+    .expect("catalogue query must not be stalled by an in-flight rtsp connect");
+    assert_eq!(got.len(), 2);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "catalogue reply took {:?}",
+        started.elapsed()
+    );
+
+    // The pending open shows as an open stream in the actor's snapshot —
+    // unless the network answered with a fast unreachable and the connect
+    // already failed (then the reservation is legitimately gone).
+    let open = handle.open_streams().await;
+    assert!(
+        open == HashSet::from(["deadcam".to_string()]) || open.is_empty(),
+        "unexpected open set {open:?}"
+    );
+
+    // The pending reservation resolves (here: fails) on its own; it never
+    // leaks past the bounded connect timeout.
+    wait_until_closed(&handle).await;
 
     viewer.close().await.unwrap();
     sensor.close().await.unwrap();

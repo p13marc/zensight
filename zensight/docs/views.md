@@ -177,12 +177,25 @@ The stream catalogue is fetched on open from the host-scoped
 Open sends `open_stream` (codec `mjpeg`) and spawns one **abortable**
 `Task::stream` per tile — a plain subscriber on the exact
 `@media/<stream>/preview/jpeg` key, latest-frame-wins, CBOR `FrameMeta`
-attachment, JPEG→RGBA decoded off the UI thread. Tiles render newest-frame
-images with a seq/fps caption. Close (and every way of leaving the device
-view: deselect, Escape, dashboard, disconnect, session replacement) aborts
-the subscriber tasks and batches `close_stream` commands; the stored
-`abort_on_drop` handles make dropping the state itself kill the subscribers,
-which is the sensor's falling-edge teardown backstop.
+attachment, JPEG→RGBA decoded off the UI thread. Video tiles (`--features
+h264`) subscribe with the profile chunk as a single-chunk wildcard
+(`@media/<stream>/video/h264/*`) — the sensor's `video.profile` is
+configurable and the catalogue doesn't carry it (KEYSPACE §3.3). Tiles render
+newest-frame images with a seq/fps caption. Each tile carries a
+**generation** (monotonic per open); frames and end reports from a replaced
+subscriber task (older generation) are ignored, a large in-generation
+sequence regression re-anchors instead of freezing (sensor pipeline restart),
+and a sensor `StreamStatus{open: false}` transition (via the host-scoped
+control subscriber) flags a tile still waiting for its first frame as a
+failed open. Close (and every way of leaving the device view: deselect,
+Escape, dashboard, navigating to any other view, selecting another device,
+disconnect, session replacement) aborts the subscriber tasks and batches
+`close_stream` commands — view changes funnel through one choke point in
+`App::update`; the stored `abort_on_drop` handles make dropping the state
+itself kill the subscribers, which is the sensor's falling-edge teardown
+backstop. Switching a preview tile to video sends `close_stream` **before**
+`open_stream(h264)` (ordered on one publisher) so the preview refcount never
+leaks.
 
 **Logs** (`view/specialized/syslog.rs` and related) — structured log drill-down
 with a MESSAGE_ID catalog, follow/pause, and a boot lens. Seeds from the cold

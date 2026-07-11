@@ -18,6 +18,13 @@ publisher has had no matching subscribers for `idle_timeout_secs` (the
 matching listener is the crash backstop for GUIs that die without
 `close_stream`).
 
+**Viewer keys**: previews are watched on the exact
+`@media/<stream>/preview/jpeg` key; video viewers subscribe with the profile
+chunk as a single-chunk wildcard (`@media/<stream>/video/h264/*`), because
+`video.profile` is *sensor* configuration that the catalogue does not carry.
+The matching listener fires for wildcard subscribers too (zenoh matching is
+intersection-based; pinned in `tests/e2e.rs`). See `docs/KEYSPACE.md` §3.3.
+
 Separate pipelines per profile — deliberately **no tee**: the preview must
 keep its 2 fps cadence whether or not the encoder runs, and closing one
 profile must not disturb the other. The cost (double capture on V4L2) is a
@@ -77,6 +84,19 @@ the same countdown even if its refcount is non-zero — the matching listener
 is the crash backstop for GUIs that die without `close_stream`, and an opener
 that never subscribes is a zombie.
 
+**Failed opens** publish a definitive `StreamStatus{open: false}` transition
+(the GUI flags a still-waiting tile with it), record a device failure, and
+drop the stream's stats entry — a leaked entry would publish phantom
+zero-valued stats forever. All open-failure paths (pipeline build, media
+publisher declare, matching listener declare, pipeline start, RTSP connect)
+funnel through the same cleanup exit.
+
+**Dead-profile reopen**: `open_stream` for a profile whose egress already
+ended (its `EgressEnded` still queued behind the command) tears the dead
+pipeline down and builds a fresh one instead of refcounting a corpse; the
+queued stale `EgressEnded` is recognized by its epoch stamp and ignored, so
+it cannot kill the replacement.
+
 **Stopping a live pipeline** (parallax 0.1.1 gotcha): the unified executor
 runs source loops on blocking threads and ignores downstream channel closure,
 so `PipelineHandle::abort()` alone cannot end a live source — the blocking
@@ -124,8 +144,11 @@ Alert rules on `@/alerts/*` (auto-resolve on recovery):
 - **RTSP is H.264-only** and passthrough: bitrate/GOP config does not apply,
   and `max_height` is ignored for the video profile. Each open profile makes
   its own RTSP connection (two when video + preview are both open). The
-  connect happens inside the session actor (bounded by a 5 s timeout), so an
-  unreachable camera briefly serializes stream commands. If the SDP carries
+  connect runs in its own task, **never inside the session actor**: the
+  profile slot is reserved as *pending* (refcounting opens/closes that race
+  the connect; the stream reads `open` in status/catalogue meanwhile), so an
+  unreachable camera (bounded by a 5 s timeout) stalls no stream commands and
+  no `@/query/streams` / `@/status/streams` replies. If the SDP carries
   no video dimensions, `FrameMeta.width/height` are `0` (= unknown) on the
   video profile and the JPEG preview cannot be opened (the encoder needs a
   size).

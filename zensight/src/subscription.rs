@@ -790,6 +790,22 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
                     None
                 }
             };
+        } else if segment1 == "parallax" && channel == "status" && rest_after_channel == "streams" {
+            // Parallax stream-status transitions (`@/status/streams`, one
+            // JSON `StreamStatus` per open/close/failed-open). The GUI uses
+            // the definitive `open: false` to flag a tile whose open failed
+            // on the sensor (the queryable on the same key replies
+            // `Vec<StreamStatus>` — that shape never rides this subscriber).
+            return match decode_auto::<zensight_common::stream::StreamStatus>(payload) {
+                Ok(status) => Some(Message::ParallaxStreamStatus {
+                    source: source.to_string(),
+                    status,
+                }),
+                Err(e) => {
+                    tracing::warn!(error = %e, key = %key, "Failed to decode StreamStatus");
+                    None
+                }
+            };
         }
         // Other scoped channels (`@/status`, `@/commands/*`, `@/query/*`, media
         // stream control, …) are not consumed via this path.
