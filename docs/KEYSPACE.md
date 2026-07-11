@@ -329,7 +329,11 @@ off — a stale frame is worthless, and the encoder must never block).
 `zensight-sensor-core`'s `Publisher::raw_media_publisher()` returns a
 `RawMediaPublisher` whose `matching_listener()` fires when a viewer subscribes,
 so the sensor can force an immediate keyframe (late joiners get a decodable
-picture at once).
+picture at once). The `keyframe` flag is a byte-level promise: the parallax
+sensor derives it from the bitstream and publishes every keyframe access unit
+self-contained (SPS/PPS in the same AU, prepended from cache when the encoder
+or camera didn't inline them) — a fresh decoder may begin at any sample whose
+attachment says `keyframe: true`.
 
 **Stream control rides the ordinary `@/` channels** (§3), not `@media` —
 and, like the media keys themselves, it is **host-scoped**: the prefix is

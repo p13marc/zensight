@@ -2589,12 +2589,17 @@ impl ZenSight {
             }
 
             Message::CommandFeedback { success, message } => {
-                let severity = if success {
-                    ToastSeverity::Success
-                } else {
-                    ToastSeverity::Error
-                };
-                self.toasts.push(severity, message);
+                // An empty message means "quiet on success" (automatic
+                // commands like resync keyframe requests); errors always
+                // carry text and always surface.
+                if !message.is_empty() {
+                    let severity = if success {
+                        ToastSeverity::Success
+                    } else {
+                        ToastSeverity::Error
+                    };
+                    self.toasts.push(severity, message);
+                }
             }
 
             Message::OpenExpectations => {
@@ -3258,7 +3263,9 @@ impl ZenSight {
     /// `key` is the full command key (build with
     /// [`zensight_common::command_key`]); `body` is serialized as JSON. Returns
     /// a [`Task`] that publishes asynchronously and reports the outcome via
-    /// [`Message::CommandFeedback`]. No-op feedback if disconnected.
+    /// [`Message::CommandFeedback`]. No-op feedback if disconnected. An empty
+    /// `ok_message` suppresses the success toast (automatic commands);
+    /// failures always toast.
     fn send_command<T: serde::Serialize>(
         &self,
         key: String,
@@ -5097,10 +5104,13 @@ impl ZenSight {
                 stream: stream.clone(),
             },
         );
+        // Quiet on success: resync-driven requests are automatic and can
+        // recur (backed off in h264_tile_stream) — a toast per request is
+        // pure noise. Failures still surface.
         self.send_command(
             zensight_common::command_key(&parallax_detail::host_prefix(&source), "stream"),
             &request,
-            format!("Requested keyframe for {stream}"),
+            String::new(),
         )
     }
 

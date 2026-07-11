@@ -20,7 +20,7 @@ use zensight_sensor_parallax::catalog::Catalog;
 use zensight_sensor_parallax::config::ParallaxConfig;
 use zensight_sensor_parallax::session::SessionManager;
 use zensight_sensor_parallax::stats::StatsRegistry;
-use zensight_sensor_parallax::{command, query, stats};
+use zensight_sensor_parallax::{annexb, command, query, stats};
 
 /// Scouting off so concurrent tests (and live sensors on the host) can't
 /// cross-contaminate; the two peers are wired together with an explicit
@@ -330,9 +330,9 @@ async fn open_h264_video_streams_with_keyframe_control() {
     )
     .await;
 
-    async fn next_meta(
+    async fn next_frame(
         sub: &zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
-    ) -> FrameMeta {
+    ) -> (FrameMeta, Vec<u8>) {
         let sample = tokio::time::timeout(Duration::from_secs(5), sub.recv_async())
             .await
             .expect("video frame timed out")
@@ -343,7 +343,27 @@ async fn open_h264_video_streams_with_keyframe_control() {
             sample.encoding()
         );
         let att = sample.attachment().expect("frame has FrameMeta attachment");
-        decode(&att.to_bytes(), Format::Cbor).expect("decode FrameMeta")
+        let meta: FrameMeta = decode(&att.to_bytes(), Format::Cbor).expect("decode FrameMeta");
+        let payload = sample.payload().to_bytes().to_vec();
+        // #435: the advertised keyframe flag must be truthful at the byte
+        // level — a flag without an IDR (or vice versa) sends fresh decoders
+        // into a dsNoParamSets loop.
+        assert_eq!(
+            meta.keyframe,
+            annexb::has_idr(&payload),
+            "FrameMeta.keyframe must match IDR presence (seq {})",
+            meta.sequence
+        );
+        // #435: every published keyframe is a self-contained decoder entry
+        // point — SPS/PPS ride in the same access unit.
+        if meta.keyframe {
+            assert!(
+                annexb::has_param_sets(&payload),
+                "keyframe AU without SPS/PPS (seq {})",
+                meta.sequence
+            );
+        }
+        (meta, payload)
     }
 
     // A keyframe must arrive within the first few access units (the sensor
@@ -351,7 +371,7 @@ async fn open_h264_video_streams_with_keyframe_control() {
     let mut sequences: Vec<u64> = Vec::new();
     let mut first_keyframe_at = None;
     for i in 0..5 {
-        let meta = next_meta(&sub).await;
+        let (meta, _) = next_frame(&sub).await;
         assert_eq!((meta.width, meta.height), (160, 120));
         sequences.push(meta.sequence);
         if meta.keyframe {
@@ -365,8 +385,15 @@ async fn open_h264_video_streams_with_keyframe_control() {
     );
 
     // Consume a few delta frames (GOP is 60 at 8 fps — no natural IDR soon).
+    // Regression for the all-frames-flagged-keyframe bug (#435 root cause,
+    // parallax < 0.1.3): these must be honest delta frames.
     for _ in 0..5 {
-        let meta = next_meta(&sub).await;
+        let (meta, _) = next_frame(&sub).await;
+        assert!(
+            !meta.keyframe,
+            "mid-GOP frame flagged as keyframe (seq {})",
+            meta.sequence
+        );
         sequences.push(meta.sequence);
     }
 
@@ -382,9 +409,13 @@ async fn open_h264_video_streams_with_keyframe_control() {
     .await;
     let mut forced = false;
     for _ in 0..10 {
-        let meta = next_meta(&sub).await;
+        let (meta, payload) = next_frame(&sub).await;
         sequences.push(meta.sequence);
         if meta.keyframe {
+            // The forced IDR is exactly what a resyncing viewer decodes
+            // from — next_frame already asserted SPS/PPS are aboard, and a
+            // fresh decoder gate opens here.
+            assert!(annexb::has_idr(&payload));
             forced = true;
             break;
         }

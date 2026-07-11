@@ -64,12 +64,31 @@ RTSP video is passthrough — the sensor cannot force a remote camera's IDR, so
 `request_keyframe` logs and no-ops; viewers instead gate on the in-band IDRs
 (`FrameMeta.keyframe`, GOP-rate).
 
+### Self-contained keyframes (#435)
+
+The video egress guarantees, at the byte level, that every access unit it
+publishes with `keyframe: true` is a **self-contained decoder entry point**:
+
+- the flag itself is derived from the bitstream (an IDR NAL is present), not
+  from upstream pipeline metadata — raw sources flag every uncompressed frame
+  as a sync point, and parallax < 0.1.3 leaked that through the encoder,
+  sending fresh decoders into an unrecoverable `dsNoParamSets` loop;
+- the egress caches the last SPS/PPS NAL units it has seen for the stream and
+  prepends them to any keyframe AU that arrived without its own (relevant for
+  RTSP passthrough cameras that announce parameter sets only out-of-band in
+  the SDP; the OpenH264 encoder paths already inline SPS/PPS with every IDR).
+
+An RTSP keyframe that arrives before *any* in-band parameter sets have been
+seen is published as-is — there is nothing to prepend yet.
+
 ## Frame metadata
 
 Every media sample carries a CBOR `FrameMeta` attachment
 (`zensight-common::stream::FrameMeta`): keyframe flag, optional
 pts/dts/duration (ns), per-stream sequence, width, height. Sequence gaps mean
-dropped frames (LiveVideo QoS is best-effort by design).
+dropped frames (LiveVideo QoS is best-effort by design). On the h264 video
+path the keyframe flag is bitstream-derived and keyframes are made
+self-contained (see "Self-contained keyframes" above).
 
 ## Teardown
 

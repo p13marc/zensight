@@ -33,6 +33,7 @@ pub use real::{H264TileDecoder, h264_tile_stream};
 #[cfg(feature = "h264")]
 mod real {
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use iced::futures::Stream;
     use iced::widget::image;
@@ -44,6 +45,13 @@ mod real {
     use zensight_common::{Format, Protocol, decode};
 
     use crate::message::Message;
+
+    /// Minimum spacing between resync `RequestKeyframe` commands (and their
+    /// warn lines) from one tile. A stream that fails to decode every AU
+    /// otherwise spams one command + one warn per frame (#435); within the
+    /// window the tile still drops sync and waits for the next keyframe —
+    /// it just doesn't re-ask (or re-warn) for one.
+    const RESYNC_MIN_INTERVAL: Duration = Duration::from_secs(2);
 
     /// A stateful H.264 → RGBA frame decoder (pure — unit-testable without
     /// Zenoh). Owns the openh264 decoder plus a cached I420→RGBA converter
@@ -136,6 +144,10 @@ mod real {
             // Never feed the decoder before its first IDR.
             let mut synced = false;
             let mut last_seq: Option<u64> = None;
+            // Backoff for resync keyframe requests (see RESYNC_MIN_INTERVAL);
+            // cleared by a successful decode so a fresh failure after a
+            // healthy stretch asks immediately.
+            let mut last_resync: Option<Instant> = None;
             loop {
                 let sample = match subscriber.recv_async().await {
                     Ok(s) => s,
@@ -154,9 +166,12 @@ mod real {
                 {
                     synced = false;
                     let _ = dec.reset();
-                    yield Message::ParallaxRequestKeyframe {
-                        stream: stream.clone(),
-                    };
+                    if last_resync.is_none_or(|at| at.elapsed() >= RESYNC_MIN_INTERVAL) {
+                        last_resync = Some(Instant::now());
+                        yield Message::ParallaxRequestKeyframe {
+                            stream: stream.clone(),
+                        };
+                    }
                 }
                 last_seq = Some(meta.sequence);
                 if !synced {
@@ -185,6 +200,7 @@ mod real {
                 dec = dec_back;
                 match decoded {
                     Ok(Some((w, h, rgba))) => {
+                        last_resync = None;
                         yield Message::ParallaxFrame {
                             stream: stream.clone(),
                             generation,
@@ -194,12 +210,17 @@ mod real {
                     }
                     Ok(None) => {} // decoder buffered; more data coming
                     Err(e) => {
-                        tracing::warn!(stream = %stream, error = %e, "h264 decode failed; resyncing");
                         synced = false;
                         let _ = dec.reset();
-                        yield Message::ParallaxRequestKeyframe {
-                            stream: stream.clone(),
-                        };
+                        if last_resync.is_none_or(|at| at.elapsed() >= RESYNC_MIN_INTERVAL) {
+                            last_resync = Some(Instant::now());
+                            tracing::warn!(stream = %stream, error = %e, "h264 decode failed; resyncing");
+                            yield Message::ParallaxRequestKeyframe {
+                                stream: stream.clone(),
+                            };
+                        } else {
+                            tracing::debug!(stream = %stream, error = %e, "h264 decode failed during resync backoff");
+                        }
                     }
                 }
             }
