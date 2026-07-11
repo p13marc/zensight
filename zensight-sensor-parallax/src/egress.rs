@@ -7,7 +7,7 @@
 //! outcome to the session actor as an `EgressEnded` message.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parallax::clock::ClockTime;
 use parallax::elements::AppSinkHandle;
@@ -21,6 +21,13 @@ use crate::stats::StreamStats;
 
 /// How long one blocking pull waits before re-checking for EOS/abort.
 const PULL_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// Watchdog: a freshly opened profile that produces no frame at all within
+/// this window is declared dead. A wedged source (e.g. a capture thread that
+/// panicked without the executor noticing) otherwise leaves the viewer on
+/// "waiting for frames…" forever — erroring out lets the session actor
+/// publish a definitive `open: false` the GUI can surface.
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Map a pipeline buffer's [`Metadata`] to the wire [`FrameMeta`].
 ///
@@ -62,7 +69,34 @@ pub async fn run(
     preview: bool,
     stats: Arc<StreamStats>,
 ) -> Result<(), String> {
+    run_with_watchdog(
+        sink,
+        publisher,
+        encoding,
+        width,
+        height,
+        preview,
+        stats,
+        FIRST_FRAME_TIMEOUT,
+    )
+    .await
+}
+
+/// [`run`] with an injectable first-frame watchdog window (tests).
+#[allow(clippy::too_many_arguments)]
+async fn run_with_watchdog(
+    sink: AppSinkHandle,
+    publisher: Arc<RawMediaPublisher>,
+    encoding: Encoding,
+    width: u32,
+    height: u32,
+    preview: bool,
+    stats: Arc<StreamStats>,
+    first_frame_timeout: Duration,
+) -> Result<(), String> {
     let mut last_sequence: Option<u64> = None;
+    let started = Instant::now();
+    let mut produced_any = false;
     loop {
         let pull_sink = sink.clone();
         let pulled =
@@ -76,10 +110,17 @@ pub async fn run(
                 if sink.is_eos() {
                     return Ok(());
                 }
+                if !produced_any && started.elapsed() >= first_frame_timeout {
+                    return Err(format!(
+                        "no frames from source within {:.1}s of open",
+                        first_frame_timeout.as_secs_f64()
+                    ));
+                }
                 continue;
             }
             Err(e) => return Err(format!("pipeline sink error: {e}")),
         };
+        produced_any = true;
 
         let frame_meta = metadata_to_frame_meta(buffer.metadata(), width, height, preview);
         if !preview {
@@ -128,5 +169,49 @@ mod tests {
         assert!(!metadata_to_frame_meta(&delta, 320, 240, false).keyframe);
         // …but the preview path always flags keyframe (JPEG).
         assert!(metadata_to_frame_meta(&delta, 320, 240, true).keyframe);
+    }
+
+    /// A profile whose source never delivers a single frame must error out
+    /// (→ `EgressEnded` → `open: false`) instead of leaving the viewer on
+    /// "waiting for frames…" forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watchdog_errors_when_source_never_produces() {
+        // Lone session: scouting off, no endpoints — cannot join any mesh.
+        let mut cfg = zenoh::Config::default();
+        cfg.insert_json5("scouting/multicast/enabled", "false")
+            .unwrap();
+        cfg.insert_json5("scouting/gossip/enabled", "false")
+            .unwrap();
+        let session = Arc::new(zenoh::open(cfg).await.unwrap());
+        let publisher = zensight_sensor_core::Publisher::new(
+            session,
+            "zensight/parallax/watchdog-test",
+            Format::Json,
+        );
+        let media = publisher
+            .raw_media_publisher("zensight/parallax/watchdog-test/@media/x/preview/jpeg")
+            .await
+            .unwrap();
+
+        // An AppSink handle with no pipeline behind it: pulls time out forever.
+        let sink = parallax::elements::AppSink::new();
+        let handle = sink.handle();
+
+        let err = run_with_watchdog(
+            handle,
+            Arc::new(media),
+            Encoding::IMAGE_JPEG,
+            320,
+            240,
+            true,
+            Arc::new(StreamStats::default()),
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.contains("no frames from source"),
+            "unexpected error: {err}"
+        );
     }
 }
