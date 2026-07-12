@@ -1,6 +1,6 @@
 # 12 — Decisions
 
-**Status: all six items DECIDED** (2026-07-12, review round 4). This
+**Status: v1.0 (ratified) — all six items DECIDED** (2026-07-12, review round 4). This
 chapter began as the open-questions list; it is kept as the decision
 record — each item preserves the alternatives and names its
 **revisit trigger**, the concrete future fact that would reopen it.

@@ -1,6 +1,6 @@
 # 08 — The Subject Registry
 
-**Status: Draft** · normative chapter
+**Status: v1.0 (ratified)** · normative chapter
 
 The grammar fixes positions 1–5 of every key; the registry governs the rest.
 It is the single, machine-readable inventory of every subject, procedure,

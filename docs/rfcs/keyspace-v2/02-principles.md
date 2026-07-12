@@ -1,6 +1,6 @@
 # 02 — Design Principles
 
-**Status: Draft** · normative chapter
+**Status: v1.0 (ratified)** · normative chapter
 
 Eleven principles, each with its provenance. Every rule in the normative
 chapters traces back to one of these; when a future change is debated, the

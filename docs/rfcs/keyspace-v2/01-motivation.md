@@ -1,6 +1,6 @@
 # 01 — Motivation
 
-**Status: Draft** · informative chapter
+**Status: v1.0 (ratified)** · informative chapter
 
 This RFC exists because ZenSight's shipped keyspace — documented in
 [`docs/KEYSPACE.md`](../../KEYSPACE.md), which remains authoritative for

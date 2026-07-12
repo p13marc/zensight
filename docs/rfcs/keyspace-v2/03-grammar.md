@@ -1,6 +1,6 @@
 # 03 — Canonical Grammar
 
-**Status: Draft** · normative chapter
+**Status: v1.0 (ratified)** · normative chapter
 
 This chapter defines the canonical key grammar of the convention. Everything
 else in this RFC (planes, RPC, identity, registry) hangs off this shape.

@@ -1,6 +1,6 @@
 # 11 — Reference Application Profile: ZenSight
 
-**Status: Draft** · informative chapter
+**Status: v1.0 (ratified)** · informative chapter
 
 The convention chapters (02–10) are application-neutral. This chapter binds
 them to ZenSight: the concrete base, producers, service origins, and a

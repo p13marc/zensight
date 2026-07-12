@@ -1,5 +1,14 @@
 # ZenSight Zenoh Keyspace Reference
 
+> **LEGACY keyspace.** The ratified successor is the **keyspace-v2
+> convention** ([`docs/rfcs/keyspace-v2/`](rfcs/keyspace-v2/00-index.md),
+> v1.0) — grammar `zensight/@v1/<origin>/<class>/<producer>/<subject...>`,
+> enforced by the `zensight-keyspace` crate. Migration is tracked in
+> [#453](https://github.com/p13marc/zensight/issues/453). This file remains
+> **authoritative for what is deployed** until that migration completes;
+> the two keyspaces are mutually invisible by key algebra (verbatim `@v1`),
+> so they coexist without interference.
+
 This is the canonical reference for every Zenoh key expression ZenSight uses.
 All sensors, exporters, and the frontend follow these conventions; new code MUST
 build keys through the shared helpers listed in [§7](#7-key-building-helpers)

@@ -1,6 +1,6 @@
 # 10 — Prior Art
 
-**Status: Draft** · informative chapter
+**Status: v1.0 (ratified)** · informative chapter
 
 The convention was designed against six existing systems (§1–6, plus
 Zenoh's own guidance, §7); the first review round added three more —

@@ -10,8 +10,10 @@ an Iced desktop frontend, correlates per-host identity, and exports to Prometheu
 **Every crate documents itself** in its own `README.md` + `docs/` directory — that is the
 authoritative reference for how that crate works. This file is the *contributor/agent* guide:
 build/test/lint commands, conventions, and a map into the per-crate docs. The cross-cutting
-contracts are [`docs/KEYSPACE.md`](docs/KEYSPACE.md) (the Zenoh key contract — untouchable
-single source) and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (system overview). Archived
+contracts are [`docs/KEYSPACE.md`](docs/KEYSPACE.md) (the *deployed* Zenoh key contract — untouchable
+single source) and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (system overview). The
+ratified **keyspace-v2 convention** ([`docs/rfcs/keyspace-v2/`](docs/rfcs/keyspace-v2/00-index.md),
+v1.0, enforced by `zensight-keyspace`) is the successor contract; migration = epic #453. Archived
 design rationale lives in [`docs/design/`](docs/design/).
 
 ### Crate map (→ each crate's docs)

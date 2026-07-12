@@ -1,11 +1,13 @@
 # Zenoh Semantic Convention RFC — Index
 
-**Status: Draft v1.4 — all open questions decided** (round 1: adversarial
-review + Zenoh 1.9 source verification + D-Bus/Homie/OPC-UA research;
-round 2: base = session namespace, storage guidance; round 3: delivery
-re-grounded — stable baseline default, advanced pub/sub a priced opt-in
-tier; round 4: the six open questions decided, chapters consolidated —
-July 2026) ·
+**Status: v1.0 — RATIFIED** (2026-07-12; adopted for ZenSight, migration
+tracked in [#453](https://github.com/p13marc/zensight/issues/453) with the
+enforcement crate `zensight-keyspace`). Drafting history: round 1
+adversarial review + Zenoh 1.9 source verification + D-Bus/Homie/OPC-UA
+research; round 2 base = session namespace + storage guidance; round 3
+delivery re-grounded (stable baseline default, advanced pub/sub a priced
+opt-in tier); round 4 all open questions decided
+([12-open-questions.md](12-open-questions.md) is the decision record). ·
 supersedes the exploratory drafts in `zensight-key-semantic/` (credited in
 [03 §6.2](03-grammar.md)) · does **not** replace
 [`docs/KEYSPACE.md`](../../KEYSPACE.md), which remains authoritative for

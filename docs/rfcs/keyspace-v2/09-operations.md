@@ -1,6 +1,6 @@
 # 09 — Operations Cookbook
 
-**Status: Draft** · informative chapter
+**Status: v1.0 (ratified)** · informative chapter
 
 Worked recipes for the infrastructure concerns the grammar was shaped
 around: session setup, subscriptions, storage, ACL, and constrained links.

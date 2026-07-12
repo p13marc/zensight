@@ -1,6 +1,6 @@
 # 06 — Identity, Origins, and the Catalog
 
-**Status: Draft** · normative chapter
+**Status: v1.0 (ratified)** · normative chapter
 
 The grammar puts a stable identity in every key (the origin chunk,
 [03-grammar.md §1.3](03-grammar.md)). This chapter defines how that identity
