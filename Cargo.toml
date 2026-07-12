@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "zensight",
     "zensight-common",
+    "zensight-keyspace",
     "zensight-correlator",
     "zensight-sensor-core",
     "zensight-exporter-prometheus",
@@ -106,6 +107,7 @@ aya-build = "0.1"
 
 # Internal crates
 zensight-common = { path = "zensight-common" }
+zensight-keyspace = { path = "zensight-keyspace" }
 zensight-sensor-core = { path = "zensight-sensor-core" }
 # Generic resumable chunked blob transfer over Zenoh (zero ZenSight types;
 # incubated in-tree, to graduate to its own repo + crates.io — epic #193).
