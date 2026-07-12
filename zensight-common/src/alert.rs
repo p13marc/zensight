@@ -6,8 +6,8 @@
 //! wrong (a port scan, a missing listener, a downed interface) and publishes the
 //! alert on the bus. This is the wire type for that channel.
 //!
-//! Alerts are published, keyed by [`Alert::alert_key`], at
-//! `zensight/<protocol>/@/alerts/<alert_key>`:
+//! Alerts are LWW state, keyed by [`Alert::alert_key`], at
+//! `<base>/@v1/<origin>/state/<producer>/alert/<alert_key>` (RFC 04 §1.2):
 //! - a `Put` with [`AlertState::Firing`] raises or updates an alert,
 //! - a `Put` with [`AlertState::Resolved`] (then a Zenoh `Delete` tombstone)
 //!   clears it.
@@ -157,11 +157,14 @@ impl Alert {
     /// sorted labels.
     ///
     /// Two alerts that describe the same underlying condition on the same host
-    /// (same source, rule, labels) share a key, so a `Put` replaces the prior
-    /// state in place and a later `Resolved`/`Delete` clears exactly that alert.
-    /// Including `source` keeps alerts from different hosts on distinct keys (no
-    /// cross-host collisions). The key is stable under label reordering (labels
-    /// are sorted before hashing).
+    /// (same rule, labels) share a key, so a `Put` replaces the prior state
+    /// in place and a later `Resolved`/`Delete` clears exactly that alert.
+    /// The producing **source is not hashed** (v1, RFC 04 §1.2): the origin
+    /// and producer chunks already scope the key per host — that is what
+    /// makes it origin-scoped. The key is stable under label reordering
+    /// (labels are sorted before hashing) and renders as 16 lowercase hex
+    /// (the rule-name prefix is gone: rule names are CamelCase, and chunks
+    /// are lowercase-only per RFC 03 §2).
     ///
     /// Labels prefixed **`host.`** are the *annotation namespace* — identity
     /// metadata (`host.id`, `host.boot_id`, ...) stamped onto alerts for
@@ -171,8 +174,6 @@ impl Alert {
     /// inconsistently (a pre-stamp `Firing` could never be `Resolved` post-stamp).
     pub fn alert_key(&self) -> String {
         let mut hasher = Fnv1a::new();
-        hasher.update(self.source.as_bytes());
-        hasher.update(b"\0");
         hasher.update(self.rule.as_bytes());
         hasher.update(b"\0");
         // BTreeMap iterates in sorted key order → deterministic.
@@ -186,21 +187,8 @@ impl Alert {
             hasher.update(v.as_bytes());
             hasher.update(b"\0");
         }
-        format!("{}-{:016x}", sanitize_segment(&self.rule), hasher.finish())
+        format!("{:016x}", hasher.finish())
     }
-}
-
-/// Replace characters that are not safe in a single key-expression segment.
-fn sanitize_segment(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 /// Tiny FNV-1a 64-bit hasher — stable across runs/platforms (unlike
