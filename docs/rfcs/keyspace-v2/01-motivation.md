@@ -21,8 +21,10 @@ zensight/<protocol>/<source>/@media/…             media plane
 zensight/@pdns/<ip-slug>                          historical passive-DNS tier
 ```
 
-Four planes held apart by the `@`-verbatim rule — the one invariant this
-RFC keeps at its core and extends.
+Three planes held apart by the `@`-verbatim rule (`@/…` control, `@media`,
+`@pdns`) — the one invariant this RFC keeps at its core and extends — plus
+a `_meta` prefix that is *not* verbatim: `zensight/**` matches it, which is
+half of pain point P6 below.
 
 ## 2. The eight pain points
 
@@ -50,7 +52,8 @@ makes the target a key position ([05-control-rpc.md §2](05-control-rpc.md)).
 **P4 — Scope asymmetry.** sysinfo's `@/query/*` is host-scoped;
 netlink/netring's is protocol-scoped; parallax's stream control is
 host-scoped. Every consumer must know which channel uses which scope.
-The new grammar has exactly one scope: the origin.
+The new grammar has exactly one scope: the origin
+([03-grammar.md §1.3](03-grammar.md), [05-control-rpc.md §5](05-control-rpc.md)).
 
 **P5 — One structured parser, for one plane.** `parse_key_expr` handles
 telemetry only (positional split, hard-coded protocol arms); every `@/…`
@@ -103,7 +106,10 @@ is the clean-slate counterpart.
 
 - **Renaming metrics.** Subject vocabulary migrates as-is wherever it is
   already good; this RFC moves *where* keys live, not what things are
-  called.
+  called. (Not every family qualifies: subjects whose shipped shape
+  violates the grammar's lexical or cardinality rules — gNMI's bracketed
+  paths, netflow's per-pair keys — are redesigned, and
+  [11-zensight-profile.md §3](11-zensight-profile.md) says so explicitly.)
 - **Multi-tenancy.** Isolation is a deployment-prefix concern
   ([03-grammar.md §1.1](03-grammar.md)); no tenant machinery is specified.
 - **Migration planning.** This RFC specifies the destination, not the

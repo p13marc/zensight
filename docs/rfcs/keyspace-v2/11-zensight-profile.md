@@ -43,15 +43,30 @@ zensight/@v1/h-3fa9c2d41b7e/state/snmp/device/router01/alive          (livelines
 
 # netlink
 zensight/@v1/h-3fa9c2d41b7e/telemetry/netlink/sockets/tcp/established
-zensight/@v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7
+zensight/@v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1
 zensight/@v1/h-3fa9c2d41b7e/@rpc/netlink/sockets?ip=10.0.0.7
 zensight/@v1/h-3fa9c2d41b7e/@rpc/netlink/expectations/set
 
 # netring
 zensight/@v1/h-3fa9c2d41b7e/telemetry/netring/flow/red/p95_ms
 zensight/@v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-7
-zensight/@v1/h-3fa9c2d41b7e/events/netring/capture/01JGXQZ4YQK8V6TXW3M9F2A7CD
+zensight/@v1/h-3fa9c2d41b7e/events/netring/capture/01jgxqz4yqk8v6txw3m9f2a7cd
 zensight/@v1/h-3fa9c2d41b7e/@rpc/netring/capture/trigger
+
+# netflow (proxy; REDESIGNED, not migrated as-is — see §3)
+zensight/@v1/h-3fa9c2d41b7e/telemetry/netflow/exporter01/flows_per_second
+zensight/@v1/h-3fa9c2d41b7e/telemetry/netflow/exporter01/top/talkers/1
+zensight/@v1/h-3fa9c2d41b7e/@rpc/netflow/flows?src=10.0.0.1;dst=10.0.0.2;max=500
+
+# modbus (proxy)
+zensight/@v1/h-3fa9c2d41b7e/telemetry/modbus/plc01/holding/40001
+zensight/@v1/h-3fa9c2d41b7e/state/modbus/device/plc01/liveness
+
+# gnmi (proxy; open-depth subject via the {path...} rest-variable, 08 §2;
+# shipped bracketed path-elements are slugged per 03 §2:
+# interfaces/interface[name=eth0]/state → interfaces/interface/eth0/state —
+# the gNMI key list collapses into a chunk, original path in the payload)
+zensight/@v1/h-3fa9c2d41b7e/telemetry/gnmi/router01/interfaces/interface/eth0/state/counters/in_octets
 
 # systemd
 zensight/@v1/h-3fa9c2d41b7e/telemetry/systemd/unit/sshd.service/active
@@ -91,7 +106,7 @@ Conceptual correspondence (shipped grammar per
 | `zensight/<proto>/<source>/<metric>` | `…/<origin>/telemetry/<proto>/[<device>/]<metric>` | `<source>` → origin (host-local) or first subject chunk (proxy) |
 | `…/<source>/@/health` `@/errors` `@/status` | `…/<origin>/state/<proto>/health` etc. | status doc merges into health/registration |
 | `…/<source>/@/alive` (+ devices) | `…/state/<proto>/alive`, `…/device/<d>/alive` | token keys mirror state grammar ([04-planes.md §5](04-planes.md)) |
-| `…/<proto>/@/alerts/<key>` | `…/<origin>/state/<proto>/alert/<key>` | same `alert_key` hash; now origin-scoped |
+| `…/<proto>/@/alerts/<key>` | `…/<origin>/state/<proto>/alert/<key>` | key function **changes**: shipped = `<rule>-<16hex>` of FNV-1a(source+rule+labels), case-preserving; convention = 16 lowercase hex of FNV-1a(rule+labels) — source dropped (origin+producer are in the key), rule prefix dropped (uppercase rules violate the charset). Normative definition: [04-planes.md §1.2](04-planes.md) |
 | `…/<proto>/@/query/alerts` | GET `…/*/state/*/alert/*` | seed = state itself ([05 §4](05-control-rpc.md)) |
 | `…/@/commands/<t>` + `@/status/<t>` + `@/query/<t>` | `…/<origin>/@rpc/<proto>/…` | full table in [05-control-rpc.md §5](05-control-rpc.md) |
 | `…/@/artifact/{request,status,cancel}` | `@rpc` + `state/<proto>/artifact/<kind>` | long-running pattern ([05 §3](05-control-rpc.md)) |
@@ -104,12 +119,24 @@ Conceptual correspondence (shipped grammar per
 | `_meta/query/{entities,names}` | GET on entity state / `@catalog/@rpc/names` | |
 | `_meta/correlator/@/alive` | `@catalog/state/alive` | |
 | `zensight/@pdns/<ip>` | `@catalog/state/pdns/<ip>` | historical tier = storage choice ([06 §5.2](06-identity.md)) |
+| `…/<source>/@/devices/<d>/liveness` | `…/state/<proto>/device/<d>/liveness` (doc) + `…/device/<d>/alive` (token) | |
+| netflow `zensight/netflow/<exp>/<src>/<dst>` | **no as-is home — redesigned** | per-flow-pair keys are unbounded-cardinality per-message data ([03 §2](03-grammar.md), [04 R3](04-planes.md)): the family becomes bounded rollups on `telemetry` + on-demand `@rpc/netflow/flows` (§2) |
+| gnmi bracketed paths | slugged `{path...}` subject | shipped `[name=eth0]` charset is illegal under [03 §2](03-grammar.md); see §2's slug rule |
 
-Nothing in the shipped keyspace lacks a home, and nothing in the convention
-exists without a shipped counterpart exercising it — the profile is
-closed both ways. (The one deliberate deletion: protocol-scoped shared
-channels have no successor; their two uses — fan-in queries and
-fleet-wide commands — are both expressed by `*`-origin RPC selectors.)
+Every shipped family has a mapped home, with two honest asymmetries.
+*Forward*: netflow's per-pair telemetry and gNMI's bracketed paths do
+**not** migrate as-is — their shipped shapes violate the grammar's
+cardinality/charset rules and are redesigned above (the
+[01 §5](01-motivation.md) "vocabulary migrates as-is" non-goal is
+qualified accordingly). *Reverse*: a few convention mechanisms have no
+shipped counterpart and are marked as new — `alias/<old-id>` records as
+keys (shipped aliases are a payload field on `HostEntity`), the `events`
+class's budget machinery, and the ownership-claim keys of
+[06 §5.3](06-identity.md). (The one deliberate deletion: protocol-scoped
+shared channels have no successor; their two uses — fan-in queries and
+fleet-wide commands — are both expressed by `*`-origin RPC selectors.
+The `@/status` running/offline flag lands in the `health` document's
+status field.)
 
 ## 4. What ZenSight-specific knowledge remains
 
@@ -117,5 +144,7 @@ For other adopters, the checklist of what they would replace: the base
 chunk; the producer vocabulary and their registry files
 ([08-registry.md](08-registry.md)); the payload types (`TelemetryPoint`,
 `Alert`, `HealthSnapshot`, `HostEntity`, `FrameMeta`…); the catalog
-implementation behind `@catalog`; and the salt of the origin derivation.
-Everything else in chapters 02–10 transfers unchanged.
+implementation behind `@catalog`; and the application salt constant of the
+origin derivation (ZenSight's is `"zensight-host-id-v1"`, compiled-in and
+non-configurable — [06-identity.md §1](06-identity.md)). Everything else
+in chapters 02–10 transfers unchanged.

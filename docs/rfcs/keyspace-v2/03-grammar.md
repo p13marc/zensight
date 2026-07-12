@@ -1,9 +1,26 @@
 # 03 — Canonical Grammar
 
-**Status: Draft** · normative chapter · uses MUST/SHOULD/MAY per RFC 2119
+**Status: Draft** · normative chapter
 
 This chapter defines the canonical key grammar of the convention. Everything
 else in this RFC (planes, RPC, identity, registry) hangs off this shape.
+
+## 0. Conformance
+
+MUST/SHOULD/MAY are used per RFC 2119 **throughout this RFC**, not only in
+this chapter. Normative statements bind one of four roles, named explicitly
+or clear from context:
+
+- a **publisher** (a producer process emitting keys/payloads),
+- a **consumer** (anything subscribing or querying),
+- a **deployment** (the operator: router config, storage, ACL, enrollment),
+- a **registry** (the subject-registry maintainers and their CI).
+
+Requirements are of three kinds, and chapters say which where it is not
+obvious: *statically checkable* (CI against the registry and key constants),
+*runtime checkable* (guard tests, bus observation), and *attestations*
+(unobservable by a checker — e.g. "an events key is written exactly once";
+the publisher attests by construction and review).
 
 ---
 
@@ -13,8 +30,10 @@ else in this RFC (planes, RPC, identity, registry) hangs off this shape.
 <base>/@v1/<origin>/<class>/<producer>/<subject...>
 ```
 
-Six positions; the first five are exactly one chunk each, the subject is an
-open-ended path of one or more chunks. Example (reference application):
+Six positions. Positions 2–5 are exactly one chunk each; `<base>` is one or
+more literal chunks, fixed per deployment and known to every participant by
+configuration; the subject is an open-ended path of one or more chunks.
+Example (reference application):
 
 ```
 zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage
@@ -24,7 +43,7 @@ zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage
 
 | Position | Name | Arity | Rule |
 |---|---|---|---|
-| 1 | `<base>` | 1 chunk | Deployment root. Configurable per deployment; MUST be a literal, non-verbatim chunk. |
+| 1 | `<base>` | ≥ 1 chunk (config-fixed) | Deployment root. Configurable per deployment; MUST be a fixed run of literal, non-verbatim chunks. |
 | 2 | `@v1` | 1 chunk | Convention major version. MUST be a verbatim chunk of the form `@v<integer>`. |
 | 3 | `<origin>` | 1 chunk | Who publishes: a **host origin** (stable opaque id) or a **service origin** (verbatim `@<service>`). |
 | 4 | `<class>` | 1 chunk | Message class: `telemetry` \| `state` \| `events`, or a verbatim plane `@rpc` \| `@media` \| `@blob`. |
@@ -39,7 +58,9 @@ zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage
 - Multi-tenancy, realms, and sites are **deployment prefixes**, not grammar
   chunks: `acme/fleet-a` is a valid `<base>` (two chunks) as long as it is a
   fixed literal run. Nothing in the convention ever inspects the base; every
-  selector in this RFC is written relative to it.
+  selector in this RFC is written relative to it. Positional tooling
+  ("origin is chunk 3") MUST therefore resolve positions relative to the
+  configured base, never by absolute index.
 - Rationale: an isolation token you rarely use should not cost every key a
   chunk. Deployments that need it prepend it; deployments that don't, don't
   pay. (See NATS guidance: the first token is the isolation key —
@@ -62,7 +83,11 @@ zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage
 - Everything the convention defines lives **under** the version chunk.
   Nothing — no status key, no discovery key, no side channel — may sit
   beside it. (Sparkplug placed its STATE topic outside `spBv1.0/` and needed
-  a breaking release to fix it; see [10-prior-art.md §4](10-prior-art.md).)
+  a breaking release to fix it; see [10-prior-art.md §4](10-prior-art.md).
+  Homie learned the same lesson from the other side: through v4 the
+  convention major was an attribute *value* (`$homie`), so majors shared one
+  topic space; v5 had to insert the major into the path — `homie/5/…` — to
+  make coexistence possible. See [10-prior-art.md §9](10-prior-art.md).)
 
 ### 1.3 `<origin>` — publishing identity
 
@@ -71,16 +96,25 @@ Two forms:
 **Host origin** — `h-<12hex>`: a stable, opaque, self-minted identifier of
 the publishing machine.
 
+- MUST match `h-[0-9a-f]{12}` exactly. Tooling MAY rely on this shape to
+  distinguish host origins from service origins.
 - MUST be derivable by the publisher alone, at first startup, with no
   network round-trip (no registration service, no coordinator).
 - Reference derivation: `h-` + first 12 hex chars of
-  `sha256(machine-id + application salt)`. The raw machine-id never leaves
-  the host. All publishers on one machine derive the same value.
+  `sha256(machine-id + application salt)` — byte-precise definition and a
+  test vector in [06-identity.md §1](06-identity.md). The raw machine-id
+  never leaves the host. All publishers on one machine derive the same
+  value.
 - MUST be stable across restarts and upgrades. MUST NOT encode a mutable
   name (hostname, DNS, IP). Human names belong to the catalog
   ([06-identity.md](06-identity.md)).
+- 12 hex = 48 bits. Truncation is a deliberate trade
+  (short keys, negligible birthday risk at fleet scale: ≈ 1.8 × 10⁻⁵ at
+  100 k hosts); a collision is *detected*, not prevented — the catalog
+  raises a conflict when disjoint `evidence/self` claims share one origin
+  ([06-identity.md §1](06-identity.md)).
 - Fallback rules for hosts without a machine-id are defined in
-  [06-identity.md §2](06-identity.md).
+  [06-identity.md §1.1](06-identity.md).
 
 **Service origin** — `@<service>`: a verbatim chunk naming a singleton,
 deployment-level service (not tied to one host), e.g. `@catalog` for the
@@ -127,16 +161,33 @@ verbatim hermeticity ([10-prior-art.md §4](10-prior-art.md)).
 ### 1.5 `<producer>` — producing component
 
 - One chunk: `<name>` or `<name>-<instance>` when several instances of the
-  same producer run on one origin (`snmp` / `snmp-2`). The instance suffix
-  is the collision rule: two publishers MUST NOT share
-  `<origin>/<class>/<producer>` ownership of a subject.
+  same producer run on one origin (`snmp` / `snmp-2`). To keep the chunk
+  parseable back into (name, instance): the instance suffix MUST be
+  `-<positive decimal integer>`, and producer base names MUST NOT end in
+  `-<integer>` (registry-checked, [08-registry.md §5](08-registry.md)).
+  Registry entries are keyed by the base name; consumers strip a trailing
+  `-<int>` to find the entry.
+- Instance numbers are assigned by local configuration: each instance MUST
+  be configured with a distinct suffix (the first/only instance uses the
+  bare name). There is no coordinator; a producer SHOULD probe the
+  liveliness key of its intended producer chunk at startup and refuse to
+  start over a live twin. The suffix rule is the collision rule: two
+  publishers MUST NOT share `<origin>/<class>/<producer>` ownership of a
+  subject.
 - The producer chunk is **before** the subject, not after it. A trailing
   producer (Keelson's `source_id`) is only parseable when the subject has
   fixed depth; this convention's subjects are open-depth (gNMI paths,
   directory-like metrics), so a trailing chunk would be ambiguous —
   no parser could tell where the subject ends and the producer begins.
 - Under service origins the producer position is **omitted** (the service
-  *is* the producer): `<base>/@v1/@<service>/<class>/<subject...>`.
+  *is* the producer): `<base>/@v1/@<service>/<class>/<subject...>`. A parser
+  disambiguates by the origin chunk alone: verbatim origin ⇒ chunk 5 (after
+  the class) is already subject; host origin ⇒ chunk 5 is the producer.
+- Under `@blob` the producer position is replaced by a reserved **tier
+  token** — `artifact` | `tree` | `store` ([07-bulk-planes.md §2](07-bulk-planes.md)).
+  Content-addressed data has no meaningful owning component (any producer's
+  RPC can mint an artifact id; a hash is a hash); the tier tokens are listed
+  in §3 and MUST NOT be used as producer names.
 
 ### 1.6 `<subject...>` — meaning path
 
@@ -164,15 +215,27 @@ This convention narrows it:
 - Non-verbatim chunks MUST match `[a-z0-9]([a-z0-9._-]*[a-z0-9])?` —
   lowercase ASCII letters, digits, `.`, `_`, `-`; must start and end
   alphanumeric. No uppercase (case-sensitivity footguns), no `%`-escaping.
+  Identifiers whose canonical text form is uppercase MUST be lowercased at
+  key-build time — in particular **ULIDs are key-encoded in lowercase**
+  (Crockford base32 decodes case-insensitively; payloads MAY carry the
+  canonical uppercase form).
 - Verbatim chunks MUST match `@[a-z0-9][a-z0-9_-]*` (plus the `@v<int>`
   version form).
-- Values that contain `/`, `:`, or other excluded characters MUST be
-  **slugged** before entering a key, and the original value MUST travel in
-  the payload. Reference slugs:
-  - IP address: `.`/`:` → `-` (`10.0.0.7` → `10-0-0-7`,
-    `2001:db8::1` → `2001-db8--1`)
-  - systemd unit / filename: literal if already legal, else `-` for each
-    excluded character
+- Values that contain characters outside this charset MUST be **slugged**
+  before entering a key, and the original value MUST travel in the payload.
+  Slugging MUST be canonical and injective within each documented variable
+  domain — two spellings of one value MUST slug identically, and two
+  distinct values MUST NOT slug to one chunk. Reference slugs:
+  - IP address: **always slugged**, even though dotted IPv4 is
+    charset-legal (dotted forms are non-canonical key chunks). IPv6 MUST
+    first be canonicalized per RFC 5952 and IPv4 to minimal dotted-quad;
+    then `.`/`:` → `-` (`10.0.0.7` → `10-0-0-7`, `2001:db8::1` →
+    `2001-db8--1`).
+  - systemd unit / filename: literal if already legal *per this section's
+    charset* (not merely Zenoh-legal), else each excluded character is
+    escaped losslessly as `_xNN_` (lowercase hex of the byte) — plain `-`
+    substitution is forbidden because it is not injective (`foo@1.service`
+    and `foo-1.service` must not share a key).
 - Wildcards (`*`, `**`) and the sub-chunk wildcard `$*` are **selector**
   syntax and MUST NOT appear in published keys. Published keys and selectors
   MUST be in Zenoh canon form.
@@ -181,10 +244,15 @@ This convention narrows it:
   chunks (`if/eth0/rx_bytes`). (Zenoh: `$*` is markedly slower and strains
   the infrastructure; see [02-principles.md P6](02-principles.md).)
 - Per-message data (request ids, timestamps, sequence numbers) MUST NOT
-  appear in `telemetry` or `state` keys — unbounded-cardinality keys defeat
-  interning, caches, and storage. The single sanctioned exception is the
-  unique id of an `events` key and content hashes under `@blob`
-  ([04-planes.md §4](04-planes.md)).
+  appear in any published key — unbounded-cardinality keys defeat interning,
+  caches, and storage — with exactly three sanctioned exceptions: the unique
+  id terminating an `events` key ([04-planes.md §1.3](04-planes.md)),
+  content hashes under `@blob/store`, and artifact ids under
+  `@blob/artifact` ([07-bulk-planes.md §2](07-bulk-planes.md)).
+- State subjects that key on an *observed population* (one chunk per
+  observed IP, device, unit) are not per-message data but are also not free:
+  they MUST carry an explicit cardinality budget in the registry
+  ([04-planes.md §1.2](04-planes.md), [08-registry.md §2](08-registry.md)).
 
 ---
 
@@ -197,50 +265,81 @@ This convention narrows it:
 | `@catalog` | 3 | the identity/catalog service ([06-identity.md](06-identity.md)) |
 | `telemetry`, `state`, `events` | 4 | data classes |
 | `@rpc`, `@media`, `@blob` | 4 | verbatim planes |
+| `artifact`, `tree`, `store` | 5 (under `@blob` only) | blob tiers ([07-bulk-planes.md](07-bulk-planes.md)); MUST NOT be producer names |
+| `alive` | subject leaf under `state` | liveliness-token keys only ([04-planes.md §5](04-planes.md)); MUST NOT be registered as a data subject |
 
 Applications MAY register further service origins and MUST NOT redefine the
 tokens above. New class or plane tokens are a convention-major change.
 
 ---
 
-## 4. Design properties (each one is a testable claim)
+## 4. Design properties (theorems and their preconditions)
 
-The grammar is chosen so that the following hold *by key algebra* — they are
-pinned as guard tests in the reference implementation, not enforced by
-review:
+Each property below separates a **theorem** — a claim that holds by key
+algebra alone, pinned as a guard test in the reference implementation — from
+its **precondition** — the placement or deployment rule that makes the
+plain-prose reading true. The theorems cannot be violated by any publisher;
+the preconditions are enforced by registry review, CI, and deployment
+config, and the RFC is explicit about which is which.
 
-**D1 — Version hermeticity.** `<base>/**` ∩ `<base>/@v1/**` = ∅.
-Old and new keyspaces coexist with zero cross-talk.
+**D1 — Version hermeticity.** *Theorem*: `<base>/**` ∩ `<base>/@v1/**` = ∅.
+Old and new keyspaces coexist with zero cross-talk. No precondition — this
+one is pure algebra.
 
 **D2 — Per-origin firehose is data-only.**
-`<base>/@v1/h-xxx/**` matches every `telemetry`/`state`/`events` key of that
-host and **no** `@rpc`/`@media`/`@blob` key. One subscription = one host's
-complete data plane, and it can never accidentally pull video frames or blob
-chunks. This is the single most load-bearing property of the design.
+*Theorem*: `<base>/@v1/h-xxx/**` matches every key under the three data
+classes of that host and **no** key under `@rpc`/`@media`/`@blob`.
+*Precondition*: bulk and high-rate payloads actually live under the verbatim
+planes — placement rule R4 ([04-planes.md §2](04-planes.md)), enforced by
+registry review. A producer that publishes video frames at
+`telemetry/cam0/frame` is lexically legal and would ride the firehose; the
+algebra protects against *accident and selector mistakes*, the registry
+protects against *misplacement*. With both, one subscription = one host's
+complete data plane at bounded rate. This is the single most load-bearing
+property of the design.
 
-**D3 — Class disjointness.** `<base>/@v1/*/telemetry/**`,
+**D3 — Class disjointness.** *Theorem*: `<base>/@v1/*/telemetry/**`,
 `…/*/state/**`, `…/*/events/**` are pairwise non-intersecting — literal
 class chunks differ. Storage and QoS policy select on them directly.
 
-**D4 — Service exclusion.** `<base>/@v1/*/state/**` does not match
-`<base>/@v1/@catalog/state/**` (verbatim origin). Fleet selectors see hosts
-only; catalog consumers subscribe by name.
+**D4 — Service exclusion.** *Theorem*: `<base>/@v1/*/state/**` does not
+match `<base>/@v1/@catalog/state/**` (verbatim origin). Fleet selectors see
+hosts only; catalog consumers subscribe by name. Corollary: this applies to
+**every** keyexpr in a deployment, including ACL rules and storage
+selectors — a rule written with `*` in the origin position never covers
+`@catalog`, which needs its own rule ([09-operations.md §3](09-operations.md)).
 
 **D5 — Targeted and fleet RPC from one key shape.**
-`GET <base>/@v1/h-xxx/@rpc/netlink/sockets` reaches one host;
-`GET <base>/@v1/*/@rpc/netlink/sockets` fans in over every host serving that
-procedure — same key, `*` in the origin position. (The `*` matches host
-origins but not `@catalog`, by D4's mechanism.)
+*Theorem*: `GET <base>/@v1/h-xxx/@rpc/netlink/sockets` reaches one host;
+`GET <base>/@v1/*/@rpc/netlink/sockets` intersects every host's queryable —
+same key, `*` in the origin position (the `*` matches host origins but not
+`@catalog`, by D4's mechanism). *Precondition*: collecting **all** replies
+additionally requires the fan-in call discipline of
+[05-control-rpc.md §2.1](05-control-rpc.md) — Zenoh's default query target
+and consolidation can short-circuit to a single reply.
 
-**D6 — Static policy prefixes.** Every security- or storage-relevant
-boundary (deployment, version, origin, class) is a fixed-position literal
-run from the left, so:
-- Zenoh storage `strip_prefix` (which must be a literal prefix) can strip
-  `<base>/@v1` and select per class;
-- ACL rules can be written as literal prefixes plus one trailing `**`
-  (fast path) — e.g. host `h-xxx` may publish only `<base>/@v1/h-xxx/**`;
-- a constrained link can allowlist by prefix (`…/h-xxx/state/**` +
-  `…/h-xxx/telemetry/<producer>/**`) with no per-key inspection.
+**D6 — Static policy prefixes.** *Theorem*: every security- or
+storage-relevant boundary (deployment, version, origin, class) is a
+fixed-position literal run from the left. So Zenoh storage `strip_prefix`
+(which must be a literal prefix) can strip `<base>/@v1` and select per
+class, and a constrained link can be provisioned by prefix rules with no
+per-key inspection. *Preconditions and limits*:
+- **Per-principal ACL is a fixed set of prefix rules, one per plane — not
+  one rule.** ACL matching is keyexpr *inclusion*, and `**` never crosses a
+  verbatim chunk there either: `<base>/@v1/h-xxx/**` does not cover the
+  host's `@rpc` replies, `@media` frames, or `@blob` keys. "Host X may act
+  only as itself" is expressed as ~4 literal-prefix rules
+  (`…/h-xxx/**`, `…/h-xxx/@rpc/**`, `…/h-xxx/@media/**`, `…/h-xxx/@blob/**`)
+  — still static, still literal, but plural ([09-operations.md §3](09-operations.md)).
+- **Per-origin ACL requires enrollment.** Origins are self-minted (§1.3), so
+  nothing in the grammar binds a transport identity to an origin id: absent
+  a binding, any connected peer may publish (and tombstone!) any origin's
+  keys while remaining grammar-conformant. A deployment relying on D6 for
+  security MUST bind origins to transport identities — e.g. mTLS
+  certificate CN = origin id, bound in ACL `subjects` — via an explicit
+  enrollment step, and MUST accept that Zenoh ACL config is not
+  runtime-reloadable (adding a host is a router config change). Without
+  enrollment, D6 is a hygiene boundary, not a security boundary.
 
 ---
 
@@ -253,9 +352,9 @@ guard tests). Base = `zensight`.
 zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage
 zensight/@v1/h-3fa9c2d41b7e/telemetry/snmp/router01/system/sys_uptime
 zensight/@v1/h-3fa9c2d41b7e/state/netring/health
-zensight/@v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7
+zensight/@v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1
 zensight/@v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-7
-zensight/@v1/h-3fa9c2d41b7e/events/netring/capture/01JGXQZ4YQK8V6TXW3M9F2A7CD
+zensight/@v1/h-3fa9c2d41b7e/events/netring/capture/01jgxqz4yqk8v6txw3m9f2a7cd
 zensight/@v1/h-3fa9c2d41b7e/@rpc/netlink/sockets
 zensight/@v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main
 zensight/@v1/h-3fa9c2d41b7e/@blob/store/sha256/ab12cd34ef56
@@ -317,8 +416,10 @@ All of those survive in this grammar. The skeleton itself is rejected:
 - **Filler nouns route nothing.** The literal plurals `assets/` and
   `entities/` appear in every key, so they can never discriminate a
   selector; they are pure wire and depth cost. No surveyed convention
-  (Keelson, Sparkplug, uProtocol, rmw_zenoh) spends chunks on scaffolding
-  nouns.
+  (Keelson, Sparkplug, uProtocol, rmw_zenoh) spends chunks on
+  *non-discriminating* scaffolding nouns — literals that appear in every
+  key and can never distinguish a selector. (Keelson's `pubsub` literal
+  discriminates against its RPC branch, as this RFC's class chunk does.)
 - **`<realm>` doesn't earn a fixed position** in a single-tenant system;
   isolation belongs to `<base>` (§1.1), where deployments that need it pay
   for it and others don't.

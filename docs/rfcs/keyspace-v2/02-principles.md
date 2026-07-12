@@ -25,11 +25,14 @@ resource-vs-point rule; the hard prohibition is per-message data in keys
 (NATS: request-ids in subjects "explode cardinality and pollute caches").
 
 **P3 — Policy boundaries are static literal prefixes.**
-Zenoh ACLs match fastest on literal chunks and cannot be reloaded at
-runtime; storage `strip_prefix` must be a literal prefix; constrained links
-filter by prefix. Therefore every boundary policy cares about —
-deployment, version, origin, class — is a fixed-position literal from the
-left, and variance (open subjects) is pushed right.
+Zenoh ACLs match by keyexpr inclusion and cannot be reloaded at runtime;
+storage `strip_prefix` must be a literal prefix; constrained links filter
+by prefix. Therefore every boundary policy cares about — deployment,
+version, origin, class — is a fixed-position literal from the left, and
+variance (open subjects) is pushed right. Corollary the planes impose:
+because `**` never crosses a verbatim chunk, "one principal" is a *fixed
+set* of prefix rules (one per plane), not one rule
+([03-grammar.md §4 D6](03-grammar.md)).
 *(Zenoh ACL + storage-manager guidance.)*
 
 **P4 — Verbatim chunks make planes; everything lives under the version.**
@@ -52,8 +55,11 @@ compound ones (`if-eth0-rx-bytes`). `$*` strains matching infrastructure
 and signals a key that should have been split. *(Zenoh guidance.)*
 
 **P7 — Declared publishers only.**
-Every publisher is declared (interned key, primed routing, attached QoS);
-ad-hoc one-shot puts are banned. Queryables serve everything pull-shaped.
+Every publisher on the data classes and `@media` is declared (interned
+key, primed routing, attached QoS); ad-hoc one-shot puts are banned.
+Queryables serve everything pull-shaped. (Single scoped exemption:
+seeding a router-hosted `@blob` content store,
+[04-planes.md §3](04-planes.md).)
 *(Reference application's existing CI-enforced rule, promoted to
 convention.)*
 
@@ -64,7 +70,9 @@ contradict. Names, kinds, and roles are catalog facts. When identity
 conclusions change, the catalog publishes aliases — data is never re-keyed.
 
 **P9 — The bus is low-cardinality; everything else is pull.**
-Push is for bounded, enumerable key sets (metrics, state, budgeted events).
+Push is for bounded or explicitly budgeted key sets (metrics, state,
+rate-budgeted events, population-budgeted state —
+[04-planes.md §1.2](04-planes.md)).
 Per-line, per-flow, per-packet detail lives in bounded rings at the
 producer and is served on demand via `@rpc`; bulk bytes are `@blob`
 queryables. A consumer that doesn't ask doesn't pay — the property that

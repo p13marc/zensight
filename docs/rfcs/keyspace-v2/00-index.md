@@ -1,9 +1,11 @@
 # Zenoh Semantic Convention RFC — Index
 
-**Status: Draft v1** · July 2026 · supersedes the exploratory drafts in
-`zensight-key-semantic/` (credited in [03 §6.2](03-grammar.md)) · does
-**not** replace [`docs/KEYSPACE.md`](../../KEYSPACE.md), which remains
-authoritative for the shipped keyspace.
+**Status: Draft v1.1** (post review round 1: adversarial review + Zenoh
+1.9 source verification + D-Bus/Homie/OPC-UA research, July 2026) ·
+supersedes the exploratory drafts in `zensight-key-semantic/` (credited in
+[03 §6.2](03-grammar.md)) · does **not** replace
+[`docs/KEYSPACE.md`](../../KEYSPACE.md), which remains authoritative for
+the shipped keyspace.
 
 A key-space convention for Zenoh applications: how to shape key
 expressions so that routing, subscriptions, storage selection, access
@@ -26,7 +28,7 @@ the reference application and supplies the worked examples.
 | 3 | **origin** — who publishes: self-minted stable host id, or verbatim service | `h-3fa9c2d41b7e` · `@catalog` |
 | 4 | **class** — bus semantics: `telemetry` (superseded) · `state` (LWW+tombstone) · `events` (immutable) · verbatim planes `@rpc` · `@media` · `@blob` | `state` |
 | 5 | **producer** — the component that produced it (`name[-instance]`; omitted under service origins) | `netlink` |
-| 6+ | **subject** — open-ended, registry-governed meaning path | `alert/9f2c81ab04d7` |
+| 6+ | **subject** — open-ended, registry-governed meaning path | `alert/9f2c81ab04d7e3f1` |
 
 Normative examples (base = `zensight`):
 
@@ -34,9 +36,9 @@ Normative examples (base = `zensight`):
 zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage
 zensight/@v1/h-3fa9c2d41b7e/telemetry/snmp/router01/system/sys_uptime
 zensight/@v1/h-3fa9c2d41b7e/state/netring/health
-zensight/@v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7
+zensight/@v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1
 zensight/@v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-7
-zensight/@v1/h-3fa9c2d41b7e/events/netring/capture/01JGXQZ4YQK8V6TXW3M9F2A7CD
+zensight/@v1/h-3fa9c2d41b7e/events/netring/capture/01jgxqz4yqk8v6txw3m9f2a7cd
 zensight/@v1/h-3fa9c2d41b7e/@rpc/netlink/sockets
 zensight/@v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main
 zensight/@v1/h-3fa9c2d41b7e/@blob/store/sha256/ab12cd34ef56
@@ -47,7 +49,9 @@ zensight/@v1/@catalog/state/pdns/93-184-216-34
 The canonical selectors, and the properties that make them safe, are in
 [03 §4–5](03-grammar.md); the headline property: a per-host subscription
 `zensight/@v1/h-xxx/**` delivers that host's complete data plane and can
-never pull video frames, blob chunks, or RPC traffic.
+never pull keys under `@rpc`/`@media`/`@blob` — by key algebra; that
+frames and bulk actually live there is the registry's placement rule
+(the theorem/precondition split of [03 §4](03-grammar.md)).
 
 ## Glossary
 
@@ -56,7 +60,7 @@ never pull video frames, blob chunks, or RPC traffic.
 | **base** | the deployment's root chunk(s); everything the convention defines lives under it |
 | **origin** | the publishing identity in every key — a host id or a named service |
 | **class** | the update semantics of a subtree: telemetry / state / events |
-| **plane** | a verbatim-isolated subtree no data wildcard can reach: `@rpc`, `@media`, `@blob` (and the version boundary itself) |
+| **plane** | a verbatim-isolated subtree no data wildcard can reach: `@rpc`, `@media`, `@blob` (the version chunk uses the same verbatim mechanism but is not a plane) |
 | **producer** | the component (sensor/agent/service) that emits the data |
 | **subject** | the registry-governed meaning path — the open part of the key |
 | **catalog** | the singleton service that fuses identity evidence into entities; the only author of identity *conclusions* |
@@ -80,14 +84,14 @@ Chapters are numbered for reference, not reading. Suggested paths:
 | 00 | this file | grammar-on-a-page, glossary, reading order |
 | 01 | [01-motivation.md](01-motivation.md) | the shipped keyspace, its eight structural pain points, goals and non-goals |
 | 02 | [02-principles.md](02-principles.md) | the eleven design principles, each with provenance |
-| 03 | [03-grammar.md](03-grammar.md) | **normative core**: chunk-by-chunk grammar, lexical rules, reserved tokens, design properties D1–D6, alternatives considered |
+| 03 | [03-grammar.md](03-grammar.md) | **normative core**: conformance model, chunk-by-chunk grammar, lexical rules, reserved tokens, design properties D1–D6 (theorems + preconditions), alternatives considered |
 | 04 | [04-planes.md](04-planes.md) | class semantics (telemetry/state/events), placement rules, QoS defaults, storage mapping, liveliness |
 | 05 | [05-control-rpc.md](05-control-rpc.md) | the `@rpc` plane: targeting, read/write/long-running idioms, mapping of every incumbent control channel |
 | 06 | [06-identity.md](06-identity.md) | origin minting, observed devices, evidence, the `@catalog` contract |
 | 07 | [07-bulk-planes.md](07-bulk-planes.md) | `@media` (live frames) and `@blob` (bulk/content-addressed transfer) |
 | 08 | [08-registry.md](08-registry.md) | the subject registry: format, versioning policy, naming rules, ownership |
-| 09 | [09-operations.md](09-operations.md) | cookbook: selectors, storage configs, ACL recipes, constrained-link allowlists |
-| 10 | [10-prior-art.md](10-prior-art.md) | Keelson, uProtocol/automotive, rmw_zenoh, Sparkplug, OTel, NATS, Zenoh guidance — took/rejected per system |
+| 09 | [09-operations.md](09-operations.md) | cookbook: selectors, storage configs, ACL recipes (rules/subjects/policies, per-plane), constrained-link policy |
+| 10 | [10-prior-art.md](10-prior-art.md) | Keelson, uProtocol/automotive, rmw_zenoh, Sparkplug, OTel, NATS, Zenoh guidance, D-Bus, Homie, OPC UA — took/rejected per system |
 | 11 | [11-zensight-profile.md](11-zensight-profile.md) | the reference application: profile constants, worked keys per sensor, full shipped-family mapping |
 | 12 | [12-open-questions.md](12-open-questions.md) | the six genuinely open items, each with options and a default |
 

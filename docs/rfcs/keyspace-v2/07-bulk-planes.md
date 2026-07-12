@@ -38,7 +38,11 @@ Rules:
   (matching listener) and force a keyframe when a viewer arrives, and the
   keyframe flag MUST be a byte-level promise — a fresh decoder can start at
   any sample whose attachment says keyframe (parameter sets inline or
-  prepended).
+  prepended). Note the matching listener signals only the
+  no-viewers ↔ some-viewers *edge*: an Nth viewer joining beside a current
+  one produces no event and obtains its immediate keyframe via
+  `@rpc/<producer>/stream/keyframe`
+  ([05-control-rpc.md §5](05-control-rpc.md)) instead of waiting out a GOP.
 - **Viewer selectors stay single-stream**: exact key for previews;
   `…/<stream>/video/<codec>/*` for video (one `*` over the
   publisher-configured profile chunk, which the viewer cannot know).
@@ -58,10 +62,12 @@ Rules:
 <base>/@v1/<origin>/@blob/store/<algo>/<hash>         Tier-2: content-addressed chunk (immutable)
 ```
 
-All three are **queryables** served by the origin (pull-only — a consumer
-that never asks never pays a byte), fronted by a resumable client
-(reference: `zenoh-blob` — manifest + ranged chunk GETs, hash verification,
-resume by have-set).
+The chunk after `@blob` is a reserved **tier token** (`artifact` | `tree` |
+`store`), not a producer chunk ([03-grammar.md §1.5](03-grammar.md)) —
+content-addressed data has no owning component. All three tiers are
+**queryables** served by the origin (pull-only — a consumer that never asks
+never pays a byte), fronted by a resumable client (reference: `zenoh-blob`
+— manifest + ranged chunk GETs, hash verification, resume by have-set).
 
 - **Tier-1 (`artifact/<id>`)**: whole-file delivery of a one-off artifact
   (debug bundle, pcap). The `<id>` is the ULID minted by the RPC that
@@ -75,16 +81,23 @@ resume by have-set).
   "which hashes I already have" — it survives reconnect and restart with
   no session state.
 - **Chunks are immutable ⇒ cacheable fleet-wide.** `store/<algo>/<hash>`
-  replies are valid from *any* holder, so:
-  - a fleet client MAY fan out
-    `GET <base>/@v1/*/@blob/store/sha256/<hash>` and take the first reply —
-    nearest-holder delivery with zero coordination;
-  - chunks and indexes MAY be PUT into a router-hosted storage so a
-    producer publishes once and exits, and the fleet dedups against the
-    router copy.
-- **QoS: bulk yields.** Blob replies ride data-low priority; a transfer
-  must never starve telemetry or an alert on a constrained link
-  ([04-planes.md §3](04-planes.md)).
+  replies are valid from *any* holder. The normative dedup point is a
+  **router-hosted content store**: chunks and indexes MAY be PUT into a
+  router storage on the `store/**` selector (the sanctioned exemption from
+  the declared-publisher rule, [04-planes.md §3](04-planes.md)) so a
+  producer publishes once and exits, and the fleet fetches the router copy.
+  A wildcard-origin fan-out (`GET <base>/@v1/*/@blob/store/sha256/<hash>`)
+  is legal but MUST NOT be the default fetch path: every holder ships the
+  full chunk (Zenoh cannot cancel remote replies in flight), so N holders
+  cost N× the bytes — amplification on exactly the links this plane
+  promises to spare. If used at all, wildcard fan-out is for *probing*
+  (manifest/existence checks with tiny replies), followed by a fetch from
+  one chosen origin's literal key.
+- **QoS: bulk yields — a client obligation.** Zenoh replies inherit the
+  *query's* QoS (server-side reply-QoS setters are no-ops), so it is the
+  `@blob` caller that MUST issue its GETs at data-low priority; that is
+  what keeps a transfer from starving telemetry or an alert on a
+  constrained link ([04-planes.md §3](04-planes.md)).
 
 ## 3. Why planes and not payloads
 
@@ -93,8 +106,10 @@ payload type — fails all three constraints these planes exist for:
 
 - **Selector safety**: `…/h-xxx/**` (a UI's per-host subscription) must be
   affordable on a constrained link; one camera behind it must not turn it
-  into a video feed. Verbatim chunks make that impossible, not just
-  discouraged.
+  into a video feed. Verbatim chunks make reaching a *placed* frame
+  impossible for any data selector — and registry review is what
+  guarantees frames are placed here (the theorem/precondition split of
+  design property D2, [03-grammar.md §4](03-grammar.md)).
 - **Storage safety**: class-driven storage selectors
   ([04-planes.md §4](04-planes.md)) must never ingest frames or chunks into
   a time-series backend by accident.

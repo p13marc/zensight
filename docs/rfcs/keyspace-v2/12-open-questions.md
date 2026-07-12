@@ -79,10 +79,22 @@ per-declaration and per-selector, not per-sample — so the readable tokens
 should be free in steady state. But this is an assumption about wire
 behavior, not a measurement.
 
+**Position, sharpened by review.** The interning claim is now
+source-verified: declared publishers send one `DeclareKeyExpr` per key and
+every subsequent sample carries a varint id with zero key bytes, per hop —
+so long tokens genuinely cost only declarations and selectors in steady
+state. What remains unmeasured is declaration-storm and selector cost on a
+truly constrained link.
+
 **Default: full words**, with a measurement task attached: publish a
 representative fleet over a bandwidth-shaped link and compare declaration
 + steady-state overhead. The RFC should ratify with the numbers recorded
-in this chapter, whichever way they point.
+in this chapter, whichever way they point. One constraint either way:
+compression MUST NOT take the form of an alias table with a different
+lifetime than the names it stands for — OPC UA's session-local namespace
+indices (persisted by clients, invalidated by restarts) are the canonical
+failure ([10-prior-art.md §10](10-prior-art.md)); if short tokens win,
+they are a spelling change in the grammar, not a runtime aliasing layer.
 
 ## 6. Alert placement
 
@@ -98,5 +110,11 @@ all state machinery (seed-by-GET, latest-value storage, tombstones);
 
 **Default: (a).** The selector difference is cosmetic and the ACL case is
 speculative; a fourth data class dilutes the "class = update semantics"
-rule, since alerts *are* state semantically. Revisit only if a real
-consumer needs alerts-without-state read permission.
+rule, since alerts *are* state semantically. Honesty requires noting the
+strongest counter-evidence, which is the RFC's own: alerts already get a
+dedicated QoS profile (`alert`, [04-planes.md §3](04-planes.md)) — the
+infrastructure special-cases them at subject granularity today, which is
+an argument (b) would happily cite. It has not tipped the default because
+QoS-per-subject is exactly what the registry exists to express, while a
+class is a heavier hammer. Revisit if a real consumer needs
+alerts-without-state read permission.
