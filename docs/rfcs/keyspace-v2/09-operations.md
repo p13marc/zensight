@@ -2,11 +2,32 @@
 
 **Status: Draft** · informative chapter
 
-Worked recipes for the four infrastructure concerns the grammar was shaped
-around: subscriptions, storage, ACL, and constrained links. Base =
-`zensight` throughout; substitute your deployment's base.
+Worked recipes for the infrastructure concerns the grammar was shaped
+around: session setup, subscriptions, storage, ACL, and constrained links.
+Base = `zensight` throughout; substitute your deployment's base.
 
 ---
+
+## 0. Session configuration
+
+Every participant sets the base as its session **namespace** (stable
+config; [03-grammar.md §1.1](03-grammar.md)) and enables timestamping
+(required by state LWW, storages, and publisher caches):
+
+```json5
+{
+  namespace: "zensight",                 // = <base>; app code never spells it
+  timestamping: { enabled: true },       // peers/clients default to false — turn it on
+  // mode/connect/listen as the deployment requires
+}
+```
+
+With the namespace set, everything the application declares is
+base-relative (`@v1/…`), and ingress from outside the namespace is
+filtered — the base is an isolation boundary, not a string convention.
+Remember the two scope rules: router-side config (storages, ACL,
+interceptors — everything below) is written with the **full** key, and a
+namespaced session cannot reach the router admin space (§5).
 
 ## 1. Selector cookbook
 
@@ -86,13 +107,70 @@ Notes:
   is answered by both (duplicate, possibly divergent replies). Either
   accept it (subscribers are unaffected; GET consumers consolidate) or
   carve `pdns/**` out of the `catalog` storage's selector.
-- Do not mark these storages `complete: true` casually: a complete
-  queryable short-circuits `BestMatching` queries — including fleet RPC
-  fan-ins whose selectors it happens to intersect
-  ([05-control-rpc.md §2.1](05-control-rpc.md)).
 - Media is never stored (recording is a deliberate consumer, not a storage
   rule); blob chunks MAY be stored to make the router a content cache
   ([07-bulk-planes.md §2](07-bulk-planes.md)).
+
+### 2.1 Choosing volumes
+
+A backend advertises a capability pair — *persistence* (volatile/durable)
+× *history* (latest/all) — and the class semantics pick it:
+
+| Volume | Capability | Use for | Caveats |
+|---|---|---|---|
+| `memory` (bundled) | volatile · latest | seed-only deployments, testing | gone on router restart — late joiners lose their seed until state refreshes |
+| `fs` / `rocksdb` | durable · latest | `latest`, `catalog` — the LWW truth stores | out-of-tree plugins, version-matched to the router |
+| `influxdb` | durable · all | `timeseries`, `events`, `pdns_history` — anything whose value is the *sequence* | retention lives in the database (RP), not zenoh config |
+
+Storages are read-write by construction (there is no `read_only` field);
+restrict who can write *into* a storage's selector with ACL, not storage
+config. Out-of-order and wildcard writes are safe: the storage applies
+updates by timestamp (an outdated sample is discarded, a wildcard delete
+still masks a slower concrete put).
+
+### 2.2 Replication (HA for the seed store)
+
+The `latest` storage is a single point of seed failure; Zenoh storage
+**replication** (anti-entropy digest alignment between storages on
+different routers) fixes that for latest-value storages:
+
+```json5
+latest: {
+  key_expr: "zensight/@v1/*/state/**",
+  strip_prefix: "zensight/@v1",
+  volume: { id: "fs", dir: "latest" },
+  replication: {
+    interval: 10.0,          // digest period, seconds
+    sub_intervals: 5,
+    hot: 6, warm: 30,        // eras of decreasing digest resolution
+    propagation_delay: 250,  // ms; MUST be < interval/2
+  },
+},
+```
+
+Rules: every replica MUST use the **identical** `key_expr`,
+`strip_prefix`, and replication parameters (divergent parameters cause
+digest storms, not errors); replication requires timestamps and works
+**only on latest-value backends** — the influx history storages do not
+replicate at the Zenoh layer, their availability is the database's
+concern (cluster the database, or accept a history gap on router loss).
+
+A **replicated, fully-covering** `latest` storage is also the one place
+`complete: true` is *right*: it lets the router answer any state GET from
+the nearest replica without fanning out. Keep the round-1 caveat in mind —
+never mark a storage complete whose selector intersects `@rpc` fan-in
+paths ([05-control-rpc.md §2.1](05-control-rpc.md)); the class-scoped
+selectors above cannot (verbatim `@rpc` is unreachable from `state/**`).
+
+### 2.3 Garbage collection = tombstone lifetime
+
+`garbage_collection: { period, lifespan }` on a storage prunes *metadata*
+— including deletion tombstones — older than `lifespan` (default 24 h).
+This is the knob behind the convention's tombstone rule
+([04-planes.md §1.2](04-planes.md)): set `lifespan` ≥ the longest
+`ttl_s` in the registry, or a retired key's tombstone can be GC'd while
+consumers are still entitled to see it, and a slow replica may resurrect
+the key.
 
 ## 3. ACL recipes
 
@@ -136,8 +214,13 @@ access_control: {
       messages: ["declare_queryable", "reply", "query"],        // query egress = router forwards calls to it
       key_exprs: ["zensight/@v1/h-3fa9c2d41b7e/@rpc/**",
                   "zensight/@v1/h-3fa9c2d41b7e/@blob/**"] },
-    // if AdvancedPublisher history is used, its verbatim sidecar needs cover too:
-    // { …, key_exprs: ["zensight/@v1/h-3fa9c2d41b7e/**/@adv/**"] }
+    // AdvancedPublisher sidecars (04-planes §3.1) live under a verbatim @adv
+    // suffix — cache queryable, liveliness token, heartbeat publisher at
+    // <key>/@adv/pub/<zid>/… — which the host-data '**' rule cannot reach:
+    { id: "host-adv", permission: "allow",
+      messages: ["put", "liveliness_token",
+                 "declare_queryable", "reply", "query"],
+      key_exprs: ["zensight/@v1/h-3fa9c2d41b7e/**/@adv/**"] },
 
     // ---- catalog service ----
     { id: "catalog-own", permission: "allow",
@@ -151,17 +234,22 @@ access_control: {
       key_exprs: ["zensight/@v1/**"] },                          // evidence in, seeds via storage
 
     // ---- operator console: read everything, write nothing but RPC ----
+    // (the **/@adv/** entries carry AdvancedSubscriber traffic: history/
+    //  recovery GETs to publisher caches, late-publisher liveliness
+    //  detection, and the console's own subscriber-detection token)
     { id: "ops-sub", permission: "allow", flows: ["ingress"],
       messages: ["declare_subscriber", "declare_liveliness_subscriber",
-                 "liveliness_query", "query"],
+                 "liveliness_query", "query", "liveliness_token"],
       key_exprs: ["zensight/@v1/**", "zensight/@v1/@catalog/**",
                   "zensight/@v1/*/@rpc/**", "zensight/@v1/@catalog/@rpc/**",
-                  "zensight/@v1/*/@blob/**", "zensight/@v1/*/@media/**"] },
+                  "zensight/@v1/*/@blob/**", "zensight/@v1/*/@media/**",
+                  "zensight/@v1/**/@adv/**"] },
     { id: "ops-recv", permission: "allow", flows: ["egress"],
       messages: ["put", "delete", "reply", "liveliness_token"],
       key_exprs: ["zensight/@v1/**", "zensight/@v1/@catalog/**",
                   "zensight/@v1/*/@rpc/**", "zensight/@v1/@catalog/@rpc/**",
-                  "zensight/@v1/*/@blob/**", "zensight/@v1/*/@media/**"] },
+                  "zensight/@v1/*/@blob/**", "zensight/@v1/*/@media/**",
+                  "zensight/@v1/**/@adv/**"] },
 
     // dangerous procedures deniable per-key, because the key IS the target
     // (deny wins; sound under default-deny — an origin-`**` query that would
@@ -217,6 +305,21 @@ two real mechanisms, both selecting on the same class prefixes:
   allow/deny: `[{ interfaces: ["wlan0"], rules: [{ key_expr:
   "zensight/@v1/*/telemetry/**", freq: 0.1 }] }]` — telemetry crosses at
   ≤ 0.1 Hz, state and events untouched.
+- **`qos` overwrite interceptor** to *enforce* the class QoS profiles
+  ([04-planes.md §3](04-planes.md)) at the router regardless of what
+  publishers set: one rule per class prefix, e.g. force
+  `zensight/@v1/*/telemetry/**` to `priority: "data_low"` and
+  `zensight/@v1/*/state/*/alert/*` to
+  `{ priority: "interactive_high", congestion_control: "block" }`. The
+  interceptor ignores API-level QoS — deployment policy wins.
+
+Advanced-pub/sub traffic deserves a thought on constrained links: per-key
+miss-detection heartbeats and declare-time history bursts are real bytes.
+The class defaults in [04-planes.md §3.1](04-planes.md) already encode the
+mitigation (cache-only for refreshed state — no heartbeats; heartbeats
+reserved for transition state and events), and a leaf consumer can run a
+plain subscriber + local store instead of `history()` (the reference
+GUI's constrained profile does exactly that).
 
 Complementary conventions already assumed by the classes: superseded
 streams drop under congestion, must-arrive state blocks
@@ -228,7 +331,13 @@ can simply not be allowed on the link at all).
 ## 5. Debugging etiquette
 
 - `z_sub 'zensight/@v1/*/state/**'` shows fleet truth; add
-  `…/@catalog/state/entity/*` to see conclusions.
+  `…/@catalog/state/entity/*` to see conclusions. (Debug tools run
+  *without* the namespace and spell full keys — which is also the honest
+  view of what is on the wire.)
+- Router administration (`GET @/<zid>/**`, admin space) needs an
+  **un-namespaced** session: a namespaced session's selector is rewritten
+  to `zensight/@/<zid>/**` and matches nothing
+  ([03-grammar.md §1.1](03-grammar.md)).
 - Reading a raw key aloud is the parse: *base, version, origin, class,
   producer, subject* — position 3 is always who, position 4 is always what
   kind. No lookup table required; that property is worth defending in

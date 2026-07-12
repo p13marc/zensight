@@ -151,6 +151,10 @@ keys and config reloads need restarts; storage `strip_prefix` must be a
 literal prefix; liveliness tokens are queryable, history-capable presence.
 Every one of these appears as a principle in
 [02-principles.md](02-principles.md) with its consequence in the grammar.
+And one feature is the convention's own front position made native: the
+session **namespace** (stable config) transparently prefixes and filters
+every keyexpr of a session — the `<base>` chunk implemented by the
+middleware itself ([03-grammar.md §1.1](03-grammar.md)).
 
 The `@`-convention also carries a caveat worth recording: Zenoh's *own*
 admin space lives under top-level `@/<zid>/…`. This convention never

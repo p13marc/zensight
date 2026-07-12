@@ -15,7 +15,7 @@ coexistence, and code changes are explicitly out of scope
 
 | Convention slot | ZenSight binding |
 |---|---|
-| `<base>` | `zensight` (configurable per deployment, as today) |
+| `<base>` | `zensight` — set as the session `namespace` in the shared zenoh config block (overridable per deployment / `ZENSIGHT_ZENOH_*`), so no crate ever concatenates it ([03-grammar.md §1.1](03-grammar.md)) |
 | version | `@v1` |
 | host origin | `h-<12hex>` from `sha256(machine-id + app salt)` — the same value the correlator uses today as `host_id`/`entity_id` (currently spelled `h_<12hex>`; the profile normalizes the separator to `-`) |
 | service origins | `@catalog` (implemented by `zensight-correlator`) |

@@ -178,15 +178,23 @@ Two normative disciplines make the seed correct:
   dropped delete is a resurrected key. Corollary: all state publishers and
   storages MUST run with timestamping enabled — an untimestamped sample
   cannot be reconciled.
-- **The seed source is a deployment fact.** A *plain* GET on a state
-  selector (e.g. `<base>/@v1/*/state/*/alert/*`) is answered only by a
-  router **storage** ([09-operations.md §2](09-operations.md)) — Zenoh
-  publisher-side caches (zenoh-ext AdvancedPublisher) serve their history
-  under a verbatim `@adv` sidecar that plain GETs cannot reach.
-  Deployments MUST therefore either run the latest-value state storage
-  (recommended; it is what makes plain-GET seeds work) or mandate
-  AdvancedSubscriber-based seeding in every consumer. The two are not
-  interchangeable per consumer — pick one per deployment.
+- **There are exactly two seed paths, and they answer from different
+  places.** (1) An **AdvancedSubscriber with `history()`** (unstable,
+  [04-planes.md §3.1](04-planes.md)) seeds from the publishers'
+  `@adv` caches — it works with no router storage at all, replays each
+  live publisher's ring on declare (and re-queries late publishers via
+  `detect_late_publishers()`), and does the timestamp/seqnum reconcile
+  internally. (2) A **plain GET on the state selector** (e.g.
+  `<base>/@v1/*/state/*/alert/*`) is answered only by a router **storage**
+  ([09-operations.md §2](09-operations.md)) — publisher caches live under
+  the verbatim `@adv` sidecar that a plain GET cannot reach. (The old
+  zenoh-ext `FetchingSubscriber`, which queried the data selector, is
+  deprecated; do not build new seeding on it.) The recommendation:
+  stateful live consumers seed via (1); plain-GET tooling, dashboards-of-
+  record, and anything that must see state from *crashed* producers seed
+  via (2) — an `@adv` cache dies with its publisher, a storage does not.
+  A deployment that runs both gets both; what it MUST NOT do is assume a
+  plain GET reaches publisher caches or that `history()` reaches storages.
 
 ## 5. Mapping the incumbent channels
 

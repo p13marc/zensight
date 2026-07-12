@@ -1,7 +1,9 @@
 # Zenoh Semantic Convention RFC — Index
 
-**Status: Draft v1.1** (post review round 1: adversarial review + Zenoh
-1.9 source verification + D-Bus/Homie/OPC-UA research, July 2026) ·
+**Status: Draft v1.2** (round 1: adversarial review + Zenoh 1.9 source
+verification + D-Bus/Homie/OPC-UA research; round 2: base = session
+namespace, delivery mechanics via zenoh-ext advanced pub/sub, storage
+guidance — July 2026) ·
 supersedes the exploratory drafts in `zensight-key-semantic/` (credited in
 [03 §6.2](03-grammar.md)) · does **not** replace
 [`docs/KEYSPACE.md`](../../KEYSPACE.md), which remains authoritative for
@@ -23,7 +25,7 @@ the reference application and supplies the worked examples.
 
 | Position | Chunk | Example |
 |---|---|---|
-| 1 | **base** — deployment root (configurable; tenancy = deployment prefix) | `zensight` |
+| 1 | **base** — deployment root = the session **namespace** (config; tenancy = deployment prefix; app code never spells it) | `zensight` |
 | 2 | **version** — verbatim `@v<int>`; majors are mutually invisible by key algebra | `@v1` |
 | 3 | **origin** — who publishes: self-minted stable host id, or verbatim service | `h-3fa9c2d41b7e` · `@catalog` |
 | 4 | **class** — bus semantics: `telemetry` (superseded) · `state` (LWW+tombstone) · `events` (immutable) · verbatim planes `@rpc` · `@media` · `@blob` | `state` |
@@ -65,6 +67,7 @@ frames and bulk actually live there is the registry's placement rule
 | **subject** | the registry-governed meaning path — the open part of the key |
 | **catalog** | the singleton service that fuses identity evidence into entities; the only author of identity *conclusions* |
 | **registry** | the machine-readable inventory binding every subject/procedure to a payload type, QoS, and lifecycle |
+| **sidecar** | the `@adv` machinery keys zenoh-ext parks under a data key (`<key>/@adv/…`: publisher cache, liveliness, heartbeat) — verbatim-isolated, ACL-relevant, never application-published |
 
 ## Reading order
 
@@ -85,12 +88,12 @@ Chapters are numbered for reference, not reading. Suggested paths:
 | 01 | [01-motivation.md](01-motivation.md) | the shipped keyspace, its eight structural pain points, goals and non-goals |
 | 02 | [02-principles.md](02-principles.md) | the eleven design principles, each with provenance |
 | 03 | [03-grammar.md](03-grammar.md) | **normative core**: conformance model, chunk-by-chunk grammar, lexical rules, reserved tokens, design properties D1–D6 (theorems + preconditions), alternatives considered |
-| 04 | [04-planes.md](04-planes.md) | class semantics (telemetry/state/events), placement rules, QoS defaults, storage mapping, liveliness |
+| 04 | [04-planes.md](04-planes.md) | class semantics (telemetry/state/events), placement rules, QoS profiles, delivery mechanics (advanced pub/sub per class), storage mapping, liveliness |
 | 05 | [05-control-rpc.md](05-control-rpc.md) | the `@rpc` plane: targeting, read/write/long-running idioms, mapping of every incumbent control channel |
 | 06 | [06-identity.md](06-identity.md) | origin minting, observed devices, evidence, the `@catalog` contract |
 | 07 | [07-bulk-planes.md](07-bulk-planes.md) | `@media` (live frames) and `@blob` (bulk/content-addressed transfer) |
 | 08 | [08-registry.md](08-registry.md) | the subject registry: format, versioning policy, naming rules, ownership |
-| 09 | [09-operations.md](09-operations.md) | cookbook: selectors, storage configs, ACL recipes (rules/subjects/policies, per-plane), constrained-link policy |
+| 09 | [09-operations.md](09-operations.md) | cookbook: session/namespace config, selectors, storage (volumes, replication, GC), ACL recipes (rules/subjects/policies, per-plane), constrained-link policy |
 | 10 | [10-prior-art.md](10-prior-art.md) | Keelson, uProtocol/automotive, rmw_zenoh, Sparkplug, OTel, NATS, Zenoh guidance, D-Bus, Homie, OPC UA — took/rejected per system |
 | 11 | [11-zensight-profile.md](11-zensight-profile.md) | the reference application: profile constants, worked keys per sensor, full shipped-family mapping |
 | 12 | [12-open-questions.md](12-open-questions.md) | the six genuinely open items, each with options and a default |

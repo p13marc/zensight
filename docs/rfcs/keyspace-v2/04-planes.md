@@ -30,9 +30,8 @@ rules for deciding where a given piece of information belongs.
   set of a producer is stable and enumerable; only values change.
 - A publisher MUST publish each metric on its own stable key; it MUST NOT
   encode values, timestamps, or sequence numbers in the key.
-- Late-joiner support (last sample per key) SHOULD be provided by the
-  publisher-side cache mechanism of the underlying middleware (e.g.
-  zenoh-ext AdvancedPublisher history) rather than by re-publishing.
+- Late-joiner support (last samples per key) SHOULD be provided by the
+  publisher-side cache mechanism (§3.1) rather than by re-publishing.
 
 ### 1.2 `state` — last-writer-wins with tombstones
 
@@ -179,6 +178,76 @@ Sole exemption: seeding a router-hosted `@blob` content store MAY use puts
 ([07-bulk-planes.md §2](07-bulk-planes.md)) — those keys are
 content-addressed, written once, and ride no firehose.
 
+**Profiles can be deployment-enforced.** Zenoh's `qos` overwrite
+interceptor (stable config) rewrites priority/congestion/express per
+keyexpr at the router, ignoring whatever the API set. Because the class is
+a fixed key position, a deployment MAY pin the profile table above as
+router policy — one overwrite rule per class prefix
+([09-operations.md §4](09-operations.md)) — turning publisher discipline
+into infrastructure guarantee. This is the QoS counterpart of storage
+selection: one more infrastructure concern the grammar made a config file.
+
+### 3.1 Delivery mechanics per class
+
+QoS says how samples travel; this section says **which publisher/consumer
+machinery each class uses** — cache, history, miss detection, recovery.
+The mechanisms are zenoh-ext's `AdvancedPublisher`/`AdvancedSubscriber`
+(**unstable** — adopted deliberately, [03-grammar.md §0.1](03-grammar.md));
+every row degrades to a stable mechanism with reduced guarantees, never a
+different key shape. Timestamping MUST be enabled wherever a cache is used
+(the builder refuses otherwise), which the convention already requires for
+state ([05-control-rpc.md §4](05-control-rpc.md)).
+
+| Class / subject kind | Publisher mechanism | Why |
+|---|---|---|
+| `telemetry` | AdvancedPublisher: `cache(max_samples ≈ 10)` + `sample_miss_detection(heartbeat ≈ 5 s)` + `publisher_detection()` | late joiners get a chart tail, not a blank; gaps are detected per source. Floor: plain declared publisher |
+| `state`, refreshed (health, evidence) | AdvancedPublisher: `cache(max_samples = 1)` only — **no** miss detection, **no** heartbeat | the refresh cadence already self-heals; a per-key heartbeat is pure overhead on constrained links (the reference application added its cache-only mode for exactly this) |
+| `state`, transition-written (alerts, config echoes, entity docs) | AdvancedPublisher: `cache(1)` + `sample_miss_detection(heartbeat = TTL/2)` + `publisher_detection()` | a missed flank never self-heals; the heartbeat lets subscribers *detect* the gap and recover it instead of trusting luck |
+| `events` | AdvancedPublisher: `cache(max_samples = N)` as the replay ring + `sample_miss_detection(heartbeat)` | **the `@adv` cache is the producer-side event ring**: bounded, queryable, recoverable — no bespoke RPC ring needed ([12-open-questions.md §4](12-open-questions.md)) |
+| `@media` | plain declared publisher, nothing else | recovering a superseded frame is anti-useful ([07-bulk-planes.md §1](07-bulk-planes.md)) |
+| `@rpc` / `@blob` | queryables — the cache/recovery machinery does not apply | |
+
+Consumer side, matched to what the consumer is:
+
+- **Stateful live consumers** (UIs, the catalog, anything that must not
+  miss a transition): AdvancedSubscriber with
+  `history(HistoryConfig::default().detect_late_publishers())` +
+  `recovery(RecoveryConfig::default().heartbeat())` — history replays the
+  publishers' caches on declare (and again when a late publisher's
+  liveliness appears), recovery re-queries per-source sequence gaps
+  flagged by the heartbeat. This *natively implements* the
+  subscribe-first-and-reconcile seed discipline of
+  [05-control-rpc.md §4](05-control-rpc.md). Note `RecoveryConfig::default()`
+  alone recovers a gap only when the *next* sample arrives — for
+  transition-written state and events (which may stay silent forever after
+  the missed sample) the `heartbeat()` or `periodic_queries(period)` mode
+  is REQUIRED, paired with the publisher's `sample_miss_detection`.
+- **Stateless pass-through consumers** (exporters): plain subscriber. A
+  missed telemetry sample is superseded anyway, and alert correctness is
+  carried by the reliable QoS profile plus the storage tier.
+- **Detection without recovery**: a consumer MAY use
+  `sample_miss_listener()` (reports `{source, count}`) to *count* losses
+  instead of repairing them — the right choice for a metrics pipeline that
+  wants a `zenoh_missed_samples` gauge, not retransmission traffic.
+
+Two operational rules, both learned in production by the reference
+application:
+
+- **`history()` + a bounded handler channel self-deadlocks the session at
+  declare time**: the history burst fills the channel before anything
+  drains it, the session RX task blocks, and the declare never returns.
+  An AdvancedSubscriber using `history()` MUST drain through an unbounded
+  (or provably burst-sized) channel.
+- **Declare AdvancedSubscribers last** on a session, after one-shot seed
+  GETs — the declare-time history burst otherwise starves the pending
+  queries into their timeout.
+
+The sidecar keys these mechanisms create are verbatim-isolated under the
+data key — `<key>/@adv/pub/<zid>/…` (cache queryable, liveliness token,
+heartbeat) and `<key>/@adv/sub/<zid>/…` (subscriber detection) — so they
+ride no firehose and no data selector, but they DO need ACL cover
+([09-operations.md §3](09-operations.md)).
+
 ---
 
 ## 4. Storage mapping
@@ -197,8 +266,15 @@ Zenoh requires):
 
 Storages require timestamped samples for LWW to be meaningful: deployments
 MUST enable Zenoh timestamping on the publishing side (routers default to
-on, peers/clients to off). Concrete config, volume plugins, and the
-overlap/`complete` caveats: [09-operations.md §2](09-operations.md).
+on, peers/clients to off). Two facts that shape deployment choices: Zenoh
+**storage replication** (anti-entropy alignment between replicas) works
+only on latest-value storages — history capture does not replicate at the
+Zenoh layer, its availability is the backend database's concern; and the
+storage `garbage_collection.lifespan` is the knob that bounds tombstone
+visibility — it MUST be set ≥ the longest state TTL, or §1.2's
+tombstone-retention rule is silently violated (the default is 24 h).
+Concrete config, volume guidance, replication, and the overlap/`complete`
+caveats: [09-operations.md §2](09-operations.md).
 
 Two consequences the incumbent keyspace could not offer:
 

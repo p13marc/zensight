@@ -22,6 +22,30 @@ obvious: *statically checkable* (CI against the registry and key constants),
 (unobservable by a checker — e.g. "an events key is written exactly once";
 the publisher attests by construction and review).
 
+### 0.1 API-stability posture
+
+The convention is layered against Zenoh's stability tiers, and every
+mechanism is marked at first mention:
+
+- The **grammar, planes, and control idioms** rest exclusively on stable
+  API and config: key expressions, declared publishers/queryables,
+  liveliness (tokens, queries, history subscribers), matching listeners,
+  `Querier`, query target/consolidation/payload/attachment, `reply_err`,
+  session `namespace`, ACL/interceptor/storage configuration. A minimal
+  conforming participant needs nothing unstable.
+- The **delivery-mechanics layer** ([04-planes.md §3.1](04-planes.md)) —
+  publisher caches, history seeding, sample-miss detection and recovery —
+  adopts zenoh-ext's `AdvancedPublisher`/`AdvancedSubscriber` and Zenoh's
+  `SourceInfo`, which are **unstable** (building with `zenoh-ext/unstable`
+  pulls zenoh's `unstable` + `internal`). This is a deliberate decision:
+  the capability (publisher-side history + per-source gap recovery with no
+  router storage) has no stable equivalent, the reference application has
+  shipped on it since 0.7, and the layer is an *upgrade path*, not a
+  dependency — every advanced mechanism degrades to a stable one (plain
+  declared publisher, storage-backed GET seed) with reduced guarantees,
+  never a different key shape. If the unstable surface moves, the keys and
+  the registry do not.
+
 ---
 
 ## 1. Canonical form
@@ -50,7 +74,7 @@ zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage
 | 5 | `<producer>` | 1 chunk | The component on the origin that produced the data (sensor/agent), optionally instance-suffixed. Omitted under service origins. |
 | 6+ | `<subject...>` | ≥ 1 chunk | Registry-governed meaning path. The only open-ended part of the key. |
 
-### 1.1 `<base>` — deployment root
+### 1.1 `<base>` — deployment root = Zenoh namespace
 
 - The base chunk names the *deployment*, not the software: two independent
   installations on one Zenoh network MUST use different bases (or a shared
@@ -61,9 +85,34 @@ zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage
   selector in this RFC is written relative to it. Positional tooling
   ("origin is chunk 3") MUST therefore resolve positions relative to the
   configured base, never by absolute index.
+- **The base is exactly Zenoh's session `namespace`** (stable config,
+  `namespace: "<base>"`), and setting it there is the RECOMMENDED
+  implementation: the runtime transparently prepends the namespace to every
+  keyexpr the session emits — publications, subscriptions, queries,
+  queryables, liveliness tokens, and zenoh-ext `@adv` sidecars — and strips
+  it on delivery, *filtering out* anything that doesn't match. Application
+  code and the registry then never spell the base at all: every key in this
+  RFC from `@v1` rightward is what the code actually writes. Constraints
+  and consequences:
+  - a namespace is any **non-wild** keyexpr — multi-chunk bases work;
+    wildcards are rejected; verbatim chunks are type-permitted but a base
+    MUST NOT contain them (§1.4's planes and [10-prior-art.md §7](10-prior-art.md)'s
+    admin-space caveat both assume a plain-chunk base);
+  - **router-side artifacts see full keys.** The namespace is a
+    session-side shim; storage selectors, ACL rules, and interceptor
+    configs ([09-operations.md](09-operations.md)) are written with the
+    explicit base, exactly as this RFC shows them;
+  - **the router admin space is unreachable from a namespaced session** —
+    a `GET @/<zid>/**` is rewritten to `<base>/@/<zid>/**` and matches
+    nothing. Router administration uses a separate un-namespaced session
+    ([09-operations.md §5](09-operations.md));
+  - the ingress filter makes the namespace an *isolation boundary*, not
+    just a prefix: a namespaced session cannot even accidentally consume
+    another deployment's traffic ([12-open-questions.md §1](12-open-questions.md)).
 - Rationale: an isolation token you rarely use should not cost every key a
-  chunk. Deployments that need it prepend it; deployments that don't, don't
-  pay. (See NATS guidance: the first token is the isolation key —
+  chunk — and with the namespace mechanism it costs no *code* either.
+  Deployments that need it prepend it; deployments that don't, don't pay.
+  (See NATS guidance: the first token is the isolation key —
   [10-prior-art.md §6](10-prior-art.md).)
 
 ### 1.2 `@v1` — version chunk

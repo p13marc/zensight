@@ -15,10 +15,16 @@ deployment prefix (`acme/fleet-a` as `<base>`) sufficient forever?
 ([03-grammar.md §1.1](03-grammar.md)); (b) reserve a fixed chunk between
 `<base>` and `@v1` now, empty-tolerated later.
 
-**Default: (a).** A reserved-but-unused chunk costs every key today for a
-need that may never come, and the verbatim `@v1` boundary means a future
-`@v2` could introduce a realm position without ambiguity anyway. Revisit
-only if a real multi-realm deployment materializes.
+**Default: (a),** strengthened since review round 2: the deployment
+prefix is now *zero-code* — it is the session `namespace`
+([03-grammar.md §1.1](03-grammar.md)), set in config, invisible to
+application code, and enforced as an ingress filter (a session cannot even
+accidentally consume another realm's traffic). A reserved-but-unused chunk
+costs every key today for a need the namespace already serves, and the
+verbatim `@v1` boundary means a future `@v2` could introduce a realm
+position without ambiguity anyway. Revisit only if a real multi-realm
+deployment needs *cross-realm* consumers (the one thing a namespaced
+session cannot be).
 
 ## 2. Observed-device promotion to origin
 
@@ -58,15 +64,20 @@ semantics); if durability is wanted, it must come as desired state.
 + a per-subject rate budget ([04-planes.md §1.3](04-planes.md)). What is
 the *deployment* contract — how long are events queryable, and via what?
 
-**Options.** (a) storage-only: a retention-windowed time-series storage on
-`…/*/events/**`, replay = storage query; (b) additionally require each
-producer to serve its recent events over `@rpc` from a bounded ring
-(uniform with other detail queries, works with no router storage).
+**Options.** (a) storage-only: a time-series storage on `…/*/events/**`
+(retention set in the backend database), replay = storage query; (b) a
+producer-side bounded ring serving recent events. Review round 2 resolved
+(b)'s *mechanism*: the AdvancedPublisher cache (`max_samples = N`) **is**
+that ring — queryable, recoverable, already required for events' miss
+detection ([04-planes.md §3.1](04-planes.md)) — so no bespoke `@rpc` ring
+procedure is needed.
 
 **Default: (a) + (b)** — they are cheap together and cover both
-router-full and router-less deployments. The unresolved part is the budget
-rule itself: what rate class boundaries the registry should enforce
-(per-minute? per-hour?) needs one release of real data before being fixed.
+router-full and router-less deployments ((b) covers only events whose
+producer is alive; (a) covers the rest). The remaining open part is the
+budget rule itself: the `rate` classes exist
+([08-registry.md §2](08-registry.md): `rare`/`low`/`burst(n/h)`) but their
+boundaries need one release of real data before being fixed.
 
 ## 5. Short class tokens
 

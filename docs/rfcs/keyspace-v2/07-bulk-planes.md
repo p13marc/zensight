@@ -32,8 +32,9 @@ Rules:
   them ([03-grammar.md §2](03-grammar.md)).
 - **QoS: best-effort · drop · interactive-high** — a stale frame is
   worthless and the encoder must never block ([04-planes.md §3](04-planes.md)).
-  Plain declared publisher; no history/cache mechanism (recovering a
-  superseded frame is anti-useful).
+  Plain declared publisher; explicitly **never** an AdvancedPublisher —
+  no cache, no miss detection, no heartbeat (recovering a superseded frame
+  is anti-useful; [04-planes.md §3.1](04-planes.md)).
 - **Keyframe-on-subscribe**: the publisher SHOULD watch subscriber matching
   (matching listener) and force a keyframe when a viewer arrives, and the
   keyframe flag MUST be a byte-level promise — a fresh decoder can start at
