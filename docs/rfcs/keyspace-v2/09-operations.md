@@ -40,7 +40,7 @@ namespaced session cannot reach the router admin space (§5).
 | Exporter (alerts) | `zensight/@v1/*/state/*/alert/*` | |
 | Protocol-specialist view | `zensight/@v1/*/telemetry/netring/**` | one `*`, protocol-first ergonomics preserved |
 | Catalog (evidence intake) | `zensight/@v1/*/state/*/evidence/**` | |
-| Late-joiner seeds | `GET` the same state selectors | state is its own seed ([05-control-rpc.md §4](05-control-rpc.md)) |
+| Late-joiner seeds | `GET` the same state selectors | state is its own seed ([05-control-rpc.md §4](05-control-rpc.md)); discipline in [04-planes.md §3.2](04-planes.md) |
 | Media viewer | exact `…/@media/<producer>/<stream>/preview/jpeg`, or `…/video/<codec>/*` | single-stream only, by construction |
 
 Anti-patterns:
@@ -100,7 +100,7 @@ Notes:
 - The `latest` storage doubles as the fleet-wide late-joiner seed: a GET on
   any state selector is answered by the router even when producers sleep.
   (It is what makes plain-GET seeds work at all —
-  [05-control-rpc.md §4](05-control-rpc.md).) Timestamping must be enabled
+  seed discipline in [04-planes.md §3.2](04-planes.md).) Timestamping must be enabled
   on the publishing side for LWW to be meaningful
   ([04-planes.md §4](04-planes.md)).
 - `catalog` and `pdns_history` **overlap**: a GET under `…/state/pdns/**`
@@ -166,11 +166,10 @@ selectors above cannot (verbatim `@rpc` is unreachable from `state/**`).
 
 `garbage_collection: { period, lifespan }` on a storage prunes *metadata*
 — including deletion tombstones — older than `lifespan` (default 24 h).
-This is the knob behind the convention's tombstone rule
-([04-planes.md §1.2](04-planes.md)): set `lifespan` ≥ the longest
-`ttl_s` in the registry, or a retired key's tombstone can be GC'd while
-consumers are still entitled to see it, and a slow replica may resurrect
-the key.
+This is the knob that enforces the tombstone-visibility row of the
+staleness contract ([04-planes.md §1.2](04-planes.md)): `lifespan` ≥ the
+longest `ttl_s` in the registry, else a slow replica may resurrect a
+retired key.
 
 ## 3. ACL recipes
 
@@ -194,6 +193,25 @@ the convention's own algebra:
    producer that may not `declare_queryable` serves nothing, and queries
    must be allowed **egress** toward the responder's face as well as
    ingress from the caller's.
+
+The grant matrix at a glance — one row per rule id in the sketch below, so
+a wrong or missing grant is visible before reading any JSON5 (`(adv)` =
+only for principals on the advanced tier):
+
+| Principal | Rule | Covers | Flow | Messages |
+|---|---|---|---|---|
+| host | `host-data` | `h-xxx/**` (data classes + `alive` tokens) | in | put, delete, liveliness_token |
+| host | `host-media` | `h-xxx/@media/**` | in | put |
+| host | `host-serve` | `h-xxx/@rpc/**`, `h-xxx/@blob/**` | both | declare_queryable, reply, query |
+| host | `host-blob-seed` | `h-xxx/@blob/{store,tree}/**` | in | put |
+| host | `host-adv` (adv) | `h-xxx/**/@adv/**` | both | put, liveliness_token, declare_queryable, reply, query |
+| catalog | `catalog-own` | `@catalog/**` (+ its `@rpc`) | both | put, delete, liveliness_token, declare_queryable, reply, query |
+| catalog | `catalog-intake-declare` | `@v1/**` | **in only** | declare_subscriber, declare_liveliness_subscriber, liveliness_query, query |
+| catalog | `catalog-intake-recv` | `@v1/**` | **out only** | put, delete, liveliness_token, reply |
+| console | `ops-sub` | all planes (each named) | in | declares, liveliness_query, query |
+| console | `ops-own-token` (adv) | `**/@adv/**` | in | liveliness_token |
+| console | `ops-recv` | all planes (each named) | out | put, delete, reply, liveliness_token |
+| console | `no-remote-actions` | `*/@rpc/systemd/action` | both | **deny** query |
 
 Sketch (structure verified against the Zenoh 1.9 schema; validate against
 a live `zenohd` before deploying):
@@ -299,11 +317,11 @@ access_control: {
 }
 ```
 
-The property to notice survives the plane-per-rule tax: *"host X may act
-only as itself"* and *"nobody but the console may invoke actions"* are
-still **static literal-prefix rules pinned to enrolled identities** —
-inexpressible in a keyspace where the host discriminator is a mutable name
-at varying positions. And one more rule of thumb: a rule's `key_exprs`
+The property to notice: *"host X may act only as itself"* and *"nobody but
+the console may invoke actions"* are **static literal-prefix rules pinned
+to enrolled identities** — inexpressible in a keyspace where the host
+discriminator is a mutable name at varying positions. One more rule of
+thumb: a rule's `key_exprs`
 must **include** (⊇) the consumer's declared selector, not merely
 intersect it — allow `zensight/@v1/**` does not admit a `zensight/**`
 subscriber.

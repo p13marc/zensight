@@ -1,10 +1,11 @@
 # Zenoh Semantic Convention RFC — Index
 
-**Status: Draft v1.3** (round 1: adversarial review + Zenoh 1.9 source
-verification + D-Bus/Homie/OPC-UA research; round 2: base = session
-namespace, storage guidance; round 3: delivery re-grounded — stable
-baseline as the default, zenoh-ext advanced pub/sub demoted to a priced,
-opt-in per-subject tier — July 2026) ·
+**Status: Draft v1.4 — all open questions decided** (round 1: adversarial
+review + Zenoh 1.9 source verification + D-Bus/Homie/OPC-UA research;
+round 2: base = session namespace, storage guidance; round 3: delivery
+re-grounded — stable baseline default, advanced pub/sub a priced opt-in
+tier; round 4: the six open questions decided, chapters consolidated —
+July 2026) ·
 supersedes the exploratory drafts in `zensight-key-semantic/` (credited in
 [03 §6.2](03-grammar.md)) · does **not** replace
 [`docs/KEYSPACE.md`](../../KEYSPACE.md), which remains authoritative for
@@ -76,8 +77,9 @@ Chapters are numbered for reference, not reading. Suggested paths:
 
 - **Evaluating the design** (reviewers): 01 → 03 → 04 → 05 → 06 → 12,
   with 10 for the influences and 03 §6 for the roads not taken.
-- **Adopting the convention** (other Zenoh apps): 02 → 03 → 04 → 08 → 09,
-  then 11 §4 for the replace-this checklist.
+- **Adopting the convention** (other Zenoh apps): 02 → 03 → 04 (delivery
+  contracts §3.1–3.4 especially) → 08 → 09, then 11 §4 for the
+  replace-this checklist.
 - **Operating a deployment**: 09, with 04 for the class semantics behind
   the recipes.
 
@@ -97,7 +99,7 @@ Chapters are numbered for reference, not reading. Suggested paths:
 | 09 | [09-operations.md](09-operations.md) | cookbook: session/namespace config, selectors, storage (volumes, replication, GC), ACL recipes (rules/subjects/policies, per-plane), constrained-link policy |
 | 10 | [10-prior-art.md](10-prior-art.md) | Keelson, uProtocol/automotive, rmw_zenoh, Sparkplug, OTel, NATS, Zenoh guidance, D-Bus, Homie, OPC UA — took/rejected per system |
 | 11 | [11-zensight-profile.md](11-zensight-profile.md) | the reference application: profile constants, worked keys per sensor, full shipped-family mapping |
-| 12 | [12-open-questions.md](12-open-questions.md) | the six genuinely open items, each with options and a default |
+| 12 | [12-open-questions.md](12-open-questions.md) | the decision record: all six former open questions decided, each with its alternatives and revisit trigger |
 
 ## Scope
 

@@ -46,22 +46,18 @@ rules for deciding where a given piece of information belongs.
 - The key MUST be stable for the lifetime of the stateful thing, so that
   firing→resolved→gone is a sequence of writes and one delete on a *single*
   key — not a family of keys to garbage-collect.
-- **TTL.** Every live-state subject declares its staleness TTL in the
-  registry ([08-registry.md §2](08-registry.md)) — the registry value is
-  authoritative for both sides: publishers MUST refresh at ≤ TTL/2, and
-  consumers MUST apply the registry TTL (not a locally configured one) when
-  aging state out. (The reference application uses 60 s re-emission against
-  a 900 s evidence TTL.) State whose producer's liveliness token
-  ([§5](#5-liveliness-presence)) is absent SHOULD be treated as suspect
-  immediately and MUST be treated as stale after its TTL — this is what
-  retires a firing alert whose publisher crashed without tombstoning.
-- **Tombstones.** A retired key MUST be tombstoned with a Zenoh delete
-  (`SampleKind::Delete` — not a payload marker), and consumers MUST treat
-  the delete as authoritative retirement. Seed replies
-  ([05-control-rpc.md §4](05-control-rpc.md)) MUST NOT present a key whose
-  latest sample is a delete as live; deployments MUST retain tombstone
-  visibility for at least the subject's TTL, so that every seed mechanism
-  agrees on retirement.
+- **TTL & tombstones — the staleness contract.** Stated once, here;
+  every other chapter references this table. The TTL value is the
+  registry's `ttl_s` ([08-registry.md §2](08-registry.md)), authoritative
+  for all parties (never a locally configured one; the reference
+  application uses 60 s re-emission against a 900 s evidence TTL):
+
+  | Rule | Binds | Requirement | Enforced by |
+  |---|---|---|---|
+  | refresh | publisher | re-emit live state at ≤ `ttl_s`/2 — the self-heal | registry review |
+  | aging | consumer | state older than `ttl_s` is stale; producer's `alive` token absent ([§5](#5-liveliness-presence)) ⇒ suspect immediately, stale at TTL — this retires a firing alert whose publisher crashed without tombstoning | liveliness roster |
+  | retirement | publisher | retire a key with a Zenoh delete (`SampleKind::Delete` — never a payload marker); consumers treat it as authoritative | class semantics (§1) |
+  | tombstone visibility | deployment | a delete stays observable ≥ `ttl_s`; seed replies (§3.2) never present a deleted key as live | storage `gc.lifespan` ≥ max `ttl_s` ([09-operations.md §2.3](09-operations.md)) |
 - **Cardinality budget.** A state subject keyed by an *observed population*
   (one key per seen IP, device, unit — e.g. `evidence/names/<ip-slug>`,
   `@catalog/state/pdns/<ip-slug>`) is permitted only with an explicit
@@ -116,8 +112,9 @@ with one selector: `<base>/@v1/*/state/*/alert/*`.
   are served on demand via `@rpc` (rule R3 below). Events exist so that
   *rare, meaningful* occurrences survive verbatim; they are not a log
   transport.
-- Retention/replay of events is a storage-deployment concern
-  ([12-open-questions.md §4](12-open-questions.md)); the bus contract is
+- Retention/replay of events is a storage-deployment concern — the events
+  storage is the normative contract, decided in
+  [12-open-questions.md §4](12-open-questions.md); the bus contract is
   only immutability + unique keys.
 
 ---
@@ -244,11 +241,41 @@ entitlements say otherwise. It uses nothing unstable:
   producer's state suspect on token retraction and stale at TTL; the
   mandated refresh (≤ TTL/2, §1.2) is the self-heal. Together these meet
   `detect_s = ttl_s` with zero per-key machinery.
-- **Seeding**: subscribe-first, then a GET on the state selector answered
-  by the latest-value storage, merged per key by HLC timestamp — newer
-  value wins, newer tombstone wins ([05-control-rpc.md §4](05-control-rpc.md)).
+- **Seeding**: the seed discipline below.
 - **Events**: reliable one-shot puts; replay and post-crash visibility are
   the events storage's job.
+
+**Seed discipline** (normative, both tiers — this is the single home;
+[05-control-rpc.md §4](05-control-rpc.md) explains only why dedicated
+seed *procedures* no longer exist):
+
+- *Subscribe first, reconcile by timestamp.* A consumer MUST declare its
+  subscriber before issuing the seed GET, and MUST merge seed replies with
+  live samples per key by Zenoh (HLC) timestamp — newer value wins, newer
+  tombstone wins. GET-then-subscribe is forbidden: a transition published
+  in the gap is silently dropped, and a dropped delete is a resurrected
+  key. Corollary: state publishers and storages MUST run timestamped — an
+  untimestamped sample cannot be reconciled.
+- *Two seed paths, answering from different places.* (1) An
+  AdvancedSubscriber with `history()` (§3.3) seeds from live publishers'
+  `@adv` caches — no storage needed, reconcile internal. (2) A plain GET
+  on the state selector is answered only by a router storage — publisher
+  caches live under the verbatim `@adv` sidecar a plain GET cannot reach.
+  They differ in *coverage*: a cache dies with its publisher, a storage
+  does not. A consumer whose correctness depends on state from **crashed**
+  producers (a UI rendering the firing alert of a dead host — the case
+  §1.2's TTL retirement exists for) MUST include the storage seed where
+  one is deployed; cache seeding alone suffices only where dead producers'
+  state may lapse until TTL.
+- *Composition.* A consumer running both paths issues the storage GET
+  first (or concurrently), declares the AdvancedSubscriber last on the
+  session (§3.3's ordering note; its declare-time history query is
+  internally race-free), merges by the same timestamp rule — and, in a
+  fleet that also contains baseline (cache-less) publishers, re-issues the
+  seed GET once after the declare, since no history query can replay a
+  cache-less publisher's gap-window transition. What no consumer may do:
+  assume a plain GET reaches publisher caches, or that `history()`
+  reaches storages.
 
 The honest limits of the baseline, so the trade is explicit: detection
 latency for a missed transition is bounded by TTL (aging), not by a

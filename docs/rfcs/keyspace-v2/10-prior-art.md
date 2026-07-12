@@ -202,7 +202,7 @@ everyone).
   with stated failure modes. The seed pattern — GDBusProxy subscribes,
   snapshots via `GetAll`, and flushes its cache when the name owner
   vanishes; our subscribe-first / reconcile-by-timestamp rule and
-  liveliness-driven staleness ([05-control-rpc.md §4](05-control-rpc.md),
+  liveliness-driven staleness ([04-planes.md §3.2](04-planes.md),
   [04-planes.md §5](04-planes.md)) do the same job without a broker's
   ordering. `invalidated_properties` — notify-without-value for large
   values — as the registry's `invalidate` delivery mode

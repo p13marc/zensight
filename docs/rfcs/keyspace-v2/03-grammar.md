@@ -88,28 +88,17 @@ zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage
   configured base, never by absolute index.
 - **The base is exactly Zenoh's session `namespace`** (stable config,
   `namespace: "<base>"`), and setting it there is the RECOMMENDED
-  implementation: the runtime transparently prepends the namespace to every
-  keyexpr the session emits — publications, subscriptions, queries,
-  queryables, liveliness tokens, and zenoh-ext `@adv` sidecars — and strips
-  it on delivery, *filtering out* anything that doesn't match. Application
-  code and the registry then never spell the base at all: every key in this
-  RFC from `@v1` rightward is what the code actually writes. Constraints
-  and consequences:
-  - a namespace is any **non-wild** keyexpr — multi-chunk bases work;
-    wildcards are rejected; verbatim chunks are type-permitted but a base
-    MUST NOT contain them (§1.4's planes and [10-prior-art.md §7](10-prior-art.md)'s
-    admin-space caveat both assume a plain-chunk base);
-  - **router-side artifacts see full keys.** The namespace is a
-    session-side shim; storage selectors, ACL rules, and interceptor
-    configs ([09-operations.md](09-operations.md)) are written with the
-    explicit base, exactly as this RFC shows them;
-  - **the router admin space is unreachable from a namespaced session** —
-    a `GET @/<zid>/**` is rewritten to `<base>/@/<zid>/**` and matches
-    nothing. Router administration uses a separate un-namespaced session
-    ([09-operations.md §5](09-operations.md));
-  - the ingress filter makes the namespace an *isolation boundary*, not
-    just a prefix: a namespaced session cannot even accidentally consume
-    another deployment's traffic ([12-open-questions.md §1](12-open-questions.md)).
+  implementation: the runtime transparently prepends it to every keyexpr
+  the session emits (publications, subscriptions, queries, queryables,
+  liveliness tokens, `@adv` sidecars), strips it on delivery, and
+  *filters* non-matching ingress — application code and the registry never
+  spell the base, and the base is an isolation boundary, not just a
+  prefix ([12-open-questions.md §1](12-open-questions.md)). Lexical
+  constraints: any **non-wild** keyexpr (multi-chunk bases work; wildcards
+  rejected); verbatim chunks are type-permitted but a base MUST NOT
+  contain them. Operational consequences — router-side configs still see
+  full keys; router admin needs an un-namespaced session — live in the
+  cookbook ([09-operations.md §0, §5](09-operations.md)).
 - Rationale: an isolation token you rarely use should not cost every key a
   chunk — and with the namespace mechanism it costs no *code* either.
   Deployments that need it prepend it; deployments that don't, don't pay.
@@ -516,7 +505,8 @@ arity. We take its lesson that the *addressable* part of the key (positions
 
 ### 6.6 Short class tokens (`t`/`s`/`e`)
 
-Deferred, not rejected: declared publishers intern keys (the wire cost is
-per-declaration, not per-sample), so readability wins until a measurement on
-a constrained link says otherwise. Recorded as an open question
-([12-open-questions.md §5](12-open-questions.md)).
+Rejected (decided in [12-open-questions.md §5](12-open-questions.md)):
+declared publishers intern keys — the wire cost is per-declaration, not
+per-sample — and the declaration arithmetic puts the saving around 8 bytes
+per key per hop, once, so readability wins outright. The decision record
+keeps the revisit trigger and the no-alias-layer constraint.

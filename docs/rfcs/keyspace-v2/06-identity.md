@@ -120,7 +120,8 @@ zensight/@v1/h-3fa9c2d41b7e/telemetry/snmp/router01/system/sys_uptime
   by observed-evidence claims (§4).
 - A device MAY be promoted to a first-class origin only by *running a
   publisher itself*; a deployment that wants per-device ACL on proxied
-  devices is asking for a different trust model, recorded in
+  devices is asking for a different trust model — decided against, with
+  the revisit trigger recorded in
   [12-open-questions.md §2](12-open-questions.md).
 
 ## 4. Evidence — identity claims as ordinary state
@@ -193,7 +194,7 @@ Contract:
 
 1. Subscribe `<base>/@v1/@catalog/state/entity/*` **and**
    `<base>/@v1/@catalog/state/alias/*` (+ GET the same selectors as the
-   late-joiner seed, [05-control-rpc.md §4](05-control-rpc.md)) — alias
+   late-joiner seed, [04-planes.md §3.2](04-planes.md)) — alias
    records are their own key family, and without them step 3's
    origin→entity re-pointing on merges never arrives.
 2. Group data keys by their origin chunk — a plain string read at
