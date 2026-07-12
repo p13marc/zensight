@@ -175,7 +175,7 @@ impl<C: SensorConfig> SensorRunner<C> {
     /// state channels (`@/health`, `@/errors`, `@/status`, `@/alive`,
     /// `@/devices/**`) hang off it.
     fn control_prefix(&self) -> String {
-        format!("{}/{}", self.config.key_prefix(), self.source)
+        crate::keys::control_prefix(self.config.key_prefix(), &self.source)
     }
 
     /// Enable status publishing.

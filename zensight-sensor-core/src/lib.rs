@@ -42,6 +42,7 @@ pub mod container;
 mod error;
 mod health;
 mod identity;
+mod keys;
 mod liveliness;
 pub mod procutil;
 mod publisher;

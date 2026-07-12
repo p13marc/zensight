@@ -162,7 +162,7 @@ impl AdvancedPublisherRegistry {
         if suffix.is_empty() {
             self.key_prefix.clone()
         } else {
-            format!("{}/{}", self.key_prefix, suffix)
+            crate::keys::telemetry_key(&self.key_prefix, suffix)
         }
     }
 

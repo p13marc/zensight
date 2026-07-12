@@ -66,7 +66,7 @@ impl SensorStatus {
     /// the host-scoped instance prefix (`zensight/<protocol>/<source>`) so two
     /// hosts running the same protocol never overwrite each other's status.
     pub async fn publish(&self, publisher: &Publisher, control_prefix: &str) -> Result<()> {
-        let key = format!("{}/@/status", control_prefix);
+        let key = crate::keys::status_key(control_prefix);
         publisher
             .publish_json(&key, self, zensight_common::QosClass::Command)
             .await

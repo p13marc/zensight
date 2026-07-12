@@ -128,28 +128,19 @@ pub struct SensorHealth {
 /// Build the health key for one sensor instance:
 /// `{prefix}/{source}/@/health` (legacy `{prefix}/@/health` without a source).
 pub(crate) fn health_key(prefix: &str, source: Option<&str>) -> String {
-    match source {
-        Some(s) => format!("{}/{}/@/health", prefix, s),
-        None => format!("{}/@/health", prefix),
-    }
+    crate::keys::health_key(prefix, source)
 }
 
 /// Build the errors key for one sensor instance:
 /// `{prefix}/{source}/@/errors` (legacy `{prefix}/@/errors` without a source).
 pub(crate) fn errors_key(prefix: &str, source: Option<&str>) -> String {
-    match source {
-        Some(s) => format!("{}/{}/@/errors", prefix, s),
-        None => format!("{}/@/errors", prefix),
-    }
+    crate::keys::errors_key(prefix, source)
 }
 
 /// Build the device-liveness key for one device of one sensor instance:
 /// `{prefix}/{source}/@/devices/{device}/liveness`.
 pub(crate) fn device_liveness_key(prefix: &str, source: Option<&str>, device: &str) -> String {
-    match source {
-        Some(s) => format!("{}/{}/@/devices/{}/liveness", prefix, s, device),
-        None => format!("{}/@/devices/{}/liveness", prefix, device),
-    }
+    crate::keys::device_liveness_key(prefix, source, device)
 }
 
 /// Device state for liveness tracking.

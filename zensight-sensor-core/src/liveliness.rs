@@ -63,7 +63,7 @@ impl LivelinessManager {
     /// For example: `zensight/snmp/poller01/@/alive`
     pub async fn new(session: Arc<Session>, key_prefix: impl Into<String>) -> Result<Self> {
         let key_prefix = key_prefix.into();
-        let sensor_key = format!("{}/@/alive", key_prefix);
+        let sensor_key = crate::keys::alive_key(&key_prefix);
 
         let sensor_token = session
             .liveliness()
@@ -98,7 +98,7 @@ impl LivelinessManager {
             }
         }
 
-        let device_key = format!("{}/@/devices/{}/alive", self.key_prefix, device_id);
+        let device_key = crate::keys::device_alive_key(&self.key_prefix, device_id);
 
         let token = self
             .session
