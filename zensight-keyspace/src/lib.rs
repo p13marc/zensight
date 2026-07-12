@@ -28,6 +28,7 @@
 pub mod grammar;
 pub mod origin;
 pub mod qos;
+pub mod registry;
 pub mod slug;
 
 pub use grammar::{Class, KeyError, Origin, Plane, Producer, StructuralKey, VERSION_CHUNK};

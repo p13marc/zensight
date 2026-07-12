@@ -1,0 +1,98 @@
+# Subject registry: netring (wire-level flow/L7/NDR sensor). RFC 08 §2.
+
+[registry]
+version = "1.0"
+app = "zensight"
+convention = 1
+
+[producer]
+name = "netring"
+description = "wire-level flow/L7/NDR sensor"
+
+[[subject]]
+path = "flow/red/{quantile}"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "ms"
+cardinality = 5
+since = "1.0"
+description = "flow-lifetime RED quantiles from the capture path"
+
+[[subject]]
+path = "bandwidth/{iface}/{direction}"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "bytes_per_s"
+cardinality = 16
+since = "1.0"
+description = "per-interface capture-path bandwidth"
+
+[[subject]]
+path = "health"
+class = "state"
+type = "HealthSnapshot"
+ttl_s = 120
+since = "1.0"
+description = "sensor health document (framework)"
+
+[[subject]]
+path = "alert/{alert_key}"
+class = "state"
+type = "Alert"
+qos = "alert"
+cardinality = 64
+ttl_s = 900
+since = "1.0"
+description = "detector alerts; firing->resolved on one key, delete = tombstone"
+
+[[subject]]
+path = "evidence/self"
+class = "state"
+type = "HostEvidence"
+ttl_s = 900
+since = "1.0"
+description = "self-identity claim (RFC 06 §4)"
+
+[[subject]]
+path = "evidence/names/{ip_slug}"
+class = "state"
+type = "NameObservation"
+cardinality = 4096
+ttl_s = 900
+since = "1.0"
+description = "passive-DNS observation for an actively observed IP (population-budgeted, RFC 04 §1.2)"
+
+[[subject]]
+path = "capture/{ulid}"
+class = "events"
+type = "CaptureRecord"
+rate = "rare"
+cardinality = 1000
+replay = "window(7d)"
+since = "1.0"
+description = "a capture was triggered; immutable audit record"
+
+[[procedure]]
+path = "capture/trigger"
+kind = "write"
+request = "CaptureTrigger"
+reply = "Ack"
+idempotent = false
+since = "1.0"
+description = "fire the pre-trigger ring / rotate the spool"
+
+[[procedure]]
+path = "flows"
+kind = "read"
+reply = "Vec<FlowRecord>"
+idempotent = true
+since = "1.0"
+description = "on-demand flow detail from the bounded ring (per-flow data never rides the bus, RFC 04 R3)"
+
+[[procedure]]
+path = "introspect"
+kind = "read"
+reply = "RegistrySlice"
+idempotent = true
+since = "1.0"
+description = "the registry slice this build serves (RFC 08 §6)"
