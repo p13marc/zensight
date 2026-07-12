@@ -156,6 +156,18 @@ session **namespace** (stable config) transparently prefixes and filters
 every keyexpr of a session — the `<base>` chunk implemented by the
 middleware itself ([03-grammar.md §1.1](03-grammar.md)).
 
+Two more pieces of the team's own guidance shaped the delivery tiers
+([04-planes.md §3.2–3.3](04-planes.md)): the liveliness RFC warns that
+universal liveliness "puts a lot of pressure on the infrastructure" —
+tokens are opt-in for that reason (the convention's one-token-per-
+*producer* roster, never per key, follows directly); and the
+fault-tolerance RFC's design goal that publisher state stay independent of
+subscriber count is exactly the property per-key heartbeats walk back —
+one reason the advanced tier is priced and opt-in rather than default
+([roadmap RFCs](https://github.com/eclipse-zenoh/roadmap/tree/main/rfcs/ALL);
+field evidence: rmw_zenoh's token-per-entity workload,
+[rmw_zenoh#763](https://github.com/ros2/rmw_zenoh/issues/763)).
+
 The `@`-convention also carries a caveat worth recording: Zenoh's *own*
 admin space lives under top-level `@/<zid>/…`. This convention never
 publishes at top level (everything is under `<base>/`), so no collision is

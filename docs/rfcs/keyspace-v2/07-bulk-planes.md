@@ -34,7 +34,7 @@ Rules:
   worthless and the encoder must never block ([04-planes.md §3](04-planes.md)).
   Plain declared publisher; explicitly **never** an AdvancedPublisher —
   no cache, no miss detection, no heartbeat (recovering a superseded frame
-  is anti-useful; [04-planes.md §3.1](04-planes.md)).
+  is anti-useful; [04-planes.md §3.3](04-planes.md)).
 - **Keyframe-on-subscribe**: the publisher SHOULD watch subscriber matching
   (matching listener) and force a keyframe when a viewer arrives, and the
   keyframe flag MUST be a byte-level promise — a fresh decoder can start at
@@ -83,10 +83,12 @@ never pays a byte), fronted by a resumable client (reference: `zenoh-blob`
   no session state.
 - **Chunks are immutable ⇒ cacheable fleet-wide.** `store/<algo>/<hash>`
   replies are valid from *any* holder. The normative dedup point is a
-  **router-hosted content store**: chunks and indexes MAY be PUT into a
-  router storage on the `store/**` selector (the sanctioned exemption from
-  the declared-publisher rule, [04-planes.md §3](04-planes.md)) so a
-  producer publishes once and exits, and the fleet fetches the router copy.
+  **router-hosted content store**: chunks and indexes MAY be PUT into
+  router storages on the `…/@blob/store/**` and `…/@blob/tree/**`
+  selectors (the sanctioned exemption from the declared-publisher rule,
+  [04-planes.md §3](04-planes.md); tree ids are root hashes, so both
+  families are content-addressed) so a producer publishes once and exits,
+  and the fleet fetches the router copy.
   A wildcard-origin fan-out (`GET <base>/@v1/*/@blob/store/sha256/<hash>`)
   is legal but MUST NOT be the default fetch path: every holder ships the
   full chunk (Zenoh cannot cancel remote replies in flight), so N holders

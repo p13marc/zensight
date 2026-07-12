@@ -33,18 +33,19 @@ mechanism is marked at first mention:
   `Querier`, query target/consolidation/payload/attachment, `reply_err`,
   session `namespace`, ACL/interceptor/storage configuration. A minimal
   conforming participant needs nothing unstable.
-- The **delivery-mechanics layer** ([04-planes.md §3.1](04-planes.md)) —
+- The **delivery baseline** ([04-planes.md §3.2](04-planes.md)) — plain
+  declared publishers, per-producer liveliness, refresh/TTL staleness,
+  storage-backed seeding — is also stable-only, and it is the *default*:
+  it meets every delivery entitlement the registry grants by default.
+- The **advanced tier** ([04-planes.md §3.3](04-planes.md)) — per-key
   publisher caches, history seeding, sample-miss detection and recovery —
-  adopts zenoh-ext's `AdvancedPublisher`/`AdvancedSubscriber` and Zenoh's
+  uses zenoh-ext's `AdvancedPublisher`/`AdvancedSubscriber` and Zenoh's
   `SourceInfo`, which are **unstable** (building with `zenoh-ext/unstable`
-  pulls zenoh's `unstable` + `internal`). This is a deliberate decision:
-  the capability (publisher-side history + per-source gap recovery with no
-  router storage) has no stable equivalent, the reference application has
-  shipped on it since 0.7, and the layer is an *upgrade path*, not a
-  dependency — every advanced mechanism degrades to a stable one (plain
-  declared publisher, storage-backed GET seed) with reduced guarantees,
-  never a different key shape. If the unstable surface moves, the keys and
-  the registry do not.
+  pulls zenoh's `unstable` + `internal`). The tier is **opt-in per
+  subject**, priced in 04's cost box, and chosen only where a subject's
+  entitlements exceed the baseline (fast miss detection, storage-less
+  seeding). It never changes a key shape: if the unstable surface moves,
+  the keys and the registry do not.
 
 ---
 
@@ -294,9 +295,10 @@ This convention narrows it:
   the infrastructure; see [02-principles.md P6](02-principles.md).)
 - Per-message data (request ids, timestamps, sequence numbers) MUST NOT
   appear in any published key — unbounded-cardinality keys defeat interning,
-  caches, and storage — with exactly three sanctioned exceptions: the unique
+  caches, and storage — with exactly four sanctioned exceptions: the unique
   id terminating an `events` key ([04-planes.md §1.3](04-planes.md)),
-  content hashes under `@blob/store`, and artifact ids under
+  content hashes under `@blob/store`, tree-index ids under `@blob/tree`
+  (the root hash of the tree they index), and artifact ids under
   `@blob/artifact` ([07-bulk-planes.md §2](07-bulk-planes.md)).
 - State subjects that key on an *observed population* (one chunk per
   observed IP, device, unit) are not per-message data but are also not free:

@@ -79,16 +79,9 @@ path        = "capture/{ulid}"
 class       = "events"
 type        = "CaptureRecord"
 rate        = "rare"                        # events only: rare | low | burst(n/h)
+replay      = "window(7d)"                  # events only: deployment must keep 7 days queryable
 since       = "1.0"
 description = "a capture was triggered; immutable audit record"
-
-[[subject]]
-path        = "gnmi/{device}/{path...}"     # {path...}: rest-variable, see rules
-class       = "telemetry"
-type        = "TelemetryPoint"
-cardinality = 10000                         # per device config, bounded by subscription list
-since       = "1.1"
-description = "gNMI subscription paths, slugged per 03-grammar §2"
 
 [[procedure]]
 path        = "capture/trigger"
@@ -113,6 +106,24 @@ gone        = "1.2"                          # still reserved; never reused
 replaced_by = "flow/red/p50_ms"
 ```
 
+Open-depth subjects use the rest-variable, in their **own producer's**
+file (§5's ownership rule — a `gnmi/…` path inside `netring.toml` would be
+namespace-squatting):
+
+```toml
+# registry/gnmi.toml
+[producer]
+name = "gnmi"
+
+[[subject]]
+path        = "{device}/{path...}"          # {path...}: rest-variable, see rules
+class       = "telemetry"
+type        = "TelemetryPoint"
+cardinality = 10000                         # bounded by the device subscription list
+since       = "1.0"
+description = "gNMI subscription paths, slugged per 03-grammar §2"
+```
+
 Normative field table (`[[subject]]`; `[[procedure]]`/`[[media]]` analogous):
 
 | Field | Type | Required | Meaning |
@@ -125,6 +136,9 @@ Normative field table (`[[subject]]`; `[[procedure]]`/`[[media]]` analogous):
 | `cardinality` | integer | yes if `path` has any `{var}` | expected key-population bound (order of magnitude); the budget review enforces |
 | `ttl_s` | integer | live `state` only | staleness TTL; publishers refresh ≤ ttl/2, consumers age out at ttl |
 | `rate` | `rare` \| `low` \| `burst(n/h)` | `events` only | rate class (CI-checked, [04-planes.md §1.3](04-planes.md)) |
+| `seed` | `none` \| `latest` \| `tail(n)` | no (class default: `state` → `latest`, `telemetry` → `none`) | late-joiner entitlement ([04-planes.md §3.1](04-planes.md)); *how* it is met (storage vs cache) is deployment config |
+| `detect_s` | integer | no (live `state` only; default = `ttl_s`) | max latency to detect a missed transition; values ≪ `ttl_s` require the advanced tier ([04-planes.md §3.3](04-planes.md)) |
+| `replay` | `none` \| `window(t)` | `events` only | how far back events must stay queryable (met by the events storage) |
 | `delivery` | `full` (default) \| `invalidate` | no | oversized-state pattern ([04-planes.md §1.2](04-planes.md)) |
 | `since` / `gone` / `replaced_by` | registry versions / path | `since` yes | lifecycle (§3) |
 | `description` | string | yes | one line, human |

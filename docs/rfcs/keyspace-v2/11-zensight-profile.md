@@ -28,6 +28,19 @@ device as the first subject chunk; host-local producers (`sysinfo`,
 the metric directly — the origin already names the host, so the incumbent
 `<source>` hostname chunk disappears for them.
 
+**Delivery tier, honestly.** The shipped sensors currently run the
+advanced tier per-key across the *whole telemetry fan* (cache 10 +
+heartbeat 5 s + publisher detection on every telemetry key) — a default
+that predates the convention's cost analysis and lands squarely in
+[04-planes.md §3.3](04-planes.md)'s "what the tier is NOT for" (wide fans:
+4 entities and 2 network-wide declarations per key, heartbeat load
+proportional to key count). Under this profile the target posture is the
+baseline ([04 §3.2](04-planes.md)) for telemetry — the deployment already
+runs the storages — with the tier retained only where its decision rule
+holds: alerts and expectation/config echoes (`detect_s ≪ ttl_s`,
+`sporadic_heartbeat`), and evidence documents keep their shipped
+cache-only depth 1.
+
 ## 2. Worked examples per sensor
 
 ```

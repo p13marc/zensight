@@ -167,34 +167,42 @@ seeds from the same keys it will then watch. A dedicated `query/alerts`
 procedure would duplicate the state selector. RPC is reserved for what
 state cannot express: parameterised, high-cardinality, or computed replies.
 
-Two normative disciplines make the seed correct:
+Two normative disciplines make the seed correct (they are part of the
+delivery contract, [04-planes.md §3.1–3.2](04-planes.md); stated here
+because this is where the incumbent's seed queryables dissolve):
 
 - **Subscribe first, reconcile by timestamp.** A consumer MUST declare its
   subscriber *before* issuing the seed GET, and MUST merge seed replies
   with live samples per key by Zenoh (HLC) timestamp — newer value wins,
-  newer tombstone wins (this is what zenoh-ext's `FetchingSubscriber`
-  implements; use it or replicate its merge). GET-then-subscribe is
-  forbidden: a transition published in the gap is silently dropped, and a
-  dropped delete is a resurrected key. Corollary: all state publishers and
-  storages MUST run with timestamping enabled — an untimestamped sample
-  cannot be reconciled.
+  newer tombstone wins. GET-then-subscribe is forbidden: a transition
+  published in the gap is silently dropped, and a dropped delete is a
+  resurrected key. Corollary: all state publishers and storages MUST run
+  with timestamping enabled — an untimestamped sample cannot be
+  reconciled.
 - **There are exactly two seed paths, and they answer from different
-  places.** (1) An **AdvancedSubscriber with `history()`** (unstable,
-  [04-planes.md §3.1](04-planes.md)) seeds from the publishers'
-  `@adv` caches — it works with no router storage at all, replays each
-  live publisher's ring on declare (and re-queries late publishers via
-  `detect_late_publishers()`), and does the timestamp/seqnum reconcile
-  internally. (2) A **plain GET on the state selector** (e.g.
+  places.** (1) An **AdvancedSubscriber with `history()`** (the advanced
+  tier, [04-planes.md §3.3](04-planes.md)) seeds from live publishers'
+  `@adv` caches — no router storage needed, reconcile done internally.
+  (2) A **plain GET on the state selector** (e.g.
   `<base>/@v1/*/state/*/alert/*`) is answered only by a router **storage**
   ([09-operations.md §2](09-operations.md)) — publisher caches live under
-  the verbatim `@adv` sidecar that a plain GET cannot reach. (The old
-  zenoh-ext `FetchingSubscriber`, which queried the data selector, is
-  deprecated; do not build new seeding on it.) The recommendation:
-  stateful live consumers seed via (1); plain-GET tooling, dashboards-of-
-  record, and anything that must see state from *crashed* producers seed
-  via (2) — an `@adv` cache dies with its publisher, a storage does not.
-  A deployment that runs both gets both; what it MUST NOT do is assume a
-  plain GET reaches publisher caches or that `history()` reaches storages.
+  the verbatim `@adv` sidecar that a plain GET cannot reach. They differ
+  in *coverage*, not just mechanism: a cache dies with its publisher, a
+  storage does not. So a consumer whose correctness depends on state from
+  **crashed** producers (a UI rendering the firing alert of a host that
+  died — exactly the case [04 §1.2](04-planes.md)'s TTL retirement
+  exists for) MUST include the storage seed where one is deployed; cache
+  seeding alone suffices only where dead producers' state may lapse until
+  TTL. And composition is well-defined: the AdvancedSubscriber's own
+  declare-time history query is internally race-free, so a consumer
+  running both paths issues the storage GET first (or concurrently),
+  declares the AdvancedSubscriber last on the session
+  ([04 §3.3](04-planes.md)'s ordering note), and merges everything by the
+  same timestamp rule — re-issuing the seed GET once after the declare if
+  the fleet also contains baseline (cache-less) publishers, whose
+  gap-window transitions no history query can replay. What no consumer may
+  do is assume a plain GET reaches publisher caches or that `history()`
+  reaches storages.
 
 ## 5. Mapping the incumbent channels
 

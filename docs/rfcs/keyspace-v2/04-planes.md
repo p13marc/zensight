@@ -158,11 +158,14 @@ to Zenoh reliability × congestion control × priority:
 | `alert` | reliable | block | interactive-high | `state/*/alert/*` |
 | `frame` | best-effort | drop | interactive-high | `@media` (a stale frame is worthless; the encoder must never block) |
 
-The `refreshed`/`transition` split inside `state` is decided by a testable
-rule: state that is re-published on a cadence ≤ TTL/2 self-heals after a
-drop and MAY use `refreshed`; state written **only on transition** (an
-alert flank, an entity tombstone, a config echo) does not self-heal and
-MUST use `transition` or stronger.
+The `refreshed`/`transition` split inside `state` is about the **cost of
+waiting out a missed write**, not about self-healing: *all* live state
+refreshes at ≤ TTL/2 (§1.2), so every state subject eventually self-heals.
+State whose value changes on rare transitions that consumers cannot afford
+to learn a refresh-period late (an alert flank, an entity tombstone, a
+config echo) MUST use `transition` or stronger — the reliable profile buys
+the *latency* of truth; the refresh mandate already guarantees its
+eventuality.
 
 The query planes have no publisher-side profile — **Zenoh replies inherit
 the QoS of the query** (the server-side reply-QoS setters are documented
@@ -171,12 +174,17 @@ issue GETs at interactive-high priority; `@blob` callers MUST issue GETs at
 data-low — that, not anything the responder does, is what makes bulk
 transfer yield ([07-bulk-planes.md §2](07-bulk-planes.md)).
 
-All publishers on the data classes and `@media` MUST be *declared*
+All publishers on `telemetry`, `state`, and `@media` MUST be *declared*
 publishers — never one-shot ad-hoc puts — so keys are interned, routing is
 primed, and QoS is attached once ([02-principles.md P7](02-principles.md)).
-Sole exemption: seeding a router-hosted `@blob` content store MAY use puts
-([07-bulk-planes.md §2](07-bulk-planes.md)) — those keys are
-content-addressed, written once, and ride no firehose.
+Two scoped exemptions, both for write-once keys where interning buys
+nothing: seeding a router-hosted `@blob` content store
+([07-bulk-planes.md §2](07-bulk-planes.md)), and **`events` publication** —
+every events key is written exactly once (§1.3), so there is no routing to
+prime and no key to reuse; events are one-shot puts carrying their QoS
+profile explicitly, kept cheap by the class's rate budget. (A declared
+publisher per event key would be a declaration plus a put plus an
+undeclare — the same wire cost wearing a compliance costume.)
 
 **Profiles can be deployment-enforced.** Zenoh's `qos` overwrite
 interceptor (stable config) rewrites priority/congestion/express per
@@ -187,66 +195,148 @@ router policy — one overwrite rule per class prefix
 into infrastructure guarantee. This is the QoS counterpart of storage
 selection: one more infrastructure concern the grammar made a config file.
 
-### 3.1 Delivery mechanics per class
+### 3.1 Delivery contracts per class
 
-QoS says how samples travel; this section says **which publisher/consumer
-machinery each class uses** — cache, history, miss detection, recovery.
-The mechanisms are zenoh-ext's `AdvancedPublisher`/`AdvancedSubscriber`
-(**unstable** — adopted deliberately, [03-grammar.md §0.1](03-grammar.md));
-every row degrades to a stable mechanism with reduced guarantees, never a
-different key shape. Timestamping MUST be enabled wherever a cache is used
-(the builder refuses otherwise), which the convention already requires for
-state ([05-control-rpc.md §4](05-control-rpc.md)).
+QoS says how samples travel; this section says what consumers are
+**entitled to** — and deliberately not which library delivers it. The
+entitlements live in the registry beside QoS
+([08-registry.md §2](08-registry.md)); *mechanisms* are a deployment/build
+choice, exactly as QoS profiles are enforceable by router config:
 
-| Class / subject kind | Publisher mechanism | Why |
-|---|---|---|
-| `telemetry` | AdvancedPublisher: `cache(max_samples ≈ 10)` + `sample_miss_detection(heartbeat ≈ 5 s)` + `publisher_detection()` | late joiners get a chart tail, not a blank; gaps are detected per source. Floor: plain declared publisher |
-| `state`, refreshed (health, evidence) | AdvancedPublisher: `cache(max_samples = 1)` only — **no** miss detection, **no** heartbeat | the refresh cadence already self-heals; a per-key heartbeat is pure overhead on constrained links (the reference application added its cache-only mode for exactly this) |
-| `state`, transition-written (alerts, config echoes, entity docs) | AdvancedPublisher: `cache(1)` + `sample_miss_detection(heartbeat = TTL/2)` + `publisher_detection()` | a missed flank never self-heals; the heartbeat lets subscribers *detect* the gap and recover it instead of trusting luck |
-| `events` | AdvancedPublisher: `cache(max_samples = N)` as the replay ring + `sample_miss_detection(heartbeat)` | **the `@adv` cache is the producer-side event ring**: bounded, queryable, recoverable — no bespoke RPC ring needed ([12-open-questions.md §4](12-open-questions.md)) |
-| `@media` | plain declared publisher, nothing else | recovering a superseded frame is anti-useful ([07-bulk-planes.md §1](07-bulk-planes.md)) |
-| `@rpc` / `@blob` | queryables — the cache/recovery machinery does not apply | |
+| Entitlement | Registry field | Meaning | Class defaults |
+|---|---|---|---|
+| **Seed** | `seed = none \| latest \| tail(n)` | what a late joiner may obtain per key without waiting out a cadence | `state`: `latest` (mandatory) · `telemetry`: `none` (a blank chart until the next cadence conforms) · `events`: n/a (see replay) |
+| **Miss detection** | `detect_s` (live `state` only; default = `ttl_s`) | the maximum time within which a consumer can *detect* a missed transition | baseline meets `detect_s = ttl_s` for free (refresh + aging + liveliness); smaller values need the advanced tier (§3.3) |
+| **Replay** | `replay = none \| window(t)` (`events` only) | how far back events are queryable | satisfied at deployment level by the events storage |
+| **Tombstone visibility** | (from `ttl_s`) | a delete is observable ≥ TTL (§1.2) | enforced by storage GC sizing ([09-operations.md §2.3](09-operations.md)) |
 
-Consumer side, matched to what the consumer is:
+Two universal rules, mechanism-independent:
 
-- **Stateful live consumers** (UIs, the catalog, anything that must not
-  miss a transition): AdvancedSubscriber with
-  `history(HistoryConfig::default().detect_late_publishers())` +
-  `recovery(RecoveryConfig::default().heartbeat())` — history replays the
-  publishers' caches on declare (and again when a late publisher's
-  liveliness appears), recovery re-queries per-source sequence gaps
-  flagged by the heartbeat. This *natively implements* the
-  subscribe-first-and-reconcile seed discipline of
-  [05-control-rpc.md §4](05-control-rpc.md). Note `RecoveryConfig::default()`
-  alone recovers a gap only when the *next* sample arrives — for
-  transition-written state and events (which may stay silent forever after
-  the missed sample) the `heartbeat()` or `periodic_queries(period)` mode
-  is REQUIRED, paired with the publisher's `sample_miss_detection`.
-- **Stateless pass-through consumers** (exporters): plain subscriber. A
-  missed telemetry sample is superseded anyway, and alert correctness is
-  carried by the reliable QoS profile plus the storage tier.
-- **Detection without recovery**: a consumer MAY use
-  `sample_miss_listener()` (reports `{source, count}`) to *count* losses
-  instead of repairing them — the right choice for a metrics pipeline that
-  wants a `zenoh_missed_samples` gauge, not retransmission traffic.
+- Late-joiner support MUST NOT be implemented by re-publishing on the data
+  key — it corrupts the time-series and the LWW record; seeds come from a
+  seed source, never from fake samples.
+- **A deployment MUST provide at least one seed source for every `state`
+  subject** — a latest-value storage covering `state/**`
+  ([09-operations.md §2](09-operations.md)), publisher-side caches (§3.3),
+  or both. A deployment with neither has no late-joiner story at all,
+  which does not conform.
 
-Two operational rules, both learned in production by the reference
-application:
+Telemetry loss needs no detection machinery: a dropped sample is priced
+into the `sampled` profile and superseded by the next cadence — spending
+bytes to detect drops the QoS invited is waste (consumers wanting a loss
+*metric* can count, §3.3).
 
-- **`history()` + a bounded handler channel self-deadlocks the session at
-  declare time**: the history burst fills the channel before anything
-  drains it, the session RX task blocks, and the declare never returns.
-  An AdvancedSubscriber using `history()` MUST drain through an unbounded
-  (or provably burst-sized) channel.
-- **Declare AdvancedSubscribers last** on a session, after one-shot seed
-  GETs — the declare-time history burst otherwise starves the pending
-  queries into their timeout.
+### 3.2 Baseline mechanics (stable API — the default)
 
-The sidecar keys these mechanisms create are verbatim-isolated under the
-data key — `<key>/@adv/pub/<zid>/…` (cache queryable, liveliness token,
-heartbeat) and `<key>/@adv/sub/<zid>/…` (subscriber detection) — so they
-ride no firehose and no data selector, but they DO need ACL cover
-([09-operations.md §3](09-operations.md)).
+The baseline is what every conforming participant runs unless a subject's
+entitlements say otherwise. It uses nothing unstable:
+
+- **Publishers**: one plain declared publisher per key with the class QoS
+  profile (§3), plus one-shot puts for `events` (§3 exemption).
+- **Presence & staleness**: one liveliness token per producer
+  (`state/<producer>/alive`, §5) — *not* per key. A consumer marks a
+  producer's state suspect on token retraction and stale at TTL; the
+  mandated refresh (≤ TTL/2, §1.2) is the self-heal. Together these meet
+  `detect_s = ttl_s` with zero per-key machinery.
+- **Seeding**: subscribe-first, then a GET on the state selector answered
+  by the latest-value storage, merged per key by HLC timestamp — newer
+  value wins, newer tombstone wins ([05-control-rpc.md §4](05-control-rpc.md)).
+- **Events**: reliable one-shot puts; replay and post-crash visibility are
+  the events storage's job.
+
+The honest limits of the baseline, so the trade is explicit: detection
+latency for a missed transition is bounded by TTL (aging), not by a
+heartbeat period; a telemetry late joiner sees nothing until the next
+cadence unless the deployment adds a telemetry storage; per-sample gap
+*recovery* does not exist — a lost reliable sample surfaces as staleness,
+not retransmission.
+
+### 3.3 The advanced tier (opt-in, unstable)
+
+zenoh-ext's `AdvancedPublisher`/`AdvancedSubscriber` add per-key
+publisher-side history, per-source sequence numbers, and gap recovery.
+The tier is **opt-in per subject** — it is never a class default —
+because its costs are per *key*, and the fleet's key population multiplies
+them:
+
+> **Cost box** (from the zenoh 1.9 source; there are no published
+> benchmarks). A fully-optioned AdvancedPublisher creates **4 entities per
+> key**, two of which — the cache queryable and the liveliness token at
+> `<key>/@adv/pub/<zid>/<eid>/…` — are **network-wide routed declarations
+> that no router can aggregate** (the key embeds zid+eid). A periodic
+> `heartbeat(p)` publishes unconditionally forever (a 4-byte seqnum every
+> `p`); the moment one subscriber enables `recovery(heartbeat)`, **every
+> matching publisher's heartbeat crosses the network to it** — K
+> matching keys ⇒ K/p msg/s per such subscriber, paid when nothing is
+> lost. `history()` cold-start costs O(publishers × depth) reply samples;
+> adding `detect_late_publishers()` can double it and turns every
+> publisher restart into one token replay + one GET *per subscriber*.
+> At a 10 000-key fleet that is ~40 000 entities, ~20 000 router-table
+> entries per router, and (at `heartbeat(1 s)`) ~10 000 msg/s per
+> recovering subscriber. Field evidence from the closest comparable
+> workload (rmw_zenoh's token-per-entity model): seconds of router CPU
+> saturation per node restart; its maintainers ship miss-detection off by
+> default for traffic reasons.
+
+Where the tier earns its cost:
+
+- **Low-count, high-value transition state** needing `detect_s ≪ ttl_s` —
+  alerts, config echoes: O(1–10) keys per producer. Configuration:
+  `cache(1)` + `sample_miss_detection(sporadic_heartbeat(detect_s))` —
+  sporadic, because these keys are idle almost always and the sporadic
+  mode publishes only after a change. Consumers pair it with
+  `recovery(heartbeat())`.
+- **Router-less / storage-less meshes**, where publisher caches are the
+  *only* possible seed source: `cache(1)` on state subjects (no miss
+  detection unless `detect_s` demands it), consumers seed with
+  `history()`.
+- **Chart-tail seeding without a telemetry storage**: `cache(n)` on the
+  handful of subjects whose registry says `seed = tail(n)` — not across a
+  wide telemetry fan.
+
+What the tier is NOT for: wide telemetry fans (hundreds of keys per
+producer — the entity and heartbeat arithmetic above), telemetry gap
+*recovery* (fighting the `sampled` profile: re-querying shed samples
+presses on exactly the congested link), `events` replay (**unbuildable**:
+a publisher owns one key, every events key is unique — an events "cache
+ring" cannot exist; replay is the storage's job), and `@media` (recovering
+a superseded frame is anti-useful).
+
+Implementation notes for the tier (production-learned): timestamping must
+already be on ([09-operations.md §0](09-operations.md)) — and do not rely
+on the builder to catch its absence: only the cache-*only* configuration
+self-checks; cache + miss-detection builds happily untimestamped. Always
+set `HistoryConfig::max_samples` — **the default is unbounded buffering**;
+`history()` MUST drain through an unbounded (or provably burst-sized)
+handler channel or the declare deadlocks the session; declare
+AdvancedSubscribers after one-shot seed GETs on the same session (§3.2's
+subscribe-first rule is satisfied by the AdvancedSubscriber itself — its
+declare-time history query is internally race-free; the ordering rule is
+about *other* GETs sharing the session); prefer `periodic_queries(p)` over
+`recovery(heartbeat)` on wide wildcard subscriptions — it bounds load by
+the subscriber's choice instead of the publishers' key count. A consumer
+that wants a loss *metric* without recovery uses
+`sample_miss_listener()` (reports `{source, count}`).
+
+The sidecar keys the tier creates are verbatim-isolated under the data key
+(`<key>/@adv/pub/<zid>/…`, `<key>/@adv/sub/<zid>/…`): they ride no
+firehose and no data selector, but principals that opt in DO need the
+`@adv` ACL rules — and a missing rule fails *silently* (empty seeds,
+denied recovery, indistinguishable from "nothing to recover";
+[09-operations.md §3](09-operations.md)).
+
+### 3.4 Choosing a tier
+
+| Deployment shape | State | Telemetry | Events |
+|---|---|---|---|
+| Router + storages (the normal fleet) | baseline; advanced only on subjects with `detect_s ≪ ttl_s` | baseline (storage supplies any tail) | baseline + events storage |
+| Router-less mesh (no storage anywhere) | advanced `cache(1)` — publisher caches are the only seed | baseline; `cache(n)` only where a tail entitlement exists | accept producer-lifetime visibility, or add a storage node |
+| Constrained leaf | baseline + plain subscriber + local store (no history bursts, no heartbeats) | baseline | baseline |
+
+The split mirrors §3's QoS design: **entitlements in the registry,
+mechanisms in deployment/build config.** A subject's row in the registry
+says what consumers may rely on; whether a cache or a storage delivers it
+is invisible to the keys and to the wire contract.
 
 ---
 
@@ -329,9 +419,18 @@ like data selectors:
   ([10-prior-art.md](10-prior-art.md)): mark that producer's cached state
   suspect immediately rather than waiting out the TTL, and re-seed when the
   token reappears.
-- Producers MUST declare their `@rpc` queryables *before* declaring their
-  `alive` token, so that "alive ⇒ callable" holds and callers can attribute
-  RPC silence ([05-control-rpc.md §3](05-control-rpc.md)).
+- Producers MUST declare their `@rpc` queryables **and** (if on the
+  advanced tier) all their AdvancedPublishers *before* declaring their
+  `alive` token — "alive ⇒ callable **and seedable**": callers can
+  attribute RPC silence ([05-control-rpc.md §3](05-control-rpc.md)), and a
+  §5-triggered re-seed can never race an undeclared cache.
+- **One roster, not two.** The advanced tier's `publisher_detection`
+  tokens (`<key>/@adv/pub/…`, §3.3) are per-*publisher-entity* machinery,
+  consumed only by AdvancedSubscriber internals
+  (`detect_late_publishers()`); the per-producer `alive` token is the
+  only presence signal consumers, dashboards, and RPC attribution may
+  read. An AdvancedSubscriber already re-seeds natively on `@adv` token
+  events and MUST NOT double-trigger from `alive`.
 - The token *key* is the identity record (origin + producer + device) —
   the pattern proven by rmw_zenoh's `@ros2_lv` discovery space and
   Keelson's presence tokens ([10-prior-art.md](10-prior-art.md)).

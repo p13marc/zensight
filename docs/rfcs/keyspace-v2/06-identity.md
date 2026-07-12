@@ -191,8 +191,11 @@ Contract:
 
 ### 5.1 How a UI joins
 
-1. Subscribe `<base>/@v1/@catalog/state/entity/*` (+ GET the same selector
-   as the late-joiner seed, [05-control-rpc.md §4](05-control-rpc.md)).
+1. Subscribe `<base>/@v1/@catalog/state/entity/*` **and**
+   `<base>/@v1/@catalog/state/alias/*` (+ GET the same selectors as the
+   late-joiner seed, [05-control-rpc.md §4](05-control-rpc.md)) — alias
+   records are their own key family, and without them step 3's
+   origin→entity re-pointing on merges never arrives.
 2. Group data keys by their origin chunk — a plain string read at
    position 3, no parsing heuristics.
 3. `entity.origins[]` (and `alias` records) map origin → entity;
@@ -264,9 +267,14 @@ the old origin, reachable only via storage.
 Deployments that want continuity assert it explicitly:
 `GET …/@catalog/@rpc/link?old=<id>;new=<id>` (operator-invoked, gated) —
 the catalog records the assertion as operator evidence (strong, does not
-age out), publishes `alias/<old-id>`, and merges. Alias and tombstone
-records are retained like any state: they persist in the latest-value
-storage until an operator retires them (`@rpc/unlink`), and SHOULD be
-GC'd by the catalog once no consumer has resolved them for a
-deployment-configured horizon.
+age out), publishes `alias/<old-id>`, and merges. Retention differs by
+record kind: an **alias** is an ordinary put and persists in the
+latest-value storage until an operator retires it (`@rpc/unlink`), with
+catalog-side GC once unresolved for a deployment-configured horizon; an
+entity **tombstone** is storage *metadata* and lives exactly as long as
+the storage's `garbage_collection.lifespan`
+([09-operations.md §2.3](09-operations.md)) — deployments running
+replicated catalog storages SHOULD size that lifespan to their
+partition-heal horizon, because a pruned tombstone is what lets a slow
+replica resurrect a merged-away entity.
 

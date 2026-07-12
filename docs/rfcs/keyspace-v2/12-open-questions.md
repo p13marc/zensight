@@ -66,16 +66,18 @@ the *deployment* contract — how long are events queryable, and via what?
 
 **Options.** (a) storage-only: a time-series storage on `…/*/events/**`
 (retention set in the backend database), replay = storage query; (b) a
-producer-side bounded ring serving recent events. Review round 2 resolved
-(b)'s *mechanism*: the AdvancedPublisher cache (`max_samples = N`) **is**
-that ring — queryable, recoverable, already required for events' miss
-detection ([04-planes.md §3.1](04-planes.md)) — so no bespoke `@rpc` ring
-procedure is needed.
+producer-side bounded ring serving recent events over `@rpc`
+(`@rpc/<producer>/events?since=…`). Round 2 briefly claimed (b) was
+"resolved" by the AdvancedPublisher cache; round 3 review showed that is
+**unbuildable** — a publisher owns exactly one key and every events key
+is unique, so an events cache-ring cannot exist
+([04-planes.md §3.3](04-planes.md)). (b) is therefore genuinely open
+again, and if wanted must be the bespoke `@rpc` ring after all.
 
-**Default: (a) + (b)** — they are cheap together and cover both
-router-full and router-less deployments ((b) covers only events whose
-producer is alive; (a) covers the rest). The remaining open part is the
-budget rule itself: the `rate` classes exist
+**Default: (a)**, with (b) an optional per-producer addition for
+router-less deployments (it covers only events whose producer is alive;
+(a) covers the rest and is the durable record). Also open: the budget rule
+itself — the `rate` classes exist
 ([08-registry.md §2](08-registry.md): `rare`/`low`/`burst(n/h)`) but their
 boundaries need one release of real data before being fixed.
 

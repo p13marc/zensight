@@ -33,7 +33,7 @@ namespaced session cannot reach the router admin space (§5).
 
 | Consumer | Declares | Notes |
 |---|---|---|
-| UI, full fleet | `zensight/@v1/*/telemetry/**` + `zensight/@v1/*/state/**` + `zensight/@v1/*/events/**` + `zensight/@v1/@catalog/state/entity/*` | three class subs replace firehose-plus-filtering; catalog named explicitly (D4) |
+| UI, full fleet | `zensight/@v1/*/telemetry/**` + `zensight/@v1/*/state/**` + `zensight/@v1/*/events/**` + `zensight/@v1/@catalog/state/entity/*` + `zensight/@v1/@catalog/state/alias/*` | three class subs replace firehose-plus-filtering; catalog (and its alias records — the origin→entity re-pointing on merges) named explicitly (D4) |
 | UI, one host drill-down | `zensight/@v1/h-xxx/**` | complete data plane of one host; cannot pull media/blob/rpc (D2) |
 | UI, presence | liveliness subs `zensight/@v1/*/state/*/alive` + `zensight/@v1/*/state/*/device/*/alive` + `zensight/@v1/@catalog/state/alive` | token keys are the identity; zero payload; the catalog token named explicitly (D4 — `*` never matches it), else "catalog dead" is indistinguishable from "no entities" |
 | Exporter (metrics) | `zensight/@v1/*/telemetry/**` | nothing to discard client-side |
@@ -214,9 +214,18 @@ access_control: {
       messages: ["declare_queryable", "reply", "query"],        // query egress = router forwards calls to it
       key_exprs: ["zensight/@v1/h-3fa9c2d41b7e/@rpc/**",
                   "zensight/@v1/h-3fa9c2d41b7e/@blob/**"] },
-    // AdvancedPublisher sidecars (04-planes §3.1) live under a verbatim @adv
-    // suffix — cache queryable, liveliness token, heartbeat publisher at
-    // <key>/@adv/pub/<zid>/… — which the host-data '**' rule cannot reach:
+    // hosts that seed the router @blob content store use the sanctioned
+    // one-shot PUT path (04-planes §3) — grant it explicitly, or omit this
+    // rule in deployments without a router content store:
+    { id: "host-blob-seed", permission: "allow", flows: ["ingress"],
+      messages: ["put"],
+      key_exprs: ["zensight/@v1/h-3fa9c2d41b7e/@blob/store/**",
+                  "zensight/@v1/h-3fa9c2d41b7e/@blob/tree/**"] },
+    // ONLY for hosts on the advanced tier (04-planes §3.3): the sidecars
+    // (cache queryable, liveliness token, heartbeat publisher at
+    // <key>/@adv/pub/<zid>/…) live under a verbatim @adv suffix the
+    // host-data '**' rule cannot reach. Omitting this rule when the tier
+    // is in use fails SILENTLY — empty seeds, dead recovery:
     { id: "host-adv", permission: "allow",
       messages: ["put", "liveliness_token",
                  "declare_queryable", "reply", "query"],
@@ -228,10 +237,17 @@ access_control: {
                  "declare_queryable", "reply", "query"],
       key_exprs: ["zensight/@v1/@catalog/**",
                   "zensight/@v1/@catalog/@rpc/**"] },
-    { id: "catalog-intake", permission: "allow",
+    // intake is split by flow: the catalog DECLARES interest (ingress) and
+    // RECEIVES data/tokens (egress) — a flowless rule here would let the
+    // catalog principal ingress-publish and tombstone ANY host's keys,
+    // defeating the per-host enrollment story:
+    { id: "catalog-intake-declare", permission: "allow", flows: ["ingress"],
       messages: ["declare_subscriber", "declare_liveliness_subscriber",
-                 "liveliness_query", "put", "delete", "liveliness_token", "query", "reply"],
-      key_exprs: ["zensight/@v1/**"] },                          // evidence in, seeds via storage
+                 "liveliness_query", "query"],
+      key_exprs: ["zensight/@v1/**"] },
+    { id: "catalog-intake-recv", permission: "allow", flows: ["egress"],
+      messages: ["put", "delete", "liveliness_token", "reply"],
+      key_exprs: ["zensight/@v1/**"] },
 
     // ---- operator console: read everything, write nothing but RPC ----
     // (the **/@adv/** entries carry AdvancedSubscriber traffic: history/
@@ -239,11 +255,17 @@ access_control: {
     //  detection, and the console's own subscriber-detection token)
     { id: "ops-sub", permission: "allow", flows: ["ingress"],
       messages: ["declare_subscriber", "declare_liveliness_subscriber",
-                 "liveliness_query", "query", "liveliness_token"],
+                 "liveliness_query", "query"],
       key_exprs: ["zensight/@v1/**", "zensight/@v1/@catalog/**",
                   "zensight/@v1/*/@rpc/**", "zensight/@v1/@catalog/@rpc/**",
                   "zensight/@v1/*/@blob/**", "zensight/@v1/*/@media/**",
                   "zensight/@v1/**/@adv/**"] },
+    // the console's OWN token (advanced-tier subscriber detection) is
+    // confined to @adv — a broad ingress liveliness_token allow would let
+    // the console forge any host's `state/*/alive` roster entry:
+    { id: "ops-own-token", permission: "allow", flows: ["ingress"],
+      messages: ["liveliness_token"],
+      key_exprs: ["zensight/@v1/**/@adv/**"] },
     { id: "ops-recv", permission: "allow", flows: ["egress"],
       messages: ["put", "delete", "reply", "liveliness_token"],
       key_exprs: ["zensight/@v1/**", "zensight/@v1/@catalog/**",
@@ -267,10 +289,12 @@ access_control: {
   ],
 
   policies: [
-    { rules: ["host-data", "host-media", "host-serve"], subjects: ["host-3fa9"] },
-    { rules: ["catalog-own", "catalog-intake"],         subjects: ["catalog"] },
-    { rules: ["ops-sub", "ops-recv"],                   subjects: ["console"] },
-    { rules: ["no-remote-actions"],                     subjects: ["console"] },
+    { rules: ["host-data", "host-media", "host-serve",
+              "host-blob-seed", "host-adv"],                 subjects: ["host-3fa9"] },
+    { rules: ["catalog-own", "catalog-intake-declare",
+              "catalog-intake-recv"],                        subjects: ["catalog"] },
+    { rules: ["ops-sub", "ops-recv", "ops-own-token"],       subjects: ["console"] },
+    { rules: ["no-remote-actions"],                          subjects: ["console"] },
   ],
 }
 ```
@@ -313,13 +337,14 @@ two real mechanisms, both selecting on the same class prefixes:
   `{ priority: "interactive_high", congestion_control: "block" }`. The
   interceptor ignores API-level QoS — deployment policy wins.
 
-Advanced-pub/sub traffic deserves a thought on constrained links: per-key
-miss-detection heartbeats and declare-time history bursts are real bytes.
-The class defaults in [04-planes.md §3.1](04-planes.md) already encode the
-mitigation (cache-only for refreshed state — no heartbeats; heartbeats
-reserved for transition state and events), and a leaf consumer can run a
-plain subscriber + local store instead of `history()` (the reference
-GUI's constrained profile does exactly that).
+Advanced-tier traffic deserves a thought on constrained links: per-key
+miss-detection heartbeats and declare-time history bursts are real bytes
+(the cost box in [04-planes.md §3.3](04-planes.md)). The baseline
+([04 §3.2](04-planes.md)) creates none of it — no per-key entities, no
+heartbeats — which is why it is the default; the tier is opt-in per
+subject, and a constrained leaf simply doesn't opt in: a leaf consumer
+runs a plain subscriber + local store instead of `history()` (the
+reference GUI's constrained profile does exactly that).
 
 Complementary conventions already assumed by the classes: superseded
 streams drop under congestion, must-arrive state blocks
@@ -339,9 +364,10 @@ can simply not be allowed on the link at all).
   to `zensight/@/<zid>/**` and matches nothing
   ([03-grammar.md §1.1](03-grammar.md)).
 - Reading a raw key aloud is the parse: *base, version, origin, class,
-  producer, subject* — position 3 is always who, position 4 is always what
-  kind. No lookup table required; that property is worth defending in
-  review.
+  producer, subject* — the chunk after `@v1` is always who, the next is
+  always what kind (positions are base-relative: multi-chunk bases are
+  legal, [03-grammar.md §1.1](03-grammar.md)). No lookup table required;
+  that property is worth defending in review.
 - If a needed selector is awkward to write, that is registry feedback —
   file it against the subject layout before inventing a client-side filter
   ([08-registry.md §5](08-registry.md)).

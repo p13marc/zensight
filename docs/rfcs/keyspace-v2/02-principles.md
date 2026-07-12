@@ -55,11 +55,11 @@ compound ones (`if-eth0-rx-bytes`). `$*` strains matching infrastructure
 and signals a key that should have been split. *(Zenoh guidance.)*
 
 **P7 — Declared publishers only.**
-Every publisher on the data classes and `@media` is declared (interned
-key, primed routing, attached QoS); ad-hoc one-shot puts are banned.
-Queryables serve everything pull-shaped. (Single scoped exemption:
-seeding a router-hosted `@blob` content store,
-[04-planes.md §3](04-planes.md).)
+Every publisher on `telemetry`, `state`, and `@media` is declared
+(interned key, primed routing, attached QoS); ad-hoc one-shot puts are
+banned. Queryables serve everything pull-shaped. (Two scoped exemptions,
+both write-once keys where interning buys nothing: `@blob` content-store
+seeding and `events` publication — [04-planes.md §3](04-planes.md).)
 *(Reference application's existing CI-enforced rule, promoted to
 convention.)*
 
