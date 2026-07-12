@@ -1,0 +1,114 @@
+# Subject registry: logs (syslog + journald). RFC 08 §2; migration epic #453.
+# Telemetry metric trees register as {metric...} families (one payload type,
+# TelemetryPoint) — typed per-metric refinement is additive (registry MINOR).
+
+[registry]
+version = "1.0"
+app = "zensight"
+convention = 1
+
+[producer]
+name = "logs"
+description = "unified logs sensor; per-line detail is pull-only (RFC 04 R3)"
+
+[[subject]]
+path = "{metric...}"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 200
+since = "1.0"
+description = "log rate rollups (by_severity/, by_source/, ...)"
+[[subject]]
+path = "health"
+class = "state"
+type = "HealthSnapshot"
+ttl_s = 120
+since = "1.0"
+description = "sensor health document (framework; absorbs the legacy @/status running flag)"
+
+[[subject]]
+path = "errors"
+class = "state"
+type = "ErrorReport"
+ttl_s = 300
+since = "1.0"
+description = "rolling error window (framework)"
+
+[[subject]]
+path = "sensor"
+class = "state"
+type = "SensorInfo"
+ttl_s = 900
+since = "1.0"
+description = "registration document: identity, version, capabilities (framework, 60 s re-emit)"
+
+[[subject]]
+path = "evidence/self"
+class = "state"
+type = "HostEvidence"
+ttl_s = 900
+since = "1.0"
+description = "self-identity claim (RFC 06 §4)"
+
+[[subject]]
+path = "artifact/{kind}"
+class = "state"
+type = "ArtifactStatus"
+cardinality = 8
+ttl_s = 900
+since = "1.0"
+description = "artifact lifecycle status doc per kind (RFC 05 §3 long-running pattern; tombstoned when freed)"
+
+[[subject]]
+path = "alert/{alert_key}"
+class = "state"
+type = "Alert"
+qos = "alert"
+cardinality = 64
+ttl_s = 900
+since = "1.0"
+description = "alerts; firing->resolved on one key, delete = tombstone"
+[[procedure]]
+path = "introspect"
+kind = "read"
+reply = "RegistrySlice"
+idempotent = true
+since = "1.0"
+description = "the registry slice this build serves (RFC 08 §6)"
+
+[[procedure]]
+path = "artifact/request"
+kind = "write"
+request = "ArtifactRequest"
+reply = "ArtifactAck"
+since = "1.0"
+description = "initiate artifact generation; replies { id } immediately (RFC 05 §3)"
+
+[[procedure]]
+path = "artifact/cancel"
+kind = "write"
+reply = "Ack"
+since = "1.0"
+description = "free an in-flight/ready artifact early (?id=<ulid>)"
+[[procedure]]
+path = "events"
+kind = "read"
+reply = "Vec<LogRecord>"
+idempotent = true
+since = "1.0"
+description = "bounded log ring, newest first (?since=;max=;source= — source filters the observed device, a central receiver holds many)"
+[[procedure]]
+path = "filter"
+kind = "read"
+reply = "TopicStatus"
+idempotent = true
+since = "1.0"
+description = "current filter configuration (dynamic message filters)"
+
+[[procedure]]
+path = "filter/set"
+kind = "write"
+request = "TopicConfig"
+reply = "Ack"
+since = "1.0"
+description = "apply filter configuration (dynamic message filters)"

@@ -1,4 +1,6 @@
-# Subject registry: netring (wire-level flow/L7/NDR sensor). RFC 08 §2.
+# Subject registry: netring (wire-level flow/L7/NDR). RFC 08 §2; migration epic #453.
+# Telemetry metric trees register as {metric...} families (one payload type,
+# TelemetryPoint) — typed per-metric refinement is additive (registry MINOR).
 
 [registry]
 version = "1.0"
@@ -10,6 +12,13 @@ name = "netring"
 description = "wire-level flow/L7/NDR sensor"
 
 [[subject]]
+path = "{metric...}"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 2000
+since = "1.0"
+description = "flow/bandwidth/capture-disk metric tree"
+[[subject]]
 path = "flow/red/{quantile}"
 class = "telemetry"
 type = "TelemetryPoint"
@@ -17,33 +26,46 @@ unit = "ms"
 cardinality = 5
 since = "1.0"
 description = "flow-lifetime RED quantiles from the capture path"
-
 [[subject]]
-path = "bandwidth/{iface}/{direction}"
-class = "telemetry"
-type = "TelemetryPoint"
-unit = "bytes_per_s"
-cardinality = 16
+path = "evidence/names/{ip_slug}"
+class = "state"
+type = "NameObservation"
+cardinality = 4096
+ttl_s = 900
 since = "1.0"
-description = "per-interface capture-path bandwidth"
-
+description = "passive-DNS observation for an actively observed IP (population-budgeted, RFC 04 §1.2)"
+[[subject]]
+path = "capture/{ulid}"
+class = "events"
+type = "CaptureRecord"
+cardinality = 1000
+rate = "rare"
+replay = "window(7d)"
+since = "1.0"
+description = "a capture was triggered; immutable audit record"
 [[subject]]
 path = "health"
 class = "state"
 type = "HealthSnapshot"
 ttl_s = 120
 since = "1.0"
-description = "sensor health document (framework)"
+description = "sensor health document (framework; absorbs the legacy @/status running flag)"
 
 [[subject]]
-path = "alert/{alert_key}"
+path = "errors"
 class = "state"
-type = "Alert"
-qos = "alert"
-cardinality = 64
+type = "ErrorReport"
+ttl_s = 300
+since = "1.0"
+description = "rolling error window (framework)"
+
+[[subject]]
+path = "sensor"
+class = "state"
+type = "SensorInfo"
 ttl_s = 900
 since = "1.0"
-description = "detector alerts; firing->resolved on one key, delete = tombstone"
+description = "registration document: identity, version, capabilities (framework, 60 s re-emit)"
 
 [[subject]]
 path = "evidence/self"
@@ -54,41 +76,23 @@ since = "1.0"
 description = "self-identity claim (RFC 06 §4)"
 
 [[subject]]
-path = "evidence/names/{ip_slug}"
+path = "artifact/{kind}"
 class = "state"
-type = "NameObservation"
-cardinality = 4096
+type = "ArtifactStatus"
+cardinality = 8
 ttl_s = 900
 since = "1.0"
-description = "passive-DNS observation for an actively observed IP (population-budgeted, RFC 04 §1.2)"
+description = "artifact lifecycle status doc per kind (RFC 05 §3 long-running pattern; tombstoned when freed)"
 
 [[subject]]
-path = "capture/{ulid}"
-class = "events"
-type = "CaptureRecord"
-rate = "rare"
-cardinality = 1000
-replay = "window(7d)"
+path = "alert/{alert_key}"
+class = "state"
+type = "Alert"
+qos = "alert"
+cardinality = 64
+ttl_s = 900
 since = "1.0"
-description = "a capture was triggered; immutable audit record"
-
-[[procedure]]
-path = "capture/trigger"
-kind = "write"
-request = "CaptureTrigger"
-reply = "Ack"
-idempotent = false
-since = "1.0"
-description = "fire the pre-trigger ring / rotate the spool"
-
-[[procedure]]
-path = "flows"
-kind = "read"
-reply = "Vec<FlowRecord>"
-idempotent = true
-since = "1.0"
-description = "on-demand flow detail from the bounded ring (per-flow data never rides the bus, RFC 04 R3)"
-
+description = "alerts; firing->resolved on one key, delete = tombstone"
 [[procedure]]
 path = "introspect"
 kind = "read"
@@ -96,3 +100,197 @@ reply = "RegistrySlice"
 idempotent = true
 since = "1.0"
 description = "the registry slice this build serves (RFC 08 §6)"
+
+[[procedure]]
+path = "artifact/request"
+kind = "write"
+request = "ArtifactRequest"
+reply = "ArtifactAck"
+since = "1.0"
+description = "initiate artifact generation; replies { id } immediately (RFC 05 §3)"
+
+[[procedure]]
+path = "artifact/cancel"
+kind = "write"
+reply = "Ack"
+since = "1.0"
+description = "free an in-flight/ready artifact early (?id=<ulid>)"
+[[procedure]]
+path = "capture/trigger"
+kind = "write"
+request = "CaptureTrigger"
+reply = "Ack"
+idempotent = false
+since = "1.0"
+description = "fire the pre-trigger ring / rotate the spool (?tag=)"
+[[procedure]]
+path = "capture/mode"
+kind = "read"
+reply = "TopicStatus"
+idempotent = true
+since = "1.0"
+description = "current capture/mode configuration (capture-to-disk mode hot-switch)"
+
+[[procedure]]
+path = "capture/mode/set"
+kind = "write"
+request = "CaptureMode"
+reply = "Ack"
+since = "1.0"
+description = "apply capture/mode configuration (capture-to-disk mode hot-switch)"
+[[procedure]]
+path = "detectors"
+kind = "read"
+reply = "TopicStatus"
+idempotent = true
+since = "1.0"
+description = "current detectors configuration (runtime detection tuning)"
+
+[[procedure]]
+path = "detectors/set"
+kind = "write"
+request = "DetectorConfig"
+reply = "Ack"
+since = "1.0"
+description = "apply detectors configuration (runtime detection tuning)"
+[[procedure]]
+path = "capture-filter"
+kind = "read"
+reply = "TopicStatus"
+idempotent = true
+since = "1.0"
+description = "current capture-filter configuration (reloadable packet-tier BPF filter)"
+
+[[procedure]]
+path = "capture-filter/set"
+kind = "write"
+request = "FilterConfig"
+reply = "Ack"
+since = "1.0"
+description = "apply capture-filter configuration (reloadable packet-tier BPF filter)"
+[[procedure]]
+path = "threat-intel"
+kind = "read"
+reply = "TopicStatus"
+idempotent = true
+since = "1.0"
+description = "current threat-intel configuration (IOC/YARA hot-reload)"
+
+[[procedure]]
+path = "threat-intel/set"
+kind = "write"
+request = "ThreatIntelConfig"
+reply = "Ack"
+since = "1.0"
+description = "apply threat-intel configuration (IOC/YARA hot-reload)"
+[[procedure]]
+path = "flows"
+kind = "read"
+reply = "Vec<FlowRecord>"
+idempotent = true
+since = "1.0"
+description = "flow ring (per-flow data never rides the bus, RFC 04 R3)"
+
+[[procedure]]
+path = "tls"
+kind = "read"
+reply = "Vec<TlsRecord>"
+idempotent = true
+since = "1.0"
+description = "TLS fingerprint ring"
+
+[[procedure]]
+path = "talkers"
+kind = "read"
+reply = "Vec<TalkerRecord>"
+idempotent = true
+since = "1.0"
+description = "per-source rolling rate (?top=N)"
+
+[[procedure]]
+path = "matrix"
+kind = "read"
+reply = "Vec<MatrixRecord>"
+idempotent = true
+since = "1.0"
+description = "src/dst rolling rate matrix (?top=N)"
+
+[[procedure]]
+path = "elephant-flows"
+kind = "read"
+reply = "Vec<FlowRecord>"
+idempotent = true
+since = "1.0"
+description = "elephant flow ring"
+
+[[procedure]]
+path = "dns"
+kind = "read"
+reply = "Vec<DnsRecord>"
+idempotent = true
+since = "1.0"
+description = "DNS ring (?top=N)"
+
+[[procedure]]
+path = "http"
+kind = "read"
+reply = "Vec<HttpRecord>"
+idempotent = true
+since = "1.0"
+description = "HTTP ring (?top=N)"
+
+[[procedure]]
+path = "quic"
+kind = "read"
+reply = "Vec<QuicRecord>"
+idempotent = true
+since = "1.0"
+description = "QUIC ring"
+
+[[procedure]]
+path = "ssh"
+kind = "read"
+reply = "Vec<SshRecord>"
+idempotent = true
+since = "1.0"
+description = "SSH/HASSH ring"
+
+[[procedure]]
+path = "encrypted-dns"
+kind = "read"
+reply = "Vec<EncryptedDnsRecord>"
+idempotent = true
+since = "1.0"
+description = "DoH/DoT detections"
+
+[[procedure]]
+path = "ja4h"
+kind = "read"
+reply = "Vec<Ja4hRecord>"
+idempotent = true
+since = "1.0"
+description = "JA4H fingerprints (feature ja4plus, ?top=N)"
+
+[[procedure]]
+path = "assets"
+kind = "read"
+reply = "Vec<AssetRecord>"
+idempotent = true
+since = "1.0"
+description = "observed asset inventory"
+
+[[procedure]]
+path = "captures"
+kind = "read"
+reply = "Vec<CaptureRecord>"
+idempotent = true
+since = "1.0"
+description = "capture-to-disk file index"
+
+[[procedure]]
+path = "bandwidth"
+kind = "read"
+reply = "Vec<BandwidthRecord>"
+idempotent = true
+since = "1.0"
+description = "wire-level bandwidth-by-process (?top=N)"

@@ -1,0 +1,217 @@
+# Subject registry: netlink (kernel networking). RFC 08 §2; migration epic #453.
+# Telemetry metric trees register as {metric...} families (one payload type,
+# TelemetryPoint) — typed per-metric refinement is additive (registry MINOR).
+
+[registry]
+version = "1.0"
+app = "zensight"
+convention = 1
+
+[producer]
+name = "netlink"
+description = "kernel net telemetry (RTNETLINK/sock_diag) + embedded sentinel"
+
+[[subject]]
+path = "{metric...}"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 2000
+since = "1.0"
+description = "iface/socket/route metric tree"
+[[subject]]
+path = "health"
+class = "state"
+type = "HealthSnapshot"
+ttl_s = 120
+since = "1.0"
+description = "sensor health document (framework; absorbs the legacy @/status running flag)"
+
+[[subject]]
+path = "errors"
+class = "state"
+type = "ErrorReport"
+ttl_s = 300
+since = "1.0"
+description = "rolling error window (framework)"
+
+[[subject]]
+path = "sensor"
+class = "state"
+type = "SensorInfo"
+ttl_s = 900
+since = "1.0"
+description = "registration document: identity, version, capabilities (framework, 60 s re-emit)"
+
+[[subject]]
+path = "evidence/self"
+class = "state"
+type = "HostEvidence"
+ttl_s = 900
+since = "1.0"
+description = "self-identity claim (RFC 06 §4)"
+
+[[subject]]
+path = "artifact/{kind}"
+class = "state"
+type = "ArtifactStatus"
+cardinality = 8
+ttl_s = 900
+since = "1.0"
+description = "artifact lifecycle status doc per kind (RFC 05 §3 long-running pattern; tombstoned when freed)"
+
+[[subject]]
+path = "alert/{alert_key}"
+class = "state"
+type = "Alert"
+qos = "alert"
+cardinality = 64
+ttl_s = 900
+since = "1.0"
+description = "alerts; firing->resolved on one key, delete = tombstone"
+[[procedure]]
+path = "introspect"
+kind = "read"
+reply = "RegistrySlice"
+idempotent = true
+since = "1.0"
+description = "the registry slice this build serves (RFC 08 §6)"
+
+[[procedure]]
+path = "artifact/request"
+kind = "write"
+request = "ArtifactRequest"
+reply = "ArtifactAck"
+since = "1.0"
+description = "initiate artifact generation; replies { id } immediately (RFC 05 §3)"
+
+[[procedure]]
+path = "artifact/cancel"
+kind = "write"
+reply = "Ack"
+since = "1.0"
+description = "free an in-flight/ready artifact early (?id=<ulid>)"
+[[procedure]]
+path = "expectations"
+kind = "read"
+reply = "TopicStatus"
+idempotent = true
+since = "1.0"
+description = "current expectations configuration (sentinel expectations hot-swap)"
+
+[[procedure]]
+path = "expectations/set"
+kind = "write"
+request = "ExpectationsConfig"
+reply = "Ack"
+since = "1.0"
+description = "apply expectations configuration (sentinel expectations hot-swap)"
+[[procedure]]
+path = "collection"
+kind = "read"
+reply = "TopicStatus"
+idempotent = true
+since = "1.0"
+description = "current collection configuration (collector toggles)"
+
+[[procedure]]
+path = "collection/set"
+kind = "write"
+request = "CollectionConfig"
+reply = "Ack"
+since = "1.0"
+description = "apply collection configuration (collector toggles)"
+[[procedure]]
+path = "routes"
+kind = "read"
+reply = "Vec<RouteRecord>"
+idempotent = true
+since = "1.0"
+description = "routing table"
+
+[[procedure]]
+path = "neighbors"
+kind = "read"
+reply = "Vec<NeighborRecord>"
+idempotent = true
+since = "1.0"
+description = "neighbor table"
+
+[[procedure]]
+path = "sockets"
+kind = "read"
+reply = "Vec<SocketRecord>"
+idempotent = true
+since = "1.0"
+description = "socket table (?state=;port=;ip= — ip matches local OR remote endpoint)"
+
+[[procedure]]
+path = "addresses"
+kind = "read"
+reply = "Vec<AddressRecord>"
+idempotent = true
+since = "1.0"
+description = "interface addresses"
+
+[[procedure]]
+path = "events"
+kind = "read"
+reply = "Vec<EventRecord>"
+idempotent = true
+since = "1.0"
+description = "control-plane event ring"
+
+[[procedure]]
+path = "route-changes"
+kind = "read"
+reply = "Vec<RouteChangeRecord>"
+idempotent = true
+since = "1.0"
+description = "route-change ring"
+
+[[procedure]]
+path = "tc"
+kind = "read"
+reply = "Vec<TcRecord>"
+idempotent = true
+since = "1.0"
+description = "traffic-control state"
+
+[[procedure]]
+path = "xfrm"
+kind = "read"
+reply = "Vec<XfrmRecord>"
+idempotent = true
+since = "1.0"
+description = "IPsec/xfrm state"
+
+[[procedure]]
+path = "nft"
+kind = "read"
+reply = "Vec<NftRecord>"
+idempotent = true
+since = "1.0"
+description = "nftables state"
+
+[[procedure]]
+path = "bandwidth"
+kind = "read"
+reply = "Vec<BandwidthRecord>"
+idempotent = true
+since = "1.0"
+description = "per-process TCP goodput (?top=N)"
+
+[[procedure]]
+path = "retransmits"
+kind = "read"
+reply = "Vec<RetransmitRecord>"
+idempotent = true
+since = "1.0"
+description = "eBPF retransmit ring (feature ebpf)"
+
+[[procedure]]
+path = "connections"
+kind = "read"
+reply = "Vec<ConnectionRecord>"
+idempotent = true
+since = "1.0"
+description = "eBPF connection lifecycle (feature ebpf)"

@@ -15,9 +15,8 @@ fn build_parse_round_trip() {
         netring::Subject::FlowRed {
             quantile: "p95_ms".into(),
         },
-        netring::Subject::Bandwidth {
-            iface: "eth0".into(),
-            direction: "rx".into(),
+        netring::Subject::Metric {
+            metric: vec!["bandwidth".into(), "eth0".into(), "rx".into()],
         },
         netring::Subject::Health,
         netring::Subject::Alert {
@@ -77,10 +76,28 @@ fn concrete_keys() {
 }
 
 #[test]
-fn class_mismatch_does_not_parse() {
-    // `health` is registered as state — a telemetry tail must not refine to it.
-    assert!(netring::Subject::parse(Class::Telemetry, &["health"]).is_none());
-    assert!(netring::Subject::parse(Class::State, &["health"]).is_some());
+fn class_disambiguates() {
+    // `health` is registered as state; the same tail under telemetry falls
+    // into the {metric...} family instead of cross-class confusion.
+    assert_eq!(
+        netring::Subject::parse(Class::State, &["health"]),
+        Some(netring::Subject::Health)
+    );
+    assert_eq!(
+        netring::Subject::parse(Class::Telemetry, &["health"]),
+        Some(netring::Subject::Metric {
+            metric: vec!["health".into()]
+        })
+    );
+    // Specific entries beat the catchall: flow/red/{q} is its own family.
+    assert_eq!(
+        netring::Subject::parse(Class::Telemetry, &["flow", "red", "p95_ms"]),
+        Some(netring::Subject::FlowRed {
+            quantile: "p95_ms".into()
+        })
+    );
+    // Unregistered *state* tails still refine to nothing (no state catchall).
+    assert!(netring::Subject::parse(Class::State, &["bogus"]).is_none());
 }
 
 #[test]
