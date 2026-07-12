@@ -708,24 +708,17 @@ mod tests {
         );
     }
 
-    /// Stream control (#359) reuses the ordinary `@/` command/query/status
-    /// channels with topics `stream`/`streams` — pin the concrete shapes.
+    /// Stream control rides the v1 `@rpc` plane (RFC 05; epic #453) —
+    /// writes are `<topic>/set`, reads are `<topic>`.
     #[test]
-    fn media_control_rides_the_command_channels() {
+    fn media_control_rides_the_rpc_plane() {
         use crate::command::{command_key, query_key, status_key};
-        let prefix = "zensight/netring/host01";
-        assert_eq!(
-            command_key(prefix, "stream"),
-            "zensight/netring/host01/@/commands/stream"
-        );
-        assert_eq!(
-            query_key(prefix, "streams"),
-            "zensight/netring/host01/@/query/streams"
-        );
-        assert_eq!(
-            status_key(prefix, "streams"),
-            "zensight/netring/host01/@/status/streams"
-        );
+        let prefix = "zensight/netring";
+        let cmd = command_key(prefix, "stream");
+        assert!(cmd.starts_with("zensight/@v1/h-"), "{cmd}");
+        assert!(cmd.ends_with("/@rpc/netring/stream/set"), "{cmd}");
+        assert!(query_key(prefix, "streams").ends_with("/@rpc/netring/streams"));
+        assert_eq!(query_key(prefix, "streams"), status_key(prefix, "streams"));
     }
 
     /// Multi-host acceptance pin: the host-scoped control plane

@@ -130,11 +130,11 @@ async fn main() -> Result<()> {
 
         tracing::info!("Dynamic filters enabled, listening on {}", command_key);
 
-        // Subscribe to filter commands
+        // Serve filter writes as an @rpc procedure (RFC 05; epic #453).
         let subscriber = session
-            .declare_subscriber(&command_key)
+            .declare_queryable(&command_key)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to subscribe to commands: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to declare filter/set queryable: {}", e))?;
 
         // Declare queryable for filter status
         let filter_manager_for_status = filter_manager_for_commands.clone();
@@ -148,14 +148,24 @@ async fn main() -> Result<()> {
         runner.spawn(async move {
             loop {
                 tokio::select! {
-                    Ok(sample) = subscriber.recv_async() => {
-                        let payload = sample.payload().to_bytes();
+                    Ok(query) = subscriber.recv_async() => {
+                        let payload = query
+                            .payload()
+                            .map(|p| p.to_bytes().to_vec())
+                            .unwrap_or_default();
                         match serde_json::from_slice::<FilterCommand>(&payload) {
                             Ok(cmd) => {
                                 handle_filter_command(&filter_manager_cmd, cmd).await;
+                                if let Err(e) = query.reply(command_key.as_str(), Vec::<u8>::new()).await {
+                                    tracing::warn!("Failed to ack filter command: {}", e);
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!("Failed to parse filter command: {}", e);
+                                let err = zensight_sensor_core::rpc::RpcError::invalid_args(e.to_string());
+                                let _ = query
+                                    .reply_err(serde_json::to_vec(&err).unwrap_or_default())
+                                    .await;
                             }
                         }
                     }
@@ -163,7 +173,7 @@ async fn main() -> Result<()> {
                         let status = build_filter_status(&filter_manager_for_status).await;
                         match serde_json::to_vec(&status) {
                             Ok(payload) => {
-                                if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                                if let Err(e) = query.reply(status_key.as_str(), payload).await {
                                     tracing::warn!("Failed to reply to status query: {}", e);
                                 }
                             }

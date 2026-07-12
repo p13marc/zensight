@@ -318,7 +318,7 @@ fn hex_lower(bytes: Vec<u8>) -> String {
 async fn reply_json<T: serde::Serialize>(query: &zenoh::query::Query, records: &T) {
     match serde_json::to_vec(records) {
         Ok(payload) => {
-            if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+            if let Err(e) = query.reply(key.as_str(), payload).await {
                 tracing::warn!(error = %e, "query: reply failed");
             }
         }

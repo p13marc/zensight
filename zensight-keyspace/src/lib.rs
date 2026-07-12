@@ -25,12 +25,14 @@
 //! The RFC's design properties D1–D6 are pinned as executable guard tests in
 //! `tests/guard.rs` — run by CI, as RFC 03 §4 requires.
 
+pub mod context;
 pub mod grammar;
 pub mod origin;
 pub mod qos;
 pub mod registry;
 pub mod slug;
 
+pub use context::V1Context;
 pub use grammar::{Class, KeyError, Origin, Plane, Producer, StructuralKey, VERSION_CHUNK};
 pub use origin::HostId;
 pub use qos::QosProfile;

@@ -25,7 +25,6 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use zenoh::bytes::Encoding;
 use zensight_common::QosClass;
-use zensight_common::command::status_key;
 use zensight_common::stream::{StreamControl, StreamStatus};
 use zensight_sensor_core::{Publisher, RawMediaPublisher, SensorHealth};
 
@@ -264,7 +263,10 @@ pub struct SessionManager {
     #[allow(dead_code)]
     source: String,
     publisher: Publisher,
-    status_key: String,
+    /// v1: per-stream LWW status docs (`state/parallax/stream/<stream>`,
+    /// RFC 05 §5) — the catalogue+status document; tombstoned on removal
+    /// from config, never on close.
+    state_ctx: zensight_sensor_core::v1::V1Context,
     sessions: HashMap<String, StreamSession>,
     tx: mpsc::Sender<SessionMsg>,
     /// Per-stream stats counters (fed by egress/encoders, read by the ticker).
@@ -289,13 +291,13 @@ impl SessionManager {
         alerts: Option<Arc<ParallaxAlerts>>,
     ) -> SessionHandle {
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let host_prefix = format!("{}/{}", config.key_prefix, source);
+        let state_ctx = zensight_sensor_core::v1::V1Context::from_prefix(&config.key_prefix);
         let manager = SessionManager {
             catalog,
             config,
             source,
             publisher,
-            status_key: status_key(&host_prefix, "streams"),
+            state_ctx,
             sessions: HashMap::new(),
             tx: tx.clone(),
             stats,
@@ -947,9 +949,10 @@ impl SessionManager {
                 profile: None,
             },
         };
+        let key = self.state_ctx.state_key(&["stream", stream]);
         if let Err(e) = self
             .publisher
-            .publish_json(&self.status_key, &status, QosClass::Command)
+            .publish_json(&key, &status, QosClass::Command)
             .await
         {
             tracing::warn!(error = %e, "failed to publish stream status");

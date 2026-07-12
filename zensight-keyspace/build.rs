@@ -774,6 +774,26 @@ fn emit(files: &[RegistryFile]) -> String {
         let _ = writeln!(out, "}}\n");
     }
 
+    // Raw registry slice by producer name (introspect, RFC 08 §6).
+    let _ = writeln!(
+        out,
+        "/// The raw registry slice for a producer/service, by base name."
+    );
+    let _ = writeln!(
+        out,
+        "pub fn registry_toml(name: &str) -> Option<&'static str> {{"
+    );
+    let _ = writeln!(out, "    match name {{");
+    for f in files {
+        let module = producer_module(&f.name);
+        let _ = writeln!(
+            out,
+            "        {:?} => Some({module}::REGISTRY_TOML),",
+            f.name
+        );
+    }
+    let _ = writeln!(out, "        _ => None,\n    }}\n}}\n");
+
     // Cross-producer dispatch: refine a structural key into (producer, subject).
     let _ = writeln!(out, "/// Refined subject from any registered producer.");
     let _ = writeln!(out, "#[derive(Debug, Clone, PartialEq, Eq)]");

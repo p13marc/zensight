@@ -78,10 +78,10 @@ impl CmdlinePolicy {
 pub async fn run(
     session: Arc<zenoh::Session>,
     key_prefix: String,
-    source: String,
+    _source: String,
     scrub: ProcessScrubConfig,
 ) {
-    let key = format!("{key_prefix}/{source}/@/query/processes");
+    let key = zensight_keyspace_ctx(&key_prefix).rpc_key(&["processes"]);
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -104,7 +104,7 @@ pub async fn run(
                     Vec::new()
                 }
             };
-        reply_json(&query, &records).await;
+        reply_json(&query, &key, &records).await;
     }
 }
 
@@ -118,10 +118,10 @@ pub async fn run(
 pub async fn run_latency(
     session: Arc<zenoh::Session>,
     key_prefix: String,
-    source: String,
+    _source: String,
     report: Arc<std::sync::Mutex<crate::map::LatencyReport>>,
 ) {
-    let key = format!("{key_prefix}/{source}/@/query/latency");
+    let key = zensight_keyspace_ctx(&key_prefix).rpc_key(&["latency"]);
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -133,15 +133,22 @@ pub async fn run_latency(
 
     while let Ok(query) = queryable.recv_async().await {
         let snapshot = report.lock().map(|r| r.clone()).unwrap_or_default();
-        reply_json(&query, &snapshot).await;
+        reply_json(&query, &key, &snapshot).await;
     }
 }
 
 /// Serialize `records` as JSON and reply on the query's own key.
-async fn reply_json<T: serde::Serialize>(query: &zenoh::query::Query, records: &T) {
+/// Small helper: derive the v1 context from the config prefix.
+fn zensight_keyspace_ctx(prefix: &str) -> zensight_sensor_core::v1::V1Context {
+    zensight_sensor_core::v1::V1Context::from_prefix(prefix)
+}
+
+/// Reply on the queryable's **concrete** key (RFC 05 §2.1), never the
+/// query's selector.
+async fn reply_json<T: serde::Serialize>(query: &zenoh::query::Query, key: &str, records: &T) {
     match serde_json::to_vec(records) {
         Ok(payload) => {
-            if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+            if let Err(e) = query.reply(key, payload).await {
                 tracing::warn!(error = %e, "query: reply failed");
             }
         }

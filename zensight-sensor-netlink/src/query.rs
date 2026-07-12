@@ -188,12 +188,12 @@ pub async fn run(
             q = routes_q.recv_async() => {
                 let Ok(query) = q else { return };
                 let records = collect_routes(&route).await;
-                reply_json(&query, &records).await;
+                reply_json(&query, &routes_key, &records).await;
             }
             q = neighbors_q.recv_async() => {
                 let Ok(query) = q else { return };
                 let records = collect_neighbors(&route).await;
-                reply_json(&query, &records).await;
+                reply_json(&query, &neighbors_key, &records).await;
             }
             q = sockets_q.recv_async() => {
                 let Ok(query) = q else { return };
@@ -208,25 +208,25 @@ pub async fn run(
                 // Tier 2a (#304): closing-state sockets can never be
                 // /proc-attributed (fd gone) — consult the eBPF close map.
                 annotate_closing_sockets(&mut records, &ebpf);
-                reply_json(&query, &records).await;
+                reply_json(&query, &sockets_key, &records).await;
             }
             q = addresses_q.recv_async() => {
                 let Ok(query) = q else { return };
                 let records = collect_addresses(&route).await;
-                reply_json(&query, &records).await;
+                reply_json(&query, &addresses_key, &records).await;
             }
             q = events_q.recv_async() => {
                 let Ok(query) = q else { return };
-                reply_json(&query, &events.recent()).await;
+                reply_json(&query, &events_key, &events.recent()).await;
             }
             q = route_changes_q.recv_async() => {
                 let Ok(query) = q else { return };
-                reply_json(&query, &route_history.recent()).await;
+                reply_json(&query, &route_changes_key, &route_history.recent()).await;
             }
             q = tc_q.recv_async() => {
                 let Ok(query) = q else { return };
                 let records = collect_tc(&route).await;
-                reply_json(&query, &records).await;
+                reply_json(&query, &tc_key, &records).await;
             }
             q = xfrm_q.recv_async() => {
                 let Ok(query) = q else { return };
@@ -234,7 +234,7 @@ pub async fn run(
                     Some(x) => collect_xfrm(x).await,
                     None => Vec::new(),
                 };
-                reply_json(&query, &records).await;
+                reply_json(&query, &xfrm_key, &records).await;
             }
             q = nft_q.recv_async() => {
                 let Ok(query) = q else { return };
@@ -242,7 +242,7 @@ pub async fn run(
                     Some(n) => collect_nft(n).await,
                     None => Vec::new(),
                 };
-                reply_json(&query, &records).await;
+                reply_json(&query, &nft_key, &records).await;
             }
             // Per-process bandwidth sampler tick (#317): cheap cookie→bytes dump,
             // no /proc scan. Idle no-op when the feature is toggled off.
@@ -270,7 +270,7 @@ pub async fn run(
                 } else {
                     Vec::new()
                 };
-                reply_json(&query, &out).await;
+                reply_json(&query, &bandwidth_key, &out).await;
             }
         }
     }
@@ -334,21 +334,23 @@ pub async fn run_ebpf_queries(
         tokio::select! {
             q = retransmits_q.recv_async() => {
                 let Ok(query) = q else { return };
-                reply_json(&query, &ebpf.top_retransmits(top_k)).await;
+                reply_json(&query, &retransmits_key, &ebpf.top_retransmits(top_k)).await;
             }
             q = connections_q.recv_async() => {
                 let Ok(query) = q else { return };
-                reply_json(&query, &ebpf.recent_connections()).await;
+                reply_json(&query, &connections_key, &ebpf.recent_connections()).await;
             }
         }
     }
 }
 
-/// Serialize `records` as JSON and reply on the query's own key.
-async fn reply_json<T: serde::Serialize>(query: &zenoh::query::Query, records: &T) {
+/// Serialize `records` as JSON and reply on the queryable's **concrete**
+/// key — never the query's (possibly wildcard) selector (RFC 05 §2.1: fleet
+/// fan-in consolidation keeps one reply per reply key).
+async fn reply_json<T: serde::Serialize>(query: &zenoh::query::Query, key: &str, records: &T) {
     match serde_json::to_vec(records) {
         Ok(payload) => {
-            if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+            if let Err(e) = query.reply(key, payload).await {
                 tracing::warn!(error = %e, "query: reply failed");
             }
         }

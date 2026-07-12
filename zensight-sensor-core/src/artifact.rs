@@ -7,7 +7,7 @@
 //!
 //! The channel owns the control plane — a **request** subscriber
 //! (`@/artifact/request`), a **status** queryable (`@/artifact/status`, one entry
-//! per registered kind), a **cancel** subscriber (`@/artifact/cancel`) and a TTL
+//! per registered kind), a **cancel** write procedure and a TTL
 //! reaper — plus the `zenoh-blob` delivery servers (a [`BlobServer`] for Tier-1
 //! producers, a [`TreeServer`] + in-memory chunk store for Tier-2 producers),
 //! spun up only when a producer of that delivery kind is registered.
@@ -238,21 +238,24 @@ impl ArtifactChannel {
     }
 
     async fn run_inner(self: &ArtifactChannel) -> anyhow::Result<()> {
-        let req_sub = self
+        let request_key = artifact_request_key(&self.key_prefix);
+        let req_q = self
             .session
-            .declare_subscriber(artifact_request_key(&self.key_prefix))
+            .declare_queryable(request_key.as_str())
             .await
-            .map_err(|e| anyhow::anyhow!("declare artifact request sub: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("declare artifact request queryable: {e}"))?;
+        let status_key = artifact_status_key(&self.key_prefix);
         let status_q = self
             .session
-            .declare_queryable(artifact_status_key(&self.key_prefix))
+            .declare_queryable(status_key.as_str())
             .await
             .map_err(|e| anyhow::anyhow!("declare artifact status queryable: {e}"))?;
-        let cancel_sub = self
+        let cancel_key = artifact_cancel_key(&self.key_prefix);
+        let cancel_q = self
             .session
-            .declare_subscriber(artifact_cancel_key(&self.key_prefix))
+            .declare_queryable(cancel_key.as_str())
             .await
-            .map_err(|e| anyhow::anyhow!("declare artifact cancel sub: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("declare artifact cancel queryable: {e}"))?;
 
         if let Some(blob) = &self.blob {
             tokio::spawn(blob.clone().run());
@@ -270,20 +273,63 @@ impl ArtifactChannel {
 
         loop {
             tokio::select! {
-                Ok(sample) = req_sub.recv_async() => {
-                    self.handle_request(&sample.payload().to_bytes()).await;
+                Ok(query) = req_q.recv_async() => {
+                    // Write procedure (RFC 05 §3): value reply = accepted
+                    // ({ id }); failures ride reply_err with a namespaced name.
+                    let payload = query
+                        .payload()
+                        .map(|p| p.to_bytes().to_vec())
+                        .unwrap_or_default();
+                    match self.handle_request(&payload).await {
+                        Ok(id) => {
+                            let body = serde_json::to_vec(&serde_json::json!({ "id": id.to_string() }))
+                                .unwrap_or_default();
+                            if let Err(e) = query.reply(request_key.as_str(), body).await {
+                                tracing::warn!(error = %e, "artifact request reply failed");
+                            }
+                        }
+                        Err(err) => {
+                            let body = serde_json::to_vec(&err).unwrap_or_default();
+                            if let Err(e) = query.reply_err(body).await {
+                                tracing::warn!(error = %e, "artifact request reply_err failed");
+                            }
+                        }
+                    }
                 }
                 Ok(query) = status_q.recv_async() => {
                     let status = self.status().await;
                     let payload = serde_json::to_vec(&status).unwrap_or_default();
-                    if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                    // Concrete reply key (RFC 05 §2.1).
+                    if let Err(e) = query.reply(status_key.as_str(), payload).await {
                         tracing::warn!(error = %e, "artifact status reply failed");
                     }
                 }
-                Ok(sample) = cancel_sub.recv_async() => {
-                    let body = sample.payload().to_bytes();
-                    if let Ok(id) = std::str::from_utf8(&body).unwrap_or("").trim().parse::<Ulid>() {
-                        self.cancel(id).await;
+                Ok(query) = cancel_q.recv_async() => {
+                    // `?id=<ulid>` selector param, with the legacy body form
+                    // as fallback.
+                    let param_id = query
+                        .parameters()
+                        .as_str()
+                        .split(';')
+                        .find_map(|kv| kv.strip_prefix("id="))
+                        .map(str::to_string);
+                    let body_id = query
+                        .payload()
+                        .map(|p| String::from_utf8_lossy(&p.to_bytes()).trim().to_string());
+                    match param_id.or(body_id).and_then(|s| s.parse::<Ulid>().ok()) {
+                        Some(id) => {
+                            self.cancel(id).await;
+                            if let Err(e) = query.reply(cancel_key.as_str(), Vec::new()).await {
+                                tracing::warn!(error = %e, "artifact cancel reply failed");
+                            }
+                        }
+                        None => {
+                            let err = crate::rpc::RpcError::invalid_args(
+                                "cancel needs ?id=<ulid> (or a ULID body)",
+                            );
+                            let body = serde_json::to_vec(&err).unwrap_or_default();
+                            let _ = query.reply_err(body).await;
+                        }
                     }
                 }
                 _ = ttl_tick.tick() => {
@@ -316,33 +362,34 @@ impl ArtifactChannel {
         ArtifactStatus { kinds }
     }
 
-    async fn handle_request(&self, payload: &[u8]) {
-        let req: ArtifactRequest = match serde_json::from_slice(payload) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, "bad artifact request");
-                return;
-            }
-        };
+    async fn handle_request(&self, payload: &[u8]) -> Result<Ulid, crate::rpc::RpcError> {
+        use crate::rpc::RpcError;
+        let req: ArtifactRequest = serde_json::from_slice(payload)
+            .map_err(|e| RpcError::invalid_args(format!("bad artifact request: {e}")))?;
 
-        // Not for us — another host running this protocol will answer.
+        // Legacy payload targeting; v1 targeting is the origin chunk (RFC 05
+        // §2), so a mismatch is a caller error, not a silent skip.
         if let Some(target) = &req.opts.target_source
             && target != &self.source_id
         {
-            return;
+            return Err(RpcError::not_found(format!(
+                "target_source {target:?} is not this host (v1: target by origin key)"
+            )));
         }
 
         let slug = req.kind.slug();
         let Some(producer) = self.producers.get(slug).cloned() else {
             self.set_failed(slug, req.id, &format!("unsupported artifact kind: {slug}"))
                 .await;
-            return;
+            return Err(RpcError::unsupported(format!(
+                "unsupported artifact kind: {slug}"
+            )));
         };
 
         // Producer-specific validation / authorization.
         if let Err(reason) = producer.accepts(&req.kind) {
             self.set_failed(slug, req.id, &reason).await;
-            return;
+            return Err(RpcError::gated(reason));
         }
 
         // Per-kind busy + cooldown gate.
@@ -354,7 +401,10 @@ impl ArtifactChannel {
                 drop(rt);
                 self.set_failed(slug, req.id, "already producing this artifact kind")
                     .await;
-                return;
+                return Err(crate::rpc::RpcError::new(
+                    crate::rpc::ERR_BUSY,
+                    "already producing this artifact kind",
+                ));
             }
             if let Some(last) = kr.last_gen
                 && last.elapsed() < Duration::from_secs(producer.common().cooldown_secs)
@@ -362,7 +412,10 @@ impl ArtifactChannel {
                 drop(rt);
                 self.set_failed(slug, req.id, "cooling down; try again shortly")
                     .await;
-                return;
+                return Err(crate::rpc::RpcError::new(
+                    crate::rpc::ERR_BUSY,
+                    "cooling down; try again shortly",
+                ));
             }
             kr.busy = true;
             kr.in_flight = Some((req.id, cancel.clone()));
@@ -381,6 +434,7 @@ impl ArtifactChannel {
         tokio::spawn(async move {
             this.drive(slug, id, kind, producer, cancel).await;
         });
+        Ok(id)
     }
 
     /// Run one production to completion and record the outcome.

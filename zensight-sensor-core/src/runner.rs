@@ -365,6 +365,23 @@ impl<C: SensorConfig> SensorRunner<C> {
 
     /// Run the sensor with custom status metadata.
     pub async fn run_with_metadata(mut self, metadata: Option<serde_json::Value>) -> Result<()> {
+        // Serve `introspect` (RFC 08 §6) — the registry slice this build was
+        // compiled against — before the liveliness token, so "alive ⇒
+        // callable" holds (RFC 04 §5). A producer missing from the registry
+        // is a build-time error elsewhere; here it just has no slice.
+        {
+            let ctx = self.publisher.v1().clone();
+            let producer_name = ctx.producer().name().to_string();
+            if let Some(toml) = zensight_keyspace::registry::registry_toml(&producer_name) {
+                match crate::rpc::serve_introspect(self.session.clone(), &ctx, toml).await {
+                    Ok(task) => self.tasks.push(task),
+                    Err(e) => tracing::warn!(error = %e, "failed to serve introspect"),
+                }
+            } else {
+                tracing::debug!(producer = %producer_name, "no registry slice; introspect not served");
+            }
+        }
+
         // Presence is not optional: declare the sensor-level liveliness token
         // (`<prefix>/<source>/@/alive`) unless [`Self::with_liveliness`] already
         // did. The frontend flips this sensor's card Offline when the token

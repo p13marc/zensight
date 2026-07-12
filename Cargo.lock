@@ -13382,6 +13382,7 @@ dependencies = [
  "ulid",
  "zenoh",
  "zenoh-blob",
+ "zensight-keyspace",
 ]
 
 [[package]]
@@ -13460,9 +13461,11 @@ dependencies = [
 name = "zensight-keyspace"
 version = "0.7.0"
 dependencies = [
+ "dirs 5.0.1",
  "sha2",
  "thiserror 2.0.18",
  "toml 0.8.23",
+ "tracing",
  "zenoh",
  "zenoh-keyexpr",
 ]

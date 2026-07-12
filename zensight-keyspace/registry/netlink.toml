@@ -161,7 +161,7 @@ since = "1.0"
 description = "control-plane event ring"
 
 [[procedure]]
-path = "route-changes"
+path = "route_changes"
 kind = "read"
 reply = "Vec<RouteChangeRecord>"
 idempotent = true

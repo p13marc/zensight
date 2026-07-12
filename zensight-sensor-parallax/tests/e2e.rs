@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use zensight_common::command::{Command, command_key, query_key, status_key};
+use zensight_common::command::{Command, command_key, query_key};
 use zensight_common::stream::{FrameMeta, StreamControl, StreamDescriptor, StreamStatus};
 use zensight_common::{Format, decode};
 use zensight_sensor_core::Publisher;
@@ -122,7 +122,9 @@ async fn spawn_sensor_with_config(
 ) {
     let catalog = Arc::new(Catalog::build(&config));
     let publisher = Publisher::new(session.clone(), config.key_prefix.clone(), Format::Json);
-    let host_prefix = format!("{}/{}", config.key_prefix, source);
+    // v1: control/query surfaces key off the producer prefix (the origin
+    // chunk scopes per host; the source label is payload-only).
+    let host_prefix = config.key_prefix.clone();
     let registry = StatsRegistry::default();
     tokio::spawn(stats::run_ticker(
         publisher.clone(),
@@ -158,9 +160,9 @@ fn v1ctx() -> zensight_sensor_core::v1::V1Context {
     zensight_sensor_core::v1::V1Context::from_prefix("zensight/parallax")
 }
 
-async fn query_catalogue(viewer: &zenoh::Session, host_prefix: &str) -> Vec<StreamDescriptor> {
+async fn query_catalogue(viewer: &zenoh::Session, _host_prefix: &str) -> Vec<StreamDescriptor> {
     let replies = viewer
-        .get(query_key(host_prefix, "streams"))
+        .get(query_key("zensight/parallax", "streams"))
         .await
         .expect("query streams");
     let reply = tokio::time::timeout(Duration::from_secs(5), replies.recv_async())
@@ -171,15 +173,37 @@ async fn query_catalogue(viewer: &zenoh::Session, host_prefix: &str) -> Vec<Stre
     serde_json::from_slice(&sample.payload().to_bytes()).expect("decode catalogue")
 }
 
-async fn send_control(viewer: &zenoh::Session, host_prefix: &str, control: StreamControl) {
+/// Await the latest per-stream status document (v1: LWW state at
+/// `state/parallax/stream/<stream>`, RFC 05 §5) matching `pred`.
+async fn await_status(
+    sub: &zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
+    pred: impl Fn(&StreamStatus) -> bool,
+) -> StreamStatus {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let sample = sub.recv_async().await.expect("status sub closed");
+            if let Ok(s) = serde_json::from_slice::<StreamStatus>(&sample.payload().to_bytes())
+                && pred(&s)
+            {
+                return s;
+            }
+        }
+    })
+    .await
+    .expect("status doc timed out")
+}
+
+async fn send_control(viewer: &zenoh::Session, _host_prefix: &str, control: StreamControl) {
+    // v1 (RFC 05): stream control is the `stream/set` write procedure —
+    // GET with a body; the value reply is the ack.
     let cmd = Command::new(control);
-    viewer
-        .put(
-            command_key(host_prefix, "stream"),
-            serde_json::to_vec(&cmd).unwrap(),
-        )
+    let replies = viewer
+        .get(command_key("zensight/parallax", "stream"))
+        .payload(serde_json::to_vec(&cmd).unwrap())
         .await
         .expect("send stream control");
+    let reply = replies.recv_async().await.expect("control ack");
+    assert!(reply.result().is_ok(), "control refused: {reply:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -216,6 +240,12 @@ async fn open_preview_streams_jpeg_frames_at_config_fps() {
         .declare_subscriber(&preview_key)
         .await
         .expect("declare preview subscriber");
+    // Subscribe to the per-stream status doc BEFORE opening (v1 state has no
+    // storage in this harness; LWW without a seed means catch-the-transition).
+    let status_sub = viewer
+        .declare_subscriber(v1ctx().state_key(&["stream", "test0"]))
+        .await
+        .expect("declare status sub");
 
     send_control(
         &viewer,
@@ -274,20 +304,10 @@ async fn open_preview_streams_jpeg_frames_at_config_fps() {
     let got = query_catalogue(&viewer, &host_prefix).await;
     assert!(got[0].active, "stream must be active while open");
 
-    // The status queryable reports the open session.
-    let replies = viewer
-        .get(status_key(&host_prefix, "streams"))
-        .await
-        .expect("query status");
-    let reply = tokio::time::timeout(Duration::from_secs(5), replies.recv_async())
-        .await
-        .expect("status query timed out")
-        .expect("status reply channel closed");
-    let statuses: Vec<StreamStatus> =
-        serde_json::from_slice(&reply.result().unwrap().payload().to_bytes()).unwrap();
-    assert_eq!(statuses.len(), 1);
-    assert!(statuses[0].open);
-    assert_eq!(statuses[0].profile.as_deref(), Some("mjpeg"));
+    // The per-stream state doc reported the open transition (v1: LWW state,
+    // RFC 05 §5) — the subscriber was declared before the open.
+    let status = await_status(&status_sub, |s| s.open).await;
+    assert_eq!(status.profile.as_deref(), Some("mjpeg"));
 
     // Tear the stream down before the runtime drops: a live pipeline keeps a
     // blocking source task alive, and tokio's shutdown would wait forever.
@@ -326,6 +346,10 @@ async fn open_h264_video_streams_with_keyframe_control() {
         .declare_subscriber(&video_key)
         .await
         .expect("declare video subscriber");
+    let status_sub = viewer
+        .declare_subscriber(v1ctx().state_key(&["stream", "test0"]))
+        .await
+        .expect("declare status sub");
 
     send_control(
         &viewer,
@@ -436,23 +460,16 @@ async fn open_h264_video_streams_with_keyframe_control() {
         "sequences {sequences:?}"
     );
 
-    // The status queryable reports the h264 profile.
-    let replies = viewer
-        .get(status_key(&host_prefix, "streams"))
-        .await
-        .expect("query status");
-    let reply = tokio::time::timeout(Duration::from_secs(5), replies.recv_async())
-        .await
-        .expect("status query timed out")
-        .expect("status reply channel closed");
-    let statuses: Vec<StreamStatus> =
-        serde_json::from_slice(&reply.result().unwrap().payload().to_bytes()).unwrap();
-    assert_eq!(statuses[0].profile.as_deref(), Some("h264/main"));
+    // The per-stream state doc reports the h264 profile (v1 LWW state);
+    // the subscriber was declared before the open, and viewer-count
+    // transitions re-publish the doc.
+    let status = await_status(&status_sub, |s| s.open && s.viewers >= 1).await;
+    assert_eq!(status.profile.as_deref(), Some("h264/main"));
     // The wildcard-profile subscriber registered as a viewer: the sensor's
     // matching listener fired on it (this also proves the idle reaper —
     // idle_timeout_secs: 1, and we streamed well past that — saw a viewer).
     assert!(
-        statuses[0].viewers >= 1,
+        status.viewers >= 1,
         "matching listener must count the wildcard-profile subscriber as a viewer"
     );
 
@@ -646,7 +663,7 @@ async fn failed_open_publishes_closed_status_and_leaks_no_stats() {
 
     // Watch the status transitions BEFORE opening.
     let status_sub = viewer
-        .declare_subscriber(status_key(&host_prefix, "streams"))
+        .declare_subscriber(v1ctx().state_key(&["stream", "deadcam"]))
         .await
         .expect("declare status subscriber");
 

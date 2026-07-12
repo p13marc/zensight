@@ -154,35 +154,35 @@ reply = "Ack"
 since = "1.0"
 description = "apply detectors configuration (runtime detection tuning)"
 [[procedure]]
-path = "capture-filter"
+path = "capture_filter"
 kind = "read"
 reply = "TopicStatus"
 idempotent = true
 since = "1.0"
-description = "current capture-filter configuration (reloadable packet-tier BPF filter)"
+description = "current capture_filter configuration (reloadable packet-tier BPF filter)"
 
 [[procedure]]
-path = "capture-filter/set"
+path = "capture_filter/set"
 kind = "write"
 request = "FilterConfig"
 reply = "Ack"
 since = "1.0"
-description = "apply capture-filter configuration (reloadable packet-tier BPF filter)"
+description = "apply capture_filter configuration (reloadable packet-tier BPF filter)"
 [[procedure]]
-path = "threat-intel"
+path = "threat_intel"
 kind = "read"
 reply = "TopicStatus"
 idempotent = true
 since = "1.0"
-description = "current threat-intel configuration (IOC/YARA hot-reload)"
+description = "current threat_intel configuration (IOC/YARA hot-reload)"
 
 [[procedure]]
-path = "threat-intel/set"
+path = "threat_intel/set"
 kind = "write"
 request = "ThreatIntelConfig"
 reply = "Ack"
 since = "1.0"
-description = "apply threat-intel configuration (IOC/YARA hot-reload)"
+description = "apply threat_intel configuration (IOC/YARA hot-reload)"
 [[procedure]]
 path = "flows"
 kind = "read"
@@ -216,7 +216,7 @@ since = "1.0"
 description = "src/dst rolling rate matrix (?top=N)"
 
 [[procedure]]
-path = "elephant-flows"
+path = "elephant_flows"
 kind = "read"
 reply = "Vec<FlowRecord>"
 idempotent = true
@@ -256,7 +256,7 @@ since = "1.0"
 description = "SSH/HASSH ring"
 
 [[procedure]]
-path = "encrypted-dns"
+path = "encrypted_dns"
 kind = "read"
 reply = "Vec<EncryptedDnsRecord>"
 idempotent = true

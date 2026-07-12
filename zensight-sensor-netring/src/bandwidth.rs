@@ -133,7 +133,7 @@ pub async fn run_query(session: Arc<zenoh::Session>, key_prefix: String, shared:
         records.truncate(top);
         match serde_json::to_vec(&records) {
             Ok(payload) => {
-                if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                if let Err(e) = query.reply(key.as_str(), payload).await {
                     tracing::warn!(error = %e, "query: bandwidth reply failed");
                 }
             }

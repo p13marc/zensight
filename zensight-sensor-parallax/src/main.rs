@@ -61,7 +61,6 @@ async fn main() -> Result<()> {
 
     let parallax_config = runner.config().parallax.clone();
     let session = runner.session().clone();
-    let host_prefix = format!("{}/{}", parallax_config.key_prefix, source);
 
     // Build the stream catalogue: enumerated V4L2 cameras + configured RTSP +
     // test-pattern sources.
@@ -157,7 +156,7 @@ async fn main() -> Result<()> {
     // Stream control channel (`@/commands/stream` + `@/status/streams`).
     {
         let c_session = session.clone();
-        let c_prefix = host_prefix.clone();
+        let c_prefix = parallax_config.key_prefix.clone();
         let c_handle = session_handle.clone();
         runner.spawn(async move {
             command::run(c_session, c_prefix, c_handle).await;
@@ -167,7 +166,7 @@ async fn main() -> Result<()> {
     // Serve the stream catalogue on `@/query/streams`.
     {
         let q_session = session.clone();
-        let q_prefix = host_prefix.clone();
+        let q_prefix = parallax_config.key_prefix.clone();
         let q_catalog = catalog.clone();
         let q_handle = session_handle.clone();
         runner.spawn(async move {

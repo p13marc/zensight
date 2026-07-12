@@ -50,7 +50,7 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, flows: FlowRi
         };
         match serde_json::to_vec(&records) {
             Ok(payload) => {
-                if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                if let Err(e) = query.reply(key.as_str(), payload).await {
                     tracing::warn!(error = %e, "query: flows reply failed");
                 }
             }
@@ -81,7 +81,7 @@ pub async fn run_tls(session: Arc<zenoh::Session>, key_prefix: String, inventory
         records.sort_by_key(|r| std::cmp::Reverse(r.count));
         match serde_json::to_vec(&records) {
             Ok(payload) => {
-                if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                if let Err(e) = query.reply(key.as_str(), payload).await {
                     tracing::warn!(error = %e, "query: tls reply failed");
                 }
             }
@@ -110,7 +110,7 @@ pub async fn run_quic(session: Arc<zenoh::Session>, key_prefix: String, inventor
             Err(_) => Vec::new(),
         };
         records.sort_by_key(|r| std::cmp::Reverse(r.count));
-        reply(&query, &records, "quic").await;
+        reply(&query, &key, &records, "quic").await;
     }
 }
 
@@ -134,7 +134,7 @@ pub async fn run_ssh(session: Arc<zenoh::Session>, key_prefix: String, inventory
             Err(_) => Vec::new(),
         };
         records.sort_by_key(|r| std::cmp::Reverse(r.count));
-        reply(&query, &records, "ssh").await;
+        reply(&query, &key, &records, "ssh").await;
     }
 }
 
@@ -162,7 +162,7 @@ pub async fn run_encrypted_dns(
             Err(_) => Vec::new(),
         };
         records.sort_by_key(|r| std::cmp::Reverse(r.count));
-        reply(&query, &records, "encrypted_dns").await;
+        reply(&query, &key, &records, "encrypted_dns").await;
     }
 }
 
@@ -190,7 +190,7 @@ pub async fn run_assets(
             Err(_) => Vec::new(),
         };
         records.sort_by_key(|r| std::cmp::Reverse(r.last_seen));
-        reply(&query, &records, "assets").await;
+        reply(&query, &key, &records, "assets").await;
     }
 }
 
@@ -236,7 +236,7 @@ pub async fn run_talkers(
                 }
             }
         }
-        reply(&query, &records, "talkers").await;
+        reply(&query, &key, &records, "talkers").await;
     }
 }
 
@@ -276,7 +276,7 @@ pub async fn run_matrix(
                 }
             }
         }
-        reply(&query, &records, "matrix").await;
+        reply(&query, &key, &records, "matrix").await;
     }
 }
 
@@ -299,7 +299,7 @@ pub async fn run_elephants(session: Arc<zenoh::Session>, key_prefix: String, rin
             Err(_) => Vec::new(),
         };
         records.sort_by_key(|r| std::cmp::Reverse(r.bytes));
-        reply(&query, &records, "elephant_flows").await;
+        reply(&query, &key, &records, "elephant_flows").await;
     }
 }
 
@@ -322,7 +322,7 @@ pub async fn run_dns(session: Arc<zenoh::Session>, key_prefix: String, inventory
             Ok(inv) => map::top_dns_records(&inv, top),
             Err(_) => Vec::new(),
         };
-        reply(&query, &records, "dns").await;
+        reply(&query, &key, &records, "dns").await;
     }
 }
 
@@ -345,7 +345,7 @@ pub async fn run_http(session: Arc<zenoh::Session>, key_prefix: String, inventor
             Ok(inv) => map::top_http_hosts(&inv, top),
             Err(_) => Vec::new(),
         };
-        reply(&query, &records, "http").await;
+        reply(&query, &key, &records, "http").await;
     }
 }
 
@@ -370,7 +370,7 @@ pub async fn run_ja4h(session: Arc<zenoh::Session>, key_prefix: String, inventor
             Ok(inv) => map::top_ja4h(&inv, top),
             Err(_) => Vec::new(),
         };
-        reply(&query, &records, "ja4h").await;
+        reply(&query, &key, &records, "ja4h").await;
     }
 }
 
@@ -402,7 +402,7 @@ pub async fn run_ipfix(
             Ok(r) => r.iter().rev().map(|rec| rec.to_ipfix_record()).collect(),
             Err(_) => Vec::new(),
         };
-        reply(&query, &ie, "ipfix").await;
+        reply(&query, &key, &ie, "ipfix").await;
     }
 }
 
@@ -430,15 +430,21 @@ pub async fn run_captures(
             Ok(idx) => idx.iter().cloned().collect(),
             Err(_) => Vec::new(),
         };
-        reply(&query, &records, "captures").await;
+        reply(&query, &key, &records, "captures").await;
     }
 }
 
-/// Serialize `records` to JSON and reply; logs (does not panic) on failure.
-async fn reply<T: serde::Serialize>(query: &zenoh::query::Query, records: &T, label: &str) {
+/// Serialize `records` to JSON and reply on the queryable's **concrete**
+/// key (RFC 05 §2.1); logs (does not panic) on failure.
+async fn reply<T: serde::Serialize>(
+    query: &zenoh::query::Query,
+    key: &str,
+    records: &T,
+    label: &str,
+) {
     match serde_json::to_vec(records) {
         Ok(payload) => {
-            if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+            if let Err(e) = query.reply(key, payload).await {
                 tracing::warn!(error = %e, channel = label, "query reply failed");
             }
         }

@@ -47,6 +47,7 @@ mod liveliness;
 pub mod procutil;
 mod publisher;
 pub mod report;
+pub mod rpc;
 mod runner;
 pub mod scrub;
 mod status;
