@@ -30,8 +30,14 @@ rules for deciding where a given piece of information belongs.
   set of a producer is stable and enumerable; only values change.
 - A publisher MUST publish each metric on its own stable key; it MUST NOT
   encode values, timestamps, or sequence numbers in the key.
-- Late-joiner support (last samples per key) SHOULD be provided by the
-  publisher-side cache mechanism (§3.1) rather than by re-publishing.
+- A late joiner on a cadence-published metric (position, temperature,
+  a counter) needs no seeding: **the next publication is the seed** —
+  `seed = none` is the class default (§3.1), and on constrained links it
+  is also the right answer (zero standing machinery, zero seed traffic).
+  The rare subject that genuinely needs a tail on arrival declares
+  `seed = tail(n)` in the registry and gets it from a seed source
+  (§3.1) — never from re-publishing on the data key, which corrupts the
+  time-series.
 
 ### 1.2 `state` — last-writer-wins with tombstones
 
