@@ -387,7 +387,7 @@ impl SystemdCollector {
 
         let n = points.len();
         for point in &points {
-            let suffix = format!("{}/{}", point.source, point.metric);
+            let suffix = point.metric.clone();
             if let Err(e) = self.publisher.publish(&suffix, point).await {
                 tracing::warn!(error = %e, metric = %point.metric, "publish failed");
             } else {

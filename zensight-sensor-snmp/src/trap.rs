@@ -90,7 +90,7 @@ pub struct TrapReceiver {
     /// Declared-publisher registry for the telemetry path (declare-on-first-use +
     /// cache per key, drop QoS) — never a one-shot `session.put`.
     registry: Arc<zensight_common::PublisherRegistry>,
-    key_builder: KeyExprBuilder,
+    key_prefix: String,
     mib_resolver: Arc<MibResolver>,
     format: Format,
 }
@@ -107,7 +107,7 @@ impl TrapReceiver {
         Self {
             bind_addr: bind_addr.to_string(),
             registry: Arc::new(zensight_common::PublisherRegistry::new(zenoh)),
-            key_builder: KeyExprBuilder::with_prefix(key_prefix, Protocol::Snmp),
+            key_prefix: zensight_sensor_core::v1::v1_telemetry_prefix(key_prefix),
             mib_resolver,
             format,
         }

@@ -233,8 +233,7 @@ pub async fn run_ticker(
 
 async fn publish(publisher: &Publisher, source: &str, metric: &str, value: TelemetryValue) {
     let point = TelemetryPoint::new(source, Protocol::Parallax, metric, value);
-    let suffix = format!("{source}/{metric}");
-    if let Err(e) = publisher.publish(&suffix, &point).await {
+    if let Err(e) = publisher.publish(metric, &point).await {
         tracing::warn!(error = %e, metric = %metric, "failed to publish stream stats");
     }
 }

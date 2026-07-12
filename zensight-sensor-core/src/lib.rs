@@ -50,6 +50,7 @@ pub mod report;
 mod runner;
 pub mod scrub;
 mod status;
+pub mod v1;
 
 pub use advanced_publisher::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
 pub use alert::{AlertReporter, serve_alerts_query};

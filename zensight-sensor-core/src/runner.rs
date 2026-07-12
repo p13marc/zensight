@@ -199,7 +199,7 @@ impl<C: SensorConfig> SensorRunner<C> {
     /// with [`LivelinessManager::declare_device_alive`] before `run()`.
     pub async fn with_liveliness(mut self) -> Result<Self> {
         let liveliness =
-            LivelinessManager::new(self.session.clone(), self.control_prefix()).await?;
+            LivelinessManager::new(self.session.clone(), self.publisher.v1().clone()).await?;
         self.liveliness = Some(liveliness);
         Ok(self)
     }
@@ -372,7 +372,7 @@ impl<C: SensorConfig> SensorRunner<C> {
         // would read as its last health forever. Declaration failure is only a
         // warning — a broken liveliness path must never stop telemetry.
         if self.liveliness.is_none() {
-            match LivelinessManager::new(self.session.clone(), self.control_prefix()).await {
+            match LivelinessManager::new(self.session.clone(), self.publisher.v1().clone()).await {
                 Ok(manager) => self.liveliness = Some(manager),
                 Err(e) => tracing::warn!(error = %e, "Failed to declare liveliness token"),
             }
@@ -418,6 +418,7 @@ impl<C: SensorConfig> SensorRunner<C> {
             let name = self.name.clone();
             let version = self.version.clone();
             let key_prefix = self.config.key_prefix().to_string();
+            let v1_ctx = self.publisher.v1().clone();
             let health = self.health.clone();
             let identity_cfg = self.config.identity_config();
             let task = tokio::spawn(async move {
@@ -440,8 +441,8 @@ impl<C: SensorConfig> SensorRunner<C> {
                         None => tracing::debug!("cloud metadata probe: no provider found"),
                     }
                 }
-                let info_key = zensight_common::sensor_info_key(&name, &source);
-                let evidence_key = zensight_common::host_evidence_key(&name, &source);
+                let info_key = v1_ctx.sensor_info_key();
+                let evidence_key = v1_ctx.evidence_self_key();
                 let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
                 let mut n: u64 = 0;
                 loop {

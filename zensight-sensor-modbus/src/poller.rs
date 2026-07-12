@@ -50,7 +50,7 @@ impl ModbusPoller {
         Self {
             device,
             registers,
-            key_prefix: config.key_prefix.clone(),
+            key_prefix: zensight_sensor_core::v1::v1_telemetry_prefix(&config.key_prefix),
             register_names: config.register_names.clone(),
             registry: Arc::new(zensight_common::PublisherRegistry::new(session)),
             format,

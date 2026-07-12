@@ -270,7 +270,12 @@ impl GnmiSubscriber {
                     labels: HashMap::new(),
                 };
 
-                let key = format!("{}/{}/{}", self.key_prefix, self.target.name, full_path);
+                let key = format!(
+                    "{}/{}/{}",
+                    zensight_sensor_core::v1::v1_telemetry_prefix(&self.key_prefix),
+                    self.target.name,
+                    full_path
+                );
 
                 let payload = match self.serialization {
                     SerializationFormat::Json => serde_json::to_vec(&point)?,

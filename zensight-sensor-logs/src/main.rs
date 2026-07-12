@@ -297,7 +297,7 @@ async fn main() -> Result<()> {
         let stats = ingest_stats.clone();
         let health = runner.health();
         let registry_tick = registry.clone();
-        let key_prefix_tick = key_prefix.clone();
+        let v1_prefix_tick = zensight_sensor_core::v1::v1_telemetry_prefix(&key_prefix);
         let interval_secs = syslog_config.derived_interval_secs.max(1);
         let drop_alert_ratio = syslog_config.ingest.drop_alert_ratio;
         let source = source.clone();
@@ -312,7 +312,7 @@ async fn main() -> Result<()> {
 
                 // Publish the ingest counters as telemetry.
                 for point in cur.to_points(&source) {
-                    let key = format!("{}/{}/{}", key_prefix_tick, point.source, point.metric);
+                    let key = format!("{}/{}", v1_prefix_tick, point.metric);
                     match encode(&point, format) {
                         Ok(payload) => {
                             if let Err(e) = registry_tick
@@ -378,7 +378,7 @@ async fn main() -> Result<()> {
     });
     if let Some(agg) = aggregator.clone() {
         let registry_tick = registry.clone();
-        let key_prefix_tick = key_prefix.clone();
+        let v1_prefix_tick = zensight_sensor_core::v1::v1_telemetry_prefix(&key_prefix);
         let interval_secs = syslog_config.derived_interval_secs.max(1);
         let stats_tick = journald_stats.clone();
         let budget_reporter = budget_alerts_on.then(|| alert_reporter.clone()).flatten();
@@ -414,7 +414,7 @@ async fn main() -> Result<()> {
                 }
 
                 for point in points {
-                    let key = format!("{}/{}/{}", key_prefix_tick, point.source, point.metric);
+                    let key = format!("{}/{}", v1_prefix_tick, point.metric);
                     match encode(&point, format) {
                         Ok(payload) => {
                             if let Err(e) = registry_tick.put(&key, payload, zensight_common::QosClass::Telemetry).await {
@@ -445,7 +445,7 @@ async fn main() -> Result<()> {
     });
     if let Some(tagg) = template_agg.clone() {
         let registry_tick = registry.clone();
-        let key_prefix_tick = key_prefix.clone();
+        let v1_prefix_tick = zensight_sensor_core::v1::v1_telemetry_prefix(&key_prefix);
         let interval_secs = syslog_config.derived_interval_secs.max(1);
         let source = source.clone();
         runner.spawn(async move {
@@ -454,7 +454,7 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
                 for point in tagg.emit(&source) {
-                    let key = format!("{}/{}/{}", key_prefix_tick, point.source, point.metric);
+                    let key = format!("{}/{}", v1_prefix_tick, point.metric);
                     match encode(&point, format) {
                         Ok(payload) => {
                             if let Err(e) = registry_tick.put(&key, payload, zensight_common::QosClass::Telemetry).await {

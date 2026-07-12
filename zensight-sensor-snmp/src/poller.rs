@@ -22,7 +22,7 @@ pub struct SnmpPoller {
     /// Declared-publisher registry for the telemetry path (declare-on-first-use +
     /// cache per key, drop QoS) — never a one-shot `session.put`.
     registry: Arc<zensight_common::PublisherRegistry>,
-    key_builder: KeyExprBuilder,
+    key_prefix: String,
     mib_resolver: Arc<MibResolver>,
     format: Format,
     oids: Vec<String>,
@@ -42,7 +42,7 @@ impl SnmpPoller {
         oid_groups: &HashMap<String, OidGroup>,
         format: Format,
     ) -> Self {
-        let key_builder = KeyExprBuilder::with_prefix(key_prefix, Protocol::Snmp);
+        let key_prefix = zensight_sensor_core::v1::v1_telemetry_prefix(key_prefix);
 
         let oids = device.all_oids(oid_groups);
         let walks = device.all_walks(oid_groups);
@@ -50,7 +50,7 @@ impl SnmpPoller {
         Self {
             device,
             registry: Arc::new(zensight_common::PublisherRegistry::new(zenoh)),
-            key_builder,
+            key_prefix,
             mib_resolver,
             format,
             oids,
@@ -295,7 +295,7 @@ impl SnmpPoller {
         let point = TelemetryPoint::new(&self.device.name, Protocol::Snmp, &metric_name, value)
             .with_label("oid", oid_str);
 
-        let key = self.key_builder.build(&self.device.name, &metric_name);
+        let key = format!("{}/{}/{}", self.key_prefix, self.device.name, metric_name);
 
         match encode(&point, self.format) {
             Ok(payload) => {

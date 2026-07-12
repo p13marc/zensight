@@ -7,32 +7,33 @@ use zenoh::handlers::DefaultHandler;
 use zenoh::matching::MatchingListenerBuilder;
 use zensight_common::{Format, QosClass, TelemetryPoint};
 
-use crate::advanced_publisher::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
 use crate::error::{Result, SensorError};
+use crate::v1::V1Context;
 
 /// Publisher for sending telemetry to Zenoh.
 ///
 /// Wraps a Zenoh session and provides convenient methods for publishing
 /// [`TelemetryPoint`] values with automatic serialization.
 ///
-/// **Telemetry** (`publish` / `publish_to_key` / `publish_batch`) goes out
-/// through [`AdvancedPublisherRegistry`] zenoh-ext **advanced** publishers
-/// (per-key cache + miss/publisher detection) so it always matches the GUI's
-/// `AdvancedSubscriber` on `zensight/**` — that pairing is required for reliable
-/// delivery + late-joiner history/recovery. **Control-plane** writes
-/// (`publish_raw` / `publish_json` / `delete`, for `@/…` keys the GUI reads with
-/// a plain subscriber) stay plain `put`/`delete`.
+/// **Telemetry** (`publish` / `publish_to_key` / `publish_batch`) publishes
+/// under the v1 grammar (`<base>/@v1/<origin>/telemetry/<producer>/…`) on the
+/// **baseline delivery tier** (RFC 04 §3.2): plain declared publishers, no
+/// per-key cache/heartbeat machinery — a late joiner waits out the next
+/// cadence (`seed = none`), which is the class default. The advanced tier is
+/// opt-in per subject (RFC 04 §3.3; the runner's evidence publishers use
+/// cache-only depth 1). **Control-plane** writes (`publish_raw` /
+/// `publish_json` / `delete`) stay plain declared `put`/`delete`.
 #[derive(Clone, Debug)]
 pub struct Publisher {
     session: Arc<zenoh::Session>,
+    /// The v1 telemetry prefix (`<base>/@v1/<origin>/telemetry/<producer>`).
     key_prefix: String,
     format: Format,
-    /// Shared advanced-publisher registry backing the telemetry path. Shared
-    /// across clones so the per-key publisher cache persists.
-    registry: Arc<AdvancedPublisherRegistry>,
-    /// Shared registry of declared plain publishers backing the control-plane
-    /// path (`publish_raw`/`publish_json`/`delete`) — declared, never one-shot
-    /// `session.put`, so `@/…` keys are interned + routing-optimized too.
+    /// The v1 key context this publisher derives every key from.
+    v1: V1Context,
+    /// Shared registry of declared plain publishers backing both telemetry
+    /// (baseline tier) and control-plane writes — declared, never one-shot
+    /// `session.put`, so keys are interned + routing-optimized.
     control: Arc<zensight_common::PublisherRegistry>,
 }
 
@@ -43,21 +44,21 @@ impl Publisher {
         key_prefix: impl Into<String>,
         format: Format,
     ) -> Self {
-        let key_prefix = key_prefix.into();
-        let registry = Arc::new(AdvancedPublisherRegistry::new(
-            session.clone(),
-            key_prefix.clone(),
-            format,
-            AdvancedPublisherConfig::default(),
-        ));
+        let v1 = V1Context::from_prefix(&key_prefix.into());
+        let key_prefix = v1.telemetry_prefix();
         let control = Arc::new(zensight_common::PublisherRegistry::new(session.clone()));
         Self {
             session,
             key_prefix,
             format,
-            registry,
+            v1,
             control,
         }
+    }
+
+    /// The v1 key context (origin + producer + base) behind this publisher.
+    pub fn v1(&self) -> &V1Context {
+        &self.v1
     }
 
     /// Get the key prefix.
@@ -87,18 +88,22 @@ impl Publisher {
         }
     }
 
-    /// Publish a telemetry point (advanced publisher — matches the GUI's
-    /// `AdvancedSubscriber`).
+    /// Publish a telemetry point (baseline tier: plain declared publisher).
     ///
     /// The key is constructed by appending `key_suffix` to the publisher's prefix.
     pub async fn publish(&self, key_suffix: &str, point: &TelemetryPoint) -> Result<()> {
-        self.registry.publish(key_suffix, point).await
+        let key = self.build_key(key_suffix);
+        self.publish_to_key(&key, point).await
     }
 
-    /// Publish a telemetry point with a full key (not using prefix), via an
-    /// advanced publisher.
+    /// Publish a telemetry point with a full key (not using prefix).
     pub async fn publish_to_key(&self, key: &str, point: &TelemetryPoint) -> Result<()> {
-        self.registry.publish_to_key(key, point).await
+        let payload =
+            zensight_common::encode(point, self.format).map_err(|e| SensorError::Publish {
+                key: key.to_string(),
+                message: e.to_string(),
+            })?;
+        self.publish_raw(key, payload, QosClass::Telemetry).await
     }
 
     /// Publish a batch of telemetry points.

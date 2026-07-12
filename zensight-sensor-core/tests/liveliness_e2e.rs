@@ -4,7 +4,7 @@
 //! Two real Zenoh sessions (sensor + frontend) over an explicit localhost
 //! endpoint, so the DELETE genuinely crosses the wire — a same-session
 //! subscriber would die with the sensor and prove nothing. The subscriber
-//! uses the frontend's host-scoped pattern (`zensight/*/*/@/alive`,
+//! uses the frontend's v1 presence pattern (`zensight/@v1/*/state/*/alive`,
 //! `SENSOR_LIVELINESS_SCOPED_EXPR` in zensight/src/subscription.rs) so this
 //! test pins the cross-crate key-shape contract.
 
@@ -15,7 +15,7 @@ use zenoh::sample::SampleKind;
 use zensight_sensor_core::LivelinessManager;
 
 /// The frontend's host-scoped sensor-liveliness pattern.
-const FRONTEND_SENSOR_LIVELINESS_EXPR: &str = "zensight/*/*/@/alive";
+const FRONTEND_SENSOR_LIVELINESS_EXPR: &str = "zensight/@v1/*/state/*/alive";
 
 /// Scouting off so concurrent tests can't cross-contaminate; the two peers
 /// are wired together with an explicit listen/connect endpoint instead.
@@ -88,7 +88,9 @@ async fn token_delete_reaches_frontend_pattern_on_session_close() {
             .await
             .expect("open sensor session"),
     );
-    let manager = LivelinessManager::new(sensor.clone(), "zensight/testproto/hostliv")
+    let ctx = zensight_sensor_core::v1::V1Context::from_prefix("zensight/testproto");
+    let expected_key = ctx.alive_key();
+    let manager = LivelinessManager::new(sensor.clone(), ctx)
         .await
         .expect("declare sensor token");
 
@@ -98,10 +100,7 @@ async fn token_delete_reaches_frontend_pattern_on_session_close() {
         .expect("timed out waiting for liveliness PUT")
         .expect("subscriber closed");
     assert_eq!(sample.kind(), SampleKind::Put);
-    assert_eq!(
-        sample.key_expr().as_str(),
-        "zensight/testproto/hostliv/@/alive"
-    );
+    assert_eq!(sample.key_expr().as_str(), expected_key);
 
     // Sensor shuts down: manager dropped, session closed — exactly what
     // SensorRunner does. The frontend must see the token DELETE.
@@ -113,8 +112,5 @@ async fn token_delete_reaches_frontend_pattern_on_session_close() {
         .expect("timed out waiting for liveliness DELETE")
         .expect("subscriber closed");
     assert_eq!(sample.kind(), SampleKind::Delete);
-    assert_eq!(
-        sample.key_expr().as_str(),
-        "zensight/testproto/hostliv/@/alive"
-    );
+    assert_eq!(sample.key_expr().as_str(), expected_key);
 }

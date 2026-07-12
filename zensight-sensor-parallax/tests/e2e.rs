@@ -12,9 +12,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use zensight_common::command::{Command, command_key, query_key, status_key};
-use zensight_common::keyexpr::{media_preview_key, media_video_key};
 use zensight_common::stream::{FrameMeta, StreamControl, StreamDescriptor, StreamStatus};
-use zensight_common::{Format, Protocol, decode};
+use zensight_common::{Format, decode};
 use zensight_sensor_core::Publisher;
 use zensight_sensor_parallax::catalog::Catalog;
 use zensight_sensor_parallax::config::ParallaxConfig;
@@ -153,6 +152,12 @@ async fn spawn_sensor_with_config(
     (handle, registry)
 }
 
+/// The sensor runs in-process, so the test's v1 context (same global host
+/// origin) yields exactly the keys the sensor publishes on (epic #453).
+fn v1ctx() -> zensight_sensor_core::v1::V1Context {
+    zensight_sensor_core::v1::V1Context::from_prefix("zensight/parallax")
+}
+
 async fn query_catalogue(viewer: &zenoh::Session, host_prefix: &str) -> Vec<StreamDescriptor> {
     let replies = viewer
         .get(query_key(host_prefix, "streams"))
@@ -206,7 +211,7 @@ async fn open_preview_streams_jpeg_frames_at_config_fps() {
     let handle = spawn_sensor(sensor.clone(), source).await;
 
     // Subscribe FIRST so the very first published frame is observed.
-    let preview_key = media_preview_key(Protocol::Parallax, source, "test0");
+    let preview_key = v1ctx().media_preview_key("test0");
     let sub = viewer
         .declare_subscriber(&preview_key)
         .await
@@ -313,7 +318,10 @@ async fn open_h264_video_streams_with_keyframe_control() {
     // configurable and the catalogue doesn't carry it) — zenoh matching is
     // intersection-based, so the sensor's matching listener must see this
     // subscriber as a viewer (asserted below via the status queryable).
-    let video_key = media_video_key(Protocol::Parallax, source, "test0", "h264", "*");
+    let video_key = {
+        let concrete = v1ctx().media_video_key("test0", "h264", "main");
+        format!("{}/*", concrete.rsplit_once('/').expect("profile chunk").0)
+    };
     let sub = viewer
         .declare_subscriber(&video_key)
         .await
@@ -473,12 +481,12 @@ async fn stats_ticker_publishes_fps_telemetry() {
 
     // Watch the stream's stats subtree (ordinary telemetry keys).
     let stats_sub = viewer
-        .declare_subscriber(format!("zensight/parallax/{source}/test0/stats/**"))
+        .declare_subscriber(format!("{}/test0/stats/**", v1ctx().telemetry_prefix()))
         .await
         .expect("declare stats subscriber");
 
     // Keep a media viewer subscribed so the 1 s idle reaper never fires.
-    let preview_key = media_preview_key(Protocol::Parallax, source, "test0");
+    let preview_key = v1ctx().media_preview_key("test0");
     let media_sub = viewer
         .declare_subscriber(&preview_key)
         .await
@@ -554,7 +562,7 @@ async fn close_and_idle_reaper_tear_stream_down() {
     let host_prefix = format!("zensight/parallax/{source}");
     let handle = spawn_sensor(sensor.clone(), source).await;
 
-    let preview_key = media_preview_key(Protocol::Parallax, source, "test0");
+    let preview_key = v1ctx().media_preview_key("test0");
     let sub = viewer
         .declare_subscriber(&preview_key)
         .await

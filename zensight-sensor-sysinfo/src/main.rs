@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
 
     tracing::info!(
         "Sysinfo sensor running (prefix: {}, interval: {}s, source: {})",
-        sysinfo_config.key_prefix,
+        zensight_sensor_core::v1::v1_telemetry_prefix(&sysinfo_config.key_prefix),
         sysinfo_config.poll_interval_secs,
         source
     );

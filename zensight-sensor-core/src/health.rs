@@ -125,24 +125,6 @@ pub struct SensorHealth {
     liveliness_manager: Option<Arc<LivelinessManager>>,
 }
 
-/// Build the health key for one sensor instance:
-/// `{prefix}/{source}/@/health` (legacy `{prefix}/@/health` without a source).
-pub(crate) fn health_key(prefix: &str, source: Option<&str>) -> String {
-    crate::keys::health_key(prefix, source)
-}
-
-/// Build the errors key for one sensor instance:
-/// `{prefix}/{source}/@/errors` (legacy `{prefix}/@/errors` without a source).
-pub(crate) fn errors_key(prefix: &str, source: Option<&str>) -> String {
-    crate::keys::errors_key(prefix, source)
-}
-
-/// Build the device-liveness key for one device of one sensor instance:
-/// `{prefix}/{source}/@/devices/{device}/liveness`.
-pub(crate) fn device_liveness_key(prefix: &str, source: Option<&str>, device: &str) -> String {
-    crate::keys::device_liveness_key(prefix, source, device)
-}
-
 /// Device state for liveness tracking.
 #[derive(Debug, Clone)]
 struct DeviceState {
@@ -554,7 +536,7 @@ impl SensorHealth {
         };
 
         let snapshot = self.snapshot();
-        let key = health_key(publisher.key_prefix(), self.source.as_deref());
+        let key = publisher.v1().health_key();
         publisher
             .publish_json(&key, &snapshot, zensight_common::QosClass::HealthLiveness)
             .await
@@ -567,8 +549,7 @@ impl SensorHealth {
         };
 
         if let Some(liveness) = self.device_liveness(device_id) {
-            let key =
-                device_liveness_key(publisher.key_prefix(), self.source.as_deref(), device_id);
+            let key = publisher.v1().device_liveness_key(device_id);
             publisher
                 .publish_json(&key, &liveness, zensight_common::QosClass::HealthLiveness)
                 .await?;
@@ -583,7 +564,7 @@ impl SensorHealth {
             return Ok(());
         };
 
-        let key = errors_key(publisher.key_prefix(), self.source.as_deref());
+        let key = publisher.v1().errors_key();
         publisher
             .publish_json(&key, report, zensight_common::QosClass::HealthLiveness)
             .await
@@ -750,30 +731,18 @@ mod tests {
         assert_eq!(health.snapshot().metrics_published, 15);
     }
 
-    /// Multi-host pin: with a source the control-plane keys are host-scoped
-    /// (`{prefix}/{source}/@/…`); without one they keep the legacy
-    /// protocol-scoped shape for standalone/legacy uses.
+    /// v1 pin: state keys are origin-scoped (`<base>/@v1/<origin>/state/
+    /// <producer>/…`, RFC 04), so two hosts running the same producer never
+    /// collide — the job the legacy `{source}` chunk used to do.
     #[test]
-    fn test_control_plane_keys_are_host_scoped() {
-        assert_eq!(
-            health_key("zensight/sysinfo", Some("hostA")),
-            "zensight/sysinfo/hostA/@/health"
-        );
-        assert_eq!(
-            health_key("zensight/sysinfo", None),
-            "zensight/sysinfo/@/health"
-        );
-        assert_eq!(
-            errors_key("zensight/sysinfo", Some("hostA")),
-            "zensight/sysinfo/hostA/@/errors"
-        );
-        assert_eq!(
-            device_liveness_key("zensight/snmp", Some("poller01"), "router01"),
-            "zensight/snmp/poller01/@/devices/router01/liveness"
-        );
-        assert_eq!(
-            device_liveness_key("zensight/snmp", None, "router01"),
-            "zensight/snmp/@/devices/router01/liveness"
+    fn test_state_keys_are_origin_scoped() {
+        let ctx = crate::v1::V1Context::from_prefix("zensight/sysinfo");
+        assert!(ctx.health_key().starts_with("zensight/@v1/h-"));
+        assert!(ctx.health_key().ends_with("/state/sysinfo/health"));
+        assert!(ctx.errors_key().ends_with("/state/sysinfo/errors"));
+        assert!(
+            ctx.device_liveness_key("router01")
+                .ends_with("/state/sysinfo/device/router01/liveness")
         );
     }
 

@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
         netflow_config.key_prefix
     );
 
-    let key_prefix = netflow_config.key_prefix.clone();
+    let key_prefix = zensight_sensor_core::v1::v1_telemetry_prefix(&netflow_config.key_prefix);
     let publish_flows = netflow_config.publish_flows;
 
     // Build status metadata

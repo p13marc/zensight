@@ -1456,7 +1456,7 @@ impl SystemCollector {
         labels: HashMap<String, String>,
     ) {
         self.health.record_metrics_published(1);
-        let key = format!("{}/{}/{}", self.key_prefix, self.source, metric);
+        let key = format!("{}/{}", self.key_prefix, metric);
 
         let point = TelemetryPoint {
             timestamp,
@@ -1485,8 +1485,10 @@ impl SystemCollector {
 }
 
 /// Build a key expression for a sysinfo metric.
-pub fn build_key_expr(prefix: &str, source: &str, metric: &str) -> String {
-    format!("{}/{}/{}", prefix, source, metric)
+pub fn build_key_expr(prefix: &str, _source: &str, metric: &str) -> String {
+    // v1 (epic #453): the origin chunk in the prefix replaces the mutable
+    // hostname; subjects start at the metric.
+    format!("{}/{}", prefix, metric)
 }
 
 #[cfg(test)]
@@ -1496,10 +1498,13 @@ mod tests {
 
     #[test]
     fn test_build_key_expr() {
-        assert_eq!(
-            build_key_expr("zensight/sysinfo", "server01", "cpu/usage"),
-            "zensight/sysinfo/server01/cpu/usage"
-        );
+        // v1 (epic #453): the origin in the prefix replaces the hostname
+        // chunk — subjects start at the metric.
+        let prefix = zensight_sensor_core::v1::v1_telemetry_prefix("zensight/sysinfo");
+        let key = build_key_expr(&prefix, "server01", "cpu/usage");
+        assert!(key.starts_with("zensight/@v1/h-"), "{key}");
+        assert!(key.ends_with("/telemetry/sysinfo/cpu/usage"), "{key}");
+        assert!(!key.contains("server01"), "{key}");
     }
 
     #[test]

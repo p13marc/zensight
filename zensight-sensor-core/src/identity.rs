@@ -10,11 +10,11 @@
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-use sha2::{Digest, Sha256};
-
 /// App-scoped salt for the machine-id hash (the `sd_id128_get_machine_app_specific`
 /// spirit). Fixed — not configurable — so every sensor on a host agrees.
-const HOST_ID_SALT: &str = "zensight-host-id-v1";
+/// The application salt lives in zensight-keyspace (RFC 06 §1); re-exported
+/// here for the doc trail. The wire `host_id` IS the v1 origin id.
+const HOST_ID_SALT: &str = zensight_keyspace::origin::ZENSIGHT_SALT;
 
 /// The identity envelope for the local host.
 #[derive(Debug, Clone, Default)]
@@ -101,15 +101,13 @@ pub(crate) fn hash_machine_id(raw: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    let mut hasher = Sha256::new();
-    hasher.update(trimmed.as_bytes());
-    hasher.update(HOST_ID_SALT.as_bytes());
-    let digest = hasher.finalize();
-    Some(digest.iter().fold(String::with_capacity(64), |mut s, b| {
-        use std::fmt::Write;
-        let _ = write!(s, "{b:02x}");
-        s
-    }))
+    // The v1 origin id (RFC 06 §1): payload host_id == key origin == entity
+    // id, so consumers group without a correlation join (epic #453).
+    Some(
+        zensight_keyspace::origin::HostId::from_machine_id(trimmed, HOST_ID_SALT)
+            .as_str()
+            .to_string(),
+    )
 }
 
 /// Non-loopback interface MACs from a `/sys/class/net`-shaped directory.
@@ -196,10 +194,10 @@ mod tests {
     use super::*;
 
     const FIXTURE_MACHINE_ID: &str = "0123456789abcdef0123456789abcdef";
-    /// sha256(FIXTURE_MACHINE_ID + HOST_ID_SALT) — pinned so any change to the
-    /// hashing scheme (which would silently re-identify every host) fails loudly.
-    const FIXTURE_HOST_ID: &str =
-        "4631a192d7bd0b99420f3f98ad683b52ed0b8d7eb00383858279f80a7ebc0872";
+    /// `h-` + first 12 hex of sha256(FIXTURE_MACHINE_ID + HOST_ID_SALT) — the
+    /// v1 origin id (RFC 06 §1), pinned so any change to the hashing scheme
+    /// (which would silently re-identify every host) fails loudly.
+    const FIXTURE_HOST_ID: &str = "h-4631a192d7bd";
 
     #[test]
     fn hash_is_pinned_and_never_leaks_raw_machine_id() {

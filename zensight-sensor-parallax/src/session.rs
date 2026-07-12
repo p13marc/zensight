@@ -24,10 +24,9 @@ use parallax::pipeline::UnifiedPipelineHandle as PipelineHandle;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use zenoh::bytes::Encoding;
+use zensight_common::QosClass;
 use zensight_common::command::status_key;
-use zensight_common::keyexpr::{media_preview_key, media_video_key};
 use zensight_common::stream::{StreamControl, StreamStatus};
-use zensight_common::{Protocol, QosClass};
 use zensight_sensor_core::{Publisher, RawMediaPublisher, SensorHealth};
 
 use crate::alerts::ParallaxAlerts;
@@ -260,6 +259,9 @@ impl StreamSession {
 pub struct SessionManager {
     catalog: Arc<Catalog>,
     config: ParallaxConfig,
+    /// Legacy instance label; keys no longer carry it (v1 origin does, epic
+    /// #453) but stream status payloads may still reference it.
+    #[allow(dead_code)]
     source: String,
     publisher: Publisher,
     status_key: String,
@@ -570,15 +572,12 @@ impl SessionManager {
         };
 
         // Declare the media publisher on the profile's concrete key.
-        let key = match profile {
-            Profile::Video => media_video_key(
-                Protocol::Parallax,
-                &self.source,
-                stream,
-                "h264",
-                &self.config.video.profile,
-            ),
-            Profile::Preview => media_preview_key(Protocol::Parallax, &self.source, stream),
+        let key = {
+            let ctx = self.publisher.v1();
+            match profile {
+                Profile::Video => ctx.media_video_key(stream, "h264", &self.config.video.profile),
+                Profile::Preview => ctx.media_preview_key(stream),
+            }
         };
         let media = match self.publisher.raw_media_publisher(key.clone()).await {
             Ok(p) => Arc::new(p),

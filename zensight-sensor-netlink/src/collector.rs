@@ -950,7 +950,7 @@ impl Collector {
         // Tap the latest numeric value for the sentinel's metric-threshold checks.
         self.metric_cache.update(&point.metric, &point.value).await;
         // Key = <prefix>/<source>/<metric>, published via a cached AdvancedPublisher.
-        let suffix = format!("{}/{}", point.source, point.metric);
+        let suffix = point.metric.clone();
         if let Err(e) = self.registry.publish(&suffix, point).await {
             tracing::warn!(error = %e, "publish failed");
         }

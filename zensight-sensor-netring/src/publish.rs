@@ -237,13 +237,13 @@ pub async fn run_drains(
             point = channels.telemetry.recv() => {
                 match point {
                     Some(point) => { health.record_metrics_published(1);
-                        let suffix = format!("{}/{}", point.source, point.metric);
+                        let suffix = point.metric.clone();
                         if let Err(e) = registry.publish(&suffix, &point).await { tracing::warn!(error=%e, "publish failed"); } }
                     None => {
                         // Monitor finished (e.g. pcap EOF / shutdown): flush a final
                         // aggregate so short replays still emit their counts.
                         for point in build_aggregate(&sensor_id) {
-                            let suffix = format!("{}/{}", point.source, point.metric);
+                            let suffix = point.metric.clone();
                             let _ = registry.publish(&suffix, &point).await;
                         }
                         // Drain any detector anomalies / sensor alerts still queued so a
@@ -266,7 +266,7 @@ pub async fn run_drains(
                         // Flush a final per-detector count so short replays surface totals.
                         for (kind, count) in &anomaly_counts {
                             let point = map::anomaly_count_point(&sensor_id, kind, *count);
-                            let suffix = format!("{}/{}", point.source, point.metric);
+                            let suffix = point.metric.clone();
                             let _ = registry.publish(&suffix, &point).await;
                         }
                         // Give late subscribers a moment to pull from the cache.
@@ -305,14 +305,14 @@ pub async fn run_drains(
             _ = flow_tick.tick() => {
                 for point in build_aggregate(&sensor_id) {
                     health.record_metrics_published(1);
-                    let suffix = format!("{}/{}", point.source, point.metric);
+                    let suffix = point.metric.clone();
                     if let Err(e) = registry.publish(&suffix, &point).await { tracing::warn!(error=%e, "publish failed"); }
                 }
                 // Per-detector anomaly counters (#254): re-emit the running totals.
                 for (kind, count) in &anomaly_counts {
                     let point = map::anomaly_count_point(&sensor_id, kind, *count);
                     health.record_metrics_published(1);
-                    let suffix = format!("{}/{}", point.source, point.metric);
+                    let suffix = point.metric.clone();
                     if let Err(e) = registry.publish(&suffix, &point).await { tracing::warn!(error=%e, "publish failed"); }
                 }
                 // The capture host responded this window.

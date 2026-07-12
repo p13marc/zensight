@@ -4,21 +4,20 @@
 //! Liveliness tokens allow the frontend to instantly detect when sensors or devices
 //! come online or go offline.
 //!
-//! # Key Expressions
+//! # Key Expressions (v1, RFC 04 §5)
 //!
-//! The manager takes the sensor instance's host-scoped control prefix
-//! (`zensight/<protocol>/<source>`), so two hosts running the same protocol
-//! hold distinct tokens:
+//! The manager takes the sensor's [`V1Context`]; token keys mirror the state
+//! grammar (origin-scoped, so two hosts never collide):
 //!
-//! - Sensor liveliness: `zensight/<protocol>/<source>/@/alive`
-//! - Device liveliness: `zensight/<protocol>/<source>/@/devices/<device_id>/alive`
+//! - Sensor liveliness: `<base>/@v1/<origin>/state/<producer>/alive`
+//! - Device liveliness: `<base>/@v1/<origin>/state/<producer>/device/<device>/alive`
 //!
 //! # Example
 //!
 //! ```ignore
 //! use zensight_sensor_core::LivelinessManager;
 //!
-//! let manager = LivelinessManager::new(session.clone(), "zensight/snmp/poller01").await?;
+//! let manager = LivelinessManager::new(session.clone(), publisher.v1().clone()).await?;
 //!
 //! // Declare device as alive
 //! manager.declare_device_alive("router01").await?;
@@ -35,6 +34,7 @@ use zenoh::Session;
 use zenoh::liveliness::LivelinessToken;
 
 use crate::error::{Result, SensorError};
+use crate::v1::V1Context;
 
 /// Manages liveliness tokens for a sensor and its devices.
 ///
@@ -44,8 +44,8 @@ use crate::error::{Result, SensorError};
 pub struct LivelinessManager {
     /// Zenoh session.
     session: Arc<Session>,
-    /// Host-scoped control prefix (e.g., "zensight/snmp/poller01").
-    key_prefix: String,
+    /// The v1 key context (origin + producer) the token keys derive from.
+    ctx: V1Context,
     /// Sensor-level liveliness token.
     /// Kept alive for the lifetime of the manager.
     #[allow(dead_code)]
@@ -57,13 +57,10 @@ pub struct LivelinessManager {
 impl LivelinessManager {
     /// Create a new liveliness manager and declare the sensor as alive.
     ///
-    /// The sensor liveliness token is declared immediately at:
-    /// `<key_prefix>/@/alive`
-    ///
-    /// For example: `zensight/snmp/poller01/@/alive`
-    pub async fn new(session: Arc<Session>, key_prefix: impl Into<String>) -> Result<Self> {
-        let key_prefix = key_prefix.into();
-        let sensor_key = crate::keys::alive_key(&key_prefix);
+    /// The sensor liveliness token is declared immediately at
+    /// `<base>/@v1/<origin>/state/<producer>/alive` (RFC 04 §5).
+    pub async fn new(session: Arc<Session>, ctx: V1Context) -> Result<Self> {
+        let sensor_key = ctx.alive_key();
 
         let sensor_token = session
             .liveliness()
@@ -77,7 +74,7 @@ impl LivelinessManager {
 
         Ok(Self {
             session,
-            key_prefix,
+            ctx,
             sensor_token,
             device_tokens: RwLock::new(HashMap::new()),
         })
@@ -85,8 +82,8 @@ impl LivelinessManager {
 
     /// Declare a device as alive.
     ///
-    /// Creates a liveliness token at:
-    /// `<key_prefix>/@/devices/<device_id>/alive`
+    /// Creates a liveliness token at
+    /// `<base>/@v1/<origin>/state/<producer>/device/<device>/alive`
     ///
     /// If the device already has a token, this is a no-op.
     pub async fn declare_device_alive(&self, device_id: &str) -> Result<()> {
@@ -98,7 +95,7 @@ impl LivelinessManager {
             }
         }
 
-        let device_key = crate::keys::device_alive_key(&self.key_prefix, device_id);
+        let device_key = self.ctx.device_alive_key(device_id);
 
         let token = self
             .session
@@ -145,11 +142,6 @@ impl LivelinessManager {
         tokens.keys().cloned().collect()
     }
 
-    /// Get the key prefix.
-    pub fn key_prefix(&self) -> &str {
-        &self.key_prefix
-    }
-
     /// Undeclare all device tokens.
     ///
     /// Called automatically on drop, but can be called explicitly for cleanup.
@@ -170,16 +162,17 @@ mod tests {
 
     #[test]
     fn test_key_format() {
-        // The prefix is the host-scoped instance prefix, so tokens from two
-        // hosts running the same protocol never collide.
-        let prefix = "zensight/snmp/poller01";
-        let sensor_key = format!("{}/@/alive", prefix);
-        assert_eq!(sensor_key, "zensight/snmp/poller01/@/alive");
+        // Token keys mirror the v1 state grammar; origin-scoped so two hosts
+        // running the same producer never collide (RFC 04 §5).
+        let ctx = crate::v1::V1Context::from_prefix("zensight/snmp");
+        let sensor_key = ctx.alive_key();
+        assert!(sensor_key.starts_with("zensight/@v1/h-"), "{sensor_key}");
+        assert!(sensor_key.ends_with("/state/snmp/alive"), "{sensor_key}");
 
-        let device_key = format!("{}/@/devices/{}/alive", prefix, "router01");
-        assert_eq!(
-            device_key,
-            "zensight/snmp/poller01/@/devices/router01/alive"
+        let device_key = ctx.device_alive_key("router01");
+        assert!(
+            device_key.ends_with("/state/snmp/device/router01/alive"),
+            "{device_key}"
         );
     }
 }

@@ -664,7 +664,11 @@ fn emit(files: &[RegistryFile]) -> String {
                 s.chunks.len()
             };
             let len_cond = if has_rest {
-                format!("tail.len() > {fixed}")
+                if fixed == 0 {
+                    "!tail.is_empty()".to_string()
+                } else {
+                    format!("tail.len() > {fixed}")
+                }
             } else {
                 format!("tail.len() == {fixed}")
             };

@@ -13496,6 +13496,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "dirs 5.0.1",
  "hostname",
  "if-addrs",
  "json5",
@@ -13514,6 +13515,7 @@ dependencies = [
  "zenoh-blob",
  "zenoh-ext",
  "zensight-common",
+ "zensight-keyspace",
  "zstd",
 ]
 
