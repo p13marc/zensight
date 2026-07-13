@@ -1,4 +1,13 @@
 # Subject registry: @catalog (identity/ontology service). RFC 06, RFC 08 §2.
+#
+# `@catalog/state/claim/{zid}` is deliberately NOT registered, and that is not an
+# oversight. It is a **liveliness token** — the correlator declares it with
+# `session.liveliness().declare_token()` (zensight-correlator/src/guard.rs), so it
+# carries no payload and is never `put`. The registry describes *data subjects*: a
+# subject exists to say what a key's payload is and who may write it. A presence
+# token has neither, which is why `alive` is a reserved leaf that build.rs refuses
+# as a subject chunk at all. Registering `claim` would advertise a data surface that
+# nothing serves — the mirror image of the advertised-but-unserved finding in #467.
 
 [registry]
 version = "1.0"

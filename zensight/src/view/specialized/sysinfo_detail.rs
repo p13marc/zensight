@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use zensight_common::ProcessRecord;
+use zensight_common::{LatencyReport, ProcessRecord};
 
 use crate::view::specialized::fetch::Fetch;
 
@@ -87,10 +87,25 @@ pub fn pid_filter_verdict(procs: &[ProcessRecord], filter: &PidFilter) -> PidVer
     }
 }
 
+/// The eBPF saturation-histogram key (#99). No parameters: the sensor replies
+/// with the whole report, and it always declares the queryable — even when the
+/// histograms are `available: false` — so the GUI can tell "not built with
+/// eBPF" from "no answer at all".
+pub fn latency_key(origin: Option<&str>) -> String {
+    match origin {
+        Some(o) => zensight_common::origin_rpc_key(o, "sysinfo", "latency"),
+        None => zensight_common::fleet_rpc_key("sysinfo", "latency"),
+    }
+}
+
 /// On-demand process detail fetched for the selected sysinfo host.
 #[derive(Debug, Clone, Default)]
 pub struct SysinfoDetailState {
     pub processes: Fetch<Vec<ProcessRecord>>,
+    /// eBPF run-queue + block-I/O latency histograms (#99, `@rpc/sysinfo/latency`).
+    /// These answer what a load average cannot: is the CPU oversubscribed, and is
+    /// the disk the bottleneck.
+    pub latency: Fetch<LatencyReport>,
     /// The sort the last fetch used (drives the active toggle highlight).
     pub sort: ProcessSort,
     /// Active pid pivot (#313): filters the explorer to one process, with the
@@ -109,6 +124,42 @@ impl SysinfoDetailState {
     pub fn apply(&mut self, result: Result<Vec<ProcessRecord>, String>) {
         self.processes = Fetch::from_result(result);
     }
+
+    /// Mark a latency-histogram fetch as in flight.
+    pub fn loading_latency(&mut self) {
+        self.latency = Fetch::Loading;
+    }
+
+    /// Store the latency-histogram fetch outcome.
+    pub fn apply_latency(&mut self, result: Result<LatencyReport, String>) {
+        self.latency = Fetch::from_result(result);
+    }
+}
+
+/// Fetch + decode the eBPF saturation histograms (#99).
+///
+/// The reply is a single `LatencyReport`, not a `Vec`, so this cannot reuse the
+/// record fan-in helpers — it takes the first reply from the drilled-in host.
+pub async fn fetch_latency(
+    session: Arc<zenoh::Session>,
+    origin: Option<String>,
+) -> Option<LatencyReport> {
+    let key = latency_key(origin.as_deref());
+    let replies = session
+        .get(&key)
+        .target(zenoh::query::QueryTarget::All)
+        .timeout(std::time::Duration::from_secs(3))
+        .await
+        .ok()?;
+    while let Ok(reply) = replies.recv_async().await {
+        if let Ok(sample) = reply.result()
+            && let Ok(report) =
+                zensight_common::decode_auto::<LatencyReport>(&sample.payload().to_bytes())
+        {
+            return Some(report);
+        }
+    }
+    None
 }
 
 /// Fetch + decode the process table sorted by `sort` — origin-scoped when

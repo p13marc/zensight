@@ -160,11 +160,17 @@ impl AdvancedPublisherRegistry {
     }
 
     /// Build a full key expression from a suffix.
+    ///
+    /// The advanced tier declares its own publishers rather than going through
+    /// [`zensight_common::PublisherRegistry`], so the registry-conformance
+    /// guard (RFC 08 §5) has to be applied here too.
     fn build_key(&self, suffix: &str) -> String {
         if suffix.is_empty() {
             self.telemetry_prefix.clone()
         } else {
-            format!("{}/{}", self.telemetry_prefix, suffix)
+            let key = format!("{}/{}", self.telemetry_prefix, suffix);
+            zensight_common::metric_guard::check_telemetry_key(&key);
+            key
         }
     }
 

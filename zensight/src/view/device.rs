@@ -93,6 +93,9 @@ pub struct DeviceDetailState {
     /// On-demand netring flow detail, fetched lazily from `@rpc/netring/flows`.
     pub netring_detail: crate::view::specialized::netring_detail::NetringDetailState,
     pub systemd_detail: crate::view::specialized::systemd_detail::SystemdDetailState,
+    /// On-demand NetFlow record ring, fetched lazily from `@rpc/netflow/flows`
+    /// (#469). NetFlow publishes only rollups — the per-flow detail is pulled.
+    pub netflow_detail: crate::view::specialized::netflow_detail::NetflowDetailState,
     /// Parallax stream catalogue + live preview tiles, fetched/opened on
     /// demand from the sensor's stream-control channels (#408).
     pub parallax_detail: crate::view::specialized::parallax_detail::ParallaxDetailState,
@@ -114,6 +117,13 @@ pub struct DeviceDetailState {
     /// Active tab of the tabbed specialized view (#243), remembered per device.
     /// Defaults to `Overview`.
     pub specialized_tab: crate::view::specialized::SpecializedTab,
+    /// This device's host origin (`h-<12hex>`), once the source→origin map has
+    /// learned it (#476). `None` in the ~5 s before the first health doc lands,
+    /// which is why the Focus control is disabled rather than guessing: an
+    /// origin-scoped selector built from a wrong origin subscribes to silence.
+    pub origin: Option<String>,
+    /// Whether the link is currently focused on *this* host (#476).
+    pub focused: bool,
 }
 
 impl DeviceDetailState {
@@ -138,6 +148,7 @@ impl DeviceDetailState {
             netlink_detail: Default::default(),
             netring_detail: Default::default(),
             systemd_detail: Default::default(),
+            netflow_detail: Default::default(),
             parallax_detail: Default::default(),
             sysinfo_detail: Default::default(),
             chart_expanded: false,
@@ -146,6 +157,8 @@ impl DeviceDetailState {
             chart_to_input: String::new(),
             favorites: HashSet::new(),
             specialized_tab: Default::default(),
+            origin: None,
+            focused: false,
         }
     }
 
@@ -1048,6 +1061,54 @@ fn render_header<'a>(
             .into()
         });
 
+    // "Focus this host" (#476): drop the fleet subscriptions and declare
+    // `zensight/@v1/<origin>/**` instead. On a constrained link a technician
+    // debugging one host otherwise pays for every host's telemetry to reach
+    // their laptop; the v1 grammar put the origin at a fixed position, which is
+    // what makes "this host and nothing else" expressible at all.
+    let focus_button: Element<'a, Message> = match (&state.origin, state.focused) {
+        (_, true) => tooltip(
+            button(text("Exit focus").size(12))
+                .on_press(Message::SetFocusHost(None))
+                .padding([2, 8])
+                .style(iced::widget::button::primary),
+            container(text("Resubscribe to the whole fleet.").size(11))
+                .padding(6)
+                .style(container::rounded_box),
+            tooltip::Position::Bottom,
+        )
+        .into(),
+        (Some(origin), false) => tooltip(
+            button(text("Focus this host").size(12))
+                .on_press(Message::SetFocusHost(Some(origin.clone())))
+                .padding([2, 8])
+                .style(iced::widget::button::secondary),
+            container(
+                text(
+                    "Subscribe to this host only. Fleet telemetry stops crossing \
+                     the link until you exit — the point of focus on a constrained \
+                     link.",
+                )
+                .size(11),
+            )
+            .padding(6)
+            .style(container::rounded_box),
+            tooltip::Position::Bottom,
+        )
+        .into(),
+        // Origin not learned yet: disabled (no `on_press`) rather than guessing.
+        (None, false) => tooltip(
+            button(text("Focus this host").size(12))
+                .padding([2, 8])
+                .style(iced::widget::button::secondary),
+            container(text("Waiting for this host's identity (health doc).").size(11))
+                .padding(6)
+                .style(container::rounded_box),
+            tooltip::Position::Bottom,
+        )
+        .into(),
+    };
+
     let mut bar = row![
         back_button,
         prev_button,
@@ -1060,7 +1121,11 @@ fn render_header<'a>(
     if let Some(summary) = identity_summary {
         bar = bar.push(summary);
     }
-    bar = bar.push(metric_count).push(csv_button).push(json_button);
+    bar = bar
+        .push(metric_count)
+        .push(focus_button)
+        .push(csv_button)
+        .push(json_button);
     if let Some(forget) = forget_button {
         bar = bar.push(forget);
     }

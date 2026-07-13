@@ -17,6 +17,7 @@ mod novelty;
 mod parser;
 mod query;
 mod receiver;
+mod telemetry_guard;
 mod template;
 
 use anyhow::Result;

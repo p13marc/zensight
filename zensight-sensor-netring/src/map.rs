@@ -177,17 +177,33 @@ pub fn netring_backend(kind: crate::config::BackendKind) -> netring::monitor::Ba
 /// `capture/focus/*` counters (#225): packets/bytes seen by the reloadable
 /// capture-focus packet sub. Narrowing the live filter slows these for
 /// non-matching traffic — the visible effect of a runtime capture focus.
+/// Build one telemetry point.
+///
+/// Every metric name this sensor emits funnels through here, so this is where
+/// the registry gets enforced (RFC 08 §5, issue #468): in debug builds — which
+/// is every unit test — an unregistered metric name panics. The mapper tests
+/// below are therefore also the registry-conformance suite, and adding a metric
+/// without registering it in `zensight-keyspace/registry/netring.toml` fails
+/// them.
+fn point(sensor_id: &str, metric: impl Into<String>, value: TelemetryValue) -> TelemetryPoint {
+    let metric = metric.into();
+    debug_assert!(
+        zensight_keyspace::registry::is_registered_telemetry("netring", &metric),
+        "unregistered netring telemetry subject {metric:?} — add it to \
+         zensight-keyspace/registry/netring.toml (RFC 08 §5, issue #468)"
+    );
+    TelemetryPoint::new(sensor_id, Protocol::Netring, metric, value)
+}
+
 pub fn focus_points(sensor_id: &str, packets: u64, bytes: u64) -> Vec<TelemetryPoint> {
     vec![
-        TelemetryPoint::new(
+        point(
             sensor_id,
-            Protocol::Netring,
             "capture/focus/packets".to_string(),
             TelemetryValue::Counter(packets),
         ),
-        TelemetryPoint::new(
+        point(
             sensor_id,
-            Protocol::Netring,
             "capture/focus/bytes".to_string(),
             TelemetryValue::Counter(bytes),
         ),
@@ -198,9 +214,8 @@ pub fn focus_points(sensor_id: &str, packets: u64, bytes: u64) -> Vec<TelemetryP
 /// event (trigger fired, capture ready, mode switch) as Text with an `event`
 /// label, so the GUI Capture tab shows a live event feed.
 pub fn capture_event_point(sensor_id: &str, event: &str, detail: &str) -> TelemetryPoint {
-    TelemetryPoint::new(
+    point(
         sensor_id,
-        Protocol::Netring,
         "capture/events".to_string(),
         TelemetryValue::Text(detail.to_string()),
     )
@@ -224,51 +239,43 @@ pub fn capture_disk_points(
 ) -> Vec<TelemetryPoint> {
     let pfx = "capture/disk";
     vec![
-        TelemetryPoint::new(
+        point(
             sensor_id,
-            Protocol::Netring,
             format!("{pfx}/mode"),
             TelemetryValue::Text(mode.to_string()),
         ),
-        TelemetryPoint::new(
+        point(
             sensor_id,
-            Protocol::Netring,
             format!("{pfx}/ring_packets"),
             TelemetryValue::Gauge(ring_packets as f64),
         ),
-        TelemetryPoint::new(
+        point(
             sensor_id,
-            Protocol::Netring,
             format!("{pfx}/ring_bytes"),
             TelemetryValue::Gauge(ring_bytes as f64),
         ),
-        TelemetryPoint::new(
+        point(
             sensor_id,
-            Protocol::Netring,
             format!("{pfx}/retained_files"),
             TelemetryValue::Gauge(retained_files as f64),
         ),
-        TelemetryPoint::new(
+        point(
             sensor_id,
-            Protocol::Netring,
             format!("{pfx}/retained_bytes"),
             TelemetryValue::Gauge(retained_bytes as f64),
         ),
-        TelemetryPoint::new(
+        point(
             sensor_id,
-            Protocol::Netring,
             format!("{pfx}/dropped"),
             TelemetryValue::Counter(dropped),
         ),
-        TelemetryPoint::new(
+        point(
             sensor_id,
-            Protocol::Netring,
             format!("{pfx}/evictions"),
             TelemetryValue::Counter(evictions),
         ),
-        TelemetryPoint::new(
+        point(
             sensor_id,
-            Protocol::Netring,
             format!("{pfx}/triggers"),
             TelemetryValue::Counter(triggers),
         ),
@@ -278,9 +285,8 @@ pub fn capture_disk_points(
 /// One-shot `capture/backend` info point (#227): the resolved capture backend
 /// (or `pcap-replay`) as Text, so the GUI Sensors view can show what is live.
 pub fn backend_point(sensor_id: &str, label: &str) -> TelemetryPoint {
-    TelemetryPoint::new(
+    point(
         sensor_id,
-        Protocol::Netring,
         "capture/backend".to_string(),
         TelemetryValue::Text(label.to_string()),
     )
@@ -598,9 +604,8 @@ fn human_summary(a: &AnomalyView) -> String {
 
 /// Per-application bandwidth point: `bandwidth/<app>/bytes_per_sec` (Gauge).
 pub fn bandwidth_point(sensor_id: &str, app: &str, bytes_per_sec: f64) -> TelemetryPoint {
-    TelemetryPoint::new(
+    point(
         sensor_id,
-        Protocol::Netring,
         format!("bandwidth/{app}/bytes_per_sec"),
         TelemetryValue::Gauge(bytes_per_sec),
     )
@@ -614,9 +619,7 @@ pub fn flow_points(
     ended_total: u64,
     active: u64,
 ) -> Vec<TelemetryPoint> {
-    let p = |metric: &str, v: TelemetryValue| {
-        TelemetryPoint::new(sensor_id, Protocol::Netring, metric, v)
-    };
+    let p = |metric: &str, v: TelemetryValue| point(sensor_id, metric, v);
     vec![
         p("flow/started_total", TelemetryValue::Counter(started_total)),
         p("flow/ended_total", TelemetryValue::Counter(ended_total)),
@@ -632,14 +635,7 @@ pub fn flow_volume_points(
     packets_total: u64,
     retransmits_total: u64,
 ) -> Vec<TelemetryPoint> {
-    let c = |metric: &str, v: u64| {
-        TelemetryPoint::new(
-            sensor_id,
-            Protocol::Netring,
-            metric,
-            TelemetryValue::Counter(v),
-        )
-    };
+    let c = |metric: &str, v: u64| point(sensor_id, metric, TelemetryValue::Counter(v));
     vec![
         c("flow/bytes_total", bytes_total),
         c("flow/packets_total", packets_total),
@@ -663,14 +659,7 @@ pub fn flow_red_points(
     p95: Option<f64>,
     p99: Option<f64>,
 ) -> Vec<TelemetryPoint> {
-    let g = |metric: &str, v: f64| {
-        TelemetryPoint::new(
-            sensor_id,
-            Protocol::Netring,
-            metric,
-            TelemetryValue::Gauge(v),
-        )
-    };
+    let g = |metric: &str, v: f64| point(sensor_id, metric, TelemetryValue::Gauge(v));
     let mut pts = vec![
         g("flow/red/rate", rate),
         g("flow/red/error_ratio", error_ratio),
@@ -717,14 +706,11 @@ pub fn capture_points(
     drop_rate: f64,
     detail: &CaptureDrops,
 ) -> Vec<TelemetryPoint> {
-    let p = |metric: String, v: TelemetryValue| {
-        TelemetryPoint::new(sensor_id, Protocol::Netring, metric, v)
-    };
+    let p = |metric: String, v: TelemetryValue| point(sensor_id, metric, v);
     let pfx = format!("capture/{source}");
     let c = |pfx: &str, leaf: &str, v: u64| {
-        TelemetryPoint::new(
+        point(
             sensor_id,
-            Protocol::Netring,
             format!("{pfx}/{leaf}"),
             TelemetryValue::Counter(v),
         )
@@ -865,15 +851,13 @@ pub fn shed_points(
     };
     let pfx = format!("capture/{source}/shed");
     vec![
-        TelemetryPoint::new(
+        point(
             sensor_id,
-            Protocol::Netring,
             format!("{pfx}/{leaf}"),
             TelemetryValue::Counter(shed_total),
         ),
-        TelemetryPoint::new(
+        point(
             sensor_id,
-            Protocol::Netring,
             format!("{pfx}/active"),
             TelemetryValue::Gauge(if active { 1.0 } else { 0.0 }),
         ),
@@ -884,15 +868,13 @@ pub fn shed_points(
 /// fingerprints seen (asset-inventory size).
 pub fn tls_points(sensor_id: &str, handshakes: u64, distinct: u64) -> Vec<TelemetryPoint> {
     vec![
-        TelemetryPoint::new(
+        point(
             sensor_id,
-            Protocol::Netring,
             "tls/handshakes_total",
             TelemetryValue::Counter(handshakes),
         ),
-        TelemetryPoint::new(
+        point(
             sensor_id,
-            Protocol::Netring,
             "tls/distinct_fingerprints",
             TelemetryValue::Gauge(distinct as f64),
         ),
@@ -902,9 +884,8 @@ pub fn tls_points(sensor_id: &str, handshakes: u64, distinct: u64) -> Vec<Teleme
 /// QUIC inventory aggregate (issue #72): distinct (sni, version) pairs seen.
 /// Low-cardinality count safe to stream; detail pulled from `@rpc/netring/quic`.
 pub fn quic_count_point(sensor_id: &str, distinct: u64) -> TelemetryPoint {
-    TelemetryPoint::new(
+    point(
         sensor_id,
-        Protocol::Netring,
         "quic/distinct_sni",
         TelemetryValue::Gauge(distinct as f64),
     )
@@ -912,9 +893,8 @@ pub fn quic_count_point(sensor_id: &str, distinct: u64) -> TelemetryPoint {
 
 /// SSH/HASSH inventory aggregate (issue #72): distinct HASSH fingerprints seen.
 pub fn ssh_count_point(sensor_id: &str, distinct: u64) -> TelemetryPoint {
-    TelemetryPoint::new(
+    point(
         sensor_id,
-        Protocol::Netring,
         "ssh/distinct_hassh",
         TelemetryValue::Gauge(distinct as f64),
     )
@@ -992,33 +972,16 @@ pub fn encrypted_dns_points(
     distinct: u64,
 ) -> Vec<TelemetryPoint> {
     vec![
-        TelemetryPoint::new(
+        point(sensor_id, "dns/encrypted/dot", TelemetryValue::Counter(dot)),
+        point(sensor_id, "dns/encrypted/doq", TelemetryValue::Counter(doq)),
+        point(sensor_id, "dns/encrypted/doh", TelemetryValue::Counter(doh)),
+        point(
             sensor_id,
-            Protocol::Netring,
-            "dns/encrypted/dot",
-            TelemetryValue::Counter(dot),
-        ),
-        TelemetryPoint::new(
-            sensor_id,
-            Protocol::Netring,
-            "dns/encrypted/doq",
-            TelemetryValue::Counter(doq),
-        ),
-        TelemetryPoint::new(
-            sensor_id,
-            Protocol::Netring,
-            "dns/encrypted/doh",
-            TelemetryValue::Counter(doh),
-        ),
-        TelemetryPoint::new(
-            sensor_id,
-            Protocol::Netring,
             "dns/encrypted/unknown_resolver",
             TelemetryValue::Counter(unknown_resolver),
         ),
-        TelemetryPoint::new(
+        point(
             sensor_id,
-            Protocol::Netring,
             "dns/encrypted/distinct",
             TelemetryValue::Gauge(distinct as f64),
         ),
@@ -1033,21 +996,15 @@ pub fn tls_pq_ratio_point(sensor_id: &str, pq: u64, total: u64) -> TelemetryPoin
     } else {
         0.0
     };
-    TelemetryPoint::new(
-        sensor_id,
-        Protocol::Netring,
-        "tls/pq_ratio",
-        TelemetryValue::Gauge(ratio),
-    )
+    point(sensor_id, "tls/pq_ratio", TelemetryValue::Gauge(ratio))
 }
 
 /// Passive asset-inventory aggregate: number of distinct assets (MACs) the
 /// inventory currently holds. Low-cardinality count safe to stream; the
 /// per-asset detail is pulled on demand from `@rpc/netring/assets` (principle P2).
 pub fn asset_count_point(sensor_id: &str, discovered: u64) -> TelemetryPoint {
-    TelemetryPoint::new(
+    point(
         sensor_id,
-        Protocol::Netring,
         "assets/discovered",
         TelemetryValue::Gauge(discovered as f64),
     )
@@ -1059,9 +1016,8 @@ pub fn asset_count_point(sensor_id: &str, discovered: u64) -> TelemetryPoint {
 /// Overview anomaly strip roll up per-detector activity without a Security-view
 /// round-trip; the same slug is the alert `rule`, so the two correlate.
 pub fn anomaly_count_point(sensor_id: &str, kind: &str, count: u64) -> TelemetryPoint {
-    TelemetryPoint::new(
+    point(
         sensor_id,
-        Protocol::Netring,
         format!("anomaly/{kind}/total"),
         TelemetryValue::Counter(count),
     )
@@ -1102,14 +1058,7 @@ pub fn icmp_points(
     mtu_signal_total: u64,
     by_kind: &[(String, u64)],
 ) -> Vec<TelemetryPoint> {
-    let c = |metric: String, v: u64| {
-        TelemetryPoint::new(
-            sensor_id,
-            Protocol::Netring,
-            metric,
-            TelemetryValue::Counter(v),
-        )
-    };
+    let c = |metric: String, v: u64| point(sensor_id, metric, TelemetryValue::Counter(v));
     let mut pts = vec![
         c("icmp/unreachable_total".into(), unreachable_total),
         c("icmp/time_exceeded_total".into(), time_exceeded_total),
@@ -1159,14 +1108,7 @@ pub fn flow_by_l4_points(
     icmp_bytes: u64,
     icmp_flows: u64,
 ) -> Vec<TelemetryPoint> {
-    let c = |metric: String, v: u64| {
-        TelemetryPoint::new(
-            sensor_id,
-            Protocol::Netring,
-            metric,
-            TelemetryValue::Counter(v),
-        )
-    };
+    let c = |metric: String, v: u64| point(sensor_id, metric, TelemetryValue::Counter(v));
     vec![
         c("flow/by_l4/tcp/bytes_total".into(), tcp_bytes),
         c("flow/by_l4/tcp/flows_total".into(), tcp_flows),
@@ -1197,14 +1139,7 @@ pub fn tcp_closed_points(
     closed_rst: u64,
     closed_idle: u64,
 ) -> Vec<TelemetryPoint> {
-    let c = |metric: &str, v: u64| {
-        TelemetryPoint::new(
-            sensor_id,
-            Protocol::Netring,
-            metric,
-            TelemetryValue::Counter(v),
-        )
-    };
+    let c = |metric: &str, v: u64| point(sensor_id, metric, TelemetryValue::Counter(v));
     vec![
         c("tcp/closed_fin_total", closed_fin),
         c("tcp/closed_rst_total", closed_rst),
@@ -1215,15 +1150,13 @@ pub fn tcp_closed_points(
 /// TCP reset aggregate points.
 pub fn tcp_reset_points(sensor_id: &str, resets: u64, refused: u64) -> Vec<TelemetryPoint> {
     vec![
-        TelemetryPoint::new(
+        point(
             sensor_id,
-            Protocol::Netring,
             "tcp/resets_total",
             TelemetryValue::Counter(resets),
         ),
-        TelemetryPoint::new(
+        point(
             sensor_id,
-            Protocol::Netring,
             "tcp/refused_total",
             TelemetryValue::Counter(refused),
         ),
@@ -1293,22 +1226,8 @@ pub fn dns_points(
     unanswered_total: u64,
     rtt_pcts: Option<[f64; 3]>,
 ) -> Vec<TelemetryPoint> {
-    let c = |metric: String, v: u64| {
-        TelemetryPoint::new(
-            sensor_id,
-            Protocol::Netring,
-            metric,
-            TelemetryValue::Counter(v),
-        )
-    };
-    let g = |metric: &str, v: f64| {
-        TelemetryPoint::new(
-            sensor_id,
-            Protocol::Netring,
-            metric,
-            TelemetryValue::Gauge(v),
-        )
-    };
+    let c = |metric: String, v: u64| point(sensor_id, metric, TelemetryValue::Counter(v));
+    let g = |metric: &str, v: f64| point(sensor_id, metric, TelemetryValue::Gauge(v));
     let mut pts = vec![
         c("dns/queries_total".into(), queries_total),
         c("dns/unanswered_total".into(), unanswered_total),
@@ -1381,22 +1300,8 @@ pub fn http_points(
     by_method: &[(String, u64)],
     latency_pcts: Option<[f64; 3]>,
 ) -> Vec<TelemetryPoint> {
-    let c = |metric: String, v: u64| {
-        TelemetryPoint::new(
-            sensor_id,
-            Protocol::Netring,
-            metric,
-            TelemetryValue::Counter(v),
-        )
-    };
-    let g = |metric: &str, v: f64| {
-        TelemetryPoint::new(
-            sensor_id,
-            Protocol::Netring,
-            metric,
-            TelemetryValue::Gauge(v),
-        )
-    };
+    let c = |metric: String, v: u64| point(sensor_id, metric, TelemetryValue::Counter(v));
+    let g = |metric: &str, v: f64| point(sensor_id, metric, TelemetryValue::Gauge(v));
     let mut pts = vec![
         c("http/requests_total".into(), requests_total),
         c("http/status_2xx_total".into(), status_2xx),
@@ -2543,5 +2448,23 @@ mod tests {
         assert!(!resolved.is_firing());
         // Same rule + bucketing key so it resolves the firing alert.
         assert_eq!(resolved.rule, "capture-overload");
+    }
+
+    /// The registry guard must actually bite. A conformance suite that cannot fail
+    /// is the same mistake as the `{metric...}` catch-all it replaced: vacuously
+    /// true. This is the test that proves the others mean something.
+    #[test]
+    #[should_panic(expected = "unregistered netring telemetry subject")]
+    fn an_unregistered_metric_panics_in_debug() {
+        let _ = point("s", "totally/made/up/subject", TelemetryValue::Gauge(1.0));
+    }
+
+    /// ...and a real subject constructs.
+    #[test]
+    fn a_registered_metric_constructs() {
+        assert_eq!(
+            point("s", "flow/active", TelemetryValue::Gauge(1.0)).metric,
+            "flow/active"
+        );
     }
 }

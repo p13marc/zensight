@@ -940,3 +940,75 @@ mod tests {
         }
     }
 }
+
+/// Mock `introspect` replies for the Fleet view in `--demo` (#469): demo never
+/// serves the `@rpc/<producer>/introspect` queryable, so the demo fetch branch
+/// returns these instead.
+///
+/// The slices are the *real* compiled ones — the demo must mirror the sensor
+/// contract, not a hand-written fiction of it — with one deliberate exception:
+/// `edge01` serves a bumped `[registry] version`, so the demo actually shows
+/// what the view is for. A demo where every host is in sync demonstrates
+/// nothing.
+pub mod fleet {
+    use crate::view::fleet::FleetReply;
+
+    fn slice(name: &str) -> String {
+        zensight_keyspace::registry::REGISTRIES
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, t)| (*t).to_string())
+            .unwrap_or_default()
+    }
+
+    /// Bump a slice's `[registry] version` — a synthetic skew, so the demo has
+    /// an odd one out to find.
+    fn skewed(name: &str, version: &str) -> String {
+        let src = slice(name);
+        let mut out = String::with_capacity(src.len());
+        let mut bumped = false;
+        for line in src.lines() {
+            if !bumped && line.trim_start().starts_with("version =") {
+                out.push_str(&format!("version = \"{version}\"\n"));
+                bumped = true;
+            } else {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    pub fn replies() -> Vec<FleetReply> {
+        let server01 = "h-1a2b3c4d5e6f";
+        let edge01 = "h-9f8e7d6c5b4a";
+        vec![
+            FleetReply {
+                origin: server01.into(),
+                producer: "sysinfo".into(),
+                toml: slice("sysinfo"),
+            },
+            FleetReply {
+                origin: server01.into(),
+                producer: "netlink".into(),
+                toml: slice("netlink"),
+            },
+            FleetReply {
+                origin: server01.into(),
+                producer: "netring".into(),
+                toml: slice("netring"),
+            },
+            FleetReply {
+                origin: edge01.into(),
+                producer: "sysinfo".into(),
+                toml: slice("sysinfo"),
+            },
+            // The odd one out: an older deployment still on registry 1.0.
+            FleetReply {
+                origin: edge01.into(),
+                producer: "netlink".into(),
+                toml: skewed("netlink", "1.0"),
+            },
+        ]
+    }
+}

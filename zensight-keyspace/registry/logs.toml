@@ -1,9 +1,17 @@
 # Subject registry: logs (syslog + journald). RFC 08 §2; migration epic #453.
-# Telemetry metric trees register as {metric...} families (one payload type,
-# TelemetryPoint) — typed per-metric refinement is additive (registry MINOR).
+# Telemetry is registered as real subjects, not a `{metric...}` catch-all
+# (issue #468) — see registry/sysinfo.toml for the rule and why.
+# Source: src/derived.rs, src/ingest.rs, src/template.rs.
+#
+# The doubled `logs/` head (`telemetry/logs/logs/...`) is issue #470 and is
+# deliberately NOT fixed here — stripping it renames the exported Prometheus
+# series. This registers what the sensor actually emits today.
+#
+# `events/{uid}` (src/receiver.rs) is NOT registered: it is never published,
+# it only feeds the bounded `@rpc/logs/events` ring (src/main.rs).
 
 [registry]
-version = "1.0"
+version = "1.1"
 app = "zensight"
 convention = 1
 
@@ -12,12 +20,138 @@ name = "logs"
 description = "unified logs sensor; per-line detail is pull-only (RFC 04 R3)"
 
 [[subject]]
-path = "{metric...}"
+path = "logs/ingest/received_total"
 class = "telemetry"
 type = "TelemetryPoint"
-cardinality = 200
-since = "1.0"
-description = "log rate rollups (by_severity/, by_source/, ...)"
+since = "1.1"
+description = "lines received"
+
+[[subject]]
+path = "logs/ingest/parsed_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "lines parsed"
+
+[[subject]]
+path = "logs/ingest/parse_failed_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "lines that failed to parse"
+
+[[subject]]
+path = "logs/ingest/dropped_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "lines dropped"
+
+[[subject]]
+path = "logs/by_severity/{severity}"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 16
+since = "1.1"
+description = "lines by syslog severity; the leaf is `<severity>_total`"
+
+[[subject]]
+path = "logs/errors_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "error-severity lines"
+
+[[subject]]
+path = "logs/warnings_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "warning-severity lines"
+
+[[subject]]
+path = "logs/units_in_failure"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "units currently in a failure state per the log stream"
+
+[[subject]]
+path = "logs/journald/read_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "journald entries read"
+
+[[subject]]
+path = "logs/journald/published_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "entries published"
+
+[[subject]]
+path = "logs/journald/dropped_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "entries dropped"
+
+[[subject]]
+path = "logs/journald/sampled_out_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "entries sampled out"
+
+[[subject]]
+path = "logs/by_unit/{unit}/messages_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "lines from this unit"
+
+[[subject]]
+path = "logs/by_unit/{unit}/errors_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "error lines from this unit"
+
+[[subject]]
+path = "logs/by_unit/{unit}/error_ratio"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "error share for this unit"
+
+[[subject]]
+path = "logs/by_unit/{unit}/burn_rate"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "error burn rate for this unit"
+
+[[subject]]
+path = "logs/by_template/{template}/count_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "lines matching this template"
+
+[[subject]]
+path = "logs/by_template/{template}/errors_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "error lines matching this template"
+
 [[subject]]
 path = "health"
 class = "state"
@@ -59,6 +193,15 @@ cardinality = 64
 ttl_s = 900
 since = "1.0"
 description = "alerts; firing->resolved on one key, delete = tombstone"
+[[subject]]
+path = "artifact/{kind}"
+class = "state"
+type = "ArtifactStatus"
+cardinality = 16
+ttl_s = 900
+since = "1.1"
+description = "per-kind artifact progress (framework: V1Context::artifact_status_key)"
+
 [[procedure]]
 path = "introspect"
 kind = "read"

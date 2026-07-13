@@ -96,6 +96,7 @@ pub enum CurrentView {
     Inventory,
     Incidents,
     Bandwidth,
+    Fleet,
 }
 
 /// Application theme.
@@ -212,6 +213,8 @@ pub struct ZenSight {
     /// Bandwidth live-monitor state (#319, epic #320): per-process (queried) and
     /// per-service (streamed) network rate.
     bandwidth: crate::view::bandwidth::BandwidthState,
+    /// Fleet capabilities: what each host's build says it serves (#469).
+    fleet: crate::view::fleet::FleetState,
     /// Local tiered time-series store (hot ring + redb), Plan v3-04 §A / #22.
     /// Telemetry writes through it; charts read from it so trends survive restart.
     store: crate::store::MetricStore,
@@ -268,6 +271,9 @@ impl ZenSight {
             zenoh: zenoh_config,
             scope: persistent.subscription_scope.clone(),
             profile: persistent.link_profile,
+            // Focus is runtime-only: a GUI that came up already focused would
+            // look like a GUI that had lost the fleet.
+            focus: None,
         };
 
         let stale_threshold_ms = (persistent.stale_threshold_secs * 1000) as i64;
@@ -394,6 +400,7 @@ impl ZenSight {
             inventory: crate::view::inventory::InventoryState::default(),
             incidents: crate::view::incident::IncidentsState::default(),
             bandwidth: crate::view::bandwidth::BandwidthState::default(),
+            fleet: crate::view::fleet::FleetState::default(),
             // In demo mode keep history in-memory only (no disk churn / restart survival
             // for synthetic data); otherwise open the persistent tiered store.
             store: if demo_mode {
@@ -1373,6 +1380,17 @@ impl ZenSight {
                     device.netring_detail.apply_dns(result);
                 }
             }
+            Message::FetchNetringEncryptedDns => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_encrypted_dns();
+                }
+                return ControlFlow::Break(self.query_netring_encrypted_dns());
+            }
+            Message::NetringEncryptedDnsReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_encrypted_dns(result);
+                }
+            }
             Message::FetchNetringHttp => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netring_detail.loading_http();
@@ -1425,6 +1443,49 @@ impl ZenSight {
             Message::SysinfoProcessesReceived(result) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.sysinfo_detail.apply(result);
+                }
+            }
+            Message::FetchNetflowFlows => {
+                let host = self.selected_device.as_mut().map(|device| {
+                    device.netflow_detail.loading();
+                    device.device_id.source.clone()
+                });
+                if let Some(host) = host {
+                    return ControlFlow::Break(self.query_netflow_flows(host));
+                }
+            }
+            Message::NetflowFlowsReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netflow_detail.apply(result);
+                }
+            }
+            Message::NetflowTableSort(col) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netflow_detail.table.toggle_sort(col);
+                }
+            }
+            Message::NetflowTableFilter(q) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netflow_detail.table.set_filter(q);
+                }
+            }
+            Message::NetflowTableMore => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netflow_detail.table.load_more();
+                }
+            }
+            Message::FetchSysinfoLatency => {
+                let host = self.selected_device.as_mut().map(|device| {
+                    device.sysinfo_detail.loading_latency();
+                    device.device_id.source.clone()
+                });
+                if let Some(host) = host {
+                    return ControlFlow::Break(self.query_sysinfo_latency(host));
+                }
+            }
+            Message::SysinfoLatencyReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.sysinfo_detail.apply_latency(result);
                 }
             }
             Message::FetchParallaxStreams => {
@@ -1554,6 +1615,9 @@ impl ZenSight {
                 let key = sensor_instance_key(&snapshot.sensor, snapshot.source.as_deref());
                 if let (Some(hid), Some(src)) = (&snapshot.host_id, &snapshot.source) {
                     self.origins.insert(src.clone(), hid.clone());
+                    // The Focus control (#476) is disabled until the origin is
+                    // known; this is where it usually becomes known.
+                    self.refresh_focus_state();
                 }
                 self.sensor_health.insert(key, snapshot);
             }
@@ -1584,6 +1648,7 @@ impl ZenSight {
             Message::SensorInfoReceived(info) => {
                 if let Some(hid) = &info.host_id {
                     self.origins.insert(info.source.clone(), hid.clone());
+                    self.refresh_focus_state();
                 }
                 self.known_sensors
                     .insert(format!("{}@{}", info.name, info.source), info);
@@ -1651,6 +1716,7 @@ impl ZenSight {
                     for member in &entity.members {
                         self.origins.insert(member.source.clone(), hid.clone());
                     }
+                    self.refresh_focus_state();
                 }
                 self.entities.upsert(entity);
                 self.rederive_entities();
@@ -1827,6 +1893,45 @@ impl ZenSight {
                 self.selected_device = None;
                 self.set_view(CurrentView::Dashboard);
                 return teardown;
+            }
+
+            Message::SetFocusHost(origin) => {
+                // Re-keying `self.link` is the whole mechanism: Iced hashes it,
+                // so the subscription tears the Zenoh session down and
+                // re-declares against the narrowed selectors (#476). The fleet's
+                // devices will age out of the dashboard while focused — that is
+                // the point, and the shell shows a banner saying so.
+                if self.link.focus == origin {
+                    return Task::none();
+                }
+                match &origin {
+                    Some(o) => {
+                        let host = self
+                            .origins
+                            .iter()
+                            .find(|(_, v)| *v == o)
+                            .map(|(k, _)| k.clone())
+                            .unwrap_or_else(|| o.clone());
+                        self.toasts.push(
+                            ToastSeverity::Info,
+                            format!(
+                                "Focused on {host} — subscribing to that host only; \
+                                 fleet data is paused"
+                            ),
+                        );
+                    }
+                    None => self.toasts.push(
+                        ToastSeverity::Info,
+                        "Focus cleared — back to the fleet".to_string(),
+                    ),
+                }
+                self.link.focus = origin;
+                self.refresh_focus_state();
+                // Reconnecting: the restarted subscription drives
+                // Connecting → Connected.
+                self.dashboard.connection_state =
+                    crate::view::dashboard::ConnectionState::Connecting;
+                self.dashboard.connected = false;
             }
 
             Message::ForgetDevice(id) => {
@@ -2149,6 +2254,41 @@ impl ZenSight {
             }
             Message::BandwidthTableFilter(q) => {
                 self.bandwidth.table.set_filter(q);
+            }
+
+            Message::OpenFleet => {
+                self.set_view(CurrentView::Fleet);
+                self.save_current_view();
+                // Ask once on open; the answer is a build property, so it does
+                // not change until something on the fleet is redeployed.
+                if matches!(
+                    self.fleet.rows,
+                    crate::view::specialized::fetch::Fetch::Idle
+                ) {
+                    self.fleet.loading();
+                    return self.query_fleet();
+                }
+            }
+            Message::RefreshFleet => {
+                self.fleet.loading();
+                return self.query_fleet();
+            }
+            Message::FleetLoaded(result) => {
+                let alive = self.alive_producers();
+                self.fleet.apply(result, &alive);
+            }
+            Message::ToggleFleetFindings(id) => {
+                self.fleet.expanded = if self.fleet.expanded.as_deref() == Some(id.as_str()) {
+                    None
+                } else {
+                    Some(id)
+                };
+            }
+            Message::FleetTableSort(col) => {
+                self.fleet.table.toggle_sort(col);
+            }
+            Message::FleetTableFilter(q) => {
+                self.fleet.table.set_filter(q);
             }
 
             Message::OpenSettings => {
@@ -3417,7 +3557,7 @@ impl ZenSight {
         // A tree is reconstructed into a clearly-named subfolder of the picked dir.
         let dest = match &kind {
             zensight_common::ArtifactKind::Snapshot { dir } => {
-                let sensor = producer.rsplit('/').next().unwrap_or("sensor");
+                let sensor = producer.as_str();
                 dest.join(format!("{sensor}-{dir}-snapshot"))
             }
             _ => dest,
@@ -3648,10 +3788,9 @@ impl ZenSight {
             let _ = session
                 .get(format!(
                     "{}?id={}",
-                    zensight_common::fleet_rpc_key(
-                        producer.rsplit('/').next().unwrap_or("sensor"),
-                        "artifact/cancel"
-                    ),
+                    // `producer` is a producer name ("netring"); it has contained
+                    // no `/` since the #465 cutover retired key_prefix.
+                    zensight_common::fleet_rpc_key(&producer, "artifact/cancel"),
                     id
                 ))
                 .await;
@@ -4137,6 +4276,21 @@ impl ZenSight {
         self.origins.get(source).cloned()
     }
 
+    /// Re-project the selected device's origin and focus flag (#476).
+    ///
+    /// The source→origin map fills in asynchronously (health/registration/entity
+    /// docs), so a device selected in the first few seconds has no origin yet
+    /// and its Focus control starts disabled. Call this whenever the map or the
+    /// link's focus changes.
+    fn refresh_focus_state(&mut self) {
+        let focus = self.link.focus.clone();
+        if let Some(device) = self.selected_device.as_mut() {
+            let origin = self.origins.get(&device.device_id.source).cloned();
+            device.focused = origin.is_some() && origin == focus;
+            device.origin = origin;
+        }
+    }
+
     /// The parallax `stream/set` write key for `source`'s host: the concrete
     /// origin key when the origin is known, else the fleet selector (the
     /// command carries the stream name, and send_command targets All).
@@ -4264,6 +4418,7 @@ impl ZenSight {
             }
             if dns {
                 d.loading_dns();
+                d.loading_encrypted_dns();
             }
             if http {
                 d.loading_http();
@@ -4296,6 +4451,10 @@ impl ZenSight {
         }
         if dns {
             tasks.push(self.query_netring_dns());
+            // Encrypted DNS rides the same tab: it is precisely what the
+            // cleartext RED rollups cannot see, so showing one without the
+            // other is how a DoH tunnel stays invisible.
+            tasks.push(self.query_netring_encrypted_dns());
         }
         if http {
             tasks.push(self.query_netring_http());
@@ -4650,11 +4809,13 @@ impl ZenSight {
             let mut tx = 0.0f64;
             let mut saw = false;
             for metric in device_state.metrics.keys() {
-                let is_rx = metric.starts_with("network/") && metric.ends_with("/rx_bytes");
-                let is_tx = metric.starts_with("network/") && metric.ends_with("/tx_bytes");
-                if !is_rx && !is_tx {
-                    continue;
-                }
+                // sysinfo `network/{iface}/{rx,tx}_bytes`, via the registry (#475).
+                use zensight_keyspace::registry::sysinfo::Subject as SysSubject;
+                let is_rx = match SysSubject::parse_metric(metric) {
+                    Some(SysSubject::NetworkRxBytes { .. }) => true,
+                    Some(SysSubject::NetworkTxBytes { .. }) => false,
+                    _ => continue,
+                };
                 let key = format!("{}/{}|{}", device_id.protocol, device_id.source, metric);
                 if let Some(rate) =
                     crate::view::topology::counter_rate(&self.store.hot_samples(&key))
@@ -4848,6 +5009,19 @@ impl ZenSight {
         )
     }
 
+    /// Fetch the passive encrypted-DNS destination inventory (#326).
+    fn query_netring_encrypted_dns(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_encrypted_dns;
+        self.query_channel(
+            {
+                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
+                move |s| fetch_encrypted_dns(s, origin)
+            },
+            Message::NetringEncryptedDnsReceived,
+            "No encrypted-DNS data — is the netring sensor running with collect.dns enabled?",
+        )
+    }
+
     /// Fetch the on-demand netring per-host HTTP detail (#45).
     fn query_netring_http(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_http;
@@ -4978,6 +5152,48 @@ impl ZenSight {
                 .await
                 .ok_or_else(|| "No sysinfo sensor responded".to_string());
             Message::SysinfoProcessesReceived(result)
+        })
+    }
+
+    /// Fetch the recent-flow ring for the selected exporter's host (#469).
+    ///
+    /// The exporter's `source` is the *exporter* name, not the host running the
+    /// collector, so the origin comes from the device's origin map like every
+    /// other drill-down.
+    fn query_netflow_flows(&self, host: String) -> Task<Message> {
+        use crate::view::specialized::netflow_detail::fetch_flows;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::NetflowFlowsReceived(Err(
+                "Not connected to Zenoh".to_string()
+            )));
+        };
+        let origin = self.origin_for(&host);
+        Task::future(async move {
+            let result = fetch_flows(session, origin)
+                .await
+                .ok_or_else(|| "No netflow sensor responded".to_string());
+            Message::NetflowFlowsReceived(result)
+        })
+    }
+
+    /// Fetch the eBPF saturation histograms for `host` (#99).
+    ///
+    /// The sensor declares this queryable even without the `ebpf` feature (it
+    /// replies `available: false`), so "no sensor responded" and "not built with
+    /// eBPF" are genuinely different answers — and the view says which.
+    fn query_sysinfo_latency(&self, host: String) -> Task<Message> {
+        use crate::view::specialized::sysinfo_detail::fetch_latency;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::SysinfoLatencyReceived(Err(
+                "Not connected to Zenoh".to_string(),
+            )));
+        };
+        let origin = self.origin_for(&host);
+        Task::future(async move {
+            let result = fetch_latency(session, origin)
+                .await
+                .ok_or_else(|| "No sysinfo sensor responded".to_string());
+            Message::SysinfoLatencyReceived(result)
         })
     }
 
@@ -5387,6 +5603,112 @@ impl ZenSight {
         })
     }
 
+    /// Every (origin, producer, host) that is **currently up**. The Fleet view
+    /// needs this to tell "not deployed" from "deployed but answering nothing" —
+    /// a producer that is alive and silent on `introspect` is the row you most
+    /// want to see, and fanning out alone cannot find it.
+    ///
+    /// Liveliness is the gate, not registration. `known_sensors` is insert-only —
+    /// a sensor's registration doc stays in it forever, so on its own it would
+    /// report a *dead* sensor as `silent`, which claims "deployed and not
+    /// answering" about a host that is simply gone. That is a lie in exactly the
+    /// case this row exists to expose. Presence lives in `sensor_health`, which
+    /// `set_sensor_liveliness` flips to `Offline` when the token disappears; both
+    /// maps are keyed by `sensor_instance_key` precisely so they line up.
+    fn alive_producers(&self) -> Vec<crate::view::fleet::AliveProducer> {
+        let mut out: Vec<crate::view::fleet::AliveProducer> = self
+            .known_sensors
+            .values()
+            .filter(|info| {
+                let key = sensor_instance_key(&info.name, Some(&info.source));
+                !matches!(
+                    self.sensor_health.get(&key).map(|s| s.status),
+                    Some(HealthStatus::Offline)
+                )
+            })
+            .filter_map(|info| {
+                let origin = info.host_id.clone()?;
+                Some((origin, info.producer.clone(), info.source.clone()))
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Fan `introspect` out across the fleet (#469, RFC 08 §6).
+    ///
+    /// One GET per registered producer, `QueryTarget::All` so a `complete`
+    /// queryable on one host cannot short-circuit the multi-host consolidation
+    /// (RFC 05 §2.1). The origin comes from the *answering key* — a registry
+    /// slice describes a build, not a deployment, so it does not name its host.
+    ///
+    /// `@catalog` is a service origin, and a verbatim `@` chunk is structurally
+    /// unmatchable by the `*` in a fleet selector (design property D2). So it
+    /// takes its own key rather than riding the fan-out — which is the grammar
+    /// working, not an exception to it.
+    fn query_fleet(&self) -> Task<Message> {
+        use crate::view::fleet::FleetReply;
+
+        if self.demo_mode {
+            return Task::done(Message::FleetLoaded(Ok(crate::mock::fleet::replies())));
+        }
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::FleetLoaded(Err(
+                "Not connected to Zenoh".to_string()
+            )));
+        };
+
+        let keys: Vec<(String, String)> = zensight_keyspace::registry::REGISTRIES
+            .iter()
+            .map(|(name, _)| {
+                let key = if *name == "catalog" {
+                    zensight_common::catalog_rpc_key("introspect")
+                } else {
+                    zensight_common::fleet_rpc_key(name, "introspect")
+                };
+                (name.to_string(), key)
+            })
+            .collect();
+
+        Task::future(async move {
+            let mut replies: Vec<FleetReply> = Vec::new();
+            let mut errors = 0usize;
+            for (producer, key) in keys {
+                let Ok(stream) = session
+                    .get(&key)
+                    .target(zenoh::query::QueryTarget::All)
+                    .timeout(std::time::Duration::from_secs(3))
+                    .await
+                else {
+                    errors += 1;
+                    continue;
+                };
+                while let Ok(reply) = stream.recv_async().await {
+                    let Ok(sample) = reply.result() else { continue };
+                    // The concrete key that answered carries the origin.
+                    let Some(parsed) =
+                        zensight_common::keyexpr::parse_wire_key(sample.key_expr().as_str())
+                    else {
+                        continue;
+                    };
+                    let Ok(toml) = String::from_utf8(sample.payload().to_bytes().to_vec()) else {
+                        continue;
+                    };
+                    replies.push(FleetReply {
+                        origin: parsed.origin.chunk().to_string(),
+                        producer: producer.clone(),
+                        toml,
+                    });
+                }
+            }
+            if replies.is_empty() && errors > 0 {
+                return Message::FleetLoaded(Err(format!("{errors} introspect queries failed")));
+            }
+            Message::FleetLoaded(Ok(replies))
+        })
+    }
+
     /// Derive the per-service bandwidth rows (#319) from streamed systemd
     /// `unit/<name>/{ip_ingress_bps,ip_egress_bps}` telemetry, with per-unit
     /// sparkline history from the store. Ingress = rx, egress = tx.
@@ -5410,16 +5732,16 @@ impl ZenSight {
                 } else {
                     continue;
                 };
-                if let Some(unit) = metric
-                    .strip_prefix("unit/")
-                    .and_then(|m| m.strip_suffix("/ip_egress_bps"))
-                {
-                    units.entry(unit.to_string()).or_default().0 = v;
-                } else if let Some(unit) = metric
-                    .strip_prefix("unit/")
-                    .and_then(|m| m.strip_suffix("/ip_ingress_bps"))
-                {
-                    units.entry(unit.to_string()).or_default().1 = v;
+                // systemd `unit/{unit}/ip_{egress,ingress}_bps`, via the registry (#475).
+                use zensight_keyspace::registry::systemd::Subject as SystemdSubject;
+                match SystemdSubject::parse_metric(metric) {
+                    Some(SystemdSubject::UnitIpEgressBps { unit }) => {
+                        units.entry(unit).or_default().0 = v;
+                    }
+                    Some(SystemdSubject::UnitIpIngressBps { unit }) => {
+                        units.entry(unit).or_default().1 = v;
+                    }
+                    _ => {}
                 }
             }
             for (unit, (tx, rx)) in units {
@@ -5515,6 +5837,7 @@ impl ZenSight {
             | CurrentView::Logs
             | CurrentView::Inventory
             | CurrentView::Bandwidth
+            | CurrentView::Fleet
             | CurrentView::Incidents => {
                 self.set_view(CurrentView::Dashboard);
             }
@@ -5523,6 +5846,13 @@ impl ZenSight {
                 if !self.dashboard.search_filter.is_empty() {
                     self.dashboard.search_filter.clear();
                     self.dashboard.pending_search.clear();
+                } else if self.link.focus.is_some() {
+                    // Focus (#476) is the outermost narrowing there is — it cuts the
+                    // *bus*, not the view — so Escape unwinds it last, once nothing
+                    // nearer is left to clear. Putting it any earlier would steal
+                    // Escape from navigation: leaving a drill-down while staying
+                    // focused on the host is a thing people want to do.
+                    return self.update(Message::SetFocusHost(None));
                 }
             }
         }
@@ -5621,6 +5951,7 @@ impl ZenSight {
                 crate::view::inventory::inventory_view(&self.inventory, &self.entities, now_ms())
             }
             CurrentView::Bandwidth => crate::view::bandwidth::bandwidth_view(&self.bandwidth),
+            CurrentView::Fleet => crate::view::fleet::fleet_view(&self.fleet),
             CurrentView::Incidents => {
                 crate::view::incident::incidents_view(&self.alerts, &self.incidents)
             }
@@ -5745,6 +6076,17 @@ impl ZenSight {
             .as_ref()
             .filter(|_| self.current_view == CurrentView::Device)
             .map(|d| d.device_id.source.as_str());
+        // Focus mode (#476): show the *hostname* if we can map the origin back
+        // to one, else the origin id itself — never nothing, because the banner
+        // is what explains why the rest of the fleet vanished.
+        let focused_host = self.link.focus.as_ref().map(|origin| {
+            self.origins
+                .iter()
+                .find(|(_, v)| *v == origin)
+                .map(|(source, _)| source.clone())
+                .unwrap_or_else(|| origin.clone())
+        });
+
         let shelled = crate::view::shell::app_shell(
             self.current_view,
             device_name,
@@ -5752,6 +6094,7 @@ impl ZenSight {
             unack,
             self.last_telemetry_ms,
             now_ms(),
+            focused_host,
             main_view,
         );
 
@@ -6204,6 +6547,12 @@ impl ZenSight {
         let mut detail_state = DeviceDetailState::with_max_history(device_id.clone(), max_history);
         // Project this device's favorited metrics (#27) from the global set.
         detail_state.set_favorites(self.device_favorites(&device_id));
+        // Focus state (#476): the origin may not be known yet (the map is fed by
+        // health/registration/entity docs), in which case the Focus control
+        // renders disabled — see `refresh_focus_state`.
+        detail_state.origin = self.origin_for(&device_id.source);
+        detail_state.focused =
+            detail_state.origin.is_some() && detail_state.origin == self.link.focus;
         self.selected_device = Some(detail_state);
         self.set_view(CurrentView::Device);
         // Project firing anomalies for this source into the netring view (#253).
@@ -6350,6 +6699,8 @@ impl ZenSight {
             },
             scope: self.settings.scope_entries(),
             profile: self.settings.link_profile,
+            // A settings edit does not clear focus.
+            focus: self.link.focus.clone(),
         };
         let connection_changed = self.link != new_link;
         self.link = new_link;
@@ -7011,6 +7362,67 @@ mod sensor_liveliness_tests {
         assert!(!sensor_liveliness_matches("sysinfo@h1", "snmp", None));
     }
 
+    /// A dead sensor must DISAPPEAR from the Fleet view's alive set, not be
+    /// reported as `silent` (#469).
+    ///
+    /// `silent` means "up on the bus but answering no `introspect`" — a broken
+    /// queryable or an old build. `known_sensors` is insert-only, so sourcing the
+    /// alive set from it alone would keep a gone-away sensor in the list forever
+    /// and label it with a claim that is false about it. Liveliness is the gate.
+    #[test]
+    fn a_dead_sensor_is_not_reported_as_silent() {
+        fn info(name: &str, source: &str, origin: &str) -> zensight_common::SensorInfo {
+            zensight_common::SensorInfo {
+                name: name.to_string(),
+                version: "0.7.0".to_string(),
+                producer: name.to_string(),
+                source: source.to_string(),
+                host_id: Some(origin.to_string()),
+                boot_id: None,
+                hostname: None,
+                fqdn: None,
+                ips: Vec::new(),
+                macs: Vec::new(),
+                metadata: None,
+                last_updated: 0,
+            }
+        }
+
+        let mut a = app();
+        // Two sensors register and report healthy.
+        for (name, source, origin) in [
+            ("sysinfo", "hostA", "h-aaaaaaaaaaaa"),
+            ("netlink", "hostB", "h-bbbbbbbbbbbb"),
+        ] {
+            let _ = a.update(Message::SensorInfoReceived(info(name, source, origin)));
+            let _ = a.update(Message::HealthSnapshotReceived(snapshot(
+                name,
+                Some(source),
+                HealthStatus::Healthy,
+            )));
+        }
+        assert_eq!(a.alive_producers().len(), 2, "both are up");
+
+        // hostB's netlink sensor dies — its liveliness token disappears.
+        let _ = a.update(Message::SensorOffline(
+            "netlink".into(),
+            Some("hostB".into()),
+        ));
+
+        let alive = a.alive_producers();
+        assert_eq!(
+            alive.len(),
+            1,
+            "the dead sensor must drop out of the alive set"
+        );
+        assert_eq!(alive[0].1, "sysinfo");
+        assert!(
+            !alive.iter().any(|(_, producer, _)| producer == "netlink"),
+            "a gone-away sensor reported as `silent` would claim it is deployed and \
+             not answering — false about a host that is simply gone"
+        );
+    }
+
     #[test]
     fn sensor_offline_marks_its_health_card_offline() {
         let mut a = app();
@@ -7205,5 +7617,198 @@ mod forget_device_tests {
         assert!(!a.dashboard.devices.contains_key(&gone));
         assert!(a.dashboard.devices.contains_key(&open));
         assert!(a.selected_device.is_some());
+    }
+}
+
+#[cfg(test)]
+mod focus_escape_tests {
+    use super::*;
+    use zensight_common::Protocol;
+
+    const ORIGIN: &str = "h-3fa9c2d41b7e";
+
+    fn focused_app() -> ZenSight {
+        let mut a = ZenSight::boot(true).0;
+        a.link.focus = Some(ORIGIN.to_string());
+        a
+    }
+
+    /// Escape on the dashboard, with nothing nearer to clear, exits focus (#476).
+    /// The banner's button is the obvious way out; this is the one you reach for
+    /// without looking.
+    #[test]
+    fn escape_on_the_dashboard_exits_focus() {
+        let mut a = focused_app();
+        a.set_view(CurrentView::Dashboard);
+
+        let _ = a.update(Message::EscapePressed);
+        assert!(
+            a.link.focus.is_none(),
+            "Escape should unwind focus once nothing nearer is left to clear"
+        );
+    }
+
+    /// ...but it must NOT steal Escape from navigation. Leaving a drill-down while
+    /// staying focused on the host is a thing people do, so the first Escape goes
+    /// back and only a later one drops focus.
+    #[test]
+    fn escape_in_a_drill_down_navigates_and_keeps_focus() {
+        let mut a = focused_app();
+        let id = DeviceId::new(Protocol::Sysinfo, "server01");
+        a.dashboard
+            .devices
+            .insert(id.clone(), DeviceState::new(id.clone()));
+        a.selected_device = Some(crate::view::device::DeviceDetailState::new(id));
+        a.set_view(CurrentView::Device);
+
+        let _ = a.update(Message::EscapePressed);
+        assert_eq!(a.current_view, CurrentView::Dashboard, "Escape goes back");
+        assert!(
+            a.link.focus.is_some(),
+            "leaving a drill-down must not drop focus — that is navigation, not un-focusing"
+        );
+
+        // Only now, with nothing nearer to unwind, does Escape drop focus.
+        let _ = a.update(Message::EscapePressed);
+        assert!(a.link.focus.is_none());
+    }
+
+    /// A search filter is nearer than focus, so it unwinds first.
+    #[test]
+    fn escape_clears_the_search_filter_before_focus() {
+        let mut a = focused_app();
+        a.set_view(CurrentView::Dashboard);
+        a.dashboard.search_filter = "web".to_string();
+
+        let _ = a.update(Message::EscapePressed);
+        assert!(a.dashboard.search_filter.is_empty());
+        assert!(
+            a.link.focus.is_some(),
+            "the filter is the innermost narrowing; focus is the outermost"
+        );
+    }
+
+    /// Escape with no focus set must stay a no-op, not toggle focus on.
+    #[test]
+    fn escape_unfocused_does_nothing() {
+        let mut a = ZenSight::boot(true).0;
+        a.set_view(CurrentView::Dashboard);
+        let _ = a.update(Message::EscapePressed);
+        assert!(a.link.focus.is_none());
+    }
+}
+
+#[cfg(test)]
+mod tier2_app_fold_tests {
+    //! The two registry-parsing folds that live in `app.rs` rather than a view
+    //! (#475). Neither had a caller in the test suite, so a registry pattern could
+    //! move and these would quietly start returning nothing — the topology map
+    //! would show zero throughput on every node and the Bandwidth monitor's
+    //! Services tab would go blank, with no panic and no failing test.
+
+    use super::*;
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    fn device(protocol: Protocol, source: &str, points: &[(&str, TelemetryValue)]) -> DeviceState {
+        let id = DeviceId::new(protocol, source);
+        let mut d = DeviceState::new(id);
+        for (metric, value) in points {
+            d.metrics.insert(
+                (*metric).to_string(),
+                TelemetryPoint {
+                    timestamp: 0,
+                    source: source.to_string(),
+                    protocol,
+                    metric: (*metric).to_string(),
+                    value: value.clone(),
+                    labels: Default::default(),
+                },
+            );
+        }
+        d
+    }
+
+    /// `topology_rates()` turns sysinfo `network/{iface}/{rx,tx}_bytes` counters
+    /// into per-host throughput. The *rate* comes from the local store's hot ring
+    /// (two samples, positive dt), so this drives telemetry through the real
+    /// ingest path rather than hand-stuffing the device map — a fold that reads
+    /// the store cannot be tested by faking the map.
+    ///
+    /// The literal families sharing the `network/` head must not be counted as
+    /// interfaces.
+    #[test]
+    fn topology_rates_sums_only_real_interfaces() {
+        let mut a = ZenSight::boot(true).0;
+        a.dashboard.devices.clear();
+
+        let point = |metric: &str, ts: i64, v: u64| TelemetryPoint {
+            timestamp: ts,
+            source: "server01".to_string(),
+            protocol: Protocol::Sysinfo,
+            metric: metric.to_string(),
+            value: TelemetryValue::Counter(v),
+            labels: Default::default(),
+        };
+
+        // Two samples one second apart: eth0 +1000 rx / +2000 tx, wlan0 +500 rx.
+        // The `network/tcp/*` counter climbs hard and must be ignored entirely.
+        for (metric, v0, v1) in [
+            ("network/eth0/rx_bytes", 10_000, 11_000),
+            ("network/eth0/tx_bytes", 20_000, 22_000),
+            ("network/wlan0/rx_bytes", 5_000, 5_500),
+            ("network/tcp/retrans_segs_total", 0, 999_999),
+        ] {
+            let _ = a.update(Message::TelemetryReceived(point(metric, 1_000, v0)));
+            let _ = a.update(Message::TelemetryReceived(point(metric, 2_000, v1)));
+        }
+
+        // The map is keyed by the *node* id — the resolved entity when one is
+        // known, else the source — so assert on the single host's rates rather
+        // than on a name the correlator is free to rewrite.
+        let rates = a.topology_rates();
+        assert_eq!(rates.len(), 1, "one sysinfo host, one rate entry");
+        let (rx, tx) = *rates.values().next().unwrap();
+        assert_eq!(rx, 1500.0, "rx = eth0 + wlan0 over 1s, and nothing else");
+        assert_eq!(tx, 2000.0);
+    }
+
+    /// `bandwidth_service_rows()` folds systemd `unit/{unit}/ip_{egress,ingress}_bps`
+    /// into the Bandwidth monitor's Services tab. The sibling `ip_*_bytes` counters
+    /// are a *different* subject and must not land in the per-second table.
+    #[test]
+    fn bandwidth_service_rows_reads_the_bps_subjects_only() {
+        let mut a = ZenSight::boot(true).0;
+        a.dashboard.devices.clear();
+
+        let d = device(
+            Protocol::Systemd,
+            "server01",
+            &[
+                (
+                    "unit/nginx.service/ip_egress_bps",
+                    TelemetryValue::Gauge(1_000.0),
+                ),
+                (
+                    "unit/nginx.service/ip_ingress_bps",
+                    TelemetryValue::Gauge(2_000.0),
+                ),
+                // Cumulative counters, not rates — the same `unit/{unit}/` head.
+                (
+                    "unit/nginx.service/ip_egress_bytes",
+                    TelemetryValue::Gauge(9_999_999.0),
+                ),
+            ],
+        );
+        a.dashboard.devices.insert(d.id.clone(), d);
+
+        let rows = a.bandwidth_service_rows();
+        assert_eq!(rows.len(), 1, "one unit, one row");
+        let r = &rows[0];
+        assert_eq!(r.record.tx_bps, 1_000.0, "egress is tx");
+        assert_eq!(r.record.rx_bps, 2_000.0, "ingress is rx");
+        assert!(
+            format!("{:?}", r.record.key).contains("nginx.service"),
+            "the row must be keyed by the unit the registry named"
+        );
     }
 }

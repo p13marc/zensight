@@ -12783,6 +12783,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "zenctl"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+ "zenoh",
+ "zensight-common",
+ "zensight-keyspace",
+]
+
+[[package]]
 name = "zeno"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13363,6 +13377,7 @@ dependencies = [
  "zenoh-blob",
  "zenoh-ext",
  "zensight-common",
+ "zensight-keyspace",
  "zstd",
 ]
 
@@ -13572,6 +13587,7 @@ dependencies = [
  "uuid",
  "zenoh",
  "zensight-common",
+ "zensight-keyspace",
  "zensight-sensor-core",
 ]
 
@@ -13638,6 +13654,7 @@ dependencies = [
  "tracing-subscriber",
  "zenoh",
  "zensight-common",
+ "zensight-keyspace",
  "zensight-sensor-core",
  "zensight-sensor-netlink-ebpf-common",
 ]
@@ -13681,6 +13698,7 @@ dependencies = [
  "zenoh",
  "zenoh-blob",
  "zensight-common",
+ "zensight-keyspace",
  "zensight-sensor-core",
  "zstd",
 ]
@@ -13702,6 +13720,7 @@ dependencies = [
  "tracing-subscriber",
  "zenoh",
  "zensight-common",
+ "zensight-keyspace",
  "zensight-sensor-core",
 ]
 
@@ -13750,6 +13769,7 @@ dependencies = [
  "tracing-subscriber",
  "zenoh",
  "zensight-common",
+ "zensight-keyspace",
  "zensight-sensor-core",
  "zensight-sensor-sysinfo-ebpf-common",
 ]
@@ -13788,6 +13808,7 @@ dependencies = [
  "zbus",
  "zenoh",
  "zensight-common",
+ "zensight-keyspace",
  "zensight-sensor-core",
 ]
 

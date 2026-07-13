@@ -11,6 +11,8 @@ use iced_anim::widget::button;
 
 use zensight_common::{TelemetryPoint, TelemetryValue};
 
+use zensight_keyspace::registry::logs::Subject as LogsSubject;
+
 use crate::message::Message;
 use crate::view::components::{Sparkline, card};
 use crate::view::device::DeviceDetailState;
@@ -512,9 +514,11 @@ fn render_logs_rollup<'a>(
         .metrics
         .iter()
         .filter_map(|(m, p)| {
-            let unit = m
-                .strip_prefix("logs/by_unit/")?
-                .strip_suffix("/messages_total")?;
+            // `logs/by_unit/{unit}/messages_total` (#475).
+            let Some(LogsSubject::LogsByUnitMessagesTotal { unit }) = LogsSubject::parse_metric(m)
+            else {
+                return None;
+            };
             let n = match &p.value {
                 TelemetryValue::Counter(c) => *c,
                 TelemetryValue::Gauge(g) => *g as u64,

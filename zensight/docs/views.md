@@ -32,12 +32,12 @@ under `view/overview/`.
 
 ```
 Dashboard, Device, Settings, Alerts, Topology, Expectations,
-Security, Sensors, Logs, Inventory, Incidents, Bandwidth
+Security, Sensors, Logs, Inventory, Incidents, Bandwidth, Fleet
 ```
 
 The active variant decides which `*_view` the app renders. `Dashboard`,
 `Alerts`, `Topology`, `Expectations`, `Security`, `Sensors`, `Logs`,
-`Inventory`, `Incidents`, and `Bandwidth` are reachable from the nav rail;
+`Inventory`, `Incidents`, `Bandwidth`, and `Fleet` are reachable from the nav rail;
 `Device` and `Settings` are entered contextually (clicking a host/device card,
 opening settings) and are marked `#[serde(skip)]` so they are not persisted as a
 landing view.
@@ -50,6 +50,29 @@ landing view.
 - a **top bar** (connection status, theme toggle, global affordances).
 
 The shell is always present; only the content region swaps as you navigate.
+
+## Focus mode (one host instead of the fleet)
+
+The v1 grammar made a single host expressible as one selector — `@v1/<origin>/**`
+— so the host detail header carries a **Focus this host** button (#476). Focusing
+sets `LinkConfig.focus = Some(origin)`; `subscription.rs` then swaps the fleet
+data-plane selectors for that origin's telemetry, state, alerts and liveliness. On
+a constrained link this is the difference between one host's samples and the whole
+fleet's firehose.
+
+Two consequences worth knowing:
+
+- **The fleet dashboard empties while focused.** That is the feature, but it looks
+  exactly like an outage, so the shell renders a persistent banner naming the
+  focused host with a one-click **Exit focus**.
+- **Toggling re-declares the Zenoh session.** Iced hashes `LinkConfig` in
+  `Subscription::run_with`, so a change tears the subscription down and rebuilds
+  it — a second or two of `Connecting…`, not a free switch.
+
+The `@catalog` entity subscription deliberately stays fleet-wide: it is tiny, and
+it is what lets you un-focus, or focus straight onto a different host. Focus is
+runtime-only — it is not persisted to `settings.json5`, and the configured
+`subscription_scope` is left untouched underneath it.
 
 ## Overlays (not routable)
 
@@ -82,6 +105,7 @@ flowchart TB
             V10["Inventory"]
             V11["Incidents"]
             V12["Bandwidth"]
+            V13["Fleet"]
         end
         Nav --> Content
         Top --> Content
@@ -235,6 +259,43 @@ explorer (JA3/JA4/JA4H/SNI/HASSH), joined against correlated host entities.
 
 **Bandwidth** (`view/bandwidth.rs`) — a live bandwidth-by-process/service monitor
 (bmon/nethogs style).
+
+**Fleet** (`view/fleet.rs`) — what each host's build actually says it serves. Fans
+the `introspect` procedure out across every registered producer (`QueryTarget::All`;
+`@catalog` takes its own key, since a verbatim `@` chunk is structurally unmatchable
+by a `*` fleet selector) and diffs each reply against the registry slice this GUI
+compiled in. Answers, without SSH: what does this host speak, is it the same build
+as us, is it serving anything deprecated, and does its registry match reality — RFC
+08 §6 calls a disagreement here a *finding*, not an ambiguity. A producer that is
+alive on the bus but answers no `introspect` is listed as `silent` rather than
+omitted; fanning out alone cannot distinguish "not deployed" from "deployed and not
+answering", and the second is the one you need to see.
+
+## Streamed rollups vs pulled records
+
+Several specialized views show the same shape twice, and it is deliberate
+(RFC 08 §4). A quantity that is **bounded** is streamed as telemetry; a
+quantity with **unbounded cardinality** is a record you pull from an `@rpc`
+procedure, never a key you publish. Three of these were served by the sensors
+from the day of the keyspace cutover and had no caller until #469:
+
+- **NetFlow** (`view/specialized/netflow.rs`) — `flows_total` / `bytes_total` /
+  `by_proto/{proto}/flows` stream; individual flows come from
+  `@rpc/netflow/flows`. Until this was wired, the view *reconstructed* flows
+  from telemetry labels the sensor does not emit (it publishes
+  `labels: HashMap::new()`), so every row it drew read `0.0.0.0:0 → 0.0.0.0:0`.
+  Fields now come from the exporter's template, and a field the template omits
+  renders `—` rather than being invented.
+- **sysinfo latency** (`@rpc/sysinfo/latency`) — eBPF run-queue and block-I/O
+  histograms, shown as percentiles beneath the PSI panel. PSI says how much time
+  was lost to contention; the histograms say how long one wait actually was, and
+  the tail is the finding. The sensor declares the queryable even without the
+  `ebpf` feature (replying `available: false`), so "cannot measure it" and
+  "nothing answered" stay distinguishable — and the view says which.
+- **netring encrypted DNS** (`@rpc/netring/encrypted_dns`) — the DoT/DoQ/DoH
+  *destinations* behind the streamed `dns/encrypted/*` counts. An unrecognised
+  resolver is called out, because that is what a DNS tunnel looks like from the
+  wire.
 
 **Incidents** (`view/incident.rs`, `view/groups.rs`) — the unified Incident
 object: related alerts grouped into one incident with a timeline and evidence

@@ -217,6 +217,19 @@ pub enum Message {
     /// Filter the bandwidth table by name substring.
     BandwidthTableFilter(String),
 
+    /// Open the fleet-capabilities view (#469) and fan `introspect` out.
+    OpenFleet,
+    /// Re-ask the fleet what it serves (`@rpc/<producer>/introspect`).
+    RefreshFleet,
+    /// The fan-out's replies: one raw registry slice per (origin, producer).
+    FleetLoaded(Result<Vec<crate::view::fleet::FleetReply>, String>),
+    /// Expand/collapse one row's registry findings.
+    ToggleFleetFindings(String),
+    /// Sort the fleet table by column index.
+    FleetTableSort(usize),
+    /// Filter the fleet table by host/producer substring.
+    FleetTableFilter(String),
+
     /// Fetch an on-demand systemd detail channel (units/timers/events/cgroups) (#281).
     FetchSystemdDetail(crate::view::specialized::systemd_detail::SystemdDetailTopic),
     /// A systemd detail reply for a topic: the decoded payload, or an error message.
@@ -398,6 +411,10 @@ pub enum Message {
     FetchNetringDns,
     /// A netring DNS-detail reply: the decoded records, or an error message.
     NetringDnsReceived(Result<Vec<zensight_common::DnsRecord>, String>),
+    /// Fetch the passive encrypted-DNS (DoT/DoQ/DoH) destination inventory (#326).
+    FetchNetringEncryptedDns,
+    /// An encrypted-DNS inventory reply: the decoded records, or an error message.
+    NetringEncryptedDnsReceived(Result<Vec<zensight_common::EncryptedDnsRecord>, String>),
     /// Fetch the on-demand netring per-host HTTP detail (#45).
     FetchNetringHttp,
     /// A netring HTTP-detail reply: the decoded records, or an error message.
@@ -426,6 +443,21 @@ pub enum Message {
     FetchSysinfoProcesses(crate::view::specialized::sysinfo_detail::ProcessSort),
     /// A sysinfo process-explorer reply: the decoded records, or an error.
     SysinfoProcessesReceived(Result<Vec<zensight_common::ProcessRecord>, String>),
+    /// Fetch the recent-flow ring (`@rpc/netflow/flows`) for the selected exporter (#469).
+    FetchNetflowFlows,
+    /// A netflow flow-ring reply: the decoded records, or an error message.
+    NetflowFlowsReceived(Result<Vec<zensight_common::NetflowRecord>, String>),
+    /// Sort the netflow flow table by column index.
+    NetflowTableSort(usize),
+    /// Filter the netflow flow table.
+    NetflowTableFilter(String),
+    /// Show more rows of the netflow flow table.
+    NetflowTableMore,
+    /// Fetch the eBPF saturation histograms (`@rpc/sysinfo/latency`) for the
+    /// selected host (#99).
+    FetchSysinfoLatency,
+    /// A sysinfo latency reply: run-queue + block-I/O histograms, or an error.
+    SysinfoLatencyReceived(Result<zensight_common::LatencyReport, String>),
     /// Fetch the parallax stream catalogue (`@rpc/parallax/streams`) for the
     /// selected host (#408).
     FetchParallaxStreams,
@@ -595,6 +627,14 @@ pub enum Message {
 
     /// User cleared device selection (back to dashboard).
     ClearSelection,
+
+    /// **Focus this host** (#476): subscribe to one origin instead of the fleet.
+    ///
+    /// `Some(origin)` narrows every data-plane subscription to
+    /// `zensight/@v1/<origin>/…`; `None` restores the fleet. Changing this
+    /// re-keys the Zenoh subscription, so Iced tears the session down and
+    /// re-declares — same mechanism as a settings change.
+    SetFocusHost(Option<String>),
 
     /// User toggled protocol filter.
     ToggleProtocolFilter(Protocol),

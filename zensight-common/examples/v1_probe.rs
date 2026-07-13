@@ -57,7 +57,17 @@ async fn main() {
         .await
         .expect("legacy subscriber");
 
+    // Registry conformance (RFC 08 §5, issue #468): every telemetry key that
+    // actually reaches the bus must be buildable from a registry entry. The
+    // in-process guard (`zensight_common::metric_guard`) catches this at the
+    // publisher, but only for metrics a given run happens to emit; this is the
+    // end-to-end half — whatever the sensor *really* published on *this* host.
+    let unregistered: Arc<Mutex<BTreeSet<String>>> = Arc::new(Mutex::new(BTreeSet::new()));
+    let telemetry_seen: Arc<Mutex<BTreeSet<String>>> = Arc::new(Mutex::new(BTreeSet::new()));
+
     let v1_log = v1.clone();
+    let unreg_log = unregistered.clone();
+    let seen_log = telemetry_seen.clone();
     let _v1_sub = session
         .declare_subscriber("zensight/@v1/**")
         .callback(move |s| {
@@ -70,6 +80,36 @@ async fn main() {
                 key.to_string()
             };
             *v1_log.lock().unwrap().entry(bucket).or_default() += 1;
+
+            if let Some(idx) = key.find("@v1/")
+                && let Ok(parsed) = zensight_keyspace::grammar::parse(&key[idx..])
+                && matches!(
+                    parsed.class,
+                    zensight_keyspace::grammar::ClassOrPlane::Class(
+                        zensight_keyspace::grammar::Class::Telemetry
+                    )
+                )
+                && let Some(producer) = parsed.producer.as_ref()
+            {
+                let tail: Vec<&str> = parsed.subject.iter().map(String::as_str).collect();
+                seen_log
+                    .lock()
+                    .unwrap()
+                    .insert(format!("{}/{}", producer.name(), tail.join("/")));
+                if zensight_keyspace::registry::parse_subject(
+                    producer.name(),
+                    zensight_keyspace::grammar::Class::Telemetry,
+                    &tail,
+                )
+                .is_none()
+                {
+                    unreg_log.lock().unwrap().insert(format!(
+                        "{}: {}",
+                        producer.name(),
+                        tail.join("/")
+                    ));
+                }
+            }
         })
         .await
         .expect("v1 subscriber");
@@ -103,6 +143,25 @@ async fn main() {
         .keys()
         .filter_map(|b| b.split('/').nth(1).map(str::to_string))
         .collect();
+
+    // == Registry conformance: is every telemetry subject on the wire registered?
+    let seen = telemetry_seen.lock().unwrap().clone();
+    let unreg = unregistered.lock().unwrap().clone();
+    println!(
+        "== registry conformance ==\n  {} distinct telemetry subjects observed",
+        seen.len()
+    );
+    let registry_fail = !unreg.is_empty();
+    if registry_fail {
+        println!("  FAIL: {} unregistered (RFC 08 §5):", unreg.len());
+        for u in &unreg {
+            println!("    !! {u}");
+        }
+    } else if seen.is_empty() {
+        println!("  (no telemetry observed — nothing to check)");
+    } else {
+        println!("  all registered");
+    }
 
     // @rpc round-trips against whatever producers are live.
     println!("== @rpc probes ==");
@@ -205,7 +264,7 @@ async fn main() {
     }
 
     println!("== verdict ==");
-    let mut fail = rpc_fail || gui_fail;
+    let mut fail = rpc_fail || gui_fail || registry_fail;
     if !legacy_keys.is_empty() {
         println!("FAIL: legacy bus carried {} samples:", legacy_keys.len());
         for k in legacy_keys.iter().take(10) {

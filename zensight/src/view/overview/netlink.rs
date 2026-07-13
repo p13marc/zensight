@@ -11,6 +11,7 @@ use crate::message::{DeviceId, Message};
 use crate::view::components::{StatusLed, StatusLedState};
 use crate::view::dashboard::DeviceState;
 use crate::view::theme;
+use zensight_keyspace::registry::netlink::Subject;
 
 #[derive(Default)]
 struct NetlinkAgg {
@@ -34,9 +35,8 @@ fn aggregate(devices: &HashMap<&DeviceId, &DeviceState>) -> NetlinkAgg {
     let mut agg = NetlinkAgg::default();
     for state in devices.values() {
         for (key, point) in &state.metrics {
-            if let Some(rest) = key.strip_prefix("iface/")
-                && rest.ends_with("/up")
-            {
+            // `iface/{iface}/up`, via the registry (#475).
+            if matches!(Subject::parse_metric(key), Some(Subject::IfaceUp { .. })) {
                 agg.ifaces_total += 1;
                 if matches!(point.value, TelemetryValue::Boolean(true)) {
                     agg.ifaces_up += 1;

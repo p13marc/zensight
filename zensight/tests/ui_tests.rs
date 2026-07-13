@@ -267,6 +267,7 @@ fn shell_ui() -> iced_test::Simulator<'static, Message> {
         0,
         Some(10_000),
         12_000,
+        None,
         content,
     ))
 }
@@ -283,6 +284,7 @@ fn test_shell_shows_freshness_live() {
         0,
         Some(10_000),
         12_000, // 2s after last point => Live
+        None,
         content,
     ));
     assert!(ui.find("Live").is_ok());
@@ -298,6 +300,7 @@ fn test_shell_shows_freshness_paused() {
         0,
         None,
         12_000,
+        None,
         content,
     ));
     assert!(ui.find("Paused").is_ok());
@@ -398,6 +401,70 @@ fn test_device_detail_view() {
     // Should show section headers (specialized view shows CPU, Memory, etc.)
     assert!(ui.find("CPU").is_ok());
     assert!(ui.find("Memory").is_ok());
+}
+
+/// #476: the host detail header offers "Focus this host" once the host's origin
+/// is known, and clicking it drives `SetFocusHost(Some(origin))`.
+#[test]
+fn test_device_detail_focus_button() {
+    let device_id = DeviceId {
+        protocol: Protocol::Sysinfo,
+        source: "server01".to_string(),
+    };
+    let mut state = DeviceDetailState::new(device_id);
+    state.origin = Some("h-3fa9c2d41b7e".to_string());
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
+    let _ = ui.click("Focus this host");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::SetFocusHost(Some(o)) if o == "h-3fa9c2d41b7e")),
+        "clicking Focus should request focus on this host's origin"
+    );
+}
+
+/// #476: while focused the same button becomes the way out — and the shell says
+/// so, because an emptied fleet dashboard otherwise looks like an outage.
+#[test]
+fn test_focus_mode_offers_a_way_out() {
+    let device_id = DeviceId {
+        protocol: Protocol::Sysinfo,
+        source: "server01".to_string(),
+    };
+    let mut state = DeviceDetailState::new(device_id);
+    state.origin = Some("h-3fa9c2d41b7e".to_string());
+    state.focused = true;
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
+    let _ = ui.click("Exit focus");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::SetFocusHost(None)))
+    );
+
+    // The shell banner names the focused host and carries its own exit.
+    let content = iced::widget::text("content").into();
+    let mut shell = simulator(zensight::view::shell::app_shell(
+        CurrentView::Dashboard,
+        None,
+        ConnectionState::Connected,
+        0,
+        Some(10_000),
+        12_000,
+        Some("server01".to_string()),
+        content,
+    ));
+    assert!(shell.find("Focused on server01").is_ok());
+    let _ = shell.click("Exit focus");
+    let msgs: Vec<Message> = shell.into_messages().collect();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::SetFocusHost(None)))
+    );
 }
 
 /// #133: a multi-sensor host renders one facet tab per sensor, and clicking an
@@ -3568,6 +3635,7 @@ fn test_nav_opens_logs() {
         0,
         None,
         0,
+        None,
         inner.into(),
     ));
     let _ = ui.click("Logs");
@@ -3588,6 +3656,7 @@ fn test_nav_opens_incidents() {
         0,
         None,
         0,
+        None,
         inner.into(),
     ));
     let _ = ui.click("Incidents");
@@ -3608,6 +3677,7 @@ fn test_nav_opens_inventory() {
         0,
         None,
         0,
+        None,
         inner.into(),
     ));
     let _ = ui.click("Inventory");
@@ -4254,7 +4324,7 @@ fn netring_capture_tab_hosts_capture_form() {
     state.update(zensight_common::TelemetryPoint::new(
         "host01",
         Protocol::Netring,
-        "capture/eth0/packets_total",
+        "capture/eth0/packets",
         zensight_common::TelemetryValue::Counter(10),
     ));
 
@@ -4294,7 +4364,7 @@ fn netring_capture_tab_without_advert_is_health_only() {
     state.update(zensight_common::TelemetryPoint::new(
         "host01",
         Protocol::Netring,
-        "capture/eth0/packets_total",
+        "capture/eth0/packets",
         zensight_common::TelemetryValue::Counter(10),
     ));
 
@@ -4511,4 +4581,530 @@ fn test_parallax_catalogue_and_tiles() {
         .end_tile("video0", generation, Some("stream ended".into()));
     let mut ui = simulator(parallax_view(&state));
     assert!(ui.find("video0 — stream ended").is_ok());
+}
+
+// ===========================================================================
+// Tier-2 conversion regression net (#475).
+//
+// These views were switched from positional string-splitting to the registry's
+// typed parse direction. The failure mode of that conversion is NOT a panic —
+// it is a table that silently renders zero rows, because `parse_metric` returned
+// `None` and the loop body never ran. Several of these sections still gate their
+// *header* on a string prefix (`has_temperatures`, `has_disk_io`, the neighbor
+// donut), so the title appears either way and a title-only assertion proves
+// nothing.
+//
+// Every test below therefore feeds REAL registered subjects and asserts on a
+// rendered ROW. If a registry pattern moves and a consumer is not updated with
+// it, one of these goes red instead of a view going quietly blank in production.
+// ===========================================================================
+
+/// Build a sysinfo telemetry point with a registered subject.
+fn sysinfo_point(
+    metric: &str,
+    value: zensight_common::TelemetryValue,
+) -> zensight_common::TelemetryPoint {
+    zensight_common::TelemetryPoint {
+        timestamp: 0,
+        source: "server01".to_string(),
+        protocol: Protocol::Sysinfo,
+        metric: metric.to_string(),
+        value,
+        labels: HashMap::new(),
+    }
+}
+
+fn sysinfo_state(points: &[(&str, zensight_common::TelemetryValue)]) -> DeviceDetailState {
+    let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Sysinfo, "server01"));
+    for (metric, value) in points {
+        state.update(sysinfo_point(metric, value.clone()));
+    }
+    state
+}
+
+/// `disk/{mount}/used` + `/total` must produce a mount row. The mount is a slug
+/// (`/home` → `home`, `/` → `_`), and the row only renders when BOTH keys parse.
+#[test]
+fn tier2_sysinfo_disk_rows_render() {
+    let state = sysinfo_state(&[
+        (
+            "disk/home/used",
+            zensight_common::TelemetryValue::Gauge(30_000_000_000.0),
+        ),
+        (
+            "disk/home/total",
+            zensight_common::TelemetryValue::Gauge(100_000_000_000.0),
+        ),
+    ]);
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(
+        ui.find("home").is_ok(),
+        "the disk section must render a row for the `home` mount, not just its header"
+    );
+}
+
+/// `network/{iface}/rx_bytes` must produce an interface row — and the sibling
+/// `network/tcp/*` / `network/sockets/*` literal families must NOT be mistaken
+/// for interfaces named `tcp`/`sockets`. That confusion is exactly what the
+/// typed parse exists to prevent, and nothing pinned it until now.
+#[test]
+fn tier2_sysinfo_network_rows_render_and_do_not_invent_an_iface() {
+    let state = sysinfo_state(&[
+        (
+            "network/eth0/rx_bytes",
+            zensight_common::TelemetryValue::Counter(1_000_000),
+        ),
+        (
+            "network/eth0/tx_bytes",
+            zensight_common::TelemetryValue::Counter(2_000_000),
+        ),
+        // Literal-headed siblings — a positional parse would read chunk 1 as an
+        // interface name and invent an iface called "tcp".
+        (
+            "network/tcp/retrans_segs_total",
+            zensight_common::TelemetryValue::Counter(12),
+        ),
+        (
+            "network/sockets/tcp_inuse",
+            zensight_common::TelemetryValue::Gauge(40.0),
+        ),
+    ]);
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(ui.find("eth0").is_ok(), "eth0 must render as an interface");
+
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(
+        ui.find("network/tcp").is_err(),
+        "the `network/tcp/*` literal family must not surface as an interface"
+    );
+}
+
+/// `disk/{device}/io/read_rate` must produce a device row. `has_disk_io()` gates
+/// the header on a string prefix, so the header alone proves nothing.
+#[test]
+fn tier2_sysinfo_disk_io_rows_render() {
+    let state = sysinfo_state(&[
+        (
+            "disk/sda/io/read_rate",
+            zensight_common::TelemetryValue::Gauge(1_048_576.0),
+        ),
+        (
+            "disk/sda/io/write_rate",
+            zensight_common::TelemetryValue::Gauge(524_288.0),
+        ),
+    ]);
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(
+        ui.find("sda").is_ok(),
+        "the Disk I/O section must render the `sda` device row, not an empty section"
+    );
+}
+
+/// `sensors/{chip}/{label}/temp` — two variables — must produce a sensor row.
+/// `has_temperatures()` is a `starts_with("sensors/")` check, so this section
+/// renders its title with zero rows if the two-var parse breaks.
+#[test]
+fn tier2_sysinfo_temperature_rows_render() {
+    let state = sysinfo_state(&[(
+        "sensors/coretemp/core_0/temp",
+        zensight_common::TelemetryValue::Gauge(45.0),
+    )]);
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    // The row is `{chip}/{label}` — both variables named by the registry rather
+    // than read off parts[1]/parts[2].
+    assert!(
+        ui.find("coretemp/core_0").is_ok(),
+        "the Temperatures section must render the chip/label row, not an empty section"
+    );
+}
+
+fn netlink_state(points: &[(&str, zensight_common::TelemetryValue)]) -> DeviceDetailState {
+    let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Netlink, "server01"));
+    for (metric, value) in points {
+        state.update(zensight_common::TelemetryPoint {
+            timestamp: 0,
+            source: "server01".to_string(),
+            protocol: Protocol::Netlink,
+            metric: metric.to_string(),
+            value: value.clone(),
+            labels: HashMap::new(),
+        });
+    }
+    state
+}
+
+/// `sockets/tcp/by_cong/{algo}` must produce a per-algorithm row. Note the
+/// section early-returns unless some other `sockets/tcp/*` key is present.
+#[test]
+fn tier2_netlink_congestion_rows_render() {
+    let mut state = netlink_state(&[
+        (
+            "sockets/tcp/total",
+            zensight_common::TelemetryValue::Gauge(10.0),
+        ),
+        (
+            "sockets/tcp/by_cong/cubic",
+            zensight_common::TelemetryValue::Gauge(7.0),
+        ),
+        (
+            "sockets/tcp/by_cong/bbr",
+            zensight_common::TelemetryValue::Gauge(3.0),
+        ),
+    ]);
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Sockets;
+    let mut ui = simulator(zensight::view::specialized::netlink::netlink_host_view(
+        &state,
+    ));
+    // The row label is indented (`format!("  {algo}")`).
+    assert!(
+        ui.find("  cubic").is_ok(),
+        "the congestion-algorithm rows must render the algo name"
+    );
+}
+
+/// `neighbors/by_state/{state}` must produce a donut slice *label*, not just the
+/// "Neighbor states" header — which is gated on a string prefix and would render
+/// over an empty donut.
+#[test]
+fn tier2_netlink_neighbor_state_slices_render() {
+    let mut state = netlink_state(&[
+        (
+            "neighbors/total",
+            zensight_common::TelemetryValue::Gauge(5.0),
+        ),
+        (
+            "neighbors/by_state/reachable",
+            zensight_common::TelemetryValue::Gauge(4.0),
+        ),
+        (
+            "neighbors/by_state/stale",
+            zensight_common::TelemetryValue::Gauge(1.0),
+        ),
+    ]);
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::RoutingNeighbors;
+    let mut ui = simulator(zensight::view::specialized::netlink::netlink_host_view(
+        &state,
+    ));
+    assert!(
+        ui.find("reachable").is_ok(),
+        "the neighbor-state donut must render its slice labels, not just its header"
+    );
+}
+
+fn netring_state(
+    tab: zensight::view::specialized::SpecializedTab,
+    points: &[(&str, zensight_common::TelemetryValue)],
+) -> DeviceDetailState {
+    let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Netring, "wiretap1"));
+    for (metric, value) in points {
+        state.update(zensight_common::TelemetryPoint {
+            timestamp: 0,
+            source: "wiretap1".to_string(),
+            protocol: Protocol::Netring,
+            metric: metric.to_string(),
+            value: value.clone(),
+            labels: HashMap::new(),
+        });
+    }
+    state.specialized_tab = tab;
+    state
+}
+
+/// `dns/responses_by_rcode/{rcode}` — the sensor publishes `<rcode>_total`, and
+/// the view trims the suffix — must produce a ranked-bar row per rcode.
+#[test]
+fn tier2_netring_dns_rcode_rows_render() {
+    let state = netring_state(
+        zensight::view::specialized::SpecializedTab::Dns,
+        &[
+            (
+                "dns/queries_total",
+                zensight_common::TelemetryValue::Counter(100),
+            ),
+            (
+                "dns/responses_by_rcode/nxdomain_total",
+                zensight_common::TelemetryValue::Counter(12),
+            ),
+            (
+                "dns/responses_by_rcode/noerror_total",
+                zensight_common::TelemetryValue::Counter(88),
+            ),
+        ],
+    );
+    let mut ui = simulator(zensight::view::specialized::netring::netring_sensor_view(
+        &state, None,
+    ));
+    assert!(
+        ui.find("nxdomain").is_ok(),
+        "the by-rcode bar must render a row per response code"
+    );
+}
+
+/// `http/methods/{method}` (published as `<method>_total`) must produce a row.
+#[test]
+fn tier2_netring_http_method_rows_render() {
+    let state = netring_state(
+        zensight::view::specialized::SpecializedTab::HttpTls,
+        &[
+            (
+                "http/requests_total",
+                zensight_common::TelemetryValue::Counter(50),
+            ),
+            (
+                "http/methods/get_total",
+                zensight_common::TelemetryValue::Counter(40),
+            ),
+            (
+                "http/methods/post_total",
+                zensight_common::TelemetryValue::Counter(10),
+            ),
+        ],
+    );
+    let mut ui = simulator(zensight::view::specialized::netring::netring_sensor_view(
+        &state, None,
+    ));
+    assert!(
+        ui.find("get").is_ok(),
+        "the by-method bar must render a row per HTTP method"
+    );
+}
+
+/// The netlink overview's "Interfaces up" is an N/M stat derived from
+/// `iface/{iface}/up`. Asserting the *label* proves nothing — it renders "0/0"
+/// just as happily. Assert the value.
+#[test]
+fn tier2_netlink_overview_counts_interfaces() {
+    use zensight::view::overview::netlink::netlink_overview;
+
+    let id = DeviceId::new(Protocol::Netlink, "server01");
+    let mut device = DeviceState::new(id.clone());
+    for (metric, up) in [("iface/eth0/up", true), ("iface/wan0/up", false)] {
+        device.metrics.insert(
+            metric.to_string(),
+            zensight_common::TelemetryPoint {
+                timestamp: 0,
+                source: "server01".to_string(),
+                protocol: Protocol::Netlink,
+                metric: metric.to_string(),
+                value: zensight_common::TelemetryValue::Boolean(up),
+                labels: HashMap::new(),
+            },
+        );
+    }
+    let devices: HashMap<&DeviceId, &DeviceState> = HashMap::from([(&id, &device)]);
+
+    let mut ui = simulator(netlink_overview(&devices));
+    assert!(
+        ui.find("1/2").is_ok(),
+        "one of two interfaces is up — the stat must count, not just label"
+    );
+}
+
+// ===========================================================================
+// Phase-5 panels (#469): the three procedures that had no caller, and the Fleet
+// view. Driven through the project's GUI harness (iced_test::simulator).
+// ===========================================================================
+
+/// The sysinfo latency panel renders percentiles, not a mean — the tail is the
+/// finding. Sub-millisecond waits read in µs, longer ones in ms.
+#[test]
+fn sysinfo_latency_panel_renders_percentiles() {
+    use zensight_common::{Histogram, LatencyReport};
+
+    let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Sysinfo, "server01"));
+    state.sysinfo_detail.apply_latency(Ok(LatencyReport {
+        available: true,
+        window_secs: 10,
+        runqlat: Histogram {
+            unit: "us".into(),
+            buckets: Vec::new(),
+            total: 500,
+            p50_us: 20,
+            p95_us: 8_000,
+            p99_us: 40_000,
+            max_us: 60_000,
+        },
+        biolatency: Histogram::default(),
+    }));
+
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(ui.find("Run-queue delay (runqlat)").is_ok());
+
+    // p50 is sub-millisecond → µs; p99 is a 40 ms stall → ms. A mean would have
+    // hidden the second behind the first, which is the whole reason for the panel.
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(ui.find("20 µs").is_ok(), "p50 renders in µs");
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(ui.find("40.0 ms").is_ok(), "p99 renders in ms");
+}
+
+/// A sensor built without the `ebpf` feature still answers, with
+/// `available: false`. "Cannot measure it" and "nothing answered" are different
+/// problems and must not render the same.
+#[test]
+fn sysinfo_latency_panel_distinguishes_unavailable_from_no_answer() {
+    use zensight_common::LatencyReport;
+
+    let mut unavailable = DeviceDetailState::new(DeviceId::new(Protocol::Sysinfo, "server01"));
+    unavailable.sysinfo_detail.apply_latency(Ok(LatencyReport {
+        available: false,
+        ..Default::default()
+    }));
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &unavailable,
+    ));
+    assert!(
+        ui.find(
+            "The sensor is not collecting these — it needs the `ebpf` feature, \
+             a supported kernel and CAP_BPF."
+        )
+        .is_ok(),
+        "an unavailable collector must say so, not look like a failed fetch"
+    );
+
+    let mut failed = DeviceDetailState::new(DeviceId::new(Protocol::Sysinfo, "server01"));
+    failed
+        .sysinfo_detail
+        .apply_latency(Err("No sysinfo sensor responded".into()));
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &failed,
+    ));
+    assert!(ui.find("Fetch failed: No sysinfo sensor responded").is_ok());
+}
+
+/// The encrypted-DNS destination inventory: an unrecognised resolver is what a
+/// DNS tunnel looks like from the wire, so it is called out, not left as a
+/// `false` in a cell.
+#[test]
+fn netring_encrypted_dns_destinations_flag_unknown_resolvers() {
+    use zensight_common::EncryptedDnsRecord;
+
+    let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Netring, "wiretap1"));
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Dns;
+    // The DNS tab is capability-gated on `dns/` telemetry. A host doing *only*
+    // encrypted DNS still publishes `dns/encrypted/*`, so it reaches the tab —
+    // which is the case that matters, since that host has no cleartext DNS at all.
+    state.update(zensight_common::TelemetryPoint {
+        timestamp: 0,
+        source: "wiretap1".to_string(),
+        protocol: Protocol::Netring,
+        metric: "dns/encrypted/doh".to_string(),
+        value: zensight_common::TelemetryValue::Counter(43),
+        labels: HashMap::new(),
+    });
+    state.netring_detail.apply_encrypted_dns(Ok(vec![
+        EncryptedDnsRecord {
+            transport: "doh".into(),
+            sni: Some("cloudflare-dns.com".into()),
+            via_known_resolver: true,
+            count: 40,
+        },
+        EncryptedDnsRecord {
+            transport: "dot".into(),
+            sni: Some("suspicious.example".into()),
+            via_known_resolver: false,
+            count: 3,
+        },
+    ]));
+
+    let mut ui = simulator(zensight::view::specialized::netring::netring_sensor_view(
+        &state, None,
+    ));
+    assert!(ui.find("suspicious.example").is_ok());
+
+    let mut ui = simulator(zensight::view::specialized::netring::netring_sensor_view(
+        &state, None,
+    ));
+    assert!(
+        ui.find("⚠ 1 destination(s) are not a recognised public resolver")
+            .is_ok(),
+        "the un-known resolver must be called out, not buried in a column"
+    );
+}
+
+/// The Fleet view's whole reason to exist is spotting the odd one out, so the
+/// skew row is the case worth pinning — and it must sort above the healthy hosts.
+#[test]
+fn fleet_view_surfaces_a_skewed_host_above_the_healthy_ones() {
+    use zensight::view::fleet::{FleetReply, FleetState, fleet_view};
+
+    let sysinfo_slice = zensight_keyspace::registry::REGISTRIES
+        .iter()
+        .find(|(n, _)| *n == "sysinfo")
+        .map(|(_, t)| (*t).to_string())
+        .expect("sysinfo registry");
+
+    // edge01 serves a bumped registry version; server01 serves ours.
+    let skewed = sysinfo_slice.replacen("version = \"1.1\"", "version = \"1.0\"", 1);
+    assert_ne!(skewed, sysinfo_slice, "the fixture must actually differ");
+
+    let mut state = FleetState::default();
+    state.apply(
+        Ok(vec![
+            FleetReply {
+                origin: "h-aaaaaaaaaaaa".into(),
+                producer: "sysinfo".into(),
+                toml: sysinfo_slice,
+            },
+            FleetReply {
+                origin: "h-bbbbbbbbbbbb".into(),
+                producer: "sysinfo".into(),
+                toml: skewed,
+            },
+        ]),
+        &[
+            ("h-aaaaaaaaaaaa".into(), "sysinfo".into(), "server01".into()),
+            ("h-bbbbbbbbbbbb".into(), "sysinfo".into(), "edge01".into()),
+        ],
+    );
+
+    let rows = state.rows.ready().expect("rows");
+    assert_eq!(
+        rows[0].host, "edge01",
+        "the skewed host must sort first — a drifting host buried under ten healthy \
+         ones is the failure this view exists to prevent"
+    );
+
+    let mut ui = simulator(fleet_view(&state));
+    assert!(ui.find("version skew").is_ok());
+    let mut ui = simulator(fleet_view(&state));
+    assert!(ui.find("in sync").is_ok(), "server01 agrees with us");
+}
+
+/// A producer that is alive on the bus but answers no `introspect` must appear as
+/// `silent`, not vanish. Fanning out alone cannot tell "not deployed" from
+/// "deployed and not answering", and the second is the row you need to see.
+#[test]
+fn fleet_view_shows_an_alive_but_silent_producer() {
+    use zensight::view::fleet::{FleetState, fleet_view};
+
+    let mut state = FleetState::default();
+    state.apply(
+        Ok(Vec::new()),
+        &[("h-cccccccccccc".into(), "netring".into(), "edge01".into())],
+    );
+
+    let mut ui = simulator(fleet_view(&state));
+    assert!(
+        ui.find("edge01").is_ok(),
+        "the silent host must still be listed"
+    );
+    let mut ui = simulator(fleet_view(&state));
+    assert!(ui.find("silent").is_ok());
 }

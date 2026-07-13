@@ -2,7 +2,7 @@
 //! under `systemd/unit/<unit>/*`, plus the `systemd/other/*` overflow bucket.
 //! Kept free of I/O so it is unit-testable without a bus.
 
-use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 
 use crate::unit::UnitSample;
 
@@ -34,7 +34,7 @@ pub fn unit_points(source: &str, s: &UnitSample) -> Vec<TelemetryPoint> {
     let slug = sanitize_unit(&s.name);
     let base = format!("unit/{slug}");
     let point = |metric: String, value: TelemetryValue| {
-        TelemetryPoint::new(source, Protocol::Systemd, metric, value)
+        crate::telemetry_guard::checked_point(source, metric, value)
             .with_label("unit", s.name.clone())
     };
 
@@ -44,9 +44,8 @@ pub fn unit_points(source: &str, s: &UnitSample) -> Vec<TelemetryPoint> {
             TelemetryValue::Boolean(s.is_active()),
         ),
         // Active/sub state as text; load_state rides as a label for context.
-        TelemetryPoint::new(
+        crate::telemetry_guard::checked_point(
             source,
-            Protocol::Systemd,
             format!("{base}/state"),
             TelemetryValue::Text(s.active_state.clone()),
         )
@@ -137,7 +136,7 @@ pub fn ip_rate_points(
     let slug = sanitize_unit(unit);
     let base = format!("unit/{slug}");
     let gauge = |metric: String, v: f64| {
-        TelemetryPoint::new(source, Protocol::Systemd, metric, TelemetryValue::Gauge(v))
+        crate::telemetry_guard::checked_point(source, metric, TelemetryValue::Gauge(v))
             .with_label("unit", unit.to_string())
             .with_label(LABEL_SOURCE, BandwidthSource::Systemd.as_str())
             .with_label(LABEL_SEMANTICS, ByteSemantics::WireL3.as_str())
@@ -152,9 +151,8 @@ pub fn ip_rate_points(
     }
     if accounting_off {
         pts.push(
-            TelemetryPoint::new(
+            crate::telemetry_guard::checked_point(
                 source,
-                Protocol::Systemd,
                 format!("{base}/ip_accounting"),
                 TelemetryValue::Boolean(false),
             )
@@ -175,7 +173,7 @@ pub fn socket_points(
 ) -> Vec<TelemetryPoint> {
     let base = format!("unit/{}", sanitize_unit(name));
     let point = |metric: String, value: TelemetryValue| {
-        TelemetryPoint::new(source, Protocol::Systemd, metric, value).with_label("unit", name)
+        crate::telemetry_guard::checked_point(source, metric, value).with_label("unit", name)
     };
     vec![
         // n_accepted is monotonic (lifetime connections accepted) → Counter.
@@ -205,7 +203,7 @@ pub fn timer_points(
 ) -> Vec<TelemetryPoint> {
     let base = format!("unit/{}", sanitize_unit(name));
     let point = |metric: String, value: TelemetryValue| {
-        TelemetryPoint::new(source, Protocol::Systemd, metric, value).with_label("unit", name)
+        crate::telemetry_guard::checked_point(source, metric, value).with_label("unit", name)
     };
     let mut pts = vec![point(
         format!("{base}/last_trigger_usec"),
@@ -237,12 +235,7 @@ pub fn mount_points<'a>(
         }
     }
     let gauge = |metric: &str, v: u64| {
-        TelemetryPoint::new(
-            source,
-            Protocol::Systemd,
-            metric,
-            TelemetryValue::Gauge(v as f64),
-        )
+        crate::telemetry_guard::checked_point(source, metric, TelemetryValue::Gauge(v as f64))
     };
     vec![
         gauge("mounts/total", total),
@@ -259,7 +252,7 @@ pub fn journal_points(
     available_bytes: Option<u64>,
 ) -> Vec<TelemetryPoint> {
     let gauge = |metric: &str, v: f64| {
-        TelemetryPoint::new(source, Protocol::Systemd, metric, TelemetryValue::Gauge(v))
+        crate::telemetry_guard::checked_point(source, metric, TelemetryValue::Gauge(v))
     };
     let mut pts = vec![gauge("journal/disk_usage_bytes", usage_bytes as f64)];
     if let Some(avail) = available_bytes {
@@ -272,9 +265,8 @@ pub fn journal_points(
 /// units that are NOT individually streamed (total minus watched), so their
 /// existence isn't lost to the watchlist scoping.
 pub fn other_points(source: &str, unwatched_total: u64) -> Vec<TelemetryPoint> {
-    vec![TelemetryPoint::new(
+    vec![crate::telemetry_guard::checked_point(
         source,
-        Protocol::Systemd,
         "other/units_total",
         TelemetryValue::Gauge(unwatched_total as f64),
     )]

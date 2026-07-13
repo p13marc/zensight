@@ -20,4 +20,5 @@ pub mod journal;
 pub mod map;
 pub mod query;
 pub mod sentinel;
+pub(crate) mod telemetry_guard;
 pub mod unit;

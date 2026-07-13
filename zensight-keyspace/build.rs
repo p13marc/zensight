@@ -24,6 +24,9 @@ struct SubjectEntry {
     path: String,
     chunks: Vec<Chunk>,
     class: String,
+    payload_type: String,
+    unit: Option<String>,
+    cardinality: Option<i64>,
     qos: String,
     ttl_s: Option<i64>,
     rate: Option<String>,
@@ -35,6 +38,8 @@ struct ProcedureEntry {
     path: String,
     chunks: Vec<String>,
     kind: String,
+    request: Option<String>,
+    reply: Option<String>,
     variant: String,
 }
 
@@ -108,6 +113,13 @@ fn camel(parts: &[&str]) -> String {
         }
     }
     out
+}
+
+/// A hand-written `variant = "..."` override must be a plain CamelCase Rust
+/// identifier — it lands verbatim in the generated enum.
+fn is_valid_variant(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_uppercase()) && chars.all(|c| c.is_ascii_alphanumeric())
 }
 
 /// Variant name: CamelCase of the literal chunks; all-variable patterns use
@@ -263,13 +275,21 @@ fn load_registry(dir: &Path) -> Vec<RegistryFile> {
                     &format!("{spath:?}: unknown qos profile {qos:?} (RFC 04 §3)"),
                 );
             }
+            // RFC 08 §2: `type` is required — it is what binds one payload type
+            // to every expansion of the pattern (P5), and what lets a consumer
+            // decode a wildcard result set without sniffing.
+            let payload_type = entry
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| fail(&fname, &format!("{spath:?}: missing type (RFC 08 §2)")))
+                .to_string();
+            let unit = entry
+                .get("unit")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let cardinality = entry.get("cardinality").and_then(|v| v.as_integer());
             let has_var = chunks.iter().any(|c| !matches!(c, Chunk::Literal(_)));
-            if has_var
-                && entry
-                    .get("cardinality")
-                    .and_then(|v| v.as_integer())
-                    .is_none()
-            {
+            if has_var && cardinality.is_none() {
                 fail(
                     &fname,
                     &format!("{spath:?}: {{var}} pattern needs integer cardinality (RFC 08 §5)"),
@@ -303,11 +323,26 @@ fn load_registry(dir: &Path) -> Vec<RegistryFile> {
             {
                 fail(&fname, &format!("{spath:?}: missing description/since"));
             }
+            // `variant` overrides the derived name. Two patterns with the same
+            // literal chunks but different arity (`cpu/usage` vs
+            // `cpu/{core}/usage`) derive the same name and would otherwise trip
+            // the collision lint below with no way out.
+            let variant = match entry.get("variant").and_then(|v| v.as_str()) {
+                Some(v) if is_valid_variant(v) => v.to_string(),
+                Some(v) => fail(
+                    &fname,
+                    &format!("{spath:?}: variant {v:?} is not a CamelCase identifier"),
+                ),
+                None => variant_name(&chunks),
+            };
             subjects.push(SubjectEntry {
                 path: spath.to_string(),
-                variant: variant_name(&chunks),
+                variant,
                 chunks,
                 class: class.to_string(),
+                payload_type,
+                unit,
+                cardinality,
                 qos,
                 ttl_s,
                 rate,
@@ -371,6 +406,14 @@ fn load_registry(dir: &Path) -> Vec<RegistryFile> {
                 variant: camel(&refs),
                 chunks,
                 kind: kind.to_string(),
+                request: entry
+                    .get("request")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                reply: entry
+                    .get("reply")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
             });
         }
 
@@ -594,6 +637,52 @@ fn emit(files: &[RegistryFile]) -> String {
         }
         let _ = writeln!(out, "            }}\n        }}\n");
 
+        // payload_type() — the registry `type` column (RFC 08 §2). One payload
+        // type per pattern (P5), so this is what a consumer decodes as.
+        let _ = writeln!(
+            out,
+            "        /// The one payload type of every expansion of this subject (RFC 08 §2)."
+        );
+        let _ = writeln!(out, "        pub fn payload_type(&self) -> &'static str {{");
+        let _ = writeln!(out, "            match self {{");
+        for s in &f.subjects {
+            let _ = writeln!(
+                out,
+                "                Self::{} {{ .. }} => {:?},",
+                s.variant, s.payload_type
+            );
+        }
+        let _ = writeln!(out, "            }}\n        }}\n");
+
+        // unit() — RFC 08 §4: the registry is authoritative for units, whether
+        // or not the key spells one as a suffix.
+        let _ = writeln!(out, "        pub fn unit(&self) -> Option<&'static str> {{");
+        let _ = writeln!(out, "            match self {{");
+        for s in &f.subjects {
+            let unit = match &s.unit {
+                Some(u) => format!("Some({u:?})"),
+                None => "None".to_string(),
+            };
+            let _ = writeln!(
+                out,
+                "                Self::{} {{ .. }} => {unit},",
+                s.variant
+            );
+        }
+        let _ = writeln!(out, "            }}\n        }}\n");
+
+        // cardinality() — the key-population bound the budget review enforces.
+        let _ = writeln!(out, "        pub fn cardinality(&self) -> Option<u64> {{");
+        let _ = writeln!(out, "            match self {{");
+        for s in &f.subjects {
+            let c = match s.cardinality {
+                Some(c) => format!("Some({c})"),
+                None => "None".to_string(),
+            };
+            let _ = writeln!(out, "                Self::{} {{ .. }} => {c},", s.variant);
+        }
+        let _ = writeln!(out, "            }}\n        }}\n");
+
         // pattern()
         let _ = writeln!(out, "        pub fn pattern(&self) -> &'static str {{");
         let _ = writeln!(out, "            match self {{");
@@ -631,6 +720,45 @@ fn emit(files: &[RegistryFile]) -> String {
                 let _ = write!(binds, "{n}, ");
                 body = format!("{{ let mut c = {body}; c.extend({n}.iter().cloned()); c }}");
             }
+            let pat = if binds.is_empty() {
+                format!("Self::{}", s.variant)
+            } else {
+                format!("Self::{} {{ {binds}}}", s.variant)
+            };
+            let _ = writeln!(out, "                {pat} => {body},");
+        }
+        let _ = writeln!(out, "            }}\n        }}\n");
+
+        // vars() — the variable bindings, in pattern order. A `{var...}` rest
+        // binds as its chunks rejoined with `/`.
+        let _ = writeln!(
+            out,
+            "        /// The pattern's variable bindings, in order (a `{{var...}}` rest rejoins with `/`)."
+        );
+        let _ = writeln!(
+            out,
+            "        pub fn vars(&self) -> Vec<(&'static str, String)> {{"
+        );
+        let _ = writeln!(out, "            match self {{");
+        for s in &f.subjects {
+            let mut binds = String::new();
+            let mut body = String::from("vec![");
+            for c in &s.chunks {
+                match c {
+                    Chunk::Literal(_) => {}
+                    Chunk::Var(v) => {
+                        let n = snake(v);
+                        let _ = write!(binds, "{n}, ");
+                        let _ = write!(body, "({v:?}, {n}.clone()), ");
+                    }
+                    Chunk::Rest(v) => {
+                        let n = snake(v);
+                        let _ = write!(binds, "{n}, ");
+                        let _ = write!(body, "({v:?}, {n}.join(\"/\")), ");
+                    }
+                }
+            }
+            body.push(']');
             let pat = if binds.is_empty() {
                 format!("Self::{}", s.variant)
             } else {
@@ -705,7 +833,19 @@ fn emit(files: &[RegistryFile]) -> String {
                 conds.join(" && ")
             );
         }
-        let _ = writeln!(out, "            None\n        }}");
+        let _ = writeln!(out, "            None\n        }}\n");
+
+        // parse_metric() — the ergonomic entry point. Consumers hold the
+        // telemetry tail as one string (`TelemetryPoint::metric` *is* the
+        // subject tail, verbatim), so splitting it belongs here, once.
+        let _ = writeln!(
+            out,
+            "        /// Refine a telemetry metric name (the subject tail as one `/`-joined string)."
+        );
+        let _ = writeln!(
+            out,
+            "        pub fn parse_metric(metric: &str) -> Option<Self> {{\n            let tail: Vec<&str> = metric.split('/').collect();\n            Self::parse(Class::Telemetry, &tail)\n        }}"
+        );
         let _ = writeln!(out, "    }}\n");
 
         // Full-key builder.
@@ -756,7 +896,43 @@ fn emit(files: &[RegistryFile]) -> String {
             for p in &f.procedures {
                 let _ = writeln!(out, "                Self::{} => {:?},", p.variant, p.kind);
             }
-            let _ = writeln!(out, "            }}\n        }}");
+            let _ = writeln!(out, "            }}\n        }}\n");
+            let _ = writeln!(
+                out,
+                "        /// The registered path, e.g. `artifact/request`."
+            );
+            let _ = writeln!(out, "        pub fn path(self) -> &'static str {{");
+            let _ = writeln!(out, "            match self {{");
+            for p in &f.procedures {
+                let _ = writeln!(out, "                Self::{} => {:?},", p.variant, p.path);
+            }
+            let _ = writeln!(out, "            }}\n        }}\n");
+            // request_type()/reply_type() — RFC 08 §2. A `read` has no request
+            // body; a write that acks with nothing has no reply type.
+            for (method, field) in [
+                ("request_type", &|p: &ProcedureEntry| {
+                    p.request.clone() as Option<String>
+                }),
+                ("reply_type", &|p: &ProcedureEntry| {
+                    p.reply.clone() as Option<String>
+                }),
+            ]
+                as [(&str, &dyn Fn(&ProcedureEntry) -> Option<String>); 2]
+            {
+                let _ = writeln!(
+                    out,
+                    "        pub fn {method}(self) -> Option<&'static str> {{"
+                );
+                let _ = writeln!(out, "            match self {{");
+                for p in &f.procedures {
+                    let t = match field(p) {
+                        Some(t) => format!("Some({t:?})"),
+                        None => "None".to_string(),
+                    };
+                    let _ = writeln!(out, "                Self::{} => {t},", p.variant);
+                }
+                let _ = writeln!(out, "            }}\n        }}\n");
+            }
             let _ = writeln!(out, "    }}\n");
             if f.service_origin.is_some() {
                 let _ = writeln!(
@@ -794,6 +970,20 @@ fn emit(files: &[RegistryFile]) -> String {
     }
     let _ = writeln!(out, "        _ => None,\n    }}\n}}\n");
 
+    // Every registry slice this build was compiled against, by base name. The
+    // fleet-capabilities view (#469) fans `introspect` out over exactly this
+    // list and diffs each reply against the local slice.
+    let _ = writeln!(
+        out,
+        "/// Every producer/service this build knows, with its raw registry slice."
+    );
+    let _ = writeln!(out, "pub const REGISTRIES: &[(&str, &str)] = &[");
+    for f in files {
+        let module = producer_module(&f.name);
+        let _ = writeln!(out, "    ({:?}, {module}::REGISTRY_TOML),", f.name);
+    }
+    let _ = writeln!(out, "];\n");
+
     // Cross-producer dispatch: refine a structural key into (producer, subject).
     let _ = writeln!(out, "/// Refined subject from any registered producer.");
     let _ = writeln!(out, "#[derive(Debug, Clone, PartialEq, Eq)]");
@@ -803,6 +993,105 @@ fn emit(files: &[RegistryFile]) -> String {
         let _ = writeln!(out, "    {}({module}::Subject),", camel(&[f.name.as_str()]));
     }
     let _ = writeln!(out, "}}\n");
+
+    // AnySubject accessors: producer-agnostic introspection of a refined
+    // subject. `vars()` is what lets a consumer read `{iface}` by name instead
+    // of by position.
+    let _ = writeln!(out, "impl AnySubject {{");
+    for (method, ret, body) in [
+        ("producer_name", "&'static str", "NAME"),
+        ("class", "crate::grammar::Class", "s.class()"),
+        ("pattern", "&'static str", "s.pattern()"),
+        ("vars", "Vec<(&'static str, String)>", "s.vars()"),
+        ("payload_type", "&'static str", "s.payload_type()"),
+        ("unit", "Option<&'static str>", "s.unit()"),
+        ("cardinality", "Option<u64>", "s.cardinality()"),
+        ("qos", "crate::qos::QosProfile", "s.qos()"),
+        ("ttl_s", "Option<u64>", "s.ttl_s()"),
+        ("rate", "Option<&'static str>", "s.rate()"),
+    ] {
+        let _ = writeln!(out, "    pub fn {method}(&self) -> {ret} {{");
+        let _ = writeln!(out, "        match self {{");
+        for f in files {
+            let variant = camel(&[f.name.as_str()]);
+            let arm = if body == "NAME" {
+                format!("{:?}", f.name)
+            } else {
+                body.to_string()
+            };
+            let bind = if body == "NAME" { "_" } else { "s" };
+            let _ = writeln!(out, "            Self::{variant}({bind}) => {arm},");
+        }
+        let _ = writeln!(out, "        }}\n    }}\n");
+    }
+    let _ = writeln!(out, "}}\n");
+
+    // AnySubject::common_state() — refine any producer's state subject into the
+    // shared framework set (see src/common_state.rs). Driven off the registered
+    // *pattern*, so it cannot drift from the registry: rename a subject in a
+    // TOML and its arm disappears here.
+    let common: &[(&str, &str)] = &[
+        ("health", "Health"),
+        ("errors", "Errors"),
+        ("sensor", "Sensor"),
+        ("alert/{alert_key}", "Alert { alert_key }"),
+        ("artifact/{kind}", "Artifact { kind }"),
+        ("evidence/self", "EvidenceSelf"),
+        ("evidence/device/{device}", "EvidenceDevice { device }"),
+        ("evidence/names/{ip_slug}", "EvidenceNames { ip_slug }"),
+        ("stream/{stream}", "Stream { stream }"),
+        ("entity/{entity_id}", "CatalogEntity { entity_id }"),
+        ("alias/{old_id}", "CatalogAlias { old_id }"),
+        ("pdns/{ip_slug}", "CatalogPdns { ip_slug }"),
+    ];
+    let _ = writeln!(out, "impl AnySubject {{");
+    let _ = writeln!(
+        out,
+        "    /// The framework state subject this refines to, if any (issue #475).\n    pub fn common_state(&self) -> Option<crate::common_state::CommonState<'_>> {{\n        use crate::common_state::CommonState as C;\n        match self {{"
+    );
+    for f in files {
+        let module = producer_module(&f.name);
+        let variant = camel(&[f.name.as_str()]);
+        let _ = writeln!(out, "            Self::{variant}(s) => match s {{");
+        let mut mapped = 0usize;
+        for s in &f.subjects {
+            if s.class != "state" {
+                continue;
+            }
+            let Some((_, ctor)) = common.iter().find(|(pat, _)| *pat == s.path) else {
+                continue;
+            };
+            mapped += 1;
+            // Bind the pattern's variables by name; the CommonState ctor uses
+            // the same names, so field-init shorthand lines them up.
+            let binds: Vec<String> = s
+                .chunks
+                .iter()
+                .filter_map(|c| match c {
+                    Chunk::Var(v) | Chunk::Rest(v) => Some(snake(v)),
+                    Chunk::Literal(_) => None,
+                })
+                .collect();
+            let pat = if binds.is_empty() {
+                format!("{module}::Subject::{}", s.variant)
+            } else {
+                format!(
+                    "{module}::Subject::{} {{ {} }}",
+                    s.variant,
+                    binds.join(", ")
+                )
+            };
+            let _ = writeln!(out, "                {pat} => Some(C::{ctor}),");
+        }
+        // A producer whose every subject is a framework one (the `@catalog`
+        // service) leaves nothing for a wildcard arm to catch.
+        if mapped < f.subjects.len() {
+            let _ = writeln!(out, "                _ => None,");
+        }
+        let _ = writeln!(out, "            }},");
+    }
+    let _ = writeln!(out, "        }}\n    }}\n}}\n");
+
     let _ = writeln!(
         out,
         "/// Registry-refine a structurally parsed key (RFC 08 §1 parse direction).\n/// `producer_name` is the *base* name (instance suffix already stripped by\n/// [`crate::grammar::Producer::parse_chunk`]); service keys pass the service\n/// name (e.g. \"catalog\").\npub fn parse_subject(producer_name: &str, class: crate::grammar::Class, tail: &[&str]) -> Option<AnySubject> {{"

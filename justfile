@@ -2,6 +2,7 @@
 #   (netring, netlink, sysinfo, logs, systemd, parallax + the identity correlator)
 #
 #   just run            # build, grant caps, configure, then launch everything
+#                       # (just run rerun=live|record|both to add the Rerun sidecar)
 #   just demo           # run the GUI in demo mode (simulated data, no sensors)
 #   just setup          # build + grant capabilities only
 #   just gui            # run just the GUI    (just gui listen=tcp/0.0.0.0:7447 for remote sensors)
@@ -106,7 +107,7 @@ configure:
 # sensors on OTHER machines, listen on all interfaces:
 #   just gui listen=tcp/0.0.0.0:7447
 gui listen=hub: build
-    ZENSIGHT_ZENOH_LISTEN="{{listen}}" {{bindir}}/zensight
+    ZENSIGHT_ZENOH_LISTEN="{{trim_start_match(listen, 'listen=')}}" {{bindir}}/zensight
 
 # A built-in simulator feeds realistic telemetry, health, liveness and anomaly
 # alerts for every sensor type — no real sensors, capabilities or Zenoh hub.
@@ -143,7 +144,8 @@ parallax: build configure
 correlator: build configure
     ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-correlator --config {{rundir}}/correlator.json5
 
-# Optional Rerun sidecar (evaluation prototype, epic #415) — NOT part of `just run`.
+# Optional Rerun sidecar (evaluation prototype, epic #415), standalone — or add
+# it to the full stack with `just run rerun=live|record|both`.
 # Feeds the live bus into Rerun; built on demand (pulls the arrow/tonic stack).
 #   just rerun                # live → viewer at rerun+http://127.0.0.1:9876/proxy
 #                             #   (start the viewer first: `rerun`)
@@ -152,7 +154,7 @@ rerun mode="live":
     cargo build {{relflag}} -p zensight-rerun
     mkdir -p {{rundir}}
     ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-rerun --config configs/rerun.json5 \
-        --mode {{mode}} --rrd-path {{rundir}}/zensight.rrd
+        --mode {{trim_start_match(mode, 'mode=')}} --rrd-path {{rundir}}/zensight.rrd
 
 # ── Run (everything) ─────────────────────────────────────────────────────────
 
@@ -160,12 +162,28 @@ rerun mode="live":
 # Point them at a remote GUI with: just sensors connect=tcp/<gui-host>:7447
 sensors connect=hub: setup configure
     BINDIR="{{bindir}}" CONFDIR="{{rundir}}" LOGDIR="{{rundir}}" \
-    CONNECT="{{connect}}" scripts/run-sensors.sh
+    CONNECT="{{trim_start_match(connect, 'connect=')}}" scripts/run-sensors.sh
 
 # Build + caps + configure, then launch the sensors + GUI (close GUI to stop all).
-run: setup configure
+# Optionally add the Rerun sidecar (evaluation, epic #415):
+#   just run rerun=live     # stream to a Rerun viewer (auto-started if installed)
+#   just run rerun=record   # headless → {{rundir}}/zensight.rrd (replay later)
+#   just run rerun=both     # both at once
+run rerun="": setup configure
     #!/usr/bin/env bash
     set -euo pipefail
+    # Optional Rerun sidecar. `just` recipe args are positional, so accept both
+    # `just run live` and the self-documenting `just run rerun=live`.
+    rerun_mode="{{trim_start_match(rerun, 'rerun=')}}"
+    case "$rerun_mode" in
+        ""|live|record|both) ;;
+        *) echo "error: rerun mode must be live|record|both, got '$rerun_mode'" >&2; exit 1 ;;
+    esac
+    # Build it up front (on-demand — it pulls the arrow/tonic stack) so the
+    # sensors and GUI start together afterwards.
+    if [[ -n "$rerun_mode" ]]; then
+        cargo build {{relflag}} -p zensight-rerun
+    fi
     # Sensors + correlator via the shared spawner (same process group, so the
     # trap below reaps them when the GUI exits or on Ctrl-C). They connect to
     # the GUI's loopback rendezvous (no multicast needed); logs in {{rundir}}/.
@@ -173,6 +191,22 @@ run: setup configure
     CONNECT="{{hub}}" WITH_CORRELATOR=1 scripts/run-sensors.sh &
     # Stop all sensors when the GUI exits (or on Ctrl-C).
     trap 'echo; echo "Stopping sensors…"; kill 0' EXIT
+    if [[ -n "$rerun_mode" ]]; then
+        case "$rerun_mode" in
+        live|both)
+            if command -v rerun >/dev/null; then
+                echo "Starting Rerun viewer (log → {{rundir}}/rerun-viewer.log)…"
+                rerun --port 9876 > {{rundir}}/rerun-viewer.log 2>&1 &
+            else
+                echo "note: 'rerun' viewer not installed — the sidecar still streams to" \
+                     "rerun+http://127.0.0.1:9876/proxy; install it (cargo binstall rerun-cli)" \
+                     "and start it with: rerun --port 9876"
+            fi ;;
+        esac
+        echo "Starting Rerun sidecar, mode=$rerun_mode (log → {{rundir}}/rerun.log)…"
+        ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-rerun --config configs/rerun.json5 \
+            --mode "$rerun_mode" --rrd-path {{rundir}}/zensight.rrd > {{rundir}}/rerun.log 2>&1 &
+    fi
     sleep 1
     echo "Launching GUI (listening on {{hub}}; close it to stop everything)…"
     echo "GUI log → {{rundir}}/gui.log"

@@ -217,10 +217,10 @@ impl LogAggregator {
     pub fn emit(&self, source: &str, stats: Option<JournaldStatsSnapshot>) -> Vec<TelemetryPoint> {
         let mut points = Vec::new();
         let counter = |metric: String, v: u64| {
-            TelemetryPoint::new(source, Protocol::Logs, metric, TelemetryValue::Counter(v))
+            crate::telemetry_guard::checked_point(source, metric, TelemetryValue::Counter(v))
         };
         let gauge = |metric: String, v: f64| {
-            TelemetryPoint::new(source, Protocol::Logs, metric, TelemetryValue::Gauge(v))
+            crate::telemetry_guard::checked_point(source, metric, TelemetryValue::Gauge(v))
         };
 
         let Ok(mut inner) = self.inner.lock() else {
@@ -283,7 +283,7 @@ impl LogAggregator {
     /// key set for reconcile; quiet/healthy units never fire.
     pub fn tick_budgets(&self, source: &str) -> BudgetTick {
         let gauge = |metric: String, v: f64| {
-            TelemetryPoint::new(source, Protocol::Logs, metric, TelemetryValue::Gauge(v))
+            crate::telemetry_guard::checked_point(source, metric, TelemetryValue::Gauge(v))
         };
         let p = self.budget;
         let mut out = BudgetTick {

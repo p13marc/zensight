@@ -48,7 +48,31 @@ zensight/@v1/@catalog/…                                   the identity catalog
   [`zensight-keyspace/registry/*.toml`](../zensight-keyspace/registry/) —
   compiled by `zensight-keyspace`'s `build.rs` into typed builders/parsers;
   registry violations are build errors. Sensors serve their compiled slice at
-  `…/@rpc/<producer>/introspect`.
+  `…/@rpc/<producer>/introspect` — and the GUI's **Fleet** view calls it, parsing
+  the reply into a `zensight_keyspace::RegistrySlice` and diffing it against the
+  slice it compiled in. RFC 08 §6: a disagreement is a *finding*, not an ambiguity.
+- **The registry is load-bearing.** Publishing a telemetry subject that is not
+  registered panics in debug builds and warns once per name in release
+  (`zensight_common::metric_guard`). This is only meaningful because the six host
+  producers (sysinfo, netlink, netring, systemd, logs, parallax) register their
+  telemetry as real subject families rather than a `{metric...}` catch-all — a
+  catch-all makes the lint vacuously true (issue #468). `snmp`/`modbus`/`gnmi`/
+  `netflow` keep a rest-var by design: their metric tree belongs to the polled
+  device, not to us.
+- **Type table** (RFC 08 §5): [`zensight_common::payload`](../zensight-common/src/payload.rs)
+  maps each registry `type` name to its Rust definition, and `decode_payload()`
+  turns a name into a decoder. This is what makes `type = "TelemetryPoint"`
+  resolvable outside the producer's own crate — a consumer can now go wire key →
+  subject → type → value with nothing producer-specific compiled in. The
+  `types_are_total` test is the CI enforcement the RFC asks for ("a `type` name
+  not present in the type table fails CI"): it walks every subject of every
+  registry file and fails if a declared type does not resolve. It found one that
+  did not — `parallax` declared `StreamDoc` for a subject whose payload is a
+  `StreamStatus`, a name that existed nowhere else in the workspace.
+- **Bus explorer**: [`zenctl`](../zenctl/README.md) is the `busctl`/`d-feet`
+  equivalent RFC 08 §6 exists to enable — `topic list/info/echo`, `node list`,
+  `service list/call`, and `doctor` (fan `introspect` fleet-wide, diff each reply
+  against this build's slice, print the findings).
 - **Key builders**: `zensight-keyspace::V1Context` (producer-side),
   `zensight_common::keyexpr` (consumer-side selectors + fleet/origin RPC
   keys), `zensight_common::command` (topic/artifact procedure keys). New code

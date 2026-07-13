@@ -20,6 +20,8 @@ pub mod error;
 pub mod evidence;
 pub mod health;
 pub mod keyexpr;
+pub mod metric_guard;
+pub mod payload;
 pub mod publisher_registry;
 pub mod qos;
 pub mod query_detail;
@@ -56,25 +58,31 @@ pub use health::{
     DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, HealthStatus, SensorInfo,
 };
 pub use keyexpr::{
-    KEY_PREFIX, alias_key, all_alerts_wildcard, all_entity_wildcard, all_evidence_wildcard,
-    all_health_wildcard, all_name_evidence_wildcard, all_pdns_wildcard, all_state_wildcard,
-    all_telemetry_wildcard, catalog_claim_key, catalog_claims_wildcard, catalog_rpc_key,
-    correlator_alive_key, entities_query_key, entity_key, fleet_blob_prefix, fleet_command_key,
-    fleet_rpc_key, host_evidence_key, media_preview_key, media_video_key, name_observation_key,
-    names_query_key, origin_rpc_key, pdns_key,
+    KEY_PREFIX, alias_key, all_alerts_wildcard, all_device_liveliness_wildcard,
+    all_entity_wildcard, all_evidence_wildcard, all_health_wildcard, all_liveliness_wildcard,
+    all_name_evidence_wildcard, all_pdns_wildcard, all_state_wildcard, all_telemetry_wildcard,
+    catalog_claim_key, catalog_claims_wildcard, catalog_rpc_key, correlator_alive_key,
+    entities_query_key, entity_key, fleet_blob_prefix, fleet_command_key, fleet_rpc_key,
+    host_evidence_key, is_telemetry_key, media_preview_key, media_video_key, name_observation_key,
+    names_query_key, origin_rpc_key, parse_wire_key, pdns_key, refine_wire_key,
 };
+pub use payload::{PAYLOAD_TYPES, decode_payload, schema_location};
 pub use publisher_registry::PublisherRegistry;
 pub use qos::QosClass;
 pub use query_detail::{
     AssetRecord, CaptureRecord, CgroupNode, CgroupPid, DnsRecord, ElephantRecord,
-    EncryptedDnsRecord, FlowRecord, HttpHostRecord, Ja4hRecord, LogRecord, MatrixRecord, NameInfo,
-    NeighborRecord, ProcessRecord, QuicRecord, RouteRecord, SocketRecord, SshRecord, TalkerRecord,
+    EncryptedDnsRecord, FlowRecord, HistBucket, Histogram, HttpHostRecord, Ja4hRecord,
+    LatencyReport, LogRecord, MatrixRecord, NameInfo, NeighborRecord, NetflowFieldValue,
+    NetflowRecord, ProcessRecord, QuicRecord, RouteRecord, SocketRecord, SshRecord, TalkerRecord,
     TimerRecord, TlsRecord, UnitDetail, UnitRecord,
 };
 pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;
 pub use stream::{FrameMeta, StreamControl, StreamDescriptor, StreamStatus};
 pub use telemetry::{Protocol, TelemetryPoint, TelemetryValue, current_timestamp_millis};
+/// The registry's *parse* direction, re-exported so consumers get it without a
+/// direct `zensight-keyspace` dependency (RFC 08 §1, issue #475).
+pub use zensight_keyspace::CommonState;
 
 /// Initialize tracing with the given configuration.
 ///

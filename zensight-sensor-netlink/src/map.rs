@@ -208,7 +208,21 @@ pub struct SocketCounts {
     pub rcv_buf_total: u64,
 }
 
+/// Build one telemetry point.
+///
+/// Every metric name this sensor emits funnels through here, so this is where
+/// the registry gets enforced (RFC 08 §5, issue #468): in debug builds — which
+/// is every unit test — an unregistered metric name panics. The 27 mapper tests
+/// below are therefore also the registry-conformance suite, and adding a metric
+/// without registering it in `zensight-keyspace/registry/netlink.toml` fails
+/// them.
 fn point(host: &str, metric: impl Into<String>, value: TelemetryValue) -> TelemetryPoint {
+    let metric = metric.into();
+    debug_assert!(
+        zensight_keyspace::registry::is_registered_telemetry("netlink", &metric),
+        "unregistered netlink telemetry subject {metric:?} — add it to \
+         zensight-keyspace/registry/netlink.toml (RFC 08 §5, issue #468)"
+    );
     TelemetryPoint::new(host, Protocol::Netlink, metric, value)
 }
 
@@ -2158,5 +2172,23 @@ mod tests {
         let json = serde_json::to_string(&v).unwrap();
         let back: ConnView = serde_json::from_str(&json).unwrap();
         assert_eq!(v, back);
+    }
+
+    /// The registry guard must actually bite. A conformance suite that cannot fail
+    /// is the same mistake as the `{metric...}` catch-all it replaced: vacuously
+    /// true. This is the test that proves the others mean something.
+    #[test]
+    #[should_panic(expected = "unregistered netlink telemetry subject")]
+    fn an_unregistered_metric_panics_in_debug() {
+        let _ = point("h", "totally/made/up/subject", TelemetryValue::Gauge(1.0));
+    }
+
+    /// ...and a real subject constructs.
+    #[test]
+    fn a_registered_metric_constructs() {
+        assert_eq!(
+            point("h", "routes/total", TelemetryValue::Gauge(1.0)).metric,
+            "routes/total"
+        );
     }
 }

@@ -1,7 +1,64 @@
 use crate::telemetry::Protocol;
 
+use zensight_keyspace::grammar::{self, Class, ClassOrPlane, Origin, StructuralKey};
+use zensight_keyspace::registry::{self, AnySubject};
+
 /// Default key expression prefix for all ZenSight telemetry.
 pub const KEY_PREFIX: &str = "zensight";
+
+/// Structurally parse a key **as it appears on the wire** (RFC 03).
+///
+/// [`grammar::parse`] is base-relative — the base is meant to be the Zenoh
+/// session namespace (RFC 03 §1.1), so no key the keyspace crate builds
+/// contains it — but keys on the wire still carry `zensight/` because we do not
+/// set the namespace yet (issue #466). This is the single place that bridges
+/// the two; when #466 lands, it becomes a straight call to [`grammar::parse`].
+///
+/// Consumers should reach for this instead of hand-rolling `split('/')`:
+/// positional re-parsing of keys is exactly what the registry was built to
+/// delete (RFC 08 §1, issue #475).
+pub fn parse_wire_key(key: &str) -> Option<StructuralKey> {
+    let rel = key.strip_prefix(KEY_PREFIX)?.strip_prefix('/')?;
+    grammar::parse(rel).ok()
+}
+
+/// Parse a wire key and refine its subject tail through the registry (RFC 08
+/// §1's *parse* direction). Returns the producer (or service) base name
+/// alongside the refined subject.
+///
+/// `None` when the key is not a v1 data key, or when the subject is not
+/// registered — "a subject that is not registered does not exist".
+pub fn refine_wire_key(key: &str) -> Option<(StructuralKey, String, AnySubject)> {
+    let parsed = parse_wire_key(key)?;
+    let ClassOrPlane::Class(class) = parsed.class else {
+        return None;
+    };
+    let name = match parsed.producer.as_ref() {
+        // The instance suffix (`netring-2`) is already stripped, so the
+        // registry lookup sees the base name.
+        Some(p) => p.name().to_string(),
+        // Service origins (`@catalog`) carry no producer chunk.
+        None => match &parsed.origin {
+            Origin::Service(s) => s.trim_start_matches('@').to_string(),
+            Origin::Host(_) => return None,
+        },
+    };
+    let tail: Vec<&str> = parsed.subject.iter().map(String::as_str).collect();
+    let subject = registry::parse_subject(&name, class, &tail)?;
+    Some((parsed, name, subject))
+}
+
+/// Whether a wire key carries a [`crate::TelemetryPoint`] — i.e. is a v1
+/// telemetry-class key on a host origin.
+///
+/// This replaces a positional 4-chunk gate that had been copy-pasted verbatim
+/// into both exporters.
+pub fn is_telemetry_key(key: &str) -> bool {
+    parse_wire_key(key).is_some_and(|k| {
+        matches!(k.class, ClassOrPlane::Class(Class::Telemetry))
+            && matches!(k.origin, Origin::Host(_))
+    })
+}
 
 /// Build the v1 telemetry class selector (all producers, all origins).
 ///
@@ -244,6 +301,74 @@ pub fn catalog_claims_wildcard() -> String {
 /// ```
 pub fn all_alerts_wildcard() -> String {
     format!("{}/@v1/*/state/*/alert/*", KEY_PREFIX)
+}
+
+// ---------------------------------------------------------------------------
+// Focus mode (issue #476): one origin instead of the fleet firehose.
+//
+// The origin is a single chunk at a fixed position, so "everything one host
+// publishes, and nothing else" is one selector — a subscription that was not
+// expressible on the incumbent keyspace, where the host was buried in a
+// per-protocol position. On a constrained link (the deployment this convention
+// was shaped around, RFC 09 §4) a technician debugging one host otherwise pays
+// for the whole fleet's telemetry to reach their laptop.
+//
+// The `@`-verbatim planes are structurally excluded: a wildcard never matches an
+// `@`-chunk, so none of these can pull `@rpc`/`@media`/`@blob` (design property
+// D2). RFC 09 §1's cookbook writes this as a single `@v1/<origin>/**`; we keep
+// the per-class selectors instead, because telemetry and state ride *different
+// delivery tiers* in this consumer (advanced/history vs plain) and one selector
+// would collapse them onto one subscriber.
+// ---------------------------------------------------------------------------
+
+/// Every telemetry key published by one host.
+pub fn origin_telemetry_wildcard(origin: &str) -> String {
+    format!("{KEY_PREFIX}/@v1/{origin}/telemetry/**")
+}
+
+/// Every state key published by one host.
+pub fn origin_state_wildcard(origin: &str) -> String {
+    format!("{KEY_PREFIX}/@v1/{origin}/state/**")
+}
+
+/// One host's firing alerts (the late-joiner seed GET).
+pub fn origin_alerts_wildcard(origin: &str) -> String {
+    format!("{KEY_PREFIX}/@v1/{origin}/state/*/alert/*")
+}
+
+/// One host's sensor liveliness tokens.
+pub fn origin_liveliness_expr(origin: &str) -> String {
+    format!("{KEY_PREFIX}/@v1/{origin}/state/*/alive")
+}
+
+/// One host's device liveliness tokens.
+pub fn origin_device_liveliness_expr(origin: &str) -> String {
+    format!("{KEY_PREFIX}/@v1/{origin}/state/*/device/*/alive")
+}
+
+/// The whole fleet's producer liveliness tokens — RFC 04 §5's "entire
+/// fleet-presence protocol, zero payload bytes".
+///
+/// The token *key* is the record: `…/<origin>/state/<producer>/alive` says who
+/// is up and what they run. Note `*` in the origin position can never match a
+/// verbatim service origin (design property D4), so `@catalog`'s own token
+/// ([`correlator_alive_key`]) is **not** in this set and must be asked for by
+/// name.
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::all_liveliness_wildcard;
+///
+/// assert_eq!(all_liveliness_wildcard(), "zensight/@v1/*/state/*/alive");
+/// ```
+pub fn all_liveliness_wildcard() -> String {
+    format!("{KEY_PREFIX}/@v1/*/state/*/alive")
+}
+
+/// The whole fleet's device liveliness tokens (producers that track downstream
+/// devices — RFC 04 §5).
+pub fn all_device_liveliness_wildcard() -> String {
+    format!("{KEY_PREFIX}/@v1/*/state/*/device/*/alive")
 }
 
 /// Build the v1 media-plane key for one video stream profile (RFC 07 §1):
