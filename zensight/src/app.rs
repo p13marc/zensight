@@ -3417,7 +3417,7 @@ impl ZenSight {
         // A tree is reconstructed into a clearly-named subfolder of the picked dir.
         let dest = match &kind {
             zensight_common::ArtifactKind::Snapshot { dir } => {
-                let sensor = producer.rsplit('/').next().unwrap_or("sensor");
+                let sensor = producer.as_str();
                 dest.join(format!("{sensor}-{dir}-snapshot"))
             }
             _ => dest,
@@ -3648,10 +3648,9 @@ impl ZenSight {
             let _ = session
                 .get(format!(
                     "{}?id={}",
-                    zensight_common::fleet_rpc_key(
-                        producer.rsplit('/').next().unwrap_or("sensor"),
-                        "artifact/cancel"
-                    ),
+                    // `producer` is a producer name ("netring"); it has contained
+                    // no `/` since the #465 cutover retired key_prefix.
+                    zensight_common::fleet_rpc_key(&producer, "artifact/cancel"),
                     id
                 ))
                 .await;
@@ -4650,11 +4649,13 @@ impl ZenSight {
             let mut tx = 0.0f64;
             let mut saw = false;
             for metric in device_state.metrics.keys() {
-                let is_rx = metric.starts_with("network/") && metric.ends_with("/rx_bytes");
-                let is_tx = metric.starts_with("network/") && metric.ends_with("/tx_bytes");
-                if !is_rx && !is_tx {
-                    continue;
-                }
+                // sysinfo `network/{iface}/{rx,tx}_bytes`, via the registry (#475).
+                use zensight_keyspace::registry::sysinfo::Subject as SysSubject;
+                let is_rx = match SysSubject::parse_metric(metric) {
+                    Some(SysSubject::NetworkRxBytes { .. }) => true,
+                    Some(SysSubject::NetworkTxBytes { .. }) => false,
+                    _ => continue,
+                };
                 let key = format!("{}/{}|{}", device_id.protocol, device_id.source, metric);
                 if let Some(rate) =
                     crate::view::topology::counter_rate(&self.store.hot_samples(&key))
@@ -5410,16 +5411,16 @@ impl ZenSight {
                 } else {
                     continue;
                 };
-                if let Some(unit) = metric
-                    .strip_prefix("unit/")
-                    .and_then(|m| m.strip_suffix("/ip_egress_bps"))
-                {
-                    units.entry(unit.to_string()).or_default().0 = v;
-                } else if let Some(unit) = metric
-                    .strip_prefix("unit/")
-                    .and_then(|m| m.strip_suffix("/ip_ingress_bps"))
-                {
-                    units.entry(unit.to_string()).or_default().1 = v;
+                // systemd `unit/{unit}/ip_{egress,ingress}_bps`, via the registry (#475).
+                use zensight_keyspace::registry::systemd::Subject as SystemdSubject;
+                match SystemdSubject::parse_metric(metric) {
+                    Some(SystemdSubject::UnitIpEgressBps { unit }) => {
+                        units.entry(unit).or_default().0 = v;
+                    }
+                    Some(SystemdSubject::UnitIpIngressBps { unit }) => {
+                        units.entry(unit).or_default().1 = v;
+                    }
+                    _ => {}
                 }
             }
             for (unit, (tx, rx)) in units {

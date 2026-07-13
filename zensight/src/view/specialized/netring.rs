@@ -8,6 +8,8 @@ use iced::widget::{Column, button, column, container, row, scrollable, text};
 use iced::{Length, Theme};
 use zensight_common::TelemetryValue;
 
+use zensight_keyspace::registry::netring::Subject;
+
 use crate::message::Message;
 use crate::view::chart;
 use crate::view::components::{
@@ -19,6 +21,7 @@ use crate::view::formatting::{format_bytes, format_count, format_rate};
 use crate::view::specialized::SpecializedTab;
 use crate::view::specialized::fetch::Fetch;
 use crate::view::specialized::netring_detail::NetringTable;
+use crate::view::subject::{leaf, var};
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
@@ -612,16 +615,20 @@ fn render_capture<'a>(
         std::collections::BTreeMap<String, &TelemetryValue>,
     > = Default::default();
     for (metric, point) in &state.metrics {
-        if let Some(rest) = metric.strip_prefix("capture/")
-            && let Some((src, stat)) = rest.split_once('/')
-            // `capture/focus/*` is the reloadable-filter counter and
-            // `capture/disk/*` is the capture-to-disk engine (#327), not NIC
-            // legs — both surfaced separately, so keep them out of the table.
-            && src != "focus"
-            && src != "disk"
+        // `capture/{source}/…` — the per-NIC-leg family. `capture/focus/*` (the
+        // reloadable-filter counter) and `capture/disk/*` (the capture-to-disk
+        // engine, #327) are *different registered subjects*, so literal-beats-var
+        // precedence keeps them out of this table on its own — the hand-coded
+        // `src != "focus" && src != "disk"` exclusion list is gone (#475).
+        if let Some(s) = Subject::parse_metric(metric)
+            && let Some(src) = var(&s.vars(), "source")
         {
+            let stat = s
+                .pattern()
+                .strip_prefix("capture/{source}/")
+                .unwrap_or_else(|| leaf(s.pattern()));
             sources
-                .entry(src.to_string())
+                .entry(src)
                 .or_default()
                 .insert(stat.to_string(), &point.value);
         }
@@ -1140,12 +1147,12 @@ fn render_dns(state: &DeviceDetailState) -> Element<'_, Message> {
     let mut rcodes: Vec<(String, f64)> = state
         .metrics
         .iter()
-        .filter_map(|(m, p)| {
-            let r = m.strip_prefix("dns/responses_by_rcode/")?;
-            Some((
-                r.trim_end_matches("_total").to_string(),
+        .filter_map(|(m, p)| match Subject::parse_metric(m) {
+            Some(Subject::DnsResponsesByRcode { rcode }) => Some((
+                rcode.trim_end_matches("_total").to_string(),
                 value_f64(&p.value),
-            ))
+            )),
+            _ => None,
         })
         .collect();
     rcodes.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -1250,9 +1257,12 @@ fn render_http(state: &DeviceDetailState) -> Element<'_, Message> {
     let mut methods: Vec<(String, f64)> = state
         .metrics
         .iter()
-        .filter_map(|(m, p)| {
-            let meth = m.strip_prefix("http/methods/")?.strip_suffix("_total")?;
-            Some((meth.to_string(), value_f64(&p.value)))
+        .filter_map(|(m, p)| match Subject::parse_metric(m) {
+            Some(Subject::HttpMethods { method }) => Some((
+                method.trim_end_matches("_total").to_string(),
+                value_f64(&p.value),
+            )),
+            _ => None,
         })
         .collect();
     methods.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -1766,11 +1776,9 @@ fn render_bandwidth(state: &DeviceDetailState) -> Element<'_, Message> {
     let mut rows: Vec<(String, f64)> = state
         .metrics
         .iter()
-        .filter_map(|(metric, point)| {
-            let app = metric
-                .strip_prefix("bandwidth/")?
-                .strip_suffix("/bytes_per_sec")?;
-            Some((app.to_string(), value_f64(&point.value)))
+        .filter_map(|(metric, point)| match Subject::parse_metric(metric) {
+            Some(Subject::BandwidthBytesPerSec { app }) => Some((app, value_f64(&point.value))),
+            _ => None,
         })
         .collect();
     rows.sort_by(|a, b| b.1.total_cmp(&a.1));

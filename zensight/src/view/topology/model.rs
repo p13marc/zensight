@@ -248,14 +248,19 @@ impl Node {
                     }
                 }
                 _ => {
-                    // sysinfo network counters
-                    if name.starts_with("network/") && name.ends_with("/rx_bytes") {
+                    // sysinfo network counters, via the registry (#475).
+                    use zensight_keyspace::registry::sysinfo::Subject as SysSubject;
+                    if matches!(
+                        SysSubject::parse_metric(name),
+                        Some(SysSubject::NetworkRxBytes { .. })
+                    ) {
                         if let TelemetryValue::Counter(v) = &point.value {
                             self.network_rx = Some(*v);
                         }
-                    } else if name.starts_with("network/")
-                        && name.ends_with("/tx_bytes")
-                        && let TelemetryValue::Counter(v) = &point.value
+                    } else if matches!(
+                        SysSubject::parse_metric(name),
+                        Some(SysSubject::NetworkTxBytes { .. })
+                    ) && let TelemetryValue::Counter(v) = &point.value
                     {
                         self.network_tx = Some(*v);
                     } else if name.starts_with("iface/") && name.ends_with("/up") {

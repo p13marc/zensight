@@ -26,6 +26,7 @@ pub mod sensors;
 pub mod settings;
 pub mod shell;
 pub mod specialized;
+pub mod subject;
 pub mod theme;
 pub mod toast;
 pub mod tokens;
