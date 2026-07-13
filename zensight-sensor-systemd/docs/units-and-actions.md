@@ -21,10 +21,11 @@ not silently truncated) and folded into the `other/*` aggregate bucket. Watched
 The sentinel is an embedded evaluator of declarative service-health expectations
 (`systemd.expectations`; omit the block to disable). It re-evaluates every
 `eval_interval_secs` (default 10) and on every relevant D-Bus event, and
-publishes firing/resolved alerts on `zensight/systemd/@/alerts/*`. A firing
-alert is held for `for_secs` (default 15) before publish. It mirrors the netlink
-sentinel and is **hot-swappable at runtime** via `@/commands/expectations`
-(current config readable on the `@/status/expectations` queryable).
+publishes firing/resolved alerts on
+`zensight/@v1/<origin>/state/systemd/alert/*`. A firing alert is held for
+`for_secs` (default 15) before publish. It mirrors the netlink sentinel and is
+**hot-swappable at runtime** via a GET on `@rpc/systemd/expectations/set`
+(current config readable with a GET on `@rpc/systemd/expectations`).
 
 Expectation types (`src/sentinel.rs`):
 
@@ -39,15 +40,19 @@ Expectation types (`src/sentinel.rs`):
 ## Gated service control (#283) — security-sensitive
 
 **Default OFF.** The sensor is strictly read-only unless `systemd.actions.enabled`
-is explicitly set. When disabled, **no `@/commands/action` channel is declared at
-all** — there is no write surface to reach. This section describes the gating as
-implemented in `src/action.rs`; treat it as the authoritative security contract.
+is explicitly set. When disabled, **no `@rpc/systemd/action` procedure is
+declared at all** — there is no write surface to reach. This section describes
+the gating as implemented in `src/action.rs`; treat it as the authoritative
+security contract.
 
 ### Request/response shape
 
-- Command: `@/commands/action` accepts JSON `{ "verb": "start|stop|restart|
-  reload", "unit": "<name>" }` (`ActionCommand`).
-- Status: `@/status/action` is a queryable replying the most recent
+- Write: a GET on `zensight/@v1/<origin>/@rpc/systemd/action/set` carrying JSON
+  `{ "verb": "start|stop|restart|reload", "unit": "<name>" }` (`ActionCommand`).
+  An accepted request replies the resulting `ActionStatus`; a refused request
+  replies `reply_err` with the namespaced `error/gated` name (bad payloads get
+  `error/invalid-args`).
+- Read: `zensight/@v1/<origin>/@rpc/systemd/action` replies the most recent
   `ActionStatus` — `{ unit, verb, accepted, result, error, ts_unix }`.
   `accepted` reflects whether the request passed validation and was issued;
   `result` is the `JobRemoved` outcome (`done`/`failed`/`timeout`/`canceled`/…)
@@ -58,9 +63,9 @@ implemented in `src/action.rs`; treat it as the authoritative security contract.
 Every request must clear all of the following before anything happens to a unit:
 
 1. **Master switch (`actions.enabled`).** `run()` returns immediately when false,
-   logging `service control disabled`, and never declares the command
-   subscriber or status queryable. This is the primary gate — with it off there
-   is no channel to send to.
+   logging `service control disabled`, and never declares the `action/set` or
+   `action` queryables. This is the primary gate — with it off there is no
+   procedure to call.
 2. **Allowlist (`actions.allow_units`).** `validate()` (a pure, unit-tested
    function) requires the target unit to match at least one glob in
    `allow_units`. An **empty allowlist rejects every request** (and the sensor

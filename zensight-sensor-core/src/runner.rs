@@ -208,12 +208,9 @@ impl<C: SensorConfig> SensorRunner<C> {
     /// Detects the local [`HostIdentity`](crate::HostIdentity) (hashed
     /// machine-id, boot id, hostname, IPs, MACs), stamps `host_id` onto health
     /// snapshots, and — once [`run`](Self::run) starts — publishes the sensor's
-    /// registration (`zensight/_meta/sensors/<name>/<source>`) and self-report
-    /// evidence (`zensight/_meta/evidence/host/<name>/<source>`) every 60 s via
-    /// cached publishers, re-detecting on a slow timer for DHCP churn.
-    ///
-    /// The keys use the runner's `source` — the same value that host-scopes
-    /// the control-plane keys and the telemetry `<source>` segment.
+    /// registration (`state/<producer>/sensor`) and self-report evidence
+    /// (`state/<producer>/evidence/self`) every 60 s via cached publishers,
+    /// re-detecting on a slow timer for DHCP churn.
     pub fn with_identity(self) -> Self {
         let identity = crate::identity::SharedIdentity::detect();
         self.with_shared_identity(identity)
@@ -359,9 +356,9 @@ impl<C: SensorConfig> SensorRunner<C> {
             }
         }
 
-        // Periodically publish sensor health to `<prefix>/<source>/@/health` so the
-        // frontend's Sensors view and dashboard health bar populate. The first
-        // tick fires immediately, then every 10s.
+        // Periodically publish sensor health to `state/<producer>/health` so
+        // the frontend's Sensors view and dashboard health bar populate. The
+        // first tick fires immediately, then every 5s.
         {
             let health = self.health.clone();
             let task = tokio::spawn(async move {

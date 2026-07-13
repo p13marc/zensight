@@ -374,7 +374,7 @@ pub async fn run_ja4h(session: Arc<zenoh::Session>, key_prefix: String, inventor
     }
 }
 
-/// Run the canonical IPFIX query channel (#223): `zensight/netring/@/query/ipfix`
+/// Run the canonical IPFIX query channel (#223): `@rpc/netring/ipfix`
 /// replies with the recent ended flows as IANA-IE-keyed records
 /// (`FlowRecord::to_ipfix_record`) — per-direction deltas (IE 1/2), totals
 /// (IE 85/86), `flowEndReason` (IE 136) + the un-collapsed shadow, and the

@@ -10,12 +10,17 @@ this page is the mapping/behavior reference.
 
 Two independent subscribers:
 
-- **Telemetry** on `filters.key_expr` (default `zensight/**`). Narrow it — e.g.
-  `zensight/netring/**` — to tame the firehose at the *subscription*, so unwanted
-  protocols and the `_meta/**` control plane never reach the exporter over the
-  wire. The `zensight/**` wildcard does **not** match `@/`-prefixed control keys.
-- **Alerts** on `zensight/*/@/alerts/*` (only when `export_alerts` is on). Because
-  the telemetry wildcard skips `@/` keys, alert export needs its own subscriber.
+- **Telemetry** on `filters.key_expr` (default `zensight/@v1/*/telemetry/**`,
+  the v1 telemetry class selector). The class chunk *is* the filter — state
+  documents and the verbatim `@rpc`/`@media`/`@blob` planes structurally never
+  match, so nothing is discarded client-side. Narrow it — e.g.
+  `zensight/@v1/*/telemetry/netring/**` — to tame the firehose at the
+  *subscription*, so unwanted producers never reach the exporter over the wire
+  (a structural v1 check, `is_telemetry_key`, stays as belt-and-braces for
+  narrowed overrides).
+- **Alerts** on `zensight/@v1/*/state/*/alert/*` (only when `export_alerts` is
+  on). Alerts are state-class keys, so the telemetry class selector cannot see
+  them — alert export needs its own subscriber.
 
 `include_protocols` / `exclude_protocols` / `include_metrics` / `exclude_metrics`
 (glob) / `include_sources` / `exclude_sources` apply as a post-receive filter on
@@ -98,7 +103,8 @@ Extra `headers` (e.g. `Authorization`, `X-Scope-OrgID`) are attached to each pus
 
 ## Alert export
 
-With `export_alerts` on (default), each **firing** alert from `@/alerts/*` becomes
+With `export_alerts` on (default), each **firing** alert from
+`zensight/@v1/*/state/*/alert/*` becomes
 one `<prefix>_alert` gauge series with value 1:
 
 ```

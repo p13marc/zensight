@@ -95,7 +95,7 @@ impl AlertReporter {
     /// the severity escalates after firing.
     pub async fn observe(&self, mut alert: Alert, for_duration: Option<Duration>) -> Result<()> {
         // Stamp the identity annotation once at entry: `entry.last` then carries
-        // it through the firing publication, the `@/query/alerts` seed, and the
+        // it through the firing publication, the `state alert selector` seed, and the
         // eventual resolve — one stamp site, consistent everywhere.
         if let Some(host_id) = self.identity.as_ref().and_then(|i| i.get().host_id) {
             alert.labels.insert("host.id".to_string(), host_id);
@@ -189,7 +189,7 @@ impl AlertReporter {
 
     /// The current set of firing (published) alerts.
     ///
-    /// Used to answer the `@/query/alerts` queryable so a late-joining consumer
+    /// Used to answer the `state alert selector` queryable so a late-joining consumer
     /// (a GUI opened *after* an alert fired) can seed its firing set — alerts are
     /// only published on state change, so without this seed a late joiner would
     /// never see an already-firing alert.

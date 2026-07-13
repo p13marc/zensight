@@ -51,9 +51,10 @@ a **negative** one becomes `Gauge`.
 
 ## Alert model
 
-Sensors publish durable, fully-formed alert decisions on
-`zensight/<protocol>/@/alerts/<alert_key>` (`alert.rs`). Unlike the frontend's
-local threshold rules, an `Alert` is a decision the sensor/sentinel already made.
+Sensors publish durable, fully-formed alert decisions as LWW state documents on
+`zensight/@v1/<origin>/state/<producer>/alert/<alert_key>` (`alert.rs`). Unlike the
+frontend's local threshold rules, an `Alert` is a decision the sensor/sentinel
+already made.
 
 ```rust
 pub struct Alert {
@@ -87,38 +88,44 @@ stateDiagram-v2
 
 ### alert_key
 
-`Alert::alert_key()` derives the stable key segment from `source` + `rule` +
-sorted `labels`, hashed with FNV-1a (stable across runs/platforms, unlike
-`DefaultHasher`). Two alerts describing the same condition on the same host share
-a key, so a `Put` replaces state in place and a later `Resolved`/`Delete` clears
-exactly that alert. Two rules:
+`Alert::alert_key()` derives the stable key segment from `rule` + sorted
+`labels`, hashed with FNV-1a (stable across runs/platforms, unlike
+`DefaultHasher`) and rendered as 16 lowercase hex. Two alerts describing the same
+condition on the same host share a key, so a `Put` replaces state in place and a
+later `Resolved`/`Delete` clears exactly that alert. Two rules:
 
-- **`source` is included** so alerts from different hosts never collide.
+- **`source` is *not* hashed** — the `<origin>` and `<producer>` key chunks
+  already scope the key per host, so alerts from different hosts never collide.
 - **Labels prefixed `host.`** are the identity-annotation namespace and are
-  **excluded** — `source` already distinguishes hosts, and keying on annotations
+  **excluded** — the origin already distinguishes hosts, and keying on annotations
   would orphan a firing alert whenever the identity envelope refreshes.
 
 High-cardinality detail (offending IP, JA4, expected/actual) belongs in `labels`
 / `summary`, never in the key — so a 1000-port scan stays one alert.
 
-## Command & status channel
+## Runtime control — the `@rpc` plane
 
-`command.rs` provides the key builders for a sensor's runtime control surface.
-A "topic" namespaces a control surface (`filter` for logs, `expectations` for
+Commands do not exist in v1: runtime control is request/reply GETs on the
+verbatim `@rpc` plane. `command.rs` provides the procedure key builders. A
+"topic" namespaces a control surface (`filter` for logs, `expectations` for
 the sentinel, `detectors` for netring):
 
 | Builder | Key | Zenoh primitive |
 |---------|-----|-----------------|
-| `command_key(prefix, topic)` | `<prefix>/@/commands/<topic>` | pub/sub |
-| `status_key(prefix, topic)` | `<prefix>/@/status/<topic>` | queryable |
-| `query_key(prefix, topic)` | `<prefix>/@/query/<topic>` | queryable (on-demand bulk detail) |
+| `command_key(prefix, topic)` | `zensight/@v1/<origin>/@rpc/<producer>/<topic>/set` | queryable (write procedure) |
+| `status_key(prefix, topic)` | `zensight/@v1/<origin>/@rpc/<producer>/<topic>` | queryable (read) |
+| `query_key(prefix, topic)` | same key as `status_key` — reads are reads | queryable (on-demand bulk detail) |
 
-The payload type is topic-specific. Wrap it in `Command<T>` when you need an
-optional correlation `id` echoed back on an async reply.
+Fleet callers select `zensight/@v1/*/@rpc/…` (`fleet_rpc_key` /
+`fleet_command_key` in `keyexpr.rs`) with query target `All`; failures ride
+`reply_err` with namespaced `error/...` names. The payload type is
+topic-specific. Wrap it in `Command<T>` when you need an optional correlation
+`id` echoed back on a reply.
 
-The artifact channel adds its own builders (`artifact_request_key`,
-`artifact_status_key`, `artifact_cancel_key`, plus the `blob` / `store` / `tree`
-delivery prefixes) — see [identity & artifacts context in the sensor framework](../../zensight-sensor-core/docs/artifacts.md).
+The artifact channel adds its own procedures (`artifact_request_key`,
+`artifact_status_key`, `artifact_cancel_key` on `@rpc`, plus the `@blob`
+`artifact` / `store` / `tree` delivery prefixes) — see
+[artifacts in the sensor framework](../../zensight-sensor-core/docs/artifacts.md).
 
 ## Serialization
 

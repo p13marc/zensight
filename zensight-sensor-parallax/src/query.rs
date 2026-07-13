@@ -1,6 +1,6 @@
-//! The `@/query/streams` catalogue queryable (late-joiner seed).
+//! The `@rpc/parallax/streams` catalogue queryable (late-joiner seed).
 //!
-//! The GUI calls `zensight/parallax/<source>/@/query/streams` when a user
+//! The GUI calls `zensight/parallax/<source>/@rpc/parallax/streams` when a user
 //! opens the parallax device view; the reply is the full
 //! `Vec<StreamDescriptor>` catalogue as JSON, with `active` stamped from the
 //! session actor's open set. High-cardinality media never rides this channel

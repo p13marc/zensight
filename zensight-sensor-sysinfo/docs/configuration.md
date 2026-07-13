@@ -12,14 +12,14 @@ block with every metric type disabled.
 | `zenoh` | — | Zenoh connection (`mode` = `client`/`peer`/`router`, `connect`, `listen`). |
 | `sysinfo` | — | Sensor settings (below). |
 | `logging.level` | `info` | `trace`/`debug`/`info`/`warn`/`error`. |
-| `artifacts` | all disabled | On-demand `@/artifact` channel limits (report + snapshot); every kind off by default. |
+| `artifacts` | all disabled | On-demand artifact limits (report + snapshot) for the `@rpc/sysinfo/artifact/{request,cancel}` procedures; every kind off by default. |
 
 ## `sysinfo`
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `key_prefix` | `zensight/sysinfo` | Key-expression prefix. |
-| `source` | `auto` | Source id in keys; `auto` resolves the local hostname (falls back to `unknown`). |
+| `key_prefix` | `zensight/sysinfo` | Legacy-form prefix from which the v1 context derives (base `zensight`, producer `sysinfo` → keys under `zensight/@v1/<origin>/…/sysinfo/…`). |
+| `source` | `auto` | `source` field in telemetry payloads (not part of the key); `auto` resolves the local hostname (falls back to `unknown`). |
 | `poll_interval_secs` | `5` | Collection interval (must be > 0). |
 | `collect` | see below | Which metric families to gather. |
 | `network` | see below | Interface filters. |
@@ -53,7 +53,7 @@ families regardless of the flag.
 | `edac` | true | ECC memory errors (Linux) |
 | `mdadm` | true | software-RAID state (Linux) |
 | `saturation_score` | true | derived `system/saturation_score` + `health_state` |
-| `process_query` | true | serve `@/query/processes` |
+| `process_query` | true | serve `@rpc/sysinfo/processes` |
 | `temperatures` | **false** | hwmon temperatures (Linux) |
 | `tcp_states` | **false** | `/proc/net/tcp` state counts (Linux) |
 | `processes` | **false** | top-N process aggregates (can be heavy) |
@@ -102,7 +102,7 @@ Tunes the score blend + health bands (only meaningful with
 
 ## `sysinfo.processes` (privacy)
 
-Applies to `@/query/processes` command lines (#302):
+Applies to `@rpc/sysinfo/processes` command lines (#302):
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -114,8 +114,8 @@ Applies to `@/query/processes` command lines (#302):
 
 `collect.ebpf: true` is a **no-op** unless the binary was built with
 `--features ebpf` **and** the process holds `CAP_BPF` + `CAP_PERFMON` (kernel
-≥ 5.8). It serves the `@/query/latency` histograms only — never streamed onto
-the bus. Off / missing caps / unsupported kernel → one warning, `available:
+≥ 5.8). It serves the `@rpc/sysinfo/latency` histograms only — never streamed
+onto the bus. Off / missing caps / unsupported kernel → one warning, `available:
 false`, and the unprivileged baseline is unchanged.
 
 Build:

@@ -665,7 +665,7 @@ pub struct CgroupPid {
 }
 
 /// One per-line log event, served on demand from the logs sensor's bounded
-/// ring at `zensight/logs/@/query/events` (#358). Replaces the old streamed
+/// ring at `@rpc/logs/events` (#358). Replaces the old streamed
 /// `zensight/logs/<host>/events/<uid>` keys — per-line events are
 /// high-cardinality detail and ride the bus only as low-rate rollups.
 ///

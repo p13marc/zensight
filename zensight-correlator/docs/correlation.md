@@ -93,10 +93,12 @@ fqdn, vendor, platform): a self-report beats an observed value.
 Ids are stable and order-independent (`entity_id_for`):
 
 1. If any member has a `host_id` (the guard guarantees at most one distinct value
-   per set), the id is `h_<first 12 hex of that host_id>`.
+   per set), the id is `h-<first 12 hex of that host_id>` — and when the payload
+   `host_id` is already origin-shaped (`h-<12hex>`, RFC 06 §2) it **is** the id,
+   so the entity id equals the host's `<origin>` key chunk.
 2. Otherwise, take the **highest-priority category any member has** —
    `fqdn` > `mac` > `hostname` > `ip` — and within it the
-   lexicographically-smallest value, and the id is `h_<first 12 hex of
+   lexicographically-smallest value, and the id is `h-<first 12 hex of
    sha256(value)>`. Picking the category before comparing values keeps the choice
    independent of member order.
 3. If a set has none of those, fall back to `sha256` of the smallest member

@@ -1,49 +1,55 @@
 # Correlator keyspace
 
-The keys the correlator consumes and produces. The authoritative fleet-wide
-contract lives in [`../../docs/KEYSPACE.md`](../../docs/KEYSPACE.md); this page is
-the correlator-scoped slice. All key builders are in `zensight-common/src/keyexpr.rs`.
+The keys the catalog (correlator) consumes and produces. The deployed fleet-wide
+profile lives in [`../../docs/KEYSPACE.md`](../../docs/KEYSPACE.md) (normative
+spec: [`../../docs/rfcs/keyspace-v2/`](../../docs/rfcs/keyspace-v2/00-index.md));
+this page is the correlator-scoped slice. All key builders are in
+`zensight-common/src/keyexpr.rs`.
 
-The correlator never touches the telemetry firehose (`zensight/<protocol>/**`). It
-lives entirely on the `_meta/**` control plane plus the `@pdns` verbatim tier.
+The catalog never touches the telemetry firehose
+(`zensight/@v1/*/telemetry/**`). It consumes the fleet **state plane** and is the
+single writer of the verbatim `@catalog` origin (`zensight/@v1/@catalog/…`).
 
 ## Consumes (subscriptions)
 
 | Key | Payload | Notes |
 |-----|---------|-------|
-| `zensight/_meta/evidence/host/<sensor>/<source>` | `HostEvidence` | Self-report or observed host claim. `AdvancedSubscriber` with `history()` + late-publisher detection, so a fresh correlator immediately gets the sensors' cached claims. A `DELETE` on this key drops the claim (an evidence tombstone). |
-| `zensight/_meta/evidence/names/<sensor>/<ip-slug>` | `NameObservation` | Passive-DNS, one key per observed IP (`.`/`:` → `-`), last-writer-wins on the wire; accumulated in the name store. Own `AdvancedSubscriber`. |
-| `zensight/<protocol>/<source>/@/devices/*/liveness` | `DeviceLiveness` | Plain subscriber (no history). Rolled up onto `entity.status`. Gated by `status_from_liveness`; skipped entirely when off. The legacy protocol-scoped shape (`zensight/<protocol>/@/devices/*/liveness`, pre-0.8 sensors) gets a second subscriber for one release. |
+| `zensight/@v1/*/state/*/evidence/**` | `HostEvidence` | Self-report (`…/evidence/self`) or observed-device (`…/evidence/device/<device>`) claim. `AdvancedSubscriber` with `history()` + late-publisher detection, so a fresh catalog immediately gets the sensors' cached claims. A `DELETE` on a claim key drops the claim (an evidence tombstone). |
+| `zensight/@v1/*/state/*/evidence/names/*` | `NameObservation` | Passive-DNS, one key per observed IP (`.`/`:` → `-`), last-writer-wins on the wire; accumulated in the name store. Own `AdvancedSubscriber` (the host-evidence subscriber skips the `names/` subtree, handled here). |
+| `zensight/@v1/*/state/*/device/*/liveness` | `DeviceLiveness` | Plain subscriber (no history). Rolled up onto `entity.status`. Gated by `status_from_liveness`; skipped entirely when off. |
 
-Wildcards used: `all_evidence_wildcard()` = `zensight/_meta/evidence/**` (the host
-subscriber skips the `/names/` subtree, handled by its own subscriber),
-`all_name_evidence_wildcard()` = `zensight/_meta/evidence/names/**`,
-`all_liveness_wildcard()` = `zensight/*/*/@/devices/*/liveness` (host-scoped; the
-legacy shape is subscribed literally during the transition).
+Wildcards used: `all_evidence_wildcard()`, `all_name_evidence_wildcard()`,
+`all_liveness_wildcard()`.
 
 ## Produces (publications)
 
 | Key | Payload | Notes |
 |-----|---------|-------|
-| `zensight/_meta/entity/host/<entity_id>` | `HostEntity` | The merged entity view. The correlator is the **single writer**. A `PUT` upserts (cached plain publisher per id, reliable + block); a `DELETE` tombstones a retired entity. Re-emitted every `reemit_secs`. |
-| `zensight/@pdns/<ip-slug>` | `PdnsRecord` | Historical passive-DNS: an IP's full accumulated name set, published on every name-store update for that IP. Plain `session.put` (the IP set is unbounded), reliable + block. Meant to be captured by a storage backend, not consumed live — see [`storage.md`](storage.md). |
+| `zensight/@v1/@catalog/state/entity/<entity_id>` | `HostEntity` | The merged entity view; `<entity_id>` is `h-<12hex>` (the origin id when a member has a `host_id`). The catalog is the **single writer**. A `PUT` upserts (cached plain publisher per id, reliable + block); a `DELETE` tombstones a retired entity. Re-emitted every `reemit_secs`. |
+| `zensight/@v1/@catalog/state/pdns/<ip-slug>` | `PdnsRecord` | Historical passive-DNS: an IP's full accumulated name set, published on every name-store update for that IP. Plain `session.put` (the IP set is unbounded), reliable + block. Meant to be captured by a storage backend, not consumed live — see [`storage.md`](storage.md). |
 
 ## Queryables (late-joiner seed / on-demand)
 
 | Key | Selector | Reply |
 |-----|----------|-------|
-| `zensight/_meta/query/entities` | — | JSON `Vec<HostEntity>` — the full current entity set. A late-joining frontend GETs this on connect to seed before the next re-emit. |
-| `zensight/_meta/query/names` | `?ip=<addr>` | JSON `Vec<NameVal>` — up to 32 accumulated names for that IP. Resolves arbitrary/external IPs on demand instead of flooding the bus; a missing/blank `ip` replies with an empty set. |
+| `zensight/@v1/@catalog/state/entity/*` | — | The entity seed IS the state selector: a late-joining frontend plain-GETs it on connect and the catalog answers **storage-shaped** — one JSON `HostEntity` reply per entity, each on its concrete state key. |
+| `zensight/@v1/@catalog/@rpc/names` | `?ip=<addr>` | JSON `Vec<NameVal>` — up to 32 accumulated names for that IP. An `@rpc` procedure: resolves arbitrary/external IPs on demand instead of flooding the bus; a missing/blank `ip` replies with an empty set. |
 
-## Liveliness (single-writer guard)
+## Liveliness (catalog ownership)
 
-`zensight/_meta/correlator/@/alive` — a Zenoh liveliness token. On startup the
-correlator GETs it; if another instance already holds it, the new instance
-warn-and-exits. Otherwise it declares its own token for the process lifetime.
+Ownership is an explicit claim protocol (`guard.rs`, RFC 06 §5.3): every
+candidate declares a liveliness claim token at
+`zensight/@v1/@catalog/state/claim/<zid>`, queries the claim set
+(`…/state/claim/*`), and the lexically-lowest claim chunk wins the election —
+deterministic and coordinator-free. Losers exit; only the elected owner declares
+`zensight/@v1/@catalog/state/alive` and the catalog publishers/queryables.
 
-## Why `@pdns` is off the firehose
+## Why the pdns tier is off the firehose
 
-`@pdns` is an `@`-verbatim chunk, so it is invisible to the telemetry wildcard
-(`zensight/**`) and the per-sensor control wildcard (`zensight/*/@/**`), and the
-exporters' `@`-chunk reject keeps it off Prometheus/OTel. A regression test in
+`@catalog` is an `@`-verbatim chunk, so
+`zensight/@v1/@catalog/state/pdns/<ip-slug>` is invisible to the telemetry class
+selector (`zensight/@v1/*/telemetry/**`) **and** to the `*`-origin fleet state
+selector (`zensight/@v1/*/state/**`) — `*` never matches a verbatim chunk. Only
+the dedicated selector (`all_pdns_wildcard()` =
+`zensight/@v1/@catalog/state/pdns/**`) captures it. A regression test in
 `zensight-common` pins this.

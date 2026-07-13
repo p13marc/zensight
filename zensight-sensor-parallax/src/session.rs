@@ -938,7 +938,7 @@ impl SessionManager {
     }
 
     /// Publish the stream's status transition on the declared status
-    /// publisher (`@/status/streams`) — never a raw `session.put`.
+    /// publisher (`@rpc/parallax/streams`) — never a raw `session.put`.
     async fn publish_status(&self, stream: &str) {
         let status = match self.sessions.get(stream) {
             Some(session) => self.status_for(stream, session),

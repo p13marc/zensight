@@ -385,7 +385,13 @@ pub async fn fetch_records_all<T: DeserializeOwned>(
     session: Arc<zenoh::Session>,
     key: String,
 ) -> Option<Vec<T>> {
-    let replies = match session.get(&key).await {
+    // Fleet fan-in: target All so BestMatching can never short-circuit the
+    // multi-host consolidation (RFC 05 §2.1).
+    let replies = match session
+        .get(&key)
+        .target(zenoh::query::QueryTarget::All)
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(key = %key, error = %e, "query get failed");

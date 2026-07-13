@@ -87,6 +87,9 @@ Create a JSON5 configuration file:
 
   // Filtering (optional)
   filters: {
+    // Subscription selector (default: the v1 telemetry class selector).
+    // Narrow it per producer, e.g. "zensight/@v1/*/telemetry/netring/**".
+    key_expr: "zensight/@v1/*/telemetry/**",
     include_protocols: ["snmp", "sysinfo", "syslog"],
     exclude_sources: ["test-device"],
   },
@@ -128,11 +131,11 @@ Log attributes include:
 ### Alerts
 
 With `export_alerts` on (the default), sensor alerts from the
-`zensight/<protocol>/@/alerts/*` control channel are exported as OTLP log records
+`zensight/@v1/*/state/*/alert/*` state selector are exported as OTLP log records
 on the `zensight.alerts` scope (event name `zensight.alert`). Severity is mapped
 from the alert severity and `alert.*` attributes carry source, rule, and state.
-Because the telemetry wildcard `zensight/**` does not match `@/` keys, the
-exporter declares a dedicated subscriber for this channel.
+Because the telemetry class selector `zensight/@v1/*/telemetry/**` cannot match
+state keys, the exporter declares a dedicated subscriber for this selector.
 
 ### Traces (opt-in)
 

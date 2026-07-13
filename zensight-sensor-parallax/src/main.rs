@@ -153,7 +153,7 @@ async fn main() -> Result<()> {
         Some(alerts.clone()),
     );
 
-    // Stream control channel (`@/commands/stream` + `@/status/streams`).
+    // Stream control channel (`@rpc/parallax/stream/set` + `@rpc/parallax/streams`).
     {
         let c_session = session.clone();
         let c_prefix = parallax_config.key_prefix.clone();
@@ -163,7 +163,7 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Serve the stream catalogue on `@/query/streams`.
+    // Serve the stream catalogue on `@rpc/parallax/streams`.
     {
         let q_session = session.clone();
         let q_prefix = parallax_config.key_prefix.clone();

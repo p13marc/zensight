@@ -35,15 +35,6 @@ ttl_s = 900
 since = "1.0"
 description = "passive-DNS observation for an actively observed IP (population-budgeted, RFC 04 §1.2)"
 [[subject]]
-path = "capture/{ulid}"
-class = "events"
-type = "CaptureRecord"
-cardinality = 1000
-rate = "rare"
-replay = "window(7d)"
-since = "1.0"
-description = "a capture was triggered; immutable audit record"
-[[subject]]
 path = "health"
 class = "state"
 type = "HealthSnapshot"
@@ -124,14 +115,6 @@ kind = "write"
 reply = "Ack"
 since = "1.0"
 description = "free an in-flight/ready artifact early (?id=<ulid>)"
-[[procedure]]
-path = "capture/trigger"
-kind = "write"
-request = "CaptureTrigger"
-reply = "Ack"
-idempotent = false
-since = "1.0"
-description = "fire the pre-trigger ring / rotate the spool (?tag=)"
 [[procedure]]
 path = "capture_disk"
 kind = "read"
@@ -287,6 +270,14 @@ reply = "Vec<AssetRecord>"
 idempotent = true
 since = "1.0"
 description = "observed asset inventory"
+
+[[procedure]]
+path = "ipfix"
+kind = "read"
+reply = "Vec<IpfixRecord>"
+idempotent = true
+since = "1.0"
+description = "recent IPFIX/Netflow-style flow records (feature `ipfix`; ?max=)"
 
 [[procedure]]
 path = "captures"

@@ -15,18 +15,22 @@ Resource attributes: `service.name` (default `zensight`), optional
 
 Two subscribers, same split as the Prometheus exporter:
 
-- **Telemetry** on `filters.key_expr` (default `zensight/**`); narrow it to tame
-  the firehose at the subscription. The telemetry wildcard does **not** match
-  `@/` control keys.
-- **Alerts** on `zensight/*/@/alerts/*` (when `export_alerts` or `traces.enabled`).
+- **Telemetry** on `filters.key_expr` (default `zensight/@v1/*/telemetry/**`,
+  the v1 telemetry class selector — the class chunk *is* the filter, so state
+  and the `@rpc`/`@media`/`@blob` planes never arrive and nothing is discarded
+  client-side); narrow it — e.g. `zensight/@v1/*/telemetry/netring/**` — to
+  tame the firehose at the subscription.
+- **Alerts** on `zensight/@v1/*/state/*/alert/*` (when `export_alerts` or
+  `traces.enabled`) — alerts are state-class keys the telemetry selector
+  cannot see.
 
 `include_protocols` / `exclude_protocols` / `include_sources` / `exclude_sources`
 apply as a post-receive filter.
 
 ```mermaid
 flowchart LR
-    T["telemetry subscriber — zensight/**"] --> Filt
-    Al["alerts subscriber — zensight/*/@/alerts/*"] --> Filt
+    T["telemetry subscriber — zensight/@v1/*/telemetry/**"] --> Filt
+    Al["alerts subscriber — zensight/@v1/*/state/*/alert/*"] --> Filt
 
     Filt{"post-receive filter — include/exclude protocol/source"} --> Map["map"]
 
@@ -74,11 +78,12 @@ Log attributes: `hostname` (source), `syslog.severity`, and `syslog.facility` /
 
 ## Alerts (as OTLP logs)
 
-With `export_alerts` on (default), alerts from `zensight/<protocol>/@/alerts/*` are
+With `export_alerts` on (default), alerts from
+`zensight/@v1/*/state/*/alert/*` are
 exported as OTLP log records on the `zensight.alerts` scope (event name
 `zensight.alert`). Severity is mapped from the alert severity; `alert.*`
 attributes carry source, rule, and state. The dedicated alert subscriber exists
-because the telemetry wildcard skips `@/` keys.
+because the telemetry class selector cannot match state keys.
 
 ## Traces (synthesized from alert lifecycles)
 
@@ -99,4 +104,5 @@ tracing backend (Tempo/Jaeger) with no sensor-side changes.
 - Pending firings are bounded (`MAX_PENDING`); new firings past the bound are
   dropped with a warning.
 - Artifact-transfer spans are intentionally **not** synthesized — the exporter
-  does not subscribe to `@/artifact/status`, only `@/alerts/*`.
+  does not watch artifact status (the `@rpc`/`@blob` planes), only the alert
+  state selector.

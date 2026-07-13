@@ -5,26 +5,31 @@ scaled values from a per-device register map.
 
 ## Telemetry & keyspace
 
-All keys are rooted at `key_prefix` (default `zensight/modbus`).
+All keys follow the v1 grammar, `zensight/@v1/<origin>/…`, where `<origin>` is
+the **poller host's** stable id (`h-<12hex>`). Modbus is a *proxy producer*: the
+observed device is the first subject chunk after the producer.
 
 | Key | Payload |
 |-----|---------|
-| `zensight/modbus/<device>/<register_type>/<register>` | Decoded register value. `<register_type>` is `coil`, `discrete`, `input`, or `holding`; `<register>` is the register's configured `name` (falls back to a `register_names` map entry, else the raw address). |
+| `zensight/@v1/<origin>/telemetry/modbus/<device>/<register_type>/<register>` | Decoded register value. `<register_type>` is `coil`, `discrete`, `input`, or `holding`; `<register>` is the register's configured `name` (falls back to a `register_names` map entry, else the raw address). |
 
-Example: `zensight/modbus/plc01/holding/temperature`. Each point carries labels
-including `register_type`, `address`, `unit_id`, and `data_type`.
+Example: `zensight/@v1/h-3fa9c2d41b7e/telemetry/modbus/plc01/holding/temperature`.
+Each point carries labels including `register_type`, `address`, `unit_id`, and
+`data_type`.
 
-`<device>` comes from each device's `name`; the point `source` defaults to the
-local hostname unless `modbus.source` is set.
+`<device>` comes from each device's `name`; the point `source` payload field
+defaults to the local hostname unless `modbus.source` is set.
 
 ### Control plane (via `zensight-sensor-core`)
 
-- `zensight/modbus/<source>/@/health` — sensor health snapshots (host-scoped)
-- `zensight/modbus/@/devices/*/liveness` — per-device liveness
-- `zensight/modbus/@/errors` — error reports
-- `zensight/modbus/@/artifact/{request,status,cancel}` — on-demand debug report / snapshot (opt-in via `artifacts`)
-- `zensight/_meta/sensors/modbus/<source>` — sensor registration (`SensorInfo`)
-- `zensight/_meta/evidence/host/modbus/<source>` — self-reported host evidence
+- `zensight/@v1/<origin>/state/modbus/health` — sensor health document (absorbs the legacy running flag)
+- `zensight/@v1/<origin>/state/modbus/device/<device>/liveness` — per-device liveness document (a `…/device/<device>/alive` liveliness token is separate machinery)
+- `zensight/@v1/<origin>/state/modbus/errors` — error reports
+- `zensight/@v1/<origin>/@rpc/modbus/artifact/{request,cancel}` — on-demand debug report / snapshot (opt-in via `artifacts`); progress rides the `state/modbus/artifact/<kind>` status document
+- `zensight/@v1/<origin>/state/modbus/sensor` — sensor registration (`SensorInfo`)
+- `zensight/@v1/<origin>/state/modbus/evidence/self` — self-reported host evidence
+- `zensight/@v1/<origin>/state/modbus/alive` — sensor liveliness token
+- `zensight/@v1/<origin>/@rpc/modbus/introspect` — the registry slice this build serves
 
 See [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for the authoritative contract.
 
@@ -37,8 +42,7 @@ and `modbus`.
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `key_prefix` | string | Key-expression root (default `zensight/modbus`). |
-| `source` | string? | Override the agent-host source id (default: local hostname). |
+| `source` | string? | Override the agent-host source id in payloads (default: local hostname; v1 keys are origin-scoped, so it no longer appears in key expressions). |
 | `devices[]` | array | Devices to poll (see below). |
 | `register_groups` | map | Named, reusable register lists referenced by `device.register_group`. |
 | `register_names` | map | `"<type>:<address>"` → friendly name (e.g. `"holding:100": "motor_speed"`). |

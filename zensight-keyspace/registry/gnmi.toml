@@ -9,7 +9,7 @@ convention = 1
 
 [producer]
 name = "gnmi"
-description = "gNMI subscription collector (proxy producer; bracketed path elements slugged per RFC 03 §2)"
+description = "gNMI subscription collector (proxy producer; bracketed path elements ride literally in the key)"
 
 [[subject]]
 path = "{device}/{path...}"

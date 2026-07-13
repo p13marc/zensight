@@ -62,10 +62,10 @@ fn parse_top(params: &str) -> Option<usize> {
         .and_then(|v| v.parse().ok())
 }
 
-/// `key_prefix` is the sensor's telemetry prefix (e.g. `zensight/netlink`); the
-/// queryables live under `<key_prefix>/@/query/<topic>`. `events` is the shared
-/// real-time event ring (#8), served on `@/query/events`; `route_history` is the
-/// default-route flap ring (#111), served on `@/query/route_changes`. `collect`
+/// `key_prefix` is the sensor's legacy-shaped prefix (e.g. `zensight/netlink`);
+/// the queryables live at the v1 procedure keys `@rpc/netlink/<topic>`.
+/// `events` is the shared real-time event ring (#8); `route_history` is the
+/// default-route flap ring (#111), served as `route_changes`. `collect`
 /// is the live collector-toggle handle (shared with the poll loop and the
 /// runtime `collection` command channel) so the socket→process attribution
 /// (#304) honors the same hot-swappable `socket_processes` toggle. `ebpf` is

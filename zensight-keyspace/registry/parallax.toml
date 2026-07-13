@@ -59,6 +59,16 @@ since = "1.0"
 description = "self-identity claim (RFC 06 §4)"
 
 [[subject]]
+path = "alert/{alert_key}"
+class = "state"
+type = "Alert"
+qos = "alert"
+cardinality = 64
+ttl_s = 900
+since = "1.0"
+description = "alerts; firing->resolved on one key, delete = tombstone"
+
+[[subject]]
 path = "artifact/{kind}"
 class = "state"
 type = "ArtifactStatus"
@@ -89,28 +99,20 @@ reply = "Ack"
 since = "1.0"
 description = "free an in-flight/ready artifact early (?id=<ulid>)"
 [[procedure]]
-path = "stream/open"
-kind = "write"
-request = "StreamControl"
-reply = "Ack"
-idempotent = false
-since = "1.0"
-description = "open a stream (?stream=)"
-[[procedure]]
-path = "stream/close"
-kind = "write"
-request = "StreamControl"
-reply = "Ack"
-idempotent = false
-since = "1.0"
-description = "close a stream (?stream=)"
-[[procedure]]
-path = "stream/keyframe"
-kind = "write"
-reply = "Ack"
+path = "streams"
+kind = "read"
+reply = "Vec<StreamDescriptor>"
 idempotent = true
 since = "1.0"
-description = "request an immediate keyframe (Nth-viewer path, RFC 07 §1)"
+description = "the configured stream catalogue (descriptors incl. open state)"
+[[procedure]]
+path = "stream/set"
+kind = "write"
+request = "Command<StreamControl>"
+reply = "Ack"
+idempotent = false
+since = "1.0"
+description = "stream control: open_stream / close_stream / request_keyframe"
 [[media]]
 path = "{stream}/video/{codec}/{profile}"
 encoding = "video/*"

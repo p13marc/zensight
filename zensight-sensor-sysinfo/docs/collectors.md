@@ -66,8 +66,8 @@ and skip gracefully when a `/proc`/`/sys` file is absent.
   `cgroup_paths`.
 - **power** — RAPL energy→watts, hwmon fan RPM, battery capacity/status, kernel
   entropy pool.
-- **ebpf** — `runqlat` + `biolatency` histograms on `@/query/latency`; opt-in
-  build only (see [configuration.md](configuration.md)).
+- **ebpf** — `runqlat` + `biolatency` histograms on `@rpc/sysinfo/latency`;
+  opt-in build only (see [configuration.md](configuration.md)).
 
 ## Saturation score model
 
@@ -109,7 +109,8 @@ that normalizes to a saturation fraction of 1.0.
 
 Gated by `sysinfo.alerts.enabled` (default on). Each poll tick the
 already-collected saturation data is graded against the rule thresholds and
-firing/resolved alerts publish on `zensight/sysinfo/@/alerts/*`. A firing alert
+firing/resolved alerts publish on `zensight/@v1/<origin>/state/sysinfo/alert/*`.
+A firing alert
 is only published after the violation persists for `for_secs` (`0` = fire on the
 first violation).
 

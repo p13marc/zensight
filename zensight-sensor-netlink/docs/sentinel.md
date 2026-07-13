@@ -7,9 +7,11 @@ expectation is satisfied again. Expectations are configured under
 
 Each expectation carries a `severity` (`info`/`warning`/`critical`, default
 `warning`) and an optional per-expectation `for_secs` debounce (fall back to
-`default_for_secs`). Alerts are published on `zensight/netlink/@/alerts/<alert_key>`
-as a lifecycle (firing → resolved → tombstone), where `<alert_key>` is a stable
-hash of `source + rule + labels`. The rule slug is `<kind>:<name>`.
+`default_for_secs`). Alerts are published on
+`zensight/@v1/<origin>/state/netlink/alert/<alert_key>` as a lifecycle
+(firing → resolved → Delete tombstone), where `<alert_key>` is a stable 16-hex
+FNV-1a hash of `rule + labels` (the origin chunk already identifies the host,
+so `source` is not hashed). The rule slug is `<kind>:<name>`.
 
 ## Expectation kinds
 
@@ -68,16 +70,18 @@ view's tactic lens.
 Rate and route-flap checks retain the previous sample / sliding window inside the
 evaluator, so they need two sweeps before they can fire.
 
-## Runtime hot-swap — `@/commands/expectations` + `@/status/expectations`
+## Runtime hot-swap — `@rpc/netlink/expectations` + `.../set`
 
-Expectations can be replaced live without a restart:
+Expectations can be replaced live without a restart. Both legs are request/reply
+GETs on the `@rpc` plane (there is no pub-sub command channel):
 
-- **Command** (subscribe): `zensight/netlink/@/commands/expectations` — a
-  `SetExpectations(ExpectationsConfig)` command **replaces the set wholesale**.
+- **Write** (GET with payload): `zensight/@v1/<origin>/@rpc/netlink/expectations/set`
+  — a `SetExpectations(ExpectationsConfig)` command payload **replaces the set
+  wholesale**; failures ride `reply_err` with a namespaced `error/...` name.
   Expectations authored in the GUI (Expectations view) are merged with the
   config-declared ones.
-- **Status** (queryable): `zensight/netlink/@/status/expectations` — returns the
-  currently active `ExpectationsConfig`.
+- **Read** (plain GET): `zensight/@v1/<origin>/@rpc/netlink/expectations` —
+  returns the currently active `ExpectationsConfig`.
 
-A separate `@/commands/collection` (+ `@/status/collection`) channel toggles the
-`collect.*` collectors at runtime.
+A separate `@rpc/netlink/collection` (+ `.../collection/set`) procedure pair
+toggles the `collect.*` collectors at runtime.

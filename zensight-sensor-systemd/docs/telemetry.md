@@ -1,9 +1,9 @@
 # systemd — telemetry reference
 
-Telemetry is published as `zensight/systemd/<source>/<metric>`, where `<source>`
-is the configured `systemd.source` override or the local hostname. The sensor
-refreshes every `poll_interval_secs` (default 15) by reading
-`org.freedesktop.systemd1.Manager` on the system D-Bus, read-only and
+Telemetry is published as `zensight/@v1/<origin>/telemetry/systemd/<metric>`,
+where `<origin>` is the host's stable id (`h-<12hex>`; systemd is a host-local
+producer). The sensor refreshes every `poll_interval_secs` (default 15) by
+reading `org.freedesktop.systemd1.Manager` on the system D-Bus, read-only and
 unprivileged.
 
 ## Streamed metrics
@@ -66,9 +66,11 @@ walk + `statvfs`.
 completions carry the `ActiveState` from→to transition. Each event also nudges
 the sentinel for instant re-evaluation.
 
-## On-demand queries (`@/query/<topic>`)
+## On-demand reads (`@rpc/systemd/<topic>`)
 
-Never streamed — served on request.
+Never streamed — served on request as GETs on
+`zensight/@v1/<origin>/@rpc/systemd/<topic>` (fleet callers select
+`zensight/@v1/*/@rpc/systemd/<topic>` with query target `All`).
 
 | Topic | Reply | Notes |
 |-------|-------|-------|
@@ -90,35 +92,39 @@ mem/cpu/tasks/io + pid/comm (#280), depth/breadth/pid-capped by `systemd.cgroup`
 
 ## Alerts & sentinel
 
-Both publish on the standard `zensight/systemd/@/alerts/<alert_key>` channel
-(firing → resolved lifecycle):
+Both publish on the standard `zensight/@v1/<origin>/state/systemd/alert/<alert_key>`
+channel (`<alert_key>` = 16-hex FNV-1a of rule + labels; firing = Put, resolved
+= Put(Resolved) then a Delete tombstone):
 
 - **Threshold alerts** (#276, `systemd.alerts.*`): `systemd-unit-failed`,
   `systemd-system-degraded`, `systemd-restart-storm`, `systemd-timer-overdue`,
   `systemd-unit-mem`.
 - **Sentinel** (#277, `systemd.expectations`): declarative service-health
-  expectations, hot-swappable via `@/commands/expectations`.
+  expectations, hot-swappable via a GET on `@rpc/systemd/expectations/set`.
 
 See [units-and-actions.md](units-and-actions.md) for both.
 
 ## Control-plane keys
 
 ```
-zensight/systemd/@/health                     # sensor health snapshots
-zensight/systemd/@/devices/*/liveness         # per-source liveness
-zensight/systemd/@/errors                     # error reports
-zensight/systemd/@/alerts/<alert_key>         # threshold + sentinel alerts
-zensight/systemd/@/query/<topic>              # on-demand queries (above)
-zensight/systemd/@/commands/expectations      # hot-swap sentinel expectations
-zensight/systemd/@/status/expectations        # current expectations config
-zensight/systemd/@/commands/action            # gated service control (only if enabled)
-zensight/systemd/@/status/action              # last action outcome
-zensight/_meta/sensors/systemd/<source>       # SensorInfo registration
+zensight/@v1/<origin>/state/systemd/health              # sensor health document (absorbs the legacy running flag)
+zensight/@v1/<origin>/state/systemd/alive               # sensor liveliness token
+zensight/@v1/<origin>/state/systemd/errors              # error reports
+zensight/@v1/<origin>/state/systemd/alert/<alert_key>   # threshold + sentinel alerts
+zensight/@v1/<origin>/@rpc/systemd/<topic>              # on-demand reads (above)
+zensight/@v1/<origin>/@rpc/systemd/expectations/set     # hot-swap sentinel expectations (GET + payload)
+zensight/@v1/<origin>/@rpc/systemd/expectations         # current expectations config
+zensight/@v1/<origin>/@rpc/systemd/action/set           # gated service control (only if enabled)
+zensight/@v1/<origin>/@rpc/systemd/action               # last action outcome
+zensight/@v1/<origin>/@rpc/systemd/introspect           # the registry slice this build serves
+zensight/@v1/<origin>/state/systemd/sensor              # SensorInfo registration
+zensight/@v1/<origin>/state/systemd/evidence/self       # self-identity claim
 ```
 
-The telemetry wildcard `zensight/systemd/**` does **not** match the
-`@/`-prefixed control plane. See [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for
-the full contract.
+The telemetry class selector `zensight/@v1/*/telemetry/systemd/**` matches only
+telemetry — `state` and the `@rpc` plane are disjoint by construction (and the
+legacy `zensight/**` wildcard matches nothing v1). See
+[../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for the full contract.
 
 ## Exporters (#282)
 

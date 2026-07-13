@@ -63,7 +63,7 @@ pub fn all_health_wildcard() -> String {
 
 /// Build a wildcard key expression for all device liveness data.
 ///
-/// Matches: `zensight/<protocol>/<source>/@/devices/<device>/liveness`
+/// Matches: `zensight/@v1/<origin>/state/<producer>/device/<device>/liveness`
 ///
 /// # Example
 /// ```
@@ -406,9 +406,10 @@ mod tests {
             !telemetry.intersects(&query_key),
             "the events procedure must be invisible to the telemetry firehose"
         );
-        // ...and a telemetry rollup key IS on the bus.
+        // ...and a telemetry rollup key IS on the bus (logs metrics keep
+        // their legacy `logs/` head chunk, hence the doubled chunk).
         let rollup =
-            KeyExpr::try_from("zensight/@v1/h-3fa9c2d41b7e/telemetry/logs/by_severity/error")
+            KeyExpr::try_from("zensight/@v1/h-3fa9c2d41b7e/telemetry/logs/logs/by_severity/error")
                 .unwrap();
         assert!(telemetry.intersects(&rollup));
     }

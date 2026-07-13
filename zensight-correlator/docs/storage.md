@@ -14,15 +14,15 @@ The fleet-wide overview is [`../../docs/KEYSPACE.md`](../../docs/KEYSPACE.md).
 
 | Tier | Config | Backend | Keys | Mutability |
 |------|--------|---------|------|------------|
-| Identity control plane | [`configs/router-evidence-storage.json5`](../../configs/router-evidence-storage.json5) | `zenoh-backend-fs` | `zensight/_meta/{evidence,entity}/**` | mutable (last-writer-wins) |
-| Historical passive-DNS | [`configs/router-pdns-influxdb-storage.json5`](../../configs/router-pdns-influxdb-storage.json5) | `zenoh-backend-influxdb` | `zensight/@pdns/**` | append (time series) |
+| Fleet state + catalog | [`configs/router-evidence-storage.json5`](../../configs/router-evidence-storage.json5) | `zenoh-backend-fs` | `zensight/@v1/*/state/**` + `zensight/@v1/@catalog/state/**` | mutable (last-writer-wins) |
+| Historical passive-DNS | [`configs/router-pdns-influxdb-storage.json5`](../../configs/router-pdns-influxdb-storage.json5) | `zenoh-backend-influxdb` | `zensight/@v1/@catalog/state/pdns/**` | append (time series) |
 
 ## Mutable keys need timestamping — the one correctness subtlety
 
 This is what separates the identity stores from the immutable blob store.
-Evidence, entity, and `@pdns` docs are **last-writer-wins mutable**: a sensor
-re-publishes its `HostEvidence` on every refresh; the correlator re-publishes each
-`HostEntity` (and `DELETE`-tombstones retired ones) and re-emits `@pdns` records as
+Evidence, entity, and pdns docs are **last-writer-wins mutable**: a sensor
+re-publishes its `HostEvidence` on every refresh; the catalog re-publishes each
+`HostEntity` (and `DELETE`-tombstones retired ones) and re-emits pdns records as
 an IP's name set grows. The storage must keep the **newest** value per key and
 must **never let a late, duplicated, or replayed sample clobber newer state**.
 
@@ -40,15 +40,17 @@ timestamping: {
 A **router** enables timestamping by default; both identity configs set it
 explicitly so they stay correct even if run on a peer/client.
 
-## Evidence + entity (fs backend)
+## Fleet state + catalog (fs backend)
 
 [`configs/router-evidence-storage.json5`](../../configs/router-evidence-storage.json5)
-persists the identity control plane with two fs storages:
+persists the identity plane with two fs storages — two because the `@catalog`
+chunk is verbatim, so the `*`-origin selector can never cover it:
 
-- `zensight/_meta/evidence/**` — `HostEvidence` claims and `NameObservation`
-  batches (correlator *input*).
-- `zensight/_meta/entity/**` — the correlator's merged `HostEntity` docs
-  (correlator *output*, single writer).
+- `zensight/@v1/*/state/**` — the whole fleet state plane, including the
+  `HostEvidence` claims and `NameObservation` batches (catalog *input*), stored
+  under `dir: "latest"`.
+- `zensight/@v1/@catalog/state/**` — the catalog's merged `HostEntity` docs and
+  pdns records (catalog *output*, single writer), stored under `dir: "catalog"`.
 
 ```bash
 export ZENOH_BACKEND_FS_ROOT=/var/lib/zensight/storage
@@ -57,20 +59,23 @@ zenohd -c configs/router-evidence-storage.json5
 
 `DELETE` tombstones (a dropped claim, a retired entity) remove the key like any
 other sample; with timestamping on, a replayed old tombstone can't erase a live
-doc. This is **complementary** to the correlator's in-RAM reseed, not a
+doc. This is **complementary** to the catalog's in-RAM reseed, not a
 replacement — it adds durability so a late joiner (or a whole-fleet restart) can
-seed the last known identity state from disk before the sensors re-report.
+seed the last known identity state from disk before the sensors re-report:
+state is its own seed, so a plain GET on the same state selectors is answered by
+this store exactly like the producer-side queryables would.
 
-## Historical passive-DNS (`@pdns`, InfluxDB backend)
+## Historical passive-DNS (pdns, InfluxDB backend)
 
 The evidence/entity tier is live state (TTL-swept, no history). For a durable
 *historical* IP↔name record ("what did 10.0.0.9 resolve to last Tuesday?"), the
-correlator publishes a `PdnsRecord` — the IP's full accumulated name set — on
-`zensight/@pdns/<ip-slug>` every time its name store learns/updates names for an
-IP. Nothing consumes `@pdns` on the live bus; it exists to be captured.
+catalog publishes a `PdnsRecord` — the IP's full accumulated name set — on
+`zensight/@v1/@catalog/state/pdns/<ip-slug>` every time its name store
+learns/updates names for an IP. Nothing consumes the pdns records on the live
+bus; they exist to be captured.
 
 [`configs/router-pdns-influxdb-storage.json5`](../../configs/router-pdns-influxdb-storage.json5)
-subscribes `zensight/@pdns/**` into an InfluxDB bucket via
+subscribes `zensight/@v1/@catalog/state/pdns/**` into an InfluxDB bucket via
 `zenoh-backend-influxdb`, so each write becomes a time-series point.
 
 > **Not live-tested.** There is no InfluxDB in the build/CI sandbox, so this
@@ -86,9 +91,9 @@ subscribes `zensight/@pdns/**` into an InfluxDB bucket via
 - **Authorization.** A storage answers any GET and accepts any PUT in its key
   range. Gate the identity keyspace with Zenoh access control if sensitive —
   evidence carries hashed machine-ids, IPs, MACs, and passive-DNS names.
-- **Retention.** The fs evidence/entity store keeps the latest doc per key; keys
-  age out only when the correlator tombstones them, so disk use tracks fleet size,
-  not time. The InfluxDB `@pdns` store grows with history — set a bucket retention
+- **Retention.** The fs state/catalog store keeps the latest doc per key; keys
+  age out only when the publisher tombstones them, so disk use tracks fleet size,
+  not time. The InfluxDB pdns store grows with history — set a bucket retention
   policy to bound it.
 - **One storage per key range per fleet.** Run these on a stable router (or a
   small storage-only router), not on every peer.

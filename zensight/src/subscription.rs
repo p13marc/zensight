@@ -30,16 +30,17 @@ pub struct LinkConfig {
     /// How to join the Zenoh mesh.
     pub zenoh: ZenohConfig,
     /// Telemetry subscription key expressions. Empty ⇒ the full
-    /// [`all_telemetry_wildcard`] firehose (`zensight/**`).
+    /// [`all_telemetry_wildcard`] class selector
+    /// (`zensight/@v1/*/telemetry/**`).
     pub scope: Vec<String>,
     /// Standard (history/recovery) vs. constrained (plain, store back-fill).
     pub profile: LinkProfile,
 }
 
-/// The telemetry key expressions to subscribe to: the configured scope, or the
-/// `zensight/**` firehose when no scope is set. Control-plane (`@/…`) and
-/// `_meta` subscribers are unaffected — those keys are `@`-verbatim or
-/// `_meta`-prefixed and never ride the telemetry scope.
+/// The telemetry key expressions to subscribe to: the configured scope, or
+/// the full telemetry class selector when no scope is set. The state/entity
+/// subscribers are unaffected — classes are disjoint (D3), so those keys
+/// never ride the telemetry scope.
 fn effective_scopes(config: &LinkConfig) -> Vec<String> {
     if config.scope.is_empty() {
         vec![all_telemetry_wildcard()]
@@ -98,11 +99,12 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                 tracing::warn!("Failed to create state-plane subscriber (health/alerts)");
             }
 
-            // Entity subscriber (#306): correlator host-entity docs live under
-            // `zensight/_meta/entity/**`, which the telemetry `zensight/**` and
-            // the control `zensight/*/@/**` subscribers both miss (second
-            // segment is `_meta`, not `@`). Plain subscriber, unbounded — puts
-            // are HostEntity docs, deletes are tombstones.
+            // Entity subscriber (#306): catalog host-entity docs live under
+            // `zensight/@v1/@catalog/state/entity/*` — the `*`-origin
+            // telemetry/state selectors never match the verbatim `@catalog`
+            // chunk (D4), so the catalog is named explicitly. Plain
+            // subscriber, unbounded — puts are HostEntity docs, deletes are
+            // tombstones.
             let entity_sub = session
                 .declare_subscriber(&all_entity_wildcard())
                 .with(flume::unbounded())

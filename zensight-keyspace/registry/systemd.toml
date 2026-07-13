@@ -107,6 +107,13 @@ since = "1.0"
 description = "apply expectations configuration (sentinel expectations hot-swap)"
 [[procedure]]
 path = "action"
+kind = "read"
+reply = "ActionStatus"
+idempotent = true
+since = "1.0"
+description = "gated-action switch state + last action outcome"
+[[procedure]]
+path = "action/set"
 kind = "write"
 request = "ServiceAction"
 reply = "Ack"

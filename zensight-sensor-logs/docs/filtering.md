@@ -42,13 +42,13 @@ syslog: {
 }
 ```
 
-## Dynamic filters — `@/commands/filter` + `@/status/filter`
+## Dynamic filters — `@rpc/logs/filter/set` + `@rpc/logs/filter`
 
-Set `enable_dynamic_filters: true` to expose the runtime control channel. Dynamic
-filters are keyed by id and combine with the static base filter.
+Set `enable_dynamic_filters: true` to expose the runtime control procedures.
+Dynamic filters are keyed by id and combine with the static base filter.
 
-- **Command** (subscribe): `zensight/logs/@/commands/filter` — a `FilterCommand`
-  (serde-tagged `"type"`, snake_case):
+- **Write** (a GET with payload): `zensight/@v1/<origin>/@rpc/logs/filter/set`
+  — a `FilterCommand` (serde-tagged `"type"`, snake_case):
 
   ```json
   { "type": "add_filter", "id": "my-filter",
@@ -62,7 +62,7 @@ filters are keyed by id and combine with the static base filter.
 
   `id` is optional on `add_filter` (auto-generated if omitted).
 
-- **Status** (queryable): `zensight/logs/@/status/filter` — returns a
+- **Read**: `zensight/@v1/<origin>/@rpc/logs/filter` — returns a
   `FilterStatus { base_filter, dynamic_filters, stats }` (the config base filter,
   the active dynamic filters, and filter statistics).
 
@@ -88,7 +88,7 @@ after they are read.
 
 `journald.detect_events` (default on) matches well-known systemd events —
 coredump / unit-failed / OOM — by their stable `MESSAGE_ID` and raises alerts on
-`@/alerts/*`. Coredump entries capture `COREDUMP_*` (exe/signal/pid) onto the
+`state/logs/alert/*`. Coredump entries capture `COREDUMP_*` (exe/signal/pid) onto the
 record + alert; audit / SELinux records (`_AUDIT_TYPE_NAME`, `_SELINUX_CONTEXT`)
 are tagged `category=security` for the Security view. Tuning: `event_dedup_secs`
 (coalesce + auto-resolve window), `event_severity` (per-`MESSAGE_ID` override).

@@ -6,9 +6,9 @@ journald**, feeds both into one model, and publishes derived rollups plus
 per-unit SLO alerts to Zenoh.
 
 Per-line log events are high-cardinality, so they are **served on demand** from a
-bounded in-memory ring (`@/query/events`), never streamed onto the telemetry bus
-(#358). Only low-rate rollups (`logs/by_severity/*`, `logs/by_unit/*`,
-`logs/ingest/*`, …) ride the bus for charts and alerts.
+bounded in-memory ring (a GET on `@rpc/logs/events`), never streamed onto the
+telemetry bus (#358). Only low-rate rollups (`logs/by_severity/*`,
+`logs/by_unit/*`, `logs/ingest/*`, …) ride the bus for charts and alerts.
 
 ## Features
 
@@ -45,7 +45,7 @@ At least one listener **or** enabled journald is required.
 
 ## Documentation
 
-- [Telemetry reference](docs/telemetry.md) — rollup keys + the `@/query/events` queryable.
+- [Telemetry reference](docs/telemetry.md) — rollup keys + the `@rpc/logs/events` read procedure.
 - [Filtering](docs/filtering.md) — static + dynamic message filters, journald matching.
 - [Configuration](docs/configuration.md) — listeners, journald, SLO/alert blocks.
 - [../docs/KEYSPACE.md](../docs/KEYSPACE.md) — authoritative key-expression contract.

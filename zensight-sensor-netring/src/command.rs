@@ -554,7 +554,7 @@ fn apply_ioc_reporting(
     format!("ok: {verb} applied {} indicators", *ioc_total)
 }
 
-/// A capture-to-disk command (tagged JSON) on `@/commands/capture_disk` (#327),
+/// A capture-to-disk command (tagged JSON) on `@rpc/netring/capture_disk/set` (#327),
 /// applied to the disk engine via its [`crate::disk::CaptureDiskHandle`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -574,7 +574,7 @@ pub enum CaptureDiskCommand {
     },
 }
 
-/// The capture-to-disk status served on `@/status/capture_disk` (#327): the
+/// The capture-to-disk status served on `@rpc/netring/capture_disk` (#327): the
 /// live mode, ring occupancy, retention usage and the last lifecycle event.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CaptureDiskStatus {
@@ -800,7 +800,7 @@ mod tests {
 
     #[test]
     fn capture_disk_command_wire_format() {
-        // Pin the JSON the GUI (#327) sends on @/commands/capture_disk.
+        // Pin the JSON the GUI (#327) sends on @rpc/netring/capture_disk/set.
         let now: CaptureDiskCommand =
             serde_json::from_str(r#"{"type":"capture_now","tag":"incident-42"}"#).unwrap();
         assert_eq!(

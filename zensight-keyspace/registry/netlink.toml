@@ -110,7 +110,7 @@ description = "current expectations configuration (sentinel expectations hot-swa
 [[procedure]]
 path = "expectations/set"
 kind = "write"
-request = "ExpectationsConfig"
+request = "ExpectationCommand"
 reply = "Ack"
 since = "1.0"
 description = "apply expectations configuration (sentinel expectations hot-swap)"

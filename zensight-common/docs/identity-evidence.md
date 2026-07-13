@@ -1,22 +1,24 @@
 # Identity, evidence & entities
 
-ZenSight keeps telemetry keyed by a human-readable `source`
-(`zensight/<protocol>/<source>/…`) but still needs to know *which physical host*
-each source belongs to. It solves this without re-keying telemetry: sensors
-publish identity **evidence**, and a single-writer **correlator** fuses that
-evidence into one **entity** per host. This page describes the wire types in
-`zensight-common`; the exact keys are in [`../docs/KEYSPACE.md`](../../docs/KEYSPACE.md).
+ZenSight keys telemetry by origin (`zensight/@v1/<origin>/telemetry/…`, where
+`<origin>` is a hashed host id) but still needs to know *which physical host*
+each observed source/device belongs to. It solves this without re-keying
+telemetry: sensors publish identity **evidence** as ordinary per-origin state,
+and the single-writer **catalog** (the correlator service) fuses that evidence
+into one **entity** per host under the verbatim `@catalog` origin. This page
+describes the wire types in `zensight-common`; the exact keys are in
+[`../docs/KEYSPACE.md`](../../docs/KEYSPACE.md).
 
 ## The pipeline
 
 ```mermaid
 flowchart LR
-    Self["self-report sensor (observer: None)"] -->|"HostEvidence"| Evidence["_meta/evidence/**"]
+    Self["self-report sensor (observer: None)"] -->|"HostEvidence"| Evidence["state/*/evidence/**"]
     Third["third-party observer (observer: Some(sensor))"] -->|"HostEvidence"| Evidence
     Third -->|"NameObservation"| Evidence
-    Evidence --> Correlator["correlator (single writer)"]
-    Correlator -->|"HostEntity"| Entity["_meta/entity/host/&lt;id&gt;"]
-    Correlator -->|"PdnsRecord"| Pdns["@pdns/&lt;ip-slug&gt; (durable, #310)"]
+    Evidence --> Correlator["catalog (single writer)"]
+    Correlator -->|"HostEntity"| Entity["@catalog/state/entity/&lt;id&gt;"]
+    Correlator -->|"PdnsRecord"| Pdns["@catalog/state/pdns/&lt;ip-slug&gt; (durable, #310)"]
 ```
 
 Evidence is a **claim, not a verdict**. Two provenance kinds, distinguished by the
@@ -34,8 +36,11 @@ sensor framework re-emits self-reports every 60 s).
 
 ## HostEvidence
 
-One host-identity claim, published on
-`zensight/_meta/evidence/host/<sensor>/<source>` (`evidence.rs`). Every optional
+One host-identity claim (`evidence.rs`). Self-reports go to
+`zensight/@v1/<origin>/state/<producer>/evidence/self`; observed devices to
+`zensight/@v1/<origin>/state/<sensor>/evidence/device/<device-slug>` (built by
+`host_evidence_key`, always under the **local** origin — the observed identity is
+in the payload, not the key). Every optional
 field is `skip_serializing_if`-elided, so a sparse claim stays small on the wire
 and an old/minimal publisher still decodes with defaults.
 
@@ -73,7 +78,8 @@ Merge strength of the identifying fields (strongest first): `host_id` >
 ## NameObservation
 
 One passive-DNS name observation, published on
-`zensight/_meta/evidence/names/<sensor>/<ip-slug>` (#307). A third-party claim
+`zensight/@v1/<origin>/state/<sensor>/evidence/names/<ip-slug>` (#307, e.g.
+`state/netring/evidence/names/10-0-0-9`). A third-party claim
 binding an observed IP to a name seen on the wire (DNS answer, PTR, TLS SNI, …),
 so the correlator can attach names to entities that emit no telemetry of their
 own. One observation per IP key (last-writer-wins); like `HostEvidence`, stale
@@ -89,17 +95,17 @@ pub struct NameObservation {
 }
 ```
 
-## HostEntity — the correlator's output
+## HostEntity — the catalog's output
 
-The correlator merges every TTL-live `HostEvidence` claim into `HostEntity` docs
-(`entity.rs`), published on `zensight/_meta/entity/host/<entity_id>`. An entity is
-a **materialized view** — a pure, deterministic function of the current evidence
-set — so a restarted correlator rebuilds byte-identical docs from the caches with
-no local state.
+The catalog merges every TTL-live `HostEvidence` claim into `HostEntity` docs
+(`entity.rs`), published on `zensight/@v1/@catalog/state/entity/<entity_id>`. An
+entity is a **materialized view** — a pure, deterministic function of the current
+evidence set — so a restarted catalog rebuilds byte-identical docs from the caches
+with no local state.
 
 ```rust
 pub struct HostEntity {
-    pub entity_id: String,          // "h_<12hex>": prefix of hashed machine-id, else of sha256(best key)
+    pub entity_id: String,          // "h-<12hex>": the origin id (hashed machine-id prefix), else of sha256(best key)
     pub aliases: Vec<String>,       // prior entity_ids this one subsumed (upgrade/merge)
     pub host_id: Option<String>,    // identifying — joins allowed
     pub boot_id: Option<String>,
@@ -135,17 +141,20 @@ pub struct HostEntity {
 
 ### PdnsRecord (durable passive-DNS tier)
 
-Separately, the correlator publishes its *full accumulated* per-IP `NameVal` set
-as a `PdnsRecord` on the `@`-verbatim `zensight/@pdns/<ip-slug>` tier (#310), for
+Separately, the catalog publishes its *full accumulated* per-IP `NameVal` set
+as a `PdnsRecord` on `zensight/@v1/@catalog/state/pdns/<ip-slug>` (#310), for
 a router-hosted storage backend to capture the complete IP↔name history. Because
-`@pdns` is a verbatim chunk (like `@/` and `@media`), these records are invisible
-to both the telemetry firehose (`zensight/**`) and the per-sensor control-plane
-wildcard (`zensight/*/@/**`).
+`@catalog` is a verbatim chunk, these records are invisible to both the telemetry
+class selector (`zensight/@v1/*/telemetry/**`) and the `*`-origin fleet state
+selector (`zensight/@v1/*/state/**`) — only the dedicated pdns selector
+(`all_pdns_wildcard()`) captures them.
 
 ## Query seeds (late joiners)
 
-The correlator also serves queryables so a late-joining consumer can seed state
-on demand: `zensight/_meta/query/entities` (full current entity set) and
-`zensight/_meta/query/names?ip=<addr>` (resolve names for an arbitrary IP without
-flooding the bus). See [`../docs/KEYSPACE.md`](../../docs/KEYSPACE.md) and the
-`keyexpr.rs` builders indexed in [keyspace-helpers.md](keyspace-helpers.md).
+State is its own seed: a late-joining consumer plain-GETs the entity state
+selector `zensight/@v1/@catalog/state/entity/*` and the catalog answers
+storage-shaped (one reply per entity on its concrete key). On-demand name
+resolution is a catalog procedure: GET
+`zensight/@v1/@catalog/@rpc/names?ip=<addr>` resolves names for an arbitrary IP
+without flooding the bus. See [`../docs/KEYSPACE.md`](../../docs/KEYSPACE.md) and
+the `keyexpr.rs` builders indexed in [keyspace-helpers.md](keyspace-helpers.md).

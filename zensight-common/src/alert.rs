@@ -85,8 +85,8 @@ pub enum AlertState {
     Resolved,
 }
 
-/// A fully-formed, sensor-decided alert. The wire type published on
-/// `zensight/<protocol>/@/alerts/<alert_key>`.
+/// A fully-formed, sensor-decided alert. The wire type published as LWW
+/// state on `zensight/@v1/<origin>/state/<producer>/alert/<alert_key>`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Alert {
     /// Unix epoch millis of the latest state transition.
@@ -153,8 +153,9 @@ impl Alert {
         self.state == AlertState::Firing
     }
 
-    /// Stable key for this logical alert: derived from `source` + `rule` +
-    /// sorted labels.
+    /// Stable key for this logical alert: derived from `rule` + sorted
+    /// labels (v1: `source` is NOT hashed — the origin/producer key chunks
+    /// scope the alert to its host).
     ///
     /// Two alerts that describe the same underlying condition on the same host
     /// (same rule, labels) share a key, so a `Put` replaces the prior state

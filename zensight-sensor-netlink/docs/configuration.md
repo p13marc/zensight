@@ -10,7 +10,7 @@ each block; defaults are as parsed by `src/config.rs`.
 {
   zenoh: { mode: "peer" },        // "client" | "peer" | "router"
   serialization: "json",          // "json" | "cbor"  (default json)
-  artifacts: { report: { ... } }, // on-demand @/artifact channel (disabled by default)
+  artifacts: { report: { ... } }, // on-demand artifact procedures (disabled by default)
   netlink: { ... },
   logging: { level: "info" },
 }
@@ -20,11 +20,11 @@ each block; defaults are as parsed by `src/config.rs`.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `key_prefix` | `"zensight/netlink"` | telemetry / control-plane key prefix |
-| `source` | `"auto"` | telemetry `source` id; `"auto"` detects the hostname |
+| `key_prefix` | `"zensight/netlink"` | legacy-form prefix from which the v1 context derives (base `zensight`, producer `netlink` → keys under `zensight/@v1/<origin>/…/netlink/…`) |
+| `source` | `"auto"` | telemetry `source` id (payload field — not part of the key); `"auto"` detects the hostname |
 | `poll_interval_secs` | `5` | poll cadence (config example uses `2`) |
 | `collect` | see below | per-collector toggles |
-| `events` | `{ ring_capacity: 256 }` | recent-events ring size for `@/query/events` |
+| `events` | `{ ring_capacity: 256 }` | recent-events ring size for `@rpc/netlink/events` |
 | `interfaces` | see below | interface include/exclude filter |
 | `wireguard` | see below | WireGuard peer monitoring |
 | `expectations` | none | embedded sentinel — see [sentinel.md](sentinel.md) |
@@ -48,9 +48,9 @@ each block; defaults are as parsed by `src/config.rs`.
 | `nftables` | `false` | `CAP_NET_ADMIN` | nftables table/chain/rule + hit-rate counters |
 | `conntrack` | `false` | `CAP_NET_ADMIN` | conntrack table summary |
 | `ebpf` | `false` | `CAP_BPF`+`CAP_NET_ADMIN` | connect-latency + retransmit/tcplife (needs `--features ebpf` build) |
-| `socket_processes` | `true` | none | socket→process attribution on `@/query/sockets` (#304) |
+| `socket_processes` | `true` | none | socket→process attribution on `@rpc/netlink/sockets` (#304) |
 | `socket_process_max_procs` | `4096` | — | skip the `/proc` fd-walk above this many processes |
-| `bandwidth` | `true` | none | per-process TCP goodput on `@/query/bandwidth` (#317) |
+| `bandwidth` | `true` | none | per-process TCP goodput on `@rpc/netlink/bandwidth` (#317) |
 
 \* The struct default for `xfrm` is `true`, but the shipped
 `configs/netlink.json5` sets it **`false`** — nlink's XFRM dump trips a cosmetic
@@ -85,16 +85,16 @@ Only read when `collect.ebpf` is set on a `--features ebpf` build.
 
 ```json5
 ebpf: {
-  conn_ring_capacity: 256, // recent-connections ring (@/query/connections)
-  retransmit_top_k: 20,    // top peers returned by @/query/retransmits
+  conn_ring_capacity: 256, // recent-connections ring (@rpc/netlink/connections)
+  retransmit_top_k: 20,    // top peers returned by @rpc/netlink/retransmits
 }
 ```
 
 ### `netlink.evidence` (#307)
 
 Republishes observed ARP/NDP neighbors as third-party identity evidence on
-`zensight/_meta/evidence/**` for the correlator. Change-driven with a periodic
-liveness refresh.
+`zensight/@v1/<origin>/state/netlink/evidence/device/<device>` for the
+correlator. Change-driven with a periodic liveness refresh.
 
 ```json5
 evidence: {
@@ -113,9 +113,11 @@ The embedded sentinel. Every kind is documented in
 
 ## `artifacts`
 
-The on-demand `@/artifact` channel (framework-wide, `zensight-sensor-core`).
-Every kind is **disabled by default**; enable `report` to allow downloading a
-redacted `tar.zst` debug bundle from the GUI.
+The on-demand artifact surface (framework-wide, `zensight-sensor-core`):
+`@rpc/netlink/artifact/request` + `artifact/cancel` procedures, a lifecycle
+status doc at `state/netlink/artifact/<kind>`, and bulk bytes on the `@blob`
+plane. Every kind is **disabled by default**; enable `report` to allow
+downloading a redacted `tar.zst` debug bundle from the GUI.
 
 ```json5
 artifacts: {

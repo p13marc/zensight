@@ -26,9 +26,6 @@ fn build_parse_round_trip() {
         netring::Subject::EvidenceNames {
             ip_slug: "10-0-0-7".into(),
         },
-        netring::Subject::Capture {
-            ulid: "01jgxqz4yqk8v6txw3m9f2a7cd".into(),
-        },
     ];
     for subject in cases {
         let key = netring::key(&host(), &subject).unwrap();
@@ -137,14 +134,14 @@ fn subject_metadata() {
 #[test]
 fn procedures() {
     assert_eq!(
-        netring::rpc_key(&host(), netring::ProcedureId::CaptureTrigger).unwrap(),
-        "@v1/h-3fa9c2d41b7e/@rpc/netring/capture/trigger"
+        netring::rpc_key(&host(), netring::ProcedureId::CaptureDiskSet).unwrap(),
+        "@v1/h-3fa9c2d41b7e/@rpc/netring/capture_disk/set"
     );
-    assert_eq!(netring::ProcedureId::CaptureTrigger.kind(), "write");
+    assert_eq!(netring::ProcedureId::CaptureDiskSet.kind(), "write");
     assert_eq!(netring::ProcedureId::Flows.kind(), "read");
     assert!(netring::ProcedureId::ALL.contains(&netring::ProcedureId::Introspect));
     // The rpc key parses back structurally.
-    let parsed = grammar::parse("@v1/h-3fa9c2d41b7e/@rpc/netring/capture/trigger").unwrap();
+    let parsed = grammar::parse("@v1/h-3fa9c2d41b7e/@rpc/netring/capture_disk/set").unwrap();
     assert_eq!(parsed.class, ClassOrPlane::Plane(Plane::Rpc));
 }
 

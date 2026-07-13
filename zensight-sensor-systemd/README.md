@@ -5,7 +5,8 @@ Reads the `org.freedesktop.systemd1.Manager` interface on the **system D-Bus**
 (read-only, unprivileged) and publishes system-level unit state, boot-performance
 timings, and per-unit series to Zenoh. It adds the *unit* dimension that
 complements `sysinfo` (hardware) and `logs` (messages). Fails gracefully on
-non-systemd hosts — reports unhealthy on `@/health` and retries, never crashes.
+non-systemd hosts — reports unhealthy on its `state/systemd/health` document
+and retries, never crashes.
 
 ## What it does
 
@@ -17,9 +18,11 @@ non-systemd hosts — reports unhealthy on `@/health` and retries, never crashes
   state, restarts, memory, CPU, tasks, and optional IP/IO accounting including a
   per-service bandwidth tier).
 - **On-demand queries** — units, failed units, unit detail, timers, events, and
-  a `systemd-cgls`-style cgroup tree, served on `@/query/*` (never streamed).
+  a `systemd-cgls`-style cgroup tree, served as `@rpc/systemd/*` read
+  procedures (never streamed).
 - **Embedded sentinel** (#277) — declarative service-health expectations →
-  `@/alerts/*`, hot-swappable at runtime via `@/commands/expectations`.
+  `state/systemd/alert/*`, hot-swappable at runtime via
+  `@rpc/systemd/expectations/set`.
 - **Threshold alerts** (#276) — unit-failed, system-degraded, restart-storm,
   timer-overdue, unit-mem.
 - **Gated service control** (#283, **default OFF**) — an opt-in, allowlisted,

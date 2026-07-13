@@ -89,9 +89,8 @@ pub struct HealthSnapshot {
     /// Hashed machine-id of the publishing host (identity envelope, #301).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_id: Option<String>,
-    /// The `<source>` key segment of the publishing sensor instance — the
-    /// same value that host-scopes its control-plane keys
-    /// (`zensight/<protocol>/<source>/@/health`). Optional for
+    /// The `<source>` id of the publishing sensor instance (payload-only in
+    /// v1 — the origin chunk scopes the health doc key). Optional for
     /// mixed-fleet/persisted payloads predating the host-scoped keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,

@@ -686,7 +686,7 @@ pub struct CollectConfig {
     pub asset_cdp: bool,
     /// Canonical IPFIX flow export (netring 0.28, issue #223). No-op unless
     /// built with `--features ipfix`. When set, serves IANA-IE-keyed flow
-    /// records (`FlowRecord::to_ipfix_record`) on `@/query/ipfix` — per-direction
+    /// records (`FlowRecord::to_ipfix_record`) on `@rpc/netring/ipfix` — per-direction
     /// deltas, both-direction totals, precise `flowEndReason`, Community ID — so
     /// a SIEM / flow collector consumes standard fields without re-deriving them.
     /// Default OFF (opt-in, standards export).

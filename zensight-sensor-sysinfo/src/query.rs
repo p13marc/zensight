@@ -72,9 +72,8 @@ impl CmdlinePolicy {
 
 /// Run the per-process detail query channel until the session closes.
 ///
-/// `key_prefix` is the sensor's telemetry prefix (e.g. `zensight/sysinfo`) and
-/// `source` the source segment, so the queryable lives at
-/// `<key_prefix>/<source>/@/query/processes`.
+/// `key_prefix` is the sensor's legacy-shaped prefix (e.g. `zensight/sysinfo`);
+/// the queryable lives at the v1 procedure key `@rpc/sysinfo/processes`.
 pub async fn run(
     session: Arc<zenoh::Session>,
     key_prefix: String,
@@ -108,8 +107,8 @@ pub async fn run(
     }
 }
 
-/// Serve the opt-in eBPF saturation histograms on
-/// `<key_prefix>/<source>/@/query/latency` (issue #99).
+/// Serve the opt-in eBPF saturation histograms on `@rpc/sysinfo/latency`
+/// (issue #99).
 ///
 /// Reads the shared snapshot the eBPF poller maintains (runqlat + biolatency,
 /// never streamed) and replies it as JSON. Always declared when the feature is

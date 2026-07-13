@@ -14,7 +14,7 @@ required (validated at load).
   zenoh: { mode: "peer" },        // "client" | "peer" | "router"
   serialization: "json",          // "json" | "cbor" (default json)
   syslog: { ... },                // sensor settings (historical key name)
-  artifacts: { report: { ... } }, // on-demand @/artifact channel (disabled by default)
+  artifacts: { report: { ... } }, // on-demand artifact procedures (disabled by default)
   logging: { level: "info" },
 }
 ```
@@ -23,13 +23,12 @@ required (validated at load).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `key_prefix` | `"zensight/logs"` | telemetry / control-plane key prefix |
-| `source` | hostname | override the agent-host source id |
+| `source` | hostname | override the agent-host source id in payloads (v1 keys are origin-scoped, so it no longer appears in key expressions) |
 | `listeners` | `[]` (example: udp+tcp) | network listeners — see below |
 | `hostname_aliases` | `{}` | map sender IP → friendly name when a message has no hostname |
 | `include_raw_message` | `false` | keep the raw line in labels (`log.record.original`) |
 | `filter` | empty | static message filters — see [filtering.md](filtering.md) |
-| `enable_dynamic_filters` | `false` | expose `@/commands/filter` + `@/status/filter` |
+| `enable_dynamic_filters` | `false` | expose `@rpc/logs/filter/set` + `@rpc/logs/filter` |
 | `journald` | `null` (off) | systemd-journald source — see below |
 | `derived` | `true` | emit derived rollups |
 | `derived_interval_secs` | `10` | rollup emission cadence |
@@ -39,7 +38,7 @@ required (validated at load).
 | `novelty` | off | novelty / rate-spike anomaly alerts — see below |
 | `ingest` | safe | network-path rate-limit + loss accounting — see below |
 | `multiline` | on | stack-trace joining on stream listeners — see below |
-| `events_ring_capacity` | `10000` | in-memory ring served on `@/query/events` (min 100, ≈3 MB) |
+| `events_ring_capacity` | `10000` | in-memory ring served on `@rpc/logs/events` (min 100, ≈3 MB) |
 
 ### `syslog.listeners[]`
 
@@ -185,7 +184,9 @@ multiline: {
 
 ## `artifacts`
 
-The on-demand `@/artifact` channel (framework-wide). Every kind is disabled by
+The on-demand artifact procedures (framework-wide:
+`@rpc/logs/artifact/{request,cancel}`, progress on the
+`state/logs/artifact/<kind>` status document). Every kind is disabled by
 default; enable `report` to allow downloading a redacted `tar.zst` debug bundle
 from the GUI (`max_bytes`, `cooldown_secs`, `ttl_secs`, `chunk_size`).
 

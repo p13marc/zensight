@@ -1,17 +1,19 @@
 # netring telemetry
 
 Every metric is a serialized `TelemetryPoint` published under
-`zensight/netring/<sensor>/<metric>` (JSON or CBOR per the `serialization`
-config), via a zenoh-ext `AdvancedPublisher` (per-key cache + late-joiner
-history). `<metric>` is a `/`-separated path, so a key can carry more than four
-chunks.
+`zensight/@v1/<origin>/telemetry/netring/<metric>` (JSON or CBOR per the
+`serialization` config), via a zenoh-ext `AdvancedPublisher` (per-key cache +
+late-joiner history). `<origin>` is the host's `h-<12hex>` id — the key carries
+no source chunk (the payload `TelemetryPoint` still carries `source`).
+`<metric>` is a `/`-separated path, so a key can carry several chunks.
 
 The design discipline throughout: **the telemetry bus stays low-cardinality.**
 Streamed series are bounded, closed sets (per-L4, per-rcode, per-status-class,
 per-detector); high-cardinality detail (individual flows, talkers, assets,
-per-process bandwidth) is **served on demand** from the `@/query/*` queryables in
-[§ On-demand detail](#on-demand-detail--query), never streamed. Sources: this
-crate's `src/map.rs`, `../../docs/KEYSPACE.md`, and `docs/KEYSPACE.md`.
+per-process bandwidth) is **served on demand** from the `@rpc/netring/*` read
+procedures in [§ On-demand detail](#on-demand-detail--rpcnetringtopic), never
+streamed. Sources: this crate's `src/map.rs`, `../../docs/KEYSPACE.md`, and
+[`zensight-keyspace/registry/netring.toml`](../../zensight-keyspace/registry/netring.toml).
 
 Collector gating is noted per family — a family is only published when its
 `collect.*` (or feature/config) switch is on. Defaults are in
@@ -69,7 +71,7 @@ pre-#369 bespoke `flow/duration_p*` gauges.
 | `dns/responses_by_rcode/<slug>_total` | Counter | per-rcode: `noerror`/`nxdomain`/`servfail`/`refused`/`other` |
 | `dns/query_rtt_p50_ms` `p95_ms` `p99_ms` | Gauge | query-RTT percentiles (omitted on an empty window) |
 
-Top-SLD detail rides `@/query/dns` (not streamed).
+Top-SLD detail rides `@rpc/netring/dns` (not streamed).
 
 ## HTTP RED (`collect.http`, opt-in, cleartext TCP/80,8080 — TLS is opaque)
 
@@ -80,7 +82,7 @@ Top-SLD detail rides `@/query/dns` (not streamed).
 | `http/methods/<verb>_total` | Counter | per HTTP verb (closed set) |
 | `http/latency_p50_ms` `p95_ms` | Gauge | request→response latency (omitted on an empty window) |
 
-Top-host detail rides `@/query/http`.
+Top-host detail rides `@rpc/netring/http`.
 
 ## TLS / QUIC / SSH fingerprints
 
@@ -92,7 +94,7 @@ Top-host detail rides `@/query/http`.
 | `quic/distinct_sni` | Gauge | `collect.quic` | distinct (SNI, version) pairs (passive QUIC Initial, UDP/443) |
 | `ssh/distinct_hassh` | Gauge | `collect.ssh` | distinct HASSH fingerprints (TCP/22) |
 
-Per-fingerprint detail rides `@/query/{tls,quic,ssh,ja4h}` (see below).
+Per-fingerprint detail rides `@rpc/netring/{tls,quic,ssh,ja4h}` (see below).
 
 ## Encrypted DNS (`collect.encrypted_dns`, netring 0.29 / #326)
 
@@ -106,7 +108,7 @@ Classifies DoT/DoQ/DoH from the TLS/QUIC handshake:
 | `dns/encrypted/unknown_resolver` | Counter | sessions to a resolver not classed as known-public (the policy-bypass signal) |
 | `dns/encrypted/distinct` | Gauge | distinct destinations |
 
-Per-destination detail rides `@/query/encrypted_dns`. Pairs with the
+Per-destination detail rides `@rpc/netring/encrypted_dns`. Pairs with the
 `encrypted_dns_bypass` anomaly (see [detectors.md](detectors.md)).
 
 ## ICMP errors (`collect.icmp`, opt-in, live-gated)
@@ -132,8 +134,8 @@ alert (bucketed by `dst`).
 | `bandwidth/<app>/bytes_per_sec` | Gauge | per-application rolling rate; the application name rides as the `app` label |
 
 Emitted on the `bandwidth_period_secs` cadence. This is the *per-application*
-stream; the opt-in *per-process wire* tier is query-only on `@/query/bandwidth`
-(see below).
+stream; the opt-in *per-process wire* tier is query-only on
+`@rpc/netring/bandwidth` (see below).
 
 ## Passive asset inventory (`collect.assets`)
 
@@ -142,7 +144,7 @@ stream; the opt-in *per-process wire* tier is query-only on `@/query/bandwidth`
 | `assets/discovered` | Gauge | distinct assets (MACs) currently held |
 
 Per-asset detail (MAC/IPs/hostname/vendor/platform/role/fingerprints/seen-via)
-rides `@/query/assets`. Discovery sources: ARP / NDP / LLDP (+ CDP via
+rides `@rpc/netring/assets`. Discovery sources: ARP / NDP / LLDP (+ CDP via
 `collect.asset_cdp`).
 
 ## Per-detector anomaly counters (#254)
@@ -152,8 +154,8 @@ rides `@/query/assets`. Discovery sources: ARP / NDP / LLDP (+ CDP via
 | `anomaly/<kind>/total` | Counter | monotonic count of anomalies a detector has fired since start (e.g. `anomaly/BeaconRita/total`, `anomaly/DnsTunnel/total`) |
 
 The `<kind>` slug equals the alert `rule`, so the streamed counter correlates
-with the alerts on `@/alerts/*`. Lets the GUI Overview anomaly strip roll up
-per-detector activity without a Security-view round-trip.
+with the alerts on `state/netring/alert/*`. Lets the GUI Overview anomaly strip
+roll up per-detector activity without a Security-view round-trip.
 
 ## Capture self-health (`collect.capture_stats`)
 
@@ -200,15 +202,17 @@ enter 5% / recover 1% × 3 windows). See [detectors.md](detectors.md) and the
 | `capture/disk/triggers` | Counter | triggers fired |
 | `capture/events` | Text | lifecycle feed (trigger fired / capture ready / mode switch), with an `event` label |
 
-The finished-capture file index rides `@/query/captures`.
+The finished-capture file index rides `@rpc/netring/captures`.
 
 ---
 
-## On-demand detail — `@/query/<topic>`
+## On-demand detail — `@rpc/netring/<topic>`
 
-High-cardinality detail is served on request, never streamed. Parameters are
-Zenoh selector params (e.g. `?top=20`). netring uses the host-less
-`command::query_key` form (`zensight/netring/@/query/<topic>`).
+High-cardinality detail is served on request, never streamed — read procedures
+(GETs) on the `@rpc` plane: `zensight/@v1/<origin>/@rpc/netring/<topic>`.
+Parameters are Zenoh selector params (e.g. `?top=20`). A fleet-wide caller
+selects `zensight/@v1/*/@rpc/netring/<topic>` with query target `All`; every
+sensor also serves `@rpc/netring/introspect`, returning its registry slice.
 
 | Topic | Reply | Gate |
 |---|---|---|
@@ -234,8 +238,8 @@ on the `ssh` channel.
 ### Traffic matrix / service map (#122)
 
 Alongside the per-destination talker histogram, the `(src,dst)`-keyed
-byte/packet/flow matrix on `@/query/matrix?top=N` answers "who talks to whom" for
-the GUI service-map view. TCP initiator inference (`collect.infer_initiator`,
+byte/packet/flow matrix on `@rpc/netring/matrix?top=N` answers "who talks to
+whom" for the GUI service-map view. TCP initiator inference (`collect.infer_initiator`,
 default on) labels each pair client → server regardless of capture endpoint
 order.
 
@@ -260,26 +264,31 @@ TCP-goodput or systemd's wire-L3 numbers.
 
 ---
 
-## Alerts — `@/alerts/<alert_key>`
+## Alerts — `state/netring/alert/<alert_key>`
 
 Detector, threat-intel, and capture-health alerts publish as a lifecycle
-(firing → resolved → tombstone) on `zensight/netring/@/alerts/<alert_key>`, where
-`<alert_key>` is a stable hash of `source + rule + sorted-labels`. The current
-firing set is seeded to late joiners via the `@/query/alerts` queryable. Offending
-IP/domain/5-tuple detail lives in alert **labels** (with MITRE ATT&CK `technique`
-and cross-tool `community_id` where the 5-tuple is whole), never in a metric
-series name — see [detectors.md](detectors.md) for the full detector surface.
+(firing = Put → resolved = Put(Resolved) → Delete tombstone) on
+`zensight/@v1/<origin>/state/netring/alert/<alert_key>`, where `<alert_key>` is
+a stable 16-hex FNV-1a hash of `rule + sorted-labels` (the origin chunk already
+identifies the host, so `source` is not hashed). Late joiners seed the current
+firing set with a plain GET on the same alert state selector (the sensor serves
+a storage-shaped queryable there). Offending IP/domain/5-tuple detail lives in
+alert **labels** (with MITRE ATT&CK `technique` and cross-tool `community_id`
+where the 5-tuple is whole), never in a metric series name — see
+[detectors.md](detectors.md) for the full detector surface.
 
 Capture-health alerts (`AlertKind::SensorHealth`): `capture-overload` (silent
 packet loss) and `capture-leg-asymmetry` (#226 — a flow whose two directions
 arrived on mismatched capture legs; tap miswire or asymmetric routing).
 
-## Identity evidence — `zensight/_meta/evidence/**` (#307)
+## Identity evidence — `state/netring/evidence/**` (#307)
 
 With `evidence` on (default), netring republishes third-party identity claims for
 the correlator: observed-asset `HostEvidence` (`observer=netring`, from the asset
-inventory) and passive-DNS `NameObservation`s (one per IP). Rate-limited
+inventory) on `zensight/@v1/<origin>/state/netring/evidence/device/<device>` and
+passive-DNS `NameObservation`s (one per IP) on
+`zensight/@v1/<origin>/state/netring/evidence/names/<ip-slug>`. Rate-limited
 (per-source min-interval + per-tick cap) and TTL-aged. **Gating:** asset evidence
 needs `collect.assets`; name evidence needs `collect.dns` — with those collectors
 off (the shipped default) netring emits no evidence even though `evidence.enabled`
-is true. See `docs/KEYSPACE.md` for the evidence/entity contract.
+is true. See `../../docs/KEYSPACE.md` for the evidence/entity contract.
