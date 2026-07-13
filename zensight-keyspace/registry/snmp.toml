@@ -50,42 +50,6 @@ ttl_s = 900
 since = "1.0"
 description = "self-identity claim (RFC 06 §4)"
 
-[[subject]]
-path = "artifact/{kind}"
-class = "state"
-type = "ArtifactStatus"
-cardinality = 8
-ttl_s = 900
-since = "1.0"
-description = "artifact lifecycle status doc per kind (RFC 05 §3 long-running pattern; tombstoned when freed)"
-
-[[subject]]
-path = "alert/{alert_key}"
-class = "state"
-type = "Alert"
-qos = "alert"
-cardinality = 64
-ttl_s = 900
-since = "1.0"
-description = "alerts; firing->resolved on one key, delete = tombstone"
-
-[[subject]]
-path = "device/{device}/liveness"
-class = "state"
-type = "DeviceLiveness"
-cardinality = 256
-ttl_s = 300
-since = "1.0"
-description = "observed-device liveness document (token key is separate machinery, RFC 04 §5)"
-
-[[subject]]
-path = "evidence/device/{device}"
-class = "state"
-type = "DeviceEvidence"
-cardinality = 256
-ttl_s = 900
-since = "1.0"
-description = "third-party identity claim about an observed device (RFC 06 §4)"
 [[procedure]]
 path = "introspect"
 kind = "read"
@@ -108,3 +72,11 @@ kind = "write"
 reply = "Ack"
 since = "1.0"
 description = "free an in-flight/ready artifact early (?id=<ulid>)"
+
+[[procedure]]
+path = "artifact/status"
+kind = "read"
+reply = "ArtifactStatus"
+idempotent = true
+since = "1.0"
+description = "advertised artifact kinds + the in-flight/ready state per kind (RFC 05 §3)"

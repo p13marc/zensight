@@ -124,6 +124,16 @@ async fn main() -> anyhow::Result<()> {
         })
     };
 
+    let introspect_task = {
+        let s = session.clone();
+        let sh = shutdown_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = query::serve_introspect(s, sh).await {
+                error!(error = %e, "introspect queryable error");
+            }
+        })
+    };
+
     // Input source: real evidence subscribers, or (in --demo) a synthetic feed
     // driving the exact same engine/store/publisher pipeline.
     let input_task = if args.demo {
@@ -134,11 +144,8 @@ async fn main() -> anyhow::Result<()> {
     } else {
         let sub_session = session.clone();
         let sub_shutdown = shutdown_rx.clone();
-        let status_from_liveness = config.status_from_liveness;
         tokio::spawn(async move {
-            if let Err(e) =
-                subscriber::run(sub_session, tx, status_from_liveness, sub_shutdown).await
-            {
+            if let Err(e) = subscriber::run(sub_session, tx, sub_shutdown).await {
                 error!(error = %e, "subscriber error");
             }
         })
@@ -156,6 +163,7 @@ async fn main() -> anyhow::Result<()> {
         let _ = pdns_task.await;
         let _ = entities_task.await;
         let _ = names_task.await;
+        let _ = introspect_task.await;
     })
     .await;
 

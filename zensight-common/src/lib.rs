@@ -49,7 +49,7 @@ pub use config::{
     IdentityConfig, LinkProfile, LogFormat, LoggingConfig, SnapshotDir, ZenohConfig, load_config,
     parse_config,
 };
-pub use entity::{HostEntity, MemberClaim, NameVal, PdnsRecord};
+pub use entity::{AliasRecord, HostEntity, MemberClaim, NameVal, PdnsRecord};
 pub use error::{Error, Result};
 pub use evidence::{CloudFacts, HostEvidence, NameObservation};
 pub use health::{
@@ -57,12 +57,11 @@ pub use health::{
 };
 pub use keyexpr::{
     KEY_PREFIX, alias_key, all_alerts_wildcard, all_entity_wildcard, all_errors_wildcard,
-    all_evidence_wildcard, all_health_wildcard, all_liveness_wildcard, all_name_evidence_wildcard,
-    all_pdns_wildcard, all_sensors_wildcard, all_state_wildcard, all_telemetry_wildcard,
-    catalog_claim_key, catalog_claims_wildcard, correlator_alive_key, entities_query_key,
-    entity_key, fleet_blob_prefix, fleet_command_key, fleet_rpc_key, host_evidence_key,
-    media_preview_key, media_video_key, name_observation_key, names_query_key, origin_rpc_key,
-    pdns_key,
+    all_evidence_wildcard, all_health_wildcard, all_name_evidence_wildcard, all_pdns_wildcard,
+    all_sensors_wildcard, all_state_wildcard, all_telemetry_wildcard, catalog_claim_key,
+    catalog_claims_wildcard, catalog_rpc_key, correlator_alive_key, entities_query_key, entity_key,
+    fleet_blob_prefix, fleet_command_key, fleet_rpc_key, host_evidence_key, media_preview_key,
+    media_video_key, name_observation_key, names_query_key, origin_rpc_key, pdns_key,
 };
 pub use publisher_registry::PublisherRegistry;
 pub use qos::QosClass;

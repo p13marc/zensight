@@ -41,6 +41,20 @@ pub struct NameVal {
 /// tier records the complete IP↔name history off a single key. The `@pdns`
 /// verbatim chunk keeps these off the telemetry (`zensight/**`) and per-sensor
 /// control (`zensight/*/@/**`) buses — see [`crate::keyexpr::pdns_key`].
+/// An old-id → entity-id re-pointing record (RFC 06 §5.4), published at
+/// `zensight/@v1/@catalog/state/alias/<old_id>` when a merge/upgrade retires
+/// an entity id. Long-TTL so a consumer holding a stale id can re-point after
+/// arbitrarily long offline periods.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AliasRecord {
+    /// The retired entity id.
+    pub old_id: String,
+    /// The current entity id it merged into.
+    pub entity_id: String,
+    /// Unix epoch millis this record was published.
+    pub last_updated: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PdnsRecord {
     /// The IP these names are bound to (canonical, *un*-slugified — the key is

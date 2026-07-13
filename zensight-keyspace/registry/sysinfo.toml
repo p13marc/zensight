@@ -51,13 +51,15 @@ since = "1.0"
 description = "self-identity claim (RFC 06 §4)"
 
 [[subject]]
-path = "artifact/{kind}"
+path = "alert/{alert_key}"
 class = "state"
-type = "ArtifactStatus"
-cardinality = 8
+type = "Alert"
+qos = "alert"
+cardinality = 64
 ttl_s = 900
 since = "1.0"
-description = "artifact lifecycle status doc per kind (RFC 05 §3 long-running pattern; tombstoned when freed)"
+description = "alerts; firing->resolved on one key, delete = tombstone"
+
 [[procedure]]
 path = "introspect"
 kind = "read"
@@ -80,6 +82,14 @@ kind = "write"
 reply = "Ack"
 since = "1.0"
 description = "free an in-flight/ready artifact early (?id=<ulid>)"
+
+[[procedure]]
+path = "artifact/status"
+kind = "read"
+reply = "ArtifactStatus"
+idempotent = true
+since = "1.0"
+description = "advertised artifact kinds + the in-flight/ready state per kind (RFC 05 §3)"
 [[procedure]]
 path = "processes"
 kind = "read"

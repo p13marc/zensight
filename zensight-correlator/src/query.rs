@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::{info, warn};
 use zenoh::Session;
-use zensight_common::{entities_query_key, names_query_key};
+use zensight_common::{catalog_rpc_key, entities_query_key, names_query_key};
 
 use crate::engine::SharedState;
 
@@ -100,6 +100,37 @@ pub async fn serve_names(
                         }
                     }
                     Err(e) => warn!(error = %e, "serialize names failed"),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Serve `introspect` — the catalog registry slice this build was compiled
+/// against (RFC 08 §6), mirroring what every sensor serves via its runner.
+pub async fn serve_introspect(
+    session: Arc<Session>,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let key = catalog_rpc_key("introspect");
+    let slice = zensight_keyspace::registry::registry_toml("catalog")
+        .ok_or_else(|| anyhow::anyhow!("catalog registry slice missing from the build"))?;
+    let queryable = session
+        .declare_queryable(&key)
+        .await
+        .map_err(|e| anyhow::anyhow!("declare introspect queryable: {e}"))?;
+    info!(key = %key, "introspect queryable ready");
+
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+            query = queryable.recv_async() => {
+                let Ok(query) = query else { break };
+                if let Err(e) = query.reply(key.as_str(), slice.as_bytes()).await {
+                    warn!(error = %e, "introspect reply failed");
                 }
             }
         }

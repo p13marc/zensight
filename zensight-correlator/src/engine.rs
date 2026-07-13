@@ -36,9 +36,6 @@ pub enum EvidenceMsg {
     Host(Box<HostEvidence>),
     /// A passive-DNS name observation (`_meta/evidence/names/<sensor>/<ip>`).
     Name(NameObservation),
-    /// A device-liveness update; `source` is the device id, `status` the
-    /// reported status string.
-    Liveness { source: String, status: String },
     /// A host-evidence tombstone (a `Delete` on
     /// `_meta/evidence/host/<sensor>/<source>`): drop that claim now instead of
     /// waiting for it to age out by TTL.
@@ -69,8 +66,6 @@ pub struct CorrelatorState {
     config: CorrelatorConfig,
     evidence: EvidenceStore,
     names: NameStore,
-    /// Latest device-liveness status per device (== evidence `source`).
-    liveness: HashMap<String, String>,
     /// Entity id → last published record.
     last: HashMap<String, EntityRecord>,
 }
@@ -82,7 +77,6 @@ impl CorrelatorState {
             config,
             evidence: EvidenceStore::default(),
             names: NameStore::default(),
-            liveness: HashMap::new(),
             last: HashMap::new(),
         }
     }
@@ -92,9 +86,6 @@ impl CorrelatorState {
         match msg {
             EvidenceMsg::Host(ev) => self.evidence.upsert(*ev),
             EvidenceMsg::Name(obs) => self.names.upsert(obs),
-            EvidenceMsg::Liveness { source, status } => {
-                self.liveness.insert(source, status);
-            }
             EvidenceMsg::RemoveHost { sensor, source } => {
                 self.evidence.remove(&sensor, &source);
             }
@@ -116,7 +107,6 @@ impl CorrelatorState {
 
         for e in &mut entities {
             self.inject_names(e);
-            self.assign_status(e);
             e.last_updated = now_ms;
         }
 
@@ -199,23 +189,6 @@ impl CorrelatorState {
         e.names = names;
     }
 
-    /// Roll device-liveness up onto the entity (worst-of-members). Skipped when
-    /// `status_from_liveness` is disabled or no member has a liveness record.
-    fn assign_status(&self, e: &mut HostEntity) {
-        if !self.config.status_from_liveness {
-            return;
-        }
-        let mut worst: Option<&str> = None;
-        for m in &e.members {
-            if let Some(s) = self.liveness.get(&m.source)
-                && worst.is_none_or(|w| status_rank(s) > status_rank(w))
-            {
-                worst = Some(s);
-            }
-        }
-        e.status = worst.map(|s| s.to_string());
-    }
-
     /// Record entity-id lineage: an old id that shares ≥1 member with a new
     /// entity but is not itself a current id was upgraded/merged into that new
     /// entity — put the old id in the new entity's `aliases` (it is tombstoned
@@ -250,16 +223,6 @@ fn member_set(e: &HostEntity) -> std::collections::HashSet<(String, String)> {
         .iter()
         .map(|m| (m.sensor.clone(), m.source.clone()))
         .collect()
-}
-
-/// Worst-of ranking for status rollup: offline > degraded > online > unknown.
-fn status_rank(status: &str) -> u8 {
-    match status {
-        "offline" => 3,
-        "degraded" => 2,
-        "online" => 1,
-        _ => 0,
-    }
 }
 
 /// Content hash of an entity with `last_updated` zeroed — so pure liveness
@@ -550,29 +513,6 @@ mod tests {
             e.names[0].name, "new.example.com",
             "ranked most-recent first"
         );
-    }
-
-    #[test]
-    fn status_rolls_up_worst_of_members() {
-        let mut s = CorrelatorState::new(cfg());
-        s.apply(EvidenceMsg::Host(Box::new(self_report(
-            "sysinfo",
-            "host1",
-            &hid(5),
-        ))));
-        s.apply(EvidenceMsg::Liveness {
-            source: "host1".into(),
-            status: "degraded".into(),
-        });
-        let ops = s.recompute(2000);
-        let e = ops
-            .iter()
-            .find_map(|o| match o {
-                EntityOp::Upsert(e) => Some(e),
-                _ => None,
-            })
-            .unwrap();
-        assert_eq!(e.status.as_deref(), Some("degraded"));
     }
 
     #[tokio::test]

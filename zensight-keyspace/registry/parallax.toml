@@ -68,14 +68,6 @@ ttl_s = 900
 since = "1.0"
 description = "alerts; firing->resolved on one key, delete = tombstone"
 
-[[subject]]
-path = "artifact/{kind}"
-class = "state"
-type = "ArtifactStatus"
-cardinality = 8
-ttl_s = 900
-since = "1.0"
-description = "artifact lifecycle status doc per kind (RFC 05 §3 long-running pattern; tombstoned when freed)"
 [[procedure]]
 path = "introspect"
 kind = "read"
@@ -98,6 +90,14 @@ kind = "write"
 reply = "Ack"
 since = "1.0"
 description = "free an in-flight/ready artifact early (?id=<ulid>)"
+
+[[procedure]]
+path = "artifact/status"
+kind = "read"
+reply = "ArtifactStatus"
+idempotent = true
+since = "1.0"
+description = "advertised artifact kinds + the in-flight/ready state per kind (RFC 05 §3)"
 [[procedure]]
 path = "streams"
 kind = "read"

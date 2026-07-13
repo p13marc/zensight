@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 use zenoh::Session;
 use zenoh::pubsub::Publisher;
 use zensight_common::serialization::Format;
-use zensight_common::{HostEntity, encode, entity_key};
+use zensight_common::{AliasRecord, HostEntity, alias_key, encode, entity_key};
 
 use crate::engine::EntityOp;
 
@@ -23,6 +23,9 @@ struct EntityPublisher {
     session: Arc<Session>,
     format: Format,
     publishers: HashMap<String, Publisher<'static>>,
+    /// old_id → entity_id alias records already published (skip re-puts on
+    /// pure re-emits; LWW makes an occasional duplicate harmless anyway).
+    aliases_published: HashMap<String, String>,
 }
 
 impl EntityPublisher {
@@ -31,6 +34,7 @@ impl EntityPublisher {
             session,
             format,
             publishers: HashMap::new(),
+            aliases_published: HashMap::new(),
         }
     }
 
@@ -54,7 +58,9 @@ impl EntityPublisher {
         Ok(self.publishers.get(entity_id).unwrap())
     }
 
-    /// Publish (create/update) an entity on its cached key.
+    /// Publish (create/update) an entity on its cached key, plus an
+    /// [`AliasRecord`] per retired id (RFC 06 §5.4) so consumers holding an
+    /// old entity id can re-point after a merge/upgrade.
     async fn upsert(&mut self, entity: &HostEntity) -> anyhow::Result<()> {
         let payload =
             encode(entity, self.format).map_err(|e| anyhow::anyhow!("encode entity: {e}"))?;
@@ -62,6 +68,38 @@ impl EntityPublisher {
         pubr.put(payload)
             .await
             .map_err(|e| anyhow::anyhow!("put entity {}: {e}", entity.entity_id))?;
+        for old_id in &entity.aliases {
+            if self.aliases_published.get(old_id) == Some(&entity.entity_id) {
+                continue;
+            }
+            let record = AliasRecord {
+                old_id: old_id.clone(),
+                entity_id: entity.entity_id.clone(),
+                last_updated: zensight_common::current_timestamp_millis(),
+            };
+            let payload = encode(&record, self.format)
+                .map_err(|e| anyhow::anyhow!("encode alias record: {e}"))?;
+            // One-shot LWW docs on rare merges — a session put via the cached
+            // entity-publisher machinery is overkill; reuse a plain declared
+            // publisher keyed like the entities.
+            let key = alias_key(old_id);
+            let q = zensight_common::QosClass::Entity;
+            let alias_pub = self
+                .session
+                .declare_publisher(key.clone())
+                .congestion_control(q.congestion_control())
+                .priority(q.priority())
+                .express(q.express())
+                .reliability(q.reliability())
+                .await
+                .map_err(|e| anyhow::anyhow!("declare alias publisher {key}: {e}"))?;
+            alias_pub
+                .put(payload)
+                .await
+                .map_err(|e| anyhow::anyhow!("put alias {old_id}: {e}"))?;
+            self.aliases_published
+                .insert(old_id.clone(), entity.entity_id.clone());
+        }
         Ok(())
     }
 

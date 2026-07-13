@@ -1,8 +1,8 @@
 //! Zenoh subscribers feeding the engine.
 //!
 //! Two AdvancedSubscribers on the evidence keyspace (host claims + name
-//! observations) plus, optionally, a plain subscriber on device liveness. Each
-//! decodes its samples and forwards an [`EvidenceMsg`] into the engine's mpsc.
+//! observations). Each decodes its samples and forwards an [`EvidenceMsg`]
+//! into the engine's mpsc.
 //!
 //! The evidence subscribers use `history()` (+ `detect_late_publishers`) so a
 //! freshly-started correlator immediately receives the sensors' cached
@@ -19,8 +19,7 @@ use zenoh::Session;
 use zenoh::sample::{Sample, SampleKind};
 use zenoh_ext::{AdvancedSubscriberBuilderExt, HistoryConfig, RecoveryConfig};
 use zensight_common::{
-    DeviceLiveness, HostEvidence, NameObservation, all_evidence_wildcard, all_liveness_wildcard,
-    all_name_evidence_wildcard,
+    HostEvidence, NameObservation, all_evidence_wildcard, all_name_evidence_wildcard,
 };
 
 use crate::engine::EvidenceMsg;
@@ -34,11 +33,9 @@ fn decode<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Option<T> {
 
 /// Declare the evidence subscribers and run the forwarding loop until shutdown.
 ///
-/// `status_from_liveness` gates the extra device-liveness subscription.
 pub async fn run(
     session: Arc<Session>,
     tx: mpsc::Sender<EvidenceMsg>,
-    status_from_liveness: bool,
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     // Host evidence. `all_evidence_wildcard()` also matches the names subtree, so
@@ -64,25 +61,6 @@ pub async fn run(
         .await
         .map_err(|e| anyhow::anyhow!("failed to declare name-evidence subscriber: {e}"))?;
 
-    // Device liveness → entity status. Plain subscriber (no history needed).
-    let liveness_sub = if status_from_liveness {
-        let key = all_liveness_wildcard();
-        info!(key = %key, "subscribing to device liveness");
-        match session
-            .declare_subscriber(&key)
-            .with(flume::unbounded())
-            .await
-        {
-            Ok(s) => Some(s),
-            Err(e) => {
-                warn!(error = %e, "failed to declare liveness subscriber; status disabled");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
     info!("evidence subscribers ready");
 
     loop {
@@ -103,14 +81,6 @@ pub async fn run(
                 match sample {
                     Ok(sample) => handle_name(&sample, &tx).await,
                     Err(e) => warn!(error = %e, "name-evidence recv error"),
-                }
-            }
-            sample = async { liveness_sub.as_ref().unwrap().recv_async().await },
-                if liveness_sub.is_some() =>
-            {
-                match sample {
-                    Ok(sample) => handle_liveness(&sample, &tx).await,
-                    Err(e) => warn!(error = %e, "liveness recv error"),
                 }
             }
         }
@@ -183,24 +153,6 @@ async fn handle_name(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
             let _ = tx.send(EvidenceMsg::Name(obs)).await;
         }
         None => warn!(key = %key, "failed to decode NameObservation"),
-    }
-}
-
-async fn handle_liveness(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
-    if !is_put(sample) {
-        return;
-    }
-    let key = sample.key_expr().as_str();
-    match decode::<DeviceLiveness>(&sample.payload().to_bytes()) {
-        Some(dl) => {
-            let _ = tx
-                .send(EvidenceMsg::Liveness {
-                    source: dl.device,
-                    status: dl.status.to_string(),
-                })
-                .await;
-        }
-        None => trace!(key = %key, "failed to decode DeviceLiveness"),
     }
 }
 

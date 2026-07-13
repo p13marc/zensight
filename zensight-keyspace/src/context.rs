@@ -152,10 +152,6 @@ impl V1Context {
         self.state_key(&["evidence", "device", device])
     }
 
-    pub fn device_liveness_key(&self, device: &str) -> String {
-        self.state_key(&["device", device, "liveness"])
-    }
-
     pub fn artifact_status_key(&self, kind: &str) -> String {
         self.state_key(&["artifact", kind])
     }

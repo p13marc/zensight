@@ -14,10 +14,10 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
-use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
 
-/// A parsed flow record ready for publishing.
-#[derive(Debug, Clone)]
+/// A parsed flow record — folded into the per-exporter rollups and held in
+/// the bounded ring behind the `flows` read procedure.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FlowRecord {
     /// Exporter IP address.
     pub exporter_ip: String,
@@ -32,7 +32,7 @@ pub struct FlowRecord {
 }
 
 /// A flow field value.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum FlowFieldValue {
     /// Unsigned integer value.
     Uint(u64),
@@ -48,21 +48,6 @@ pub enum FlowFieldValue {
     String(String),
     /// Raw bytes.
     Bytes(Vec<u8>),
-}
-
-impl FlowFieldValue {
-    /// Convert to TelemetryValue.
-    pub fn to_telemetry_value(&self) -> TelemetryValue {
-        match self {
-            FlowFieldValue::Uint(v) => TelemetryValue::Counter(*v),
-            FlowFieldValue::Int(v) => TelemetryValue::Gauge(*v as f64),
-            FlowFieldValue::Float(v) => TelemetryValue::Gauge(*v),
-            FlowFieldValue::IpAddr(s) => TelemetryValue::Text(s.clone()),
-            FlowFieldValue::MacAddr(s) => TelemetryValue::Text(s.clone()),
-            FlowFieldValue::String(s) => TelemetryValue::Text(s.clone()),
-            FlowFieldValue::Bytes(b) => TelemetryValue::Binary(b.clone()),
-        }
-    }
 }
 
 /// Start all configured listeners and return a channel for receiving flow records.
@@ -473,118 +458,8 @@ fn parse_field_value(field_value: &FieldValue) -> FlowFieldValue {
     }
 }
 
-/// Convert a FlowRecord to a TelemetryPoint.
-pub fn to_telemetry_point(record: &FlowRecord) -> TelemetryPoint {
-    let mut labels = HashMap::new();
-
-    labels.insert("version".to_string(), format!("v{}", record.version));
-    labels.insert("exporter_ip".to_string(), record.exporter_ip.clone());
-
-    // Add common flow fields as labels
-    for (key, value) in &record.fields {
-        match value {
-            FlowFieldValue::IpAddr(s) | FlowFieldValue::MacAddr(s) | FlowFieldValue::String(s) => {
-                labels.insert(key.clone(), s.clone());
-            }
-            FlowFieldValue::Uint(v) => {
-                labels.insert(key.clone(), v.to_string());
-            }
-            FlowFieldValue::Int(v) => {
-                labels.insert(key.clone(), v.to_string());
-            }
-            FlowFieldValue::Float(v) => {
-                labels.insert(key.clone(), v.to_string());
-            }
-            FlowFieldValue::Bytes(_) => {
-                // Skip binary data in labels
-            }
-        }
-    }
-
-    // Use bytes as the primary metric value if available
-    let value = record
-        .fields
-        .get("bytes")
-        .map(|v| v.to_telemetry_value())
-        .or_else(|| record.fields.get("packets").map(|v| v.to_telemetry_value()))
-        .unwrap_or(TelemetryValue::Counter(1));
-
-    // Build metric name from flow key fields
-    let metric = build_flow_metric(record);
-
-    TelemetryPoint {
-        timestamp: record.timestamp,
-        source: record.exporter_name.clone(),
-        protocol: Protocol::Netflow,
-        metric,
-        value,
-        labels,
-    }
-}
-
-/// Build a metric name from flow fields.
-fn build_flow_metric(record: &FlowRecord) -> String {
-    let src = record
-        .fields
-        .get("src_addr")
-        .map(|v| match v {
-            FlowFieldValue::IpAddr(s) => s.clone(),
-            _ => "unknown".to_string(),
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let dst = record
-        .fields
-        .get("dst_addr")
-        .map(|v| match v {
-            FlowFieldValue::IpAddr(s) => s.clone(),
-            _ => "unknown".to_string(),
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let proto = record
-        .fields
-        .get("protocol")
-        .map(|v| match v {
-            FlowFieldValue::Uint(p) => protocol_number_to_name(*p as u8),
-            _ => "unknown".to_string(),
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-
-    format!("{}/{}/{}", src, dst, proto)
-}
-
-/// Build the key expression for a flow record.
-pub fn build_key_expr(prefix: &str, record: &FlowRecord) -> String {
-    let src = record
-        .fields
-        .get("src_addr")
-        .map(|v| match v {
-            FlowFieldValue::IpAddr(s) => s.replace(['.', ':'], "_"),
-            _ => "unknown".to_string(),
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let dst = record
-        .fields
-        .get("dst_addr")
-        .map(|v| match v {
-            FlowFieldValue::IpAddr(s) => s.replace(['.', ':'], "_"),
-            _ => "unknown".to_string(),
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-
-    format!(
-        "{}/{}/{}/{}",
-        prefix,
-        record.exporter_name.replace('.', "_"),
-        src,
-        dst
-    )
-}
-
 /// Convert protocol number to name.
-fn protocol_number_to_name(proto: u8) -> String {
+pub(crate) fn protocol_number_to_name(proto: u8) -> String {
     match proto {
         1 => "icmp".to_string(),
         6 => "tcp".to_string(),
@@ -603,20 +478,23 @@ fn protocol_number_to_name(proto: u8) -> String {
 mod tests {
     use super::*;
 
+    /// FlowRecords ride the `flows` procedure as JSON — the enum must
+    /// round-trip.
     #[test]
-    fn test_flow_field_value_to_telemetry() {
-        assert!(matches!(
-            FlowFieldValue::Uint(100).to_telemetry_value(),
-            TelemetryValue::Counter(100)
-        ));
-        assert!(matches!(
-            FlowFieldValue::Int(-50).to_telemetry_value(),
-            TelemetryValue::Gauge(_)
-        ));
-        assert!(matches!(
-            FlowFieldValue::IpAddr("192.168.1.1".to_string()).to_telemetry_value(),
-            TelemetryValue::Text(_)
-        ));
+    fn test_flow_field_value_serde_roundtrip() {
+        for v in [
+            FlowFieldValue::Uint(100),
+            FlowFieldValue::Int(-50),
+            FlowFieldValue::Float(1.5),
+            FlowFieldValue::IpAddr("192.168.1.1".to_string()),
+            FlowFieldValue::MacAddr("aa:bb:cc:00:00:01".to_string()),
+            FlowFieldValue::String("x".to_string()),
+            FlowFieldValue::Bytes(vec![1, 2, 3]),
+        ] {
+            let json = serde_json::to_string(&v).unwrap();
+            let back: FlowFieldValue = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, v);
+        }
     }
 
     #[test]
@@ -625,133 +503,6 @@ mod tests {
         assert_eq!(protocol_number_to_name(17), "udp");
         assert_eq!(protocol_number_to_name(1), "icmp");
         assert_eq!(protocol_number_to_name(200), "proto_200");
-    }
-
-    #[test]
-    fn test_build_key_expr() {
-        let mut fields = HashMap::new();
-        fields.insert(
-            "src_addr".to_string(),
-            FlowFieldValue::IpAddr("192.168.1.1".to_string()),
-        );
-        fields.insert(
-            "dst_addr".to_string(),
-            FlowFieldValue::IpAddr("10.0.0.1".to_string()),
-        );
-
-        let record = FlowRecord {
-            exporter_ip: "172.16.0.1".to_string(),
-            exporter_name: "router01".to_string(),
-            version: 5,
-            fields,
-            timestamp: 0,
-        };
-
-        let key = build_key_expr("zensight/netflow", &record);
-        assert_eq!(key, "zensight/netflow/router01/192_168_1_1/10_0_0_1");
-    }
-
-    #[test]
-    fn test_build_flow_metric() {
-        let mut fields = HashMap::new();
-        fields.insert(
-            "src_addr".to_string(),
-            FlowFieldValue::IpAddr("192.168.1.1".to_string()),
-        );
-        fields.insert(
-            "dst_addr".to_string(),
-            FlowFieldValue::IpAddr("10.0.0.1".to_string()),
-        );
-        fields.insert("protocol".to_string(), FlowFieldValue::Uint(6));
-
-        let record = FlowRecord {
-            exporter_ip: "172.16.0.1".to_string(),
-            exporter_name: "router01".to_string(),
-            version: 5,
-            fields,
-            timestamp: 0,
-        };
-
-        let metric = build_flow_metric(&record);
-        assert_eq!(metric, "192.168.1.1/10.0.0.1/tcp");
-    }
-
-    #[test]
-    fn test_flow_field_value_all_variants() {
-        assert!(matches!(
-            FlowFieldValue::Float(1.5).to_telemetry_value(),
-            TelemetryValue::Gauge(_)
-        ));
-        assert!(matches!(
-            FlowFieldValue::MacAddr("aa:bb".into()).to_telemetry_value(),
-            TelemetryValue::Text(_)
-        ));
-        assert!(matches!(
-            FlowFieldValue::String("x".into()).to_telemetry_value(),
-            TelemetryValue::Text(_)
-        ));
-        assert!(matches!(
-            FlowFieldValue::Bytes(vec![1, 2]).to_telemetry_value(),
-            TelemetryValue::Binary(_)
-        ));
-    }
-
-    /// A FlowRecord uses `bytes` as the primary metric value, falls back to
-    /// `packets`, and projects fields onto labels + protocol = Netflow.
-    #[test]
-    fn test_to_telemetry_point() {
-        let mut fields = HashMap::new();
-        fields.insert(
-            "src_addr".to_string(),
-            FlowFieldValue::IpAddr("192.168.1.1".to_string()),
-        );
-        fields.insert(
-            "dst_addr".to_string(),
-            FlowFieldValue::IpAddr("10.0.0.1".to_string()),
-        );
-        fields.insert("protocol".to_string(), FlowFieldValue::Uint(6));
-        fields.insert("packets".to_string(), FlowFieldValue::Uint(10));
-        fields.insert("bytes".to_string(), FlowFieldValue::Uint(1500));
-
-        let record = FlowRecord {
-            exporter_ip: "172.16.0.1".to_string(),
-            exporter_name: "router01".to_string(),
-            version: 5,
-            fields,
-            timestamp: 42,
-        };
-
-        let tp = to_telemetry_point(&record);
-        assert_eq!(tp.protocol, Protocol::Netflow);
-        assert_eq!(tp.source, "router01");
-        assert_eq!(tp.metric, "192.168.1.1/10.0.0.1/tcp");
-        assert_eq!(tp.timestamp, 42);
-        // `bytes` is preferred over `packets` as the series value.
-        assert!(matches!(tp.value, TelemetryValue::Counter(1500)));
-        assert_eq!(tp.labels.get("version").map(String::as_str), Some("v5"));
-        assert_eq!(
-            tp.labels.get("exporter_ip").map(String::as_str),
-            Some("172.16.0.1")
-        );
-        assert_eq!(tp.labels.get("bytes").map(String::as_str), Some("1500"));
-    }
-
-    /// `packets` is used as the value when no `bytes` field is present.
-    #[test]
-    fn test_to_telemetry_point_packets_fallback() {
-        let mut fields = HashMap::new();
-        fields.insert("packets".to_string(), FlowFieldValue::Uint(7));
-        let record = FlowRecord {
-            exporter_ip: "e".to_string(),
-            exporter_name: "e".to_string(),
-            version: 9,
-            fields,
-            timestamp: 0,
-        };
-        assert!(matches!(
-            to_telemetry_point(&record).value,
-            TelemetryValue::Counter(7)
-        ));
     }
 
     /// Build a minimal NetFlow v5 packet (24-byte header + one 48-byte record)

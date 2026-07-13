@@ -542,22 +542,6 @@ impl SensorHealth {
             .await
     }
 
-    /// Publish device liveness to Zenoh.
-    pub async fn publish_device_liveness(&self, device_id: &str) -> Result<()> {
-        let Some(ref publisher) = self.publisher else {
-            return Ok(());
-        };
-
-        if let Some(liveness) = self.device_liveness(device_id) {
-            let key = publisher.v1().device_liveness_key(device_id);
-            publisher
-                .publish_json(&key, &liveness, zensight_common::QosClass::HealthLiveness)
-                .await?;
-        }
-
-        Ok(())
-    }
-
     /// Publish an error report to Zenoh.
     pub async fn publish_error(&self, report: &ErrorReport) -> Result<()> {
         let Some(ref publisher) = self.publisher else {
@@ -741,8 +725,8 @@ mod tests {
         assert!(ctx.health_key().ends_with("/state/sysinfo/health"));
         assert!(ctx.errors_key().ends_with("/state/sysinfo/errors"));
         assert!(
-            ctx.device_liveness_key("router01")
-                .ends_with("/state/sysinfo/device/router01/liveness")
+            ctx.device_alive_key("router01")
+                .ends_with("/state/sysinfo/device/router01/alive")
         );
     }
 

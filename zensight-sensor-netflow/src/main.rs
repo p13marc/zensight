@@ -1,10 +1,15 @@
 //! Zenoh sensor for NetFlow/IPFIX telemetry.
 //!
-//! This sensor receives NetFlow (v5, v7, v9) and IPFIX packets,
-//! parses flow records, and publishes them to Zenoh as TelemetryPoints.
+//! Receives NetFlow (v5, v7, v9) and IPFIX packets, folds the flow records
+//! into per-exporter rollup counters on the telemetry class
+//! (`{exporter}/{flows,bytes,packets}_total` + `{exporter}/by_proto/*` —
+//! RFC 11 §3; per-flow-pair keys are the population the convention forbids),
+//! and serves the raw records pull-only from a bounded ring on the `flows`
+//! read procedure.
 
 mod config;
 mod receiver;
+mod rollup;
 
 use anyhow::Result;
 use config::NetFlowSensorConfig;
@@ -66,33 +71,58 @@ async fn main() -> Result<()> {
 
     let key_prefix = zensight_sensor_core::v1::v1_telemetry_prefix(&netflow_config.key_prefix);
     let publish_flows = netflow_config.publish_flows;
+    let publish_stats = netflow_config.publish_stats;
+    // Rollup cadence: `aggregation_interval_secs`, defaulting to 30 s when
+    // unset/0 (the field predates the rollup design, where 0 meant "no
+    // aggregation" — rollups ARE the telemetry now, so 0 keeps the default).
+    let rollup_period = match netflow_config.aggregation_interval_secs {
+        0 => 30,
+        s => s,
+    };
 
     // Build status metadata
     let metadata = serde_json::json!({
         "listeners": netflow_config.listeners.iter().map(|l| &l.bind).collect::<Vec<_>>(),
         "publish_flows": publish_flows,
-        "publish_stats": netflow_config.publish_stats,
+        "publish_stats": publish_stats,
+        "rollup_period_secs": rollup_period,
     });
 
-    // Spawn the flow processing task. Telemetry goes through declared publishers
-    // (declare-on-first-use + cache per key, drop QoS), never a one-shot put.
+    // The bounded flow ring behind the `flows` read procedure (RFC 11 §3:
+    // raw records are pull-only detail, never streamed).
+    let ring = rollup::new_ring();
+    if publish_flows {
+        let flows_key = zensight_common::command::query_key(&netflow_config.key_prefix, "flows");
+        tokio::spawn(rollup::serve_flows(
+            session.clone(),
+            flows_key,
+            ring.clone(),
+        ));
+    }
+
+    // Intake: fold each record into the rollups + the ring; publish the
+    // rollup counters on a cadence through declared publishers.
     let registry = zensight_common::PublisherRegistry::new(session.clone());
     let mut runner = runner;
     runner.spawn(async move {
-        let mut flow_count: u64 = 0;
-        let mut last_stats_time = std::time::Instant::now();
+        let mut rollups = rollup::Rollups::default();
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(rollup_period.max(1)));
+        // The first tick fires immediately; skip it so the first publication
+        // carries a full period of data.
+        tick.tick().await;
 
         loop {
             tokio::select! {
                 Some(record) = rx.recv() => {
+                    rollups.ingest(&record);
                     if publish_flows {
-                        // Convert to telemetry point
-                        let point = receiver::to_telemetry_point(&record);
-
-                        // Build key expression
-                        let key = receiver::build_key_expr(&key_prefix, &record);
-
-                        // Serialize and publish
+                        rollup::push(&ring, record);
+                    }
+                }
+                _ = tick.tick(), if publish_stats => {
+                    let now = zensight_common::current_timestamp_millis();
+                    for point in rollups.points(now) {
+                        let key = format!("{key_prefix}/{}", point.metric);
                         match encode(&point, format) {
                             Ok(payload) => {
                                 if let Err(e) = registry
@@ -100,30 +130,10 @@ async fn main() -> Result<()> {
                                     .await
                                 {
                                     tracing::error!("Failed to publish to {}: {}", key, e);
-                                } else {
-                                    tracing::trace!(
-                                        "Published flow: {} from {} v{}",
-                                        key,
-                                        record.exporter_name,
-                                        record.version
-                                    );
-                                    flow_count += 1;
                                 }
                             }
-                            Err(e) => {
-                                tracing::error!("Failed to serialize flow: {}", e);
-                            }
+                            Err(e) => tracing::error!("Failed to serialize rollup: {}", e),
                         }
-                    }
-
-                    // Log statistics periodically
-                    if last_stats_time.elapsed().as_secs() >= 60 {
-                        tracing::info!(
-                            "Processed {} flows in the last minute",
-                            flow_count
-                        );
-                        flow_count = 0;
-                        last_stats_time = std::time::Instant::now();
                     }
                 }
                 else => break,

@@ -13404,6 +13404,7 @@ dependencies = [
  "zenoh",
  "zenoh-ext",
  "zensight-common",
+ "zensight-keyspace",
 ]
 
 [[package]]

@@ -70,21 +70,6 @@ pub fn all_health_wildcard() -> String {
     format!("{}/@v1/*/state/*/health", KEY_PREFIX)
 }
 
-/// Build a wildcard key expression for all device liveness data.
-///
-/// Matches: `zensight/@v1/<origin>/state/<producer>/device/<device>/liveness`
-///
-/// # Example
-/// ```
-/// use zensight_common::keyexpr::all_liveness_wildcard;
-///
-/// assert_eq!(all_liveness_wildcard(), "zensight/@v1/*/state/*/device/*/liveness");
-/// ```
-pub fn all_liveness_wildcard() -> String {
-    // v1 (RFC 04): device-liveness documents under every producer.
-    format!("{}/@v1/*/state/*/device/*/liveness", KEY_PREFIX)
-}
-
 /// Build a wildcard key expression for all sensor error reports.
 ///
 /// Matches: `zensight/@v1/<origin>/state/<producer>/errors`
@@ -224,6 +209,13 @@ pub fn entities_query_key() -> String {
     format!("{}/@v1/@catalog/state/entity/*", KEY_PREFIX)
 }
 
+/// Build a catalog procedure key (RFC 06 §5): the catalog is a service
+/// origin, so its procedures ride `<base>/@v1/@catalog/@rpc/<procedure>`
+/// with no producer chunk.
+pub fn catalog_rpc_key(procedure: &str) -> String {
+    format!("{}/@v1/@catalog/@rpc/{}", KEY_PREFIX, procedure)
+}
+
 /// Build the queryable key for on-demand IP→name resolution (selector
 /// `?ip=<ip>`), served by the catalog so arbitrary/external IPs don't flood
 /// the bus (#305).
@@ -236,7 +228,7 @@ pub fn entities_query_key() -> String {
 /// ```
 pub fn names_query_key() -> String {
     // v1 (RFC 06 §5): on-demand name resolution is a catalog procedure.
-    format!("{}/@v1/@catalog/@rpc/names", KEY_PREFIX)
+    catalog_rpc_key("names")
 }
 
 /// Build the correlator's liveliness-token key. A second correlator instance

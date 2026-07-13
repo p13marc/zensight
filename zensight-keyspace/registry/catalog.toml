@@ -45,20 +45,6 @@ idempotent = true
 since = "1.0"
 description = "on-demand name resolution (?ip=...)"
 [[procedure]]
-path = "link"
-kind = "write"
-reply = "Ack"
-idempotent = true
-since = "1.0"
-description = "operator assertion old==new across a reinstall (?old=;new=) — gated (RFC 06 §5.4)"
-[[procedure]]
-path = "unlink"
-kind = "write"
-reply = "Ack"
-idempotent = true
-since = "1.0"
-description = "retire an operator link assertion (?old=) — gated"
-[[procedure]]
 path = "introspect"
 kind = "read"
 reply = "RegistrySlice"
