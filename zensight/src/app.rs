@@ -3751,7 +3751,7 @@ impl ZenSight {
         let Some(session) = self.session.clone() else {
             return Task::none();
         };
-        let key = zensight_common::status_key("zensight/systemd", "action");
+        let key = zensight_common::fleet_rpc_key("systemd", "action");
         Task::future(async move {
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             let no_reply = Message::CommandFeedback {
@@ -3812,7 +3812,7 @@ impl ZenSight {
                 "Not connected to Zenoh".to_string(),
             )));
         };
-        let key = zensight_common::status_key("zensight/netring", "detectors");
+        let key = zensight_common::fleet_rpc_key("netring", "detectors");
         Task::future(async move {
             match session.get(&key).await {
                 Ok(replies) => {
@@ -3838,7 +3838,7 @@ impl ZenSight {
                 "Not connected to Zenoh".to_string(),
             )));
         };
-        let key = zensight_common::status_key("zensight/netring", "capture_filter");
+        let key = zensight_common::fleet_rpc_key("netring", "capture_filter");
         Task::future(async move {
             match session.get(&key).await {
                 Ok(replies) => {
@@ -3868,7 +3868,7 @@ impl ZenSight {
                 "Not connected to Zenoh".to_string(),
             )));
         };
-        let key = zensight_common::status_key("zensight/netring", "threat_intel");
+        let key = zensight_common::fleet_rpc_key("netring", "threat_intel");
         Task::future(async move {
             match session.get(&key).await {
                 Ok(replies) => {
@@ -4345,7 +4345,7 @@ impl ZenSight {
         self.topology.panel.listen = Fetch::Loading;
         let key = format!(
             "{}?state=listen",
-            zensight_common::command::query_key("zensight/netlink", "sockets")
+            zensight_common::fleet_rpc_key("netlink", "sockets")
         );
         Task::future(async move {
             let result = fetch_records_all::<zensight_common::SocketRecord>(session, key)
@@ -4435,7 +4435,7 @@ impl ZenSight {
             // Not connected: leave edges as-is, no error toast.
             return Task::none();
         };
-        let neighbors_key = zensight_common::command::query_key("zensight/netlink", "neighbors");
+        let neighbors_key = zensight_common::fleet_rpc_key("netlink", "neighbors");
         Task::future(async move {
             let (flows, neighbors, matrix, assets) = tokio::join!(
                 fetch_flows(session.clone()),
