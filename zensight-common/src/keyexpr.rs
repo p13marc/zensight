@@ -1,7 +1,64 @@
 use crate::telemetry::Protocol;
 
+use zensight_keyspace::grammar::{self, Class, ClassOrPlane, Origin, StructuralKey};
+use zensight_keyspace::registry::{self, AnySubject};
+
 /// Default key expression prefix for all ZenSight telemetry.
 pub const KEY_PREFIX: &str = "zensight";
+
+/// Structurally parse a key **as it appears on the wire** (RFC 03).
+///
+/// [`grammar::parse`] is base-relative — the base is meant to be the Zenoh
+/// session namespace (RFC 03 §1.1), so no key the keyspace crate builds
+/// contains it — but keys on the wire still carry `zensight/` because we do not
+/// set the namespace yet (issue #466). This is the single place that bridges
+/// the two; when #466 lands, it becomes a straight call to [`grammar::parse`].
+///
+/// Consumers should reach for this instead of hand-rolling `split('/')`:
+/// positional re-parsing of keys is exactly what the registry was built to
+/// delete (RFC 08 §1, issue #475).
+pub fn parse_wire_key(key: &str) -> Option<StructuralKey> {
+    let rel = key.strip_prefix(KEY_PREFIX)?.strip_prefix('/')?;
+    grammar::parse(rel).ok()
+}
+
+/// Parse a wire key and refine its subject tail through the registry (RFC 08
+/// §1's *parse* direction). Returns the producer (or service) base name
+/// alongside the refined subject.
+///
+/// `None` when the key is not a v1 data key, or when the subject is not
+/// registered — "a subject that is not registered does not exist".
+pub fn refine_wire_key(key: &str) -> Option<(StructuralKey, String, AnySubject)> {
+    let parsed = parse_wire_key(key)?;
+    let ClassOrPlane::Class(class) = parsed.class else {
+        return None;
+    };
+    let name = match parsed.producer.as_ref() {
+        // The instance suffix (`netring-2`) is already stripped, so the
+        // registry lookup sees the base name.
+        Some(p) => p.name().to_string(),
+        // Service origins (`@catalog`) carry no producer chunk.
+        None => match &parsed.origin {
+            Origin::Service(s) => s.trim_start_matches('@').to_string(),
+            Origin::Host(_) => return None,
+        },
+    };
+    let tail: Vec<&str> = parsed.subject.iter().map(String::as_str).collect();
+    let subject = registry::parse_subject(&name, class, &tail)?;
+    Some((parsed, name, subject))
+}
+
+/// Whether a wire key carries a [`crate::TelemetryPoint`] — i.e. is a v1
+/// telemetry-class key on a host origin.
+///
+/// This replaces a positional 4-chunk gate that had been copy-pasted verbatim
+/// into both exporters.
+pub fn is_telemetry_key(key: &str) -> bool {
+    parse_wire_key(key).is_some_and(|k| {
+        matches!(k.class, ClassOrPlane::Class(Class::Telemetry))
+            && matches!(k.origin, Origin::Host(_))
+    })
+}
 
 /// Build the v1 telemetry class selector (all producers, all origins).
 ///

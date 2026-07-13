@@ -21,13 +21,10 @@ pub const DEFAULT_KEY_EXPR: &str = "zensight/@v1/*/telemetry/**";
 /// class keys (`zensight/@v1/<origin>/telemetry/…`). With the class selector
 /// as the subscription this is belt-and-braces (a narrowed `filters.key_expr`
 /// override could still point anywhere).
-pub(crate) fn is_telemetry_key(key: &str) -> bool {
-    let mut chunks = key.split('/');
-    chunks.next() == Some("zensight")
-        && chunks.next() == Some("@v1")
-        && chunks.next().is_some_and(|origin| !origin.starts_with('@'))
-        && chunks.next() == Some("telemetry")
-}
+///
+/// This was a hand-rolled 4-chunk positional gate, copy-pasted byte-for-byte
+/// into the OTel exporter. It is now one registry-backed helper (issue #475).
+pub(crate) use zensight_common::keyexpr::is_telemetry_key;
 
 /// Statistics for the subscriber.
 #[derive(Debug, Default)]
@@ -241,7 +238,13 @@ impl TelemetrySubscriber {
     fn handle_alert_sample(&self, sample: &Sample) {
         let key = sample.key_expr().as_str();
         if sample.kind() == SampleKind::Delete {
-            if let Some(alert_key) = key.rsplit('/').next() {
+            // The alert key is the `alert/{alert_key}` variable — ask the
+            // registry for it rather than taking the last chunk on faith
+            // (issue #475). A tombstone on any other state subject is not ours.
+            if let Some((_, _, subject)) = zensight_common::keyexpr::refine_wire_key(key)
+                && let Some(zensight_common::CommonState::Alert { alert_key }) =
+                    subject.common_state()
+            {
                 trace!(key = %key, "Alert tombstone");
                 self.collector.remove_alert(alert_key);
             }

@@ -61,8 +61,9 @@ pub use keyexpr::{
     all_health_wildcard, all_name_evidence_wildcard, all_pdns_wildcard, all_state_wildcard,
     all_telemetry_wildcard, catalog_claim_key, catalog_claims_wildcard, catalog_rpc_key,
     correlator_alive_key, entities_query_key, entity_key, fleet_blob_prefix, fleet_command_key,
-    fleet_rpc_key, host_evidence_key, media_preview_key, media_video_key, name_observation_key,
-    names_query_key, origin_rpc_key, pdns_key,
+    fleet_rpc_key, host_evidence_key, is_telemetry_key, media_preview_key, media_video_key,
+    name_observation_key, names_query_key, origin_rpc_key, parse_wire_key, pdns_key,
+    refine_wire_key,
 };
 pub use publisher_registry::PublisherRegistry;
 pub use qos::QosClass;
@@ -76,6 +77,9 @@ pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;
 pub use stream::{FrameMeta, StreamControl, StreamDescriptor, StreamStatus};
 pub use telemetry::{Protocol, TelemetryPoint, TelemetryValue, current_timestamp_millis};
+/// The registry's *parse* direction, re-exported so consumers get it without a
+/// direct `zensight-keyspace` dependency (RFC 08 §1, issue #475).
+pub use zensight_keyspace::CommonState;
 
 /// Initialize tracing with the given configuration.
 ///

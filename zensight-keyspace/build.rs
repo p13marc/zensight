@@ -900,6 +900,72 @@ fn emit(files: &[RegistryFile]) -> String {
     }
     let _ = writeln!(out, "}}\n");
 
+    // AnySubject::common_state() — refine any producer's state subject into the
+    // shared framework set (see src/common_state.rs). Driven off the registered
+    // *pattern*, so it cannot drift from the registry: rename a subject in a
+    // TOML and its arm disappears here.
+    let common: &[(&str, &str)] = &[
+        ("health", "Health"),
+        ("errors", "Errors"),
+        ("sensor", "Sensor"),
+        ("alert/{alert_key}", "Alert { alert_key }"),
+        ("artifact/{kind}", "Artifact { kind }"),
+        ("evidence/self", "EvidenceSelf"),
+        ("evidence/device/{device}", "EvidenceDevice { device }"),
+        ("evidence/names/{ip_slug}", "EvidenceNames { ip_slug }"),
+        ("stream/{stream}", "Stream { stream }"),
+        ("entity/{entity_id}", "CatalogEntity { entity_id }"),
+        ("alias/{old_id}", "CatalogAlias { old_id }"),
+        ("pdns/{ip_slug}", "CatalogPdns { ip_slug }"),
+    ];
+    let _ = writeln!(out, "impl AnySubject {{");
+    let _ = writeln!(
+        out,
+        "    /// The framework state subject this refines to, if any (issue #475).\n    pub fn common_state(&self) -> Option<crate::common_state::CommonState<'_>> {{\n        use crate::common_state::CommonState as C;\n        match self {{"
+    );
+    for f in files {
+        let module = producer_module(&f.name);
+        let variant = camel(&[f.name.as_str()]);
+        let _ = writeln!(out, "            Self::{variant}(s) => match s {{");
+        let mut mapped = 0usize;
+        for s in &f.subjects {
+            if s.class != "state" {
+                continue;
+            }
+            let Some((_, ctor)) = common.iter().find(|(pat, _)| *pat == s.path) else {
+                continue;
+            };
+            mapped += 1;
+            // Bind the pattern's variables by name; the CommonState ctor uses
+            // the same names, so field-init shorthand lines them up.
+            let binds: Vec<String> = s
+                .chunks
+                .iter()
+                .filter_map(|c| match c {
+                    Chunk::Var(v) | Chunk::Rest(v) => Some(snake(v)),
+                    Chunk::Literal(_) => None,
+                })
+                .collect();
+            let pat = if binds.is_empty() {
+                format!("{module}::Subject::{}", s.variant)
+            } else {
+                format!(
+                    "{module}::Subject::{} {{ {} }}",
+                    s.variant,
+                    binds.join(", ")
+                )
+            };
+            let _ = writeln!(out, "                {pat} => Some(C::{ctor}),");
+        }
+        // A producer whose every subject is a framework one (the `@catalog`
+        // service) leaves nothing for a wildcard arm to catch.
+        if mapped < f.subjects.len() {
+            let _ = writeln!(out, "                _ => None,");
+        }
+        let _ = writeln!(out, "            }},");
+    }
+    let _ = writeln!(out, "        }}\n    }}\n}}\n");
+
     let _ = writeln!(
         out,
         "/// Registry-refine a structurally parsed key (RFC 08 §1 parse direction).\n/// `producer_name` is the *base* name (instance suffix already stripped by\n/// [`crate::grammar::Producer::parse_chunk`]); service keys pass the service\n/// name (e.g. \"catalog\").\npub fn parse_subject(producer_name: &str, class: crate::grammar::Class, tail: &[&str]) -> Option<AnySubject> {{"

@@ -21,13 +21,10 @@ pub const DEFAULT_KEY_EXPR: &str = "zensight/@v1/*/telemetry/**";
 /// class keys (`zensight/@v1/<origin>/telemetry/…`). With the class selector
 /// as the subscription this is belt-and-braces (a narrowed `filters.key_expr`
 /// override could still point anywhere).
-pub(crate) fn is_telemetry_key(key: &str) -> bool {
-    let mut chunks = key.split('/');
-    chunks.next() == Some("zensight")
-        && chunks.next() == Some("@v1")
-        && chunks.next().is_some_and(|origin| !origin.starts_with('@'))
-        && chunks.next() == Some("telemetry")
-}
+///
+/// This was a hand-rolled 4-chunk positional gate, copy-pasted byte-for-byte
+/// from the Prometheus exporter. It is now one registry-backed helper (#475).
+pub(crate) use zensight_common::keyexpr::is_telemetry_key;
 
 /// Statistics for the subscriber.
 #[derive(Debug, Default)]
