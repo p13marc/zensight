@@ -59,6 +59,20 @@ zensight/@v1/@catalog/…                                   the identity catalog
   catch-all makes the lint vacuously true (issue #468). `snmp`/`modbus`/`gnmi`/
   `netflow` keep a rest-var by design: their metric tree belongs to the polled
   device, not to us.
+- **Type table** (RFC 08 §5): [`zensight_common::payload`](../zensight-common/src/payload.rs)
+  maps each registry `type` name to its Rust definition, and `decode_payload()`
+  turns a name into a decoder. This is what makes `type = "TelemetryPoint"`
+  resolvable outside the producer's own crate — a consumer can now go wire key →
+  subject → type → value with nothing producer-specific compiled in. The
+  `types_are_total` test is the CI enforcement the RFC asks for ("a `type` name
+  not present in the type table fails CI"): it walks every subject of every
+  registry file and fails if a declared type does not resolve. It found one that
+  did not — `parallax` declared `StreamDoc` for a subject whose payload is a
+  `StreamStatus`, a name that existed nowhere else in the workspace.
+- **Bus explorer**: [`zenctl`](../zenctl/README.md) is the `busctl`/`d-feet`
+  equivalent RFC 08 §6 exists to enable — `topic list/info/echo`, `node list`,
+  `service list/call`, and `doctor` (fan `introspect` fleet-wide, diff each reply
+  against this build's slice, print the findings).
 - **Key builders**: `zensight-keyspace::V1Context` (producer-side),
   `zensight_common::keyexpr` (consumer-side selectors + fleet/origin RPC
   keys), `zensight_common::command` (topic/artifact procedure keys). New code

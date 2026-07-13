@@ -58,13 +58,13 @@ pub use health::{
     DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, HealthStatus, SensorInfo,
 };
 pub use keyexpr::{
-    KEY_PREFIX, alias_key, all_alerts_wildcard, all_entity_wildcard, all_evidence_wildcard,
-    all_health_wildcard, all_name_evidence_wildcard, all_pdns_wildcard, all_state_wildcard,
-    all_telemetry_wildcard, catalog_claim_key, catalog_claims_wildcard, catalog_rpc_key,
-    correlator_alive_key, entities_query_key, entity_key, fleet_blob_prefix, fleet_command_key,
-    fleet_rpc_key, host_evidence_key, is_telemetry_key, media_preview_key, media_video_key,
-    name_observation_key, names_query_key, origin_rpc_key, parse_wire_key, pdns_key,
-    refine_wire_key,
+    KEY_PREFIX, alias_key, all_alerts_wildcard, all_device_liveliness_wildcard,
+    all_entity_wildcard, all_evidence_wildcard, all_health_wildcard, all_liveliness_wildcard,
+    all_name_evidence_wildcard, all_pdns_wildcard, all_state_wildcard, all_telemetry_wildcard,
+    catalog_claim_key, catalog_claims_wildcard, catalog_rpc_key, correlator_alive_key,
+    entities_query_key, entity_key, fleet_blob_prefix, fleet_command_key, fleet_rpc_key,
+    host_evidence_key, is_telemetry_key, media_preview_key, media_video_key, name_observation_key,
+    names_query_key, origin_rpc_key, parse_wire_key, pdns_key, refine_wire_key,
 };
 pub use payload::{PAYLOAD_TYPES, decode_payload, schema_location};
 pub use publisher_registry::PublisherRegistry;

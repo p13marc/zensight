@@ -346,6 +346,31 @@ pub fn origin_device_liveliness_expr(origin: &str) -> String {
     format!("{KEY_PREFIX}/@v1/{origin}/state/*/device/*/alive")
 }
 
+/// The whole fleet's producer liveliness tokens — RFC 04 §5's "entire
+/// fleet-presence protocol, zero payload bytes".
+///
+/// The token *key* is the record: `…/<origin>/state/<producer>/alive` says who
+/// is up and what they run. Note `*` in the origin position can never match a
+/// verbatim service origin (design property D4), so `@catalog`'s own token
+/// ([`correlator_alive_key`]) is **not** in this set and must be asked for by
+/// name.
+///
+/// # Example
+/// ```
+/// use zensight_common::keyexpr::all_liveliness_wildcard;
+///
+/// assert_eq!(all_liveliness_wildcard(), "zensight/@v1/*/state/*/alive");
+/// ```
+pub fn all_liveliness_wildcard() -> String {
+    format!("{KEY_PREFIX}/@v1/*/state/*/alive")
+}
+
+/// The whole fleet's device liveliness tokens (producers that track downstream
+/// devices — RFC 04 §5).
+pub fn all_device_liveliness_wildcard() -> String {
+    format!("{KEY_PREFIX}/@v1/*/state/*/device/*/alive")
+}
+
 /// Build the v1 media-plane key for one video stream profile (RFC 07 §1):
 /// `zensight/@v1/<origin>/@media/<producer>/<stream>/video/<codec>/<profile>`.
 ///
