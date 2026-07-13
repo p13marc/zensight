@@ -1,9 +1,28 @@
 # Subject registry: sysinfo (host metrics). RFC 08 §2; migration epic #453.
-# Telemetry metric trees register as {metric...} families (one payload type,
-# TelemetryPoint) — typed per-metric refinement is additive (registry MINOR).
+#
+# Telemetry is registered as real subjects, not a `{metric...}` catch-all
+# (issue #468). The catch-all made RFC 08 §5's lint vacuous — every conceivable
+# subject was "buildable from a registry entry" — and left `introspect` unable
+# to say anything about what a producer emits.
+#
+# The registration rule, applied across all six self-describing producers:
+#
+#   * a leaf that names a distinct **measurement** is a literal
+#     (`memory/used`, `disk/{mount}/used`, `iface/{iface}/rx_bytes`), so a
+#     typo'd or renamed metric fails to parse and the sensor's conformance
+#     test fails with it;
+#   * a leaf that is a **value of a dimension** stays a `{var}`
+#     (`tcp/{state}`, `cpu/times/{component}`, `pressure/{resource}/{stat}`) —
+#     the ratified `flow/red/{quantile}` precedent.
+#
+# Consumers get typed variables out of this (`Subject::DiskUsed { mount }`,
+# not `parts[1]`), which is what issue #475 spends.
+#
+# This is the reference file; the other five follow the same shape.
+# Sources: src/collector.rs (the `publish` helper) and src/map.rs.
 
 [registry]
-version = "1.0"
+version = "1.1"
 app = "zensight"
 convention = 1
 
@@ -12,12 +31,859 @@ name = "sysinfo"
 description = "host CPU/memory/disk/net metrics"
 
 [[subject]]
-path = "{metric...}"
+path = "system/uptime"
 class = "telemetry"
 type = "TelemetryPoint"
-cardinality = 500
-since = "1.0"
-description = "host metric tree (cpu/load/memory/swap/disk/net/psi/vmstat...)"
+since = "1.1"
+description = "seconds since boot"
+
+[[subject]]
+path = "system/load"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "1-minute load average"
+
+[[subject]]
+path = "system/boot_time"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "boot timestamp (unix seconds)"
+
+[[subject]]
+path = "system/processes_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "process count"
+
+[[subject]]
+path = "system/processes_zombie"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "zombie process count"
+
+[[subject]]
+path = "system/saturation_score"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "composite saturation score (0-100)"
+
+[[subject]]
+path = "system/health_state"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "derived host health state"
+
+[[subject]]
+path = "system/context_switches_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "context switches since boot"
+
+[[subject]]
+path = "system/forks_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "forks since boot"
+
+[[subject]]
+path = "system/procs_running"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "run-queue depth"
+
+[[subject]]
+path = "system/procs_blocked"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "processes blocked on I/O"
+
+[[subject]]
+path = "system/file_descriptors_used"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "file handles in use"
+
+[[subject]]
+path = "system/file_descriptors_max"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "file-handle ceiling (fs.file-max)"
+
+[[subject]]
+path = "system/file_descriptors_used_percent"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "file-handle occupancy"
+
+[[subject]]
+path = "system/entropy_avail"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "available entropy bits"
+
+[[subject]]
+path = "cpu/usage"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "host CPU utilisation (percent)"
+
+[[subject]]
+path = "cpu/{core}/usage"
+variant = "CpuCoreUsage"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "per-core utilisation (percent)"
+
+[[subject]]
+path = "cpu/{core}/frequency"
+variant = "CpuCoreFrequency"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "per-core clock (MHz)"
+
+[[subject]]
+path = "cpu/times/{component}"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 8
+since = "1.1"
+description = "host CPU time by component (user|nice|system|idle|iowait|irq|softirq|steal)"
+
+[[subject]]
+path = "cpu/schedstat/run_delay_ns_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "host runqueue delay (ns, cumulative)"
+
+[[subject]]
+path = "{cpu}/times/{component}"
+variant = "PerCpuTimes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 4096
+since = "1.1"
+description = "per-CPU time by component; {cpu} is the /proc/stat row name (cpu0, cpu1, ...)"
+
+[[subject]]
+path = "{cpu}/schedstat/run_delay_ns_total"
+variant = "PerCpuSchedstatRunDelay"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "per-CPU runqueue delay (ns, cumulative)"
+
+[[subject]]
+path = "memory/total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "total RAM (bytes)"
+
+[[subject]]
+path = "memory/used"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "used RAM (bytes)"
+
+[[subject]]
+path = "memory/available"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "available RAM (bytes)"
+
+[[subject]]
+path = "memory/usage_percent"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "RAM occupancy"
+
+[[subject]]
+path = "memory/swap_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "total swap (bytes)"
+
+[[subject]]
+path = "memory/swap_used"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "used swap (bytes)"
+
+[[subject]]
+path = "memory/swap_percent"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "swap occupancy"
+
+[[subject]]
+path = "memory/cached"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "page cache (bytes)"
+
+[[subject]]
+path = "memory/buffers"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "buffer cache (bytes)"
+
+[[subject]]
+path = "memory/slab"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "slab allocator (bytes)"
+
+[[subject]]
+path = "memory/dirty"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "dirty pages (bytes)"
+
+[[subject]]
+path = "memory/writeback"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "pages under writeback (bytes)"
+
+[[subject]]
+path = "memory/oom_kills_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "OOM kills since boot"
+
+[[subject]]
+path = "memory/page_faults_major_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "major faults since boot"
+
+[[subject]]
+path = "memory/page_faults_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "all faults since boot"
+
+[[subject]]
+path = "memory/paging_in_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "pages swapped in"
+
+[[subject]]
+path = "memory/paging_out_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "pages swapped out"
+
+[[subject]]
+path = "memory/pgpgin_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "blocks paged in"
+
+[[subject]]
+path = "memory/pgpgout_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "blocks paged out"
+
+[[subject]]
+path = "memory/edac/{controller}/correctable_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 16
+since = "1.1"
+description = "ECC correctable errors per memory controller"
+
+[[subject]]
+path = "memory/edac/{controller}/uncorrectable_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 16
+since = "1.1"
+description = "ECC uncorrectable errors per memory controller"
+
+[[subject]]
+path = "disk/{mount}/total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "filesystem size (bytes)"
+
+[[subject]]
+path = "disk/{mount}/used"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "used (bytes)"
+
+[[subject]]
+path = "disk/{mount}/available"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "available (bytes)"
+
+[[subject]]
+path = "disk/{mount}/usage_percent"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "occupancy"
+
+[[subject]]
+path = "disk/{mount}/inodes_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "inode count"
+
+[[subject]]
+path = "disk/{mount}/inodes_used"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "inodes used"
+
+[[subject]]
+path = "disk/{mount}/inodes_free"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "inodes free"
+
+[[subject]]
+path = "disk/{mount}/inode_used_percent"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "inode occupancy"
+
+[[subject]]
+path = "disk/{device}/io/read_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "bytes read"
+
+[[subject]]
+path = "disk/{device}/io/write_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "bytes written"
+
+[[subject]]
+path = "disk/{device}/io/read_ops"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "read operations"
+
+[[subject]]
+path = "disk/{device}/io/write_ops"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "write operations"
+
+[[subject]]
+path = "disk/{device}/io/time_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "time spent in I/O (ms)"
+
+[[subject]]
+path = "disk/{device}/io/util_percent"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "device utilisation"
+
+[[subject]]
+path = "disk/{device}/io/queue_depth"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "average queue depth"
+
+[[subject]]
+path = "disk/{device}/io/read_rate"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "read throughput (B/s)"
+
+[[subject]]
+path = "disk/{device}/io/write_rate"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "write throughput (B/s)"
+
+[[subject]]
+path = "disk/{device}/io/read_iops"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "read IOPS"
+
+[[subject]]
+path = "disk/{device}/io/write_iops"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "write IOPS"
+
+[[subject]]
+path = "disk/md/{array}/state"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "array state"
+
+[[subject]]
+path = "disk/md/{array}/degraded"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "array is degraded"
+
+[[subject]]
+path = "disk/md/{array}/failed_disks"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "members flagged failed"
+
+[[subject]]
+path = "disk/md/{array}/total_disks"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "configured members"
+
+[[subject]]
+path = "disk/md/{array}/active_disks"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "working members"
+
+[[subject]]
+path = "network/{iface}/rx_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "bytes received"
+
+[[subject]]
+path = "network/{iface}/tx_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "bytes sent"
+
+[[subject]]
+path = "network/{iface}/rx_packets"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "packets received"
+
+[[subject]]
+path = "network/{iface}/tx_packets"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "packets sent"
+
+[[subject]]
+path = "network/{iface}/rx_errors"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "receive errors"
+
+[[subject]]
+path = "network/{iface}/tx_errors"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "transmit errors"
+
+[[subject]]
+path = "network/{iface}/rx_rate"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "receive throughput (B/s)"
+
+[[subject]]
+path = "network/{iface}/tx_rate"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "transmit throughput (B/s)"
+
+[[subject]]
+path = "network/{iface}/rx_dropped"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "receive drops"
+
+[[subject]]
+path = "network/{iface}/rx_fifo"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "receive FIFO overruns"
+
+[[subject]]
+path = "network/{iface}/rx_frame"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "receive framing errors"
+
+[[subject]]
+path = "network/{iface}/multicast"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "multicast frames"
+
+[[subject]]
+path = "network/{iface}/tx_dropped"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "transmit drops"
+
+[[subject]]
+path = "network/{iface}/tx_fifo"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "transmit FIFO underruns"
+
+[[subject]]
+path = "network/{iface}/tx_colls"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "collisions"
+
+[[subject]]
+path = "network/{iface}/tx_carrier"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "carrier losses"
+
+[[subject]]
+path = "network/tcp/retrans_segs_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "TCP segments retransmitted"
+
+[[subject]]
+path = "network/tcp/listen_overflows_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "accept-queue overflows"
+
+[[subject]]
+path = "network/tcp/listen_drops_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "SYN drops"
+
+[[subject]]
+path = "network/sockets/used"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "sockets in use"
+
+[[subject]]
+path = "network/sockets/tcp_inuse"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "TCP sockets in use"
+
+[[subject]]
+path = "network/sockets/tcp_mem_pages"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "TCP memory (kernel pages)"
+
+[[subject]]
+path = "network/sockets/udp_inuse"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "UDP sockets in use"
+
+[[subject]]
+path = "network/softnet/processed_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "packets processed"
+
+[[subject]]
+path = "network/softnet/dropped_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "backlog drops"
+
+[[subject]]
+path = "network/softnet/squeezed_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "budget exhaustions"
+
+[[subject]]
+path = "network/conntrack/count"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "conntrack entries"
+
+[[subject]]
+path = "network/conntrack/max"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "conntrack table size"
+
+[[subject]]
+path = "network/conntrack/utilization_percent"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "conntrack occupancy"
+
+[[subject]]
+path = "tcp/{state}"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 16
+since = "1.1"
+description = "TCP sockets by state (the 11 kernel states, plus `total`)"
+
+[[subject]]
+path = "pressure/{resource}/{stat}"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 32
+since = "1.1"
+description = "PSI per resource (cpu|memory|io): {some,full}_avg{10,60,300} and {some,full}_total_us — scope and window ride the leaf together"
+
+[[subject]]
+path = "cgroup/cpu/nr_throttled"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "throttled enforcement periods"
+
+[[subject]]
+path = "cgroup/cpu/throttled_usec"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "time throttled (us)"
+
+[[subject]]
+path = "cgroup/memory/current"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "current usage (bytes)"
+
+[[subject]]
+path = "cgroup/memory/max"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "hard limit (bytes)"
+
+[[subject]]
+path = "cgroup/memory/used_percent"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "occupancy against the limit"
+
+[[subject]]
+path = "cgroup/memory/oom_kills_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "processes OOM-killed in this cgroup"
+
+[[subject]]
+path = "cgroup/memory/oom_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "times the cgroup hit its limit"
+
+[[subject]]
+path = "cgroup/{resource}/pressure/{stat}"
+variant = "CgroupPressure"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 32
+since = "1.1"
+description = "cgroup PSI per resource: {some,full}_avg10 and {some,full}_total_us"
+
+[[subject]]
+path = "sensors/{chip}/{label}/temp"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "temperature (C)"
+
+[[subject]]
+path = "sensors/{chip}/{label}/critical"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "critical threshold (C)"
+
+[[subject]]
+path = "sensors/{chip}/{label}/max"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "max threshold (C)"
+
+[[subject]]
+path = "sensors/{chip}/{label}/rpm"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "fan speed (RPM)"
+
+[[subject]]
+path = "power/rapl/{zone}/watts"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 16
+since = "1.1"
+description = "RAPL power draw per zone (package-0, core, ...)"
+
+[[subject]]
+path = "battery/{name}/capacity"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 8
+since = "1.1"
+description = "charge (percent)"
+
+[[subject]]
+path = "battery/{name}/status"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 8
+since = "1.1"
+description = "charging status"
+
+# ── state ───────────────────────────────────────────────────────────────────
 [[subject]]
 path = "health"
 class = "state"
@@ -59,6 +925,15 @@ cardinality = 64
 ttl_s = 900
 since = "1.0"
 description = "alerts; firing->resolved on one key, delete = tombstone"
+
+[[subject]]
+path = "artifact/{kind}"
+class = "state"
+type = "ArtifactStatus"
+cardinality = 16
+ttl_s = 900
+since = "1.1"
+description = "per-kind artifact progress (framework: V1Context::artifact_status_key)"
 
 [[procedure]]
 path = "introspect"

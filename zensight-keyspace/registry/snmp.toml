@@ -50,6 +50,15 @@ ttl_s = 900
 since = "1.0"
 description = "self-identity claim (RFC 06 §4)"
 
+[[subject]]
+path = "artifact/{kind}"
+class = "state"
+type = "ArtifactStatus"
+cardinality = 16
+ttl_s = 900
+since = "1.1"
+description = "per-kind artifact progress (framework: V1Context::artifact_status_key)"
+
 [[procedure]]
 path = "introspect"
 kind = "read"

@@ -11,3 +11,21 @@
 //! compile.
 
 include!(concat!(env!("OUT_DIR"), "/registry_gen.rs"));
+
+/// Is this telemetry metric name a registered subject of this producer?
+///
+/// `metric` is [`zensight_common::TelemetryPoint::metric`] — which *is* the
+/// telemetry subject tail, verbatim (the publisher appends it to
+/// `telemetry/<producer>`). This is the check that makes RFC 08 §5's lint
+/// non-vacuous: it can only return `false` because the producer's telemetry
+/// tree is registered as real subject families rather than a `{metric...}`
+/// catch-all (issue #468).
+///
+/// Producers whose metric tree is defined by the polled device rather than by
+/// us — `snmp`, `modbus`, `gnmi`, `netflow` — keep a rest-var by design, so
+/// this is always `true` for them. That is correct, not a gap: we do not know
+/// what OIDs a device exposes.
+pub fn is_registered_telemetry(producer_name: &str, metric: &str) -> bool {
+    let tail: Vec<&str> = metric.split('/').collect();
+    parse_subject(producer_name, crate::grammar::Class::Telemetry, &tail).is_some()
+}

@@ -68,6 +68,7 @@ impl PublisherRegistry {
 
     /// Publish `payload` on `key` via its declared publisher.
     pub async fn put(&self, key: &str, payload: Vec<u8>, qos: QosClass) -> Result<()> {
+        crate::metric_guard::check_telemetry_key(key);
         self.ensure(key, qos).await?;
         let publishers = self.publishers.read().await;
         publishers

@@ -84,6 +84,15 @@ cardinality = 64
 ttl_s = 900
 since = "1.0"
 description = "alerts; firing->resolved on one key, delete = tombstone"
+[[subject]]
+path = "artifact/{kind}"
+class = "state"
+type = "ArtifactStatus"
+cardinality = 16
+ttl_s = 900
+since = "1.1"
+description = "per-kind artifact progress (framework: V1Context::artifact_status_key)"
+
 [[procedure]]
 path = "introspect"
 kind = "read"

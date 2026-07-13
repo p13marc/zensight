@@ -110,6 +110,13 @@ fn camel(parts: &[&str]) -> String {
     out
 }
 
+/// A hand-written `variant = "..."` override must be a plain CamelCase Rust
+/// identifier — it lands verbatim in the generated enum.
+fn is_valid_variant(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_uppercase()) && chars.all(|c| c.is_ascii_alphanumeric())
+}
+
 /// Variant name: CamelCase of the literal chunks; all-variable patterns use
 /// the variable names instead.
 fn variant_name(chunks: &[Chunk]) -> String {
@@ -303,9 +310,21 @@ fn load_registry(dir: &Path) -> Vec<RegistryFile> {
             {
                 fail(&fname, &format!("{spath:?}: missing description/since"));
             }
+            // `variant` overrides the derived name. Two patterns with the same
+            // literal chunks but different arity (`cpu/usage` vs
+            // `cpu/{core}/usage`) derive the same name and would otherwise trip
+            // the collision lint below with no way out.
+            let variant = match entry.get("variant").and_then(|v| v.as_str()) {
+                Some(v) if is_valid_variant(v) => v.to_string(),
+                Some(v) => fail(
+                    &fname,
+                    &format!("{spath:?}: variant {v:?} is not a CamelCase identifier"),
+                ),
+                None => variant_name(&chunks),
+            };
             subjects.push(SubjectEntry {
                 path: spath.to_string(),
-                variant: variant_name(&chunks),
+                variant,
                 chunks,
                 class: class.to_string(),
                 qos,
@@ -640,6 +659,45 @@ fn emit(files: &[RegistryFile]) -> String {
         }
         let _ = writeln!(out, "            }}\n        }}\n");
 
+        // vars() — the variable bindings, in pattern order. A `{var...}` rest
+        // binds as its chunks rejoined with `/`.
+        let _ = writeln!(
+            out,
+            "        /// The pattern's variable bindings, in order (a `{{var...}}` rest rejoins with `/`)."
+        );
+        let _ = writeln!(
+            out,
+            "        pub fn vars(&self) -> Vec<(&'static str, String)> {{"
+        );
+        let _ = writeln!(out, "            match self {{");
+        for s in &f.subjects {
+            let mut binds = String::new();
+            let mut body = String::from("vec![");
+            for c in &s.chunks {
+                match c {
+                    Chunk::Literal(_) => {}
+                    Chunk::Var(v) => {
+                        let n = snake(v);
+                        let _ = write!(binds, "{n}, ");
+                        let _ = write!(body, "({v:?}, {n}.clone()), ");
+                    }
+                    Chunk::Rest(v) => {
+                        let n = snake(v);
+                        let _ = write!(binds, "{n}, ");
+                        let _ = write!(body, "({v:?}, {n}.join(\"/\")), ");
+                    }
+                }
+            }
+            body.push(']');
+            let pat = if binds.is_empty() {
+                format!("Self::{}", s.variant)
+            } else {
+                format!("Self::{} {{ {binds}}}", s.variant)
+            };
+            let _ = writeln!(out, "                {pat} => {body},");
+        }
+        let _ = writeln!(out, "            }}\n        }}\n");
+
         // parse(), precedence-ordered (RFC 08 §1: literal beats {var} beats {var...}).
         let mut ordered: Vec<&SubjectEntry> = f.subjects.iter().collect();
         ordered.sort_by(|a, b| {
@@ -705,7 +763,19 @@ fn emit(files: &[RegistryFile]) -> String {
                 conds.join(" && ")
             );
         }
-        let _ = writeln!(out, "            None\n        }}");
+        let _ = writeln!(out, "            None\n        }}\n");
+
+        // parse_metric() — the ergonomic entry point. Consumers hold the
+        // telemetry tail as one string (`TelemetryPoint::metric` *is* the
+        // subject tail, verbatim), so splitting it belongs here, once.
+        let _ = writeln!(
+            out,
+            "        /// Refine a telemetry metric name (the subject tail as one `/`-joined string)."
+        );
+        let _ = writeln!(
+            out,
+            "        pub fn parse_metric(metric: &str) -> Option<Self> {{\n            let tail: Vec<&str> = metric.split('/').collect();\n            Self::parse(Class::Telemetry, &tail)\n        }}"
+        );
         let _ = writeln!(out, "    }}\n");
 
         // Full-key builder.
@@ -803,6 +873,33 @@ fn emit(files: &[RegistryFile]) -> String {
         let _ = writeln!(out, "    {}({module}::Subject),", camel(&[f.name.as_str()]));
     }
     let _ = writeln!(out, "}}\n");
+
+    // AnySubject accessors: producer-agnostic introspection of a refined
+    // subject. `vars()` is what lets a consumer read `{iface}` by name instead
+    // of by position.
+    let _ = writeln!(out, "impl AnySubject {{");
+    for (method, ret, body) in [
+        ("producer_name", "&'static str", "NAME"),
+        ("class", "crate::grammar::Class", "s.class()"),
+        ("pattern", "&'static str", "s.pattern()"),
+        ("vars", "Vec<(&'static str, String)>", "s.vars()"),
+    ] {
+        let _ = writeln!(out, "    pub fn {method}(&self) -> {ret} {{");
+        let _ = writeln!(out, "        match self {{");
+        for f in files {
+            let variant = camel(&[f.name.as_str()]);
+            let arm = if body == "NAME" {
+                format!("{:?}", f.name)
+            } else {
+                body.to_string()
+            };
+            let bind = if body == "NAME" { "_" } else { "s" };
+            let _ = writeln!(out, "            Self::{variant}({bind}) => {arm},");
+        }
+        let _ = writeln!(out, "        }}\n    }}\n");
+    }
+    let _ = writeln!(out, "}}\n");
+
     let _ = writeln!(
         out,
         "/// Registry-refine a structurally parsed key (RFC 08 §1 parse direction).\n/// `producer_name` is the *base* name (instance suffix already stripped by\n/// [`crate::grammar::Producer::parse_chunk`]); service keys pass the service\n/// name (e.g. \"catalog\").\npub fn parse_subject(producer_name: &str, class: crate::grammar::Class, tail: &[&str]) -> Option<AnySubject> {{"

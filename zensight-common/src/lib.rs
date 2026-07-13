@@ -20,6 +20,7 @@ pub mod error;
 pub mod evidence;
 pub mod health;
 pub mod keyexpr;
+pub mod metric_guard;
 pub mod publisher_registry;
 pub mod qos;
 pub mod query_detail;
