@@ -1,14 +1,14 @@
 //! Runtime detection-tuning control channel (#121).
 //!
-//! Mirrors the netlink sentinel's `command.rs`: a `(subscriber + queryable)`
+//! Mirrors the netlink sentinel's `command.rs`: a `(write + read queryable)`
 //! loop lets the GUI tune anomaly detection without restarting the sensor —
 //! add/remove allowlist entries, mute/unmute a detector, and adjust a
 //! detector's threshold. The live config lives behind a lock-free
 //! [`arc_swap::ArcSwap`] that the hot-path detectors read (see `monitor.rs`).
 //!
 //! Keys (via `zensight-common`):
-//! - commands: `zensight/netring/@/commands/detectors`  (a [`DetectorCommand`])
-//! - status:   `zensight/netring/@/status/detectors`    (the current `AnomalyConfig`)
+//! - write: `@rpc/netring/detectors/set`  (a [`DetectorCommand`])
+//! - read:  `@rpc/netring/detectors`      (the current `AnomalyConfig`)
 //!
 //! Scope note: a detector that was **off at startup is not built into the
 //! capture pipeline**, so enabling it takes effect on the next restart. Tuning
@@ -22,7 +22,7 @@ use zensight_common::command::{command_key, status_key};
 
 use crate::config::{AnomalyConfig, IocConfig};
 
-/// The control topic under `@/commands/` and `@/status/`.
+/// The control topic under `@rpc/netring/` (write `…/set`, read bare).
 pub const DETECTORS_TOPIC: &str = "detectors";
 
 /// The capture-focus control topic (netring 0.28, issue #225).
@@ -46,7 +46,7 @@ pub enum CaptureFilterCommand {
     ClearPacketFilter,
 }
 
-/// The capture-focus status served on `@/status/capture_filter` (#225) so the
+/// The capture-focus status served on `@rpc/netring/capture_filter` (#225) so the
 /// GUI can show what is live and surface a friendly error for a bad expression.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CaptureFilterStatus {
@@ -191,9 +191,9 @@ fn normalize_allowlist(entries: Vec<String>) -> Vec<String> {
 }
 
 /// Run the command subscriber + status queryable until the session closes.
-pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, handle: DetectorHandle) {
-    let cmd_key = command_key(&key_prefix, DETECTORS_TOPIC);
-    let stat_key = status_key(&key_prefix, DETECTORS_TOPIC);
+pub async fn run(session: Arc<zenoh::Session>, producer: String, handle: DetectorHandle) {
+    let cmd_key = command_key(&producer, DETECTORS_TOPIC);
+    let stat_key = status_key(&producer, DETECTORS_TOPIC);
 
     let subscriber = match session.declare_queryable(&cmd_key).await {
         Ok(s) => s,
@@ -269,12 +269,12 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, handle: Detec
 /// error and the previous filter keeps running — never a panic or dropped capture.
 pub async fn run_capture_filter(
     session: Arc<zenoh::Session>,
-    key_prefix: String,
+    producer: String,
     reload: netring::monitor::ReloadHandle,
     base_expr: String,
 ) {
-    let cmd_key = command_key(&key_prefix, CAPTURE_FILTER_TOPIC);
-    let stat_key = status_key(&key_prefix, CAPTURE_FILTER_TOPIC);
+    let cmd_key = command_key(&producer, CAPTURE_FILTER_TOPIC);
+    let stat_key = status_key(&producer, CAPTURE_FILTER_TOPIC);
 
     let subscriber = match session.declare_queryable(&cmd_key).await {
         Ok(s) => s,
@@ -372,7 +372,7 @@ fn apply_filter(
     }
 }
 
-/// A runtime threat-intel command (tagged JSON) on `@/commands/threat_intel`
+/// A runtime threat-intel command (tagged JSON) on `@rpc/netring/threat_intel/set`
 /// (#328), applied to the monitor's live IOC / YARA matchers via `ReloadHandle`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -398,7 +398,7 @@ pub enum ThreatIntelCommand {
     SetYara { rules: String },
 }
 
-/// The threat-intel status served on `@/status/threat_intel` (#328) so the GUI
+/// The threat-intel status served on `@rpc/netring/threat_intel` (#328) so the GUI
 /// can show what is armed / loaded and surface a YARA compile error.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ThreatIntelStatus {
@@ -421,12 +421,12 @@ pub struct ThreatIntelStatus {
 /// becomes a status error and the previous rules keep scanning — never a panic.
 pub async fn run_threat_intel(
     session: Arc<zenoh::Session>,
-    key_prefix: String,
+    producer: String,
     reload: netring::monitor::ReloadHandle,
     startup_ioc: IocConfig,
 ) {
-    let cmd_key = command_key(&key_prefix, THREAT_INTEL_TOPIC);
-    let stat_key = status_key(&key_prefix, THREAT_INTEL_TOPIC);
+    let cmd_key = command_key(&producer, THREAT_INTEL_TOPIC);
+    let stat_key = status_key(&producer, THREAT_INTEL_TOPIC);
 
     let subscriber = match session.declare_queryable(&cmd_key).await {
         Ok(s) => s,
@@ -606,15 +606,15 @@ pub struct CaptureDiskStatus {
 /// (never a panic), the status reply always reflects the live engine state.
 pub async fn run_capture_disk(
     session: Arc<zenoh::Session>,
-    key_prefix: String,
+    producer: String,
     handle: crate::disk::CaptureDiskHandle,
     max_files: u64,
     max_total_bytes: u64,
 ) {
     use std::sync::atomic::Ordering;
 
-    let cmd_key = command_key(&key_prefix, CAPTURE_DISK_TOPIC);
-    let stat_key = status_key(&key_prefix, CAPTURE_DISK_TOPIC);
+    let cmd_key = command_key(&producer, CAPTURE_DISK_TOPIC);
+    let stat_key = status_key(&producer, CAPTURE_DISK_TOPIC);
 
     let subscriber = match session.declare_queryable(&cmd_key).await {
         Ok(s) => s,
@@ -752,7 +752,7 @@ mod tests {
 
     #[test]
     fn threat_intel_command_wire_format() {
-        // Pin the JSON the GUI (#328) sends on @/commands/threat_intel.
+        // Pin the JSON the GUI (#328) sends on @rpc/netring/threat_intel/set.
         let set: ThreatIntelCommand = serde_json::from_str(
             r#"{"type":"set_ioc","ips":["198.51.100.7"],"domains":["malware.test"]}"#,
         )
@@ -855,7 +855,7 @@ mod tests {
 
     #[test]
     fn capture_filter_command_wire_format() {
-        // Pin the JSON the GUI (#228) sends on @/commands/capture_filter.
+        // Pin the JSON the GUI (#228) sends on @rpc/netring/capture_filter/set.
         let set: CaptureFilterCommand = serde_json::from_str(
             r#"{"type":"set_packet_filter","expr":"host 10.0.0.5 and port 443"}"#,
         )
@@ -869,7 +869,7 @@ mod tests {
         let clear: CaptureFilterCommand =
             serde_json::from_str(r#"{"type":"clear_packet_filter"}"#).unwrap();
         assert_eq!(clear, CaptureFilterCommand::ClearPacketFilter);
-        // Status round-trips (the @/status/capture_filter shape the GUI reads).
+        // Status round-trips (the @rpc/netring/capture_filter shape the GUI reads).
         let status = CaptureFilterStatus {
             enabled: true,
             reloadable: 1,

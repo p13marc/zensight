@@ -5,7 +5,7 @@
 //! common connectivity incident — leaves only a counter with no per-change
 //! history. This module keeps a bounded ring of default-route transitions
 //! (gateway change / withdrawal / (re)appearance) with timestamps, served on
-//! demand via `@/query/route_changes`, plus a `routes/default_v4_flaps_total`
+//! demand via `@rpc/netlink/route_changes`, plus a `routes/default_v4_flaps_total`
 //! counter streamed onto the bus.
 //!
 //! The collector calls [`RouteHistory::observe`] each route poll with the
@@ -27,7 +27,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-/// One default-route transition, served via `@/query/route_changes`.
+/// One default-route transition, served via `@rpc/netlink/route_changes`.
 ///
 /// Defined locally (this sensor owns only its own crate); the GUI decoder
 /// mirrors this shape from the JSON reply.
@@ -160,7 +160,7 @@ impl RouteHistory {
         )]
     }
 
-    /// Snapshot of the transition ring (oldest first), for `@/query/route_changes`.
+    /// Snapshot of the transition ring (oldest first), for `@rpc/netlink/route_changes`.
     pub fn recent(&self) -> Vec<RouteChangeRecord> {
         self.inner.ring.lock().unwrap().iter().cloned().collect()
     }

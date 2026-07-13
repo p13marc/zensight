@@ -44,7 +44,7 @@ fn endpoint_ip(endpoint: &str) -> String {
 /// Cap on the rolling log buffer feeding the top-level Logs view.
 const MAX_RECENT_LOGS: usize = 5000;
 
-/// Minimum gap between `@/query/events` fetches while a logs surface is open
+/// Minimum gap between `@rpc/logs/events` fetches while a logs surface is open
 /// (#358). A log *viewer* cadence — not tail -f; tune here if needed.
 const LOG_REFRESH_SECS: i64 = 5;
 
@@ -53,7 +53,7 @@ const LOG_REFRESH_SECS: i64 = 5;
 /// skew or a slow tick never opens a gap. Overlapping records de-dup on merge.
 const LOG_FETCH_OVERLAP_MS: i64 = 10_000;
 
-/// Reply cap requested per `@/query/events` fetch (#358).
+/// Reply cap requested per `@rpc/logs/events` fetch (#358).
 const LOG_FETCH_MAX: usize = 500;
 
 /// Text input ID for dashboard search.
@@ -151,12 +151,12 @@ pub struct ZenSight {
     /// Rolling buffer of recent log lines (all syslog/journald sources) for the
     /// top-level Logs view. Bounded to [`MAX_RECENT_LOGS`].
     recent_logs: std::collections::VecDeque<crate::view::specialized::SyslogMessage>,
-    /// Newest event timestamp seen from `@/query/events` (#358) — the `since=`
+    /// Newest event timestamp seen from `@rpc/logs/events` (#358) — the `since=`
     /// watermark for incremental fetches (minus [`LOG_FETCH_OVERLAP_MS`]).
     last_log_event_ms: Option<i64>,
-    /// When the last `@/query/events` fetch was issued (#358) — cadence gate.
+    /// When the last `@rpc/logs/events` fetch was issued (#358) — cadence gate.
     last_log_fetch_ms: Option<i64>,
-    /// An `@/query/events` fetch is in flight (#358) — never stack fetches.
+    /// An `@rpc/logs/events` fetch is in flight (#358) — never stack fetches.
     log_fetch_inflight: bool,
     /// Whether the host identity details (facts + resolution group) are
     /// expanded in the merged host nav bar (#350). Persisted.
@@ -189,9 +189,9 @@ pub struct ZenSight {
     artifact_fetch: crate::view::artifact_fetch::ArtifactFetch,
     /// The in-flight download's identity (key prefix, kind, id, delivery, dest).
     artifact_job: Option<crate::view::artifact_fetch::ArtifactJob>,
-    /// Per-sensor advertised artifact kinds (`key_prefix` → kinds + bounds/adverts).
+    /// Per-sensor advertised artifact kinds (`producer` → kinds + bounds/adverts).
     artifact_kinds: std::collections::HashMap<String, Vec<zensight_common::KindStatus>>,
-    /// Per-sensor on-demand capture form state (`key_prefix` → form), shared by
+    /// Per-sensor on-demand capture form state (`producer` → form), shared by
     /// the sensor card and the netring Capture tab (#333).
     capture_forms: std::collections::HashMap<String, crate::view::artifact_fetch::CaptureForm>,
     /// Expectations authoring view state (netlink sentinel, Plan 08).
@@ -2373,32 +2373,32 @@ impl ZenSight {
                 }
             },
 
-            // Unified artifact download (report / snapshot / capture) via `@/artifact`.
+            // Unified artifact download (report / snapshot / capture) via the artifact channel.
             Message::LoadArtifactKinds => {
                 if let Some(task) = self.load_artifact_kinds() {
                     return task;
                 }
             }
 
-            Message::ArtifactKindsLoaded { key_prefix, kinds } => {
+            Message::ArtifactKindsLoaded { producer, kinds } => {
                 // Seed a default capture form for a sensor that advertises the
                 // Capture kind, so the form renders before the operator edits it.
                 if kinds
                     .iter()
                     .any(|k| matches!(k.advert, zensight_common::KindAdvert::Capture { .. }))
                 {
-                    self.capture_forms.entry(key_prefix.clone()).or_default();
+                    self.capture_forms.entry(producer.clone()).or_default();
                 }
-                self.artifact_kinds.insert(key_prefix, kinds);
+                self.artifact_kinds.insert(producer, kinds);
             }
 
             Message::CaptureFormEdited {
-                key_prefix,
+                producer,
                 field,
                 value,
             } => {
                 use crate::view::artifact_fetch::CaptureField;
-                let form = self.capture_forms.entry(key_prefix).or_default();
+                let form = self.capture_forms.entry(producer).or_default();
                 match field {
                     CaptureField::Duration => form.duration_secs = value,
                     CaptureField::Filter => form.filter = value,
@@ -2406,9 +2406,9 @@ impl ZenSight {
                 }
             }
 
-            Message::CaptureFormToggled { key_prefix, field } => {
+            Message::CaptureFormToggled { producer, field } => {
                 use crate::view::artifact_fetch::CaptureToggle;
-                let form = self.capture_forms.entry(key_prefix).or_default();
+                let form = self.capture_forms.entry(producer).or_default();
                 match field {
                     CaptureToggle::Compress => form.compress = !form.compress,
                     CaptureToggle::DecompressOnSave => {
@@ -2418,34 +2418,34 @@ impl ZenSight {
             }
 
             Message::StartArtifact {
-                key_prefix,
+                producer,
                 kind,
                 target_source,
             } => {
-                if let Some(task) = self.start_artifact(key_prefix, kind, target_source) {
+                if let Some(task) = self.start_artifact(producer, kind, target_source) {
                     return task;
                 }
             }
 
             Message::DownloadCaptureBlob {
-                key_prefix,
+                producer,
                 artifact_id,
                 filename,
             } => {
-                if let Some(task) = self.download_capture_blob(key_prefix, artifact_id, filename) {
+                if let Some(task) = self.download_capture_blob(producer, artifact_id, filename) {
                     return task;
                 }
             }
 
             Message::ArtifactDestChosen {
-                key_prefix,
+                producer,
                 kind,
                 target_source,
                 dest,
             } => {
                 if let Some(dest) = dest
                     && let Some(task) =
-                        self.start_artifact_with_dest(key_prefix, kind, target_source, dest)
+                        self.start_artifact_with_dest(producer, kind, target_source, dest)
                 {
                     return task;
                 }
@@ -2870,7 +2870,7 @@ impl ZenSight {
 
             // Netring capture-focus (#225/#228): hot-swap the reloadable packet
             // filter. Validation happens sensor-side — a bad expr comes back as a
-            // `last_error` on `@/status/capture_filter`, surfaced inline.
+            // `last_error` on `@rpc/netring/capture_filter`, surfaced inline.
             Message::SetPacketFilterInput(value) => {
                 self.detection_tuning.packet_filter_input = value;
             }
@@ -2916,7 +2916,7 @@ impl ZenSight {
 
             // Netring threat-intel (#328): hot-swap IOC / YARA matchers. Sensor
             // validates YARA; a compile error comes back as `last_reload` on
-            // `@/status/threat_intel`, surfaced inline + as a toast.
+            // `@rpc/netring/threat_intel`, surfaced inline + as a toast.
             Message::SetThreatIocInput(value) => {
                 self.detection_tuning.threat_ioc_input = value;
             }
@@ -3352,7 +3352,7 @@ impl ZenSight {
     /// kind (report/capture) goes straight to a temp dir + Requesting.
     fn start_artifact(
         &mut self,
-        key_prefix: String,
+        producer: String,
         kind: zensight_common::ArtifactKind,
         target_source: Option<String>,
     ) -> Option<Task<Message>> {
@@ -3370,7 +3370,7 @@ impl ZenSight {
                         .await
                         .map(|h| h.path().to_path_buf());
                     Message::ArtifactDestChosen {
-                        key_prefix,
+                        producer,
                         kind,
                         target_source,
                         dest,
@@ -3379,7 +3379,7 @@ impl ZenSight {
             }
             _ => {
                 let dest = std::env::temp_dir().join("zensight-downloads");
-                self.start_artifact_with_dest(key_prefix, kind, target_source, dest)
+                self.start_artifact_with_dest(producer, kind, target_source, dest)
             }
         }
     }
@@ -3389,7 +3389,7 @@ impl ZenSight {
     /// `ArtifactGenerating`, the outcome as `ArtifactRequested`).
     fn start_artifact_with_dest(
         &mut self,
-        key_prefix: String,
+        producer: String,
         kind: zensight_common::ArtifactKind,
         target_source: Option<String>,
         dest: std::path::PathBuf,
@@ -3399,13 +3399,13 @@ impl ZenSight {
         // A tree is reconstructed into a clearly-named subfolder of the picked dir.
         let dest = match &kind {
             zensight_common::ArtifactKind::Snapshot { dir } => {
-                let sensor = key_prefix.rsplit('/').next().unwrap_or("sensor");
+                let sensor = producer.rsplit('/').next().unwrap_or("sensor");
                 dest.join(format!("{sensor}-{dir}-snapshot"))
             }
             _ => dest,
         };
         let job =
-            crate::view::artifact_fetch::ArtifactJob::new(key_prefix.clone(), kind.clone(), dest);
+            crate::view::artifact_fetch::ArtifactJob::new(producer.clone(), kind.clone(), dest);
         let id = job.id;
         self.artifact_job = Some(job);
         self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Requesting;
@@ -3413,7 +3413,7 @@ impl ZenSight {
             crate::view::artifact_fetch::request_and_stream_ready(
                 session,
                 registry,
-                key_prefix,
+                producer,
                 kind,
                 id,
                 target_source,
@@ -3428,7 +3428,7 @@ impl ZenSight {
     /// not offered on this path (no `Delivery` is stored); Cancel works.
     fn download_capture_blob(
         &mut self,
-        key_prefix: String,
+        producer: String,
         artifact_id: String,
         filename: String,
     ) -> Option<Task<Message>> {
@@ -3446,7 +3446,7 @@ impl ZenSight {
         };
         let dest = std::env::temp_dir().join("zensight-downloads");
         let mut job = crate::view::artifact_fetch::ArtifactJob::new(
-            key_prefix.clone(),
+            producer.clone(),
             zensight_common::ArtifactKind::Capture {
                 duration_secs: 0,
                 max_bytes: None,
@@ -3530,19 +3530,19 @@ impl ZenSight {
     ) -> Option<Task<Message>> {
         // Ignore if the user cancelled (job cleared). Extract the delivery-shape +
         // filename up front so no borrow of the job outlives the state mutation.
-        let (is_tree, filename, key_prefix) = {
+        let (is_tree, filename, producer) = {
             let job = self.artifact_job.as_ref()?;
             (
                 matches!(job.delivery, Some(zensight_common::Delivery::Tree { .. })),
                 job.filename.clone(),
-                job.key_prefix.clone(),
+                job.producer.clone(),
             )
         };
         // A capture (.pcap.zst) can be decompressed back to .pcap on save when the
         // sensor's form asked for it (#333).
         let decompress_on_save = self
             .capture_forms
-            .get(&key_prefix)
+            .get(&producer)
             .is_some_and(|f| f.decompress_on_save);
         match result {
             Ok(path) if is_tree => {
@@ -3610,7 +3610,7 @@ impl ZenSight {
         let job = self.artifact_job.as_ref()?;
         job.cancel.cancel();
         let session = self.session.clone()?;
-        let key_prefix = job.key_prefix.clone();
+        let producer = job.producer.clone();
         let id = job.id.to_string();
         // Only a blob delivery leaves an on-disk partial to clean up.
         let blob = match &job.delivery {
@@ -3631,7 +3631,7 @@ impl ZenSight {
                 .get(format!(
                     "{}?id={}",
                     zensight_common::fleet_rpc_key(
-                        key_prefix.rsplit('/').next().unwrap_or("sensor"),
+                        producer.rsplit('/').next().unwrap_or("sensor"),
                         "artifact/cancel"
                     ),
                     id
@@ -3651,31 +3651,32 @@ impl ZenSight {
         }
     }
 
-    /// Query every connected sensor's `@/artifact/status` to learn which kinds it
-    /// produces (report/snapshot/capture) plus their bounds/adverts, storing the
-    /// result per key prefix so the Sensors view renders the right affordances.
+    /// Query every connected sensor's `artifact/status` procedure to learn which
+    /// kinds it produces (report/snapshot/capture) plus their bounds/adverts,
+    /// storing the result per producer so the Sensors view renders the right
+    /// affordances.
     fn load_artifact_kinds(&self) -> Option<Task<Message>> {
         let session = self.session.clone()?;
-        // Artifact channels are protocol-scoped (`zensight/<sensor>/@/artifact`),
-        // so derive prefixes from the snapshots' sensor names — the map keys are
-        // per-instance (`sensor@source`) and would produce bogus prefixes.
+        // Artifact procedures are producer-scoped (`@rpc/<producer>/artifact/*`),
+        // so derive producer names from the snapshots' sensor names — the map keys
+        // are per-instance (`sensor@source`) and would produce bogus names.
         let prefixes: Vec<String> = self
             .sensor_health
             .values()
-            .map(|snap| format!("zensight/{}", snap.sensor))
+            .map(|snap| snap.sensor.clone())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
         if prefixes.is_empty() {
             return None;
         }
-        let tasks = prefixes.into_iter().map(|key_prefix| {
+        let tasks = prefixes.into_iter().map(|producer| {
             let session = session.clone();
             Task::future(async move {
                 let kinds =
-                    crate::view::artifact_fetch::load_artifact_kinds(session, key_prefix.clone())
+                    crate::view::artifact_fetch::load_artifact_kinds(session, producer.clone())
                         .await;
-                Message::ArtifactKindsLoaded { key_prefix, kinds }
+                Message::ArtifactKindsLoaded { producer, kinds }
             })
         });
         Some(Task::batch(tasks))
@@ -3748,7 +3749,7 @@ impl ZenSight {
         })
     }
 
-    /// Poll `@/status/action` after sending a unit action (#283) and toast the
+    /// Poll `@rpc/systemd/action` after sending a unit action (#283) and toast the
     /// outcome. The short delay lets the sensor's async `JobRemoved` tracking
     /// resolve first, so the toast usually carries the real job result.
     fn query_systemd_action_status(&self) -> Task<Message> {
@@ -3834,8 +3835,8 @@ impl ZenSight {
         })
     }
 
-    /// Query the netring sensor's live capture-focus filter (`@/status/
-    /// capture_filter`). Routes to `CaptureFilterStatusReceived`.
+    /// Query the netring sensor's live capture-focus filter
+    /// (`@rpc/netring/capture_filter`). Routes to `CaptureFilterStatusReceived`.
     fn query_capture_filter_status(&self) -> Task<Message> {
         let Some(session) = self.session.clone() else {
             return Task::done(Message::CaptureFilterStatusReceived(Err(
@@ -3864,8 +3865,8 @@ impl ZenSight {
         })
     }
 
-    /// Query the netring sensor's live threat-intel status (`@/status/
-    /// threat_intel`). Routes to `ThreatIntelStatusReceived`.
+    /// Query the netring sensor's live threat-intel status
+    /// (`@rpc/netring/threat_intel`). Routes to `ThreatIntelStatusReceived`.
     fn query_threat_intel_status(&self) -> Task<Message> {
         let Some(session) = self.session.clone() else {
             return Task::done(Message::ThreatIntelStatusReceived(Err(
@@ -4277,7 +4278,7 @@ impl ZenSight {
         Some(Task::batch(tasks))
     }
 
-    /// Prefetch the on-demand `@/query` channels a newly-activated netlink tab
+    /// Prefetch the on-demand `@rpc/netlink/*` procedures a newly-activated netlink tab
     /// needs, so tabs populate without a manual "Fetch" click (#258). Only idle
     /// channels are fetched; Overview/Interfaces/WireGuard stream live.
     fn prefetch_netlink_tab(
@@ -4705,7 +4706,7 @@ impl ZenSight {
 
     /// Combined fetch for the first-class inventory view (#120): assets + the
     /// TLS/QUIC/SSH fingerprint inventories, fetched concurrently from the global
-    /// netring `@/query/*` channels and folded into one [`InventoryData`].
+    /// `@rpc/netring/*` procedures and folded into one [`InventoryData`].
     fn query_inventory(&self) -> Task<Message> {
         use crate::view::inventory::InventoryData;
         use crate::view::specialized::netring_detail::{
@@ -4850,7 +4851,7 @@ impl ZenSight {
     /// Pivot from a Security anomaly to its netring flows (#119): fetch the
     /// recent-flow ring and keep only flows whose src or dst IP matches the
     /// anomaly's offending source. Client-side filtering keeps the sensor's
-    /// `@/query/flows` contract unchanged.
+    /// `@rpc/netring/flows` contract unchanged.
     fn query_anomaly_flows(&self, key: String, src: String) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_flows;
         let Some(session) = self.session.clone() else {
@@ -5296,7 +5297,7 @@ impl ZenSight {
     }
 
     /// Fetch the per-process bandwidth table from the netlink sensor's
-    /// `@/query/bandwidth` channel (#319/epic #320). In demo mode (no session)
+    /// `@rpc/netlink/bandwidth` procedure (#319/epic #320). In demo mode (no session)
     /// return synthetic rows so the Processes view is developable without sensors
     /// — demo never serves queryables.
     fn query_bandwidth(&self) -> Task<Message> {
@@ -5563,7 +5564,7 @@ impl ZenSight {
                 &self.sensor_health,
                 &self.recent_errors,
                 &self.artifact_fetch,
-                self.artifact_job.as_ref().map(|j| j.key_prefix.as_str()),
+                self.artifact_job.as_ref().map(|j| j.producer.as_str()),
                 self.artifact_job.as_ref().map(|j| j.kind.slug()),
                 &self.artifact_kinds,
                 &self.capture_forms,
@@ -5660,10 +5661,7 @@ impl ZenSight {
                             fetch: &self.artifact_fetch,
                             kinds: &self.artifact_kinds,
                             capture_forms: &self.capture_forms,
-                            active_prefix: self
-                                .artifact_job
-                                .as_ref()
-                                .map(|j| j.key_prefix.as_str()),
+                            active_prefix: self.artifact_job.as_ref().map(|j| j.producer.as_str()),
                             active_kind: self.artifact_job.as_ref().map(|j| j.kind.slug()),
                         }),
                     })
@@ -5946,7 +5944,7 @@ impl ZenSight {
             .is_none_or(|t| now_ms - t >= LOG_REFRESH_SECS * 1000)
     }
 
-    /// Fire an incremental `@/query/events` fetch when due (#358). The `since=`
+    /// Fire an incremental `@rpc/logs/events` fetch when due (#358). The `since=`
     /// selector trails the newest-seen event by [`LOG_FETCH_OVERLAP_MS`] so
     /// clock skew never opens a gap; the merge de-dup absorbs the overlap.
     fn maybe_refresh_logs(&mut self) -> Option<Task<Message>> {
@@ -5960,7 +5958,7 @@ impl ZenSight {
         Some(self.query_log_events(since))
     }
 
-    /// One `@/query/events` GET (#358): fans out to every logs sensor's
+    /// One `@rpc/logs/events` GET (#358): fans out to every logs sensor's
     /// queryable, drains ALL replies (one per sensor — never first-reply-wins),
     /// and concatenates the decoded records.
     fn query_log_events(&self, since: Option<i64>) -> Task<Message> {
@@ -6030,7 +6028,7 @@ impl ZenSight {
         // Unlike per-metric device state (which keeps only the latest point per
         // facility/severity), this preserves the full recent stream.
         //
-        // Since #358 current sensors serve per-line events from `@/query/events`
+        // Since #358 current sensors serve per-line events from `@rpc/logs/events`
         // instead of streaming them, so live lines normally arrive via the
         // periodic fetch (`LogEventsLoaded`). This ingest branch stays for demo
         // mode (the mock stream) and pre-#358 sensors on the wire.
@@ -6176,9 +6174,7 @@ impl ZenSight {
         // Lazily discover them (and seed the shared form) if the Sensors page
         // hasn't already.
         if device_id.protocol == Protocol::Netring
-            && !self
-                .artifact_kinds
-                .contains_key(&format!("zensight/{}", Protocol::Netring.as_str()))
+            && !self.artifact_kinds.contains_key(Protocol::Netring.as_str())
             && let Some(task) = self.load_artifact_kinds()
         {
             prefetch = Task::batch([prefetch, task]);
@@ -6767,7 +6763,7 @@ mod prefetch_tests {
     }
 }
 
-/// #358: per-line log events are pulled from `@/query/events`, not streamed.
+/// #358: per-line log events are pulled from `@rpc/logs/events`, not streamed.
 /// These tests pin the fetch gating, the watermark, and the overlap de-dup.
 #[cfg(test)]
 mod log_fetch_tests {

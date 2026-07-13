@@ -1,6 +1,6 @@
 //! On-demand detail fetches for the systemd specialized view (#281).
 //!
-//! Mirrors `netlink_detail`: each `@/query/*` topic has its own [`Fetch`] slot so
+//! Mirrors `netlink_detail`: each `@rpc/systemd/*` topic has its own [`Fetch`] slot so
 //! the UI can show idle/loading/ready/error independently. Record types are the
 //! shared ones from `zensight-common::query_detail`; the event record matches the
 //! sensor's `events::EventRecord` JSON.
@@ -87,7 +87,7 @@ pub struct SystemdDetailState {
     pub pending_action: Option<(String, String)>,
     /// The unit whose identity drill-down panel is open (#313).
     pub selected_unit: Option<String>,
-    /// The drill-down's `@/query/unit?name=` reply (#313): control_group,
+    /// The drill-down's `@rpc/systemd/unit?name=` reply (#313): control_group,
     /// MainPID + start_time, invocation_id — the cross-view join keys.
     pub unit_detail: Fetch<UnitDetail>,
 }
@@ -125,7 +125,7 @@ impl SystemdDetailState {
 }
 
 /// The single-unit detail key (#313), matching the sensor's
-/// `@/query/unit?name=<u>` queryable.
+/// `@rpc/systemd/unit?name=<u>` queryable.
 pub fn unit_detail_key(origin: Option<&str>, unit: &str) -> String {
     let key = match origin {
         Some(o) => zensight_common::origin_rpc_key(o, "systemd", "unit"),

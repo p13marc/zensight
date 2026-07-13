@@ -20,7 +20,7 @@ use crate::monitor::{MonitorChannels, dns_snapshot, to_view};
 pub async fn run_drains(
     mut channels: MonitorChannels,
     session: Arc<zenoh::Session>,
-    key_prefix: String,
+    producer: String,
     sensor_id: String,
     format: Format,
     reporter: Arc<AlertReporter>,
@@ -64,7 +64,7 @@ pub async fn run_drains(
     // Cached publishers so late-joining consumers get current values on connect.
     let registry = AdvancedPublisherRegistry::new(
         session,
-        key_prefix,
+        zensight_sensor_core::v1::V1Context::for_producer(&producer).telemetry_prefix(),
         format,
         AdvancedPublisherConfig::default(),
     );

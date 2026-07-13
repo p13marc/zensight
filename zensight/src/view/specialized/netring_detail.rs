@@ -1,5 +1,5 @@
 //! On-demand netring flow-detail client: fetches the recent-flow ring from the
-//! sensor's `@/query/flows` channel (principle P2 — pulled only when a user
+//! sensor's `@rpc/netring/flows` procedure (principle P2 — pulled only when a user
 //! drills into a netring host, never streamed).
 //!
 //! Reuses the Iced-independent [`fetch_records`](super::netlink_detail::fetch_records)

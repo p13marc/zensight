@@ -128,6 +128,28 @@ jobs:
             exit 1
           fi
 
+      # The legacy keyspace is retired (#465): every wire key rides
+      # zensight/@v1/... . Ban NEW legacy-shaped literals ("zensight/<x>" not
+      # followed by @v1) in non-test source so the old grammar cannot creep
+      # back. Comments and assertions are excluded — negative pins ("must
+      # NOT match") and historical notes are legitimate.
+      - name: no legacy keyspace literals (v1 guard)
+        run: |
+          hits=$(grep -rnE '"zensight/[a-z_]' \
+            zensight/src zensight-common/src zensight-correlator/src \
+            zensight-sensor-core/src zensight-sensor-*/src zensight-exporter-*/src \
+            zensight-rerun/src zensight-keyspace/src \
+            --include='*.rs' \
+            | grep -v 'zensight/@v1' \
+            | grep -vE '/tests/|_test\.rs|journald\.cursor|zensight/host-id' \
+            | grep -vE ':[0-9]+: *//' \
+            | grep -v 'assert' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Legacy-shaped zensight/<x> key literal — build keys through zensight-keyspace/zensight-common (v1 grammar):"
+            echo "$hits"
+            exit 1
+          fi
+
       # zenoh-blob is a generic crate meant to graduate to its own repo +
       # crates.io (#202). It must stay free of ZenSight types and path deps so
       # the switch to the published crate is a one-line change. Guard the

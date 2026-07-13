@@ -35,8 +35,8 @@ use zensight_common::ArtifactLimits;
 ///         &self.logging
 ///     }
 ///
-///     fn key_prefix(&self) -> &str {
-///         &self.my_protocol.key_prefix
+///     fn producer(&self) -> &str {
+///         "my_protocol"
 ///     }
 ///
 ///     fn validate(&self) -> Result<()> {
@@ -54,8 +54,10 @@ pub trait SensorConfig: Sized + DeserializeOwned {
     /// Get the logging configuration.
     fn logging(&self) -> &LoggingConfig;
 
-    /// Get the key expression prefix for this sensor.
-    fn key_prefix(&self) -> &str;
+    /// The producer name ("netlink", "logs", …) — the registry chunk this
+    /// sensor publishes under. A constant per crate; the legacy config
+    /// `key_prefix` is retired (#465).
+    fn producer(&self) -> &str;
 
     /// Unified artifact-channel limits (`artifacts.{report,snapshot}`). Every kind
     /// is disabled by default; a sensor opts in by overriding this to return its
@@ -110,7 +112,6 @@ mod tests {
     struct TestConfig {
         zenoh: ZenohConfig,
         logging: LoggingConfig,
-        key_prefix: String,
     }
 
     impl SensorConfig for TestConfig {
@@ -122,8 +123,8 @@ mod tests {
             &self.logging
         }
 
-        fn key_prefix(&self) -> &str {
-            &self.key_prefix
+        fn producer(&self) -> &str {
+            "test"
         }
     }
 

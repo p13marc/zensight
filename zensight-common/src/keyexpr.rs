@@ -70,35 +70,6 @@ pub fn all_health_wildcard() -> String {
     format!("{}/@v1/*/state/*/health", KEY_PREFIX)
 }
 
-/// Build a wildcard key expression for all sensor error reports.
-///
-/// Matches: `zensight/@v1/<origin>/state/<producer>/errors`
-///
-/// # Example
-/// ```
-/// use zensight_common::keyexpr::all_errors_wildcard;
-///
-/// assert_eq!(all_errors_wildcard(), "zensight/@v1/*/state/*/errors");
-/// ```
-pub fn all_errors_wildcard() -> String {
-    format!("{}/@v1/*/state/*/errors", KEY_PREFIX)
-}
-
-/// Build a wildcard key expression for all sensor discovery data.
-///
-/// Matches: `zensight/@v1/<origin>/state/<producer>/sensor`
-///
-/// # Example
-/// ```
-/// use zensight_common::keyexpr::all_sensors_wildcard;
-///
-/// assert_eq!(all_sensors_wildcard(), "zensight/@v1/*/state/*/sensor");
-/// ```
-pub fn all_sensors_wildcard() -> String {
-    // v1: the registration document (state/<producer>/sensor).
-    format!("{}/@v1/*/state/*/sensor", KEY_PREFIX)
-}
-
 /// Build this host's v1 evidence key for one observed device (RFC 06 §4):
 /// `zensight/@v1/<local-origin>/state/<sensor>/evidence/device/<device>`.
 /// The device chunk is slugged, so raw hostnames/IPs/MACs are safe inputs;
@@ -349,12 +320,12 @@ fn ip_slug(ip: &str) -> String {
 }
 
 /// Build the durable historical passive-DNS key for one IP (#310):
-/// `zensight/@pdns/<ip-slug>`.
+/// `zensight/@v1/@catalog/state/pdns/<ip-slug>`.
 ///
-/// `@pdns` is an `@`-verbatim chunk — a sibling of the per-sensor `@/` control
-/// plane and the `@media` plane (#359), but a *different* chunk — so a durable
-/// IP↔name record is invisible to BOTH the telemetry firehose (`zensight/**`)
-/// and the per-sensor control-plane wildcard (`zensight/*/@/**`). These records
+/// `@catalog` is a verbatim origin — the `*` selectors never match it (D4) —
+/// so a durable IP↔name record is invisible to BOTH the telemetry class
+/// selector (`zensight/@v1/*/telemetry/**`) and the `*`-origin state
+/// selectors. These records
 /// are published by the **correlator** off its accumulated per-IP
 /// [`NameVal`](crate::NameVal) set (payload:
 /// [`PdnsRecord`](crate::PdnsRecord)) and are meant to be captured by a
@@ -374,8 +345,8 @@ pub fn pdns_key(ip: &str) -> String {
 }
 
 /// Build the wildcard key for the whole historical passive-DNS tier
-/// (`zensight/@pdns/**`) — what a router-hosted storage backend subscribes to
-/// to capture every IP↔name record (#310).
+/// (`zensight/@v1/@catalog/state/pdns/**`) — what a router-hosted storage
+/// backend subscribes to to capture every IP↔name record (#310).
 ///
 /// # Example
 /// ```
@@ -402,7 +373,7 @@ mod tests {
         use crate::command::query_key;
         // v1: the events read procedure lives on the verbatim @rpc plane —
         // invisible to the telemetry class selector by construction (D2).
-        let query_key = KeyExpr::try_from(query_key("zensight/logs", "events")).unwrap();
+        let query_key = KeyExpr::try_from(query_key("logs", "events")).unwrap();
         assert!(
             !telemetry.intersects(&query_key),
             "the events procedure must be invisible to the telemetry firehose"
@@ -490,12 +461,15 @@ mod tests {
     #[test]
     fn media_control_rides_the_rpc_plane() {
         use crate::command::{command_key, query_key, status_key};
-        let prefix = "zensight/netring";
-        let cmd = command_key(prefix, "stream");
+        let producer = "netring";
+        let cmd = command_key(producer, "stream");
         assert!(cmd.starts_with("zensight/@v1/h-"), "{cmd}");
         assert!(cmd.ends_with("/@rpc/netring/stream/set"), "{cmd}");
-        assert!(query_key(prefix, "streams").ends_with("/@rpc/netring/streams"));
-        assert_eq!(query_key(prefix, "streams"), status_key(prefix, "streams"));
+        assert!(query_key(producer, "streams").ends_with("/@rpc/netring/streams"));
+        assert_eq!(
+            query_key(producer, "streams"),
+            status_key(producer, "streams")
+        );
     }
 
     #[test]

@@ -3,13 +3,13 @@
 //! - `entities_query_key()` (the entity state selector) → storage-shaped
 //!   seed: one reply per entity on its concrete key,
 //!   the seed a late-joining frontend GETs on connect (mirrors the sensors'
-//!   `@/query/alerts` firing-set seed).
+//!   alert-state seed: a queryable on `state/<producer>/alert/*`, RFC 05 §4).
 //! - `names_query_key()` with selector `?ip=<ip>` → that IP's accumulated
 //!   `Vec<NameVal>` from the [`NameStore`], so arbitrary/external IPs are
 //!   resolved on demand instead of flooding the bus. A missing/blank `ip`
 //!   replies with an empty set (error-free).
 //!
-//! Replies are JSON (consistent with the existing `@/query/alerts` seed).
+//! Replies are JSON (consistent with the existing alert-state seed).
 
 use std::sync::Arc;
 

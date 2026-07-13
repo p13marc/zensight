@@ -87,7 +87,7 @@ pub fn severity_weight(severity: AlertSeverity) -> f64 {
 }
 
 /// Live `(sensor, source) → entity_id` join, maintained from the
-/// `zensight/_meta/entity/**` subscription. Alias ids resolve to the
+/// `zensight/@v1/@catalog/state/entity/*` subscription. Alias ids resolve to the
 /// surviving entity (02-mapping.md §1).
 #[derive(Debug, Default)]
 pub struct EntityIndex {

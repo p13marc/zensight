@@ -54,12 +54,8 @@ pub async fn apply_collection(handle: &CollectHandle, cmd: CollectionCommand) {
 
 /// Serve the collection control surface as `@rpc` procedures until the
 /// session closes: `collection` (read) + `collection/set` (write).
-pub async fn run_collection(
-    session: Arc<zenoh::Session>,
-    key_prefix: String,
-    handle: CollectHandle,
-) {
-    let ctx = V1Context::from_prefix(&key_prefix);
+pub async fn run_collection(session: Arc<zenoh::Session>, producer: String, handle: CollectHandle) {
+    let ctx = V1Context::for_producer(&producer);
     let apply_handle = handle.clone();
     let tasks = rpc::serve_topic::<CollectionCommand, _, _, _, _>(
         session,
@@ -172,8 +168,8 @@ pub async fn apply(handle: &SentinelHandle, cmd: ExpectationCommand) {
 
 /// Serve the expectations control surface as `@rpc` procedures until the
 /// session closes: `expectations` (read) + `expectations/set` (write).
-pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, handle: SentinelHandle) {
-    let ctx = V1Context::from_prefix(&key_prefix);
+pub async fn run(session: Arc<zenoh::Session>, producer: String, handle: SentinelHandle) {
+    let ctx = V1Context::for_producer(&producer);
     let apply_handle = handle.clone();
     let tasks = rpc::serve_topic::<ExpectationCommand, _, _, _, _>(
         session,

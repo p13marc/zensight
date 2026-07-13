@@ -1,5 +1,5 @@
 //! On-demand sysinfo process-explorer client: fetches the per-process table from
-//! the sensor's `@/query/processes` channel (principle P2 — the per-pid firehose
+//! the sensor's `@rpc/sysinfo/processes` procedure (principle P2 — the per-pid firehose
 //! is never streamed; the GUI pulls it only when a user drills into a host).
 //!
 //! Reuses the Iced-independent [`fetch_records`](super::netlink_detail::fetch_records)

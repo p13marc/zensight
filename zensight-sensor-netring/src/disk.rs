@@ -8,13 +8,13 @@
 //! * **`rotating`** — stream every frame into a
 //!   [`netring::pcap_rotate::RotatingPcapWriter`] (size/duration rotation,
 //!   file-count / total-byte retention). A local forensics spool: files are
-//!   listed on `@/query/captures` but their bytes are not served over the bus.
+//!   listed on `@rpc/netring/captures` but their bytes are not served over the bus.
 //! * **`triggered`** — buffer recent frames in a bytes-bounded in-memory ring;
 //!   when an anomaly passes the severity/kind gate (see [`should_trigger`],
 //!   applied in `publish.rs`) or a `capture_now` command arrives, flush the
 //!   lead-up plus `post_trigger_secs` of aftermath to a pcap file, optionally
 //!   zstd-compress it, and register it as a TTL'd Tier-1 blob on the engine's
-//!   own [`BlobServer`] (same `@/artifact/blob` prefix as the artifact channel
+//!   own [`BlobServer`] (same `@blob/artifact` prefix as the artifact channel
 //!   — a blob server ignores ids it doesn't own, so both coexist). The GUI
 //!   downloads it by `artifact_id` exactly like a #333 on-demand capture.
 //!
@@ -25,7 +25,7 @@
 //! Like the runtime detector registry, a mode that is `off` at startup is not
 //! armed (no packet subscription is registered) — switching it on takes a
 //! restart; switching between `rotating`/`triggered` (and to `off`) is live via
-//! `@/commands/capture_disk`.
+//! `@rpc/netring/capture_disk/set`.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -62,7 +62,7 @@ pub struct DiskFrame {
     pub original_len: usize,
 }
 
-/// The bounded ring of recent [`CaptureRecord`]s served on `@/query/captures`.
+/// The bounded ring of recent [`CaptureRecord`]s served on `@rpc/netring/captures`.
 pub type CaptureIndex = Arc<Mutex<VecDeque<CaptureRecord>>>;
 
 /// Live engine counters, shared with the packet subscription (drop counter),

@@ -66,7 +66,7 @@ pub struct PrometheusConfig {
 
     /// Export sensor alerts as a `<prefix>_alert` gauge (default: true).
     ///
-    /// When enabled the exporter also subscribes to the `@/alerts/*` control
+    /// When enabled the exporter also subscribes to the `state/*/alert/*`
     /// channel and surfaces each firing alert as a gauge with value 1; the
     /// series disappears once the alert resolves (Alertmanager treats absence
     /// as resolved). Set to false to expose telemetry metrics only.
@@ -188,9 +188,11 @@ pub struct FilterConfig {
     /// Zenoh subscription key expression for telemetry (R6/#357). Defaults to the
     /// full telemetry class selector; narrow it (e.g.
     /// `zensight/@v1/*/telemetry/netring/**`) to tame the
-    /// firehose at the *subscription* — unwanted protocols and the `_meta/**`
-    /// control plane never reach this exporter over the wire. The `@/alerts/*`
-    /// subscriber is separate and unaffected. `include_protocols` etc. still apply
+    /// firehose at the *subscription* — unwanted protocols never reach this
+    /// exporter over the wire, and the state plane / non-telemetry classes
+    /// can't match the telemetry class selector by construction. The
+    /// `state/*/alert/*` subscriber is separate and unaffected.
+    /// `include_protocols` etc. still apply
     /// as a post-receive filter.
     #[serde(default)]
     pub key_expr: Option<String>,

@@ -169,7 +169,7 @@ impl SystemdCollector {
     }
 
     /// Run the periodic collect loop. Never panics: a bus/connection error records
-    /// a device failure (surfaced on `@/health`) and retries on the next tick.
+    /// a device failure (surfaced on `state/systemd/health`) and retries on the next tick.
     pub async fn run(mut self) {
         let interval = Duration::from_secs(self.config.poll_interval_secs.max(1));
         self.health.set_devices_total(1);

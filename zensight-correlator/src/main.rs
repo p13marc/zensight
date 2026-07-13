@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (tx, rx) = mpsc::channel(ENGINE_CHANNEL_CAP);
     let (op_tx, op_rx) = mpsc::channel::<zensight_correlator::EntityOp>(ENGINE_CHANNEL_CAP);
-    // Durable historical passive-DNS records (@pdns, #310).
+    // Durable historical passive-DNS records (@catalog/state/pdns, #310).
     let (pdns_tx, pdns_rx) = mpsc::channel::<zensight_common::PdnsRecord>(ENGINE_CHANNEL_CAP);
 
     // Shared correlation state (engine mutates; queryables read).
@@ -90,8 +90,9 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Historical passive-DNS publisher: durable IP↔name records on @pdns (#310),
-    // meant to be captured by a router-hosted storage backend.
+    // Historical passive-DNS publisher: durable IP↔name records on
+    // @catalog/state/pdns (#310), meant to be captured by a router-hosted
+    // storage backend.
     let pdns_task = {
         let s = session.clone();
         let sh = shutdown_rx.clone();

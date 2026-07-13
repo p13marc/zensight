@@ -152,16 +152,16 @@ pub struct ErrorReport {
 }
 
 /// Sensor registration/discovery record, published by every sensor's runner on
-/// `zensight/_meta/sensors/<name>/<source>` (identity envelope, #301). Health
-/// and device counts live on `@/health`, not here.
+/// the registration doc `state/<producer>/sensor` (identity envelope, #301).
+/// Health and device counts live on `state/<producer>/health`, not here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SensorInfo {
     /// Sensor name (e.g., "sysinfo", "netlink").
     pub name: String,
     /// Sensor crate version.
     pub version: String,
-    /// Key prefix used by this sensor (e.g. "zensight/netlink").
-    pub key_prefix: String,
+    /// Producer name this sensor publishes under (e.g. "netlink").
+    pub producer: String,
     /// Unified host/source id (the `<source>` telemetry key segment).
     pub source: String,
     /// Hashed machine-id (never the raw id).
@@ -244,7 +244,7 @@ mod tests {
         let json = r#"{
             "name": "sysinfo",
             "version": "0.6.2",
-            "key_prefix": "zensight/sysinfo",
+            "producer": "sysinfo",
             "source": "host1",
             "host_id": "abcd",
             "ips": ["10.0.0.1"],

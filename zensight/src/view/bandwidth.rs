@@ -1,5 +1,5 @@
 //! Bandwidth live monitor (#319, epic #320) — a bmon/nethogs-style view of
-//! network rate by **process** (netlink `@/query/bandwidth`, sock_diag goodput)
+//! network rate by **process** (netlink `@rpc/netlink/bandwidth`, sock_diag goodput)
 //! and by **service** (systemd streamed `unit/<name>/ip_*_bps`).
 //!
 //! No single OS source can own this, so every row shows a **source/semantics
@@ -26,7 +26,7 @@ use crate::view::tokens::{font, space};
 /// Which bandwidth breakdown the monitor is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BandwidthMode {
-    /// Per-process rows fetched from `@/query/bandwidth` (sock_diag / eBPF).
+    /// Per-process rows fetched from `@rpc/netlink/bandwidth` (sock_diag / eBPF).
     #[default]
     Processes,
     /// Per-service rows read from the streamed systemd `ip_*_bps` telemetry.
@@ -177,7 +177,7 @@ pub fn bandwidth_view(state: &BandwidthState) -> Element<'_, Message> {
     col.push(body).into()
 }
 
-/// Per-process table over the `@/query/bandwidth` fetch (no sparkline — the query
+/// Per-process table over the `@rpc/netlink/bandwidth` fetch (no sparkline — the query
 /// returns a point-in-time rate, not a series).
 fn render_processes(state: &BandwidthState) -> Element<'_, Message> {
     if state.processes.is_loading() {

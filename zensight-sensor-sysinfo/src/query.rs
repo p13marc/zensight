@@ -1,6 +1,6 @@
 //! On-demand per-process detail query channel (principle P2, plan §F).
 //!
-//! Declares `zensight/sysinfo/<host>/@/query/processes`. The GUI calls it when a
+//! Declares `zensight/@v1/<origin>/@rpc/sysinfo/processes`. The GUI calls it when a
 //! user drills into a host to ask "what's eating the box?". Each reply is a
 //! fresh, sorted, bounded `Vec<ProcessRecord>` serialized as JSON — the
 //! high-cardinality per-pid firehose is *never* streamed onto the telemetry bus
@@ -72,15 +72,15 @@ impl CmdlinePolicy {
 
 /// Run the per-process detail query channel until the session closes.
 ///
-/// `key_prefix` is the sensor's legacy-shaped prefix (e.g. `zensight/sysinfo`);
-/// the queryable lives at the v1 procedure key `@rpc/sysinfo/processes`.
+/// `producer` is the sensor's producer name (`sysinfo`); the queryable lives
+/// at the v1 procedure key `@rpc/sysinfo/processes`.
 pub async fn run(
     session: Arc<zenoh::Session>,
-    key_prefix: String,
+    producer: String,
     _source: String,
     scrub: ProcessScrubConfig,
 ) {
-    let key = zensight_keyspace_ctx(&key_prefix).rpc_key(&["processes"]);
+    let key = zensight_keyspace_ctx(&producer).rpc_key(&["processes"]);
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -116,11 +116,11 @@ pub async fn run(
 /// `available: false` (no caps / unsupported kernel).
 pub async fn run_latency(
     session: Arc<zenoh::Session>,
-    key_prefix: String,
+    producer: String,
     _source: String,
     report: Arc<std::sync::Mutex<crate::map::LatencyReport>>,
 ) {
-    let key = zensight_keyspace_ctx(&key_prefix).rpc_key(&["latency"]);
+    let key = zensight_keyspace_ctx(&producer).rpc_key(&["latency"]);
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -137,9 +137,9 @@ pub async fn run_latency(
 }
 
 /// Serialize `records` as JSON and reply on the query's own key.
-/// Small helper: derive the v1 context from the config prefix.
-fn zensight_keyspace_ctx(prefix: &str) -> zensight_sensor_core::v1::V1Context {
-    zensight_sensor_core::v1::V1Context::from_prefix(prefix)
+/// Small helper: the v1 context for one producer.
+fn zensight_keyspace_ctx(producer: &str) -> zensight_sensor_core::v1::V1Context {
+    zensight_sensor_core::v1::V1Context::for_producer(producer)
 }
 
 /// Reply on the queryable's **concrete** key (RFC 05 §2.1), never the

@@ -4,7 +4,8 @@
     mode: "peer",
   },
 
-  // On-demand artifact channel (@/artifact) — opt-in per kind. When enabled,
+  // On-demand artifact channel (@rpc artifact/request + @blob delivery) —
+  // opt-in per kind. When enabled,
   // an operator can download a redacted tar.zst debug bundle from the GUI.
   artifacts: {
     report: {

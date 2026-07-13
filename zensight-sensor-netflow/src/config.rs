@@ -24,7 +24,7 @@ pub struct NetFlowSensorConfig {
     #[serde(default)]
     pub logging: LoggingConfig,
 
-    /// On-demand artifact channel (`@/artifact`) limits — report + snapshot.
+    /// On-demand artifact channel (`@rpc/netflow/artifact/*`) limits — report + snapshot.
     /// Every kind disabled by default.
     #[serde(default)]
     pub artifacts: zensight_sensor_core::ArtifactLimits,
@@ -33,10 +33,6 @@ pub struct NetFlowSensorConfig {
 /// NetFlow receiver configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetFlowConfig {
-    /// Key expression prefix for publishing.
-    #[serde(default = "default_key_prefix")]
-    pub key_prefix: String,
-
     /// Override the agent-host source id (default: the local hostname).
     #[serde(default)]
     pub source: Option<String>,
@@ -60,10 +56,6 @@ pub struct NetFlowConfig {
     /// Flow aggregation interval in seconds (0 = no aggregation).
     #[serde(default)]
     pub aggregation_interval_secs: u64,
-}
-
-fn default_key_prefix() -> String {
-    "zensight/netflow".to_string()
 }
 
 fn default_true() -> bool {
@@ -137,8 +129,8 @@ impl zensight_sensor_core::SensorConfig for NetFlowSensorConfig {
         &self.logging
     }
 
-    fn key_prefix(&self) -> &str {
-        &self.netflow.key_prefix
+    fn producer(&self) -> &str {
+        "netflow"
     }
 
     fn artifact_limits(&self) -> zensight_sensor_core::ArtifactLimits {
@@ -154,7 +146,6 @@ impl zensight_sensor_core::SensorConfig for NetFlowSensorConfig {
 impl Default for NetFlowConfig {
     fn default() -> Self {
         Self {
-            key_prefix: default_key_prefix(),
             source: None,
             listeners: vec![ListenerConfig {
                 bind: "0.0.0.0:2055".to_string(),
@@ -184,7 +175,6 @@ mod tests {
         }"#;
 
         let config: NetFlowSensorConfig = json5::from_str(json).unwrap();
-        assert_eq!(config.netflow.key_prefix, "zensight/netflow");
         assert_eq!(config.netflow.listeners.len(), 1);
         assert!(config.netflow.publish_flows);
         assert!(config.netflow.publish_stats);
@@ -198,7 +188,6 @@ mod tests {
                 connect: ["tcp/localhost:7447"]
             },
             netflow: {
-                key_prefix: "custom/netflow",
                 listeners: [
                     { bind: "0.0.0.0:2055", max_packet_size: 9000 },
                     { bind: "0.0.0.0:4739" }
@@ -217,7 +206,6 @@ mod tests {
         }"#;
 
         let config: NetFlowSensorConfig = json5::from_str(json).unwrap();
-        assert_eq!(config.netflow.key_prefix, "custom/netflow");
         assert_eq!(config.netflow.listeners.len(), 2);
         assert_eq!(config.netflow.listeners[0].max_packet_size, 9000);
         assert_eq!(

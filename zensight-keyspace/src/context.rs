@@ -6,12 +6,10 @@
 //! process), and the producer chunk. All framework keys flow through here —
 //! sensors never spell `@v1` by hand.
 //!
-//! Migration note: contexts are built [`V1Context::from_prefix`] from the
-//! existing config `key_prefix` ("zensight/<protocol>"), so configs keep
-//! working unchanged until the cutover (#465) introduces the explicit
-//! namespace block. Keys are emitted with the base spelled out; when
-//! sessions switch to the Zenoh namespace, the base becomes empty here and
-//! nothing else changes.
+//! Contexts are built [`V1Context::for_producer`] from the producer name
+//! alone — the legacy config `key_prefix` is retired (#465). Keys are
+//! emitted with the base spelled out; when sessions switch to the Zenoh
+//! namespace, the base becomes empty here and nothing else changes.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -43,46 +41,32 @@ pub struct V1Context {
 }
 
 impl V1Context {
-    /// Build from a key prefix — either the legacy config form
-    /// (`zensight/<protocol>`, possibly with a multi-chunk base) or an
-    /// already-v1 telemetry prefix (idempotent re-derivation, so
-    /// `Publisher::key_prefix()` round-trips).
-    pub fn from_prefix(prefix: &str) -> Self {
-        if let Some((base, rel)) = prefix.split_once("/@v1/") {
-            // "<base>/@v1/<origin>/<class>/<producer>[...]"
-            let chunks: Vec<&str> = rel.split('/').collect();
-            if chunks.len() >= 3
-                && let Ok(id) = HostId::parse(chunks[0])
-                && let Ok(producer) = Producer::parse_chunk(chunks[2])
-            {
-                return Self {
-                    base: base.to_string(),
-                    origin: Origin::Host(id),
-                    producer,
-                };
-            }
-            tracing::warn!(prefix, "unparseable v1 prefix; re-deriving from base");
-        }
-        let (base, producer_name) = match prefix.rsplit_once('/') {
-            Some((base, name)) => (base.to_string(), name),
-            // A bare base ("zensight") has no producer chunk to take —
-            // fall back to a generic producer name rather than failing.
-            None => (prefix.to_string(), "sensor"),
-        };
-        let producer = Producer::new(producer_name).unwrap_or_else(|_| {
-            let slug = chunk_slug(producer_name);
+    /// Build the context for one producer on this host: base `zensight`,
+    /// origin = the local minted host id, producer = `name` (slugged to a
+    /// valid chunk when necessary; a degenerate name falls back to
+    /// `sensor`).
+    pub fn for_producer(name: &str) -> Self {
+        let producer = Producer::new(name).unwrap_or_else(|_| {
+            let slug = chunk_slug(name);
             Producer::parse_chunk(&slug)
                 .or_else(|_| Producer::new("sensor"))
                 .expect("fallback producer name is valid")
         });
         Self {
-            base,
+            base: "zensight".to_string(),
             origin: Origin::Host(host_id().clone()),
             producer,
         }
     }
 
-    /// As [`from_prefix`](Self::from_prefix) with an explicit producer
+    /// Override the deployment base (RFC 03 §1.1 multi-chunk bases are
+    /// legal; the default is `zensight`).
+    pub fn with_base(mut self, base: impl Into<String>) -> Self {
+        self.base = base.into();
+        self
+    }
+
+    /// As [`for_producer`](Self::for_producer) with an explicit producer
     /// instance (RFC 03 §1.5).
     pub fn with_instance(mut self, instance: u32) -> Self {
         if let Ok(p) = Producer::with_instance(self.producer.name(), instance) {
@@ -219,18 +203,12 @@ impl V1Context {
     }
 }
 
-/// Convenience: transform a legacy config `key_prefix` into the v1 telemetry
-/// prefix. Sensors call this where they previously used the raw prefix.
-pub fn v1_telemetry_prefix(legacy_prefix: &str) -> String {
-    V1Context::from_prefix(legacy_prefix).telemetry_prefix()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn ctx() -> V1Context {
-        let mut c = V1Context::from_prefix("zensight/sysinfo");
+        let mut c = V1Context::for_producer("sysinfo");
         c.origin = Origin::Host(HostId::parse("h-3fa9c2d41b7e").unwrap());
         c
     }
@@ -274,18 +252,9 @@ mod tests {
         );
     }
 
-    /// from_prefix accepts its own telemetry_prefix output (idempotence).
-    #[test]
-    fn prefix_round_trip() {
-        let c = ctx();
-        let again = V1Context::from_prefix(&c.telemetry_prefix());
-        assert_eq!(again.telemetry_prefix(), c.telemetry_prefix());
-        assert_eq!(again.health_key(), c.health_key());
-    }
-
     #[test]
     fn multi_chunk_base() {
-        let mut c = V1Context::from_prefix("acme/fleet-a/netring");
+        let mut c = V1Context::for_producer("netring").with_base("acme/fleet-a");
         c.origin = Origin::Host(HostId::parse("h-3fa9c2d41b7e").unwrap());
         assert_eq!(
             c.telemetry_prefix(),

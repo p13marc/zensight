@@ -1,5 +1,5 @@
 //! Host-evidence feed (#307): republish observed neighbors (ARP/NDP cache) as
-//! third-party identity evidence on `zensight/_meta/evidence/**` for the
+//! third-party identity evidence on `state/netlink/evidence/**` for the
 //! correlator (epic #312).
 //!
 //! Each VALID neighbor (Reachable/Stale/Permanent) becomes a `HostEvidence`

@@ -1,20 +1,21 @@
-//! Historical passive-DNS publisher (`@pdns`, #310).
+//! Historical passive-DNS publisher (`@catalog/state/pdns`, #310).
 //!
 //! The correlator already accumulates provenance-tagged names per IP in its
 //! [`NameStore`](crate::store::NameStore). This task drains a channel of
 //! [`PdnsRecord`]s — emitted by the [`Engine`](crate::engine::Engine) whenever a
 //! name observation updates an IP — and PUTs each on its
-//! `zensight/@pdns/<ip-slug>` key with a **plain** publisher (a `session.put`,
-//! not a per-IP declared publisher — the IP set is unbounded).
+//! `zensight/@v1/@catalog/state/pdns/<ip-slug>` key with a **plain** publisher
+//! (a `session.put`, not a per-IP declared publisher — the IP set is unbounded).
 //!
-//! The `@pdns` verbatim chunk keeps these records off the telemetry
-//! (`zensight/**`) and per-sensor control (`zensight/*/@/**`) buses. They are
-//! **meant to be captured** by a router-hosted storage backend (filesystem
-//! snapshot or InfluxDB time series) subscribed on `zensight/@pdns/**`, giving a
-//! durable historical IP↔name tier. Publishing here is cheap and off the packet
-//! hot path: it fires on correlator name-store updates, not per packet.
+//! These records stay off the telemetry class selector and the `*`-origin state
+//! selectors because `@catalog` is a verbatim origin the `*` selectors never
+//! match (D4). They are **meant to be captured** by a router-hosted storage
+//! backend (filesystem snapshot or InfluxDB time series) subscribed on
+//! `zensight/@v1/@catalog/state/pdns/**`, giving a durable historical IP↔name
+//! tier. Publishing here is cheap and off the packet hot path: it fires on
+//! correlator name-store updates, not per packet.
 //!
-//! Records are reliable + block ([`QosClass::Entity`]): a dropped `@pdns` PUT
+//! Records are reliable + block ([`QosClass::Entity`]): a dropped pdns PUT
 //! would be a gap in the historical record, so it back-pressures rather than
 //! drops. `last_writer_wins` reconciliation on the storage side keeps the newest
 //! accumulated name set per IP (see `docs/storage.md`).
@@ -27,8 +28,8 @@ use zenoh::Session;
 use zensight_common::serialization::Format;
 use zensight_common::{PdnsRecord, QosClass, encode, pdns_key};
 
-/// Run the `@pdns` publisher: drain `rx`, PUT each record on its key, until
-/// shutdown.
+/// Run the `@catalog/state/pdns` publisher: drain `rx`, PUT each record on its
+/// key, until shutdown.
 pub async fn run(
     session: Arc<Session>,
     format: Format,

@@ -29,7 +29,7 @@ use zensight_keyspace::V1Context;
 /// read source/protocol from the payload, and the class selectors match any
 /// origin.
 fn v1ctx(producer: &str) -> V1Context {
-    V1Context::from_prefix(&format!("zensight/{producer}"))
+    V1Context::for_producer(producer)
 }
 
 /// A demo publishing context over one isolated session.

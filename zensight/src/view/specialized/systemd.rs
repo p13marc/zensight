@@ -1,6 +1,6 @@
 //! systemd host specialized view (#281) — a tabbed surface (Overview · Units ·
 //! Timers · Sentinel · Events · cgroups) over the sensor's streamed aggregates
-//! and `@/query/*` channels. Reuses the tabbed foundation built for
+//! and `@rpc/systemd/*` procedures. Reuses the tabbed foundation built for
 //! netlink/netring (epic #257/#270).
 
 use iced::widget::{Column, button, column, row, scrollable, text};
@@ -226,7 +226,7 @@ fn render_units_tab(state: &DeviceDetailState) -> Column<'_, Message> {
         .spacing(2);
         for u in rows.iter().take(400) {
             // The unit name is the identity drill-down chip (#313): clicking
-            // fetches `@/query/unit?name=` and opens the panel above the table.
+            // fetches `@rpc/systemd/unit?name=` and opens the panel above the table.
             let name_chip: Element<'_, Message> = iced::widget::container(
                 button(text(u.name.clone()).size(font::CAPTION))
                     .padding([2, 6])
@@ -440,8 +440,8 @@ fn render_sentinel_tab(state: &DeviceDetailState) -> Column<'_, Message> {
                 "The systemd sentinel raises alerts when declared expectations are \
                  violated — a service/target that must stay active, a timer that must \
                  fire within a window, a restart-rate ceiling, or any failed unit. \
-                 Author expectations here; they hot-swap on the sensor via \
-                 @/commands/expectations."
+                 Author expectations here; they hot-swap on the sensor via the \
+                 expectations/set procedure."
             )
             .size(font::BODY)
             .style(dim),

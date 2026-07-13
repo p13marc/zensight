@@ -6,11 +6,11 @@
 //! telemetry bus. Replies are built from live nlink dumps at query time.
 //!
 //! Keys (mirroring the alerts queryable in `zensight-sensor-core`):
-//! - `zensight/netlink/@/query/routes`    → `Vec<RouteRecord>`
-//! - `zensight/netlink/@/query/neighbors` → `Vec<NeighborRecord>`
-//! - `zensight/netlink/@/query/sockets?state=&port=` → `Vec<SocketRecord>`
-//! - `zensight/netlink/@/query/addresses` → `Vec<AddressRecord>` (#10)
-//! - `zensight/netlink/@/query/events`    → `Vec<EventRecord>` (#8, recent ring)
+//! - `@rpc/netlink/routes`    → `Vec<RouteRecord>`
+//! - `@rpc/netlink/neighbors` → `Vec<NeighborRecord>`
+//! - `@rpc/netlink/sockets?state=&port=` → `Vec<SocketRecord>`
+//! - `@rpc/netlink/addresses` → `Vec<AddressRecord>` (#10)
+//! - `@rpc/netlink/events`    → `Vec<EventRecord>` (#8, recent ring)
 
 use std::sync::Arc;
 
@@ -51,10 +51,10 @@ pub type QueryEbpf = Option<std::convert::Infallible>;
 /// How often the per-process bandwidth tracker samples socket byte counters
 /// (#317). A short cadence keeps rates responsive without a `/proc` scan.
 const BANDWIDTH_SAMPLE_SECS: u64 = 2;
-/// Default `top=N` cap on the `@/query/bandwidth` reply size.
+/// Default `top=N` cap on the `@rpc/netlink/bandwidth` reply size.
 const BANDWIDTH_DEFAULT_TOP: usize = 50;
 
-/// Parse the `top=<N>` selector parameter (`@/query/bandwidth?by=process&top=N`).
+/// Parse the `top=<N>` selector parameter (`@rpc/netlink/bandwidth?by=process&top=N`).
 fn parse_top(params: &str) -> Option<usize> {
     params
         .split('&')
@@ -62,8 +62,8 @@ fn parse_top(params: &str) -> Option<usize> {
         .and_then(|v| v.parse().ok())
 }
 
-/// `key_prefix` is the sensor's legacy-shaped prefix (e.g. `zensight/netlink`);
-/// the queryables live at the v1 procedure keys `@rpc/netlink/<topic>`.
+/// `producer` is the sensor's producer name (`netlink`); the queryables live
+/// at the v1 procedure keys `@rpc/netlink/<topic>`.
 /// `events` is the shared real-time event ring (#8); `route_history` is the
 /// default-route flap ring (#111), served as `route_changes`. `collect`
 /// is the live collector-toggle handle (shared with the poll loop and the
@@ -72,7 +72,7 @@ fn parse_top(params: &str) -> Option<usize> {
 /// the tier-2a recent-close attribution handle (see [`QueryEbpf`]).
 pub async fn run(
     session: Arc<zenoh::Session>,
-    key_prefix: String,
+    producer: String,
     source: String,
     events: EventState,
     route_history: RouteHistory,
@@ -90,16 +90,16 @@ pub async fn run(
     let xfrm = Connection::<Xfrm>::new().ok();
     let nft = Connection::<Nftables>::new().ok();
 
-    let routes_key = zensight_common::command::query_key(&key_prefix, "routes");
-    let neighbors_key = zensight_common::command::query_key(&key_prefix, "neighbors");
-    let sockets_key = zensight_common::command::query_key(&key_prefix, "sockets");
-    let addresses_key = zensight_common::command::query_key(&key_prefix, "addresses");
-    let events_key = zensight_common::command::query_key(&key_prefix, "events");
-    let route_changes_key = zensight_common::command::query_key(&key_prefix, "route_changes");
-    let tc_key = zensight_common::command::query_key(&key_prefix, "tc");
-    let xfrm_key = zensight_common::command::query_key(&key_prefix, "xfrm");
-    let nft_key = zensight_common::command::query_key(&key_prefix, "nft");
-    let bandwidth_key = zensight_common::command::query_key(&key_prefix, "bandwidth");
+    let routes_key = zensight_common::command::query_key(&producer, "routes");
+    let neighbors_key = zensight_common::command::query_key(&producer, "neighbors");
+    let sockets_key = zensight_common::command::query_key(&producer, "sockets");
+    let addresses_key = zensight_common::command::query_key(&producer, "addresses");
+    let events_key = zensight_common::command::query_key(&producer, "events");
+    let route_changes_key = zensight_common::command::query_key(&producer, "route_changes");
+    let tc_key = zensight_common::command::query_key(&producer, "tc");
+    let xfrm_key = zensight_common::command::query_key(&producer, "xfrm");
+    let nft_key = zensight_common::command::query_key(&producer, "nft");
+    let bandwidth_key = zensight_common::command::query_key(&producer, "bandwidth");
 
     let routes_q = match session.declare_queryable(&routes_key).await {
         Ok(q) => q,
@@ -172,7 +172,7 @@ pub async fn run(
         }
     };
     // Per-process TCP bandwidth (#317): a fixed-cadence sampler diffs `tcp_info`
-    // goodput bytes per socket cookie; the `@/query/bandwidth` handler joins the
+    // goodput bytes per socket cookie; the `@rpc/netlink/bandwidth` handler joins the
     // rates to processes at query time. Cheap sockdiag dumps, no `/proc` scan.
     let mut bw_tracker = crate::bandwidth::BandwidthTracker::default();
     let mut bw_tick = tokio::time::interval(std::time::Duration::from_secs(BANDWIDTH_SAMPLE_SECS));
@@ -300,18 +300,18 @@ async fn sample_socket_bytes(conn: &Connection<SockDiag>) -> Vec<(u64, u64, u64)
 }
 
 /// Serve the opt-in eBPF detail queryables (#114) until the session closes:
-/// `@/query/retransmits` (top-K retransmit peers) and `@/query/connections`
+/// `@rpc/netlink/retransmits` (top-K retransmit peers) and `@rpc/netlink/connections`
 /// (recent tcplife records). Spawned only when the `ebpf` feature is built and
 /// the module loaded; reads the shared [`EbpfState`](crate::ebpf::EbpfState).
 #[cfg(feature = "ebpf")]
 pub async fn run_ebpf_queries(
     session: Arc<zenoh::Session>,
-    key_prefix: String,
+    producer: String,
     ebpf: crate::ebpf::EbpfState,
     top_k: usize,
 ) {
-    let retransmits_key = zensight_common::command::query_key(&key_prefix, "retransmits");
-    let connections_key = zensight_common::command::query_key(&key_prefix, "connections");
+    let retransmits_key = zensight_common::command::query_key(&producer, "retransmits");
+    let connections_key = zensight_common::command::query_key(&producer, "connections");
     let retransmits_q = match session.declare_queryable(&retransmits_key).await {
         Ok(q) => q,
         Err(e) => {
@@ -412,7 +412,7 @@ async fn collect_neighbors(conn: &Connection<Route>) -> Vec<NeighborRecord> {
 }
 
 /// Build the full nftables rule inventory (#14): every rule across every table,
-/// with table/chain/family/handle and any comment. Served via `@/query/nft`.
+/// with table/chain/family/handle and any comment. Served via `@rpc/netlink/nft`.
 async fn collect_nft(conn: &Connection<Nftables>) -> Vec<NftRuleRecord> {
     let tables = match conn.list_tables().await {
         Ok(t) => t,
@@ -500,7 +500,7 @@ fn xfrm_mode_label(m: &XfrmMode) -> &'static str {
 }
 
 /// Build the full TC tree (#12): every qdisc + class on every interface, with
-/// counters/backlog. Served on demand via `@/query/tc`.
+/// counters/backlog. Served on demand via `@rpc/netlink/tc`.
 async fn collect_tc(conn: &Connection<Route>) -> Vec<TcRecord> {
     let names: std::collections::HashMap<u32, String> = match conn.get_links().await {
         Ok(links) => links

@@ -1,13 +1,15 @@
-//! Unified artifact production + serving (`@/artifact` + `@/store` + `@/tree`).
+//! Unified artifact production + serving (the `@rpc/<producer>/artifact/*`
+//! procedures + `@blob/{artifact,store,tree}` delivery).
 //!
 //! One channel subsumes the former `@/report` (Tier-1 whole-file) and
 //! `@/snapshot` (Tier-2 directory-tree) channels and hosts new artifact kinds
 //! (e.g. on-demand packet capture) as pluggable [`ArtifactProducer`]s instead of
 //! a third copy of the same request/status/serve/TTL machinery.
 //!
-//! The channel owns the control plane — a **request** subscriber
-//! (`@/artifact/request`), a **status** queryable (`@/artifact/status`, one entry
-//! per registered kind), a **cancel** write procedure and a TTL
+//! The channel owns the control plane — a **request** procedure
+//! (`@rpc/<producer>/artifact/request`, request/reply), a **status** read
+//! procedure (`…/artifact/status`, one entry
+//! per registered kind), a **cancel** write procedure (`…/artifact/cancel`) and a TTL
 //! reaper — plus the `zenoh-blob` delivery servers (a [`BlobServer`] for Tier-1
 //! producers, a [`TreeServer`] + in-memory chunk store for Tier-2 producers),
 //! spun up only when a producer of that delivery kind is registered.
@@ -147,14 +149,14 @@ struct KindRuntime {
     busy: bool,
     last_gen: Option<Instant>,
     active: Option<Active>,
-    /// Cancellation handle for an in-flight production (fired on `@/artifact/cancel`).
+    /// Cancellation handle for an in-flight production (fired on `artifact/cancel`).
     in_flight: Option<(Ulid, CancelToken)>,
 }
 
-/// Serves the `@/artifact` channel for one sensor.
+/// Serves the artifact channel for one sensor.
 pub struct ArtifactChannel {
     session: Arc<zenoh::Session>,
-    key_prefix: String,
+    producer: String,
     source_id: String,
     producers: HashMap<&'static str, Arc<dyn ArtifactProducer>>,
     /// Tier-1 blob server (present iff a `Blob` producer is registered).
@@ -166,13 +168,13 @@ pub struct ArtifactChannel {
 }
 
 impl ArtifactChannel {
-    /// Build a channel for `key_prefix` (e.g. `"zensight/netlink"`) serving the
+    /// Build a channel for `producer` (e.g. `"netlink"`) serving the
     /// given producers. `source_id` is this host's id (for `target_source`
     /// matching). Returns `None` if no producer is enabled (so `main` can skip
     /// spawning it entirely).
     pub fn new(
         session: Arc<zenoh::Session>,
-        key_prefix: impl Into<String>,
+        producer: impl Into<String>,
         source_id: impl Into<String>,
         producers: Vec<Arc<dyn ArtifactProducer>>,
     ) -> Option<Self> {
@@ -183,7 +185,7 @@ impl ArtifactChannel {
         if enabled.is_empty() {
             return None;
         }
-        let key_prefix = key_prefix.into();
+        let producer = producer.into();
 
         let wants_blob = enabled
             .iter()
@@ -195,7 +197,7 @@ impl ArtifactChannel {
         let blob = wants_blob.then(|| {
             BlobServer::new(
                 session.clone(),
-                artifact_blob_prefix(&key_prefix),
+                artifact_blob_prefix(&producer),
                 Format::Json,
             )
         });
@@ -203,8 +205,8 @@ impl ArtifactChannel {
             let store = Arc::new(MemoryStore::new());
             let tree_server = TreeServer::new(
                 session.clone(),
-                artifact_store_prefix(&key_prefix),
-                artifact_tree_prefix(&key_prefix),
+                artifact_store_prefix(&producer),
+                artifact_tree_prefix(&producer),
                 Format::Json,
                 store.clone() as Arc<dyn ContentStore>,
             );
@@ -220,7 +222,7 @@ impl ArtifactChannel {
 
         Some(ArtifactChannel {
             session,
-            key_prefix,
+            producer,
             source_id: source_id.into(),
             producers: map,
             blob,
@@ -238,19 +240,19 @@ impl ArtifactChannel {
     }
 
     async fn run_inner(self: &ArtifactChannel) -> anyhow::Result<()> {
-        let request_key = artifact_request_key(&self.key_prefix);
+        let request_key = artifact_request_key(&self.producer);
         let req_q = self
             .session
             .declare_queryable(request_key.as_str())
             .await
             .map_err(|e| anyhow::anyhow!("declare artifact request queryable: {e}"))?;
-        let status_key = artifact_status_key(&self.key_prefix);
+        let status_key = artifact_status_key(&self.producer);
         let status_q = self
             .session
             .declare_queryable(status_key.as_str())
             .await
             .map_err(|e| anyhow::anyhow!("declare artifact status queryable: {e}"))?;
-        let cancel_key = artifact_cancel_key(&self.key_prefix);
+        let cancel_key = artifact_cancel_key(&self.producer);
         let cancel_q = self
             .session
             .declare_queryable(cancel_key.as_str())
@@ -266,7 +268,7 @@ impl ArtifactChannel {
 
         let mut ttl_tick = tokio::time::interval(Duration::from_secs(5));
         tracing::info!(
-            prefix = %self.key_prefix,
+            producer = %self.producer,
             kinds = ?self.producers.keys().collect::<Vec<_>>(),
             "artifact channel ready"
         );
@@ -550,7 +552,7 @@ impl ArtifactChannel {
                     kind: slug.to_string(),
                     delivery: Delivery::Blob {
                         manifest,
-                        blob_prefix: artifact_blob_prefix(&self.key_prefix),
+                        blob_prefix: artifact_blob_prefix(&self.producer),
                     },
                     expires_ms,
                 };
@@ -609,8 +611,8 @@ impl ArtifactChannel {
                     kind: slug.to_string(),
                     delivery: Delivery::Tree {
                         tree_id: tree_id.clone(),
-                        store_prefix: artifact_store_prefix(&self.key_prefix),
-                        tree_prefix: artifact_tree_prefix(&self.key_prefix),
+                        store_prefix: artifact_store_prefix(&self.producer),
+                        tree_prefix: artifact_tree_prefix(&self.producer),
                         summary,
                     },
                     expires_ms,
@@ -712,7 +714,7 @@ impl ArtifactChannel {
     fn clone_handle(&self) -> ArtifactChannel {
         ArtifactChannel {
             session: self.session.clone(),
-            key_prefix: self.key_prefix.clone(),
+            producer: self.producer.clone(),
             source_id: self.source_id.clone(),
             producers: self.producers.clone(),
             blob: self.blob.clone(),

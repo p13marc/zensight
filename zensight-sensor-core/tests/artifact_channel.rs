@@ -1,7 +1,8 @@
-//! End-to-end tests of the unified `@/artifact` channel: a Tier-1 report blob and
-//! a Tier-2 snapshot tree served by one channel (per-kind status), plus the
-//! cancel-an-in-flight-production path (the design's risk #2). Single-session
-//! loopback (scouting off), mirroring `snapshot_channel.rs`.
+//! End-to-end tests of the unified artifact channel (the
+//! `@rpc/<producer>/artifact/*` procedures + `@blob` delivery): a Tier-1 report
+//! blob and a Tier-2 snapshot tree served by one channel (per-kind status), plus
+//! the cancel-an-in-flight-production path (the design's risk #2).
+//! Single-session loopback (scouting off), mirroring `snapshot_channel.rs`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -76,7 +77,7 @@ fn report_producer(prefix: &str) -> Arc<dyn ArtifactProducer> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn report_and_snapshot_on_one_channel() {
     let session = Arc::new(zenoh::open(isolated_config()).await.unwrap());
-    let prefix = "zensight/arttest1";
+    let prefix = "arttest1";
 
     // A snapshot source dir.
     let src = tempfile::tempdir().unwrap();
@@ -270,7 +271,7 @@ impl ArtifactProducer for SlowProducer {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_aborts_in_flight_production() {
     let session = Arc::new(zenoh::open(isolated_config()).await.unwrap());
-    let prefix = "zensight/arttest2";
+    let prefix = "arttest2";
 
     let started = Arc::new(tokio::sync::Notify::new());
     let producer = Arc::new(SlowProducer {

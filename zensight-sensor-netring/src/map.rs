@@ -900,7 +900,7 @@ pub fn tls_points(sensor_id: &str, handshakes: u64, distinct: u64) -> Vec<Teleme
 }
 
 /// QUIC inventory aggregate (issue #72): distinct (sni, version) pairs seen.
-/// Low-cardinality count safe to stream; detail pulled from `@/query/quic`.
+/// Low-cardinality count safe to stream; detail pulled from `@rpc/netring/quic`.
 pub fn quic_count_point(sensor_id: &str, distinct: u64) -> TelemetryPoint {
     TelemetryPoint::new(
         sensor_id,
@@ -982,7 +982,7 @@ pub fn encrypted_dns_bypass_alert(sensor_id: &str, transport: &str, sni: Option<
 /// Encrypted-DNS aggregates (#326): per-transport session counters, the
 /// un-known-resolver subset (the policy-bypass signal), and the distinct
 /// destination count. Low-cardinality — safe to stream; per-destination detail is
-/// pulled on demand from `@/query/encrypted_dns`.
+/// pulled on demand from `@rpc/netring/encrypted_dns`.
 pub fn encrypted_dns_points(
     sensor_id: &str,
     dot: u64,
@@ -1043,7 +1043,7 @@ pub fn tls_pq_ratio_point(sensor_id: &str, pq: u64, total: u64) -> TelemetryPoin
 
 /// Passive asset-inventory aggregate: number of distinct assets (MACs) the
 /// inventory currently holds. Low-cardinality count safe to stream; the
-/// per-asset detail is pulled on demand from `@/query/assets` (principle P2).
+/// per-asset detail is pulled on demand from `@rpc/netring/assets` (principle P2).
 pub fn asset_count_point(sensor_id: &str, discovered: u64) -> TelemetryPoint {
     TelemetryPoint::new(
         sensor_id,
@@ -1327,7 +1327,7 @@ pub fn dns_points(
     pts
 }
 
-/// Rank a DNS SLD inventory newest-volume-first into the on-demand `@/query/dns`
+/// Rank a DNS SLD inventory newest-volume-first into the on-demand `@rpc/netring/dns`
 /// reply (top-N by query count). Pure so the ranking is unit-testable.
 pub fn top_dns_records(
     inv: &std::collections::HashMap<String, (u64, u64)>,
@@ -1415,7 +1415,7 @@ pub fn http_points(
     pts
 }
 
-/// Rank an HTTP host inventory request-volume-first into the `@/query/http` reply.
+/// Rank an HTTP host inventory request-volume-first into the `@rpc/netring/http` reply.
 pub fn top_http_hosts(
     inv: &std::collections::HashMap<String, (u64, u64)>,
     top: usize,
@@ -1437,7 +1437,7 @@ pub fn top_http_hosts(
     v
 }
 
-/// Rank a JA4H fingerprint inventory hit-count-first into the `@/query/ja4h`
+/// Rank a JA4H fingerprint inventory hit-count-first into the `@rpc/netring/ja4h`
 /// reply (#124). Pure so the ranking is unit-testable.
 pub fn top_ja4h(
     inv: &std::collections::HashMap<String, Ja4hRecord>,
@@ -1451,7 +1451,7 @@ pub fn top_ja4h(
 
 // ─── Top-talkers + elephant flows (issue #21) ────────────────────────────────
 
-/// Rank a per-destination histogram byte-volume-first into the `@/query/talkers`
+/// Rank a per-destination histogram byte-volume-first into the `@rpc/netring/talkers`
 /// reply (top-N talkers). Pure so the ranking is unit-testable.
 pub fn top_talkers(talkers: &[(String, f64)], top: usize) -> Vec<TalkerRecord> {
     let mut v: Vec<TalkerRecord> = talkers
@@ -1474,7 +1474,7 @@ pub fn top_talkers(talkers: &[(String, f64)], top: usize) -> Vec<TalkerRecord> {
 }
 
 /// Rank the `(src,dst)` traffic-matrix pairs (netring `aggregate()`, #369)
-/// rate-first into the `@/query/matrix` reply (top-N / service map). Pure so the
+/// rate-first into the `@rpc/netring/matrix` reply (top-N / service map). Pure so the
 /// ranking is unit-testable (#122).
 pub fn traffic_matrix(pairs: &[(String, String, f64)], top: usize) -> Vec<MatrixRecord> {
     let mut v: Vec<MatrixRecord> = pairs
@@ -1813,8 +1813,8 @@ mod tests {
     fn community_id_agrees_with_netring_ipfix() {
         // Cross-check (#223): our hand-rolled Community ID must equal the value
         // netring stamps on its IPFIX records (`FlowRecord::to_ipfix_record`).
-        // These vectors were captured live from `@/query/ipfix` for the same
-        // 5-tuples we serve on `@/query/flows` — they agree because both follow
+        // These vectors were captured live from `@rpc/netring/ipfix` for the same
+        // 5-tuples we serve on `@rpc/netring/flows` — they agree because both follow
         // the Corelight spec with universal seed 0. Pins both impls.
         let tcp_a: SocketAddr = "10.0.0.10:49152".parse().unwrap();
         let tcp_b: SocketAddr = "10.0.0.20:80".parse().unwrap();

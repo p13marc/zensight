@@ -1,9 +1,9 @@
 //! On-demand unit inventory query channel (principle P2, #274).
 //!
 //! Full per-unit inventory is high-cardinality (hundreds/host) so it is served on
-//! demand, never streamed. Mirrors the netlink `@/query/*` pattern.
+//! demand, never streamed. Mirrors the netlink `@rpc/netlink/*` pattern.
 //!
-//! Keys (under `<key_prefix>/@/query/`):
+//! Procedures (under `…/@rpc/systemd/`):
 //! - `units`            → `Vec<UnitRecord>` (all loaded units)
 //! - `failed`           → `Vec<UnitRecord>` (only `active_state == failed`)
 //! - `unit?name=<name>` → `UnitDetail` (full props + deps), or `null` if unknown
@@ -40,13 +40,13 @@ fn accounting(v: u64) -> Option<u64> {
     (v != u64::MAX).then_some(v)
 }
 
-/// How many event-ring lines a `@/query/unit?name=` reply carries (#274).
+/// How many event-ring lines a `@rpc/systemd/unit?name=` reply carries (#274).
 const RECENT_CHANGES_MAX: usize = 20;
 
 /// Run the on-demand unit inventory query channel until the session closes.
 pub async fn run(
     session: Arc<zenoh::Session>,
-    key_prefix: String,
+    producer: String,
     events: EventState,
     cgroup: crate::config::CgroupConfig,
 ) {
@@ -65,12 +65,12 @@ pub async fn run(
         }
     };
 
-    let units_key = zensight_common::command::query_key(&key_prefix, "units");
-    let failed_key = zensight_common::command::query_key(&key_prefix, "failed");
-    let unit_key = zensight_common::command::query_key(&key_prefix, "unit");
-    let events_key = zensight_common::command::query_key(&key_prefix, "events");
-    let timers_key = zensight_common::command::query_key(&key_prefix, "timers");
-    let cgroups_key = zensight_common::command::query_key(&key_prefix, "cgroups");
+    let units_key = zensight_common::command::query_key(&producer, "units");
+    let failed_key = zensight_common::command::query_key(&producer, "failed");
+    let unit_key = zensight_common::command::query_key(&producer, "unit");
+    let events_key = zensight_common::command::query_key(&producer, "events");
+    let timers_key = zensight_common::command::query_key(&producer, "timers");
+    let cgroups_key = zensight_common::command::query_key(&producer, "cgroups");
 
     let units_q = match session.declare_queryable(&units_key).await {
         Ok(q) => q,
@@ -161,7 +161,7 @@ pub async fn run(
     }
 }
 
-/// Build the cgroup subtree for a `@/query/cgroups[?path=<rel>]` request (#280).
+/// Build the cgroup subtree for a `@rpc/systemd/cgroups[?path=<rel>]` request (#280).
 /// `None` when the path is rejected (traversal) or the subtree doesn't exist.
 fn build_cgroup_tree(
     cfg: &crate::config::CgroupConfig,

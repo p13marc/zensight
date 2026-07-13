@@ -6,7 +6,7 @@
 //! alert via the [`AlertReporter`] (firing → resolved → tombstone); each rule is
 //! reconciled every sweep so a recovered expectation auto-resolves. The rule set
 //! lives behind an `Arc<RwLock<…>>` so [`SentinelHandle`] can swap it live
-//! (`@/commands/expectations`).
+//! (`@rpc/systemd/expectations/set`).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -100,7 +100,7 @@ pub fn timer_ok(last_trigger_usec: u64, now_usec: u64, within_secs: u64) -> bool
 
 // ─── Hot-swap handle ─────────────────────────────────────────────────────────
 
-/// Runtime handle to the sentinel's expectation set (`@/commands/expectations`).
+/// Runtime handle to the sentinel's expectation set (`@rpc/systemd/expectations/set`).
 #[derive(Clone)]
 pub struct SentinelHandle {
     expectations: Arc<RwLock<ExpectationsConfig>>,
@@ -111,7 +111,7 @@ impl SentinelHandle {
     pub async fn replace(&self, cfg: ExpectationsConfig) {
         *self.expectations.write().await = cfg;
     }
-    /// Snapshot the current set (for `@/status/expectations`).
+    /// Snapshot the current set (for the `@rpc/systemd/expectations` read).
     pub async fn snapshot(&self) -> ExpectationsConfig {
         self.expectations.read().await.clone()
     }

@@ -29,7 +29,7 @@ pub struct SysinfoSensorConfig {
     #[serde(default)]
     pub logging: LoggingConfig,
 
-    /// On-demand artifact channel (`@/artifact`) limits — report + snapshot.
+    /// On-demand artifact channel (`@rpc/sysinfo/artifact/*`) limits — report + snapshot.
     /// Every kind disabled by default.
     #[serde(default)]
     pub artifacts: zensight_sensor_core::ArtifactLimits,
@@ -38,10 +38,6 @@ pub struct SysinfoSensorConfig {
 /// System information collection configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SysinfoConfig {
-    /// Key expression prefix (default: "zensight/sysinfo").
-    #[serde(default = "default_key_prefix")]
-    pub key_prefix: String,
-
     /// Source id (hostname) to use in key expressions.
     /// Use "auto" to detect the local hostname automatically (default).
     #[serde(default = "default_source")]
@@ -77,10 +73,6 @@ pub struct SysinfoConfig {
     pub processes: ProcessScrubConfig,
 }
 
-fn default_key_prefix() -> String {
-    "zensight/sysinfo".to_string()
-}
-
 fn default_source() -> String {
     "auto".to_string()
 }
@@ -89,7 +81,7 @@ fn default_poll_interval() -> u64 {
     5
 }
 
-/// Privacy policy for the `@/query/processes` command lines (#302).
+/// Privacy policy for the `@rpc/sysinfo/processes` command lines (#302).
 ///
 /// Secrets must not transit Zenoh even on query channels: scrubbing is ON by
 /// default, with `strip_proc_arguments` as the belt-and-braces escape hatch
@@ -215,7 +207,7 @@ pub struct CollectConfig {
     pub power: bool,
 
     /// Serve the on-demand per-process detail query channel
-    /// (`@/query/processes?sort=cpu|mem|io&top=N`). Default on. The per-pid
+    /// (`@rpc/sysinfo/processes?sort=cpu|mem|io&top=N`). Default on. The per-pid
     /// firehose is served only on query (P2); the small `system/processes_*`
     /// aggregates still stream via the `processes` collector.
     #[serde(default = "default_true")]
@@ -260,7 +252,7 @@ pub struct CollectConfig {
     pub saturation_score: bool,
 
     /// Serve opt-in eBPF saturation histograms (runqlat scheduler run-queue
-    /// latency + biolatency block-I/O latency) on `@/query/latency` (#99).
+    /// latency + biolatency block-I/O latency) on `@rpc/sysinfo/latency` (#99).
     /// Default OFF. NO-OP unless the binary was built with `--features ebpf`
     /// AND the process holds CAP_BPF/CAP_PERFMON. Never streamed onto the bus.
     #[serde(default)]
@@ -409,8 +401,8 @@ impl SensorConfig for SysinfoSensorConfig {
         &self.logging
     }
 
-    fn key_prefix(&self) -> &str {
-        &self.sysinfo.key_prefix
+    fn producer(&self) -> &str {
+        "sysinfo"
     }
 
     fn artifact_limits(&self) -> zensight_sensor_core::ArtifactLimits {
@@ -509,7 +501,6 @@ mod tests {
         }"#;
 
         let config: SysinfoSensorConfig = json5::from_str(json).unwrap();
-        assert_eq!(config.sysinfo.key_prefix, "zensight/sysinfo");
         assert_eq!(config.sysinfo.source, "auto");
         assert_eq!(config.sysinfo.poll_interval_secs, 5);
         assert!(config.sysinfo.collect.cpu);
@@ -557,7 +548,6 @@ mod tests {
         let json = r#"{
             zenoh: { mode: "peer" },
             sysinfo: {
-                key_prefix: "metrics/host",
                 source: "server01",
                 poll_interval_secs: 10,
                 collect: {

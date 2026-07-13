@@ -20,7 +20,7 @@ use crate::view::tokens::{font, space};
 
 /// Render the sensors view. `artifact_fetch`/`active_prefix`/`active_kind` drive
 /// the per-sensor artifact download control (report / snapshot / capture) over the
-/// unified `@/artifact` channel; `artifact_kinds` are the per-sensor advertised
+/// artifact channel; `artifact_kinds` are the per-sensor advertised
 /// kinds that decide which affordances each card renders.
 #[allow(clippy::too_many_arguments)]
 pub fn sensors_view<'a>(
@@ -105,18 +105,18 @@ fn sensor_card<'a>(
     // the sensor's advertised kinds. The key prefix is `zensight/<sensor>`
     // (protocol-scoped by design); the card's source becomes the request's
     // `target_source` so only THIS host produces the artifact.
-    let key_prefix = format!("zensight/{}", snap.sensor);
+    let producer = snap.sensor.clone();
     col = col.push(artifact_section(
         artifact_fetch,
-        &key_prefix,
+        &producer,
         snap.source.as_deref(),
         artifact_kinds
-            .get(&key_prefix)
+            .get(&producer)
             .map(|v| v.as_slice())
             .unwrap_or(&[]),
         active_prefix,
         active_kind,
-        capture_forms.get(&key_prefix),
+        capture_forms.get(&producer),
     ));
 
     // Recent errors (newest first), if any have arrived for this sensor.

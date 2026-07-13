@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
     let format = runner.config().serialization;
     let runner = runner.with_format(format);
 
-    // On-demand debug-report (`@/artifact`): bundle redacted config + health +
+    // On-demand debug-report (the artifact channel): bundle redacted config + health +
     // counters. No-op unless `report.enabled` is set in the config.
     let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
         "systemd",
@@ -51,14 +51,13 @@ async fn main() -> Result<()> {
     let systemd_config = runner.config().systemd.clone();
 
     tracing::info!(
-        "systemd sensor running (prefix: {}, interval: {}s, source: {})",
-        systemd_config.key_prefix,
+        "systemd sensor running (interval: {}s, source: {})",
         systemd_config.poll_interval_secs,
         source
     );
 
     // Shared control-plane event ring (#275), fed by the D-Bus event stream and
-    // served on @/query/events.
+    // served on @rpc/systemd/events.
     let event_state =
         zensight_sensor_systemd::events::EventState::new(systemd_config.events_capacity);
 
@@ -80,24 +79,24 @@ async fn main() -> Result<()> {
     });
 
     // On-demand unit inventory query channel (#274/#275):
-    // @/query/{units,failed,unit,events}.
+    // @rpc/systemd/{units,failed,unit,events}.
     let query_session = runner.session().clone();
-    let query_prefix = systemd_config.key_prefix.clone();
+    let query_producer = "systemd".to_string();
     let query_events = event_state.clone();
     let query_cgroup = systemd_config.cgroup.clone();
     runner.spawn(async move {
         zensight_sensor_systemd::query::run(
             query_session,
-            query_prefix,
+            query_producer,
             query_events,
             query_cgroup,
         )
         .await;
     });
 
-    // Shared AlertReporter → zensight/systemd/@/alerts/* for both the built-in
+    // Shared AlertReporter → state/systemd/alert/* for both the built-in
     // threshold alerts (#276) and the sentinel (#277), with one late-joiner
-    // firing-set seed on @/query/alerts. Created when either feature is active.
+    // alert-state seed on state/systemd/alert/*. Created when either feature is active.
     let expectations = systemd_config.expectations.clone();
     let alerts_active = systemd_config.alerts.enabled || expectations.is_some();
     let reporter = alerts_active.then(|| {
@@ -135,7 +134,7 @@ async fn main() -> Result<()> {
     });
 
     // Embedded sentinel (#277): declarative expectations → alerts, hot-swappable
-    // via @/commands/expectations (+ @/status/expectations). Needs its own D-Bus
+    // via @rpc/systemd/expectations/set (+ read on …/expectations). Needs its own D-Bus
     // connection for per-expectation state reads.
     if let (Some(exp_cfg), Some(reporter)) = (expectations, reporter) {
         match zbus::Connection::system().await {
@@ -150,9 +149,9 @@ async fn main() -> Result<()> {
                 let handle = evaluator.handle();
                 runner.spawn(async move { evaluator.run().await });
                 let cmd_session = runner.session().clone();
-                let cmd_prefix = systemd_config.key_prefix.clone();
+                let cmd_producer = "systemd".to_string();
                 runner.spawn(async move {
-                    zensight_sensor_systemd::command::run(cmd_session, cmd_prefix, handle).await;
+                    zensight_sensor_systemd::command::run(cmd_session, cmd_producer, handle).await;
                 });
                 tracing::info!("systemd sentinel enabled");
             }
@@ -163,10 +162,10 @@ async fn main() -> Result<()> {
     // Gated service control (#283) — default OFF; only declared when explicitly
     // enabled. Read-only sensor otherwise.
     let action_session = runner.session().clone();
-    let action_prefix = systemd_config.key_prefix.clone();
+    let action_producer = "systemd".to_string();
     let action_cfg = systemd_config.actions.clone();
     runner.spawn(async move {
-        zensight_sensor_systemd::action::run(action_session, action_prefix, action_cfg).await;
+        zensight_sensor_systemd::action::run(action_session, action_producer, action_cfg).await;
     });
 
     let metadata = serde_json::json!({

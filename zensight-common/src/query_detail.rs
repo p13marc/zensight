@@ -1,5 +1,6 @@
-//! On-demand detail DTOs: the JSON reply shapes for the sensors' `@/query/*`
-//! detail channels (full route/neighbor/socket tables). Shared so the producing
+//! On-demand detail DTOs: the JSON reply shapes for the sensors'
+//! `@rpc/<producer>/<topic>` detail read procedures (full route/neighbor/socket
+//! tables). Shared so the producing
 //! sensor and the consuming frontend agree on one definition (no drift).
 //!
 //! These are higher-cardinality tables served only on demand (principle P2) —
@@ -121,7 +122,7 @@ pub struct TlsRecord {
 /// One observed QUIC Initial (netring, passive). QUIC carries the destination
 /// hostname (SNI) and ALPN in the *unprotected* Initial ClientHello, so this is
 /// the QUIC analogue of TLS SNI visibility — for the growing share of HTTPS that
-/// has moved off TCP+TLS onto QUIC/h3. Served on demand from `@/query/quic`.
+/// has moved off TCP+TLS onto QUIC/h3. Served on demand from `@rpc/netring/quic`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct QuicRecord {
     /// Server Name Indication from the ClientHello (the dialed hostname).
@@ -149,7 +150,7 @@ pub struct QuicRecord {
 /// One observed SSH handshake fingerprint (netring, passive), keyed by HASSH.
 /// HASSH (client) / HASSHServer fingerprints the SSH implementation from its
 /// KEXINIT algorithm lists — fleet fingerprinting + rogue-client detection
-/// without touching the (encrypted) session. Served on demand from `@/query/ssh`.
+/// without touching the (encrypted) session. Served on demand from `@rpc/netring/ssh`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct SshRecord {
     /// HASSH / HASSHServer fingerprint (lowercase-hex MD5).
@@ -170,7 +171,7 @@ pub struct SshRecord {
 /// One observed JA4H HTTP-request fingerprint (netring, passive — issue #124),
 /// keyed by the JA4H string. JA4H fingerprints the HTTP client from its request
 /// method, version, header set and cookie/language shape (FoxIO `a_b_c_d` form) —
-/// cleartext HTTP only (TLS is opaque). Served on demand from `@/query/ja4h`.
+/// cleartext HTTP only (TLS is opaque). Served on demand from `@rpc/netring/ja4h`.
 /// Only populated when the sensor is built with `--features ja4plus` (FoxIO
 /// License 1.1) and `collect.http_fp` is set. Note: JA4SSH is not yet available
 /// upstream (flowscope 0.19 / netring 0.27 fingerprint SSH via HASSH — see
@@ -247,9 +248,9 @@ pub struct ElephantRecord {
 }
 
 /// One capture file written by the netring capture-to-disk engine (#327),
-/// served on demand from `@/query/captures`. A `triggered`-mode file carries the
+/// served on demand from `@rpc/netring/captures`. A `triggered`-mode file carries the
 /// anomaly that fired it plus (while it lives) the artifact id to download the
-/// bytes through the `@/artifact/blob` path; a `rotating`-mode file is a local
+/// bytes through the `@blob/artifact` path; a `rotating`-mode file is a local
 /// spool entry (metadata only — retrieval needs host filesystem access).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct CaptureRecord {
@@ -274,7 +275,7 @@ pub struct CaptureRecord {
     pub start_ms: i64,
     #[serde(default)]
     pub end_ms: i64,
-    /// Tier-1 blob id to download the file through `@/artifact/blob/**` while it
+    /// Tier-1 blob id to download the file through `@blob/artifact/**` while it
     /// lives; `None` for rotating spool files or once the TTL reaped it.
     #[serde(default)]
     pub artifact_id: Option<String>,
@@ -300,7 +301,7 @@ pub struct DnsRecord {
 }
 
 /// One observed encrypted-DNS destination (netring, #326), served on demand from
-/// `@/query/encrypted_dns`. Encrypted DNS (DoT/DoQ/DoH) hides resolution from
+/// `@rpc/netring/encrypted_dns`. Encrypted DNS (DoT/DoQ/DoH) hides resolution from
 /// passive DNS RED and can tunnel/exfiltrate past a network resolver policy; this
 /// surfaces where it's going and whether the resolver is a known/sanctioned one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -395,7 +396,7 @@ pub struct AssetRecord {
 }
 
 /// One process row (sysinfo), served on demand sorted/filtered by the caller
-/// (`@/query/processes?sort=cpu|mem|io&top=N`). The high-cardinality per-pid
+/// (`@rpc/sysinfo/processes?sort=cpu|mem|io&top=N`). The high-cardinality per-pid
 /// firehose behind the streamed `system/processes_{total,zombie}` aggregates —
 /// never streamed as per-pid metric series (principle P2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -545,8 +546,8 @@ pub struct SocketRecord {
     pub proc_start_time: Option<u64>,
 }
 
-/// One systemd unit inventory row (#274), served on demand from `@/query/units`
-/// / `@/query/failed`. High-cardinality (hundreds per host) → never streamed.
+/// One systemd unit inventory row (#274), served on demand from `@rpc/systemd/units`
+/// / `@rpc/systemd/failed`. High-cardinality (hundreds per host) → never streamed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnitRecord {
     pub name: String,
@@ -559,7 +560,7 @@ pub struct UnitRecord {
     pub job: Option<String>,
 }
 
-/// Full detail for one systemd unit (#274), served from `@/query/unit?name=<u>`:
+/// Full detail for one systemd unit (#274), served from `@rpc/systemd/unit?name=<u>`:
 /// the inventory fields plus resource accounting, the unit file path, and the
 /// dependency edges. Resource fields are `None` when accounting is off / the unit
 /// isn't a service.
@@ -612,7 +613,7 @@ pub struct UnitDetail {
     pub control_group: Option<String>,
 }
 
-/// One systemd `.timer` unit row (#279), served on demand from `@/query/timers`.
+/// One systemd `.timer` unit row (#279), served on demand from `@rpc/systemd/timers`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimerRecord {
     pub name: String,
@@ -625,7 +626,7 @@ pub struct TimerRecord {
     pub overdue: bool,
 }
 
-/// One node of the systemd cgroup-v2 tree (#280), served from `@/query/cgroups`.
+/// One node of the systemd cgroup-v2 tree (#280), served from `@rpc/systemd/cgroups`.
 /// A point-in-time snapshot keyed by `path` (transient scopes churn).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CgroupNode {
@@ -818,7 +819,7 @@ mod tests {
 
     /// A `LogRecord` round-trips through its `TelemetryPoint` bridge without
     /// losing typed fields or spillover labels (`sd.journald.*`, templates,
-    /// raw) — the losslessness contract behind `@/query/events` (#358).
+    /// raw) — the losslessness contract behind `@rpc/logs/events` (#358).
     #[test]
     fn log_record_point_round_trip() {
         let mut labels = std::collections::HashMap::new();

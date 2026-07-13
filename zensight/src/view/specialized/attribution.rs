@@ -17,7 +17,7 @@ use zensight_common::SocketRecord;
 /// connection would be event-time).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttributionSource {
-    /// Matched a currently-open socket from `@/query/sockets` (#304).
+    /// Matched a currently-open socket from `@rpc/netlink/sockets` (#304).
     LiveSocket,
     // CompletedConnection: the eBPF ConnRecord tier (event-time, catches
     // short-lived flows) lands with the post-0.7.0 eBPF frontier (#168/#114).

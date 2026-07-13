@@ -28,7 +28,7 @@ fn test_snmp_telemetry_encoding() {
 /// observed device rides as the first subject chunk after the producer).
 #[test]
 fn test_snmp_key_expressions() {
-    let prefix = zensight_sensor_core::v1::v1_telemetry_prefix("zensight/snmp");
+    let prefix = zensight_sensor_core::v1::V1Context::for_producer("snmp").telemetry_prefix();
     let origin = zensight_sensor_core::v1::host_id().as_str();
 
     let sys_uptime = format!("{prefix}/router01/system/sysUpTime");
@@ -99,7 +99,7 @@ fn test_ip_address_device_names() {
 /// Test SNMP interface index in metric paths (v1 proxy shape).
 #[test]
 fn test_interface_index_metrics() {
-    let prefix = zensight_sensor_core::v1::v1_telemetry_prefix("zensight/snmp");
+    let prefix = zensight_sensor_core::v1::V1Context::for_producer("snmp").telemetry_prefix();
     for idx in 1..=10 {
         let key = format!("{prefix}/switch/if/{idx}/ifInOctets");
         assert!(key.contains(&format!("if/{}/", idx)));

@@ -3,12 +3,12 @@
 //! Per-line log events are high-cardinality, high-volume detail; streaming
 //! them per line rode (and could dominate) the `zensight/**` telemetry bus.
 //! They now live in a bounded in-memory ring served via a Zenoh queryable at
-//! `zensight/logs/@/query/events` — pulled by the GUI on open + a slow refresh
+//! `zensight/@v1/<origin>/@rpc/logs/events` — pulled by the GUI on open + a slow refresh
 //! tick, never streamed. The low-rate rollups (`logs/by_severity/*`,
 //! `logs/by_unit/*`, …) stay on the bus for charts/alerts.
 //!
 //! Selector parameters (zenoh `Parameters`, `;`-separated — e.g.
-//! `…/@/query/events?since=1719999000000;max=500`):
+//! `…/@rpc/logs/events?since=1719999000000;max=500`):
 //! - `since=<epoch_ms>` — only records with `ts >= since` (inclusive);
 //! - `max=<n>` — reply cap (default 500, clamped to the ring);
 //! - `host=<name>` — only records from one originating host.
@@ -67,8 +67,8 @@ fn filter_ring(
 
 /// Run the log-event query channel until the session closes. Replies with
 /// filtered records (most-recent first) as JSON `Vec<LogRecord>`.
-pub async fn run_events(session: Arc<zenoh::Session>, key_prefix: String, ring: EventRing) {
-    let key = zensight_common::command::query_key(&key_prefix, "events");
+pub async fn run_events(session: Arc<zenoh::Session>, producer: String, ring: EventRing) {
+    let key = zensight_common::command::query_key(&producer, "events");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {

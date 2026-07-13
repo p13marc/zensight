@@ -48,8 +48,8 @@ use crate::publisher::Publisher;
 pub struct SensorRunner<C: SensorConfig> {
     /// Sensor name for logging and status.
     name: String,
-    /// The instance's `<source>` key segment (hostname / device-poller id).
-    /// Host-scopes the control-plane keys (`{key_prefix}/{source}/@/…`) and
+    /// The instance's host id (hostname / device-poller id). Keys are
+    /// origin-scoped (`zensight/@v1/<origin>/…`); this value
     /// feeds the identity/artifact channels.
     source: String,
     /// Sensor version.
@@ -62,14 +62,14 @@ pub struct SensorRunner<C: SensorConfig> {
     publisher: Publisher,
     /// Liveliness manager for presence detection.
     liveliness: Option<LivelinessManager>,
-    /// Sensor health tracker, published periodically to the host-scoped
-    /// `<prefix>/<source>/@/health` so
+    /// Sensor health tracker, published periodically to the origin-scoped
+    /// `state/<producer>/health` so
     /// the frontend's Sensors view / health bar populate. Sensors may update it
     /// (device counts, poll durations) via [`Self::health`].
     health: Arc<crate::health::SensorHealth>,
     /// Host identity envelope (identity envelope, #301). Set via
-    /// [`Self::with_identity`]; drives the `_meta/sensors` +
-    /// `_meta/evidence` publication task (keyed by [`Self::source`]).
+    /// [`Self::with_identity`]; drives the `state/<producer>/sensor` +
+    /// `state/<producer>/evidence/**` publication task (keyed by [`Self::source`]).
     identity: Option<crate::identity::SharedIdentity>,
     /// Spawned tasks.
     tasks: Vec<JoinHandle<()>>,
@@ -78,9 +78,9 @@ pub struct SensorRunner<C: SensorConfig> {
 impl<C: SensorConfig> SensorRunner<C> {
     /// Create a new sensor runner.
     ///
-    /// `source` is the instance's `<source>` key segment (typically the
-    /// sensor config's `resolved_source()`): it host-scopes the control-plane
-    /// keys (`{key_prefix}/{source}/@/health` etc.) and feeds the
+    /// `source` is the instance's host id (typically the
+    /// sensor config's `resolved_source()`): keys themselves are origin-scoped
+    /// (`zensight/@v1/<origin>/state/<producer>/health` etc.); it feeds the
     /// identity/artifact channels.
     ///
     /// This will:
@@ -137,12 +137,12 @@ impl<C: SensorConfig> SensorRunner<C> {
         // Create publisher
         let publisher = Publisher::new(
             session.clone(),
-            config.key_prefix(),
+            config.producer(),
             Format::Json, // Default to JSON, can be overridden
         );
 
-        // Health tracker publishes JSON to the host-scoped
-        // `<prefix>/<source>/@/health` (publish_health ignores the publisher's
+        // Health tracker publishes JSON to the origin-scoped
+        // `state/<producer>/health` (publish_health ignores the publisher's
         // format, so the initial publisher is fine even if `with_format` later
         // changes telemetry encoding).
         let health = Arc::new(
@@ -178,7 +178,7 @@ impl<C: SensorConfig> SensorRunner<C> {
         Ok(self)
     }
 
-    /// Enable the unified on-demand artifact channel (`@/artifact`).
+    /// Enable the unified on-demand artifact channel (`@rpc/<producer>/artifact/*`).
     ///
     /// Registers the given producers (e.g. [`ReportProducer`](crate::ReportProducer)
     /// for debug bundles, [`SnapshotProducer`](crate::SnapshotProducer) for
@@ -193,7 +193,7 @@ impl<C: SensorConfig> SensorRunner<C> {
     ) -> Self {
         if let Some(channel) = crate::artifact::ArtifactChannel::new(
             self.session.clone(),
-            self.config.key_prefix().to_string(),
+            self.config.producer().to_string(),
             self.source.clone(),
             producers,
         ) {
@@ -232,7 +232,7 @@ impl<C: SensorConfig> SensorRunner<C> {
 
     /// Set a custom serialization format for the publisher.
     pub fn with_format(mut self, format: Format) -> Self {
-        self.publisher = Publisher::new(self.session.clone(), self.config.key_prefix(), format);
+        self.publisher = Publisher::new(self.session.clone(), self.config.producer(), format);
         self
     }
 
@@ -278,11 +278,6 @@ impl<C: SensorConfig> SensorRunner<C> {
     /// declared it early.
     pub fn liveliness(&self) -> Option<&LivelinessManager> {
         self.liveliness.as_ref()
-    }
-
-    /// Create a publisher with a different key prefix.
-    pub fn publisher_with_prefix(&self, prefix: impl Into<String>) -> Publisher {
-        Publisher::new(self.session.clone(), prefix, self.publisher.format())
     }
 
     /// Spawn a worker task.
@@ -344,7 +339,7 @@ impl<C: SensorConfig> SensorRunner<C> {
         }
 
         // Presence is not optional: declare the sensor-level liveliness token
-        // (`<prefix>/<source>/@/alive`) unless [`Self::with_liveliness`] already
+        // (`state/<producer>/alive`) unless [`Self::with_liveliness`] already
         // did. The frontend flips this sensor's card Offline when the token
         // vanishes (clean close or lease expiry), so a sensor without a token
         // would read as its last health forever. Declaration failure is only a
@@ -381,14 +376,14 @@ impl<C: SensorConfig> SensorRunner<C> {
             let source = self.source.clone();
             let registry = crate::advanced_publisher::AdvancedPublisherRegistry::new(
                 self.session.clone(),
-                self.config.key_prefix().to_string(),
+                self.config.producer().to_string(),
                 Format::Json,
                 crate::advanced_publisher::AdvancedPublisherConfig::cache_only(1),
             )
             .with_qos(zensight_common::QosClass::Evidence);
             let name = self.name.clone();
             let version = self.version.clone();
-            let key_prefix = self.config.key_prefix().to_string();
+            let producer_name = self.config.producer().to_string();
             let v1_ctx = self.publisher.v1().clone();
             let health = self.health.clone();
             let identity_cfg = self.config.identity_config();
@@ -429,7 +424,7 @@ impl<C: SensorConfig> SensorRunner<C> {
                     let info = zensight_common::SensorInfo {
                         name: name.clone(),
                         version: version.clone(),
-                        key_prefix: key_prefix.clone(),
+                        producer: producer_name.clone(),
                         source: source.clone(),
                         host_id: id.host_id.clone(),
                         boot_id: id.boot_id.clone(),

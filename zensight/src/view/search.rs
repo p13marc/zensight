@@ -48,7 +48,7 @@ pub struct GlobalSearchState {
     pub open: bool,
     /// Current query text.
     pub query: String,
-    /// An on-demand `_meta/query/names?ip=` lookup (#314): `(queried ip,
+    /// An on-demand catalog `@rpc/names?ip=` lookup (#314): `(queried ip,
     /// fetched names)`. Offered when an IP-shaped query hits no entity — the
     /// correlator's passive-DNS store may still know names for it.
     pub names_lookup: Option<(
@@ -273,7 +273,7 @@ pub fn search_entities(
 
 /// When the query is an IP the entity store does **not** claim, offer the
 /// passive-DNS naming pivot (#314): `Some(ip)` renders a "resolve names…"
-/// action firing `_meta/query/names?ip=`.
+/// action firing the catalog `@rpc/names?ip=` procedure.
 pub fn ip_lookup_offer(entities: &crate::entity::EntityStore, query: &str) -> Option<String> {
     let ip: std::net::IpAddr = query.trim().parse().ok()?;
     entities

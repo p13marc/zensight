@@ -4,7 +4,7 @@
 //! `tcp_info` carries cumulative goodput byte counters (`bytes_acked` = TX,
 //! `bytes_received` = RX). Sampling them on a fixed cadence and diffing **per
 //! socket cookie** (never inode — inodes get reused, which corrupts deltas)
-//! yields per-socket app-goodput rate; the `@/query/bandwidth` handler then joins
+//! yields per-socket app-goodput rate; the `@rpc/netlink/bandwidth` handler then joins
 //! those rates to processes at query time via the #304 `/proc` attribution scan.
 //!
 //! Hard limits, surfaced not hidden: **TCP only** (`udp_diag` has no per-socket

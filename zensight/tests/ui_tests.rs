@@ -2083,7 +2083,7 @@ fn test_netring_specialized_view() {
         ));
     }
 
-    // Pre-populate on-demand flow detail (as if @/query/flows had replied).
+    // Pre-populate on-demand flow detail (as if @rpc/netring/flows had replied).
     state
         .netring_detail
         .apply(Ok(vec![zensight_common::FlowRecord {
@@ -2309,7 +2309,7 @@ fn test_sensors_view() {
     // snmp advertises a debug-report artifact kind.
     let mut kinds: HashMap<String, Vec<KindStatus>> = HashMap::new();
     kinds.insert(
-        "zensight/snmp".to_string(),
+        "snmp".to_string(),
         vec![KindStatus {
             kind: "report".into(),
             busy: false,
@@ -2337,7 +2337,7 @@ fn test_sensors_view() {
         &health,
         &errors,
         &active,
-        Some("zensight/snmp"),
+        Some("snmp"),
         Some("report"),
         &kinds,
         &no_forms,
@@ -2383,7 +2383,7 @@ fn test_sensors_snapshot_dirs() {
     // sysinfo advertises a snapshot kind with two directories.
     let mut kinds: HashMap<String, Vec<KindStatus>> = HashMap::new();
     kinds.insert(
-        "zensight/sysinfo".to_string(),
+        "sysinfo".to_string(),
         vec![KindStatus {
             kind: "snapshot".into(),
             busy: false,
@@ -2408,8 +2408,8 @@ fn test_sensors_snapshot_dirs() {
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(msgs.iter().any(|m| matches!(
         m,
-        Message::StartArtifact { key_prefix, kind: ArtifactKind::Snapshot { dir }, target_source: None }
-            if key_prefix == "zensight/sysinfo" && dir == "etc"
+        Message::StartArtifact { producer, kind: ArtifactKind::Snapshot { dir }, target_source: None }
+            if producer == "sysinfo" && dir == "etc"
     )));
 
     // Downloading a snapshot (tree delivery): chunk progress + a Cancel button.
@@ -2418,7 +2418,7 @@ fn test_sensors_snapshot_dirs() {
         &health,
         &no_errors,
         &fetching,
-        Some("zensight/sysinfo"),
+        Some("sysinfo"),
         Some("snapshot"),
         &kinds,
         &no_forms,
@@ -3800,7 +3800,7 @@ fn test_systemd_units_tab_fetches_on_demand() {
 
 /// #283: Units-tab service controls use an inline two-step confirm — "start"
 /// arms the action, then "confirm" emits SystemdUnitActionConfirm (which the app
-/// sends to `@/commands/action`); "cancel" backs out.
+/// sends to `@rpc/systemd/action/set`); "cancel" backs out.
 #[test]
 fn test_systemd_units_action_confirm_flow() {
     use zensight::view::specialized::specialized_view;
@@ -4259,9 +4259,9 @@ fn netring_capture_tab_hosts_capture_form() {
     ));
 
     let kinds_map: HashMap<String, Vec<KindStatus>> =
-        HashMap::from([("zensight/netring".to_string(), capture_kinds(300, true))]);
+        HashMap::from([("netring".to_string(), capture_kinds(300, true))]);
     let forms: HashMap<String, CaptureForm> =
-        HashMap::from([("zensight/netring".to_string(), CaptureForm::default())]);
+        HashMap::from([("netring".to_string(), CaptureForm::default())]);
     let ctx = ArtifactCtx {
         fetch: &ArtifactFetch::Idle,
         kinds: &kinds_map,
@@ -4276,8 +4276,8 @@ fn netring_capture_tab_hosts_capture_form() {
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(messages.iter().any(|m| matches!(
         m,
-        Message::StartArtifact { key_prefix, kind: ArtifactKind::Capture { .. }, .. }
-            if key_prefix == "zensight/netring"
+        Message::StartArtifact { producer, kind: ArtifactKind::Capture { .. }, .. }
+            if producer == "netring"
     )));
 }
 
@@ -4359,7 +4359,7 @@ fn capture_form_renders_from_advert() {
     let form = CaptureForm::default();
     let mut ui = simulator(artifact_section(
         &ArtifactFetch::Idle,
-        "zensight/netring",
+        "netring",
         None,
         &kinds,
         None,
@@ -4379,7 +4379,7 @@ fn capture_form_over_cap_duration_blocks_submit() {
     };
     let mut ui = simulator(artifact_section(
         &ArtifactFetch::Idle,
-        "zensight/netring",
+        "netring",
         None,
         &kinds,
         None,
@@ -4408,10 +4408,10 @@ fn capture_generating_progress_line_renders() {
     };
     let mut ui = simulator(artifact_section(
         &fetch,
-        "zensight/netring",
+        "netring",
         None,
         &kinds,
-        Some("zensight/netring"),
+        Some("netring"),
         Some("capture"),
         Some(&form),
     ));
@@ -4432,7 +4432,7 @@ fn no_capture_advert_renders_no_form() {
     let form = CaptureForm::default();
     let mut ui = simulator(artifact_section(
         &ArtifactFetch::Idle,
-        "zensight/netlink",
+        "netlink",
         None,
         &kinds,
         None,

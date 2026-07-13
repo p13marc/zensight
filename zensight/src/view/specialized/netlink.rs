@@ -1,7 +1,7 @@
 //! Netlink host specialized view — a tabbed, chart-driven, drill-down surface
 //! (Overview · Interfaces · Sockets · Routing & Neighbors · QoS · Firewall &
 //! IPsec · Events · WireGuard) over the sensor's streamed metrics and
-//! `@/query/*` channels (#258, epic #270).
+//! `@rpc/netlink/*` procedures (#258, epic #270).
 
 use std::collections::BTreeMap;
 
@@ -482,7 +482,7 @@ fn render_sockets_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
 
 /// eBPF socket internals (#269): connect-latency percentiles + top-retransmit
 /// peers + tcplife connection records, served by the sensor's opt-in eBPF module
-/// (`@/query/retransmits`, `@/query/connections`, `sockets/tcp/connlat_us_*`).
+/// (`@rpc/netlink/retransmits`, `@rpc/netlink/connections`, `sockets/tcp/connlat_us_*`).
 /// Returns `None` on the unprivileged baseline (no eBPF) so the Sockets tab shows
 /// nothing extra.
 fn render_ebpf_sockets(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
@@ -692,7 +692,7 @@ fn render_xfrm(state: &DeviceDetailState) -> Element<'_, Message> {
 
 /// QoS / Queues tab (#263): per-(iface, qdisc) health chips + AQM class, backlog
 /// trend sparklines, drops/overlimits/requeues, and the full qdisc/class tree
-/// (`@/query/tc`) as a DataTable. From streamed `tc/<iface>/<kind>/<stat>` +
+/// (`@rpc/netlink/tc`) as a DataTable. From streamed `tc/<iface>/<kind>/<stat>` +
 /// iface-level `tc/<iface>/aqm_class`.
 fn render_qos_tab(state: &DeviceDetailState) -> Column<'_, Message> {
     // Group tc/<iface>/<kind>/<stat> by (iface, kind).
@@ -723,7 +723,7 @@ fn render_qos_tab(state: &DeviceDetailState) -> Column<'_, Message> {
         col = col.push(card(render_qdisc_card(state, iface, kind, stats)));
     }
 
-    // Full qdisc/class tree (@/query/tc).
+    // Full qdisc/class tree (@rpc/netlink/tc).
     let d = &state.netlink_detail;
     col = col.push(card(detail_datatable(
         d,
@@ -1510,7 +1510,7 @@ fn route_changes_columns<'a>() -> Vec<DataColumn<'a, RouteChangeRecord, Message>
 }
 
 /// Events tab (#265): a structured, filterable control-plane timeline
-/// (`@/query/events`, newest-first) across link/addr/route/neighbor/ipsec, with
+/// (`@rpc/netlink/events`, newest-first) across link/addr/route/neighbor/ipsec, with
 /// per-family event counters as a context chart. Family/action are their own
 /// columns so the DataTable filter box filters by either; `detail` is the
 /// sensor's already-humanized field (iface name / ip / route dest), not raw JSON.
@@ -1700,7 +1700,7 @@ fn render_firewall_tab(state: &DeviceDetailState) -> Column<'_, Message> {
     if has_prefix(state, "conntrack/") {
         col = col.push(card(render_conntrack(state)));
     }
-    // nft per-rule hit-rate (@/query/nft) with decoded packet/byte counters.
+    // nft per-rule hit-rate (@rpc/netlink/nft) with decoded packet/byte counters.
     col = col.push(card(detail_datatable(
         d,
         NetlinkTable::Nft,

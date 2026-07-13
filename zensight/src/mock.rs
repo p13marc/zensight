@@ -574,7 +574,7 @@ pub mod parallax {
     use super::*;
     use zensight_common::StreamDescriptor;
 
-    /// Mock stream catalogue — mirrors the real `@/query/streams` reply
+    /// Mock stream catalogue — mirrors the real `@rpc/parallax/streams` reply
     /// shape (demo mirrors the wire contract).
     pub fn streams() -> Vec<StreamDescriptor> {
         vec![
@@ -723,7 +723,7 @@ fn mock_entity(
 }
 
 /// Mock per-process bandwidth records (#319, epic #320) for the Bandwidth view's
-/// Processes mode in `--demo`: demo never serves the `@/query/bandwidth`
+/// Processes mode in `--demo`: demo never serves the `@rpc/netlink/bandwidth`
 /// queryable, so the demo fetch branch returns these instead. Tagged sock_diag /
 /// app-goodput / TCP, including the explicit `unattributed` bucket the real
 /// aggregator emits.

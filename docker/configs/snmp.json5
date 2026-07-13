@@ -10,7 +10,6 @@
   serialization: "json",
 
   snmp: {
-    key_prefix: "zensight/snmp",
 
     trap_listener: {
       enabled: true,

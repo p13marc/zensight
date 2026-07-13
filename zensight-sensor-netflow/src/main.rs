@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
 
     // Enable status publishing
 
-    // On-demand debug-report (`@/artifact`): bundle redacted config + health +
+    // On-demand debug-report (the artifact channel): bundle redacted config + health +
     // counters. No-op unless `report.enabled` is set in the config.
     let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
         "netflow",
@@ -64,12 +64,10 @@ async fn main() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to start NetFlow listeners: {}", e))?;
 
-    tracing::info!(
-        "NetFlow listeners started, publishing to prefix: {}",
-        netflow_config.key_prefix
-    );
+    tracing::info!("NetFlow listeners started");
 
-    let key_prefix = zensight_sensor_core::v1::v1_telemetry_prefix(&netflow_config.key_prefix);
+    let key_prefix =
+        zensight_sensor_core::v1::V1Context::for_producer("netflow").telemetry_prefix();
     let publish_flows = netflow_config.publish_flows;
     let publish_stats = netflow_config.publish_stats;
     // Rollup cadence: `aggregation_interval_secs`, defaulting to 30 s when
@@ -92,7 +90,7 @@ async fn main() -> Result<()> {
     // raw records are pull-only detail, never streamed).
     let ring = rollup::new_ring();
     if publish_flows {
-        let flows_key = zensight_common::command::query_key(&netflow_config.key_prefix, "flows");
+        let flows_key = zensight_common::command::query_key("netflow", "flows");
         tokio::spawn(rollup::serve_flows(
             session.clone(),
             flows_key,

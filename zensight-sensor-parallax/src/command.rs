@@ -20,8 +20,8 @@ pub const STREAM_TOPIC: &str = "stream";
 pub const STREAMS_TOPIC: &str = "streams";
 
 /// Run the stream command subscriber + status queryable until session close.
-pub async fn run(session: Arc<zenoh::Session>, host_prefix: String, handle: SessionHandle) {
-    let cmd_key = command_key(&host_prefix, STREAM_TOPIC);
+pub async fn run(session: Arc<zenoh::Session>, producer: String, handle: SessionHandle) {
+    let cmd_key = command_key(&producer, STREAM_TOPIC);
 
     let subscriber = match session.declare_queryable(&cmd_key).await {
         Ok(s) => s,

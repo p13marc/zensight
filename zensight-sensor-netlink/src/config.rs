@@ -3,9 +3,6 @@
 use serde::{Deserialize, Serialize};
 use zensight_sensor_core::{LoggingConfig, SensorConfig, ZenohConfig};
 
-fn default_key_prefix() -> String {
-    "zensight/netlink".to_string()
-}
 fn default_source() -> String {
     "auto".to_string()
 }
@@ -26,7 +23,7 @@ pub struct NetlinkSensorConfig {
     pub serialization: zensight_common::serialization::Format,
     #[serde(default)]
     pub logging: LoggingConfig,
-    /// On-demand artifact channel (`@/artifact`) limits — report + snapshot.
+    /// On-demand artifact channel (`@rpc/netlink/artifact/*`) limits — report + snapshot.
     /// Every kind disabled by default.
     #[serde(default)]
     pub artifacts: zensight_sensor_core::ArtifactLimits,
@@ -35,8 +32,6 @@ pub struct NetlinkSensorConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetlinkConfig {
-    #[serde(default = "default_key_prefix")]
-    pub key_prefix: String,
     /// Host identifier used as telemetry `source`. "auto" detects the hostname.
     #[serde(default = "default_source")]
     pub source: String,
@@ -62,14 +57,14 @@ pub struct NetlinkConfig {
     #[serde(default)]
     pub ebpf: EbpfConfig,
     /// Host-evidence feed (#307): republish observed neighbors as third-party
-    /// identity evidence on `zensight/_meta/evidence/**` for the correlator.
+    /// identity evidence on `state/netlink/evidence/**` for the correlator.
     #[serde(default)]
     pub evidence: EvidenceConfig,
 }
 
 /// Host-evidence feed tuning (#307). Governs how the sensor republishes
 /// observed neighbors (ARP/NDP cache) as third-party identity claims onto the
-/// `zensight/_meta/evidence/**` keyspace for the correlator (epic #312).
+/// `state/netlink/evidence/**` keyspace for the correlator (epic #312).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvidenceConfig {
     /// Publish observed-neighbor evidence at all. `true` by default.
@@ -114,10 +109,10 @@ impl Default for EvidenceConfig {
 /// Tuning for the opt-in eBPF module (issue #114).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EbpfConfig {
-    /// Capacity of the recent-connections ring served via `@/query/connections`.
+    /// Capacity of the recent-connections ring served via `@rpc/netlink/connections`.
     #[serde(default = "default_conn_ring")]
     pub conn_ring_capacity: usize,
-    /// Number of top retransmit peers returned by `@/query/retransmits`.
+    /// Number of top retransmit peers returned by `@rpc/netlink/retransmits`.
     #[serde(default = "default_top_k")]
     pub retransmit_top_k: usize,
 }
@@ -161,7 +156,7 @@ fn default_wg_stale() -> u64 {
 /// Tuning for the real-time RTNETLINK event stream (issue #8).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventsConfig {
-    /// Capacity of the recent-events ring served via `@/query/events`.
+    /// Capacity of the recent-events ring served via `@rpc/netlink/events`.
     #[serde(default = "default_event_ring")]
     pub ring_capacity: usize,
 }
@@ -222,12 +217,12 @@ pub struct CollectConfig {
     #[serde(default)]
     pub conntrack: bool,
     /// Opt-in eBPF module (#114): connect-latency gauges + per-peer retransmit
-    /// attribution (`@/query/retransmits`) + tcplife connection records
-    /// (`@/query/connections`). OFF by default. NO-OP unless the binary was
+    /// attribution (`@rpc/netlink/retransmits`) + tcplife connection records
+    /// (`@rpc/netlink/connections`). OFF by default. NO-OP unless the binary was
     /// built with `--features ebpf` AND holds CAP_BPF/CAP_NET_ADMIN.
     #[serde(default)]
     pub ebpf: bool,
-    /// Socket→process attribution for the `@/query/sockets` drill-down (#304):
+    /// Socket→process attribution for the `@rpc/netlink/sockets` drill-down (#304):
     /// one `/proc/<pid>/fd` walk per query joins each socket inode to its
     /// owning process (pid/comm/start_time) and resolves the cgroup v2 id to
     /// its path. Unprivileged reads; other users' processes are skipped
@@ -240,7 +235,7 @@ pub struct CollectConfig {
     pub socket_process_max_procs: usize,
     /// Per-process TCP bandwidth via sock_diag goodput deltas (#317, epic #320):
     /// sample `tcp_info` byte counters on a cadence, diff per cookie, and serve
-    /// per-process rate on `@/query/bandwidth`. Unprivileged, **TCP-only**
+    /// per-process rate on `@rpc/netlink/bandwidth`. Unprivileged, **TCP-only**
     /// (`udp_diag` has no per-socket byte counters). The pid join reuses
     /// `socket_processes` (attribution off ⇒ everything folds into the
     /// `unattributed` bucket). ON by default.
@@ -337,8 +332,8 @@ impl SensorConfig for NetlinkSensorConfig {
     fn logging(&self) -> &LoggingConfig {
         &self.logging
     }
-    fn key_prefix(&self) -> &str {
-        &self.netlink.key_prefix
+    fn producer(&self) -> &str {
+        "netlink"
     }
     fn artifact_limits(&self) -> zensight_sensor_core::ArtifactLimits {
         self.artifacts.clone()
@@ -385,7 +380,6 @@ mod tests {
     #[test]
     fn parse_minimal_config() {
         let cfg: NetlinkSensorConfig = json5::from_str(r#"{ netlink: { source: "h1" } }"#).unwrap();
-        assert_eq!(cfg.netlink.key_prefix, "zensight/netlink");
         assert_eq!(cfg.netlink.resolved_source(), "h1");
         assert!(cfg.netlink.collect.interfaces);
     }

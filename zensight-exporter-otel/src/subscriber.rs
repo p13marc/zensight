@@ -148,7 +148,7 @@ impl TelemetrySubscriber {
                     }
                 }
 
-                // Sensor alerts (`@/alerts/*`) are exported as OTLP log events
+                // Sensor alerts (`state/*/alert/*`) are exported as OTLP log events
                 // and/or synthesized trace spans (polled when either alert-log
                 // export or the traces signal is on). A Delete tombstone
                 // carries no payload — the prior Resolved Put already emitted the

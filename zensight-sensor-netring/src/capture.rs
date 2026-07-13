@@ -1,4 +1,4 @@
-//! On-demand packet capture over the unified `@/artifact` channel (#333).
+//! On-demand packet capture over the unified artifact channel (`@rpc/netring/artifact/*`, #333).
 //!
 //! Two pieces live here:
 //!

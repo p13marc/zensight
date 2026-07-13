@@ -90,14 +90,14 @@ pub struct DeviceDetailState {
     /// On-demand netlink detail tables (sockets/routes/neighbors), fetched lazily
     /// from the sensor's query channel when the user drills in.
     pub netlink_detail: crate::view::specialized::netlink_detail::NetlinkDetailState,
-    /// On-demand netring flow detail, fetched lazily from `@/query/flows`.
+    /// On-demand netring flow detail, fetched lazily from `@rpc/netring/flows`.
     pub netring_detail: crate::view::specialized::netring_detail::NetringDetailState,
     pub systemd_detail: crate::view::specialized::systemd_detail::SystemdDetailState,
     /// Parallax stream catalogue + live preview tiles, fetched/opened on
     /// demand from the sensor's stream-control channels (#408).
     pub parallax_detail: crate::view::specialized::parallax_detail::ParallaxDetailState,
     /// On-demand sysinfo process explorer, fetched lazily from
-    /// `@/query/processes` (#47).
+    /// `@rpc/sysinfo/processes` (#47).
     pub sysinfo_detail: crate::view::specialized::sysinfo_detail::SysinfoDetailState,
     /// Whether the chart panel is expanded to a taller height (#36).
     pub chart_expanded: bool,

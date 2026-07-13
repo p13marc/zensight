@@ -1,6 +1,6 @@
 //! The `@rpc/parallax/streams` catalogue queryable (late-joiner seed).
 //!
-//! The GUI calls `zensight/parallax/<source>/@rpc/parallax/streams` when a user
+//! The GUI calls `zensight/@v1/<origin>/@rpc/parallax/streams` when a user
 //! opens the parallax device view; the reply is the full
 //! `Vec<StreamDescriptor>` catalogue as JSON, with `active` stamped from the
 //! session actor's open set. High-cardinality media never rides this channel
@@ -15,15 +15,15 @@ use crate::session::SessionHandle;
 
 /// Run the streams catalogue queryable until the session closes.
 ///
-/// `host_prefix` is the host-scoped control prefix
-/// (`<key_prefix>/<source>`, e.g. `zensight/parallax/hostA`).
+/// `producer` is the producer name (`"parallax"`); the key is
+/// origin-scoped (`zensight/@v1/<origin>/@rpc/parallax/streams`).
 pub async fn run(
     session: Arc<zenoh::Session>,
-    host_prefix: String,
+    producer: String,
     catalog: Arc<Catalog>,
     handle: SessionHandle,
 ) {
-    let key = query_key(&host_prefix, "streams");
+    let key = query_key(&producer, "streams");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {

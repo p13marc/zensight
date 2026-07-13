@@ -67,7 +67,7 @@
     //   // match: { "_SYSTEMD_UNIT": "cron.service" }, // raw FIELD=value matches
     //
     //   // Known-event alerts (#61) — coredump / unit-failed / OOM via MESSAGE_ID:
-    //   // detect_events: true,    // raise alerts on @/alerts/* (default true)
+    //   // detect_events: true,    // raise alerts on state/logs/alert/* (default true)
     //   // event_dedup_secs: 30,   // coalesce + auto-resolve window
     //   // event_severity: { "fc2e22bc6ee647b6b90729ab34a250b1": "warning" }, // per-id override
     // },

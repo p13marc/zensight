@@ -1,9 +1,9 @@
 //! Gated service control (#283) — **default OFF, opt-in only**.
 //!
-//! `@/commands/action` accepts `{verb, unit}` (start/stop/restart/reload). The
+//! `@rpc/systemd/action/set` accepts `{verb, unit}` (start/stop/restart/reload). The
 //! unit is validated against an allowlist, the corresponding `Manager` method is
 //! called with `mode=replace`, and the async job is tracked to completion via the
-//! `JobRemoved` signal. The outcome is published on `@/status/action` and written
+//! `JobRemoved` signal. The outcome is read on `@rpc/systemd/action` and written
 //! to the audit log. Nothing is declared unless `actions.enabled` is set — a
 //! disabled sensor is strictly read-only.
 //!
@@ -44,14 +44,14 @@ impl Verb {
     }
 }
 
-/// An action request on `@/commands/action`.
+/// An action request on `@rpc/systemd/action/set`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionCommand {
     pub verb: Verb,
     pub unit: String,
 }
 
-/// The outcome of the most recent action, replied on `@/status/action`.
+/// The outcome of the most recent action, replied on `@rpc/systemd/action`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ActionStatus {
     pub unit: String,
@@ -87,7 +87,7 @@ fn now_unix() -> i64 {
 
 /// Run the gated action channel until the session closes. No-op (returns
 /// immediately) unless actions are enabled.
-pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, cfg: ActionsConfig) {
+pub async fn run(session: Arc<zenoh::Session>, producer: String, cfg: ActionsConfig) {
     if !cfg.enabled {
         tracing::info!("systemd service control disabled (actions.enabled = false)");
         return;
@@ -118,8 +118,8 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, cfg: ActionsC
         tracing::warn!(error = %e, "action: Manager.Subscribe failed (job tracking degraded)");
     }
 
-    let cmd_key = command_key(&key_prefix, ACTION_TOPIC);
-    let stat_key = status_key(&key_prefix, ACTION_TOPIC);
+    let cmd_key = command_key(&producer, ACTION_TOPIC);
+    let stat_key = status_key(&producer, ACTION_TOPIC);
     let subscriber = match session.declare_queryable(&cmd_key).await {
         Ok(s) => s,
         Err(e) => {

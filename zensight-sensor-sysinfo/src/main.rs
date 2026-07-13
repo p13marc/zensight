@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
     // Enable status publishing and set format
     let runner = runner.with_format(Format::Json);
 
-    // On-demand artifact channel (`@/artifact`): a report producer (redacted
+    // On-demand artifact channel (`@rpc/sysinfo/artifact/*`): a report producer (redacted
     // config + health + counters) and a snapshot producer (allowlisted directory
     // package). No-op unless the matching `artifacts.*` kind is enabled in config.
     let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
 
     tracing::info!(
         "Sysinfo sensor running (prefix: {}, interval: {}s, source: {})",
-        zensight_sensor_core::v1::v1_telemetry_prefix(&sysinfo_config.key_prefix),
+        zensight_sensor_core::v1::V1Context::for_producer("sysinfo").telemetry_prefix(),
         sysinfo_config.poll_interval_secs,
         source
     );
@@ -67,15 +67,15 @@ async fn main() -> Result<()> {
     // firehose is served only on query, never streamed onto the telemetry bus.
     if sysinfo_config.collect.process_query {
         let q_session = session.clone();
-        let q_prefix = sysinfo_config.key_prefix.clone();
+        let q_producer = "sysinfo".to_string();
         let q_source = source.clone();
         let q_scrub = sysinfo_config.processes.clone();
         runner.spawn(async move {
-            zensight_sensor_sysinfo::query::run(q_session, q_prefix, q_source, q_scrub).await;
+            zensight_sensor_sysinfo::query::run(q_session, q_producer, q_source, q_scrub).await;
         });
     }
 
-    // Threshold-based alerting: drive an AlertReporter → zensight/sysinfo/@/alerts/*
+    // Threshold-based alerting: drive an AlertReporter → state/sysinfo/alert/*
     // for OOM / PSI / disk / FD / thermal / swap saturation (mirrors the other
     // sensors). Late-joining GUIs seed their firing set via serve_alerts_query.
     let mut collector = SystemCollector::new(
@@ -109,7 +109,7 @@ async fn main() -> Result<()> {
     });
 
     // Opt-in eBPF saturation histograms (#99): load runqlat/biolatency, serve
-    // the snapshot on `@/query/latency`. The queryable is always declared (so
+    // the snapshot on `@rpc/sysinfo/latency`. The queryable is always declared (so
     // the GUI gets a clean reply) but the poller only runs if load+attach
     // succeed; otherwise the report stays `available: false` and the
     // unprivileged baseline is untouched.
@@ -138,10 +138,10 @@ async fn main() -> Result<()> {
             }
         }
         let q_session = runner.session().clone();
-        let q_prefix = sysinfo_config.key_prefix.clone();
+        let q_producer = "sysinfo".to_string();
         let q_source = source.clone();
         runner.spawn(async move {
-            zensight_sensor_sysinfo::query::run_latency(q_session, q_prefix, q_source, report)
+            zensight_sensor_sysinfo::query::run_latency(q_session, q_producer, q_source, report)
                 .await;
         });
     }

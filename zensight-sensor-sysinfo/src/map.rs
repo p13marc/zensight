@@ -699,7 +699,7 @@ pub fn map_power(s: &PowerSample) -> Vec<Metric> {
 // F. Per-process detail query channel (selector parsing)
 // ===========================================================================
 
-/// How to rank processes for the `@/query/processes` reply.
+/// How to rank processes for the `@rpc/sysinfo/processes` reply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProcessSort {
     /// By CPU usage, descending (default).
@@ -711,7 +711,7 @@ pub enum ProcessSort {
     Io,
 }
 
-/// Parsed `@/query/processes?sort=cpu|mem|io&top=N` selector. Bounds `top` so a
+/// Parsed `@rpc/sysinfo/processes?sort=cpu|mem|io&top=N` selector. Bounds `top` so a
 /// caller cannot request an unbounded firehose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessSelector {
@@ -1250,7 +1250,7 @@ pub fn map_mdstat(arrays: &[MdArray]) -> Vec<Metric> {
 // These types and functions are platform-agnostic and feature-independent so
 // they unit-test on stable with no kernel: the eBPF poller (behind the `ebpf`
 // feature) reads per-CPU BPF arrays, computes a windowed delta, and feeds the
-// counts here to build the `LatencyReport` that `@/query/latency` replies with.
+// counts here to build the `LatencyReport` that `@rpc/sysinfo/latency` replies with.
 // =============================================================================
 
 use serde::{Deserialize, Serialize};
@@ -1278,7 +1278,7 @@ pub struct Histogram {
     pub max_us: u64,
 }
 
-/// The `@/query/latency` reply: both saturation histograms over the last window.
+/// The `@rpc/sysinfo/latency` reply: both saturation histograms over the last window.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LatencyReport {
     /// False when the eBPF collector could not load (no caps / unsupported

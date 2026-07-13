@@ -61,7 +61,7 @@ pub fn sysinfo_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
         content = content.push(card(render_processes_section(state)));
     }
 
-    // On-demand process explorer (#47) — the rich `@/query/processes` table
+    // On-demand process explorer (#47) — the rich `@rpc/sysinfo/processes` table
     // (rss/vsz/threads/io/state/uid), always available for a sysinfo host since
     // it's pulled lazily rather than streamed.
     content = content.push(card(render_process_explorer(state)));
@@ -928,7 +928,7 @@ fn render_processes_section(state: &DeviceDetailState) -> Element<'_, Message> {
 }
 
 /// On-demand process explorer (#47): a sort toggle (CPU / Memory / I/O) that
-/// fetches the rich `@/query/processes` table and renders it. Distinct from the
+/// fetches the rich `@rpc/sysinfo/processes` table and renders it. Distinct from the
 /// streamed top-10 above — this carries rss/vsz/threads/io/state/uid and is
 /// pulled lazily (the per-pid firehose is never streamed, principle P2).
 fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {

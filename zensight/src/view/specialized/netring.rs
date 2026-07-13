@@ -1,7 +1,7 @@
 //! Netring sensor specialized view — a tabbed, chart-driven, drill-down surface
 //! (Overview · Flows · Talkers & Matrix · DNS · HTTP/TLS · Bandwidth · Assets ·
-//! Security · Capture) over the sensor's streamed metrics and `@/query/*`
-//! channels (#247, epic #257).
+//! Security · Capture) over the sensor's streamed metrics and `@rpc/netring/*`
+//! procedures (#247, epic #257).
 
 use iced::Element;
 use iced::widget::{Column, button, column, container, row, scrollable, text};
@@ -153,7 +153,7 @@ fn netring_tab_content<'a>(
 }
 
 /// TLS section: streamed handshake aggregates + an on-demand fingerprint
-/// inventory (SNI / JA4) fetched from `@/query/tls`.
+/// inventory (SNI / JA4) fetched from `@rpc/netring/tls`.
 fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
     let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
     let loading = state.netring_detail.tls.is_loading();
@@ -264,7 +264,7 @@ fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
 const OVERLOAD_DROP_RATE: f64 = 0.05;
 
 /// QUIC section (#72): streamed distinct-SNI count + an on-demand SNI/ALPN/version
-/// inventory fetched from `@/query/quic` — the QUIC analogue of the TLS card.
+/// inventory fetched from `@rpc/netring/quic` — the QUIC analogue of the TLS card.
 fn render_quic(state: &DeviceDetailState) -> Element<'_, Message> {
     let loading = state.netring_detail.quic.is_loading();
     let label = if loading { "Fetching…" } else { "Fetch QUIC" };
@@ -320,7 +320,7 @@ fn render_quic(state: &DeviceDetailState) -> Element<'_, Message> {
 }
 
 /// JA4H section (#256): on-demand HTTP-client fingerprint inventory fetched
-/// from `@/query/ja4h`. Served only by `ja4plus` sensor builds, so there is no
+/// from `@rpc/netring/ja4h`. Served only by `ja4plus` sensor builds, so there is no
 /// streamed metric to gate on — the section always shows its fetch button and
 /// the error path names the build flag.
 fn render_ja4h(state: &DeviceDetailState) -> Element<'_, Message> {
@@ -389,7 +389,7 @@ fn render_ja4h(state: &DeviceDetailState) -> Element<'_, Message> {
 }
 
 /// SSH section (#72): streamed distinct-HASSH count + an on-demand HASSH
-/// inventory (fingerprint · role · banner) fetched from `@/query/ssh`.
+/// inventory (fingerprint · role · banner) fetched from `@rpc/netring/ssh`.
 fn render_ssh(state: &DeviceDetailState) -> Element<'_, Message> {
     let loading = state.netring_detail.ssh.is_loading();
     let label = if loading { "Fetching…" } else { "Fetch SSH" };
@@ -448,7 +448,7 @@ fn render_ssh(state: &DeviceDetailState) -> Element<'_, Message> {
 
 /// Passive asset-inventory section (#70): a streamed discovered-count plus an
 /// on-demand table (MAC · IP · hostname · platform · capabilities · seen-via)
-/// fetched from `@/query/assets`. Surfaces hosts seen on the wire that emit no
+/// fetched from `@rpc/netring/assets`. Surfaces hosts seen on the wire that emit no
 /// telemetry of their own — the discovery the topology/devices views lack.
 fn render_assets(state: &DeviceDetailState) -> Element<'_, Message> {
     let loading = state.netring_detail.assets.is_loading();
@@ -587,15 +587,15 @@ fn join_or_dash(items: &[String]) -> String {
 /// signal that the sensor's *other* telemetry is currently incomplete.
 /// The netring key prefix used for artifact lookups (matches `sensors.rs`'s
 /// `zensight/<sensor>` rule).
-fn netring_key_prefix() -> String {
-    format!("zensight/{}", zensight_common::Protocol::Netring.as_str())
+fn netring_producer() -> String {
+    zensight_common::Protocol::Netring.as_str().to_string()
 }
 
 /// Whether the app-side artifact state says this sensor advertises on-demand
 /// capture (#351) — gates both the Capture tab and the in-context form.
 fn capture_advertised(artifact: Option<crate::view::artifact_fetch::ArtifactCtx<'_>>) -> bool {
     let Some(ctx) = artifact else { return false };
-    ctx.kinds.get(&netring_key_prefix()).is_some_and(|kinds| {
+    ctx.kinds.get(&netring_producer()).is_some_and(|kinds| {
         kinds
             .iter()
             .any(|k| matches!(k.advert, zensight_common::KindAdvert::Capture { .. }))
@@ -669,7 +669,7 @@ fn render_capture<'a>(
     // the Sensors-page card (mirror, not move), so edits track across both.
     // `artifact_section` with the kinds filtered to Capture also carries the
     // in-flight job controls (pause/resume/cancel) and the finished status.
-    let prefix = netring_key_prefix();
+    let prefix = netring_producer();
     let capture_kinds: Vec<zensight_common::KindStatus> = artifact
         .and_then(|ctx| ctx.kinds.get(&prefix))
         .map(|kinds| {
@@ -804,7 +804,7 @@ fn render_capture<'a>(
 /// Capture-to-disk section (#327): the engine's live mode + pre-trigger ring
 /// occupancy + retention usage (from the `capture/disk/*` telemetry), the
 /// `capture_now` / mode hot-switch controls, and the capture-file index from
-/// `@/query/captures` with a per-file download for served triggered captures.
+/// `@rpc/netring/captures` with a per-file download for served triggered captures.
 /// `None` when the sensor never published `capture/disk/*` (engine unarmed).
 fn render_capture_to_disk(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
     let mode = match state.metrics.get("capture/disk/mode").map(|p| &p.value) {
@@ -900,7 +900,7 @@ fn render_capture_to_disk(state: &DeviceDetailState) -> Option<Element<'_, Messa
     }
     col = col.push(modes);
 
-    // Capture-file index (`@/query/captures`): triggered captures download
+    // Capture-file index (`@rpc/netring/captures`): triggered captures download
     // through the artifact blob path; rotating spool files are metadata-only.
     let captures = &state.netring_detail.captures;
     let loading = captures.is_loading();
@@ -939,7 +939,7 @@ fn render_capture_to_disk(state: &DeviceDetailState) -> Option<Element<'_, Messa
                     Some(id) => button(text("Download").size(font::CAPTION))
                         .padding([3, 9])
                         .on_press(Message::DownloadCaptureBlob {
-                            key_prefix: "zensight/netring".to_string(),
+                            producer: "netring".to_string(),
                             artifact_id: id.clone(),
                             filename: rec.filename.clone(),
                         })
@@ -1155,7 +1155,7 @@ fn render_dns(state: &DeviceDetailState) -> Element<'_, Message> {
             .push(chart::ranked_bar(&rcodes, |v| format_count(v as u64), 8));
     }
 
-    // On-demand top-SLD / top-NXDOMAIN drill-down via `@/query/dns`.
+    // On-demand top-SLD / top-NXDOMAIN drill-down via `@rpc/netring/dns`.
     let loading = state.netring_detail.dns.is_loading();
     let mut fetch = button(
         text(if loading {
@@ -1262,7 +1262,7 @@ fn render_http(state: &DeviceDetailState) -> Element<'_, Message> {
             .push(chart::ranked_bar(&methods, |v| format_count(v as u64), 8));
     }
 
-    // On-demand top-hosts / error-hosts drill-down via `@/query/http` (#45).
+    // On-demand top-hosts / error-hosts drill-down via `@rpc/netring/http` (#45).
     let loading = state.netring_detail.http.is_loading();
     let mut fetch = button(
         text(if loading {
@@ -1314,7 +1314,7 @@ fn render_http(state: &DeviceDetailState) -> Element<'_, Message> {
 }
 
 /// Top-talker drill-down (#45): the per-destination histogram the sensor serves
-/// on `@/query/talkers` — distinct from the per-app bandwidth card. "Who are the
+/// on `@rpc/netring/talkers` — distinct from the per-app bandwidth card. "Who are the
 /// major backends?" by bytes/packets/flows.
 fn render_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
     let loading = state.netring_detail.talkers.is_loading();
@@ -1373,7 +1373,7 @@ fn render_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
 }
 
 /// Traffic-matrix / service-map drill-down (#122): the heaviest `src → dst` pairs
-/// by byte volume, served on `@/query/matrix`. "Who talks to whom?" — the service
+/// by byte volume, served on `@rpc/netring/matrix`. "Who talks to whom?" — the service
 /// map behind the per-destination Top Talkers card.
 fn render_matrix(state: &DeviceDetailState) -> Element<'_, Message> {
     let loading = state.netring_detail.matrix.is_loading();
@@ -1462,7 +1462,7 @@ fn matrix_heatmap<'a>(records: &[zensight_common::MatrixRecord]) -> Option<Eleme
 }
 
 /// Elephant-flow drill-down (#45): the biggest recently-ended flows, served on
-/// `@/query/elephant_flows`. "What were the biggest transfers?"
+/// `@rpc/netring/elephant_flows`. "What were the biggest transfers?"
 fn render_elephants(state: &DeviceDetailState) -> Element<'_, Message> {
     let loading = state.netring_detail.elephants.is_loading();
     let title = section_header("Elephant Flows (on demand)", None);
@@ -1602,7 +1602,7 @@ fn capture_chip(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
 }
 
 /// On-demand recent-flow detail: a fetch button + the fetched flow table (P2 —
-/// pulled from the sensor's `@/query/flows` channel, never streamed).
+/// pulled from the sensor's `@rpc/netring/flows` channel, never streamed).
 fn render_flow_detail(state: &DeviceDetailState) -> Element<'_, Message> {
     let loading = state.netring_detail.flows.is_loading();
     let title = section_header("Recent Flows (on demand)", None);

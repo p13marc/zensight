@@ -110,7 +110,7 @@ async fn legacy_bus_is_silent_and_v1_carries_everything() {
     );
     tokio::time::sleep(Duration::from_millis(400)).await;
 
-    let publisher = Publisher::new(sensor.clone(), "zensight/netlink", Format::Json);
+    let publisher = Publisher::new(sensor.clone(), "netlink", Format::Json);
 
     let point = zensight_common::TelemetryPoint::new(
         "cutover-host",

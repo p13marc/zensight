@@ -1,5 +1,5 @@
 //! On-demand netlink detail client: fetches the full route/neighbor/socket
-//! tables from the sensor's `@/query/*` channels (principle P2 — nothing is
+//! tables from the sensor's `@rpc/netlink/*` procedures (principle P2 — nothing is
 //! streamed; the GUI pulls detail only when a user drills in).
 //!
 //! The fetch+decode core ([`fetch_records`]) is independent of Iced so it can be
@@ -21,7 +21,7 @@ use crate::view::specialized::fetch::Fetch;
 // xfrm/nft query channels (#109). Field names/types must match
 // `zensight-sensor-netlink/src/{map,events}.rs` exactly.
 
-/// One configured IP address (`@/query/addresses`).
+/// One configured IP address (`@rpc/netlink/addresses`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct AddressRecord {
     pub family: u8,
@@ -32,7 +32,7 @@ pub struct AddressRecord {
     pub ifindex: u32,
 }
 
-/// One row of the recent control-plane events ring (`@/query/events`).
+/// One row of the recent control-plane events ring (`@rpc/netlink/events`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct EventRecord {
     pub ts_unix: u64,
@@ -42,7 +42,7 @@ pub struct EventRecord {
     pub detail: String,
 }
 
-/// One default-route transition (`@/query/route_changes`, #111). Mirrors the
+/// One default-route transition (`@rpc/netlink/route_changes`, #111). Mirrors the
 /// sensor's `RouteChangeRecord` JSON shape.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct RouteChangeRecord {
@@ -54,7 +54,7 @@ pub struct RouteChangeRecord {
     pub prev_gateway: Option<String>,
 }
 
-/// One TC qdisc/class entry (`@/query/tc`). `node` is `qdisc` or `class`.
+/// One TC qdisc/class entry (`@rpc/netlink/tc`). `node` is `qdisc` or `class`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct TcRecord {
     pub iface: String,
@@ -71,7 +71,7 @@ pub struct TcRecord {
     pub backlog_pkts: u64,
 }
 
-/// One IPsec Security Association (`@/query/xfrm`).
+/// One IPsec Security Association (`@rpc/netlink/xfrm`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct XfrmSaRecord {
     pub src: Option<String>,
@@ -84,7 +84,7 @@ pub struct XfrmSaRecord {
     pub packets: u64,
 }
 
-/// One nftables rule (`@/query/nft`).
+/// One nftables rule (`@rpc/netlink/nft`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct NftRuleRecord {
     pub family: String,
@@ -100,7 +100,7 @@ pub struct NftRuleRecord {
     pub bytes: u64,
 }
 
-/// One top-retransmit peer from the eBPF module (`@/query/retransmits`, #269).
+/// One top-retransmit peer from the eBPF module (`@rpc/netlink/retransmits`, #269).
 /// Mirrors the sensor's `RetransRecord`; only served on eBPF-enabled hosts.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct RetransRecord {
@@ -110,7 +110,7 @@ pub struct RetransRecord {
 }
 
 /// One tcplife connection-lifecycle record from the eBPF module
-/// (`@/query/connections`, #269). Mirrors the sensor's `ConnView`.
+/// (`@rpc/netlink/connections`, #269). Mirrors the sensor's `ConnView`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ConnRecord {
     pub pid: u32,

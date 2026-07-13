@@ -9,7 +9,6 @@
   },
 
   sysinfo: {
-    key_prefix: "zensight/sysinfo",
     hostname: "auto",
     poll_interval_secs: 5,
 

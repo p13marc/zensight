@@ -88,7 +88,7 @@ async fn token_delete_reaches_frontend_pattern_on_session_close() {
             .await
             .expect("open sensor session"),
     );
-    let ctx = zensight_sensor_core::v1::V1Context::from_prefix("zensight/testproto");
+    let ctx = zensight_sensor_core::v1::V1Context::for_producer("testproto");
     let expected_key = ctx.alive_key();
     let manager = LivelinessManager::new(sensor.clone(), ctx)
         .await

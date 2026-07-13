@@ -33,7 +33,7 @@ pub struct ModbusSensorConfig {
     #[serde(default)]
     pub logging: LoggingConfig,
 
-    /// On-demand artifact channel (`@/artifact`) limits — report + snapshot.
+    /// On-demand artifact channel (`@rpc/modbus/artifact/*`) limits — report + snapshot.
     /// Every kind disabled by default.
     #[serde(default)]
     pub artifacts: zensight_sensor_core::ArtifactLimits,
@@ -42,10 +42,6 @@ pub struct ModbusSensorConfig {
 /// Modbus protocol configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModbusConfig {
-    /// Key expression prefix (default: "zensight/modbus")
-    #[serde(default = "default_key_prefix")]
-    pub key_prefix: String,
-
     /// Override the agent-host source id (default: the local hostname).
     #[serde(default)]
     pub source: Option<String>,
@@ -60,10 +56,6 @@ pub struct ModbusConfig {
     /// Register name mappings
     #[serde(default)]
     pub register_names: HashMap<String, String>,
-}
-
-fn default_key_prefix() -> String {
-    "zensight/modbus".to_string()
 }
 
 impl ModbusConfig {
@@ -354,8 +346,8 @@ impl zensight_sensor_core::SensorConfig for ModbusSensorConfig {
         &self.logging
     }
 
-    fn key_prefix(&self) -> &str {
-        &self.modbus.key_prefix
+    fn producer(&self) -> &str {
+        "modbus"
     }
 
     fn artifact_limits(&self) -> zensight_sensor_core::ArtifactLimits {

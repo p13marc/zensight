@@ -3,9 +3,6 @@
 use serde::{Deserialize, Serialize};
 use zensight_sensor_core::{LoggingConfig, SensorConfig, ZenohConfig};
 
-fn default_key_prefix() -> String {
-    "zensight/netring".to_string()
-}
 fn default_source() -> String {
     "auto".to_string()
 }
@@ -26,7 +23,7 @@ pub struct NetringSensorConfig {
     #[serde(default)]
     pub logging: LoggingConfig,
     pub netring: NetringConfig,
-    /// On-demand artifact channel (`@/artifact`) limits — report + snapshot.
+    /// On-demand artifact channel (`@rpc/netring/artifact/*`) limits — report + snapshot.
     /// Every kind disabled by default.
     #[serde(default)]
     pub artifacts: zensight_sensor_core::ArtifactLimits,
@@ -34,8 +31,6 @@ pub struct NetringSensorConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetringConfig {
-    #[serde(default = "default_key_prefix")]
-    pub key_prefix: String,
     /// Host identifier used as telemetry `source`. "auto" → hostname.
     #[serde(default = "default_source")]
     pub source: String,
@@ -58,7 +53,7 @@ pub struct NetringConfig {
     /// this tier joins netring's live per-flow wire bandwidth against the kernel
     /// socket table via a periodic sock_diag dump + `/proc` fd scan, so it costs
     /// `/proc` walks (hence opt-in). When on, per-process wire-L2 rows are served
-    /// query-only on `@/query/bandwidth`. Best-effort: flows whose socket isn't in
+    /// query-only on `@rpc/netring/bandwidth`. Best-effort: flows whose socket isn't in
     /// the current dump fall into an explicit unattributed bucket.
     #[serde(default)]
     pub bandwidth_attribution: bool,
@@ -76,7 +71,7 @@ pub struct NetringConfig {
     pub overload: OverloadConfig,
     /// Runtime capture-focus filter (netring 0.28, issue #225). Off by default.
     /// When enabled, registers a reloadable packet-tier subscription whose BPF
-    /// filter can be hot-swapped at runtime via `@/commands/capture_filter`
+    /// filter can be hot-swapped at runtime via `@rpc/netring/capture_filter/set`
     /// (no capture restart) to narrow attention to a host/port under
     /// investigation, with focused packet/byte counters as the visible effect.
     #[serde(default)]
@@ -88,10 +83,10 @@ pub struct NetringConfig {
     #[serde(default)]
     pub names: NamesConfig,
     /// Host-evidence feed (#307): republish observed assets / passive-DNS names
-    /// as identity evidence on `zensight/_meta/evidence/**` for the correlator.
+    /// as identity evidence on `state/netring/evidence/**` for the correlator.
     #[serde(default)]
     pub evidence: EvidenceConfig,
-    /// On-demand packet capture over the `@/artifact` channel (#333). Disabled
+    /// On-demand packet capture over the artifact channel (#333). Disabled
     /// by default; `capture.on_demand.enabled` arms a dedicated reloadable
     /// packet-tier tap and registers the capture artifact producer.
     #[serde(default)]
@@ -103,7 +98,7 @@ pub struct NetringConfig {
 /// filter section.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CaptureConfig {
-    /// Operator-triggered capture over the `@/artifact` channel.
+    /// Operator-triggered capture over the artifact channel.
     #[serde(default)]
     pub on_demand: CaptureOnDemandConfig,
     /// Continuous capture-to-disk: rotating spool or anomaly-triggered
@@ -121,7 +116,7 @@ pub enum CaptureDiskMode {
     Off,
     /// Continuously spool rotating pcap files to `dir` (size/duration rotation,
     /// file-count / total-byte retention). Local forensics spool; files are
-    /// listed on `@/query/captures` but not served over the bus.
+    /// listed on `@rpc/netring/captures` but not served over the bus.
     Rotating,
     /// Buffer recent packets in a bounded in-memory ring; when an anomaly at or
     /// above `trigger_min_severity` fires (or `capture_now` is commanded), flush
@@ -301,7 +296,7 @@ impl CaptureOnDemandConfig {
 
 /// Host-evidence feed tuning (#307). Governs how the sensor republishes
 /// third-party identity claims (observed assets, passive-DNS names) onto the
-/// `zensight/_meta/evidence/**` keyspace for the correlator (epic #312).
+/// `state/netring/evidence/**` keyspace for the correlator (epic #312).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvidenceConfig {
     /// Publish observed-device evidence at all. `true` by default.
@@ -412,7 +407,7 @@ impl Default for NamesConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureFocusConfig {
     /// Arm the reloadable capture-focus subscription. `false` (default) → no
-    /// packet sub, zero-cost hot loop, `@/commands/capture_filter` is a no-op.
+    /// packet sub, zero-cost hot loop, `@rpc/netring/capture_filter/set` is a no-op.
     #[serde(default)]
     pub enabled: bool,
     /// Base packet filter (netring `.expr()` / tcpdump-like grammar) installed
@@ -569,7 +564,7 @@ pub struct ThreatConfig {
     pub yara: YaraConfig,
     /// Arm the runtime threat-intel reload channel (#328): always build the IOC
     /// (and YARA, when compiled `--features yara`) matchers into the monitor —
-    /// even if empty at startup — so `@/commands/threat_intel` can hot-swap
+    /// even if empty at startup — so `@rpc/netring/threat_intel/set` can hot-swap
     /// indicators / YARA rules without a restart. Off by default, in which case
     /// the matchers are armed only when config already provides indicators.
     #[serde(default)]
@@ -580,7 +575,7 @@ pub struct ThreatConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct YaraConfig {
     /// Path to a `.yar`/`.yara` rules file compiled at startup and scanned over
-    /// reassembled flow payloads. Runtime rules arrive via `@/commands/threat_intel`.
+    /// reassembled flow payloads. Runtime rules arrive via `@rpc/netring/threat_intel/set`.
     #[serde(default)]
     pub file: Option<String>,
 }
@@ -655,16 +650,16 @@ pub struct CollectConfig {
     pub talkers: bool,
     /// L7 QUIC Initial visibility (netring 0.27): passive SNI/ALPN/version from
     /// the unprotected ClientHello on UDP/443 — the QUIC analogue of TLS SNI.
-    /// Served on `@/query/quic`. Default OFF (opt-in L7).
+    /// Served on `@rpc/netring/quic`. Default OFF (opt-in L7).
     #[serde(default)]
     pub quic: bool,
     /// L7 SSH/HASSH visibility (netring 0.27): banner + KEXINIT HASSH handshake
-    /// fingerprints on TCP/22, served on `@/query/ssh`. Default OFF (opt-in L7).
+    /// fingerprints on TCP/22, served on `@rpc/netring/ssh`. Default OFF (opt-in L7).
     #[serde(default)]
     pub ssh: bool,
     /// JA4H HTTP-request fingerprinting (issue #124). No-op unless built with
     /// `--features ja4plus` (FoxIO License 1.1 — non-OSI; default build stays
-    /// OSI-clean). Cleartext HTTP only; served on `@/query/ja4h`. Default OFF.
+    /// OSI-clean). Cleartext HTTP only; served on `@rpc/netring/ja4h`. Default OFF.
     #[serde(default)]
     pub http_fp: bool,
     /// Flag cleartext SNMP v1/v2c community strings (netring 0.27) as anomalies
@@ -673,7 +668,7 @@ pub struct CollectConfig {
     pub snmp_cleartext: bool,
     /// Passive asset inventory (netring 0.27): discover hosts on the wire from
     /// L2/L3 discovery traffic (ARP / NDP / LLDP / CDP) into a MAC-keyed
-    /// inventory served on `@/query/assets`. Arming the discovery hooks narrows
+    /// inventory served on `@rpc/netring/assets`. Arming the discovery hooks narrows
     /// the kernel prefilter accordingly; needs capture (CAP_NET_RAW). Default
     /// OFF — opt-in, and CDP forces a capture-all prefilter (see `asset_cdp`).
     #[serde(default)]
@@ -702,7 +697,7 @@ pub struct CollectConfig {
     pub infer_initiator: bool,
     /// Encrypted-DNS visibility (netring 0.29, #326): classify DoT/DoQ/DoH
     /// sessions from the TLS/QUIC handshake, count them by transport + resolver
-    /// class, and serve `@/query/encrypted_dns`. Rides the `tls`/`quic` handshake
+    /// class, and serve `@rpc/netring/encrypted_dns`. Rides the `tls`/`quic` handshake
     /// parsing, so it's cheap. Default OFF (opt-in L7).
     #[serde(default)]
     pub encrypted_dns: bool,
@@ -886,8 +881,8 @@ impl SensorConfig for NetringSensorConfig {
     fn logging(&self) -> &LoggingConfig {
         &self.logging
     }
-    fn key_prefix(&self) -> &str {
-        &self.netring.key_prefix
+    fn producer(&self) -> &str {
+        "netring"
     }
     fn artifact_limits(&self) -> zensight_sensor_core::ArtifactLimits {
         self.artifacts.clone()
@@ -918,7 +913,6 @@ mod tests {
     fn parse_with_interface() {
         let cfg: NetringSensorConfig =
             json5::from_str(r#"{ netring: { source: "s1", interfaces: ["eth0"] } }"#).unwrap();
-        assert_eq!(cfg.netring.key_prefix, "zensight/netring");
         assert_eq!(cfg.netring.resolved_source(), "s1");
         assert!(cfg.netring.collect.bandwidth);
         assert!(cfg.validate().is_ok());

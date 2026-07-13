@@ -6,7 +6,8 @@
     // listen: ["tcp/0.0.0.0:7448"],   // Endpoints to listen on (for peer/router)
   },
 
-  // On-demand artifact channel (@/artifact) — opt-in per kind. When enabled,
+  // On-demand artifact channel (@rpc artifact/request + @blob delivery) —
+  // opt-in per kind. When enabled,
   // an operator can download a redacted tar.zst debug bundle (and, for
   // snapshot, an allowlisted directory) from the GUI. Bounded + rate-limited;
   // secrets are redacted.

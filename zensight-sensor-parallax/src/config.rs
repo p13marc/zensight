@@ -32,7 +32,7 @@ pub struct ParallaxSensorConfig {
     #[serde(default)]
     pub logging: LoggingConfig,
 
-    /// On-demand artifact channel (`@/artifact`) limits — report + snapshot.
+    /// On-demand artifact channel (`@rpc/parallax/artifact/*`) limits — report + snapshot.
     /// Every kind disabled by default.
     #[serde(default)]
     pub artifacts: zensight_sensor_core::ArtifactLimits,
@@ -41,10 +41,6 @@ pub struct ParallaxSensorConfig {
 /// Video source and stream configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParallaxConfig {
-    /// Key expression prefix (default: "zensight/parallax").
-    #[serde(default = "default_key_prefix")]
-    pub key_prefix: String,
-
     /// Source id (hostname) to use in key expressions.
     /// Use "auto" to detect the local hostname automatically (default).
     #[serde(default = "default_source")]
@@ -86,7 +82,6 @@ pub struct ParallaxConfig {
 impl Default for ParallaxConfig {
     fn default() -> Self {
         Self {
-            key_prefix: default_key_prefix(),
             source: default_source(),
             enumerate_v4l2: true,
             rtsp: Vec::new(),
@@ -178,10 +173,6 @@ impl Default for VideoConfig {
             profile: default_video_profile(),
         }
     }
-}
-
-fn default_key_prefix() -> String {
-    "zensight/parallax".to_string()
 }
 
 fn default_source() -> String {
@@ -346,8 +337,8 @@ impl SensorConfig for ParallaxSensorConfig {
         &self.logging
     }
 
-    fn key_prefix(&self) -> &str {
-        &self.parallax.key_prefix
+    fn producer(&self) -> &str {
+        "parallax"
     }
 
     fn artifact_limits(&self) -> zensight_sensor_core::ArtifactLimits {
@@ -371,7 +362,6 @@ mod tests {
         }"#;
         let config: ParallaxSensorConfig = json5::from_str(json).unwrap();
         config.validate().unwrap();
-        assert_eq!(config.parallax.key_prefix, "zensight/parallax");
         assert_eq!(config.parallax.source, "auto");
         assert!(config.parallax.enumerate_v4l2);
         assert!(config.parallax.rtsp.is_empty());

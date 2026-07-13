@@ -93,7 +93,12 @@ clap = { version = "4", features = ["derive"] }
 dirs = "5"
 # Native file dialogs (export save-as, #37). xdg-portal backend avoids a hard
 # GTK system-lib dependency (uses the desktop portal over D-Bus via ashpd).
-rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+# rfd backend: async-std, NOT tokio — iced_tester (the `tester` feature) pulls
+# rfd's default features, which pin ashpd/async-std; ashpd's tokio and
+# async-std features are mutually exclusive, so feature unification with our
+# own rfd dep must agree. The dialog futures are executor-agnostic — awaiting
+# them from the tokio runtime is fine; only ashpd's internal reactor changes.
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
 # Desktop notifications for CRITICAL alert transitions (#26, opt-in). On Linux it
 # uses the freedesktop notification spec over D-Bus (zbus, already pulled by rfd).
 notify-rust = "4"

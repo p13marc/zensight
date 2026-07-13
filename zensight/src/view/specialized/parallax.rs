@@ -1,7 +1,7 @@
 //! Parallax (live video / media plane) specialized view (#408, epic #402).
 //!
 //! Renders the sensor's stream catalogue (fetched on demand from
-//! `@/query/streams`) and a grid of live JPEG preview tiles. Opening a tile
+//! `@rpc/parallax/streams`) and a grid of live JPEG preview tiles. Opening a tile
 //! sends `open_stream` (codec `mjpeg`) and spawns an abortable subscriber
 //! task on the exact `@media/<stream>/preview/jpeg` key (see
 //! `parallax_detail.rs`); each decoded frame lands here as an

@@ -29,15 +29,15 @@ const ENTITY_NAMES_CAP: usize = 32;
 /// One decoded input to the engine, produced by the subscribers.
 #[derive(Debug, Clone)]
 pub enum EvidenceMsg {
-    /// A host-identity claim (`_meta/evidence/host/<sensor>/<source>`). Boxed:
+    /// A host-identity claim (`state/<sensor>/evidence/{self,device/<d>}`). Boxed:
     /// `HostEvidence` is much larger than the other variants and this message
     /// flows through a channel (keeps the enum from being fat — same reason
     /// [`EntityOp::Upsert`] boxes its entity).
     Host(Box<HostEvidence>),
-    /// A passive-DNS name observation (`_meta/evidence/names/<sensor>/<ip>`).
+    /// A passive-DNS name observation (`state/<sensor>/evidence/names/<ip-slug>`).
     Name(NameObservation),
     /// A host-evidence tombstone (a `Delete` on
-    /// `_meta/evidence/host/<sensor>/<source>`): drop that claim now instead of
+    /// `state/<sensor>/evidence/{self,device/<d>}`): drop that claim now instead of
     /// waiting for it to age out by TTL.
     RemoveHost { sensor: String, source: String },
 }
@@ -246,7 +246,8 @@ pub struct Engine {
     state: SharedState,
     rx: mpsc::Receiver<EvidenceMsg>,
     out: mpsc::Sender<EntityOp>,
-    /// Optional sink for durable historical passive-DNS records (`@pdns`, #310).
+    /// Optional sink for durable historical passive-DNS records
+    /// (`@catalog/state/pdns`, #310).
     /// Fed on every name-store update so a storage backend can capture the full
     /// IP↔name history. `None` disables the historical tier.
     pdns_out: Option<mpsc::Sender<PdnsRecord>>,
@@ -279,9 +280,9 @@ impl Engine {
         }
     }
 
-    /// Attach the durable historical passive-DNS sink (`@pdns`, #310). When set,
-    /// each name-store update emits a [`PdnsRecord`] with the IP's full
-    /// accumulated name set onto this channel for the `@pdns` publisher.
+    /// Attach the durable historical passive-DNS sink (`@catalog/state/pdns`,
+    /// #310). When set, each name-store update emits a [`PdnsRecord`] with the
+    /// IP's full accumulated name set onto this channel for the pdns publisher.
     pub fn with_pdns(mut self, pdns_out: mpsc::Sender<PdnsRecord>) -> Self {
         self.pdns_out = Some(pdns_out);
         self
@@ -311,7 +312,7 @@ impl Engine {
                         Some(msg) => {
                             // A name observation updates the accumulated names for
                             // its IP; after applying, emit the IP's full name set
-                            // as a durable historical `@pdns` record (#310). Cheap
+                            // as a durable historical `@catalog/state/pdns` record (#310). Cheap
                             // and off the packet hot path — fires per name-store
                             // update, not per packet.
                             let pdns_ip = match &msg {
@@ -518,7 +519,7 @@ mod tests {
     #[tokio::test]
     async fn name_message_emits_historical_pdns_record() {
         // #310: a passive-DNS name observation flowing through the engine emits a
-        // durable `@pdns` record carrying the IP's full accumulated name set.
+        // durable `@catalog/state/pdns` record carrying the IP's full accumulated name set.
         let state = std::sync::Arc::new(std::sync::Mutex::new(CorrelatorState::new(cfg())));
         let (tx, rx) = mpsc::channel(16);
         let (op_tx, _op_rx) = mpsc::channel(16);

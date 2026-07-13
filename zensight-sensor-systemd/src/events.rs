@@ -3,7 +3,7 @@
 //! Calls `Manager.Subscribe()` once and consumes the `UnitNew`/`UnitRemoved`/
 //! `JobNew`/`JobRemoved` signals, filtered to watched units to bound volume. Each
 //! becomes a structured [`EventRecord`] in a bounded ring served on
-//! `@/query/events` (newest-first), and optionally nudges the sentinel (#277) for
+//! `@rpc/systemd/events` (newest-first), and optionally nudges the sentinel (#277) for
 //! instant re-evaluation. Job completions also carry the resulting `ActiveState`
 //! transition (`from`→`to`), tracked across events.
 
@@ -74,7 +74,7 @@ impl EventState {
         }
     }
 
-    /// Recent events, newest-first (for `@/query/events`).
+    /// Recent events, newest-first (for `@rpc/systemd/events`).
     pub fn recent(&self) -> Vec<EventRecord> {
         self.inner
             .ring
@@ -84,7 +84,7 @@ impl EventState {
     }
 
     /// Recent state-change lines for one unit, newest-first, capped at `max`
-    /// (#274). Feeds `UnitDetail.recent_changes` on `@/query/unit?name=`.
+    /// (#274). Feeds `UnitDetail.recent_changes` on `@rpc/systemd/unit?name=`.
     pub fn recent_for_unit(&self, unit: &str, max: usize) -> Vec<String> {
         self.inner
             .ring

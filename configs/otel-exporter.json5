@@ -31,7 +31,7 @@
     // Export logs (Syslog text messages)
     export_logs: true,
 
-    // Export sensor alerts (@/alerts/*) as OTLP log events on the
+    // Export sensor alerts (state/*/alert/*) as OTLP log events on the
     // "zensight.alerts" scope (severity mapped from the alert severity,
     // alert.* attributes). Set false to skip alert export.
     export_alerts: true,
@@ -60,7 +60,7 @@
     // (default "zensight/@v1/*/telemetry/**" — the v1 class selector).
     // Narrow it to tame the firehose at the subscription — unwanted protocols
     // and the state/media planes never reach this exporter over the wire.
-    // The @/alerts/* subscriber is separate and unaffected.
+    // The state/*/alert/* subscriber is separate and unaffected.
     // key_expr: "zensight/@v1/*/telemetry/netring/**",
 
     // Only include these protocols (empty = all)

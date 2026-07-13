@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
 
     // Enable status publishing
 
-    // On-demand debug-report (`@/artifact`): bundle redacted config + health +
+    // On-demand debug-report (the artifact channel): bundle redacted config + health +
     // counters. No-op unless `report.enabled` is set in the config.
     let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
         "logs",
@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
         runner.config().clone(),
         runner.health(),
     ));
-    // Tier-2 directory snapshots (`@/artifact`). No-op unless `snapshot.enabled`.
+    // Tier-2 directory snapshots (the artifact channel). No-op unless `snapshot.enabled`.
     let artifacts = runner.config().artifact_limits();
     let runner = runner.with_identity().with_artifacts(vec![
         std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
@@ -96,13 +96,9 @@ async fn main() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to start syslog listeners: {}", e))?;
 
-    tracing::info!(
-        "Syslog listeners started, publishing to prefix: {}",
-        syslog_config.key_prefix
-    );
+    tracing::info!("Syslog listeners started");
 
     // Process incoming messages
-    let key_prefix = syslog_config.key_prefix.clone();
     let include_raw = syslog_config.include_raw_message;
     let enable_dynamic_filters = syslog_config.enable_dynamic_filters;
 
@@ -119,13 +115,12 @@ async fn main() -> Result<()> {
     // Set up dynamic filter command handling if enabled
     let filter_manager_for_commands = filter_manager.clone();
     let session_for_commands = session.clone();
-    let _key_prefix_for_commands = key_prefix.clone();
 
     let mut runner = runner;
 
     if enable_dynamic_filters {
-        let command_key = commands::command_key(&key_prefix);
-        let status_key = commands::status_key(&key_prefix);
+        let command_key = commands::command_key("logs");
+        let status_key = commands::status_key("logs");
 
         tracing::info!("Dynamic filters enabled, listening on {}", command_key);
 
@@ -306,7 +301,8 @@ async fn main() -> Result<()> {
         let stats = ingest_stats.clone();
         let health = runner.health();
         let registry_tick = registry.clone();
-        let v1_prefix_tick = zensight_sensor_core::v1::v1_telemetry_prefix(&key_prefix);
+        let v1_prefix_tick =
+            zensight_sensor_core::v1::V1Context::for_producer("logs").telemetry_prefix();
         let interval_secs = syslog_config.derived_interval_secs.max(1);
         let drop_alert_ratio = syslog_config.ingest.drop_alert_ratio;
         let source = source.clone();
@@ -387,7 +383,8 @@ async fn main() -> Result<()> {
     });
     if let Some(agg) = aggregator.clone() {
         let registry_tick = registry.clone();
-        let v1_prefix_tick = zensight_sensor_core::v1::v1_telemetry_prefix(&key_prefix);
+        let v1_prefix_tick =
+            zensight_sensor_core::v1::V1Context::for_producer("logs").telemetry_prefix();
         let interval_secs = syslog_config.derived_interval_secs.max(1);
         let stats_tick = journald_stats.clone();
         let budget_reporter = budget_alerts_on.then(|| alert_reporter.clone()).flatten();
@@ -454,7 +451,8 @@ async fn main() -> Result<()> {
     });
     if let Some(tagg) = template_agg.clone() {
         let registry_tick = registry.clone();
-        let v1_prefix_tick = zensight_sensor_core::v1::v1_telemetry_prefix(&key_prefix);
+        let v1_prefix_tick =
+            zensight_sensor_core::v1::V1Context::for_producer("logs").telemetry_prefix();
         let interval_secs = syslog_config.derived_interval_secs.max(1);
         let source = source.clone();
         runner.spawn(async move {
@@ -539,11 +537,11 @@ async fn main() -> Result<()> {
     }
 
     // Per-line event ring + on-demand query channel (#358): log lines are
-    // served from `@/query/events`, never streamed on the telemetry bus.
+    // served from `@rpc/logs/events`, never streamed on the telemetry bus.
     let (event_ring, event_ring_capacity) = query::new_ring(syslog_config.events_ring_capacity);
     runner.spawn(query::run_events(
         session.clone(),
-        key_prefix.clone(),
+        "logs".to_string(),
         event_ring.clone(),
     ));
 
@@ -625,7 +623,7 @@ async fn main() -> Result<()> {
                     }
 
                     // Ring, don't stream (#358): the per-line event goes into
-                    // the bounded `@/query/events` ring for on-demand pulls.
+                    // the bounded `@rpc/logs/events` ring for on-demand pulls.
                     // Only the derived rollups above ride the telemetry bus.
                     if let Some(record) = zensight_common::LogRecord::from_point(&point) {
                         query::push(&event_ring, event_ring_capacity, record);

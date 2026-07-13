@@ -4,7 +4,7 @@
 //! tracepoint programs, then runs a poller that periodically sums the per-CPU
 //! histogram arrays, computes a per-window delta, and stores a
 //! [`LatencyReport`](crate::map::LatencyReport) into shared state that the
-//! `@/query/latency` queryable replies with.
+//! `@rpc/sysinfo/latency` queryable replies with.
 //!
 //! Gated on `cfg(all(target_os = "linux", feature = "ebpf"))` — the rest of the
 //! crate stays aya-free. Any load/attach failure (no `CAP_BPF`/`CAP_PERFMON`,
@@ -37,7 +37,7 @@ pub fn start(report: Arc<Mutex<LatencyReport>>, poll_interval_secs: u64) -> Resu
     let mut bpf = EbpfLoader::new()
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
-            "/zensight-sensor-sysinfo-ebpf"
+            "/zensight-sysinfo-ebpf-prog"
         )))
         .context("load eBPF bytecode")?;
 

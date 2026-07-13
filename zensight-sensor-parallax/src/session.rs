@@ -291,7 +291,7 @@ impl SessionManager {
         alerts: Option<Arc<ParallaxAlerts>>,
     ) -> SessionHandle {
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let state_ctx = zensight_sensor_core::v1::V1Context::from_prefix(&config.key_prefix);
+        let state_ctx = zensight_sensor_core::v1::V1Context::for_producer("parallax");
         let manager = SessionManager {
             catalog,
             config,

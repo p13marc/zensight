@@ -1,8 +1,8 @@
 //! Parallax stream catalogue + live preview tiles — state and transport
 //! (#408, epic #402).
 //!
-//! The catalogue is an on-demand [`Fetch`] from the sensor's host-scoped
-//! `@/query/streams` queryable. Each opened tile runs one abortable
+//! The catalogue is an on-demand [`Fetch`] from the sensor's origin-scoped
+//! `@rpc/parallax/streams` queryable. Each opened tile runs one abortable
 //! [`iced::Task::stream`] built from [`preview_tile_stream`]: a plain Zenoh
 //! subscriber on the exact `@media/<stream>/preview/jpeg` key, draining to
 //! the newest frame (latest wins — stale previews are worthless), decoding
@@ -41,7 +41,7 @@ const SEQ_RESTART_GAP: u64 = 300;
 /// Per-device parallax state: the stream catalogue + open preview tiles.
 #[derive(Debug, Default)]
 pub struct ParallaxDetailState {
-    /// The advertised streams (`@/query/streams`).
+    /// The advertised streams (`@rpc/parallax/streams`).
     pub catalogue: Fetch<Vec<StreamDescriptor>>,
     /// Open preview tiles, keyed by stream name (BTreeMap: stable grid order).
     pub tiles: BTreeMap<String, TileState>,
@@ -232,7 +232,7 @@ impl ParallaxDetailState {
         }
     }
 
-    /// Fold a sensor-side `StreamStatus` transition (`@/status/streams`) in:
+    /// Fold a sensor-side `StreamStatus` transition (`state/parallax/stream/<stream>`) in:
     /// a definitive `open: false` for a tile still waiting for its first
     /// frame means the open failed on the sensor — surface it instead of
     /// "waiting for frames…" forever. The subscriber task stays alive (the

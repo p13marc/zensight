@@ -5,9 +5,9 @@
 //! - configured remote RTSP cameras,
 //! - configured synthetic test-pattern sources (demo mode / CI).
 //!
-//! Every entry becomes one `StreamDescriptor` on the `@/query/streams`
-//! catalogue and one `@/devices/<stream>/alive` liveliness token; the
-//! `<stream>` name is the key chunk under `@media/`.
+//! Every entry becomes one `StreamDescriptor` on the `@rpc/parallax/streams`
+//! catalogue and one `state/parallax/device/<stream>/alive` liveliness token; the
+//! `<stream>` name is the key chunk under `@media/parallax/`.
 
 use std::collections::HashSet;
 

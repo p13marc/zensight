@@ -121,10 +121,10 @@ async fn spawn_sensor_with_config(
     StatsRegistry,
 ) {
     let catalog = Arc::new(Catalog::build(&config));
-    let publisher = Publisher::new(session.clone(), config.key_prefix.clone(), Format::Json);
-    // v1: control/query surfaces key off the producer prefix (the origin
+    let publisher = Publisher::new(session.clone(), "parallax", Format::Json);
+    // v1: control/query surfaces key off the producer name (the origin
     // chunk scopes per host; the source label is payload-only).
-    let host_prefix = config.key_prefix.clone();
+    let host_prefix = "parallax".to_string();
     let registry = StatsRegistry::default();
     tokio::spawn(stats::run_ticker(
         publisher.clone(),
@@ -157,12 +157,12 @@ async fn spawn_sensor_with_config(
 /// The sensor runs in-process, so the test's v1 context (same global host
 /// origin) yields exactly the keys the sensor publishes on (epic #453).
 fn v1ctx() -> zensight_sensor_core::v1::V1Context {
-    zensight_sensor_core::v1::V1Context::from_prefix("zensight/parallax")
+    zensight_sensor_core::v1::V1Context::for_producer("parallax")
 }
 
 async fn query_catalogue(viewer: &zenoh::Session, _host_prefix: &str) -> Vec<StreamDescriptor> {
     let replies = viewer
-        .get(query_key("zensight/parallax", "streams"))
+        .get(query_key("parallax", "streams"))
         .await
         .expect("query streams");
     let reply = tokio::time::timeout(Duration::from_secs(5), replies.recv_async())
@@ -198,7 +198,7 @@ async fn send_control(viewer: &zenoh::Session, _host_prefix: &str, control: Stre
     // GET with a body; the value reply is the ack.
     let cmd = Command::new(control);
     let replies = viewer
-        .get(command_key("zensight/parallax", "stream"))
+        .get(command_key("parallax", "stream"))
         .payload(serde_json::to_vec(&cmd).unwrap())
         .await
         .expect("send stream control");
@@ -210,7 +210,7 @@ async fn send_control(viewer: &zenoh::Session, _host_prefix: &str, control: Stre
 async fn catalogue_query_lists_test_stream() {
     let (sensor, viewer) = isolated_pair().await;
     let source = "e2e-catalogue";
-    let host_prefix = format!("zensight/parallax/{source}");
+    let host_prefix = "parallax".to_string();
     let _handle = spawn_sensor(sensor.clone(), source).await;
 
     let got = query_catalogue(&viewer, &host_prefix).await;
@@ -231,7 +231,7 @@ async fn catalogue_query_lists_test_stream() {
 async fn open_preview_streams_jpeg_frames_at_config_fps() {
     let (sensor, viewer) = isolated_pair().await;
     let source = "e2e-preview";
-    let host_prefix = format!("zensight/parallax/{source}");
+    let host_prefix = "parallax".to_string();
     let handle = spawn_sensor(sensor.clone(), source).await;
 
     // Subscribe FIRST so the very first published frame is observed.
@@ -330,7 +330,7 @@ async fn open_preview_streams_jpeg_frames_at_config_fps() {
 async fn open_h264_video_streams_with_keyframe_control() {
     let (sensor, viewer) = isolated_pair().await;
     let source = "e2e-h264";
-    let host_prefix = format!("zensight/parallax/{source}");
+    let host_prefix = "parallax".to_string();
     let handle = spawn_sensor(sensor.clone(), source).await;
 
     // Subscribe FIRST so the initial IDR is observed. The profile chunk is
@@ -493,7 +493,7 @@ async fn open_h264_video_streams_with_keyframe_control() {
 async fn stats_ticker_publishes_fps_telemetry() {
     let (sensor, viewer) = isolated_pair().await;
     let source = "e2e-stats";
-    let host_prefix = format!("zensight/parallax/{source}");
+    let host_prefix = "parallax".to_string();
     let handle = spawn_sensor(sensor.clone(), source).await;
 
     // Watch the stream's stats subtree (ordinary telemetry keys).
@@ -576,7 +576,7 @@ async fn wait_until_closed(handle: &zensight_sensor_parallax::session::SessionHa
 async fn close_and_idle_reaper_tear_stream_down() {
     let (sensor, viewer) = isolated_pair().await;
     let source = "e2e-teardown";
-    let host_prefix = format!("zensight/parallax/{source}");
+    let host_prefix = "parallax".to_string();
     let handle = spawn_sensor(sensor.clone(), source).await;
 
     let preview_key = v1ctx().media_preview_key("test0");
@@ -652,7 +652,7 @@ fn rtsp_parallax_config(url: &str) -> ParallaxConfig {
 async fn failed_open_publishes_closed_status_and_leaks_no_stats() {
     let (sensor, viewer) = isolated_pair().await;
     let source = "e2e-failed-open";
-    let host_prefix = format!("zensight/parallax/{source}");
+    let host_prefix = "parallax".to_string();
     // Loopback port 1: nothing listens there, the connect is refused fast.
     let (handle, registry) = spawn_sensor_with_config(
         sensor.clone(),
@@ -719,7 +719,7 @@ async fn failed_open_publishes_closed_status_and_leaks_no_stats() {
 async fn rtsp_connect_does_not_block_stream_queries() {
     let (sensor, viewer) = isolated_pair().await;
     let source = "e2e-nonblocking";
-    let host_prefix = format!("zensight/parallax/{source}");
+    let host_prefix = "parallax".to_string();
     // TEST-NET-3 address: blackholed on any sane network, so the connect
     // hangs until the 5 s timeout (if the local network answers fast the
     // test still passes — it just exercises less waiting).

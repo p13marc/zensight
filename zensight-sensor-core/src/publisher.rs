@@ -27,7 +27,7 @@ use crate::v1::V1Context;
 pub struct Publisher {
     session: Arc<zenoh::Session>,
     /// The v1 telemetry prefix (`<base>/@v1/<origin>/telemetry/<producer>`).
-    key_prefix: String,
+    telemetry_prefix: String,
     format: Format,
     /// The v1 key context this publisher derives every key from.
     v1: V1Context,
@@ -38,18 +38,14 @@ pub struct Publisher {
 }
 
 impl Publisher {
-    /// Create a new publisher.
-    pub fn new(
-        session: Arc<zenoh::Session>,
-        key_prefix: impl Into<String>,
-        format: Format,
-    ) -> Self {
-        let v1 = V1Context::from_prefix(&key_prefix.into());
-        let key_prefix = v1.telemetry_prefix();
+    /// Create a new publisher for one producer on this host.
+    pub fn new(session: Arc<zenoh::Session>, producer: impl AsRef<str>, format: Format) -> Self {
+        let v1 = V1Context::for_producer(producer.as_ref());
+        let telemetry_prefix = v1.telemetry_prefix();
         let control = Arc::new(zensight_common::PublisherRegistry::new(session.clone()));
         Self {
             session,
-            key_prefix,
+            telemetry_prefix,
             format,
             v1,
             control,
@@ -62,8 +58,8 @@ impl Publisher {
     }
 
     /// Get the key prefix.
-    pub fn key_prefix(&self) -> &str {
-        &self.key_prefix
+    pub fn telemetry_prefix(&self) -> &str {
+        &self.telemetry_prefix
     }
 
     /// Get the serialization format.
@@ -82,9 +78,9 @@ impl Publisher {
     pub fn build_key(&self, suffix: &str) -> String {
         debug_assert!(!suffix.contains("//"), "key suffix must not contain '//'");
         if suffix.is_empty() {
-            self.key_prefix.clone()
+            self.telemetry_prefix.clone()
         } else {
-            format!("{}/{}", self.key_prefix, suffix)
+            format!("{}/{}", self.telemetry_prefix, suffix)
         }
     }
 
@@ -295,18 +291,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_build_key() {
-        // We can't create a real session in tests, but we can test key building logic
-        let key_prefix = "zensight/test";
-
-        // Test key building logic
-        let suffix = "device/metric";
-        let expected = format!("{}/{}", key_prefix, suffix);
-        assert_eq!(expected, "zensight/test/device/metric");
-
-        // Empty suffix
-        let empty_key = key_prefix.to_string();
-        assert_eq!(empty_key, "zensight/test");
+    fn test_telemetry_prefix_is_the_v1_telemetry_prefix() {
+        // The publisher's key root is the v1 telemetry prefix for its
+        // producer on THIS host (origin-scoped, RFC 04).
+        let prefix = V1Context::for_producer("test").telemetry_prefix();
+        assert!(prefix.starts_with("zensight/@v1/h-"), "{prefix}");
+        assert!(prefix.ends_with("/telemetry/test"), "{prefix}");
+        assert_eq!(
+            format!("{prefix}/device/metric"),
+            format!("{}/device/metric", prefix)
+        );
     }
 
     #[test]

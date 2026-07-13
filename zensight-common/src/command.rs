@@ -5,9 +5,9 @@
 //! - write: `<base>/@v1/<origin>/@rpc/<producer>/<topic>/set`
 //! - read:  `<base>/@v1/<origin>/@rpc/<producer>/<topic>`
 //!
-//! Every builder takes the sensor `prefix` (legacy `zensight/<protocol>`
-//! config form or a v1 prefix — both derive the same context) so existing
-//! call sites keep their shape.
+//! Every builder takes the **producer name** ("logs", "netring", …) and
+//! derives the LOCAL host origin — these are serving-side builders; fleet
+//! callers use [`crate::keyexpr::fleet_rpc_key`]/[`crate::keyexpr::origin_rpc_key`].
 
 use serde::{Deserialize, Serialize};
 use zensight_keyspace::V1Context;
@@ -18,60 +18,60 @@ use zensight_keyspace::grammar::BlobTier;
 /// # Example
 /// ```
 /// use zensight_common::command::command_key;
-/// let k = command_key("zensight/logs", "filter");
+/// let k = command_key("logs", "filter");
 /// assert!(k.starts_with("zensight/@v1/h-"));
 /// assert!(k.ends_with("/@rpc/logs/filter/set"));
 /// ```
-pub fn command_key(prefix: &str, topic: &str) -> String {
-    V1Context::from_prefix(prefix).rpc_key(&[topic, "set"])
+pub fn command_key(producer: &str, topic: &str) -> String {
+    V1Context::for_producer(producer).rpc_key(&[topic, "set"])
 }
 
 /// The read procedure for a control topic: `…/@rpc/<producer>/<topic>`
-/// (current configuration/status — the legacy `@/status/<topic>` queryable).
-pub fn status_key(prefix: &str, topic: &str) -> String {
-    V1Context::from_prefix(prefix).rpc_key(&[topic])
+/// (the reply carries the topic's current configuration/status).
+pub fn status_key(producer: &str, topic: &str) -> String {
+    V1Context::for_producer(producer).rpc_key(&[topic])
 }
 
 /// The on-demand detail-read procedure: `…/@rpc/<producer>/<topic>`.
 /// High-cardinality detail (flow tables, socket lists, …) is served here on
 /// request, never streamed onto the telemetry bus (RFC 04 R3). Same key
 /// shape as [`status_key`] — reads are reads (RFC 05 §5).
-pub fn query_key(prefix: &str, topic: &str) -> String {
-    V1Context::from_prefix(prefix).rpc_key(&[topic])
+pub fn query_key(producer: &str, topic: &str) -> String {
+    V1Context::for_producer(producer).rpc_key(&[topic])
 }
 
 /// The artifact-request write procedure (RFC 05 §3 long-running pattern).
-pub fn artifact_request_key(prefix: &str) -> String {
-    V1Context::from_prefix(prefix).rpc_key(&["artifact", "request"])
+pub fn artifact_request_key(producer: &str) -> String {
+    V1Context::for_producer(producer).rpc_key(&["artifact", "request"])
 }
 
 /// The artifact-status read procedure. (Residual: the RFC's ideal is the
 /// observable `state/<producer>/artifact/<kind>` document; the read
 /// procedure remains for the transition.)
-pub fn artifact_status_key(prefix: &str) -> String {
-    V1Context::from_prefix(prefix).rpc_key(&["artifact", "status"])
+pub fn artifact_status_key(producer: &str) -> String {
+    V1Context::for_producer(producer).rpc_key(&["artifact", "status"])
 }
 
 /// The artifact-cancel write procedure (`?id=<ulid>`).
-pub fn artifact_cancel_key(prefix: &str) -> String {
-    V1Context::from_prefix(prefix).rpc_key(&["artifact", "cancel"])
+pub fn artifact_cancel_key(producer: &str) -> String {
+    V1Context::for_producer(producer).rpc_key(&["artifact", "cancel"])
 }
 
 /// Tier-1 blob prefix: `<base>/@v1/<origin>/@blob/artifact` — a produced
 /// artifact's manifest + chunks live under `…/artifact/<id>/**` (RFC 07 §2).
-pub fn artifact_blob_prefix(prefix: &str) -> String {
-    V1Context::from_prefix(prefix).blob_prefix(BlobTier::Artifact)
+pub fn artifact_blob_prefix(producer: &str) -> String {
+    V1Context::for_producer(producer).blob_prefix(BlobTier::Artifact)
 }
 
 /// Tier-2 content-store prefix: `<base>/@v1/<origin>/@blob/store` — chunks
 /// at `…/store/<algo>/<hash>`, immutable ⇒ cacheable fleet-wide.
-pub fn artifact_store_prefix(prefix: &str) -> String {
-    V1Context::from_prefix(prefix).blob_prefix(BlobTier::Store)
+pub fn artifact_store_prefix(producer: &str) -> String {
+    V1Context::for_producer(producer).blob_prefix(BlobTier::Store)
 }
 
 /// Tier-2 tree-index prefix: `<base>/@v1/<origin>/@blob/tree`.
-pub fn artifact_tree_prefix(prefix: &str) -> String {
-    V1Context::from_prefix(prefix).blob_prefix(BlobTier::Tree)
+pub fn artifact_tree_prefix(producer: &str) -> String {
+    V1Context::for_producer(producer).blob_prefix(BlobTier::Tree)
 }
 
 /// Optional envelope carrying a correlation id alongside a command body.
@@ -101,18 +101,18 @@ mod tests {
 
     #[test]
     fn key_builders() {
-        let k = command_key("zensight/netlink", "expectations");
+        let k = command_key("netlink", "expectations");
         assert!(k.starts_with("zensight/@v1/h-"), "{k}");
         assert!(k.ends_with("/@rpc/netlink/expectations/set"), "{k}");
-        let s = status_key("zensight/netring", "detectors");
+        let s = status_key("netring", "detectors");
         assert!(s.ends_with("/@rpc/netring/detectors"), "{s}");
         // Reads are reads: status and query share the shape.
-        assert_eq!(s, query_key("zensight/netring", "detectors"));
+        assert_eq!(s, query_key("netring", "detectors"));
     }
 
     #[test]
     fn artifact_key_builders() {
-        let p = "zensight/netlink";
+        let p = "netlink";
         assert!(artifact_request_key(p).ends_with("/@rpc/netlink/artifact/request"));
         assert!(artifact_status_key(p).ends_with("/@rpc/netlink/artifact/status"));
         assert!(artifact_cancel_key(p).ends_with("/@rpc/netlink/artifact/cancel"));

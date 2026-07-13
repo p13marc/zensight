@@ -1,4 +1,4 @@
-//! Host-evidence wire types — the `zensight/_meta/evidence/**` keyspace (#301).
+//! Host-evidence wire types — the `zensight/@v1/*/state/*/evidence/**` keyspace (#301).
 //!
 //! Sensors publish identity *evidence*; the correlator (single writer) merges it
 //! into entities. Evidence is a claim, not a verdict: `observer: None` marks a
@@ -32,8 +32,9 @@ pub struct CloudFacts {
     pub account: Option<String>,
 }
 
-/// One host-identity claim, published on
-/// `zensight/_meta/evidence/host/<sensor>/<source>`.
+/// One host-identity claim, published origin-scoped on
+/// `state/<sensor>/evidence/self` (self claim) or
+/// `state/<sensor>/evidence/device/<device>` (observed device).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostEvidence {
     /// Publishing sensor (e.g. `"sysinfo"`, `"netring"`).
@@ -83,7 +84,7 @@ pub struct HostEvidence {
 }
 
 /// One passive-DNS name observation, published on
-/// `zensight/_meta/evidence/names/<sensor>/<ip-slug>` (#307).
+/// `state/<sensor>/evidence/names/<ip-slug>` (#307).
 ///
 /// A **third-party** claim binding an observed IP to a name seen on the wire
 /// (DNS answer, PTR, TLS SNI, ...). The correlator uses these to attach

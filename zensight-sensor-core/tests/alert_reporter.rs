@@ -50,7 +50,7 @@ async fn fires_then_resolves() {
         .expect("subscriber");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let publisher = Publisher::new(session.clone(), "zensight/netlink", Format::Json);
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
     let reporter = AlertReporter::new(publisher, Protocol::Netlink, Format::Json);
 
     let source = unique_source();
@@ -109,7 +109,7 @@ async fn debounce_suppresses_first_observe() {
         .expect("subscriber");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let publisher = Publisher::new(session.clone(), "zensight/netlink", Format::Json);
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
     let reporter = AlertReporter::new(publisher, Protocol::Netlink, Format::Json);
 
     let source = unique_source();

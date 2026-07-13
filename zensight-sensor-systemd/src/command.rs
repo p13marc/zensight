@@ -1,5 +1,5 @@
-//! Sentinel control plane (#277): `@/commands/expectations` (hot-swap the rule
-//! set) + `@/status/expectations` (queryable reply of the current set). Mirrors
+//! Sentinel control plane (#277): `@rpc/systemd/expectations/set` (hot-swap the rule
+//! set) + `@rpc/systemd/expectations` (read reply of the current set). Mirrors
 //! the netlink sentinel command channel.
 
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use crate::sentinel::{ExpectationsConfig, SentinelHandle};
 
 const EXPECTATIONS_TOPIC: &str = "expectations";
 
-/// A runtime command on `@/commands/expectations`.
+/// A runtime command on `@rpc/systemd/expectations/set`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExpectationCommand {
@@ -29,9 +29,9 @@ async fn apply(handle: &SentinelHandle, cmd: ExpectationCommand) {
 }
 
 /// Run the sentinel command/status channel until the session closes.
-pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, handle: SentinelHandle) {
-    let cmd_key = command_key(&key_prefix, EXPECTATIONS_TOPIC);
-    let stat_key = status_key(&key_prefix, EXPECTATIONS_TOPIC);
+pub async fn run(session: Arc<zenoh::Session>, producer: String, handle: SentinelHandle) {
+    let cmd_key = command_key(&producer, EXPECTATIONS_TOPIC);
+    let stat_key = status_key(&producer, EXPECTATIONS_TOPIC);
 
     let subscriber = match session.declare_queryable(&cmd_key).await {
         Ok(s) => s,

@@ -19,16 +19,21 @@ use crate::gnmi::{
 /// A gNMI subscriber that connects to a target and streams telemetry
 pub struct GnmiSubscriber {
     target: GnmiTarget,
-    key_prefix: String,
+    /// The v1 telemetry prefix keys hang off.
+    telemetry_prefix: String,
     serialization: SerializationFormat,
 }
 
 impl GnmiSubscriber {
     /// Create a new gNMI subscriber
-    pub fn new(target: GnmiTarget, key_prefix: String, serialization: SerializationFormat) -> Self {
+    pub fn new(
+        target: GnmiTarget,
+        telemetry_prefix: String,
+        serialization: SerializationFormat,
+    ) -> Self {
         Self {
             target,
-            key_prefix,
+            telemetry_prefix,
             serialization,
         }
     }
@@ -272,9 +277,7 @@ impl GnmiSubscriber {
 
                 let key = format!(
                     "{}/{}/{}",
-                    zensight_sensor_core::v1::v1_telemetry_prefix(&self.key_prefix),
-                    self.target.name,
-                    full_path
+                    self.telemetry_prefix, self.target.name, full_path
                 );
 
                 let payload = match self.serialization {
@@ -397,7 +400,7 @@ mod tests {
 
         let subscriber = GnmiSubscriber::new(
             target,
-            "zensight/gnmi".to_string(),
+            zensight_sensor_core::v1::V1Context::for_producer("gnmi").telemetry_prefix(),
             SerializationFormat::Json,
         );
 
@@ -421,7 +424,7 @@ mod tests {
 
         let subscriber = GnmiSubscriber::new(
             target,
-            "zensight/gnmi".to_string(),
+            zensight_sensor_core::v1::V1Context::for_producer("gnmi").telemetry_prefix(),
             SerializationFormat::Json,
         );
 
@@ -444,7 +447,7 @@ mod tests {
 
         let subscriber = GnmiSubscriber::new(
             target,
-            "zensight/gnmi".to_string(),
+            zensight_sensor_core::v1::V1Context::for_producer("gnmi").telemetry_prefix(),
             SerializationFormat::Json,
         );
 
@@ -486,7 +489,7 @@ mod tests {
         };
         GnmiSubscriber::new(
             target,
-            "zensight/gnmi".to_string(),
+            zensight_sensor_core::v1::V1Context::for_producer("gnmi").telemetry_prefix(),
             SerializationFormat::Json,
         )
     }

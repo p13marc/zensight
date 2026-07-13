@@ -14,7 +14,7 @@
 //! The detection core ([`XfrmDetector`]) is pure over a small string-keyed
 //! [`XfrmSignal`] (the collector maps raw `nlink` `XfrmEvent`s to it), so the
 //! rules are unit-testable without a live kernel or a Zenoh session.
-//! [`XfrmSentinel`] wraps it to publish `@/alerts/<alert_key>` through the same
+//! [`XfrmSentinel`] wraps it to publish `state/netlink/alert/<alert_key>` through the same
 //! [`AlertReporter`] the expectation sentinel uses.
 
 use std::collections::HashMap;
@@ -147,7 +147,7 @@ impl XfrmDetector {
 }
 
 /// The XFRM sentinel: a [`XfrmDetector`] plus the [`AlertReporter`] used to
-/// publish its findings on `@/alerts`.
+/// publish its findings on `state/netlink/alert/*`.
 pub struct XfrmSentinel {
     host: String,
     reporter: Arc<AlertReporter>,

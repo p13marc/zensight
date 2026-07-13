@@ -6,13 +6,13 @@
 //! retransmits) < wire-L3 (cgroup_skb / systemd: no L2) < wire-L2 (capture: full
 //! frame). Two differently-tagged numbers must never be summed or compared
 //! without the semantics shown. This module is the shared vocabulary (enums +
-//! labels + the `@/query/bandwidth` record shape) so the sensor tiers and the
+//! labels + the `bandwidth` read-procedure record shape) so the sensor tiers and the
 //! GUI can't drift.
 //!
 //! Per-**service** bandwidth (systemd units, low cardinality) is **streamed** as
 //! `unit/<name>/{ip_ingress_bps,ip_egress_bps}` telemetry with the labels below.
 //! Per-**process** bandwidth (netlink sock_diag / eBPF, high cardinality) is
-//! **query-only** — a [`BandwidthRecord`] served on `@/query/bandwidth` (principle
+//! **query-only** — a [`BandwidthRecord`] served on `@rpc/<producer>/bandwidth` (principle
 //! P2: high-cardinality tables are never streamed onto the telemetry bus).
 
 use serde::{Deserialize, Serialize};
@@ -124,7 +124,7 @@ pub enum BandwidthKey {
     Cgroup { path: String },
 }
 
-/// One row of the on-demand `@/query/bandwidth` per-process table (#317/#316).
+/// One row of the on-demand `@rpc/<producer>/bandwidth` per-process table (#317/#316).
 /// `tx`/`rx` are bytes-per-second derived from cumulative deltas by the producer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BandwidthRecord {

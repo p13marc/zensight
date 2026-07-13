@@ -378,7 +378,7 @@ impl TemplateAggregator {
     }
 
     /// Snapshot the per-template counters into telemetry points published under
-    /// `zensight/logs/<source>/logs/by_template/<id>/{count,errors}_total`.
+    /// the v1 telemetry prefix (metric `logs/by_template/<id>/{count,errors}_total`).
     pub fn emit(&self, source: &str) -> Vec<TelemetryPoint> {
         let mut points = Vec::new();
         let Ok(inner) = self.inner.lock() else {

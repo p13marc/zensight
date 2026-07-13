@@ -514,7 +514,7 @@ pub fn diagnostics_points(host: &str, d: &DiagnosticsSummary) -> Vec<TelemetryPo
 
 // ---------------------------------------------------------------------------
 // On-demand detail (principle P2): served via the query channel
-// (`@/query/{routes,neighbors,sockets}`), never streamed onto the telemetry bus.
+// (`@rpc/netlink/{routes,neighbors,sockets}`), never streamed onto the telemetry bus.
 // The record DTOs live in `zensight-common` (shared with the GUI decoder);
 // `query.rs` builds them from live nlink dumps. The `SocketSelector` below is
 // sensor-side filtering logic, kept here and unit-tested.
@@ -805,7 +805,7 @@ pub fn ethtool_points(host: &str, s: &EthtoolSample) -> Vec<TelemetryPoint> {
 
 // ---------------------------------------------------------------------------
 // Address inventory (issue #10): low-cardinality summary streamed; per-address
-// detail served via `@/query/addresses`.
+// detail served via `@rpc/netlink/addresses`.
 // ---------------------------------------------------------------------------
 
 /// One decoded address entry (nlink-free), the pure input to
@@ -840,7 +840,7 @@ pub fn address_points(host: &str, a: &AddressSummary) -> Vec<TelemetryPoint> {
     ]
 }
 
-/// One configured IP address (served via `@/query/addresses`). Defined locally
+/// One configured IP address (served via `@rpc/netlink/addresses`). Defined locally
 /// (this sensor owns only its own crate); the GUI mirrors this JSON shape.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AddressRecord {
@@ -856,7 +856,7 @@ pub struct AddressRecord {
 
 // ---------------------------------------------------------------------------
 // TC / QoS qdisc stats (issue #12): per-(iface,qdisc) aggregates streamed,
-// bounded by the TC hierarchy; full tree served via `@/query/tc`.
+// bounded by the TC hierarchy; full tree served via `@rpc/netlink/tc`.
 // ---------------------------------------------------------------------------
 
 /// A decoded TC qdisc snapshot (nlink-free), the pure input to [`tc_points`].
@@ -1010,7 +1010,7 @@ pub fn tc_points(host: &str, s: &TcQdiscSample) -> Vec<TelemetryPoint> {
     ]
 }
 
-/// One TC qdisc/class entry (served via `@/query/tc`). The GUI mirrors this JSON
+/// One TC qdisc/class entry (served via `@rpc/netlink/tc`). The GUI mirrors this JSON
 /// shape. `node` is `qdisc` or `class`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TcRecord {
@@ -1030,7 +1030,7 @@ pub struct TcRecord {
 
 // ---------------------------------------------------------------------------
 // XFRM / IPsec SA health (issue #13): low-cardinality summary streamed; per-SA
-// detail served via `@/query/xfrm`.
+// detail served via `@rpc/netlink/xfrm`.
 // ---------------------------------------------------------------------------
 
 /// One decoded XFRM Security Association fact (nlink-free), the pure input to
@@ -1072,7 +1072,7 @@ pub fn xfrm_points(host: &str, x: &XfrmSummary) -> Vec<TelemetryPoint> {
     out
 }
 
-/// One IPsec Security Association (served via `@/query/xfrm`). GUI mirrors shape.
+/// One IPsec Security Association (served via `@rpc/netlink/xfrm`). GUI mirrors shape.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct XfrmSaRecord {
     pub src: Option<String>,
@@ -1088,7 +1088,7 @@ pub struct XfrmSaRecord {
 // ---------------------------------------------------------------------------
 // nftables rule counters (issues #14, #115): per-table chain/rule counts plus the
 // per-rule packet/byte counters that are the real value of nft telemetry (firewall
-// hit-rate). Full table/chain/rule inventory served via `@/query/nft`.
+// hit-rate). Full table/chain/rule inventory served via `@rpc/netlink/nft`.
 //
 // Per-rule counters live only as a `counter` *expression* inside the rule's raw
 // `NFTA_RULE_EXPRESSIONS` blob. #115 used to hand-decode that TLV blob; nlink 0.24
@@ -1147,7 +1147,7 @@ pub fn nft_points(host: &str, s: &NftSummary) -> Vec<TelemetryPoint> {
     out
 }
 
-/// One nftables rule (served via `@/query/nft`). GUI mirrors this JSON shape.
+/// One nftables rule (served via `@rpc/netlink/nft`). GUI mirrors this JSON shape.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NftRuleRecord {
     pub family: String,
@@ -1248,7 +1248,7 @@ pub fn connlat_points(host: &str, p50_us: u64, p95_us: u64) -> Vec<TelemetryPoin
     out
 }
 
-/// A per-peer retransmit count (`@/query/retransmits`).
+/// A per-peer retransmit count (`@rpc/netlink/retransmits`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RetransRecord {
     pub peer: String,
@@ -1271,7 +1271,7 @@ pub fn top_k_retransmits(snapshot: &[(RetransKey, u64)], k: usize) -> Vec<Retran
     recs
 }
 
-/// A completed-connection record (tcplife, `@/query/connections`).
+/// A completed-connection record (tcplife, `@rpc/netlink/connections`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConnView {
     pub pid: u32,
