@@ -68,7 +68,7 @@ description = "encode time per frame"
 [[subject]]
 path = "stream/{stream}"
 class = "state"
-type = "StreamDoc"
+type = "StreamStatus"
 cardinality = 16
 ttl_s = 900
 since = "1.0"
