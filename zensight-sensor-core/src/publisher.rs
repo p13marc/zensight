@@ -16,7 +16,7 @@ use crate::v1::V1Context;
 /// [`TelemetryPoint`] values with automatic serialization.
 ///
 /// **Telemetry** (`publish` / `publish_to_key` / `publish_batch`) publishes
-/// under the v1 grammar (`<base>/@v1/<origin>/telemetry/<producer>/…`) on the
+/// under the v1 grammar (`<base>/v1/<origin>/telemetry/<producer>/…`) on the
 /// **baseline delivery tier** (RFC 04 §3.2): plain declared publishers, no
 /// per-key cache/heartbeat machinery — a late joiner waits out the next
 /// cadence (`seed = none`), which is the class default. The advanced tier is
@@ -26,7 +26,7 @@ use crate::v1::V1Context;
 #[derive(Clone, Debug)]
 pub struct Publisher {
     session: Arc<zenoh::Session>,
-    /// The v1 telemetry prefix (`<base>/@v1/<origin>/telemetry/<producer>`).
+    /// The v1 telemetry prefix (`<base>/v1/<origin>/telemetry/<producer>`).
     telemetry_prefix: String,
     format: Format,
     /// The v1 key context this publisher derives every key from.
@@ -295,7 +295,7 @@ mod tests {
         // The publisher's key root is the v1 telemetry prefix for its
         // producer on THIS host (origin-scoped, RFC 04).
         let prefix = V1Context::for_producer("test").telemetry_prefix();
-        assert!(prefix.starts_with("zensight/@v1/h-"), "{prefix}");
+        assert!(prefix.starts_with("zensight/v1/h-"), "{prefix}");
         assert!(prefix.ends_with("/telemetry/test"), "{prefix}");
         assert_eq!(
             format!("{prefix}/device/metric"),

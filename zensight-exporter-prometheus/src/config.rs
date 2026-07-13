@@ -187,7 +187,7 @@ impl Default for AggregationConfig {
 pub struct FilterConfig {
     /// Zenoh subscription key expression for telemetry (R6/#357). Defaults to the
     /// full telemetry class selector; narrow it (e.g.
-    /// `zensight/@v1/*/telemetry/netring/**`) to tame the
+    /// `zensight/v1/*/telemetry/netring/**`) to tame the
     /// firehose at the *subscription* — unwanted protocols never reach this
     /// exporter over the wire, and the state plane / non-telemetry classes
     /// can't match the telemetry class selector by construction. The
@@ -371,7 +371,7 @@ mod tests {
                 cleanup_interval_secs: 30
             },
             filters: {
-                key_expr: "zensight/@v1/*/telemetry/netring/**",
+                key_expr: "zensight/v1/*/telemetry/netring/**",
                 include_protocols: ["snmp", "sysinfo"],
                 exclude_metrics: ["**/debug/**"]
             },
@@ -397,7 +397,7 @@ mod tests {
         assert_eq!(config.filters.include_protocols, vec!["snmp", "sysinfo"]);
         assert_eq!(
             config.filters.key_expr.as_deref(),
-            Some("zensight/@v1/*/telemetry/netring/**")
+            Some("zensight/v1/*/telemetry/netring/**")
         );
         assert_eq!(config.logging.level, "debug");
         assert_eq!(config.logging.format, LogFormat::Json);

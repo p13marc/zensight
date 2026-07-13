@@ -6,13 +6,13 @@ decoded against templates cached per exporter.
 
 ## Telemetry & keyspace
 
-All keys follow the v1 grammar, `zensight/@v1/<origin>/…`, where `<origin>` is
+All keys follow the v1 grammar, `zensight/v1/<origin>/…`, where `<origin>` is
 the **receiver host's** stable id (`h-<12hex>`). NetFlow is a *proxy producer*:
 the observed exporter is the first subject chunk after the producer.
 
 | Key | Payload |
 |-----|---------|
-| `zensight/@v1/<origin>/telemetry/netflow/<exporter>/<src_ip>/<dst_ip>` | One per-conversation flow record. IP addresses are slugified in the key (`.`/`:` → `_`), e.g. `192_168_1_1`; the point's `metric` field is `<src>/<dst>/<proto>` with the resolved protocol name (e.g. `tcp`). The point value is the flow's byte count. |
+| `zensight/v1/<origin>/telemetry/netflow/<exporter>/<src_ip>/<dst_ip>` | One per-conversation flow record. IP addresses are slugified in the key (`.`/`:` → `_`), e.g. `192_168_1_1`; the point's `metric` field is `<src>/<dst>/<proto>` with the resolved protocol name (e.g. `tcp`). The point value is the flow's byte count. |
 
 `<exporter>` is the source IP of the exporting device, mapped through
 `exporter_names` when a friendly name is configured. Flow fields are carried as
@@ -24,13 +24,13 @@ The point `source` payload field defaults to the local hostname unless
 
 ### Control plane (via `zensight-sensor-core`)
 
-- `zensight/@v1/<origin>/state/netflow/health` — sensor health document (absorbs the legacy running flag)
-- `zensight/@v1/<origin>/state/netflow/errors` — error reports
-- `zensight/@v1/<origin>/@rpc/netflow/artifact/{request,cancel}` — on-demand debug report / snapshot (opt-in via `artifacts`); progress rides the `state/netflow/artifact/<kind>` status document
-- `zensight/@v1/<origin>/state/netflow/sensor` — sensor registration (`SensorInfo`)
-- `zensight/@v1/<origin>/state/netflow/evidence/self` — self-reported host evidence
-- `zensight/@v1/<origin>/state/netflow/alive` — sensor liveliness token
-- `zensight/@v1/<origin>/@rpc/netflow/introspect` — the registry slice this build serves
+- `zensight/v1/<origin>/state/netflow/health` — sensor health document (absorbs the legacy running flag)
+- `zensight/v1/<origin>/state/netflow/errors` — error reports
+- `zensight/v1/<origin>/@rpc/netflow/artifact/{request,cancel}` — on-demand debug report / snapshot (opt-in via `artifacts`); progress rides the `state/netflow/artifact/<kind>` status document
+- `zensight/v1/<origin>/state/netflow/sensor` — sensor registration (`SensorInfo`)
+- `zensight/v1/<origin>/state/netflow/evidence/self` — self-reported host evidence
+- `zensight/v1/<origin>/state/netflow/alive` — sensor liveliness token
+- `zensight/v1/<origin>/@rpc/netflow/introspect` — the registry slice this build serves
 
 See [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for the authoritative contract.
 

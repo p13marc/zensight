@@ -4,14 +4,14 @@
 //! [`NameStore`](crate::store::NameStore). This task drains a channel of
 //! [`PdnsRecord`]s — emitted by the [`Engine`](crate::engine::Engine) whenever a
 //! name observation updates an IP — and PUTs each on its
-//! `zensight/@v1/@catalog/state/pdns/<ip-slug>` key with a **plain** publisher
+//! `zensight/v1/@catalog/state/pdns/<ip-slug>` key with a **plain** publisher
 //! (a `session.put`, not a per-IP declared publisher — the IP set is unbounded).
 //!
 //! These records stay off the telemetry class selector and the `*`-origin state
 //! selectors because `@catalog` is a verbatim origin the `*` selectors never
 //! match (D4). They are **meant to be captured** by a router-hosted storage
 //! backend (filesystem snapshot or InfluxDB time series) subscribed on
-//! `zensight/@v1/@catalog/state/pdns/**`, giving a durable historical IP↔name
+//! `zensight/v1/@catalog/state/pdns/**`, giving a durable historical IP↔name
 //! tier. Publishing here is cheap and off the packet hot path: it fires on
 //! correlator name-store updates, not per packet.
 //!
@@ -79,7 +79,7 @@ mod tests {
     fn pdns_publish_key_mapping() {
         assert_eq!(
             pdns_key("10.0.0.9"),
-            "zensight/@v1/@catalog/state/pdns/10-0-0-9"
+            "zensight/v1/@catalog/state/pdns/10-0-0-9"
         );
     }
 }

@@ -6,18 +6,18 @@
 //! # Key Expressions
 //!
 //! ```text
-//! zensight/@v1/<origin>/telemetry/sysinfo/cpu/usage
-//! zensight/@v1/<origin>/telemetry/sysinfo/cpu/<core_id>/usage
-//! zensight/@v1/<origin>/telemetry/sysinfo/cpu/times/user
-//! zensight/@v1/<origin>/telemetry/sysinfo/cpu/times/system
-//! zensight/@v1/<origin>/telemetry/sysinfo/cpu/times/iowait
-//! zensight/@v1/<origin>/telemetry/sysinfo/memory/used
-//! zensight/@v1/<origin>/telemetry/sysinfo/memory/available
-//! zensight/@v1/<origin>/telemetry/sysinfo/disk/<mount>/usage
-//! zensight/@v1/<origin>/telemetry/sysinfo/disk/<device>/io/read_bytes
-//! zensight/@v1/<origin>/telemetry/sysinfo/network/<interface>/rx_bytes
-//! zensight/@v1/<origin>/telemetry/sysinfo/sensors/<chip>/<label>/temp
-//! zensight/@v1/<origin>/telemetry/sysinfo/tcp/established
+//! zensight/v1/<origin>/telemetry/sysinfo/cpu/usage
+//! zensight/v1/<origin>/telemetry/sysinfo/cpu/<core_id>/usage
+//! zensight/v1/<origin>/telemetry/sysinfo/cpu/times/user
+//! zensight/v1/<origin>/telemetry/sysinfo/cpu/times/system
+//! zensight/v1/<origin>/telemetry/sysinfo/cpu/times/iowait
+//! zensight/v1/<origin>/telemetry/sysinfo/memory/used
+//! zensight/v1/<origin>/telemetry/sysinfo/memory/available
+//! zensight/v1/<origin>/telemetry/sysinfo/disk/<mount>/usage
+//! zensight/v1/<origin>/telemetry/sysinfo/disk/<device>/io/read_bytes
+//! zensight/v1/<origin>/telemetry/sysinfo/network/<interface>/rx_bytes
+//! zensight/v1/<origin>/telemetry/sysinfo/sensors/<chip>/<label>/temp
+//! zensight/v1/<origin>/telemetry/sysinfo/tcp/established
 //! ```
 
 pub mod alerts;

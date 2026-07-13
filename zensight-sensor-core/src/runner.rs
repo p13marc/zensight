@@ -49,7 +49,7 @@ pub struct SensorRunner<C: SensorConfig> {
     /// Sensor name for logging and status.
     name: String,
     /// The instance's host id (hostname / device-poller id). Keys are
-    /// origin-scoped (`zensight/@v1/<origin>/…`); this value
+    /// origin-scoped (`zensight/v1/<origin>/…`); this value
     /// feeds the identity/artifact channels.
     source: String,
     /// Sensor version.
@@ -80,7 +80,7 @@ impl<C: SensorConfig> SensorRunner<C> {
     ///
     /// `source` is the instance's host id (typically the
     /// sensor config's `resolved_source()`): keys themselves are origin-scoped
-    /// (`zensight/@v1/<origin>/state/<producer>/health` etc.); it feeds the
+    /// (`zensight/v1/<origin>/state/<producer>/health` etc.); it feeds the
     /// identity/artifact channels.
     ///
     /// This will:

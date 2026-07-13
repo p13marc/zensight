@@ -15,7 +15,7 @@
 //! use zensight_sensor_core::AdvancedPublisherRegistry;
 //!
 //! // The prefix is the v1 telemetry prefix from `V1Context::telemetry_prefix()`
-//! // (`zensight/@v1/<origin>/telemetry/<producer>`).
+//! // (`zensight/v1/<origin>/telemetry/<producer>`).
 //! let registry = AdvancedPublisherRegistry::new(
 //!     session.clone(),
 //!     ctx.telemetry_prefix(),
@@ -99,7 +99,7 @@ impl AdvancedPublisherConfig {
 pub struct AdvancedPublisherRegistry {
     /// Zenoh session.
     session: Arc<Session>,
-    /// The v1 telemetry prefix (`zensight/@v1/<origin>/telemetry/<producer>`).
+    /// The v1 telemetry prefix (`zensight/v1/<origin>/telemetry/<producer>`).
     telemetry_prefix: String,
     /// Configuration for new publishers.
     config: AdvancedPublisherConfig,

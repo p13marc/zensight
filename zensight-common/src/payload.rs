@@ -173,7 +173,7 @@ mod tests {
     /// specific compiled in.
     #[test]
     fn refines_a_wire_key_then_decodes_it() {
-        let key = "zensight/@v1/h-3fa9c2d41b7e/state/sysinfo/health";
+        let key = "zensight/v1/h-3fa9c2d41b7e/state/sysinfo/health";
         let (_, producer, subject) = crate::keyexpr::refine_wire_key(key).expect("registered key");
         assert_eq!(producer, "sysinfo");
         assert_eq!(subject.payload_type(), "HealthSnapshot");

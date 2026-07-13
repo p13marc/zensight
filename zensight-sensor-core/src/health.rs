@@ -192,7 +192,7 @@ pub struct HealthSnapshot {
     pub host_id: Option<String>,
     /// The host id of this sensor instance — the same value
     /// behind the origin scoping its control-plane keys
-    /// (`zensight/@v1/<origin>/state/<producer>/health`). Optional for
+    /// (`zensight/v1/<origin>/state/<producer>/health`). Optional for
     /// mixed-fleet/persisted payloads predating the host-scoped keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -715,13 +715,13 @@ mod tests {
         assert_eq!(health.snapshot().metrics_published, 15);
     }
 
-    /// v1 pin: state keys are origin-scoped (`<base>/@v1/<origin>/state/
+    /// v1 pin: state keys are origin-scoped (`<base>/v1/<origin>/state/
     /// <producer>/…`, RFC 04), so two hosts running the same producer never
     /// collide — the job the legacy `{source}` chunk used to do.
     #[test]
     fn test_state_keys_are_origin_scoped() {
         let ctx = crate::v1::V1Context::for_producer("sysinfo");
-        assert!(ctx.health_key().starts_with("zensight/@v1/h-"));
+        assert!(ctx.health_key().starts_with("zensight/v1/h-"));
         assert!(ctx.health_key().ends_with("/state/sysinfo/health"));
         assert!(ctx.errors_key().ends_with("/state/sysinfo/errors"));
         assert!(

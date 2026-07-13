@@ -4,7 +4,7 @@
 //! Two real Zenoh sessions (sensor + frontend) over an explicit localhost
 //! endpoint, so the DELETE genuinely crosses the wire — a same-session
 //! subscriber would die with the sensor and prove nothing. The subscriber
-//! uses the frontend's v1 presence pattern (`zensight/@v1/*/state/*/alive`,
+//! uses the frontend's v1 presence pattern (`zensight/v1/*/state/*/alive`,
 //! `SENSOR_LIVELINESS_SCOPED_EXPR` in zensight/src/subscription.rs) so this
 //! test pins the cross-crate key-shape contract.
 
@@ -15,7 +15,7 @@ use zenoh::sample::SampleKind;
 use zensight_sensor_core::LivelinessManager;
 
 /// The frontend's host-scoped sensor-liveliness pattern.
-const FRONTEND_SENSOR_LIVELINESS_EXPR: &str = "zensight/@v1/*/state/*/alive";
+const FRONTEND_SENSOR_LIVELINESS_EXPR: &str = "zensight/v1/*/state/*/alive";
 
 /// Scouting off so concurrent tests can't cross-contaminate; the two peers
 /// are wired together with an explicit listen/connect endpoint instead.

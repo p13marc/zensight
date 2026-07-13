@@ -46,8 +46,8 @@
         // errors, alerts, evidence, expectations, stream/device docs. LWW per
         // key; DELETE tombstones retire a doc.
         "zensight-latest": {
-          key_expr: "zensight/@v1/*/state/**",
-          strip_prefix: "zensight/@v1",
+          key_expr: "zensight/v1/*/state/**",
+          strip_prefix: "zensight/v1",
           volume: { id: "fs", dir: "latest" },
           // Tombstone lifetime (RFC 09 §2.3): prune storage metadata —
           // including deletion tombstones — after 24 h. Must be ≥ the longest
@@ -58,8 +58,8 @@
         // The catalog service origin: entity/alias docs, claims, pdns. Named
         // explicitly — the `*` in the selector above cannot match `@catalog`.
         "zensight-catalog": {
-          key_expr: "zensight/@v1/@catalog/state/**",
-          strip_prefix: "zensight/@v1/@catalog",
+          key_expr: "zensight/v1/@catalog/state/**",
+          strip_prefix: "zensight/v1/@catalog",
           volume: { id: "fs", dir: "catalog" },
           garbage_collection: { period: 3600, lifespan: 86400 },
         },

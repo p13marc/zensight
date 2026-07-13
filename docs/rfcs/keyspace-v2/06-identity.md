@@ -108,7 +108,7 @@ receiver) speaks *about* other devices. Those devices go in the **first
 subject chunk**, never in the origin:
 
 ```
-zensight/@v1/h-3fa9c2d41b7e/telemetry/snmp/router01/system/sys_uptime
+zensight/v1/h-3fa9c2d41b7e/telemetry/snmp/router01/system/sys_uptime
                             ^ the poller's host      ^ the observed device
 ```
 
@@ -133,9 +133,9 @@ unrefreshed:
 
 | Key | Claim |
 |---|---|
-| `<base>/@v1/<origin>/state/<producer>/evidence/self` | "my host is: hostname H, machine-id-hash M, addresses A…" (self-report) |
-| `<base>/@v1/<origin>/state/<producer>/evidence/device/<device>` | "device `<device>` I observe has: sysName, MACs, addresses…" (third-party claim, weighted lower) |
-| `<base>/@v1/<origin>/state/<producer>/evidence/names/<ip-slug>` | "IP X currently resolves to name N" (passive DNS observation) |
+| `<base>/v1/<origin>/state/<producer>/evidence/self` | "my host is: hostname H, machine-id-hash M, addresses A…" (self-report) |
+| `<base>/v1/<origin>/state/<producer>/evidence/device/<device>` | "device `<device>` I observe has: sysName, MACs, addresses…" (third-party claim, weighted lower) |
+| `<base>/v1/<origin>/state/<producer>/evidence/names/<ip-slug>` | "IP X currently resolves to name N" (passive DNS observation) |
 
 - Claims carry `last_updated`; every consumer of evidence (the catalog
   first among them) MUST ignore claims older than the subject's registry
@@ -151,7 +151,7 @@ unrefreshed:
   address ever seen (that history belongs to the catalog's storage tier,
   §5.2).
 - The catalog subscribes to one selector:
-  `<base>/@v1/*/state/*/evidence/**`.
+  `<base>/v1/*/state/*/evidence/**`.
 
 ## 5. The `@catalog` service
 
@@ -160,12 +160,12 @@ for the deployment's identity/ontology service (the reference
 implementation: `zensight-correlator`).
 
 ```
-<base>/@v1/@catalog/state/entity/<entity-id>      merged entity document (LWW, tombstoned on retire/merge)
-<base>/@v1/@catalog/state/alias/<old-id>          alias record: old-id → entity-id (id upgrades, merges)
-<base>/@v1/@catalog/state/pdns/<ip-slug>          accumulated IP↔name record (historical tier via storage)
-<base>/@v1/@catalog/state/alive                   liveliness token (declared by the elected owner, §5.3)
-<base>/@v1/@catalog/state/claim/<zid>             liveliness claim tokens (ownership protocol, §5.3)
-<base>/@v1/@catalog/@rpc/names                    on-demand name resolution (?ip=…)
+<base>/v1/@catalog/state/entity/<entity-id>      merged entity document (LWW, tombstoned on retire/merge)
+<base>/v1/@catalog/state/alias/<old-id>          alias record: old-id → entity-id (id upgrades, merges)
+<base>/v1/@catalog/state/pdns/<ip-slug>          accumulated IP↔name record (historical tier via storage)
+<base>/v1/@catalog/state/alive                   liveliness token (declared by the elected owner, §5.3)
+<base>/v1/@catalog/state/claim/<zid>             liveliness claim tokens (ownership protocol, §5.3)
+<base>/v1/@catalog/@rpc/names                    on-demand name resolution (?ip=…)
 ```
 
 Contract:
@@ -192,8 +192,8 @@ Contract:
 
 ### 5.1 How a UI joins
 
-1. Subscribe `<base>/@v1/@catalog/state/entity/*` **and**
-   `<base>/@v1/@catalog/state/alias/*` (+ GET the same selectors as the
+1. Subscribe `<base>/v1/@catalog/state/entity/*` **and**
+   `<base>/v1/@catalog/state/alias/*` (+ GET the same selectors as the
    late-joiner seed, [04-planes.md §3.2](04-planes.md)) — alias
    records are their own key family, and without them step 3's
    origin→entity re-pointing on merges never arrives.
@@ -209,7 +209,7 @@ Contract:
 
 `state/pdns/<ip-slug>` is LWW state (the latest accumulated name-set per
 IP). Pointing a time-series storage at
-`<base>/@v1/@catalog/state/pdns/**` captures every transition — the
+`<base>/v1/@catalog/state/pdns/**` captures every transition — the
 IP↔name history — with no dedicated plane and no consumer on the live bus
 ([04-planes.md §4](04-planes.md)). This is the catalog's *budgeted*
 population-keyed state family ([04-planes.md §1.2](04-planes.md)) — the

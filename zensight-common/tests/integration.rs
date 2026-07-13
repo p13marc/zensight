@@ -51,12 +51,12 @@ fn test_full_telemetry_workflow() {
 fn test_wildcard_key_expressions() {
     // v1: the telemetry class selector (RFC 04 §4).
     let all = all_telemetry_wildcard();
-    assert_eq!(all, "zensight/@v1/*/telemetry/**");
+    assert_eq!(all, "zensight/v1/*/telemetry/**");
 
     // A per-protocol narrowing keeps one `*` for the origin (RFC 09 §1).
-    let netring_all = "zensight/@v1/*/telemetry/netring/**";
+    let netring_all = "zensight/v1/*/telemetry/netring/**";
     let one = zenoh::key_expr::KeyExpr::try_from(
-        "zensight/@v1/h-3fa9c2d41b7e/telemetry/netring/flow/count",
+        "zensight/v1/h-3fa9c2d41b7e/telemetry/netring/flow/count",
     )
     .unwrap();
     assert!(

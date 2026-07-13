@@ -12,7 +12,7 @@
 //! Per-line messages feed the bounded `@rpc/logs/events` ring (#358, pull-only);
 //! the derived rollups ride the telemetry bus under:
 //! ```text
-//! zensight/@v1/<origin>/telemetry/logs/...
+//! zensight/v1/<origin>/telemetry/logs/...
 //! ```
 
 pub mod commands;

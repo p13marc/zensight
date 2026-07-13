@@ -15,12 +15,12 @@ Resource attributes: `service.name` (default `zensight`), optional
 
 Two subscribers, same split as the Prometheus exporter:
 
-- **Telemetry** on `filters.key_expr` (default `zensight/@v1/*/telemetry/**`,
+- **Telemetry** on `filters.key_expr` (default `zensight/v1/*/telemetry/**`,
   the v1 telemetry class selector — the class chunk *is* the filter, so state
   and the `@rpc`/`@media`/`@blob` planes never arrive and nothing is discarded
-  client-side); narrow it — e.g. `zensight/@v1/*/telemetry/netring/**` — to
+  client-side); narrow it — e.g. `zensight/v1/*/telemetry/netring/**` — to
   tame the firehose at the subscription.
-- **Alerts** on `zensight/@v1/*/state/*/alert/*` (when `export_alerts` or
+- **Alerts** on `zensight/v1/*/state/*/alert/*` (when `export_alerts` or
   `traces.enabled`) — alerts are state-class keys the telemetry selector
   cannot see.
 
@@ -29,8 +29,8 @@ apply as a post-receive filter.
 
 ```mermaid
 flowchart LR
-    T["telemetry subscriber — zensight/@v1/*/telemetry/**"] --> Filt
-    Al["alerts subscriber — zensight/@v1/*/state/*/alert/*"] --> Filt
+    T["telemetry subscriber — zensight/v1/*/telemetry/**"] --> Filt
+    Al["alerts subscriber — zensight/v1/*/state/*/alert/*"] --> Filt
 
     Filt{"post-receive filter — include/exclude protocol/source"} --> Map["map"]
 
@@ -79,7 +79,7 @@ Log attributes: `hostname` (source), `syslog.severity`, and `syslog.facility` /
 ## Alerts (as OTLP logs)
 
 With `export_alerts` on (default), alerts from
-`zensight/@v1/*/state/*/alert/*` are
+`zensight/v1/*/state/*/alert/*` are
 exported as OTLP log records on the `zensight.alerts` scope (event name
 `zensight.alert`). Severity is mapped from the alert severity; `alert.*`
 attributes carry source, rule, and state. The dedicated alert subscriber exists

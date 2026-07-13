@@ -152,7 +152,7 @@ fn origin_of(key: &str) -> String {
 
 /// The fleet-presence roster: who is up, and what they run.
 ///
-/// RFC 04 §5 — a liveliness query on `zensight/@v1/*/state/*/alive`. Zero
+/// RFC 04 §5 — a liveliness query on `zensight/v1/*/state/*/alive`. Zero
 /// payload bytes: the token *key* is the record. `@catalog` is asked for by
 /// name because `*` can never match a verbatim service origin (property D4).
 pub async fn roster(session: &Session, timeout: Duration) -> Result<BTreeMap<String, Vec<String>>> {

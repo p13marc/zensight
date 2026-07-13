@@ -8,7 +8,7 @@
 //! ```text
 //! ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
 //! │  Zenoh Network  │────>│  OTEL Exporter  │────>│  OTLP Endpoint  │
-//! │  (@v1 telemetry)  │     │  (metrics/logs) │     │  (Collector)    │
+//! │  (v1 telemetry)  │     │  (metrics/logs) │     │  (Collector)    │
 //! └─────────────────┘     └─────────────────┘     └─────────────────┘
 //! ```
 //!

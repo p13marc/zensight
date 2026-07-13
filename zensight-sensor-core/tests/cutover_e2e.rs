@@ -1,16 +1,24 @@
 //! Cutover acceptance test (epic #453, #465): everything the framework
-//! publishes rides `zensight/@v1/**` — the legacy bus is silent.
+//! publishes rides `zensight/v1/**` — nothing escapes it.
 //!
 //! Two real Zenoh sessions (sensor + observer) over an explicit localhost
 //! endpoint, scouting off (isolated-pair pattern). The observer holds two
 //! debug subscribers:
 //!
-//! - `zensight/**` — the LEGACY firehose. `**` never crosses the verbatim
-//!   `@v1` chunk (RFC 03, guard D1), so if any framework channel still
-//!   published a legacy key this subscriber would catch it. It must stay
-//!   empty.
-//! - `zensight/@v1/**` — the v1 root. Telemetry, health, and alert state
+//! - `zensight/**` — the whole deployment root, v1 and otherwise. Every key it
+//!   sees that is **not** under `zensight/v1/` is a leak: a framework channel
+//!   still publishing outside the convention.
+//! - `zensight/v1/**` — the v1 root. Telemetry, health, and alert state
 //!   published through the framework must all land here.
+//!
+//! The "not under v1" filter is done in the callback rather than by the
+//! selector, and that is a consequence of the version chunk being plain (see
+//! `grammar::VERSION_CHUNK`). While it was the verbatim `@v1`, `**` could not
+//! cross it, so `zensight/**` *was* a legacy-only firehose and an empty result
+//! set proved silence on its own. A plain `v1` is reachable by `**`, so the
+//! subscriber now sees our own traffic too and the leak check has to say what it
+//! means: anything outside v1. Same guarantee, stated explicitly instead of
+//! riding on key algebra.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -81,17 +89,19 @@ async fn legacy_bus_is_silent_and_v1_carries_everything() {
     let _legacy_sub = observer
         .declare_subscriber("zensight/**")
         .callback(move |sample| {
-            legacy_log
-                .lock()
-                .unwrap()
-                .push(sample.key_expr().as_str().to_string());
+            let key = sample.key_expr().as_str();
+            // `zensight/**` now reaches v1 too (plain version chunk), so the
+            // leak is what falls OUTSIDE it.
+            if !key.starts_with("zensight/v1/") {
+                legacy_log.lock().unwrap().push(key.to_string());
+            }
         })
         .await
         .expect("declare legacy debug subscriber");
 
     let v1_log = v1_hits.clone();
     let _v1_sub = observer
-        .declare_subscriber("zensight/@v1/**")
+        .declare_subscriber("zensight/v1/**")
         .callback(move |sample| {
             v1_log
                 .lock()
@@ -163,8 +173,8 @@ async fn legacy_bus_is_silent_and_v1_carries_everything() {
         v1.iter().any(|k| k.contains("/state/netlink/alert/")),
         "v1 alert doc missing: {v1:?}"
     );
-    // Every observed key parses as base + @v1.
+    // Every observed key parses as base + v1.
     for key in &v1 {
-        assert!(key.starts_with("zensight/@v1/"), "malformed v1 key: {key}");
+        assert!(key.starts_with("zensight/v1/"), "malformed v1 key: {key}");
     }
 }

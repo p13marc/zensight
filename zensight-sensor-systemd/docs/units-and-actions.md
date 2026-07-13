@@ -22,7 +22,7 @@ The sentinel is an embedded evaluator of declarative service-health expectations
 (`systemd.expectations`; omit the block to disable). It re-evaluates every
 `eval_interval_secs` (default 10) and on every relevant D-Bus event, and
 publishes firing/resolved alerts on
-`zensight/@v1/<origin>/state/systemd/alert/*`. A firing alert is held for
+`zensight/v1/<origin>/state/systemd/alert/*`. A firing alert is held for
 `for_secs` (default 15) before publish. It mirrors the netlink sentinel and is
 **hot-swappable at runtime** via a GET on `@rpc/systemd/expectations/set`
 (current config readable with a GET on `@rpc/systemd/expectations`).
@@ -47,12 +47,12 @@ security contract.
 
 ### Request/response shape
 
-- Write: a GET on `zensight/@v1/<origin>/@rpc/systemd/action/set` carrying JSON
+- Write: a GET on `zensight/v1/<origin>/@rpc/systemd/action/set` carrying JSON
   `{ "verb": "start|stop|restart|reload", "unit": "<name>" }` (`ActionCommand`).
   An accepted request replies the resulting `ActionStatus`; a refused request
   replies `reply_err` with the namespaced `error/gated` name (bad payloads get
   `error/invalid-args`).
-- Read: `zensight/@v1/<origin>/@rpc/systemd/action` replies the most recent
+- Read: `zensight/v1/<origin>/@rpc/systemd/action` replies the most recent
   `ActionStatus` — `{ unit, verb, accepted, result, error, ts_unix }`.
   `accepted` reflects whether the request passed validation and was issued;
   `result` is the `JobRemoved` outcome (`done`/`failed`/`timeout`/`canceled`/…)

@@ -9,9 +9,9 @@ It needs no NetFlow exporter device — it generates flow telemetry itself from 
 span port, tap, or host NIC. **Live capture needs `CAP_NET_RAW`**
 (`+CAP_IPC_LOCK` for AF_XDP); **offline pcap replay needs no privileges**
 (set `netring.pcap`), which is also how the pipeline is tested. It publishes
-telemetry under `zensight/@v1/<origin>/telemetry/netring/...`, state documents
-(health/alerts/evidence) under `zensight/@v1/<origin>/state/netring/...`, and
-serves request/reply procedures on `zensight/@v1/<origin>/@rpc/netring/...`.
+telemetry under `zensight/v1/<origin>/telemetry/netring/...`, state documents
+(health/alerts/evidence) under `zensight/v1/<origin>/state/netring/...`, and
+serves request/reply procedures on `zensight/v1/<origin>/@rpc/netring/...`.
 
 ## Quick start
 

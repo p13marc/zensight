@@ -1062,7 +1062,7 @@ fn render_header<'a>(
         });
 
     // "Focus this host" (#476): drop the fleet subscriptions and declare
-    // `zensight/@v1/<origin>/**` instead. On a constrained link a technician
+    // `zensight/v1/<origin>/**` instead. On a constrained link a technician
     // debugging one host otherwise pays for every host's telemetry to reach
     // their laptop; the v1 grammar put the origin at a fixed position, which is
     // what makes "this host and nothing else" expressible at all.

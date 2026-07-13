@@ -25,7 +25,7 @@ Implementation notes + observed behavior for the metric half of the pipeline
   **real-shaped keys** through the real bus contract (`PublisherRegistry`, declared
   publishers, CBOR, `QosClass::Telemetry` — never `session.put`):
 
-  | Subject (under `zensight/@v1/<origin>/telemetry/<producer>/`) | Value shape | Exercises |
+  | Subject (under `zensight/v1/<origin>/telemetry/<producer>/`) | Value shape | Exercises |
   |---|---|---|
   | `sysinfo` · `cpu/usage` | Gauge, sine 20–50 % | plain gauge |
   | `sysinfo` · `memory/usage_percent` | Gauge, slow ramp | plain gauge |

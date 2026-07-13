@@ -13,8 +13,8 @@ map onto it.
 ## 1. Key shape
 
 ```
-<base>/@v1/<origin>/@rpc/<producer>/<procedure...>
-<base>/@v1/@<service>/@rpc/<procedure...>
+<base>/v1/<origin>/@rpc/<producer>/<procedure...>
+<base>/v1/@<service>/@rpc/<procedure...>
 ```
 
 - `@rpc` is a verbatim chunk: no `*`/`**` data selector can ever reach a
@@ -34,9 +34,9 @@ directions:
 
 | Intent | Selector |
 |---|---|
-| ask/instruct **one host** | `GET <base>/@v1/h-xxx/@rpc/netlink/sockets?ip=10.0.0.7` |
-| ask **the fleet**, collect all replies | `GET <base>/@v1/*/@rpc/netlink/sockets?ip=10.0.0.7` |
-| ask every producer of one origin | `GET <base>/@v1/h-xxx/@rpc/*/health-detail` (if registered by several) |
+| ask/instruct **one host** | `GET <base>/v1/h-xxx/@rpc/netlink/sockets?ip=10.0.0.7` |
+| ask **the fleet**, collect all replies | `GET <base>/v1/*/@rpc/netlink/sockets?ip=10.0.0.7` |
+| ask every producer of one origin | `GET <base>/v1/h-xxx/@rpc/*/health-detail` (if registered by several) |
 
 This subsumes both control patterns the incumbent keyspace had to choose
 between per channel:
@@ -69,7 +69,7 @@ discipline does, and fleet callers MUST follow it:
   Callers MAY additionally disable consolidation (`None`) for belt and
   braces.
 - **Attribution.** The caller joins the reply set against the liveliness
-  roster (`<base>/@v1/*/state/*/alive`, [04-planes.md §5](04-planes.md)) to
+  roster (`<base>/v1/*/state/*/alive`, [04-planes.md §5](04-planes.md)) to
   attribute non-replies — the reply set alone cannot say who *should* have
   answered.
 

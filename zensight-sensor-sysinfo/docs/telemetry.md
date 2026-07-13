@@ -1,6 +1,6 @@
 # sysinfo — telemetry reference
 
-All telemetry is published as `zensight/@v1/<origin>/telemetry/sysinfo/<metric>`,
+All telemetry is published as `zensight/v1/<origin>/telemetry/sysinfo/<metric>`,
 where `<origin>` is the host's `h-<12hex>` id — the key carries no source chunk;
 the payload `TelemetryPoint` still carries `source` (the resolved hostname with
 `source: "auto"`, or the configured id).
@@ -53,8 +53,8 @@ Gated by `collect.saturation_score` (default on). Each tick the sensor emits:
 ## On-demand queries (`@rpc/sysinfo/<topic>`)
 
 Served on request rather than streamed, as read procedures (GETs) on the `@rpc`
-plane: `zensight/@v1/<origin>/@rpc/sysinfo/<topic>`. A fleet-wide caller selects
-`zensight/@v1/*/@rpc/sysinfo/<topic>` with query target `All`; the sensor also
+plane: `zensight/v1/<origin>/@rpc/sysinfo/<topic>`. A fleet-wide caller selects
+`zensight/v1/*/@rpc/sysinfo/<topic>` with query target `All`; the sensor also
 serves `@rpc/sysinfo/introspect`, returning its registry slice.
 
 - **`processes?sort=cpu|mem|io&top=N`** (`collect.process_query`, default on) —
@@ -77,7 +77,7 @@ serves `@rpc/sysinfo/introspect`, returning its registry slice.
 ## Alerts
 
 Threshold alerts (`sysinfo.alerts.*`) are published on the standard alert
-family `zensight/@v1/<origin>/state/sysinfo/alert/<alert_key>` as a
+family `zensight/v1/<origin>/state/sysinfo/alert/<alert_key>` as a
 firing → resolved → Delete-tombstone lifecycle (`<alert_key>` = 16-hex FNV-1a
 of `rule + labels`), same as every other sensor (the GUI and exporters pick
 them up with no extra wiring). Rules: `oom`, `pressure` (PSI), `disk`, `inode`,
@@ -91,16 +91,17 @@ doc absorbs the retired `@/status` running flag; free-form metadata rides the
 registration doc):
 
 ```
-zensight/@v1/<origin>/state/sysinfo/health             # sensor health document
-zensight/@v1/<origin>/state/sysinfo/alive              # liveliness token (presence)
-zensight/@v1/<origin>/state/sysinfo/errors             # rolling error window
-zensight/@v1/<origin>/state/sysinfo/alert/<alert_key>  # threshold alerts
-zensight/@v1/<origin>/state/sysinfo/sensor             # SensorInfo registration
-zensight/@v1/<origin>/state/sysinfo/evidence/self      # self-identity claim
+zensight/v1/<origin>/state/sysinfo/health             # sensor health document
+zensight/v1/<origin>/state/sysinfo/alive              # liveliness token (presence)
+zensight/v1/<origin>/state/sysinfo/errors             # rolling error window
+zensight/v1/<origin>/state/sysinfo/alert/<alert_key>  # threshold alerts
+zensight/v1/<origin>/state/sysinfo/sensor             # SensorInfo registration
+zensight/v1/<origin>/state/sysinfo/evidence/self      # self-identity claim
 ```
 
 Telemetry selectors never reach the state class or the `@rpc` plane: narrow
-with `zensight/@v1/*/telemetry/sysinfo/**` (all sysinfo telemetry, fleet-wide)
-or `zensight/@v1/*/state/*/alert/*` (all alerts). The legacy `zensight/**`
-firehose matches **nothing** v1 — the verbatim `@v1` chunk blocks `**`. See
+with `zensight/v1/*/telemetry/sysinfo/**` (all sysinfo telemetry, fleet-wide)
+or `zensight/v1/*/state/*/alert/*` (all alerts). Note an un-versioned
+`zensight/**` firehose **does** match v1 keys — the version chunk is plain, not
+verbatim (`zensight_keyspace::grammar::VERSION_CHUNK`). See
 [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for the full contract.

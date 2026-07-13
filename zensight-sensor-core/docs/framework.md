@@ -50,12 +50,12 @@ Enabling identity detects the local `HostIdentity`, stamps `host_id` onto health
 snapshots, and once `run()` starts, publishes two docs every 60 s via cached
 (late-joiner-seedable) publishers:
 
-- **`SensorInfo`** on `zensight/@v1/<origin>/state/<producer>/sensor` — sensor
+- **`SensorInfo`** on `zensight/v1/<origin>/state/<producer>/sensor` — sensor
   registration. Free-form metadata (from `run_with_metadata`) rides its
   `metadata` field; the retired `@/status` document's running flag is absorbed
   by the health doc.
 - **self-report `HostEvidence`** (`observer: None`) on
-  `zensight/@v1/<origin>/state/<producer>/evidence/self`.
+  `zensight/v1/<origin>/state/<producer>/evidence/self`.
 
 Both are published through an `AdvancedPublisherRegistry` set to
 `QosClass::Evidence` (reliable, must-arrive). Identity is re-detected every 5th
@@ -76,9 +76,9 @@ are interned and routing-optimized, and telemetry matches the GUI's
 - **Telemetry** — `publish` / `publish_to_key` / `publish_batch` go through an
   `AdvancedPublisherRegistry` of zenoh-ext *advanced* publishers (per-key cache +
   sample-miss / publisher detection), keyed under the runner's
-  `V1Context::telemetry_prefix()` (`zensight/@v1/<origin>/telemetry/<producer>`).
+  `V1Context::telemetry_prefix()` (`zensight/v1/<origin>/telemetry/<producer>`).
   This pairing with the GUI's `AdvancedSubscriber` on
-  `zensight/@v1/*/telemetry/**` is what gives reliable delivery and late-joiner
+  `zensight/v1/*/telemetry/**` is what gives reliable delivery and late-joiner
   history/recovery.
 - **State plane** — `publish_raw` / `publish_json` / `delete` (for
   `state/<producer>/…` documents the GUI reads with a plain subscriber) go
@@ -103,7 +103,7 @@ are interned and routing-optimized, and telemetry matches the GUI's
 
 `RawMediaPublisher` (via `Publisher::raw_media_publisher`) is a deliberate
 exception: a **plain** publisher for the opaque, verbatim `@media` plane
-(`zensight/@v1/<origin>/@media/<producer>/<stream>/…`, #359) carrying raw
+(`zensight/v1/<origin>/@media/<producer>/<stream>/…`, #359) carrying raw
 encoded access units with per-frame `Encoding` + attachment, no `TelemetryPoint`
 envelope, `QosClass::LiveVideo`, and a `matching_listener` so the sensor can force
 a keyframe when a viewer appears.
@@ -137,7 +137,7 @@ re-identify every host) fails loudly.
 ## Health reporting
 
 `health.rs` — `SensorHealth` tracks device counts, poll durations, and errors,
-publishing `HealthSnapshot` JSON to `zensight/@v1/<origin>/state/<producer>/health`
+publishing `HealthSnapshot` JSON to `zensight/v1/<origin>/state/<producer>/health`
 (the runner does this every 5 s so the GUI's Sensors view / health bar populate;
 the health doc also absorbs the retired `@/status` running flag). Errors feed a
 **rolling one-hour window** of 60 one-minute buckets, so `errors_last_hour` is a
@@ -148,7 +148,7 @@ true sliding count that ages out old failures.
 `alert.rs` — `AlertReporter` is the sensor-side counterpart to
 `zensight_common::Alert`. It owns a `Publisher`, tracks which alerts are firing,
 and publishes firing/resolved transitions as LWW state to
-`zensight/@v1/<origin>/state/<producer>/alert/<alert_key>` (a `Put(Firing)` to
+`zensight/v1/<origin>/state/<producer>/alert/<alert_key>` (a `Put(Firing)` to
 raise/update, then `Put(Resolved)` + a `Delete` tombstone to clear).
 
 - `observe(alert, for_duration)` — call for each violation this tick. A `for:`
@@ -170,9 +170,9 @@ raise/update, then `Put(Resolved)` + a `Delete` tombstone to clear).
 
 `liveliness.rs` — `LivelinessManager` declares Zenoh liveliness tokens for
 instant presence detection: a sensor token
-(`zensight/@v1/<origin>/state/<producer>/alive`, declared on creation, undeclared
+(`zensight/v1/<origin>/state/<producer>/alive`, declared on creation, undeclared
 on drop) and per-device tokens (`declare_device_alive` / `undeclare_device` at
-`zensight/@v1/<origin>/state/<producer>/device/<id>/alive`).
+`zensight/v1/<origin>/state/<producer>/device/<id>/alive`).
 
 The sensor token is **not optional**: `run()` declares it automatically if no
 builder did, because the frontend flips the sensor's card to **Offline** when

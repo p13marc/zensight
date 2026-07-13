@@ -1,7 +1,7 @@
 //! Frontend host-entity view model (#306).
 //!
 //! The **correlator** (#305) publishes [`HostEntity`] docs on
-//! `zensight/@v1/@catalog/state/entity/<entity_id>` — one per real host, carrying the
+//! `zensight/v1/@catalog/state/entity/<entity_id>` — one per real host, carrying the
 //! union of its identifying fields plus the reversible list of
 //! [`MemberClaim`]s (`(sensor, source)` evidence) that were merged into it.
 //! [`EntityStore`] is the GUI-side materialized index over those docs: it maps

@@ -57,11 +57,11 @@
   // Telemetry filtering (optional)
   filters: {
     // Zenoh subscription key expression for telemetry
-    // (default "zensight/@v1/*/telemetry/**" — the v1 class selector).
+    // (default "zensight/v1/*/telemetry/**" — the v1 class selector).
     // Narrow it to tame the firehose at the subscription — unwanted protocols
     // and the state/media planes never reach this exporter over the wire.
     // The state/*/alert/* subscriber is separate and unaffected.
-    // key_expr: "zensight/@v1/*/telemetry/netring/**",
+    // key_expr: "zensight/v1/*/telemetry/netring/**",
 
     // Only include these protocols (empty = all)
     // include_protocols: ["snmp", "sysinfo", "logs"],

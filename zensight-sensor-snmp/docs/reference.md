@@ -6,15 +6,15 @@ traps. OIDs are resolved to metric names through the configured `oid_names` map
 
 ## Telemetry & keyspace
 
-All keys follow the v1 grammar, `zensight/@v1/<origin>/…`, where `<origin>` is
+All keys follow the v1 grammar, `zensight/v1/<origin>/…`, where `<origin>` is
 the **poller host's** stable id (`h-<12hex>`). SNMP is a *proxy producer*: the
 observed device is the first subject chunk after the producer.
 
 | Key | Payload |
 |-----|---------|
-| `zensight/@v1/<origin>/telemetry/snmp/<device>/<metric>` | Polled OID value. `<metric>` is the MIB-/map-resolved name, e.g. `system/sysUpTime`, `if/1/ifInOctets`. Unmapped OIDs fall back to the raw dotted OID. The `oid` label carries the source OID. |
-| `zensight/@v1/<origin>/telemetry/snmp/<sender>/trap/<trap_id>` | Received trap (when `trap_listener.enabled`). `<trap_id>` is the enterprise/generic trap OID; `<sender>` is the slugged sender IP (`.`/`:` → `-`). |
-| `zensight/@v1/<origin>/telemetry/snmp/<sender>/trap/<trap_id>/<varbind>` | Per-varbind value from the trap PDU. |
+| `zensight/v1/<origin>/telemetry/snmp/<device>/<metric>` | Polled OID value. `<metric>` is the MIB-/map-resolved name, e.g. `system/sysUpTime`, `if/1/ifInOctets`. Unmapped OIDs fall back to the raw dotted OID. The `oid` label carries the source OID. |
+| `zensight/v1/<origin>/telemetry/snmp/<sender>/trap/<trap_id>` | Received trap (when `trap_listener.enabled`). `<trap_id>` is the enterprise/generic trap OID; `<sender>` is the slugged sender IP (`.`/`:` → `-`). |
+| `zensight/v1/<origin>/telemetry/snmp/<sender>/trap/<trap_id>/<varbind>` | Per-varbind value from the trap PDU. |
 
 `<device>` comes from each device's `name`. The point `source` payload field
 defaults to the local hostname unless `snmp.source` is set.
@@ -23,14 +23,14 @@ defaults to the local hostname unless `snmp.source` is set.
 
 Standard sensor metadata is published by the shared runner:
 
-- `zensight/@v1/<origin>/state/snmp/health` — sensor health document (absorbs the legacy running flag)
-- `zensight/@v1/<origin>/state/snmp/device/<device>/liveness` — per-device liveness document (a `…/device/<device>/alive` liveliness token is separate machinery)
-- `zensight/@v1/<origin>/state/snmp/errors` — error reports
-- `zensight/@v1/<origin>/@rpc/snmp/artifact/{request,cancel}` — on-demand debug report / snapshot (opt-in via `artifacts`); progress rides the `state/snmp/artifact/<kind>` status document
-- `zensight/@v1/<origin>/state/snmp/sensor` — sensor registration (`SensorInfo`)
-- `zensight/@v1/<origin>/state/snmp/evidence/self` — self-reported host evidence (`with_identity`)
-- `zensight/@v1/<origin>/state/snmp/alive` — sensor liveliness token
-- `zensight/@v1/<origin>/@rpc/snmp/introspect` — the registry slice this build serves
+- `zensight/v1/<origin>/state/snmp/health` — sensor health document (absorbs the legacy running flag)
+- `zensight/v1/<origin>/state/snmp/device/<device>/liveness` — per-device liveness document (a `…/device/<device>/alive` liveliness token is separate machinery)
+- `zensight/v1/<origin>/state/snmp/errors` — error reports
+- `zensight/v1/<origin>/@rpc/snmp/artifact/{request,cancel}` — on-demand debug report / snapshot (opt-in via `artifacts`); progress rides the `state/snmp/artifact/<kind>` status document
+- `zensight/v1/<origin>/state/snmp/sensor` — sensor registration (`SensorInfo`)
+- `zensight/v1/<origin>/state/snmp/evidence/self` — self-reported host evidence (`with_identity`)
+- `zensight/v1/<origin>/state/snmp/alive` — sensor liveliness token
+- `zensight/v1/<origin>/@rpc/snmp/introspect` — the registry slice this build serves
 
 See [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for the authoritative contract.
 

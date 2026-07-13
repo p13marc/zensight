@@ -7,7 +7,7 @@
 //! origin-scoped `@media/parallax/<stream>/…` keys with a CBOR `FrameMeta` attachment
 //! per frame. Built on the `parallax` pipeline engine.
 //!
-//! Key layout (all origin-scoped under `zensight/@v1/<origin>`):
+//! Key layout (all origin-scoped under `zensight/v1/<origin>`):
 //! - catalogue: `@rpc/parallax/streams` → `Vec<StreamDescriptor>`
 //! - control:   `@rpc/parallax/stream/set` ← `Command<StreamControl>`
 //! - status:    `state/parallax/stream/<stream>` → `StreamStatus`

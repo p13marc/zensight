@@ -66,8 +66,8 @@ Create a JSON5 configuration file:
   // Filtering (optional)
   filters: {
     // Subscription selector (default: the v1 telemetry class selector).
-    // Narrow it per producer, e.g. "zensight/@v1/*/telemetry/netring/**".
-    key_expr: "zensight/@v1/*/telemetry/**",
+    // Narrow it per producer, e.g. "zensight/v1/*/telemetry/netring/**".
+    key_expr: "zensight/v1/*/telemetry/**",
     include_protocols: ["snmp", "sysinfo"],  // Only these protocols
     exclude_metrics: ["**/debug/**"],         // Glob patterns to exclude
   },
@@ -96,11 +96,11 @@ Metrics are named as `{prefix}_{protocol}_{metric_path}`:
 ## Alert Export
 
 Sensors publish alerts as LWW state at
-`zensight/@v1/<origin>/state/<producer>/alert/<alert_key>` (a firing →
+`zensight/v1/<origin>/state/<producer>/alert/<alert_key>` (a firing →
 resolved → tombstone lifecycle). With `export_alerts` on
 (the default), the exporter declares a dedicated subscriber on
-`zensight/@v1/*/state/*/alert/*` — the telemetry class selector
-`zensight/@v1/*/telemetry/**` structurally cannot match state keys —
+`zensight/v1/*/state/*/alert/*` — the telemetry class selector
+`zensight/v1/*/telemetry/**` structurally cannot match state keys —
 and renders each **firing** alert as one series:
 
 ```

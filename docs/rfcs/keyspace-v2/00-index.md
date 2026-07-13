@@ -1,8 +1,18 @@
 # Zenoh Semantic Convention RFC — Index
 
-**Status: v1.0 — RATIFIED** (2026-07-12; adopted for ZenSight, migration
+**Status: v1.1 — RATIFIED** (v1.0 2026-07-12; adopted for ZenSight, migration
 tracked in [#453](https://github.com/p13marc/zensight/issues/453) with the
-enforcement crate `zensight-keyspace`). Drafting history: round 1
+enforcement crate `zensight-keyspace`).
+
+> **v1.1 (2026-07-14) — one amendment.** The version chunk is a **plain** `v1`,
+> not the verbatim `@v1` of v1.0. Verbatim made zenoh-ext's `@adv`
+> publisher-detection tokens structurally unparseable (`**` cannot cross an `@`),
+> silently killing late-publisher detection; the invisibility it bought was a
+> *migration* property we no longer need, while cross-major isolation never
+> depended on it. Wire-breaking. See [03 §1.2](03-grammar.md) and
+> [12 §7](12-open-questions.md).
+
+Drafting history: round 1
 adversarial review + Zenoh 1.9 source verification + D-Bus/Homie/OPC-UA
 research; round 2 base = session namespace + storage guidance; round 3
 delivery re-grounded (stable baseline default, advanced pub/sub a priced
@@ -24,13 +34,13 @@ the reference application and supplies the worked examples.
 ## The convention on one page
 
 ```
-<base>/@v1/<origin>/<class>/<producer>/<subject...>
+<base>/v1/<origin>/<class>/<producer>/<subject...>
 ```
 
 | Position | Chunk | Example |
 |---|---|---|
 | 1 | **base** — deployment root (config; tenancy = deployment prefix; normally the session **namespace**, so app code never spells it) | `zensight` |
-| 2 | **version** — verbatim `@v<int>`; majors are mutually invisible by key algebra | `@v1` |
+| 2 | **version** — plain `v<int>`; majors are mutually invisible by key algebra | `v1` |
 | 3 | **origin** — who publishes: self-minted stable host id, or verbatim service | `h-3fa9c2d41b7e` · `@catalog` |
 | 4 | **class** — bus semantics: `telemetry` (superseded) · `state` (LWW+tombstone) · `events` (immutable) · verbatim planes `@rpc` · `@media` · `@blob` | `state` |
 | 5 | **producer** — the component that produced it (`name[-instance]`; omitted under service origins) | `netlink` |
@@ -39,22 +49,22 @@ the reference application and supplies the worked examples.
 Normative examples (base = `zensight`):
 
 ```
-zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage
-zensight/@v1/h-3fa9c2d41b7e/telemetry/snmp/router01/system/sys_uptime
-zensight/@v1/h-3fa9c2d41b7e/state/netring/health
-zensight/@v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1
-zensight/@v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-7
-zensight/@v1/h-3fa9c2d41b7e/events/netring/capture/01jgxqz4yqk8v6txw3m9f2a7cd
-zensight/@v1/h-3fa9c2d41b7e/@rpc/netlink/sockets
-zensight/@v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main
-zensight/@v1/h-3fa9c2d41b7e/@blob/store/sha256/ab12cd34ef56
-zensight/@v1/@catalog/state/entity/h-3fa9c2d41b7e
-zensight/@v1/@catalog/state/pdns/93-184-216-34
+zensight/v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage
+zensight/v1/h-3fa9c2d41b7e/telemetry/snmp/router01/system/sys_uptime
+zensight/v1/h-3fa9c2d41b7e/state/netring/health
+zensight/v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1
+zensight/v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-7
+zensight/v1/h-3fa9c2d41b7e/events/netring/capture/01jgxqz4yqk8v6txw3m9f2a7cd
+zensight/v1/h-3fa9c2d41b7e/@rpc/netlink/sockets
+zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main
+zensight/v1/h-3fa9c2d41b7e/@blob/store/sha256/ab12cd34ef56
+zensight/v1/@catalog/state/entity/h-3fa9c2d41b7e
+zensight/v1/@catalog/state/pdns/93-184-216-34
 ```
 
 The canonical selectors, and the properties that make them safe, are in
 [03 §4–5](03-grammar.md); the headline property: a per-host subscription
-`zensight/@v1/h-xxx/**` delivers that host's complete data plane and can
+`zensight/v1/h-xxx/**` delivers that host's complete data plane and can
 never pull keys under `@rpc`/`@media`/`@blob` — by key algebra; that
 frames and bulk actually live there is the registry's placement rule
 (the theorem/precondition split of [03 §4](03-grammar.md)).
@@ -111,6 +121,8 @@ recipes.
 
 **Out of scope** (by decision, see [01 §5](01-motivation.md)): metric
 renaming, multi-tenancy machinery, payload schema definitions, and —
-deliberately — any migration plan. The verbatim `@v1` chunk guarantees the
-shipped keyspace and this one can share a network indefinitely without
-interference; when and how to walk across is a separate decision.
+deliberately — any migration plan. Convention majors are mutually invisible by
+key algebra (`v1` and `v2` are different literal chunks), so two majors can share
+a network indefinitely; when and how to walk across is a separate decision.
+(In v1.0 the version chunk was verbatim `@v1`, which additionally hid v1 from an
+*un-versioned* selector. It no longer is — see [03 §1.2](03-grammar.md).)

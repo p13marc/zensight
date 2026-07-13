@@ -172,17 +172,17 @@ mod tests {
     fn topic_keys_and_labels() {
         assert_eq!(
             SystemdDetailTopic::Units.key(None),
-            "zensight/@v1/*/@rpc/systemd/units"
+            "zensight/v1/*/@rpc/systemd/units"
         );
         assert_eq!(
             SystemdDetailTopic::Cgroups.key(None),
-            "zensight/@v1/*/@rpc/systemd/cgroups"
+            "zensight/v1/*/@rpc/systemd/cgroups"
         );
         assert_eq!(SystemdDetailTopic::Timers.label(), "Timers");
         // Single-unit detail key (#313) matches the sensor's queryable selector.
         assert_eq!(
             unit_detail_key(None, "sshd.service"),
-            "zensight/@v1/*/@rpc/systemd/unit?name=sshd.service"
+            "zensight/v1/*/@rpc/systemd/unit?name=sshd.service"
         );
     }
 

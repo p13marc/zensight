@@ -1,6 +1,6 @@
 # Identity, evidence & entities
 
-ZenSight keys telemetry by origin (`zensight/@v1/<origin>/telemetry/…`, where
+ZenSight keys telemetry by origin (`zensight/v1/<origin>/telemetry/…`, where
 `<origin>` is a hashed host id) but still needs to know *which physical host*
 each observed source/device belongs to. It solves this without re-keying
 telemetry: sensors publish identity **evidence** as ordinary per-origin state,
@@ -37,8 +37,8 @@ sensor framework re-emits self-reports every 60 s).
 ## HostEvidence
 
 One host-identity claim (`evidence.rs`). Self-reports go to
-`zensight/@v1/<origin>/state/<producer>/evidence/self`; observed devices to
-`zensight/@v1/<origin>/state/<sensor>/evidence/device/<device-slug>` (built by
+`zensight/v1/<origin>/state/<producer>/evidence/self`; observed devices to
+`zensight/v1/<origin>/state/<sensor>/evidence/device/<device-slug>` (built by
 `host_evidence_key`, always under the **local** origin — the observed identity is
 in the payload, not the key). Every optional
 field is `skip_serializing_if`-elided, so a sparse claim stays small on the wire
@@ -78,7 +78,7 @@ Merge strength of the identifying fields (strongest first): `host_id` >
 ## NameObservation
 
 One passive-DNS name observation, published on
-`zensight/@v1/<origin>/state/<sensor>/evidence/names/<ip-slug>` (#307, e.g.
+`zensight/v1/<origin>/state/<sensor>/evidence/names/<ip-slug>` (#307, e.g.
 `state/netring/evidence/names/10-0-0-9`). A third-party claim
 binding an observed IP to a name seen on the wire (DNS answer, PTR, TLS SNI, …),
 so the correlator can attach names to entities that emit no telemetry of their
@@ -98,7 +98,7 @@ pub struct NameObservation {
 ## HostEntity — the catalog's output
 
 The catalog merges every TTL-live `HostEvidence` claim into `HostEntity` docs
-(`entity.rs`), published on `zensight/@v1/@catalog/state/entity/<entity_id>`. An
+(`entity.rs`), published on `zensight/v1/@catalog/state/entity/<entity_id>`. An
 entity is a **materialized view** — a pure, deterministic function of the current
 evidence set — so a restarted catalog rebuilds byte-identical docs from the caches
 with no local state.
@@ -142,19 +142,19 @@ pub struct HostEntity {
 ### PdnsRecord (durable passive-DNS tier)
 
 Separately, the catalog publishes its *full accumulated* per-IP `NameVal` set
-as a `PdnsRecord` on `zensight/@v1/@catalog/state/pdns/<ip-slug>` (#310), for
+as a `PdnsRecord` on `zensight/v1/@catalog/state/pdns/<ip-slug>` (#310), for
 a router-hosted storage backend to capture the complete IP↔name history. Because
 `@catalog` is a verbatim chunk, these records are invisible to both the telemetry
-class selector (`zensight/@v1/*/telemetry/**`) and the `*`-origin fleet state
-selector (`zensight/@v1/*/state/**`) — only the dedicated pdns selector
+class selector (`zensight/v1/*/telemetry/**`) and the `*`-origin fleet state
+selector (`zensight/v1/*/state/**`) — only the dedicated pdns selector
 (`all_pdns_wildcard()`) captures them.
 
 ## Query seeds (late joiners)
 
 State is its own seed: a late-joining consumer plain-GETs the entity state
-selector `zensight/@v1/@catalog/state/entity/*` and the catalog answers
+selector `zensight/v1/@catalog/state/entity/*` and the catalog answers
 storage-shaped (one reply per entity on its concrete key). On-demand name
 resolution is a catalog procedure: GET
-`zensight/@v1/@catalog/@rpc/names?ip=<addr>` resolves names for an arbitrary IP
+`zensight/v1/@catalog/@rpc/names?ip=<addr>` resolves names for an arbitrary IP
 without flooding the bus. See [`../docs/KEYSPACE.md`](../../docs/KEYSPACE.md) and
 the `keyexpr.rs` builders indexed in [keyspace-helpers.md](keyspace-helpers.md).

@@ -15,10 +15,10 @@ use crate::exporter::SharedExporter;
 /// Default key expression to subscribe to.
 // v1 (RFC 04 §4): the telemetry class selector — the class chunk IS the
 // filter, so nothing is discarded client-side (incumbent pain P6 retired).
-pub const DEFAULT_KEY_EXPR: &str = "zensight/@v1/*/telemetry/**";
+pub const DEFAULT_KEY_EXPR: &str = "zensight/v1/*/telemetry/**";
 
 /// Whether a key carries a [`TelemetryPoint`] — v1: exactly the telemetry
-/// class keys (`zensight/@v1/<origin>/telemetry/…`). With the class selector
+/// class keys (`zensight/v1/<origin>/telemetry/…`). With the class selector
 /// as the subscription this is belt-and-braces (a narrowed `filters.key_expr`
 /// override could still point anywhere).
 ///
@@ -263,27 +263,27 @@ mod tests {
 
     #[test]
     fn test_default_key_expr() {
-        assert_eq!(DEFAULT_KEY_EXPR, "zensight/@v1/*/telemetry/**");
+        assert_eq!(DEFAULT_KEY_EXPR, "zensight/v1/*/telemetry/**");
     }
 
     #[test]
     fn telemetry_key_guard() {
         assert!(is_telemetry_key(
-            "zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage"
+            "zensight/v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage"
         ));
         assert!(!is_telemetry_key(
-            "zensight/@v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1"
+            "zensight/v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1"
         ));
         assert!(!is_telemetry_key(
-            "zensight/@v1/h-3fa9c2d41b7e/state/snmp/health"
+            "zensight/v1/h-3fa9c2d41b7e/state/snmp/health"
         ));
         // Host-scoped control plane: the `@` chunk moves one level deeper but
         // stays excluded (any `@`-prefixed chunk is non-telemetry).
         assert!(!is_telemetry_key(
-            "zensight/@v1/@catalog/state/entity/h-0123456789ab"
+            "zensight/v1/@catalog/state/entity/h-0123456789ab"
         ));
         assert!(!is_telemetry_key(
-            "zensight/@v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
+            "zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
         ));
         assert!(!is_telemetry_key("zensight/legacy/host/cpu/usage"));
     }
@@ -295,14 +295,14 @@ mod tests {
     #[test]
     fn media_plane_keys_are_not_telemetry() {
         assert!(!is_telemetry_key(
-            "zensight/@v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main"
+            "zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main"
         ));
         assert!(!is_telemetry_key(
-            "zensight/@v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
+            "zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
         ));
         // ...while stream *stats* are ordinary telemetry.
         assert!(is_telemetry_key(
-            "zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage"
+            "zensight/v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage"
         ));
     }
 
@@ -314,9 +314,8 @@ mod tests {
     fn alerts_need_their_own_subscription() {
         use zenoh::key_expr::KeyExpr;
 
-        let alert =
-            KeyExpr::new("zensight/@v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1")
-                .unwrap();
+        let alert = KeyExpr::new("zensight/v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1")
+            .unwrap();
         let telemetry = KeyExpr::new(DEFAULT_KEY_EXPR).unwrap();
         let alerts_sub = KeyExpr::new(all_alerts_wildcard()).unwrap();
 

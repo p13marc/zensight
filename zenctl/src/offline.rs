@@ -101,7 +101,7 @@ pub fn topic_info(key: &str) -> Result<()> {
                 }
             )),
             None => Err(anyhow!(
-                "not a v1 key. Expected <base>/@v1/<origin>/<class>/<producer>/<subject...> \
+                "not a v1 key. Expected <base>/v1/<origin>/<class>/<producer>/<subject...> \
                  (RFC 03 §1)."
             )),
         };
@@ -250,7 +250,7 @@ mod tests {
     #[test]
     fn topic_info_refines_a_concrete_key() {
         // A registered sysinfo state subject.
-        topic_info("zensight/@v1/h-3fa9c2d41b7e/state/sysinfo/health").unwrap();
+        topic_info("zensight/v1/h-3fa9c2d41b7e/state/sysinfo/health").unwrap();
     }
 
     #[test]
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn topic_info_distinguishes_unregistered_from_malformed() {
         let err =
-            topic_info("zensight/@v1/h-3fa9c2d41b7e/state/sysinfo/not_a_real_subject").unwrap_err();
+            topic_info("zensight/v1/h-3fa9c2d41b7e/state/sysinfo/not_a_real_subject").unwrap_err();
         assert!(err.to_string().contains("not registered"), "got: {err}");
     }
 

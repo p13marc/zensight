@@ -6,7 +6,7 @@ Producers and consumers emit and parse conforming keys through this crate and
 never spell raw key strings.
 
 ```text
-@v1/<origin>/<class>/<producer>/<subject...>        (base-relative; the base
+v1/<origin>/<class>/<producer>/<subject...>        (base-relative; the base
                                                      is the session namespace)
 ```
 

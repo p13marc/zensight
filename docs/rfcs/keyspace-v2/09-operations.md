@@ -23,7 +23,7 @@ config; [03-grammar.md §1.1](03-grammar.md)) and enables timestamping
 ```
 
 With the namespace set, everything the application declares is
-base-relative (`@v1/…`), and ingress from outside the namespace is
+base-relative (`v1/…`), and ingress from outside the namespace is
 filtered — the base is an isolation boundary, not a string convention.
 Remember the two scope rules: router-side config (storages, ACL,
 interceptors — everything below) is written with the **full** key, and a
@@ -33,19 +33,19 @@ namespaced session cannot reach the router admin space (§5).
 
 | Consumer | Declares | Notes |
 |---|---|---|
-| UI, full fleet | `zensight/@v1/*/telemetry/**` + `zensight/@v1/*/state/**` + `zensight/@v1/*/events/**` + `zensight/@v1/@catalog/state/entity/*` + `zensight/@v1/@catalog/state/alias/*` | three class subs replace firehose-plus-filtering; catalog (and its alias records — the origin→entity re-pointing on merges) named explicitly (D4) |
-| UI, one host drill-down | `zensight/@v1/h-xxx/**` | complete data plane of one host; cannot pull media/blob/rpc (D2) |
-| UI, presence | liveliness subs `zensight/@v1/*/state/*/alive` + `zensight/@v1/*/state/*/device/*/alive` + `zensight/@v1/@catalog/state/alive` | token keys are the identity; zero payload; the catalog token named explicitly (D4 — `*` never matches it), else "catalog dead" is indistinguishable from "no entities" |
-| Exporter (metrics) | `zensight/@v1/*/telemetry/**` | nothing to discard client-side |
-| Exporter (alerts) | `zensight/@v1/*/state/*/alert/*` | |
-| Protocol-specialist view | `zensight/@v1/*/telemetry/netring/**` | one `*`, protocol-first ergonomics preserved |
-| Catalog (evidence intake) | `zensight/@v1/*/state/*/evidence/**` | |
+| UI, full fleet | `zensight/v1/*/telemetry/**` + `zensight/v1/*/state/**` + `zensight/v1/*/events/**` + `zensight/v1/@catalog/state/entity/*` + `zensight/v1/@catalog/state/alias/*` | three class subs replace firehose-plus-filtering; catalog (and its alias records — the origin→entity re-pointing on merges) named explicitly (D4) |
+| UI, one host drill-down | `zensight/v1/h-xxx/**` | complete data plane of one host; cannot pull media/blob/rpc (D2) |
+| UI, presence | liveliness subs `zensight/v1/*/state/*/alive` + `zensight/v1/*/state/*/device/*/alive` + `zensight/v1/@catalog/state/alive` | token keys are the identity; zero payload; the catalog token named explicitly (D4 — `*` never matches it), else "catalog dead" is indistinguishable from "no entities" |
+| Exporter (metrics) | `zensight/v1/*/telemetry/**` | nothing to discard client-side |
+| Exporter (alerts) | `zensight/v1/*/state/*/alert/*` | |
+| Protocol-specialist view | `zensight/v1/*/telemetry/netring/**` | one `*`, protocol-first ergonomics preserved |
+| Catalog (evidence intake) | `zensight/v1/*/state/*/evidence/**` | |
 | Late-joiner seeds | `GET` the same state selectors | state is its own seed ([05-control-rpc.md §4](05-control-rpc.md)); discipline in [04-planes.md §3.2](04-planes.md) |
 | Media viewer | exact `…/@media/<producer>/<stream>/preview/jpeg`, or `…/video/<codec>/*` | single-stream only, by construction |
 
 Anti-patterns:
 
-- `zensight/@v1/**` — legal, but you almost never mean it; it spans every
+- `zensight/v1/**` — legal, but you almost never mean it; it spans every
   host's every class. Subscribe per class or per origin.
 - Any selector containing `$*` — forbidden ([02-principles.md P6](02-principles.md)).
 - Subscribing a data selector to "watch" RPC or media — structurally
@@ -66,28 +66,28 @@ plugins: {
     },                                        // out-of-tree, version-matched to the router
     storages: {
       latest: {                                   // current truth of the fleet
-        key_expr: "zensight/@v1/*/state/**",
-        strip_prefix: "zensight/@v1",
+        key_expr: "zensight/v1/*/state/**",
+        strip_prefix: "zensight/v1",
         volume: { id: "fs", dir: "latest" },      // any LWW-honouring backend
       },
       timeseries: {                               // charts and history
-        key_expr: "zensight/@v1/*/telemetry/**",
-        strip_prefix: "zensight/@v1",
+        key_expr: "zensight/v1/*/telemetry/**",
+        strip_prefix: "zensight/v1",
         volume: { id: "influxdb", db: "telemetry" },
       },
       events: {                                   // immutable record; retention is the
-        key_expr: "zensight/@v1/*/events/**",     // DATABASE's policy (InfluxDB RP) —
-        strip_prefix: "zensight/@v1",             // zenoh's garbage_collection GCs metadata
+        key_expr: "zensight/v1/*/events/**",     // DATABASE's policy (InfluxDB RP) —
+        strip_prefix: "zensight/v1",             // zenoh's garbage_collection GCs metadata
         volume: { id: "influxdb", db: "events" },
       },
       catalog: {                                  // explicit: '*' never matches @catalog (D4)
-        key_expr: "zensight/@v1/@catalog/state/**",
-        strip_prefix: "zensight/@v1/@catalog",
+        key_expr: "zensight/v1/@catalog/state/**",
+        strip_prefix: "zensight/v1/@catalog",
         volume: { id: "fs", dir: "catalog" },
       },
       pdns_history: {                             // history of LWW state = a storage choice (04 §4)
-        key_expr: "zensight/@v1/@catalog/state/pdns/**",
-        strip_prefix: "zensight/@v1/@catalog/state/pdns",
+        key_expr: "zensight/v1/@catalog/state/pdns/**",
+        strip_prefix: "zensight/v1/@catalog/state/pdns",
         volume: { id: "influxdb", db: "pdns" },
       },
     },
@@ -136,8 +136,8 @@ different routers) fixes that for latest-value storages:
 
 ```json5
 latest: {
-  key_expr: "zensight/@v1/*/state/**",
-  strip_prefix: "zensight/@v1",
+  key_expr: "zensight/v1/*/state/**",
+  strip_prefix: "zensight/v1",
   volume: { id: "fs", dir: "latest" },
   replication: {
     interval: 10.0,          // digest period, seconds
@@ -206,8 +206,8 @@ only for principals on the advanced tier):
 | host | `host-blob-seed` | `h-xxx/@blob/{store,tree}/**` | in | put |
 | host | `host-adv` (adv) | `h-xxx/**/@adv/**` | both | put, liveliness_token, declare_queryable, reply, query |
 | catalog | `catalog-own` | `@catalog/**` (+ its `@rpc`) | both | put, delete, liveliness_token, declare_queryable, reply, query |
-| catalog | `catalog-intake-declare` | `@v1/**` | **in only** | declare_subscriber, declare_liveliness_subscriber, liveliness_query, query |
-| catalog | `catalog-intake-recv` | `@v1/**` | **out only** | put, delete, liveliness_token, reply |
+| catalog | `catalog-intake-declare` | `v1/**` | **in only** | declare_subscriber, declare_liveliness_subscriber, liveliness_query, query |
+| catalog | `catalog-intake-recv` | `v1/**` | **out only** | put, delete, liveliness_token, reply |
 | console | `ops-sub` | all planes (each named) | in | declares, liveliness_query, query |
 | console | `ops-own-token` (adv) | `**/@adv/**` | in | liveliness_token |
 | console | `ops-recv` | all planes (each named) | out | put, delete, reply, liveliness_token |
@@ -224,21 +224,21 @@ access_control: {
     // ---- sensor host (template: one set per enrolled host) ----
     { id: "host-data",  permission: "allow", flows: ["ingress"],
       messages: ["put", "delete", "liveliness_token"],
-      key_exprs: ["zensight/@v1/h-3fa9c2d41b7e/**"] },          // data classes + alive tokens
+      key_exprs: ["zensight/v1/h-3fa9c2d41b7e/**"] },          // data classes + alive tokens
     { id: "host-media", permission: "allow", flows: ["ingress"],
       messages: ["put"],
-      key_exprs: ["zensight/@v1/h-3fa9c2d41b7e/@media/**"] },   // plane needs its own rule (fact 1)
+      key_exprs: ["zensight/v1/h-3fa9c2d41b7e/@media/**"] },   // plane needs its own rule (fact 1)
     { id: "host-serve", permission: "allow",
       messages: ["declare_queryable", "reply", "query"],        // query egress = router forwards calls to it
-      key_exprs: ["zensight/@v1/h-3fa9c2d41b7e/@rpc/**",
-                  "zensight/@v1/h-3fa9c2d41b7e/@blob/**"] },
+      key_exprs: ["zensight/v1/h-3fa9c2d41b7e/@rpc/**",
+                  "zensight/v1/h-3fa9c2d41b7e/@blob/**"] },
     // hosts that seed the router @blob content store use the sanctioned
     // one-shot PUT path (04-planes §3) — grant it explicitly, or omit this
     // rule in deployments without a router content store:
     { id: "host-blob-seed", permission: "allow", flows: ["ingress"],
       messages: ["put"],
-      key_exprs: ["zensight/@v1/h-3fa9c2d41b7e/@blob/store/**",
-                  "zensight/@v1/h-3fa9c2d41b7e/@blob/tree/**"] },
+      key_exprs: ["zensight/v1/h-3fa9c2d41b7e/@blob/store/**",
+                  "zensight/v1/h-3fa9c2d41b7e/@blob/tree/**"] },
     // ONLY for hosts on the advanced tier (04-planes §3.3): the sidecars
     // (cache queryable, liveliness token, heartbeat publisher at
     // <key>/@adv/pub/<zid>/…) live under a verbatim @adv suffix the
@@ -247,14 +247,14 @@ access_control: {
     { id: "host-adv", permission: "allow",
       messages: ["put", "liveliness_token",
                  "declare_queryable", "reply", "query"],
-      key_exprs: ["zensight/@v1/h-3fa9c2d41b7e/**/@adv/**"] },
+      key_exprs: ["zensight/v1/h-3fa9c2d41b7e/**/@adv/**"] },
 
     // ---- catalog service ----
     { id: "catalog-own", permission: "allow",
       messages: ["put", "delete", "liveliness_token",
                  "declare_queryable", "reply", "query"],
-      key_exprs: ["zensight/@v1/@catalog/**",
-                  "zensight/@v1/@catalog/@rpc/**"] },
+      key_exprs: ["zensight/v1/@catalog/**",
+                  "zensight/v1/@catalog/@rpc/**"] },
     // intake is split by flow: the catalog DECLARES interest (ingress) and
     // RECEIVES data/tokens (egress) — a flowless rule here would let the
     // catalog principal ingress-publish and tombstone ANY host's keys,
@@ -262,10 +262,10 @@ access_control: {
     { id: "catalog-intake-declare", permission: "allow", flows: ["ingress"],
       messages: ["declare_subscriber", "declare_liveliness_subscriber",
                  "liveliness_query", "query"],
-      key_exprs: ["zensight/@v1/**"] },
+      key_exprs: ["zensight/v1/**"] },
     { id: "catalog-intake-recv", permission: "allow", flows: ["egress"],
       messages: ["put", "delete", "liveliness_token", "reply"],
-      key_exprs: ["zensight/@v1/**"] },
+      key_exprs: ["zensight/v1/**"] },
 
     // ---- operator console: read everything, write nothing but RPC ----
     // (the **/@adv/** entries carry AdvancedSubscriber traffic: history/
@@ -274,29 +274,29 @@ access_control: {
     { id: "ops-sub", permission: "allow", flows: ["ingress"],
       messages: ["declare_subscriber", "declare_liveliness_subscriber",
                  "liveliness_query", "query"],
-      key_exprs: ["zensight/@v1/**", "zensight/@v1/@catalog/**",
-                  "zensight/@v1/*/@rpc/**", "zensight/@v1/@catalog/@rpc/**",
-                  "zensight/@v1/*/@blob/**", "zensight/@v1/*/@media/**",
-                  "zensight/@v1/**/@adv/**"] },
+      key_exprs: ["zensight/v1/**", "zensight/v1/@catalog/**",
+                  "zensight/v1/*/@rpc/**", "zensight/v1/@catalog/@rpc/**",
+                  "zensight/v1/*/@blob/**", "zensight/v1/*/@media/**",
+                  "zensight/v1/**/@adv/**"] },
     // the console's OWN token (advanced-tier subscriber detection) is
     // confined to @adv — a broad ingress liveliness_token allow would let
     // the console forge any host's `state/*/alive` roster entry:
     { id: "ops-own-token", permission: "allow", flows: ["ingress"],
       messages: ["liveliness_token"],
-      key_exprs: ["zensight/@v1/**/@adv/**"] },
+      key_exprs: ["zensight/v1/**/@adv/**"] },
     { id: "ops-recv", permission: "allow", flows: ["egress"],
       messages: ["put", "delete", "reply", "liveliness_token"],
-      key_exprs: ["zensight/@v1/**", "zensight/@v1/@catalog/**",
-                  "zensight/@v1/*/@rpc/**", "zensight/@v1/@catalog/@rpc/**",
-                  "zensight/@v1/*/@blob/**", "zensight/@v1/*/@media/**",
-                  "zensight/@v1/**/@adv/**"] },
+      key_exprs: ["zensight/v1/**", "zensight/v1/@catalog/**",
+                  "zensight/v1/*/@rpc/**", "zensight/v1/@catalog/@rpc/**",
+                  "zensight/v1/*/@blob/**", "zensight/v1/*/@media/**",
+                  "zensight/v1/**/@adv/**"] },
 
     // dangerous procedures deniable per-key, because the key IS the target
     // (deny wins; sound under default-deny — an origin-`**` query that would
     // sidestep this literal also matches no allow rule):
     { id: "no-remote-actions", permission: "deny",
       messages: ["query"],
-      key_exprs: ["zensight/@v1/*/@rpc/systemd/action"] },
+      key_exprs: ["zensight/v1/*/@rpc/systemd/action"] },
   ],
 
   subjects: [
@@ -323,7 +323,7 @@ to enrolled identities** — inexpressible in a keyspace where the host
 discriminator is a mutable name at varying positions. One more rule of
 thumb: a rule's `key_exprs`
 must **include** (⊇) the consumer's declared selector, not merely
-intersect it — allow `zensight/@v1/**` does not admit a `zensight/**`
+intersect it — allow `zensight/v1/**` does not admit a `zensight/**`
 subscriber.
 
 ## 4. Constrained links
@@ -345,13 +345,13 @@ two real mechanisms, both selecting on the same class prefixes:
   five more literal-prefix rules, not zero.
 - **`downsampling`** on the link's interface for rate-limits softer than
   allow/deny: `[{ interfaces: ["wlan0"], rules: [{ key_expr:
-  "zensight/@v1/*/telemetry/**", freq: 0.1 }] }]` — telemetry crosses at
+  "zensight/v1/*/telemetry/**", freq: 0.1 }] }]` — telemetry crosses at
   ≤ 0.1 Hz, state and events untouched.
 - **`qos` overwrite interceptor** to *enforce* the class QoS profiles
   ([04-planes.md §3](04-planes.md)) at the router regardless of what
   publishers set: one rule per class prefix, e.g. force
-  `zensight/@v1/*/telemetry/**` to `priority: "data_low"` and
-  `zensight/@v1/*/state/*/alert/*` to
+  `zensight/v1/*/telemetry/**` to `priority: "data_low"` and
+  `zensight/v1/*/state/*/alert/*` to
   `{ priority: "interactive_high", congestion_control: "block" }`. The
   interceptor ignores API-level QoS — deployment policy wins.
 
@@ -373,7 +373,7 @@ can simply not be allowed on the link at all).
 
 ## 5. Debugging etiquette
 
-- `z_sub 'zensight/@v1/*/state/**'` shows fleet truth; add
+- `z_sub 'zensight/v1/*/state/**'` shows fleet truth; add
   `…/@catalog/state/entity/*` to see conclusions. (Debug tools run
   *without* the namespace and spell full keys — which is also the honest
   view of what is on the wire.)
@@ -382,7 +382,7 @@ can simply not be allowed on the link at all).
   to `zensight/@/<zid>/**` and matches nothing
   ([03-grammar.md §1.1](03-grammar.md)).
 - Reading a raw key aloud is the parse: *base, version, origin, class,
-  producer, subject* — the chunk after `@v1` is always who, the next is
+  producer, subject* — the chunk after `v1` is always who, the next is
   always what kind (positions are base-relative: multi-chunk bases are
   legal, [03-grammar.md §1.1](03-grammar.md)). No lookup table required;
   that property is worth defending in review.

@@ -8,8 +8,8 @@ egress task, and refcount:
 
 | Profile | Key | Encoding | Purpose |
 |---------|-----|----------|---------|
-| `video` | `zensight/@v1/<origin>/@media/parallax/<stream>/video/h264/<profile>` | `video/h264` | full-rate live view |
-| `preview` | `zensight/@v1/<origin>/@media/parallax/<stream>/preview/jpeg` | `image/jpeg` | low-fps GUI tiles |
+| `video` | `zensight/v1/<origin>/@media/parallax/<stream>/video/h264/<profile>` | `video/h264` | full-rate live view |
+| `preview` | `zensight/v1/<origin>/@media/parallax/<stream>/preview/jpeg` | `image/jpeg` | low-fps GUI tiles |
 
 An `open_stream` command with `codec: "h264"` (or the sensor default) opens
 the video profile; `codec: "mjpeg"` opens the preview profile. Profiles are
@@ -130,7 +130,7 @@ triggers the stop handle first.
 ## Stats, health, alerts
 
 Per-stream stats ride ordinary telemetry under
-`zensight/@v1/<origin>/telemetry/parallax/<stream>/stats/<metric>` every
+`zensight/v1/<origin>/telemetry/parallax/<stream>/stats/<metric>` every
 `stats_interval_secs`, **aggregated over the stream's open profiles**:
 
 | Metric | Kind | Meaning |

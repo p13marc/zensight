@@ -14,8 +14,8 @@ The fleet-wide overview is [`../../docs/KEYSPACE.md`](../../docs/KEYSPACE.md).
 
 | Tier | Config | Backend | Keys | Mutability |
 |------|--------|---------|------|------------|
-| Fleet state + catalog | [`configs/router-evidence-storage.json5`](../../configs/router-evidence-storage.json5) | `zenoh-backend-fs` | `zensight/@v1/*/state/**` + `zensight/@v1/@catalog/state/**` | mutable (last-writer-wins) |
-| Historical passive-DNS | [`configs/router-pdns-influxdb-storage.json5`](../../configs/router-pdns-influxdb-storage.json5) | `zenoh-backend-influxdb` | `zensight/@v1/@catalog/state/pdns/**` | append (time series) |
+| Fleet state + catalog | [`configs/router-evidence-storage.json5`](../../configs/router-evidence-storage.json5) | `zenoh-backend-fs` | `zensight/v1/*/state/**` + `zensight/v1/@catalog/state/**` | mutable (last-writer-wins) |
+| Historical passive-DNS | [`configs/router-pdns-influxdb-storage.json5`](../../configs/router-pdns-influxdb-storage.json5) | `zenoh-backend-influxdb` | `zensight/v1/@catalog/state/pdns/**` | append (time series) |
 
 ## Mutable keys need timestamping — the one correctness subtlety
 
@@ -46,10 +46,10 @@ explicitly so they stay correct even if run on a peer/client.
 persists the identity plane with two fs storages — two because the `@catalog`
 chunk is verbatim, so the `*`-origin selector can never cover it:
 
-- `zensight/@v1/*/state/**` — the whole fleet state plane, including the
+- `zensight/v1/*/state/**` — the whole fleet state plane, including the
   `HostEvidence` claims and `NameObservation` batches (catalog *input*), stored
   under `dir: "latest"`.
-- `zensight/@v1/@catalog/state/**` — the catalog's merged `HostEntity` docs and
+- `zensight/v1/@catalog/state/**` — the catalog's merged `HostEntity` docs and
   pdns records (catalog *output*, single writer), stored under `dir: "catalog"`.
 
 ```bash
@@ -70,12 +70,12 @@ this store exactly like the producer-side queryables would.
 The evidence/entity tier is live state (TTL-swept, no history). For a durable
 *historical* IP↔name record ("what did 10.0.0.9 resolve to last Tuesday?"), the
 catalog publishes a `PdnsRecord` — the IP's full accumulated name set — on
-`zensight/@v1/@catalog/state/pdns/<ip-slug>` every time its name store
+`zensight/v1/@catalog/state/pdns/<ip-slug>` every time its name store
 learns/updates names for an IP. Nothing consumes the pdns records on the live
 bus; they exist to be captured.
 
 [`configs/router-pdns-influxdb-storage.json5`](../../configs/router-pdns-influxdb-storage.json5)
-subscribes `zensight/@v1/@catalog/state/pdns/**` into an InfluxDB bucket via
+subscribes `zensight/v1/@catalog/state/pdns/**` into an InfluxDB bucket via
 `zenoh-backend-influxdb`, so each write becomes a time-series point.
 
 > **Not live-tested.** There is no InfluxDB in the build/CI sandbox, so this

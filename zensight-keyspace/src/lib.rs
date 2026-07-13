@@ -8,7 +8,7 @@
 //! *namespace*, RFC 03 §1.1, so no key built here contains it):
 //!
 //! ```text
-//! @v1/<origin>/<class>/<producer>/<subject...>
+//! v1/<origin>/<class>/<producer>/<subject...>
 //! ```
 //!
 //! Layer map:

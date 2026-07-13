@@ -29,9 +29,9 @@ fn warned() -> &'static Mutex<HashSet<String>> {
 /// `gnmi`, `netflow`) keep a rest-var subject by design, so everything they
 /// publish is registered and this is a no-op for them.
 pub fn check_telemetry_key(key: &str) {
-    // Keys reach the wire with the base spelled (`zensight/@v1/...`), but
+    // Keys reach the wire with the base spelled (`zensight/v1/...`), but
     // `grammar::parse` is base-relative (#466 will remove the difference).
-    let Some(idx) = key.find("@v1/") else { return };
+    let Some(idx) = key.find("v1/") else { return };
     let Ok(parsed) = grammar::parse(&key[idx..]) else {
         return;
     };
@@ -71,25 +71,25 @@ mod tests {
 
     #[test]
     fn registered_metric_passes() {
-        check_telemetry_key("zensight/@v1/h-0123456789ab/telemetry/sysinfo/cpu/usage");
-        check_telemetry_key("zensight/@v1/h-0123456789ab/telemetry/sysinfo/disk/sda/io/read_bytes");
+        check_telemetry_key("zensight/v1/h-0123456789ab/telemetry/sysinfo/cpu/usage");
+        check_telemetry_key("zensight/v1/h-0123456789ab/telemetry/sysinfo/disk/sda/io/read_bytes");
     }
 
     #[test]
     fn rest_var_producers_pass() {
         // snmp's tree is whatever the device exposes — a rest-var by design.
-        check_telemetry_key("zensight/@v1/h-0123456789ab/telemetry/snmp/router1/if/1/in_octets");
+        check_telemetry_key("zensight/v1/h-0123456789ab/telemetry/snmp/router1/if/1/in_octets");
     }
 
     #[test]
     fn non_telemetry_and_junk_pass() {
-        check_telemetry_key("zensight/@v1/h-0123456789ab/state/sysinfo/health");
+        check_telemetry_key("zensight/v1/h-0123456789ab/state/sysinfo/health");
         check_telemetry_key("not-a-v1-key");
     }
 
     #[test]
     #[should_panic(expected = "unregistered telemetry subject")]
     fn unregistered_metric_panics_in_debug() {
-        check_telemetry_key("zensight/@v1/h-0123456789ab/telemetry/sysinfo/not/a/real/metric");
+        check_telemetry_key("zensight/v1/h-0123456789ab/telemetry/sysinfo/not/a/real/metric");
     }
 }

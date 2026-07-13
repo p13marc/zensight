@@ -3,13 +3,13 @@
 ## Canonical key
 
 ```
-zensight/@v1/<realm>/assets/<asset>/entities/<kind>/<entity>/<state|telemetry>/<domain>/<component>/<producer>
+zensight/v1/<realm>/assets/<asset>/entities/<kind>/<entity>/<state|telemetry>/<domain>/<component>/<producer>
 ```
 
 ## Top level
 
 ```
-zensight/@v1/<realm>/assets/<asset>/
+zensight/v1/<realm>/assets/<asset>/
   entities/
   producers/
   events/

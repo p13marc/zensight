@@ -4,8 +4,8 @@ Headless ZenSight service — **the catalog** — that fuses per-sensor **identi
 evidence** into one `HostEntity` per physical host. Sensors self-report a stable
 `host_id` (and, with `evidence` on, republish the hosts and names they observe);
 the catalog is the **single writer** of the verbatim `@catalog` origin
-(`zensight/@v1/@catalog/…`) — it subscribes only to the evidence state
-(`zensight/@v1/*/state/*/evidence/**`, never the telemetry firehose), merges
+(`zensight/v1/@catalog/…`) — it subscribes only to the evidence state
+(`zensight/v1/*/state/*/evidence/**`, never the telemetry firehose), merges
 claims with a deterministic union-find over ranked identity rules, and publishes
 the materialized entity view plus storage-shaped seed queryables.
 
@@ -29,7 +29,7 @@ engine/store/publisher pipeline, so the frontend can develop against a live
 correlator without any sensors.
 
 Catalog ownership is an explicit claim protocol (`guard.rs`): every candidate
-declares a liveliness claim at `zensight/@v1/@catalog/state/claim/<zid>`, the
+declares a liveliness claim at `zensight/v1/@catalog/state/claim/<zid>`, the
 lexically-lowest claim wins the election, and losers exit rather than
 double-write. Only the elected owner declares `…/@catalog/state/alive` and the
 catalog publishers/queryables (deterministic merge means a partition-split pair

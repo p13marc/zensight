@@ -3,7 +3,7 @@
 //! Per-line log events are high-cardinality, high-volume detail; streaming
 //! them per line rode (and could dominate) the `zensight/**` telemetry bus.
 //! They now live in a bounded in-memory ring served via a Zenoh queryable at
-//! `zensight/@v1/<origin>/@rpc/logs/events` — pulled by the GUI on open + a slow refresh
+//! `zensight/v1/<origin>/@rpc/logs/events` — pulled by the GUI on open + a slow refresh
 //! tick, never streamed. The low-rate rollups (`logs/by_severity/*`,
 //! `logs/by_unit/*`, …) stay on the bus for charts/alerts.
 //!

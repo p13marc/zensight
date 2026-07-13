@@ -2,8 +2,8 @@
 //! (`@rpc` procedures + `@blob` tiers, RFC 05/07; epic #453).
 //!
 //! Runtime control is request/reply on the `@rpc` plane:
-//! - write: `<base>/@v1/<origin>/@rpc/<producer>/<topic>/set`
-//! - read:  `<base>/@v1/<origin>/@rpc/<producer>/<topic>`
+//! - write: `<base>/v1/<origin>/@rpc/<producer>/<topic>/set`
+//! - read:  `<base>/v1/<origin>/@rpc/<producer>/<topic>`
 //!
 //! Every builder takes the **producer name** ("logs", "netring", …) and
 //! derives the LOCAL host origin — these are serving-side builders; fleet
@@ -19,7 +19,7 @@ use zensight_keyspace::grammar::BlobTier;
 /// ```
 /// use zensight_common::command::command_key;
 /// let k = command_key("logs", "filter");
-/// assert!(k.starts_with("zensight/@v1/h-"));
+/// assert!(k.starts_with("zensight/v1/h-"));
 /// assert!(k.ends_with("/@rpc/logs/filter/set"));
 /// ```
 pub fn command_key(producer: &str, topic: &str) -> String {
@@ -57,19 +57,19 @@ pub fn artifact_cancel_key(producer: &str) -> String {
     V1Context::for_producer(producer).rpc_key(&["artifact", "cancel"])
 }
 
-/// Tier-1 blob prefix: `<base>/@v1/<origin>/@blob/artifact` — a produced
+/// Tier-1 blob prefix: `<base>/v1/<origin>/@blob/artifact` — a produced
 /// artifact's manifest + chunks live under `…/artifact/<id>/**` (RFC 07 §2).
 pub fn artifact_blob_prefix(producer: &str) -> String {
     V1Context::for_producer(producer).blob_prefix(BlobTier::Artifact)
 }
 
-/// Tier-2 content-store prefix: `<base>/@v1/<origin>/@blob/store` — chunks
+/// Tier-2 content-store prefix: `<base>/v1/<origin>/@blob/store` — chunks
 /// at `…/store/<algo>/<hash>`, immutable ⇒ cacheable fleet-wide.
 pub fn artifact_store_prefix(producer: &str) -> String {
     V1Context::for_producer(producer).blob_prefix(BlobTier::Store)
 }
 
-/// Tier-2 tree-index prefix: `<base>/@v1/<origin>/@blob/tree`.
+/// Tier-2 tree-index prefix: `<base>/v1/<origin>/@blob/tree`.
 pub fn artifact_tree_prefix(producer: &str) -> String {
     V1Context::for_producer(producer).blob_prefix(BlobTier::Tree)
 }
@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn key_builders() {
         let k = command_key("netlink", "expectations");
-        assert!(k.starts_with("zensight/@v1/h-"), "{k}");
+        assert!(k.starts_with("zensight/v1/h-"), "{k}");
         assert!(k.ends_with("/@rpc/netlink/expectations/set"), "{k}");
         let s = status_key("netring", "detectors");
         assert!(s.ends_with("/@rpc/netring/detectors"), "{s}");

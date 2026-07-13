@@ -63,8 +63,8 @@ mod tests {
     fn flows_key_is_origin_scoped_or_fleet() {
         assert_eq!(
             flows_key(Some("h-3fa9c2d41b7e")),
-            "zensight/@v1/h-3fa9c2d41b7e/@rpc/netflow/flows?max=200"
+            "zensight/v1/h-3fa9c2d41b7e/@rpc/netflow/flows?max=200"
         );
-        assert_eq!(flows_key(None), "zensight/@v1/*/@rpc/netflow/flows?max=200");
+        assert_eq!(flows_key(None), "zensight/v1/*/@rpc/netflow/flows?max=200");
     }
 }

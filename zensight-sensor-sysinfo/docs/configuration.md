@@ -18,7 +18,7 @@ block with every metric type disabled.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `key_prefix` | `zensight/sysinfo` | Legacy-form prefix from which the v1 context derives (base `zensight`, producer `sysinfo` → keys under `zensight/@v1/<origin>/…/sysinfo/…`). |
+| `key_prefix` | `zensight/sysinfo` | Legacy-form prefix from which the v1 context derives (base `zensight`, producer `sysinfo` → keys under `zensight/v1/<origin>/…/sysinfo/…`). |
 | `source` | `auto` | `source` field in telemetry payloads (not part of the key); `auto` resolves the local hostname (falls back to `unknown`). |
 | `poll_interval_secs` | `5` | Collection interval (must be > 0). |
 | `collect` | see below | Which metric families to gather. |

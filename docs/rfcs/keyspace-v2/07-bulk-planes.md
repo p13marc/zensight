@@ -13,11 +13,11 @@ per-origin firehose `…/h-xxx/**` — can ever pull them by accident
 ## 1. `@media` — live opaque streams
 
 ```
-<base>/@v1/<origin>/@media/<producer>/<stream>/video/<codec>/<profile>
-<base>/@v1/<origin>/@media/<producer>/<stream>/preview/<format>
+<base>/v1/<origin>/@media/<producer>/<stream>/video/<codec>/<profile>
+<base>/v1/<origin>/@media/<producer>/<stream>/preview/<format>
 ```
 
-Example: `zensight/@v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main`,
+Example: `zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main`,
 `…/@media/parallax/cam0/preview/jpeg`.
 
 Rules:
@@ -58,9 +58,9 @@ Rules:
 ## 2. `@blob` — bulk and content-addressed transfer
 
 ```
-<base>/@v1/<origin>/@blob/artifact/<id>/**            Tier-1: manifest + chunks of one named blob
-<base>/@v1/<origin>/@blob/tree/<id>                   Tier-2: directory-tree index (depth-first entry list)
-<base>/@v1/<origin>/@blob/store/<algo>/<hash>         Tier-2: content-addressed chunk (immutable)
+<base>/v1/<origin>/@blob/artifact/<id>/**            Tier-1: manifest + chunks of one named blob
+<base>/v1/<origin>/@blob/tree/<id>                   Tier-2: directory-tree index (depth-first entry list)
+<base>/v1/<origin>/@blob/store/<algo>/<hash>         Tier-2: content-addressed chunk (immutable)
 ```
 
 The chunk after `@blob` is a reserved **tier token** (`artifact` | `tree` |
@@ -89,7 +89,7 @@ never pays a byte), fronted by a resumable client (reference: `zenoh-blob`
   [04-planes.md §3](04-planes.md); tree ids are root hashes, so both
   families are content-addressed) so a producer publishes once and exits,
   and the fleet fetches the router copy.
-  A wildcard-origin fan-out (`GET <base>/@v1/*/@blob/store/sha256/<hash>`)
+  A wildcard-origin fan-out (`GET <base>/v1/*/@blob/store/sha256/<hash>`)
   is legal but MUST NOT be the default fetch path: every holder ships the
   full chunk (Zenoh cannot cancel remote replies in flight), so N holders
   cost N× the bytes — amplification on exactly the links this plane

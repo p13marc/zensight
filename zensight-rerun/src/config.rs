@@ -156,7 +156,7 @@ impl Default for RerunSinkConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FilterConfig {
     /// Telemetry subscription key expression (default
-    /// `zensight/@v1/*/telemetry/**`). Narrow
+    /// `zensight/v1/*/telemetry/**`). Narrow
     /// it to tame the firehose at the subscription. The alert/health/entity
     /// subscribers are separate and unaffected.
     #[serde(default)]

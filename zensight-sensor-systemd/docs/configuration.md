@@ -41,7 +41,7 @@ fully commented example. Validation rejects `poll_interval_secs == 0`.
 
 ## `systemd.alerts` (#276)
 
-Published on `zensight/@v1/<origin>/state/systemd/alert/*`.
+Published on `zensight/v1/<origin>/state/systemd/alert/*`.
 
 | Key | Default | Meaning |
 |-----|---------|---------|

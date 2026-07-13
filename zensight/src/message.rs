@@ -64,13 +64,13 @@ pub enum Message {
     AlertsSeed(Vec<Alert>),
 
     /// Connect-time snapshot of the correlator's [`HostEntity`] docs, fetched
-    /// from the entity seed (`zensight/@v1/@catalog/state/entity/*`) (#306).
+    /// from the entity seed (`zensight/v1/@catalog/state/entity/*`) (#306).
     /// Absent correlator ⇒ no
     /// replies ⇒ empty store ⇒ degraded per-source path.
     EntitySeed(Vec<HostEntity>),
 
     /// A single [`HostEntity`] doc was published/updated on
-    /// `zensight/@v1/@catalog/state/entity/<entity_id>` (#306).
+    /// `zensight/v1/@catalog/state/entity/<entity_id>` (#306).
     EntityReceived(HostEntity),
 
     /// A [`HostEntity`] doc was tombstoned (Delete). Payload is the `entity_id`
@@ -631,7 +631,7 @@ pub enum Message {
     /// **Focus this host** (#476): subscribe to one origin instead of the fleet.
     ///
     /// `Some(origin)` narrows every data-plane subscription to
-    /// `zensight/@v1/<origin>/…`; `None` restores the fleet. Changing this
+    /// `zensight/v1/<origin>/…`; `None` restores the fleet. Changing this
     /// re-keys the Zenoh subscription, so Iced tears the session down and
     /// re-declares — same mechanism as a settings change.
     SetFocusHost(Option<String>),

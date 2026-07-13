@@ -8,7 +8,7 @@ expectation is satisfied again. Expectations are configured under
 Each expectation carries a `severity` (`info`/`warning`/`critical`, default
 `warning`) and an optional per-expectation `for_secs` debounce (fall back to
 `default_for_secs`). Alerts are published on
-`zensight/@v1/<origin>/state/netlink/alert/<alert_key>` as a lifecycle
+`zensight/v1/<origin>/state/netlink/alert/<alert_key>` as a lifecycle
 (firing → resolved → Delete tombstone), where `<alert_key>` is a stable 16-hex
 FNV-1a hash of `rule + labels` (the origin chunk already identifies the host,
 so `source` is not hashed). The rule slug is `<kind>:<name>`.
@@ -75,12 +75,12 @@ evaluator, so they need two sweeps before they can fire.
 Expectations can be replaced live without a restart. Both legs are request/reply
 GETs on the `@rpc` plane (there is no pub-sub command channel):
 
-- **Write** (GET with payload): `zensight/@v1/<origin>/@rpc/netlink/expectations/set`
+- **Write** (GET with payload): `zensight/v1/<origin>/@rpc/netlink/expectations/set`
   — a `SetExpectations(ExpectationsConfig)` command payload **replaces the set
   wholesale**; failures ride `reply_err` with a namespaced `error/...` name.
   Expectations authored in the GUI (Expectations view) are merged with the
   config-declared ones.
-- **Read** (plain GET): `zensight/@v1/<origin>/@rpc/netlink/expectations` —
+- **Read** (plain GET): `zensight/v1/<origin>/@rpc/netlink/expectations` —
   returns the currently active `ExpectationsConfig`.
 
 A separate `@rpc/netlink/collection` (+ `.../collection/set`) procedure pair
