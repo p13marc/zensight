@@ -5603,14 +5603,29 @@ impl ZenSight {
         })
     }
 
-    /// Every (origin, producer, host) we know is up, from the sensor-registration
-    /// docs. The fleet view needs this to tell "not deployed" from "deployed but
-    /// answering nothing" — a producer that is alive and silent on `introspect`
-    /// is the row you most want to see, and fanning out alone cannot find it.
+    /// Every (origin, producer, host) that is **currently up**. The Fleet view
+    /// needs this to tell "not deployed" from "deployed but answering nothing" —
+    /// a producer that is alive and silent on `introspect` is the row you most
+    /// want to see, and fanning out alone cannot find it.
+    ///
+    /// Liveliness is the gate, not registration. `known_sensors` is insert-only —
+    /// a sensor's registration doc stays in it forever, so on its own it would
+    /// report a *dead* sensor as `silent`, which claims "deployed and not
+    /// answering" about a host that is simply gone. That is a lie in exactly the
+    /// case this row exists to expose. Presence lives in `sensor_health`, which
+    /// `set_sensor_liveliness` flips to `Offline` when the token disappears; both
+    /// maps are keyed by `sensor_instance_key` precisely so they line up.
     fn alive_producers(&self) -> Vec<crate::view::fleet::AliveProducer> {
         let mut out: Vec<crate::view::fleet::AliveProducer> = self
             .known_sensors
             .values()
+            .filter(|info| {
+                let key = sensor_instance_key(&info.name, Some(&info.source));
+                !matches!(
+                    self.sensor_health.get(&key).map(|s| s.status),
+                    Some(HealthStatus::Offline)
+                )
+            })
             .filter_map(|info| {
                 let origin = info.host_id.clone()?;
                 Some((origin, info.producer.clone(), info.source.clone()))
@@ -7345,6 +7360,67 @@ mod sensor_liveliness_tests {
         // ...but not protocols that merely share a prefix.
         assert!(!sensor_liveliness_matches("snmpx@h1", "snmp", None));
         assert!(!sensor_liveliness_matches("sysinfo@h1", "snmp", None));
+    }
+
+    /// A dead sensor must DISAPPEAR from the Fleet view's alive set, not be
+    /// reported as `silent` (#469).
+    ///
+    /// `silent` means "up on the bus but answering no `introspect`" — a broken
+    /// queryable or an old build. `known_sensors` is insert-only, so sourcing the
+    /// alive set from it alone would keep a gone-away sensor in the list forever
+    /// and label it with a claim that is false about it. Liveliness is the gate.
+    #[test]
+    fn a_dead_sensor_is_not_reported_as_silent() {
+        fn info(name: &str, source: &str, origin: &str) -> zensight_common::SensorInfo {
+            zensight_common::SensorInfo {
+                name: name.to_string(),
+                version: "0.7.0".to_string(),
+                producer: name.to_string(),
+                source: source.to_string(),
+                host_id: Some(origin.to_string()),
+                boot_id: None,
+                hostname: None,
+                fqdn: None,
+                ips: Vec::new(),
+                macs: Vec::new(),
+                metadata: None,
+                last_updated: 0,
+            }
+        }
+
+        let mut a = app();
+        // Two sensors register and report healthy.
+        for (name, source, origin) in [
+            ("sysinfo", "hostA", "h-aaaaaaaaaaaa"),
+            ("netlink", "hostB", "h-bbbbbbbbbbbb"),
+        ] {
+            let _ = a.update(Message::SensorInfoReceived(info(name, source, origin)));
+            let _ = a.update(Message::HealthSnapshotReceived(snapshot(
+                name,
+                Some(source),
+                HealthStatus::Healthy,
+            )));
+        }
+        assert_eq!(a.alive_producers().len(), 2, "both are up");
+
+        // hostB's netlink sensor dies — its liveliness token disappears.
+        let _ = a.update(Message::SensorOffline(
+            "netlink".into(),
+            Some("hostB".into()),
+        ));
+
+        let alive = a.alive_producers();
+        assert_eq!(
+            alive.len(),
+            1,
+            "the dead sensor must drop out of the alive set"
+        );
+        assert_eq!(alive[0].1, "sysinfo");
+        assert!(
+            !alive.iter().any(|(_, producer, _)| producer == "netlink"),
+            "a gone-away sensor reported as `silent` would claim it is deployed and \
+             not answering — false about a host that is simply gone"
+        );
     }
 
     #[test]

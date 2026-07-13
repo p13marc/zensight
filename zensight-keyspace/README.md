@@ -65,6 +65,19 @@ vacuously true.
 tree is defined by the polled device or the exporter's template, not by us. That is
 a genuinely open tail and the correct use of `{var...}`.
 
+Each of the six host producers funnels metric construction through a checked
+constructor, so its existing mapper tests *are* its conformance suite — and each has
+a `#[should_panic]` test proving the guard bites, because a conformance suite that
+cannot fail is the same mistake as the catch-all it replaced.
+
+**A consumer that cannot parse a subject drops it — it does not fall back to string
+parsing.** The #477 plan originally hedged the other way, so a metric the registry
+missed would still render. That hedge is deliberately retired: a fallback silently
+masks an unregistered subject, which is precisely the defect this crate exists to
+prevent ("a subject that is not registered does not exist"), and it would keep
+positional parsing alive across ~30 view sites. The guards above make a gap loud at
+*publish* time instead, which is strictly better than quiet in one view.
+
 Migration status: introduced by epic
 [#453](https://github.com/p13marc/zensight/issues/453); absorbs
 `zensight-common/src/{keyexpr,command}.rs` as the waves land.

@@ -68,6 +68,13 @@ pub fn snmp_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Element<
 }
 
 /// Collect all interfaces from all devices.
+///
+/// **Hand-parsed by design — not a gap in the #475 conversion.** snmp keeps a
+/// `{device}/{metric...}` rest-var in the registry on purpose: its metric tree is
+/// whatever OIDs the polled device exposes, not something we define. There is no
+/// typed subject to parse `if/{index}/…` into, and inventing one would be claiming
+/// knowledge of a device's MIB that we do not have. The same applies to
+/// `view/specialized/snmp.rs::parse_interfaces`.
 fn collect_interfaces(devices: &HashMap<&DeviceId, &DeviceState>) -> Vec<InterfaceSummary> {
     let mut interfaces = Vec::new();
 
