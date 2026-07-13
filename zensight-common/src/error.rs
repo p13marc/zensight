@@ -20,6 +20,12 @@ pub enum Error {
 
     #[error("Invalid key expression: {0}")]
     KeyExpr(String),
+
+    /// A registry `type` name with no entry in the RFC 08 §5 type table
+    /// (`payload::PAYLOAD_TYPES`) — the payload cannot be decoded because
+    /// nothing in this build knows what it is.
+    #[error("Unknown payload type {0:?} — not in the RFC 08 §5 type table")]
+    UnknownPayloadType(String),
 }
 
 impl From<ciborium::ser::Error<std::io::Error>> for Error {

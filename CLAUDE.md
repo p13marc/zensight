@@ -21,7 +21,8 @@ design rationale lives in [`docs/design/`](docs/design/).
 | Crate | What it is |
 |-------|-----------|
 | `zensight/` | Iced 0.14 frontend — views/state, testing, design system, local store |
-| `zensight-common/` | shared model: telemetry, alert/command, identity/evidence/entity, artifact, QoS, keyexpr |
+| `zenctl/` | bus explorer CLI (RFC 08 §6): `topic list/info/echo`, `node list`, `service list/call`, `doctor` |
+| `zensight-common/` | shared model: telemetry, alert/command, identity/evidence/entity, artifact, QoS, keyexpr, payload type table |
 | `zensight-keyspace/` | v1 key grammar + registry codegen: `V1Context`, origin minting, guard tests |
 | `zensight-sensor-core/` | sensor framework: runner, publishers (declared, QoS), health, alerting, identity, artifacts |
 | `zensight-sensor-{snmp,logs,netflow,modbus,sysinfo,gnmi}/` | protocol pollers/receivers |

@@ -24,6 +24,9 @@ struct SubjectEntry {
     path: String,
     chunks: Vec<Chunk>,
     class: String,
+    payload_type: String,
+    unit: Option<String>,
+    cardinality: Option<i64>,
     qos: String,
     ttl_s: Option<i64>,
     rate: Option<String>,
@@ -35,6 +38,8 @@ struct ProcedureEntry {
     path: String,
     chunks: Vec<String>,
     kind: String,
+    request: Option<String>,
+    reply: Option<String>,
     variant: String,
 }
 
@@ -270,13 +275,21 @@ fn load_registry(dir: &Path) -> Vec<RegistryFile> {
                     &format!("{spath:?}: unknown qos profile {qos:?} (RFC 04 §3)"),
                 );
             }
+            // RFC 08 §2: `type` is required — it is what binds one payload type
+            // to every expansion of the pattern (P5), and what lets a consumer
+            // decode a wildcard result set without sniffing.
+            let payload_type = entry
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| fail(&fname, &format!("{spath:?}: missing type (RFC 08 §2)")))
+                .to_string();
+            let unit = entry
+                .get("unit")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let cardinality = entry.get("cardinality").and_then(|v| v.as_integer());
             let has_var = chunks.iter().any(|c| !matches!(c, Chunk::Literal(_)));
-            if has_var
-                && entry
-                    .get("cardinality")
-                    .and_then(|v| v.as_integer())
-                    .is_none()
-            {
+            if has_var && cardinality.is_none() {
                 fail(
                     &fname,
                     &format!("{spath:?}: {{var}} pattern needs integer cardinality (RFC 08 §5)"),
@@ -327,6 +340,9 @@ fn load_registry(dir: &Path) -> Vec<RegistryFile> {
                 variant,
                 chunks,
                 class: class.to_string(),
+                payload_type,
+                unit,
+                cardinality,
                 qos,
                 ttl_s,
                 rate,
@@ -390,6 +406,14 @@ fn load_registry(dir: &Path) -> Vec<RegistryFile> {
                 variant: camel(&refs),
                 chunks,
                 kind: kind.to_string(),
+                request: entry
+                    .get("request")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                reply: entry
+                    .get("reply")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
             });
         }
 
@@ -613,6 +637,52 @@ fn emit(files: &[RegistryFile]) -> String {
         }
         let _ = writeln!(out, "            }}\n        }}\n");
 
+        // payload_type() — the registry `type` column (RFC 08 §2). One payload
+        // type per pattern (P5), so this is what a consumer decodes as.
+        let _ = writeln!(
+            out,
+            "        /// The one payload type of every expansion of this subject (RFC 08 §2)."
+        );
+        let _ = writeln!(out, "        pub fn payload_type(&self) -> &'static str {{");
+        let _ = writeln!(out, "            match self {{");
+        for s in &f.subjects {
+            let _ = writeln!(
+                out,
+                "                Self::{} {{ .. }} => {:?},",
+                s.variant, s.payload_type
+            );
+        }
+        let _ = writeln!(out, "            }}\n        }}\n");
+
+        // unit() — RFC 08 §4: the registry is authoritative for units, whether
+        // or not the key spells one as a suffix.
+        let _ = writeln!(out, "        pub fn unit(&self) -> Option<&'static str> {{");
+        let _ = writeln!(out, "            match self {{");
+        for s in &f.subjects {
+            let unit = match &s.unit {
+                Some(u) => format!("Some({u:?})"),
+                None => "None".to_string(),
+            };
+            let _ = writeln!(
+                out,
+                "                Self::{} {{ .. }} => {unit},",
+                s.variant
+            );
+        }
+        let _ = writeln!(out, "            }}\n        }}\n");
+
+        // cardinality() — the key-population bound the budget review enforces.
+        let _ = writeln!(out, "        pub fn cardinality(&self) -> Option<u64> {{");
+        let _ = writeln!(out, "            match self {{");
+        for s in &f.subjects {
+            let c = match s.cardinality {
+                Some(c) => format!("Some({c})"),
+                None => "None".to_string(),
+            };
+            let _ = writeln!(out, "                Self::{} {{ .. }} => {c},", s.variant);
+        }
+        let _ = writeln!(out, "            }}\n        }}\n");
+
         // pattern()
         let _ = writeln!(out, "        pub fn pattern(&self) -> &'static str {{");
         let _ = writeln!(out, "            match self {{");
@@ -826,7 +896,43 @@ fn emit(files: &[RegistryFile]) -> String {
             for p in &f.procedures {
                 let _ = writeln!(out, "                Self::{} => {:?},", p.variant, p.kind);
             }
-            let _ = writeln!(out, "            }}\n        }}");
+            let _ = writeln!(out, "            }}\n        }}\n");
+            let _ = writeln!(
+                out,
+                "        /// The registered path, e.g. `artifact/request`."
+            );
+            let _ = writeln!(out, "        pub fn path(self) -> &'static str {{");
+            let _ = writeln!(out, "            match self {{");
+            for p in &f.procedures {
+                let _ = writeln!(out, "                Self::{} => {:?},", p.variant, p.path);
+            }
+            let _ = writeln!(out, "            }}\n        }}\n");
+            // request_type()/reply_type() — RFC 08 §2. A `read` has no request
+            // body; a write that acks with nothing has no reply type.
+            for (method, field) in [
+                ("request_type", &|p: &ProcedureEntry| {
+                    p.request.clone() as Option<String>
+                }),
+                ("reply_type", &|p: &ProcedureEntry| {
+                    p.reply.clone() as Option<String>
+                }),
+            ]
+                as [(&str, &dyn Fn(&ProcedureEntry) -> Option<String>); 2]
+            {
+                let _ = writeln!(
+                    out,
+                    "        pub fn {method}(self) -> Option<&'static str> {{"
+                );
+                let _ = writeln!(out, "            match self {{");
+                for p in &f.procedures {
+                    let t = match field(p) {
+                        Some(t) => format!("Some({t:?})"),
+                        None => "None".to_string(),
+                    };
+                    let _ = writeln!(out, "                Self::{} => {t},", p.variant);
+                }
+                let _ = writeln!(out, "            }}\n        }}\n");
+            }
             let _ = writeln!(out, "    }}\n");
             if f.service_origin.is_some() {
                 let _ = writeln!(
@@ -897,6 +1003,12 @@ fn emit(files: &[RegistryFile]) -> String {
         ("class", "crate::grammar::Class", "s.class()"),
         ("pattern", "&'static str", "s.pattern()"),
         ("vars", "Vec<(&'static str, String)>", "s.vars()"),
+        ("payload_type", "&'static str", "s.payload_type()"),
+        ("unit", "Option<&'static str>", "s.unit()"),
+        ("cardinality", "Option<u64>", "s.cardinality()"),
+        ("qos", "crate::qos::QosProfile", "s.qos()"),
+        ("ttl_s", "Option<u64>", "s.ttl_s()"),
+        ("rate", "Option<&'static str>", "s.rate()"),
     ] {
         let _ = writeln!(out, "    pub fn {method}(&self) -> {ret} {{");
         let _ = writeln!(out, "        match self {{");
