@@ -1019,7 +1019,7 @@ impl ZenSight {
                     "id": "frontend-panel",
                     "filter": serde_json::Value::Object(filter),
                 });
-                let key = zensight_common::command_key("zensight/logs", "filter");
+                let key = zensight_common::fleet_command_key("logs", "filter");
                 self.syslog_filter.mark_applied();
                 return ControlFlow::Break(self.send_command(
                     key,
@@ -1070,7 +1070,7 @@ impl ZenSight {
                     .as_mut()
                     .and_then(|d| d.systemd_detail.pending_action.take())
                 {
-                    let key = zensight_common::command_key("zensight/systemd", "action");
+                    let key = zensight_common::fleet_command_key("systemd", "action");
                     let command = serde_json::json!({ "verb": verb, "unit": unit });
                     return ControlFlow::Break(
                         self.send_command(key, &command, format!("Sent {verb} {unit}"))
@@ -1384,7 +1384,7 @@ impl ZenSight {
                 }
             }
             Message::NetringCaptureNow => {
-                let key = zensight_common::command_key("zensight/netring", "capture_disk");
+                let key = zensight_common::fleet_command_key("netring", "capture_disk");
                 let command = serde_json::json!({ "type": "capture_now" });
                 return ControlFlow::Break(self.send_command(
                     key,
@@ -1393,7 +1393,7 @@ impl ZenSight {
                 ));
             }
             Message::NetringSetCaptureDiskMode(mode) => {
-                let key = zensight_common::command_key("zensight/netring", "capture_disk");
+                let key = zensight_common::fleet_command_key("netring", "capture_disk");
                 let command = serde_json::json!({ "type": "set_capture", "mode": mode });
                 return ControlFlow::Break(self.send_command(
                     key,
@@ -2688,7 +2688,7 @@ impl ZenSight {
                         SystemdExpKind::ForbidFailed => draft.forbid_failed = true,
                     }
                     let command = self.expectations.systemd.to_command_json();
-                    let key = zensight_common::command_key("zensight/systemd", "expectations");
+                    let key = zensight_common::fleet_command_key("systemd", "expectations");
                     return self
                         .send_command(key, &command, "systemd expectations pushed".to_string())
                         .chain(self.query_systemd_expectations());
@@ -2746,7 +2746,7 @@ impl ZenSight {
                         })
                     }
                 };
-                let key = zensight_common::command_key("zensight/netlink", "expectations");
+                let key = zensight_common::fleet_command_key("netlink", "expectations");
                 return self
                     .send_command(key, &command, "Expectation pushed".to_string())
                     .chain(self.query_expectations());
@@ -2756,13 +2756,13 @@ impl ZenSight {
                 if self.expectations.target == ExpTarget::Systemd {
                     self.expectations.systemd.remove_rule(&rule);
                     let command = self.expectations.systemd.to_command_json();
-                    let key = zensight_common::command_key("zensight/systemd", "expectations");
+                    let key = zensight_common::fleet_command_key("systemd", "expectations");
                     return self
                         .send_command(key, &command, format!("Removed {rule}"))
                         .chain(self.query_systemd_expectations());
                 }
                 let command = serde_json::json!({ "type": "remove", "rule": rule });
-                let key = zensight_common::command_key("zensight/netlink", "expectations");
+                let key = zensight_common::fleet_command_key("netlink", "expectations");
                 return self
                     .send_command(key, &command, format!("Removed {rule}"))
                     .chain(self.query_expectations());
@@ -2796,7 +2796,7 @@ impl ZenSight {
             Message::ToggleNetringDetector(detector) => {
                 let enabled = !self.detection_tuning.is_enabled(&detector).unwrap_or(false);
                 let command = serde_json::json!({ "type": "set_enabled", "detector": detector, "enabled": enabled });
-                let key = zensight_common::command_key("zensight/netring", "detectors");
+                let key = zensight_common::fleet_command_key("netring", "detectors");
                 return self
                     .send_command(
                         key,
@@ -2829,7 +2829,7 @@ impl ZenSight {
                     return Task::none();
                 };
                 let command = serde_json::json!({ "type": "set_threshold", "detector": detector, "value": value });
-                let key = zensight_common::command_key("zensight/netring", "detectors");
+                let key = zensight_common::fleet_command_key("netring", "detectors");
                 return self
                     .send_command(key, &command, format!("{detector} threshold = {value}"))
                     .chain(self.query_detector_status());
@@ -2844,7 +2844,7 @@ impl ZenSight {
                 }
                 self.detection_tuning.new_entry.clear();
                 let command = serde_json::json!({ "type": "add_allowlist", "entry": entry });
-                let key = zensight_common::command_key("zensight/netring", "detectors");
+                let key = zensight_common::fleet_command_key("netring", "detectors");
                 return self
                     .send_command(key, &command, format!("Allowlisted {entry}"))
                     .chain(self.query_detector_status());
@@ -2855,14 +2855,14 @@ impl ZenSight {
                     return Task::none();
                 }
                 let command = serde_json::json!({ "type": "add_allowlist", "entry": entry });
-                let key = zensight_common::command_key("zensight/netring", "detectors");
+                let key = zensight_common::fleet_command_key("netring", "detectors");
                 return self
                     .send_command(key, &command, format!("Allowlisted {entry}"))
                     .chain(self.query_detector_status());
             }
             Message::RemoveNetringAllowlist(entry) => {
                 let command = serde_json::json!({ "type": "remove_allowlist", "entry": entry });
-                let key = zensight_common::command_key("zensight/netring", "detectors");
+                let key = zensight_common::fleet_command_key("netring", "detectors");
                 return self
                     .send_command(key, &command, format!("Removed {entry}"))
                     .chain(self.query_detector_status());
@@ -2882,14 +2882,14 @@ impl ZenSight {
                     return Task::none();
                 }
                 let command = serde_json::json!({ "type": "set_packet_filter", "expr": expr });
-                let key = zensight_common::command_key("zensight/netring", "capture_filter");
+                let key = zensight_common::fleet_command_key("netring", "capture_filter");
                 return self
                     .send_command(key, &command, format!("Capture filter → {expr}"))
                     .chain(self.query_capture_filter_status());
             }
             Message::ClearPacketFilter => {
                 let command = serde_json::json!({ "type": "clear_packet_filter" });
-                let key = zensight_common::command_key("zensight/netring", "capture_filter");
+                let key = zensight_common::fleet_command_key("netring", "capture_filter");
                 return self
                     .send_command(key, &command, "Capture filter cleared".to_string())
                     .chain(self.query_capture_filter_status());
@@ -2933,21 +2933,21 @@ impl ZenSight {
                 let command = serde_json::json!({
                     "type": "set_ioc", "ips": ips, "domains": domains, "ja4": [], "ja3": [],
                 });
-                let key = zensight_common::command_key("zensight/netring", "threat_intel");
+                let key = zensight_common::fleet_command_key("netring", "threat_intel");
                 return self
                     .send_command(key, &command, format!("Pushed {n} IOC indicators"))
                     .chain(self.query_threat_intel_status());
             }
             Message::ReloadThreatIocFiles => {
                 let command = serde_json::json!({ "type": "reload_ioc_files" });
-                let key = zensight_common::command_key("zensight/netring", "threat_intel");
+                let key = zensight_common::fleet_command_key("netring", "threat_intel");
                 return self
                     .send_command(key, &command, "Reloading indicator files".to_string())
                     .chain(self.query_threat_intel_status());
             }
             Message::ClearThreatIoc => {
                 let command = serde_json::json!({ "type": "clear_ioc" });
-                let key = zensight_common::command_key("zensight/netring", "threat_intel");
+                let key = zensight_common::fleet_command_key("netring", "threat_intel");
                 return self
                     .send_command(key, &command, "Cleared IOC indicators".to_string())
                     .chain(self.query_threat_intel_status());
@@ -2963,7 +2963,7 @@ impl ZenSight {
                     return Task::none();
                 }
                 let command = serde_json::json!({ "type": "set_yara", "rules": rules });
-                let key = zensight_common::command_key("zensight/netring", "threat_intel");
+                let key = zensight_common::fleet_command_key("netring", "threat_intel");
                 return self
                     .send_command(key, &command, "Applying YARA rules".to_string())
                     .chain(self.query_threat_intel_status());
@@ -3280,7 +3280,7 @@ impl ZenSight {
         body: &T,
         ok_message: String,
     ) -> Task<Message> {
-        let Some(registry) = self.command_registry.clone() else {
+        let Some(session) = self.session.clone() else {
             return Task::done(Message::CommandFeedback {
                 success: false,
                 message: "Not connected to Zenoh".to_string(),
@@ -3295,18 +3295,53 @@ impl ZenSight {
                 });
             }
         };
+        // v1 (RFC 05 §3): a command is a write procedure — GET with a body.
+        // A value reply is the ack; a refusal arrives as a reply error
+        // carrying a namespaced { error, message } payload.
         Task::future(async move {
-            match registry
-                .put(&key, payload, zensight_common::QosClass::Command)
+            let replies = match session
+                .get(&key)
+                .payload(payload)
+                .target(zenoh::query::QueryTarget::All)
+                .timeout(std::time::Duration::from_secs(5))
                 .await
             {
-                Ok(()) => Message::CommandFeedback {
-                    success: true,
-                    message: ok_message,
+                Ok(r) => r,
+                Err(e) => {
+                    return Message::CommandFeedback {
+                        success: false,
+                        message: format!("Command failed: {e}"),
+                    };
+                }
+            };
+            match replies.recv_async().await {
+                Ok(reply) => match reply.result() {
+                    Ok(_) => Message::CommandFeedback {
+                        success: true,
+                        message: ok_message,
+                    },
+                    Err(err) => {
+                        let detail =
+                            serde_json::from_slice::<serde_json::Value>(&err.payload().to_bytes())
+                                .ok()
+                                .and_then(|v| {
+                                    Some(format!(
+                                        "{}: {}",
+                                        v.get("error")?.as_str()?,
+                                        v.get("message")?.as_str()?
+                                    ))
+                                })
+                                .unwrap_or_else(|| "refused".to_string());
+                        Message::CommandFeedback {
+                            success: false,
+                            message: format!("Command refused — {detail}"),
+                        }
+                    }
                 },
-                Err(e) => Message::CommandFeedback {
+                Err(_) => Message::CommandFeedback {
                     success: false,
-                    message: format!("Command failed: {e}"),
+                    message: "Command unanswered — target offline or procedure not served"
+                        .to_string(),
                 },
             }
         })
@@ -3586,12 +3621,17 @@ impl ZenSight {
                     zenoh_blob::BlobClient::new(session.clone(), bp, zenoh_blob::Format::Json);
                 client.delete_partial(&id, &dir).await;
             }
-            // Best-effort hint to the sensor (free the TTL'd artifact now).
+            // Best-effort hint to the sensor (free the TTL'd artifact now) —
+            // the cancel write procedure takes `?id=<ulid>` (RFC 05).
             let _ = session
-                .put(
-                    zensight_common::artifact_cancel_key(&key_prefix),
-                    id.into_bytes(),
-                )
+                .get(format!(
+                    "{}?id={}",
+                    zensight_common::fleet_rpc_key(
+                        key_prefix.rsplit('/').next().unwrap_or("sensor"),
+                        "artifact/cancel"
+                    ),
+                    id
+                ))
                 .await;
             Message::ArtifactSaved(Ok(None))
         }))

@@ -156,16 +156,18 @@ impl KeyExprBuilder {
     }
 }
 
-/// Build a wildcard key expression for all ZenSight telemetry.
+/// Build the v1 telemetry class selector (all producers, all origins).
 ///
 /// # Example
 /// ```
 /// use zensight_common::keyexpr::all_telemetry_wildcard;
 ///
-/// assert_eq!(all_telemetry_wildcard(), "zensight/**");
+/// assert_eq!(all_telemetry_wildcard(), "zensight/@v1/*/telemetry/**");
 /// ```
 pub fn all_telemetry_wildcard() -> String {
-    format!("{}/**", KEY_PREFIX)
+    // v1 (RFC 04): the telemetry class selector — nothing to discard
+    // client-side (incumbent pain P6 retired).
+    format!("{}/@v1/*/telemetry/**", KEY_PREFIX)
 }
 
 /// Build the control prefix for one sensor *instance*: `zensight/<protocol>/<source>`.
@@ -185,18 +187,37 @@ pub fn sensor_control_prefix(protocol: &str, source: &str) -> String {
     format!("{}/{}/{}", KEY_PREFIX, protocol, source)
 }
 
+/// Caller-side fleet procedure selector (RFC 05 §2): GET
+/// `<base>/@v1/*/@rpc/<producer>/<procedure...>` reaches every host serving
+/// the producer. Callers MUST use query target `All` (RFC 05 §2.1) —
+/// `BestMatching` can short-circuit the fan-in.
+pub fn fleet_rpc_key(producer: &str, procedure: &str) -> String {
+    format!("{}/@v1/*/@rpc/{}/{}", KEY_PREFIX, producer, procedure)
+}
+
+/// Caller-side fleet write selector: the `<topic>/set` procedure fleet-wide.
+pub fn fleet_command_key(producer: &str, topic: &str) -> String {
+    fleet_rpc_key(producer, &format!("{topic}/set"))
+}
+
+/// Build a wildcard key expression for the whole fleet state plane.
+pub fn all_state_wildcard() -> String {
+    // v1 (RFC 04): the whole fleet state plane, one selector.
+    format!("{}/@v1/*/state/**", KEY_PREFIX)
+}
+
 /// Build a wildcard key expression for all sensor health data.
 ///
-/// Matches: `zensight/<protocol>/<source>/@/health`
+/// Matches: `zensight/@v1/<origin>/state/<producer>/health`
 ///
 /// # Example
 /// ```
 /// use zensight_common::keyexpr::all_health_wildcard;
 ///
-/// assert_eq!(all_health_wildcard(), "zensight/*/*/@/health");
+/// assert_eq!(all_health_wildcard(), "zensight/@v1/*/state/*/health");
 /// ```
 pub fn all_health_wildcard() -> String {
-    format!("{}/*/*/@/health", KEY_PREFIX)
+    format!("{}/@v1/*/state/*/health", KEY_PREFIX)
 }
 
 /// Build a wildcard key expression for all device liveness data.
@@ -216,16 +237,16 @@ pub fn all_liveness_wildcard() -> String {
 
 /// Build a wildcard key expression for all sensor error reports.
 ///
-/// Matches: `zensight/<protocol>/<source>/@/errors`
+/// Matches: `zensight/@v1/<origin>/state/<producer>/errors`
 ///
 /// # Example
 /// ```
 /// use zensight_common::keyexpr::all_errors_wildcard;
 ///
-/// assert_eq!(all_errors_wildcard(), "zensight/*/*/@/errors");
+/// assert_eq!(all_errors_wildcard(), "zensight/@v1/*/state/*/errors");
 /// ```
 pub fn all_errors_wildcard() -> String {
-    format!("{}/*/*/@/errors", KEY_PREFIX)
+    format!("{}/@v1/*/state/*/errors", KEY_PREFIX)
 }
 
 /// Build a wildcard key expression for every host-scoped control-plane key
@@ -275,16 +296,17 @@ pub fn all_device_alive_wildcard() -> String {
 
 /// Build a wildcard key expression for all sensor discovery data.
 ///
-/// Matches: `zensight/_meta/sensors/<sensor_name>/<source>`
+/// Matches: `zensight/@v1/<origin>/state/<producer>/sensor`
 ///
 /// # Example
 /// ```
 /// use zensight_common::keyexpr::all_sensors_wildcard;
 ///
-/// assert_eq!(all_sensors_wildcard(), "zensight/_meta/sensors/**");
+/// assert_eq!(all_sensors_wildcard(), "zensight/@v1/*/state/*/sensor");
 /// ```
 pub fn all_sensors_wildcard() -> String {
-    format!("{}/_meta/sensors/**", KEY_PREFIX)
+    // v1: the registration document (state/<producer>/sensor).
+    format!("{}/@v1/*/state/*/sensor", KEY_PREFIX)
 }
 
 /// Build the sensor-registration key for one sensor instance. Keyed by
@@ -463,16 +485,16 @@ pub fn catalog_claims_wildcard() -> String {
 
 /// Build a wildcard key expression for all sensor-emitted alerts.
 ///
-/// Matches: `zensight/<protocol>/@/alerts/<alert_key>`
+/// Matches: `zensight/@v1/<origin>/state/<producer>/alert/<alert_key>`
 ///
 /// # Example
 /// ```
 /// use zensight_common::keyexpr::all_alerts_wildcard;
 ///
-/// assert_eq!(all_alerts_wildcard(), "zensight/*/@/alerts/*");
+/// assert_eq!(all_alerts_wildcard(), "zensight/@v1/*/state/*/alert/*");
 /// ```
 pub fn all_alerts_wildcard() -> String {
-    format!("{}/*/@/alerts/*", KEY_PREFIX)
+    format!("{}/@v1/*/state/*/alert/*", KEY_PREFIX)
 }
 
 /// Build the media-plane key for one video stream profile (#359):
@@ -660,17 +682,19 @@ mod tests {
     fn log_events_query_key_is_off_the_telemetry_bus() {
         use zenoh::key_expr::KeyExpr;
         let telemetry = KeyExpr::try_from(all_telemetry_wildcard()).unwrap();
-        let query_key = KeyExpr::try_from("zensight/logs/@/query/events").unwrap();
+        use crate::command::query_key;
+        // v1: the events read procedure lives on the verbatim @rpc plane —
+        // invisible to the telemetry class selector by construction (D2).
+        let query_key = KeyExpr::try_from(query_key("zensight/logs", "events")).unwrap();
         assert!(
             !telemetry.intersects(&query_key),
-            "@/query/events must be invisible to the telemetry firehose"
+            "the events procedure must be invisible to the telemetry firehose"
         );
-        let old_event_key =
-            KeyExpr::try_from("zensight/logs/web01/events/0000001719999000000000000042").unwrap();
-        assert!(
-            telemetry.intersects(&old_event_key),
-            "the pre-#358 streamed event keys were on the bus"
-        );
+        // ...and a telemetry rollup key IS on the bus.
+        let rollup =
+            KeyExpr::try_from("zensight/@v1/h-3fa9c2d41b7e/telemetry/logs/by_severity/error")
+                .unwrap();
+        assert!(telemetry.intersects(&rollup));
     }
 
     /// #359 acceptance pin: the media plane rides `@media/…` — an `@`-verbatim
@@ -868,6 +892,6 @@ mod tests {
 
     #[test]
     fn test_all_telemetry_wildcard() {
-        assert_eq!(all_telemetry_wildcard(), "zensight/**");
+        assert_eq!(all_telemetry_wildcard(), "zensight/@v1/*/telemetry/**");
     }
 }

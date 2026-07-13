@@ -38,62 +38,74 @@ const TOP_N: usize = 50;
 
 /// The flow-detail queryable key (matches the netring sensor's `query.rs`).
 pub fn flows_key() -> String {
-    "zensight/netring/@/query/flows".to_string()
+    zensight_common::fleet_rpc_key("netring", "flows")
 }
 
 /// The TLS-inventory queryable key.
 pub fn tls_key() -> String {
-    "zensight/netring/@/query/tls".to_string()
+    zensight_common::fleet_rpc_key("netring", "tls")
 }
 
 /// The QUIC SNI/ALPN inventory queryable key.
 pub fn quic_key() -> String {
-    "zensight/netring/@/query/quic".to_string()
+    zensight_common::fleet_rpc_key("netring", "quic")
 }
 
 /// The SSH/HASSH inventory queryable key.
 pub fn ssh_key() -> String {
-    "zensight/netring/@/query/ssh".to_string()
+    zensight_common::fleet_rpc_key("netring", "ssh")
 }
 
 /// The JA4H HTTP-fingerprint inventory queryable key (#124).
 pub fn ja4h_key() -> String {
-    "zensight/netring/@/query/ja4h".to_string()
+    zensight_common::fleet_rpc_key("netring", "ja4h")
 }
 
 /// The passive asset-inventory queryable key.
 pub fn assets_key() -> String {
-    "zensight/netring/@/query/assets".to_string()
+    zensight_common::fleet_rpc_key("netring", "assets")
 }
 
 /// The per-destination top-talker histogram key (`?top=N`).
 pub fn talkers_key() -> String {
-    format!("zensight/netring/@/query/talkers?top={TOP_N}")
+    format!(
+        "{}?top={TOP_N}",
+        zensight_common::fleet_rpc_key("netring", "talkers")
+    )
 }
 
 /// The recent-elephant-flow ring key.
 pub fn elephant_key() -> String {
-    "zensight/netring/@/query/elephant_flows".to_string()
+    zensight_common::fleet_rpc_key("netring", "elephant_flows")
 }
 
 /// The `(src,dst)` traffic-matrix / service-map key (`?top=N`) (#122).
 pub fn matrix_key() -> String {
-    format!("zensight/netring/@/query/matrix?top={TOP_N}")
+    format!(
+        "{}?top={TOP_N}",
+        zensight_common::fleet_rpc_key("netring", "matrix")
+    )
 }
 
 /// The capture-to-disk file-index key (#327).
 pub fn captures_key() -> String {
-    "zensight/netring/@/query/captures".to_string()
+    zensight_common::fleet_rpc_key("netring", "captures")
 }
 
 /// The per-SLD DNS detail key (`?top=N`).
 pub fn dns_key() -> String {
-    format!("zensight/netring/@/query/dns?top={TOP_N}")
+    format!(
+        "{}?top={TOP_N}",
+        zensight_common::fleet_rpc_key("netring", "dns")
+    )
 }
 
 /// The per-host HTTP detail key (`?top=N`).
 pub fn http_key() -> String {
-    format!("zensight/netring/@/query/http?top={TOP_N}")
+    format!(
+        "{}?top={TOP_N}",
+        zensight_common::fleet_rpc_key("netring", "http")
+    )
 }
 
 /// On-demand detail fetched for the selected netring host.
@@ -333,21 +345,21 @@ mod tests {
 
     #[test]
     fn key_matches_sensor() {
-        assert_eq!(flows_key(), "zensight/netring/@/query/flows");
-        assert_eq!(quic_key(), "zensight/netring/@/query/quic");
-        assert_eq!(ssh_key(), "zensight/netring/@/query/ssh");
-        assert_eq!(ja4h_key(), "zensight/netring/@/query/ja4h");
-        assert_eq!(tls_key(), "zensight/netring/@/query/tls");
-        assert_eq!(assets_key(), "zensight/netring/@/query/assets");
+        assert_eq!(flows_key(), "zensight/@v1/*/@rpc/netring/flows");
+        assert_eq!(quic_key(), "zensight/@v1/*/@rpc/netring/quic");
+        assert_eq!(ssh_key(), "zensight/@v1/*/@rpc/netring/ssh");
+        assert_eq!(ja4h_key(), "zensight/@v1/*/@rpc/netring/ja4h");
+        assert_eq!(tls_key(), "zensight/@v1/*/@rpc/netring/tls");
+        assert_eq!(assets_key(), "zensight/@v1/*/@rpc/netring/assets");
         // The 4 previously-orphaned channels now reachable (#45).
-        assert_eq!(talkers_key(), "zensight/netring/@/query/talkers?top=50");
-        assert_eq!(elephant_key(), "zensight/netring/@/query/elephant_flows");
-        assert_eq!(dns_key(), "zensight/netring/@/query/dns?top=50");
-        assert_eq!(http_key(), "zensight/netring/@/query/http?top=50");
+        assert_eq!(talkers_key(), "zensight/@v1/*/@rpc/netring/talkers?top=50");
+        assert_eq!(elephant_key(), "zensight/@v1/*/@rpc/netring/elephant_flows");
+        assert_eq!(dns_key(), "zensight/@v1/*/@rpc/netring/dns?top=50");
+        assert_eq!(http_key(), "zensight/@v1/*/@rpc/netring/http?top=50");
         // Traffic-matrix / service-map channel (#122).
-        assert_eq!(matrix_key(), "zensight/netring/@/query/matrix?top=50");
+        assert_eq!(matrix_key(), "zensight/@v1/*/@rpc/netring/matrix?top=50");
         // Capture-to-disk index channel (#327).
-        assert_eq!(captures_key(), "zensight/netring/@/query/captures");
+        assert_eq!(captures_key(), "zensight/@v1/*/@rpc/netring/captures");
     }
 
     #[test]

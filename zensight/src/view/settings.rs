@@ -721,14 +721,14 @@ fn render_zenoh_section(state: &SettingsState) -> Element<'_, Message> {
     // Subscription scope (#364): narrow the zensight/** telemetry firehose.
     let scope_label = text("Subscription scope:").size(14);
     let scope_input = text_input(
-        "zensight/netring/**, zensight/sysinfo/**",
+        "zensight/@v1/*/telemetry/netring/**, zensight/@v1/*/telemetry/sysinfo/**",
         &state.subscription_scope,
     )
     .on_input(Message::SubscriptionScopeChanged)
     .padding(8)
     .width(Length::Fixed(400.0));
     let scope_help = text(
-        "Comma-separated telemetry key expressions; empty = everything (zensight/**). \
+        "Comma-separated telemetry key expressions; empty = everything (zensight/@v1/*/telemetry/**). \
          Health, alerts, and entities are unaffected.",
     )
     .size(11)
@@ -965,7 +965,7 @@ mod tests {
             overview_expanded: true,
             current_view: CurrentView::default(),
             group_by_host: true,
-            subscription_scope: vec!["zensight/netring/**".to_string()],
+            subscription_scope: vec!["zensight/@v1/*/telemetry/netring/**".to_string()],
             link_profile: LinkProfile::Constrained,
             identity_expanded: true,
             topology_lens: Default::default(),

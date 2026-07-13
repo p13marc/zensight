@@ -680,7 +680,7 @@ fn entity_id_for(name: &str) -> String {
         hash ^= *b as u64;
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    format!("h_{:012x}", hash & 0xffff_ffff_ffff)
+    format!("h-{:012x}", hash & 0xffff_ffff_ffff)
 }
 
 /// One correlator [`HostEntity`] merging the given `(sensor, source)` members
@@ -904,7 +904,7 @@ mod tests {
         assert_eq!(entity_id_for("server01"), entity_id_for("server01"));
         assert_ne!(entity_id_for("server01"), entity_id_for("server02"));
         let ents = host_entities_at(1_000);
-        assert!(ents.iter().all(|e| e.entity_id.starts_with("h_")));
+        assert!(ents.iter().all(|e| e.entity_id.starts_with("h-")));
         assert!(ents.iter().all(|e| e.entity_id.len() == 14));
     }
 

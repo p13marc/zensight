@@ -45,7 +45,7 @@ impl SystemdDetailTopic {
             SystemdDetailTopic::Events => "events",
             SystemdDetailTopic::Cgroups => "cgroups",
         };
-        format!("zensight/systemd/@/query/{topic}")
+        zensight_common::fleet_rpc_key("systemd", topic)
     }
 
     pub fn label(&self) -> &'static str {
@@ -122,7 +122,10 @@ impl SystemdDetailState {
 /// The single-unit detail key (#313), matching the sensor's
 /// `@/query/unit?name=<u>` queryable.
 pub fn unit_detail_key(unit: &str) -> String {
-    format!("zensight/systemd/@/query/unit?name={unit}")
+    format!(
+        "{}?name={unit}",
+        zensight_common::fleet_rpc_key("systemd", "unit")
+    )
 }
 
 /// Fetch + decode one unit's detail for the drill-down panel (#313).
@@ -159,17 +162,17 @@ mod tests {
     fn topic_keys_and_labels() {
         assert_eq!(
             SystemdDetailTopic::Units.key(),
-            "zensight/systemd/@/query/units"
+            "zensight/@v1/*/@rpc/systemd/units"
         );
         assert_eq!(
             SystemdDetailTopic::Cgroups.key(),
-            "zensight/systemd/@/query/cgroups"
+            "zensight/@v1/*/@rpc/systemd/cgroups"
         );
         assert_eq!(SystemdDetailTopic::Timers.label(), "Timers");
         // Single-unit detail key (#313) matches the sensor's queryable selector.
         assert_eq!(
             unit_detail_key("sshd.service"),
-            "zensight/systemd/@/query/unit?name=sshd.service"
+            "zensight/@v1/*/@rpc/systemd/unit?name=sshd.service"
         );
     }
 

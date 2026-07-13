@@ -42,12 +42,15 @@ impl ProcessSort {
     }
 }
 
-/// The process-explorer queryable key for a given host + sort. The sysinfo query
-/// channel is host-scoped (`zensight/sysinfo/<host>/@/query/processes`), unlike
+/// The process-explorer procedure selector for a sort order. v1: the fleet
+/// selector reaches every sysinfo origin; per-host narrowing (targeting the
+/// selected host's origin key instead of `*`) is a follow-up — it needs the
+/// hostname→origin map the health documents carry. Single-host deployments
 /// the single-instance netlink/netring sensors.
-pub fn processes_key(host: &str, sort: ProcessSort) -> String {
+pub fn processes_key(_host: &str, sort: ProcessSort) -> String {
     format!(
-        "zensight/sysinfo/{host}/@/query/processes?sort={}&top={TOP_N}",
+        "{}?sort={}&top={TOP_N}",
+        zensight_common::fleet_rpc_key("sysinfo", "processes"),
         sort.token()
     )
 }
@@ -126,11 +129,11 @@ mod tests {
     fn key_is_host_scoped_with_sort_and_top() {
         assert_eq!(
             processes_key("server01", ProcessSort::Cpu),
-            "zensight/sysinfo/server01/@/query/processes?sort=cpu&top=50"
+            "zensight/@v1/*/@rpc/sysinfo/processes?sort=cpu&top=50"
         );
         assert_eq!(
             processes_key("server01", ProcessSort::Mem),
-            "zensight/sysinfo/server01/@/query/processes?sort=mem&top=50"
+            "zensight/@v1/*/@rpc/sysinfo/processes?sort=mem&top=50"
         );
         assert_eq!(ProcessSort::Io.token(), "io");
     }

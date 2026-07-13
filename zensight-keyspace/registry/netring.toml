@@ -124,20 +124,20 @@ idempotent = false
 since = "1.0"
 description = "fire the pre-trigger ring / rotate the spool (?tag=)"
 [[procedure]]
-path = "capture/mode"
+path = "capture_disk"
 kind = "read"
-reply = "TopicStatus"
+reply = "CaptureDiskStatus"
 idempotent = true
 since = "1.0"
-description = "current capture/mode configuration (capture-to-disk mode hot-switch)"
+description = "capture-to-disk status (mode, ring occupancy, retention, last event)"
 
 [[procedure]]
-path = "capture/mode/set"
+path = "capture_disk/set"
 kind = "write"
-request = "CaptureMode"
+request = "CaptureDiskCommand"
 reply = "Ack"
 since = "1.0"
-description = "apply capture/mode configuration (capture-to-disk mode hot-switch)"
+description = "capture-to-disk control: capture_now / set_capture mode hot-switch"
 [[procedure]]
 path = "detectors"
 kind = "read"

@@ -63,15 +63,14 @@ fn test_key_expression_building_and_parsing() {
 
 #[test]
 fn test_wildcard_key_expressions() {
-    // All telemetry wildcard
+    // v1: the telemetry class selector (RFC 04 §4).
     let all = all_telemetry_wildcard();
-    assert_eq!(all, "zensight/**");
+    assert_eq!(all, "zensight/@v1/*/telemetry/**");
 
-    // Protocol wildcard
+    // Legacy per-protocol/source wildcards keep their shapes until the
+    // KeyExprBuilder itself retires with the cutover (#465).
     let snmp_all = KeyExprBuilder::new(Protocol::Snmp).protocol_wildcard();
     assert_eq!(snmp_all, "zensight/snmp/**");
-
-    // Source wildcard
     let router_all = KeyExprBuilder::new(Protocol::Snmp).source_wildcard("router01");
     assert_eq!(router_all, "zensight/snmp/router01/**");
 }

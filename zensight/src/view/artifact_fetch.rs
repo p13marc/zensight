@@ -19,7 +19,7 @@ use zenoh_blob::{
 };
 use zensight_common::{
     ArtifactKind, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, KindAdvert, KindStatus,
-    artifact_request_key, artifact_status_key,
+    fleet_rpc_key,
 };
 
 use crate::message::Message;
@@ -325,7 +325,10 @@ impl ArtifactJob {
 /// GET the artifact status queryable and return every kind the sensor produces
 /// (with its bounds/advert), so the GUI knows which affordances to render.
 pub async fn load_artifact_kinds(session: Arc<Session>, key_prefix: String) -> Vec<KindStatus> {
-    let status_key = artifact_status_key(&key_prefix);
+    let status_key = fleet_rpc_key(
+        key_prefix.rsplit('/').next().unwrap_or("sensor"),
+        "artifact/status",
+    );
     let Ok(replies) = session.get(&status_key).await else {
         return Vec::new();
     };
@@ -360,9 +363,10 @@ pub fn request_and_stream_ready(
             ArtifactKind::Capture { duration_secs, .. } => *duration_secs as u64,
             _ => 0,
         };
-        // The artifact channel key is protocol-scoped, so every host running this
-        // sensor sees the request; `target_source` makes exactly one produce it.
-        // `None` preserves the fan-out (all hosts produce).
+        // v1 (RFC 05 §3): the request is a write procedure — GET with a body;
+        // the value reply is the ack, refusals arrive as reply errors. A
+        // `*`-origin GET fans the request out to every host serving the
+        // producer (`target_source` remains a legacy payload narrow).
         let req = ArtifactRequest {
             id,
             kind,
@@ -375,19 +379,42 @@ pub fn request_and_stream_ready(
                 return;
             }
         };
-        if let Err(e) = registry
-            .put(
-                &artifact_request_key(&key_prefix),
-                payload,
-                zensight_common::QosClass::Command,
-            )
+        let _ = &registry; // command registry no longer used on this path
+        match session
+            .get(&fleet_rpc_key(
+                key_prefix.rsplit('/').next().unwrap_or("sensor"),
+                "artifact/request",
+            ))
+            .target(zenoh::query::QueryTarget::All)
+            .payload(payload)
+            .timeout(std::time::Duration::from_secs(5))
             .await
         {
-            yield Message::ArtifactRequested(Err(format!("request failed: {e}")));
-            return;
+            Ok(replies) => match replies.recv_async().await {
+                Ok(reply) => {
+                    if let Err(err) = reply.result() {
+                        let msg = String::from_utf8_lossy(&err.payload().to_bytes()).to_string();
+                        yield Message::ArtifactRequested(Err(format!("request refused: {msg}")));
+                        return;
+                    }
+                }
+                Err(_) => {
+                    yield Message::ArtifactRequested(Err(
+                        "request unanswered — sensor offline or artifacts disabled".to_string(),
+                    ));
+                    return;
+                }
+            },
+            Err(e) => {
+                yield Message::ArtifactRequested(Err(format!("request failed: {e}")));
+                return;
+            }
         }
 
-        let status_key = artifact_status_key(&key_prefix);
+        let status_key = fleet_rpc_key(
+            key_prefix.rsplit('/').next().unwrap_or("sensor"),
+            "artifact/status",
+        );
         // Poll every 500ms for a scaled window (2 iters/sec).
         let iters = (60 + extra_secs) * 2;
         for _ in 0..iters {

@@ -162,7 +162,7 @@ impl NetlinkDetailTopic {
             NetlinkDetailTopic::Retransmits => "retransmits",
             NetlinkDetailTopic::Connections => "connections",
         };
-        format!("zensight/netlink/@/query/{topic}")
+        zensight_common::fleet_rpc_key("netlink", topic)
     }
 
     pub fn label(&self) -> &'static str {
@@ -371,7 +371,10 @@ impl NetlinkDetailState {
 /// The sockets key narrowed to one endpoint IP (#309), for the flow↔process
 /// join. Matches the sensor's `SocketSelector` `ip=` parameter.
 pub fn sockets_match_key(ip: &str) -> String {
-    format!("zensight/netlink/@/query/sockets?ip={ip}")
+    format!(
+        "{}?ip={ip}",
+        zensight_common::fleet_rpc_key("netlink", "sockets")
+    )
 }
 
 /// Fetch + decode **all** replies on `key`, concatenated (#309). The shared
@@ -452,44 +455,47 @@ mod tests {
     fn topic_keys_match_sensor() {
         assert_eq!(
             NetlinkDetailTopic::Sockets.key(),
-            "zensight/netlink/@/query/sockets"
+            "zensight/@v1/*/@rpc/netlink/sockets"
         );
         // The endpoint-narrowed sockets key (#309) matches the sensor's
         // SocketSelector `ip=` parameter.
         assert_eq!(
             sockets_match_key("10.0.0.5"),
-            "zensight/netlink/@/query/sockets?ip=10.0.0.5"
+            "zensight/@v1/*/@rpc/netlink/sockets?ip=10.0.0.5"
         );
         assert_eq!(
             NetlinkDetailTopic::Routes.key(),
-            "zensight/netlink/@/query/routes"
+            "zensight/@v1/*/@rpc/netlink/routes"
         );
         assert_eq!(
             NetlinkDetailTopic::Neighbors.key(),
-            "zensight/netlink/@/query/neighbors"
+            "zensight/@v1/*/@rpc/netlink/neighbors"
         );
         // The 5 previously-dead channels now reachable (#109).
         assert_eq!(
             NetlinkDetailTopic::Addresses.key(),
-            "zensight/netlink/@/query/addresses"
+            "zensight/@v1/*/@rpc/netlink/addresses"
         );
         assert_eq!(
             NetlinkDetailTopic::Events.key(),
-            "zensight/netlink/@/query/events"
+            "zensight/@v1/*/@rpc/netlink/events"
         );
         // Default-route flap history (#111).
         assert_eq!(
             NetlinkDetailTopic::RouteChanges.key(),
-            "zensight/netlink/@/query/route_changes"
+            "zensight/@v1/*/@rpc/netlink/route_changes"
         );
-        assert_eq!(NetlinkDetailTopic::Tc.key(), "zensight/netlink/@/query/tc");
+        assert_eq!(
+            NetlinkDetailTopic::Tc.key(),
+            "zensight/@v1/*/@rpc/netlink/tc"
+        );
         assert_eq!(
             NetlinkDetailTopic::Xfrm.key(),
-            "zensight/netlink/@/query/xfrm"
+            "zensight/@v1/*/@rpc/netlink/xfrm"
         );
         assert_eq!(
             NetlinkDetailTopic::Nft.key(),
-            "zensight/netlink/@/query/nft"
+            "zensight/@v1/*/@rpc/netlink/nft"
         );
     }
 
@@ -550,7 +556,7 @@ mod tests {
     /// get + decode path (the part the Iced simulator can't exercise).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fetch_records_decodes_live_queryable() {
-        let key = "zensight/netlink/@/query/sockets";
+        let key = "zensight/@v1/*/@rpc/netlink/sockets";
         // Scouting off: with the default config this session joins any real
         // ZenSight mesh on the host, and a live netlink sensor's queryable
         // answers with real sockets instead of the single mock record.
