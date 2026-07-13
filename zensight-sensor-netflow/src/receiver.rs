@@ -15,40 +15,12 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
-/// A parsed flow record — folded into the per-exporter rollups and held in
-/// the bounded ring behind the `flows` read procedure.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct FlowRecord {
-    /// Exporter IP address.
-    pub exporter_ip: String,
-    /// Resolved exporter name.
-    pub exporter_name: String,
-    /// NetFlow version (5, 7, 9, or 10 for IPFIX).
-    pub version: u16,
-    /// Flow fields as key-value pairs.
-    pub fields: HashMap<String, FlowFieldValue>,
-    /// Unix timestamp in milliseconds.
-    pub timestamp: i64,
-}
-
-/// A flow field value.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum FlowFieldValue {
-    /// Unsigned integer value.
-    Uint(u64),
-    /// Signed integer value.
-    Int(i64),
-    /// Float value.
-    Float(f64),
-    /// IP address (v4 or v6).
-    IpAddr(String),
-    /// MAC address.
-    MacAddr(String),
-    /// String value.
-    String(String),
-    /// Raw bytes.
-    Bytes(Vec<u8>),
-}
+// The wire types live in `zensight-common` (#469): `@rpc/netflow/flows` is the
+// bounded ring that keyspace-v2 put in place of per-flow-pair telemetry keys,
+// and a reply type only the producer can name is a reply nobody can read — which
+// is why that procedure had no consumer. Aliased locally so the parser below and
+// its ~40 call sites are unchanged.
+pub use zensight_common::{NetflowFieldValue as FlowFieldValue, NetflowRecord as FlowRecord};
 
 /// Start all configured listeners and return a channel for receiving flow records.
 pub async fn start_listeners(config: &NetFlowConfig) -> Result<mpsc::Receiver<FlowRecord>> {

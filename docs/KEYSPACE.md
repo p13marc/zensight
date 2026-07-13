@@ -48,7 +48,17 @@ zensight/@v1/@catalog/…                                   the identity catalog
   [`zensight-keyspace/registry/*.toml`](../zensight-keyspace/registry/) —
   compiled by `zensight-keyspace`'s `build.rs` into typed builders/parsers;
   registry violations are build errors. Sensors serve their compiled slice at
-  `…/@rpc/<producer>/introspect`.
+  `…/@rpc/<producer>/introspect` — and the GUI's **Fleet** view calls it, parsing
+  the reply into a `zensight_keyspace::RegistrySlice` and diffing it against the
+  slice it compiled in. RFC 08 §6: a disagreement is a *finding*, not an ambiguity.
+- **The registry is load-bearing.** Publishing a telemetry subject that is not
+  registered panics in debug builds and warns once per name in release
+  (`zensight_common::metric_guard`). This is only meaningful because the six host
+  producers (sysinfo, netlink, netring, systemd, logs, parallax) register their
+  telemetry as real subject families rather than a `{metric...}` catch-all — a
+  catch-all makes the lint vacuously true (issue #468). `snmp`/`modbus`/`gnmi`/
+  `netflow` keep a rest-var by design: their metric tree belongs to the polled
+  device, not to us.
 - **Key builders**: `zensight-keyspace::V1Context` (producer-side),
   `zensight_common::keyexpr` (consumer-side selectors + fleet/origin RPC
   keys), `zensight_common::command` (topic/artifact procedure keys). New code

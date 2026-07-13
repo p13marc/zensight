@@ -1380,6 +1380,17 @@ impl ZenSight {
                     device.netring_detail.apply_dns(result);
                 }
             }
+            Message::FetchNetringEncryptedDns => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.loading_encrypted_dns();
+                }
+                return ControlFlow::Break(self.query_netring_encrypted_dns());
+            }
+            Message::NetringEncryptedDnsReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netring_detail.apply_encrypted_dns(result);
+                }
+            }
             Message::FetchNetringHttp => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.netring_detail.loading_http();
@@ -1432,6 +1443,49 @@ impl ZenSight {
             Message::SysinfoProcessesReceived(result) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.sysinfo_detail.apply(result);
+                }
+            }
+            Message::FetchNetflowFlows => {
+                let host = self.selected_device.as_mut().map(|device| {
+                    device.netflow_detail.loading();
+                    device.device_id.source.clone()
+                });
+                if let Some(host) = host {
+                    return ControlFlow::Break(self.query_netflow_flows(host));
+                }
+            }
+            Message::NetflowFlowsReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netflow_detail.apply(result);
+                }
+            }
+            Message::NetflowTableSort(col) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netflow_detail.table.toggle_sort(col);
+                }
+            }
+            Message::NetflowTableFilter(q) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netflow_detail.table.set_filter(q);
+                }
+            }
+            Message::NetflowTableMore => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.netflow_detail.table.load_more();
+                }
+            }
+            Message::FetchSysinfoLatency => {
+                let host = self.selected_device.as_mut().map(|device| {
+                    device.sysinfo_detail.loading_latency();
+                    device.device_id.source.clone()
+                });
+                if let Some(host) = host {
+                    return ControlFlow::Break(self.query_sysinfo_latency(host));
+                }
+            }
+            Message::SysinfoLatencyReceived(result) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    device.sysinfo_detail.apply_latency(result);
                 }
             }
             Message::FetchParallaxStreams => {
@@ -4364,6 +4418,7 @@ impl ZenSight {
             }
             if dns {
                 d.loading_dns();
+                d.loading_encrypted_dns();
             }
             if http {
                 d.loading_http();
@@ -4396,6 +4451,10 @@ impl ZenSight {
         }
         if dns {
             tasks.push(self.query_netring_dns());
+            // Encrypted DNS rides the same tab: it is precisely what the
+            // cleartext RED rollups cannot see, so showing one without the
+            // other is how a DoH tunnel stays invisible.
+            tasks.push(self.query_netring_encrypted_dns());
         }
         if http {
             tasks.push(self.query_netring_http());
@@ -4950,6 +5009,19 @@ impl ZenSight {
         )
     }
 
+    /// Fetch the passive encrypted-DNS destination inventory (#326).
+    fn query_netring_encrypted_dns(&self) -> Task<Message> {
+        use crate::view::specialized::netring_detail::fetch_encrypted_dns;
+        self.query_channel(
+            {
+                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
+                move |s| fetch_encrypted_dns(s, origin)
+            },
+            Message::NetringEncryptedDnsReceived,
+            "No encrypted-DNS data — is the netring sensor running with collect.dns enabled?",
+        )
+    }
+
     /// Fetch the on-demand netring per-host HTTP detail (#45).
     fn query_netring_http(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_http;
@@ -5080,6 +5152,48 @@ impl ZenSight {
                 .await
                 .ok_or_else(|| "No sysinfo sensor responded".to_string());
             Message::SysinfoProcessesReceived(result)
+        })
+    }
+
+    /// Fetch the recent-flow ring for the selected exporter's host (#469).
+    ///
+    /// The exporter's `source` is the *exporter* name, not the host running the
+    /// collector, so the origin comes from the device's origin map like every
+    /// other drill-down.
+    fn query_netflow_flows(&self, host: String) -> Task<Message> {
+        use crate::view::specialized::netflow_detail::fetch_flows;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::NetflowFlowsReceived(Err(
+                "Not connected to Zenoh".to_string()
+            )));
+        };
+        let origin = self.origin_for(&host);
+        Task::future(async move {
+            let result = fetch_flows(session, origin)
+                .await
+                .ok_or_else(|| "No netflow sensor responded".to_string());
+            Message::NetflowFlowsReceived(result)
+        })
+    }
+
+    /// Fetch the eBPF saturation histograms for `host` (#99).
+    ///
+    /// The sensor declares this queryable even without the `ebpf` feature (it
+    /// replies `available: false`), so "no sensor responded" and "not built with
+    /// eBPF" are genuinely different answers — and the view says which.
+    fn query_sysinfo_latency(&self, host: String) -> Task<Message> {
+        use crate::view::specialized::sysinfo_detail::fetch_latency;
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::SysinfoLatencyReceived(Err(
+                "Not connected to Zenoh".to_string(),
+            )));
+        };
+        let origin = self.origin_for(&host);
+        Task::future(async move {
+            let result = fetch_latency(session, origin)
+                .await
+                .ok_or_else(|| "No sysinfo sensor responded".to_string());
+            Message::SysinfoLatencyReceived(result)
         })
     }
 

@@ -411,6 +411,10 @@ pub enum Message {
     FetchNetringDns,
     /// A netring DNS-detail reply: the decoded records, or an error message.
     NetringDnsReceived(Result<Vec<zensight_common::DnsRecord>, String>),
+    /// Fetch the passive encrypted-DNS (DoT/DoQ/DoH) destination inventory (#326).
+    FetchNetringEncryptedDns,
+    /// An encrypted-DNS inventory reply: the decoded records, or an error message.
+    NetringEncryptedDnsReceived(Result<Vec<zensight_common::EncryptedDnsRecord>, String>),
     /// Fetch the on-demand netring per-host HTTP detail (#45).
     FetchNetringHttp,
     /// A netring HTTP-detail reply: the decoded records, or an error message.
@@ -439,6 +443,21 @@ pub enum Message {
     FetchSysinfoProcesses(crate::view::specialized::sysinfo_detail::ProcessSort),
     /// A sysinfo process-explorer reply: the decoded records, or an error.
     SysinfoProcessesReceived(Result<Vec<zensight_common::ProcessRecord>, String>),
+    /// Fetch the recent-flow ring (`@rpc/netflow/flows`) for the selected exporter (#469).
+    FetchNetflowFlows,
+    /// A netflow flow-ring reply: the decoded records, or an error message.
+    NetflowFlowsReceived(Result<Vec<zensight_common::NetflowRecord>, String>),
+    /// Sort the netflow flow table by column index.
+    NetflowTableSort(usize),
+    /// Filter the netflow flow table.
+    NetflowTableFilter(String),
+    /// Show more rows of the netflow flow table.
+    NetflowTableMore,
+    /// Fetch the eBPF saturation histograms (`@rpc/sysinfo/latency`) for the
+    /// selected host (#99).
+    FetchSysinfoLatency,
+    /// A sysinfo latency reply: run-queue + block-I/O histograms, or an error.
+    SysinfoLatencyReceived(Result<zensight_common::LatencyReport, String>),
     /// Fetch the parallax stream catalogue (`@rpc/parallax/streams`) for the
     /// selected host (#408).
     FetchParallaxStreams,

@@ -93,6 +93,9 @@ pub struct DeviceDetailState {
     /// On-demand netring flow detail, fetched lazily from `@rpc/netring/flows`.
     pub netring_detail: crate::view::specialized::netring_detail::NetringDetailState,
     pub systemd_detail: crate::view::specialized::systemd_detail::SystemdDetailState,
+    /// On-demand NetFlow record ring, fetched lazily from `@rpc/netflow/flows`
+    /// (#469). NetFlow publishes only rollups — the per-flow detail is pulled.
+    pub netflow_detail: crate::view::specialized::netflow_detail::NetflowDetailState,
     /// Parallax stream catalogue + live preview tiles, fetched/opened on
     /// demand from the sensor's stream-control channels (#408).
     pub parallax_detail: crate::view::specialized::parallax_detail::ParallaxDetailState,
@@ -145,6 +148,7 @@ impl DeviceDetailState {
             netlink_detail: Default::default(),
             netring_detail: Default::default(),
             systemd_detail: Default::default(),
+            netflow_detail: Default::default(),
             parallax_detail: Default::default(),
             sysinfo_detail: Default::default(),
             chart_expanded: false,

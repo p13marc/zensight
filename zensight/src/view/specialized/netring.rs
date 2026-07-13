@@ -1218,7 +1218,99 @@ fn render_dns(state: &DeviceDetailState) -> Element<'_, Message> {
             col = col.push(table);
         }
     }
+    col = col.push(encrypted_dns_section(state));
     col.into()
+}
+
+/// The destinations *behind* the encrypted-DNS counts above (#326,
+/// `@rpc/netring/encrypted_dns`) — the same rollup/detail split as everywhere
+/// else: the tiles are streamed because they are bounded, the inventory is pulled
+/// because it is not.
+///
+/// The interesting column is `via_known_resolver`: encrypted DNS to Cloudflare or
+/// Quad9 is a policy question, whereas encrypted DNS to somewhere unrecognised is
+/// how a tunnel or an exfil channel looks from the wire. So an unknown resolver is
+/// called out rather than left as a `false` in a cell.
+fn encrypted_dns_section<'a>(state: &'a DeviceDetailState) -> Element<'a, Message> {
+    use zensight_common::EncryptedDnsRecord;
+
+    let mut col = column![section_header("Encrypted DNS destinations", None)].spacing(space::SM);
+
+    if state.netring_detail.encrypted_dns.is_loading() {
+        return col
+            .push(empty_state("Fetching encrypted-DNS destinations…", None))
+            .into();
+    }
+    if let Some(err) = state.netring_detail.encrypted_dns.error() {
+        return col
+            .push(empty_state(format!("Fetch failed: {err}"), None))
+            .into();
+    }
+    let Some(records) = state.netring_detail.encrypted_dns.ready() else {
+        return col
+            .push(
+                button(text("Fetch encrypted DNS").size(font::CAPTION))
+                    .padding([4, 10])
+                    .on_press(Message::FetchNetringEncryptedDns),
+            )
+            .into();
+    };
+    if records.is_empty() {
+        return col
+            .push(empty_state("No encrypted DNS observed on this host.", None))
+            .into();
+    }
+
+    let rogue = records.iter().filter(|r| !r.via_known_resolver).count();
+    if rogue > 0 {
+        col = col.push(
+            text(format!(
+                "⚠ {rogue} destination(s) are not a recognised public resolver"
+            ))
+            .size(font::CAPTION)
+            .style(warn),
+        );
+    }
+
+    let columns = vec![
+        TableColumn::fixed("transport", 90.0, |r: &EncryptedDnsRecord| {
+            text(r.transport.to_uppercase()).size(font::CAPTION).into()
+        })
+        .sortable(|r: &EncryptedDnsRecord| SortKey::Text(r.transport.clone())),
+        TableColumn::fill("resolver (SNI)", 4, |r: &EncryptedDnsRecord| {
+            text(r.sni.clone().unwrap_or_else(|| "—".into()))
+                .size(font::CAPTION)
+                .into()
+        })
+        .sortable(|r: &EncryptedDnsRecord| SortKey::Text(r.sni.clone().unwrap_or_default())),
+        TableColumn::fixed("known", 90.0, |r: &EncryptedDnsRecord| {
+            let t = text(if r.via_known_resolver { "yes" } else { "no" }).size(font::CAPTION);
+            if r.via_known_resolver {
+                t
+            } else {
+                t.style(warn)
+            }
+            .into()
+        })
+        .sortable(|r: &EncryptedDnsRecord| SortKey::Num(u8::from(r.via_known_resolver) as f64)),
+        TableColumn::fixed("sessions", 100.0, |r: &EncryptedDnsRecord| {
+            text(r.count.to_string()).size(font::CAPTION).into()
+        })
+        .sortable(|r: &EncryptedDnsRecord| SortKey::Num(r.count as f64)),
+    ];
+    col.push(
+        DataTable::new(columns)
+            .searchable(|r: &EncryptedDnsRecord| r.sni.clone().unwrap_or_default())
+            .on_sort(|c| Message::NetringTableSort(NetringTable::EncryptedDns, c))
+            .on_filter(|q| Message::NetringTableFilter(NetringTable::EncryptedDns, q))
+            .on_more(Message::NetringTableMore(NetringTable::EncryptedDns))
+            .noun("destinations")
+            .view(
+                records,
+                state.netring_detail.table(NetringTable::EncryptedDns),
+            ),
+    )
+    .into()
 }
 
 /// HTTP tab (#250-style): RED tiles + status-class & method bar charts + an

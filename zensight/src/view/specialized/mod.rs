@@ -8,6 +8,7 @@ pub mod fetch;
 pub mod gnmi;
 pub mod modbus;
 pub mod netflow;
+pub mod netflow_detail;
 pub mod netlink;
 pub mod netlink_detail;
 pub mod netring;

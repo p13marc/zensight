@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use zensight_common::{
-    AssetRecord, CaptureRecord, DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord, Ja4hRecord,
-    MatrixRecord, QuicRecord, SshRecord, TalkerRecord, TlsRecord,
+    AssetRecord, CaptureRecord, DnsRecord, ElephantRecord, EncryptedDnsRecord, FlowRecord,
+    HttpHostRecord, Ja4hRecord, MatrixRecord, QuicRecord, SshRecord, TalkerRecord, TlsRecord,
 };
 
 use crate::view::components::TableState;
@@ -25,6 +25,7 @@ pub enum NetringTable {
     Talkers,
     Matrix,
     Dns,
+    EncryptedDns,
     Http,
     Tls,
     Quic,
@@ -101,6 +102,13 @@ pub fn dns_key(origin: Option<&str>) -> String {
     format!("{}?top={TOP_N}", rpc_key(origin, "dns"))
 }
 
+/// The passive DoT/DoQ/DoH destination inventory key (#326). No `?top=` —
+/// the sensor replies with the whole inventory, which is small by construction
+/// (one row per transport × SNI × resolver class).
+pub fn encrypted_dns_key(origin: Option<&str>) -> String {
+    rpc_key(origin, "encrypted_dns")
+}
+
 /// The per-host HTTP detail key (`?top=N`).
 pub fn http_key(origin: Option<&str>) -> String {
     format!("{}?top={TOP_N}", rpc_key(origin, "http"))
@@ -118,6 +126,9 @@ pub struct NetringDetailState {
     pub matrix: Fetch<Vec<MatrixRecord>>,
     pub elephants: Fetch<Vec<ElephantRecord>>,
     pub dns: Fetch<Vec<DnsRecord>>,
+    /// Passive encrypted-DNS (DoT/DoQ/DoH) destinations (#326). Encrypted DNS is
+    /// exactly what cleartext DNS RED *cannot* see, so it belongs beside it.
+    pub encrypted_dns: Fetch<Vec<EncryptedDnsRecord>>,
     pub http: Fetch<Vec<HttpHostRecord>>,
     /// JA4H HTTP-client fingerprints (#256); served only by `ja4plus` sensor
     /// builds, so this is fetched manually rather than prefetched with the tab.
@@ -244,6 +255,16 @@ impl NetringDetailState {
     /// Store the DNS-detail fetch outcome.
     pub fn apply_dns(&mut self, result: Result<Vec<DnsRecord>, String>) {
         self.dns = Fetch::from_result(result);
+    }
+
+    /// Mark an encrypted-DNS fetch as in flight.
+    pub fn loading_encrypted_dns(&mut self) {
+        self.encrypted_dns = Fetch::Loading;
+    }
+
+    /// Store the encrypted-DNS fetch outcome.
+    pub fn apply_encrypted_dns(&mut self, result: Result<Vec<EncryptedDnsRecord>, String>) {
+        self.encrypted_dns = Fetch::from_result(result);
     }
 
     /// Mark an HTTP-detail fetch as in flight.
@@ -384,6 +405,17 @@ pub async fn fetch_dns(
     match origin {
         Some(o) => super::netlink_detail::fetch_records(session, dns_key(Some(&o))).await,
         None => super::netlink_detail::fetch_records_all(session, dns_key(None)).await,
+    }
+}
+
+/// Fetch + decode the passive encrypted-DNS destination inventory (#326).
+pub async fn fetch_encrypted_dns(
+    session: Arc<zenoh::Session>,
+    origin: Option<String>,
+) -> Option<Vec<EncryptedDnsRecord>> {
+    match origin {
+        Some(o) => super::netlink_detail::fetch_records(session, encrypted_dns_key(Some(&o))).await,
+        None => super::netlink_detail::fetch_records_all(session, encrypted_dns_key(None)).await,
     }
 }
 

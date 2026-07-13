@@ -74,6 +74,10 @@ pub fn sysinfo_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
     if has_prefix(state, "pressure/") {
         content = content.push(card(render_psi_section(state)));
     }
+    // The same question as PSI, one level deeper: PSI says *how much* time was
+    // lost to contention, the histograms say *how long an individual wait was*.
+    // Pulled on demand (#99, `@rpc/sysinfo/latency`) — never streamed.
+    content = content.push(card(render_latency_section(state)));
     if has_prefix(state, "cgroup/") {
         content = content.push(card(render_cgroup_section(state)));
     }
@@ -1177,6 +1181,110 @@ fn section_style(t: &Theme) -> container::Style {
         },
         ..Default::default()
     }
+}
+
+/// eBPF saturation histograms (#99): scheduler run-queue delay and block-I/O
+/// latency, pulled from `@rpc/sysinfo/latency`.
+///
+/// Rendered as percentiles rather than a mean, because the tail *is* the
+/// finding: a p99 run-queue delay of 40 ms behind a p50 of 20 µs is a stall that
+/// an average erases completely.
+///
+/// The sensor declares this queryable even when it is not built with `ebpf`,
+/// replying `available: false`. That distinction is worth keeping — "this kernel
+/// or build cannot measure it" and "nothing answered" are different problems —
+/// so they get different empty states.
+fn render_latency_section(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = row![text("Saturation latency (eBPF)").size(16)].spacing(8);
+    let mut col = Column::new().spacing(4).push(title);
+
+    let detail = &state.sysinfo_detail;
+    if detail.latency.is_loading() {
+        return col
+            .push(empty_state("Fetching latency histograms…", None))
+            .into();
+    }
+    if let Some(err) = detail.latency.error() {
+        return col
+            .push(empty_state(format!("Fetch failed: {err}"), None))
+            .into();
+    }
+    let Some(report) = detail.latency.ready() else {
+        return col
+            .push(
+                button(text("Fetch latency histograms").size(12))
+                    .padding([4, 10])
+                    .on_press(Message::FetchSysinfoLatency),
+            )
+            .into();
+    };
+
+    if !report.available {
+        return col
+            .push(empty_state(
+                "The sensor is not collecting these — it needs the `ebpf` feature, \
+                 a supported kernel and CAP_BPF.",
+                None,
+            ))
+            .into();
+    }
+
+    col = col.push(
+        text(format!("over the last {}s", report.window_secs))
+            .size(12)
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            }),
+    );
+
+    for (label, hist) in [
+        ("Run-queue delay (runqlat)", &report.runqlat),
+        ("Block I/O (biolatency)", &report.biolatency),
+    ] {
+        if hist.total == 0 {
+            continue;
+        }
+        col = col.push(text(label).size(14)).push(
+            row![
+                latency_stat("p50", hist.p50_us),
+                latency_stat("p95", hist.p95_us),
+                latency_stat("p99", hist.p99_us),
+                latency_stat("max", hist.max_us),
+                text(format!("{} samples", hist.total))
+                    .size(12)
+                    .style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).text_muted()),
+                    }),
+            ]
+            .spacing(space::MD)
+            .align_y(Alignment::Center),
+        );
+    }
+
+    col.push(
+        button(text("Refresh").size(12))
+            .padding([4, 10])
+            .on_press(Message::FetchSysinfoLatency),
+    )
+    .into()
+}
+
+/// One percentile, rendered in the unit a human reads it in: µs below a
+/// millisecond, ms above.
+fn latency_stat<'a>(label: &'a str, us: u64) -> Element<'a, Message> {
+    let value = if us >= 1000 {
+        format!("{:.1} ms", us as f64 / 1000.0)
+    } else {
+        format!("{us} µs")
+    };
+    column![
+        text(label).size(10).style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
+        }),
+        text(value).size(14),
+    ]
+    .spacing(2)
+    .into()
 }
 
 #[cfg(test)]

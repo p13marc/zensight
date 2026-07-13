@@ -1253,44 +1253,13 @@ pub fn map_mdstat(arrays: &[MdArray]) -> Vec<Metric> {
 // counts here to build the `LatencyReport` that `@rpc/sysinfo/latency` replies with.
 // =============================================================================
 
-use serde::{Deserialize, Serialize};
 use zensight_sensor_sysinfo_ebpf_common::MAX_SLOTS;
 
-/// One log2 histogram bucket: count of samples with latency `< le_us` µs that
-/// did not fall in a lower bucket.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct HistBucket {
-    /// Upper bound of this bucket, in microseconds.
-    pub le_us: u64,
-    /// Number of samples in this bucket over the window.
-    pub count: u64,
-}
-
-/// A latency histogram with derived percentiles (all µs).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Histogram {
-    pub unit: String,
-    pub buckets: Vec<HistBucket>,
-    pub total: u64,
-    pub p50_us: u64,
-    pub p95_us: u64,
-    pub p99_us: u64,
-    pub max_us: u64,
-}
-
-/// The `@rpc/sysinfo/latency` reply: both saturation histograms over the last window.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct LatencyReport {
-    /// False when the eBPF collector could not load (no caps / unsupported
-    /// kernel / not built with `--features ebpf`). The histograms are empty.
-    pub available: bool,
-    /// Window the bucket counts cover, in seconds.
-    pub window_secs: u64,
-    /// Scheduler run-queue latency (runqlat).
-    pub runqlat: Histogram,
-    /// Block-I/O latency (biolatency).
-    pub biolatency: Histogram,
-}
+// The wire types live in `zensight-common` (#469): a reply type only the
+// producer can name is a reply nobody can read, which is how `@rpc/sysinfo/
+// latency` went unconsumed from the day it was written. The *construction* of a
+// report from raw eBPF slots stays here — that is sensor logic, not a contract.
+pub use zensight_common::query_detail::{HistBucket, Histogram, LatencyReport};
 
 /// Upper bound (µs) of log2 bucket `i`: bucket 0 → 1, bucket `i` → `2^i`.
 pub fn bucket_upper_us(i: usize) -> u64 {

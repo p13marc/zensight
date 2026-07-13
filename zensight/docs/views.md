@@ -271,6 +271,32 @@ alive on the bus but answers no `introspect` is listed as `silent` rather than
 omitted; fanning out alone cannot distinguish "not deployed" from "deployed and not
 answering", and the second is the one you need to see.
 
+## Streamed rollups vs pulled records
+
+Several specialized views show the same shape twice, and it is deliberate
+(RFC 08 §4). A quantity that is **bounded** is streamed as telemetry; a
+quantity with **unbounded cardinality** is a record you pull from an `@rpc`
+procedure, never a key you publish. Three of these were served by the sensors
+from the day of the keyspace cutover and had no caller until #469:
+
+- **NetFlow** (`view/specialized/netflow.rs`) — `flows_total` / `bytes_total` /
+  `by_proto/{proto}/flows` stream; individual flows come from
+  `@rpc/netflow/flows`. Until this was wired, the view *reconstructed* flows
+  from telemetry labels the sensor does not emit (it publishes
+  `labels: HashMap::new()`), so every row it drew read `0.0.0.0:0 → 0.0.0.0:0`.
+  Fields now come from the exporter's template, and a field the template omits
+  renders `—` rather than being invented.
+- **sysinfo latency** (`@rpc/sysinfo/latency`) — eBPF run-queue and block-I/O
+  histograms, shown as percentiles beneath the PSI panel. PSI says how much time
+  was lost to contention; the histograms say how long one wait actually was, and
+  the tail is the finding. The sensor declares the queryable even without the
+  `ebpf` feature (replying `available: false`), so "cannot measure it" and
+  "nothing answered" stay distinguishable — and the view says which.
+- **netring encrypted DNS** (`@rpc/netring/encrypted_dns`) — the DoT/DoQ/DoH
+  *destinations* behind the streamed `dns/encrypted/*` counts. An unrecognised
+  resolver is called out, because that is what a DNS tunnel looks like from the
+  wire.
+
 **Incidents** (`view/incident.rs`, `view/groups.rs`) — the unified Incident
 object: related alerts grouped into one incident with a timeline and evidence
 pivots.
