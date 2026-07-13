@@ -14,6 +14,9 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 dirs = { workspace = true }
 tracing = { workspace = true }
+# Runtime, not just build-time: `introspect` replies with a registry slice, so a
+# consumer needs the TOML parser to read one (RFC 08 §6, issue #469).
+toml = "0.8"
 
 [build-dependencies]
 toml = "0.8"

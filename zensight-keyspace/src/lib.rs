@@ -31,6 +31,7 @@ pub mod grammar;
 pub mod origin;
 pub mod qos;
 pub mod registry;
+pub mod slice;
 pub mod slug;
 
 pub use common_state::CommonState;
@@ -40,3 +41,4 @@ pub use grammar::{
 };
 pub use origin::HostId;
 pub use qos::QosProfile;
+pub use slice::{RegistrySlice, SliceFinding, parse_slice};

@@ -864,6 +864,20 @@ fn emit(files: &[RegistryFile]) -> String {
     }
     let _ = writeln!(out, "        _ => None,\n    }}\n}}\n");
 
+    // Every registry slice this build was compiled against, by base name. The
+    // fleet-capabilities view (#469) fans `introspect` out over exactly this
+    // list and diffs each reply against the local slice.
+    let _ = writeln!(
+        out,
+        "/// Every producer/service this build knows, with its raw registry slice."
+    );
+    let _ = writeln!(out, "pub const REGISTRIES: &[(&str, &str)] = &[");
+    for f in files {
+        let module = producer_module(&f.name);
+        let _ = writeln!(out, "    ({:?}, {module}::REGISTRY_TOML),", f.name);
+    }
+    let _ = writeln!(out, "];\n");
+
     // Cross-producer dispatch: refine a structural key into (producer, subject).
     let _ = writeln!(out, "/// Refined subject from any registered producer.");
     let _ = writeln!(out, "#[derive(Debug, Clone, PartialEq, Eq)]");

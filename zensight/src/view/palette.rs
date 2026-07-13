@@ -90,6 +90,14 @@ pub fn commands() -> Vec<Command> {
             message: Message::OpenInventory,
         },
         Command {
+            label: "Go to Bandwidth",
+            message: Message::OpenBandwidth,
+        },
+        Command {
+            label: "Go to Fleet",
+            message: Message::OpenFleet,
+        },
+        Command {
             label: "Open Settings",
             message: Message::OpenSettings,
         },

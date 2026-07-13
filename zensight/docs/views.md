@@ -32,12 +32,12 @@ under `view/overview/`.
 
 ```
 Dashboard, Device, Settings, Alerts, Topology, Expectations,
-Security, Sensors, Logs, Inventory, Incidents, Bandwidth
+Security, Sensors, Logs, Inventory, Incidents, Bandwidth, Fleet
 ```
 
 The active variant decides which `*_view` the app renders. `Dashboard`,
 `Alerts`, `Topology`, `Expectations`, `Security`, `Sensors`, `Logs`,
-`Inventory`, `Incidents`, and `Bandwidth` are reachable from the nav rail;
+`Inventory`, `Incidents`, `Bandwidth`, and `Fleet` are reachable from the nav rail;
 `Device` and `Settings` are entered contextually (clicking a host/device card,
 opening settings) and are marked `#[serde(skip)]` so they are not persisted as a
 landing view.
@@ -105,6 +105,7 @@ flowchart TB
             V10["Inventory"]
             V11["Incidents"]
             V12["Bandwidth"]
+            V13["Fleet"]
         end
         Nav --> Content
         Top --> Content
@@ -258,6 +259,17 @@ explorer (JA3/JA4/JA4H/SNI/HASSH), joined against correlated host entities.
 
 **Bandwidth** (`view/bandwidth.rs`) — a live bandwidth-by-process/service monitor
 (bmon/nethogs style).
+
+**Fleet** (`view/fleet.rs`) — what each host's build actually says it serves. Fans
+the `introspect` procedure out across every registered producer (`QueryTarget::All`;
+`@catalog` takes its own key, since a verbatim `@` chunk is structurally unmatchable
+by a `*` fleet selector) and diffs each reply against the registry slice this GUI
+compiled in. Answers, without SSH: what does this host speak, is it the same build
+as us, is it serving anything deprecated, and does its registry match reality — RFC
+08 §6 calls a disagreement here a *finding*, not an ambiguity. A producer that is
+alive on the bus but answers no `introspect` is listed as `silent` rather than
+omitted; fanning out alone cannot distinguish "not deployed" from "deployed and not
+answering", and the second is the one you need to see.
 
 **Incidents** (`view/incident.rs`, `view/groups.rs`) — the unified Incident
 object: related alerts grouped into one incident with a timeline and evidence

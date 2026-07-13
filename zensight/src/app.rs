@@ -96,6 +96,7 @@ pub enum CurrentView {
     Inventory,
     Incidents,
     Bandwidth,
+    Fleet,
 }
 
 /// Application theme.
@@ -212,6 +213,8 @@ pub struct ZenSight {
     /// Bandwidth live-monitor state (#319, epic #320): per-process (queried) and
     /// per-service (streamed) network rate.
     bandwidth: crate::view::bandwidth::BandwidthState,
+    /// Fleet capabilities: what each host's build says it serves (#469).
+    fleet: crate::view::fleet::FleetState,
     /// Local tiered time-series store (hot ring + redb), Plan v3-04 §A / #22.
     /// Telemetry writes through it; charts read from it so trends survive restart.
     store: crate::store::MetricStore,
@@ -397,6 +400,7 @@ impl ZenSight {
             inventory: crate::view::inventory::InventoryState::default(),
             incidents: crate::view::incident::IncidentsState::default(),
             bandwidth: crate::view::bandwidth::BandwidthState::default(),
+            fleet: crate::view::fleet::FleetState::default(),
             // In demo mode keep history in-memory only (no disk churn / restart survival
             // for synthetic data); otherwise open the persistent tiered store.
             store: if demo_mode {
@@ -2196,6 +2200,41 @@ impl ZenSight {
             }
             Message::BandwidthTableFilter(q) => {
                 self.bandwidth.table.set_filter(q);
+            }
+
+            Message::OpenFleet => {
+                self.set_view(CurrentView::Fleet);
+                self.save_current_view();
+                // Ask once on open; the answer is a build property, so it does
+                // not change until something on the fleet is redeployed.
+                if matches!(
+                    self.fleet.rows,
+                    crate::view::specialized::fetch::Fetch::Idle
+                ) {
+                    self.fleet.loading();
+                    return self.query_fleet();
+                }
+            }
+            Message::RefreshFleet => {
+                self.fleet.loading();
+                return self.query_fleet();
+            }
+            Message::FleetLoaded(result) => {
+                let alive = self.alive_producers();
+                self.fleet.apply(result, &alive);
+            }
+            Message::ToggleFleetFindings(id) => {
+                self.fleet.expanded = if self.fleet.expanded.as_deref() == Some(id.as_str()) {
+                    None
+                } else {
+                    Some(id)
+                };
+            }
+            Message::FleetTableSort(col) => {
+                self.fleet.table.toggle_sort(col);
+            }
+            Message::FleetTableFilter(q) => {
+                self.fleet.table.set_filter(q);
             }
 
             Message::OpenSettings => {
@@ -5450,6 +5489,97 @@ impl ZenSight {
         })
     }
 
+    /// Every (origin, producer, host) we know is up, from the sensor-registration
+    /// docs. The fleet view needs this to tell "not deployed" from "deployed but
+    /// answering nothing" — a producer that is alive and silent on `introspect`
+    /// is the row you most want to see, and fanning out alone cannot find it.
+    fn alive_producers(&self) -> Vec<crate::view::fleet::AliveProducer> {
+        let mut out: Vec<crate::view::fleet::AliveProducer> = self
+            .known_sensors
+            .values()
+            .filter_map(|info| {
+                let origin = info.host_id.clone()?;
+                Some((origin, info.producer.clone(), info.source.clone()))
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Fan `introspect` out across the fleet (#469, RFC 08 §6).
+    ///
+    /// One GET per registered producer, `QueryTarget::All` so a `complete`
+    /// queryable on one host cannot short-circuit the multi-host consolidation
+    /// (RFC 05 §2.1). The origin comes from the *answering key* — a registry
+    /// slice describes a build, not a deployment, so it does not name its host.
+    ///
+    /// `@catalog` is a service origin, and a verbatim `@` chunk is structurally
+    /// unmatchable by the `*` in a fleet selector (design property D2). So it
+    /// takes its own key rather than riding the fan-out — which is the grammar
+    /// working, not an exception to it.
+    fn query_fleet(&self) -> Task<Message> {
+        use crate::view::fleet::FleetReply;
+
+        if self.demo_mode {
+            return Task::done(Message::FleetLoaded(Ok(crate::mock::fleet::replies())));
+        }
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::FleetLoaded(Err(
+                "Not connected to Zenoh".to_string()
+            )));
+        };
+
+        let keys: Vec<(String, String)> = zensight_keyspace::registry::REGISTRIES
+            .iter()
+            .map(|(name, _)| {
+                let key = if *name == "catalog" {
+                    zensight_common::catalog_rpc_key("introspect")
+                } else {
+                    zensight_common::fleet_rpc_key(name, "introspect")
+                };
+                (name.to_string(), key)
+            })
+            .collect();
+
+        Task::future(async move {
+            let mut replies: Vec<FleetReply> = Vec::new();
+            let mut errors = 0usize;
+            for (producer, key) in keys {
+                let Ok(stream) = session
+                    .get(&key)
+                    .target(zenoh::query::QueryTarget::All)
+                    .timeout(std::time::Duration::from_secs(3))
+                    .await
+                else {
+                    errors += 1;
+                    continue;
+                };
+                while let Ok(reply) = stream.recv_async().await {
+                    let Ok(sample) = reply.result() else { continue };
+                    // The concrete key that answered carries the origin.
+                    let Some(parsed) =
+                        zensight_common::keyexpr::parse_wire_key(sample.key_expr().as_str())
+                    else {
+                        continue;
+                    };
+                    let Ok(toml) = String::from_utf8(sample.payload().to_bytes().to_vec()) else {
+                        continue;
+                    };
+                    replies.push(FleetReply {
+                        origin: parsed.origin.chunk().to_string(),
+                        producer: producer.clone(),
+                        toml,
+                    });
+                }
+            }
+            if replies.is_empty() && errors > 0 {
+                return Message::FleetLoaded(Err(format!("{errors} introspect queries failed")));
+            }
+            Message::FleetLoaded(Ok(replies))
+        })
+    }
+
     /// Derive the per-service bandwidth rows (#319) from streamed systemd
     /// `unit/<name>/{ip_ingress_bps,ip_egress_bps}` telemetry, with per-unit
     /// sparkline history from the store. Ingress = rx, egress = tx.
@@ -5578,6 +5708,7 @@ impl ZenSight {
             | CurrentView::Logs
             | CurrentView::Inventory
             | CurrentView::Bandwidth
+            | CurrentView::Fleet
             | CurrentView::Incidents => {
                 self.set_view(CurrentView::Dashboard);
             }
@@ -5684,6 +5815,7 @@ impl ZenSight {
                 crate::view::inventory::inventory_view(&self.inventory, &self.entities, now_ms())
             }
             CurrentView::Bandwidth => crate::view::bandwidth::bandwidth_view(&self.bandwidth),
+            CurrentView::Fleet => crate::view::fleet::fleet_view(&self.fleet),
             CurrentView::Incidents => {
                 crate::view::incident::incidents_view(&self.alerts, &self.incidents)
             }

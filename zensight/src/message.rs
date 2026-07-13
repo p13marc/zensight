@@ -217,6 +217,19 @@ pub enum Message {
     /// Filter the bandwidth table by name substring.
     BandwidthTableFilter(String),
 
+    /// Open the fleet-capabilities view (#469) and fan `introspect` out.
+    OpenFleet,
+    /// Re-ask the fleet what it serves (`@rpc/<producer>/introspect`).
+    RefreshFleet,
+    /// The fan-out's replies: one raw registry slice per (origin, producer).
+    FleetLoaded(Result<Vec<crate::view::fleet::FleetReply>, String>),
+    /// Expand/collapse one row's registry findings.
+    ToggleFleetFindings(String),
+    /// Sort the fleet table by column index.
+    FleetTableSort(usize),
+    /// Filter the fleet table by host/producer substring.
+    FleetTableFilter(String),
+
     /// Fetch an on-demand systemd detail channel (units/timers/events/cgroups) (#281).
     FetchSystemdDetail(crate::view::specialized::systemd_detail::SystemdDetailTopic),
     /// A systemd detail reply for a topic: the decoded payload, or an error message.
