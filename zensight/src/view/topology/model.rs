@@ -1817,6 +1817,50 @@ mod tests {
         assert_eq!(node.neighbors_total, Some(18.0));
     }
 
+    /// The sysinfo `network/{iface}/{rx,tx}_bytes` arms (#475). These feed the
+    /// topology's per-node throughput, and they are the *only* consumer of that
+    /// subject in the model — so if the registry pattern moves and this match arm
+    /// does not, the map silently shows zero traffic on every node.
+    ///
+    /// The literal-headed siblings (`network/tcp/*`, `network/sockets/*`) must not
+    /// be read as interfaces; a positional parse would have taken chunk 1 blindly.
+    #[test]
+    fn node_extracts_sysinfo_network_counters() {
+        use std::collections::HashMap;
+        use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+        let mk = |metric: &str, v: TelemetryValue| TelemetryPoint {
+            timestamp: 0,
+            source: "h".to_string(),
+            protocol: Protocol::Sysinfo,
+            metric: metric.to_string(),
+            value: v,
+            labels: HashMap::new(),
+        };
+        let mut m = HashMap::new();
+        for (k, v) in [
+            ("network/eth0/rx_bytes", TelemetryValue::Counter(1000)),
+            ("network/eth0/tx_bytes", TelemetryValue::Counter(2000)),
+            // Not an interface — a literal family that shares the `network/` head.
+            (
+                "network/tcp/retrans_segs_total",
+                TelemetryValue::Counter(999_999),
+            ),
+        ] {
+            m.insert(k.to_string(), mk(k, v));
+        }
+
+        let mut node = Node {
+            id: "h".to_string(),
+            label: "h".to_string(),
+            ..Default::default()
+        };
+        node.update_from_metrics(&m);
+
+        assert_eq!(node.network_rx, Some(1000));
+        assert_eq!(node.network_tx, Some(2000));
+    }
+
     fn matrix(src: &str, dst: &str, rate: f64) -> zensight_common::MatrixRecord {
         zensight_common::MatrixRecord {
             src: src.to_string(),

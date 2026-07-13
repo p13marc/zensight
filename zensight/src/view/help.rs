@@ -18,7 +18,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl + P", "Open the command palette"),
     ("Ctrl + K", "Search metrics across all devices"),
     ("Ctrl + F", "Focus the device search"),
-    ("Esc", "Close dialog / go back"),
+    ("Esc", "Close dialog / go back / exit host focus"),
     ("+ / -", "Zoom a chart in / out (when focused)"),
     ("← / →", "Pan a focused chart"),
     ("Home", "Reset a focused chart's view"),

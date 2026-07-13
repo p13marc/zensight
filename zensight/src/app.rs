@@ -5831,6 +5831,13 @@ impl ZenSight {
                 if !self.dashboard.search_filter.is_empty() {
                     self.dashboard.search_filter.clear();
                     self.dashboard.pending_search.clear();
+                } else if self.link.focus.is_some() {
+                    // Focus (#476) is the outermost narrowing there is — it cuts the
+                    // *bus*, not the view — so Escape unwinds it last, once nothing
+                    // nearer is left to clear. Putting it any earlier would steal
+                    // Escape from navigation: leaving a drill-down while staying
+                    // focused on the host is a thing people want to do.
+                    return self.update(Message::SetFocusHost(None));
                 }
             }
         }
@@ -7534,5 +7541,198 @@ mod forget_device_tests {
         assert!(!a.dashboard.devices.contains_key(&gone));
         assert!(a.dashboard.devices.contains_key(&open));
         assert!(a.selected_device.is_some());
+    }
+}
+
+#[cfg(test)]
+mod focus_escape_tests {
+    use super::*;
+    use zensight_common::Protocol;
+
+    const ORIGIN: &str = "h-3fa9c2d41b7e";
+
+    fn focused_app() -> ZenSight {
+        let mut a = ZenSight::boot(true).0;
+        a.link.focus = Some(ORIGIN.to_string());
+        a
+    }
+
+    /// Escape on the dashboard, with nothing nearer to clear, exits focus (#476).
+    /// The banner's button is the obvious way out; this is the one you reach for
+    /// without looking.
+    #[test]
+    fn escape_on_the_dashboard_exits_focus() {
+        let mut a = focused_app();
+        a.set_view(CurrentView::Dashboard);
+
+        let _ = a.update(Message::EscapePressed);
+        assert!(
+            a.link.focus.is_none(),
+            "Escape should unwind focus once nothing nearer is left to clear"
+        );
+    }
+
+    /// ...but it must NOT steal Escape from navigation. Leaving a drill-down while
+    /// staying focused on the host is a thing people do, so the first Escape goes
+    /// back and only a later one drops focus.
+    #[test]
+    fn escape_in_a_drill_down_navigates_and_keeps_focus() {
+        let mut a = focused_app();
+        let id = DeviceId::new(Protocol::Sysinfo, "server01");
+        a.dashboard
+            .devices
+            .insert(id.clone(), DeviceState::new(id.clone()));
+        a.selected_device = Some(crate::view::device::DeviceDetailState::new(id));
+        a.set_view(CurrentView::Device);
+
+        let _ = a.update(Message::EscapePressed);
+        assert_eq!(a.current_view, CurrentView::Dashboard, "Escape goes back");
+        assert!(
+            a.link.focus.is_some(),
+            "leaving a drill-down must not drop focus — that is navigation, not un-focusing"
+        );
+
+        // Only now, with nothing nearer to unwind, does Escape drop focus.
+        let _ = a.update(Message::EscapePressed);
+        assert!(a.link.focus.is_none());
+    }
+
+    /// A search filter is nearer than focus, so it unwinds first.
+    #[test]
+    fn escape_clears_the_search_filter_before_focus() {
+        let mut a = focused_app();
+        a.set_view(CurrentView::Dashboard);
+        a.dashboard.search_filter = "web".to_string();
+
+        let _ = a.update(Message::EscapePressed);
+        assert!(a.dashboard.search_filter.is_empty());
+        assert!(
+            a.link.focus.is_some(),
+            "the filter is the innermost narrowing; focus is the outermost"
+        );
+    }
+
+    /// Escape with no focus set must stay a no-op, not toggle focus on.
+    #[test]
+    fn escape_unfocused_does_nothing() {
+        let mut a = ZenSight::boot(true).0;
+        a.set_view(CurrentView::Dashboard);
+        let _ = a.update(Message::EscapePressed);
+        assert!(a.link.focus.is_none());
+    }
+}
+
+#[cfg(test)]
+mod tier2_app_fold_tests {
+    //! The two registry-parsing folds that live in `app.rs` rather than a view
+    //! (#475). Neither had a caller in the test suite, so a registry pattern could
+    //! move and these would quietly start returning nothing — the topology map
+    //! would show zero throughput on every node and the Bandwidth monitor's
+    //! Services tab would go blank, with no panic and no failing test.
+
+    use super::*;
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+
+    fn device(protocol: Protocol, source: &str, points: &[(&str, TelemetryValue)]) -> DeviceState {
+        let id = DeviceId::new(protocol, source);
+        let mut d = DeviceState::new(id);
+        for (metric, value) in points {
+            d.metrics.insert(
+                (*metric).to_string(),
+                TelemetryPoint {
+                    timestamp: 0,
+                    source: source.to_string(),
+                    protocol,
+                    metric: (*metric).to_string(),
+                    value: value.clone(),
+                    labels: Default::default(),
+                },
+            );
+        }
+        d
+    }
+
+    /// `topology_rates()` turns sysinfo `network/{iface}/{rx,tx}_bytes` counters
+    /// into per-host throughput. The *rate* comes from the local store's hot ring
+    /// (two samples, positive dt), so this drives telemetry through the real
+    /// ingest path rather than hand-stuffing the device map — a fold that reads
+    /// the store cannot be tested by faking the map.
+    ///
+    /// The literal families sharing the `network/` head must not be counted as
+    /// interfaces.
+    #[test]
+    fn topology_rates_sums_only_real_interfaces() {
+        let mut a = ZenSight::boot(true).0;
+        a.dashboard.devices.clear();
+
+        let point = |metric: &str, ts: i64, v: u64| TelemetryPoint {
+            timestamp: ts,
+            source: "server01".to_string(),
+            protocol: Protocol::Sysinfo,
+            metric: metric.to_string(),
+            value: TelemetryValue::Counter(v),
+            labels: Default::default(),
+        };
+
+        // Two samples one second apart: eth0 +1000 rx / +2000 tx, wlan0 +500 rx.
+        // The `network/tcp/*` counter climbs hard and must be ignored entirely.
+        for (metric, v0, v1) in [
+            ("network/eth0/rx_bytes", 10_000, 11_000),
+            ("network/eth0/tx_bytes", 20_000, 22_000),
+            ("network/wlan0/rx_bytes", 5_000, 5_500),
+            ("network/tcp/retrans_segs_total", 0, 999_999),
+        ] {
+            let _ = a.update(Message::TelemetryReceived(point(metric, 1_000, v0)));
+            let _ = a.update(Message::TelemetryReceived(point(metric, 2_000, v1)));
+        }
+
+        // The map is keyed by the *node* id — the resolved entity when one is
+        // known, else the source — so assert on the single host's rates rather
+        // than on a name the correlator is free to rewrite.
+        let rates = a.topology_rates();
+        assert_eq!(rates.len(), 1, "one sysinfo host, one rate entry");
+        let (rx, tx) = *rates.values().next().unwrap();
+        assert_eq!(rx, 1500.0, "rx = eth0 + wlan0 over 1s, and nothing else");
+        assert_eq!(tx, 2000.0);
+    }
+
+    /// `bandwidth_service_rows()` folds systemd `unit/{unit}/ip_{egress,ingress}_bps`
+    /// into the Bandwidth monitor's Services tab. The sibling `ip_*_bytes` counters
+    /// are a *different* subject and must not land in the per-second table.
+    #[test]
+    fn bandwidth_service_rows_reads_the_bps_subjects_only() {
+        let mut a = ZenSight::boot(true).0;
+        a.dashboard.devices.clear();
+
+        let d = device(
+            Protocol::Systemd,
+            "server01",
+            &[
+                (
+                    "unit/nginx.service/ip_egress_bps",
+                    TelemetryValue::Gauge(1_000.0),
+                ),
+                (
+                    "unit/nginx.service/ip_ingress_bps",
+                    TelemetryValue::Gauge(2_000.0),
+                ),
+                // Cumulative counters, not rates — the same `unit/{unit}/` head.
+                (
+                    "unit/nginx.service/ip_egress_bytes",
+                    TelemetryValue::Gauge(9_999_999.0),
+                ),
+            ],
+        );
+        a.dashboard.devices.insert(d.id.clone(), d);
+
+        let rows = a.bandwidth_service_rows();
+        assert_eq!(rows.len(), 1, "one unit, one row");
+        let r = &rows[0];
+        assert_eq!(r.record.tx_bps, 1_000.0, "egress is tx");
+        assert_eq!(r.record.rx_bps, 2_000.0, "ingress is rx");
+        assert!(
+            format!("{:?}", r.record.key).contains("nginx.service"),
+            "the row must be keyed by the unit the registry named"
+        );
     }
 }

@@ -4324,7 +4324,7 @@ fn netring_capture_tab_hosts_capture_form() {
     state.update(zensight_common::TelemetryPoint::new(
         "host01",
         Protocol::Netring,
-        "capture/eth0/packets_total",
+        "capture/eth0/packets",
         zensight_common::TelemetryValue::Counter(10),
     ));
 
@@ -4364,7 +4364,7 @@ fn netring_capture_tab_without_advert_is_health_only() {
     state.update(zensight_common::TelemetryPoint::new(
         "host01",
         Protocol::Netring,
-        "capture/eth0/packets_total",
+        "capture/eth0/packets",
         zensight_common::TelemetryValue::Counter(10),
     ));
 
@@ -4581,4 +4581,331 @@ fn test_parallax_catalogue_and_tiles() {
         .end_tile("video0", generation, Some("stream ended".into()));
     let mut ui = simulator(parallax_view(&state));
     assert!(ui.find("video0 — stream ended").is_ok());
+}
+
+// ===========================================================================
+// Tier-2 conversion regression net (#475).
+//
+// These views were switched from positional string-splitting to the registry's
+// typed parse direction. The failure mode of that conversion is NOT a panic —
+// it is a table that silently renders zero rows, because `parse_metric` returned
+// `None` and the loop body never ran. Several of these sections still gate their
+// *header* on a string prefix (`has_temperatures`, `has_disk_io`, the neighbor
+// donut), so the title appears either way and a title-only assertion proves
+// nothing.
+//
+// Every test below therefore feeds REAL registered subjects and asserts on a
+// rendered ROW. If a registry pattern moves and a consumer is not updated with
+// it, one of these goes red instead of a view going quietly blank in production.
+// ===========================================================================
+
+/// Build a sysinfo telemetry point with a registered subject.
+fn sysinfo_point(
+    metric: &str,
+    value: zensight_common::TelemetryValue,
+) -> zensight_common::TelemetryPoint {
+    zensight_common::TelemetryPoint {
+        timestamp: 0,
+        source: "server01".to_string(),
+        protocol: Protocol::Sysinfo,
+        metric: metric.to_string(),
+        value,
+        labels: HashMap::new(),
+    }
+}
+
+fn sysinfo_state(points: &[(&str, zensight_common::TelemetryValue)]) -> DeviceDetailState {
+    let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Sysinfo, "server01"));
+    for (metric, value) in points {
+        state.update(sysinfo_point(metric, value.clone()));
+    }
+    state
+}
+
+/// `disk/{mount}/used` + `/total` must produce a mount row. The mount is a slug
+/// (`/home` → `home`, `/` → `_`), and the row only renders when BOTH keys parse.
+#[test]
+fn tier2_sysinfo_disk_rows_render() {
+    let state = sysinfo_state(&[
+        (
+            "disk/home/used",
+            zensight_common::TelemetryValue::Gauge(30_000_000_000.0),
+        ),
+        (
+            "disk/home/total",
+            zensight_common::TelemetryValue::Gauge(100_000_000_000.0),
+        ),
+    ]);
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(
+        ui.find("home").is_ok(),
+        "the disk section must render a row for the `home` mount, not just its header"
+    );
+}
+
+/// `network/{iface}/rx_bytes` must produce an interface row — and the sibling
+/// `network/tcp/*` / `network/sockets/*` literal families must NOT be mistaken
+/// for interfaces named `tcp`/`sockets`. That confusion is exactly what the
+/// typed parse exists to prevent, and nothing pinned it until now.
+#[test]
+fn tier2_sysinfo_network_rows_render_and_do_not_invent_an_iface() {
+    let state = sysinfo_state(&[
+        (
+            "network/eth0/rx_bytes",
+            zensight_common::TelemetryValue::Counter(1_000_000),
+        ),
+        (
+            "network/eth0/tx_bytes",
+            zensight_common::TelemetryValue::Counter(2_000_000),
+        ),
+        // Literal-headed siblings — a positional parse would read chunk 1 as an
+        // interface name and invent an iface called "tcp".
+        (
+            "network/tcp/retrans_segs_total",
+            zensight_common::TelemetryValue::Counter(12),
+        ),
+        (
+            "network/sockets/tcp_inuse",
+            zensight_common::TelemetryValue::Gauge(40.0),
+        ),
+    ]);
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(ui.find("eth0").is_ok(), "eth0 must render as an interface");
+
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(
+        ui.find("network/tcp").is_err(),
+        "the `network/tcp/*` literal family must not surface as an interface"
+    );
+}
+
+/// `disk/{device}/io/read_rate` must produce a device row. `has_disk_io()` gates
+/// the header on a string prefix, so the header alone proves nothing.
+#[test]
+fn tier2_sysinfo_disk_io_rows_render() {
+    let state = sysinfo_state(&[
+        (
+            "disk/sda/io/read_rate",
+            zensight_common::TelemetryValue::Gauge(1_048_576.0),
+        ),
+        (
+            "disk/sda/io/write_rate",
+            zensight_common::TelemetryValue::Gauge(524_288.0),
+        ),
+    ]);
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(
+        ui.find("sda").is_ok(),
+        "the Disk I/O section must render the `sda` device row, not an empty section"
+    );
+}
+
+/// `sensors/{chip}/{label}/temp` — two variables — must produce a sensor row.
+/// `has_temperatures()` is a `starts_with("sensors/")` check, so this section
+/// renders its title with zero rows if the two-var parse breaks.
+#[test]
+fn tier2_sysinfo_temperature_rows_render() {
+    let state = sysinfo_state(&[(
+        "sensors/coretemp/core_0/temp",
+        zensight_common::TelemetryValue::Gauge(45.0),
+    )]);
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    // The row is `{chip}/{label}` — both variables named by the registry rather
+    // than read off parts[1]/parts[2].
+    assert!(
+        ui.find("coretemp/core_0").is_ok(),
+        "the Temperatures section must render the chip/label row, not an empty section"
+    );
+}
+
+fn netlink_state(points: &[(&str, zensight_common::TelemetryValue)]) -> DeviceDetailState {
+    let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Netlink, "server01"));
+    for (metric, value) in points {
+        state.update(zensight_common::TelemetryPoint {
+            timestamp: 0,
+            source: "server01".to_string(),
+            protocol: Protocol::Netlink,
+            metric: metric.to_string(),
+            value: value.clone(),
+            labels: HashMap::new(),
+        });
+    }
+    state
+}
+
+/// `sockets/tcp/by_cong/{algo}` must produce a per-algorithm row. Note the
+/// section early-returns unless some other `sockets/tcp/*` key is present.
+#[test]
+fn tier2_netlink_congestion_rows_render() {
+    let mut state = netlink_state(&[
+        (
+            "sockets/tcp/total",
+            zensight_common::TelemetryValue::Gauge(10.0),
+        ),
+        (
+            "sockets/tcp/by_cong/cubic",
+            zensight_common::TelemetryValue::Gauge(7.0),
+        ),
+        (
+            "sockets/tcp/by_cong/bbr",
+            zensight_common::TelemetryValue::Gauge(3.0),
+        ),
+    ]);
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Sockets;
+    let mut ui = simulator(zensight::view::specialized::netlink::netlink_host_view(
+        &state,
+    ));
+    // The row label is indented (`format!("  {algo}")`).
+    assert!(
+        ui.find("  cubic").is_ok(),
+        "the congestion-algorithm rows must render the algo name"
+    );
+}
+
+/// `neighbors/by_state/{state}` must produce a donut slice *label*, not just the
+/// "Neighbor states" header — which is gated on a string prefix and would render
+/// over an empty donut.
+#[test]
+fn tier2_netlink_neighbor_state_slices_render() {
+    let mut state = netlink_state(&[
+        (
+            "neighbors/total",
+            zensight_common::TelemetryValue::Gauge(5.0),
+        ),
+        (
+            "neighbors/by_state/reachable",
+            zensight_common::TelemetryValue::Gauge(4.0),
+        ),
+        (
+            "neighbors/by_state/stale",
+            zensight_common::TelemetryValue::Gauge(1.0),
+        ),
+    ]);
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::RoutingNeighbors;
+    let mut ui = simulator(zensight::view::specialized::netlink::netlink_host_view(
+        &state,
+    ));
+    assert!(
+        ui.find("reachable").is_ok(),
+        "the neighbor-state donut must render its slice labels, not just its header"
+    );
+}
+
+fn netring_state(
+    tab: zensight::view::specialized::SpecializedTab,
+    points: &[(&str, zensight_common::TelemetryValue)],
+) -> DeviceDetailState {
+    let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Netring, "wiretap1"));
+    for (metric, value) in points {
+        state.update(zensight_common::TelemetryPoint {
+            timestamp: 0,
+            source: "wiretap1".to_string(),
+            protocol: Protocol::Netring,
+            metric: metric.to_string(),
+            value: value.clone(),
+            labels: HashMap::new(),
+        });
+    }
+    state.specialized_tab = tab;
+    state
+}
+
+/// `dns/responses_by_rcode/{rcode}` — the sensor publishes `<rcode>_total`, and
+/// the view trims the suffix — must produce a ranked-bar row per rcode.
+#[test]
+fn tier2_netring_dns_rcode_rows_render() {
+    let state = netring_state(
+        zensight::view::specialized::SpecializedTab::Dns,
+        &[
+            (
+                "dns/queries_total",
+                zensight_common::TelemetryValue::Counter(100),
+            ),
+            (
+                "dns/responses_by_rcode/nxdomain_total",
+                zensight_common::TelemetryValue::Counter(12),
+            ),
+            (
+                "dns/responses_by_rcode/noerror_total",
+                zensight_common::TelemetryValue::Counter(88),
+            ),
+        ],
+    );
+    let mut ui = simulator(zensight::view::specialized::netring::netring_sensor_view(
+        &state, None,
+    ));
+    assert!(
+        ui.find("nxdomain").is_ok(),
+        "the by-rcode bar must render a row per response code"
+    );
+}
+
+/// `http/methods/{method}` (published as `<method>_total`) must produce a row.
+#[test]
+fn tier2_netring_http_method_rows_render() {
+    let state = netring_state(
+        zensight::view::specialized::SpecializedTab::HttpTls,
+        &[
+            (
+                "http/requests_total",
+                zensight_common::TelemetryValue::Counter(50),
+            ),
+            (
+                "http/methods/get_total",
+                zensight_common::TelemetryValue::Counter(40),
+            ),
+            (
+                "http/methods/post_total",
+                zensight_common::TelemetryValue::Counter(10),
+            ),
+        ],
+    );
+    let mut ui = simulator(zensight::view::specialized::netring::netring_sensor_view(
+        &state, None,
+    ));
+    assert!(
+        ui.find("get").is_ok(),
+        "the by-method bar must render a row per HTTP method"
+    );
+}
+
+/// The netlink overview's "Interfaces up" is an N/M stat derived from
+/// `iface/{iface}/up`. Asserting the *label* proves nothing — it renders "0/0"
+/// just as happily. Assert the value.
+#[test]
+fn tier2_netlink_overview_counts_interfaces() {
+    use zensight::view::overview::netlink::netlink_overview;
+
+    let id = DeviceId::new(Protocol::Netlink, "server01");
+    let mut device = DeviceState::new(id.clone());
+    for (metric, up) in [("iface/eth0/up", true), ("iface/wan0/up", false)] {
+        device.metrics.insert(
+            metric.to_string(),
+            zensight_common::TelemetryPoint {
+                timestamp: 0,
+                source: "server01".to_string(),
+                protocol: Protocol::Netlink,
+                metric: metric.to_string(),
+                value: zensight_common::TelemetryValue::Boolean(up),
+                labels: HashMap::new(),
+            },
+        );
+    }
+    let devices: HashMap<&DeviceId, &DeviceState> = HashMap::from([(&id, &device)]);
+
+    let mut ui = simulator(netlink_overview(&devices));
+    assert!(
+        ui.find("1/2").is_ok(),
+        "one of two interfaces is up — the stat must count, not just label"
+    );
 }
