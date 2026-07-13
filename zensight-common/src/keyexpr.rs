@@ -207,10 +207,11 @@ pub fn all_health_wildcard() -> String {
 /// ```
 /// use zensight_common::keyexpr::all_liveness_wildcard;
 ///
-/// assert_eq!(all_liveness_wildcard(), "zensight/*/*/@/devices/*/liveness");
+/// assert_eq!(all_liveness_wildcard(), "zensight/@v1/*/state/*/device/*/liveness");
 /// ```
 pub fn all_liveness_wildcard() -> String {
-    format!("{}/*/*/@/devices/*/liveness", KEY_PREFIX)
+    // v1 (RFC 04): device-liveness documents under every producer.
+    format!("{}/@v1/*/state/*/device/*/liveness", KEY_PREFIX)
 }
 
 /// Build a wildcard key expression for all sensor error reports.
@@ -322,10 +323,11 @@ pub fn host_evidence_key(sensor: &str, source: &str) -> String {
 /// ```
 /// use zensight_common::keyexpr::all_evidence_wildcard;
 ///
-/// assert_eq!(all_evidence_wildcard(), "zensight/_meta/evidence/**");
+/// assert_eq!(all_evidence_wildcard(), "zensight/@v1/*/state/*/evidence/**");
 /// ```
 pub fn all_evidence_wildcard() -> String {
-    format!("{}/_meta/evidence/**", KEY_PREFIX)
+    // v1 (RFC 06 §4): evidence is ordinary per-origin state.
+    format!("{}/@v1/*/state/*/evidence/**", KEY_PREFIX)
 }
 
 /// Build the name-observation key for one `(sensor, source)` claim, where
@@ -355,27 +357,34 @@ pub fn name_observation_key(sensor: &str, source: &str) -> String {
 ///
 /// assert_eq!(
 ///     all_name_evidence_wildcard(),
-///     "zensight/_meta/evidence/names/**"
+///     "zensight/@v1/*/state/*/evidence/names/*"
 /// );
 /// ```
 pub fn all_name_evidence_wildcard() -> String {
-    format!("{}/_meta/evidence/names/**", KEY_PREFIX)
+    format!("{}/@v1/*/state/*/evidence/names/*", KEY_PREFIX)
 }
 
 /// Build the entity key for one resolved host, published by the correlator on
-/// `zensight/_meta/entity/host/<entity_id>` (#305).
+/// `zensight/@v1/@catalog/state/entity/<entity_id>` (RFC 06 §5).
 ///
 /// # Example
 /// ```
 /// use zensight_common::keyexpr::entity_key;
 ///
 /// assert_eq!(
-///     entity_key("h_0123456789ab"),
-///     "zensight/_meta/entity/host/h_0123456789ab"
+///     entity_key("h-0123456789ab"),
+///     "zensight/@v1/@catalog/state/entity/h-0123456789ab"
 /// );
 /// ```
 pub fn entity_key(entity_id: &str) -> String {
-    format!("{}/_meta/entity/host/{}", KEY_PREFIX, entity_id)
+    // v1 (RFC 06 §5): a catalog conclusion under the verbatim service origin.
+    format!("{}/@v1/@catalog/state/entity/{}", KEY_PREFIX, entity_id)
+}
+
+/// Build the alias-record key (RFC 06 §5): old-id → entity-id re-pointing on
+/// merges/upgrades, published by the catalog as its own key family.
+pub fn alias_key(old_id: &str) -> String {
+    format!("{}/@v1/@catalog/state/alias/{}", KEY_PREFIX, old_id)
 }
 
 /// Build a wildcard key expression for the whole entity keyspace — the
@@ -385,10 +394,11 @@ pub fn entity_key(entity_id: &str) -> String {
 /// ```
 /// use zensight_common::keyexpr::all_entity_wildcard;
 ///
-/// assert_eq!(all_entity_wildcard(), "zensight/_meta/entity/**");
+/// assert_eq!(all_entity_wildcard(), "zensight/@v1/@catalog/state/entity/*");
 /// ```
 pub fn all_entity_wildcard() -> String {
-    format!("{}/_meta/entity/**", KEY_PREFIX)
+    // v1 (RFC 06 §5): the catalog's entity documents.
+    format!("{}/@v1/@catalog/state/entity/*", KEY_PREFIX)
 }
 
 /// Build the queryable key a late joiner GETs to seed the full current entity
@@ -398,10 +408,12 @@ pub fn all_entity_wildcard() -> String {
 /// ```
 /// use zensight_common::keyexpr::entities_query_key;
 ///
-/// assert_eq!(entities_query_key(), "zensight/_meta/query/entities");
+/// assert_eq!(entities_query_key(), "zensight/@v1/@catalog/state/entity/*");
 /// ```
 pub fn entities_query_key() -> String {
-    format!("{}/_meta/query/entities", KEY_PREFIX)
+    // v1 (RFC 05 §4): the seed IS the state selector — the catalog answers
+    // it storage-shaped (one reply per entity on its concrete key).
+    format!("{}/@v1/@catalog/state/entity/*", KEY_PREFIX)
 }
 
 /// Build the queryable key for on-demand IP→name resolution
@@ -412,10 +424,11 @@ pub fn entities_query_key() -> String {
 /// ```
 /// use zensight_common::keyexpr::names_query_key;
 ///
-/// assert_eq!(names_query_key(), "zensight/_meta/query/names");
+/// assert_eq!(names_query_key(), "zensight/@v1/@catalog/@rpc/names");
 /// ```
 pub fn names_query_key() -> String {
-    format!("{}/_meta/query/names", KEY_PREFIX)
+    // v1 (RFC 06 §5): on-demand name resolution is a catalog procedure.
+    format!("{}/@v1/@catalog/@rpc/names", KEY_PREFIX)
 }
 
 /// Build the correlator's liveliness-token key. A second correlator instance
@@ -426,10 +439,26 @@ pub fn names_query_key() -> String {
 /// ```
 /// use zensight_common::keyexpr::correlator_alive_key;
 ///
-/// assert_eq!(correlator_alive_key(), "zensight/_meta/correlator/@/alive");
+/// assert_eq!(correlator_alive_key(), "zensight/@v1/@catalog/state/alive");
 /// ```
 pub fn correlator_alive_key() -> String {
-    format!("{}/_meta/correlator/@/alive", KEY_PREFIX)
+    // v1 (RFC 04 §5): declared by the elected catalog owner only.
+    format!("{}/@v1/@catalog/state/alive", KEY_PREFIX)
+}
+
+/// Build a catalog ownership-claim token key (RFC 06 §5.3). Every candidate
+/// declares one; the lexically-lowest claim chunk wins the election.
+pub fn catalog_claim_key(zid: &str) -> String {
+    format!(
+        "{}/@v1/@catalog/state/claim/{}",
+        KEY_PREFIX,
+        zid.to_ascii_lowercase()
+    )
+}
+
+/// The claim-set selector (liveliness) the election and standbys watch.
+pub fn catalog_claims_wildcard() -> String {
+    format!("{}/@v1/@catalog/state/claim/*", KEY_PREFIX)
 }
 
 /// Build a wildcard key expression for all sensor-emitted alerts.
@@ -543,11 +572,12 @@ fn ip_slug(ip: &str) -> String {
 /// ```
 /// use zensight_common::keyexpr::pdns_key;
 ///
-/// assert_eq!(pdns_key("10.0.0.9"), "zensight/@pdns/10-0-0-9");
-/// assert_eq!(pdns_key("2001:db8::1"), "zensight/@pdns/2001-db8--1");
+/// assert_eq!(pdns_key("10.0.0.9"), "zensight/@v1/@catalog/state/pdns/10-0-0-9");
+/// assert_eq!(pdns_key("2001:db8::1"), "zensight/@v1/@catalog/state/pdns/2001-db8--1");
 /// ```
 pub fn pdns_key(ip: &str) -> String {
-    format!("{}/@pdns/{}", KEY_PREFIX, ip_slug(ip))
+    // v1 (RFC 06 §5.2): catalog state; the historical tier is a storage choice.
+    format!("{}/@v1/@catalog/state/pdns/{}", KEY_PREFIX, ip_slug(ip))
 }
 
 /// Build the wildcard key for the whole historical passive-DNS tier
@@ -558,10 +588,10 @@ pub fn pdns_key(ip: &str) -> String {
 /// ```
 /// use zensight_common::keyexpr::all_pdns_wildcard;
 ///
-/// assert_eq!(all_pdns_wildcard(), "zensight/@pdns/**");
+/// assert_eq!(all_pdns_wildcard(), "zensight/@v1/@catalog/state/pdns/**");
 /// ```
 pub fn all_pdns_wildcard() -> String {
-    format!("{}/@pdns/**", KEY_PREFIX)
+    format!("{}/@v1/@catalog/state/pdns/**", KEY_PREFIX)
 }
 
 /// Parse a key expression to extract protocol, source, and metric path.

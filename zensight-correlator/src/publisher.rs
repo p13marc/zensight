@@ -121,8 +121,8 @@ mod tests {
     #[test]
     fn entity_publish_key_mapping() {
         assert_eq!(
-            entity_key("h_0123456789ab"),
-            "zensight/_meta/entity/host/h_0123456789ab"
+            entity_key("h-0123456789ab"),
+            "zensight/@v1/@catalog/state/entity/h-0123456789ab"
         );
     }
 }

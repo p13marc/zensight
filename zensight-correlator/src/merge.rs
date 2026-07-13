@@ -521,9 +521,10 @@ fn representative<'a>(candidates: impl Iterator<Item = (bool, Option<&'a str>)>)
 /// # Tie-break (order-independent by construction)
 ///
 /// 1. If any member has a `host_id` (the conflict guard guarantees at most one
-///    distinct value per set), the id is `h_<first 12 hex of that host_id>`.
+///    distinct value per set), the id IS that host_id — the v1 origin id
+///    (`h-<12hex>`, RFC 06 §2).
 ///    `host_id` is already a sha256 hex, so this is just its 12-char prefix.
-/// 2. Otherwise the id is `h_<first 12 hex of sha256(best_key)>`, where
+/// 2. Otherwise the id is `h-<first 12 hex of sha256(best_key)>`, where
 ///    `best_key` is chosen by taking the **highest-priority category any member
 ///    has** — `fqdn` > `mac` > `hostname` > `ip` — and, within that category,
 ///    the **lexicographically-smallest** value across the whole set. Picking a
@@ -546,9 +547,14 @@ fn entity_id_for(
     members: &[usize],
 ) -> String {
     if let Some(h) = host_id {
-        // host_id is a sha256 hex; 64 chars, but guard defensively.
+        // v1 (RFC 06 §2): the payload host_id IS the origin id (`h-<12hex>`)
+        // — entity id ≡ origin id, no re-derivation. Legacy full-hash values
+        // (pre-#453 sensors) still truncate.
+        if h.starts_with("h-") && h.len() == 14 {
+            return h.clone();
+        }
         let prefix: String = h.chars().take(12).collect();
-        return format!("h_{}", prefix);
+        return format!("h-{}", prefix);
     }
 
     // Highest-priority category present anywhere in the set → min value within it.
@@ -568,7 +574,7 @@ fn entity_id_for(
             .unwrap_or_default()
     };
 
-    format!("h_{}", sha256_12(&best_key))
+    format!("h-{}", sha256_12(&best_key))
 }
 
 #[cfg(test)]
@@ -806,7 +812,7 @@ mod tests {
         let mut a = ev("sysinfo", "host1");
         a.host_id = Some(hid(0xab)); // "abab…" (64 hex); first 12 chars → "abababababab"
         let ents = correlate(&[a], &RulesConfig::default());
-        assert_eq!(ents[0].entity_id, "h_abababababab");
+        assert_eq!(ents[0].entity_id, "h-abababababab");
     }
 
     #[test]
@@ -815,7 +821,7 @@ mod tests {
         let mut a = ev("s", "a");
         a.fqdn = Some("host1.example.com".into());
         let ents = correlate(&[a], &RulesConfig::default());
-        let expected = format!("h_{}", sha256_12("host1.example.com"));
+        let expected = format!("h-{}", sha256_12("host1.example.com"));
         assert_eq!(ents[0].entity_id, expected);
     }
 

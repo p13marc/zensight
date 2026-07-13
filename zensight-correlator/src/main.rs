@@ -54,8 +54,8 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Single-writer guard.
-    let _token = match guard::acquire(&session, GUARD_TIMEOUT).await? {
-        GuardOutcome::Acquired(token) => token,
+    let _tokens = match guard::acquire(&session, GUARD_TIMEOUT).await? {
+        GuardOutcome::Acquired(claim, alive) => (claim, alive),
         GuardOutcome::AlreadyRunning => {
             error!("another correlator instance is already running; exiting");
             std::process::exit(1);

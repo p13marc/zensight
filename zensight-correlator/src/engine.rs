@@ -650,7 +650,7 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        assert!(old_id.starts_with("h_"));
+        assert!(old_id.starts_with("h-"));
 
         // Now a self-report with a host_id arrives sharing the same MAC+IP, so
         // it merges with the asset and the set gains a host_id → new id.
@@ -682,7 +682,7 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        let new_id = format!("h_{}", &hid(6)[..12]);
+        let new_id = format!("h-{}", &hid(6)[..12]);
         assert_eq!(new_entity.entity_id, new_id);
         assert!(
             new_entity.aliases.contains(&old_id),

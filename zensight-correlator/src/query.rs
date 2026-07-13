@@ -1,6 +1,7 @@
 //! Late-joiner queryables served by the correlator.
 //!
-//! - `entities_query_key()` → the full current entity set (`Vec<HostEntity>`),
+//! - `entities_query_key()` (the entity state selector) → storage-shaped
+//!   seed: one reply per entity on its concrete key,
 //!   the seed a late-joining frontend GETs on connect (mirrors the sensors'
 //!   `@/query/alerts` firing-set seed).
 //! - `names_query_key()` with selector `?ip=<ip>` → that IP's accumulated
@@ -42,14 +43,19 @@ pub async fn serve_entities(
             }
             query = queryable.recv_async() => {
                 let Ok(query) = query else { break };
+                // Storage-shaped seed (RFC 05 §4): one reply per entity on
+                // its concrete state key.
                 let entities = state.lock().unwrap().current_entities();
-                match serde_json::to_vec(&entities) {
-                    Ok(payload) => {
-                        if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
-                            warn!(error = %e, "entities query reply failed");
+                for entity in entities {
+                    let key = zensight_common::entity_key(&entity.entity_id);
+                    match serde_json::to_vec(&entity) {
+                        Ok(payload) => {
+                            if let Err(e) = query.reply(key, payload).await {
+                                warn!(error = %e, "entities seed reply failed");
+                            }
                         }
+                        Err(e) => warn!(error = %e, "serialize entity failed"),
                     }
-                    Err(e) => warn!(error = %e, "serialize entities failed"),
                 }
             }
         }
@@ -88,7 +94,8 @@ pub async fn serve_names(
                 };
                 match serde_json::to_vec(&names) {
                     Ok(payload) => {
-                        if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                        // Concrete reply key (RFC 05 §2.1).
+                        if let Err(e) = query.reply(key.as_str(), payload).await {
                             warn!(error = %e, "names query reply failed");
                         }
                     }

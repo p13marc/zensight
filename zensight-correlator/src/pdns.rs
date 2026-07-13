@@ -76,6 +76,9 @@ mod tests {
 
     #[test]
     fn pdns_publish_key_mapping() {
-        assert_eq!(pdns_key("10.0.0.9"), "zensight/@pdns/10-0-0-9");
+        assert_eq!(
+            pdns_key("10.0.0.9"),
+            "zensight/@v1/@catalog/state/pdns/10-0-0-9"
+        );
     }
 }

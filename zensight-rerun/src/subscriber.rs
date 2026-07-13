@@ -5,8 +5,8 @@
 //! - alerts `zensight/*/@/alerts/*` — the telemetry wildcard can NEVER match
 //!   `@`-verbatim chunks, so alerts need their own subscriber (pinned below),
 //! - health `zensight/*/*/@/health`,
-//! - entities `zensight/_meta/entity/**`, seeded by a one-shot GET on the
-//!   correlator's `zensight/_meta/query/entities` queryable (concurrent with
+//! - entities `zensight/@v1/@catalog/state/entity/*`, seeded by a one-shot
+//!   storage-shaped GET on the same selector (concurrent with
 //!   the drain loop — all subscribers are declared before it starts).
 
 use std::sync::Arc;
@@ -199,9 +199,9 @@ pub async fn run_with_session(
     Ok(stats)
 }
 
-/// One-shot late-joiner entity seed: GET the correlator's
-/// `zensight/_meta/query/entities` queryable and forward the docs as control
-/// items. Best-effort — no correlator (the common case) is a debug, not an
+/// One-shot late-joiner entity seed: GET the catalog's
+/// entity state selector (storage-shaped: one `HostEntity` per reply) and
+/// forward the docs as control items. Best-effort — no correlator (the common case) is a debug, not an
 /// error.
 async fn seed_entities(session: Arc<Session>, tx_control: mpsc::Sender<ControlItem>) {
     match session
@@ -213,11 +213,10 @@ async fn seed_entities(session: Arc<Session>, tx_control: mpsc::Sender<ControlIt
             let mut seeded = 0usize;
             while let Ok(reply) = replies.recv_async().await {
                 if let Ok(sample) = reply.result()
-                    && let Ok(entities) =
-                        decode_auto::<Vec<HostEntity>>(&sample.payload().to_bytes())
+                    && let Ok(entity) = decode_auto::<HostEntity>(&sample.payload().to_bytes())
                 {
-                    seeded += entities.len();
-                    for entity in entities {
+                    seeded += 1;
+                    {
                         // Must-arrive: blocking send (worker upserts are
                         // idempotent, so racing the live subscription is
                         // harmless).
@@ -362,11 +361,11 @@ mod tests {
                 .intersects(&health)
         );
 
-        // `_meta` is matched by `zensight/**` on the wire — the entity plane is
-        // excluded by is_telemetry_key, not by keyexpr non-intersection; the
-        // dedicated subscriber exists to survive narrowed `filters.key_expr`.
-        let entity = KeyExpr::new("zensight/_meta/entity/host/h_0123456789ab").unwrap();
-        assert!(telemetry.intersects(&entity));
+        // v1: the entity plane sits under the verbatim `@catalog` origin —
+        // structurally invisible to the telemetry firehose (RFC D4), so the
+        // dedicated subscriber is a keyexpr necessity, not just a filter.
+        let entity = KeyExpr::new("zensight/@v1/@catalog/state/entity/h-0123456789ab").unwrap();
+        assert!(!telemetry.intersects(&entity));
         assert!(!is_telemetry_key(entity.as_str()));
         assert!(
             KeyExpr::new(all_entity_wildcard())
