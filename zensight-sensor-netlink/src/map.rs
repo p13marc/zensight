@@ -2173,4 +2173,22 @@ mod tests {
         let back: ConnView = serde_json::from_str(&json).unwrap();
         assert_eq!(v, back);
     }
+
+    /// The registry guard must actually bite. A conformance suite that cannot fail
+    /// is the same mistake as the `{metric...}` catch-all it replaced: vacuously
+    /// true. This is the test that proves the others mean something.
+    #[test]
+    #[should_panic(expected = "unregistered netlink telemetry subject")]
+    fn an_unregistered_metric_panics_in_debug() {
+        let _ = point("h", "totally/made/up/subject", TelemetryValue::Gauge(1.0));
+    }
+
+    /// ...and a real subject constructs.
+    #[test]
+    fn a_registered_metric_constructs() {
+        assert_eq!(
+            point("h", "routes/total", TelemetryValue::Gauge(1.0)).metric,
+            "routes/total"
+        );
+    }
 }

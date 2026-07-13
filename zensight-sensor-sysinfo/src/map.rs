@@ -22,22 +22,46 @@ pub struct Metric {
 }
 
 impl Metric {
-    /// A gauge metric with no labels.
-    pub fn gauge(metric: impl Into<String>, value: f64) -> Self {
+    /// The one constructor. Every metric name this sensor emits is born here, and
+    /// here it is checked against the subject registry (RFC 08 §5, issue #468).
+    ///
+    /// In debug builds — which is every unit test — an unregistered name panics.
+    /// That is what makes the ~57 mapper tests below a *conformance suite*: adding
+    /// a metric without registering it in `zensight-keyspace/registry/sysinfo.toml`
+    /// fails tests that already exist, rather than shipping a subject the registry
+    /// has never heard of and `introspect` cannot describe.
+    ///
+    /// sysinfo is the one producer whose collector publishes straight through
+    /// `PublisherRegistry::put` rather than a typed key builder, so without this it
+    /// would be the *only* host producer with no test-time conformance — and it has
+    /// the largest tree of the six.
+    fn new(metric: impl Into<String>, value: TelemetryValue) -> Self {
+        let metric = metric.into();
+        debug_assert!(
+            zensight_keyspace::registry::is_registered_telemetry("sysinfo", &metric),
+            "unregistered sysinfo telemetry subject {metric:?} — add it to \
+             zensight-keyspace/registry/sysinfo.toml (RFC 08 §5, issue #468)"
+        );
         Self {
-            metric: metric.into(),
-            value: TelemetryValue::Gauge(value),
+            metric,
+            value,
             labels: Vec::new(),
         }
     }
 
+    /// A gauge metric with no labels.
+    pub fn gauge(metric: impl Into<String>, value: f64) -> Self {
+        Self::new(metric, TelemetryValue::Gauge(value))
+    }
+
     /// A counter metric with no labels.
     pub fn counter(metric: impl Into<String>, value: u64) -> Self {
-        Self {
-            metric: metric.into(),
-            value: TelemetryValue::Counter(value),
-            labels: Vec::new(),
-        }
+        Self::new(metric, TelemetryValue::Counter(value))
+    }
+
+    /// A text metric with no labels.
+    pub fn text(metric: impl Into<String>, value: impl Into<String>) -> Self {
+        Self::new(metric, TelemetryValue::Text(value.into()))
     }
 
     /// Attach a label (builder style).
@@ -680,12 +704,8 @@ pub fn map_power(s: &PowerSample) -> Vec<Metric> {
         }
         if let Some(status) = &b.status {
             out.push(
-                Metric {
-                    metric: format!("battery/{key}/status"),
-                    value: TelemetryValue::Text(status.clone()),
-                    labels: Vec::new(),
-                }
-                .label("name", b.name.clone()),
+                Metric::text(format!("battery/{key}/status"), status.clone())
+                    .label("name", b.name.clone()),
             );
         }
     }
@@ -1215,11 +1235,10 @@ pub fn map_mdstat(arrays: &[MdArray]) -> Vec<Metric> {
     for a in arrays {
         let key = sanitize_key(&a.name);
         let label = |m: Metric| m.label("array", a.name.clone());
-        out.push(label(Metric {
-            metric: format!("disk/md/{key}/state"),
-            value: TelemetryValue::Text(if a.active { "active" } else { "inactive" }.to_string()),
-            labels: Vec::new(),
-        }));
+        out.push(label(Metric::text(
+            format!("disk/md/{key}/state"),
+            if a.active { "active" } else { "inactive" },
+        )));
         out.push(label(Metric::gauge(
             format!("disk/md/{key}/degraded"),
             if a.degraded { 1.0 } else { 0.0 },
@@ -2153,6 +2172,25 @@ mod tests {
     }
 
     // ---- eBPF latency histogram math (#99) --------------------------------
+
+    /// The registry guard must actually bite. A conformance suite that cannot fail
+    /// is the same mistake as the `{metric...}` catch-all it replaced: vacuously
+    /// true. This is the test that proves the other 96 mean something.
+    #[test]
+    #[should_panic(expected = "unregistered sysinfo telemetry subject")]
+    fn an_unregistered_metric_panics_in_debug() {
+        let _ = Metric::gauge("totally/made/up/subject", 1.0);
+    }
+
+    /// ...and a real one does not.
+    #[test]
+    fn a_registered_metric_constructs() {
+        assert_eq!(Metric::gauge("memory/used", 1.0).metric, "memory/used");
+        assert_eq!(
+            Metric::gauge("disk/home/used", 1.0).metric,
+            "disk/home/used"
+        );
+    }
 
     #[test]
     fn test_bucket_upper_us() {

@@ -2449,4 +2449,22 @@ mod tests {
         // Same rule + bucketing key so it resolves the firing alert.
         assert_eq!(resolved.rule, "capture-overload");
     }
+
+    /// The registry guard must actually bite. A conformance suite that cannot fail
+    /// is the same mistake as the `{metric...}` catch-all it replaced: vacuously
+    /// true. This is the test that proves the others mean something.
+    #[test]
+    #[should_panic(expected = "unregistered netring telemetry subject")]
+    fn an_unregistered_metric_panics_in_debug() {
+        let _ = point("s", "totally/made/up/subject", TelemetryValue::Gauge(1.0));
+    }
+
+    /// ...and a real subject constructs.
+    #[test]
+    fn a_registered_metric_constructs() {
+        assert_eq!(
+            point("s", "flow/active", TelemetryValue::Gauge(1.0)).metric,
+            "flow/active"
+        );
+    }
 }
