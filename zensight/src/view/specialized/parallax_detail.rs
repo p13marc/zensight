@@ -282,10 +282,17 @@ impl ParallaxDetailState {
     }
 }
 
-/// Query the stream catalogue (the `streams` procedure) for one host — the
-/// origin is known here, so the GET targets that host's @rpc key directly.
-pub async fn fetch_streams(session: Arc<Session>, host: String) -> Option<Vec<StreamDescriptor>> {
-    let key = origin_rpc_key(&host, "parallax", "streams");
+/// Query the stream catalogue (the `streams` procedure): the host's concrete
+/// @rpc key when its origin is known, else the fleet selector (first reply —
+/// right on a single-host mesh, and the origin map fills within ~5 s).
+pub async fn fetch_streams(
+    session: Arc<Session>,
+    origin: Option<String>,
+) -> Option<Vec<StreamDescriptor>> {
+    let key = match origin {
+        Some(o) => origin_rpc_key(&o, "parallax", "streams"),
+        None => zensight_common::fleet_rpc_key("parallax", "streams"),
+    };
     let replies = session.get(key).await.ok()?;
     let reply = replies.recv_async().await.ok()?;
     let sample = reply.result().ok()?;
@@ -298,13 +305,15 @@ pub async fn fetch_streams(session: Arc<Session>, host: String) -> Option<Vec<St
 /// yielded message carries the tile `generation` this task was opened with.
 pub fn preview_tile_stream(
     session: Arc<Session>,
-    source: String,
+    origin: String,
     stream: String,
     generation: u64,
 ) -> impl Stream<Item = Message> {
     async_stream::stream! {
-        // The EXACT preview key — never a wildcard (pinned in tests).
-        let key = media_preview_key(Protocol::Parallax, &source, &stream);
+        // The preview key for one stream on one host. `origin` is the mapped
+        // v1 origin — or `*` before the map fills, which still matches only
+        // this stream's concrete key on whichever host serves it.
+        let key = media_preview_key(Protocol::Parallax, &origin, &stream);
         let subscriber = match session.declare_subscriber(&key).await {
             Ok(s) => s,
             Err(e) => {

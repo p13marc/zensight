@@ -171,6 +171,11 @@ pub struct ZenSight {
     theme: AppTheme,
     /// Sensor health snapshots, keyed by sensor name.
     sensor_health: std::collections::HashMap<String, HealthSnapshot>,
+    /// source (payload host label, e.g. hostname) → v1 origin id (`h-<12hex>`),
+    /// learned from health/registration/entity docs. The wire payloads keep
+    /// human-readable sources while keys are origin-scoped — this map is how
+    /// drill-down fetches target the right host's @rpc/@media keys.
+    origins: std::collections::HashMap<String, String>,
     /// Recent error reports per sensor (bounded ring), for the Sensors view.
     recent_errors: std::collections::HashMap<String, std::collections::VecDeque<ErrorReport>>,
     /// Known sensor instances, keyed by `<name>@<source>` (one sensor can run
@@ -373,6 +378,7 @@ impl ZenSight {
             demo_mode,
             theme,
             sensor_health: std::collections::HashMap::new(),
+            origins: std::collections::HashMap::new(),
             recent_errors: std::collections::HashMap::new(),
             known_sensors: std::collections::HashMap::new(),
             toasts: ToastState::default(),
@@ -1546,6 +1552,9 @@ impl ZenSight {
                 // One entry per sensor INSTANCE (`sensor@source`), not per
                 // protocol — N hosts running the same sensor each keep a card.
                 let key = sensor_instance_key(&snapshot.sensor, snapshot.source.as_deref());
+                if let (Some(hid), Some(src)) = (&snapshot.host_id, &snapshot.source) {
+                    self.origins.insert(src.clone(), hid.clone());
+                }
                 self.sensor_health.insert(key, snapshot);
             }
 
@@ -1573,6 +1582,9 @@ impl ZenSight {
             }
 
             Message::SensorInfoReceived(info) => {
+                if let Some(hid) = &info.host_id {
+                    self.origins.insert(info.source.clone(), hid.clone());
+                }
                 self.known_sensors
                     .insert(format!("{}@{}", info.name, info.source), info);
             }
@@ -1635,6 +1647,11 @@ impl ZenSight {
             }
 
             Message::EntityReceived(entity) => {
+                if let Some(hid) = &entity.host_id {
+                    for member in &entity.members {
+                        self.origins.insert(member.source.clone(), hid.clone());
+                    }
+                }
                 self.entities.upsert(entity);
                 self.rederive_entities();
             }
@@ -3943,7 +3960,7 @@ impl ZenSight {
             ));
         };
         let key = topic.key(
-            self.selected_source_for(zensight_common::Protocol::Systemd)
+            self.selected_origin_for(zensight_common::Protocol::Systemd)
                 .as_deref(),
         );
         Task::future(async move {
@@ -3977,7 +3994,7 @@ impl ZenSight {
                 "Not connected to Zenoh".to_string(),
             )));
         };
-        let origin = self.selected_source_for(zensight_common::Protocol::Systemd);
+        let origin = self.selected_origin_for(zensight_common::Protocol::Systemd);
         Task::future(async move {
             let result = fetch_unit_detail(session, origin, unit)
                 .await
@@ -4059,7 +4076,7 @@ impl ZenSight {
             ));
         };
         let key = topic.key(
-            self.selected_source_for(zensight_common::Protocol::Netlink)
+            self.selected_origin_for(zensight_common::Protocol::Netlink)
                 .as_deref(),
         );
         Task::future(async move {
@@ -4112,14 +4129,33 @@ impl ZenSight {
     /// it, no toast); a non-responding sensor yields the channel's error state.
     /// `prefetch_on_open` already no-ops while disconnected, so this branch only
     /// fires on an explicit fetch.
-    /// The `source` (= v1 origin chunk) of the currently-selected device when
-    /// it belongs to `proto` — detail-tab fetches target that host's concrete
-    /// @rpc key; `None` falls back to the fleet selector.
-    fn selected_source_for(&self, proto: zensight_common::Protocol) -> Option<String> {
+    /// The v1 origin id (`h-<12hex>`) for a payload `source` (hostname), from
+    /// the health/registration/entity-fed [`Self::origins`] map. `None` until
+    /// the first health doc arrives (~5 s after connect) — callers fall back
+    /// to the fleet selector.
+    fn origin_for(&self, source: &str) -> Option<String> {
+        self.origins.get(source).cloned()
+    }
+
+    /// The parallax `stream/set` write key for `source`'s host: the concrete
+    /// origin key when the origin is known, else the fleet selector (the
+    /// command carries the stream name, and send_command targets All).
+    fn parallax_stream_set_key(&self, source: &str) -> String {
+        match self.origin_for(source) {
+            Some(origin) => zensight_common::origin_rpc_key(&origin, "parallax", "stream/set"),
+            None => zensight_common::fleet_command_key("parallax", "stream"),
+        }
+    }
+
+    /// The v1 origin of the currently-selected device when it belongs to
+    /// `proto` — detail-tab fetches target that host's concrete @rpc key;
+    /// `None` (no selection, or origin not yet learned) falls back to the
+    /// fleet selector.
+    fn selected_origin_for(&self, proto: zensight_common::Protocol) -> Option<String> {
         self.selected_device
             .as_ref()
             .filter(|d| d.device_id.protocol == proto)
-            .map(|d| d.device_id.source.clone())
+            .and_then(|d| self.origin_for(&d.device_id.source))
     }
 
     fn query_channel<T, Fut>(
@@ -4339,7 +4375,7 @@ impl ZenSight {
         use crate::view::specialized::netring_detail::fetch_flows;
         self.query_channel(
             {
-                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
                 move |s| fetch_flows(s, origin)
             },
             Message::NetringFlowsReceived,
@@ -4645,7 +4681,7 @@ impl ZenSight {
         use crate::view::specialized::netring_detail::fetch_tls;
         self.query_channel(
             {
-                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
                 move |s| fetch_tls(s, origin)
             },
             Message::NetringTlsReceived,
@@ -4658,7 +4694,7 @@ impl ZenSight {
         use crate::view::specialized::netring_detail::fetch_quic;
         self.query_channel(
             {
-                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
                 move |s| fetch_quic(s, origin)
             },
             Message::NetringQuicReceived,
@@ -4671,7 +4707,7 @@ impl ZenSight {
         use crate::view::specialized::netring_detail::fetch_ssh;
         self.query_channel(
             {
-                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
                 move |s| fetch_ssh(s, origin)
             },
             Message::NetringSshReceived,
@@ -4684,7 +4720,7 @@ impl ZenSight {
         use crate::view::specialized::netring_detail::fetch_ja4h;
         self.query_channel(
             {
-                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
                 move |s| fetch_ja4h(s, origin)
             },
             Message::NetringJa4hReceived,
@@ -4697,7 +4733,7 @@ impl ZenSight {
         use crate::view::specialized::netring_detail::fetch_assets;
         self.query_channel(
             {
-                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
                 move |s| fetch_assets(s, origin)
             },
             Message::NetringAssetsReceived,
@@ -4765,7 +4801,7 @@ impl ZenSight {
         use crate::view::specialized::netring_detail::fetch_talkers;
         self.query_channel(
             {
-                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
                 move |s| fetch_talkers(s, origin)
             },
             Message::NetringTalkersReceived,
@@ -4778,7 +4814,7 @@ impl ZenSight {
         use crate::view::specialized::netring_detail::fetch_matrix;
         self.query_channel(
             {
-                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
                 move |s| fetch_matrix(s, origin)
             },
             Message::NetringMatrixReceived,
@@ -4791,7 +4827,7 @@ impl ZenSight {
         use crate::view::specialized::netring_detail::fetch_elephants;
         self.query_channel(
             {
-                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
                 move |s| fetch_elephants(s, origin)
             },
             Message::NetringElephantsReceived,
@@ -4804,7 +4840,7 @@ impl ZenSight {
         use crate::view::specialized::netring_detail::fetch_dns;
         self.query_channel(
             {
-                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
                 move |s| fetch_dns(s, origin)
             },
             Message::NetringDnsReceived,
@@ -4817,7 +4853,7 @@ impl ZenSight {
         use crate::view::specialized::netring_detail::fetch_http;
         self.query_channel(
             {
-                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
                 move |s| fetch_http(s, origin)
             },
             Message::NetringHttpReceived,
@@ -4830,7 +4866,7 @@ impl ZenSight {
         use crate::view::specialized::netring_detail::fetch_captures;
         self.query_channel(
             {
-                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
                 move |s| fetch_captures(s, origin)
             },
             Message::NetringCapturesReceived,
@@ -4936,8 +4972,9 @@ impl ZenSight {
                 "Not connected to Zenoh".to_string(),
             )));
         };
+        let origin = self.origin_for(&host);
         Task::future(async move {
-            let result = fetch_processes(session, host, sort)
+            let result = fetch_processes(session, origin, sort)
                 .await
                 .ok_or_else(|| "No sysinfo sensor responded".to_string());
             Message::SysinfoProcessesReceived(result)
@@ -4958,8 +4995,9 @@ impl ZenSight {
                 "Not connected to Zenoh".to_string(),
             )));
         };
+        let origin = self.origin_for(&host);
         Task::future(async move {
-            let result = crate::view::specialized::parallax_detail::fetch_streams(session, host)
+            let result = crate::view::specialized::parallax_detail::fetch_streams(session, origin)
                 .await
                 .ok_or_else(|| "No parallax sensor responded".to_string());
             Message::ParallaxStreamsReceived(result)
@@ -5011,10 +5049,13 @@ impl ZenSight {
         else {
             return Task::none();
         };
+        // Media keys are origin-scoped; `*` (a legal subscriber wildcard)
+        // covers the window before the first health doc maps the origin.
+        let media_origin = self.origin_for(&source).unwrap_or_else(|| "*".into());
         let (frames, handle) = Task::stream(
             crate::view::specialized::parallax_detail::preview_tile_stream(
                 session,
-                source.clone(),
+                media_origin,
                 stream.clone(),
                 generation,
             ),
@@ -5028,7 +5069,7 @@ impl ZenSight {
                 false,
             );
         }
-        let cmd_key = zensight_common::origin_rpc_key(&source, "parallax", "stream/set");
+        let cmd_key = self.parallax_stream_set_key(&source);
         let open =
             zensight_common::command::Command::new(zensight_common::StreamControl::OpenStream {
                 stream: stream.clone(),
@@ -5075,7 +5116,7 @@ impl ZenSight {
                 stream: stream.clone(),
             });
         self.send_command(
-            zensight_common::origin_rpc_key(&source, "parallax", "stream/set"),
+            self.parallax_stream_set_key(&source),
             &close,
             format!("Closed preview for {stream}"),
         )
@@ -5131,9 +5172,11 @@ impl ZenSight {
         else {
             return Task::none();
         };
+        // Media keys are origin-scoped; `*` covers the pre-map window.
+        let media_origin = self.origin_for(&source).unwrap_or_else(|| "*".into());
         let (frames, handle) = Task::stream(parallax_h264::h264_tile_stream(
             session,
-            source.clone(),
+            media_origin,
             stream.clone(),
             generation,
         ))
@@ -5146,7 +5189,7 @@ impl ZenSight {
                 true,
             );
         }
-        let cmd_key = zensight_common::origin_rpc_key(&source, "parallax", "stream/set");
+        let cmd_key = self.parallax_stream_set_key(&source);
         let open =
             zensight_common::command::Command::new(zensight_common::StreamControl::OpenStream {
                 stream: stream.clone(),
@@ -5202,7 +5245,7 @@ impl ZenSight {
         // recur (backed off in h264_tile_stream) — a toast per request is
         // pure noise. Failures still surface.
         self.send_command(
-            zensight_common::origin_rpc_key(&source, "parallax", "stream/set"),
+            self.parallax_stream_set_key(&source),
             &request,
             String::new(),
         )
@@ -5282,7 +5325,7 @@ impl ZenSight {
         if streams.is_empty() || self.demo_mode || self.command_registry.is_none() {
             return Task::none();
         }
-        let cmd_key = zensight_common::origin_rpc_key(&source, "parallax", "stream/set");
+        let cmd_key = self.parallax_stream_set_key(&source);
         Task::batch(streams.into_iter().map(|stream| {
             let close = zensight_common::command::Command::new(
                 zensight_common::StreamControl::CloseStream {
@@ -7037,6 +7080,85 @@ mod sensor_liveliness_tests {
 
 /// Forget-device (#stale facets): dropping a facet removes its map entry, and
 /// forgetting the open device reuses the back-to-dashboard path.
+#[cfg(test)]
+mod origin_map_tests {
+    use super::*;
+    use zensight_common::Protocol;
+
+    /// The drill-down fetches key off the v1 origin, which the wire payloads
+    /// don't carry in `source` (hostnames) — the map bridges via the health/
+    /// registration/entity docs' `host_id` (== origin id, RFC 06 §1).
+    #[test]
+    fn health_snapshot_populates_the_origin_map() {
+        let mut a = ZenSight::boot(true).0;
+        assert_eq!(a.origin_for("hostA"), None);
+
+        let snapshot = zensight_common::HealthSnapshot {
+            sensor: "sysinfo".into(),
+            status: zensight_common::HealthStatus::Healthy,
+            uptime_secs: 1,
+            devices_total: 0,
+            devices_responding: 0,
+            devices_failed: 0,
+            last_poll_duration_ms: 0,
+            errors_last_hour: 0,
+            metrics_published: 1,
+            host_id: Some("h-3fa9c2d41b7e".into()),
+            source: Some("hostA".into()),
+        };
+        let _ = a.update(Message::HealthSnapshotReceived(snapshot));
+        assert_eq!(a.origin_for("hostA").as_deref(), Some("h-3fa9c2d41b7e"));
+    }
+
+    #[test]
+    fn entity_members_populate_the_origin_map() {
+        let mut a = ZenSight::boot(true).0;
+        let entity = zensight_common::HostEntity {
+            entity_id: "h-3fa9c2d41b7e".into(),
+            aliases: vec![],
+            host_id: Some("h-3fa9c2d41b7e".into()),
+            boot_id: None,
+            ips: vec![],
+            macs: vec![],
+            container_ids: vec![],
+            hostname: Some("hostA".into()),
+            fqdn: None,
+            names: vec![],
+            vendor: None,
+            platform: None,
+            members: vec![zensight_common::MemberClaim {
+                sensor: "netring".into(),
+                source: "hostA".into(),
+                rule: "host_id".into(),
+                confidence: 1.0,
+                last_seen: 1,
+            }],
+            status: None,
+            last_updated: 1,
+        };
+        let _ = a.update(Message::EntityReceived(entity));
+        assert_eq!(a.origin_for("hostA").as_deref(), Some("h-3fa9c2d41b7e"));
+    }
+
+    /// selected_origin_for: mapped origin when the selected device's source is
+    /// known; None (→ fleet fallback) otherwise.
+    #[test]
+    fn selected_origin_resolves_through_the_map() {
+        let mut a = ZenSight::boot(true).0;
+        let id = DeviceId::new(Protocol::Netring, "hostA");
+        a.selected_device = Some(DeviceDetailState::new(id));
+        assert_eq!(a.selected_origin_for(Protocol::Netring), None);
+
+        a.origins.insert("hostA".into(), "h-3fa9c2d41b7e".into());
+        assert_eq!(
+            a.selected_origin_for(Protocol::Netring).as_deref(),
+            Some("h-3fa9c2d41b7e")
+        );
+        // Wrong protocol → no origin (fleet fallback).
+        assert_eq!(a.selected_origin_for(Protocol::Sysinfo), None);
+    }
+}
+
 #[cfg(test)]
 mod forget_device_tests {
     use super::*;

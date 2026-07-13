@@ -111,13 +111,14 @@ impl SysinfoDetailState {
     }
 }
 
-/// Fetch + decode the process table for the host at `origin` sorted by `sort`.
+/// Fetch + decode the process table sorted by `sort` — origin-scoped when
+/// the host's origin is known, else the fleet selector (first reply).
 pub async fn fetch_processes(
     session: Arc<zenoh::Session>,
-    origin: String,
+    origin: Option<String>,
     sort: ProcessSort,
 ) -> Option<Vec<ProcessRecord>> {
-    super::netlink_detail::fetch_records(session, processes_key(Some(&origin), sort)).await
+    super::netlink_detail::fetch_records(session, processes_key(origin.as_deref(), sort)).await
 }
 
 #[cfg(test)]
@@ -126,10 +127,12 @@ mod tests {
 
     #[test]
     fn key_is_host_scoped_with_sort_and_top() {
+        // Mapped origin → the drilled-in host's concrete procedure key.
         assert_eq!(
-            processes_key(None, ProcessSort::Cpu),
-            "zensight/@v1/*/@rpc/sysinfo/processes?sort=cpu&top=50"
+            processes_key(Some("h-3fa9c2d41b7e"), ProcessSort::Cpu),
+            "zensight/@v1/h-3fa9c2d41b7e/@rpc/sysinfo/processes?sort=cpu&top=50"
         );
+        // No mapping yet → the fleet selector fallback.
         assert_eq!(
             processes_key(None, ProcessSort::Mem),
             "zensight/@v1/*/@rpc/sysinfo/processes?sort=mem&top=50"

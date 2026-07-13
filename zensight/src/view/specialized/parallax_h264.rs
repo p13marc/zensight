@@ -109,7 +109,7 @@ mod real {
     /// Every yielded message carries the tile `generation` it was opened with.
     pub fn h264_tile_stream(
         session: Arc<Session>,
-        source: String,
+        origin: String,
         stream: String,
         generation: u64,
     ) -> impl Stream<Item = Message> {
@@ -122,7 +122,7 @@ mod real {
             // firehose" rule's intent holds; zenoh matching is
             // intersection-based, so the sensor's matching listener sees
             // this subscriber (pinned in the sensor e2e).
-            let key = media_video_key(Protocol::Parallax, &source, &stream, "h264", "*");
+            let key = media_video_key(Protocol::Parallax, &origin, &stream, "h264", "*");
             let subscriber = match session.declare_subscriber(&key).await {
                 Ok(s) => s,
                 Err(e) => {

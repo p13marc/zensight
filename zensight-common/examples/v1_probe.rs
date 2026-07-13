@@ -18,6 +18,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use zensight_common::{HealthSnapshot, StreamDescriptor, decode_auto};
+
 #[tokio::main]
 async fn main() {
     let listen = std::env::var("PROBE_LISTEN").unwrap_or_else(|_| "tcp/127.0.0.1:17471".into());
@@ -71,6 +73,23 @@ async fn main() {
         })
         .await
         .expect("v1 subscriber");
+
+    // GUI-shaped origin map: the GUI learns source→origin from the health
+    // docs' host_id (== the v1 origin id) and keys its drill-down fetches on
+    // it — this phase replays that exact path.
+    let origins: Arc<Mutex<BTreeMap<String, String>>> = Arc::new(Mutex::new(BTreeMap::new()));
+    let origins_log = origins.clone();
+    let _health_sub = session
+        .declare_subscriber("zensight/@v1/*/state/*/health")
+        .callback(move |s| {
+            if let Ok(snapshot) = decode_auto::<HealthSnapshot>(&s.payload().to_bytes())
+                && let (Some(hid), Some(src)) = (snapshot.host_id, snapshot.source)
+            {
+                origins_log.lock().unwrap().insert(src, hid);
+            }
+        })
+        .await
+        .expect("health subscriber");
 
     tokio::time::sleep(Duration::from_secs(secs)).await;
 
@@ -134,8 +153,59 @@ async fn main() {
     probe("zensight/@v1/*/state/*/alert/*".into()).await;
     probe("zensight/@v1/@catalog/state/entity/*".into()).await;
 
+    // == GUI-shaped drill-down phase: origin-scoped GETs, exactly what the
+    // device detail tabs send (the fleet probes above cannot catch a broken
+    // origin path — that is how the origin-map bug shipped).
+    println!("== GUI-shaped drill-downs (origin-scoped) ==");
+    let origin_map = origins.lock().unwrap().clone();
+    let mut gui_fail = false;
+    if origin_map.is_empty() {
+        println!("FAIL: no source→origin mapping learned from health docs");
+        gui_fail = true;
+    }
+    for (source, origin) in &origin_map {
+        println!("  {source} -> {origin}");
+        let drill =
+            |producer: &str, tail: &str| format!("zensight/@v1/{origin}/@rpc/{producer}/{tail}");
+        let mut want = Vec::new();
+        if producers.contains("sysinfo") {
+            want.push(drill("sysinfo", "processes?sort=cpu&top=5"));
+        }
+        if producers.contains("netlink") {
+            want.push(drill("netlink", "sockets"));
+        }
+        if producers.contains("systemd") {
+            want.push(drill("systemd", "units"));
+        }
+        if producers.contains("netring") {
+            want.push(drill("netring", "flows"));
+        }
+        if producers.contains("parallax") {
+            want.push(drill("parallax", "streams"));
+        }
+        for key in want {
+            if probe(key.clone()).await == 0 {
+                eprintln!("  !! origin-scoped drill-down got no reply: {key}");
+                gui_fail = true;
+            }
+        }
+
+        // Parallax end-to-end: open a stream via the origin-scoped write
+        // procedure, expect a JPEG preview frame on the concrete media key,
+        // then close it — the full GUI tile lifecycle.
+        if producers.contains("parallax") {
+            match parallax_tile_roundtrip(&session, origin).await {
+                Ok(stream) => println!("  parallax tile round-trip on '{stream}' ✓"),
+                Err(e) => {
+                    println!("FAIL: parallax tile round-trip: {e}");
+                    gui_fail = true;
+                }
+            }
+        }
+    }
+
     println!("== verdict ==");
-    let mut fail = rpc_fail;
+    let mut fail = rpc_fail || gui_fail;
     if !legacy_keys.is_empty() {
         println!("FAIL: legacy bus carried {} samples:", legacy_keys.len());
         for k in legacy_keys.iter().take(10) {
@@ -155,4 +225,75 @@ async fn main() {
         );
     }
     std::process::exit(if fail { 1 } else { 0 });
+}
+
+/// Open the first advertised parallax stream (mjpeg), await one preview frame
+/// on the concrete `@media` key, close the stream. Mirrors the GUI tile.
+async fn parallax_tile_roundtrip(session: &zenoh::Session, origin: &str) -> Result<String, String> {
+    let streams_key = format!("zensight/@v1/{origin}/@rpc/parallax/streams");
+    let replies = session
+        .get(&streams_key)
+        .timeout(Duration::from_secs(5))
+        .await
+        .map_err(|e| format!("streams get: {e}"))?;
+    let reply = replies
+        .recv_async()
+        .await
+        .map_err(|_| "no streams reply".to_string())?;
+    let sample = reply.result().map_err(|e| format!("streams err: {e:?}"))?;
+    let catalogue: Vec<StreamDescriptor> = serde_json::from_slice(&sample.payload().to_bytes())
+        .map_err(|e| format!("streams decode: {e}"))?;
+    let stream = catalogue
+        .first()
+        .map(|d| d.stream.clone())
+        .ok_or("empty stream catalogue")?;
+
+    let preview_key = format!("zensight/@v1/{origin}/@media/parallax/{stream}/preview/jpeg");
+    let sub = session
+        .declare_subscriber(&preview_key)
+        .await
+        .map_err(|e| format!("preview subscribe: {e}"))?;
+
+    let open = zensight_common::command::Command::new(zensight_common::StreamControl::OpenStream {
+        stream: stream.clone(),
+        codec: Some("mjpeg".into()),
+        max_height: None,
+    });
+    let set_key = format!("zensight/@v1/{origin}/@rpc/parallax/stream/set");
+    let body = serde_json::to_vec(&open).map_err(|e| e.to_string())?;
+    let replies = session
+        .get(&set_key)
+        .payload(body)
+        .timeout(Duration::from_secs(5))
+        .await
+        .map_err(|e| format!("open get: {e}"))?;
+    let reply = replies
+        .recv_async()
+        .await
+        .map_err(|_| "no open reply".to_string())?;
+    reply.result().map_err(|e| format!("open refused: {e:?}"))?;
+
+    let frame = tokio::time::timeout(Duration::from_secs(15), sub.recv_async())
+        .await
+        .map_err(|_| "no preview frame within 15s".to_string())?
+        .map_err(|e| format!("preview recv: {e}"))?;
+    let n = frame.payload().to_bytes().len();
+    if n == 0 {
+        return Err("empty preview frame".into());
+    }
+
+    let close =
+        zensight_common::command::Command::new(zensight_common::StreamControl::CloseStream {
+            stream: stream.clone(),
+        });
+    let body = serde_json::to_vec(&close).map_err(|e| e.to_string())?;
+    if let Ok(replies) = session
+        .get(&set_key)
+        .payload(body)
+        .timeout(Duration::from_secs(5))
+        .await
+    {
+        let _ = replies.recv_async().await;
+    }
+    Ok(stream)
 }
