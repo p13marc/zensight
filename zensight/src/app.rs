@@ -256,6 +256,7 @@ impl ZenSight {
             mode: persistent.zenoh_mode.clone(),
             connect: persistent.zenoh_connect.clone(),
             listen: persistent.zenoh_listen.clone(),
+            scouting: true,
         }
         .with_env_overrides();
         let link = crate::subscription::LinkConfig {
@@ -6302,6 +6303,7 @@ impl ZenSight {
                 mode: self.settings.zenoh_mode.as_str().to_string(),
                 connect: self.settings.connect_endpoints(),
                 listen: self.settings.listen_endpoints(),
+                scouting: true,
             },
             scope: self.settings.scope_entries(),
             profile: self.settings.link_profile,

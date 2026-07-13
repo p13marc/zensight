@@ -54,10 +54,21 @@ pub async fn connect(config: &ZenohConfig) -> Result<Session> {
         .insert_json5("timestamping/enabled", "true")
         .map_err(|e| Error::Config(format!("Failed to enable timestamping: {}", e)))?;
 
+    // Isolated runs (tests, smoke, pinned-endpoint deployments) turn
+    // multicast scouting off so the session can NEVER join a mesh beyond its
+    // explicit endpoints. Gossip stays on: it only propagates within the
+    // already-connected graph, and hub-and-spoke deployments rely on it.
+    if !config.scouting {
+        zenoh_config
+            .insert_json5("scouting/multicast/enabled", "false")
+            .map_err(|e| Error::Config(format!("Failed to disable multicast scouting: {}", e)))?;
+    }
+
     tracing::info!(
         mode = %config.mode,
         connect = ?config.connect,
         listen = ?config.listen,
+        scouting = config.scouting,
         "Connecting to Zenoh"
     );
 

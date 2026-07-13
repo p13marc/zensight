@@ -46,6 +46,7 @@ impl DemoContext {
             mode: "peer".to_string(),
             connect: vec![endpoint.to_string()],
             listen: vec![],
+            scouting: false,
         };
         let session = Arc::new(crate::session::open_session(&config, true).await?);
         let registry = PublisherRegistry::new(session.clone());

@@ -58,6 +58,15 @@ zensight/@v1/@catalog/…                                   the identity catalog
 
 ## Operations
 
+Isolated verification: `cargo run -p zensight-common --example v1_probe` opens
+a multicast-scouting-off listener, watches the bus, exercises the @rpc plane,
+and fails if the retired legacy bus (`zensight/**`) carries anything. Point
+sensors at it with `ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:17471
+ZENSIGHT_ZENOH_SCOUTING=false` (the `zenoh.scouting` config knob / env
+override disables multicast discovery so a session can never join a mesh
+beyond its explicit endpoints; gossip stays on — it only propagates within
+the connected graph).
+
 Session config, storage recipes (latest/catalog/timeseries/pdns), ACL, and
 constrained-link profiles: RFC [09](rfcs/keyspace-v2/09-operations.md).
 Shipped router configs: [`configs/router-evidence-storage.json5`](../configs/router-evidence-storage.json5)
