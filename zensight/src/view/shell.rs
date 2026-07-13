@@ -270,23 +270,57 @@ pub fn app_shell<'a>(
     alert_count: usize,
     last_update_ms: Option<i64>,
     now_ms: i64,
+    focused_host: Option<String>,
     content: Element<'a, Message>,
 ) -> Element<'a, Message> {
-    row![
-        nav_rail(current),
-        column![
-            top_bar(
-                current,
-                device,
-                connection,
-                alert_count,
-                last_update_ms,
-                now_ms
-            ),
-            container(content).width(Length::Fill).height(Length::Fill),
+    let mut stack = column![top_bar(
+        current,
+        device,
+        connection,
+        alert_count,
+        last_update_ms,
+        now_ms
+    )];
+    if let Some(host) = focused_host {
+        stack = stack.push(focus_banner(host));
+    }
+    stack = stack.push(container(content).width(Length::Fill).height(Length::Fill));
+    row![nav_rail(current), stack.width(Length::Fill)].into()
+}
+
+/// Focus-mode banner (#476).
+///
+/// While focused the GUI subscribes to one origin, so every *other* host's
+/// cards go stale and then disappear. That is the feature — on a constrained
+/// link it is the whole point — but it looks exactly like a fleet-wide outage,
+/// so it has to be said out loud and be one click to undo.
+fn focus_banner<'a>(host: String) -> Element<'a, Message> {
+    container(
+        row![
+            text(format!("Focused on {host}")).size(font::CAPTION),
+            text("— subscribed to this host only; fleet data is paused")
+                .size(font::CAPTION)
+                .style(dim),
+            container(text("")).width(Length::Fill),
+            button(text("Exit focus").size(font::CAPTION))
+                .on_press(Message::SetFocusHost(None))
+                .padding([2, 10])
+                .style(iced::widget::button::primary),
         ]
-        .width(Length::Fill)
-    ]
+        .spacing(space::SM)
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding([space::XS, space::MD])
+    .style(|theme: &Theme| container::Style {
+        background: Some(Background::Color(theme::colors(theme).background_strong())),
+        border: Border {
+            color: theme::colors(theme).primary(),
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..Default::default()
+    })
     .into()
 }
 

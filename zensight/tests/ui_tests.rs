@@ -267,6 +267,7 @@ fn shell_ui() -> iced_test::Simulator<'static, Message> {
         0,
         Some(10_000),
         12_000,
+        None,
         content,
     ))
 }
@@ -283,6 +284,7 @@ fn test_shell_shows_freshness_live() {
         0,
         Some(10_000),
         12_000, // 2s after last point => Live
+        None,
         content,
     ));
     assert!(ui.find("Live").is_ok());
@@ -298,6 +300,7 @@ fn test_shell_shows_freshness_paused() {
         0,
         None,
         12_000,
+        None,
         content,
     ));
     assert!(ui.find("Paused").is_ok());
@@ -398,6 +401,70 @@ fn test_device_detail_view() {
     // Should show section headers (specialized view shows CPU, Memory, etc.)
     assert!(ui.find("CPU").is_ok());
     assert!(ui.find("Memory").is_ok());
+}
+
+/// #476: the host detail header offers "Focus this host" once the host's origin
+/// is known, and clicking it drives `SetFocusHost(Some(origin))`.
+#[test]
+fn test_device_detail_focus_button() {
+    let device_id = DeviceId {
+        protocol: Protocol::Sysinfo,
+        source: "server01".to_string(),
+    };
+    let mut state = DeviceDetailState::new(device_id);
+    state.origin = Some("h-3fa9c2d41b7e".to_string());
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
+    let _ = ui.click("Focus this host");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::SetFocusHost(Some(o)) if o == "h-3fa9c2d41b7e")),
+        "clicking Focus should request focus on this host's origin"
+    );
+}
+
+/// #476: while focused the same button becomes the way out — and the shell says
+/// so, because an emptied fleet dashboard otherwise looks like an outage.
+#[test]
+fn test_focus_mode_offers_a_way_out() {
+    let device_id = DeviceId {
+        protocol: Protocol::Sysinfo,
+        source: "server01".to_string(),
+    };
+    let mut state = DeviceDetailState::new(device_id);
+    state.origin = Some("h-3fa9c2d41b7e".to_string());
+    state.focused = true;
+
+    let syslog_filter = SyslogFilterState::default();
+    let mut ui = simulator(device_view_with_syslog_filter(&state, &syslog_filter, &[]));
+    let _ = ui.click("Exit focus");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::SetFocusHost(None)))
+    );
+
+    // The shell banner names the focused host and carries its own exit.
+    let content = iced::widget::text("content").into();
+    let mut shell = simulator(zensight::view::shell::app_shell(
+        CurrentView::Dashboard,
+        None,
+        ConnectionState::Connected,
+        0,
+        Some(10_000),
+        12_000,
+        Some("server01".to_string()),
+        content,
+    ));
+    assert!(shell.find("Focused on server01").is_ok());
+    let _ = shell.click("Exit focus");
+    let msgs: Vec<Message> = shell.into_messages().collect();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::SetFocusHost(None)))
+    );
 }
 
 /// #133: a multi-sensor host renders one facet tab per sensor, and clicking an
@@ -3568,6 +3635,7 @@ fn test_nav_opens_logs() {
         0,
         None,
         0,
+        None,
         inner.into(),
     ));
     let _ = ui.click("Logs");
@@ -3588,6 +3656,7 @@ fn test_nav_opens_incidents() {
         0,
         None,
         0,
+        None,
         inner.into(),
     ));
     let _ = ui.click("Incidents");
@@ -3608,6 +3677,7 @@ fn test_nav_opens_inventory() {
         0,
         None,
         0,
+        None,
         inner.into(),
     ));
     let _ = ui.click("Inventory");

@@ -51,6 +51,29 @@ landing view.
 
 The shell is always present; only the content region swaps as you navigate.
 
+## Focus mode (one host instead of the fleet)
+
+The v1 grammar made a single host expressible as one selector — `@v1/<origin>/**`
+— so the host detail header carries a **Focus this host** button (#476). Focusing
+sets `LinkConfig.focus = Some(origin)`; `subscription.rs` then swaps the fleet
+data-plane selectors for that origin's telemetry, state, alerts and liveliness. On
+a constrained link this is the difference between one host's samples and the whole
+fleet's firehose.
+
+Two consequences worth knowing:
+
+- **The fleet dashboard empties while focused.** That is the feature, but it looks
+  exactly like an outage, so the shell renders a persistent banner naming the
+  focused host with a one-click **Exit focus**.
+- **Toggling re-declares the Zenoh session.** Iced hashes `LinkConfig` in
+  `Subscription::run_with`, so a change tears the subscription down and rebuilds
+  it — a second or two of `Connecting…`, not a free switch.
+
+The `@catalog` entity subscription deliberately stays fleet-wide: it is tiny, and
+it is what lets you un-focus, or focus straight onto a different host. Focus is
+runtime-only — it is not persisted to `settings.json5`, and the configured
+`subscription_scope` is left untouched underneath it.
+
 ## Overlays (not routable)
 
 Three surfaces render *on top of* the current view rather than replacing it, so

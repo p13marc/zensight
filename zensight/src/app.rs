@@ -268,6 +268,9 @@ impl ZenSight {
             zenoh: zenoh_config,
             scope: persistent.subscription_scope.clone(),
             profile: persistent.link_profile,
+            // Focus is runtime-only: a GUI that came up already focused would
+            // look like a GUI that had lost the fleet.
+            focus: None,
         };
 
         let stale_threshold_ms = (persistent.stale_threshold_secs * 1000) as i64;
@@ -1554,6 +1557,9 @@ impl ZenSight {
                 let key = sensor_instance_key(&snapshot.sensor, snapshot.source.as_deref());
                 if let (Some(hid), Some(src)) = (&snapshot.host_id, &snapshot.source) {
                     self.origins.insert(src.clone(), hid.clone());
+                    // The Focus control (#476) is disabled until the origin is
+                    // known; this is where it usually becomes known.
+                    self.refresh_focus_state();
                 }
                 self.sensor_health.insert(key, snapshot);
             }
@@ -1584,6 +1590,7 @@ impl ZenSight {
             Message::SensorInfoReceived(info) => {
                 if let Some(hid) = &info.host_id {
                     self.origins.insert(info.source.clone(), hid.clone());
+                    self.refresh_focus_state();
                 }
                 self.known_sensors
                     .insert(format!("{}@{}", info.name, info.source), info);
@@ -1651,6 +1658,7 @@ impl ZenSight {
                     for member in &entity.members {
                         self.origins.insert(member.source.clone(), hid.clone());
                     }
+                    self.refresh_focus_state();
                 }
                 self.entities.upsert(entity);
                 self.rederive_entities();
@@ -1827,6 +1835,45 @@ impl ZenSight {
                 self.selected_device = None;
                 self.set_view(CurrentView::Dashboard);
                 return teardown;
+            }
+
+            Message::SetFocusHost(origin) => {
+                // Re-keying `self.link` is the whole mechanism: Iced hashes it,
+                // so the subscription tears the Zenoh session down and
+                // re-declares against the narrowed selectors (#476). The fleet's
+                // devices will age out of the dashboard while focused — that is
+                // the point, and the shell shows a banner saying so.
+                if self.link.focus == origin {
+                    return Task::none();
+                }
+                match &origin {
+                    Some(o) => {
+                        let host = self
+                            .origins
+                            .iter()
+                            .find(|(_, v)| *v == o)
+                            .map(|(k, _)| k.clone())
+                            .unwrap_or_else(|| o.clone());
+                        self.toasts.push(
+                            ToastSeverity::Info,
+                            format!(
+                                "Focused on {host} — subscribing to that host only; \
+                                 fleet data is paused"
+                            ),
+                        );
+                    }
+                    None => self.toasts.push(
+                        ToastSeverity::Info,
+                        "Focus cleared — back to the fleet".to_string(),
+                    ),
+                }
+                self.link.focus = origin;
+                self.refresh_focus_state();
+                // Reconnecting: the restarted subscription drives
+                // Connecting → Connected.
+                self.dashboard.connection_state =
+                    crate::view::dashboard::ConnectionState::Connecting;
+                self.dashboard.connected = false;
             }
 
             Message::ForgetDevice(id) => {
@@ -4136,6 +4183,21 @@ impl ZenSight {
         self.origins.get(source).cloned()
     }
 
+    /// Re-project the selected device's origin and focus flag (#476).
+    ///
+    /// The source→origin map fills in asynchronously (health/registration/entity
+    /// docs), so a device selected in the first few seconds has no origin yet
+    /// and its Focus control starts disabled. Call this whenever the map or the
+    /// link's focus changes.
+    fn refresh_focus_state(&mut self) {
+        let focus = self.link.focus.clone();
+        if let Some(device) = self.selected_device.as_mut() {
+            let origin = self.origins.get(&device.device_id.source).cloned();
+            device.focused = origin.is_some() && origin == focus;
+            device.origin = origin;
+        }
+    }
+
     /// The parallax `stream/set` write key for `source`'s host: the concrete
     /// origin key when the origin is known, else the fleet selector (the
     /// command carries the stream name, and send_command targets All).
@@ -5746,6 +5808,17 @@ impl ZenSight {
             .as_ref()
             .filter(|_| self.current_view == CurrentView::Device)
             .map(|d| d.device_id.source.as_str());
+        // Focus mode (#476): show the *hostname* if we can map the origin back
+        // to one, else the origin id itself — never nothing, because the banner
+        // is what explains why the rest of the fleet vanished.
+        let focused_host = self.link.focus.as_ref().map(|origin| {
+            self.origins
+                .iter()
+                .find(|(_, v)| *v == origin)
+                .map(|(source, _)| source.clone())
+                .unwrap_or_else(|| origin.clone())
+        });
+
         let shelled = crate::view::shell::app_shell(
             self.current_view,
             device_name,
@@ -5753,6 +5826,7 @@ impl ZenSight {
             unack,
             self.last_telemetry_ms,
             now_ms(),
+            focused_host,
             main_view,
         );
 
@@ -6205,6 +6279,12 @@ impl ZenSight {
         let mut detail_state = DeviceDetailState::with_max_history(device_id.clone(), max_history);
         // Project this device's favorited metrics (#27) from the global set.
         detail_state.set_favorites(self.device_favorites(&device_id));
+        // Focus state (#476): the origin may not be known yet (the map is fed by
+        // health/registration/entity docs), in which case the Focus control
+        // renders disabled — see `refresh_focus_state`.
+        detail_state.origin = self.origin_for(&device_id.source);
+        detail_state.focused =
+            detail_state.origin.is_some() && detail_state.origin == self.link.focus;
         self.selected_device = Some(detail_state);
         self.set_view(CurrentView::Device);
         // Project firing anomalies for this source into the netring view (#253).
@@ -6351,6 +6431,8 @@ impl ZenSight {
             },
             scope: self.settings.scope_entries(),
             profile: self.settings.link_profile,
+            // A settings edit does not clear focus.
+            focus: self.link.focus.clone(),
         };
         let connection_changed = self.link != new_link;
         self.link = new_link;

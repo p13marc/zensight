@@ -303,6 +303,49 @@ pub fn all_alerts_wildcard() -> String {
     format!("{}/@v1/*/state/*/alert/*", KEY_PREFIX)
 }
 
+// ---------------------------------------------------------------------------
+// Focus mode (issue #476): one origin instead of the fleet firehose.
+//
+// The origin is a single chunk at a fixed position, so "everything one host
+// publishes, and nothing else" is one selector — a subscription that was not
+// expressible on the incumbent keyspace, where the host was buried in a
+// per-protocol position. On a constrained link (the deployment this convention
+// was shaped around, RFC 09 §4) a technician debugging one host otherwise pays
+// for the whole fleet's telemetry to reach their laptop.
+//
+// The `@`-verbatim planes are structurally excluded: a wildcard never matches an
+// `@`-chunk, so none of these can pull `@rpc`/`@media`/`@blob` (design property
+// D2). RFC 09 §1's cookbook writes this as a single `@v1/<origin>/**`; we keep
+// the per-class selectors instead, because telemetry and state ride *different
+// delivery tiers* in this consumer (advanced/history vs plain) and one selector
+// would collapse them onto one subscriber.
+// ---------------------------------------------------------------------------
+
+/// Every telemetry key published by one host.
+pub fn origin_telemetry_wildcard(origin: &str) -> String {
+    format!("{KEY_PREFIX}/@v1/{origin}/telemetry/**")
+}
+
+/// Every state key published by one host.
+pub fn origin_state_wildcard(origin: &str) -> String {
+    format!("{KEY_PREFIX}/@v1/{origin}/state/**")
+}
+
+/// One host's firing alerts (the late-joiner seed GET).
+pub fn origin_alerts_wildcard(origin: &str) -> String {
+    format!("{KEY_PREFIX}/@v1/{origin}/state/*/alert/*")
+}
+
+/// One host's sensor liveliness tokens.
+pub fn origin_liveliness_expr(origin: &str) -> String {
+    format!("{KEY_PREFIX}/@v1/{origin}/state/*/alive")
+}
+
+/// One host's device liveliness tokens.
+pub fn origin_device_liveliness_expr(origin: &str) -> String {
+    format!("{KEY_PREFIX}/@v1/{origin}/state/*/device/*/alive")
+}
+
 /// Build the v1 media-plane key for one video stream profile (RFC 07 §1):
 /// `zensight/@v1/<origin>/@media/<producer>/<stream>/video/<codec>/<profile>`.
 ///

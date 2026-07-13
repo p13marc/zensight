@@ -596,6 +596,14 @@ pub enum Message {
     /// User cleared device selection (back to dashboard).
     ClearSelection,
 
+    /// **Focus this host** (#476): subscribe to one origin instead of the fleet.
+    ///
+    /// `Some(origin)` narrows every data-plane subscription to
+    /// `zensight/@v1/<origin>/…`; `None` restores the fleet. Changing this
+    /// re-keys the Zenoh subscription, so Iced tears the session down and
+    /// re-declares — same mechanism as a settings change.
+    SetFocusHost(Option<String>),
+
     /// User toggled protocol filter.
     ToggleProtocolFilter(Protocol),
 

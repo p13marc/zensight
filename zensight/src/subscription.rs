@@ -36,17 +36,58 @@ pub struct LinkConfig {
     pub scope: Vec<String>,
     /// Standard (history/recovery) vs. constrained (plain, store back-fill).
     pub profile: LinkProfile,
+    /// **Focus mode** (#476): when set, subscribe to this one origin
+    /// (`h-<12hex>`) instead of the fleet — telemetry, state, alerts and
+    /// liveliness all narrow to it. Runtime-only; not persisted.
+    ///
+    /// This is the clearest bandwidth win the v1 keyspace unlocked: the origin
+    /// is a single chunk at a fixed position, so "one host's whole data plane
+    /// and nothing else" is expressible at all (RFC 09 §1). Overrides `scope`.
+    pub focus: Option<String>,
 }
 
-/// The telemetry key expressions to subscribe to: the configured scope, or
-/// the full telemetry class selector when no scope is set. The state/entity
-/// subscribers are unaffected — classes are disjoint (D3), so those keys
-/// never ride the telemetry scope.
+/// The telemetry key expressions to subscribe to.
+///
+/// Focus mode wins over the configured scope: the point of focusing is that
+/// *nothing* but the chosen host crosses the link, and a scope entry naming
+/// another origin would defeat that. Otherwise: the configured scope, or the
+/// full telemetry class selector. The state/entity subscribers are unaffected
+/// by `scope` — classes are disjoint (D3) — but they *are* narrowed by focus.
 fn effective_scopes(config: &LinkConfig) -> Vec<String> {
-    if config.scope.is_empty() {
-        vec![all_telemetry_wildcard()]
-    } else {
-        config.scope.clone()
+    match &config.focus {
+        Some(origin) => vec![zensight_common::keyexpr::origin_telemetry_wildcard(origin)],
+        None if config.scope.is_empty() => vec![all_telemetry_wildcard()],
+        None => config.scope.clone(),
+    }
+}
+
+/// The state-plane selector: one origin under focus, the fleet otherwise.
+fn state_selector(config: &LinkConfig) -> String {
+    match &config.focus {
+        Some(origin) => zensight_common::keyexpr::origin_state_wildcard(origin),
+        None => zensight_common::keyexpr::all_state_wildcard(),
+    }
+}
+
+/// The alert seed selector: one origin under focus, the fleet otherwise.
+fn alerts_selector(config: &LinkConfig) -> String {
+    match &config.focus {
+        Some(origin) => zensight_common::keyexpr::origin_alerts_wildcard(origin),
+        None => zensight_common::all_alerts_wildcard(),
+    }
+}
+
+/// The sensor/device liveliness selectors: one origin under focus, else fleet.
+fn liveliness_exprs(config: &LinkConfig) -> (String, String) {
+    match &config.focus {
+        Some(origin) => (
+            zensight_common::keyexpr::origin_liveliness_expr(origin),
+            zensight_common::keyexpr::origin_device_liveliness_expr(origin),
+        ),
+        None => (
+            SENSOR_LIVELINESS_EXPR.to_string(),
+            DEVICE_LIVELINESS_EXPR.to_string(),
+        ),
     }
 }
 
@@ -91,8 +132,11 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
             // The telemetry selector cannot double-deliver it (class chunks
             // differ, design property D3), and the verbatim planes
             // (@rpc/@media/@blob) are structurally invisible (D2).
+            // Focus mode narrows this to one origin (#476); the catalog entity
+            // subscriber below deliberately stays fleet-wide, because it is what
+            // lets an operator un-focus and focus onto a *different* host.
             let control = session
-                .declare_subscriber(zensight_common::keyexpr::all_state_wildcard())
+                .declare_subscriber(state_selector(&config))
                 .with(flume::unbounded())
                 .await
                 .ok();
@@ -115,10 +159,12 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                 tracing::warn!("Failed to create entity subscriber (host entities)");
             }
 
+            let (sensor_liveliness_expr, device_liveliness_expr) = liveliness_exprs(&config);
+
             // Subscribe to sensor liveliness tokens
             let sensor_liveliness = match session
                 .liveliness()
-                .declare_subscriber(SENSOR_LIVELINESS_EXPR)
+                .declare_subscriber(sensor_liveliness_expr.as_str())
                 .await
             {
                 Ok(sub) => Some(sub),
@@ -131,7 +177,7 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
             // Subscribe to device liveliness tokens
             let device_liveliness = match session
                 .liveliness()
-                .declare_subscriber(DEVICE_LIVELINESS_EXPR)
+                .declare_subscriber(device_liveliness_expr.as_str())
                 .await
             {
                 Ok(sub) => Some(sub),
@@ -146,7 +192,7 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
             // drains, so a dead/slow sensor must not hold up the whole GUI for
             // zenoh's default 10s.
             let seed_timeout = std::time::Duration::from_secs(3);
-            for expr in [SENSOR_LIVELINESS_EXPR] {
+            for expr in [sensor_liveliness_expr.as_str()] {
                 if let Ok(replies) = session
                     .liveliness()
                     .get(expr)
@@ -163,7 +209,7 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                 }
             }
 
-            for expr in [DEVICE_LIVELINESS_EXPR] {
+            for expr in [device_liveliness_expr.as_str()] {
                 if let Ok(replies) = session
                     .liveliness()
                     .get(expr)
@@ -186,7 +232,7 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
             // storage. (The state subscriber above is already declared, so an
             // alert firing during this get is not lost.)
             if let Ok(replies) = session
-                .get(zensight_common::all_alerts_wildcard())
+                .get(alerts_selector(&config))
                 .target(zenoh::query::QueryTarget::All)
                 .timeout(seed_timeout)
                 .await
@@ -877,10 +923,41 @@ mod tests {
             zenoh: ZenohConfig::default(),
             scope: vec![],
             profile: LinkProfile::Standard,
+            focus: None,
         };
         assert_eq!(
             effective_scopes(&config),
             vec!["zensight/@v1/*/telemetry/**".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_focus_overrides_scope_with_one_origin() {
+        // Focus mode (#476): one origin's telemetry, whatever the configured scope was.
+        let config = LinkConfig {
+            zenoh: ZenohConfig::default(),
+            scope: vec!["zensight/@v1/*/telemetry/netring/**".into()],
+            profile: LinkProfile::Standard,
+            focus: Some("h-3fa9c2d41b7e".into()),
+        };
+        assert_eq!(
+            effective_scopes(&config),
+            vec!["zensight/@v1/h-3fa9c2d41b7e/telemetry/**".to_string()]
+        );
+        assert_eq!(
+            state_selector(&config),
+            "zensight/@v1/h-3fa9c2d41b7e/state/**"
+        );
+        assert_eq!(
+            alerts_selector(&config),
+            "zensight/@v1/h-3fa9c2d41b7e/state/*/alert/*"
+        );
+        assert_eq!(
+            liveliness_exprs(&config),
+            (
+                "zensight/@v1/h-3fa9c2d41b7e/state/*/alive".to_string(),
+                "zensight/@v1/h-3fa9c2d41b7e/state/*/device/*/alive".to_string()
+            )
         );
     }
 
@@ -893,6 +970,7 @@ mod tests {
                 "zensight/@v1/*/telemetry/sysinfo/**".into(),
             ],
             profile: LinkProfile::Constrained,
+            focus: None,
         };
         assert_eq!(
             effective_scopes(&config),
