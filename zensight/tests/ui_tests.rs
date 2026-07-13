@@ -4909,3 +4909,202 @@ fn tier2_netlink_overview_counts_interfaces() {
         "one of two interfaces is up — the stat must count, not just label"
     );
 }
+
+// ===========================================================================
+// Phase-5 panels (#469): the three procedures that had no caller, and the Fleet
+// view. Driven through the project's GUI harness (iced_test::simulator).
+// ===========================================================================
+
+/// The sysinfo latency panel renders percentiles, not a mean — the tail is the
+/// finding. Sub-millisecond waits read in µs, longer ones in ms.
+#[test]
+fn sysinfo_latency_panel_renders_percentiles() {
+    use zensight_common::{Histogram, LatencyReport};
+
+    let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Sysinfo, "server01"));
+    state.sysinfo_detail.apply_latency(Ok(LatencyReport {
+        available: true,
+        window_secs: 10,
+        runqlat: Histogram {
+            unit: "us".into(),
+            buckets: Vec::new(),
+            total: 500,
+            p50_us: 20,
+            p95_us: 8_000,
+            p99_us: 40_000,
+            max_us: 60_000,
+        },
+        biolatency: Histogram::default(),
+    }));
+
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(ui.find("Run-queue delay (runqlat)").is_ok());
+
+    // p50 is sub-millisecond → µs; p99 is a 40 ms stall → ms. A mean would have
+    // hidden the second behind the first, which is the whole reason for the panel.
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(ui.find("20 µs").is_ok(), "p50 renders in µs");
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &state,
+    ));
+    assert!(ui.find("40.0 ms").is_ok(), "p99 renders in ms");
+}
+
+/// A sensor built without the `ebpf` feature still answers, with
+/// `available: false`. "Cannot measure it" and "nothing answered" are different
+/// problems and must not render the same.
+#[test]
+fn sysinfo_latency_panel_distinguishes_unavailable_from_no_answer() {
+    use zensight_common::LatencyReport;
+
+    let mut unavailable = DeviceDetailState::new(DeviceId::new(Protocol::Sysinfo, "server01"));
+    unavailable.sysinfo_detail.apply_latency(Ok(LatencyReport {
+        available: false,
+        ..Default::default()
+    }));
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &unavailable,
+    ));
+    assert!(
+        ui.find(
+            "The sensor is not collecting these — it needs the `ebpf` feature, \
+             a supported kernel and CAP_BPF."
+        )
+        .is_ok(),
+        "an unavailable collector must say so, not look like a failed fetch"
+    );
+
+    let mut failed = DeviceDetailState::new(DeviceId::new(Protocol::Sysinfo, "server01"));
+    failed
+        .sysinfo_detail
+        .apply_latency(Err("No sysinfo sensor responded".into()));
+    let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
+        &failed,
+    ));
+    assert!(ui.find("Fetch failed: No sysinfo sensor responded").is_ok());
+}
+
+/// The encrypted-DNS destination inventory: an unrecognised resolver is what a
+/// DNS tunnel looks like from the wire, so it is called out, not left as a
+/// `false` in a cell.
+#[test]
+fn netring_encrypted_dns_destinations_flag_unknown_resolvers() {
+    use zensight_common::EncryptedDnsRecord;
+
+    let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Netring, "wiretap1"));
+    state.specialized_tab = zensight::view::specialized::SpecializedTab::Dns;
+    // The DNS tab is capability-gated on `dns/` telemetry. A host doing *only*
+    // encrypted DNS still publishes `dns/encrypted/*`, so it reaches the tab —
+    // which is the case that matters, since that host has no cleartext DNS at all.
+    state.update(zensight_common::TelemetryPoint {
+        timestamp: 0,
+        source: "wiretap1".to_string(),
+        protocol: Protocol::Netring,
+        metric: "dns/encrypted/doh".to_string(),
+        value: zensight_common::TelemetryValue::Counter(43),
+        labels: HashMap::new(),
+    });
+    state.netring_detail.apply_encrypted_dns(Ok(vec![
+        EncryptedDnsRecord {
+            transport: "doh".into(),
+            sni: Some("cloudflare-dns.com".into()),
+            via_known_resolver: true,
+            count: 40,
+        },
+        EncryptedDnsRecord {
+            transport: "dot".into(),
+            sni: Some("suspicious.example".into()),
+            via_known_resolver: false,
+            count: 3,
+        },
+    ]));
+
+    let mut ui = simulator(zensight::view::specialized::netring::netring_sensor_view(
+        &state, None,
+    ));
+    assert!(ui.find("suspicious.example").is_ok());
+
+    let mut ui = simulator(zensight::view::specialized::netring::netring_sensor_view(
+        &state, None,
+    ));
+    assert!(
+        ui.find("⚠ 1 destination(s) are not a recognised public resolver")
+            .is_ok(),
+        "the un-known resolver must be called out, not buried in a column"
+    );
+}
+
+/// The Fleet view's whole reason to exist is spotting the odd one out, so the
+/// skew row is the case worth pinning — and it must sort above the healthy hosts.
+#[test]
+fn fleet_view_surfaces_a_skewed_host_above_the_healthy_ones() {
+    use zensight::view::fleet::{FleetReply, FleetState, fleet_view};
+
+    let sysinfo_slice = zensight_keyspace::registry::REGISTRIES
+        .iter()
+        .find(|(n, _)| *n == "sysinfo")
+        .map(|(_, t)| (*t).to_string())
+        .expect("sysinfo registry");
+
+    // edge01 serves a bumped registry version; server01 serves ours.
+    let skewed = sysinfo_slice.replacen("version = \"1.1\"", "version = \"1.0\"", 1);
+    assert_ne!(skewed, sysinfo_slice, "the fixture must actually differ");
+
+    let mut state = FleetState::default();
+    state.apply(
+        Ok(vec![
+            FleetReply {
+                origin: "h-aaaaaaaaaaaa".into(),
+                producer: "sysinfo".into(),
+                toml: sysinfo_slice,
+            },
+            FleetReply {
+                origin: "h-bbbbbbbbbbbb".into(),
+                producer: "sysinfo".into(),
+                toml: skewed,
+            },
+        ]),
+        &[
+            ("h-aaaaaaaaaaaa".into(), "sysinfo".into(), "server01".into()),
+            ("h-bbbbbbbbbbbb".into(), "sysinfo".into(), "edge01".into()),
+        ],
+    );
+
+    let rows = state.rows.ready().expect("rows");
+    assert_eq!(
+        rows[0].host, "edge01",
+        "the skewed host must sort first — a drifting host buried under ten healthy \
+         ones is the failure this view exists to prevent"
+    );
+
+    let mut ui = simulator(fleet_view(&state));
+    assert!(ui.find("version skew").is_ok());
+    let mut ui = simulator(fleet_view(&state));
+    assert!(ui.find("in sync").is_ok(), "server01 agrees with us");
+}
+
+/// A producer that is alive on the bus but answers no `introspect` must appear as
+/// `silent`, not vanish. Fanning out alone cannot tell "not deployed" from
+/// "deployed and not answering", and the second is the row you need to see.
+#[test]
+fn fleet_view_shows_an_alive_but_silent_producer() {
+    use zensight::view::fleet::{FleetState, fleet_view};
+
+    let mut state = FleetState::default();
+    state.apply(
+        Ok(Vec::new()),
+        &[("h-cccccccccccc".into(), "netring".into(), "edge01".into())],
+    );
+
+    let mut ui = simulator(fleet_view(&state));
+    assert!(
+        ui.find("edge01").is_ok(),
+        "the silent host must still be listed"
+    );
+    let mut ui = simulator(fleet_view(&state));
+    assert!(ui.find("silent").is_ok());
+}
