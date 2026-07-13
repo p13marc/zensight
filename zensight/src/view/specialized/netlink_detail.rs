@@ -1,5 +1,5 @@
 //! On-demand netlink detail client: fetches the full route/neighbor/socket
-//! tables from the sensor's `@/query/*` channels (principle P2 — nothing is
+//! tables from the sensor's `@rpc/netlink/*` procedures (principle P2 — nothing is
 //! streamed; the GUI pulls detail only when a user drills in).
 //!
 //! The fetch+decode core ([`fetch_records`]) is independent of Iced so it can be
@@ -21,7 +21,7 @@ use crate::view::specialized::fetch::Fetch;
 // xfrm/nft query channels (#109). Field names/types must match
 // `zensight-sensor-netlink/src/{map,events}.rs` exactly.
 
-/// One configured IP address (`@/query/addresses`).
+/// One configured IP address (`@rpc/netlink/addresses`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct AddressRecord {
     pub family: u8,
@@ -32,7 +32,7 @@ pub struct AddressRecord {
     pub ifindex: u32,
 }
 
-/// One row of the recent control-plane events ring (`@/query/events`).
+/// One row of the recent control-plane events ring (`@rpc/netlink/events`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct EventRecord {
     pub ts_unix: u64,
@@ -42,7 +42,7 @@ pub struct EventRecord {
     pub detail: String,
 }
 
-/// One default-route transition (`@/query/route_changes`, #111). Mirrors the
+/// One default-route transition (`@rpc/netlink/route_changes`, #111). Mirrors the
 /// sensor's `RouteChangeRecord` JSON shape.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct RouteChangeRecord {
@@ -54,7 +54,7 @@ pub struct RouteChangeRecord {
     pub prev_gateway: Option<String>,
 }
 
-/// One TC qdisc/class entry (`@/query/tc`). `node` is `qdisc` or `class`.
+/// One TC qdisc/class entry (`@rpc/netlink/tc`). `node` is `qdisc` or `class`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct TcRecord {
     pub iface: String,
@@ -71,7 +71,7 @@ pub struct TcRecord {
     pub backlog_pkts: u64,
 }
 
-/// One IPsec Security Association (`@/query/xfrm`).
+/// One IPsec Security Association (`@rpc/netlink/xfrm`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct XfrmSaRecord {
     pub src: Option<String>,
@@ -84,7 +84,7 @@ pub struct XfrmSaRecord {
     pub packets: u64,
 }
 
-/// One nftables rule (`@/query/nft`).
+/// One nftables rule (`@rpc/netlink/nft`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct NftRuleRecord {
     pub family: String,
@@ -100,7 +100,7 @@ pub struct NftRuleRecord {
     pub bytes: u64,
 }
 
-/// One top-retransmit peer from the eBPF module (`@/query/retransmits`, #269).
+/// One top-retransmit peer from the eBPF module (`@rpc/netlink/retransmits`, #269).
 /// Mirrors the sensor's `RetransRecord`; only served on eBPF-enabled hosts.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct RetransRecord {
@@ -110,7 +110,7 @@ pub struct RetransRecord {
 }
 
 /// One tcplife connection-lifecycle record from the eBPF module
-/// (`@/query/connections`, #269). Mirrors the sensor's `ConnView`.
+/// (`@rpc/netlink/connections`, #269). Mirrors the sensor's `ConnView`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ConnRecord {
     pub pid: u32,
@@ -148,7 +148,9 @@ pub enum NetlinkDetailTopic {
 
 impl NetlinkDetailTopic {
     /// The queryable key for this topic (matches the sensor's `query.rs`).
-    pub fn key(&self) -> String {
+    /// `Some(origin)` targets the drilled-in host's concrete key; `None`
+    /// selects the fleet.
+    pub fn key(&self, origin: Option<&str>) -> String {
         let topic = match self {
             NetlinkDetailTopic::Sockets => "sockets",
             NetlinkDetailTopic::Routes => "routes",
@@ -162,7 +164,10 @@ impl NetlinkDetailTopic {
             NetlinkDetailTopic::Retransmits => "retransmits",
             NetlinkDetailTopic::Connections => "connections",
         };
-        format!("zensight/netlink/@/query/{topic}")
+        match origin {
+            Some(o) => zensight_common::origin_rpc_key(o, "netlink", topic),
+            None => zensight_common::fleet_rpc_key("netlink", topic),
+        }
     }
 
     pub fn label(&self) -> &'static str {
@@ -371,7 +376,10 @@ impl NetlinkDetailState {
 /// The sockets key narrowed to one endpoint IP (#309), for the flow↔process
 /// join. Matches the sensor's `SocketSelector` `ip=` parameter.
 pub fn sockets_match_key(ip: &str) -> String {
-    format!("zensight/netlink/@/query/sockets?ip={ip}")
+    format!(
+        "{}?ip={ip}",
+        zensight_common::fleet_rpc_key("netlink", "sockets")
+    )
 }
 
 /// Fetch + decode **all** replies on `key`, concatenated (#309). The shared
@@ -382,7 +390,13 @@ pub async fn fetch_records_all<T: DeserializeOwned>(
     session: Arc<zenoh::Session>,
     key: String,
 ) -> Option<Vec<T>> {
-    let replies = match session.get(&key).await {
+    // Fleet fan-in: target All so BestMatching can never short-circuit the
+    // multi-host consolidation (RFC 05 §2.1).
+    let replies = match session
+        .get(&key)
+        .target(zenoh::query::QueryTarget::All)
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(key = %key, error = %e, "query get failed");
@@ -451,45 +465,48 @@ mod tests {
     #[test]
     fn topic_keys_match_sensor() {
         assert_eq!(
-            NetlinkDetailTopic::Sockets.key(),
-            "zensight/netlink/@/query/sockets"
+            NetlinkDetailTopic::Sockets.key(None),
+            "zensight/@v1/*/@rpc/netlink/sockets"
         );
         // The endpoint-narrowed sockets key (#309) matches the sensor's
         // SocketSelector `ip=` parameter.
         assert_eq!(
             sockets_match_key("10.0.0.5"),
-            "zensight/netlink/@/query/sockets?ip=10.0.0.5"
+            "zensight/@v1/*/@rpc/netlink/sockets?ip=10.0.0.5"
         );
         assert_eq!(
-            NetlinkDetailTopic::Routes.key(),
-            "zensight/netlink/@/query/routes"
+            NetlinkDetailTopic::Routes.key(None),
+            "zensight/@v1/*/@rpc/netlink/routes"
         );
         assert_eq!(
-            NetlinkDetailTopic::Neighbors.key(),
-            "zensight/netlink/@/query/neighbors"
+            NetlinkDetailTopic::Neighbors.key(None),
+            "zensight/@v1/*/@rpc/netlink/neighbors"
         );
         // The 5 previously-dead channels now reachable (#109).
         assert_eq!(
-            NetlinkDetailTopic::Addresses.key(),
-            "zensight/netlink/@/query/addresses"
+            NetlinkDetailTopic::Addresses.key(None),
+            "zensight/@v1/*/@rpc/netlink/addresses"
         );
         assert_eq!(
-            NetlinkDetailTopic::Events.key(),
-            "zensight/netlink/@/query/events"
+            NetlinkDetailTopic::Events.key(None),
+            "zensight/@v1/*/@rpc/netlink/events"
         );
         // Default-route flap history (#111).
         assert_eq!(
-            NetlinkDetailTopic::RouteChanges.key(),
-            "zensight/netlink/@/query/route_changes"
-        );
-        assert_eq!(NetlinkDetailTopic::Tc.key(), "zensight/netlink/@/query/tc");
-        assert_eq!(
-            NetlinkDetailTopic::Xfrm.key(),
-            "zensight/netlink/@/query/xfrm"
+            NetlinkDetailTopic::RouteChanges.key(None),
+            "zensight/@v1/*/@rpc/netlink/route_changes"
         );
         assert_eq!(
-            NetlinkDetailTopic::Nft.key(),
-            "zensight/netlink/@/query/nft"
+            NetlinkDetailTopic::Tc.key(None),
+            "zensight/@v1/*/@rpc/netlink/tc"
+        );
+        assert_eq!(
+            NetlinkDetailTopic::Xfrm.key(None),
+            "zensight/@v1/*/@rpc/netlink/xfrm"
+        );
+        assert_eq!(
+            NetlinkDetailTopic::Nft.key(None),
+            "zensight/@v1/*/@rpc/netlink/nft"
         );
     }
 
@@ -550,7 +567,7 @@ mod tests {
     /// get + decode path (the part the Iced simulator can't exercise).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fetch_records_decodes_live_queryable() {
-        let key = "zensight/netlink/@/query/sockets";
+        let key = "zensight/@v1/*/@rpc/netlink/sockets";
         // Scouting off: with the default config this session joins any real
         // ZenSight mesh on the host, and a live netlink sensor's queryable
         // answers with real sockets instead of the single mock record.

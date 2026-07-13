@@ -6,18 +6,17 @@
 //! retransmits) < wire-L3 (cgroup_skb / systemd: no L2) < wire-L2 (capture: full
 //! frame). Two differently-tagged numbers must never be summed or compared
 //! without the semantics shown. This module is the shared vocabulary (enums +
-//! labels + the `@/query/bandwidth` record shape) so the sensor tiers and the
+//! labels + the `bandwidth` read-procedure record shape) so the sensor tiers and the
 //! GUI can't drift.
 //!
 //! Per-**service** bandwidth (systemd units, low cardinality) is **streamed** as
 //! `unit/<name>/{ip_ingress_bps,ip_egress_bps}` telemetry with the labels below.
 //! Per-**process** bandwidth (netlink sock_diag / eBPF, high cardinality) is
-//! **query-only** — a [`BandwidthRecord`] served on `@/query/bandwidth` (principle
+//! **query-only** — a [`BandwidthRecord`] served on `@rpc/<producer>/bandwidth` (principle
 //! P2: high-cardinality tables are never streamed onto the telemetry bus).
 
 use serde::{Deserialize, Serialize};
 
-use crate::keyexpr::KEY_PREFIX;
 use crate::telemetry::Protocol;
 
 /// Telemetry/record label key naming the measurement source (`bw.source`).
@@ -125,7 +124,7 @@ pub enum BandwidthKey {
     Cgroup { path: String },
 }
 
-/// One row of the on-demand `@/query/bandwidth` per-process table (#317/#316).
+/// One row of the on-demand `@rpc/<producer>/bandwidth` per-process table (#317/#316).
 /// `tx`/`rx` are bytes-per-second derived from cumulative deltas by the producer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BandwidthRecord {
@@ -143,17 +142,20 @@ pub struct BandwidthRecord {
     pub host: Option<String>,
 }
 
-/// The per-protocol queryable key for on-demand per-process bandwidth
-/// (`zensight/<protocol>/@/query/bandwidth`), served by the netlink/eBPF tiers.
-/// GET it with a `?by=process|socket&top=<N>` selector.
+/// The fleet-wide v1 `bandwidth` read procedure for on-demand per-process
+/// bandwidth, served by the netlink/eBPF/netring tiers. GET it with a
+/// `?by=process|socket;top=<N>` selector and query target `All` (RFC 05 §2).
 ///
 /// ```
 /// use zensight_common::bandwidth::bandwidth_query_key;
 /// use zensight_common::Protocol;
-/// assert_eq!(bandwidth_query_key(Protocol::Netlink), "zensight/netlink/@/query/bandwidth");
+/// assert_eq!(
+///     bandwidth_query_key(Protocol::Netlink),
+///     "zensight/@v1/*/@rpc/netlink/bandwidth"
+/// );
 /// ```
 pub fn bandwidth_query_key(protocol: Protocol) -> String {
-    format!("{}/{}/@/query/bandwidth", KEY_PREFIX, protocol.as_str())
+    crate::keyexpr::fleet_rpc_key(protocol.as_str(), "bandwidth")
 }
 
 #[cfg(test)]
@@ -210,10 +212,10 @@ mod tests {
     }
 
     #[test]
-    fn query_key_is_protocol_scoped() {
+    fn query_key_is_the_fleet_procedure_selector() {
         assert_eq!(
             bandwidth_query_key(Protocol::Netlink),
-            "zensight/netlink/@/query/bandwidth"
+            "zensight/@v1/*/@rpc/netlink/bandwidth"
         );
     }
 }

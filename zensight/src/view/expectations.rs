@@ -152,7 +152,7 @@ impl SystemdExpDraft {
         })
     }
 
-    /// Parse a systemd `@/status/expectations` reply into a draft (pure).
+    /// Parse a systemd `@rpc/systemd/expectations` reply into a draft (pure).
     pub fn from_status(json: &str) -> Self {
         let v: serde_json::Value = match serde_json::from_str(json) {
             Ok(v) => v,

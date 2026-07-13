@@ -24,7 +24,7 @@ pub struct SystemdSensorConfig {
     #[serde(default)]
     pub logging: LoggingConfig,
 
-    /// On-demand artifact channel (`@/artifact`) limits — report + snapshot.
+    /// On-demand artifact channel (`@rpc/systemd/artifact/*`) limits — report + snapshot.
     /// Every kind disabled by default.
     #[serde(default)]
     pub artifacts: zensight_sensor_core::ArtifactLimits,
@@ -33,10 +33,6 @@ pub struct SystemdSensorConfig {
 /// systemd protocol configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemdConfig {
-    /// Key expression prefix (default: `zensight/systemd`).
-    #[serde(default = "default_key_prefix")]
-    pub key_prefix: String,
-
     /// Poll interval in seconds (default: 15).
     #[serde(default = "default_poll_interval_secs")]
     pub poll_interval_secs: u64,
@@ -63,7 +59,7 @@ pub struct SystemdConfig {
     pub ip_io_accounting: bool,
 
     /// Bounded capacity of the control-plane event ring (#275) served on
-    /// `@/query/events`.
+    /// `@rpc/systemd/events`.
     #[serde(default = "default_events_capacity")]
     pub events_capacity: usize,
 
@@ -92,7 +88,7 @@ pub struct SystemdConfig {
 /// strictly read-only unless this is explicitly enabled with an allowlist.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionsConfig {
-    /// Master switch. When false, no `@/commands/action` channel is declared.
+    /// Master switch. When false, no `@rpc/systemd/action` procedures are declared.
     #[serde(default)]
     pub enabled: bool,
     /// Unit-name globs a start/stop/restart/reload may target. Empty = reject all.
@@ -117,7 +113,7 @@ fn default_job_timeout_secs() -> u64 {
     30
 }
 
-/// `@/query/cgroups` walk settings (#280).
+/// `@rpc/systemd/cgroups` walk settings (#280).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CgroupConfig {
     /// Default subtree to walk when the query carries no `?path=`.
@@ -223,7 +219,6 @@ impl Default for CollectConfig {
 impl Default for SystemdConfig {
     fn default() -> Self {
         Self {
-            key_prefix: default_key_prefix(),
             poll_interval_secs: default_poll_interval_secs(),
             source: None,
             watch_units: Vec::new(),
@@ -245,10 +240,6 @@ fn default_watch_max() -> usize {
 
 fn default_events_capacity() -> usize {
     256
-}
-
-fn default_key_prefix() -> String {
-    "zensight/systemd".to_string()
 }
 
 fn default_poll_interval_secs() -> u64 {
@@ -281,8 +272,8 @@ impl zensight_sensor_core::SensorConfig for SystemdSensorConfig {
         &self.logging
     }
 
-    fn key_prefix(&self) -> &str {
-        &self.systemd.key_prefix
+    fn producer(&self) -> &str {
+        "systemd"
     }
 
     fn artifact_limits(&self) -> zensight_sensor_core::ArtifactLimits {
@@ -308,7 +299,7 @@ mod tests {
     fn parses_minimal_config_with_defaults() {
         let json = r#"{ zenoh: { mode: "peer" } }"#;
         let cfg: SystemdSensorConfig = json5::from_str(json).unwrap();
-        assert_eq!(cfg.key_prefix(), "zensight/systemd");
+        assert_eq!(cfg.producer(), "systemd");
         assert_eq!(cfg.systemd.poll_interval_secs, 15);
         assert!(cfg.systemd.collect.list_units);
         assert!(cfg.systemd.collect.boot);
@@ -320,7 +311,6 @@ mod tests {
         let json = r#"{
             zenoh: { mode: "peer" },
             systemd: {
-                key_prefix: "zensight/systemd",
                 poll_interval_secs: 30,
                 source: "gw01",
                 collect: { list_units: false, boot: true },

@@ -1,0 +1,801 @@
+# Subject registry: netring (wire-level flow/L7/NDR). RFC 08 §2; migration epic #453.
+# Telemetry is registered as real subjects, not a `{metric...}` catch-all
+# (issue #468) — see registry/sysinfo.toml for the rule and why.
+# Source: src/map.rs (every metric name).
+
+[registry]
+version = "1.1"
+app = "zensight"
+convention = 1
+
+[producer]
+name = "netring"
+description = "wire-level flow/L7/NDR sensor"
+
+[[subject]]
+path = "flow/started_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "flows started"
+
+[[subject]]
+path = "flow/ended_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "flows ended"
+
+[[subject]]
+path = "flow/active"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "flows currently active"
+
+[[subject]]
+path = "flow/bytes_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "bytes across flows"
+
+[[subject]]
+path = "flow/packets_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "packets across flows"
+
+[[subject]]
+path = "flow/retransmits_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "retransmits across flows"
+
+[[subject]]
+path = "flow/by_l4/{proto}/bytes_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 8
+since = "1.1"
+description = "bytes by L4 protocol"
+
+[[subject]]
+path = "flow/by_l4/{proto}/flows_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 8
+since = "1.1"
+description = "flows by L4 protocol"
+
+[[subject]]
+path = "tcp/closed_fin_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "flows closed by FIN"
+
+[[subject]]
+path = "tcp/closed_rst_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "flows closed by RST"
+
+[[subject]]
+path = "tcp/closed_idle_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "flows closed by idle timeout"
+
+[[subject]]
+path = "tcp/resets_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "RSTs observed"
+
+[[subject]]
+path = "tcp/refused_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "connection refusals"
+
+[[subject]]
+path = "capture/{source}/packets"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 32
+since = "1.1"
+description = "packets captured"
+
+[[subject]]
+path = "capture/{source}/drops"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 32
+since = "1.1"
+description = "capture drops"
+
+[[subject]]
+path = "capture/{source}/drop_rate"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 32
+since = "1.1"
+description = "drop rate"
+
+[[subject]]
+path = "capture/{source}/freezes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 32
+since = "1.1"
+description = "AF_PACKET ring freezes"
+
+[[subject]]
+path = "capture/{source}/xdp/rx_dropped"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "AF_XDP rx dropped"
+
+[[subject]]
+path = "capture/{source}/xdp/rx_invalid_descs"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "invalid rx descriptors"
+
+[[subject]]
+path = "capture/{source}/xdp/rx_ring_full"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "rx ring full"
+
+[[subject]]
+path = "capture/{source}/xdp/rx_fill_ring_empty_descs"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "fill ring empty"
+
+[[subject]]
+path = "capture/{source}/xdp/tx_invalid_descs"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "invalid tx descriptors"
+
+[[subject]]
+path = "capture/{source}/xdp/tx_ring_empty_descs"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "tx ring empty"
+
+[[subject]]
+path = "capture/{source}/shed/new_flows_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 32
+since = "1.1"
+description = "flows shed under load"
+
+[[subject]]
+path = "capture/{source}/shed/sampled_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 32
+since = "1.1"
+description = "flows sampled under load"
+
+[[subject]]
+path = "capture/{source}/shed/active"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 32
+since = "1.1"
+description = "load shedding engaged"
+
+[[subject]]
+path = "capture/focus/packets"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "packets matching the focus filter"
+
+[[subject]]
+path = "capture/focus/bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "bytes matching the focus filter"
+
+[[subject]]
+path = "capture/disk/mode"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "capture-to-disk mode (text)"
+
+[[subject]]
+path = "capture/disk/ring_packets"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "packets in the disk ring"
+
+[[subject]]
+path = "capture/disk/ring_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "bytes in the disk ring"
+
+[[subject]]
+path = "capture/disk/retained_files"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "retained capture files"
+
+[[subject]]
+path = "capture/disk/retained_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "retained bytes on disk"
+
+[[subject]]
+path = "capture/disk/dropped"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "packets dropped by the disk writer"
+
+[[subject]]
+path = "capture/disk/evictions"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "files evicted by retention"
+
+[[subject]]
+path = "capture/disk/triggers"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "capture triggers fired"
+
+[[subject]]
+path = "capture/events"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "capture-to-disk lifecycle events (text value, `event` label)"
+
+[[subject]]
+path = "capture/backend"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "the capture backend in use (text; AF_PACKET | AF_XDP | pcap)"
+
+[[subject]]
+path = "dns/queries_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "DNS queries"
+
+[[subject]]
+path = "dns/unanswered_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "queries with no response"
+
+[[subject]]
+path = "dns/query_rtt_p50_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "query RTT p50"
+
+[[subject]]
+path = "dns/query_rtt_p95_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "query RTT p95"
+
+[[subject]]
+path = "dns/query_rtt_p99_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "query RTT p99"
+
+[[subject]]
+path = "dns/responses_by_rcode/{rcode}"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 32
+since = "1.1"
+description = "responses by rcode; the leaf is `<rcode>_total` (noerror|nxdomain|servfail|refused|...)"
+
+[[subject]]
+path = "dns/encrypted/dot"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "DNS-over-TLS detections"
+
+[[subject]]
+path = "dns/encrypted/doq"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "DNS-over-QUIC detections"
+
+[[subject]]
+path = "dns/encrypted/doh"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "DNS-over-HTTPS detections"
+
+[[subject]]
+path = "dns/encrypted/unknown_resolver"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "resolvers not on the allowlist"
+
+[[subject]]
+path = "dns/encrypted/distinct"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "distinct encrypted-DNS resolvers"
+
+[[subject]]
+path = "http/requests_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "HTTP requests"
+
+[[subject]]
+path = "http/status_2xx_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "2xx responses"
+
+[[subject]]
+path = "http/status_3xx_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "3xx responses"
+
+[[subject]]
+path = "http/status_4xx_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "4xx responses"
+
+[[subject]]
+path = "http/status_5xx_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "5xx responses"
+
+[[subject]]
+path = "http/latency_p50_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "request latency p50"
+
+[[subject]]
+path = "http/latency_p95_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "request latency p95"
+
+[[subject]]
+path = "http/methods/{method}"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 32
+since = "1.1"
+description = "requests by method; the leaf is `<method>_total`. The method comes off the wire (capped at 32 distinct)"
+
+[[subject]]
+path = "icmp/unreachable_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "ICMP unreachable"
+
+[[subject]]
+path = "icmp/time_exceeded_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "ICMP time exceeded"
+
+[[subject]]
+path = "icmp/mtu_signal_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "ICMP fragmentation-needed (PMTUD)"
+
+[[subject]]
+path = "icmp/by_kind/{kind}"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 32
+since = "1.1"
+description = "ICMP errors by kind; the leaf is `<kind>_total`"
+
+[[subject]]
+path = "tls/handshakes_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "TLS handshakes"
+
+[[subject]]
+path = "tls/distinct_fingerprints"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "distinct JA4 fingerprints"
+
+[[subject]]
+path = "tls/pq_ratio"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "share of handshakes offering post-quantum key exchange"
+
+[[subject]]
+path = "quic/distinct_sni"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "distinct QUIC SNIs"
+
+[[subject]]
+path = "ssh/distinct_hassh"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "distinct SSH HASSH fingerprints"
+
+[[subject]]
+path = "assets/discovered"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "assets in the observed inventory"
+
+[[subject]]
+path = "bandwidth/{app}/bytes_per_sec"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 32
+since = "1.1"
+description = "wire-level throughput by application class (top 20)"
+
+[[subject]]
+path = "anomaly/{kind}/total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "detector firings by kind; {kind} is the detector slug from the netring crate + enabled feature detectors"
+
+[[subject]]
+path = "flow/red/{quantile}"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "ms"
+cardinality = 5
+since = "1.0"
+description = "flow-lifetime RED quantiles from the capture path"
+[[subject]]
+path = "evidence/names/{ip_slug}"
+class = "state"
+type = "NameObservation"
+cardinality = 4096
+ttl_s = 900
+since = "1.0"
+description = "passive-DNS observation for an actively observed IP (population-budgeted, RFC 04 §1.2)"
+[[subject]]
+path = "health"
+class = "state"
+type = "HealthSnapshot"
+ttl_s = 120
+since = "1.0"
+description = "sensor health document (framework; absorbs the legacy @/status running flag)"
+
+[[subject]]
+path = "errors"
+class = "state"
+type = "ErrorReport"
+ttl_s = 300
+since = "1.0"
+description = "rolling error window (framework)"
+
+[[subject]]
+path = "sensor"
+class = "state"
+type = "SensorInfo"
+ttl_s = 900
+since = "1.0"
+description = "registration document: identity, version, capabilities (framework, 60 s re-emit)"
+
+[[subject]]
+path = "evidence/device/{device}"
+class = "state"
+type = "HostEvidence"
+cardinality = 4096
+ttl_s = 900
+since = "1.0"
+description = "wire-observed asset identity claim (MAC/IP/vendor, RFC 06 §4)"
+
+[[subject]]
+path = "evidence/self"
+class = "state"
+type = "HostEvidence"
+ttl_s = 900
+since = "1.0"
+description = "self-identity claim (RFC 06 §4)"
+
+[[subject]]
+path = "alert/{alert_key}"
+class = "state"
+type = "Alert"
+qos = "alert"
+cardinality = 64
+ttl_s = 900
+since = "1.0"
+description = "alerts; firing->resolved on one key, delete = tombstone"
+[[subject]]
+path = "artifact/{kind}"
+class = "state"
+type = "ArtifactStatus"
+cardinality = 16
+ttl_s = 900
+since = "1.1"
+description = "per-kind artifact progress (framework: V1Context::artifact_status_key)"
+
+[[procedure]]
+path = "introspect"
+kind = "read"
+reply = "RegistrySlice"
+idempotent = true
+since = "1.0"
+description = "the registry slice this build serves (RFC 08 §6)"
+
+[[procedure]]
+path = "artifact/request"
+kind = "write"
+request = "ArtifactRequest"
+reply = "ArtifactAck"
+since = "1.0"
+description = "initiate artifact generation; replies { id } immediately (RFC 05 §3)"
+
+[[procedure]]
+path = "artifact/cancel"
+kind = "write"
+reply = "Ack"
+since = "1.0"
+description = "free an in-flight/ready artifact early (?id=<ulid>)"
+
+[[procedure]]
+path = "artifact/status"
+kind = "read"
+reply = "ArtifactStatus"
+idempotent = true
+since = "1.0"
+description = "advertised artifact kinds + the in-flight/ready state per kind (RFC 05 §3)"
+[[procedure]]
+path = "capture_disk"
+kind = "read"
+reply = "CaptureDiskStatus"
+idempotent = true
+since = "1.0"
+description = "capture-to-disk status (mode, ring occupancy, retention, last event)"
+
+[[procedure]]
+path = "capture_disk/set"
+kind = "write"
+request = "CaptureDiskCommand"
+reply = "Ack"
+since = "1.0"
+description = "capture-to-disk control: capture_now / set_capture mode hot-switch"
+[[procedure]]
+path = "detectors"
+kind = "read"
+reply = "TopicStatus"
+idempotent = true
+since = "1.0"
+description = "current detectors configuration (runtime detection tuning)"
+
+[[procedure]]
+path = "detectors/set"
+kind = "write"
+request = "DetectorConfig"
+reply = "Ack"
+since = "1.0"
+description = "apply detectors configuration (runtime detection tuning)"
+[[procedure]]
+path = "capture_filter"
+kind = "read"
+reply = "TopicStatus"
+idempotent = true
+since = "1.0"
+description = "current capture_filter configuration (reloadable packet-tier BPF filter)"
+
+[[procedure]]
+path = "capture_filter/set"
+kind = "write"
+request = "FilterConfig"
+reply = "Ack"
+since = "1.0"
+description = "apply capture_filter configuration (reloadable packet-tier BPF filter)"
+[[procedure]]
+path = "threat_intel"
+kind = "read"
+reply = "TopicStatus"
+idempotent = true
+since = "1.0"
+description = "current threat_intel configuration (IOC/YARA hot-reload)"
+
+[[procedure]]
+path = "threat_intel/set"
+kind = "write"
+request = "ThreatIntelConfig"
+reply = "Ack"
+since = "1.0"
+description = "apply threat_intel configuration (IOC/YARA hot-reload)"
+[[procedure]]
+path = "flows"
+kind = "read"
+reply = "Vec<FlowRecord>"
+idempotent = true
+since = "1.0"
+description = "flow ring (per-flow data never rides the bus, RFC 04 R3)"
+
+[[procedure]]
+path = "tls"
+kind = "read"
+reply = "Vec<TlsRecord>"
+idempotent = true
+since = "1.0"
+description = "TLS fingerprint ring"
+
+[[procedure]]
+path = "talkers"
+kind = "read"
+reply = "Vec<TalkerRecord>"
+idempotent = true
+since = "1.0"
+description = "per-source rolling rate (?top=N)"
+
+[[procedure]]
+path = "matrix"
+kind = "read"
+reply = "Vec<MatrixRecord>"
+idempotent = true
+since = "1.0"
+description = "src/dst rolling rate matrix (?top=N)"
+
+[[procedure]]
+path = "elephant_flows"
+kind = "read"
+reply = "Vec<FlowRecord>"
+idempotent = true
+since = "1.0"
+description = "elephant flow ring"
+
+[[procedure]]
+path = "dns"
+kind = "read"
+reply = "Vec<DnsRecord>"
+idempotent = true
+since = "1.0"
+description = "DNS ring (?top=N)"
+
+[[procedure]]
+path = "http"
+kind = "read"
+reply = "Vec<HttpRecord>"
+idempotent = true
+since = "1.0"
+description = "HTTP ring (?top=N)"
+
+[[procedure]]
+path = "quic"
+kind = "read"
+reply = "Vec<QuicRecord>"
+idempotent = true
+since = "1.0"
+description = "QUIC ring"
+
+[[procedure]]
+path = "ssh"
+kind = "read"
+reply = "Vec<SshRecord>"
+idempotent = true
+since = "1.0"
+description = "SSH/HASSH ring"
+
+[[procedure]]
+path = "encrypted_dns"
+kind = "read"
+reply = "Vec<EncryptedDnsRecord>"
+idempotent = true
+since = "1.0"
+description = "DoH/DoT detections"
+
+[[procedure]]
+path = "ja4h"
+kind = "read"
+reply = "Vec<Ja4hRecord>"
+idempotent = true
+since = "1.0"
+description = "JA4H fingerprints (feature ja4plus, ?top=N)"
+
+[[procedure]]
+path = "assets"
+kind = "read"
+reply = "Vec<AssetRecord>"
+idempotent = true
+since = "1.0"
+description = "observed asset inventory"
+
+[[procedure]]
+path = "ipfix"
+kind = "read"
+reply = "Vec<IpfixRecord>"
+idempotent = true
+since = "1.0"
+description = "recent IPFIX/Netflow-style flow records (feature `ipfix`; ?max=)"
+
+[[procedure]]
+path = "captures"
+kind = "read"
+reply = "Vec<CaptureRecord>"
+idempotent = true
+since = "1.0"
+description = "capture-to-disk file index"
+
+[[procedure]]
+path = "bandwidth"
+kind = "read"
+reply = "Vec<BandwidthRecord>"
+idempotent = true
+since = "1.0"
+description = "wire-level bandwidth-by-process (?top=N)"

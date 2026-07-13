@@ -1,13 +1,15 @@
 //! Netlink host specialized view — a tabbed, chart-driven, drill-down surface
 //! (Overview · Interfaces · Sockets · Routing & Neighbors · QoS · Firewall &
 //! IPsec · Events · WireGuard) over the sensor's streamed metrics and
-//! `@/query/*` channels (#258, epic #270).
+//! `@rpc/netlink/*` procedures (#258, epic #270).
 
 use std::collections::BTreeMap;
 
 use iced::widget::{Column, button, column, container, row, scrollable, text, text_input};
 use iced::{Element, Length, Theme};
 use zensight_common::{NeighborRecord, RouteRecord, SocketRecord, TelemetryValue};
+
+use zensight_keyspace::registry::netlink::Subject;
 
 use crate::message::Message;
 use crate::view::components::{
@@ -21,6 +23,7 @@ use crate::view::specialized::netlink_detail::{
     AddressRecord, EventRecord, NetlinkDetailState, NetlinkDetailTopic, NetlinkTable,
     NftRuleRecord, RouteChangeRecord, SocketSort, TcRecord, XfrmSaRecord, filter_sort_sockets,
 };
+use crate::view::subject::{leaf, var};
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
@@ -122,12 +125,17 @@ fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
 fn interfaces(state: &DeviceDetailState) -> BTreeMap<String, BTreeMap<String, &TelemetryValue>> {
     let mut map: BTreeMap<String, BTreeMap<String, &TelemetryValue>> = BTreeMap::new();
     for (metric, point) in &state.metrics {
-        if let Some(rest) = metric.strip_prefix("iface/")
-            && let Some((name, stat)) = rest.split_once('/')
+        // `iface/{iface}/<stat>`: the registry names the dimension and supplies
+        // the measurement name (the pattern's literal leaf), instead of this
+        // reading `parts[1]`/`parts[2]` off a split (#475). An unregistered or
+        // typo'd metric refines to nothing and never enters the table.
+        if let Some(s) = Subject::parse_metric(metric)
+            && s.pattern().starts_with("iface/")
+            && let Some(name) = var(&s.vars(), "iface")
         {
-            map.entry(name.to_string())
+            map.entry(name)
                 .or_default()
-                .insert(stat.to_string(), &point.value);
+                .insert(leaf(s.pattern()).to_string(), &point.value);
         }
     }
     map
@@ -267,12 +275,21 @@ fn ethtool_by_iface(
 ) -> BTreeMap<String, BTreeMap<String, &TelemetryValue>> {
     let mut m: BTreeMap<String, BTreeMap<String, &TelemetryValue>> = BTreeMap::new();
     for (metric, point) in &state.metrics {
-        if let Some(rest) = metric.strip_prefix("ethtool/")
-            && let Some((iface, stat)) = rest.split_once('/')
+        // `ethtool/{iface}/…` — the tail may be one chunk (`speed_mbps`) or two
+        // (`rings/rx`, `pause/tx`, `features/{feature}`); the old `split_once`
+        // kept the whole remainder as the stat name, which happened to work.
+        // The registry says which subject it is, so the stat is the pattern's
+        // tail after the iface (#475).
+        if let Some(s) = Subject::parse_metric(metric)
+            && let Some(stat) = s.pattern().strip_prefix("ethtool/{iface}/")
+            && let Some(iface) = var(&s.vars(), "iface")
         {
-            m.entry(iface.to_string())
-                .or_default()
-                .insert(stat.to_string(), &point.value);
+            // `features/{feature}` carries its name in a variable, not a literal.
+            let stat = match var(&s.vars(), "feature") {
+                Some(f) => format!("features/{f}"),
+                None => stat.to_string(),
+            };
+            m.entry(iface).or_default().insert(stat, &point.value);
         }
     }
     m
@@ -312,9 +329,9 @@ fn render_sockets(state: &DeviceDetailState) -> Element<'_, Message> {
     let mut congs: Vec<(String, String)> = state
         .metrics
         .iter()
-        .filter_map(|(m, p)| {
-            let algo = m.strip_prefix("sockets/tcp/by_cong/")?;
-            Some((algo.to_string(), num(Some(&p.value))))
+        .filter_map(|(m, p)| match Subject::parse_metric(m) {
+            Some(Subject::SocketsTcpByCong { algo }) => Some((algo, num(Some(&p.value)))),
+            _ => None,
         })
         .collect();
     congs.sort();
@@ -482,7 +499,7 @@ fn render_sockets_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
 
 /// eBPF socket internals (#269): connect-latency percentiles + top-retransmit
 /// peers + tcplife connection records, served by the sensor's opt-in eBPF module
-/// (`@/query/retransmits`, `@/query/connections`, `sockets/tcp/connlat_us_*`).
+/// (`@rpc/netlink/retransmits`, `@rpc/netlink/connections`, `sockets/tcp/connlat_us_*`).
 /// Returns `None` on the unprivileged baseline (no eBPF) so the Sockets tab shows
 /// nothing extra.
 fn render_ebpf_sockets(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
@@ -692,20 +709,23 @@ fn render_xfrm(state: &DeviceDetailState) -> Element<'_, Message> {
 
 /// QoS / Queues tab (#263): per-(iface, qdisc) health chips + AQM class, backlog
 /// trend sparklines, drops/overlimits/requeues, and the full qdisc/class tree
-/// (`@/query/tc`) as a DataTable. From streamed `tc/<iface>/<kind>/<stat>` +
+/// (`@rpc/netlink/tc`) as a DataTable. From streamed `tc/<iface>/<kind>/<stat>` +
 /// iface-level `tc/<iface>/aqm_class`.
 fn render_qos_tab(state: &DeviceDetailState) -> Column<'_, Message> {
     // Group tc/<iface>/<kind>/<stat> by (iface, kind).
     let mut qdiscs: BTreeMap<(String, String), BTreeMap<String, &TelemetryValue>> = BTreeMap::new();
     for (metric, point) in &state.metrics {
-        if let Some(rest) = metric.strip_prefix("tc/") {
-            let parts: Vec<&str> = rest.splitn(3, '/').collect();
-            if let [iface, kind, stat] = parts[..] {
-                qdiscs
-                    .entry((iface.to_string(), kind.to_string()))
-                    .or_default()
-                    .insert(stat.to_string(), &point.value);
-            }
+        // `tc/{iface}/{kind}/<stat>` — two dimensions and a measurement. The
+        // sibling `tc/{iface}/aqm_class` has no `{kind}`, and the registry keeps
+        // them apart; the old `splitn(3)` folded aqm_class into the table with
+        // `kind = "aqm_class"` and no stat.
+        if let Some(s) = Subject::parse_metric(metric)
+            && let (Some(iface), Some(kind)) = (var(&s.vars(), "iface"), var(&s.vars(), "kind"))
+        {
+            qdiscs
+                .entry((iface, kind))
+                .or_default()
+                .insert(leaf(s.pattern()).to_string(), &point.value);
         }
     }
 
@@ -723,7 +743,7 @@ fn render_qos_tab(state: &DeviceDetailState) -> Column<'_, Message> {
         col = col.push(card(render_qdisc_card(state, iface, kind, stats)));
     }
 
-    // Full qdisc/class tree (@/query/tc).
+    // Full qdisc/class tree (@rpc/netlink/tc).
     let d = &state.netlink_detail;
     col = col.push(card(detail_datatable(
         d,
@@ -1348,9 +1368,9 @@ fn neighbor_state_mix(state: &DeviceDetailState) -> Vec<(String, f64)> {
     let mut v: Vec<(String, f64)> = state
         .metrics
         .iter()
-        .filter_map(|(m, p)| {
-            let st = m.strip_prefix("neighbors/by_state/")?;
-            Some((st.to_string(), tv_num(&p.value)?))
+        .filter_map(|(m, p)| match Subject::parse_metric(m) {
+            Some(Subject::NeighborsByState { state }) => Some((state, tv_num(&p.value)?)),
+            _ => None,
         })
         .collect();
     v.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1510,7 +1530,7 @@ fn route_changes_columns<'a>() -> Vec<DataColumn<'a, RouteChangeRecord, Message>
 }
 
 /// Events tab (#265): a structured, filterable control-plane timeline
-/// (`@/query/events`, newest-first) across link/addr/route/neighbor/ipsec, with
+/// (`@rpc/netlink/events`, newest-first) across link/addr/route/neighbor/ipsec, with
 /// per-family event counters as a context chart. Family/action are their own
 /// columns so the DataTable filter box filters by either; `detail` is the
 /// sensor's already-humanized field (iface name / ip / route dest), not raw JSON.
@@ -1580,11 +1600,11 @@ fn events_columns<'a>() -> Vec<DataColumn<'a, EventRecord, Message>> {
 fn event_family_totals(state: &DeviceDetailState) -> Vec<(String, f64)> {
     let mut map: BTreeMap<String, f64> = BTreeMap::new();
     for (m, p) in &state.metrics {
-        if let Some(rest) = m.strip_prefix("events/")
-            && let Some((fam, _)) = rest.split_once('/')
+        // `events/{family}/{action}` — sum the actions per family.
+        if let Some(Subject::Events { family, .. }) = Subject::parse_metric(m)
             && let Some(v) = tv_num(&p.value)
         {
-            *map.entry(fam.to_string()).or_default() += v;
+            *map.entry(family).or_default() += v;
         }
     }
     let mut v: Vec<(String, f64)> = map.into_iter().collect();
@@ -1700,7 +1720,7 @@ fn render_firewall_tab(state: &DeviceDetailState) -> Column<'_, Message> {
     if has_prefix(state, "conntrack/") {
         col = col.push(card(render_conntrack(state)));
     }
-    // nft per-rule hit-rate (@/query/nft) with decoded packet/byte counters.
+    // nft per-rule hit-rate (@rpc/netlink/nft) with decoded packet/byte counters.
     col = col.push(card(detail_datatable(
         d,
         NetlinkTable::Nft,
@@ -1960,17 +1980,20 @@ type WgPeers<'a> = std::collections::BTreeMap<
 fn wireguard(state: &DeviceDetailState) -> std::collections::BTreeMap<String, WgPeers<'_>> {
     let mut map: std::collections::BTreeMap<String, WgPeers<'_>> = Default::default();
     for (metric, point) in &state.metrics {
-        let Some(rest) = metric.strip_prefix("wireguard/") else {
-            continue;
-        };
-        // `<iface>/peers` is the count (no peer segment) — skip here.
-        let parts: Vec<&str> = rest.splitn(3, '/').collect();
-        if let [iface, peer, stat] = parts.as_slice() {
-            map.entry(iface.to_string())
+        // `wireguard/{iface}/{peer}/<stat>`. `wireguard/{iface}/peers` is the
+        // count, a different subject, and the registry excludes it here for
+        // free. It also excludes a peer id whose base64 happens to contain a
+        // `/` — that produces five chunks, not four, so it no longer silently
+        // mis-splits into the table (the peer chunk is 8 raw base64 chars,
+        // `collector.rs:1424`).
+        if let Some(s) = Subject::parse_metric(metric)
+            && let (Some(iface), Some(peer)) = (var(&s.vars(), "iface"), var(&s.vars(), "peer"))
+        {
+            map.entry(iface)
                 .or_default()
-                .entry(peer.to_string())
+                .entry(peer)
                 .or_default()
-                .insert(stat.to_string(), point);
+                .insert(leaf(s.pattern()).to_string(), point);
         }
     }
     map

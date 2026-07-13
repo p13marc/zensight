@@ -3,7 +3,7 @@
 //! systemd journal entries for well-known events carry a stable `MESSAGE_ID`
 //! (catalog UUID). This module recognizes the highest-signal ones (coredump,
 //! unit failure, OOM) and raises structured alerts on
-//! `zensight/logs/@/alerts/*` via the shared [`AlertReporter`].
+//! `state/logs/alert/*` via the shared [`AlertReporter`].
 //!
 //! These are *point* events, not ongoing conditions: each is fired once
 //! (immediately) and auto-resolved after `event_dedup_secs` so it shows up as a

@@ -1,10 +1,12 @@
 # logs telemetry
 
-The logs sensor publishes under `zensight/logs/<host>/...` (`<host>` = the
-originating hostname, network or journald). Two planes:
+The logs sensor publishes under `zensight/@v1/<origin>/…`, where `<origin>` is
+the **sensor host's** stable id (`h-<12hex>`); the originating host of each log
+line (network or journald) rides in the records and labels, not the key. Two
+planes:
 
 1. **Per-line log events** — high-cardinality detail, served **on demand** from a
-   bounded ring via `@/query/events`, never streamed (#358).
+   bounded ring via a GET on `@rpc/logs/events`, never streamed (#358).
 2. **Derived rollups** — cheap low-rate aggregates that ride the telemetry bus for
    charts and alerts.
 
@@ -12,9 +14,11 @@ See [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for the authoritative
 contract and [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md)
 for the canonical reference.
 
-## Per-line events — `@/query/events` (`Vec<LogRecord>`)
+## Per-line events — `@rpc/logs/events` (`Vec<LogRecord>`)
 
-Queryable at `zensight/logs/@/query/events`. Each `LogRecord` (see
+Served as a read procedure at `zensight/@v1/<origin>/@rpc/logs/events` (fleet
+callers select `zensight/@v1/*/@rpc/logs/events` with query target `All`). Each
+`LogRecord` (see
 `zensight-common/src/query_detail.rs`) keeps the #104 identity — a unique,
 time-sortable `uid` (`<timestamp_ms><seq>`, zero-padded) — plus the OpenTelemetry
 logs data model:
@@ -39,24 +43,26 @@ invocation that produced it (matches systemd sensor `UnitDetail.invocation_id`).
 Parameters are Zenoh selector params, **`;`-separated** (not `&`):
 
 ```
-zensight/logs/@/query/events?since=1719999000000;max=500;host=web01
+zensight/@v1/*/@rpc/logs/events?since=1719999000000;max=500;source=web01
 ```
 
 | Param | Meaning |
 |---|---|
 | `since=<epoch_ms>` | only records with `ts >= since` (inclusive) |
 | `max=<n>` | reply cap, newest-first (default 500, clamped to the ring capacity) |
-| `host=<name>` | only records from one originating host |
+| `source=<name>` | only records from one observed device (a central receiver holds many); `host=` is accepted as a legacy alias |
 
 Ring size is `events_ring_capacity` (default 10 000 ≈ 3 MB, min 100). The GUI
 seeds its buffer from this queryable on open and refreshes on a slow tick.
 
-> Pre-#358 sensors streamed each line as `zensight/logs/<host>/events/<uid>`; the
-> GUI still ingests that shape from old sensors, and exporters already excluded it.
+> Pre-#358 sensors streamed each line as a per-uid telemetry key; that legacy
+> shape is retired with the v1 migration — per-line detail is pull-only.
 
 ## Derived rollups (`derived`, default on)
 
-Emitted every `derived_interval_secs` (default 10) under `zensight/logs/<host>/logs/*`:
+Emitted every `derived_interval_secs` (default 10) under
+`zensight/@v1/<origin>/telemetry/logs/` — one sensor-wide series (the metric
+names below, each starting with the `logs/` chunk):
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -84,9 +90,11 @@ Layered on the per-unit rollups: `logs/by_unit/<unit>/error_ratio` (window
 `errors/messages`) and `logs/by_unit/<unit>/burn_rate` (× budget). Emitted even
 when alerting is disabled (cheap + bounded).
 
-## Alerts — `@/alerts/<alert_key>`
+## Alerts — `state/logs/alert/<alert_key>`
 
-Lifecycle alerts (firing → resolved → tombstone):
+Lifecycle alerts on `zensight/@v1/<origin>/state/logs/alert/<alert_key>`
+(`<alert_key>` = 16-hex FNV-1a of rule + labels; firing = Put, resolved =
+Put(Resolved) then a Delete tombstone):
 
 | Rule | Source | When |
 |---|---|---|
@@ -95,6 +103,8 @@ Lifecycle alerts (firing → resolved → tombstone):
 | `log-rate-spike` | `novelty.enabled` + `rate_spike_multiplier > 1` | a known template's window rate jumps N× over its EWMA baseline |
 | journald known-events | `journald.detect_events` (#61) | coredump / unit-failed / OOM matched by `MESSAGE_ID` |
 
-The firing set is seeded to late joiners via `@/query/alerts`. See
+Late joiners seed the firing set with a plain GET on the same
+`state/logs/alert/*` selector (a storage-shaped queryable answers one reply per
+firing key). See
 [configuration.md](configuration.md) for the tuning knobs and
 [filtering.md](filtering.md) for journald event detection.

@@ -29,7 +29,7 @@ pub enum PollerError {
 pub struct ModbusPoller {
     device: DeviceConfig,
     registers: Vec<RegisterConfig>,
-    key_prefix: String,
+    telemetry_prefix: String,
     register_names: HashMap<String, String>,
     /// Declared-publisher registry for the telemetry path (declare-on-first-use +
     /// cache per key, drop QoS) — never a one-shot `session.put`.
@@ -50,7 +50,8 @@ impl ModbusPoller {
         Self {
             device,
             registers,
-            key_prefix: config.key_prefix.clone(),
+            telemetry_prefix: zensight_sensor_core::v1::V1Context::for_producer("modbus")
+                .telemetry_prefix(),
             register_names: config.register_names.clone(),
             registry: Arc::new(zensight_common::PublisherRegistry::new(session)),
             format,
@@ -307,7 +308,7 @@ impl ModbusPoller {
         let metric_name = self.get_register_name(register, address);
         let key = format!(
             "{}/{}/{}/{}",
-            self.key_prefix,
+            self.telemetry_prefix,
             self.device.name,
             register.register_type.as_str(),
             metric_name
@@ -382,8 +383,13 @@ mod tests {
     #[test]
     fn test_build_key_expr() {
         assert_eq!(
-            build_key_expr("zensight/modbus", "plc01", "holding", "temperature"),
-            "zensight/modbus/plc01/holding/temperature"
+            build_key_expr(
+                "zensight/@v1/h-3fa9c2d41b7e/telemetry/modbus",
+                "plc01",
+                "holding",
+                "temperature"
+            ),
+            "zensight/@v1/h-3fa9c2d41b7e/telemetry/modbus/plc01/holding/temperature"
         );
     }
 

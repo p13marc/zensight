@@ -19,7 +19,7 @@ pub struct SystemCollector {
     disks: Disks,
     networks: Networks,
     source: String,
-    key_prefix: String,
+    telemetry_prefix: String,
     config: SysinfoConfig,
     /// Declared-publisher registry for the telemetry path (declare-on-first-use +
     /// cache per key, drop QoS) — never a one-shot `session.put`.
@@ -34,7 +34,7 @@ pub struct SystemCollector {
     /// Sensor health, updated each poll for the frontend's Sensors view.
     health: Arc<zensight_sensor_core::SensorHealth>,
     /// Threshold-based alert evaluator (OOM/PSI/disk/FD/thermal/swap), driving an
-    /// `AlertReporter` → `@/alerts/*`. `None` when alerting is disabled.
+    /// `AlertReporter` → `state/sysinfo/alert/*`. `None` when alerting is disabled.
     alerts: Option<crate::alerts::AlertEvaluator>,
     /// Busiest block device `%util` observed in the most recent `collect_disk_io`
     /// pass, fed into the saturation score (avoids a second `/proc/diskstats`
@@ -61,7 +61,8 @@ impl SystemCollector {
             system: System::new_all(),
             disks: Disks::new_with_refreshed_list(),
             networks: Networks::new_with_refreshed_list(),
-            key_prefix: config.key_prefix.clone(),
+            telemetry_prefix: zensight_sensor_core::v1::V1Context::for_producer("sysinfo")
+                .telemetry_prefix(),
             source,
             config,
             registry: Arc::new(zensight_common::PublisherRegistry::new(session)),
@@ -79,7 +80,7 @@ impl SystemCollector {
         }
     }
 
-    /// Use the runner's shared health tracker (so updates reach `@/health`).
+    /// Use the runner's shared health tracker (so updates reach `state/sysinfo/health`).
     pub fn with_health(mut self, health: Arc<zensight_sensor_core::SensorHealth>) -> Self {
         self.health = health;
         self
@@ -1037,7 +1038,7 @@ impl SystemCollector {
         let mut count = 0;
 
         // Small bounded aggregates always stream (the per-pid firehose is served
-        // on demand via the @/query/processes channel, not streamed — §F / P2).
+        // on demand via the @rpc/sysinfo/processes procedure, not streamed — §F / P2).
         let total = self.system.processes().len() as u64;
         let zombie = self
             .system
@@ -1456,7 +1457,7 @@ impl SystemCollector {
         labels: HashMap<String, String>,
     ) {
         self.health.record_metrics_published(1);
-        let key = format!("{}/{}/{}", self.key_prefix, self.source, metric);
+        let key = format!("{}/{}", self.telemetry_prefix, metric);
 
         let point = TelemetryPoint {
             timestamp,
@@ -1485,8 +1486,10 @@ impl SystemCollector {
 }
 
 /// Build a key expression for a sysinfo metric.
-pub fn build_key_expr(prefix: &str, source: &str, metric: &str) -> String {
-    format!("{}/{}/{}", prefix, source, metric)
+pub fn build_key_expr(prefix: &str, _source: &str, metric: &str) -> String {
+    // v1 (epic #453): the origin chunk in the prefix replaces the mutable
+    // hostname; subjects start at the metric.
+    format!("{}/{}", prefix, metric)
 }
 
 #[cfg(test)]
@@ -1496,10 +1499,14 @@ mod tests {
 
     #[test]
     fn test_build_key_expr() {
-        assert_eq!(
-            build_key_expr("zensight/sysinfo", "server01", "cpu/usage"),
-            "zensight/sysinfo/server01/cpu/usage"
-        );
+        // v1 (epic #453): the origin in the prefix replaces the hostname
+        // chunk — subjects start at the metric.
+        let prefix =
+            zensight_sensor_core::v1::V1Context::for_producer("sysinfo").telemetry_prefix();
+        let key = build_key_expr(&prefix, "server01", "cpu/usage");
+        assert!(key.starts_with("zensight/@v1/h-"), "{key}");
+        assert!(key.ends_with("/telemetry/sysinfo/cpu/usage"), "{key}");
+        assert!(!key.contains("server01"), "{key}");
     }
 
     #[test]

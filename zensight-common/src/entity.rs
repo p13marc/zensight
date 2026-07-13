@@ -1,4 +1,4 @@
-//! Host-entity wire types — the `zensight/_meta/entity/**` keyspace (#305).
+//! Host-entity wire types — the `zensight/@v1/@catalog/state/entity/*` keyspace (#305).
 //!
 //! The **correlator** (single writer) merges [`HostEvidence`](crate::HostEvidence)
 //! claims from every sensor into [`HostEntity`] docs: one entity per real host,
@@ -31,16 +31,31 @@ pub struct NameVal {
 }
 
 /// A durable **historical** passive-DNS record, published by the
-/// **correlator** on `zensight/@pdns/<ip-slug>` (#310) whenever it learns or
-/// updates the names for an IP.
+/// **correlator** on `zensight/@v1/@catalog/state/pdns/<ip-slug>` (#310)
+/// whenever it learns or updates the names for an IP.
 ///
 /// Unlike the live [`NameObservation`](crate::NameObservation) wire claim (one
 /// name per sample, last-writer-wins) this carries the correlator's *full
 /// accumulated* [`NameVal`] set for the IP, so a router-hosted storage backend
-/// (filesystem snapshot or InfluxDB time series) capturing the `zensight/@pdns/**`
-/// tier records the complete IP↔name history off a single key. The `@pdns`
-/// verbatim chunk keeps these off the telemetry (`zensight/**`) and per-sensor
-/// control (`zensight/*/@/**`) buses — see [`crate::keyexpr::pdns_key`].
+/// (filesystem snapshot or InfluxDB time series) capturing the
+/// `zensight/@v1/@catalog/state/pdns/**` tier records the complete IP↔name
+/// history off a single key. The catalog pdns state tier stays off the
+/// telemetry bus because `@catalog` is a verbatim origin the `*` selectors
+/// never match (D4) — see [`crate::keyexpr::pdns_key`].
+/// An old-id → entity-id re-pointing record (RFC 06 §5.4), published at
+/// `zensight/@v1/@catalog/state/alias/<old_id>` when a merge/upgrade retires
+/// an entity id. Long-TTL so a consumer holding a stale id can re-point after
+/// arbitrarily long offline periods.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AliasRecord {
+    /// The retired entity id.
+    pub old_id: String,
+    /// The current entity id it merged into.
+    pub entity_id: String,
+    /// Unix epoch millis this record was published.
+    pub last_updated: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PdnsRecord {
     /// The IP these names are bound to (canonical, *un*-slugified — the key is
@@ -74,8 +89,9 @@ pub struct MemberClaim {
     pub last_seen: i64,
 }
 
-/// A resolved host entity, published on `zensight/_meta/entity/host/<entity_id>`
-/// by the correlator (cached, re-emitted ~60 s, tombstoned on retire/merge).
+/// A resolved host entity, published on
+/// `zensight/@v1/@catalog/state/entity/<entity_id>` by the correlator (cached,
+/// re-emitted ~60 s, tombstoned on retire/merge).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostEntity {
     /// Stable id `"h_<12hex>"`: the 12-hex prefix of the host's hashed

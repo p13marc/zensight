@@ -90,7 +90,7 @@ impl<C: Serialize + Send + Sync + 'static> DebugBundleSource for SimpleBundleSou
 }
 
 /// Config field names whose value is redacted if the (lowercased) key *contains*
-/// one of these. Kept narrow enough not to clobber benign keys like `key_prefix`.
+/// one of these. Kept narrow enough not to clobber benign config keys.
 const REDACT_CONTAINS: &[&str] = &[
     "password",
     "passwd",
@@ -239,14 +239,14 @@ mod tests {
     #[test]
     fn redaction_hits_secrets_not_benign_keys() {
         let mut v = serde_json::json!({
-            "key_prefix": "zensight/netlink",
+            "producer": "netlink",
             "community": "public",
             "auth_password": "hunter2",
             "nested": { "api_key": "abc", "token": "xyz", "name": "ok" },
             "list": [ { "password": "p" } ],
         });
         redact(&mut v, &[]);
-        assert_eq!(v["key_prefix"], "zensight/netlink"); // benign, preserved
+        assert_eq!(v["producer"], "netlink"); // benign, preserved
         assert_eq!(v["community"], REDACTED);
         assert_eq!(v["auth_password"], REDACTED);
         assert_eq!(v["nested"]["api_key"], REDACTED);
@@ -269,7 +269,7 @@ mod tests {
         let inputs = BundleInputs {
             sensor_name: "netlink".into(),
             source_id: "host1".into(),
-            config: serde_json::json!({ "community": "public", "key_prefix": "zensight/netlink" }),
+            config: serde_json::json!({ "community": "public", "producer": "netlink" }),
             health: serde_json::json!({ "status": "healthy" }),
             counters: serde_json::json!({ "received": 10 }),
             created_ms: 1_700_000_000_000,
@@ -296,7 +296,7 @@ mod tests {
         let config = &found["config.json"];
         assert!(config.contains(REDACTED), "community should be redacted");
         assert!(!config.contains("public"), "secret value must not leak");
-        assert!(config.contains("zensight/netlink"), "benign key preserved");
+        assert!(config.contains("netlink"), "benign key preserved");
     }
 
     #[test]

@@ -143,10 +143,10 @@ pub struct Collector {
     /// liveness) so the frontend's Sensors view shows real activity.
     health: Arc<zensight_sensor_core::SensorHealth>,
     /// Real-time RTNETLINK event counters + recent-events ring (issue #8).
-    /// Shared with the `@/query/events` channel.
+    /// Shared with the `@rpc/netlink/events` channel.
     event_state: EventState,
     /// Default-route flap history + counter (#111). Shared with the
-    /// `@/query/route_changes` channel; updated each route poll.
+    /// `@rpc/netlink/route_changes` channel; updated each route poll.
     route_history: RouteHistory,
     /// Nudged whenever a sentinel-relevant event arrives so the sentinel
     /// re-evaluates instantly (~0s) instead of at its next sweep tick (#8).
@@ -178,7 +178,7 @@ impl Collector {
     ) -> Self {
         let registry = AdvancedPublisherRegistry::new(
             session,
-            config.key_prefix.clone(),
+            zensight_sensor_core::v1::V1Context::for_producer("netlink").telemetry_prefix(),
             format,
             AdvancedPublisherConfig::default(),
         );
@@ -229,13 +229,13 @@ impl Collector {
     }
 
     /// A clonable handle to the real-time event state (counters + recent ring),
-    /// for the `@/query/events` channel.
+    /// for the `@rpc/netlink/events` channel.
     pub fn event_state(&self) -> EventState {
         self.event_state.clone()
     }
 
     /// A clonable handle to the default-route flap history (#111), for the
-    /// `@/query/route_changes` channel.
+    /// `@rpc/netlink/route_changes` channel.
     pub fn route_history(&self) -> RouteHistory {
         self.route_history.clone()
     }
@@ -247,7 +247,7 @@ impl Collector {
     }
 
     /// Use the runner's shared health tracker (so updates reach the published
-    /// `@/health` snapshot). Without this the collector updates a local tracker.
+    /// `state/netlink/health` snapshot). Without this the collector updates a local tracker.
     pub fn with_health(mut self, health: Arc<zensight_sensor_core::SensorHealth>) -> Self {
         self.health = health;
         self
@@ -686,7 +686,7 @@ impl Collector {
 
     /// Poll the IP address inventory (#10): stream a low-cardinality summary
     /// (per-family + global counts); per-address detail is served on demand via
-    /// `@/query/addresses`. Graceful on failure (logs, emits nothing).
+    /// `@rpc/netlink/addresses`. Graceful on failure (logs, emits nothing).
     async fn poll_addresses(&self, conn: &Connection<Route>) {
         let addrs = match conn.get_addresses().await {
             Ok(a) => a,
@@ -789,7 +789,7 @@ impl Collector {
 
     /// Poll XFRM/IPsec SA + policy health (#13): a low-cardinality summary (SA
     /// counts by mode/proto + policy total). Per-SA detail is served on demand via
-    /// `@/query/xfrm`. Graceful on failure / no-IPsec.
+    /// `@rpc/netlink/xfrm`. Graceful on failure / no-IPsec.
     async fn poll_xfrm(&self, conn: &Connection<Xfrm>) {
         let sas = match conn.get_security_associations().await {
             Ok(s) => s,
@@ -822,7 +822,7 @@ impl Collector {
 
     /// Poll nftables (#14): per-table chain/rule counts + host totals — firewall
     /// ruleset shape / policy-drift visibility. Full inventory served on demand
-    /// via `@/query/nft`. Graceful on failure / empty ruleset.
+    /// via `@rpc/netlink/nft`. Graceful on failure / empty ruleset.
     async fn poll_nftables(&self, conn: &Connection<Nftables>) {
         let tables = match conn.list_tables().await {
             Ok(t) => t,
@@ -878,7 +878,7 @@ impl Collector {
     /// Poll TC/QoS qdisc stats (#12): per-(iface,qdisc) drops/overlimits/backlog.
     /// Bounded by the TC hierarchy (one series set per qdisc). Interfaces are
     /// resolved to names via a single `get_links` map; filtered/`lo` are skipped.
-    /// Full tree is served on demand via `@/query/tc`.
+    /// Full tree is served on demand via `@rpc/netlink/tc`.
     async fn poll_tc(&self, conn: &Connection<Route>) {
         let qdiscs = match conn.get_qdiscs().await {
             Ok(q) => q,
@@ -950,7 +950,7 @@ impl Collector {
         // Tap the latest numeric value for the sentinel's metric-threshold checks.
         self.metric_cache.update(&point.metric, &point.value).await;
         // Key = <prefix>/<source>/<metric>, published via a cached AdvancedPublisher.
-        let suffix = format!("{}/{}", point.source, point.metric);
+        let suffix = point.metric.clone();
         if let Err(e) = self.registry.publish(&suffix, point).await {
             tracing::warn!(error = %e, "publish failed");
         }

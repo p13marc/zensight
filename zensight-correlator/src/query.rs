@@ -1,21 +1,22 @@
 //! Late-joiner queryables served by the correlator.
 //!
-//! - `entities_query_key()` → the full current entity set (`Vec<HostEntity>`),
+//! - `entities_query_key()` (the entity state selector) → storage-shaped
+//!   seed: one reply per entity on its concrete key,
 //!   the seed a late-joining frontend GETs on connect (mirrors the sensors'
-//!   `@/query/alerts` firing-set seed).
+//!   alert-state seed: a queryable on `state/<producer>/alert/*`, RFC 05 §4).
 //! - `names_query_key()` with selector `?ip=<ip>` → that IP's accumulated
 //!   `Vec<NameVal>` from the [`NameStore`], so arbitrary/external IPs are
 //!   resolved on demand instead of flooding the bus. A missing/blank `ip`
 //!   replies with an empty set (error-free).
 //!
-//! Replies are JSON (consistent with the existing `@/query/alerts` seed).
+//! Replies are JSON (consistent with the existing alert-state seed).
 
 use std::sync::Arc;
 
 use tokio::sync::watch;
 use tracing::{info, warn};
 use zenoh::Session;
-use zensight_common::{entities_query_key, names_query_key};
+use zensight_common::{catalog_rpc_key, entities_query_key, names_query_key};
 
 use crate::engine::SharedState;
 
@@ -42,14 +43,19 @@ pub async fn serve_entities(
             }
             query = queryable.recv_async() => {
                 let Ok(query) = query else { break };
+                // Storage-shaped seed (RFC 05 §4): one reply per entity on
+                // its concrete state key.
                 let entities = state.lock().unwrap().current_entities();
-                match serde_json::to_vec(&entities) {
-                    Ok(payload) => {
-                        if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
-                            warn!(error = %e, "entities query reply failed");
+                for entity in entities {
+                    let key = zensight_common::entity_key(&entity.entity_id);
+                    match serde_json::to_vec(&entity) {
+                        Ok(payload) => {
+                            if let Err(e) = query.reply(key, payload).await {
+                                warn!(error = %e, "entities seed reply failed");
+                            }
                         }
+                        Err(e) => warn!(error = %e, "serialize entity failed"),
                     }
-                    Err(e) => warn!(error = %e, "serialize entities failed"),
                 }
             }
         }
@@ -88,11 +94,43 @@ pub async fn serve_names(
                 };
                 match serde_json::to_vec(&names) {
                     Ok(payload) => {
-                        if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                        // Concrete reply key (RFC 05 §2.1).
+                        if let Err(e) = query.reply(key.as_str(), payload).await {
                             warn!(error = %e, "names query reply failed");
                         }
                     }
                     Err(e) => warn!(error = %e, "serialize names failed"),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Serve `introspect` — the catalog registry slice this build was compiled
+/// against (RFC 08 §6), mirroring what every sensor serves via its runner.
+pub async fn serve_introspect(
+    session: Arc<Session>,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let key = catalog_rpc_key("introspect");
+    let slice = zensight_keyspace::registry::registry_toml("catalog")
+        .ok_or_else(|| anyhow::anyhow!("catalog registry slice missing from the build"))?;
+    let queryable = session
+        .declare_queryable(&key)
+        .await
+        .map_err(|e| anyhow::anyhow!("declare introspect queryable: {e}"))?;
+    info!(key = %key, "introspect queryable ready");
+
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+            query = queryable.recv_async() => {
+                let Ok(query) = query else { break };
+                if let Err(e) = query.reply(key.as_str(), slice.as_bytes()).await {
+                    warn!(error = %e, "introspect reply failed");
                 }
             }
         }

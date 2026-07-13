@@ -97,6 +97,7 @@ mod tests {
             mode: "gateway".into(),
             connect: vec![],
             listen: vec![],
+            scouting: true,
         };
         assert!(build_isolated_zenoh_config(&config).is_err());
     }

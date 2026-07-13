@@ -371,7 +371,13 @@ fn render_system_metrics(state: &DeviceDetailState) -> Element<'_, Message> {
 fn parse_interfaces(state: &DeviceDetailState) -> Vec<InterfaceInfo> {
     let mut interfaces: HashMap<u32, InterfaceInfo> = HashMap::new();
 
-    // Look for interface metrics with pattern if/<index>/<metric>
+    // Look for interface metrics with pattern if/<index>/<metric>.
+    //
+    // snmp registers its telemetry as `{device}/{metric...}` — a rest-var, on
+    // purpose: the metric tree is whatever OIDs the polled device exposes, not
+    // something we can enumerate. So this stays hand-parsed, and #475's typed
+    // parse does not apply here. Same for gnmi (`{device}/{path...}`), modbus
+    // and netflow.
     for (key, point) in &state.metrics {
         if !key.starts_with("if/") {
             continue;

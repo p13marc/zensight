@@ -33,9 +33,8 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // Enable status publishing
-    let runner = runner.with_status_publishing();
 
-    // On-demand debug-report (`@/artifact`): bundle redacted config + health +
+    // On-demand debug-report (the artifact channel): bundle redacted config + health +
     // counters. No-op unless `report.enabled` is set in the config. SNMP secrets
     // (community, auth/priv passwords) are caught by the framework's redaction.
     let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
@@ -44,7 +43,7 @@ async fn main() -> Result<()> {
         runner.config().clone(),
         runner.health(),
     ));
-    // Tier-2 directory snapshots (`@/artifact`). No-op unless `snapshot.enabled`.
+    // Tier-2 directory snapshots (the artifact channel). No-op unless `snapshot.enabled`.
     let artifacts = runner.config().artifact_limits();
     let mut runner = runner.with_identity().with_artifacts(vec![
         std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
@@ -102,7 +101,6 @@ async fn main() -> Result<()> {
         let mut poller = SnmpPoller::new(
             device.clone(),
             session.clone(),
-            &snmp_config.key_prefix,
             mib_resolver.clone(),
             &snmp_config.oid_groups,
             serialization,
@@ -128,7 +126,6 @@ async fn main() -> Result<()> {
         let trap_receiver = TrapReceiver::new(
             &snmp_config.trap_listener.bind,
             session.clone(),
-            &snmp_config.key_prefix,
             mib_resolver.clone(),
             serialization,
         );

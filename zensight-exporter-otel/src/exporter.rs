@@ -557,12 +557,12 @@ impl OtelExporter {
     }
 
     /// Whether alert export is enabled (drives whether the subscriber decodes
-    /// the `@/alerts/*` channel).
+    /// the `state/*/alert/*` channel).
     pub fn export_alerts(&self) -> bool {
         self.export_alerts
     }
 
-    /// Whether the exporter needs the `@/alerts/*` stream at all — true if
+    /// Whether the exporter needs the `state/*/alert/*` stream at all — true if
     /// either alert log export or the traces signal (which synthesizes spans
     /// from the alert lifecycle) is enabled. The subscriber uses this to decide
     /// whether to declare the alert subscriber.

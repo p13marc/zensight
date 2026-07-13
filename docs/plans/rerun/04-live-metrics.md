@@ -25,17 +25,22 @@ Implementation notes + observed behavior for the metric half of the pipeline
   **real-shaped keys** through the real bus contract (`PublisherRegistry`, declared
   publishers, CBOR, `QosClass::Telemetry` — never `session.put`):
 
-  | Key | Value shape | Exercises |
+  | Subject (under `zensight/@v1/<origin>/telemetry/<producer>/`) | Value shape | Exercises |
   |---|---|---|
-  | `zensight/sysinfo/demo-host/cpu/usage` | Gauge, sine 20–50 % | plain gauge |
-  | `zensight/sysinfo/demo-host/memory/usage_percent` | Gauge, slow ramp | plain gauge |
-  | `zensight/netlink/demo-host/iface/eth0/rx_bytes` | Counter, ~1.2 MB/s + **mid-run reset** | rate + reset re-arm |
-  | `zensight/netring/demo-host/path/gateway/rtt_ms` | Gauge, noisy 20 ms | latency lane |
-  | `zensight/netring/demo-host/path/gateway/loss_percent` | Gauge, 0 with bursts | loss lane |
-  | `zensight/netlink/demo-host/wifi/wlan0/rssi_dbm` | Gauge, ≈ −60 dBm noise | signal lane |
+  | `sysinfo` · `cpu/usage` | Gauge, sine 20–50 % | plain gauge |
+  | `sysinfo` · `memory/usage_percent` | Gauge, slow ramp | plain gauge |
+  | `netlink` · `iface/eth0/rx_bytes` | Counter, ~1.2 MB/s + **mid-run reset** | rate + reset re-arm |
+  | `netring` · `flow/red/p95_ms` | Gauge, noisy 20 ms | latency lane |
+  | `netring` · `flow/red/error_ratio` | Gauge, 0 with bursts | error lane |
+  | `netlink` · `ethtool/wlan0/speed_mbps` | Gauge, ≈ 300 Mb/s noise | link-quality lane |
 
-  (`cpu/usage`, `memory/usage_percent`, `iface/<if>/rx_bytes` are the *actual* metric names
-  the sysinfo/netlink sensors emit; the rtt/loss/RSSI lanes are synthetic but key-shaped.)
+  All six are **real registered subjects** — metric names the sysinfo/netlink/netring
+  sensors actually emit. They used to be three real ones plus three invented lanes
+  (`path/gateway/{rtt_ms,loss_percent}`, `wifi/wlan0/rssi_dbm`), which the subject
+  registry (RFC 08, issue #468) caught the moment it stopped being a `{metric...}`
+  catch-all: publishing an unregistered telemetry key now panics in debug. A demo that
+  invents keys teaches the viewer — and any blueprint built on it — a keyspace that
+  does not exist.
 
 ## 2. Running it (isolated end-to-end, headless)
 

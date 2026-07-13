@@ -7,8 +7,8 @@
 //! are the analyst's discovery surface for hosts/infrastructure that emit no
 //! telemetry of their own.
 //!
-//! Data is fetched on view-open from the netring `@/query/{assets,tls,quic,ssh}`
-//! queryables (global, not per-source) and held at app level; this module owns
+//! Data is fetched on view-open from the netring `@rpc/netring/{assets,tls,quic,ssh}`
+//! procedures (fleet-wide, not per-source) and held at app level; this module owns
 //! the state shape, the pure sort/merge logic, and the rendering.
 
 use iced::widget::{Column, button, column, container, pick_list, row, scrollable, text};
@@ -34,7 +34,7 @@ pub struct InventoryData {
     /// JA4H HTTP-request fingerprints (#124). Empty unless the netring sensor was
     /// built with `--features ja4plus` and `collect.http_fp` is set.
     pub ja4h: Vec<Ja4hRecord>,
-    /// Whether a netring sensor actually answered the `@/query/assets` queryable.
+    /// Whether a netring sensor actually answered the `@rpc/netring/assets` procedure.
     /// `false` means asset collection is disabled on the sensor (`collect.assets`
     /// is opt-in); distinct from answering with an empty list (nothing seen yet).
     pub assets_responded: bool,

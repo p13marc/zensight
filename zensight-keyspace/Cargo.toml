@@ -1,0 +1,24 @@
+[package]
+name = "zensight-keyspace"
+description = "Executable form of the keyspace-v2 convention (docs/rfcs/keyspace-v2): grammar, origin minting, slugs, QoS profiles, guard tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+zenoh = { workspace = true }
+zenoh-keyexpr = "1"
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+dirs = { workspace = true }
+tracing = { workspace = true }
+# Runtime, not just build-time: `introspect` replies with a registry slice, so a
+# consumer needs the TOML parser to read one (RFC 08 §6, issue #469).
+toml = "0.8"
+
+[build-dependencies]
+toml = "0.8"
+
+[dev-dependencies]

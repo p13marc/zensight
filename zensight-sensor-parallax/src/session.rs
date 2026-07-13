@@ -24,10 +24,8 @@ use parallax::pipeline::UnifiedPipelineHandle as PipelineHandle;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use zenoh::bytes::Encoding;
-use zensight_common::command::status_key;
-use zensight_common::keyexpr::{media_preview_key, media_video_key};
+use zensight_common::QosClass;
 use zensight_common::stream::{StreamControl, StreamStatus};
-use zensight_common::{Protocol, QosClass};
 use zensight_sensor_core::{Publisher, RawMediaPublisher, SensorHealth};
 
 use crate::alerts::ParallaxAlerts;
@@ -260,9 +258,15 @@ impl StreamSession {
 pub struct SessionManager {
     catalog: Arc<Catalog>,
     config: ParallaxConfig,
+    /// Legacy instance label; keys no longer carry it (v1 origin does, epic
+    /// #453) but stream status payloads may still reference it.
+    #[allow(dead_code)]
     source: String,
     publisher: Publisher,
-    status_key: String,
+    /// v1: per-stream LWW status docs (`state/parallax/stream/<stream>`,
+    /// RFC 05 §5) — the catalogue+status document; tombstoned on removal
+    /// from config, never on close.
+    state_ctx: zensight_sensor_core::v1::V1Context,
     sessions: HashMap<String, StreamSession>,
     tx: mpsc::Sender<SessionMsg>,
     /// Per-stream stats counters (fed by egress/encoders, read by the ticker).
@@ -287,13 +291,13 @@ impl SessionManager {
         alerts: Option<Arc<ParallaxAlerts>>,
     ) -> SessionHandle {
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let host_prefix = format!("{}/{}", config.key_prefix, source);
+        let state_ctx = zensight_sensor_core::v1::V1Context::for_producer("parallax");
         let manager = SessionManager {
             catalog,
             config,
             source,
             publisher,
-            status_key: status_key(&host_prefix, "streams"),
+            state_ctx,
             sessions: HashMap::new(),
             tx: tx.clone(),
             stats,
@@ -570,15 +574,12 @@ impl SessionManager {
         };
 
         // Declare the media publisher on the profile's concrete key.
-        let key = match profile {
-            Profile::Video => media_video_key(
-                Protocol::Parallax,
-                &self.source,
-                stream,
-                "h264",
-                &self.config.video.profile,
-            ),
-            Profile::Preview => media_preview_key(Protocol::Parallax, &self.source, stream),
+        let key = {
+            let ctx = self.publisher.v1();
+            match profile {
+                Profile::Video => ctx.media_video_key(stream, "h264", &self.config.video.profile),
+                Profile::Preview => ctx.media_preview_key(stream),
+            }
         };
         let media = match self.publisher.raw_media_publisher(key.clone()).await {
             Ok(p) => Arc::new(p),
@@ -937,7 +938,7 @@ impl SessionManager {
     }
 
     /// Publish the stream's status transition on the declared status
-    /// publisher (`@/status/streams`) — never a raw `session.put`.
+    /// publisher (`@rpc/parallax/streams`) — never a raw `session.put`.
     async fn publish_status(&self, stream: &str) {
         let status = match self.sessions.get(stream) {
             Some(session) => self.status_for(stream, session),
@@ -948,9 +949,10 @@ impl SessionManager {
                 profile: None,
             },
         };
+        let key = self.state_ctx.state_key(&["stream", stream]);
         if let Err(e) = self
             .publisher
-            .publish_json(&self.status_key, &status, QosClass::Command)
+            .publish_json(&key, &status, QosClass::Command)
             .await
         {
             tracing::warn!(error = %e, "failed to publish stream status");

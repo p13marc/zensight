@@ -25,7 +25,7 @@ pub struct SnmpSensorConfig {
     /// SNMP-specific settings.
     pub snmp: SnmpConfig,
 
-    /// On-demand artifact channel (`@/artifact`) limits — report + snapshot.
+    /// On-demand artifact channel (`@rpc/snmp/artifact/*`) limits — report + snapshot.
     /// Every kind disabled by default.
     #[serde(default)]
     pub artifacts: zensight_sensor_core::ArtifactLimits,
@@ -34,10 +34,6 @@ pub struct SnmpSensorConfig {
 /// SNMP-specific configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnmpConfig {
-    /// Key expression prefix (default: "zensight/snmp").
-    #[serde(default = "default_key_prefix")]
-    pub key_prefix: String,
-
     /// Override the agent-host source id (default: the local hostname).
     #[serde(default)]
     pub source: Option<String>,
@@ -86,10 +82,6 @@ impl Default for MibConfig {
             files: Vec::new(),
         }
     }
-}
-
-fn default_key_prefix() -> String {
-    "zensight/snmp".to_string()
 }
 
 impl SnmpConfig {
@@ -300,8 +292,8 @@ impl zensight_sensor_core::SensorConfig for SnmpSensorConfig {
         &self.logging
     }
 
-    fn key_prefix(&self) -> &str {
-        &self.snmp.key_prefix
+    fn producer(&self) -> &str {
+        "snmp"
     }
 
     fn validate(&self) -> zensight_sensor_core::Result<()> {
@@ -375,7 +367,6 @@ mod tests {
             },
             serialization: "json",
             snmp: {
-                key_prefix: "zensight/snmp",
                 devices: [
                     {
                         name: "router01",

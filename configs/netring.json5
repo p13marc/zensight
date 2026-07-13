@@ -2,7 +2,8 @@
   // Zenoh connection settings
   zenoh: { mode: "peer" },
 
-  // On-demand artifact channel (@/artifact) — opt-in per kind. When enabled,
+  // On-demand artifact channel (@rpc artifact/request + @blob delivery) —
+  // opt-in per kind. When enabled,
   // an operator can download a redacted tar.zst debug bundle (and, for
   // snapshot, an allowlisted directory) from the GUI. Bounded + rate-limited;
   // secrets are redacted.
@@ -27,14 +28,13 @@
     },
   },
 
-  // Tier-2 directory snapshots (@/artifact + @/store + @/tree) — opt-in. The
+  // Tier-2 directory snapshots (@rpc artifact/request + @blob/store + @blob/tree) — opt-in. The
   // natural fit for netring: expose a captured-pcap directory for forensic pull
   // (content-addressed, dedup'd, restart-resumable). The operator picks a dir by
   // its logical `name`, never a raw path — `dirs` is the authorization boundary.
 
   // Netring sensor settings
   netring: {
-    key_prefix: "zensight/netring",
     // Host identifier used as telemetry `source`. "auto" → hostname.
     source: "auto",
     // Capture backend (netring 0.28, #227): "auto" (default) probes + selects
@@ -61,18 +61,18 @@
       // of capture endpoint order. No-op cost when off. Default ON, TCP-only.
       infer_initiator: true,
       // L7 RED analytics (cleartext only). Enabled here so the GUI's DNS/HTTP
-      // detail tabs (@/query/dns, @/query/http) work out of the box; without
+      // detail tabs (@rpc/netring/dns, @rpc/netring/http) work out of the box; without
       // these the sensor declares no DNS/HTTP queryable and a fetch returns
       // "No netring sensor responded".
       dns: true,         // DNS queries/rcodes/RTT + top SLDs (UDP/53)
       http: true,        // HTTP requests/status/latency + top hosts (TCP/80,8080)
       // L7 protocol visibility (netring 0.27, opt-in). Detail served on
-      // @/query/quic and @/query/ssh; aggregate counts stream.
+      // @rpc/netring/quic and @rpc/netring/ssh; aggregate counts stream.
       quic: false,       // passive QUIC Initial JA4/SNI/ALPN/version + PQ (UDP/443)
       ssh: false,        // client+server HASSH + KEXINIT fingerprints (TCP/22)
       // Encrypted-DNS visibility (netring 0.29, #326): classify DoT/DoQ/DoH from
       // the TLS/QUIC handshake into streamed `dns/encrypted/*` counts + the
-      // `@/query/encrypted_dns` inventory. Pairs with anomalies.encrypted_dns_bypass.
+      // `@rpc/netring/encrypted_dns` inventory. Pairs with anomalies.encrypted_dns_bypass.
       encrypted_dns: false,
       // Reassemble IP fragments before L7 parsing so fragmented DNS / handshakes
       // still parse (netring 0.29, #326). Small buffering cost.
@@ -82,13 +82,13 @@
       snmp_cleartext: false,
       // Canonical IPFIX flow export (netring 0.28, #223). No-op unless built
       // with `--features ipfix`. Serves IANA-IE-keyed flow records on
-      // @/query/ipfix (per-direction deltas IE 1/2, totals IE 85/86, precise
+      // @rpc/netring/ipfix (per-direction deltas IE 1/2, totals IE 85/86, precise
       // flowEndReason IE 136, Community ID) for SIEM / flow-collector consumers.
       ipfix: false,
       // Passive asset inventory (netring 0.27): discover hosts on the wire from
       // ARP / NDP / LLDP. Streams an `assets/discovered` count; the per-asset
       // detail (MAC / IP / hostname / platform / seen-via) is served on demand
-      // via `@/query/assets`. Needs capture (CAP_NET_RAW).
+      // via `@rpc/netring/assets`. Needs capture (CAP_NET_RAW).
       assets: true,
       // Also feed the inventory from CDP. Separate flag because CDP forces the
       // kernel prefilter to capture-all (it can't be expressed as a BPF term).
@@ -102,7 +102,7 @@
     // full-frame (wire-L2) throughput to owning processes. Best-effort: flows
     // whose socket isn't in the current dump land in an explicit `unattributed`
     // bucket. When on, per-process rows are served query-only on
-    // `@/query/bandwidth` (refreshed every `bandwidth_period_secs`). Costs /proc
+    // `@rpc/netring/bandwidth` (refreshed every `bandwidth_period_secs`). Costs /proc
     // walks; leave off unless you want per-process wire attribution.
     bandwidth_attribution: false,
 
@@ -123,7 +123,7 @@
 
     // Host-evidence feed (#307): republish observed assets (`collect.assets`)
     // and passive-DNS name observations (`collect.dns` + `names`) as third-party
-    // identity evidence on `zensight/_meta/evidence/**` for the correlator
+    // identity evidence on `…/state/netring/evidence/**` for the correlator
     // (epic #312). Change-driven with a periodic liveness refresh; the per-tick
     // cap keeps a busy L2 segment from flooding the evidence bus.
     // NOTE: this feed is gated on its SOURCE collectors — asset evidence needs
@@ -168,7 +168,7 @@
       exfil_min_bytes: 10485760, // 10 MiB outbound-byte floor
     },
 
-    // Threat-intel detection (netring 0.27). Hits become alerts on @/alerts via
+    // Threat-intel detection (netring 0.27). Hits become alerts on state/netring/alert/* via
     // the same path as the detectors above.
     threat: {
       // Passive flow-risk scoring: obsolete TLS, cleartext HTTP credentials.
@@ -207,9 +207,9 @@
 
     // Runtime capture-focus (netring 0.28, #225). Off by default. When enabled,
     // registers a reloadable packet-tier subscription whose filter can be
-    // hot-swapped during an incident via `@/commands/capture_filter` (no capture
+    // hot-swapped during an incident via `@rpc/netring/capture_filter/set` (no capture
     // restart) to narrow attention to a host/port; `capture/focus/{packets,
-    // bytes}` counters show the effect, and `@/status/capture_filter` reports the
+    // bytes}` counters show the effect, and `@rpc/netring/capture_filter` reports the
     // live filter. Grammar: `tcp|udp|icmp`, `[src|dst] port N`, `[src|dst] host
     // IP`, `[src|dst] net CIDR`, combined with `and`/`or`/`!`/parens.
     capture_focus: {
@@ -217,7 +217,8 @@
       base_expr: "tcp or udp or icmp",
     },
 
-    // On-demand packet capture over the unified `@/artifact` channel (#333).
+    // On-demand packet capture over the unified artifact channel
+    // (@rpc artifact/request + @blob delivery, #333).
     // Off by default. When `on_demand.enabled`, an operator can request a
     // bounded pcap from the GUI (or any client) — a dedicated reloadable
     // packet-tier tap streams frames to a `pcap[.zst]` file delivered as a
@@ -247,7 +248,7 @@
       // MEMORY COST: `ring_bytes` of raw frames stays resident while triggered
       // mode is armed. A mode that is off at startup is not armed (no packet
       // subscription); switching between armed modes is live via
-      // `@/commands/capture_disk`. Under systemd, add `ReadWritePaths=` for
+      // `@rpc/netring/capture_disk/set`. Under systemd, add `ReadWritePaths=` for
       // `dir` to the unit.
       to_disk: {
         mode: "off",                     // "off" | "rotating" | "triggered"

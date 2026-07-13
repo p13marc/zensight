@@ -50,9 +50,6 @@ pub struct CorrelatorConfig {
     pub reemit_secs: u64,
 
     /// Roll device-liveness status onto entities (worst-of-members). Disable if
-    /// the extra liveness subscription is unwanted.
-    #[serde(default = "default_status_from_liveness")]
-    pub status_from_liveness: bool,
 
     /// Per-rule kill-switches.
     #[serde(default)]
@@ -75,10 +72,6 @@ fn default_reemit_secs() -> u64 {
     60
 }
 
-fn default_status_from_liveness() -> bool {
-    true
-}
-
 impl Default for CorrelatorConfig {
     fn default() -> Self {
         Self {
@@ -87,7 +80,6 @@ impl Default for CorrelatorConfig {
             evidence_ttl_secs: default_evidence_ttl(),
             recompute_debounce_ms: default_recompute_debounce_ms(),
             reemit_secs: default_reemit_secs(),
-            status_from_liveness: default_status_from_liveness(),
             rules: RulesConfig::default(),
             logging: LoggingConfig::default(),
         }
@@ -176,7 +168,6 @@ mod tests {
         assert_eq!(config.evidence_ttl_secs, 900);
         assert_eq!(config.recompute_debounce_ms, 500);
         assert_eq!(config.reemit_secs, 60);
-        assert!(config.status_from_liveness);
         assert!(config.rules.host_id);
         assert!(config.rules.cloud_instance);
         assert!(config.rules.mac_ip);
@@ -192,7 +183,6 @@ mod tests {
             evidence_ttl_secs: 600,
             recompute_debounce_ms: 250,
             reemit_secs: 30,
-            status_from_liveness: false,
             rules: { hostname_enabled: false },
         }"#;
         let config = CorrelatorConfig::parse(json).unwrap();
@@ -201,7 +191,6 @@ mod tests {
         assert_eq!(config.evidence_ttl_secs, 600);
         assert_eq!(config.recompute_debounce_ms, 250);
         assert_eq!(config.reemit_secs, 30);
-        assert!(!config.status_from_liveness);
         // Unspecified rule fields keep their default (true); the named one flips.
         assert!(config.rules.host_id);
         assert!(!config.rules.hostname_enabled);
@@ -220,7 +209,6 @@ mod tests {
         assert_eq!(d.evidence_ttl_secs, 900);
         assert_eq!(d.recompute_debounce_ms, 500);
         assert_eq!(d.reemit_secs, 60);
-        assert!(d.status_from_liveness);
         assert!(d.rules.hostname_enabled);
     }
 }

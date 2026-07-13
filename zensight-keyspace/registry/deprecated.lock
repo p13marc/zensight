@@ -1,0 +1,4 @@
+# Append-only deprecation ledger (RFC 08 §3/§5).
+# One line per retired subject: <producer>\t<path>. Lines are never removed;
+# build.rs fails if a ledger line loses its [[deprecated]] entry or a
+# [[deprecated]] entry is missing from the ledger.

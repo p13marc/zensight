@@ -3,8 +3,8 @@
 //! [`AlertReporter`] is the sensor-side counterpart to
 //! [`zensight_common::Alert`]: it owns a [`Publisher`], tracks which alerts are
 //! currently firing, applies a "must be violated continuously for N" debounce,
-//! and publishes firing/resolved transitions to
-//! `zensight/<protocol>/@/alerts/<alert_key>` (a `Put` to raise/update, a `Put`
+//! and publishes firing/resolved transitions to the v1 state key
+//! `<base>/@v1/<origin>/state/<producer>/alert/<alert_key>` (a `Put` to raise/update, a `Put`
 //! with state `Resolved` followed by a `Delete` tombstone to clear).
 //!
 //! Usage from an evaluator sweep:
@@ -54,8 +54,8 @@ pub struct AlertReporter {
 }
 
 impl AlertReporter {
-    /// Create a reporter. `publisher`'s session is used to publish to
-    /// `zensight/<protocol>/@/alerts/<key>`; the publisher prefix is ignored for
+    /// Create a reporter. `publisher`'s v1 context keys the alert state
+    /// (`state/<producer>/alert/<key>`); the telemetry prefix is ignored for
     /// alert keys (we build the full key from `protocol`).
     pub fn new(publisher: Publisher, protocol: Protocol, format: Format) -> Self {
         Self {
@@ -84,7 +84,9 @@ impl AlertReporter {
     }
 
     fn alert_key_expr(&self, alert_key: &str) -> String {
-        format!("zensight/{}/@/alerts/{}", self.protocol.as_str(), alert_key)
+        // v1 (RFC 04 §1.2): alerts are LWW state under the producer, keyed by
+        // the origin — the legacy protocol-shared channel is gone.
+        self.publisher.v1().state_key(&["alert", alert_key])
     }
 
     /// Report that `alert` is currently violated. Publishes a `Put(Firing)` once
@@ -93,7 +95,7 @@ impl AlertReporter {
     /// the severity escalates after firing.
     pub async fn observe(&self, mut alert: Alert, for_duration: Option<Duration>) -> Result<()> {
         // Stamp the identity annotation once at entry: `entry.last` then carries
-        // it through the firing publication, the `@/query/alerts` seed, and the
+        // it through the firing publication, the `state alert selector` seed, and the
         // eventual resolve — one stamp site, consistent everywhere.
         if let Some(host_id) = self.identity.as_ref().and_then(|i| i.get().host_id) {
             alert.labels.insert("host.id".to_string(), host_id);
@@ -187,7 +189,7 @@ impl AlertReporter {
 
     /// The current set of firing (published) alerts.
     ///
-    /// Used to answer the `@/query/alerts` queryable so a late-joining consumer
+    /// Used to answer the `state alert selector` queryable so a late-joining consumer
     /// (a GUI opened *after* an alert fired) can seed its firing set — alerts are
     /// only published on state change, so without this seed a late joiner would
     /// never see an already-firing alert.
@@ -241,30 +243,37 @@ impl AlertReporter {
     }
 }
 
-/// Serve `zensight/<protocol>/@/query/alerts` — replies with the reporter's
-/// current firing-alert set as JSON (`Vec<Alert>`). Spawn this as a task; it runs
-/// until the session closes. Lets a late-joining GUI seed its firing set on
-/// connect (the alerts late-joiner fix — see plans/enhancements/05 §1b).
+/// Serve the late-joiner seed for this producer's firing alerts — RFC 05 §4
+/// style: not a bespoke procedure but a queryable on the **alert state
+/// selector** (`state/<producer>/alert/*`), replying one sample per firing
+/// alert on its concrete state key — exactly the answer a router latest-value
+/// storage would give, so plain-GET seeding works with or without one (the
+/// producer-side leg covers live producers; the storage covers crashed ones).
 pub async fn serve_alerts_query(reporter: std::sync::Arc<AlertReporter>) {
     let session = reporter.publisher().session().clone();
-    let key = format!("zensight/{}/@/query/alerts", reporter.protocol().as_str());
-    let queryable = match session.declare_queryable(&key).await {
+    let selector = format!("{}/*", reporter.publisher().v1().state_key(&["alert"]));
+    let queryable = match session.declare_queryable(&selector).await {
         Ok(q) => q,
         Err(e) => {
-            tracing::error!(error = %e, key = %key, "failed to declare alerts queryable");
+            tracing::error!(error = %e, key = %selector, "failed to declare alert seed queryable");
             return;
         }
     };
-    tracing::info!(key = %key, "alerts firing-set queryable ready");
+    tracing::info!(key = %selector, "alert state seed ready");
     while let Ok(query) = queryable.recv_async().await {
         let firing = reporter.firing_alerts();
-        match serde_json::to_vec(&firing) {
-            Ok(payload) => {
-                if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
-                    tracing::warn!(error = %e, "failed to reply to alerts query");
+        for alert in firing {
+            let key = reporter.alert_key_expr(&alert.alert_key());
+            match serde_json::to_vec(&alert) {
+                Ok(payload) => {
+                    // One reply per firing alert on its concrete state key —
+                    // storage-shaped (RFC 05 §2.1 reply-key discipline).
+                    if let Err(e) = query.reply(key, payload).await {
+                        tracing::warn!(error = %e, "failed to reply alert seed");
+                    }
                 }
+                Err(e) => tracing::warn!(error = %e, "failed to serialize alert"),
             }
-            Err(e) => tracing::warn!(error = %e, "failed to serialize firing alerts"),
         }
     }
 }

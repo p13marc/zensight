@@ -1,4 +1,4 @@
-//! Parallax alert rules on `@/alerts/*` (mirrors the other sensors'
+//! Parallax alert rules on `state/parallax/alert/*` (mirrors the other sensors'
 //! firing/resolved lifecycle via [`AlertReporter`]):
 //!
 //! - `camera_disappeared` — a V4L2 device the catalogue advertises vanished

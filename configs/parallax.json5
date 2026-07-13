@@ -4,7 +4,8 @@
     mode: "peer",
   },
 
-  // On-demand artifact channel (@/artifact) — opt-in per kind. When enabled,
+  // On-demand artifact channel (@rpc artifact/request + @blob delivery) —
+  // opt-in per kind. When enabled,
   // an operator can download a redacted tar.zst debug bundle from the GUI.
   artifacts: {
     report: {
@@ -18,7 +19,6 @@
 
   // Parallax video sensor settings
   parallax: {
-    key_prefix: "zensight/parallax",
     source: "auto",       // host id used as the `source` key chunk; "auto" detects the hostname
 
     // Advertise local V4L2 cameras (/dev/video*) in the stream catalogue.

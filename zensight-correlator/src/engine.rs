@@ -29,18 +29,15 @@ const ENTITY_NAMES_CAP: usize = 32;
 /// One decoded input to the engine, produced by the subscribers.
 #[derive(Debug, Clone)]
 pub enum EvidenceMsg {
-    /// A host-identity claim (`_meta/evidence/host/<sensor>/<source>`). Boxed:
+    /// A host-identity claim (`state/<sensor>/evidence/{self,device/<d>}`). Boxed:
     /// `HostEvidence` is much larger than the other variants and this message
     /// flows through a channel (keeps the enum from being fat — same reason
     /// [`EntityOp::Upsert`] boxes its entity).
     Host(Box<HostEvidence>),
-    /// A passive-DNS name observation (`_meta/evidence/names/<sensor>/<ip>`).
+    /// A passive-DNS name observation (`state/<sensor>/evidence/names/<ip-slug>`).
     Name(NameObservation),
-    /// A device-liveness update; `source` is the device id, `status` the
-    /// reported status string.
-    Liveness { source: String, status: String },
     /// A host-evidence tombstone (a `Delete` on
-    /// `_meta/evidence/host/<sensor>/<source>`): drop that claim now instead of
+    /// `state/<sensor>/evidence/{self,device/<d>}`): drop that claim now instead of
     /// waiting for it to age out by TTL.
     RemoveHost { sensor: String, source: String },
 }
@@ -69,8 +66,6 @@ pub struct CorrelatorState {
     config: CorrelatorConfig,
     evidence: EvidenceStore,
     names: NameStore,
-    /// Latest device-liveness status per device (== evidence `source`).
-    liveness: HashMap<String, String>,
     /// Entity id → last published record.
     last: HashMap<String, EntityRecord>,
 }
@@ -82,7 +77,6 @@ impl CorrelatorState {
             config,
             evidence: EvidenceStore::default(),
             names: NameStore::default(),
-            liveness: HashMap::new(),
             last: HashMap::new(),
         }
     }
@@ -92,9 +86,6 @@ impl CorrelatorState {
         match msg {
             EvidenceMsg::Host(ev) => self.evidence.upsert(*ev),
             EvidenceMsg::Name(obs) => self.names.upsert(obs),
-            EvidenceMsg::Liveness { source, status } => {
-                self.liveness.insert(source, status);
-            }
             EvidenceMsg::RemoveHost { sensor, source } => {
                 self.evidence.remove(&sensor, &source);
             }
@@ -116,7 +107,6 @@ impl CorrelatorState {
 
         for e in &mut entities {
             self.inject_names(e);
-            self.assign_status(e);
             e.last_updated = now_ms;
         }
 
@@ -199,23 +189,6 @@ impl CorrelatorState {
         e.names = names;
     }
 
-    /// Roll device-liveness up onto the entity (worst-of-members). Skipped when
-    /// `status_from_liveness` is disabled or no member has a liveness record.
-    fn assign_status(&self, e: &mut HostEntity) {
-        if !self.config.status_from_liveness {
-            return;
-        }
-        let mut worst: Option<&str> = None;
-        for m in &e.members {
-            if let Some(s) = self.liveness.get(&m.source)
-                && worst.is_none_or(|w| status_rank(s) > status_rank(w))
-            {
-                worst = Some(s);
-            }
-        }
-        e.status = worst.map(|s| s.to_string());
-    }
-
     /// Record entity-id lineage: an old id that shares ≥1 member with a new
     /// entity but is not itself a current id was upgraded/merged into that new
     /// entity — put the old id in the new entity's `aliases` (it is tombstoned
@@ -252,16 +225,6 @@ fn member_set(e: &HostEntity) -> std::collections::HashSet<(String, String)> {
         .collect()
 }
 
-/// Worst-of ranking for status rollup: offline > degraded > online > unknown.
-fn status_rank(status: &str) -> u8 {
-    match status {
-        "offline" => 3,
-        "degraded" => 2,
-        "online" => 1,
-        _ => 0,
-    }
-}
-
 /// Content hash of an entity with `last_updated` zeroed — so pure liveness
 /// re-emits (which only bump `last_updated`) don't count as changes.
 fn content_hash(entity: &HostEntity) -> u64 {
@@ -283,7 +246,8 @@ pub struct Engine {
     state: SharedState,
     rx: mpsc::Receiver<EvidenceMsg>,
     out: mpsc::Sender<EntityOp>,
-    /// Optional sink for durable historical passive-DNS records (`@pdns`, #310).
+    /// Optional sink for durable historical passive-DNS records
+    /// (`@catalog/state/pdns`, #310).
     /// Fed on every name-store update so a storage backend can capture the full
     /// IP↔name history. `None` disables the historical tier.
     pdns_out: Option<mpsc::Sender<PdnsRecord>>,
@@ -316,9 +280,9 @@ impl Engine {
         }
     }
 
-    /// Attach the durable historical passive-DNS sink (`@pdns`, #310). When set,
-    /// each name-store update emits a [`PdnsRecord`] with the IP's full
-    /// accumulated name set onto this channel for the `@pdns` publisher.
+    /// Attach the durable historical passive-DNS sink (`@catalog/state/pdns`,
+    /// #310). When set, each name-store update emits a [`PdnsRecord`] with the
+    /// IP's full accumulated name set onto this channel for the pdns publisher.
     pub fn with_pdns(mut self, pdns_out: mpsc::Sender<PdnsRecord>) -> Self {
         self.pdns_out = Some(pdns_out);
         self
@@ -348,7 +312,7 @@ impl Engine {
                         Some(msg) => {
                             // A name observation updates the accumulated names for
                             // its IP; after applying, emit the IP's full name set
-                            // as a durable historical `@pdns` record (#310). Cheap
+                            // as a durable historical `@catalog/state/pdns` record (#310). Cheap
                             // and off the packet hot path — fires per name-store
                             // update, not per packet.
                             let pdns_ip = match &msg {
@@ -552,33 +516,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn status_rolls_up_worst_of_members() {
-        let mut s = CorrelatorState::new(cfg());
-        s.apply(EvidenceMsg::Host(Box::new(self_report(
-            "sysinfo",
-            "host1",
-            &hid(5),
-        ))));
-        s.apply(EvidenceMsg::Liveness {
-            source: "host1".into(),
-            status: "degraded".into(),
-        });
-        let ops = s.recompute(2000);
-        let e = ops
-            .iter()
-            .find_map(|o| match o {
-                EntityOp::Upsert(e) => Some(e),
-                _ => None,
-            })
-            .unwrap();
-        assert_eq!(e.status.as_deref(), Some("degraded"));
-    }
-
     #[tokio::test]
     async fn name_message_emits_historical_pdns_record() {
         // #310: a passive-DNS name observation flowing through the engine emits a
-        // durable `@pdns` record carrying the IP's full accumulated name set.
+        // durable `@catalog/state/pdns` record carrying the IP's full accumulated name set.
         let state = std::sync::Arc::new(std::sync::Mutex::new(CorrelatorState::new(cfg())));
         let (tx, rx) = mpsc::channel(16);
         let (op_tx, _op_rx) = mpsc::channel(16);
@@ -650,7 +591,7 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        assert!(old_id.starts_with("h_"));
+        assert!(old_id.starts_with("h-"));
 
         // Now a self-report with a host_id arrives sharing the same MAC+IP, so
         // it merges with the asset and the set gains a host_id → new id.
@@ -682,7 +623,7 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        let new_id = format!("h_{}", &hid(6)[..12]);
+        let new_id = format!("h-{}", &hid(6)[..12]);
         assert_eq!(new_entity.entity_id, new_id);
         assert!(
             new_entity.aliases.contains(&old_id),

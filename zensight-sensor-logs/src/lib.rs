@@ -9,15 +9,10 @@
 //!
 //! # Key Expression Format
 //!
-//! Messages are published to:
+//! Per-line messages feed the bounded `@rpc/logs/events` ring (#358, pull-only);
+//! the derived rollups ride the telemetry bus under:
 //! ```text
-//! {prefix}/{hostname}/{facility}/{severity}
-//! ```
-//!
-//! For example:
-//! ```text
-//! zensight/logs/router01/auth/warning
-//! zensight/logs/webserver/daemon/info
+//! zensight/@v1/<origin>/telemetry/logs/...
 //! ```
 
 pub mod commands;
@@ -30,3 +25,4 @@ pub mod journald;
 pub mod multiline;
 pub mod parser;
 pub mod receiver;
+pub(crate) mod telemetry_guard;

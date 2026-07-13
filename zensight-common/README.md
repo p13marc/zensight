@@ -9,18 +9,20 @@ speak.
 
 - **Telemetry model** — `TelemetryPoint`, `Protocol`, `TelemetryValue`
   (`Counter` / `Gauge` / `Text` / `Boolean` / `Binary`) with labels.
-- **Alert & command model** — `Alert{Kind,Severity,State}` + `alert_key`, and the
-  `@/commands` / `@/status` / `@/query` control channels.
+- **Alert & RPC model** — `Alert{Kind,Severity,State}` + `alert_key` (LWW alert
+  state documents), and the `@rpc` procedure key builders (`command_key` /
+  `status_key` / `query_key` — writes are `<topic>/set` GETs, reads are `<topic>`).
 - **Identity, evidence & entities** — `HostEvidence`, `NameObservation`,
   `HostEntity` / `MemberClaim` / `NameVal`: the sensor-published evidence that the
-  correlator fuses into one entity per physical host.
+  catalog (correlator) fuses into one entity per physical host.
 - **Artifact channel** — `ArtifactRequest` / `ArtifactKind` / `ArtifactStatus` /
   `Delivery` wire types for on-demand large-data transfer (report / snapshot /
-  capture) over `zenoh-blob`.
+  capture) over `zenoh-blob` on the `@blob` plane.
 - **QoS** — `QosClass`, the per-traffic-class Zenoh profile (telemetry drops,
   control blocks) tuned for low-bandwidth / unreliable links.
-- **Keyspace helpers** — builders in `keyexpr.rs` for every telemetry, `@/`
-  control, `_meta` and `@`-verbatim (`@media` / `@pdns`) key.
+- **Keyspace helpers** — consumer-side v1 selectors and keys in `keyexpr.rs`
+  (class wildcards, fleet/origin `@rpc` selectors, `@catalog` entity/pdns keys);
+  producer-side keys come from `zensight_keyspace::V1Context`.
 - **Serialization** — JSON / CBOR `encode` / `decode`, with first-byte-sniffing
   `decode_auto` so JSON and CBOR senders interoperate on the wire.
 - **Config & session** — JSON5 `load_config`, `ZenohConfig`, and the `connect`
@@ -55,10 +57,11 @@ cargo test -p zensight-common
 
 ## Documentation
 
-- [Data model](docs/data-model.md) — telemetry, alerts, commands, serialization, QoS.
+- [Data model](docs/data-model.md) — telemetry, alerts, RPC, serialization, QoS.
 - [Identity, evidence & entities](docs/identity-evidence.md) — the evidence → entity pipeline.
-- [Keyspace helpers](docs/keyspace-helpers.md) — index of the `keyexpr.rs` builders.
-- [`../docs/KEYSPACE.md`](../docs/KEYSPACE.md) — the authoritative, full key-expression contract.
+- [Keyspace helpers](docs/keyspace-helpers.md) — index of the `keyexpr.rs` / `command.rs` builders.
+- [`../docs/KEYSPACE.md`](../docs/KEYSPACE.md) — the deployed keyspace profile
+  (normative spec: [`../docs/rfcs/keyspace-v2/`](../docs/rfcs/keyspace-v2/00-index.md)).
 
 ## License
 

@@ -1,9 +1,9 @@
 //! Netring detection-tuning panel (#121).
 //!
 //! Surfaces the netring sensor's runtime detector config (fetched from
-//! `zensight/netring/@/status/detectors`) and lets an operator mute/unmute a
-//! detector, adjust its threshold, and edit the allowlist — pushed back over the
-//! command channel (`@/commands/detectors`) and applied without a sensor
+//! `@rpc/netring/detectors`) and lets an operator mute/unmute a
+//! detector, adjust its threshold, and edit the allowlist — pushed back via
+//! `@rpc/netring/detectors/set` and applied without a sensor
 //! restart. Rendered inside the Security view (the NDR home).
 
 use iced::widget::{Row, column, container, row, text, text_input};
@@ -50,7 +50,7 @@ pub struct DetectorRow {
 }
 
 /// The netring sensor's live capture-focus filter state (#225/#228), parsed from
-/// `zensight/netring/@/status/capture_filter`.
+/// `@rpc/netring/capture_filter`.
 #[derive(Debug, Clone, Default)]
 pub struct CaptureFilterView {
     /// Whether the reloadable packet-tier subscription is wired up.
@@ -66,7 +66,7 @@ pub struct CaptureFilterView {
 }
 
 /// The netring sensor's live threat-intel (IOC / YARA) reload state (#328),
-/// parsed from `zensight/netring/@/status/threat_intel`.
+/// parsed from `@rpc/netring/threat_intel`.
 #[derive(Debug, Clone, Default)]
 pub struct ThreatIntelView {
     /// IOC reload is armed (monitor built with `ioc(..)`).
@@ -356,9 +356,9 @@ pub fn detection_tuning_panel(state: &DetectionTuningState) -> Element<'_, Messa
 }
 
 /// Capture-focus card (#225/#228): a live BPF box that hot-swaps the netring
-/// sensor's reloadable packet-tier filter via `@/commands/capture_filter`, with a
+/// sensor's reloadable packet-tier filter via `@rpc/netring/capture_filter/set`, with a
 /// readout of the currently-applied filter (and any validation error) from
-/// `@/status/capture_filter`. Narrows capture attention during an incident
+/// `@rpc/netring/capture_filter`. Narrows capture attention during an incident
 /// without restarting capture.
 fn capture_focus_card(state: &DetectionTuningState) -> Element<'_, Message> {
     let muted = |t: &Theme| text::Style {
@@ -428,8 +428,8 @@ fn capture_focus_card(state: &DetectionTuningState) -> Element<'_, Message> {
 
 /// Threat-intel (IOC / YARA) hot-reload card (#328): paste indicators or YARA
 /// rules and swap them into the live netring matchers via
-/// `@/commands/threat_intel`, with an armed/loaded readout and the last-reload
-/// outcome from `@/status/threat_intel`. No capture restart.
+/// `@rpc/netring/threat_intel/set`, with an armed/loaded readout and the last-reload
+/// outcome from `@rpc/netring/threat_intel`. No capture restart.
 fn threat_intel_card(state: &DetectionTuningState) -> Element<'_, Message> {
     let muted = |t: &Theme| text::Style {
         color: Some(theme::colors(t).text_muted()),

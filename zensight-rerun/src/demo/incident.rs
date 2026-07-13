@@ -65,10 +65,21 @@ fn ramp(t: f64, start: f64, end: f64, from: f64, to: f64) -> f64 {
 
 /// The continuous series at `sec` seconds into the script.
 ///
-/// - RSSI: −60 dBm, ramps to −85 over t+10..t+20, recovers t+50..t+60.
-/// - Loss: 0 %, ramps to 8 % over t+15..t+22, recovers t+50..t+55.
+/// Every metric here is one a **real sensor actually emits** — the registry
+/// (RFC 08, issue #468) now enforces that, and it caught this file publishing
+/// four series that no sensor produces (`wifi/wlan0/rssi_dbm`,
+/// `path/gateway/{rtt_ms,loss_percent}`, and `sockets/tcp/retransmits` with the
+/// `_total` suffix missing). A demo that invents keys teaches the viewer — and
+/// any blueprint built on it — a keyspace that does not exist.
+///
+/// The story is unchanged, told on the real keys: a wifi link degrades, so its
+/// negotiated rate collapses, flows start erroring, TCP retransmits spike, and
+/// flow lifetimes stretch out.
+///
+/// - Link rate: 300 Mb/s, collapses to 6 over t+10..t+20, recovers t+50..t+60.
+/// - Flow error ratio: 0, ramps to 0.08 over t+15..t+22, recovers t+50..t+55.
 /// - Retransmits (counter): 1/s baseline, 50/s from t+18, 1/s after t+50.
-/// - RTT: 20 ms, ramps to 400 over t+22..t+30, recovers t+50..t+60.
+/// - Flow-lifetime p95: 20 ms, ramps to 400 over t+22..t+30, recovers t+50..t+60.
 pub fn series_at(base_ts: i64, sec: u64) -> Vec<TelemetryPoint> {
     let ts = base_ts + (sec * 1000) as i64;
     let t = sec as f64;
@@ -80,8 +91,8 @@ pub fn series_at(base_ts: i64, sec: u64) -> Vec<TelemetryPoint> {
 
     let recovering = |v: f64, healthy: f64, rec_end: f64| ramp(t, 50.0, rec_end, v, healthy);
 
-    let rssi = recovering(ramp(t, 10.0, 20.0, -60.0, -85.0), -60.0, 60.0);
-    let loss = recovering(ramp(t, 15.0, 22.0, 0.0, 8.0), 0.0, 55.0);
+    let link_mbps = recovering(ramp(t, 10.0, 20.0, 300.0, 6.0), 300.0, 60.0);
+    let error_ratio = recovering(ramp(t, 15.0, 22.0, 0.0, 0.08), 0.0, 55.0);
     let rtt = recovering(ramp(t, 22.0, 30.0, 20.0, 400.0), 20.0, 60.0);
 
     // Retransmit counter: integrate the scripted per-second rate.
@@ -92,22 +103,22 @@ pub fn series_at(base_ts: i64, sec: u64) -> Vec<TelemetryPoint> {
     vec![
         point(
             Protocol::Netlink,
-            "wifi/wlan0/rssi_dbm",
-            TelemetryValue::Gauge(rssi),
+            "ethtool/wlan0/speed_mbps",
+            TelemetryValue::Gauge(link_mbps),
         ),
         point(
             Protocol::Netring,
-            "path/gateway/loss_percent",
-            TelemetryValue::Gauge(loss),
+            "flow/red/error_ratio",
+            TelemetryValue::Gauge(error_ratio),
         ),
         point(
             Protocol::Netlink,
-            "sockets/tcp/retransmits",
+            "sockets/tcp/retransmits_total",
             TelemetryValue::Counter(retransmits),
         ),
         point(
             Protocol::Netring,
-            "path/gateway/rtt_ms",
+            "flow/red/p95_ms",
             TelemetryValue::Gauge(rtt),
         ),
     ]
@@ -278,15 +289,15 @@ mod tests {
             other => panic!("unexpected value {other:?}"),
         };
         // Baseline.
-        assert_eq!(g(5, 0), -60.0); // rssi
-        assert_eq!(g(5, 1), 0.0); // loss
-        assert_eq!(g(5, 3), 20.0); // rtt
+        assert_eq!(g(5, 0), 300.0); // ethtool/wlan0/speed_mbps
+        assert_eq!(g(5, 1), 0.0); // flow/red/error_ratio
+        assert_eq!(g(5, 3), 20.0); // flow/red/p95_ms
         // Degraded plateau (t=40 is inside every ramp's plateau).
-        assert_eq!(g(40, 0), -85.0);
-        assert_eq!(g(40, 1), 8.0);
+        assert_eq!(g(40, 0), 6.0);
+        assert_eq!(g(40, 1), 0.08);
         assert_eq!(g(40, 3), 400.0);
         // Recovered.
-        assert_eq!(g(65, 0), -60.0);
+        assert_eq!(g(65, 0), 300.0);
         assert_eq!(g(65, 1), 0.0);
         assert_eq!(g(65, 3), 20.0);
         // Retransmit counter accelerates at t=18 (50/s vs 1/s).

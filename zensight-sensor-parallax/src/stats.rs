@@ -7,7 +7,7 @@
 //! aggregated over its open profiles (kbps is the stream's total media
 //! bandwidth; fps counts every published frame, video + preview).
 //!
-//! Telemetry rides `zensight/parallax/<source>/<stream>/stats/<metric>`
+//! Telemetry rides `zensight/@v1/<origin>/telemetry/parallax/<stream>/stats/<metric>`
 //! (fps / kbps / drops / viewers / encode_ms), so existing charts light up
 //! for free; `streams/advertised` is published every tick so a parallax host
 //! shows up on the dashboard even before any stream is opened.
@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::TelemetryValue;
 use zensight_sensor_core::Publisher;
 
 /// Lock-free counters for one stream (shared by its open profiles).
@@ -232,9 +232,8 @@ pub async fn run_ticker(
 }
 
 async fn publish(publisher: &Publisher, source: &str, metric: &str, value: TelemetryValue) {
-    let point = TelemetryPoint::new(source, Protocol::Parallax, metric, value);
-    let suffix = format!("{source}/{metric}");
-    if let Err(e) = publisher.publish(&suffix, &point).await {
+    let point = crate::telemetry_guard::checked_point(source, metric, value);
+    if let Err(e) = publisher.publish(metric, &point).await {
         tracing::warn!(error = %e, metric = %metric, "failed to publish stream stats");
     }
 }

@@ -226,7 +226,7 @@ impl TopologyState {
     }
 
     /// Update topology from dashboard device states. `sensor_health` is the
-    /// per-sensor `@/health` snapshot map (host-scoped via `host_id`, #391);
+    /// per-sensor `state/<producer>/health` snapshot map (host-scoped via `host_id`, #391);
     /// `now_ms` drives entity staleness.
     pub fn update_from_devices(
         &mut self,

@@ -23,18 +23,18 @@ use crate::config::AnomalyConfig;
 /// restart. The per-packet `feed` paths are left untouched.
 type LiveConfig = Arc<ArcSwap<AnomalyConfig>>;
 
-/// Bounded ring of recent ended-flow records served via `@/query/flows`.
+/// Bounded ring of recent ended-flow records served via `@rpc/netring/flows`.
 pub type FlowRing = Arc<Mutex<VecDeque<FlowRecord>>>;
 
 /// Bounded ring of netring's canonical flow records served (mapped to IANA-IE
-/// shape via `to_ipfix_record`) on `@/query/ipfix` (#223, feature `ipfix`).
+/// shape via `to_ipfix_record`) on `@rpc/netring/ipfix` (#223, feature `ipfix`).
 #[cfg(feature = "ipfix")]
 pub type IpfixRing = Arc<Mutex<VecDeque<netring::export::FlowRecord>>>;
 
-/// Max recent flows retained for the on-demand `@/query/flows` channel.
+/// Max recent flows retained for the on-demand `@rpc/netring/flows` channel.
 const FLOW_RING_CAP: usize = 512;
 
-/// Max recent elephant flows retained for `@/query/elephant_flows`.
+/// Max recent elephant flows retained for `@rpc/netring/elephant_flows`.
 const ELEPHANT_RING_CAP: usize = 128;
 
 /// Cardinality guards for the on-demand inventories (DNS / HTTP). Talkers now
@@ -58,7 +58,7 @@ use crate::map::{self, AnomalyView, DnsRcodeClass};
 
 /// Latest netring `aggregate()` snapshot (#369): src-IP rolling talkers +
 /// `(src,dst)` pair rates, refreshed by the `on_aggregate` tick and served on
-/// `@/query/{talkers,matrix}`.
+/// `@rpc/netring/{talkers,matrix}`.
 pub type AggregateState = Arc<Mutex<netring::monitor::aggregate::AggregateSnapshot>>;
 /// Latest netring per-flow RED snapshot (#369): rate / error-ratio / p50·p95·p99
 /// flow-lifetime percentiles, refreshed by the `on_red` tick. `None` until the
@@ -75,11 +75,11 @@ const OWNER_BW_TOP: usize = 100;
 pub type ElephantRing = Arc<Mutex<VecDeque<ElephantRecord>>>;
 /// Passive TLS fingerprint inventory: (sni, ja4) → record with a hit count.
 pub type TlsInventory = Arc<Mutex<HashMap<(String, String), TlsRecord>>>;
-/// DNS SLD inventory: `sld -> (queries, nxdomain)` for `@/query/dns`.
+/// DNS SLD inventory: `sld -> (queries, nxdomain)` for `@rpc/netring/dns`.
 pub type DnsInventory = Arc<Mutex<HashMap<String, (u64, u64)>>>;
-/// HTTP host inventory: `host -> (requests, errors)` for `@/query/http`.
+/// HTTP host inventory: `host -> (requests, errors)` for `@rpc/netring/http`.
 pub type HttpInventory = Arc<Mutex<HashMap<String, (u64, u64)>>>;
-/// Passive asset inventory: `mac -> AssetRecord` for `@/query/assets` (issue #70).
+/// Passive asset inventory: `mac -> AssetRecord` for `@rpc/netring/assets` (issue #70).
 pub type AssetInventory = Arc<Mutex<HashMap<String, AssetRecord>>>;
 
 /// Wire-level owner-bandwidth shared state (#318, opt-in). The
@@ -88,7 +88,7 @@ pub type AssetInventory = Arc<Mutex<HashMap<String, AssetRecord>>>;
 /// scan) for its allocation-free slot lookup; the periodic
 /// [`on_owner_bandwidth`](netring::monitor::MonitorBuilder::on_owner_bandwidth)
 /// report writes the resolved per-owner rows into `records`, served on
-/// `@/query/bandwidth`. Present only when `bandwidth_attribution` is enabled.
+/// `@rpc/netring/bandwidth`. Present only when `bandwidth_attribution` is enabled.
 #[derive(Clone)]
 pub struct OwnerBandwidth {
     /// Hot-swapped flow→owner lookup, consulted by the attribution hook.
@@ -104,11 +104,11 @@ pub type AssetDirty = Arc<Mutex<std::collections::HashSet<String>>>;
 /// Per-flow in-flight HTTP request state: `flow -> (request_start_ms, host)`,
 /// used to derive request→response latency and attribute response status.
 type HttpPending = Arc<Mutex<HashMap<FiveTupleKey, (u64, Option<String>)>>>;
-/// Passive QUIC SNI/ALPN inventory: (sni, version) → record for `@/query/quic` (#72).
+/// Passive QUIC SNI/ALPN inventory: (sni, version) → record for `@rpc/netring/quic` (#72).
 pub type QuicInventory = Arc<Mutex<HashMap<(String, String), QuicRecord>>>;
-/// Passive SSH/HASSH inventory: hassh → record for `@/query/ssh` (#72).
+/// Passive SSH/HASSH inventory: hassh → record for `@rpc/netring/ssh` (#72).
 pub type SshInventory = Arc<Mutex<HashMap<String, SshRecord>>>;
-/// Passive JA4H HTTP-fingerprint inventory: ja4h → record for `@/query/ja4h`
+/// Passive JA4H HTTP-fingerprint inventory: ja4h → record for `@rpc/netring/ja4h`
 /// (#124, only populated with `--features ja4plus`).
 pub type Ja4hInventory = Arc<Mutex<HashMap<String, Ja4hRecord>>>;
 /// Shared passive-DNS name cache (issue #308): IP → provenance-tagged name
@@ -128,7 +128,7 @@ const ENC_DNS_INVENTORY_CAP: usize = 4096;
 #[cfg(feature = "ja4plus")]
 const JA4H_INVENTORY_CAP: usize = 4096;
 /// LRU capacity of the passive asset inventory (MAC-keyed) — matches the bound
-/// on the served `@/query/assets` map (issue #70).
+/// on the served `@rpc/netring/assets` map (issue #70).
 const ASSET_INVENTORY_CAP: usize = 8192;
 
 /// A bounded DDSketch for RED latency / duration percentiles (#325): O(1)
@@ -187,7 +187,7 @@ pub struct DnsState {
 
 /// Encrypted-DNS (DoT/DoQ/DoH) accumulators (#326). Session counts per transport
 /// plus the un-known-resolver subset (the tunneling / policy-bypass signal), and a
-/// bounded per-(transport, sni) inventory served on `@/query/encrypted_dns`.
+/// bounded per-(transport, sni) inventory served on `@rpc/netring/encrypted_dns`.
 #[derive(Default)]
 pub struct EncDnsState {
     pub dot: AtomicU64,
@@ -257,7 +257,7 @@ pub struct MonitorChannels {
     /// Latest per-flow RED snapshot from netring's `red()` (#369): rate /
     /// error-ratio / p50·p95·p99 flow-lifetime percentiles.
     pub flow_red: FlowRedState,
-    /// Bounded ring of recent ended-flow detail records for `@/query/flows`.
+    /// Bounded ring of recent ended-flow detail records for `@rpc/netring/flows`.
     pub flow_records: FlowRing,
     /// TCP RST counters: total resets and the subset that are connection refusals.
     pub tcp_resets: Arc<AtomicU64>,
@@ -267,7 +267,7 @@ pub struct MonitorChannels {
     /// Subset of `tls_handshakes` that offered a post-quantum (hybrid) key-share
     /// group (#326); the ratio is the streamed `tls/pq_ratio` PQ-readiness gauge.
     pub tls_pq_handshakes: Arc<AtomicU64>,
-    /// Passive TLS asset inventory keyed by (sni, ja4): the served `@/query/tls`.
+    /// Passive TLS asset inventory keyed by (sni, ja4): the served `@rpc/netring/tls`.
     pub tls_inventory: TlsInventory,
     /// Encrypted-DNS (DoT/DoQ/DoH) accumulators + inventory (#326).
     pub enc_dns: Arc<EncDnsState>,
@@ -280,24 +280,24 @@ pub struct MonitorChannels {
     /// HTTP RED accumulators (issue #20).
     pub http: Arc<HttpState>,
     /// Latest netring `aggregate()` snapshot (#369): src-IP rolling talkers +
-    /// `(src,dst)` pair rates, served on `@/query/{talkers,matrix}`.
+    /// `(src,dst)` pair rates, served on `@rpc/netring/{talkers,matrix}`.
     pub aggregate: AggregateState,
     /// Recent elephant (large) flows ring (issue #21).
     pub elephants: ElephantRing,
-    /// Passive QUIC SNI/ALPN inventory: served on `@/query/quic` (issue #72).
+    /// Passive QUIC SNI/ALPN inventory: served on `@rpc/netring/quic` (issue #72).
     pub quic: QuicInventory,
-    /// Passive SSH/HASSH inventory: served on `@/query/ssh` (issue #72).
+    /// Passive SSH/HASSH inventory: served on `@rpc/netring/ssh` (issue #72).
     pub ssh: SshInventory,
-    /// Passive JA4H HTTP-fingerprint inventory: served on `@/query/ja4h` (#124).
+    /// Passive JA4H HTTP-fingerprint inventory: served on `@rpc/netring/ja4h` (#124).
     /// Stays empty unless built with `--features ja4plus` + `collect.http_fp`.
     pub ja4h_fp: Ja4hInventory,
-    /// Passive asset inventory keyed by MAC: served on `@/query/assets` (#70).
+    /// Passive asset inventory keyed by MAC: served on `@rpc/netring/assets` (#70).
     pub assets: AssetInventory,
     /// MACs whose asset record changed since the last host-evidence drain (#307).
     /// Fed by `on_asset`, consumed by the asset-evidence feed task in `main`.
     pub asset_dirty: AssetDirty,
     /// Bounded ring of netring flow records for the canonical IPFIX query
-    /// channel `@/query/ipfix` (#223). Populated only when built with
+    /// channel `@rpc/netring/ipfix` (#223). Populated only when built with
     /// `--features ipfix` and `collect.ipfix` is set; empty otherwise.
     #[cfg(feature = "ipfix")]
     pub ipfix_records: IpfixRing,
@@ -320,12 +320,12 @@ pub struct MonitorChannels {
     )>,
     /// Wire-level bandwidth-by-process attribution shared state (#318): `Some`
     /// iff `bandwidth_attribution` is enabled. Taken by `main` to drive the
-    /// off-hook socket-table refresh and the `@/query/bandwidth` queryable.
+    /// off-hook socket-table refresh and the `@rpc/netring/bandwidth` queryable.
     pub owner_bandwidth: Option<OwnerBandwidth>,
 }
 
 /// Flow exporter that captures netring's canonical `FlowRecord` into a bounded
-/// ring for the `@/query/ipfix` channel (#223). netring builds the record (with
+/// ring for the `@rpc/netring/ipfix` channel (#223). netring builds the record (with
 /// per-direction counters + Community ID); we map it to the IANA-IE shape via
 /// `to_ipfix_record()` only on demand, in the query handler.
 #[cfg(feature = "ipfix")]
@@ -855,7 +855,7 @@ pub fn build(
     // Rolling traffic aggregate (#369): netring's `aggregate()` maintains 60 s
     // bytes/sec by src IP (talkers) and by `(src,dst)` pair (matrix) across every
     // L4. The `on_aggregate` tick snapshots it into the shared state served on
-    // `@/query/{talkers,matrix}`. Flow RED (`red()`) tracks per-flow lifetime
+    // `@rpc/netring/{talkers,matrix}`. Flow RED (`red()`) tracks per-flow lifetime
     // rate / error-ratio / p50·p95·p99, snapshotted the same way (retires the
     // bespoke duration DDSketch).
     if cfg.collect.talkers || cfg.collect.flows {
@@ -882,7 +882,7 @@ pub fn build(
 
     // Canonical IPFIX export (#223): register a flow exporter that captures
     // netring's own `FlowRecord` (per-direction counters, precise EndReason,
-    // Community ID) into a ring, mapped to IANA-IE shape on `@/query/ipfix`.
+    // Community ID) into a ring, mapped to IANA-IE shape on `@rpc/netring/ipfix`.
     // Independent of `collect.flows` — netring drives it from the same tracker.
     #[cfg(feature = "ipfix")]
     if cfg.collect.ipfix {
@@ -893,7 +893,7 @@ pub fn build(
 
     // Runtime capture-focus (#225): an opt-in reloadable packet-tier
     // subscription whose BPF filter is hot-swappable via
-    // `@/commands/capture_filter` (no capture restart). Its handler counts
+    // `@rpc/netring/capture_filter/set` (no capture restart). Its handler counts
     // focused packets/bytes — the visible effect of narrowing — and the reload
     // itself is driven from `main` via the monitor's `ReloadHandle`. Off by
     // default: the per-frame handler is a cost the zero-cost hot loop avoids.
@@ -1420,7 +1420,7 @@ pub fn build(
     // L7 encrypted-DNS visibility + policy (#326) — netring classifies DoT/DoQ/DoH
     // from the TLS/QUIC handshake (ALPN + SNI + server port). We count sessions per
     // transport + resolver class into a streamed aggregate, keep a bounded
-    // per-destination inventory (`@/query/encrypted_dns`), and — when the sentinel
+    // per-destination inventory (`@rpc/netring/encrypted_dns`), and — when the sentinel
     // policy is armed — fire an `encrypted_dns_bypass` anomaly (ATT&CK T1572) for a
     // session to an un-sanctioned resolver, the DNS-tunnel / policy-bypass signal.
     if cfg.collect.encrypted_dns {
@@ -1481,7 +1481,7 @@ pub fn build(
     // L7 JA4H HTTP-request fingerprinting (issue #124) — opt-in, behind the
     // `ja4plus` build feature (FoxIO License 1.1). netring computes the JA4H
     // fingerprint from the cleartext request; we accumulate a per-fingerprint
-    // inventory served on `@/query/ja4h`. The hook auto-registers `Http`, which
+    // inventory served on `@rpc/netring/ja4h`. The hook auto-registers `Http`, which
     // netring de-dups against the `collect.http` RED handler's `.protocol::<Http>()`.
     #[cfg(feature = "ja4plus")]
     if cfg.collect.http_fp {
@@ -1773,7 +1773,7 @@ pub fn build(
     }
     // YARA payload scanning (opt-in `--features yara`). Arm when a startup rules
     // file is given, or unconditionally under `threat.reload` (seeded empty) so
-    // `@/commands/threat_intel set_yara` can hot-swap rules without a restart.
+    // `set_yara` on `@rpc/netring/threat_intel/set` can hot-swap rules live.
     #[cfg(feature = "yara")]
     if cfg.threat.yara.file.is_some() || cfg.threat.reload {
         let source = match &cfg.threat.yara.file {

@@ -5,7 +5,8 @@
     // connect: ["tcp/localhost:7447"], // Router endpoints (if client mode)
   },
 
-  // On-demand artifact channel (@/artifact) — opt-in per kind. When enabled,
+  // On-demand artifact channel (@rpc artifact/request + @blob delivery) —
+  // opt-in per kind. When enabled,
   // an operator can download a redacted tar.zst debug bundle (and, for
   // snapshot, an allowlisted directory) from the GUI. Bounded + rate-limited;
   // secrets are redacted.
@@ -31,7 +32,7 @@
     },
   },
 
-  // Tier-2 directory snapshots (@/artifact + @/store + @/tree) — opt-in. When
+  // Tier-2 directory snapshots (@rpc artifact/request + @blob/store + @blob/tree) — opt-in. When
   // enabled, an operator can download a whole allowlisted directory tree from the
   // GUI (content-addressed + dedup'd + restart-resumable). The operator picks a
   // directory by its logical `name`, never an arbitrary path — `dirs` is the
@@ -40,8 +41,6 @@
 
   // System information collection settings
   sysinfo: {
-    // Key expression prefix
-    key_prefix: "zensight/sysinfo",
 
     // Source id (hostname) for key expressions
     // Use "auto" to detect the local hostname automatically, or specify a custom name
@@ -77,7 +76,7 @@
       // Requires a binary built with `--features ebpf` (nightly + rust-src +
       // bpf-linker) AND CAP_BPF/CAP_PERFMON at runtime. Serves runqlat
       // (scheduler run-queue latency) and biolatency (block-I/O latency) log2
-      // histograms on zensight/sysinfo/<host>/@/query/latency — never streamed.
+      // histograms on @rpc/sysinfo/latency — never streamed.
       // Ignored (graceful, baseline unaffected) if either prerequisite is
       // missing.
       ebpf: false,
@@ -121,7 +120,7 @@
 
     // Threshold-based alerting. Each poll tick the already-collected saturation
     // data is graded against these thresholds and firing/resolved alerts are
-    // published on zensight/sysinfo/@/alerts/* (same channel as the other
+    // published on state/sysinfo/alert/* (same channel as the other
     // sensors; the GUI picks them up with no extra wiring). All values below are
     // the built-in defaults — the whole `alerts` block is optional.
     alerts: {

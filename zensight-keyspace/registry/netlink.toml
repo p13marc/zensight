@@ -1,0 +1,1030 @@
+# Subject registry: netlink (kernel networking). RFC 08 §2; migration epic #453.
+# Telemetry is registered as real subjects, not a `{metric...}` catch-all
+# (issue #468) — see registry/sysinfo.toml for the rule and why. Sources:
+# src/map.rs (every metric name), src/events.rs, src/route_history.rs.
+
+[registry]
+version = "1.1"
+app = "zensight"
+convention = 1
+
+[producer]
+name = "netlink"
+description = "kernel net telemetry (RTNETLINK/sock_diag) + embedded sentinel"
+
+[[subject]]
+path = "iface/{iface}/rx_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "bytes received"
+
+[[subject]]
+path = "iface/{iface}/tx_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "bytes sent"
+
+[[subject]]
+path = "iface/{iface}/rx_packets"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "packets received"
+
+[[subject]]
+path = "iface/{iface}/tx_packets"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "packets sent"
+
+[[subject]]
+path = "iface/{iface}/rx_errors"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "receive errors"
+
+[[subject]]
+path = "iface/{iface}/tx_errors"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "transmit errors"
+
+[[subject]]
+path = "iface/{iface}/rx_dropped"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "receive drops"
+
+[[subject]]
+path = "iface/{iface}/tx_dropped"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "transmit drops"
+
+[[subject]]
+path = "iface/{iface}/multicast"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "multicast frames"
+
+[[subject]]
+path = "iface/{iface}/collisions"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "collisions"
+
+[[subject]]
+path = "iface/{iface}/oper_state"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "RFC 2863 operational state (text)"
+
+[[subject]]
+path = "iface/{iface}/up"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "admin up"
+
+[[subject]]
+path = "iface/{iface}/carrier"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "carrier detected"
+
+[[subject]]
+path = "iface/{iface}/mtu"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "link MTU"
+
+[[subject]]
+path = "iface/{iface}/info"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "link info; MAC rides the value and the `mac` label"
+
+[[subject]]
+path = "sockets/tcp/established"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "sockets in ESTABLISHED"
+
+[[subject]]
+path = "sockets/tcp/listen"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "listening sockets"
+
+[[subject]]
+path = "sockets/tcp/time_wait"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "sockets in TIME_WAIT"
+
+[[subject]]
+path = "sockets/tcp/syn_sent"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "sockets in SYN_SENT"
+
+[[subject]]
+path = "sockets/tcp/close_wait"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "sockets in CLOSE_WAIT"
+
+[[subject]]
+path = "sockets/tcp/retransmits_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "retransmits"
+
+[[subject]]
+path = "sockets/tcp/max_rtt_us"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "max RTT (us)"
+
+[[subject]]
+path = "sockets/tcp/rtt_p50_us"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "RTT p50 (us)"
+
+[[subject]]
+path = "sockets/tcp/rtt_p95_us"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "RTT p95 (us)"
+
+[[subject]]
+path = "sockets/tcp/bytes_retrans_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "bytes retransmitted"
+
+[[subject]]
+path = "sockets/tcp/total_retrans_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "segments retransmitted"
+
+[[subject]]
+path = "sockets/tcp/reordered_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "reordering events"
+
+[[subject]]
+path = "sockets/tcp/lost_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "segments lost"
+
+[[subject]]
+path = "sockets/tcp/delivery_rate_p50"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "delivery rate p50"
+
+[[subject]]
+path = "sockets/tcp/delivery_rate_p95"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "delivery rate p95"
+
+[[subject]]
+path = "sockets/tcp/pacing_rate_p50"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "pacing rate p50"
+
+[[subject]]
+path = "sockets/tcp/pacing_rate_p95"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "pacing rate p95"
+
+[[subject]]
+path = "sockets/tcp/rcv_rtt_p50_us"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "receiver RTT p50 (us)"
+
+[[subject]]
+path = "sockets/tcp/rcv_rtt_p95_us"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "receiver RTT p95 (us)"
+
+[[subject]]
+path = "sockets/tcp/connlat_us_p50"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "connect latency p50 (us) — feature `ebpf`"
+
+[[subject]]
+path = "sockets/tcp/connlat_us_p95"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "connect latency p95 (us) — feature `ebpf`"
+
+[[subject]]
+path = "sockets/tcp/mem/snd_buf_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "send-buffer bytes across sockets"
+
+[[subject]]
+path = "sockets/tcp/mem/rcv_buf_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "receive-buffer bytes across sockets"
+
+[[subject]]
+path = "sockets/tcp/by_cong/{algo}"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 8
+since = "1.1"
+description = "sockets by congestion-control algorithm (cubic, bbr, ...)"
+
+[[subject]]
+path = "routes/ipv4_count"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "IPv4 routes"
+
+[[subject]]
+path = "routes/ipv6_count"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "IPv6 routes"
+
+[[subject]]
+path = "routes/total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "routes"
+
+[[subject]]
+path = "routes/default_v4_present"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "a default IPv4 route exists"
+
+[[subject]]
+path = "routes/default_v6_present"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "a default IPv6 route exists"
+
+[[subject]]
+path = "routes/default_v4_gw"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "current default IPv4 gateway (text)"
+
+[[subject]]
+path = "routes/default_v4_flaps_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "default-route changes since start"
+
+[[subject]]
+path = "neighbors/total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "neighbour (ARP/ND) entries"
+
+[[subject]]
+path = "neighbors/by_state/{state}"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 8
+since = "1.1"
+description = "neighbours by state (reachable|stale|failed|incomplete|permanent|other)"
+
+[[subject]]
+path = "addresses/ipv4_count"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "IPv4 addresses"
+
+[[subject]]
+path = "addresses/ipv6_count"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "IPv6 addresses"
+
+[[subject]]
+path = "addresses/global_count"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "globally-scoped addresses"
+
+[[subject]]
+path = "addresses/total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "addresses"
+
+[[subject]]
+path = "conntrack/entries"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "conntrack entries"
+
+[[subject]]
+path = "conntrack/max"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "conntrack table size"
+
+[[subject]]
+path = "conntrack/utilization"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "conntrack occupancy"
+
+[[subject]]
+path = "conntrack/by_proto/{proto}"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 8
+since = "1.1"
+description = "conntrack entries by protocol (tcp|udp|icmp|other)"
+
+[[subject]]
+path = "diagnostics/bottleneck_score"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "composite bottleneck score"
+
+[[subject]]
+path = "diagnostics/bottleneck"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "the dominant bottleneck (text)"
+
+[[subject]]
+path = "diagnostics/issues/{severity}"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 8
+since = "1.1"
+description = "open diagnostic issues by severity (info|warning|error|critical|total)"
+
+[[subject]]
+path = "ethtool/{iface}/carrier"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "carrier detected"
+
+[[subject]]
+path = "ethtool/{iface}/speed_mbps"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "negotiated speed (Mb/s)"
+
+[[subject]]
+path = "ethtool/{iface}/duplex"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "duplex mode (text)"
+
+[[subject]]
+path = "ethtool/{iface}/full_duplex"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "link is full-duplex"
+
+[[subject]]
+path = "ethtool/{iface}/autoneg"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "auto-negotiation enabled"
+
+[[subject]]
+path = "ethtool/{iface}/rings/rx"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "RX ring entries"
+
+[[subject]]
+path = "ethtool/{iface}/rings/tx"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "TX ring entries"
+
+[[subject]]
+path = "ethtool/{iface}/rings/rx_max"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "RX ring capacity"
+
+[[subject]]
+path = "ethtool/{iface}/rings/tx_max"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "TX ring capacity"
+
+[[subject]]
+path = "ethtool/{iface}/pause/rx"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "RX pause enabled"
+
+[[subject]]
+path = "ethtool/{iface}/pause/tx"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "TX pause enabled"
+
+[[subject]]
+path = "ethtool/{iface}/pause/autoneg"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "pause auto-negotiation"
+
+[[subject]]
+path = "ethtool/{iface}/pause/rx_frames"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "pause frames received"
+
+[[subject]]
+path = "ethtool/{iface}/pause/tx_frames"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 256
+since = "1.1"
+description = "pause frames sent"
+
+[[subject]]
+path = "ethtool/{iface}/fec/modes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.1"
+description = "configured FEC mode(s) (text)"
+
+[[subject]]
+path = "ethtool/{iface}/fec/auto"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.1"
+description = "FEC auto-negotiation"
+
+[[subject]]
+path = "ethtool/{iface}/eee/enabled"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.1"
+description = "EEE admin-enabled"
+
+[[subject]]
+path = "ethtool/{iface}/eee/active"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.1"
+description = "EEE active on the link"
+
+[[subject]]
+path = "ethtool/{iface}/features/{feature}"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "offload features (curated list: checksumming, TSO/GSO/GRO, scatter-gather)"
+
+[[subject]]
+path = "tc/{iface}/{kind}/drops"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "packets dropped by the qdisc"
+
+[[subject]]
+path = "tc/{iface}/{kind}/overlimits"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "overlimit events"
+
+[[subject]]
+path = "tc/{iface}/{kind}/requeues"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "requeues"
+
+[[subject]]
+path = "tc/{iface}/{kind}/bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "bytes through the qdisc"
+
+[[subject]]
+path = "tc/{iface}/{kind}/packets"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "packets through the qdisc"
+
+[[subject]]
+path = "tc/{iface}/{kind}/backlog_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "backlog (bytes)"
+
+[[subject]]
+path = "tc/{iface}/{kind}/backlog_pkts"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "backlog (packets)"
+
+[[subject]]
+path = "tc/{iface}/{kind}/health_score"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "derived qdisc health"
+
+[[subject]]
+path = "tc/{iface}/aqm_class"
+variant = "TcAqmClass"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.1"
+description = "AQM classification for the root qdisc (text); the qdisc kind rides a label"
+
+[[subject]]
+path = "xfrm/sa/total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "IPsec security associations"
+
+[[subject]]
+path = "xfrm/policy/total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "IPsec policies"
+
+[[subject]]
+path = "xfrm/sa/by_mode/{mode}"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 8
+since = "1.1"
+description = "SAs by mode (transport|tunnel|...)"
+
+[[subject]]
+path = "xfrm/sa/by_proto/{proto}"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 8
+since = "1.1"
+description = "SAs by protocol (esp|ah|comp)"
+
+[[subject]]
+path = "nft/tables_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "nftables tables"
+
+[[subject]]
+path = "nft/chains_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "chains"
+
+[[subject]]
+path = "nft/rules_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "rules"
+
+[[subject]]
+path = "nft/packets_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "packets matched"
+
+[[subject]]
+path = "nft/bytes_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "bytes matched"
+
+[[subject]]
+path = "nft/{family}/{table}/chains"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "chains in this table"
+
+[[subject]]
+path = "nft/{family}/{table}/rules"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "rules in this table"
+
+[[subject]]
+path = "nft/{family}/{table}/packets"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "packets matched in this table"
+
+[[subject]]
+path = "nft/{family}/{table}/bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "bytes matched in this table"
+
+[[subject]]
+path = "wireguard/{iface}/peers"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "configured peers on this WireGuard interface"
+
+[[subject]]
+path = "wireguard/{iface}/{peer}/rx_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "bytes received from this peer"
+
+[[subject]]
+path = "wireguard/{iface}/{peer}/tx_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "bytes sent to this peer"
+
+[[subject]]
+path = "wireguard/{iface}/{peer}/last_handshake_age_s"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "seconds since the last handshake"
+
+[[subject]]
+path = "wireguard/{iface}/{peer}/up"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1024
+since = "1.1"
+description = "peer considered up"
+
+[[subject]]
+path = "events/{family}/{action}"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "RTNETLINK event counters: {family} in link|addr|route|neighbor|ipsec|rule|nexthop|mdb|nsid, {action} in added_total|removed_total|changed_total"
+
+[[subject]]
+path = "health"
+class = "state"
+type = "HealthSnapshot"
+ttl_s = 120
+since = "1.0"
+description = "sensor health document (framework; absorbs the legacy @/status running flag)"
+
+[[subject]]
+path = "errors"
+class = "state"
+type = "ErrorReport"
+ttl_s = 300
+since = "1.0"
+description = "rolling error window (framework)"
+
+[[subject]]
+path = "sensor"
+class = "state"
+type = "SensorInfo"
+ttl_s = 900
+since = "1.0"
+description = "registration document: identity, version, capabilities (framework, 60 s re-emit)"
+
+[[subject]]
+path = "evidence/device/{device}"
+class = "state"
+type = "HostEvidence"
+cardinality = 256
+ttl_s = 900
+since = "1.0"
+description = "neighbor-table identity claim about an observed host (RFC 06 §4)"
+
+[[subject]]
+path = "evidence/self"
+class = "state"
+type = "HostEvidence"
+ttl_s = 900
+since = "1.0"
+description = "self-identity claim (RFC 06 §4)"
+
+[[subject]]
+path = "alert/{alert_key}"
+class = "state"
+type = "Alert"
+qos = "alert"
+cardinality = 64
+ttl_s = 900
+since = "1.0"
+description = "alerts; firing->resolved on one key, delete = tombstone"
+[[subject]]
+path = "artifact/{kind}"
+class = "state"
+type = "ArtifactStatus"
+cardinality = 16
+ttl_s = 900
+since = "1.1"
+description = "per-kind artifact progress (framework: V1Context::artifact_status_key)"
+
+[[procedure]]
+path = "introspect"
+kind = "read"
+reply = "RegistrySlice"
+idempotent = true
+since = "1.0"
+description = "the registry slice this build serves (RFC 08 §6)"
+
+[[procedure]]
+path = "artifact/request"
+kind = "write"
+request = "ArtifactRequest"
+reply = "ArtifactAck"
+since = "1.0"
+description = "initiate artifact generation; replies { id } immediately (RFC 05 §3)"
+
+[[procedure]]
+path = "artifact/cancel"
+kind = "write"
+reply = "Ack"
+since = "1.0"
+description = "free an in-flight/ready artifact early (?id=<ulid>)"
+
+[[procedure]]
+path = "artifact/status"
+kind = "read"
+reply = "ArtifactStatus"
+idempotent = true
+since = "1.0"
+description = "advertised artifact kinds + the in-flight/ready state per kind (RFC 05 §3)"
+[[procedure]]
+path = "expectations"
+kind = "read"
+reply = "TopicStatus"
+idempotent = true
+since = "1.0"
+description = "current expectations configuration (sentinel expectations hot-swap)"
+
+[[procedure]]
+path = "expectations/set"
+kind = "write"
+request = "ExpectationCommand"
+reply = "Ack"
+since = "1.0"
+description = "apply expectations configuration (sentinel expectations hot-swap)"
+[[procedure]]
+path = "collection"
+kind = "read"
+reply = "TopicStatus"
+idempotent = true
+since = "1.0"
+description = "current collection configuration (collector toggles)"
+
+[[procedure]]
+path = "collection/set"
+kind = "write"
+request = "CollectionConfig"
+reply = "Ack"
+since = "1.0"
+description = "apply collection configuration (collector toggles)"
+[[procedure]]
+path = "routes"
+kind = "read"
+reply = "Vec<RouteRecord>"
+idempotent = true
+since = "1.0"
+description = "routing table"
+
+[[procedure]]
+path = "neighbors"
+kind = "read"
+reply = "Vec<NeighborRecord>"
+idempotent = true
+since = "1.0"
+description = "neighbor table"
+
+[[procedure]]
+path = "sockets"
+kind = "read"
+reply = "Vec<SocketRecord>"
+idempotent = true
+since = "1.0"
+description = "socket table (?state=;port=;ip= — ip matches local OR remote endpoint)"
+
+[[procedure]]
+path = "addresses"
+kind = "read"
+reply = "Vec<AddressRecord>"
+idempotent = true
+since = "1.0"
+description = "interface addresses"
+
+[[procedure]]
+path = "events"
+kind = "read"
+reply = "Vec<EventRecord>"
+idempotent = true
+since = "1.0"
+description = "control-plane event ring"
+
+[[procedure]]
+path = "route_changes"
+kind = "read"
+reply = "Vec<RouteChangeRecord>"
+idempotent = true
+since = "1.0"
+description = "route-change ring"
+
+[[procedure]]
+path = "tc"
+kind = "read"
+reply = "Vec<TcRecord>"
+idempotent = true
+since = "1.0"
+description = "traffic-control state"
+
+[[procedure]]
+path = "xfrm"
+kind = "read"
+reply = "Vec<XfrmRecord>"
+idempotent = true
+since = "1.0"
+description = "IPsec/xfrm state"
+
+[[procedure]]
+path = "nft"
+kind = "read"
+reply = "Vec<NftRecord>"
+idempotent = true
+since = "1.0"
+description = "nftables state"
+
+[[procedure]]
+path = "bandwidth"
+kind = "read"
+reply = "Vec<BandwidthRecord>"
+idempotent = true
+since = "1.0"
+description = "per-process TCP goodput (?top=N)"
+
+[[procedure]]
+path = "retransmits"
+kind = "read"
+reply = "Vec<RetransmitRecord>"
+idempotent = true
+since = "1.0"
+description = "eBPF retransmit ring (feature ebpf)"
+
+[[procedure]]
+path = "connections"
+kind = "read"
+reply = "Vec<ConnectionRecord>"
+idempotent = true
+since = "1.0"
+description = "eBPF connection lifecycle (feature ebpf)"

@@ -32,12 +32,12 @@ under `view/overview/`.
 
 ```
 Dashboard, Device, Settings, Alerts, Topology, Expectations,
-Security, Sensors, Logs, Inventory, Incidents, Bandwidth
+Security, Sensors, Logs, Inventory, Incidents, Bandwidth, Fleet
 ```
 
 The active variant decides which `*_view` the app renders. `Dashboard`,
 `Alerts`, `Topology`, `Expectations`, `Security`, `Sensors`, `Logs`,
-`Inventory`, `Incidents`, and `Bandwidth` are reachable from the nav rail;
+`Inventory`, `Incidents`, `Bandwidth`, and `Fleet` are reachable from the nav rail;
 `Device` and `Settings` are entered contextually (clicking a host/device card,
 opening settings) and are marked `#[serde(skip)]` so they are not persisted as a
 landing view.
@@ -50,6 +50,29 @@ landing view.
 - a **top bar** (connection status, theme toggle, global affordances).
 
 The shell is always present; only the content region swaps as you navigate.
+
+## Focus mode (one host instead of the fleet)
+
+The v1 grammar made a single host expressible as one selector — `@v1/<origin>/**`
+— so the host detail header carries a **Focus this host** button (#476). Focusing
+sets `LinkConfig.focus = Some(origin)`; `subscription.rs` then swaps the fleet
+data-plane selectors for that origin's telemetry, state, alerts and liveliness. On
+a constrained link this is the difference between one host's samples and the whole
+fleet's firehose.
+
+Two consequences worth knowing:
+
+- **The fleet dashboard empties while focused.** That is the feature, but it looks
+  exactly like an outage, so the shell renders a persistent banner naming the
+  focused host with a one-click **Exit focus**.
+- **Toggling re-declares the Zenoh session.** Iced hashes `LinkConfig` in
+  `Subscription::run_with`, so a change tears the subscription down and rebuilds
+  it — a second or two of `Connecting…`, not a free switch.
+
+The `@catalog` entity subscription deliberately stays fleet-wide: it is tiny, and
+it is what lets you un-focus, or focus straight onto a different host. Focus is
+runtime-only — it is not persisted to `settings.json5`, and the configured
+`subscription_scope` is left untouched underneath it.
 
 ## Overlays (not routable)
 
@@ -82,6 +105,7 @@ flowchart TB
             V10["Inventory"]
             V11["Incidents"]
             V12["Bandwidth"]
+            V13["Fleet"]
         end
         Nav --> Content
         Top --> Content
@@ -122,9 +146,12 @@ adds a runtime detector allowlist/threshold panel. Anomalies pivot into flow
 drill-downs.
 
 **Expectations** (`view/expectations.rs`) — authors sentinel expectations (over
-sockets/links/routes) and pushes them to the netlink sensor at runtime via the
-`@/commands` channel; the sensor hot-swaps its evaluator and replies on
-`@/status`.
+sockets/links/routes) and pushes them to the netlink sensor at runtime as an
+`@rpc` write: a GET on the fleet selector
+`zensight/@v1/*/@rpc/netlink/expectations/set` (query target `All`); the sensor
+hot-swaps its evaluator and acks in the reply (refusals arrive as `reply_err`
+`{error, message}` payloads). The current config reads back with a GET on
+`…/@rpc/netlink/expectations`.
 
 **Topology** (`view/topology/`) — an interactive map of the monitored network
 (redesign epic #395, layout/performance overhaul epic #439; design report
@@ -139,9 +166,10 @@ changes tween nodes to their new slots over 400 ms; captioned band backdrops
 name each row. `model.rs` is the pure, unit-tested graph model: typed nodes
 (`NodeRole` router/switch/ap/phone/iot from the netring asset inventory,
 `Provenance` monitored/wire-only, `NodeHealth` healthy/degraded/down/stale from
-liveness + host-scoped `@/health` + entity staleness) and typed edges
-(`EdgeKind`): **Flow** edges are directed and rate-weighted from the netring
-traffic matrix (`@/query/matrix`, bytes/sec; arrowheads only where a rate was
+liveness + per-producer `state/*/health` documents + entity staleness) and
+typed edges (`EdgeKind`): **Flow** edges are directed and rate-weighted from
+the netring traffic matrix (the `@rpc` procedure
+`zensight/@v1/*/@rpc/netring/matrix`, bytes/sec; arrowheads only where a rate was
 observed; flows are the fallback + cumulative-stat enrichment), **L2Adjacency**
 edges come from netlink neighbor tables (dotted), and **Gateway** edges from
 the `routes/default_v4_gw` metric (dashed; unresolved gateways become wire-only
@@ -186,21 +214,24 @@ netring flow table and device detail.
 
 **Parallax live video** (`view/specialized/parallax.rs` +
 `parallax_detail.rs`, #408) — the media-plane viewer for a parallax device.
-The stream catalogue is fetched on open from the host-scoped
-`@/query/streams` queryable (`Fetch` lifecycle, mock-served in demo mode);
-Open sends `open_stream` (codec `mjpeg`) and spawns one **abortable**
+The stream catalogue is fetched on open with a GET on the single-host `@rpc`
+key `zensight/@v1/<origin>/@rpc/parallax/streams` (`Fetch` lifecycle,
+mock-served in demo mode); Open sends `open_stream` (codec `mjpeg`) as an
+`@rpc` write on `…/@rpc/parallax/stream/set` and spawns one **abortable**
 `Task::stream` per tile — a plain subscriber on the exact
-`@media/<stream>/preview/jpeg` key, latest-frame-wins, CBOR `FrameMeta`
+`zensight/@v1/<origin>/@media/parallax/<stream>/preview/jpeg` key,
+latest-frame-wins, CBOR `FrameMeta`
 attachment, JPEG→RGBA decoded off the UI thread. Video tiles (`--features
 h264`) subscribe with the profile chunk as a single-chunk wildcard
-(`@media/<stream>/video/h264/*`) — the sensor's `video.profile` is
-configurable and the catalogue doesn't carry it (KEYSPACE §3.3). Tiles render
+(`…/@media/parallax/<stream>/video/h264/*`) — the sensor's `video.profile` is
+configurable and the catalogue doesn't carry it (RFC 07). Tiles render
 newest-frame images with a seq/fps caption. Each tile carries a
 **generation** (monotonic per open); frames and end reports from a replaced
 subscriber task (older generation) are ignored, a large in-generation
 sequence regression re-anchors instead of freezing (sensor pipeline restart),
-and a sensor `StreamStatus{open: false}` transition (via the host-scoped
-control subscriber) flags a tile still waiting for its first frame as a
+and a sensor `StreamStatus{open: false}` transition (a per-stream
+`state/parallax/stream/<stream>` document on the state subscriber) flags a
+tile still waiting for its first frame as a
 failed open. Close (and every way of leaving the device view: deselect,
 Escape, dashboard, navigating to any other view, selecting another device,
 disconnect, session replacement) aborts the subscriber tasks and batches
@@ -208,8 +239,8 @@ disconnect, session replacement) aborts the subscriber tasks and batches
 `App::update`; the stored `abort_on_drop` handles make dropping the state
 itself kill the subscribers, which is the sensor's falling-edge teardown
 backstop. Switching a preview tile to video sends `close_stream` **before**
-`open_stream(h264)` (ordered on one publisher) so the preview refcount never
-leaks. Clicking a tile's frame **expands** it into a near-fullscreen overlay
+`open_stream(h264)` (the two `stream/set` calls are chained) so the preview
+refcount never leaks. Clicking a tile's frame **expands** it into a near-fullscreen overlay
 (#436): a scrim layer in the root `Stack` showing the tile's newest frame
 scaled (`ContentFit::Contain`) with a caption + Close button. Expand upgrades
 a preview tile to the video profile when the build and the stream support it
@@ -229,13 +260,51 @@ explorer (JA3/JA4/JA4H/SNI/HASSH), joined against correlated host entities.
 **Bandwidth** (`view/bandwidth.rs`) — a live bandwidth-by-process/service monitor
 (bmon/nethogs style).
 
+**Fleet** (`view/fleet.rs`) — what each host's build actually says it serves. Fans
+the `introspect` procedure out across every registered producer (`QueryTarget::All`;
+`@catalog` takes its own key, since a verbatim `@` chunk is structurally unmatchable
+by a `*` fleet selector) and diffs each reply against the registry slice this GUI
+compiled in. Answers, without SSH: what does this host speak, is it the same build
+as us, is it serving anything deprecated, and does its registry match reality — RFC
+08 §6 calls a disagreement here a *finding*, not an ambiguity. A producer that is
+alive on the bus but answers no `introspect` is listed as `silent` rather than
+omitted; fanning out alone cannot distinguish "not deployed" from "deployed and not
+answering", and the second is the one you need to see.
+
+## Streamed rollups vs pulled records
+
+Several specialized views show the same shape twice, and it is deliberate
+(RFC 08 §4). A quantity that is **bounded** is streamed as telemetry; a
+quantity with **unbounded cardinality** is a record you pull from an `@rpc`
+procedure, never a key you publish. Three of these were served by the sensors
+from the day of the keyspace cutover and had no caller until #469:
+
+- **NetFlow** (`view/specialized/netflow.rs`) — `flows_total` / `bytes_total` /
+  `by_proto/{proto}/flows` stream; individual flows come from
+  `@rpc/netflow/flows`. Until this was wired, the view *reconstructed* flows
+  from telemetry labels the sensor does not emit (it publishes
+  `labels: HashMap::new()`), so every row it drew read `0.0.0.0:0 → 0.0.0.0:0`.
+  Fields now come from the exporter's template, and a field the template omits
+  renders `—` rather than being invented.
+- **sysinfo latency** (`@rpc/sysinfo/latency`) — eBPF run-queue and block-I/O
+  histograms, shown as percentiles beneath the PSI panel. PSI says how much time
+  was lost to contention; the histograms say how long one wait actually was, and
+  the tail is the finding. The sensor declares the queryable even without the
+  `ebpf` feature (replying `available: false`), so "cannot measure it" and
+  "nothing answered" stay distinguishable — and the view says which.
+- **netring encrypted DNS** (`@rpc/netring/encrypted_dns`) — the DoT/DoQ/DoH
+  *destinations* behind the streamed `dns/encrypted/*` counts. An unrecognised
+  resolver is called out, because that is what a DNS tunnel looks like from the
+  wire.
+
 **Incidents** (`view/incident.rs`, `view/groups.rs`) — the unified Incident
 object: related alerts grouped into one incident with a timeline and evidence
 pivots.
 
 **Sensors** (`view/sensors.rs`) — the sensor registry and per-instance health
-detail (from `_meta/sensors/**` registrations and the host-scoped
-`<proto>/<source>/@/health` snapshots). One card per sensor **instance**
+detail (from the `zensight/@v1/<origin>/state/<producer>/sensor` registration
+documents and the `…/state/<producer>/health` snapshots, both riding the one
+state subscriber). One card per sensor **instance**
 (`sysinfo @ hostA`), keyed by `sensor@source`, so N machines running the same
 protocol each keep their own card; the card's artifact downloads set
 `target_source` so only that host produces the artifact.
@@ -249,13 +318,15 @@ fraction); while **downloading**, `zenoh-blob` chunk counts drive the same bar
 the Sensors-page card and the netring Capture tab — get the bar.
 
 Card status follows Zenoh liveliness, not just snapshots: when a sensor's
-`<proto>/<source>/@/alive` token disappears (clean shutdown, or lease expiry
+`zensight/@v1/<origin>/state/<producer>/alive` token disappears (clean
+shutdown, or lease expiry
 after a crash), its card flips to **Offline** — a dead sensor publishes no
 further snapshots, so without this the last-reported status would stick
 forever. When the token reappears, an Offline card lifts to **Starting** until
-the next real `@/health` snapshot lands; liveliness never overrides a live
-sensor's own reported status. Legacy (non-host-scoped) `<proto>/@/alive`
-tokens can't distinguish hosts and flip every instance of that protocol.
+the next real health snapshot lands; liveliness never overrides a live
+sensor's own reported status. The origin chunk in the token distinguishes
+hosts, so N instances of the same protocol never flip together (the catalog's
+own `@catalog/state/alive` service token is recognized and excluded).
 
 **Settings** (`view/settings.rs`) — Zenoh connection mode (peer/client/router),
 connect/listen endpoints, stale threshold, and theme; persisted to

@@ -1,12 +1,14 @@
 //! Zenoh subscriptions feeding the sink worker.
 //!
-//! Four channels, same split as the frontend/exporters (docs/KEYSPACE.md):
-//! - telemetry `zensight/**` (or a narrowed `filters.key_expr`),
-//! - alerts `zensight/*/@/alerts/*` — the telemetry wildcard can NEVER match
-//!   `@`-verbatim chunks, so alerts need their own subscriber (pinned below),
-//! - health `zensight/*/*/@/health`,
-//! - entities `zensight/_meta/entity/**`, seeded by a one-shot GET on the
-//!   correlator's `zensight/_meta/query/entities` queryable (concurrent with
+//! Four channels, same split as the frontend/exporters (v1, RFC 04):
+//! - telemetry `zensight/@v1/*/telemetry/**` (or a narrowed
+//!   `filters.key_expr`),
+//! - alerts `zensight/@v1/*/state/*/alert/*` — classes are disjoint (D3), so
+//!   the telemetry selector can NEVER see alerts and they need their own
+//!   subscriber (pinned below),
+//! - health `zensight/@v1/*/state/*/health`,
+//! - entities `zensight/@v1/@catalog/state/entity/*`, seeded by a one-shot
+//!   storage-shaped GET on the same selector (concurrent with
 //!   the drain loop — all subscribers are declared before it starts).
 
 use std::sync::Arc;
@@ -33,13 +35,17 @@ use crate::sink::ControlItem;
 /// How long the late-joiner entity seed GET waits for the correlator.
 pub const ENTITY_SEED_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Whether a key carries a [`TelemetryPoint`]. Control/metadata channels do
-/// not: any `@`-prefixed chunk (`.../@/...` control plane, the opaque
-/// `.../@media/...` and `@pdns` planes) and `zensight/_meta/...`. Local copy
-/// by design — the exporters each carry one too; shared extraction is
-/// deferred (03-sink-design.md §2).
+/// Whether a key carries a [`TelemetryPoint`] — v1: exactly the telemetry
+/// class keys (`zensight/@v1/<origin>/telemetry/…`). With the class selector
+/// as the subscription this is belt-and-braces (a narrowed `filters.key_expr`
+/// override could still point anywhere). Local copy by design — the exporters
+/// each carry one too; shared extraction is deferred (03-sink-design.md §2).
 pub(crate) fn is_telemetry_key(key: &str) -> bool {
-    !key.starts_with("zensight/_meta/") && !key.split('/').any(|chunk| chunk.starts_with('@'))
+    let mut chunks = key.split('/');
+    chunks.next() == Some("zensight")
+        && chunks.next() == Some("@v1")
+        && chunks.next().is_some_and(|origin| !origin.starts_with('@'))
+        && chunks.next() == Some("telemetry")
 }
 
 /// Subscriber-side counters (shared, readable while running).
@@ -199,9 +205,9 @@ pub async fn run_with_session(
     Ok(stats)
 }
 
-/// One-shot late-joiner entity seed: GET the correlator's
-/// `zensight/_meta/query/entities` queryable and forward the docs as control
-/// items. Best-effort — no correlator (the common case) is a debug, not an
+/// One-shot late-joiner entity seed: GET the catalog's
+/// entity state selector (storage-shaped: one `HostEntity` per reply) and
+/// forward the docs as control items. Best-effort — no correlator (the common case) is a debug, not an
 /// error.
 async fn seed_entities(session: Arc<Session>, tx_control: mpsc::Sender<ControlItem>) {
     match session
@@ -213,11 +219,10 @@ async fn seed_entities(session: Arc<Session>, tx_control: mpsc::Sender<ControlIt
             let mut seeded = 0usize;
             while let Ok(reply) = replies.recv_async().await {
                 if let Ok(sample) = reply.result()
-                    && let Ok(entities) =
-                        decode_auto::<Vec<HostEntity>>(&sample.payload().to_bytes())
+                    && let Ok(entity) = decode_auto::<HostEntity>(&sample.payload().to_bytes())
                 {
-                    seeded += entities.len();
-                    for entity in entities {
+                    seeded += 1;
+                    {
                         // Must-arrive: blocking send (worker upserts are
                         // idempotent, so racing the live subscription is
                         // harmless).
@@ -308,41 +313,52 @@ mod tests {
     #[test]
     fn telemetry_key_guard() {
         assert!(is_telemetry_key(
-            "zensight/netlink/host/iface/eth0/rx_bytes"
+            "zensight/@v1/h-3fa9c2d41b7e/telemetry/netlink/iface/eth0/rx_bytes"
         ));
-        assert!(!is_telemetry_key("zensight/netlink/@/alerts/foo-00"));
-        assert!(!is_telemetry_key("zensight/sysinfo/host1/@/health"));
-        assert!(!is_telemetry_key("zensight/sysinfo/host1/@/errors"));
-        assert!(!is_telemetry_key("zensight/_meta/sensors/snmp"));
-        assert!(!is_telemetry_key("zensight/_meta/entity/host/h_00"));
-        // The media/pdns planes ride `@`-prefixed chunks too (#359/#310).
         assert!(!is_telemetry_key(
-            "zensight/netring/host01/@media/cam0/video/h264/main"
+            "zensight/@v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1"
         ));
-        assert!(!is_telemetry_key("zensight/@pdns/10-0-0-9"));
+        assert!(!is_telemetry_key(
+            "zensight/@v1/h-3fa9c2d41b7e/state/sysinfo/health"
+        ));
+        assert!(!is_telemetry_key(
+            "zensight/@v1/@catalog/state/entity/h-0123456789ab"
+        ));
+        assert!(!is_telemetry_key("zensight/legacy/host/cpu/usage"));
+        // The media plane rides a verbatim `@media` chunk (#359).
+        assert!(!is_telemetry_key(
+            "zensight/@v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main"
+        ));
+        assert!(!is_telemetry_key(
+            "zensight/@v1/@catalog/state/pdns/10-0-0-9"
+        ));
         // ...while stream *stats* are ordinary telemetry.
-        assert!(is_telemetry_key("zensight/netring/host01/cam0/stats/fps"));
+        assert!(is_telemetry_key(
+            "zensight/@v1/h-3fa9c2d41b7e/telemetry/parallax/cam0/stats/fps"
+        ));
     }
 
-    /// The telemetry wildcard `zensight/**` must NOT match `@/alerts/*` (Zenoh
-    /// treats an `@`-prefixed chunk as verbatim) — which is exactly why the
-    /// adapter declares a separate alerts subscriber. A regression here means
-    /// alerts silently stop reaching the sink.
+    /// The telemetry class selector must NOT match alert state keys (D3:
+    /// classes are disjoint) — which is exactly why the adapter declares a
+    /// separate alerts subscriber. A regression here means alerts silently
+    /// stop reaching the sink.
     #[test]
     fn alerts_need_their_own_subscription() {
         use zenoh::key_expr::KeyExpr;
 
-        let alert = KeyExpr::new("zensight/netlink/@/alerts/foo-00").unwrap();
+        let alert =
+            KeyExpr::new("zensight/@v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1")
+                .unwrap();
         let telemetry = KeyExpr::new(all_telemetry_wildcard()).unwrap();
         let alerts_sub = KeyExpr::new(all_alerts_wildcard()).unwrap();
 
         assert!(
             !telemetry.intersects(&alert),
-            "zensight/** must not match @/alerts/* — a single telemetry subscriber cannot see alerts"
+            "the telemetry class selector must not match alert state (D3)"
         );
         assert!(
             alerts_sub.intersects(&alert),
-            "the alerts wildcard must match @/alerts/* so the dedicated subscriber receives them"
+            "the alerts selector must match alert state keys"
         );
     }
 
@@ -354,7 +370,7 @@ mod tests {
 
         let telemetry = KeyExpr::new(all_telemetry_wildcard()).unwrap();
 
-        let health = KeyExpr::new("zensight/sysinfo/host1/@/health").unwrap();
+        let health = KeyExpr::new("zensight/@v1/h-3fa9c2d41b7e/state/sysinfo/health").unwrap();
         assert!(!telemetry.intersects(&health));
         assert!(
             KeyExpr::new(all_health_wildcard())
@@ -362,11 +378,11 @@ mod tests {
                 .intersects(&health)
         );
 
-        // `_meta` is matched by `zensight/**` on the wire — the entity plane is
-        // excluded by is_telemetry_key, not by keyexpr non-intersection; the
-        // dedicated subscriber exists to survive narrowed `filters.key_expr`.
-        let entity = KeyExpr::new("zensight/_meta/entity/host/h_0123456789ab").unwrap();
-        assert!(telemetry.intersects(&entity));
+        // v1: the entity plane sits under the verbatim `@catalog` origin —
+        // structurally invisible to the telemetry firehose (RFC D4), so the
+        // dedicated subscriber is a keyexpr necessity, not just a filter.
+        let entity = KeyExpr::new("zensight/@v1/@catalog/state/entity/h-0123456789ab").unwrap();
+        assert!(!telemetry.intersects(&entity));
         assert!(!is_telemetry_key(entity.as_str()));
         assert!(
             KeyExpr::new(all_entity_wildcard())

@@ -1,5 +1,5 @@
-//! Sentinel control plane (#277): `@/commands/expectations` (hot-swap the rule
-//! set) + `@/status/expectations` (queryable reply of the current set). Mirrors
+//! Sentinel control plane (#277): `@rpc/systemd/expectations/set` (hot-swap the rule
+//! set) + `@rpc/systemd/expectations` (read reply of the current set). Mirrors
 //! the netlink sentinel command channel.
 
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use crate::sentinel::{ExpectationsConfig, SentinelHandle};
 
 const EXPECTATIONS_TOPIC: &str = "expectations";
 
-/// A runtime command on `@/commands/expectations`.
+/// A runtime command on `@rpc/systemd/expectations/set`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExpectationCommand {
@@ -29,11 +29,11 @@ async fn apply(handle: &SentinelHandle, cmd: ExpectationCommand) {
 }
 
 /// Run the sentinel command/status channel until the session closes.
-pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, handle: SentinelHandle) {
-    let cmd_key = command_key(&key_prefix, EXPECTATIONS_TOPIC);
-    let stat_key = status_key(&key_prefix, EXPECTATIONS_TOPIC);
+pub async fn run(session: Arc<zenoh::Session>, producer: String, handle: SentinelHandle) {
+    let cmd_key = command_key(&producer, EXPECTATIONS_TOPIC);
+    let stat_key = status_key(&producer, EXPECTATIONS_TOPIC);
 
-    let subscriber = match session.declare_subscriber(&cmd_key).await {
+    let subscriber = match session.declare_queryable(&cmd_key).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, key = %cmd_key, "sentinel: subscribe to commands failed");
@@ -51,17 +51,31 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, handle: Senti
 
     loop {
         tokio::select! {
-            sample = subscriber.recv_async() => {
-                match sample {
-                    Ok(sample) => {
-                        let payload = sample.payload().to_bytes();
+            query = subscriber.recv_async() => {
+                match query {
+                    Ok(query) => {
+                        let payload = query
+                            .payload()
+                            .map(|p| p.to_bytes().to_vec())
+                            .unwrap_or_default();
                         match serde_json::from_slice::<ExpectationCommand>(&payload) {
-                            Ok(cmd) => apply(&handle, cmd).await,
-                            Err(e) => tracing::warn!(error = %e, "sentinel: bad expectation command"),
+                            Ok(cmd) => {
+                                apply(&handle, cmd).await;
+                                if let Err(e) = query.reply(cmd_key.as_str(), Vec::<u8>::new()).await {
+                                    tracing::warn!(error = %e, "sentinel: ack failed");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "sentinel: bad expectation command");
+                                let err = zensight_sensor_core::rpc::RpcError::invalid_args(e.to_string());
+                                let _ = query
+                                    .reply_err(serde_json::to_vec(&err).unwrap_or_default())
+                                    .await;
+                            }
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "sentinel: command subscriber ended");
+                        tracing::warn!(error = %e, "sentinel: command queryable ended");
                         return;
                     }
                 }
@@ -72,7 +86,7 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, handle: Senti
                         let snapshot = handle.snapshot().await;
                         match serde_json::to_vec(&snapshot) {
                             Ok(payload) => {
-                                if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                                if let Err(e) = query.reply(stat_key.as_str(), payload).await {
                                     tracing::warn!(error = %e, "sentinel: reply to status query failed");
                                 }
                             }

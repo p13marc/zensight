@@ -25,7 +25,7 @@ pub struct SyslogSensorConfig {
     #[serde(default)]
     pub logging: LoggingConfig,
 
-    /// On-demand artifact channel (`@/artifact`) limits — report + snapshot.
+    /// On-demand artifact channel (`@rpc/logs/artifact/*`) limits — report + snapshot.
     /// Every kind disabled by default.
     #[serde(default)]
     pub artifacts: zensight_sensor_core::ArtifactLimits,
@@ -34,10 +34,6 @@ pub struct SyslogSensorConfig {
 /// Syslog receiver configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyslogConfig {
-    /// Key expression prefix for publishing.
-    #[serde(default = "default_key_prefix")]
-    pub key_prefix: String,
-
     /// Override the agent-host source id (default: the local hostname).
     #[serde(default)]
     pub source: Option<String>,
@@ -123,7 +119,7 @@ pub struct SyslogConfig {
     pub multiline: MultilineConfig,
 
     /// Capacity of the in-memory per-line event ring served on demand at
-    /// `@/query/events` (#358). Per-line events no longer stream on the
+    /// `@rpc/logs/events` (#358). Per-line events no longer stream on the
     /// telemetry bus — consumers pull them from this ring. Default 10 000
     /// records (~3 MB), clamped to at least 100.
     #[serde(default = "default_events_ring_capacity")]
@@ -244,7 +240,7 @@ fn default_top_units() -> usize {
     10
 }
 
-/// Default `@/query/events` ring capacity (#358): 10 000 records ≈ 3 MB.
+/// Default `@rpc/logs/events` ring capacity (#358): 10 000 records ≈ 3 MB.
 fn default_events_ring_capacity() -> usize {
     10_000
 }
@@ -527,7 +523,7 @@ pub struct JournaldConfig {
     pub include_dev_fields: bool,
 
     /// Detect well-known systemd events (coredump, unit-failed, OOM) by their
-    /// stable `MESSAGE_ID` and raise alerts on `@/alerts/*` (#61). On by default.
+    /// stable `MESSAGE_ID` and raise alerts on `state/logs/alert/*` (#61). On by default.
     #[serde(default = "default_true")]
     pub detect_events: bool,
 
@@ -658,10 +654,6 @@ pub enum JournaldScope {
     LocalOnly,
     /// Only volatile runtime journals (`/run`), not persisted ones.
     RuntimeOnly,
-}
-
-fn default_key_prefix() -> String {
-    "zensight/logs".to_string()
 }
 
 impl SyslogConfig {
@@ -803,8 +795,8 @@ impl zensight_sensor_core::SensorConfig for SyslogSensorConfig {
         &self.logging
     }
 
-    fn key_prefix(&self) -> &str {
-        &self.syslog.key_prefix
+    fn producer(&self) -> &str {
+        "logs"
     }
 
     fn artifact_limits(&self) -> zensight_sensor_core::ArtifactLimits {
@@ -820,7 +812,6 @@ impl zensight_sensor_core::SensorConfig for SyslogSensorConfig {
 impl Default for SyslogConfig {
     fn default() -> Self {
         Self {
-            key_prefix: default_key_prefix(),
             source: None,
             listeners: vec![ListenerConfig {
                 protocol: ListenerProtocol::Udp,
@@ -866,7 +857,6 @@ mod tests {
         }"#;
 
         let config: SyslogSensorConfig = json5::from_str(json).unwrap();
-        assert_eq!(config.syslog.key_prefix, "zensight/logs");
         assert_eq!(config.syslog.listeners.len(), 1);
         assert_eq!(config.syslog.listeners[0].protocol, ListenerProtocol::Udp);
     }
@@ -879,7 +869,6 @@ mod tests {
                 connect: ["tcp/localhost:7447"]
             },
             syslog: {
-                key_prefix: "custom/syslog",
                 listeners: [
                     { protocol: "udp", bind: "0.0.0.0:514", max_message_size: 8192 },
                     { protocol: "tcp", bind: "0.0.0.0:514", max_connections: 500 }
@@ -895,7 +884,6 @@ mod tests {
         }"#;
 
         let config: SyslogSensorConfig = json5::from_str(json).unwrap();
-        assert_eq!(config.syslog.key_prefix, "custom/syslog");
         assert_eq!(config.syslog.listeners.len(), 2);
         assert_eq!(config.syslog.listeners[0].max_message_size, 8192);
         assert_eq!(config.syslog.listeners[1].max_connections, 500);

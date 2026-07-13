@@ -1,7 +1,7 @@
 //! On-demand flow detail query channel (principle P2).
 //!
 //! Serves the bounded ring of recent ended-flow records via a Zenoh queryable at
-//! `zensight/netring/@/query/flows` — the high-cardinality 5-tuple/volume detail
+//! `@rpc/netring/flows` — the high-cardinality 5-tuple/volume detail
 //! behind the streamed flow aggregates, pulled only when a user drills in (never
 //! streamed onto the telemetry bus).
 
@@ -29,8 +29,8 @@ fn top_n(query: &zenoh::query::Query) -> usize {
 
 /// Run the flow-detail query channel until the session closes. Replies with the
 /// recent ended-flow records (most-recent first) as JSON `Vec<FlowRecord>`.
-pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, flows: FlowRing) {
-    let key = zensight_common::command::query_key(&key_prefix, "flows");
+pub async fn run(session: Arc<zenoh::Session>, producer: String, flows: FlowRing) {
+    let key = zensight_common::command::query_key(&producer, "flows");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -50,7 +50,7 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, flows: FlowRi
         };
         match serde_json::to_vec(&records) {
             Ok(payload) => {
-                if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                if let Err(e) = query.reply(key.as_str(), payload).await {
                     tracing::warn!(error = %e, "query: flows reply failed");
                 }
             }
@@ -59,11 +59,11 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, flows: FlowRi
     }
 }
 
-/// Run the TLS asset-inventory query channel: `zensight/netring/@/query/tls`
+/// Run the TLS asset-inventory query channel: `@rpc/netring/tls`
 /// replies with the passive fingerprint inventory (most-seen first) as JSON
 /// `Vec<TlsRecord>`.
-pub async fn run_tls(session: Arc<zenoh::Session>, key_prefix: String, inventory: TlsInventory) {
-    let key = zensight_common::command::query_key(&key_prefix, "tls");
+pub async fn run_tls(session: Arc<zenoh::Session>, producer: String, inventory: TlsInventory) {
+    let key = zensight_common::command::query_key(&producer, "tls");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -81,7 +81,7 @@ pub async fn run_tls(session: Arc<zenoh::Session>, key_prefix: String, inventory
         records.sort_by_key(|r| std::cmp::Reverse(r.count));
         match serde_json::to_vec(&records) {
             Ok(payload) => {
-                if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                if let Err(e) = query.reply(key.as_str(), payload).await {
                     tracing::warn!(error = %e, "query: tls reply failed");
                 }
             }
@@ -90,11 +90,11 @@ pub async fn run_tls(session: Arc<zenoh::Session>, key_prefix: String, inventory
     }
 }
 
-/// Run the QUIC SNI/ALPN inventory query channel: `zensight/netring/@/query/quic`
+/// Run the QUIC SNI/ALPN inventory query channel: `@rpc/netring/quic`
 /// replies with the passive QUIC Initial inventory (most-seen first) as JSON
 /// `Vec<QuicRecord>` (issue #72).
-pub async fn run_quic(session: Arc<zenoh::Session>, key_prefix: String, inventory: QuicInventory) {
-    let key = zensight_common::command::query_key(&key_prefix, "quic");
+pub async fn run_quic(session: Arc<zenoh::Session>, producer: String, inventory: QuicInventory) {
+    let key = zensight_common::command::query_key(&producer, "quic");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -110,15 +110,15 @@ pub async fn run_quic(session: Arc<zenoh::Session>, key_prefix: String, inventor
             Err(_) => Vec::new(),
         };
         records.sort_by_key(|r| std::cmp::Reverse(r.count));
-        reply(&query, &records, "quic").await;
+        reply(&query, &key, &records, "quic").await;
     }
 }
 
-/// Run the SSH/HASSH inventory query channel: `zensight/netring/@/query/ssh`
+/// Run the SSH/HASSH inventory query channel: `@rpc/netring/ssh`
 /// replies with the passive HASSH inventory (most-seen first) as JSON
 /// `Vec<SshRecord>` (issue #72).
-pub async fn run_ssh(session: Arc<zenoh::Session>, key_prefix: String, inventory: SshInventory) {
-    let key = zensight_common::command::query_key(&key_prefix, "ssh");
+pub async fn run_ssh(session: Arc<zenoh::Session>, producer: String, inventory: SshInventory) {
+    let key = zensight_common::command::query_key(&producer, "ssh");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -134,19 +134,19 @@ pub async fn run_ssh(session: Arc<zenoh::Session>, key_prefix: String, inventory
             Err(_) => Vec::new(),
         };
         records.sort_by_key(|r| std::cmp::Reverse(r.count));
-        reply(&query, &records, "ssh").await;
+        reply(&query, &key, &records, "ssh").await;
     }
 }
 
 /// Run the encrypted-DNS inventory query channel:
-/// `zensight/netring/@/query/encrypted_dns` replies with the passive DoT/DoQ/DoH
+/// `@rpc/netring/encrypted_dns` replies with the passive DoT/DoQ/DoH
 /// destination inventory (most-seen first) as JSON `Vec<EncryptedDnsRecord>` (#326).
 pub async fn run_encrypted_dns(
     session: Arc<zenoh::Session>,
-    key_prefix: String,
+    producer: String,
     state: Arc<crate::monitor::EncDnsState>,
 ) {
-    let key = zensight_common::command::query_key(&key_prefix, "encrypted_dns");
+    let key = zensight_common::command::query_key(&producer, "encrypted_dns");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -162,19 +162,15 @@ pub async fn run_encrypted_dns(
             Err(_) => Vec::new(),
         };
         records.sort_by_key(|r| std::cmp::Reverse(r.count));
-        reply(&query, &records, "encrypted_dns").await;
+        reply(&query, &key, &records, "encrypted_dns").await;
     }
 }
 
-/// Run the passive asset-inventory query channel: `zensight/netring/@/query/assets`
+/// Run the passive asset-inventory query channel: `@rpc/netring/assets`
 /// replies with the discovered assets (most-recently-seen first) as JSON
 /// `Vec<AssetRecord>` (issue #70).
-pub async fn run_assets(
-    session: Arc<zenoh::Session>,
-    key_prefix: String,
-    inventory: AssetInventory,
-) {
-    let key = zensight_common::command::query_key(&key_prefix, "assets");
+pub async fn run_assets(session: Arc<zenoh::Session>, producer: String, inventory: AssetInventory) {
+    let key = zensight_common::command::query_key(&producer, "assets");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -190,11 +186,11 @@ pub async fn run_assets(
             Err(_) => Vec::new(),
         };
         records.sort_by_key(|r| std::cmp::Reverse(r.last_seen));
-        reply(&query, &records, "assets").await;
+        reply(&query, &key, &records, "assets").await;
     }
 }
 
-/// Run the top-talkers query channel: `zensight/netring/@/query/talkers?top=N`
+/// Run the top-talkers query channel: `@rpc/netring/talkers?top=N`
 /// replies with the top-N **source hosts** by rolling bytes/sec (netring
 /// `aggregate()`, #369) as JSON `Vec<TalkerRecord>`.
 ///
@@ -203,11 +199,11 @@ pub async fn run_assets(
 /// via the non-promoting `peek_names` (a query must not perturb the LRU), ranked.
 pub async fn run_talkers(
     session: Arc<zenoh::Session>,
-    key_prefix: String,
+    producer: String,
     aggregate: AggregateState,
     name_map: Option<crate::monitor::SharedNameMap>,
 ) {
-    let key = zensight_common::command::query_key(&key_prefix, "talkers");
+    let key = zensight_common::command::query_key(&producer, "talkers");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -236,21 +232,21 @@ pub async fn run_talkers(
                 }
             }
         }
-        reply(&query, &records, "talkers").await;
+        reply(&query, &key, &records, "talkers").await;
     }
 }
 
 /// Run the traffic-matrix query channel (#122/#369):
-/// `zensight/netring/@/query/matrix?top=N` replies with the top-N `(src,dst)` pairs
+/// `@rpc/netring/matrix?top=N` replies with the top-N `(src,dst)` pairs
 /// by rolling bytes/sec (netring `aggregate()`) as JSON `Vec<MatrixRecord>` — the
 /// service-map data. Destination rows are name-enriched from passive DNS (#308).
 pub async fn run_matrix(
     session: Arc<zenoh::Session>,
-    key_prefix: String,
+    producer: String,
     aggregate: AggregateState,
     name_map: Option<crate::monitor::SharedNameMap>,
 ) {
-    let key = zensight_common::command::query_key(&key_prefix, "matrix");
+    let key = zensight_common::command::query_key(&producer, "matrix");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -276,14 +272,14 @@ pub async fn run_matrix(
                 }
             }
         }
-        reply(&query, &records, "matrix").await;
+        reply(&query, &key, &records, "matrix").await;
     }
 }
 
-/// Run the elephant-flows query channel: `zensight/netring/@/query/elephant_flows`
+/// Run the elephant-flows query channel: `@rpc/netring/elephant_flows`
 /// replies with the recent largest flows (biggest first) as `Vec<ElephantRecord>`.
-pub async fn run_elephants(session: Arc<zenoh::Session>, key_prefix: String, ring: ElephantRing) {
-    let key = zensight_common::command::query_key(&key_prefix, "elephant_flows");
+pub async fn run_elephants(session: Arc<zenoh::Session>, producer: String, ring: ElephantRing) {
+    let key = zensight_common::command::query_key(&producer, "elephant_flows");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -299,14 +295,14 @@ pub async fn run_elephants(session: Arc<zenoh::Session>, key_prefix: String, rin
             Err(_) => Vec::new(),
         };
         records.sort_by_key(|r| std::cmp::Reverse(r.bytes));
-        reply(&query, &records, "elephant_flows").await;
+        reply(&query, &key, &records, "elephant_flows").await;
     }
 }
 
-/// Run the top-DNS-domains query channel: `zensight/netring/@/query/dns?top=N`
+/// Run the top-DNS-domains query channel: `@rpc/netring/dns?top=N`
 /// replies with the top-N SLDs by query count as JSON `Vec<DnsRecord>`.
-pub async fn run_dns(session: Arc<zenoh::Session>, key_prefix: String, inventory: DnsInventory) {
-    let key = zensight_common::command::query_key(&key_prefix, "dns");
+pub async fn run_dns(session: Arc<zenoh::Session>, producer: String, inventory: DnsInventory) {
+    let key = zensight_common::command::query_key(&producer, "dns");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -322,14 +318,14 @@ pub async fn run_dns(session: Arc<zenoh::Session>, key_prefix: String, inventory
             Ok(inv) => map::top_dns_records(&inv, top),
             Err(_) => Vec::new(),
         };
-        reply(&query, &records, "dns").await;
+        reply(&query, &key, &records, "dns").await;
     }
 }
 
-/// Run the top-HTTP-hosts query channel: `zensight/netring/@/query/http?top=N`
+/// Run the top-HTTP-hosts query channel: `@rpc/netring/http?top=N`
 /// replies with the top-N hosts by request count as JSON `Vec<HttpHostRecord>`.
-pub async fn run_http(session: Arc<zenoh::Session>, key_prefix: String, inventory: HttpInventory) {
-    let key = zensight_common::command::query_key(&key_prefix, "http");
+pub async fn run_http(session: Arc<zenoh::Session>, producer: String, inventory: HttpInventory) {
+    let key = zensight_common::command::query_key(&producer, "http");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -345,16 +341,16 @@ pub async fn run_http(session: Arc<zenoh::Session>, key_prefix: String, inventor
             Ok(inv) => map::top_http_hosts(&inv, top),
             Err(_) => Vec::new(),
         };
-        reply(&query, &records, "http").await;
+        reply(&query, &key, &records, "http").await;
     }
 }
 
-/// Run the JA4H fingerprint query channel: `zensight/netring/@/query/ja4h?top=N`
+/// Run the JA4H fingerprint query channel: `@rpc/netring/ja4h?top=N`
 /// replies with the top-N JA4H fingerprints by hit count as JSON `Vec<Ja4hRecord>`
 /// (#124). The inventory stays empty unless the sensor was built with
 /// `--features ja4plus` and `collect.http_fp` is set.
-pub async fn run_ja4h(session: Arc<zenoh::Session>, key_prefix: String, inventory: Ja4hInventory) {
-    let key = zensight_common::command::query_key(&key_prefix, "ja4h");
+pub async fn run_ja4h(session: Arc<zenoh::Session>, producer: String, inventory: Ja4hInventory) {
+    let key = zensight_common::command::query_key(&producer, "ja4h");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -370,11 +366,11 @@ pub async fn run_ja4h(session: Arc<zenoh::Session>, key_prefix: String, inventor
             Ok(inv) => map::top_ja4h(&inv, top),
             Err(_) => Vec::new(),
         };
-        reply(&query, &records, "ja4h").await;
+        reply(&query, &key, &records, "ja4h").await;
     }
 }
 
-/// Run the canonical IPFIX query channel (#223): `zensight/netring/@/query/ipfix`
+/// Run the canonical IPFIX query channel (#223): `@rpc/netring/ipfix`
 /// replies with the recent ended flows as IANA-IE-keyed records
 /// (`FlowRecord::to_ipfix_record`) — per-direction deltas (IE 1/2), totals
 /// (IE 85/86), `flowEndReason` (IE 136) + the un-collapsed shadow, and the
@@ -383,10 +379,10 @@ pub async fn run_ja4h(session: Arc<zenoh::Session>, key_prefix: String, inventor
 #[cfg(feature = "ipfix")]
 pub async fn run_ipfix(
     session: Arc<zenoh::Session>,
-    key_prefix: String,
+    producer: String,
     records: crate::monitor::IpfixRing,
 ) {
-    let key = zensight_common::command::query_key(&key_prefix, "ipfix");
+    let key = zensight_common::command::query_key(&producer, "ipfix");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -402,20 +398,20 @@ pub async fn run_ipfix(
             Ok(r) => r.iter().rev().map(|rec| rec.to_ipfix_record()).collect(),
             Err(_) => Vec::new(),
         };
-        reply(&query, &ie, "ipfix").await;
+        reply(&query, &key, &ie, "ipfix").await;
     }
 }
 
 /// Run the capture-file index query channel (#327):
-/// `zensight/netring/@/query/captures` replies with the capture-to-disk file
+/// `@rpc/netring/captures` replies with the capture-to-disk file
 /// index (newest first) as JSON `Vec<CaptureRecord>` — triggered captures with
 /// their trigger/artifact metadata, or the rotating spool listing.
 pub async fn run_captures(
     session: Arc<zenoh::Session>,
-    key_prefix: String,
+    producer: String,
     index: crate::disk::CaptureIndex,
 ) {
-    let key = zensight_common::command::query_key(&key_prefix, "captures");
+    let key = zensight_common::command::query_key(&producer, "captures");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -430,15 +426,21 @@ pub async fn run_captures(
             Ok(idx) => idx.iter().cloned().collect(),
             Err(_) => Vec::new(),
         };
-        reply(&query, &records, "captures").await;
+        reply(&query, &key, &records, "captures").await;
     }
 }
 
-/// Serialize `records` to JSON and reply; logs (does not panic) on failure.
-async fn reply<T: serde::Serialize>(query: &zenoh::query::Query, records: &T, label: &str) {
+/// Serialize `records` to JSON and reply on the queryable's **concrete**
+/// key (RFC 05 §2.1); logs (does not panic) on failure.
+async fn reply<T: serde::Serialize>(
+    query: &zenoh::query::Query,
+    key: &str,
+    records: &T,
+    label: &str,
+) {
     match serde_json::to_vec(records) {
         Ok(payload) => {
-            if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+            if let Err(e) = query.reply(key, payload).await {
                 tracing::warn!(error = %e, channel = label, "query reply failed");
             }
         }

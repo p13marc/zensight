@@ -8,8 +8,8 @@ egress task, and refcount:
 
 | Profile | Key | Encoding | Purpose |
 |---------|-----|----------|---------|
-| `video` | `@media/<stream>/video/h264/<profile>` | `video/h264` | full-rate live view |
-| `preview` | `@media/<stream>/preview/jpeg` | `image/jpeg` | low-fps GUI tiles |
+| `video` | `zensight/@v1/<origin>/@media/parallax/<stream>/video/h264/<profile>` | `video/h264` | full-rate live view |
+| `preview` | `zensight/@v1/<origin>/@media/parallax/<stream>/preview/jpeg` | `image/jpeg` | low-fps GUI tiles |
 
 An `open_stream` command with `codec: "h264"` (or the sensor default) opens
 the video profile; `codec: "mjpeg"` opens the preview profile. Profiles are
@@ -19,11 +19,12 @@ matching listener is the crash backstop for GUIs that die without
 `close_stream`).
 
 **Viewer keys**: previews are watched on the exact
-`@media/<stream>/preview/jpeg` key; video viewers subscribe with the profile
-chunk as a single-chunk wildcard (`@media/<stream>/video/h264/*`), because
-`video.profile` is *sensor* configuration that the catalogue does not carry.
-The matching listener fires for wildcard subscribers too (zenoh matching is
-intersection-based; pinned in `tests/e2e.rs`). See `docs/KEYSPACE.md` §3.3.
+`…/@media/parallax/<stream>/preview/jpeg` key; video viewers subscribe with the
+profile chunk as a single-chunk wildcard
+(`…/@media/parallax/<stream>/video/h264/*`), because `video.profile` is
+*sensor* configuration that the catalogue does not carry. The matching listener
+fires for wildcard subscribers too (zenoh matching is intersection-based;
+pinned in `tests/e2e.rs`). See `docs/KEYSPACE.md`.
 
 Separate pipelines per profile — deliberately **no tee**: the preview must
 keep its 2 fps cadence whether or not the encoder runs, and closing one
@@ -96,7 +97,9 @@ self-contained (see "Self-contained keyframes" above).
 idle countdown (unless a viewer is still subscribed). The idle reaper stops
 the pipeline, aborts the egress and matching-listener tasks, and undeclares
 the publisher. Closing the last profile marks the stream inactive in the
-catalogue and publishes a `StreamStatus{open: false}` transition.
+catalogue and publishes a `StreamStatus{open: false}` transition on the
+stream's `state/parallax/stream/<stream>` doc (the doc is only tombstoned when
+the stream leaves the config, never on close).
 
 A profile that was opened but never gets (or loses) its viewer is reaped by
 the same countdown even if its refcount is non-zero — the matching listener
@@ -127,7 +130,7 @@ triggers the stop handle first.
 ## Stats, health, alerts
 
 Per-stream stats ride ordinary telemetry under
-`zensight/parallax/<source>/<stream>/stats/<metric>` every
+`zensight/@v1/<origin>/telemetry/parallax/<stream>/stats/<metric>` every
 `stats_interval_secs`, **aggregated over the stream's open profiles**:
 
 | Metric | Kind | Meaning |
@@ -146,7 +149,7 @@ Health: each successful profile open records a device success for the
 stream; pipeline build failures and egress errors record failures (3
 consecutive → the stream's device flips Offline).
 
-Alert rules on `@/alerts/*` (auto-resolve on recovery):
+Alert rules on `state/parallax/alert/*` (auto-resolve on recovery):
 
 - `camera_disappeared` — an advertised V4L2 device vanished from periodic
   re-enumeration.
@@ -166,8 +169,9 @@ Alert rules on `@/alerts/*` (auto-resolve on recovery):
   connect runs in its own task, **never inside the session actor**: the
   profile slot is reserved as *pending* (refcounting opens/closes that race
   the connect; the stream reads `open` in status/catalogue meanwhile), so an
-  unreachable camera (bounded by a 5 s timeout) stalls no stream commands and
-  no `@/query/streams` / `@/status/streams` replies. If the SDP carries
+  unreachable camera (bounded by a 5 s timeout) stalls no stream commands, no
+  `@rpc/parallax/streams` replies, and no `state/parallax/stream/<stream>`
+  doc updates. If the SDP carries
   no video dimensions, `FrameMeta.width/height` are `0` (= unknown) on the
   video profile and the JPEG preview cannot be opened (the encoder needs a
   size).

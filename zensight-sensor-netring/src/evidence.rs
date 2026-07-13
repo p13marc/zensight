@@ -1,5 +1,5 @@
 //! Host-evidence feed (#307): republish observed assets and passive-DNS name
-//! observations onto `zensight/_meta/evidence/**` for the correlator (epic #312).
+//! observations onto `state/netring/evidence/**` for the correlator (epic #312).
 //!
 //! These are **third-party** claims (`observer = Some("netring")`) about devices
 //! seen on the wire — the correlator weighs them lower than a host's self-report

@@ -575,7 +575,7 @@ pub fn make_log_uid(timestamp_ms: i64, seq: u64) -> String {
 /// `include_raw` — `log.record.original`) alongside facility/severity/app/etc.
 ///
 /// Since #358 the point is no longer published on the telemetry bus: it feeds
-/// the bounded `@/query/events` ring (via `LogRecord::from_point`), from which
+/// the bounded `@rpc/logs/events` ring (via `LogRecord::from_point`), from which
 /// consumers pull on demand.
 pub fn to_telemetry_point(
     received: &ReceivedMessage,

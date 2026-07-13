@@ -10,13 +10,13 @@ pub const FILTER_TOPIC: &str = "filter";
 
 /// Key expression for filter commands.
 /// The `@` in the path indicates an administrative/control channel.
-pub fn command_key(prefix: &str) -> String {
-    zensight_common::command_key(prefix, FILTER_TOPIC)
+pub fn command_key(producer: &str) -> String {
+    zensight_common::command_key(producer, FILTER_TOPIC)
 }
 
 /// Key expression for filter status queries.
-pub fn status_key(prefix: &str) -> String {
-    zensight_common::status_key(prefix, FILTER_TOPIC)
+pub fn status_key(producer: &str) -> String {
+    zensight_common::status_key(producer, FILTER_TOPIC)
 }
 
 /// Filter command sent from frontend to sensor.
@@ -59,15 +59,15 @@ mod tests {
 
     #[test]
     fn test_command_key() {
-        assert_eq!(
-            command_key("zensight/logs"),
-            "zensight/logs/@/commands/filter"
-        );
+        // v1 (RFC 05): filter writes are the `filter/set` procedure.
+        let k = command_key("logs");
+        assert!(k.starts_with("zensight/@v1/h-"), "{k}");
+        assert!(k.ends_with("/@rpc/logs/filter/set"), "{k}");
     }
 
     #[test]
     fn test_status_key() {
-        assert_eq!(status_key("zensight/logs"), "zensight/logs/@/status/filter");
+        assert!(status_key("logs").ends_with("/@rpc/logs/filter"));
     }
 
     #[test]

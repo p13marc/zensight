@@ -6,6 +6,10 @@ use iced::widget::{Column, Row, button, column, container, row, scrollable, text
 use iced::{Alignment, Element, Length, Theme};
 
 use zensight_common::TelemetryValue;
+/// The registry's parse direction for this producer (RFC 08 §1, issue #475).
+/// `TelemetryPoint::metric` **is** the telemetry subject tail, verbatim, so a
+/// metric name refines straight into a typed subject with its variables named.
+use zensight_keyspace::registry::sysinfo::Subject;
 
 use crate::message::Message;
 use crate::view::components::card;
@@ -61,7 +65,7 @@ pub fn sysinfo_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
         content = content.push(card(render_processes_section(state)));
     }
 
-    // On-demand process explorer (#47) — the rich `@/query/processes` table
+    // On-demand process explorer (#47) — the rich `@rpc/sysinfo/processes` table
     // (rss/vsz/threads/io/state/uid), always available for a sysinfo host since
     // it's pulled lazily rather than streamed.
     content = content.push(card(render_process_explorer(state)));
@@ -70,6 +74,10 @@ pub fn sysinfo_host_view(state: &DeviceDetailState) -> Element<'_, Message> {
     if has_prefix(state, "pressure/") {
         content = content.push(card(render_psi_section(state)));
     }
+    // The same question as PSI, one level deeper: PSI says *how much* time was
+    // lost to contention, the histograms say *how long an individual wait was*.
+    // Pulled on demand (#99, `@rpc/sysinfo/latency`) — never streamed.
+    content = content.push(card(render_latency_section(state)));
     if has_prefix(state, "cgroup/") {
         content = content.push(card(render_cgroup_section(state)));
     }
@@ -338,17 +346,16 @@ fn render_disk_section(state: &DeviceDetailState) -> Element<'_, Message> {
 
     let mut disk_content = Column::new().spacing(10);
 
-    // Find all disk metrics (disk/<mount>/used, disk/<mount>/total)
+    // The mounts this host reports, from the registry (RFC 08 §1's parse
+    // direction, #475): `disk/{mount}/used` yields its `mount` variable typed
+    // and named, instead of a strip_prefix/strip_suffix pair that silently
+    // stops matching if the subject ever moves.
     let mut mounts: Vec<String> = state
         .metrics
         .keys()
-        .filter_map(|k| {
-            if k.starts_with("disk/") && k.ends_with("/used") {
-                let mount = k.strip_prefix("disk/")?.strip_suffix("/used")?;
-                Some(mount.to_string())
-            } else {
-                None
-            }
+        .filter_map(|k| match Subject::parse_metric(k) {
+            Some(Subject::DiskUsed { mount }) => Some(mount),
+            _ => None,
         })
         .collect();
 
@@ -391,16 +398,16 @@ fn render_network_section(state: &DeviceDetailState) -> Element<'_, Message> {
     let mut net_content = Column::new().spacing(8);
 
     // Find all network interfaces (network/<iface>/rx_bytes, etc.)
+    // `network/{iface}/rx_bytes`. Note the old `contains("/rx_bytes")` also
+    // matched `network/tcp/...`-shaped keys by accident; the registry knows
+    // `network/tcp/*` is a different subject family and will not hand it back
+    // here (literal beats var, RFC 08 §1).
     let mut interfaces: Vec<String> = state
         .metrics
         .keys()
-        .filter_map(|k| {
-            if k.starts_with("network/") && k.contains("/rx_bytes") {
-                let iface = k.strip_prefix("network/")?.split('/').next()?;
-                Some(iface.to_string())
-            } else {
-                None
-            }
+        .filter_map(|k| match Subject::parse_metric(k) {
+            Some(Subject::NetworkRxBytes { iface }) => Some(iface),
+            _ => None,
         })
         .collect();
 
@@ -537,15 +544,10 @@ fn render_disk_io_section(state: &DeviceDetailState) -> Element<'_, Message> {
     let mut devices: Vec<String> = state
         .metrics
         .keys()
-        .filter_map(|k| {
-            if k.contains("/io/read_rate") {
-                // Extract device name: disk/{device}/io/read_rate
-                let parts: Vec<&str> = k.split('/').collect();
-                if parts.len() >= 4 && parts[0] == "disk" {
-                    return Some(parts[1].to_string());
-                }
-            }
-            None
+        .filter_map(|k| match Subject::parse_metric(k) {
+            // `disk/{device}/io/read_rate` — the device was `parts[1]`.
+            Some(Subject::DiskIoReadRate { device }) => Some(device),
+            _ => None,
         })
         .collect();
 
@@ -603,17 +605,13 @@ fn render_temperatures_section(state: &DeviceDetailState) -> Element<'_, Message
     let mut sensors: Vec<(String, String, f64, Option<f64>)> = Vec::new();
 
     for key in state.metrics.keys() {
-        if key.starts_with("sensors/") && key.ends_with("/temp") {
-            let parts: Vec<&str> = key.split('/').collect();
-            if parts.len() >= 4 {
-                let chip = parts[1];
-                let label = parts[2];
-                if let Some(temp) = get_metric_value(state, key) {
-                    let critical =
-                        get_metric_value(state, &format!("sensors/{}/{}/critical", chip, label));
-                    sensors.push((chip.to_string(), label.to_string(), temp, critical));
-                }
-            }
+        // `sensors/{chip}/{label}/temp` — two variables, both named by the
+        // registry instead of read off `parts[1]`/`parts[2]`.
+        if let Some(Subject::SensorsTemp { chip, label }) = Subject::parse_metric(key)
+            && let Some(temp) = get_metric_value(state, key)
+        {
+            let critical = get_metric_value(state, &format!("sensors/{chip}/{label}/critical"));
+            sensors.push((chip, label, temp, critical));
         }
     }
 
@@ -928,7 +926,7 @@ fn render_processes_section(state: &DeviceDetailState) -> Element<'_, Message> {
 }
 
 /// On-demand process explorer (#47): a sort toggle (CPU / Memory / I/O) that
-/// fetches the rich `@/query/processes` table and renders it. Distinct from the
+/// fetches the rich `@rpc/sysinfo/processes` table and renders it. Distinct from the
 /// streamed top-10 above — this carries rss/vsz/threads/io/state/uid and is
 /// pulled lazily (the per-pid firehose is never streamed, principle P2).
 fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
@@ -1183,6 +1181,110 @@ fn section_style(t: &Theme) -> container::Style {
         },
         ..Default::default()
     }
+}
+
+/// eBPF saturation histograms (#99): scheduler run-queue delay and block-I/O
+/// latency, pulled from `@rpc/sysinfo/latency`.
+///
+/// Rendered as percentiles rather than a mean, because the tail *is* the
+/// finding: a p99 run-queue delay of 40 ms behind a p50 of 20 µs is a stall that
+/// an average erases completely.
+///
+/// The sensor declares this queryable even when it is not built with `ebpf`,
+/// replying `available: false`. That distinction is worth keeping — "this kernel
+/// or build cannot measure it" and "nothing answered" are different problems —
+/// so they get different empty states.
+fn render_latency_section(state: &DeviceDetailState) -> Element<'_, Message> {
+    let title = row![text("Saturation latency (eBPF)").size(16)].spacing(8);
+    let mut col = Column::new().spacing(4).push(title);
+
+    let detail = &state.sysinfo_detail;
+    if detail.latency.is_loading() {
+        return col
+            .push(empty_state("Fetching latency histograms…", None))
+            .into();
+    }
+    if let Some(err) = detail.latency.error() {
+        return col
+            .push(empty_state(format!("Fetch failed: {err}"), None))
+            .into();
+    }
+    let Some(report) = detail.latency.ready() else {
+        return col
+            .push(
+                button(text("Fetch latency histograms").size(12))
+                    .padding([4, 10])
+                    .on_press(Message::FetchSysinfoLatency),
+            )
+            .into();
+    };
+
+    if !report.available {
+        return col
+            .push(empty_state(
+                "The sensor is not collecting these — it needs the `ebpf` feature, \
+                 a supported kernel and CAP_BPF.",
+                None,
+            ))
+            .into();
+    }
+
+    col = col.push(
+        text(format!("over the last {}s", report.window_secs))
+            .size(12)
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            }),
+    );
+
+    for (label, hist) in [
+        ("Run-queue delay (runqlat)", &report.runqlat),
+        ("Block I/O (biolatency)", &report.biolatency),
+    ] {
+        if hist.total == 0 {
+            continue;
+        }
+        col = col.push(text(label).size(14)).push(
+            row![
+                latency_stat("p50", hist.p50_us),
+                latency_stat("p95", hist.p95_us),
+                latency_stat("p99", hist.p99_us),
+                latency_stat("max", hist.max_us),
+                text(format!("{} samples", hist.total))
+                    .size(12)
+                    .style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).text_muted()),
+                    }),
+            ]
+            .spacing(space::MD)
+            .align_y(Alignment::Center),
+        );
+    }
+
+    col.push(
+        button(text("Refresh").size(12))
+            .padding([4, 10])
+            .on_press(Message::FetchSysinfoLatency),
+    )
+    .into()
+}
+
+/// One percentile, rendered in the unit a human reads it in: µs below a
+/// millisecond, ms above.
+fn latency_stat<'a>(label: &'a str, us: u64) -> Element<'a, Message> {
+    let value = if us >= 1000 {
+        format!("{:.1} ms", us as f64 / 1000.0)
+    } else {
+        format!("{us} µs")
+    };
+    column![
+        text(label).size(10).style(|t: &Theme| text::Style {
+            color: Some(theme::colors(t).text_muted()),
+        }),
+        text(value).size(14),
+    ]
+    .spacing(2)
+    .into()
 }
 
 #[cfg(test)]

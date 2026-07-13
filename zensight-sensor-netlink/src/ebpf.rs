@@ -3,7 +3,7 @@
 //! Loads the bytecode compiled by `build.rs`, attaches the connlat kprobes +
 //! the retransmit / tcplife tracepoints, drains the connection ring buffer into
 //! a bounded in-memory ring, and exposes readers for the collector (connlat
-//! gauges) and the `@/query/{retransmits,connections}` channels.
+//! gauges) and the `@rpc/netlink/{retransmits,connections}` channels.
 //!
 //! Gated on `feature = "ebpf"` — the rest of the crate stays aya-free. Any
 //! load/attach failure (no `CAP_BPF`/`CAP_NET_ADMIN`, unsupported kernel) is
@@ -53,7 +53,7 @@ const LIVE_TTL: Duration = Duration::from_secs(6 * 3600);
 ///
 /// Two instances live in [`EbpfState`]:
 /// * `closed` (tier 2a) — fed at TCP_CLOSE from the tcplife ring; consulted by
-///   `@/query/sockets` for closing-state sockets (TIME_WAIT/CLOSE_WAIT/
+///   `@rpc/netlink/sockets` for closing-state sockets (TIME_WAIT/CLOSE_WAIT/
 ///   FIN_WAIT*/LAST_ACK/CLOSING) that the `/proc` fd scan can never attribute —
 ///   their fd is already gone by the time the socket lingers in those states.
 /// * `live` (tier 2b) — fed at client-connect ESTABLISHED, removed at close;
@@ -197,7 +197,7 @@ impl EbpfState {
         self.inner.live.owner(local_ip, lport, remote_ip, rport)
     }
 
-    /// Recent completed-connection records (oldest first), for `@/query/connections`.
+    /// Recent completed-connection records (oldest first), for `@rpc/netlink/connections`.
     pub fn recent_connections(&self) -> Vec<ConnView> {
         self.inner
             .conns
@@ -206,7 +206,7 @@ impl EbpfState {
             .unwrap_or_default()
     }
 
-    /// Top-K retransmit peers, for `@/query/retransmits`.
+    /// Top-K retransmit peers, for `@rpc/netlink/retransmits`.
     pub fn top_retransmits(&self, k: usize) -> Vec<RetransRecord> {
         let snapshot: Vec<(RetransKey, u64)> = match self.inner.retrans.lock() {
             Ok(map) => map.iter().filter_map(|r| r.ok()).collect(),

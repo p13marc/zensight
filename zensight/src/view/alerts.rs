@@ -370,8 +370,18 @@ impl AlertsState {
     /// Ingest a sensor-pushed alert. Firing alerts are inserted/updated by
     /// `alert_key`; resolved alerts are removed. Returns what happened so the
     /// caller can toast appropriately.
+    /// The in-GUI identity of an external alert. v1 (epic #453): the
+    /// `alert_key` hash no longer includes the source — the wire key's
+    /// origin chunk scopes it — so the GUI scopes by (source, hash).
+    pub fn external_key(alert: &SensorAlert) -> String {
+        format!("{}/{}", alert.source, alert.alert_key())
+    }
+
     pub fn ingest_external(&mut self, alert: SensorAlert) -> ExternalAlertOutcome {
-        let key = alert.alert_key();
+        // v1 (epic #453): the alert_key hash no longer includes the source —
+        // the wire key's origin chunk scopes it. Keep the in-GUI map keyed by
+        // (source, hash) so distinct hosts' alerts never collide here.
+        let key = Self::external_key(&alert);
         match alert.state {
             SensorAlertState::Resolved => {
                 if self.external.remove(&key).is_some() {
@@ -546,7 +556,7 @@ impl AlertsState {
                 });
                 let unacked = alerts
                     .iter()
-                    .filter(|a| !self.acknowledged_external.contains(&a.alert_key()))
+                    .filter(|a| !self.acknowledged_external.contains(&Self::external_key(a)))
                     .count();
                 let top_severity = alerts.iter().map(|a| a.severity).max();
                 ExternalIncident {
@@ -664,7 +674,7 @@ impl AlertsState {
         self.external
             .values()
             .filter(|a| {
-                !self.acknowledged_external.contains(&a.alert_key())
+                !self.acknowledged_external.contains(&Self::external_key(a))
                     && !self.is_silenced(&a.source, now)
             })
             .count()
@@ -1410,10 +1420,10 @@ fn render_incident<'a>(
 
     let mut col = Column::new().spacing(2).push(header);
     for alert in &incident.alerts {
-        let acked = state.is_external_acked(&alert.alert_key());
+        let acked = state.is_external_acked(&AlertsState::external_key(alert));
         col = col.push(render_external_alert_row(alert, acked));
         // Incident timeline strip: firing→resolved transitions (#26).
-        let tl = state.timeline(&alert.alert_key());
+        let tl = state.timeline(&AlertsState::external_key(alert));
         if tl.len() > 1 {
             col = col.push(render_timeline(&tl));
         }
@@ -1713,7 +1723,7 @@ mod tests {
         use zensight_common::AlertSeverity;
         let mut state = AlertsState::new();
         let a = ext_alert("ssh-listening", AlertSeverity::Critical);
-        let key = a.alert_key();
+        let key = AlertsState::external_key(&a);
 
         assert_eq!(state.ingest_external(a.clone()), ExternalAlertOutcome::New);
         assert_eq!(state.external_count(), 1);
@@ -1879,7 +1889,7 @@ mod tests {
         let mut state = AlertsState::new();
         let mut a = ext_alert("ssh", AlertSeverity::Warning);
         a.timestamp = 1_000;
-        let key = a.alert_key();
+        let key = AlertsState::external_key(&a);
         state.ingest_external(a.clone());
         // A repeat firing (update) does NOT add a transition.
         let mut a2 = a.clone();

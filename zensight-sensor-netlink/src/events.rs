@@ -5,7 +5,7 @@
 //! poll tick. Each [`NetworkEvent`] is folded into:
 //! 1. bounded **counters** `events/{link,addr,route,neighbor,rule,nexthop,mdb,
 //!    nsid}/{added,removed,changed}_total` (streamed), and
-//! 2. a bounded **recent-events ring** served on demand via `@/query/events`.
+//! 2. a bounded **recent-events ring** served on demand via `@rpc/netlink/events`.
 //!
 //! Relevant events (a `DelLink`, default-route withdrawal, gateway-neighbor
 //! failure, …) also *nudge* the sentinel so the matching expectation is
@@ -190,7 +190,7 @@ pub fn is_sentinel_relevant(ev: &NetworkEvent) -> bool {
     }
 }
 
-/// One row of the recent-events ring, served via `@/query/events`.
+/// One row of the recent-events ring, served via `@rpc/netlink/events`.
 ///
 /// Defined locally (not in `zensight-common`) because this sensor owns only its
 /// own crate; the GUI decoder mirrors this shape from the JSON reply.

@@ -108,17 +108,44 @@ jobs:
       # sensor-core's AdvancedPublisherRegistry / common's PublisherRegistry /
       # a `session.declare_publisher(...)` — never a one-shot `session.put` /
       # `session.delete` (declaring interns the key + primes router routing).
-      # Bans `<session-like>.put(` / `.delete(` outside the registry modules,
-      # tests, and zenoh-blob (an external-bound crate with its own transport).
+      # v1 (RFC 02 P7): the sanctioned one-shot exemptions — events-class
+      # records and @blob chunk seeding — still ride the registry modules, so
+      # the ban stands as-is; commands no longer publish at all (they are
+      # @rpc GETs, RFC 05). Bans `<session-like>.put(` / `.delete(` outside
+      # the registry modules, tests, and zenoh-blob (an external-bound crate
+      # with its own transport).
       - name: declared-publishers only (R5 guard)
         run: |
           hits=$(grep -rnE '(session[a-z_]*|zenoh)\.(put|delete)\(' \
             zensight/src zensight-common/src zensight-correlator/src \
             zensight-sensor-core/src zensight-sensor-*/src zensight-exporter-*/src \
+            zensight-rerun/src zensight-keyspace/src \
             --include='*.rs' \
             | grep -vE 'publisher_registry\.rs|/tests/|_test\.rs|mod tests' || true)
           if [ -n "$hits" ]; then
             echo "::error::Raw session.put/delete — publish through a declared publisher (PublisherRegistry / AdvancedPublisherRegistry / declare_publisher):"
+            echo "$hits"
+            exit 1
+          fi
+
+      # The legacy keyspace is retired (#465): every wire key rides
+      # zensight/@v1/... . Ban NEW legacy-shaped literals ("zensight/<x>" not
+      # followed by @v1) in non-test source so the old grammar cannot creep
+      # back. Comments and assertions are excluded — negative pins ("must
+      # NOT match") and historical notes are legitimate.
+      - name: no legacy keyspace literals (v1 guard)
+        run: |
+          hits=$(grep -rnE '"zensight/[a-z_]' \
+            zensight/src zensight-common/src zensight-correlator/src \
+            zensight-sensor-core/src zensight-sensor-*/src zensight-exporter-*/src \
+            zensight-rerun/src zensight-keyspace/src \
+            --include='*.rs' \
+            | grep -v 'zensight/@v1' \
+            | grep -vE '/tests/|_test\.rs|journald\.cursor|zensight/host-id' \
+            | grep -vE ':[0-9]+: *//' \
+            | grep -v 'assert' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Legacy-shaped zensight/<x> key literal — build keys through zensight-keyspace/zensight-common (v1 grammar):"
             echo "$hits"
             exit 1
           fi

@@ -5,24 +5,27 @@ publishes each update to Zenoh.
 
 ## Telemetry & keyspace
 
-All keys are rooted at `key_prefix` (default `zensight/gnmi`).
+All keys follow the v1 grammar, `zensight/@v1/<origin>/…`, where `<origin>` is
+the **collector host's** stable id (`h-<12hex>`). gNMI is a *proxy producer*:
+the observed device is the first subject chunk after the producer.
 
 | Key | Payload |
 |-----|---------|
-| `zensight/gnmi/<device>/<path>` | One gNMI update leaf. `<path>` mirrors the gNMI path, including path keys, e.g. `interfaces/interface[name=eth0]/state/counters/in-octets`. |
+| `zensight/@v1/<origin>/telemetry/gnmi/<device>/<path>` | One gNMI update leaf. `<path>` mirrors the gNMI path, including path keys, e.g. `interfaces/interface[name=eth0]/state/counters/in-octets`. |
 
-`<device>` comes from each target's `name`. The full gNMI path is also carried in
-the `path` label. The point `source` defaults to the local hostname unless
-`gnmi.source` is set.
+`<device>` comes from each target's `name`, which is also stamped as the point's
+`source` payload field.
 
 ### Control plane (via `zensight-sensor-core`)
 
-- `zensight/gnmi/<source>/@/health` — sensor health snapshots (host-scoped)
-- `zensight/gnmi/@/devices/*/liveness` — per-device liveness
-- `zensight/gnmi/@/errors` — error reports
-- `zensight/gnmi/@/artifact/{request,status,cancel}` — on-demand debug report / snapshot (opt-in via `artifacts`)
-- `zensight/_meta/sensors/gnmi/<source>` — sensor registration (`SensorInfo`)
-- `zensight/_meta/evidence/host/gnmi/<source>` — self-reported host evidence
+- `zensight/@v1/<origin>/state/gnmi/health` — sensor health document (absorbs the legacy running flag)
+- `zensight/@v1/<origin>/state/gnmi/device/<device>/liveness` — per-device liveness document (a `…/device/<device>/alive` liveliness token is separate machinery)
+- `zensight/@v1/<origin>/state/gnmi/errors` — error reports
+- `zensight/@v1/<origin>/@rpc/gnmi/artifact/{request,cancel}` — on-demand debug report / snapshot (opt-in via `artifacts`); progress rides the `state/gnmi/artifact/<kind>` status document
+- `zensight/@v1/<origin>/state/gnmi/sensor` — sensor registration (`SensorInfo`)
+- `zensight/@v1/<origin>/state/gnmi/evidence/self` — self-reported host evidence
+- `zensight/@v1/<origin>/state/gnmi/alive` — sensor liveliness token
+- `zensight/@v1/<origin>/@rpc/gnmi/introspect` — the registry slice this build serves
 
 See [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for the authoritative contract.
 
@@ -35,8 +38,7 @@ and `gnmi`.
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `key_prefix` | string | Key-expression root (default `zensight/gnmi`). |
-| `source` | string? | Override the agent-host source id (default: local hostname). |
+| `source` | string? | Override the sensor instance id used in registration/evidence payloads (default: local hostname; v1 keys are origin-scoped, so it no longer appears in key expressions). |
 | `serialization` | enum | Telemetry encoding: `json` or `cbor`. |
 | `targets[]` | array | Devices to subscribe to (see below). |
 

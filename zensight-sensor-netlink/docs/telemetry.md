@@ -1,14 +1,18 @@
 # netlink telemetry
 
-All streamed telemetry is published under `zensight/netlink/<source>/<metric>` as
-a serialized `TelemetryPoint` (JSON or CBOR per `serialization`). High-cardinality
-detail is **never streamed** — it is served on request from the `@/query/<topic>`
-queryables (see below). Metric families are gated by the `collect.*` config
-toggles (see [configuration.md](configuration.md)).
+All streamed telemetry is published under
+`zensight/@v1/<origin>/telemetry/netlink/<metric>` as a serialized
+`TelemetryPoint` (JSON or CBOR per `serialization`), where `<origin>` is the
+host's `h-<12hex>` id — the key carries no source chunk; the payload
+`TelemetryPoint` still carries `source`. High-cardinality detail is **never
+streamed** — it is served on request from the `@rpc/netlink/<topic>` procedures
+(see below). Metric families are gated by the `collect.*` config toggles (see
+[configuration.md](configuration.md)).
 
 See [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for the authoritative
-key-expression contract and [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md)
-for the canonical reference this page summarizes.
+key-expression contract and
+[`zensight-keyspace/registry/netlink.toml`](../../zensight-keyspace/registry/netlink.toml)
+for the machine-readable subject/procedure registry this page summarizes.
 
 ## Streamed telemetry
 
@@ -38,7 +42,8 @@ Fleet-wide TCP state counts and enriched `tcp_info` roll-ups under `sockets/tcp/
 - per-congestion-control fleet counts: `sockets/tcp/by_cong/<algo>`
 
 Full per-socket rows (with congestion-control detail — BBR bottleneck bandwidth
-`bbr_bw_bps` + min-RTT `cc_min_rtt_us`) come from `@/query/sockets`, not the bus.
+`bbr_bw_bps` + min-RTT `cc_min_rtt_us`) come from `@rpc/netlink/sockets`, not
+the bus.
 
 ### ethtool link health (`collect.ethtool`, nlink 0.23)
 
@@ -50,12 +55,14 @@ Best-effort per family; drivers lacking one still yield the rest.
 ### TC / QoS / bufferbloat (`collect.tc`)
 
 Per-qdisc drops/overlimits/backlog plus a bufferbloat/AQM health score. Read is
-unprivileged; absent where no qdiscs are configured. Per-qdisc rows on `@/query/tc`.
+unprivileged; absent where no qdiscs are configured. Per-qdisc rows on
+`@rpc/netlink/tc`.
 
 ### Routes, neighbors, addresses, diagnostics
 
 - `collect.routes` — routing-table summary + `routes/default_v4_flaps_total`
-  (default-route flap counter; per-transition history on `@/query/route_changes`).
+  (default-route flap counter; per-transition history on
+  `@rpc/netlink/route_changes`).
 - `collect.neighbors` — ARP/NDP neighbor-state summary.
 - `collect.addresses` — per-family + global IP address counts (#10).
 - `collect.diagnostics` — nlink's bottleneck score + issue counts.
@@ -63,7 +70,7 @@ unprivileged; absent where no qdiscs are configured. Per-qdisc rows on `@/query/
 ### Control-plane change timeline (`collect.events`)
 
 Real-time RTNETLINK changes fold into counters and a recent-events ring
-(`@/query/events`). Counter families `events/<family>/{added,removed,changed}_total`:
+(`@rpc/netlink/events`). Counter families `events/<family>/{added,removed,changed}_total`:
 
 | Family | Source |
 |---|---|
@@ -77,7 +84,7 @@ Real-time RTNETLINK changes fold into counters and a recent-events ring
 
 Ruleset shape `nft/{tables,chains,rules}_total`, monotonic `nft/{packets,bytes}_total`,
 and per-table `nft/<family>/<table>/{packets,bytes}`. Per-rule counters decoded from
-nlink's native `RuleInfo::counter()` (#322). Per-rule detail on `@/query/nft`.
+nlink's native `RuleInfo::counter()` (#322). Per-rule detail on `@rpc/netlink/nft`.
 
 ### conntrack (`collect.conntrack`, needs `CAP_NET_ADMIN`)
 
@@ -88,7 +95,7 @@ Netfilter conntrack table summary (entries/proto/utilization).
 The **unprivileged, TCP-only** bandwidth tier (#317, epic #320). A background
 sampler diffs each socket's `tcp_info` goodput byte counters (`bytes_acked` = TX,
 `bytes_received` = RX) **per cookie** (never the reusable inode). Served
-query-only on `@/query/bandwidth`. Limits are labelled, not hidden: **TCP only**
+query-only on `@rpc/netlink/bandwidth`. Limits are labelled, not hidden: **TCP only**
 (`udp_diag` exposes no per-socket byte counters), **app-goodput** (below wire — no
 headers/retransmits), and short flows opened+closed between samples are missed.
 Records tagged `bw.source=sock_diag` / `bw.semantics=app-goodput` / `bw.proto=tcp`.
@@ -104,15 +111,17 @@ AllowedIPs/endpoint (#268).
 What `sock_diag` snapshots cannot see — connection *lifecycle* and *attribution*.
 Streams connect-latency gauges `sockets/tcp/connlat_us_{p50,p95}` (through the
 normal publish path, so sentinel `metric-threshold` expectations can watch them).
-Also serves `@/query/retransmits` and `@/query/connections` (see below).
+Also serves `@rpc/netlink/retransmits` and `@rpc/netlink/connections` (see below).
 No-op unless built with `--features ebpf` **and** holding `CAP_BPF` + `CAP_NET_ADMIN`.
 
-## On-demand detail — `@/query/<topic>`
+## On-demand detail — `@rpc/netlink/<topic>`
 
-Served on request, never streamed. Parameters are Zenoh selector params
-(`?state=&port=`, `?top=N`). Keys use the host-less `command::query_key` form
-(`zensight/netlink/@/query/<topic>`), so a shared query fans out to every netlink
-sensor on the bus.
+Served on request, never streamed — read procedures (GETs) on the `@rpc` plane:
+`zensight/@v1/<origin>/@rpc/netlink/<topic>`. Parameters are Zenoh selector
+params (`?state=&port=`, `?top=N`). A fleet-wide caller selects
+`zensight/@v1/*/@rpc/netlink/<topic>` with query target `All` to fan out to
+every netlink sensor on the bus. Every sensor also serves
+`@rpc/netlink/introspect`, returning the registry slice this build serves.
 
 | Topic | Reply | Notes |
 |---|---|---|
@@ -142,9 +151,13 @@ systemd unit's `main_pid`, and netring flow ownership.
 
 ## Alerts & identity evidence
 
-- **Alerts** — `@/alerts/<alert_key>` from sentinel expectation violations. See
-  [sentinel.md](sentinel.md).
+- **Alerts** — `zensight/@v1/<origin>/state/netlink/alert/<alert_key>` from
+  sentinel expectation violations (`<alert_key>` = 16-hex FNV-1a of
+  `rule + labels`; firing = Put, resolved = Put(Resolved) then a Delete
+  tombstone). See [sentinel.md](sentinel.md).
 - **Identity evidence (#307)** — with `evidence` (default on), the neighbor poll
   publishes observed-neighbor `HostEvidence` (ARP/ND table → MAC↔IP,
-  `observer=netlink`) to the correlator's `_meta/evidence/**` keyspace, with the
-  configured rate-limiting and TTL aging.
+  `observer=netlink`) on
+  `zensight/@v1/<origin>/state/netlink/evidence/device/<device>` (plus the
+  self-claim on `.../evidence/self`) for the correlator, with the configured
+  rate-limiting and TTL aging.

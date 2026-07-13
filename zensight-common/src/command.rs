@@ -1,95 +1,77 @@
-//! Control-channel command primitives shared by sensors and the frontend.
+//! Control-plane key builders shared by sensors and the frontend — v1
+//! (`@rpc` procedures + `@blob` tiers, RFC 05/07; epic #453).
 //!
-//! Sensors expose runtime control via two conventional channels under their
-//! key prefix:
-//! - commands (pub/sub): `zensight/<protocol>/@/commands/<topic>`
-//! - status (queryable): `zensight/<protocol>/@/status/<topic>`
+//! Runtime control is request/reply on the `@rpc` plane:
+//! - write: `<base>/@v1/<origin>/@rpc/<producer>/<topic>/set`
+//! - read:  `<base>/@v1/<origin>/@rpc/<producer>/<topic>`
 //!
-//! A "topic" namespaces a control surface — e.g. `filter` (syslog),
-//! `expectations` (the sentinel), `detectors` (netring). The payload type is
-//! topic-specific; wrap it in [`Command`] when you want an optional correlation
-//! id for matching an async reply.
+//! Every builder takes the **producer name** ("logs", "netring", …) and
+//! derives the LOCAL host origin — these are serving-side builders; fleet
+//! callers use [`crate::keyexpr::fleet_rpc_key`]/[`crate::keyexpr::origin_rpc_key`].
 
 use serde::{Deserialize, Serialize};
+use zensight_keyspace::V1Context;
+use zensight_keyspace::grammar::BlobTier;
 
-/// Build the command key for a sensor `prefix` and `topic`.
+/// The write procedure for a control topic: `…/@rpc/<producer>/<topic>/set`.
 ///
 /// # Example
 /// ```
 /// use zensight_common::command::command_key;
-/// assert_eq!(command_key("zensight/logs", "filter"), "zensight/logs/@/commands/filter");
+/// let k = command_key("logs", "filter");
+/// assert!(k.starts_with("zensight/@v1/h-"));
+/// assert!(k.ends_with("/@rpc/logs/filter/set"));
 /// ```
-pub fn command_key(prefix: &str, topic: &str) -> String {
-    format!("{}/@/commands/{}", prefix, topic)
+pub fn command_key(producer: &str, topic: &str) -> String {
+    V1Context::for_producer(producer).rpc_key(&[topic, "set"])
 }
 
-/// Build the status (queryable) key for a sensor `prefix` and `topic`.
-///
-/// # Example
-/// ```
-/// use zensight_common::command::status_key;
-/// assert_eq!(status_key("zensight/logs", "filter"), "zensight/logs/@/status/filter");
-/// ```
-pub fn status_key(prefix: &str, topic: &str) -> String {
-    format!("{}/@/status/{}", prefix, topic)
+/// The read procedure for a control topic: `…/@rpc/<producer>/<topic>`
+/// (the reply carries the topic's current configuration/status).
+pub fn status_key(producer: &str, topic: &str) -> String {
+    V1Context::for_producer(producer).rpc_key(&[topic])
 }
 
-/// Build the on-demand detail-query (queryable) key for a sensor `prefix` and
-/// `topic`. High-cardinality detail (flow tables, socket lists, …) is served
-/// here on request, never streamed onto the telemetry bus.
-///
-/// # Example
-/// ```
-/// use zensight_common::command::query_key;
-/// assert_eq!(query_key("zensight/netring", "flows"), "zensight/netring/@/query/flows");
-/// ```
-pub fn query_key(prefix: &str, topic: &str) -> String {
-    format!("{}/@/query/{}", prefix, topic)
+/// The on-demand detail-read procedure: `…/@rpc/<producer>/<topic>`.
+/// High-cardinality detail (flow tables, socket lists, …) is served here on
+/// request, never streamed onto the telemetry bus (RFC 04 R3). Same key
+/// shape as [`status_key`] — reads are reads (RFC 05 §5).
+pub fn query_key(producer: &str, topic: &str) -> String {
+    V1Context::for_producer(producer).rpc_key(&[topic])
 }
 
-/// Build the artifact-request (subscriber) key: PUT an `ArtifactRequest` here to
-/// ask a sensor to produce an artifact (report / snapshot / capture).
-///
-/// # Example
-/// ```
-/// use zensight_common::command::artifact_request_key;
-/// assert_eq!(artifact_request_key("zensight/netlink"), "zensight/netlink/@/artifact/request");
-/// ```
-pub fn artifact_request_key(prefix: &str) -> String {
-    format!("{prefix}/@/artifact/request")
+/// The artifact-request write procedure (RFC 05 §3 long-running pattern).
+pub fn artifact_request_key(producer: &str) -> String {
+    V1Context::for_producer(producer).rpc_key(&["artifact", "request"])
 }
 
-/// Build the artifact-status (queryable) key: GET an `ArtifactStatus` to learn
-/// the produced kinds and track each one's lifecycle.
-pub fn artifact_status_key(prefix: &str) -> String {
-    format!("{prefix}/@/artifact/status")
+/// The artifact-status read procedure. (Residual: the RFC's ideal is the
+/// observable `state/<producer>/artifact/<kind>` document; the read
+/// procedure remains for the transition.)
+pub fn artifact_status_key(producer: &str) -> String {
+    V1Context::for_producer(producer).rpc_key(&["artifact", "status"])
 }
 
-/// Build the artifact-cancel (subscriber) key: PUT an artifact id (ULID string)
-/// to abort an in-flight production or free a ready artifact early.
-pub fn artifact_cancel_key(prefix: &str) -> String {
-    format!("{prefix}/@/artifact/cancel")
+/// The artifact-cancel write procedure (`?id=<ulid>`).
+pub fn artifact_cancel_key(producer: &str) -> String {
+    V1Context::for_producer(producer).rpc_key(&["artifact", "cancel"])
 }
 
-/// Build the key prefix of the `zenoh-blob` server that serves Tier-1 artifact
-/// bytes. The blob lives under `<prefix>/@/artifact/blob/<id>/…` (its own `blob/`
-/// segment so the blob queryable on `…/blob/**` cannot collide with the
-/// request/status/cancel channels).
-pub fn artifact_blob_prefix(prefix: &str) -> String {
-    format!("{prefix}/@/artifact/blob")
+/// Tier-1 blob prefix: `<base>/@v1/<origin>/@blob/artifact` — a produced
+/// artifact's manifest + chunks live under `…/artifact/<id>/**` (RFC 07 §2).
+pub fn artifact_blob_prefix(producer: &str) -> String {
+    V1Context::for_producer(producer).blob_prefix(BlobTier::Artifact)
 }
 
-/// Build the key prefix of the content-addressed chunk queryable (Tier-2 tree
-/// delivery). Chunks live at `<prefix>/@/store/<algo>/<hash>` — immutable, so
-/// cacheable fleet-wide. Shared by every tree-delivering artifact kind.
-pub fn artifact_store_prefix(prefix: &str) -> String {
-    format!("{prefix}/@/store")
+/// Tier-2 content-store prefix: `<base>/@v1/<origin>/@blob/store` — chunks
+/// at `…/store/<algo>/<hash>`, immutable ⇒ cacheable fleet-wide.
+pub fn artifact_store_prefix(producer: &str) -> String {
+    V1Context::for_producer(producer).blob_prefix(BlobTier::Store)
 }
 
-/// Build the key prefix of the tree-index queryable (Tier-2 tree delivery). An
-/// index lives at `<prefix>/@/tree/<id>`.
-pub fn artifact_tree_prefix(prefix: &str) -> String {
-    format!("{prefix}/@/tree")
+/// Tier-2 tree-index prefix: `<base>/@v1/<origin>/@blob/tree`.
+pub fn artifact_tree_prefix(producer: &str) -> String {
+    V1Context::for_producer(producer).blob_prefix(BlobTier::Tree)
 }
 
 /// Optional envelope carrying a correlation id alongside a command body.
@@ -119,34 +101,26 @@ mod tests {
 
     #[test]
     fn key_builders() {
-        assert_eq!(
-            command_key("zensight/netlink", "expectations"),
-            "zensight/netlink/@/commands/expectations"
-        );
-        assert_eq!(
-            status_key("zensight/netring", "detectors"),
-            "zensight/netring/@/status/detectors"
-        );
+        let k = command_key("netlink", "expectations");
+        assert!(k.starts_with("zensight/@v1/h-"), "{k}");
+        assert!(k.ends_with("/@rpc/netlink/expectations/set"), "{k}");
+        let s = status_key("netring", "detectors");
+        assert!(s.ends_with("/@rpc/netring/detectors"), "{s}");
+        // Reads are reads: status and query share the shape.
+        assert_eq!(s, query_key("netring", "detectors"));
     }
 
     #[test]
     fn artifact_key_builders() {
-        let p = "zensight/netlink";
-        assert_eq!(
-            artifact_request_key(p),
-            "zensight/netlink/@/artifact/request"
-        );
-        assert_eq!(artifact_status_key(p), "zensight/netlink/@/artifact/status");
-        assert_eq!(artifact_cancel_key(p), "zensight/netlink/@/artifact/cancel");
-        assert_eq!(artifact_blob_prefix(p), "zensight/netlink/@/artifact/blob");
-        // The blob server (queryable on `…/blob/**`) must not swallow the
-        // request/status/cancel control channels.
+        let p = "netlink";
+        assert!(artifact_request_key(p).ends_with("/@rpc/netlink/artifact/request"));
+        assert!(artifact_status_key(p).ends_with("/@rpc/netlink/artifact/status"));
+        assert!(artifact_cancel_key(p).ends_with("/@rpc/netlink/artifact/cancel"));
+        assert!(artifact_blob_prefix(p).ends_with("/@blob/artifact"));
+        assert!(artifact_store_prefix(p).ends_with("/@blob/store"));
+        assert!(artifact_tree_prefix(p).ends_with("/@blob/tree"));
+        // Control procedures and blob delivery live on different planes.
         assert!(!artifact_request_key(p).starts_with(&artifact_blob_prefix(p)));
-        // Tier-2 store/tree keys are shared, kind-agnostic delivery infrastructure.
-        assert_eq!(artifact_store_prefix(p), "zensight/netlink/@/store");
-        assert_eq!(artifact_tree_prefix(p), "zensight/netlink/@/tree");
-        assert!(!artifact_request_key(p).starts_with(&artifact_store_prefix(p)));
-        assert!(!artifact_request_key(p).starts_with(&artifact_tree_prefix(p)));
     }
 
     #[test]

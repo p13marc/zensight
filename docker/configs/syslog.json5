@@ -8,7 +8,6 @@
   },
 
   syslog: {
-    key_prefix: "zensight/syslog",
 
     listeners: [
       {

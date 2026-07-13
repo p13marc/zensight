@@ -12,22 +12,21 @@ fully commented example. Validation rejects `poll_interval_secs == 0`.
 | `serialization` | `json` | telemetry encoding (`json` or `cbor`). |
 | `systemd` | — | sensor settings (below). |
 | `logging.level` | `info` | log level. |
-| `artifacts` | all disabled | on-demand `@/artifact` limits; every kind off by default. |
+| `artifacts` | all disabled | on-demand artifact limits (`@rpc/systemd/artifact/{request,cancel}`); every kind off by default. |
 
 ## `systemd`
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `key_prefix` | `zensight/systemd` | key-expression prefix. |
 | `poll_interval_secs` | `15` | Manager read interval (must be > 0). |
-| `source` | hostname | telemetry source id; falls back to `unknown`. |
+| `source` | hostname | sensor instance id in payloads; falls back to `unknown` (v1 keys are origin-scoped, so it no longer appears in key expressions). |
 | `watch_units` | `[]` | glob list of units to stream `unit/<name>/*` for (empty = aggregates only). |
 | `watch_max` | `50` | hard cap on watched units; excess folded into `other/*`. |
 | `ip_io_accounting` | `false` | include IP/IO byte + `ip_*_bps` series for watched units that enabled accounting. |
-| `events_capacity` | `256` | bounded control-plane event ring (`@/query/events`). |
+| `events_capacity` | `256` | bounded control-plane event ring (`@rpc/systemd/events`). |
 | `alerts` | see below | threshold alerts (#276). |
 | `expectations` | absent (disabled) | embedded sentinel (#277). |
-| `cgroup` | see below | `@/query/cgroups` walk caps (#280). |
+| `cgroup` | see below | `@rpc/systemd/cgroups` walk caps (#280). |
 | `actions` | disabled | gated service control (#283). |
 | `collect` | see below | collector toggles. |
 
@@ -42,7 +41,7 @@ fully commented example. Validation rejects `poll_interval_secs == 0`.
 
 ## `systemd.alerts` (#276)
 
-Published on `zensight/systemd/@/alerts/*`.
+Published on `zensight/@v1/<origin>/state/systemd/alert/*`.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -70,13 +69,13 @@ Absent block = sentinel disabled. Fields (see
 | `restart_rates` | `[]` | `[{ unit, max, window_secs }]` — restarts < max per window |
 | `forbid_failed` | false | alert if any unit is `failed` |
 
-Hot-swappable at runtime via `@/commands/expectations`; the current config is
-readable on `@/status/expectations`.
+Hot-swappable at runtime via a GET on `@rpc/systemd/expectations/set`; the
+current config is readable with a GET on `@rpc/systemd/expectations`.
 
 ## `systemd.cgroup` (#280)
 
-Caps for the on-demand `@/query/cgroups[?path=<rel>]` walk (never streamed;
-unprivileged `/sys/fs/cgroup` v2 walk).
+Caps for the on-demand `@rpc/systemd/cgroups[?path=<rel>]` walk (never
+streamed; unprivileged `/sys/fs/cgroup` v2 walk).
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -94,7 +93,7 @@ authorization model are security-sensitive.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `enabled` | false | master switch; when false, no `@/commands/action` channel is declared |
+| `enabled` | false | master switch; when false, no `@rpc/systemd/action` procedure is declared |
 | `allow_units` | `[]` | unit-name globs a `start/stop/restart/reload` may target; **empty = reject all** |
 | `job_timeout_secs` | 30 | bounded wait for the `JobRemoved` completion result |
 

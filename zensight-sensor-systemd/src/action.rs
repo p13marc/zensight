@@ -1,9 +1,9 @@
 //! Gated service control (#283) — **default OFF, opt-in only**.
 //!
-//! `@/commands/action` accepts `{verb, unit}` (start/stop/restart/reload). The
+//! `@rpc/systemd/action/set` accepts `{verb, unit}` (start/stop/restart/reload). The
 //! unit is validated against an allowlist, the corresponding `Manager` method is
 //! called with `mode=replace`, and the async job is tracked to completion via the
-//! `JobRemoved` signal. The outcome is published on `@/status/action` and written
+//! `JobRemoved` signal. The outcome is read on `@rpc/systemd/action` and written
 //! to the audit log. Nothing is declared unless `actions.enabled` is set — a
 //! disabled sensor is strictly read-only.
 //!
@@ -44,14 +44,14 @@ impl Verb {
     }
 }
 
-/// An action request on `@/commands/action`.
+/// An action request on `@rpc/systemd/action/set`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionCommand {
     pub verb: Verb,
     pub unit: String,
 }
 
-/// The outcome of the most recent action, replied on `@/status/action`.
+/// The outcome of the most recent action, replied on `@rpc/systemd/action`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ActionStatus {
     pub unit: String,
@@ -87,7 +87,7 @@ fn now_unix() -> i64 {
 
 /// Run the gated action channel until the session closes. No-op (returns
 /// immediately) unless actions are enabled.
-pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, cfg: ActionsConfig) {
+pub async fn run(session: Arc<zenoh::Session>, producer: String, cfg: ActionsConfig) {
     if !cfg.enabled {
         tracing::info!("systemd service control disabled (actions.enabled = false)");
         return;
@@ -118,9 +118,9 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, cfg: ActionsC
         tracing::warn!(error = %e, "action: Manager.Subscribe failed (job tracking degraded)");
     }
 
-    let cmd_key = command_key(&key_prefix, ACTION_TOPIC);
-    let stat_key = status_key(&key_prefix, ACTION_TOPIC);
-    let subscriber = match session.declare_subscriber(&cmd_key).await {
+    let cmd_key = command_key(&producer, ACTION_TOPIC);
+    let stat_key = status_key(&producer, ACTION_TOPIC);
+    let subscriber = match session.declare_queryable(&cmd_key).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, key = %cmd_key, "action: subscribe failed");
@@ -140,21 +140,46 @@ pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, cfg: ActionsC
     let mut last = ActionStatus::default();
     loop {
         tokio::select! {
-            sample = subscriber.recv_async() => {
-                let Ok(sample) = sample else { return };
-                let payload = sample.payload().to_bytes();
+            query = subscriber.recv_async() => {
+                let Ok(query) = query else { return };
+                let payload = query
+                    .payload()
+                    .map(|p| p.to_bytes().to_vec())
+                    .unwrap_or_default();
                 match serde_json::from_slice::<ActionCommand>(&payload) {
                     Ok(cmd) => {
                         last = execute(&manager, &allow, &cmd, cfg.job_timeout_secs).await;
+                        // The gate refuses inside `execute` (allowlist/polkit) —
+                        // surface refusal as error/gated, success as the
+                        // resulting status (RFC 05 §3).
+                        if last.accepted {
+                            let body = serde_json::to_vec(&last).unwrap_or_default();
+                            if let Err(e) = query.reply(cmd_key.as_str(), body).await {
+                                tracing::warn!(error = %e, "action: ack failed");
+                            }
+                        } else {
+                            let err = zensight_sensor_core::rpc::RpcError::gated(
+                                last.error.clone().unwrap_or_else(|| "refused".into()),
+                            );
+                            let _ = query
+                                .reply_err(serde_json::to_vec(&err).unwrap_or_default())
+                                .await;
+                        }
                     }
-                    Err(e) => tracing::warn!(error = %e, "action: bad action command"),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "action: bad action command");
+                        let err = zensight_sensor_core::rpc::RpcError::invalid_args(e.to_string());
+                        let _ = query
+                            .reply_err(serde_json::to_vec(&err).unwrap_or_default())
+                            .await;
+                    }
                 }
             }
             query = queryable.recv_async() => {
                 let Ok(query) = query else { return };
                 match serde_json::to_vec(&last) {
                     Ok(payload) => {
-                        if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                        if let Err(e) = query.reply(stat_key.as_str(), payload).await {
                             tracing::warn!(error = %e, "action: status reply failed");
                         }
                     }

@@ -3,12 +3,12 @@
 //! Per-line log events are high-cardinality, high-volume detail; streaming
 //! them per line rode (and could dominate) the `zensight/**` telemetry bus.
 //! They now live in a bounded in-memory ring served via a Zenoh queryable at
-//! `zensight/logs/@/query/events` — pulled by the GUI on open + a slow refresh
+//! `zensight/@v1/<origin>/@rpc/logs/events` — pulled by the GUI on open + a slow refresh
 //! tick, never streamed. The low-rate rollups (`logs/by_severity/*`,
 //! `logs/by_unit/*`, …) stay on the bus for charts/alerts.
 //!
 //! Selector parameters (zenoh `Parameters`, `;`-separated — e.g.
-//! `…/@/query/events?since=1719999000000;max=500`):
+//! `…/@rpc/logs/events?since=1719999000000;max=500`):
 //! - `since=<epoch_ms>` — only records with `ts >= since` (inclusive);
 //! - `max=<n>` — reply cap (default 500, clamped to the ring);
 //! - `host=<name>` — only records from one originating host.
@@ -67,8 +67,8 @@ fn filter_ring(
 
 /// Run the log-event query channel until the session closes. Replies with
 /// filtered records (most-recent first) as JSON `Vec<LogRecord>`.
-pub async fn run_events(session: Arc<zenoh::Session>, key_prefix: String, ring: EventRing) {
-    let key = zensight_common::command::query_key(&key_prefix, "events");
+pub async fn run_events(session: Arc<zenoh::Session>, producer: String, ring: EventRing) {
+    let key = zensight_common::command::query_key(&producer, "events");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -81,7 +81,12 @@ pub async fn run_events(session: Arc<zenoh::Session>, key_prefix: String, ring: 
     while let Ok(query) = queryable.recv_async().await {
         let params = query.parameters();
         let since = params.get("since").and_then(|v| v.parse::<i64>().ok());
-        let host = params.get("host").map(str::to_string);
+        // v1 (RFC 05 §5): `source=` filters the observed device (a central
+        // receiver holds many sources); `host=` accepted as the legacy alias.
+        let host = params
+            .get("source")
+            .or_else(|| params.get("host"))
+            .map(str::to_string);
         let max = params
             .get("max")
             .and_then(|v| v.parse::<usize>().ok())
@@ -97,7 +102,7 @@ pub async fn run_events(session: Arc<zenoh::Session>, key_prefix: String, ring: 
         };
         match serde_json::to_vec(&records) {
             Ok(payload) => {
-                if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                if let Err(e) = query.reply(key.as_str(), payload).await {
                     tracing::warn!(error = %e, "query: events reply failed");
                 }
             }
@@ -180,7 +185,9 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
         // zenoh selector params are `;`-separated (Parameters), not `&`.
-        let selector = format!("{prefix}/@/query/events?since=102;max=2");
+        // v1 (RFC 05): the events read procedure lives on the @rpc plane.
+        let events_key = zensight_common::command::query_key(&prefix, "events");
+        let selector = format!("{events_key}?since=102;max=2");
         let replies = session
             .get(&selector)
             .timeout(std::time::Duration::from_secs(5))

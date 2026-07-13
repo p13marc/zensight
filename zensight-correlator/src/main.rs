@@ -54,8 +54,8 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Single-writer guard.
-    let _token = match guard::acquire(&session, GUARD_TIMEOUT).await? {
-        GuardOutcome::Acquired(token) => token,
+    let _tokens = match guard::acquire(&session, GUARD_TIMEOUT).await? {
+        GuardOutcome::Acquired(claim, alive) => (claim, alive),
         GuardOutcome::AlreadyRunning => {
             error!("another correlator instance is already running; exiting");
             std::process::exit(1);
@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (tx, rx) = mpsc::channel(ENGINE_CHANNEL_CAP);
     let (op_tx, op_rx) = mpsc::channel::<zensight_correlator::EntityOp>(ENGINE_CHANNEL_CAP);
-    // Durable historical passive-DNS records (@pdns, #310).
+    // Durable historical passive-DNS records (@catalog/state/pdns, #310).
     let (pdns_tx, pdns_rx) = mpsc::channel::<zensight_common::PdnsRecord>(ENGINE_CHANNEL_CAP);
 
     // Shared correlation state (engine mutates; queryables read).
@@ -90,8 +90,9 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Historical passive-DNS publisher: durable IP↔name records on @pdns (#310),
-    // meant to be captured by a router-hosted storage backend.
+    // Historical passive-DNS publisher: durable IP↔name records on
+    // @catalog/state/pdns (#310), meant to be captured by a router-hosted
+    // storage backend.
     let pdns_task = {
         let s = session.clone();
         let sh = shutdown_rx.clone();
@@ -124,6 +125,16 @@ async fn main() -> anyhow::Result<()> {
         })
     };
 
+    let introspect_task = {
+        let s = session.clone();
+        let sh = shutdown_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = query::serve_introspect(s, sh).await {
+                error!(error = %e, "introspect queryable error");
+            }
+        })
+    };
+
     // Input source: real evidence subscribers, or (in --demo) a synthetic feed
     // driving the exact same engine/store/publisher pipeline.
     let input_task = if args.demo {
@@ -134,11 +145,8 @@ async fn main() -> anyhow::Result<()> {
     } else {
         let sub_session = session.clone();
         let sub_shutdown = shutdown_rx.clone();
-        let status_from_liveness = config.status_from_liveness;
         tokio::spawn(async move {
-            if let Err(e) =
-                subscriber::run(sub_session, tx, status_from_liveness, sub_shutdown).await
-            {
+            if let Err(e) = subscriber::run(sub_session, tx, sub_shutdown).await {
                 error!(error = %e, "subscriber error");
             }
         })
@@ -156,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
         let _ = pdns_task.await;
         let _ = entities_task.await;
         let _ = names_task.await;
+        let _ = introspect_task.await;
     })
     .await;
 

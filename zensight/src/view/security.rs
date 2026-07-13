@@ -31,7 +31,7 @@ pub struct SecurityState {
     pub hide_info: bool,
     /// The anomaly whose evidence is expanded in the drill-down, if any.
     pub selected: Option<String>,
-    /// On-demand flows pivoted from an anomaly (#119): the netring `@/query/flows`
+    /// On-demand flows pivoted from an anomaly (#119): the `@rpc/netring/flows`
     /// reply, filtered to the offending source.
     pub flows: Fetch<Vec<FlowRecord>>,
     /// Which anomaly (`alert_key`) the fetched `flows` belong to, so the pivot
@@ -499,7 +499,7 @@ fn render_anomaly_row<'a>(a: &'a Alert, sec: &'a SecurityState) -> Element<'a, M
                     .padding([3, 9])
                     .style(iced::widget::button::secondary)
                     .on_press(Message::DownloadCaptureBlob {
-                        key_prefix: "zensight/netring".to_string(),
+                        producer: "netring".to_string(),
                         artifact_id: id.clone(),
                         filename: cap.filename.clone(),
                     }),

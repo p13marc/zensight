@@ -9,8 +9,9 @@ It needs no NetFlow exporter device — it generates flow telemetry itself from 
 span port, tap, or host NIC. **Live capture needs `CAP_NET_RAW`**
 (`+CAP_IPC_LOCK` for AF_XDP); **offline pcap replay needs no privileges**
 (set `netring.pcap`), which is also how the pipeline is tested. It publishes
-under `zensight/netring/<sensor>/...` and the `zensight/netring/@/...` control
-plane.
+telemetry under `zensight/@v1/<origin>/telemetry/netring/...`, state documents
+(health/alerts/evidence) under `zensight/@v1/<origin>/state/netring/...`, and
+serves request/reply procedures on `zensight/@v1/<origin>/@rpc/netring/...`.
 
 ## Quick start
 
@@ -49,7 +50,7 @@ OSI-clean and lean; enable them at build time to compile the extra parsers in.
 - [`docs/telemetry.md`](docs/telemetry.md) — the full published keyspace: flow /
   L4 / connection-state RED, DNS / HTTP RED, TLS/QUIC/SSH fingerprints,
   encrypted-DNS, ICMP errors, traffic matrix, bandwidth, capture health, and the
-  `@/query/*` detail channels.
+  `@rpc` detail procedures.
 - [`docs/detectors.md`](docs/detectors.md) — the NDR + threat-intel +
   asset-inventory surface, runtime tuning / hot-reload contracts, and MITRE
   ATT&CK tagging.

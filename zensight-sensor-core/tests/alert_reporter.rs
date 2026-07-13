@@ -7,7 +7,7 @@ use zensight_common::{Alert, AlertKind, AlertSeverity, AlertState, Format, Proto
 use zensight_sensor_core::{AlertReporter, Publisher};
 
 /// A standalone Zenoh config: scouting disabled so concurrent test peers don't
-/// discover each other and cross-contaminate the shared `@/alerts/**` space.
+/// discover each other and cross-contaminate the shared alert state space.
 /// Local pub/sub within one session still works.
 fn isolated_config() -> zenoh::Config {
     let mut config = zenoh::Config::default();
@@ -45,12 +45,12 @@ fn sample_alert(source: &str) -> Alert {
 async fn fires_then_resolves() {
     let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
     let sub = session
-        .declare_subscriber("zensight/netlink/@/alerts/**")
+        .declare_subscriber("zensight/@v1/*/state/netlink/alert/*")
         .await
         .expect("subscriber");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let publisher = Publisher::new(session.clone(), "zensight/netlink", Format::Json);
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
     let reporter = AlertReporter::new(publisher, Protocol::Netlink, Format::Json);
 
     let source = unique_source();
@@ -104,12 +104,12 @@ async fn fires_then_resolves() {
 async fn debounce_suppresses_first_observe() {
     let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
     let sub = session
-        .declare_subscriber("zensight/netlink/@/alerts/**")
+        .declare_subscriber("zensight/@v1/*/state/netlink/alert/*")
         .await
         .expect("subscriber");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let publisher = Publisher::new(session.clone(), "zensight/netlink", Format::Json);
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
     let reporter = AlertReporter::new(publisher, Protocol::Netlink, Format::Json);
 
     let source = unique_source();

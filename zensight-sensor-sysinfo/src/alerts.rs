@@ -3,7 +3,7 @@
 //! sysinfo collects best-in-class saturation/error data (PSI, OOM kills, near-full
 //! disks, FD/inode exhaustion, thermal criticals, swap thrash) but historically
 //! emitted *no* alerts — unlike snmp/logs/netlink/netring, which all drive a
-//! [`AlertReporter`] → `zensight/<protocol>/@/alerts/<key>`. This module closes
+//! [`AlertReporter`] → `state/<producer>/alert/<key>`. This module closes
 //! that gap with config-driven threshold rules evaluated each poll tick.
 //!
 //! Design (mirrors the netlink sentinel):

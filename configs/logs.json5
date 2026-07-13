@@ -5,7 +5,8 @@
     mode: "peer",
   },
 
-  // On-demand artifact channel (@/artifact) — opt-in per kind. When enabled,
+  // On-demand artifact channel (@rpc artifact/request + @blob delivery) —
+  // opt-in per kind. When enabled,
   // an operator can download a redacted tar.zst debug bundle (and, for
   // snapshot, an allowlisted directory) from the GUI. Bounded + rate-limited;
   // secrets are redacted.
@@ -20,7 +21,6 @@
   },
 
   syslog: {
-    key_prefix: "zensight/logs",
 
     // Override the agent-host source id (default: the local hostname).
     // source: "agent-host-01",
@@ -43,7 +43,7 @@
       start_from: "tail",
 
       // detect_events defaults to true: coredump / unit-failed / OOM journal
-      // events (matched by MESSAGE_ID) are raised as alerts on @/alerts.
+      // events (matched by MESSAGE_ID) are raised as alerts on state/logs/alert/*.
 
       // Robustness under storms / rotation (#62). The reader feeds a bounded
       // channel; pick what happens when it fills:

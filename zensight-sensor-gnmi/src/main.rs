@@ -22,9 +22,8 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // Enable status publishing
-    let runner = runner.with_status_publishing();
 
-    // On-demand debug-report (`@/artifact`): bundle redacted config + health +
+    // On-demand debug-report (the artifact channel): bundle redacted config + health +
     // counters. No-op unless `report.enabled` is set in the config. Target
     // `password` is redacted by default; add `redact_extra: ["username"]` in the
     // config if target usernames are sensitive.
@@ -34,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
         runner.config().clone(),
         runner.health(),
     ));
-    // Tier-2 directory snapshots (`@/artifact`). No-op unless `snapshot.enabled`.
+    // Tier-2 directory snapshots (the artifact channel). No-op unless `snapshot.enabled`.
     let artifacts = runner.config().artifact_limits();
     let mut runner = runner.with_identity().with_artifacts(vec![
         std::sync::Arc::new(zensight_sensor_core::ReportProducer::new(
@@ -59,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
     for target in gnmi_config.targets {
         let subscriber = GnmiSubscriber::new(
             target.clone(),
-            gnmi_config.key_prefix.clone(),
+            zensight_sensor_core::v1::V1Context::for_producer("gnmi").telemetry_prefix(),
             gnmi_config.serialization,
         );
         let session = session.clone();

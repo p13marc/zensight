@@ -1,7 +1,9 @@
 # sysinfo — telemetry reference
 
-All telemetry is published as `zensight/sysinfo/<source>/<metric>`, where
-`<source>` is the resolved hostname (`source: "auto"`) or the configured id.
+All telemetry is published as `zensight/@v1/<origin>/telemetry/sysinfo/<metric>`,
+where `<origin>` is the host's `h-<12hex>` id — the key carries no source chunk;
+the payload `TelemetryPoint` still carries `source` (the resolved hostname with
+`source: "auto"`, or the configured id).
 Every family is gated by a `collect.*` flag (see
 [configuration.md](configuration.md)); the families marked **default off** are
 opt-in. Linux-only families degrade gracefully — an absent `/proc`/`/sys` file
@@ -48,10 +50,12 @@ Gated by `collect.saturation_score` (default on). Each tick the sensor emits:
 - `system/health_state` — a coarse `ok` / `warn` / `crit` band derived from the
   score (see [collectors.md](collectors.md) for the model and thresholds).
 
-## On-demand queries (`@/query/<topic>`)
+## On-demand queries (`@rpc/sysinfo/<topic>`)
 
-Served on request rather than streamed. Note that sysinfo's `@/query/*` keys
-carry the `<source>` segment: `zensight/sysinfo/<source>/@/query/<topic>`.
+Served on request rather than streamed, as read procedures (GETs) on the `@rpc`
+plane: `zensight/@v1/<origin>/@rpc/sysinfo/<topic>`. A fleet-wide caller selects
+`zensight/@v1/*/@rpc/sysinfo/<topic>` with query target `All`; the sensor also
+serves `@rpc/sysinfo/introspect`, returning its registry slice.
 
 - **`processes?sort=cpu|mem|io&top=N`** (`collect.process_query`, default on) —
   the per-pid firehose, returned as `Vec<ProcessRecord>`. Each record carries
@@ -73,24 +77,30 @@ carry the `<source>` segment: `zensight/sysinfo/<source>/@/query/<topic>`.
 ## Alerts
 
 Threshold alerts (`sysinfo.alerts.*`) are published on the standard alert
-channel `zensight/sysinfo/@/alerts/<alert_key>` as a firing → resolved
-lifecycle, same as every other sensor (the GUI and exporters pick them up with
-no extra wiring). Rules: `oom`, `pressure` (PSI), `disk`, `inode`, `fd`,
-`thermal`, `swap` — see [collectors.md](collectors.md) for the grading logic and
-[configuration.md](configuration.md) for the thresholds.
+family `zensight/@v1/<origin>/state/sysinfo/alert/<alert_key>` as a
+firing → resolved → Delete-tombstone lifecycle (`<alert_key>` = 16-hex FNV-1a
+of `rule + labels`), same as every other sensor (the GUI and exporters pick
+them up with no extra wiring). Rules: `oom`, `pressure` (PSI), `disk`, `inode`,
+`fd`, `thermal`, `swap` — see [collectors.md](collectors.md) for the grading
+logic and [configuration.md](configuration.md) for the thresholds.
 
 ## Control-plane keys
 
-Standard sensor metadata is published alongside telemetry:
+Standard sensor state documents are published alongside telemetry (the health
+doc absorbs the retired `@/status` running flag; free-form metadata rides the
+registration doc):
 
 ```
-zensight/sysinfo/<host>/@/health         # sensor health snapshots (host-scoped)
-zensight/sysinfo/@/devices/*/liveness    # per-source liveness
-zensight/sysinfo/@/errors                # error reports
-zensight/sysinfo/@/alerts/<alert_key>    # threshold alerts
-zensight/_meta/sensors/sysinfo/<source>  # SensorInfo registration
+zensight/@v1/<origin>/state/sysinfo/health             # sensor health document
+zensight/@v1/<origin>/state/sysinfo/alive              # liveliness token (presence)
+zensight/@v1/<origin>/state/sysinfo/errors             # rolling error window
+zensight/@v1/<origin>/state/sysinfo/alert/<alert_key>  # threshold alerts
+zensight/@v1/<origin>/state/sysinfo/sensor             # SensorInfo registration
+zensight/@v1/<origin>/state/sysinfo/evidence/self      # self-identity claim
 ```
 
-The telemetry wildcard `zensight/sysinfo/**` does **not** match the `@/`-prefixed
-control plane. See [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for the full
-contract.
+Telemetry selectors never reach the state class or the `@rpc` plane: narrow
+with `zensight/@v1/*/telemetry/sysinfo/**` (all sysinfo telemetry, fleet-wide)
+or `zensight/@v1/*/state/*/alert/*` (all alerts). The legacy `zensight/**`
+firehose matches **nothing** v1 — the verbatim `@v1` chunk blocks `**`. See
+[../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for the full contract.

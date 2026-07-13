@@ -19,7 +19,7 @@ pub struct GnmiConfig {
     #[serde(default)]
     pub logging: LoggingConfig,
 
-    /// On-demand artifact channel (`@/artifact`) limits — report + snapshot.
+    /// On-demand artifact channel (`@rpc/gnmi/artifact/*`) limits — report + snapshot.
     /// Every kind disabled by default.
     #[serde(default)]
     pub artifacts: zensight_sensor_core::ArtifactLimits,
@@ -28,10 +28,6 @@ pub struct GnmiConfig {
 /// gNMI-specific settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GnmiSettings {
-    /// Key expression prefix for publishing
-    #[serde(default = "default_key_prefix")]
-    pub key_prefix: String,
-
     /// Override the agent-host source id (default: the local hostname).
     #[serde(default)]
     pub source: Option<String>,
@@ -169,10 +165,6 @@ pub enum SerializationFormat {
     Cbor,
 }
 
-fn default_key_prefix() -> String {
-    "zensight/gnmi".to_string()
-}
-
 impl GnmiSettings {
     /// The agent host's unified source id: the `source` override, else the hostname.
     pub fn resolved_source(&self) -> String {
@@ -206,8 +198,8 @@ impl zensight_sensor_core::SensorConfig for GnmiConfig {
         &self.logging
     }
 
-    fn key_prefix(&self) -> &str {
-        &self.gnmi.key_prefix
+    fn producer(&self) -> &str {
+        "gnmi"
     }
 
     fn validate(&self) -> zensight_sensor_core::Result<()> {
@@ -260,7 +252,6 @@ mod tests {
                 "mode": "peer"
             },
             "gnmi": {
-                "key_prefix": "zensight/gnmi",
                 "targets": [
                     {
                         "name": "router01",

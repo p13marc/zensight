@@ -1,8 +1,8 @@
 //! Zenoh subscribers feeding the engine.
 //!
 //! Two AdvancedSubscribers on the evidence keyspace (host claims + name
-//! observations) plus, optionally, a plain subscriber on device liveness. Each
-//! decodes its samples and forwards an [`EvidenceMsg`] into the engine's mpsc.
+//! observations). Each decodes its samples and forwards an [`EvidenceMsg`]
+//! into the engine's mpsc.
 //!
 //! The evidence subscribers use `history()` (+ `detect_late_publishers`) so a
 //! freshly-started correlator immediately receives the sensors' cached
@@ -19,8 +19,7 @@ use zenoh::Session;
 use zenoh::sample::{Sample, SampleKind};
 use zenoh_ext::{AdvancedSubscriberBuilderExt, HistoryConfig, RecoveryConfig};
 use zensight_common::{
-    DeviceLiveness, HostEvidence, NameObservation, all_evidence_wildcard, all_liveness_wildcard,
-    all_name_evidence_wildcard,
+    HostEvidence, NameObservation, all_evidence_wildcard, all_name_evidence_wildcard,
 };
 
 use crate::engine::EvidenceMsg;
@@ -34,11 +33,9 @@ fn decode<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Option<T> {
 
 /// Declare the evidence subscribers and run the forwarding loop until shutdown.
 ///
-/// `status_from_liveness` gates the extra device-liveness subscription.
 pub async fn run(
     session: Arc<Session>,
     tx: mpsc::Sender<EvidenceMsg>,
-    status_from_liveness: bool,
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     // Host evidence. `all_evidence_wildcard()` also matches the names subtree, so
@@ -64,47 +61,6 @@ pub async fn run(
         .await
         .map_err(|e| anyhow::anyhow!("failed to declare name-evidence subscriber: {e}"))?;
 
-    // Device liveness → entity status. Plain subscriber (no history needed).
-    let liveness_sub = if status_from_liveness {
-        let key = all_liveness_wildcard();
-        info!(key = %key, "subscribing to device liveness");
-        match session
-            .declare_subscriber(&key)
-            .with(flume::unbounded())
-            .await
-        {
-            Ok(s) => Some(s),
-            Err(e) => {
-                warn!(error = %e, "failed to declare liveness subscriber; status disabled");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    // Legacy (protocol-scoped) device-liveness shape, kept for one release so
-    // pre-host-scoping sensors still feed entity status. The two wildcards
-    // never match the same concrete key (pinned in zensight-common), and
-    // `handle_liveness` decodes the payload only — no key parsing to fork.
-    let liveness_legacy_sub = if status_from_liveness {
-        let key = "zensight/*/@/devices/*/liveness";
-        info!(key = %key, "subscribing to device liveness (legacy shape)");
-        match session
-            .declare_subscriber(key)
-            .with(flume::unbounded())
-            .await
-        {
-            Ok(s) => Some(s),
-            Err(e) => {
-                warn!(error = %e, "failed to declare legacy liveness subscriber");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
     info!("evidence subscribers ready");
 
     loop {
@@ -127,22 +83,6 @@ pub async fn run(
                     Err(e) => warn!(error = %e, "name-evidence recv error"),
                 }
             }
-            sample = async { liveness_sub.as_ref().unwrap().recv_async().await },
-                if liveness_sub.is_some() =>
-            {
-                match sample {
-                    Ok(sample) => handle_liveness(&sample, &tx).await,
-                    Err(e) => warn!(error = %e, "liveness recv error"),
-                }
-            }
-            sample = async { liveness_legacy_sub.as_ref().unwrap().recv_async().await },
-                if liveness_legacy_sub.is_some() =>
-            {
-                match sample {
-                    Ok(sample) => handle_liveness(&sample, &tx).await,
-                    Err(e) => warn!(error = %e, "legacy liveness recv error"),
-                }
-            }
         }
     }
 
@@ -154,15 +94,29 @@ fn is_put(sample: &Sample) -> bool {
     sample.kind() == SampleKind::Put
 }
 
-/// Extract `(sensor, source)` from a host-evidence key
-/// `.../_meta/evidence/host/<sensor>/<source>` (used to resolve a tombstone).
+/// Extract `(sensor, device)` from a v1 device-evidence key (used to resolve
+/// a tombstone into the claim it withdraws).
 fn parse_host_evidence_key(key: &str) -> Option<(String, String)> {
-    let rest = key.split("/evidence/host/").nth(1)?;
-    let (sensor, source) = rest.split_once('/')?;
-    if sensor.is_empty() || source.is_empty() {
+    // v1: zensight/@v1/<origin>/state/<sensor>/evidence/device/<device>.
+    // A `…/evidence/self` tombstone carries only the origin — the store keys
+    // claims by the payload's source, so it just ages out by TTL instead.
+    let mut chunks = key.split('/');
+    if chunks.next() != Some("zensight") || chunks.next() != Some("@v1") {
         return None;
     }
-    Some((sensor.to_string(), source.to_string()))
+    let _origin = chunks.next()?;
+    if chunks.next() != Some("state") {
+        return None;
+    }
+    let sensor = chunks.next()?;
+    if chunks.next() != Some("evidence") || chunks.next() != Some("device") {
+        return None;
+    }
+    let device = chunks.next()?;
+    if sensor.is_empty() || device.is_empty() || chunks.next().is_some() {
+        return None;
+    }
+    Some((sensor.to_string(), device.to_string()))
 }
 
 async fn handle_host(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
@@ -202,24 +156,6 @@ async fn handle_name(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
     }
 }
 
-async fn handle_liveness(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
-    if !is_put(sample) {
-        return;
-    }
-    let key = sample.key_expr().as_str();
-    match decode::<DeviceLiveness>(&sample.payload().to_bytes()) {
-        Some(dl) => {
-            let _ = tx
-                .send(EvidenceMsg::Liveness {
-                    source: dl.device,
-                    status: dl.status.to_string(),
-                })
-                .await;
-        }
-        None => trace!(key = %key, "failed to decode DeviceLiveness"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::parse_host_evidence_key;
@@ -227,22 +163,35 @@ mod tests {
     #[test]
     fn parses_host_evidence_key() {
         assert_eq!(
-            parse_host_evidence_key("zensight/_meta/evidence/host/netlink/host1"),
+            parse_host_evidence_key(
+                "zensight/@v1/h-3fa9c2d41b7e/state/netlink/evidence/device/host1"
+            ),
             Some(("netlink".to_string(), "host1".to_string()))
         );
-        // A MAC-slug source (third-party evidence) stays a single chunk.
+        // A MAC-slug device (third-party evidence) stays a single chunk.
         assert_eq!(
-            parse_host_evidence_key("zensight/_meta/evidence/host/netring/aa-bb-cc-00-00-02"),
+            parse_host_evidence_key(
+                "zensight/@v1/h-3fa9c2d41b7e/state/netring/evidence/device/aa-bb-cc-00-00-02"
+            ),
             Some(("netring".to_string(), "aa-bb-cc-00-00-02".to_string()))
         );
-        // The names subtree is not a host key.
+        // The names subtree is not a device key.
         assert_eq!(
-            parse_host_evidence_key("zensight/_meta/evidence/names/netring/10-0-0-5"),
+            parse_host_evidence_key(
+                "zensight/@v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-5"
+            ),
             None
         );
-        // Missing source chunk.
+        // A self-evidence tombstone carries only the origin — ages out by TTL.
         assert_eq!(
-            parse_host_evidence_key("zensight/_meta/evidence/host/only"),
+            parse_host_evidence_key("zensight/@v1/h-3fa9c2d41b7e/state/netlink/evidence/self"),
+            None
+        );
+        // Trailing chunks make it malformed.
+        assert_eq!(
+            parse_host_evidence_key(
+                "zensight/@v1/h-3fa9c2d41b7e/state/netlink/evidence/device/host1/extra"
+            ),
             None
         );
     }

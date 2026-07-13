@@ -3,7 +3,7 @@
 //! ZenSight sensors do not propagate trace context — there is no W3C
 //! `traceparent` flowing through the bus. Instead, this module *synthesizes*
 //! spans from request/response-shaped events the exporter already observes:
-//! the alert lifecycle on `@/alerts/*`. Each firing → resolved transition
+//! the alert lifecycle on `state/*/alert/*`. Each firing → resolved transition
 //! becomes exactly one span named `alert:<rule>` whose start is the firing
 //! timestamp and whose end is the resolved timestamp, i.e. the span duration
 //! is *how long the condition was violated*. That makes alert flap patterns,
@@ -17,8 +17,9 @@
 //! synthesis, not propagation: the ids correlate replays of the same alert
 //! lifecycle; they do not link to any sensor-side trace.
 //!
-//! Artifact-transfer spans (`@/artifact/status`) are intentionally **not**
-//! synthesized: the exporter only subscribes to telemetry and `@/alerts/*`,
+//! Artifact-transfer spans (the `artifact/status` read procedure) are
+//! intentionally **not** synthesized: the exporter only subscribes to
+//! telemetry and `state/*/alert/*`,
 //! and artifact status does not pass either subscription. See
 //! [`crate::config::TracesConfig`].
 //!

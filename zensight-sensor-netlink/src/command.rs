@@ -1,13 +1,15 @@
 //! Runtime control channel for the sentinel: lets the GUI author/push
-//! expectations over Zenoh.
+//! expectations over Zenoh — as `@rpc` procedures (RFC 05, epic #453):
 //!
-//! - commands (pub/sub): `zensight/netlink/@/commands/expectations`
-//! - status (queryable): `zensight/netlink/@/status/expectations`
+//! - write: `<base>/@v1/<origin>/@rpc/netlink/expectations/set`
+//! - read:  `<base>/@v1/<origin>/@rpc/netlink/expectations`
+//!   (and the same pair for `collection`)
 
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use zensight_common::{command_key, status_key};
+use zensight_sensor_core::rpc::{self, RpcError};
+use zensight_sensor_core::v1::V1Context;
 
 use crate::collector::CollectHandle;
 use crate::config::CollectConfig;
@@ -50,69 +52,39 @@ pub async fn apply_collection(handle: &CollectHandle, cmd: CollectionCommand) {
     }
 }
 
-/// Run the collection command subscriber + status queryable until session close.
-/// Commands: `<prefix>/@/commands/collection`; status: `<prefix>/@/status/collection`.
-pub async fn run_collection(
-    session: Arc<zenoh::Session>,
-    key_prefix: String,
-    handle: CollectHandle,
-) {
-    let cmd_key = command_key(&key_prefix, COLLECTION_TOPIC);
-    let stat_key = status_key(&key_prefix, COLLECTION_TOPIC);
-
-    let subscriber = match session.declare_subscriber(&cmd_key).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error = %e, key = %cmd_key, "collection: failed to subscribe to commands");
-            return;
-        }
-    };
-    let queryable = match session.declare_queryable(&stat_key).await {
-        Ok(q) => q,
-        Err(e) => {
-            tracing::error!(error = %e, key = %stat_key, "collection: failed to declare status queryable");
-            return;
-        }
-    };
-    tracing::info!(commands = %cmd_key, status = %stat_key, "collection: control channel ready");
-
-    loop {
-        tokio::select! {
-            sample = subscriber.recv_async() => {
-                match sample {
-                    Ok(sample) => {
-                        let payload = sample.payload().to_bytes();
-                        match serde_json::from_slice::<CollectionCommand>(&payload) {
-                            Ok(cmd) => apply_collection(&handle, cmd).await,
-                            Err(e) => tracing::warn!(error = %e, "collection: bad command"),
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "collection: command subscriber ended");
-                        return;
-                    }
-                }
+/// Serve the collection control surface as `@rpc` procedures until the
+/// session closes: `collection` (read) + `collection/set` (write).
+pub async fn run_collection(session: Arc<zenoh::Session>, producer: String, handle: CollectHandle) {
+    let ctx = V1Context::for_producer(&producer);
+    let apply_handle = handle.clone();
+    let tasks = rpc::serve_topic::<CollectionCommand, _, _, _, _>(
+        session,
+        &ctx,
+        crate::command::COLLECTION_TOPIC,
+        move |cmd| {
+            let h = apply_handle.clone();
+            async move {
+                apply_collection(&h, cmd).await;
+                Ok(())
             }
-            query = queryable.recv_async() => {
-                match query {
-                    Ok(query) => {
-                        let snapshot = handle.snapshot().await;
-                        match serde_json::to_vec(&snapshot) {
-                            Ok(payload) => {
-                                if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
-                                    tracing::warn!(error = %e, "collection: failed to reply to status query");
-                                }
-                            }
-                            Err(e) => tracing::warn!(error = %e, "collection: failed to serialize status"),
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "collection: status queryable ended");
-                        return;
-                    }
-                }
+        },
+        move || {
+            let h = handle.clone();
+            async move {
+                let snapshot = h.snapshot().await;
+                serde_json::to_vec(&snapshot)
+                    .map_err(|e| RpcError::new("error/netlink/serialize", e.to_string()))
+            }
+        },
+    )
+    .await;
+    match tasks {
+        Ok(tasks) => {
+            for t in tasks {
+                let _ = t.await;
             }
         }
+        Err(e) => tracing::error!(error = %e, "collection: failed to serve @rpc procedures"),
     }
 }
 
@@ -194,64 +166,39 @@ pub async fn apply(handle: &SentinelHandle, cmd: ExpectationCommand) {
     }
 }
 
-/// Run the command subscriber + status queryable until the session closes.
-pub async fn run(session: Arc<zenoh::Session>, key_prefix: String, handle: SentinelHandle) {
-    let cmd_key = command_key(&key_prefix, EXPECTATIONS_TOPIC);
-    let stat_key = status_key(&key_prefix, EXPECTATIONS_TOPIC);
-
-    let subscriber = match session.declare_subscriber(&cmd_key).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error = %e, key = %cmd_key, "sentinel: failed to subscribe to commands");
-            return;
-        }
-    };
-    let queryable = match session.declare_queryable(&stat_key).await {
-        Ok(q) => q,
-        Err(e) => {
-            tracing::error!(error = %e, key = %stat_key, "sentinel: failed to declare status queryable");
-            return;
-        }
-    };
-    tracing::info!(commands = %cmd_key, status = %stat_key, "sentinel: control channel ready");
-
-    loop {
-        tokio::select! {
-            sample = subscriber.recv_async() => {
-                match sample {
-                    Ok(sample) => {
-                        let payload = sample.payload().to_bytes();
-                        match serde_json::from_slice::<ExpectationCommand>(&payload) {
-                            Ok(cmd) => apply(&handle, cmd).await,
-                            Err(e) => tracing::warn!(error = %e, "sentinel: bad expectation command"),
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "sentinel: command subscriber ended");
-                        return;
-                    }
-                }
+/// Serve the expectations control surface as `@rpc` procedures until the
+/// session closes: `expectations` (read) + `expectations/set` (write).
+pub async fn run(session: Arc<zenoh::Session>, producer: String, handle: SentinelHandle) {
+    let ctx = V1Context::for_producer(&producer);
+    let apply_handle = handle.clone();
+    let tasks = rpc::serve_topic::<ExpectationCommand, _, _, _, _>(
+        session,
+        &ctx,
+        EXPECTATIONS_TOPIC,
+        move |cmd| {
+            let h = apply_handle.clone();
+            async move {
+                apply(&h, cmd).await;
+                Ok(())
             }
-            query = queryable.recv_async() => {
-                match query {
-                    Ok(query) => {
-                        let snapshot = handle.snapshot().await;
-                        match serde_json::to_vec(&snapshot) {
-                            Ok(payload) => {
-                                if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
-                                    tracing::warn!(error = %e, "sentinel: failed to reply to status query");
-                                }
-                            }
-                            Err(e) => tracing::warn!(error = %e, "sentinel: failed to serialize status"),
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "sentinel: status queryable ended");
-                        return;
-                    }
-                }
+        },
+        move || {
+            let h = handle.clone();
+            async move {
+                let snapshot = h.snapshot().await;
+                serde_json::to_vec(&snapshot)
+                    .map_err(|e| RpcError::new("error/netlink/serialize", e.to_string()))
+            }
+        },
+    )
+    .await;
+    match tasks {
+        Ok(tasks) => {
+            for t in tasks {
+                let _ = t.await;
             }
         }
+        Err(e) => tracing::error!(error = %e, "sentinel: failed to serve @rpc procedures"),
     }
 }
 

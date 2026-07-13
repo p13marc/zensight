@@ -128,15 +128,25 @@ pub fn syslog_overview<'a>(devices: &HashMap<&DeviceId, &DeviceState>) -> Elemen
 }
 
 /// Collect all log messages from all devices.
+///
+/// **Deliberately hand-parsed — do not convert this to the registry's typed parse
+/// direction (#475).** It reads a `<facility>/<severity>` metric with the line as a
+/// `Text` value, and that is *not a registered logs subject*: `logs.toml` carries
+/// only the `logs/*` rollup families. Since #358 the sensor serves log lines from
+/// `@rpc/logs/events` and publishes no per-line telemetry at all — the only things
+/// still emitting this shape are `demo.rs` and `mock.rs`. A typed parse would
+/// therefore return `None` for every line and blank the demo Logs overview.
+///
+/// The shape is unregistered because it is legacy, not because the registry missed
+/// it. Leaving it as a string split is correct; converting it would be the bug.
 fn collect_messages(devices: &HashMap<&DeviceId, &DeviceState>) -> Vec<LogMessage> {
     let mut messages = Vec::new();
 
     for (device_id, state) in devices {
         for (key, point) in &state.metrics {
-            // The logs sensor publishes each line under `<facility>/<severity>`
-            // with the message as a Text value. Skip the derived `logs/*` rollup
-            // counters and any non-text metric (#101 — the old `message/*` +
-            // numeric-severity contract this read no longer exists).
+            // Skip the derived `logs/*` rollup counters (those *are* registered) and
+            // any non-text metric (#101 — the old `message/*` + numeric-severity
+            // contract this read no longer exists).
             if key.starts_with("logs/") {
                 continue;
             }

@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Invalid listen address: {}", e))?;
 
     // Create components. A configured `filters.key_expr` narrows the telemetry
-    // subscription (R6/#357) — default stays the broad `zensight/**`.
+    // subscription (R6/#357) — default stays the full telemetry class selector.
     let subscriber = {
         let s = TelemetrySubscriber::new(collector.clone(), config.zenoh.clone());
         match &config.filters.key_expr {

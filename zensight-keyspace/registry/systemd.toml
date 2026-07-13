@@ -1,0 +1,452 @@
+# Subject registry: systemd (unit/boot telemetry). RFC 08 §2; migration epic #453.
+# Telemetry is registered as real subjects, not a `{metric...}` catch-all
+# (issue #468) — see registry/sysinfo.toml for the rule and why.
+# Source: src/map.rs, src/collector.rs (boot/manager/units), src/events.rs.
+
+[registry]
+version = "1.1"
+app = "zensight"
+convention = 1
+
+[producer]
+name = "systemd"
+description = "systemd unit/boot telemetry (D-Bus) + sentinel + gated actions"
+
+[[subject]]
+path = "unit/{unit}/active"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "unit is active"
+
+[[subject]]
+path = "unit/{unit}/state"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "active state (text)"
+
+[[subject]]
+path = "unit/{unit}/restarts_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "restarts (NRestarts)"
+
+[[subject]]
+path = "unit/{unit}/active_since_usec"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "active-enter timestamp"
+
+[[subject]]
+path = "unit/{unit}/mem_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "MemoryCurrent"
+
+[[subject]]
+path = "unit/{unit}/cpu_usec"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "CPUUsageNSec, in us"
+
+[[subject]]
+path = "unit/{unit}/tasks"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "TasksCurrent"
+
+[[subject]]
+path = "unit/{unit}/exit_code"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "last exit code"
+
+[[subject]]
+path = "unit/{unit}/ip_ingress_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "IPIngressBytes"
+
+[[subject]]
+path = "unit/{unit}/ip_egress_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "IPEgressBytes"
+
+[[subject]]
+path = "unit/{unit}/io_read_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "IOReadBytes"
+
+[[subject]]
+path = "unit/{unit}/io_write_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "IOWriteBytes"
+
+[[subject]]
+path = "unit/{unit}/ip_ingress_bps"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "ingress rate derived between reads"
+
+[[subject]]
+path = "unit/{unit}/ip_egress_bps"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "egress rate derived between reads"
+
+[[subject]]
+path = "unit/{unit}/ip_accounting"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "IPAccounting is enabled for this unit"
+
+[[subject]]
+path = "unit/{unit}/n_accepted"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "socket units: connections accepted"
+
+[[subject]]
+path = "unit/{unit}/n_connections"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "socket units: current connections"
+
+[[subject]]
+path = "unit/{unit}/n_refused"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "socket units: connections refused"
+
+[[subject]]
+path = "unit/{unit}/last_trigger_usec"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "timer units: last trigger"
+
+[[subject]]
+path = "unit/{unit}/next_trigger_usec"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 512
+since = "1.1"
+description = "timer units: next trigger"
+
+[[subject]]
+path = "manager/n_names"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "known unit names"
+
+[[subject]]
+path = "manager/n_failed_units"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "failed units"
+
+[[subject]]
+path = "manager/n_jobs"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "queued jobs"
+
+[[subject]]
+path = "manager/n_installed_jobs"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "jobs installed since boot"
+
+[[subject]]
+path = "units/total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "units"
+
+[[subject]]
+path = "units/active"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "active units"
+
+[[subject]]
+path = "units/failed"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "failed units"
+
+[[subject]]
+path = "units/loaded"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "loaded units"
+
+[[subject]]
+path = "units/inactive"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "inactive units"
+
+[[subject]]
+path = "boot/{phase}"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 16
+since = "1.1"
+description = "boot phase durations; the leaf is `<phase>_usec` (firmware|loader|kernel|initrd|userspace|total)"
+
+[[subject]]
+path = "mounts/total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "mount units"
+
+[[subject]]
+path = "mounts/mounted"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "mounted"
+
+[[subject]]
+path = "mounts/failed"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "failed mounts"
+
+[[subject]]
+path = "journal/disk_usage_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "journal on-disk size"
+
+[[subject]]
+path = "journal/disk_available_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "free space on the journal filesystem"
+
+[[subject]]
+path = "other/units_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.1"
+description = "units outside the watchlist"
+
+[[subject]]
+path = "events/{kind}"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 16
+since = "1.1"
+description = "unit/job lifecycle counters; the leaf is `<kind>_total` (unit_new|unit_removed|job_new|job_removed)"
+
+[[subject]]
+path = "health"
+class = "state"
+type = "HealthSnapshot"
+ttl_s = 120
+since = "1.0"
+description = "sensor health document (framework; absorbs the legacy @/status running flag)"
+
+[[subject]]
+path = "errors"
+class = "state"
+type = "ErrorReport"
+ttl_s = 300
+since = "1.0"
+description = "rolling error window (framework)"
+
+[[subject]]
+path = "sensor"
+class = "state"
+type = "SensorInfo"
+ttl_s = 900
+since = "1.0"
+description = "registration document: identity, version, capabilities (framework, 60 s re-emit)"
+
+[[subject]]
+path = "evidence/self"
+class = "state"
+type = "HostEvidence"
+ttl_s = 900
+since = "1.0"
+description = "self-identity claim (RFC 06 §4)"
+
+[[subject]]
+path = "alert/{alert_key}"
+class = "state"
+type = "Alert"
+qos = "alert"
+cardinality = 64
+ttl_s = 900
+since = "1.0"
+description = "alerts; firing->resolved on one key, delete = tombstone"
+[[subject]]
+path = "artifact/{kind}"
+class = "state"
+type = "ArtifactStatus"
+cardinality = 16
+ttl_s = 900
+since = "1.1"
+description = "per-kind artifact progress (framework: V1Context::artifact_status_key)"
+
+[[procedure]]
+path = "introspect"
+kind = "read"
+reply = "RegistrySlice"
+idempotent = true
+since = "1.0"
+description = "the registry slice this build serves (RFC 08 §6)"
+
+[[procedure]]
+path = "artifact/request"
+kind = "write"
+request = "ArtifactRequest"
+reply = "ArtifactAck"
+since = "1.0"
+description = "initiate artifact generation; replies { id } immediately (RFC 05 §3)"
+
+[[procedure]]
+path = "artifact/cancel"
+kind = "write"
+reply = "Ack"
+since = "1.0"
+description = "free an in-flight/ready artifact early (?id=<ulid>)"
+
+[[procedure]]
+path = "artifact/status"
+kind = "read"
+reply = "ArtifactStatus"
+idempotent = true
+since = "1.0"
+description = "advertised artifact kinds + the in-flight/ready state per kind (RFC 05 §3)"
+[[procedure]]
+path = "expectations"
+kind = "read"
+reply = "TopicStatus"
+idempotent = true
+since = "1.0"
+description = "current expectations configuration (sentinel expectations hot-swap)"
+
+[[procedure]]
+path = "expectations/set"
+kind = "write"
+request = "ExpectationsConfig"
+reply = "Ack"
+since = "1.0"
+description = "apply expectations configuration (sentinel expectations hot-swap)"
+[[procedure]]
+path = "action"
+kind = "read"
+reply = "ActionStatus"
+idempotent = true
+since = "1.0"
+description = "gated-action switch state + last action outcome"
+[[procedure]]
+path = "action/set"
+kind = "write"
+request = "ServiceAction"
+reply = "Ack"
+idempotent = false
+since = "1.0"
+description = "gated service control {verb,unit} — default OFF, allowlist + polkit; refuses with error/gated"
+[[procedure]]
+path = "units"
+kind = "read"
+reply = "Vec<UnitRecord>"
+idempotent = true
+since = "1.0"
+description = "unit table"
+
+[[procedure]]
+path = "failed"
+kind = "read"
+reply = "Vec<UnitRecord>"
+idempotent = true
+since = "1.0"
+description = "failed units"
+
+[[procedure]]
+path = "unit"
+kind = "read"
+reply = "UnitDetail"
+idempotent = true
+since = "1.0"
+description = "one unit's detail (?name=<u>)"
+
+[[procedure]]
+path = "timers"
+kind = "read"
+reply = "Vec<TimerRecord>"
+idempotent = true
+since = "1.0"
+description = "timer table"
+
+[[procedure]]
+path = "events"
+kind = "read"
+reply = "Vec<EventRecord>"
+idempotent = true
+since = "1.0"
+description = "unit event ring"
+
+[[procedure]]
+path = "cgroups"
+kind = "read"
+reply = "CgroupNode"
+idempotent = true
+since = "1.0"
+description = "cgroup subtree (?path=<rel>)"

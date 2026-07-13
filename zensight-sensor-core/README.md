@@ -4,7 +4,7 @@ The shared framework every ZenSight protocol sensor is built on. A sensor crate
 (`zensight-sensor-snmp`, `-netlink`, `-netring`, …) supplies the protocol-specific
 polling/parsing; this crate supplies everything else: the lifecycle runner, the
 Zenoh publishers with the right QoS, host identity, health and alert reporting,
-liveness, and the on-demand artifact channel.
+liveness, the `@rpc` request/reply plumbing, and the on-demand artifact channel.
 
 ## What it gives a sensor
 
@@ -12,16 +12,22 @@ liveness, and the on-demand artifact channel.
   graceful shutdown (SIGINT/SIGTERM), and periodic health + identity/evidence
   publication.
 - **`Publisher` / registries** — declare-once Zenoh publishers: zenoh-ext
-  *advanced* publishers for telemetry (cache + late-joiner recovery) and plain
-  declared publishers for the `@/` control plane, each with the correct
-  `QosClass`.
+  *advanced* publishers for the v1 telemetry class (cache + late-joiner recovery)
+  and plain declared publishers for the state plane, each with the correct
+  `QosClass`. Keys come from `zensight_keyspace::V1Context` (re-exported as
+  `zensight_sensor_core::v1`).
 - **`HostIdentity` / `SharedIdentity`** — a stable, non-reversible `host_id`
   (`sha256(machine-id + salt)`) plus boot id, hostname, IPs, MACs, container and
   cloud facts.
 - **`HealthReporter` / `AlertReporter`** — rolling-window health snapshots and the
-  firing/resolved alert lifecycle with debounce + reconcile.
+  firing/resolved alert lifecycle with debounce + reconcile (LWW alert state +
+  a storage-shaped seed queryable).
+- **RPC (`rpc.rs`)** — `serve` / `serve_topic` / `serve_introspect` queryable
+  helpers and `RpcRequest` / `RpcError` for the `@rpc` plane (`<topic>` read,
+  `<topic>/set` write, `reply_err` with `error/...` names).
 - **`ArtifactChannel` / `ArtifactProducer`** — on-demand large-data transfer
-  (debug report, directory snapshot, packet capture) over `zenoh-blob`.
+  (debug report, directory snapshot, packet capture) over `zenoh-blob` on the
+  `@blob` plane.
 - **`procutil` / `scrub`** — `(pid, start_time)` process identity and an argv
   secret scrubber.
 
@@ -44,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut runner = SensorRunner::new("mysensor", config)
         .await?
-        .with_identity("host01");
+        .with_identity();
 
     let publisher = runner.publisher();
     runner.spawn(async move { /* poll + publisher.publish(...) */ });
@@ -62,14 +68,15 @@ cargo test -p zensight-sensor-core
 ## Documentation
 
 - [Framework](docs/framework.md) — runner, publishers, identity, health, alerts,
-  liveness, procutil, scrub, and the declare-all discipline.
+  liveness, RPC, procutil, scrub, and the declare-all discipline.
 - [Artifacts](docs/artifacts.md) — the `ArtifactChannel` + `ArtifactProducer`
   contract for on-demand large data.
 
 The wire types this framework publishes (`TelemetryPoint`, `Alert`, `HostEvidence`,
 `ArtifactRequest`, `QosClass`, …) live in and are documented under
-[`zensight-common`](../zensight-common/README.md). The full key contract is
-[`../docs/KEYSPACE.md`](../docs/KEYSPACE.md).
+[`zensight-common`](../zensight-common/README.md). The deployed key contract is
+summarized in [`../docs/KEYSPACE.md`](../docs/KEYSPACE.md) (normative spec:
+[`../docs/rfcs/keyspace-v2/`](../docs/rfcs/keyspace-v2/00-index.md)).
 
 ## License
 

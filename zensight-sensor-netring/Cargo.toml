@@ -20,7 +20,7 @@ sigma = ["netring/sigma"]
 # YARA payload scanning (#328). Off by default — pulls the `yara-x` engine via
 # `netring/yara`. Enable with `--features yara`, then set `threat.yara.file`
 # (startup rules) and/or `threat.reload` to hot-swap rules at runtime through
-# `@/commands/threat_intel`.
+# `@rpc/netring/threat_intel/set`.
 yara = ["netring/yara"]
 # Cleartext-SNMP detection (netring 0.27, issue #72). Off by default — pulls the
 # SNMP parser via netring. Enable with `--features snmp`, then set
@@ -34,17 +34,18 @@ lateral = ["netring/smb", "netring/rdp", "netring/kerberos"]
 # JA4H HTTP fingerprinting (#124). Off by default — pulls the JA4+ suite via
 # `netring/ja4plus`, which carries the FoxIO License 1.1 (NOT OSI). The default
 # build stays OSI-clean. Enable with `--features ja4plus`, then set
-# `collect.http_fp` to serve JA4H fingerprints on `@/query/ja4h`.
+# `collect.http_fp` to serve JA4H fingerprints on `@rpc/netring/ja4h`.
 ja4plus = ["netring/ja4plus"]
 # Canonical IPFIX flow export (netring 0.28, issue #223). Off by default —
 # pulls netring's IPFIX encoder (`FlowRecord::to_ipfix_record`) and flowscope's
 # serde so the IANA-IE record can be JSON-serialised. Enable with
 # `--features ipfix`, then set `collect.ipfix` to serve canonical, IANA-IE-keyed
-# flow records on `@/query/ipfix` (per-direction deltas IE 1/2, totals IE 85/86,
+# flow records on `@rpc/netring/ipfix` (per-direction deltas IE 1/2, totals IE 85/86,
 # precise `flowEndReason` IE 136, Community ID).
 ipfix = ["netring/ipfix", "flowscope/serde"]
 
 [dependencies]
+zensight-keyspace = { workspace = true }
 zensight-common = { path = "../zensight-common" }
 zensight-sensor-core = { path = "../zensight-sensor-core" }
 
@@ -80,7 +81,7 @@ zstd = { workspace = true }
 # Object-safe async `ArtifactProducer` impl (the capture producer, #333).
 async-trait = { workspace = true }
 # Triggered-capture artifact serving (#327): the capture-to-disk engine registers
-# finished trigger files on its own Tier-1 `BlobServer` (same `@/artifact/blob`
+# finished trigger files on its own Tier-1 `BlobServer` (same `@blob/artifact`
 # prefix as the artifact channel) with TTL'd manifests.
 zenoh-blob = { workspace = true }
 # Artifact ids for triggered-capture blobs (#327).

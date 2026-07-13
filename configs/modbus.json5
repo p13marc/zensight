@@ -6,7 +6,8 @@
     serialization: "cbor",           // "json" or "cbor"
   },
 
-  // On-demand artifact channel (@/artifact) — opt-in per kind. When enabled,
+  // On-demand artifact channel (@rpc artifact/request + @blob delivery) —
+  // opt-in per kind. When enabled,
   // an operator can download a redacted tar.zst debug bundle (and, for
   // snapshot, an allowlisted directory) from the GUI. Bounded + rate-limited;
   // secrets are redacted.
@@ -22,8 +23,6 @@
 
   // Modbus sensor settings
   modbus: {
-    // Key expression prefix
-    key_prefix: "zensight/modbus",
 
     // Override the agent-host source id (default: the local hostname).
     // source: "agent-host-01",

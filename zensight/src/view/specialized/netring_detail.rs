@@ -1,5 +1,5 @@
 //! On-demand netring flow-detail client: fetches the recent-flow ring from the
-//! sensor's `@/query/flows` channel (principle P2 — pulled only when a user
+//! sensor's `@rpc/netring/flows` procedure (principle P2 — pulled only when a user
 //! drills into a netring host, never streamed).
 //!
 //! Reuses the Iced-independent [`fetch_records`](super::netlink_detail::fetch_records)
@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use zensight_common::{
-    AssetRecord, CaptureRecord, DnsRecord, ElephantRecord, FlowRecord, HttpHostRecord, Ja4hRecord,
-    MatrixRecord, QuicRecord, SshRecord, TalkerRecord, TlsRecord,
+    AssetRecord, CaptureRecord, DnsRecord, ElephantRecord, EncryptedDnsRecord, FlowRecord,
+    HttpHostRecord, Ja4hRecord, MatrixRecord, QuicRecord, SshRecord, TalkerRecord, TlsRecord,
 };
 
 use crate::view::components::TableState;
@@ -25,6 +25,7 @@ pub enum NetringTable {
     Talkers,
     Matrix,
     Dns,
+    EncryptedDns,
     Http,
     Tls,
     Quic,
@@ -36,64 +37,81 @@ pub enum NetringTable {
 /// How many rows the top-N query channels (talkers/dns/http) ask the sensor for.
 const TOP_N: usize = 50;
 
+/// One netring @rpc key: `Some(origin)` targets that host's concrete
+/// procedure key (device drill-down — RFC 05 §2); `None` selects the whole
+/// fleet (`*` origin — inventory/topology joins, fetched with target `All`).
+fn rpc_key(origin: Option<&str>, topic: &str) -> String {
+    match origin {
+        Some(o) => zensight_common::origin_rpc_key(o, "netring", topic),
+        None => zensight_common::fleet_rpc_key("netring", topic),
+    }
+}
+
 /// The flow-detail queryable key (matches the netring sensor's `query.rs`).
-pub fn flows_key() -> String {
-    "zensight/netring/@/query/flows".to_string()
+pub fn flows_key(origin: Option<&str>) -> String {
+    rpc_key(origin, "flows")
 }
 
 /// The TLS-inventory queryable key.
-pub fn tls_key() -> String {
-    "zensight/netring/@/query/tls".to_string()
+pub fn tls_key(origin: Option<&str>) -> String {
+    rpc_key(origin, "tls")
 }
 
 /// The QUIC SNI/ALPN inventory queryable key.
-pub fn quic_key() -> String {
-    "zensight/netring/@/query/quic".to_string()
+pub fn quic_key(origin: Option<&str>) -> String {
+    rpc_key(origin, "quic")
 }
 
 /// The SSH/HASSH inventory queryable key.
-pub fn ssh_key() -> String {
-    "zensight/netring/@/query/ssh".to_string()
+pub fn ssh_key(origin: Option<&str>) -> String {
+    rpc_key(origin, "ssh")
 }
 
 /// The JA4H HTTP-fingerprint inventory queryable key (#124).
-pub fn ja4h_key() -> String {
-    "zensight/netring/@/query/ja4h".to_string()
+pub fn ja4h_key(origin: Option<&str>) -> String {
+    rpc_key(origin, "ja4h")
 }
 
 /// The passive asset-inventory queryable key.
-pub fn assets_key() -> String {
-    "zensight/netring/@/query/assets".to_string()
+pub fn assets_key(origin: Option<&str>) -> String {
+    rpc_key(origin, "assets")
 }
 
 /// The per-destination top-talker histogram key (`?top=N`).
-pub fn talkers_key() -> String {
-    format!("zensight/netring/@/query/talkers?top={TOP_N}")
+pub fn talkers_key(origin: Option<&str>) -> String {
+    format!("{}?top={TOP_N}", rpc_key(origin, "talkers"))
 }
 
 /// The recent-elephant-flow ring key.
-pub fn elephant_key() -> String {
-    "zensight/netring/@/query/elephant_flows".to_string()
+pub fn elephant_key(origin: Option<&str>) -> String {
+    rpc_key(origin, "elephant_flows")
 }
 
 /// The `(src,dst)` traffic-matrix / service-map key (`?top=N`) (#122).
-pub fn matrix_key() -> String {
-    format!("zensight/netring/@/query/matrix?top={TOP_N}")
+pub fn matrix_key(origin: Option<&str>) -> String {
+    format!("{}?top={TOP_N}", rpc_key(origin, "matrix"))
 }
 
 /// The capture-to-disk file-index key (#327).
-pub fn captures_key() -> String {
-    "zensight/netring/@/query/captures".to_string()
+pub fn captures_key(origin: Option<&str>) -> String {
+    rpc_key(origin, "captures")
 }
 
 /// The per-SLD DNS detail key (`?top=N`).
-pub fn dns_key() -> String {
-    format!("zensight/netring/@/query/dns?top={TOP_N}")
+pub fn dns_key(origin: Option<&str>) -> String {
+    format!("{}?top={TOP_N}", rpc_key(origin, "dns"))
+}
+
+/// The passive DoT/DoQ/DoH destination inventory key (#326). No `?top=` —
+/// the sensor replies with the whole inventory, which is small by construction
+/// (one row per transport × SNI × resolver class).
+pub fn encrypted_dns_key(origin: Option<&str>) -> String {
+    rpc_key(origin, "encrypted_dns")
 }
 
 /// The per-host HTTP detail key (`?top=N`).
-pub fn http_key() -> String {
-    format!("zensight/netring/@/query/http?top={TOP_N}")
+pub fn http_key(origin: Option<&str>) -> String {
+    format!("{}?top={TOP_N}", rpc_key(origin, "http"))
 }
 
 /// On-demand detail fetched for the selected netring host.
@@ -108,6 +126,9 @@ pub struct NetringDetailState {
     pub matrix: Fetch<Vec<MatrixRecord>>,
     pub elephants: Fetch<Vec<ElephantRecord>>,
     pub dns: Fetch<Vec<DnsRecord>>,
+    /// Passive encrypted-DNS (DoT/DoQ/DoH) destinations (#326). Encrypted DNS is
+    /// exactly what cleartext DNS RED *cannot* see, so it belongs beside it.
+    pub encrypted_dns: Fetch<Vec<EncryptedDnsRecord>>,
     pub http: Fetch<Vec<HttpHostRecord>>,
     /// JA4H HTTP-client fingerprints (#256); served only by `ja4plus` sensor
     /// builds, so this is fetched manually rather than prefetched with the tab.
@@ -236,6 +257,16 @@ impl NetringDetailState {
         self.dns = Fetch::from_result(result);
     }
 
+    /// Mark an encrypted-DNS fetch as in flight.
+    pub fn loading_encrypted_dns(&mut self) {
+        self.encrypted_dns = Fetch::Loading;
+    }
+
+    /// Store the encrypted-DNS fetch outcome.
+    pub fn apply_encrypted_dns(&mut self, result: Result<Vec<EncryptedDnsRecord>, String>) {
+        self.encrypted_dns = Fetch::from_result(result);
+    }
+
     /// Mark an HTTP-detail fetch as in flight.
     pub fn loading_http(&mut self) {
         self.http = Fetch::Loading;
@@ -268,63 +299,146 @@ impl NetringDetailState {
 }
 
 /// Fetch + decode the recent-flow ring. Thin wrapper over the shared helper.
-pub async fn fetch_flows(session: Arc<zenoh::Session>) -> Option<Vec<FlowRecord>> {
-    super::netlink_detail::fetch_records(session, flows_key()).await
+pub async fn fetch_flows(
+    session: Arc<zenoh::Session>,
+    origin: Option<String>,
+) -> Option<Vec<FlowRecord>> {
+    match origin {
+        Some(o) => super::netlink_detail::fetch_records(session, flows_key(Some(&o))).await,
+        None => super::netlink_detail::fetch_records_all(session, flows_key(None)).await,
+    }
 }
 
 /// Fetch + decode the TLS asset inventory.
-pub async fn fetch_tls(session: Arc<zenoh::Session>) -> Option<Vec<TlsRecord>> {
-    super::netlink_detail::fetch_records(session, tls_key()).await
+pub async fn fetch_tls(
+    session: Arc<zenoh::Session>,
+    origin: Option<String>,
+) -> Option<Vec<TlsRecord>> {
+    match origin {
+        Some(o) => super::netlink_detail::fetch_records(session, tls_key(Some(&o))).await,
+        None => super::netlink_detail::fetch_records_all(session, tls_key(None)).await,
+    }
 }
 
 /// Fetch + decode the QUIC SNI/ALPN inventory.
-pub async fn fetch_quic(session: Arc<zenoh::Session>) -> Option<Vec<QuicRecord>> {
-    super::netlink_detail::fetch_records(session, quic_key()).await
+pub async fn fetch_quic(
+    session: Arc<zenoh::Session>,
+    origin: Option<String>,
+) -> Option<Vec<QuicRecord>> {
+    match origin {
+        Some(o) => super::netlink_detail::fetch_records(session, quic_key(Some(&o))).await,
+        None => super::netlink_detail::fetch_records_all(session, quic_key(None)).await,
+    }
 }
 
 /// Fetch + decode the SSH/HASSH inventory.
-pub async fn fetch_ssh(session: Arc<zenoh::Session>) -> Option<Vec<SshRecord>> {
-    super::netlink_detail::fetch_records(session, ssh_key()).await
+pub async fn fetch_ssh(
+    session: Arc<zenoh::Session>,
+    origin: Option<String>,
+) -> Option<Vec<SshRecord>> {
+    match origin {
+        Some(o) => super::netlink_detail::fetch_records(session, ssh_key(Some(&o))).await,
+        None => super::netlink_detail::fetch_records_all(session, ssh_key(None)).await,
+    }
 }
 
 /// Fetch + decode the JA4H HTTP-fingerprint inventory (#124).
-pub async fn fetch_ja4h(session: Arc<zenoh::Session>) -> Option<Vec<Ja4hRecord>> {
-    super::netlink_detail::fetch_records(session, ja4h_key()).await
+pub async fn fetch_ja4h(
+    session: Arc<zenoh::Session>,
+    origin: Option<String>,
+) -> Option<Vec<Ja4hRecord>> {
+    match origin {
+        Some(o) => super::netlink_detail::fetch_records(session, ja4h_key(Some(&o))).await,
+        None => super::netlink_detail::fetch_records_all(session, ja4h_key(None)).await,
+    }
 }
 
 /// Fetch + decode the passive asset inventory.
-pub async fn fetch_assets(session: Arc<zenoh::Session>) -> Option<Vec<AssetRecord>> {
-    super::netlink_detail::fetch_records(session, assets_key()).await
+pub async fn fetch_assets(
+    session: Arc<zenoh::Session>,
+    origin: Option<String>,
+) -> Option<Vec<AssetRecord>> {
+    match origin {
+        Some(o) => super::netlink_detail::fetch_records(session, assets_key(Some(&o))).await,
+        None => super::netlink_detail::fetch_records_all(session, assets_key(None)).await,
+    }
 }
 
 /// Fetch + decode the per-destination top-talker histogram.
-pub async fn fetch_talkers(session: Arc<zenoh::Session>) -> Option<Vec<TalkerRecord>> {
-    super::netlink_detail::fetch_records(session, talkers_key()).await
+pub async fn fetch_talkers(
+    session: Arc<zenoh::Session>,
+    origin: Option<String>,
+) -> Option<Vec<TalkerRecord>> {
+    match origin {
+        Some(o) => super::netlink_detail::fetch_records(session, talkers_key(Some(&o))).await,
+        None => super::netlink_detail::fetch_records_all(session, talkers_key(None)).await,
+    }
 }
 
 /// Fetch + decode the recent-elephant-flow ring.
-pub async fn fetch_elephants(session: Arc<zenoh::Session>) -> Option<Vec<ElephantRecord>> {
-    super::netlink_detail::fetch_records(session, elephant_key()).await
+pub async fn fetch_elephants(
+    session: Arc<zenoh::Session>,
+    origin: Option<String>,
+) -> Option<Vec<ElephantRecord>> {
+    match origin {
+        Some(o) => super::netlink_detail::fetch_records(session, elephant_key(Some(&o))).await,
+        None => super::netlink_detail::fetch_records_all(session, elephant_key(None)).await,
+    }
 }
 
 /// Fetch + decode the `(src,dst)` traffic matrix / service map (#122).
-pub async fn fetch_matrix(session: Arc<zenoh::Session>) -> Option<Vec<MatrixRecord>> {
-    super::netlink_detail::fetch_records(session, matrix_key()).await
+pub async fn fetch_matrix(
+    session: Arc<zenoh::Session>,
+    origin: Option<String>,
+) -> Option<Vec<MatrixRecord>> {
+    match origin {
+        Some(o) => super::netlink_detail::fetch_records(session, matrix_key(Some(&o))).await,
+        None => super::netlink_detail::fetch_records_all(session, matrix_key(None)).await,
+    }
 }
 
 /// Fetch + decode the per-SLD DNS detail (top SLDs / NXDOMAIN).
-pub async fn fetch_dns(session: Arc<zenoh::Session>) -> Option<Vec<DnsRecord>> {
-    super::netlink_detail::fetch_records(session, dns_key()).await
+pub async fn fetch_dns(
+    session: Arc<zenoh::Session>,
+    origin: Option<String>,
+) -> Option<Vec<DnsRecord>> {
+    match origin {
+        Some(o) => super::netlink_detail::fetch_records(session, dns_key(Some(&o))).await,
+        None => super::netlink_detail::fetch_records_all(session, dns_key(None)).await,
+    }
+}
+
+/// Fetch + decode the passive encrypted-DNS destination inventory (#326).
+pub async fn fetch_encrypted_dns(
+    session: Arc<zenoh::Session>,
+    origin: Option<String>,
+) -> Option<Vec<EncryptedDnsRecord>> {
+    match origin {
+        Some(o) => super::netlink_detail::fetch_records(session, encrypted_dns_key(Some(&o))).await,
+        None => super::netlink_detail::fetch_records_all(session, encrypted_dns_key(None)).await,
+    }
 }
 
 /// Fetch + decode the per-host HTTP detail (top hosts / errors).
-pub async fn fetch_http(session: Arc<zenoh::Session>) -> Option<Vec<HttpHostRecord>> {
-    super::netlink_detail::fetch_records(session, http_key()).await
+pub async fn fetch_http(
+    session: Arc<zenoh::Session>,
+    origin: Option<String>,
+) -> Option<Vec<HttpHostRecord>> {
+    match origin {
+        Some(o) => super::netlink_detail::fetch_records(session, http_key(Some(&o))).await,
+        None => super::netlink_detail::fetch_records_all(session, http_key(None)).await,
+    }
 }
 
 /// Fetch + decode the capture-to-disk file index (#327).
-pub async fn fetch_captures(session: Arc<zenoh::Session>) -> Option<Vec<CaptureRecord>> {
-    super::netlink_detail::fetch_records(session, captures_key()).await
+pub async fn fetch_captures(
+    session: Arc<zenoh::Session>,
+    origin: Option<String>,
+) -> Option<Vec<CaptureRecord>> {
+    match origin {
+        Some(o) => super::netlink_detail::fetch_records(session, captures_key(Some(&o))).await,
+        None => super::netlink_detail::fetch_records_all(session, captures_key(None)).await,
+    }
 }
 
 #[cfg(test)]
@@ -333,21 +447,35 @@ mod tests {
 
     #[test]
     fn key_matches_sensor() {
-        assert_eq!(flows_key(), "zensight/netring/@/query/flows");
-        assert_eq!(quic_key(), "zensight/netring/@/query/quic");
-        assert_eq!(ssh_key(), "zensight/netring/@/query/ssh");
-        assert_eq!(ja4h_key(), "zensight/netring/@/query/ja4h");
-        assert_eq!(tls_key(), "zensight/netring/@/query/tls");
-        assert_eq!(assets_key(), "zensight/netring/@/query/assets");
+        assert_eq!(flows_key(None), "zensight/@v1/*/@rpc/netring/flows");
+        assert_eq!(quic_key(None), "zensight/@v1/*/@rpc/netring/quic");
+        assert_eq!(ssh_key(None), "zensight/@v1/*/@rpc/netring/ssh");
+        assert_eq!(ja4h_key(None), "zensight/@v1/*/@rpc/netring/ja4h");
+        assert_eq!(tls_key(None), "zensight/@v1/*/@rpc/netring/tls");
+        assert_eq!(assets_key(None), "zensight/@v1/*/@rpc/netring/assets");
         // The 4 previously-orphaned channels now reachable (#45).
-        assert_eq!(talkers_key(), "zensight/netring/@/query/talkers?top=50");
-        assert_eq!(elephant_key(), "zensight/netring/@/query/elephant_flows");
-        assert_eq!(dns_key(), "zensight/netring/@/query/dns?top=50");
-        assert_eq!(http_key(), "zensight/netring/@/query/http?top=50");
+        assert_eq!(
+            talkers_key(None),
+            "zensight/@v1/*/@rpc/netring/talkers?top=50"
+        );
+        assert_eq!(
+            elephant_key(None),
+            "zensight/@v1/*/@rpc/netring/elephant_flows"
+        );
+        assert_eq!(dns_key(None), "zensight/@v1/*/@rpc/netring/dns?top=50");
+        assert_eq!(http_key(None), "zensight/@v1/*/@rpc/netring/http?top=50");
         // Traffic-matrix / service-map channel (#122).
-        assert_eq!(matrix_key(), "zensight/netring/@/query/matrix?top=50");
+        assert_eq!(
+            matrix_key(None),
+            "zensight/@v1/*/@rpc/netring/matrix?top=50"
+        );
         // Capture-to-disk index channel (#327).
-        assert_eq!(captures_key(), "zensight/netring/@/query/captures");
+        assert_eq!(captures_key(None), "zensight/@v1/*/@rpc/netring/captures");
+        // The device drill-down targets one host's concrete procedure key.
+        assert_eq!(
+            flows_key(Some("h-3fa9c2d41b7e")),
+            "zensight/@v1/h-3fa9c2d41b7e/@rpc/netring/flows"
+        );
     }
 
     #[test]

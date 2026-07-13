@@ -1,0 +1,22 @@
+[package]
+name = "zenctl"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Bus explorer for the keyspace-v2 convention — the busctl/d-feet equivalent (RFC 08 §6)"
+license = "Apache-2.0"
+
+[[bin]]
+name = "zenctl"
+path = "src/main.rs"
+
+[dependencies]
+zensight-common = { path = "../zensight-common" }
+zensight-keyspace = { workspace = true }
+
+zenoh = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -16,8 +16,8 @@ Validation (`NetringSensorConfig::validate`) requires **either** at least one
 
 ```json5
 netring: {
-  key_prefix: "zensight/netring",   // control-plane / telemetry prefix
-  source: "auto",                   // telemetry `source`; "auto" → hostname
+  key_prefix: "zensight/netring",   // legacy-form prefix; derives the v1 context (base + producer)
+  source: "auto",                   // payload `source` field (not in the key); "auto" → hostname
   backend: "auto",                  // "auto" | "afpacket" | "afxdp"
   interfaces: ["eth0"],             // live capture NICs (needs CAP_NET_RAW)
   // pcap: "/path/to/capture.pcap", // replay instead (no privileges); always overrides `interfaces`
@@ -44,7 +44,7 @@ Each toggles a telemetry family (see [telemetry.md](telemetry.md)). Defaults:
 | `tcp_resets` | **on** | TCP reset + connection-refused counters |
 | `tls` | **on** | passive TLS fingerprinting (SNI + JA3/JA4, PQ ratio) |
 | `capture_stats` | **on** | capture self-health (packets/drops/drop_rate); live-only |
-| `talkers` | **on** | top-talkers + matrix + elephant-flow query channels (#21/#122) |
+| `talkers` | **on** | top-talkers + matrix + elephant-flow detail procedures (#21/#122) |
 | `infer_initiator` | **on** | TCP SYN-analysis to label flows client → server regardless of capture order (#122); TCP-only, zero cost when off |
 | `icmp` | off | ICMP error telemetry (live-gated; silent under replay) |
 | `dns` | off | L7 DNS RED (cleartext UDP/53) — needed by passive DNS + DNS detectors |
@@ -57,7 +57,7 @@ Each toggles a telemetry family (see [telemetry.md](telemetry.md)). Defaults:
 | `snmp_cleartext` | off | flag cleartext SNMP v1/v2c communities; no-op unless `--features snmp` |
 | `assets` | off | passive asset inventory (ARP/NDP/LLDP) |
 | `asset_cdp` | off | also feed the inventory from CDP (forces capture-all prefilter); needs `assets` |
-| `ipfix` | off | canonical IPFIX flow export on `@/query/ipfix` (#223); no-op unless `--features ipfix` |
+| `ipfix` | off | canonical IPFIX flow export on `@rpc/netring/ipfix` (#223); no-op unless `--features ipfix` |
 
 ## `anomalies.*` — detectors
 
@@ -88,13 +88,13 @@ threat: {
   ioc: { ips: [], domains: [], ja4: [], ja3: [], files: [] },
   sigma: { enabled: false, dir: null },  // needs --features sigma
   yara: { file: null },             // needs --features yara
-  reload: false,                    // always arm the IOC/YARA matchers for @/commands/threat_intel
+  reload: false,                    // always arm the IOC/YARA matchers for @rpc/netring/threat_intel/set
 }
 ```
 
 Set `reload: true` (or provide startup indicators / a `yara.file`) to hot-reload
 IOC / YARA at runtime — otherwise the frozen-at-build matchers make a reload a
-no-op. See [detectors.md](detectors.md#runtime-threat-intel-reload--commandsthreat_intel-328).
+no-op. See [detectors.md](detectors.md#runtime-threat-intel-reload--rpcnetringthreat_intel-328).
 
 ## `overload` — capture-overload detection
 
@@ -125,8 +125,9 @@ shedding to fire.
 
 Off by default (the packet-tier handler is a per-frame cost the default build
 avoids). When on, registers a reloadable packet subscription whose BPF filter can
-be hot-swapped at runtime via `@/commands/capture_filter` (no capture restart) to
-narrow attention during an incident; `capture/focus/{packets,bytes}` counters
+be hot-swapped at runtime via the `@rpc/netring/capture_filter/set` procedure
+(read the current filter on `@rpc/netring/capture_filter`; no capture restart)
+to narrow attention during an incident; `capture/focus/{packets,bytes}` counters
 show the effect.
 
 ```json5
@@ -149,7 +150,7 @@ bandwidth_attribution: false,    // opt-in per-process WIRE bandwidth (#318)
 `bandwidth_attribution` (off by default) joins netring's live per-flow wire
 bandwidth against the kernel socket table (periodic sock_diag dump + `/proc` fd
 scan, off the hot path) and serves per-process **wire-L2** rows query-only on
-`@/query/bandwidth`. Best-effort; costs `/proc` walks; reads are unprivileged.
+`@rpc/netring/bandwidth`. Best-effort; costs `/proc` walks; reads are unprivileged.
 See [telemetry.md](telemetry.md#per-process-wire-bandwidth-318-opt-in).
 
 ## `names` — passive-DNS name cache (#308)
@@ -174,10 +175,11 @@ names: {
 ## `evidence` — host-evidence feed (#307)
 
 Republishes observed assets / passive-DNS names as identity evidence on
-`zensight/_meta/evidence/**` for the correlator. Enabled by default but **gated on
-its source collectors**: asset evidence needs `collect.assets`, name evidence
-needs `collect.dns` — with those off (the shipped default) netring emits no
-evidence even though `enabled` is true.
+`zensight/@v1/<origin>/state/netring/evidence/{device/<device>,names/<ip-slug>}`
+for the correlator. Enabled by default but **gated on its source collectors**:
+asset evidence needs `collect.assets`, name evidence needs `collect.dns` — with
+those off (the shipped default) netring emits no evidence even though `enabled`
+is true.
 
 ```json5
 evidence: {
@@ -209,9 +211,11 @@ on_demand: {
 }
 ```
 
-When `enabled`, an operator pulls a bounded `pcap[.zst]` over the unified
-`@/artifact` channel (GUI *Capture* tab or any client), delivered as a Tier-1
-blob. Every request is clamped to these limits. **Limitation:** the packet tier
+When `enabled`, an operator pulls a bounded `pcap[.zst]` via the unified
+artifact procedures (`@rpc/netring/artifact/request` + `artifact/cancel`,
+lifecycle doc at `state/netring/artifact/capture`; GUI *Capture* tab or any
+client), delivered as a Tier-1 blob on
+`zensight/@v1/<origin>/@blob/artifact/...`. Every request is clamped to these limits. **Limitation:** the packet tier
 only sees IP/L4 frames — non-IP traffic (ARP/LLDP) is not captured. Backpressure
 is drop-with-count (a lossy capture never stalls telemetry).
 
@@ -236,20 +240,23 @@ to_disk: {
 ```
 
 - **`rotating`** — continuously spool rotating pcap files to `dir` (local
-  forensics; metadata-only on the bus, indexed on `@/query/captures`).
+  forensics; metadata-only on the bus, indexed on `@rpc/netring/captures`).
 - **`triggered`** — buffer recent frames in the in-memory pre-trigger ring;
   when an anomaly at/above `trigger_min_severity` fires (optionally narrowed to
   `trigger_kinds`) or the GUI sends `capture_now`, flush the lead-up +
   `post_trigger_secs` of aftermath to a `pcap[.zst]` served as a TTL'd Tier-1
   blob.
-- Control at runtime via `@/commands/capture_disk` (`capture_now`, `set_capture`);
+- Control at runtime via the `@rpc/netring/capture_disk/set` procedure
+  (`capture_now`, `set_capture`; status read on `@rpc/netring/capture_disk`);
   a mode that is `off` at startup is not armed, switching between armed modes is
   live. Health rides `capture/disk/*` + `capture/events`.
 
 ## `artifacts` — report / snapshot channels
 
-Top-level (not under `netring`); the framework-wide `@/artifact` channel for
-Tier-1 `report` (redacted debug bundle) and Tier-2 `snapshot` (allowlisted
-directory — a natural fit for a captured-pcap directory). Every kind disabled by
-default; the on-demand pcap `Capture` kind is configured under
-`netring.capture.on_demand` instead. See `docs/LARGE-DATA-TRANSFER.md`.
+Top-level (not under `netring`); the framework-wide artifact procedures
+(`@rpc/netring/artifact/{request,cancel}` + `state/netring/artifact/<kind>`
+status docs, bytes on the `@blob` plane) for Tier-1 `report` (redacted debug
+bundle) and Tier-2 `snapshot` (allowlisted directory — a natural fit for a
+captured-pcap directory). Every kind disabled by default; the on-demand pcap
+`Capture` kind is configured under `netring.capture.on_demand` instead. See
+`docs/LARGE-DATA-TRANSFER.md`.

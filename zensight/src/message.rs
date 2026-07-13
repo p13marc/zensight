@@ -29,7 +29,7 @@ pub enum Message {
     /// records (newest-first) to merge into the rolling buffer on Logs-view open.
     LogHistoryLoaded(Vec<crate::store::StoredLog>),
 
-    /// On-demand `@/query/events` fetch finished (#358): per-line log events
+    /// On-demand `@rpc/logs/events` fetch finished (#358): per-line log events
     /// pulled from the logs sensors' rings (all repliers concatenated), to
     /// merge into the rolling buffer + persist for search-back.
     LogEventsLoaded(Result<Vec<zensight_common::LogRecord>, String>),
@@ -48,7 +48,7 @@ pub enum Message {
     SensorInfoReceived(SensorInfo),
 
     /// A sensor-emitted alert was received (firing or resolved). Published on
-    /// `zensight/<protocol>/@/alerts/<alert_key>`.
+    /// `state/<producer>/alert/<alert_key>`.
     AlertReceived(Alert),
 
     /// A sensor alert key was deleted (resolve tombstone).
@@ -58,17 +58,19 @@ pub enum Message {
     },
 
     /// Seed of currently-firing alerts fetched on connect from sensors'
-    /// `@/query/alerts` queryables (late-joiner recovery — populates without
+    /// alert-state seed queryables on `state/<producer>/alert/*`
+    /// (late-joiner recovery — populates without
     /// toasting, since these aren't newly-fired).
     AlertsSeed(Vec<Alert>),
 
     /// Connect-time snapshot of the correlator's [`HostEntity`] docs, fetched
-    /// from the `_meta/query/entities` queryable (#306). Absent correlator ⇒ no
+    /// from the entity seed (`zensight/@v1/@catalog/state/entity/*`) (#306).
+    /// Absent correlator ⇒ no
     /// replies ⇒ empty store ⇒ degraded per-source path.
     EntitySeed(Vec<HostEntity>),
 
     /// A single [`HostEntity`] doc was published/updated on
-    /// `zensight/_meta/entity/host/<entity_id>` (#306).
+    /// `zensight/@v1/@catalog/state/entity/<entity_id>` (#306).
     EntityReceived(HostEntity),
 
     /// A [`HostEntity`] doc was tombstoned (Delete). Payload is the `entity_id`
@@ -76,7 +78,7 @@ pub enum Message {
     EntityRemoved(String),
 
     /// Resolve passive-DNS names for an IP the entity store doesn't claim
-    /// (#314): GET the correlator's `_meta/query/names?ip=` from the global
+    /// (#314): GET the catalog's `@rpc/names?ip=` procedure from the global
     /// search panel.
     LookupNamesForIp(String),
     /// The names-lookup reply for `ip` (#314): observed names with provenance,
@@ -170,7 +172,7 @@ pub enum Message {
     CaptureFilterStatusReceived(Result<String, String>),
 
     // Netring threat-intel (IOC / YARA) hot-reload (#328): swap the live matchers
-    // without a capture restart via `@/commands/threat_intel`.
+    // without a capture restart via `@rpc/netring/threat_intel/set`.
     /// Edit the IOC paste box (indicators, one per line).
     SetThreatIocInput(String),
     /// Apply the pasted IOC indicators to the netring sensor's live set.
@@ -204,7 +206,7 @@ pub enum Message {
 
     /// Open the bandwidth live-monitor view (#319, epic #320) and fetch per-process rows.
     OpenBandwidth,
-    /// Re-fetch the per-process bandwidth table (`@/query/bandwidth`).
+    /// Re-fetch the per-process bandwidth table (`@rpc/netlink/bandwidth`).
     RefreshBandwidth,
     /// Per-process bandwidth fetch outcome.
     BandwidthLoaded(Result<Vec<zensight_common::BandwidthRecord>, String>),
@@ -214,6 +216,19 @@ pub enum Message {
     BandwidthTableSort(usize),
     /// Filter the bandwidth table by name substring.
     BandwidthTableFilter(String),
+
+    /// Open the fleet-capabilities view (#469) and fan `introspect` out.
+    OpenFleet,
+    /// Re-ask the fleet what it serves (`@rpc/<producer>/introspect`).
+    RefreshFleet,
+    /// The fan-out's replies: one raw registry slice per (origin, producer).
+    FleetLoaded(Result<Vec<crate::view::fleet::FleetReply>, String>),
+    /// Expand/collapse one row's registry findings.
+    ToggleFleetFindings(String),
+    /// Sort the fleet table by column index.
+    FleetTableSort(usize),
+    /// Filter the fleet table by host/producer substring.
+    FleetTableFilter(String),
 
     /// Fetch an on-demand systemd detail channel (units/timers/events/cgroups) (#281).
     FetchSystemdDetail(crate::view::specialized::systemd_detail::SystemdDetailTopic),
@@ -232,8 +247,8 @@ pub enum Message {
     },
     /// Cancel the armed unit action (#283).
     SystemdUnitActionCancel,
-    /// Send the armed unit action as `{verb, unit}` on
-    /// `zensight/systemd/@/commands/action` (#283), then poll `@/status/action`
+    /// Send the armed unit action as `{verb, unit}` via
+    /// `@rpc/systemd/action/set` (#283), then poll `@rpc/systemd/action`
     /// for the job outcome. The sensor refuses unless `actions.enabled` is set.
     SystemdUnitActionConfirm,
 
@@ -396,6 +411,10 @@ pub enum Message {
     FetchNetringDns,
     /// A netring DNS-detail reply: the decoded records, or an error message.
     NetringDnsReceived(Result<Vec<zensight_common::DnsRecord>, String>),
+    /// Fetch the passive encrypted-DNS (DoT/DoQ/DoH) destination inventory (#326).
+    FetchNetringEncryptedDns,
+    /// An encrypted-DNS inventory reply: the decoded records, or an error message.
+    NetringEncryptedDnsReceived(Result<Vec<zensight_common::EncryptedDnsRecord>, String>),
     /// Fetch the on-demand netring per-host HTTP detail (#45).
     FetchNetringHttp,
     /// A netring HTTP-detail reply: the decoded records, or an error message.
@@ -404,18 +423,18 @@ pub enum Message {
     FetchNetringCaptures,
     /// A netring capture-index reply: the decoded records, or an error message.
     NetringCapturesReceived(Result<Vec<zensight_common::CaptureRecord>, String>),
-    /// Manual capture trigger (#327): `capture_now` on `@/commands/capture_disk`
+    /// Manual capture trigger (#327): `capture_now` on `@rpc/netring/capture_disk/set`
     /// (fires the pre-trigger ring in triggered mode, rotates the spool in
     /// rotating mode).
     NetringCaptureNow,
     /// Hot-switch the capture-to-disk mode (#327): `set_capture` on
-    /// `@/commands/capture_disk` (`"off"` / `"rotating"` / `"triggered"`).
+    /// `@rpc/netring/capture_disk/set` (`"off"` / `"rotating"` / `"triggered"`).
     NetringSetCaptureDiskMode(String),
     /// Download a finished triggered capture by its blob id (#327). Unlike
     /// `StartArtifact` there is no request/produce phase — the file is already
-    /// registered on the sensor's `@/artifact/blob` server.
+    /// registered on the sensor's `@blob/artifact` server.
     DownloadCaptureBlob {
-        key_prefix: String,
+        producer: String,
         artifact_id: String,
         filename: String,
     },
@@ -424,7 +443,22 @@ pub enum Message {
     FetchSysinfoProcesses(crate::view::specialized::sysinfo_detail::ProcessSort),
     /// A sysinfo process-explorer reply: the decoded records, or an error.
     SysinfoProcessesReceived(Result<Vec<zensight_common::ProcessRecord>, String>),
-    /// Fetch the parallax stream catalogue (`@/query/streams`) for the
+    /// Fetch the recent-flow ring (`@rpc/netflow/flows`) for the selected exporter (#469).
+    FetchNetflowFlows,
+    /// A netflow flow-ring reply: the decoded records, or an error message.
+    NetflowFlowsReceived(Result<Vec<zensight_common::NetflowRecord>, String>),
+    /// Sort the netflow flow table by column index.
+    NetflowTableSort(usize),
+    /// Filter the netflow flow table.
+    NetflowTableFilter(String),
+    /// Show more rows of the netflow flow table.
+    NetflowTableMore,
+    /// Fetch the eBPF saturation histograms (`@rpc/sysinfo/latency`) for the
+    /// selected host (#99).
+    FetchSysinfoLatency,
+    /// A sysinfo latency reply: run-queue + block-I/O histograms, or an error.
+    SysinfoLatencyReceived(Result<zensight_common::LatencyReport, String>),
+    /// Fetch the parallax stream catalogue (`@rpc/parallax/streams`) for the
     /// selected host (#408).
     FetchParallaxStreams,
     /// A parallax catalogue reply: the advertised streams, or an error.
@@ -457,7 +491,7 @@ pub enum Message {
         generation: u64,
         error: Option<String>,
     },
-    /// A parallax `StreamStatus` transition from `@/status/streams` (arrives
+    /// A parallax `StreamStatus` transition from `state/parallax/stream/<stream>` (arrives
     /// on the host-scoped control-plane subscriber): a definitive
     /// `open: false` marks a still-waiting tile as failed.
     ParallaxStreamStatus {
@@ -488,7 +522,7 @@ pub enum Message {
     // ── Cross-view identity pivots (#313) — host-local joins over already-
     // published data; every pivot is a query-time read, no new bus traffic.
     /// Open (`Some(unit)`) or close (`None`) the systemd unit drill-down: fetch
-    /// `@/query/unit?name=` and render the identity panel in the Units tab.
+    /// `@rpc/systemd/unit?name=` and render the identity panel in the Units tab.
     SystemdSelectUnit(Option<String>),
     /// The single-unit detail reply for the drill-down panel.
     SystemdUnitDetailReceived(Result<zensight_common::UnitDetail, String>),
@@ -519,7 +553,7 @@ pub enum Message {
     /// Clear the Logs view's unit-run (invocation id) filter.
     ClearLogsInvocationFilter,
     /// Pivot from a Security anomaly to its netring flows (#119): fetch
-    /// `@/query/flows` and filter to the offending `src`. `key` is the anomaly's
+    /// `@rpc/netring/flows` and filter to the offending `src`. `key` is the anomaly's
     /// `alert_key` so the result renders under the right row.
     FetchAnomalyFlows {
         key: String,
@@ -528,7 +562,7 @@ pub enum Message {
     /// A flow-pivot reply for anomaly `key`: the filtered flows, or an error.
     AnomalyFlowsReceived(String, Result<Vec<zensight_common::FlowRecord>, String>),
     /// Flow ↔ process display join (#309): fetch the endpoint hosts' sockets
-    /// (`@/query/sockets?ip=`, all replies) and match the flow's 5-tuple to its
+    /// (`@rpc/netlink/sockets?ip=`, all replies) and match the flow's 5-tuple to its
     /// owning process. `key` identifies the flow row the result renders under.
     FetchFlowAttribution {
         target: AttributionTarget,
@@ -593,6 +627,14 @@ pub enum Message {
 
     /// User cleared device selection (back to dashboard).
     ClearSelection,
+
+    /// **Focus this host** (#476): subscribe to one origin instead of the fleet.
+    ///
+    /// `Some(origin)` narrows every data-plane subscription to
+    /// `zensight/@v1/<origin>/…`; `None` restores the fleet. Changing this
+    /// re-keys the Zenoh subscription, so Iced tears the session down and
+    /// re-declares — same mechanism as a settings change.
+    SetFocusHost(Option<String>),
 
     /// User toggled protocol filter.
     ToggleProtocolFilter(Protocol),
@@ -844,22 +886,22 @@ pub enum Message {
     /// `Ok(None)` the user cancelled the dialog, `Err(msg)` the write failed.
     ExportFinished(Result<Option<String>, String>),
 
-    // Unified artifact download messages (report / snapshot / capture) via `@/artifact`.
+    // Unified artifact download messages (report / snapshot / capture) via the artifact channel.
     /// Discover the artifact kinds each connected sensor produces (queries every
-    /// sensor's `@/artifact/status`), so the GUI knows which affordances to render.
+    /// sensor's `artifact/status` read procedure), so the GUI knows which affordances to render.
     LoadArtifactKinds,
-    /// The advertised artifact kinds (+ bounds/adverts) for one sensor key prefix.
+    /// The advertised artifact kinds (+ bounds/adverts) for one producer.
     ArtifactKindsLoaded {
-        /// Sensor key prefix, e.g. `zensight/sysinfo`.
-        key_prefix: String,
+        /// Producer name, e.g. `sysinfo`.
+        producer: String,
         /// The kinds this sensor produces and their per-kind status.
         kinds: Vec<zensight_common::KindStatus>,
     },
-    /// Request + download an artifact of `kind` from the sensor at `key_prefix`
-    /// (e.g. `zensight/netlink`).
+    /// Request + download an artifact of `kind` from the sensor at `producer`
+    /// (e.g. `netlink`).
     StartArtifact {
-        /// Sensor key prefix.
-        key_prefix: String,
+        /// Producer name.
+        producer: String,
         /// What to produce (report / snapshot / capture).
         kind: zensight_common::ArtifactKind,
         /// Target one sensor instance (`ArtifactRequest.opts.target_source`).
@@ -870,8 +912,8 @@ pub enum Message {
     /// user cancelled). Only tree kinds (snapshots) pick a folder first; blobs go
     /// to a temp dir then a Save-as dialog.
     ArtifactDestChosen {
-        /// Sensor key prefix.
-        key_prefix: String,
+        /// Producer name.
+        producer: String,
         /// What to produce.
         kind: zensight_common::ArtifactKind,
         /// Target one sensor instance, threaded from `StartArtifact`.
@@ -911,7 +953,7 @@ pub enum Message {
     /// Edit a text field of a sensor's capture form (#333).
     CaptureFormEdited {
         /// Sensor key prefix the form belongs to.
-        key_prefix: String,
+        producer: String,
         /// Which field changed.
         field: crate::view::artifact_fetch::CaptureField,
         /// The new text value.
@@ -920,7 +962,7 @@ pub enum Message {
     /// Toggle a boolean of a sensor's capture form (#333).
     CaptureFormToggled {
         /// Sensor key prefix the form belongs to.
-        key_prefix: String,
+        producer: String,
         /// Which toggle flipped.
         field: crate::view::artifact_fetch::CaptureToggle,
     },

@@ -3,7 +3,7 @@
 //! Calls `Manager.Subscribe()` once and consumes the `UnitNew`/`UnitRemoved`/
 //! `JobNew`/`JobRemoved` signals, filtered to watched units to bound volume. Each
 //! becomes a structured [`EventRecord`] in a bounded ring served on
-//! `@/query/events` (newest-first), and optionally nudges the sentinel (#277) for
+//! `@rpc/systemd/events` (newest-first), and optionally nudges the sentinel (#277) for
 //! instant re-evaluation. Job completions also carry the resulting `ActiveState`
 //! transition (`from`→`to`), tracked across events.
 
@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
-use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 
 use crate::dbus::ManagerProxy;
 
@@ -74,7 +74,7 @@ impl EventState {
         }
     }
 
-    /// Recent events, newest-first (for `@/query/events`).
+    /// Recent events, newest-first (for `@rpc/systemd/events`).
     pub fn recent(&self) -> Vec<EventRecord> {
         self.inner
             .ring
@@ -84,7 +84,7 @@ impl EventState {
     }
 
     /// Recent state-change lines for one unit, newest-first, capped at `max`
-    /// (#274). Feeds `UnitDetail.recent_changes` on `@/query/unit?name=`.
+    /// (#274). Feeds `UnitDetail.recent_changes` on `@rpc/systemd/unit?name=`.
     pub fn recent_for_unit(&self, unit: &str, max: usize) -> Vec<String> {
         self.inner
             .ring
@@ -111,9 +111,8 @@ impl EventState {
         snapshot
             .into_iter()
             .map(|(kind, total)| {
-                TelemetryPoint::new(
+                crate::telemetry_guard::checked_point(
                     source,
-                    Protocol::Systemd,
                     format!("events/{kind}_total"),
                     TelemetryValue::Counter(total),
                 )

@@ -286,7 +286,7 @@ impl MetricCollector {
         }
     }
 
-    /// Record a sensor alert (from the `@/alerts/*` control channel). Firing
+    /// Record a sensor alert (from the `state/*/alert/*` channel). Firing
     /// alerts are stored; resolved alerts clear their series. No-op unless
     /// alert export is enabled.
     pub fn record_alert(&self, alert: zensight_common::alert::Alert) {
@@ -303,7 +303,7 @@ impl MetricCollector {
     }
 
     /// Whether alert export is enabled (drives whether the subscriber bothers
-    /// decoding the `@/alerts/*` channel).
+    /// decoding the `state/*/alert/*` channel).
     pub fn export_alerts(&self) -> bool {
         self.prometheus_config.export_alerts
     }

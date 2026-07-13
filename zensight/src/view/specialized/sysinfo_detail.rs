@@ -1,5 +1,5 @@
 //! On-demand sysinfo process-explorer client: fetches the per-process table from
-//! the sensor's `@/query/processes` channel (principle P2 — the per-pid firehose
+//! the sensor's `@rpc/sysinfo/processes` procedure (principle P2 — the per-pid firehose
 //! is never streamed; the GUI pulls it only when a user drills into a host).
 //!
 //! Reuses the Iced-independent [`fetch_records`](super::netlink_detail::fetch_records)
@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use zensight_common::ProcessRecord;
+use zensight_common::{LatencyReport, ProcessRecord};
 
 use crate::view::specialized::fetch::Fetch;
 
@@ -42,14 +42,16 @@ impl ProcessSort {
     }
 }
 
-/// The process-explorer queryable key for a given host + sort. The sysinfo query
-/// channel is host-scoped (`zensight/sysinfo/<host>/@/query/processes`), unlike
+/// The process-explorer procedure key for a sort order. `Some(origin)`
+/// targets the drilled-in host's concrete key (the GUI's device `source` IS
+/// the origin chunk); `None` selects the fleet. Single-host deployments
 /// the single-instance netlink/netring sensors.
-pub fn processes_key(host: &str, sort: ProcessSort) -> String {
-    format!(
-        "zensight/sysinfo/{host}/@/query/processes?sort={}&top={TOP_N}",
-        sort.token()
-    )
+pub fn processes_key(origin: Option<&str>, sort: ProcessSort) -> String {
+    let key = match origin {
+        Some(o) => zensight_common::origin_rpc_key(o, "sysinfo", "processes"),
+        None => zensight_common::fleet_rpc_key("sysinfo", "processes"),
+    };
+    format!("{key}?sort={}&top={TOP_N}", sort.token())
 }
 
 /// A pid pivot into the process explorer (#313): carried by
@@ -85,10 +87,25 @@ pub fn pid_filter_verdict(procs: &[ProcessRecord], filter: &PidFilter) -> PidVer
     }
 }
 
+/// The eBPF saturation-histogram key (#99). No parameters: the sensor replies
+/// with the whole report, and it always declares the queryable — even when the
+/// histograms are `available: false` — so the GUI can tell "not built with
+/// eBPF" from "no answer at all".
+pub fn latency_key(origin: Option<&str>) -> String {
+    match origin {
+        Some(o) => zensight_common::origin_rpc_key(o, "sysinfo", "latency"),
+        None => zensight_common::fleet_rpc_key("sysinfo", "latency"),
+    }
+}
+
 /// On-demand process detail fetched for the selected sysinfo host.
 #[derive(Debug, Clone, Default)]
 pub struct SysinfoDetailState {
     pub processes: Fetch<Vec<ProcessRecord>>,
+    /// eBPF run-queue + block-I/O latency histograms (#99, `@rpc/sysinfo/latency`).
+    /// These answer what a load average cannot: is the CPU oversubscribed, and is
+    /// the disk the bottleneck.
+    pub latency: Fetch<LatencyReport>,
     /// The sort the last fetch used (drives the active toggle highlight).
     pub sort: ProcessSort,
     /// Active pid pivot (#313): filters the explorer to one process, with the
@@ -107,15 +124,52 @@ impl SysinfoDetailState {
     pub fn apply(&mut self, result: Result<Vec<ProcessRecord>, String>) {
         self.processes = Fetch::from_result(result);
     }
+
+    /// Mark a latency-histogram fetch as in flight.
+    pub fn loading_latency(&mut self) {
+        self.latency = Fetch::Loading;
+    }
+
+    /// Store the latency-histogram fetch outcome.
+    pub fn apply_latency(&mut self, result: Result<LatencyReport, String>) {
+        self.latency = Fetch::from_result(result);
+    }
 }
 
-/// Fetch + decode the process table for `host` sorted by `sort`.
+/// Fetch + decode the eBPF saturation histograms (#99).
+///
+/// The reply is a single `LatencyReport`, not a `Vec`, so this cannot reuse the
+/// record fan-in helpers — it takes the first reply from the drilled-in host.
+pub async fn fetch_latency(
+    session: Arc<zenoh::Session>,
+    origin: Option<String>,
+) -> Option<LatencyReport> {
+    let key = latency_key(origin.as_deref());
+    let replies = session
+        .get(&key)
+        .target(zenoh::query::QueryTarget::All)
+        .timeout(std::time::Duration::from_secs(3))
+        .await
+        .ok()?;
+    while let Ok(reply) = replies.recv_async().await {
+        if let Ok(sample) = reply.result()
+            && let Ok(report) =
+                zensight_common::decode_auto::<LatencyReport>(&sample.payload().to_bytes())
+        {
+            return Some(report);
+        }
+    }
+    None
+}
+
+/// Fetch + decode the process table sorted by `sort` — origin-scoped when
+/// the host's origin is known, else the fleet selector (first reply).
 pub async fn fetch_processes(
     session: Arc<zenoh::Session>,
-    host: String,
+    origin: Option<String>,
     sort: ProcessSort,
 ) -> Option<Vec<ProcessRecord>> {
-    super::netlink_detail::fetch_records(session, processes_key(&host, sort)).await
+    super::netlink_detail::fetch_records(session, processes_key(origin.as_deref(), sort)).await
 }
 
 #[cfg(test)]
@@ -124,13 +178,15 @@ mod tests {
 
     #[test]
     fn key_is_host_scoped_with_sort_and_top() {
+        // Mapped origin → the drilled-in host's concrete procedure key.
         assert_eq!(
-            processes_key("server01", ProcessSort::Cpu),
-            "zensight/sysinfo/server01/@/query/processes?sort=cpu&top=50"
+            processes_key(Some("h-3fa9c2d41b7e"), ProcessSort::Cpu),
+            "zensight/@v1/h-3fa9c2d41b7e/@rpc/sysinfo/processes?sort=cpu&top=50"
         );
+        // No mapping yet → the fleet selector fallback.
         assert_eq!(
-            processes_key("server01", ProcessSort::Mem),
-            "zensight/sysinfo/server01/@/query/processes?sort=mem&top=50"
+            processes_key(None, ProcessSort::Mem),
+            "zensight/@v1/*/@rpc/sysinfo/processes?sort=mem&top=50"
         );
         assert_eq!(ProcessSort::Io.token(), "io");
     }

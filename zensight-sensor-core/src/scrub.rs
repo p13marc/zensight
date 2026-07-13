@@ -25,7 +25,7 @@ pub const DEFAULT_SENSITIVE_KEYS: &[&str] = &[
 /// Replacement marker for scrubbed values.
 const SCRUBBED: &str = "********";
 
-/// Hard cap on a published cmdline, bytes (bounds `@/query/processes` payloads).
+/// Hard cap on a published cmdline, bytes (bounds `@rpc/sysinfo/processes` payloads).
 pub const CMDLINE_CAP_BYTES: usize = 512;
 
 /// Compiled scrubber: the default sensitive keys plus user-supplied

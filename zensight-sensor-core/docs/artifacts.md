@@ -8,30 +8,35 @@ sensor builds it off the poll/capture path, and the client fetches the bytes ove
 `@/report` and `@/snapshot` surfaces and hosts new kinds as pluggable producers.
 
 See [`../../docs/design/large-data-transfer.md`](../../docs/design/large-data-transfer.md) for the
-transfer-tier rationale and [`../../docs/KEYSPACE.md`](../../docs/KEYSPACE.md) §3
-for the `@/artifact` / `@/store` / `@/tree` keys.
+transfer-tier rationale and [`../../docs/KEYSPACE.md`](../../docs/KEYSPACE.md)
+for the `@rpc` artifact procedures and `@blob` delivery tiers.
 
 ## The control plane
 
-A sensor enables the channel with `SensorRunner::with_artifacts(source_id,
-producers)` (a no-op if no producer is enabled in config). The channel owns:
+A sensor enables the channel with `SensorRunner::with_artifacts(producers)` (a
+no-op if no producer is enabled in config). The channel owns three `@rpc`
+procedures (RFC 05's long-running-operation pattern — all queryables,
+request/reply, no publications):
 
 | Key | Primitive | Purpose |
 |-----|-----------|---------|
-| `<prefix>/@/artifact/request` | subscriber | PUT an `ArtifactRequest` to ask for an artifact |
-| `<prefix>/@/artifact/status` | queryable | GET the per-kind `ArtifactStatus` (lifecycle) |
-| `<prefix>/@/artifact/cancel` | subscriber | PUT an artifact id (ULID) to abort/free early |
+| `…/@rpc/<producer>/artifact/request` | queryable (write procedure) | GET with an `ArtifactRequest` body; value reply `{ id }` = accepted, failures ride `reply_err` |
+| `…/@rpc/<producer>/artifact/status` | queryable (read) | GET the per-kind `ArtifactStatus` (lifecycle) |
+| `…/@rpc/<producer>/artifact/cancel` | queryable (write procedure) | GET with the artifact id (ULID) to abort/free early |
 
-Delivery servers are spun up only for the tiers actually registered:
+Delivery servers are spun up only for the tiers actually registered, on the
+verbatim `@blob` plane (`zensight/@v1/<origin>/@blob/…` — `zenoh-blob` itself
+stays prefix-agnostic):
 
-- **Tier-1 (`Blob`)** — a `zenoh-blob` `BlobServer` under `<prefix>/@/artifact/blob`.
+- **Tier-1 (`Blob`)** — a `zenoh-blob` `BlobServer` under `…/@blob/artifact`.
 - **Tier-2 (`Tree`)** — a `TreeServer` + in-memory chunk store over
-  `<prefix>/@/store/<algo>/<hash>` (content-addressed, cacheable) and the index at
-  `<prefix>/@/tree/<id>`.
+  `…/@blob/store/<algo>/<hash>` (content-addressed, cacheable) and the index at
+  `…/@blob/tree/<id>`.
 
-Because the control plane is per-protocol (shared by every host running that
-protocol), a request's `opts.target_source` disambiguates which host answers; the
-channel drops a request whose `target_source` isn't its `source_id`.
+The keys are origin-scoped, but a fleet caller may fan a request out on the
+`*`-origin `@rpc` selector; a request's `opts.target_source` disambiguates which
+host answers — the channel drops a request whose `target_source` isn't its own
+source id.
 
 ## Lifecycle
 
@@ -64,15 +69,15 @@ stateDiagram-v2
 ```mermaid
 sequenceDiagram
     participant Operator
-    participant Request as "@/artifact/request"
+    participant Request as "@rpc …/artifact/request"
     participant Channel as ArtifactChannel
     participant Producer as ArtifactProducer
-    participant Status as "@/artifact/status"
+    participant Status as "@rpc …/artifact/status"
     participant Blob as "BlobServer / TreeServer"
     participant Client
 
-    Operator->>Request: PUT ArtifactRequest{id, kind, opts}
-    Request->>Channel: handle_request
+    Operator->>Request: GET with ArtifactRequest{id, kind, opts}
+    Request->>Channel: handle_request (value reply = accepted, reply_err = rejected)
     Channel->>Producer: accepts(kind)
     alt rejected, or busy/cooldown gate blocks
         Channel->>Channel: set_failed → Failed{reason}
@@ -148,4 +153,5 @@ status, and delivery.
 ## See also
 
 - [Framework](framework.md) — `with_artifacts` and the runner lifecycle.
-- [`../../docs/KEYSPACE.md`](../../docs/KEYSPACE.md) — `@/artifact` key contract.
+- [`../../docs/KEYSPACE.md`](../../docs/KEYSPACE.md) — the artifact `@rpc`
+  procedures and `@blob` tier contract.

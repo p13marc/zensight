@@ -5,14 +5,16 @@
 //! trees) surfaces, and hosts new artifact kinds (e.g. on-demand packet capture)
 //! without a third copy of the same machinery.
 //!
-//! An operator asks a sensor to produce an artifact by PUTting an
-//! [`ArtifactRequest`] to `<prefix>/@/artifact/request`; the sensor produces it
+//! An operator asks a sensor to produce an artifact by sending an
+//! [`ArtifactRequest`] to the `artifact/request` write procedure
+//! (`@rpc/<producer>/artifact/request`, request/reply); the sensor produces it
 //! off the poll/capture path and exposes per-kind [`ArtifactState`] on the
-//! `<prefix>/@/artifact/status` queryable. Once `Ready`, the artifact is fetched
-//! via `zenoh-blob` — a Tier-1 [`Delivery::Blob`] from the blob queryable under
-//! `<prefix>/@/artifact/blob`, or a Tier-2 [`Delivery::Tree`] from the
-//! content-addressed chunk (`<prefix>/@/store/<algo>/<hash>`) + index
-//! (`<prefix>/@/tree/<id>`) queryables. See `docs/KEYSPACE.md` §3 and
+//! `artifact/status` read procedure (`artifact/cancel` aborts). Once `Ready`,
+//! the artifact is fetched via `zenoh-blob` — a Tier-1 [`Delivery::Blob`] from
+//! the blob queryable under the `@blob/artifact` prefix, or a Tier-2
+//! [`Delivery::Tree`] from the content-addressed chunk
+//! (`@blob/store/<algo>/<hash>`) + index (`@blob/tree/<id>`) queryables. See
+//! `docs/KEYSPACE.md` §3 and
 //! `docs/design/large-data-transfer.md`.
 //!
 //! Typed [`ArtifactKind`] (rather than opaque JSON params) is deliberate: this is
@@ -94,7 +96,8 @@ pub struct ArtifactOptions {
     pub target_source: Option<String>,
 }
 
-/// PUT to `<prefix>/@/artifact/request` — the single authorization trigger.
+/// Payload of the `artifact/request` write procedure — the single
+/// authorization trigger.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactRequest {
     /// Client-chosen id correlating the request, status, and delivery.
@@ -262,7 +265,7 @@ pub struct KindStatus {
     pub advert: KindAdvert,
 }
 
-/// Reply of the `<prefix>/@/artifact/status` queryable: one entry per kind the
+/// Reply of the `artifact/status` read procedure: one entry per kind the
 /// sensor produces. Busy/cooldown/current are per kind, so a slow capture never
 /// blocks a quick debug bundle.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -342,7 +345,7 @@ mod tests {
                     hash: zenoh_blob::Hash([0u8; 32]),
                     created_ms: 1,
                 },
-                blob_prefix: "zensight/netlink/@/artifact/blob".into(),
+                blob_prefix: "zensight/@v1/h-3fa9c2d41b7e/@blob/artifact".into(),
             },
             expires_ms: 1,
         };
@@ -358,8 +361,8 @@ mod tests {
             kind: "snapshot".into(),
             delivery: Delivery::Tree {
                 tree_id: "t".into(),
-                store_prefix: "zensight/sysinfo/@/store".into(),
-                tree_prefix: "zensight/sysinfo/@/tree".into(),
+                store_prefix: "zensight/@v1/h-3fa9c2d41b7e/@blob/store".into(),
+                tree_prefix: "zensight/@v1/h-3fa9c2d41b7e/@blob/tree".into(),
                 summary: TreeSummary {
                     file_count: 3,
                     total_bytes: 42,

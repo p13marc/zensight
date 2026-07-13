@@ -1,7 +1,8 @@
-//! End-to-end tests of the unified `@/artifact` channel: a Tier-1 report blob and
-//! a Tier-2 snapshot tree served by one channel (per-kind status), plus the
-//! cancel-an-in-flight-production path (the design's risk #2). Single-session
-//! loopback (scouting off), mirroring `snapshot_channel.rs`.
+//! End-to-end tests of the unified artifact channel (the
+//! `@rpc/<producer>/artifact/*` procedures + `@blob` delivery): a Tier-1 report
+//! blob and a Tier-2 snapshot tree served by one channel (per-kind status), plus
+//! the cancel-an-in-flight-production path (the design's risk #2).
+//! Single-session loopback (scouting off), mirroring `snapshot_channel.rs`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -76,7 +77,7 @@ fn report_producer(prefix: &str) -> Arc<dyn ArtifactProducer> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn report_and_snapshot_on_one_channel() {
     let session = Arc::new(zenoh::open(isolated_config()).await.unwrap());
-    let prefix = "zensight/arttest1";
+    let prefix = "arttest1";
 
     // A snapshot source dir.
     let src = tempfile::tempdir().unwrap();
@@ -118,9 +119,11 @@ async fn report_and_snapshot_on_one_channel() {
 
     // --- Tier-1: request a report, download the blob. ---
     let report_id = Ulid::from_parts(1, 1);
-    session
-        .put(
-            artifact_request_key(prefix),
+    // v1 (RFC 05): requests are write procedures — GET with a body; the
+    // value reply is the ack, errors ride reply_err.
+    let replies = session
+        .get(artifact_request_key(prefix))
+        .payload(
             serde_json::to_vec(&ArtifactRequest {
                 id: report_id,
                 kind: ArtifactKind::Report {},
@@ -130,6 +133,8 @@ async fn report_and_snapshot_on_one_channel() {
         )
         .await
         .unwrap();
+    let reply = replies.recv_async().await.expect("request reply");
+    assert!(reply.result().is_ok(), "request refused: {reply:?}");
 
     let (manifest, blob_prefix) = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -175,9 +180,9 @@ async fn report_and_snapshot_on_one_channel() {
 
     // --- Tier-2: request a snapshot, download the tree. ---
     let snap_id = Ulid::from_parts(2, 2);
-    session
-        .put(
-            artifact_request_key(prefix),
+    let replies = session
+        .get(artifact_request_key(prefix))
+        .payload(
             serde_json::to_vec(&ArtifactRequest {
                 id: snap_id,
                 kind: ArtifactKind::Snapshot { dir: "snap".into() },
@@ -187,6 +192,8 @@ async fn report_and_snapshot_on_one_channel() {
         )
         .await
         .unwrap();
+    let reply = replies.recv_async().await.expect("snapshot request reply");
+    assert!(reply.result().is_ok(), "snapshot refused: {reply:?}");
 
     let (tree_id, store_prefix, tree_prefix) =
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -264,7 +271,7 @@ impl ArtifactProducer for SlowProducer {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_aborts_in_flight_production() {
     let session = Arc::new(zenoh::open(isolated_config()).await.unwrap());
-    let prefix = "zensight/arttest2";
+    let prefix = "arttest2";
 
     let started = Arc::new(tokio::sync::Notify::new());
     let producer = Arc::new(SlowProducer {
@@ -282,9 +289,9 @@ async fn cancel_aborts_in_flight_production() {
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     let id = Ulid::from_parts(5, 5);
-    session
-        .put(
-            artifact_request_key(prefix),
+    let replies = session
+        .get(artifact_request_key(prefix))
+        .payload(
             serde_json::to_vec(&ArtifactRequest {
                 id,
                 kind: ArtifactKind::Report {},
@@ -294,15 +301,26 @@ async fn cancel_aborts_in_flight_production() {
         )
         .await
         .unwrap();
+    let reply = replies.recv_async().await.expect("request reply");
+    assert!(reply.result().is_ok(), "request refused: {reply:?}");
 
     // Wait until the producer is actually running, then cancel it.
     tokio::time::timeout(Duration::from_secs(5), started.notified())
         .await
         .expect("producer never started");
-    session
-        .put(zensight_common::artifact_cancel_key(prefix), id.to_string())
+    let cancel_replies = session
+        .get(format!(
+            "{}?id={}",
+            zensight_common::artifact_cancel_key(prefix),
+            id
+        ))
         .await
         .unwrap();
+    let cancel_reply = cancel_replies.recv_async().await.expect("cancel reply");
+    assert!(
+        cancel_reply.result().is_ok(),
+        "cancel refused: {cancel_reply:?}"
+    );
 
     let status_key = artifact_status_key(prefix);
     let reason = tokio::time::timeout(Duration::from_secs(5), async {

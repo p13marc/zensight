@@ -1,6 +1,6 @@
 //! cgroup-v2 tree walk (#280): a `systemd-cgls`-style slice→service→scope
 //! hierarchy with per-node resource rollups, served on demand from
-//! `@/query/cgroups`.
+//! `@rpc/systemd/cgroups`.
 //!
 //! Unprivileged: reads the unified hierarchy under `/sys/fs/cgroup` (control files
 //! are world-readable). The walk is a point-in-time snapshot keyed by path

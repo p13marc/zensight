@@ -69,7 +69,7 @@ pub struct OtelConfig {
     #[serde(default = "default_true")]
     pub export_logs: bool,
 
-    /// Whether to export sensor alerts (`@/alerts/*`) as OTLP log records.
+    /// Whether to export sensor alerts (`state/*/alert/*`) as OTLP log records.
     ///
     /// Each alert transition (firing/resolved) is emitted as a log record on the
     /// `zensight.alerts` scope with severity mapped from the alert severity and
@@ -148,8 +148,9 @@ impl Default for OtelConfig {
 /// Traces signal configuration.
 ///
 /// Off by default: span synthesis is opt-in, and artifact-transfer spans are
-/// not implemented (artifact status lives on `@/artifact/status`, which the
-/// exporter does not subscribe to — only `@/alerts/*` is observed).
+/// not implemented (artifact status lives on the `artifact/status` read
+/// procedure, which the exporter never GETs — only `state/*/alert/*` is
+/// observed).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TracesConfig {
     /// Synthesize + export alert-lifecycle spans via OTLP (default: false).
@@ -184,10 +185,13 @@ pub enum OtlpProtocol {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FilterConfig {
     /// Zenoh subscription key expression for telemetry (R6/#357). Defaults to the
-    /// broad `zensight/**`; narrow it (e.g. `zensight/netring/**`) to tame the
-    /// firehose at the *subscription* — unwanted protocols and the `_meta/**`
-    /// control plane never reach this exporter over the wire. The `@/alerts/*`
-    /// subscriber is separate and unaffected. `include_protocols` etc. still apply
+    /// full telemetry class selector; narrow it (e.g.
+    /// `zensight/@v1/*/telemetry/netring/**`) to tame the
+    /// firehose at the *subscription* — unwanted protocols never reach this
+    /// exporter over the wire, and the state plane / non-telemetry classes
+    /// can't match the telemetry class selector by construction. The
+    /// `state/*/alert/*` subscriber is separate and unaffected.
+    /// `include_protocols` etc. still apply
     /// as a post-receive filter.
     #[serde(default)]
     pub key_expr: Option<String>,
@@ -334,7 +338,7 @@ mod tests {
                 }
             },
             filters: {
-                key_expr: "zensight/netring/**",
+                key_expr: "zensight/@v1/*/telemetry/netring/**",
                 include_protocols: ["snmp", "sysinfo"],
                 exclude_sources: ["test-device"]
             },
@@ -362,7 +366,7 @@ mod tests {
         assert_eq!(config.filters.include_protocols, vec!["snmp", "sysinfo"]);
         assert_eq!(
             config.filters.key_expr.as_deref(),
-            Some("zensight/netring/**")
+            Some("zensight/@v1/*/telemetry/netring/**")
         );
         assert_eq!(config.logging.level, "debug");
         assert_eq!(config.logging.format, LogFormat::Json);

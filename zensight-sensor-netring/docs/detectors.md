@@ -3,9 +3,9 @@
 netring's NDR surface runs three families off the same tracked flow / DNS
 stream: **built-in anomaly detectors** (`anomalies.*`), **threat-intel**
 (`threat.*`), and the **passive asset inventory** (`collect.assets`). Every hit
-becomes an `Alert` on `zensight/netring/@/alerts/<alert_key>` through one uniform
-drain (`ChannelSink → to_view → map::anomaly_alert`), so they share the same
-lifecycle, labelling, and cardinality discipline.
+becomes an `Alert` on `zensight/@v1/<origin>/state/netring/alert/<alert_key>`
+through one uniform drain (`ChannelSink → to_view → map::anomaly_alert`), so
+they share the same lifecycle, labelling, and cardinality discipline.
 
 Sources: this crate's `src/detectors.rs` (the `Tuned` registry), `src/map.rs`
 (the anomaly→alert mapping and ATT&CK table), and `telemetry.md`.
@@ -15,7 +15,8 @@ Sources: this crate's `src/detectors.rs` (the `Tuned` registry), `src/map.rs`
 ## Cardinality discipline
 
 An alert is **bucketed** by `(rule, <key>)` via the labels that feed `alert_key`
-(a stable FNV-1a hash of `source + rule + sorted-labels`). Detectors deliberately
+(a stable 16-hex FNV-1a hash of `rule + sorted-labels` — the origin chunk
+already identifies the host, so `source` is not hashed). Detectors deliberately
 key on a *stable* subject so activity that rotates its ephemeral fields collapses
 to one series:
 
@@ -70,9 +71,11 @@ agents, DGA-scored CDN/randomised-but-benign SLDs).
 
 ---
 
-## Runtime detection tuning — `@/commands/detectors` (#121)
+## Runtime detection tuning — `@rpc/netring/detectors` (#121)
 
-The `detectors` command channel (status on `@/status/detectors`) hot-swaps the
+The `detectors` procedure pair — write via a GET with payload on
+`zensight/@v1/<origin>/@rpc/netring/detectors/set`, read the current
+configuration with a plain GET on `.../@rpc/netring/detectors` — hot-swaps the
 allowlist and each detector's **mute / threshold** without a restart — surfaced
 in the GUI Security view's *Detection Tuning* panel.
 
@@ -104,7 +107,7 @@ flowchart LR
     P -->|"kept, DNS-driven"| N["keep stock source-only key"]
     K --> A["map::anomaly_alert"]
     N --> A
-    A --> Z["@/alerts/&lt;alert_key&gt;"]
+    A --> Z["state/netring/alert/&lt;alert_key&gt;"]
 ```
 
 Stock gates are constructed at the **lowest sensible floor** — below the runtime
@@ -122,7 +125,8 @@ pipeline at all, so enabling it still needs a restart. Tuning and mute/unmute of
 
 ## Threat-intel (`threat.*`)
 
-Hits become alerts on `@/alerts` via the same drain as the built-in detectors.
+Hits become alerts on `state/netring/alert/*` via the same drain as the
+built-in detectors.
 
 | Arm | Config | Notes |
 |---|---|---|
@@ -131,13 +135,14 @@ Hits become alerts on `@/alerts` via the same drain as the built-in detectors.
 | Sigma rules | `threat.sigma.{enabled,dir}` + `--features sigma` | evaluate `.yml` Sigma rules over flow observations; no-op without the feature |
 | YARA scanning | `threat.yara.file` + `--features yara` | scan reassembled flow payloads against a compiled `.yar`/`.yara` rule set |
 
-### Runtime threat-intel reload — `@/commands/threat_intel` (#328)
+### Runtime threat-intel reload — `@rpc/netring/threat_intel` (#328)
 
-The `threat_intel` command channel (status on `@/status/threat_intel`) hot-swaps
-the live **IOC** set (`set_ioc` / `reload_ioc_files` / `clear_ioc`) and **YARA**
-rules (`set_yara`, `--features yara`) without a restart — surfaced in the GUI
-Security view's *Threat Intel* panel. A bad YARA source is rejected with a compile
-error in the status reply and the previous rules keep scanning.
+The `threat_intel` procedure pair (write on `@rpc/netring/threat_intel/set`,
+current configuration read on `@rpc/netring/threat_intel`) hot-swaps the live
+**IOC** set (`set_ioc` / `reload_ioc_files` / `clear_ioc`) and **YARA** rules
+(`set_yara`, `--features yara`) without a restart — surfaced in the GUI
+Security view's *Threat Intel* panel. A bad YARA source is rejected with a
+compile error in the reply and the previous rules keep scanning.
 
 **Arming:** the matchers are frozen at build time, so set `threat.reload = true`
 (or provide startup indicators / a `threat.yara.file`) to always build the IOC
@@ -151,8 +156,8 @@ of an unarmed matcher is a reported no-op.
 Discovers hosts on the wire from L2/L3 discovery traffic (ARP / NDP / LLDP, + CDP
 via `collect.asset_cdp`) into a MAC-keyed inventory — covering hosts that emit no
 telemetry of their own. It streams only a low-cardinality `assets/discovered`
-count; the per-asset detail is served on `@/query/assets` (principle: keep the
-bus low-cardinality).
+count; the per-asset detail is served on `@rpc/netring/assets` (principle: keep
+the bus low-cardinality).
 
 Records carry MAC / IPs / hostname set / vendor / platform / capabilities /
 seen-via, plus (netring 0.29) a classified **role** (router / switch /
@@ -167,13 +172,13 @@ term — so `asset_cdp` forces a capture-all (fail-open) prefilter and is opt-in
 top of `assets`.
 
 With `evidence` on, the asset inventory and passive-DNS cache are republished as
-identity evidence for the correlator (see [telemetry.md](telemetry.md#identity-evidence--zensight_metaevidence-307)).
+identity evidence for the correlator (see [telemetry.md](telemetry.md#identity-evidence--statenetringevidence-307)).
 
 ---
 
 ## Capture-health alerts
 
-Not anomaly detectors, but they share the `@/alerts` channel as
+Not anomaly detectors, but they share the `state/netring/alert/*` family as
 `AlertKind::SensorHealth`:
 
 - **`capture-overload`** (#71) — the windowed capture drop-rate crossing the

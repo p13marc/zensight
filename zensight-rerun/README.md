@@ -6,8 +6,10 @@
 > evaluation concludes "do not adopt". Design notes and findings: [`docs/plans/rerun/`](../docs/plans/rerun/).
 
 A standalone adapter that consumes the Zenoh bus exactly like the exporters do — telemetry
-(`zensight/**`), alerts (`zensight/*/@/alerts/*`), health (`zensight/*/*/@/health`), and
-correlated host entities (`zensight/_meta/entity/**`) — and feeds a Rerun recording stream:
+(`zensight/@v1/*/telemetry/**`), alerts (`zensight/@v1/*/state/*/alert/*`), health
+(`zensight/@v1/*/state/*/health`), and correlated host entities
+(`zensight/@v1/@catalog/state/entity/*`, plus a one-shot storage-shaped GET seed on the same
+selector) — and feeds a Rerun recording stream:
 live to a viewer over gRPC, into a `.rrd` file, or both.
 
 Layering rule (grep-gated): `src/rerun_sink.rs` is the **only** module that may `use rerun`.
@@ -51,9 +53,9 @@ correlated-incident script are documented in
 
 | Bus | Rerun |
 |---|---|
-| `zensight/<proto>/<source>/<metric>` (correlated) | `hosts/<entity_id>/<proto>/<metric>` |
-| `zensight/<proto>/<source>/<metric>` (uncorrelated) | `sensors/<proto>/<source>/<metric>` |
-| `zensight/<proto>/@/alerts/<key>` | `alerts/<proto>/<source>/<alert_key>` (+ `/state` lane) |
+| `zensight/@v1/<origin>/telemetry/<proto>/…` (source correlated) | `hosts/<entity_id>/<proto>/<metric>` |
+| `zensight/@v1/<origin>/telemetry/<proto>/…` (uncorrelated) | `sensors/<proto>/<source>/<metric>` |
+| `zensight/@v1/<origin>/state/<proto>/alert/<key>` | `alerts/<proto>/<source>/<alert_key>` (+ `/state` lane) |
 | health transitions | `health/<sensor>/<source>` |
 
 Full mapping: [`docs/plans/rerun/02-mapping.md`](../docs/plans/rerun/02-mapping.md).

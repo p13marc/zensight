@@ -1,8 +1,8 @@
 //! End-to-end media-plane test (#359) over real Zenoh sessions.
 //!
 //! Exercises the whole minimal media enabler without the H.264/parallax daemon:
-//! a mock stream sensor advertises a stream on `@/query/streams`, honors an
-//! `OpenStream` command on `@/commands/stream`, then publishes canned JPEG bytes
+//! a mock stream sensor advertises a stream on `@rpc/netring/streams`, honors an
+//! `OpenStream` command on `@rpc/netring/stream/set`, then publishes canned JPEG bytes
 //! on the opaque `@media/.../preview/jpeg` key via [`RawMediaPublisher`]. A
 //! viewer queries the catalogue, opens the stream, subscribes to the media key,
 //! and must observe a **keyframe-flagged** [`FrameMeta`] attachment produced by
@@ -105,8 +105,7 @@ async fn media_plane_e2e_stream_control_and_keyframe() {
         .expect("open connecting viewer session");
 
     let source = unique_source();
-    let prefix = format!("zensight/netring/{source}");
-    let publisher = Publisher::new(sensor.clone(), prefix.clone(), Format::Json);
+    let publisher = Publisher::new(sensor.clone(), "netring", Format::Json);
 
     let descriptors = vec![StreamDescriptor {
         stream: "cam0".into(),
@@ -115,8 +114,8 @@ async fn media_plane_e2e_stream_control_and_keyframe() {
         description: Some("front door".into()),
     }];
 
-    // --- Sensor: serve the stream catalogue on @/query/streams. ---
-    let streams_key = query_key(&prefix, "streams");
+    // --- Sensor: serve the stream catalogue on @rpc/netring/streams. ---
+    let streams_key = query_key("netring", "streams");
     let queryable = sensor
         .declare_queryable(&streams_key)
         .await
@@ -132,8 +131,8 @@ async fn media_plane_e2e_stream_control_and_keyframe() {
         });
     }
 
-    // --- Sensor: honor OpenStream on @/commands/stream. ---
-    let cmd_key = command_key(&prefix, "stream");
+    // --- Sensor: honor OpenStream on @rpc/netring/stream/set. ---
+    let cmd_key = command_key("netring", "stream");
     let cmd_sub = sensor
         .declare_subscriber(&cmd_key)
         .await

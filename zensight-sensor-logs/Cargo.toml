@@ -10,6 +10,7 @@ name = "zensight-sensor-logs"
 path = "src/main.rs"
 
 [dependencies]
+zensight-keyspace.workspace = true
 zensight-common.workspace = true
 zensight-sensor-core.workspace = true
 zenoh.workspace = true

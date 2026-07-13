@@ -96,9 +96,9 @@ async fn v4l2_camera_preview_delivers_real_frames() {
 
     let (sensor, viewer) = isolated_pair().await;
     let source = "hw-camera";
-    let host_prefix = format!("zensight/parallax/{source}");
+    let host_prefix = "parallax".to_string();
 
-    let publisher = Publisher::new(sensor.clone(), config.key_prefix.clone(), Format::Json);
+    let publisher = Publisher::new(sensor.clone(), "parallax", Format::Json);
     let registry = StatsRegistry::default();
     let handle = SessionManager::spawn(
         catalog.clone(),

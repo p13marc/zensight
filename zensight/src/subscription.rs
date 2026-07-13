@@ -4,27 +4,22 @@ use iced::keyboard::{self, Key, key};
 use zenoh::sample::SampleKind;
 use zenoh_ext::{AdvancedSubscriberBuilderExt, HistoryConfig, RecoveryConfig};
 
+use zensight_common::keyexpr::{parse_wire_key, refine_wire_key};
 use zensight_common::{
-    Alert, DeviceLiveness, ErrorReport, HealthSnapshot, HostEntity, LinkProfile, SensorInfo,
-    TelemetryPoint, ZenohConfig, all_entity_wildcard, all_telemetry_wildcard, decode_auto,
-    entities_query_key,
+    Alert, ErrorReport, HealthSnapshot, HostEntity, LinkProfile, SensorInfo, TelemetryPoint,
+    ZenohConfig, all_entity_wildcard, all_telemetry_wildcard, decode_auto, entities_query_key,
 };
+use zensight_keyspace::{Class, ClassOrPlane, CommonState, Origin};
 
 use crate::message::Message;
 
-/// Key expression for legacy (protocol-scoped) sensor liveliness tokens.
-/// Kept for one release so pre-host-scoping sensors stay visible.
-const SENSOR_LIVELINESS_EXPR: &str = "zensight/*/@/alive";
+/// v1 sensor liveliness tokens (RFC 04 §5):
+/// `zensight/@v1/<origin>/state/<producer>/alive`.
+const SENSOR_LIVELINESS_EXPR: &str = "zensight/@v1/*/state/*/alive";
 
-/// Key expression for legacy (protocol-scoped) device liveliness tokens.
-const DEVICE_LIVELINESS_EXPR: &str = "zensight/*/@/devices/*/alive";
-
-/// Key expression for host-scoped sensor liveliness tokens
-/// (`zensight/<protocol>/<source>/@/alive`).
-const SENSOR_LIVELINESS_SCOPED_EXPR: &str = "zensight/*/*/@/alive";
-
-/// Key expression for host-scoped device liveliness tokens.
-const DEVICE_LIVELINESS_SCOPED_EXPR: &str = "zensight/*/*/@/devices/*/alive";
+/// v1 device liveliness tokens:
+/// `zensight/@v1/<origin>/state/<producer>/device/<device>/alive`.
+const DEVICE_LIVELINESS_EXPR: &str = "zensight/@v1/*/state/*/device/*/alive";
 
 /// Everything the telemetry subscription is keyed on (#364).
 ///
@@ -36,21 +31,63 @@ pub struct LinkConfig {
     /// How to join the Zenoh mesh.
     pub zenoh: ZenohConfig,
     /// Telemetry subscription key expressions. Empty ⇒ the full
-    /// [`all_telemetry_wildcard`] firehose (`zensight/**`).
+    /// [`all_telemetry_wildcard`] class selector
+    /// (`zensight/@v1/*/telemetry/**`).
     pub scope: Vec<String>,
     /// Standard (history/recovery) vs. constrained (plain, store back-fill).
     pub profile: LinkProfile,
+    /// **Focus mode** (#476): when set, subscribe to this one origin
+    /// (`h-<12hex>`) instead of the fleet — telemetry, state, alerts and
+    /// liveliness all narrow to it. Runtime-only; not persisted.
+    ///
+    /// This is the clearest bandwidth win the v1 keyspace unlocked: the origin
+    /// is a single chunk at a fixed position, so "one host's whole data plane
+    /// and nothing else" is expressible at all (RFC 09 §1). Overrides `scope`.
+    pub focus: Option<String>,
 }
 
-/// The telemetry key expressions to subscribe to: the configured scope, or the
-/// `zensight/**` firehose when no scope is set. Control-plane (`@/…`) and
-/// `_meta` subscribers are unaffected — those keys are `@`-verbatim or
-/// `_meta`-prefixed and never ride the telemetry scope.
+/// The telemetry key expressions to subscribe to.
+///
+/// Focus mode wins over the configured scope: the point of focusing is that
+/// *nothing* but the chosen host crosses the link, and a scope entry naming
+/// another origin would defeat that. Otherwise: the configured scope, or the
+/// full telemetry class selector. The state/entity subscribers are unaffected
+/// by `scope` — classes are disjoint (D3) — but they *are* narrowed by focus.
 fn effective_scopes(config: &LinkConfig) -> Vec<String> {
-    if config.scope.is_empty() {
-        vec![all_telemetry_wildcard()]
-    } else {
-        config.scope.clone()
+    match &config.focus {
+        Some(origin) => vec![zensight_common::keyexpr::origin_telemetry_wildcard(origin)],
+        None if config.scope.is_empty() => vec![all_telemetry_wildcard()],
+        None => config.scope.clone(),
+    }
+}
+
+/// The state-plane selector: one origin under focus, the fleet otherwise.
+fn state_selector(config: &LinkConfig) -> String {
+    match &config.focus {
+        Some(origin) => zensight_common::keyexpr::origin_state_wildcard(origin),
+        None => zensight_common::keyexpr::all_state_wildcard(),
+    }
+}
+
+/// The alert seed selector: one origin under focus, the fleet otherwise.
+fn alerts_selector(config: &LinkConfig) -> String {
+    match &config.focus {
+        Some(origin) => zensight_common::keyexpr::origin_alerts_wildcard(origin),
+        None => zensight_common::all_alerts_wildcard(),
+    }
+}
+
+/// The sensor/device liveliness selectors: one origin under focus, else fleet.
+fn liveliness_exprs(config: &LinkConfig) -> (String, String) {
+    match &config.focus {
+        Some(origin) => (
+            zensight_common::keyexpr::origin_liveliness_expr(origin),
+            zensight_common::keyexpr::origin_device_liveliness_expr(origin),
+        ),
+        None => (
+            SENSOR_LIVELINESS_EXPR.to_string(),
+            DEVICE_LIVELINESS_EXPR.to_string(),
+        ),
     }
 }
 
@@ -88,42 +125,31 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
             // a multi-second backlog (observed live: alerts-seed query 0 timing
             // out at exactly 10s with every reply arriving as "unknown Query").
 
-            // The telemetry subscriber's `zensight/**` does NOT match the
-            // control-plane keys: a key chunk starting with `@` is matched
-            // verbatim in Zenoh, so `**` never crosses into `zensight/<proto>/@/…`.
-            // Health, errors, alerts, and liveness therefore need their own plain
-            // subscriber on `zensight/*/@/**`. (It can't double-deliver telemetry,
-            // which has a `<source>` segment where this has `@`.)
+            // v1 (epic #453): everything stateful rides ONE class selector —
+            // health, errors, sensor registrations, device liveness docs,
+            // alerts, evidence, stream docs are all
+            // `zensight/@v1/<origin>/state/<producer>/<subject…>` (RFC 04).
+            // The telemetry selector cannot double-deliver it (class chunks
+            // differ, design property D3), and the verbatim planes
+            // (@rpc/@media/@blob) are structurally invisible (D2).
+            // Focus mode narrows this to one origin (#476); the catalog entity
+            // subscriber below deliberately stays fleet-wide, because it is what
+            // lets an operator un-focus and focus onto a *different* host.
             let control = session
-                .declare_subscriber("zensight/*/@/**")
+                .declare_subscriber(state_selector(&config))
                 .with(flume::unbounded())
                 .await
                 .ok();
             if control.is_none() {
-                tracing::warn!("Failed to create control-plane subscriber (health/alerts)");
+                tracing::warn!("Failed to create state-plane subscriber (health/alerts)");
             }
 
-            // Host-scoped control plane: per-instance state keys carry the
-            // `<source>` segment (`zensight/<proto>/<source>/@/health` etc.) so
-            // machines never collide. The legacy `zensight/*/@/**` subscriber
-            // above can't match these (its second chunk is the verbatim `@`),
-            // and the pinned keyexpr tests in zensight-common prove the two
-            // subscribers never double-deliver a concrete key. It stays for the
-            // protocol-scoped alert keys + pre-host-scoping sensors.
-            let control_scoped = session
-                .declare_subscriber("zensight/*/*/@/**")
-                .with(flume::unbounded())
-                .await
-                .ok();
-            if control_scoped.is_none() {
-                tracing::warn!("Failed to create host-scoped control-plane subscriber");
-            }
-
-            // Entity subscriber (#306): correlator host-entity docs live under
-            // `zensight/_meta/entity/**`, which the telemetry `zensight/**` and
-            // the control `zensight/*/@/**` subscribers both miss (second
-            // segment is `_meta`, not `@`). Plain subscriber, unbounded — puts
-            // are HostEntity docs, deletes are tombstones.
+            // Entity subscriber (#306): catalog host-entity docs live under
+            // `zensight/@v1/@catalog/state/entity/*` — the `*`-origin
+            // telemetry/state selectors never match the verbatim `@catalog`
+            // chunk (D4), so the catalog is named explicitly. Plain
+            // subscriber, unbounded — puts are HostEntity docs, deletes are
+            // tombstones.
             let entity_sub = session
                 .declare_subscriber(&all_entity_wildcard())
                 .with(flume::unbounded())
@@ -133,10 +159,12 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                 tracing::warn!("Failed to create entity subscriber (host entities)");
             }
 
+            let (sensor_liveliness_expr, device_liveliness_expr) = liveliness_exprs(&config);
+
             // Subscribe to sensor liveliness tokens
             let sensor_liveliness = match session
                 .liveliness()
-                .declare_subscriber(SENSOR_LIVELINESS_EXPR)
+                .declare_subscriber(sensor_liveliness_expr.as_str())
                 .await
             {
                 Ok(sub) => Some(sub),
@@ -149,7 +177,7 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
             // Subscribe to device liveliness tokens
             let device_liveliness = match session
                 .liveliness()
-                .declare_subscriber(DEVICE_LIVELINESS_EXPR)
+                .declare_subscriber(device_liveliness_expr.as_str())
                 .await
             {
                 Ok(sub) => Some(sub),
@@ -159,39 +187,12 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                 }
             };
 
-            // Host-scoped liveliness tokens (`zensight/<proto>/<source>/@/…`).
-            // Declared alongside the legacy shape; the parsers accept both and
-            // the two key expressions never match the same concrete key.
-            let sensor_liveliness_scoped = match session
-                .liveliness()
-                .declare_subscriber(SENSOR_LIVELINESS_SCOPED_EXPR)
-                .await
-            {
-                Ok(sub) => Some(sub),
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to create scoped sensor liveliness subscriber");
-                    None
-                }
-            };
-
-            let device_liveliness_scoped = match session
-                .liveliness()
-                .declare_subscriber(DEVICE_LIVELINESS_SCOPED_EXPR)
-                .await
-            {
-                Ok(sub) => Some(sub),
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to create scoped device liveliness subscriber");
-                    None
-                }
-            };
-
             // Query existing liveliness tokens to get current state. The seed
             // queries are bounded to a short timeout: they run before telemetry
             // drains, so a dead/slow sensor must not hold up the whole GUI for
             // zenoh's default 10s.
             let seed_timeout = std::time::Duration::from_secs(3);
-            for expr in [SENSOR_LIVELINESS_EXPR, SENSOR_LIVELINESS_SCOPED_EXPR] {
+            for expr in [sensor_liveliness_expr.as_str()] {
                 if let Ok(replies) = session
                     .liveliness()
                     .get(expr)
@@ -208,7 +209,7 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                 }
             }
 
-            for expr in [DEVICE_LIVELINESS_EXPR, DEVICE_LIVELINESS_SCOPED_EXPR] {
+            for expr in [device_liveliness_expr.as_str()] {
                 if let Ok(replies) = session
                     .liveliness()
                     .get(expr)
@@ -225,23 +226,28 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                 }
             }
 
-            // Late-joiner alert seed: fetch each sensor's current firing set so a
-            // GUI opened after an alert fired shows it immediately. (The control
-            // subscriber above is already declared, so an alert firing during
-            // this get is not lost.)
+            // Late-joiner alert seed (v1, RFC 05 §4): a plain GET on the alert
+            // state selector, answered storage-shaped — one firing alert per
+            // reply on its concrete key — by producers and/or a router
+            // storage. (The state subscriber above is already declared, so an
+            // alert firing during this get is not lost.)
             if let Ok(replies) = session
-                .get("zensight/*/@/query/alerts")
+                .get(alerts_selector(&config))
+                .target(zenoh::query::QueryTarget::All)
                 .timeout(seed_timeout)
                 .await
             {
+                let mut seeded = Vec::new();
                 while let Ok(reply) = replies.recv_async().await {
                     if let Ok(sample) = reply.result()
-                        && let Ok(alerts) = zensight_common::decode_auto::<Vec<Alert>>(
-                            &sample.payload().to_bytes(),
-                        )
+                        && let Ok(alert) =
+                            zensight_common::decode_auto::<Alert>(&sample.payload().to_bytes())
                     {
-                        yield Message::AlertsSeed(alerts);
+                        seeded.push(alert);
                     }
+                }
+                if !seeded.is_empty() {
+                    yield Message::AlertsSeed(seeded);
                 }
             }
 
@@ -251,17 +257,22 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
             // degraded per-source path, by construction.
             if let Ok(replies) = session
                 .get(entities_query_key())
+                .target(zenoh::query::QueryTarget::All)
                 .timeout(seed_timeout)
                 .await
             {
+                let mut seeded = Vec::new();
                 while let Ok(reply) = replies.recv_async().await {
                     if let Ok(sample) = reply.result()
-                        && let Ok(entities) = zensight_common::decode_auto::<Vec<HostEntity>>(
+                        && let Ok(entity) = zensight_common::decode_auto::<HostEntity>(
                             &sample.payload().to_bytes(),
                         )
                     {
-                        yield Message::EntitySeed(entities);
+                        seeded.push(entity);
                     }
+                }
+                if !seeded.is_empty() {
+                    yield Message::EntitySeed(seeded);
                 }
             }
 
@@ -425,39 +436,9 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                         }
                     }
 
-                    // Host-scoped sensor liveliness subscription
-                    result = async {
-                        match &sensor_liveliness_scoped {
-                            Some(sub) => sub.recv_async().await,
-                            None => std::future::pending().await,
-                        }
-                    } => {
-                        if let Ok(sample) = result {
-                            let is_alive = sample.kind() == SampleKind::Put;
-                            if let Some(msg) = parse_sensor_liveliness(sample.key_expr().as_str(), is_alive) {
-                                yield msg;
-                            }
-                        }
-                    }
-
-                    // Host-scoped device liveliness subscription
-                    result = async {
-                        match &device_liveliness_scoped {
-                            Some(sub) => sub.recv_async().await,
-                            None => std::future::pending().await,
-                        }
-                    } => {
-                        if let Ok(sample) = result {
-                            let is_alive = sample.kind() == SampleKind::Put;
-                            if let Some(msg) = parse_device_liveliness(sample.key_expr().as_str(), is_alive) {
-                                yield msg;
-                            }
-                        }
-                    }
-
-                    // Control plane (plain puts: health / errors / alerts /
-                    // device liveness) — the AdvancedSubscriber doesn't deliver
-                    // these, so they come through a plain subscriber here.
+                    // State plane (v1): health / errors / registrations /
+                    // alerts / device liveness / stream docs — plain puts and
+                    // tombstone deletes on one class selector.
                     result = async {
                         match &control {
                             Some(sub) => sub.recv_async().await,
@@ -467,29 +448,10 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                         if let Ok(sample) = result {
                             let key = sample.key_expr().as_str();
                             if sample.kind() == SampleKind::Delete {
-                                if let Some(msg) = parse_alert_cleared(key) {
+                                if let Some(msg) = parse_tombstone(key) {
                                     yield msg;
                                 }
                             } else {
-                                let payload = sample.payload().to_bytes();
-                                if let Some(msg) = decode_sample(key, &payload) {
-                                    yield msg;
-                                }
-                            }
-                        }
-                    }
-
-                    // Host-scoped control plane: per-instance health / errors /
-                    // status / device liveness on `zensight/<proto>/<source>/@/…`.
-                    result = async {
-                        match &control_scoped {
-                            Some(sub) => sub.recv_async().await,
-                            None => std::future::pending().await,
-                        }
-                    } => {
-                        if let Ok(sample) = result {
-                            let key = sample.key_expr().as_str();
-                            if sample.kind() != SampleKind::Delete {
                                 let payload = sample.payload().to_bytes();
                                 if let Some(msg) = decode_sample(key, &payload) {
                                     yield msg;
@@ -509,7 +471,7 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                         if let Ok(sample) = result {
                             let key = sample.key_expr().as_str();
                             if sample.kind() == SampleKind::Delete {
-                                if let Some(msg) = parse_entity_removed(key) {
+                                if let Some(msg) = parse_tombstone(key) {
                                     yield msg;
                                 }
                             } else {
@@ -535,7 +497,7 @@ const TELEMETRY_BATCH_MAX: usize = 512;
 fn sample_to_message(sample: &zenoh::sample::Sample) -> Option<Message> {
     let key = sample.key_expr().as_str();
     if sample.kind() == SampleKind::Delete {
-        parse_alert_cleared(key)
+        parse_tombstone(key)
     } else {
         decode_sample(key, &sample.payload().to_bytes())
     }
@@ -549,30 +511,23 @@ fn push_sorted(msg: Message, telemetry: &mut Vec<TelemetryPoint>, others: &mut V
     }
 }
 
-/// Parse a sensor liveliness key expression.
+/// Parse a v1 sensor liveliness key:
+/// `zensight/@v1/<origin>/state/<producer>/alive` (RFC 04 §5). The origin is
+/// carried as the instance discriminator (the legacy `source` slot).
 ///
-/// Key formats: `zensight/<protocol>/<source>/@/alive` (host-scoped) or the
-/// legacy `zensight/<protocol>/@/alive`. Returns the protocol and, on the
-/// scoped shape, the instance's source.
+/// `alive` is a **liveliness token**, not a data subject — the registry rejects
+/// it as a subject chunk on purpose (RFC 03 §3) — so this stays structural.
 fn parse_sensor_liveliness(key: &str, is_alive: bool) -> Option<Message> {
-    // Parse without allocating a Vec.
-    let rest = key.strip_prefix("zensight/")?;
-    let (protocol, rest) = rest.split_once('/')?;
-    // The scoped wildcard also matches `zensight/_meta/correlator/@/alive`
-    // (the correlator's single-writer guard) — not a sensor.
-    if protocol == "_meta" {
+    let parsed = parse_wire_key(key)?;
+    // `@catalog/state/alive` is a service token, not a sensor.
+    let Origin::Host(_) = parsed.origin else {
+        return None;
+    };
+    if parsed.subject != ["alive"] {
         return None;
     }
-    let source = if rest == "@/alive" {
-        None
-    } else {
-        let (source, rest) = rest.split_once('/')?;
-        if rest != "@/alive" {
-            return None;
-        }
-        Some(source.to_string())
-    };
-    let protocol = protocol.to_string();
+    let protocol = parsed.producer?.name().to_string();
+    let source = Some(parsed.origin.chunk().to_string());
     if is_alive {
         tracing::info!(protocol = %protocol, source = ?source, "Sensor came online");
         Some(Message::SensorOnline(protocol, source))
@@ -582,33 +537,22 @@ fn parse_sensor_liveliness(key: &str, is_alive: bool) -> Option<Message> {
     }
 }
 
-/// Parse a device liveliness key expression.
-///
-/// Key formats: `zensight/<protocol>/<source>/@/devices/<device_id>/alive`
-/// (host-scoped) or the legacy shape without `<source>`. The GUI keys devices
-/// by `(protocol, device_id)` — the source segment only disambiguates the
-/// publishing instance, so it is parsed but not carried further.
+/// Parse a v1 device liveliness key:
+/// `zensight/@v1/<origin>/state/<producer>/device/<device>/alive`. Also a
+/// liveliness token, so also structural.
 fn parse_device_liveliness(key: &str, is_alive: bool) -> Option<Message> {
-    // Parse without allocating a Vec.
-    let rest = key.strip_prefix("zensight/")?;
-    let (protocol, rest) = rest.split_once('/')?;
-    if protocol == "_meta" {
+    let parsed = parse_wire_key(key)?;
+    let Origin::Host(_) = parsed.origin else {
         return None;
-    }
-    let rest = match rest.strip_prefix("@/devices/") {
-        Some(rest) => rest,
-        None => {
-            // Host-scoped: skip the `<source>` segment.
-            let (_source, rest) = rest.split_once('/')?;
-            rest.strip_prefix("@/devices/")?
-        }
     };
-    let (device_id, rest) = rest.split_once('/')?;
-    if rest != "alive" {
+    let [device_head, device_id, alive] = parsed.subject.as_slice() else {
+        return None;
+    };
+    if device_head != "device" || alive != "alive" {
         return None;
     }
-    let protocol = protocol.to_string();
-    let device_id = device_id.to_string();
+    let protocol = parsed.producer?.name().to_string();
+    let device_id = device_id.clone();
     if is_alive {
         tracing::debug!(protocol = %protocol, device = %device_id, "Device came online");
         Some(Message::DeviceOnline(protocol, device_id))
@@ -618,207 +562,95 @@ fn parse_device_liveliness(key: &str, is_alive: bool) -> Option<Message> {
     }
 }
 
-/// Parse an alert-key Delete tombstone into an [`Message::AlertCleared`].
-///
-/// Key format: `zensight/<protocol>/@/alerts/<alert_key>`.
-fn parse_alert_cleared(key: &str) -> Option<Message> {
-    let rest = key.strip_prefix("zensight/")?;
-    let (protocol, rest) = rest.split_once('/')?;
-    let rest = rest.strip_prefix("@/alerts/")?;
-    if rest.is_empty() || rest.contains('/') {
+/// Route a Delete tombstone. Alerts and entities are the two keyed, lifecycle-
+/// managed state families the GUI tracks, and the registry tells them apart.
+fn parse_tombstone(key: &str) -> Option<Message> {
+    let (parsed, protocol, subject) = refine_wire_key(key)?;
+    if !matches!(parsed.class, ClassOrPlane::Class(Class::State)) {
         return None;
     }
-    Some(Message::AlertCleared {
-        protocol: protocol.to_string(),
-        alert_key: rest.to_string(),
-    })
-}
-
-/// Parse an entity-key Delete tombstone into a [`Message::EntityRemoved`].
-///
-/// Key format: `zensight/_meta/entity/host/<entity_id>`.
-fn parse_entity_removed(key: &str) -> Option<Message> {
-    let rest = key.strip_prefix("zensight/_meta/entity/host/")?;
-    if rest.is_empty() || rest.contains('/') {
-        return None;
+    match subject.common_state()? {
+        CommonState::Alert { alert_key } => Some(Message::AlertCleared {
+            protocol,
+            alert_key: alert_key.to_string(),
+        }),
+        CommonState::CatalogEntity { entity_id } => {
+            Some(Message::EntityRemoved(entity_id.to_string()))
+        }
+        _ => None,
     }
-    Some(Message::EntityRemoved(rest.to_string()))
 }
 
-/// Decode a sample based on its key expression pattern.
+/// Decode a sample from its v1 key (RFC 03) via the registry's **parse**
+/// direction (RFC 08 §1, issue #475).
 ///
-/// Routes messages to the appropriate type based on the key structure:
-/// - `zensight/<protocol>/<source>/@/health` -> HealthSnapshot (host-scoped)
-/// - `zensight/<protocol>/<source>/@/devices/<device>/liveness` -> DeviceLiveness
-/// - `zensight/<protocol>/<source>/@/errors` -> ErrorReport
-/// - `zensight/<protocol>/@/{health,errors,devices/*/liveness}` — the legacy
-///   protocol-scoped shapes, kept for one release (source = None)
-/// - `zensight/<protocol>/@/alerts/<alert_key>` -> Alert (protocol-scoped by design)
-/// - `zensight/_meta/sensors/<name>/<source>` -> SensorInfo
-/// - `zensight/_meta/evidence/**` is correlator input, not decoded here
-/// - `zensight/<protocol>/<source>/<metric>` -> TelemetryPoint
+/// This used to re-implement the grammar by hand — `strip_prefix("zensight/@v1/")`,
+/// `split_once('/')` four times, then a string match on the subject head, with
+/// the producer's instance suffix stripped by a private copy of
+/// `Producer::parse_chunk`. All of that is what the registry generates, and
+/// generating it is the whole reason the registry exists: a subject that is not
+/// registered does not parse, and the variables come out named and typed
+/// instead of as `parts[3]`.
+///
+/// The decoded messages keep their legacy shapes (protocol = producer base
+/// name, source = payload/origin) so the view layer is untouched.
 fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
-    // Parse without allocating a Vec — use positional split_once
-    let rest = key.strip_prefix("zensight/")?;
+    let parsed = parse_wire_key(key)?;
 
-    // Get the second segment (protocol or _meta)
-    let (segment1, rest) = rest.split_once('/')?;
-
-    // Check for metadata paths first
-    if segment1 == "_meta" {
-        let (segment2, _remainder) = rest.split_once('/').unwrap_or((rest, ""));
-        if segment2 == "sensors" {
-            return match decode_auto::<SensorInfo>(payload) {
-                Ok(info) => Some(Message::SensorInfoReceived(info)),
-                Err(e) => {
-                    tracing::warn!(error = %e, key = %key, "Failed to decode SensorInfo");
-                    None
-                }
-            };
-        }
-        if segment2 == "entity" {
-            // zensight/_meta/entity/host/<entity_id> (Put = HostEntity doc).
-            return match decode_auto::<HostEntity>(payload) {
-                Ok(entity) => Some(Message::EntityReceived(entity)),
-                Err(e) => {
-                    tracing::warn!(error = %e, key = %key, "Failed to decode HostEntity");
-                    None
-                }
-            };
-        }
-        return None;
+    // Telemetry: the point carries its own metric name; a subscriber does not
+    // need to know *which* subject it is (the views that do refine it
+    // themselves, against their own producer's Subject enum).
+    if matches!(parsed.class, ClassOrPlane::Class(Class::Telemetry)) {
+        return match decode_auto::<TelemetryPoint>(payload) {
+            Ok(point) => Some(Message::TelemetryReceived(point)),
+            Err(e) => {
+                tracing::warn!(error = %e, key = %key, "Failed to decode TelemetryPoint");
+                None
+            }
+        };
     }
 
-    // Check for @ paths (sensor health/liveness/errors)
-    // rest is now: "@/<subpath>" or "<source>/<metric...>"
-    let (segment2, rest_after_seg2) = rest.split_once('/').unwrap_or((rest, ""));
-    if segment2 == "@" {
-        let (segment3, rest_after_seg3) = rest_after_seg2
-            .split_once('/')
-            .unwrap_or((rest_after_seg2, ""));
-        if segment3 == "health" {
-            return match decode_auto::<HealthSnapshot>(payload) {
-                Ok(snapshot) => Some(Message::HealthSnapshotReceived(snapshot)),
+    let origin = parsed.origin.chunk().to_string();
+    let (_, protocol, subject) = refine_wire_key(key)?;
+
+    // One typed match over the framework state set, instead of a string match
+    // on the subject head. A registry move is now a compile error here.
+    macro_rules! decode {
+        ($ty:ty, $ok:expr) => {
+            match decode_auto::<$ty>(payload) {
+                Ok(v) => Some($ok(v)),
                 Err(e) => {
-                    tracing::warn!(error = %e, key = %key, "Failed to decode HealthSnapshot");
+                    tracing::warn!(error = %e, key = %key, "Failed to decode {}", stringify!($ty));
                     None
                 }
-            };
-        } else if segment3 == "errors" {
-            return match decode_auto::<ErrorReport>(payload) {
-                Ok(report) => Some(Message::ErrorReportReceived(
-                    segment1.to_string(),
-                    None,
-                    report,
-                )),
-                Err(e) => {
-                    tracing::warn!(error = %e, key = %key, "Failed to decode ErrorReport");
-                    None
-                }
-            };
-        } else if segment3 == "devices"
-            && let Some((device, suffix)) = rest_after_seg3.split_once('/')
-            && suffix == "liveness"
-        {
-            let protocol = segment1.to_string();
-            return match decode_auto::<DeviceLiveness>(payload) {
-                Ok(liveness) => Some(Message::DeviceLivenessReceived(protocol, liveness)),
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e, key = %key, device = %device,
-                        "Failed to decode DeviceLiveness"
-                    );
-                    None
-                }
-            };
-        } else if segment3 == "alerts" {
-            // zensight/<protocol>/@/alerts/<alert_key> (Put = firing/resolved).
-            return match decode_auto::<Alert>(payload) {
-                Ok(alert) => Some(Message::AlertReceived(alert)),
-                Err(e) => {
-                    tracing::warn!(error = %e, key = %key, "Failed to decode Alert");
-                    None
-                }
-            };
-        }
-        return None;
+            }
+        };
     }
 
-    // Host-scoped control plane: zensight/<protocol>/<source>/@/<channel>.
-    // segment2 is the instance's source; the key is authoritative for it (the
-    // payload's optional `source` field is only a fallback for store/demo
-    // paths). Must run BEFORE the telemetry fallback — these arrive on the
-    // scoped control subscriber, not on `zensight/**`.
-    if let Some(scoped) = rest_after_seg2.strip_prefix("@/") {
-        let source = segment2;
-        let (channel, rest_after_channel) = scoped.split_once('/').unwrap_or((scoped, ""));
-        if channel == "health" {
-            return match decode_auto::<HealthSnapshot>(payload) {
-                Ok(mut snapshot) => {
-                    snapshot.source = Some(source.to_string());
-                    Some(Message::HealthSnapshotReceived(snapshot))
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, key = %key, "Failed to decode HealthSnapshot");
-                    None
-                }
-            };
-        } else if channel == "errors" {
-            return match decode_auto::<ErrorReport>(payload) {
-                Ok(report) => Some(Message::ErrorReportReceived(
-                    segment1.to_string(),
-                    Some(source.to_string()),
-                    report,
-                )),
-                Err(e) => {
-                    tracing::warn!(error = %e, key = %key, "Failed to decode ErrorReport");
-                    None
-                }
-            };
-        } else if channel == "devices"
-            && let Some((device, suffix)) = rest_after_channel.split_once('/')
-            && suffix == "liveness"
-        {
-            let protocol = segment1.to_string();
-            return match decode_auto::<DeviceLiveness>(payload) {
-                Ok(liveness) => Some(Message::DeviceLivenessReceived(protocol, liveness)),
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e, key = %key, device = %device,
-                        "Failed to decode DeviceLiveness"
-                    );
-                    None
-                }
-            };
-        } else if segment1 == "parallax" && channel == "status" && rest_after_channel == "streams" {
-            // Parallax stream-status transitions (`@/status/streams`, one
-            // JSON `StreamStatus` per open/close/failed-open). The GUI uses
-            // the definitive `open: false` to flag a tile whose open failed
-            // on the sensor (the queryable on the same key replies
-            // `Vec<StreamStatus>` — that shape never rides this subscriber).
-            return match decode_auto::<zensight_common::stream::StreamStatus>(payload) {
-                Ok(status) => Some(Message::ParallaxStreamStatus {
-                    source: source.to_string(),
-                    status,
-                }),
-                Err(e) => {
-                    tracing::warn!(error = %e, key = %key, "Failed to decode StreamStatus");
-                    None
-                }
-            };
-        }
-        // Other scoped channels (`@/status`, `@/commands/*`, `@/query/*`, media
-        // stream control, …) are not consumed via this path.
-        return None;
-    }
-
-    // Regular telemetry: zensight/<protocol>/<source>/<metric...>
-    match decode_auto::<TelemetryPoint>(payload) {
-        Ok(point) => Some(Message::TelemetryReceived(point)),
-        Err(e) => {
-            tracing::warn!(error = %e, key = %key, "Failed to decode TelemetryPoint");
-            None
-        }
+    match subject.common_state()? {
+        CommonState::Health => decode!(HealthSnapshot, Message::HealthSnapshotReceived),
+        CommonState::Errors => decode!(ErrorReport, |report| Message::ErrorReportReceived(
+            protocol,
+            Some(origin),
+            report
+        )),
+        CommonState::Sensor => decode!(SensorInfo, Message::SensorInfoReceived),
+        CommonState::Alert { .. } => decode!(Alert, Message::AlertReceived),
+        CommonState::Stream { .. } => decode!(zensight_common::stream::StreamStatus, |status| {
+            Message::ParallaxStreamStatus {
+                source: origin,
+                status,
+            }
+        }),
+        CommonState::CatalogEntity { .. } => decode!(HostEntity, Message::EntityReceived),
+        // Evidence is the catalog's input, not the GUI's; artifact progress is
+        // polled over @rpc; aliases and pdns have no GUI consumer.
+        CommonState::EvidenceSelf
+        | CommonState::EvidenceDevice { .. }
+        | CommonState::EvidenceNames { .. }
+        | CommonState::Artifact { .. }
+        | CommonState::CatalogAlias { .. }
+        | CommonState::CatalogPdns { .. } => None,
     }
 }
 
@@ -1010,88 +842,79 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_sensor_liveliness_online() {
-        // Legacy protocol-scoped shape (compat pin, one release).
-        let key = "zensight/snmp/@/alive";
+    fn test_parse_sensor_liveliness() {
+        let key = "zensight/@v1/h-3fa9c2d41b7e/state/sysinfo/alive";
         let msg = parse_sensor_liveliness(key, true);
-        assert!(matches!(msg, Some(Message::SensorOnline(ref p, None)) if p == "snmp"));
-    }
-
-    #[test]
-    fn test_parse_sensor_liveliness_scoped() {
-        // Host-scoped shape: the source segment is carried through.
-        let msg = parse_sensor_liveliness("zensight/sysinfo/hostA/@/alive", true);
         assert!(matches!(
             msg,
-            Some(Message::SensorOnline(ref p, Some(ref s))) if p == "sysinfo" && s == "hostA"
+            Some(Message::SensorOnline(ref p, Some(ref s))) if p == "sysinfo" && s == "h-3fa9c2d41b7e"
         ));
-        let msg = parse_sensor_liveliness("zensight/sysinfo/hostA/@/alive", false);
-        assert!(matches!(
-            msg,
-            Some(Message::SensorOffline(ref p, Some(ref s))) if p == "sysinfo" && s == "hostA"
-        ));
-    }
-
-    #[test]
-    fn test_parse_sensor_liveliness_ignores_correlator_token() {
-        // `zensight/*/*/@/alive` also matches the correlator's single-writer
-        // guard token — it is not a sensor and must not produce a message.
-        assert!(parse_sensor_liveliness("zensight/_meta/correlator/@/alive", true).is_none());
-    }
-
-    #[test]
-    fn test_parse_sensor_liveliness_offline() {
-        let key = "zensight/sysinfo/@/alive";
         let msg = parse_sensor_liveliness(key, false);
-        assert!(matches!(msg, Some(Message::SensorOffline(ref p, None)) if p == "sysinfo"));
+        assert!(matches!(
+            msg,
+            Some(Message::SensorOffline(ref p, Some(ref s))) if p == "sysinfo" && s == "h-3fa9c2d41b7e"
+        ));
+        // Instance suffix folds back to the base producer name.
+        let msg = parse_sensor_liveliness("zensight/@v1/h-3fa9c2d41b7e/state/snmp-2/alive", true);
+        assert!(matches!(
+            msg,
+            Some(Message::SensorOnline(ref p, _)) if p == "snmp"
+        ));
+    }
+
+    #[test]
+    fn test_parse_sensor_liveliness_ignores_catalog_token() {
+        // The catalog's alive/claim tokens are service machinery, not sensors
+        // (they also never match the `*`-origin selector — D4 — but the
+        // parser guards regardless).
+        assert!(parse_sensor_liveliness("zensight/@v1/@catalog/state/alive", true).is_none());
     }
 
     #[test]
     fn test_parse_sensor_liveliness_invalid() {
-        // Wrong format
-        assert!(parse_sensor_liveliness("zensight/snmp/device/metric", true).is_none());
-        // Missing alive
-        assert!(parse_sensor_liveliness("zensight/snmp/@/health", true).is_none());
-        // Wrong prefix
-        assert!(parse_sensor_liveliness("other/snmp/@/alive", true).is_none());
-    }
-
-    #[test]
-    fn test_parse_device_liveliness_online() {
-        let key = "zensight/snmp/@/devices/router01/alive";
-        let msg = parse_device_liveliness(key, true);
+        // Legacy shapes no longer parse.
+        assert!(parse_sensor_liveliness("zensight/sysinfo/@/alive", true).is_none());
+        assert!(parse_sensor_liveliness("zensight/sysinfo/hostA/@/alive", true).is_none());
+        // Missing alive leaf.
         assert!(
-            matches!(msg, Some(Message::DeviceOnline(ref p, ref d)) if p == "snmp" && d == "router01")
+            parse_sensor_liveliness("zensight/@v1/h-3fa9c2d41b7e/state/snmp/health", true)
+                .is_none()
+        );
+        // Wrong prefix.
+        assert!(
+            parse_sensor_liveliness("other/@v1/h-3fa9c2d41b7e/state/snmp/alive", true).is_none()
         );
     }
 
     #[test]
-    fn test_parse_device_liveliness_scoped() {
-        // Host-scoped shape: devices stay keyed by (protocol, device_id).
-        let key = "zensight/snmp/poller01/@/devices/router01/alive";
+    fn test_parse_device_liveliness() {
+        let key = "zensight/@v1/h-3fa9c2d41b7e/state/snmp/device/router01/alive";
         let msg = parse_device_liveliness(key, true);
         assert!(
             matches!(msg, Some(Message::DeviceOnline(ref p, ref d)) if p == "snmp" && d == "router01")
         );
-    }
-
-    #[test]
-    fn test_parse_device_liveliness_offline() {
-        let key = "zensight/sysinfo/@/devices/server01/alive";
         let msg = parse_device_liveliness(key, false);
         assert!(
-            matches!(msg, Some(Message::DeviceOffline(ref p, ref d)) if p == "sysinfo" && d == "server01")
+            matches!(msg, Some(Message::DeviceOffline(ref p, ref d)) if p == "snmp" && d == "router01")
         );
     }
 
     #[test]
     fn test_parse_device_liveliness_invalid() {
-        // Wrong format
-        assert!(parse_device_liveliness("zensight/snmp/@/alive", true).is_none());
-        // Missing alive
-        assert!(parse_device_liveliness("zensight/snmp/@/devices/router01/status", true).is_none());
-        // Too short
-        assert!(parse_device_liveliness("zensight/snmp/@/devices", true).is_none());
+        // Sensor token, not a device token.
+        assert!(
+            parse_device_liveliness("zensight/@v1/h-3fa9c2d41b7e/state/snmp/alive", true).is_none()
+        );
+        // Wrong leaf.
+        assert!(
+            parse_device_liveliness(
+                "zensight/@v1/h-3fa9c2d41b7e/state/snmp/device/router01/status",
+                true
+            )
+            .is_none()
+        );
+        // Legacy shape.
+        assert!(parse_device_liveliness("zensight/snmp/@/devices/router01/alive", true).is_none());
     }
 
     #[test]
@@ -1100,42 +923,78 @@ mod tests {
             zenoh: ZenohConfig::default(),
             scope: vec![],
             profile: LinkProfile::Standard,
+            focus: None,
         };
-        assert_eq!(effective_scopes(&config), vec!["zensight/**".to_string()]);
+        assert_eq!(
+            effective_scopes(&config),
+            vec!["zensight/@v1/*/telemetry/**".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_focus_overrides_scope_with_one_origin() {
+        // Focus mode (#476): one origin's telemetry, whatever the configured scope was.
+        let config = LinkConfig {
+            zenoh: ZenohConfig::default(),
+            scope: vec!["zensight/@v1/*/telemetry/netring/**".into()],
+            profile: LinkProfile::Standard,
+            focus: Some("h-3fa9c2d41b7e".into()),
+        };
+        assert_eq!(
+            effective_scopes(&config),
+            vec!["zensight/@v1/h-3fa9c2d41b7e/telemetry/**".to_string()]
+        );
+        assert_eq!(
+            state_selector(&config),
+            "zensight/@v1/h-3fa9c2d41b7e/state/**"
+        );
+        assert_eq!(
+            alerts_selector(&config),
+            "zensight/@v1/h-3fa9c2d41b7e/state/*/alert/*"
+        );
+        assert_eq!(
+            liveliness_exprs(&config),
+            (
+                "zensight/@v1/h-3fa9c2d41b7e/state/*/alive".to_string(),
+                "zensight/@v1/h-3fa9c2d41b7e/state/*/device/*/alive".to_string()
+            )
+        );
     }
 
     #[test]
     fn test_effective_scopes_passthrough_preserves_order() {
         let config = LinkConfig {
             zenoh: ZenohConfig::default(),
-            scope: vec!["zensight/netring/**".into(), "zensight/sysinfo/**".into()],
+            scope: vec![
+                "zensight/@v1/*/telemetry/netring/**".into(),
+                "zensight/@v1/*/telemetry/sysinfo/**".into(),
+            ],
             profile: LinkProfile::Constrained,
+            focus: None,
         };
         assert_eq!(
             effective_scopes(&config),
             vec![
-                "zensight/netring/**".to_string(),
-                "zensight/sysinfo/**".to_string()
+                "zensight/@v1/*/telemetry/netring/**".to_string(),
+                "zensight/@v1/*/telemetry/sysinfo/**".to_string()
             ]
         );
     }
 
     #[test]
     fn test_liveliness_key_expressions() {
-        // Verify our constants match expected patterns
-        assert_eq!(SENSOR_LIVELINESS_EXPR, "zensight/*/@/alive");
-        assert_eq!(DEVICE_LIVELINESS_EXPR, "zensight/*/@/devices/*/alive");
-        assert_eq!(SENSOR_LIVELINESS_SCOPED_EXPR, "zensight/*/*/@/alive");
+        // v1 presence selectors (RFC 04 §5).
+        assert_eq!(SENSOR_LIVELINESS_EXPR, "zensight/@v1/*/state/*/alive");
         assert_eq!(
-            DEVICE_LIVELINESS_SCOPED_EXPR,
-            "zensight/*/*/@/devices/*/alive"
+            DEVICE_LIVELINESS_EXPR,
+            "zensight/@v1/*/state/*/device/*/alive"
         );
     }
 
-    /// Host-scoped health keys route to HealthSnapshotReceived with the source
-    /// stamped from the KEY (authoritative), not the payload.
+    /// v1 health keys route to HealthSnapshotReceived; the origin scopes the
+    /// key, the payload carries the human source label.
     #[test]
-    fn test_decode_sample_scoped_health_stamps_source() {
+    fn test_decode_sample_health() {
         let snapshot = HealthSnapshot {
             sensor: "sysinfo".into(),
             status: zensight_common::HealthStatus::Healthy,
@@ -1147,20 +1006,20 @@ mod tests {
             errors_last_hour: 0,
             metrics_published: 0,
             host_id: None,
-            source: None, // key wins even when the payload lacks it
+            source: Some("hosta".into()),
         };
         let payload = zensight_common::encode(&snapshot, zensight_common::Format::Json).unwrap();
-        match decode_sample("zensight/sysinfo/hostA/@/health", &payload) {
+        match decode_sample("zensight/@v1/h-3fa9c2d41b7e/state/sysinfo/health", &payload) {
             Some(Message::HealthSnapshotReceived(s)) => {
-                assert_eq!(s.source.as_deref(), Some("hostA"));
+                assert_eq!(s.source.as_deref(), Some("hosta"));
             }
             other => panic!("expected HealthSnapshotReceived, got {other:?}"),
         }
     }
 
-    /// Host-scoped error keys carry the source; legacy keys carry None.
+    /// v1 error keys carry the origin as the instance discriminator.
     #[test]
-    fn test_decode_sample_scoped_errors() {
+    fn test_decode_sample_errors() {
         let report = ErrorReport {
             timestamp: 0,
             device: None,
@@ -1169,39 +1028,68 @@ mod tests {
             retryable: true,
         };
         let payload = zensight_common::encode(&report, zensight_common::Format::Json).unwrap();
-        match decode_sample("zensight/netlink/hostA/@/errors", &payload) {
+        match decode_sample("zensight/@v1/h-3fa9c2d41b7e/state/netlink/errors", &payload) {
             Some(Message::ErrorReportReceived(protocol, source, _)) => {
                 assert_eq!(protocol, "netlink");
-                assert_eq!(source.as_deref(), Some("hostA"));
-            }
-            other => panic!("expected ErrorReportReceived, got {other:?}"),
-        }
-        match decode_sample("zensight/netlink/@/errors", &payload) {
-            Some(Message::ErrorReportReceived(protocol, source, _)) => {
-                assert_eq!(protocol, "netlink");
-                assert_eq!(source, None);
+                assert_eq!(source.as_deref(), Some("h-3fa9c2d41b7e"));
             }
             other => panic!("expected ErrorReportReceived, got {other:?}"),
         }
     }
 
     #[test]
-    fn test_parse_alert_cleared() {
-        let msg = parse_alert_cleared("zensight/netlink/@/alerts/ssh-listening-00ff").unwrap();
+    fn test_parse_tombstone() {
+        let msg =
+            parse_tombstone("zensight/@v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1")
+                .unwrap();
         match msg {
             Message::AlertCleared {
                 protocol,
                 alert_key,
             } => {
                 assert_eq!(protocol, "netlink");
-                assert_eq!(alert_key, "ssh-listening-00ff");
+                assert_eq!(alert_key, "9f2c81ab04d7e3f1");
             }
             _ => panic!("expected AlertCleared"),
         }
-        // Not an alert key.
-        assert!(parse_alert_cleared("zensight/netlink/@/health").is_none());
-        // Nested key (has extra slash) is rejected.
-        assert!(parse_alert_cleared("zensight/netlink/@/alerts/a/b").is_none());
+        // The catalog's entity tombstone rides the same parser.
+        assert!(matches!(
+            parse_tombstone("zensight/@v1/@catalog/state/entity/e-123"),
+            Some(Message::EntityRemoved(id)) if id == "e-123"
+        ));
+        // A state subject that is not a keyed, lifecycle-managed one.
+        assert!(parse_tombstone("zensight/@v1/h-3fa9c2d41b7e/state/netlink/health").is_none());
+        // `alert/{alert_key}` is one chunk: a nested key is not that subject,
+        // and the registry — not a hand-rolled `contains('/')` check — is what
+        // rejects it now.
+        assert!(parse_tombstone("zensight/@v1/h-3fa9c2d41b7e/state/netlink/alert/a/b").is_none());
+        // An instance-suffixed producer still resolves to its base name
+        // (RFC 03 §1.5) — that used to need a private copy of
+        // `Producer::parse_chunk` in this file.
+        assert!(matches!(
+            parse_tombstone("zensight/@v1/h-3fa9c2d41b7e/state/netlink-2/alert/deadbeef00000000"),
+            Some(Message::AlertCleared { protocol, .. }) if protocol == "netlink"
+        ));
+    }
+
+    /// An unregistered subject does not decode. This is the property the
+    /// registry buys (RFC 08 §1) and it is why #468 had to delete the
+    /// `{metric...}` catch-all first.
+    #[test]
+    fn unregistered_subjects_do_not_decode() {
+        assert!(decode_sample("zensight/@v1/h-3fa9c2d41b7e/state/netlink/bogus", b"{}").is_none());
+        // `device/<device>/liveness` documents: the GUI used to have a decode
+        // arm for these, but no producer has ever published one (device liveness
+        // rides the liveliness *token* plane, `state/<producer>/device/<d>/alive`,
+        // which `parse_device_liveliness` handles). It is not registered, so it
+        // no longer parses — the dead arm is gone.
+        assert!(
+            decode_sample(
+                "zensight/@v1/h-3fa9c2d41b7e/state/netlink/device/dev1/liveness",
+                b"{}"
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1214,7 +1102,10 @@ mod tests {
             zensight_common::AlertSeverity::Warning,
             "scan",
         );
-        let key = format!("zensight/netring/@/alerts/{}", alert.alert_key());
+        let key = format!(
+            "zensight/@v1/h-3fa9c2d41b7e/state/netring/alert/{}",
+            alert.alert_key()
+        );
         let payload = zensight_common::encode(&alert, zensight_common::Format::Json).unwrap();
         match decode_sample(&key, &payload) {
             Some(Message::AlertReceived(got)) => assert_eq!(got.rule, "port_scan"),

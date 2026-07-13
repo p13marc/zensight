@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 use zensight_sensor_core::{Publisher, SensorHealth};
 
 use crate::config::SystemdConfig;
@@ -169,7 +169,7 @@ impl SystemdCollector {
     }
 
     /// Run the periodic collect loop. Never panics: a bus/connection error records
-    /// a device failure (surfaced on `@/health`) and retries on the next tick.
+    /// a device failure (surfaced on `state/systemd/health`) and retries on the next tick.
     pub async fn run(mut self) {
         let interval = Duration::from_secs(self.config.poll_interval_secs.max(1));
         self.health.set_devices_total(1);
@@ -387,7 +387,7 @@ impl SystemdCollector {
 
         let n = points.len();
         for point in &points {
-            let suffix = format!("{}/{}", point.source, point.metric);
+            let suffix = point.metric.clone();
             if let Err(e) = self.publisher.publish(&suffix, point).await {
                 tracing::warn!(error = %e, metric = %point.metric, "publish failed");
             } else {
@@ -423,7 +423,7 @@ pub fn build_points(
     aggregates: Option<&Aggregates>,
 ) -> Vec<TelemetryPoint> {
     let gauge = |metric: &str, v: f64| {
-        TelemetryPoint::new(source, Protocol::Systemd, metric, TelemetryValue::Gauge(v))
+        crate::telemetry_guard::checked_point(source, metric, TelemetryValue::Gauge(v))
     };
     let mut points = vec![
         gauge("manager/n_names", counts.n_names as f64),
@@ -449,6 +449,9 @@ pub fn build_points(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Points are built by `checked_point`, so the lib no longer names Protocol;
+    // the tests still assert on it.
+    use zensight_common::telemetry::Protocol;
 
     #[test]
     fn aggregates_count_by_state() {

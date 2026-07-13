@@ -17,12 +17,12 @@ thermal/power) and publishes it to Zenoh as `TelemetryPoint`s.
 - **Derived saturation score** — a `0..100` host saturation score plus a coarse
   `ok`/`warn`/`crit` health state, blended from the already-collected USE signals.
 - **Threshold alerting** — OOM / PSI / disk / inode / FD / thermal / swap rules
-  published on `zensight/sysinfo/@/alerts/*`.
+  published on `zensight/@v1/<origin>/state/sysinfo/alert/*`.
 - **Process explorer** — a per-pid firehose served on demand at
-  `@/query/processes` (never streamed), with secret-scrubbed command lines (#302).
+  `@rpc/sysinfo/processes` (never streamed), with secret-scrubbed command lines (#302).
 - **Optional eBPF saturation histograms** (#99) — `runqlat` + `biolatency` log2
-  histograms on `@/query/latency`; opt-in build (`--features ebpf`) and off by
-  default.
+  histograms on `@rpc/sysinfo/latency`; opt-in build (`--features ebpf`) and off
+  by default.
 
 ## Quick start
 

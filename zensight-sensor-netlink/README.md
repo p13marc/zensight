@@ -12,11 +12,12 @@ real-time control-plane change timeline, and per-process TCP bandwidth.
 
 Two extras sit on top of the raw telemetry:
 
-- **Socket → process attribution (#304):** each `@/query/sockets` row is joined —
-  unprivileged — to its owning process (`cookie`/`cgroup`/`pid`/`start_time`) via
-  a per-request `/proc` fd-scan.
+- **Socket → process attribution (#304):** each `@rpc/netlink/sockets` row is
+  joined — unprivileged — to its owning process (`cookie`/`cgroup`/`pid`/
+  `start_time`) via a per-request `/proc` fd-scan.
 - **Embedded sentinel:** declared expectations over sockets/links/routes/rules
-  raise alerts on deviation, hot-swappable at runtime via `@/commands`.
+  raise alerts on deviation, hot-swappable at runtime via the
+  `@rpc/netlink/expectations/set` procedure.
 - **Optional eBPF tier (#114, off by default):** connection lifecycle + latency
   the `sock_diag` snapshot cannot see (opt-in build, `--features ebpf`).
 
@@ -32,7 +33,7 @@ everything under `collect.*` defaults on except `nftables`/`conntrack`/`ebpf`
 
 ## Documentation
 
-- [Telemetry reference](docs/telemetry.md) — published keys + `@/query/*` detail.
+- [Telemetry reference](docs/telemetry.md) — published keys + `@rpc` detail procedures.
 - [Sentinel](docs/sentinel.md) — expectations, alerts, hot-swap control.
 - [Configuration](docs/configuration.md) — every config block.
 - [../docs/KEYSPACE.md](../docs/KEYSPACE.md) — authoritative key-expression contract.

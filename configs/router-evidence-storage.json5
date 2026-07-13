@@ -1,35 +1,29 @@
-// zenohd (router) configuration that makes the ZenSight **identity control
-// plane** durable (#310). Today the evidence/entity docs live only in the RAM of
-// the sensors (self-report caches) and the correlator (its materialized view);
-// nothing survives a fleet-wide restart. Point a router-hosted storage at those
-// two key ranges and the identity plane is persisted to disk and re-served to
-// late/rejoining subscribers.
+// zenohd (router) configuration that makes the ZenSight v1 STATE plane durable
+// (RFC 09 §2): one LWW "latest" storage over the fleet state selector, plus an
+// explicit "catalog" storage for the @catalog service origin (`*` never matches
+// the verbatim `@catalog` chunk — D4). Together they double as the fleet-wide
+// late-joiner seed: a GET on any state selector is answered by the router even
+// when producers sleep (RFC 05 §4).
 //
 //   zenohd -c configs/router-evidence-storage.json5
 //
 // Requires the storage-manager + filesystem-backend plugins (shipped with a
 // standard zenohd build): zenoh-plugin-storage-manager, zenoh-backend-fs.
-// (This is the same plugin stack as configs/router-blob-storage.json5 — see
-// docs/STORAGE.md; that one stores immutable content-addressed chunks, this one
-// stores mutable identity docs, hence the extra timestamping below.)
 {
   mode: "router",
 
-  // Listen for sensors, the correlator, and GUIs. Adjust to your network.
+  // Listen for sensors, the catalog, and GUIs. Adjust to your network.
   listen: {
     endpoints: ["tcp/0.0.0.0:7447"],
   },
 
-  // MUTABLE-KEY CORRECTNESS (the difference from the blob store).
-  //
-  // Unlike blob chunks (immutable: a hash maps to exactly one byte string),
-  // evidence and entity docs are **last-writer-wins mutable** keys: a sensor
-  // re-publishes its HostEvidence on every refresh, and the correlator
-  // re-publishes each HostEntity (and DELETE-tombstones retired ones). For the
-  // storage to keep the *newest* state — and to never let a late, duplicated, or
-  // replayed sample clobber newer state — every sample must carry a timestamp.
-  // A router timestamps by default; we set it explicitly so this config is
-  // correct even if the storage is ever run on a peer/client. `enabled: true`
+  // MUTABLE-KEY CORRECTNESS. State docs are last-writer-wins mutable keys
+  // (RFC 04 §1): a sensor re-publishes its health/evidence on every refresh,
+  // the catalog re-publishes each HostEntity (and DELETE-tombstones retired
+  // ones). For the storage to keep the *newest* state — and never let a late,
+  // duplicated, or replayed sample clobber newer state — every sample must
+  // carry a timestamp. A router timestamps by default; set explicitly so this
+  // config stays correct even run on a peer/client. `enabled: true`
   // re-timestamps any un-timestamped sample; `drop_future_timestamp: false`
   // re-timestamps (rather than drops) samples from a clock-skewed publisher.
   timestamping: {
@@ -42,27 +36,32 @@
   plugins: {
     storage_manager: {
       volumes: {
-        // Persist docs to disk so they survive a router restart. Point `dir`
-        // at a durable path; ZENOH_BACKEND_FS_ROOT (env) sets the base directory
-        // the relative `dir`s below hang under. `backend: "fs"` is implied by
-        // the volume name.
+        // Persist docs to disk so they survive a router restart.
+        // ZENOH_BACKEND_FS_ROOT (env) sets the base directory the relative
+        // `dir`s below hang under. `backend: "fs"` is implied by the name.
         fs: {},
       },
       storages: {
-        // Identity EVIDENCE: HostEvidence self-reports + observed claims
-        // (`.../evidence/host/**`) and passive-DNS name observations
-        // (`.../evidence/names/**`). Last-writer-wins per key; DELETE tombstones
-        // drop a claim. Timestamping (above) makes the LWW reconciliation safe.
-        "zensight-evidence": {
-          key_expr: "zensight/_meta/evidence/**",
-          volume: { id: "fs", dir: "zensight-evidence" },
+        // Current truth of the fleet: every host's state class — health,
+        // errors, alerts, evidence, expectations, stream/device docs. LWW per
+        // key; DELETE tombstones retire a doc.
+        "zensight-latest": {
+          key_expr: "zensight/@v1/*/state/**",
+          strip_prefix: "zensight/@v1",
+          volume: { id: "fs", dir: "latest" },
+          // Tombstone lifetime (RFC 09 §2.3): prune storage metadata —
+          // including deletion tombstones — after 24 h. Must be ≥ the longest
+          // registry ttl_s among mutable state docs, else a slow replica may
+          // resurrect a retired key.
+          garbage_collection: { period: 3600, lifespan: 86400 },
         },
-        // Merged ENTITY view: the correlator's single-writer HostEntity docs
-        // (`.../entity/host/<id>`), re-emitted on a cadence and DELETE-tombstoned
-        // on retire. Also mutable LWW — same timestamping requirement.
-        "zensight-entity": {
-          key_expr: "zensight/_meta/entity/**",
-          volume: { id: "fs", dir: "zensight-entity" },
+        // The catalog service origin: entity/alias docs, claims, pdns. Named
+        // explicitly — the `*` in the selector above cannot match `@catalog`.
+        "zensight-catalog": {
+          key_expr: "zensight/@v1/@catalog/state/**",
+          strip_prefix: "zensight/@v1/@catalog",
+          volume: { id: "fs", dir: "catalog" },
+          garbage_collection: { period: 3600, lifespan: 86400 },
         },
       },
     },

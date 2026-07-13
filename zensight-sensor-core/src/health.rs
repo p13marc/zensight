@@ -125,33 +125,6 @@ pub struct SensorHealth {
     liveliness_manager: Option<Arc<LivelinessManager>>,
 }
 
-/// Build the health key for one sensor instance:
-/// `{prefix}/{source}/@/health` (legacy `{prefix}/@/health` without a source).
-pub(crate) fn health_key(prefix: &str, source: Option<&str>) -> String {
-    match source {
-        Some(s) => format!("{}/{}/@/health", prefix, s),
-        None => format!("{}/@/health", prefix),
-    }
-}
-
-/// Build the errors key for one sensor instance:
-/// `{prefix}/{source}/@/errors` (legacy `{prefix}/@/errors` without a source).
-pub(crate) fn errors_key(prefix: &str, source: Option<&str>) -> String {
-    match source {
-        Some(s) => format!("{}/{}/@/errors", prefix, s),
-        None => format!("{}/@/errors", prefix),
-    }
-}
-
-/// Build the device-liveness key for one device of one sensor instance:
-/// `{prefix}/{source}/@/devices/{device}/liveness`.
-pub(crate) fn device_liveness_key(prefix: &str, source: Option<&str>, device: &str) -> String {
-    match source {
-        Some(s) => format!("{}/{}/@/devices/{}/liveness", prefix, s, device),
-        None => format!("{}/@/devices/{}/liveness", prefix, device),
-    }
-}
-
 /// Device state for liveness tracking.
 #[derive(Debug, Clone)]
 struct DeviceState {
@@ -217,9 +190,9 @@ pub struct HealthSnapshot {
     /// Hashed machine-id of the publishing host (identity envelope, #301).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_id: Option<String>,
-    /// The `<source>` key segment of this sensor instance — the same value
-    /// that host-scopes its control-plane keys
-    /// (`zensight/<protocol>/<source>/@/health`). Optional for
+    /// The host id of this sensor instance — the same value
+    /// behind the origin scoping its control-plane keys
+    /// (`zensight/@v1/<origin>/state/<producer>/health`). Optional for
     /// mixed-fleet/persisted payloads predating the host-scoped keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -305,9 +278,9 @@ impl SensorHealth {
         *self.host_id.write().expect("host_id lock poisoned") = host_id;
     }
 
-    /// Set the instance's `<source>` key segment, host-scoping the published
-    /// control-plane keys (`{prefix}/{source}/@/health` etc.) so two hosts
-    /// running the same protocol never collide. The runner always sets this.
+    /// Set the instance's host id, stamped onto snapshots; the published
+    /// control-plane keys (`state/<producer>/health` etc.) are origin-scoped
+    /// so two hosts running the same protocol never collide. The runner always sets this.
     pub fn with_source(mut self, source: impl Into<String>) -> Self {
         self.source = Some(source.into());
         self
@@ -563,27 +536,10 @@ impl SensorHealth {
         };
 
         let snapshot = self.snapshot();
-        let key = health_key(publisher.key_prefix(), self.source.as_deref());
+        let key = publisher.v1().health_key();
         publisher
             .publish_json(&key, &snapshot, zensight_common::QosClass::HealthLiveness)
             .await
-    }
-
-    /// Publish device liveness to Zenoh.
-    pub async fn publish_device_liveness(&self, device_id: &str) -> Result<()> {
-        let Some(ref publisher) = self.publisher else {
-            return Ok(());
-        };
-
-        if let Some(liveness) = self.device_liveness(device_id) {
-            let key =
-                device_liveness_key(publisher.key_prefix(), self.source.as_deref(), device_id);
-            publisher
-                .publish_json(&key, &liveness, zensight_common::QosClass::HealthLiveness)
-                .await?;
-        }
-
-        Ok(())
     }
 
     /// Publish an error report to Zenoh.
@@ -592,7 +548,7 @@ impl SensorHealth {
             return Ok(());
         };
 
-        let key = errors_key(publisher.key_prefix(), self.source.as_deref());
+        let key = publisher.v1().errors_key();
         publisher
             .publish_json(&key, report, zensight_common::QosClass::HealthLiveness)
             .await
@@ -759,30 +715,18 @@ mod tests {
         assert_eq!(health.snapshot().metrics_published, 15);
     }
 
-    /// Multi-host pin: with a source the control-plane keys are host-scoped
-    /// (`{prefix}/{source}/@/…`); without one they keep the legacy
-    /// protocol-scoped shape for standalone/legacy uses.
+    /// v1 pin: state keys are origin-scoped (`<base>/@v1/<origin>/state/
+    /// <producer>/…`, RFC 04), so two hosts running the same producer never
+    /// collide — the job the legacy `{source}` chunk used to do.
     #[test]
-    fn test_control_plane_keys_are_host_scoped() {
-        assert_eq!(
-            health_key("zensight/sysinfo", Some("hostA")),
-            "zensight/sysinfo/hostA/@/health"
-        );
-        assert_eq!(
-            health_key("zensight/sysinfo", None),
-            "zensight/sysinfo/@/health"
-        );
-        assert_eq!(
-            errors_key("zensight/sysinfo", Some("hostA")),
-            "zensight/sysinfo/hostA/@/errors"
-        );
-        assert_eq!(
-            device_liveness_key("zensight/snmp", Some("poller01"), "router01"),
-            "zensight/snmp/poller01/@/devices/router01/liveness"
-        );
-        assert_eq!(
-            device_liveness_key("zensight/snmp", None, "router01"),
-            "zensight/snmp/@/devices/router01/liveness"
+    fn test_state_keys_are_origin_scoped() {
+        let ctx = crate::v1::V1Context::for_producer("sysinfo");
+        assert!(ctx.health_key().starts_with("zensight/@v1/h-"));
+        assert!(ctx.health_key().ends_with("/state/sysinfo/health"));
+        assert!(ctx.errors_key().ends_with("/state/sysinfo/errors"));
+        assert!(
+            ctx.device_alive_key("router01")
+                .ends_with("/state/sysinfo/device/router01/alive")
         );
     }
 

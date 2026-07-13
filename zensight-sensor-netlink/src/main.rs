@@ -23,9 +23,9 @@ async fn main() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
     let format = runner.config().serialization;
-    let runner = runner.with_status_publishing().with_format(format);
+    let runner = runner.with_format(format);
 
-    // On-demand artifact channel (`@/artifact`): bundle redacted config + health +
+    // On-demand artifact channel (`@rpc/netlink/artifact/*`): bundle redacted config + health +
     // counters (report) plus tier-2 directory snapshots. Each kind is a no-op
     // unless enabled in the config's `artifacts` limits.
     let report_source = std::sync::Arc::new(zensight_sensor_core::SimpleBundleSource::new(
@@ -49,8 +49,7 @@ async fn main() -> Result<()> {
     let session = runner.session().clone();
 
     tracing::info!(
-        "Netlink sensor running (prefix: {}, interval: {}s, host: {})",
-        netlink_config.key_prefix,
+        "Netlink sensor running (interval: {}s, host: {})",
         netlink_config.poll_interval_secs,
         source
     );
@@ -74,12 +73,12 @@ async fn main() -> Result<()> {
                     zensight_sensor_netlink::ebpf::drain_ring(ring, drain_state).await;
                 });
                 let q_session = runner.session().clone();
-                let q_prefix = netlink_config.key_prefix.clone();
+                let q_producer = "netlink".to_string();
                 let q_state = state.clone();
                 let top_k = netlink_config.ebpf.retransmit_top_k;
                 runner.spawn(async move {
                     zensight_sensor_netlink::query::run_ebpf_queries(
-                        q_session, q_prefix, q_state, top_k,
+                        q_session, q_producer, q_state, top_k,
                     )
                     .await;
                 });
@@ -137,7 +136,7 @@ async fn main() -> Result<()> {
     let collect_handle = collector.collect_handle();
     // Latest-metric cache shared with the sentinel's metric-threshold expectations.
     let metric_cache = collector.metric_cache();
-    // Real-time event ring (served on @/query/events) + the sentinel wake signal
+    // Real-time event ring (served on @rpc/netlink/events) + the sentinel wake signal
     // (instant re-eval on a relevant RTNETLINK event), grabbed before run() moves
     // the collector (#8).
     let event_state = collector.event_state();
@@ -152,7 +151,7 @@ async fn main() -> Result<()> {
     // without streaming them onto the bus.
     {
         let query_session = runner.session().clone();
-        let query_prefix = netlink_config.key_prefix.clone();
+        let query_producer = "netlink".to_string();
         let query_source = source.clone();
         let query_events = event_state.clone();
         let query_routes = route_history.clone();
@@ -168,7 +167,7 @@ async fn main() -> Result<()> {
         runner.spawn(async move {
             zensight_sensor_netlink::query::run(
                 query_session,
-                query_prefix,
+                query_producer,
                 query_source,
                 query_events,
                 query_routes,
@@ -182,11 +181,11 @@ async fn main() -> Result<()> {
     // Dynamic configuration (P4): toggle any collector at runtime, no restart.
     {
         let cmd_session = runner.session().clone();
-        let cmd_prefix = netlink_config.key_prefix.clone();
+        let cmd_producer = "netlink".to_string();
         runner.spawn(async move {
             zensight_sensor_netlink::command::run_collection(
                 cmd_session,
-                cmd_prefix,
+                cmd_producer,
                 collect_handle,
             )
             .await;
@@ -211,12 +210,12 @@ async fn main() -> Result<()> {
         .with_wake(sentinel_wake);
         let handle = evaluator.handle();
         let cmd_session = runner.session().clone();
-        let cmd_prefix = netlink_config.key_prefix.clone();
+        let cmd_producer = "netlink".to_string();
         runner.spawn(async move {
             evaluator.run().await;
         });
         runner.spawn(async move {
-            zensight_sensor_netlink::command::run(cmd_session, cmd_prefix, handle).await;
+            zensight_sensor_netlink::command::run(cmd_session, cmd_producer, handle).await;
         });
         tracing::info!("Sentinel + expectation command channel enabled");
     }

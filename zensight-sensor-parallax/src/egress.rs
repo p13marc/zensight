@@ -202,13 +202,9 @@ mod tests {
         cfg.insert_json5("scouting/gossip/enabled", "false")
             .unwrap();
         let session = Arc::new(zenoh::open(cfg).await.unwrap());
-        let publisher = zensight_sensor_core::Publisher::new(
-            session,
-            "zensight/parallax/watchdog-test",
-            Format::Json,
-        );
+        let publisher = zensight_sensor_core::Publisher::new(session, "parallax", Format::Json);
         let media = publisher
-            .raw_media_publisher("zensight/parallax/watchdog-test/@media/x/preview/jpeg")
+            .raw_media_publisher(publisher.v1().media_preview_key("watchdog-test"))
             .await
             .unwrap();
 

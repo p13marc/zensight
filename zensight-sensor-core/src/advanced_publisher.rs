@@ -14,9 +14,11 @@
 //! ```ignore
 //! use zensight_sensor_core::AdvancedPublisherRegistry;
 //!
+//! // The prefix is the v1 telemetry prefix from `V1Context::telemetry_prefix()`
+//! // (`zensight/@v1/<origin>/telemetry/<producer>`).
 //! let registry = AdvancedPublisherRegistry::new(
 //!     session.clone(),
-//!     "zensight/snmp",
+//!     ctx.telemetry_prefix(),
 //!     AdvancedPublisherConfig::default(),
 //! ).await?;
 //!
@@ -97,8 +99,8 @@ impl AdvancedPublisherConfig {
 pub struct AdvancedPublisherRegistry {
     /// Zenoh session.
     session: Arc<Session>,
-    /// Key prefix (e.g., "zensight/snmp").
-    key_prefix: String,
+    /// The v1 telemetry prefix (`zensight/@v1/<origin>/telemetry/<producer>`).
+    telemetry_prefix: String,
     /// Configuration for new publishers.
     config: AdvancedPublisherConfig,
     /// Serialization format.
@@ -114,7 +116,7 @@ pub struct AdvancedPublisherRegistry {
 impl std::fmt::Debug for AdvancedPublisherRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AdvancedPublisherRegistry")
-            .field("key_prefix", &self.key_prefix)
+            .field("telemetry_prefix", &self.telemetry_prefix)
             .field("config", &self.config)
             .field("format", &self.format)
             .finish_non_exhaustive()
@@ -125,13 +127,13 @@ impl AdvancedPublisherRegistry {
     /// Create a new advanced publisher registry.
     pub fn new(
         session: Arc<Session>,
-        key_prefix: impl Into<String>,
+        telemetry_prefix: impl Into<String>,
         format: Format,
         config: AdvancedPublisherConfig,
     ) -> Self {
         Self {
             session,
-            key_prefix: key_prefix.into(),
+            telemetry_prefix: telemetry_prefix.into(),
             config,
             format,
             qos: QosClass::Telemetry,
@@ -148,8 +150,8 @@ impl AdvancedPublisherRegistry {
     }
 
     /// Get the key prefix.
-    pub fn key_prefix(&self) -> &str {
-        &self.key_prefix
+    pub fn telemetry_prefix(&self) -> &str {
+        &self.telemetry_prefix
     }
 
     /// Get the configuration.
@@ -158,11 +160,17 @@ impl AdvancedPublisherRegistry {
     }
 
     /// Build a full key expression from a suffix.
+    ///
+    /// The advanced tier declares its own publishers rather than going through
+    /// [`zensight_common::PublisherRegistry`], so the registry-conformance
+    /// guard (RFC 08 §5) has to be applied here too.
     fn build_key(&self, suffix: &str) -> String {
         if suffix.is_empty() {
-            self.key_prefix.clone()
+            self.telemetry_prefix.clone()
         } else {
-            format!("{}/{}", self.key_prefix, suffix)
+            let key = format!("{}/{}", self.telemetry_prefix, suffix);
+            zensight_common::metric_guard::check_telemetry_key(&key);
+            key
         }
     }
 

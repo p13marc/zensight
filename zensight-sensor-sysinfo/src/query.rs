@@ -1,6 +1,6 @@
 //! On-demand per-process detail query channel (principle P2, plan §F).
 //!
-//! Declares `zensight/sysinfo/<host>/@/query/processes`. The GUI calls it when a
+//! Declares `zensight/@v1/<origin>/@rpc/sysinfo/processes`. The GUI calls it when a
 //! user drills into a host to ask "what's eating the box?". Each reply is a
 //! fresh, sorted, bounded `Vec<ProcessRecord>` serialized as JSON — the
 //! high-cardinality per-pid firehose is *never* streamed onto the telemetry bus
@@ -72,16 +72,15 @@ impl CmdlinePolicy {
 
 /// Run the per-process detail query channel until the session closes.
 ///
-/// `key_prefix` is the sensor's telemetry prefix (e.g. `zensight/sysinfo`) and
-/// `source` the source segment, so the queryable lives at
-/// `<key_prefix>/<source>/@/query/processes`.
+/// `producer` is the sensor's producer name (`sysinfo`); the queryable lives
+/// at the v1 procedure key `@rpc/sysinfo/processes`.
 pub async fn run(
     session: Arc<zenoh::Session>,
-    key_prefix: String,
-    source: String,
+    producer: String,
+    _source: String,
     scrub: ProcessScrubConfig,
 ) {
-    let key = format!("{key_prefix}/{source}/@/query/processes");
+    let key = zensight_keyspace_ctx(&producer).rpc_key(&["processes"]);
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -104,12 +103,12 @@ pub async fn run(
                     Vec::new()
                 }
             };
-        reply_json(&query, &records).await;
+        reply_json(&query, &key, &records).await;
     }
 }
 
-/// Serve the opt-in eBPF saturation histograms on
-/// `<key_prefix>/<source>/@/query/latency` (issue #99).
+/// Serve the opt-in eBPF saturation histograms on `@rpc/sysinfo/latency`
+/// (issue #99).
 ///
 /// Reads the shared snapshot the eBPF poller maintains (runqlat + biolatency,
 /// never streamed) and replies it as JSON. Always declared when the feature is
@@ -117,11 +116,11 @@ pub async fn run(
 /// `available: false` (no caps / unsupported kernel).
 pub async fn run_latency(
     session: Arc<zenoh::Session>,
-    key_prefix: String,
-    source: String,
+    producer: String,
+    _source: String,
     report: Arc<std::sync::Mutex<crate::map::LatencyReport>>,
 ) {
-    let key = format!("{key_prefix}/{source}/@/query/latency");
+    let key = zensight_keyspace_ctx(&producer).rpc_key(&["latency"]);
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -133,15 +132,22 @@ pub async fn run_latency(
 
     while let Ok(query) = queryable.recv_async().await {
         let snapshot = report.lock().map(|r| r.clone()).unwrap_or_default();
-        reply_json(&query, &snapshot).await;
+        reply_json(&query, &key, &snapshot).await;
     }
 }
 
 /// Serialize `records` as JSON and reply on the query's own key.
-async fn reply_json<T: serde::Serialize>(query: &zenoh::query::Query, records: &T) {
+/// Small helper: the v1 context for one producer.
+fn zensight_keyspace_ctx(producer: &str) -> zensight_sensor_core::v1::V1Context {
+    zensight_sensor_core::v1::V1Context::for_producer(producer)
+}
+
+/// Reply on the queryable's **concrete** key (RFC 05 §2.1), never the
+/// query's selector.
+async fn reply_json<T: serde::Serialize>(query: &zenoh::query::Query, key: &str, records: &T) {
     match serde_json::to_vec(records) {
         Ok(payload) => {
-            if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+            if let Err(e) = query.reply(key, payload).await {
                 tracing::warn!(error = %e, "query: reply failed");
             }
         }

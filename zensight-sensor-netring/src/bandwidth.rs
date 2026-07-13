@@ -9,7 +9,7 @@
 //!   hot-swaps it into the shared `ArcSwap` the capture hook loads. All the
 //!   scanning is here, OFF netring's synchronous attribution hook.
 //! * [`run_query`] — serves the latest per-owner wire-L2 rows on
-//!   `zensight/netring/@/query/bandwidth` (query-only, principle P2), the same
+//!   `@rpc/netring/bandwidth` (query-only, principle P2), the same
 //!   `BandwidthRecord` contract the netlink sock_diag tier serves.
 
 use std::sync::Arc;
@@ -106,10 +106,10 @@ async fn dump_sockets(conn: &Connection<SockDiag>) -> Vec<SocketRow> {
 }
 
 /// Serve the latest wire-level per-process bandwidth rows on
-/// `zensight/netring/@/query/bandwidth` as JSON `Vec<BandwidthRecord>`, newest
+/// `@rpc/netring/bandwidth` as JSON `Vec<BandwidthRecord>`, newest
 /// snapshot, trimmed to `?top=N` (default 100).
-pub async fn run_query(session: Arc<zenoh::Session>, key_prefix: String, shared: OwnerBandwidth) {
-    let key = zensight_common::command::query_key(&key_prefix, "bandwidth");
+pub async fn run_query(session: Arc<zenoh::Session>, producer: String, shared: OwnerBandwidth) {
+    let key = zensight_common::command::query_key(&producer, "bandwidth");
     let queryable = match session.declare_queryable(&key).await {
         Ok(q) => q,
         Err(e) => {
@@ -133,7 +133,7 @@ pub async fn run_query(session: Arc<zenoh::Session>, key_prefix: String, shared:
         records.truncate(top);
         match serde_json::to_vec(&records) {
             Ok(payload) => {
-                if let Err(e) = query.reply(query.key_expr().clone(), payload).await {
+                if let Err(e) = query.reply(key.as_str(), payload).await {
                     tracing::warn!(error = %e, "query: bandwidth reply failed");
                 }
             }

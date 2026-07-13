@@ -6,7 +6,8 @@
     serialization: "cbor",           // "json" or "cbor"
   },
 
-  // On-demand artifact channel (@/artifact) — opt-in per kind. When enabled,
+  // On-demand artifact channel (@rpc artifact/request + @blob delivery) —
+  // opt-in per kind. When enabled,
   // an operator can download a redacted tar.zst debug bundle (and, for
   // snapshot, an allowlisted directory) from the GUI. Bounded + rate-limited;
   // secrets are redacted.
@@ -22,8 +23,6 @@
 
   // systemd sensor settings
   systemd: {
-    // Key expression prefix
-    key_prefix: "zensight/systemd",
 
     // How often to read the systemd Manager (seconds)
     poll_interval_secs: 15,
@@ -37,9 +36,9 @@
     watch_max: 50,
     ip_io_accounting: false,   // include ip/io bytes when the unit enables accounting
 
-    events_capacity: 256,      // control-plane event ring size (#275, @/query/events)
+    events_capacity: 256,      // control-plane event ring size (#275, @rpc/systemd/events)
 
-    // Built-in threshold alerts (#276) → @/alerts/*.
+    // Built-in threshold alerts (#276) → state/systemd/alert/*.
     alerts: {
       enabled: true,
       for_secs: 15,            // debounce before a firing alert publishes
@@ -51,12 +50,12 @@
       timer_overdue_grace_secs: 300,
     },
 
-    // cgroup-tree query (#280) — served on demand at @/query/cgroups[?path=<rel>];
+    // cgroup-tree query (#280) — served on demand at @rpc/systemd/cgroups[?path=<rel>];
     // never streamed. Unprivileged /sys/fs/cgroup v2 walk, depth/breadth capped.
     cgroup: { root: "system.slice", max_depth: 6, max_children: 64, max_pids: 32 },
 
-    // Embedded sentinel (#277) — declarative expectations → @/alerts/*,
-    // hot-swappable via @/commands/expectations. Omit to disable.
+    // Embedded sentinel (#277) — declarative expectations → state/systemd/alert/*,
+    // hot-swappable via @rpc/systemd/expectations/set. Omit to disable.
     // expectations: {
     //   eval_interval_secs: 10,
     //   for_secs: 15,
@@ -71,7 +70,7 @@
     // sensor is strictly read-only unless this is explicitly enabled with an
     // allowlist. Authorization is enforced by systemd/polkit (run as root, or add
     // a scoped polkit rule granting org.freedesktop.systemd1.manage-units for the
-    // allowlisted units). @/commands/action {verb,unit} → @/status/action.
+    // allowlisted units). @rpc/systemd/action/set {verb,unit} → @rpc/systemd/action.
     // actions: {
     //   enabled: false,
     //   allow_units: ["nginx.service", "app-*.service"],

@@ -574,7 +574,7 @@ pub mod parallax {
     use super::*;
     use zensight_common::StreamDescriptor;
 
-    /// Mock stream catalogue — mirrors the real `@/query/streams` reply
+    /// Mock stream catalogue — mirrors the real `@rpc/parallax/streams` reply
     /// shape (demo mirrors the wire contract).
     pub fn streams() -> Vec<StreamDescriptor> {
         vec![
@@ -680,7 +680,7 @@ fn entity_id_for(name: &str) -> String {
         hash ^= *b as u64;
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    format!("h_{:012x}", hash & 0xffff_ffff_ffff)
+    format!("h-{:012x}", hash & 0xffff_ffff_ffff)
 }
 
 /// One correlator [`HostEntity`] merging the given `(sensor, source)` members
@@ -723,7 +723,7 @@ fn mock_entity(
 }
 
 /// Mock per-process bandwidth records (#319, epic #320) for the Bandwidth view's
-/// Processes mode in `--demo`: demo never serves the `@/query/bandwidth`
+/// Processes mode in `--demo`: demo never serves the `@rpc/netlink/bandwidth`
 /// queryable, so the demo fetch branch returns these instead. Tagged sock_diag /
 /// app-goodput / TCP, including the explicit `unattributed` bucket the real
 /// aggregator emits.
@@ -904,7 +904,7 @@ mod tests {
         assert_eq!(entity_id_for("server01"), entity_id_for("server01"));
         assert_ne!(entity_id_for("server01"), entity_id_for("server02"));
         let ents = host_entities_at(1_000);
-        assert!(ents.iter().all(|e| e.entity_id.starts_with("h_")));
+        assert!(ents.iter().all(|e| e.entity_id.starts_with("h-")));
         assert!(ents.iter().all(|e| e.entity_id.len() == 14));
     }
 
@@ -938,5 +938,77 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+/// Mock `introspect` replies for the Fleet view in `--demo` (#469): demo never
+/// serves the `@rpc/<producer>/introspect` queryable, so the demo fetch branch
+/// returns these instead.
+///
+/// The slices are the *real* compiled ones — the demo must mirror the sensor
+/// contract, not a hand-written fiction of it — with one deliberate exception:
+/// `edge01` serves a bumped `[registry] version`, so the demo actually shows
+/// what the view is for. A demo where every host is in sync demonstrates
+/// nothing.
+pub mod fleet {
+    use crate::view::fleet::FleetReply;
+
+    fn slice(name: &str) -> String {
+        zensight_keyspace::registry::REGISTRIES
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, t)| (*t).to_string())
+            .unwrap_or_default()
+    }
+
+    /// Bump a slice's `[registry] version` — a synthetic skew, so the demo has
+    /// an odd one out to find.
+    fn skewed(name: &str, version: &str) -> String {
+        let src = slice(name);
+        let mut out = String::with_capacity(src.len());
+        let mut bumped = false;
+        for line in src.lines() {
+            if !bumped && line.trim_start().starts_with("version =") {
+                out.push_str(&format!("version = \"{version}\"\n"));
+                bumped = true;
+            } else {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    pub fn replies() -> Vec<FleetReply> {
+        let server01 = "h-1a2b3c4d5e6f";
+        let edge01 = "h-9f8e7d6c5b4a";
+        vec![
+            FleetReply {
+                origin: server01.into(),
+                producer: "sysinfo".into(),
+                toml: slice("sysinfo"),
+            },
+            FleetReply {
+                origin: server01.into(),
+                producer: "netlink".into(),
+                toml: slice("netlink"),
+            },
+            FleetReply {
+                origin: server01.into(),
+                producer: "netring".into(),
+                toml: slice("netring"),
+            },
+            FleetReply {
+                origin: edge01.into(),
+                producer: "sysinfo".into(),
+                toml: slice("sysinfo"),
+            },
+            // The odd one out: an older deployment still on registry 1.0.
+            FleetReply {
+                origin: edge01.into(),
+                producer: "netlink".into(),
+                toml: skewed("netlink", "1.0"),
+            },
+        ]
     }
 }

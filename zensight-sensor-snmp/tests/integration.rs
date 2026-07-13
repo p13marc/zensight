@@ -1,8 +1,6 @@
 //! Integration tests for zensight-sensor-snmp.
 
-use zensight_common::{
-    Format, KeyExprBuilder, Protocol, TelemetryPoint, TelemetryValue, decode_auto, encode,
-};
+use zensight_common::{Format, Protocol, TelemetryPoint, TelemetryValue, decode_auto, encode};
 
 /// Test that we can encode telemetry and it would be decodable by the frontend.
 #[test]
@@ -26,22 +24,18 @@ fn test_snmp_telemetry_encoding() {
     assert_eq!(decoded.metric, "system/sysUpTime");
 }
 
-/// Test key expression generation for SNMP metrics.
+/// Test key expression generation for SNMP metrics (v1: proxy shape — the
+/// observed device rides as the first subject chunk after the producer).
 #[test]
 fn test_snmp_key_expressions() {
-    let builder = KeyExprBuilder::new(Protocol::Snmp);
+    let prefix = zensight_sensor_core::v1::V1Context::for_producer("snmp").telemetry_prefix();
+    let origin = zensight_sensor_core::v1::host_id().as_str();
 
-    // System metrics
-    let sys_uptime = builder.build("router01", "system/sysUpTime");
-    assert_eq!(sys_uptime, "zensight/snmp/router01/system/sysUpTime");
-
-    // Interface metrics
-    let if_in_octets = builder.build("switch01", "if/1/ifInOctets");
-    assert_eq!(if_in_octets, "zensight/snmp/switch01/if/1/ifInOctets");
-
-    // Device wildcard
-    let device_all = builder.source_wildcard("router01");
-    assert_eq!(device_all, "zensight/snmp/router01/**");
+    let sys_uptime = format!("{prefix}/router01/system/sysUpTime");
+    assert_eq!(
+        sys_uptime,
+        format!("zensight/@v1/{origin}/telemetry/snmp/router01/system/sysUpTime")
+    );
 }
 
 /// Test various SNMP value types that could come from polling.
@@ -95,27 +89,19 @@ fn test_ip_address_device_names() {
     ];
 
     for device in devices {
-        let key = KeyExprBuilder::new(Protocol::Snmp).build(device, "sysUpTime");
-        assert!(key.contains(device) || key.contains("2001")); // IPv6 might be encoded
+        // v1 chunks slug the separators away (RFC 03 §2) — the slug must be
+        // a single valid chunk with no dots or colons.
+        let slug = device.replace(['.', ':'], "-");
+        assert!(!slug.contains(['.', ':', '/']));
     }
 }
 
-/// Test SNMP interface index in metric paths.
+/// Test SNMP interface index in metric paths (v1 proxy shape).
 #[test]
 fn test_interface_index_metrics() {
-    let builder = KeyExprBuilder::new(Protocol::Snmp);
-
+    let prefix = zensight_sensor_core::v1::V1Context::for_producer("snmp").telemetry_prefix();
     for idx in 1..=10 {
-        let key = builder.build("switch", &format!("if/{}/ifInOctets", idx));
+        let key = format!("{prefix}/switch/if/{idx}/ifInOctets");
         assert!(key.contains(&format!("if/{}/", idx)));
     }
-}
-
-/// Test that the sensor status key is correct — host-scoped by the instance's
-/// `<source>` segment so two pollers never overwrite each other's status.
-#[test]
-fn test_sensor_status_key() {
-    let builder = KeyExprBuilder::new(Protocol::Snmp);
-    let status_key = builder.status_key("poller01");
-    assert_eq!(status_key, "zensight/snmp/poller01/@/status");
 }

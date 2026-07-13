@@ -89,9 +89,8 @@ pub struct HealthSnapshot {
     /// Hashed machine-id of the publishing host (identity envelope, #301).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_id: Option<String>,
-    /// The `<source>` key segment of the publishing sensor instance — the
-    /// same value that host-scopes its control-plane keys
-    /// (`zensight/<protocol>/<source>/@/health`). Optional for
+    /// The `<source>` id of the publishing sensor instance (payload-only in
+    /// v1 — the origin chunk scopes the health doc key). Optional for
     /// mixed-fleet/persisted payloads predating the host-scoped keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -153,16 +152,16 @@ pub struct ErrorReport {
 }
 
 /// Sensor registration/discovery record, published by every sensor's runner on
-/// `zensight/_meta/sensors/<name>/<source>` (identity envelope, #301). Health
-/// and device counts live on `@/health`, not here.
+/// the registration doc `state/<producer>/sensor` (identity envelope, #301).
+/// Health and device counts live on `state/<producer>/health`, not here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SensorInfo {
     /// Sensor name (e.g., "sysinfo", "netlink").
     pub name: String,
     /// Sensor crate version.
     pub version: String,
-    /// Key prefix used by this sensor (e.g. "zensight/netlink").
-    pub key_prefix: String,
+    /// Producer name this sensor publishes under (e.g. "netlink").
+    pub producer: String,
     /// Unified host/source id (the `<source>` telemetry key segment).
     pub source: String,
     /// Hashed machine-id (never the raw id).
@@ -177,6 +176,11 @@ pub struct SensorInfo {
     pub fqdn: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ips: Vec<String>,
+    /// Free-form sensor metadata (device counts, listener addresses, …) —
+    /// carried on the registration doc since the legacy `@/status` document
+    /// retired with the v1 cutover (the health doc absorbs the running flag).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub macs: Vec<String>,
     /// Unix epoch millis of the latest re-emission.
@@ -240,7 +244,7 @@ mod tests {
         let json = r#"{
             "name": "sysinfo",
             "version": "0.6.2",
-            "key_prefix": "zensight/sysinfo",
+            "producer": "sysinfo",
             "source": "host1",
             "host_id": "abcd",
             "ips": ["10.0.0.1"],

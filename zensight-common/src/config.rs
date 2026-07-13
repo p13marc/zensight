@@ -18,6 +18,20 @@ pub struct ZenohConfig {
     /// Endpoints to listen on (for peer/router mode).
     #[serde(default)]
     pub listen: Vec<String>,
+
+    /// Zenoh multicast scouting. Default true. Set false — or export
+    /// `ZENSIGHT_ZENOH_SCOUTING=false` — for ISOLATED runs pinned to
+    /// explicit endpoints: with multicast scouting on, a default-config
+    /// session joins any reachable mesh (the "sensors contaminate the live
+    /// hub" hazard). Gossip stays on either way — it only propagates within
+    /// the explicitly-connected graph (and is what lets spokes of a hub
+    /// find each other, the `just run` topology).
+    #[serde(default = "default_scouting")]
+    pub scouting: bool,
+}
+
+fn default_scouting() -> bool {
+    true
 }
 
 fn default_mode() -> String {
@@ -30,12 +44,13 @@ impl Default for ZenohConfig {
             mode: default_mode(),
             connect: Vec::new(),
             listen: Vec::new(),
+            scouting: true,
         }
     }
 }
 
 impl ZenohConfig {
-    /// Apply `ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN}` environment overrides.
+    /// Apply `ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN,SCOUTING}` environment overrides.
     ///
     /// `CONNECT`/`LISTEN` are comma-separated endpoint lists. Unset variables
     /// leave the field untouched. This lets a launcher (e.g. `just run`) pin
@@ -64,6 +79,9 @@ impl ZenohConfig {
         if let Some(l) = get("ZENSIGHT_ZENOH_LISTEN") {
             self.listen = parse(l);
         }
+        if let Some(s) = get("ZENSIGHT_ZENOH_SCOUTING") {
+            self.scouting = !matches!(s.trim(), "false" | "0" | "off" | "no");
+        }
         self
     }
 }
@@ -87,6 +105,7 @@ mod zenoh_env_tests {
             mode: "peer".into(),
             connect: vec!["tcp/a:1".into()],
             listen: vec![],
+            scouting: true,
         };
         assert_eq!(over(base.clone(), &[]), base);
     }

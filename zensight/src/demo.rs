@@ -486,7 +486,7 @@ impl DemoSimulator {
     /// time-varying IPAccounting rates (`unit/<name>/ip_*_bps`, wire-L3) so the
     /// Bandwidth view's Services mode + sparklines populate in `--demo`. The
     /// Processes mode is fed separately by the demo query branch in `app.rs`
-    /// (demo never serves the `@/query/bandwidth` queryable).
+    /// (demo never serves the `@rpc/netlink/bandwidth` queryable).
     fn generate_bandwidth(&mut self, timestamp: i64) -> Vec<TelemetryPoint> {
         let mut points = Vec::new();
         // (unit, rx_base bytes/s, tx_base bytes/s)
@@ -2068,7 +2068,7 @@ impl DemoSimulator {
     }
 
     /// Map an anomaly to the sensor alert a real sensor would raise for it, or
-    /// `None` for anomalies that don't surface on the `@/alerts` channel.
+    /// `None` for anomalies that don't surface on `state/<producer>/alert/*`.
     fn anomaly_to_alert(anomaly: &AnomalyType) -> Option<Alert> {
         match anomaly {
             AnomalyType::PortScan { src_ip } => Some(

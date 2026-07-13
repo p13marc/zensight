@@ -12,8 +12,7 @@ Minimal:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `key_prefix` | `"zensight/parallax"` | Telemetry/control key prefix. |
-| `source` | `"auto"` | Host id key chunk; `"auto"` resolves the hostname. |
+| `source` | `"auto"` | Instance label in payloads; `"auto"` resolves the hostname (v1 keys are origin-scoped, so it no longer appears in key expressions). |
 | `enumerate_v4l2` | `true` | Advertise local `/dev/video*` cameras. Headless hosts contribute nothing. |
 | `rtsp` | `[]` | Remote RTSP cameras (see below). |
 | `test_sources` | `[]` | Synthetic `VideoTestSrc` patterns (see below). |
@@ -21,7 +20,7 @@ Minimal:
 | `preview.quality` | `75` | JPEG quality 1–100. |
 | `video.bitrate_kbps` | `2000` | H.264 target bitrate. |
 | `video.gop_frames` | `60` | Keyframe (IDR) interval in frames. |
-| `video.profile` | `"main"` | Profile name used in the `@media/.../video/h264/<profile>` key chunk. |
+| `video.profile` | `"main"` | Profile name used in the `@media/parallax/<stream>/video/h264/<profile>` key chunk. |
 | `idle_timeout_secs` | `30` | Tear an open profile down after this long with no viewers and no explicit opens. |
 | `stats_interval_secs` | `5` | Per-stream stats telemetry cadence. |
 

@@ -6,6 +6,7 @@ license.workspace = true
 description = "Common types and utilities for ZenSight observability sensors"
 
 [dependencies]
+zensight-keyspace = { workspace = true }
 zenoh.workspace = true
 tokio.workspace = true
 serde.workspace = true

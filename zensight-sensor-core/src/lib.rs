@@ -46,9 +46,10 @@ mod liveliness;
 pub mod procutil;
 mod publisher;
 pub mod report;
+pub mod rpc;
 mod runner;
 pub mod scrub;
-mod status;
+pub mod v1;
 
 pub use advanced_publisher::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
 pub use alert::{AlertReporter, serve_alerts_query};
@@ -70,7 +71,6 @@ pub use publisher::{Publisher, RawMediaPublisher};
 pub use report::{DebugBundleSource, SimpleBundleSource, redact};
 pub use runner::SensorRunner;
 pub use scrub::{ArgScrubber, CMDLINE_CAP_BYTES};
-pub use status::SensorStatus;
 
 // Re-export commonly used types from zensight-common
 pub use zensight_common::{

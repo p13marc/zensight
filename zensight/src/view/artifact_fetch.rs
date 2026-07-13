@@ -1,4 +1,4 @@
-//! Operator artifact download over the unified `@/artifact` channel — the client
+//! Operator artifact download over the unified artifact channel — the client
 //! state machine, the request/poll/stream helpers that drive `zenoh-blob`, and the
 //! per-sensor UI. Subsumes the old Tier-1 debug-report (`blob_fetch`) and Tier-2
 //! directory-snapshot (`dir_fetch`) modules: they were the same lifecycle with
@@ -19,7 +19,7 @@ use zenoh_blob::{
 };
 use zensight_common::{
     ArtifactKind, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery, KindAdvert, KindStatus,
-    artifact_request_key, artifact_status_key,
+    fleet_rpc_key,
 };
 
 use crate::message::Message;
@@ -285,7 +285,7 @@ impl CaptureForm {
 #[derive(Clone)]
 pub struct ArtifactJob {
     /// Sensor key prefix, e.g. `zensight/netlink`.
-    pub key_prefix: String,
+    pub producer: String,
     /// What is being produced (its slug drives status matching + label wording).
     pub kind: ArtifactKind,
     /// Artifact id.
@@ -301,11 +301,11 @@ pub struct ArtifactJob {
 }
 
 impl ArtifactJob {
-    /// Start a job for `key_prefix`/`kind` with a fresh id + cancel token landing
+    /// Start a job for `producer`/`kind` with a fresh id + cancel token landing
     /// in `dest`.
-    pub fn new(key_prefix: String, kind: ArtifactKind, dest: PathBuf) -> Self {
+    pub fn new(producer: String, kind: ArtifactKind, dest: PathBuf) -> Self {
         ArtifactJob {
-            key_prefix,
+            producer,
             kind,
             id: Ulid::new(),
             delivery: None,
@@ -324,16 +324,24 @@ impl ArtifactJob {
 
 /// GET the artifact status queryable and return every kind the sensor produces
 /// (with its bounds/advert), so the GUI knows which affordances to render.
-pub async fn load_artifact_kinds(session: Arc<Session>, key_prefix: String) -> Vec<KindStatus> {
-    let status_key = artifact_status_key(&key_prefix);
-    let Ok(replies) = session.get(&status_key).await else {
+pub async fn load_artifact_kinds(session: Arc<Session>, producer: String) -> Vec<KindStatus> {
+    let status_key = fleet_rpc_key(&producer, "artifact/status");
+    // Fleet fan-in (RFC 05 §2.1): target All and take the first decodable
+    // reply — every host advertising the producer serves the same kind set.
+    let Ok(replies) = session
+        .get(&status_key)
+        .target(zenoh::query::QueryTarget::All)
+        .await
+    else {
         return Vec::new();
     };
-    if let Ok(reply) = replies.recv_async().await
-        && let Ok(sample) = reply.result()
-        && let Ok(status) = serde_json::from_slice::<ArtifactStatus>(&sample.payload().to_bytes())
-    {
-        return status.kinds;
+    while let Ok(reply) = replies.recv_async().await {
+        if let Ok(sample) = reply.result()
+            && let Ok(status) =
+                serde_json::from_slice::<ArtifactStatus>(&sample.payload().to_bytes())
+        {
+            return status.kinds;
+        }
     }
     Vec::new()
 }
@@ -349,7 +357,7 @@ pub async fn load_artifact_kinds(session: Arc<Session>, key_prefix: String) -> V
 pub fn request_and_stream_ready(
     session: Arc<Session>,
     registry: Arc<zensight_common::PublisherRegistry>,
-    key_prefix: String,
+    producer: String,
     kind: ArtifactKind,
     id: Ulid,
     target_source: Option<String>,
@@ -360,9 +368,10 @@ pub fn request_and_stream_ready(
             ArtifactKind::Capture { duration_secs, .. } => *duration_secs as u64,
             _ => 0,
         };
-        // The artifact channel key is protocol-scoped, so every host running this
-        // sensor sees the request; `target_source` makes exactly one produce it.
-        // `None` preserves the fan-out (all hosts produce).
+        // v1 (RFC 05 §3): the request is a write procedure — GET with a body;
+        // the value reply is the ack, refusals arrive as reply errors. A
+        // `*`-origin GET fans the request out to every host serving the
+        // producer (`target_source` remains a legacy payload narrow).
         let req = ArtifactRequest {
             id,
             kind,
@@ -375,19 +384,42 @@ pub fn request_and_stream_ready(
                 return;
             }
         };
-        if let Err(e) = registry
-            .put(
-                &artifact_request_key(&key_prefix),
-                payload,
-                zensight_common::QosClass::Command,
-            )
+        let _ = &registry; // command registry no longer used on this path
+        match session
+            .get(&fleet_rpc_key(
+                &producer,
+                "artifact/request",
+            ))
+            .target(zenoh::query::QueryTarget::All)
+            .payload(payload)
+            .timeout(std::time::Duration::from_secs(5))
             .await
         {
-            yield Message::ArtifactRequested(Err(format!("request failed: {e}")));
-            return;
+            Ok(replies) => match replies.recv_async().await {
+                Ok(reply) => {
+                    if let Err(err) = reply.result() {
+                        let msg = String::from_utf8_lossy(&err.payload().to_bytes()).to_string();
+                        yield Message::ArtifactRequested(Err(format!("request refused: {msg}")));
+                        return;
+                    }
+                }
+                Err(_) => {
+                    yield Message::ArtifactRequested(Err(
+                        "request unanswered — sensor offline or artifacts disabled".to_string(),
+                    ));
+                    return;
+                }
+            },
+            Err(e) => {
+                yield Message::ArtifactRequested(Err(format!("request failed: {e}")));
+                return;
+            }
         }
 
-        let status_key = artifact_status_key(&key_prefix);
+        let status_key = fleet_rpc_key(
+            &producer,
+            "artifact/status",
+        );
         // Poll every 500ms for a scaled window (2 iters/sec).
         let iters = (60 + extra_secs) * 2;
         for _ in 0..iters {
@@ -424,16 +456,31 @@ async fn poll_status(
     slug: &str,
     id: Ulid,
 ) -> Option<ArtifactState> {
-    let replies = session.get(status_key).await.ok()?;
-    let reply = replies.recv_async().await.ok()?;
-    let sample = reply.result().ok()?;
-    let status: ArtifactStatus = serde_json::from_slice(&sample.payload().to_bytes()).ok()?;
-    status
-        .kinds
-        .into_iter()
-        .find(|k| k.kind == slug)
-        .and_then(|k| k.current)
-        .filter(|s| s.id() == id)
+    // Fleet fan-in (RFC 05 §2.1): every host serving the producer replies,
+    // but only the one that accepted `id` carries its state — scan them all
+    // instead of trusting whichever host answered first.
+    let replies = session
+        .get(status_key)
+        .target(zenoh::query::QueryTarget::All)
+        .await
+        .ok()?;
+    while let Ok(reply) = replies.recv_async().await {
+        let Ok(sample) = reply.result() else { continue };
+        let Ok(status) = serde_json::from_slice::<ArtifactStatus>(&sample.payload().to_bytes())
+        else {
+            continue;
+        };
+        if let Some(state) = status
+            .kinds
+            .into_iter()
+            .find(|k| k.kind == slug)
+            .and_then(|k| k.current)
+            .filter(|s| s.id() == id)
+        {
+            return Some(state);
+        }
+    }
+    None
 }
 
 /// Drive the right `zenoh-blob` client for `delivery` into `dest`, yielding
@@ -492,7 +539,7 @@ pub fn download_stream(
 }
 
 /// Download an already-registered blob by id (#327: triggered captures listed on
-/// `@/query/captures`). Unlike [`download_stream`] there is no request/produce
+/// `@rpc/netring/captures`). Unlike [`download_stream`] there is no request/produce
 /// phase and no `Delivery` in hand — the `BlobClient` fetches the manifest by id
 /// itself. Pause/resume is not offered on this path (no stored delivery); cancel
 /// works through the token.
@@ -542,7 +589,7 @@ fn caption_danger(theme: &iced::Theme) -> iced::widget::text::Style {
 /// advert.
 pub fn capture_form_view<'a>(
     form: &CaptureForm,
-    key_prefix: &str,
+    producer: &str,
     target_source: Option<&str>,
     advert: &KindAdvert,
     ks: &KindStatus,
@@ -556,13 +603,13 @@ pub fn capture_form_view<'a>(
         } => (*max_duration_secs, *filter_allowed),
         _ => (0, false),
     };
-    let kp = key_prefix.to_string();
+    let kp = producer.to_string();
     let max_mib = ks.max_bytes / (1024 * 1024);
 
     let edit = |field: CaptureField| {
         let kp = kp.clone();
         move |value: String| Message::CaptureFormEdited {
-            key_prefix: kp.clone(),
+            producer: kp.clone(),
             field,
             value,
         }
@@ -599,7 +646,7 @@ pub fn capture_form_view<'a>(
         .label("Compress (zstd)")
         .text_size(font::CAPTION)
         .on_toggle(move |_| Message::CaptureFormToggled {
-            key_prefix: kp_c.clone(),
+            producer: kp_c.clone(),
             field: CaptureToggle::Compress,
         });
     let mut toggles = row![compress].spacing(space::MD).align_y(Alignment::Center);
@@ -610,7 +657,7 @@ pub fn capture_form_view<'a>(
                 .label("Decompress on save")
                 .text_size(font::CAPTION)
                 .on_toggle(move |_| Message::CaptureFormToggled {
-                    key_prefix: kp_d.clone(),
+                    producer: kp_d.clone(),
                     field: CaptureToggle::DecompressOnSave,
                 }),
         );
@@ -620,7 +667,7 @@ pub fn capture_form_view<'a>(
     let mut submit = button(text("Start capture").size(font::CAPTION));
     if !disabled && let Ok(kind) = &validation {
         submit = submit.on_press(Message::StartArtifact {
-            key_prefix: kp.clone(),
+            producer: kp.clone(),
             kind: kind.clone(),
             target_source: target_source.map(str::to_string),
         });
@@ -700,7 +747,7 @@ pub fn artifact_section<'a>(
                 let mut btn = button(text("Download debug report").size(font::CAPTION));
                 if !other_busy {
                     btn = btn.on_press(Message::StartArtifact {
-                        key_prefix: this_prefix.to_string(),
+                        producer: this_prefix.to_string(),
                         kind: ArtifactKind::Report {},
                         target_source: target_source.map(str::to_string),
                     });
@@ -715,7 +762,7 @@ pub fn artifact_section<'a>(
                     let mut b = button(text(format!("Download {d}")).size(font::CAPTION));
                     if !other_busy {
                         b = b.on_press(Message::StartArtifact {
-                            key_prefix: this_prefix.to_string(),
+                            producer: this_prefix.to_string(),
                             kind: ArtifactKind::Snapshot { dir: d.clone() },
                             target_source: target_source.map(str::to_string),
                         });

@@ -29,11 +29,6 @@
   // cache. The frontend marks an entity stale after ~3x this period.
   reemit_secs: 60,
 
-  // Roll device-liveness (zensight/<proto>/@/devices/*/liveness) up into each
-  // entity's status field (worst-of-members). Set false to skip the liveness
-  // subscription entirely.
-  status_from_liveness: true,
-
   // Identity merge rules (kill-switches). host_id is the strongest join and
   // effectively never wrong; hostname is the weakest and most false-merge prone,
   // so disable it on networks with duplicate hostnames.
