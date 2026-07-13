@@ -184,7 +184,8 @@ pub enum OtlpProtocol {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FilterConfig {
     /// Zenoh subscription key expression for telemetry (R6/#357). Defaults to the
-    /// broad `zensight/**`; narrow it (e.g. `zensight/netring/**`) to tame the
+    /// full telemetry class selector; narrow it (e.g.
+    /// `zensight/@v1/*/telemetry/netring/**`) to tame the
     /// firehose at the *subscription* — unwanted protocols and the `_meta/**`
     /// control plane never reach this exporter over the wire. The `@/alerts/*`
     /// subscriber is separate and unaffected. `include_protocols` etc. still apply
@@ -334,7 +335,7 @@ mod tests {
                 }
             },
             filters: {
-                key_expr: "zensight/netring/**",
+                key_expr: "zensight/@v1/*/telemetry/netring/**",
                 include_protocols: ["snmp", "sysinfo"],
                 exclude_sources: ["test-device"]
             },
@@ -362,7 +363,7 @@ mod tests {
         assert_eq!(config.filters.include_protocols, vec!["snmp", "sysinfo"]);
         assert_eq!(
             config.filters.key_expr.as_deref(),
-            Some("zensight/netring/**")
+            Some("zensight/@v1/*/telemetry/netring/**")
         );
         assert_eq!(config.logging.level, "debug");
         assert_eq!(config.logging.format, LogFormat::Json);

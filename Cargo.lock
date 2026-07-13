@@ -13489,6 +13489,7 @@ dependencies = [
  "tracing-subscriber",
  "zenoh",
  "zensight-common",
+ "zensight-keyspace",
 ]
 
 [[package]]

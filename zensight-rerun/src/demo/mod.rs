@@ -1,8 +1,8 @@
 //! Synthetic demo publishers (the `zensight-rerun-demo` bin).
 //!
 //! Everything goes through the real bus contract: declared publishers via
-//! [`PublisherRegistry`] with the proper [`QosClass`], CBOR encoding, keys
-//! from [`KeyExprBuilder`]/keyexpr helpers — never a hand-formatted key,
+//! [`PublisherRegistry`] with the proper [`QosClass`], CBOR encoding, v1 keys
+//! from [`V1Context`]/keyexpr helpers — never a hand-formatted key,
 //! never `session.put`. Demo sessions are ALWAYS isolated (scouting off,
 //! explicit connect endpoint): a live sensor fleet must not contaminate a
 //! demo recording, and vice versa (docs/plans/rerun/08-multi-process.md §5).
@@ -18,10 +18,19 @@ use zensight_common::alert::Alert;
 use zensight_common::config::ZenohConfig;
 use zensight_common::entity::HostEntity;
 use zensight_common::health::HealthSnapshot;
-use zensight_common::keyexpr::{KeyExprBuilder, entity_key, sensor_control_prefix};
+use zensight_common::keyexpr::entity_key;
 use zensight_common::qos::QosClass;
 use zensight_common::serialization::Format;
 use zensight_common::telemetry::TelemetryPoint;
+use zensight_keyspace::V1Context;
+
+/// The v1 key context for one demo producer. The origin is this machine's
+/// minted `h-` id — demo *payloads* keep their synthetic sources; consumers
+/// read source/protocol from the payload, and the class selectors match any
+/// origin.
+fn v1ctx(producer: &str) -> V1Context {
+    V1Context::from_prefix(&format!("zensight/{producer}"))
+}
 
 /// A demo publishing context over one isolated session.
 pub struct DemoContext {
@@ -50,33 +59,32 @@ impl DemoContext {
         Self { session, registry }
     }
 
-    /// Publish one telemetry point on its canonical key.
+    /// Publish one telemetry point on its canonical v1 key.
     pub async fn publish_point(&self, point: &TelemetryPoint) -> anyhow::Result<()> {
-        let key = KeyExprBuilder::new(point.protocol).build(&point.source, &point.metric);
+        let key = format!(
+            "{}/{}",
+            v1ctx(point.protocol.as_str()).telemetry_prefix(),
+            point.metric
+        );
         self.registry
             .put_serializable(&key, point, Format::Cbor, QosClass::Telemetry)
             .await?;
         Ok(())
     }
 
-    /// Publish one alert transition on its keyed `@/alerts/<alert_key>` channel.
+    /// Publish one alert transition on its keyed `state/<producer>/alert/<key>` doc.
     pub async fn publish_alert(&self, alert: &Alert) -> anyhow::Result<()> {
-        let key = KeyExprBuilder::new(alert.protocol).alert_key_expr(&alert.alert_key());
+        let key = v1ctx(alert.protocol.as_str()).state_key(&["alert", &alert.alert_key()]);
         self.registry
             .put_serializable(&key, alert, Format::Cbor, QosClass::Alert)
             .await?;
         Ok(())
     }
 
-    /// Publish one health snapshot on the sensor's host-scoped `@/health`
-    /// channel (`sensor_control_prefix` + the canonical `@/health` suffix,
-    /// the same shape sensor-core publishes on — docs/KEYSPACE.md).
+    /// Publish one health snapshot on the sensor's `state/<producer>/health`
+    /// doc (the same shape sensor-core publishes on — RFC 04 §5).
     pub async fn publish_health(&self, snapshot: &HealthSnapshot) -> anyhow::Result<()> {
-        let source = snapshot.source.as_deref().unwrap_or("unknown");
-        let key = format!(
-            "{}/@/health",
-            sensor_control_prefix(&snapshot.sensor, source)
-        );
+        let key = v1ctx(&snapshot.sensor).health_key();
         self.registry
             .put_serializable(&key, snapshot, Format::Cbor, QosClass::HealthLiveness)
             .await?;

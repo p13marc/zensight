@@ -13,15 +13,20 @@ use zensight_common::telemetry::TelemetryPoint;
 use crate::collector::SharedCollector;
 
 /// Default key expression to subscribe to.
-pub const DEFAULT_KEY_EXPR: &str = "zensight/**";
+// v1 (RFC 04 §4): the telemetry class selector — the class chunk IS the
+// filter, so nothing is discarded client-side (incumbent pain P6 retired).
+pub const DEFAULT_KEY_EXPR: &str = "zensight/@v1/*/telemetry/**";
 
-/// Whether a key carries a [`TelemetryPoint`]. Control/metadata channels do
-/// not: any `@`-prefixed chunk (`.../@/...` health/liveness/errors/alerts, but
-/// also the opaque `.../@media/...` plane, #359) and `zensight/_meta/...`.
-/// Rejecting every `@`-prefixed segment — not just the literal `/@/` — keeps
-/// raw media bytes from ever reaching the TelemetryPoint decoder.
+/// Whether a key carries a [`TelemetryPoint`] — v1: exactly the telemetry
+/// class keys (`zensight/@v1/<origin>/telemetry/…`). With the class selector
+/// as the subscription this is belt-and-braces (a narrowed `filters.key_expr`
+/// override could still point anywhere).
 pub(crate) fn is_telemetry_key(key: &str) -> bool {
-    !key.starts_with("zensight/_meta/") && !key.split('/').any(|chunk| chunk.starts_with('@'))
+    let mut chunks = key.split('/');
+    chunks.next() == Some("zensight")
+        && chunks.next() == Some("@v1")
+        && chunks.next().is_some_and(|origin| !origin.starts_with('@'))
+        && chunks.next() == Some("telemetry")
 }
 
 /// Statistics for the subscriber.
@@ -117,10 +122,9 @@ impl TelemetrySubscriber {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create subscriber: {}", e))?;
 
-        // Sensor alerts live on the `@/alerts/*` control channel. The telemetry
-        // wildcard `zensight/**` does NOT match `@/`-prefixed chunks (Zenoh
-        // treats a chunk starting with `@` as verbatim), so firing alerts need
-        // their own subscriber on `zensight/*/@/alerts/*`.
+        // Firing alerts are state, not telemetry (`…/state/<producer>/alert/*`),
+        // so the telemetry class selector never sees them — they need their
+        // own subscriber on the alerts selector.
         let alert_subscriber = if self.collector.export_alerts() {
             let alerts_key = all_alerts_wildcard();
             info!(key_expr = %alerts_key, "Subscribing to sensor alerts");
@@ -296,15 +300,23 @@ mod tests {
     #[test]
     fn telemetry_key_guard() {
         assert!(is_telemetry_key(
-            "zensight/netlink/host/iface/eth0/rx_bytes"
+            "zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage"
         ));
-        assert!(!is_telemetry_key("zensight/netlink/@/alerts/foo-00"));
-        assert!(!is_telemetry_key("zensight/snmp/@/health"));
+        assert!(!is_telemetry_key(
+            "zensight/@v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1"
+        ));
+        assert!(!is_telemetry_key(
+            "zensight/@v1/h-3fa9c2d41b7e/state/snmp/health"
+        ));
         // Host-scoped control plane: the `@` chunk moves one level deeper but
         // stays excluded (any `@`-prefixed chunk is non-telemetry).
-        assert!(!is_telemetry_key("zensight/sysinfo/host1/@/health"));
-        assert!(!is_telemetry_key("zensight/sysinfo/host1/@/errors"));
-        assert!(!is_telemetry_key("zensight/_meta/sensors/snmp"));
+        assert!(!is_telemetry_key(
+            "zensight/@v1/@catalog/state/entity/h-0123456789ab"
+        ));
+        assert!(!is_telemetry_key(
+            "zensight/@v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
+        ));
+        assert!(!is_telemetry_key("zensight/legacy/host/cpu/usage"));
     }
 
     /// #359 regression: the media plane rides `@media/...` chunks. The old
@@ -314,34 +326,38 @@ mod tests {
     #[test]
     fn media_plane_keys_are_not_telemetry() {
         assert!(!is_telemetry_key(
-            "zensight/netring/host01/@media/cam0/video/h264/main"
+            "zensight/@v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main"
         ));
         assert!(!is_telemetry_key(
-            "zensight/netring/host01/@media/cam0/preview/jpeg"
+            "zensight/@v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
         ));
         // ...while stream *stats* are ordinary telemetry.
-        assert!(is_telemetry_key("zensight/netring/host01/cam0/stats/fps"));
+        assert!(is_telemetry_key(
+            "zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage"
+        ));
     }
 
-    /// The telemetry wildcard `zensight/**` must NOT match `@/alerts/*` (Zenoh
-    /// treats an `@`-prefixed chunk as verbatim), which is exactly why alert
-    /// export needs its own subscriber on `all_alerts_wildcard()`. Lock that in:
-    /// a regression here means alerts silently stop reaching the exporter.
+    /// The telemetry class selector must NOT match alert state keys (D3:
+    /// classes are disjoint), which is exactly why alert export needs its own
+    /// subscriber on `all_alerts_wildcard()`. Lock that in: a regression here
+    /// means alerts silently stop reaching the exporter.
     #[test]
     fn alerts_need_their_own_subscription() {
         use zenoh::key_expr::KeyExpr;
 
-        let alert = KeyExpr::new("zensight/netlink/@/alerts/foo-00").unwrap();
+        let alert =
+            KeyExpr::new("zensight/@v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1")
+                .unwrap();
         let telemetry = KeyExpr::new(DEFAULT_KEY_EXPR).unwrap();
         let alerts_sub = KeyExpr::new(all_alerts_wildcard()).unwrap();
 
         assert!(
             !telemetry.intersects(&alert),
-            "zensight/** must not match @/alerts/* — a single telemetry subscriber cannot see alerts"
+            "the telemetry class selector must not match alert state (D3)"
         );
         assert!(
             alerts_sub.intersects(&alert),
-            "the alerts wildcard must match @/alerts/* so the dedicated subscriber receives them"
+            "the alerts selector must match alert state keys"
         );
     }
 }
