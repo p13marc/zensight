@@ -1,5 +1,10 @@
-//! `zensight-rerun-demo metrics` — six live series on real-shaped keys
+//! `zensight-rerun-demo metrics` — six live series on **real registry keys**
 //! (docs/plans/rerun/04-live-metrics.md §1).
+//!
+//! Every metric here is one a real sensor actually emits. The subject registry
+//! (RFC 08, issue #468) enforces that: publishing an unregistered telemetry key
+//! panics in debug. It caught three series in this file that no sensor
+//! produces — a demo that invents keys teaches a keyspace that does not exist.
 
 use std::time::Duration;
 
@@ -44,18 +49,18 @@ pub fn points_for_tick(base_ts: i64, interval_ms: u64, tick: u64) -> Vec<Telemet
         ),
         point(
             Protocol::Netring,
-            "path/gateway/rtt_ms",
+            "flow/red/p95_ms",
             TelemetryValue::Gauge(20.0 + 3.0 * (t * 1.7).sin()),
         ),
         point(
             Protocol::Netring,
-            "path/gateway/loss_percent",
-            TelemetryValue::Gauge(if tick.is_multiple_of(13) { 1.5 } else { 0.0 }),
+            "flow/red/error_ratio",
+            TelemetryValue::Gauge(if tick.is_multiple_of(13) { 0.015 } else { 0.0 }),
         ),
         point(
             Protocol::Netlink,
-            "wifi/wlan0/rssi_dbm",
-            TelemetryValue::Gauge(-60.0 + 2.0 * (t * 0.9).cos()),
+            "ethtool/wlan0/speed_mbps",
+            TelemetryValue::Gauge(300.0 + 20.0 * (t * 0.9).cos()),
         ),
     ]
 }

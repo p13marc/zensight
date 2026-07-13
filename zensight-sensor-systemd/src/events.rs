@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
-use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 
 use crate::dbus::ManagerProxy;
 
@@ -111,9 +111,8 @@ impl EventState {
         snapshot
             .into_iter()
             .map(|(kind, total)| {
-                TelemetryPoint::new(
+                crate::telemetry_guard::checked_point(
                     source,
-                    Protocol::Systemd,
                     format!("events/{kind}_total"),
                     TelemetryValue::Counter(total),
                 )

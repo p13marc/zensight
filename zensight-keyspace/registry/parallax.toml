@@ -1,9 +1,16 @@
 # Subject registry: parallax (live video). RFC 08 §2; migration epic #453.
-# Telemetry metric trees register as {metric...} families (one payload type,
-# TelemetryPoint) — typed per-metric refinement is additive (registry MINOR).
+# Telemetry is registered as real subjects, not a `{metric...}` catch-all
+# (issue #468) — see registry/sysinfo.toml for the rule and why.
+# Source: src/stats.rs.
+#
+# `{stream}/stats/{metric}` has a *variable* head chunk — there is no literal
+# prefix — so it structurally matches anything whose 2nd chunk is `stats`. A
+# stream named `streams` would shadow `streams/advertised`; literal-first
+# precedence keeps the literal winning, so the shadow costs the stream, not the
+# gauge.
 
 [registry]
-version = "1.0"
+version = "1.1"
 app = "zensight"
 convention = 1
 
@@ -12,12 +19,52 @@ name = "parallax"
 description = "live video (V4L2/RTSP/test) -> H.264 + JPEG previews on @media"
 
 [[subject]]
-path = "{metric...}"
+path = "streams/advertised"
 class = "telemetry"
 type = "TelemetryPoint"
-cardinality = 200
-since = "1.0"
-description = "per-stream stats (fps/kbps/drops/viewers)"
+since = "1.1"
+description = "streams in this host's catalogue"
+
+[[subject]]
+path = "{stream}/stats/fps"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "frames per second"
+
+[[subject]]
+path = "{stream}/stats/kbps"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "encoded bitrate"
+
+[[subject]]
+path = "{stream}/stats/drops"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "dropped frames"
+
+[[subject]]
+path = "{stream}/stats/viewers"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "subscribers on the @media plane"
+
+[[subject]]
+path = "{stream}/stats/encode_ms"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.1"
+description = "encode time per frame"
+
 [[subject]]
 path = "stream/{stream}"
 class = "state"

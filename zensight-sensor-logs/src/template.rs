@@ -22,7 +22,7 @@ use std::sync::Mutex;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 
 /// Wildcard token for positions that vary within a cluster.
 const WILDCARD: &str = "<*>";
@@ -385,7 +385,7 @@ impl TemplateAggregator {
             return points;
         };
         let counter = |metric: String, v: u64| {
-            TelemetryPoint::new(source, Protocol::Logs, metric, TelemetryValue::Counter(v))
+            crate::telemetry_guard::checked_point(source, metric, TelemetryValue::Counter(v))
         };
         for (id, c) in &inner.counts {
             points.push(counter(

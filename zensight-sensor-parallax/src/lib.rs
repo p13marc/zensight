@@ -24,3 +24,4 @@ pub mod pipeline;
 pub mod query;
 pub mod session;
 pub mod stats;
+pub(crate) mod telemetry_guard;

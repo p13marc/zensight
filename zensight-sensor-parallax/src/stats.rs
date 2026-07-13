@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::TelemetryValue;
 use zensight_sensor_core::Publisher;
 
 /// Lock-free counters for one stream (shared by its open profiles).
@@ -232,7 +232,7 @@ pub async fn run_ticker(
 }
 
 async fn publish(publisher: &Publisher, source: &str, metric: &str, value: TelemetryValue) {
-    let point = TelemetryPoint::new(source, Protocol::Parallax, metric, value);
+    let point = crate::telemetry_guard::checked_point(source, metric, value);
     if let Err(e) = publisher.publish(metric, &point).await {
         tracing::warn!(error = %e, metric = %metric, "failed to publish stream stats");
     }

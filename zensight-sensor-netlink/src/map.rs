@@ -208,7 +208,21 @@ pub struct SocketCounts {
     pub rcv_buf_total: u64,
 }
 
+/// Build one telemetry point.
+///
+/// Every metric name this sensor emits funnels through here, so this is where
+/// the registry gets enforced (RFC 08 §5, issue #468): in debug builds — which
+/// is every unit test — an unregistered metric name panics. The 27 mapper tests
+/// below are therefore also the registry-conformance suite, and adding a metric
+/// without registering it in `zensight-keyspace/registry/netlink.toml` fails
+/// them.
 fn point(host: &str, metric: impl Into<String>, value: TelemetryValue) -> TelemetryPoint {
+    let metric = metric.into();
+    debug_assert!(
+        zensight_keyspace::registry::is_registered_telemetry("netlink", &metric),
+        "unregistered netlink telemetry subject {metric:?} — add it to \
+         zensight-keyspace/registry/netlink.toml (RFC 08 §5, issue #468)"
+    );
     TelemetryPoint::new(host, Protocol::Netlink, metric, value)
 }
 

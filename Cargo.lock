@@ -13572,6 +13572,7 @@ dependencies = [
  "uuid",
  "zenoh",
  "zensight-common",
+ "zensight-keyspace",
  "zensight-sensor-core",
 ]
 
@@ -13638,6 +13639,7 @@ dependencies = [
  "tracing-subscriber",
  "zenoh",
  "zensight-common",
+ "zensight-keyspace",
  "zensight-sensor-core",
  "zensight-sensor-netlink-ebpf-common",
 ]
@@ -13681,6 +13683,7 @@ dependencies = [
  "zenoh",
  "zenoh-blob",
  "zensight-common",
+ "zensight-keyspace",
  "zensight-sensor-core",
  "zstd",
 ]
@@ -13702,6 +13705,7 @@ dependencies = [
  "tracing-subscriber",
  "zenoh",
  "zensight-common",
+ "zensight-keyspace",
  "zensight-sensor-core",
 ]
 
@@ -13789,6 +13793,7 @@ dependencies = [
  "zbus",
  "zenoh",
  "zensight-common",
+ "zensight-keyspace",
  "zensight-sensor-core",
 ]
 

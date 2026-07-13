@@ -15,9 +15,10 @@ fn build_parse_round_trip() {
         netring::Subject::FlowRed {
             quantile: "p95_ms".into(),
         },
-        netring::Subject::Metric {
-            metric: vec!["bandwidth".into(), "eth0".into(), "rx".into()],
+        netring::Subject::BandwidthBytesPerSec {
+            app: "https".into(),
         },
+        netring::Subject::CaptureXdpRxRingFull { source: "0".into() },
         netring::Subject::Health,
         netring::Subject::Alert {
             alert_key: "9f2c81ab04d7e3f1".into(),
@@ -74,26 +75,29 @@ fn concrete_keys() {
 
 #[test]
 fn class_disambiguates() {
-    // `health` is registered as state; the same tail under telemetry falls
-    // into the {metric...} family instead of cross-class confusion.
+    // `health` is registered as state. Under telemetry the same tail is
+    // unregistered — and now *says so*. Before #468 it matched the
+    // `{metric...}` catch-all, which is why the RFC 08 §5 lint was vacuous:
+    // every conceivable telemetry subject was "buildable from a registry
+    // entry", so it could never fail.
     assert_eq!(
         netring::Subject::parse(Class::State, &["health"]),
         Some(netring::Subject::Health)
     );
-    assert_eq!(
-        netring::Subject::parse(Class::Telemetry, &["health"]),
-        Some(netring::Subject::Metric {
-            metric: vec!["health".into()]
-        })
-    );
-    // Specific entries beat the catchall: flow/red/{q} is its own family.
+    assert!(netring::Subject::parse(Class::Telemetry, &["health"]).is_none());
+
+    // A literal beats a {var}: flow/red/{quantile} is its own family, and a
+    // typo'd leaf no longer silently parses.
     assert_eq!(
         netring::Subject::parse(Class::Telemetry, &["flow", "red", "p95_ms"]),
         Some(netring::Subject::FlowRed {
             quantile: "p95_ms".into()
         })
     );
-    // Unregistered *state* tails still refine to nothing (no state catchall).
+    assert!(netring::Subject::parse(Class::Telemetry, &["flow", "bytes_totl"]).is_none());
+
+    // Unregistered *state* tails refine to nothing (there was never a state
+    // catch-all).
     assert!(netring::Subject::parse(Class::State, &["bogus"]).is_none());
 }
 

@@ -25,3 +25,4 @@ pub mod journald;
 pub mod multiline;
 pub mod parser;
 pub mod receiver;
+pub(crate) mod telemetry_guard;

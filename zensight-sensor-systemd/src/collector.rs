@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 use zensight_sensor_core::{Publisher, SensorHealth};
 
 use crate::config::SystemdConfig;
@@ -423,7 +423,7 @@ pub fn build_points(
     aggregates: Option<&Aggregates>,
 ) -> Vec<TelemetryPoint> {
     let gauge = |metric: &str, v: f64| {
-        TelemetryPoint::new(source, Protocol::Systemd, metric, TelemetryValue::Gauge(v))
+        crate::telemetry_guard::checked_point(source, metric, TelemetryValue::Gauge(v))
     };
     let mut points = vec![
         gauge("manager/n_names", counts.n_names as f64),
@@ -449,6 +449,9 @@ pub fn build_points(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Points are built by `checked_point`, so the lib no longer names Protocol;
+    // the tests still assert on it.
+    use zensight_common::telemetry::Protocol;
 
     #[test]
     fn aggregates_count_by_state() {

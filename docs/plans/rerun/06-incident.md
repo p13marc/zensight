@@ -13,11 +13,18 @@ steps live in `const SCRIPT: &[(u64, Step)]`.
 
 | t (s) | signal | behavior |
 |---|---|---|
-| 0–10 | all | healthy baseline (RSSI −60 dBm, loss 0 %, RTT 20 ms, retransmits 1/s) |
-| 10–20 | `netlink … wifi/wlan0/rssi_dbm` | ramps −60 → **−85 dBm** (cause) |
-| 15–22 | `netring … path/gateway/loss_percent` | ramps 0 → **8 %** |
-| 18 | `netlink … sockets/tcp/retransmits` (counter) | accelerates 1/s → **50/s** |
-| 22–30 | `netring … path/gateway/rtt_ms` | ramps 20 → **400 ms** |
+| 0–10 | all | healthy baseline (link 300 Mb/s, error ratio 0, flow p95 20 ms, retransmits 1/s) |
+| 10–20 | `netlink … ethtool/wlan0/speed_mbps` | collapses 300 → **6 Mb/s** (cause) |
+| 15–22 | `netring … flow/red/error_ratio` | ramps 0 → **0.08** |
+| 18 | `netlink … sockets/tcp/retransmits_total` (counter) | accelerates 1/s → **50/s** |
+| 22–30 | `netring … flow/red/p95_ms` | ramps 20 → **400 ms** |
+
+All four are **real registered subjects** (RFC 08 / issue #468). The script used to
+run on invented keys (`wifi/wlan0/rssi_dbm`, `path/gateway/*`) plus a mis-suffixed
+`sockets/tcp/retransmits`; the registry caught all four once telemetry stopped being a
+`{metric...}` catch-all. Same story — a wifi link degrades, so its negotiated rate
+collapses, flows start erroring, TCP retransmits spike, and flow lifetimes stretch —
+told on keys that actually exist.
 | 26 | `events/peer_down/gateway` | **PeerDown**: gateway unreachable via wlan0 (topology edge drops) |
 | 28 | `events/route/replace` | **RouteChange**: default via lte0 (was wlan0) |
 | 30 | `@/alerts` | **Critical firing** `wan-path-degraded`, `correlation_id=inc-<base_ts>` |

@@ -45,6 +45,7 @@ ja4plus = ["netring/ja4plus"]
 ipfix = ["netring/ipfix", "flowscope/serde"]
 
 [dependencies]
+zensight-keyspace = { workspace = true }
 zensight-common = { path = "../zensight-common" }
 zensight-sensor-core = { path = "../zensight-sensor-core" }
 
