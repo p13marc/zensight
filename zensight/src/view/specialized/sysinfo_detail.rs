@@ -42,17 +42,16 @@ impl ProcessSort {
     }
 }
 
-/// The process-explorer procedure selector for a sort order. v1: the fleet
-/// selector reaches every sysinfo origin; per-host narrowing (targeting the
-/// selected host's origin key instead of `*`) is a follow-up — it needs the
-/// hostname→origin map the health documents carry. Single-host deployments
+/// The process-explorer procedure key for a sort order. `Some(origin)`
+/// targets the drilled-in host's concrete key (the GUI's device `source` IS
+/// the origin chunk); `None` selects the fleet. Single-host deployments
 /// the single-instance netlink/netring sensors.
-pub fn processes_key(_host: &str, sort: ProcessSort) -> String {
-    format!(
-        "{}?sort={}&top={TOP_N}",
-        zensight_common::fleet_rpc_key("sysinfo", "processes"),
-        sort.token()
-    )
+pub fn processes_key(origin: Option<&str>, sort: ProcessSort) -> String {
+    let key = match origin {
+        Some(o) => zensight_common::origin_rpc_key(o, "sysinfo", "processes"),
+        None => zensight_common::fleet_rpc_key("sysinfo", "processes"),
+    };
+    format!("{key}?sort={}&top={TOP_N}", sort.token())
 }
 
 /// A pid pivot into the process explorer (#313): carried by
@@ -112,13 +111,13 @@ impl SysinfoDetailState {
     }
 }
 
-/// Fetch + decode the process table for `host` sorted by `sort`.
+/// Fetch + decode the process table for the host at `origin` sorted by `sort`.
 pub async fn fetch_processes(
     session: Arc<zenoh::Session>,
-    host: String,
+    origin: String,
     sort: ProcessSort,
 ) -> Option<Vec<ProcessRecord>> {
-    super::netlink_detail::fetch_records(session, processes_key(&host, sort)).await
+    super::netlink_detail::fetch_records(session, processes_key(Some(&origin), sort)).await
 }
 
 #[cfg(test)]
@@ -128,11 +127,11 @@ mod tests {
     #[test]
     fn key_is_host_scoped_with_sort_and_top() {
         assert_eq!(
-            processes_key("server01", ProcessSort::Cpu),
+            processes_key(None, ProcessSort::Cpu),
             "zensight/@v1/*/@rpc/sysinfo/processes?sort=cpu&top=50"
         );
         assert_eq!(
-            processes_key("server01", ProcessSort::Mem),
+            processes_key(None, ProcessSort::Mem),
             "zensight/@v1/*/@rpc/sysinfo/processes?sort=mem&top=50"
         );
         assert_eq!(ProcessSort::Io.token(), "io");

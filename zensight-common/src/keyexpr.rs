@@ -30,6 +30,15 @@ pub fn fleet_command_key(producer: &str, topic: &str) -> String {
     fleet_rpc_key(producer, &format!("{topic}/set"))
 }
 
+/// Caller-side fleet blob-artifact prefix: a Tier-1 artifact id (ULID) is
+/// globally unique and exactly one host serves it, so a GET under the
+/// `*`-origin prefix reaches the owner without knowing which host it is
+/// (RFC 07 §2). Producers derive their own concrete prefix via
+/// [`crate::command::artifact_blob_prefix`].
+pub fn fleet_blob_prefix() -> String {
+    format!("{}/@v1/*/@blob/artifact", KEY_PREFIX)
+}
+
 /// Caller-side single-host procedure key (RFC 05 §2): GET
 /// `<base>/@v1/<origin>/@rpc/<producer>/<procedure...>` reaches exactly one
 /// host's producer — use when the origin is already known (e.g. a drill-down

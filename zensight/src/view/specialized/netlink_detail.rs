@@ -148,7 +148,9 @@ pub enum NetlinkDetailTopic {
 
 impl NetlinkDetailTopic {
     /// The queryable key for this topic (matches the sensor's `query.rs`).
-    pub fn key(&self) -> String {
+    /// `Some(origin)` targets the drilled-in host's concrete key; `None`
+    /// selects the fleet.
+    pub fn key(&self, origin: Option<&str>) -> String {
         let topic = match self {
             NetlinkDetailTopic::Sockets => "sockets",
             NetlinkDetailTopic::Routes => "routes",
@@ -162,7 +164,10 @@ impl NetlinkDetailTopic {
             NetlinkDetailTopic::Retransmits => "retransmits",
             NetlinkDetailTopic::Connections => "connections",
         };
-        zensight_common::fleet_rpc_key("netlink", topic)
+        match origin {
+            Some(o) => zensight_common::origin_rpc_key(o, "netlink", topic),
+            None => zensight_common::fleet_rpc_key("netlink", topic),
+        }
     }
 
     pub fn label(&self) -> &'static str {
@@ -460,7 +465,7 @@ mod tests {
     #[test]
     fn topic_keys_match_sensor() {
         assert_eq!(
-            NetlinkDetailTopic::Sockets.key(),
+            NetlinkDetailTopic::Sockets.key(None),
             "zensight/@v1/*/@rpc/netlink/sockets"
         );
         // The endpoint-narrowed sockets key (#309) matches the sensor's
@@ -470,37 +475,37 @@ mod tests {
             "zensight/@v1/*/@rpc/netlink/sockets?ip=10.0.0.5"
         );
         assert_eq!(
-            NetlinkDetailTopic::Routes.key(),
+            NetlinkDetailTopic::Routes.key(None),
             "zensight/@v1/*/@rpc/netlink/routes"
         );
         assert_eq!(
-            NetlinkDetailTopic::Neighbors.key(),
+            NetlinkDetailTopic::Neighbors.key(None),
             "zensight/@v1/*/@rpc/netlink/neighbors"
         );
         // The 5 previously-dead channels now reachable (#109).
         assert_eq!(
-            NetlinkDetailTopic::Addresses.key(),
+            NetlinkDetailTopic::Addresses.key(None),
             "zensight/@v1/*/@rpc/netlink/addresses"
         );
         assert_eq!(
-            NetlinkDetailTopic::Events.key(),
+            NetlinkDetailTopic::Events.key(None),
             "zensight/@v1/*/@rpc/netlink/events"
         );
         // Default-route flap history (#111).
         assert_eq!(
-            NetlinkDetailTopic::RouteChanges.key(),
+            NetlinkDetailTopic::RouteChanges.key(None),
             "zensight/@v1/*/@rpc/netlink/route_changes"
         );
         assert_eq!(
-            NetlinkDetailTopic::Tc.key(),
+            NetlinkDetailTopic::Tc.key(None),
             "zensight/@v1/*/@rpc/netlink/tc"
         );
         assert_eq!(
-            NetlinkDetailTopic::Xfrm.key(),
+            NetlinkDetailTopic::Xfrm.key(None),
             "zensight/@v1/*/@rpc/netlink/xfrm"
         );
         assert_eq!(
-            NetlinkDetailTopic::Nft.key(),
+            NetlinkDetailTopic::Nft.key(None),
             "zensight/@v1/*/@rpc/netlink/nft"
         );
     }

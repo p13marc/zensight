@@ -38,14 +38,19 @@ pub enum SystemdDetailTopic {
 
 impl SystemdDetailTopic {
     /// The queryable key for this topic (matches the sensor's `query.rs`).
-    pub fn key(&self) -> String {
+    /// `Some(origin)` targets the drilled-in host's concrete key; `None`
+    /// selects the fleet.
+    pub fn key(&self, origin: Option<&str>) -> String {
         let topic = match self {
             SystemdDetailTopic::Units => "units",
             SystemdDetailTopic::Timers => "timers",
             SystemdDetailTopic::Events => "events",
             SystemdDetailTopic::Cgroups => "cgroups",
         };
-        zensight_common::fleet_rpc_key("systemd", topic)
+        match origin {
+            Some(o) => zensight_common::origin_rpc_key(o, "systemd", topic),
+            None => zensight_common::fleet_rpc_key("systemd", topic),
+        }
     }
 
     pub fn label(&self) -> &'static str {
@@ -121,16 +126,21 @@ impl SystemdDetailState {
 
 /// The single-unit detail key (#313), matching the sensor's
 /// `@/query/unit?name=<u>` queryable.
-pub fn unit_detail_key(unit: &str) -> String {
-    format!(
-        "{}?name={unit}",
-        zensight_common::fleet_rpc_key("systemd", "unit")
-    )
+pub fn unit_detail_key(origin: Option<&str>, unit: &str) -> String {
+    let key = match origin {
+        Some(o) => zensight_common::origin_rpc_key(o, "systemd", "unit"),
+        None => zensight_common::fleet_rpc_key("systemd", "unit"),
+    };
+    format!("{key}?name={unit}")
 }
 
 /// Fetch + decode one unit's detail for the drill-down panel (#313).
-pub async fn fetch_unit_detail(session: Arc<zenoh::Session>, unit: String) -> Option<UnitDetail> {
-    fetch_one(session, unit_detail_key(&unit)).await
+pub async fn fetch_unit_detail(
+    session: Arc<zenoh::Session>,
+    origin: Option<String>,
+    unit: String,
+) -> Option<UnitDetail> {
+    fetch_one(session, unit_detail_key(origin.as_deref(), &unit)).await
 }
 
 /// Extract the systemd unit name from a cgroup path (#313) — the
@@ -161,17 +171,17 @@ mod tests {
     #[test]
     fn topic_keys_and_labels() {
         assert_eq!(
-            SystemdDetailTopic::Units.key(),
+            SystemdDetailTopic::Units.key(None),
             "zensight/@v1/*/@rpc/systemd/units"
         );
         assert_eq!(
-            SystemdDetailTopic::Cgroups.key(),
+            SystemdDetailTopic::Cgroups.key(None),
             "zensight/@v1/*/@rpc/systemd/cgroups"
         );
         assert_eq!(SystemdDetailTopic::Timers.label(), "Timers");
         // Single-unit detail key (#313) matches the sensor's queryable selector.
         assert_eq!(
-            unit_detail_key("sshd.service"),
+            unit_detail_key(None, "sshd.service"),
             "zensight/@v1/*/@rpc/systemd/unit?name=sshd.service"
         );
     }

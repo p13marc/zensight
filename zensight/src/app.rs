@@ -3464,7 +3464,11 @@ impl ZenSight {
         self.artifact_job = Some(job);
         self.artifact_fetch =
             crate::view::artifact_fetch::ArtifactFetch::Downloading { got: 0, total: 0 };
-        let blob_prefix = zensight_common::artifact_blob_prefix(&key_prefix);
+        // The artifact id is globally unique and one host owns it — the
+        // `*`-origin blob prefix reaches that owner without deriving an origin
+        // locally (the old artifact_blob_prefix call built the GUI's OWN
+        // origin, which is never where the capture lives).
+        let blob_prefix = zensight_common::fleet_blob_prefix();
         Some(Task::stream(
             crate::view::artifact_fetch::download_blob_direct(
                 session,
@@ -3936,7 +3940,10 @@ impl ZenSight {
                 Err("Not connected to Zenoh".to_string()),
             ));
         };
-        let key = topic.key();
+        let key = topic.key(
+            self.selected_source_for(zensight_common::Protocol::Systemd)
+                .as_deref(),
+        );
         Task::future(async move {
             let data = match topic {
                 SystemdDetailTopic::Units => fetch_records(session, key)
@@ -3959,8 +3966,8 @@ impl ZenSight {
         })
     }
 
-    /// Fetch one unit's identity detail (`@/query/unit?name=`) for the systemd
-    /// drill-down panel (#313).
+    /// Fetch one unit's identity detail (the `unit?name=` procedure) for the
+    /// systemd drill-down panel (#313), targeting the drilled-in host.
     fn query_systemd_unit_detail(&self, unit: String) -> Task<Message> {
         use crate::view::specialized::systemd_detail::fetch_unit_detail;
         let Some(session) = self.session.clone() else {
@@ -3968,8 +3975,9 @@ impl ZenSight {
                 "Not connected to Zenoh".to_string(),
             )));
         };
+        let origin = self.selected_source_for(zensight_common::Protocol::Systemd);
         Task::future(async move {
-            let result = fetch_unit_detail(session, unit)
+            let result = fetch_unit_detail(session, origin, unit)
                 .await
                 .ok_or_else(|| "No systemd sensor responded".to_string());
             Message::SystemdUnitDetailReceived(result)
@@ -4048,7 +4056,10 @@ impl ZenSight {
                 Err("Not connected to Zenoh".to_string()),
             ));
         };
-        let key = topic.key();
+        let key = topic.key(
+            self.selected_source_for(zensight_common::Protocol::Netlink)
+                .as_deref(),
+        );
         Task::future(async move {
             let data = match topic {
                 NetlinkDetailTopic::Sockets => fetch_records(session, key)
@@ -4099,6 +4110,16 @@ impl ZenSight {
     /// it, no toast); a non-responding sensor yields the channel's error state.
     /// `prefetch_on_open` already no-ops while disconnected, so this branch only
     /// fires on an explicit fetch.
+    /// The `source` (= v1 origin chunk) of the currently-selected device when
+    /// it belongs to `proto` — detail-tab fetches target that host's concrete
+    /// @rpc key; `None` falls back to the fleet selector.
+    fn selected_source_for(&self, proto: zensight_common::Protocol) -> Option<String> {
+        self.selected_device
+            .as_ref()
+            .filter(|d| d.device_id.protocol == proto)
+            .map(|d| d.device_id.source.clone())
+    }
+
     fn query_channel<T, Fut>(
         &self,
         fetch: impl FnOnce(std::sync::Arc<zenoh::Session>) -> Fut + Send + 'static,
@@ -4315,7 +4336,10 @@ impl ZenSight {
     fn query_netring_flows(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_flows;
         self.query_channel(
-            fetch_flows,
+            {
+                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                move |s| fetch_flows(s, origin)
+            },
             Message::NetringFlowsReceived,
             "No netring sensor responded",
         )
@@ -4376,7 +4400,7 @@ impl ZenSight {
         };
         self.topology.panel.edge_flows = Fetch::Loading;
         Task::future(async move {
-            let result = fetch_flows(session)
+            let result = fetch_flows(session, None)
                 .await
                 .ok_or_else(|| "No netring sensor responded".to_string());
             Message::TopologyEdgeFlowsReceived(edge_index, result)
@@ -4438,10 +4462,10 @@ impl ZenSight {
         let neighbors_key = zensight_common::fleet_rpc_key("netlink", "neighbors");
         Task::future(async move {
             let (flows, neighbors, matrix, assets) = tokio::join!(
-                fetch_flows(session.clone()),
+                fetch_flows(session.clone(), None),
                 fetch_records::<zensight_common::NeighborRecord>(session.clone(), neighbors_key),
-                fetch_matrix(session.clone()),
-                fetch_assets(session),
+                fetch_matrix(session.clone(), None),
+                fetch_assets(session, None),
             );
             Message::TopologyBatchReceived(TopologyBatch {
                 flows,
@@ -4618,7 +4642,10 @@ impl ZenSight {
     fn query_netring_tls(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_tls;
         self.query_channel(
-            fetch_tls,
+            {
+                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                move |s| fetch_tls(s, origin)
+            },
             Message::NetringTlsReceived,
             "No netring sensor responded",
         )
@@ -4628,7 +4655,10 @@ impl ZenSight {
     fn query_netring_quic(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_quic;
         self.query_channel(
-            fetch_quic,
+            {
+                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                move |s| fetch_quic(s, origin)
+            },
             Message::NetringQuicReceived,
             "No QUIC data — is the netring sensor running with collect.quic enabled?",
         )
@@ -4638,7 +4668,10 @@ impl ZenSight {
     fn query_netring_ssh(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_ssh;
         self.query_channel(
-            fetch_ssh,
+            {
+                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                move |s| fetch_ssh(s, origin)
+            },
             Message::NetringSshReceived,
             "No SSH data — is the netring sensor running with collect.ssh enabled?",
         )
@@ -4648,7 +4681,10 @@ impl ZenSight {
     fn query_netring_ja4h(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_ja4h;
         self.query_channel(
-            fetch_ja4h,
+            {
+                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                move |s| fetch_ja4h(s, origin)
+            },
             Message::NetringJa4hReceived,
             "No JA4H data — needs a netring sensor built with the ja4plus feature and collect.http_fp enabled",
         )
@@ -4658,7 +4694,10 @@ impl ZenSight {
     fn query_netring_assets(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_assets;
         self.query_channel(
-            fetch_assets,
+            {
+                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                move |s| fetch_assets(s, origin)
+            },
             Message::NetringAssetsReceived,
             "No netring sensor responded",
         )
@@ -4694,11 +4733,11 @@ impl ZenSight {
             // yields an empty table rather than failing the whole view. JA4H is
             // only populated when the sensor was built with `--features ja4plus`.
             let (assets, tls, quic, ssh, ja4h) = tokio::join!(
-                fetch_assets(session.clone()),
-                fetch_tls(session.clone()),
-                fetch_quic(session.clone()),
-                fetch_ssh(session.clone()),
-                fetch_ja4h(session.clone()),
+                fetch_assets(session.clone(), None),
+                fetch_tls(session.clone(), None),
+                fetch_quic(session.clone(), None),
+                fetch_ssh(session.clone(), None),
+                fetch_ja4h(session.clone(), None),
             );
             if assets.is_none()
                 && tls.is_none()
@@ -4723,7 +4762,10 @@ impl ZenSight {
     fn query_netring_talkers(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_talkers;
         self.query_channel(
-            fetch_talkers,
+            {
+                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                move |s| fetch_talkers(s, origin)
+            },
             Message::NetringTalkersReceived,
             "No netring sensor responded",
         )
@@ -4733,7 +4775,10 @@ impl ZenSight {
     fn query_netring_matrix(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_matrix;
         self.query_channel(
-            fetch_matrix,
+            {
+                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                move |s| fetch_matrix(s, origin)
+            },
             Message::NetringMatrixReceived,
             "No netring sensor responded",
         )
@@ -4743,7 +4788,10 @@ impl ZenSight {
     fn query_netring_elephants(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_elephants;
         self.query_channel(
-            fetch_elephants,
+            {
+                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                move |s| fetch_elephants(s, origin)
+            },
             Message::NetringElephantsReceived,
             "No netring sensor responded",
         )
@@ -4753,7 +4801,10 @@ impl ZenSight {
     fn query_netring_dns(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_dns;
         self.query_channel(
-            fetch_dns,
+            {
+                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                move |s| fetch_dns(s, origin)
+            },
             Message::NetringDnsReceived,
             "No DNS data — is the netring sensor running with collect.dns enabled?",
         )
@@ -4763,7 +4814,10 @@ impl ZenSight {
     fn query_netring_http(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_http;
         self.query_channel(
-            fetch_http,
+            {
+                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                move |s| fetch_http(s, origin)
+            },
             Message::NetringHttpReceived,
             "No HTTP data — is the netring sensor running with collect.http enabled?",
         )
@@ -4773,7 +4827,10 @@ impl ZenSight {
     fn query_netring_captures(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_captures;
         self.query_channel(
-            fetch_captures,
+            {
+                let origin = self.selected_source_for(zensight_common::Protocol::Netring);
+                move |s| fetch_captures(s, origin)
+            },
             Message::NetringCapturesReceived,
             "No captures — is capture.to_disk enabled on the netring sensor?",
         )
@@ -4784,7 +4841,7 @@ impl ZenSight {
     fn query_anomaly_captures(&self) -> Task<Message> {
         use crate::view::specialized::netring_detail::fetch_captures;
         self.query_channel(
-            fetch_captures,
+            |s| fetch_captures(s, None),
             Message::AnomalyCapturesReceived,
             "no capture index",
         )
@@ -4806,7 +4863,7 @@ impl ZenSight {
         // matches both directions of a flow's `ip:port` endpoints.
         let want_ip = endpoint_ip(&src);
         Task::future(async move {
-            let result = match fetch_flows(session).await {
+            let result = match fetch_flows(session, None).await {
                 Some(flows) => Ok(flows
                     .into_iter()
                     .filter(|f| endpoint_ip(&f.src) == want_ip || endpoint_ip(&f.dst) == want_ip)

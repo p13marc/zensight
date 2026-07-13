@@ -329,14 +329,22 @@ pub async fn load_artifact_kinds(session: Arc<Session>, key_prefix: String) -> V
         key_prefix.rsplit('/').next().unwrap_or("sensor"),
         "artifact/status",
     );
-    let Ok(replies) = session.get(&status_key).await else {
+    // Fleet fan-in (RFC 05 §2.1): target All and take the first decodable
+    // reply — every host advertising the producer serves the same kind set.
+    let Ok(replies) = session
+        .get(&status_key)
+        .target(zenoh::query::QueryTarget::All)
+        .await
+    else {
         return Vec::new();
     };
-    if let Ok(reply) = replies.recv_async().await
-        && let Ok(sample) = reply.result()
-        && let Ok(status) = serde_json::from_slice::<ArtifactStatus>(&sample.payload().to_bytes())
-    {
-        return status.kinds;
+    while let Ok(reply) = replies.recv_async().await {
+        if let Ok(sample) = reply.result()
+            && let Ok(status) =
+                serde_json::from_slice::<ArtifactStatus>(&sample.payload().to_bytes())
+        {
+            return status.kinds;
+        }
     }
     Vec::new()
 }
@@ -451,16 +459,31 @@ async fn poll_status(
     slug: &str,
     id: Ulid,
 ) -> Option<ArtifactState> {
-    let replies = session.get(status_key).await.ok()?;
-    let reply = replies.recv_async().await.ok()?;
-    let sample = reply.result().ok()?;
-    let status: ArtifactStatus = serde_json::from_slice(&sample.payload().to_bytes()).ok()?;
-    status
-        .kinds
-        .into_iter()
-        .find(|k| k.kind == slug)
-        .and_then(|k| k.current)
-        .filter(|s| s.id() == id)
+    // Fleet fan-in (RFC 05 §2.1): every host serving the producer replies,
+    // but only the one that accepted `id` carries its state — scan them all
+    // instead of trusting whichever host answered first.
+    let replies = session
+        .get(status_key)
+        .target(zenoh::query::QueryTarget::All)
+        .await
+        .ok()?;
+    while let Ok(reply) = replies.recv_async().await {
+        let Ok(sample) = reply.result() else { continue };
+        let Ok(status) = serde_json::from_slice::<ArtifactStatus>(&sample.payload().to_bytes())
+        else {
+            continue;
+        };
+        if let Some(state) = status
+            .kinds
+            .into_iter()
+            .find(|k| k.kind == slug)
+            .and_then(|k| k.current)
+            .filter(|s| s.id() == id)
+        {
+            return Some(state);
+        }
+    }
+    None
 }
 
 /// Drive the right `zenoh-blob` client for `delivery` into `dest`, yielding

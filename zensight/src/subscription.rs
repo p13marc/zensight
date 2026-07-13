@@ -186,6 +186,7 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
             // alert firing during this get is not lost.)
             if let Ok(replies) = session
                 .get(zensight_common::all_alerts_wildcard())
+                .target(zenoh::query::QueryTarget::All)
                 .timeout(seed_timeout)
                 .await
             {
@@ -209,6 +210,7 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
             // degraded per-source path, by construction.
             if let Ok(replies) = session
                 .get(entities_query_key())
+                .target(zenoh::query::QueryTarget::All)
                 .timeout(seed_timeout)
                 .await
             {
