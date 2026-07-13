@@ -1,10 +1,14 @@
 // zenohd (router) configuration that captures the ZenSight historical
-// passive-DNS tier (`zensight/@pdns/**`, #310) into an InfluxDB time-series
-// bucket. The correlator publishes a PdnsRecord (an IP's full accumulated
-// name set) on `zensight/@pdns/<ip-slug>` every time it learns/updates names for
-// an IP; an InfluxDB-backed storage subscribed on that tier records each write
-// as a time-series point, giving a queryable IP↔name history ("what did
-// 10.0.0.9 resolve to last Tuesday?").
+// passive-DNS tier (`zensight/@v1/@catalog/state/pdns/**`, #310 / RFC 09 §2)
+// into an InfluxDB time-series bucket. The catalog publishes a PdnsRecord (an
+// IP's full accumulated name set) on `…/state/pdns/<ip-slug>` every time it
+// learns/updates names for an IP; an InfluxDB-backed storage subscribed on
+// that tier records each write as a time-series point, giving a queryable
+// IP↔name history ("what did 10.0.0.9 resolve to last Tuesday?").
+//
+// NOTE this selector overlaps the catalog storage in
+// configs/router-evidence-storage.json5 — a GET under `state/pdns/**` is
+// answered by both (RFC 09 §2's stated overlap; GET consumers consolidate).
 //
 //   zenohd -c configs/router-pdns-influxdb-storage.json5
 //
@@ -27,7 +31,7 @@
     endpoints: ["tcp/0.0.0.0:7447"],
   },
 
-  // Ensure every @pdns write carries a timestamp so InfluxDB points land at the
+  // Ensure every pdns write carries a timestamp so InfluxDB points land at the
   // correct instant (and a late/replayed sample doesn't misorder the series). A
   // router timestamps by default; set explicitly for peer/client deployments.
   timestamping: {
@@ -58,12 +62,12 @@
         // },
       },
       storages: {
-        // The whole historical passive-DNS tier. `strip_prefix` drops the common
-        // `zensight/@pdns` head so each IP's records key on just its ip-slug
-        // (the InfluxDB measurement/series), keeping the time series tidy.
+        // The whole historical passive-DNS tier. `strip_prefix` drops the
+        // common head so each IP's records key on just its ip-slug (the
+        // InfluxDB measurement/series), keeping the time series tidy.
         "zensight-pdns": {
-          key_expr: "zensight/@pdns/**",
-          strip_prefix: "zensight/@pdns",
+          key_expr: "zensight/@v1/@catalog/state/pdns/**",
+          strip_prefix: "zensight/@v1/@catalog/state/pdns",
           volume: {
             id: "influxdb",
             db: "zensight_pdns",
@@ -75,8 +79,8 @@
 
         // --- v2.x storage variant (UNVERIFIED) ---
         // "zensight-pdns": {
-        //   key_expr: "zensight/@pdns/**",
-        //   strip_prefix: "zensight/@pdns",
+        //   key_expr: "zensight/@v1/@catalog/state/pdns/**",
+        //   strip_prefix: "zensight/@v1/@catalog/state/pdns",
         //   volume: {
         //     id: "influxdb2",
         //     db: "zensight_pdns",           // v2 bucket

@@ -34,7 +34,6 @@
 
   // Netring sensor settings
   netring: {
-    key_prefix: "zensight/netring",
     // Host identifier used as telemetry `source`. "auto" → hostname.
     source: "auto",
     // Capture backend (netring 0.28, #227): "auto" (default) probes + selects
@@ -123,7 +122,7 @@
 
     // Host-evidence feed (#307): republish observed assets (`collect.assets`)
     // and passive-DNS name observations (`collect.dns` + `names`) as third-party
-    // identity evidence on `zensight/_meta/evidence/**` for the correlator
+    // identity evidence on `…/state/netring/evidence/**` for the correlator
     // (epic #312). Change-driven with a periodic liveness refresh; the per-tick
     // cap keeps a busy L2 segment from flooding the evidence bus.
     // NOTE: this feed is gated on its SOURCE collectors — asset evidence needs

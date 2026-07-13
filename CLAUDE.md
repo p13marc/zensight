@@ -10,10 +10,10 @@ an Iced desktop frontend, correlates per-host identity, and exports to Prometheu
 **Every crate documents itself** in its own `README.md` + `docs/` directory — that is the
 authoritative reference for how that crate works. This file is the *contributor/agent* guide:
 build/test/lint commands, conventions, and a map into the per-crate docs. The cross-cutting
-contracts are [`docs/KEYSPACE.md`](docs/KEYSPACE.md) (the *deployed* Zenoh key contract — untouchable
-single source) and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (system overview). The
-ratified **keyspace-v2 convention** ([`docs/rfcs/keyspace-v2/`](docs/rfcs/keyspace-v2/00-index.md),
-v1.0, enforced by `zensight-keyspace`) is the successor contract; migration = epic #453. Archived
+contracts are the ratified **keyspace-v2 convention**
+([`docs/rfcs/keyspace-v2/`](docs/rfcs/keyspace-v2/00-index.md), v1.0, enforced by
+`zensight-keyspace` — deployed-profile summary in [`docs/KEYSPACE.md`](docs/KEYSPACE.md))
+and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (system overview). Archived
 design rationale lives in [`docs/design/`](docs/design/).
 
 ### Crate map (→ each crate's docs)
@@ -22,6 +22,7 @@ design rationale lives in [`docs/design/`](docs/design/).
 |-------|-----------|
 | `zensight/` | Iced 0.14 frontend — views/state, testing, design system, local store |
 | `zensight-common/` | shared model: telemetry, alert/command, identity/evidence/entity, artifact, QoS, keyexpr |
+| `zensight-keyspace/` | v1 key grammar + registry codegen: `V1Context`, origin minting, guard tests |
 | `zensight-sensor-core/` | sensor framework: runner, publishers (declared, QoS), health, alerting, identity, artifacts |
 | `zensight-sensor-{snmp,logs,netflow,modbus,sysinfo,gnmi}/` | protocol pollers/receivers |
 | `zensight-sensor-netlink/` | kernel net telemetry (RTNETLINK/sock_diag) + sentinel + optional eBPF |
@@ -74,17 +75,20 @@ cargo clippy --workspace -- -D warnings
 
 ```mermaid
 flowchart LR
-    S["sensors"] -- publish --> BUS["Zenoh bus<br/>zensight/** · @/… · _meta/… · @media/…"]
+    S["sensors"] -- publish --> BUS["Zenoh bus<br/>zensight/@v1/&lt;origin&gt;/… · @catalog · @rpc/@media/@blob"]
     BUS -- subscribe --> FE["frontend"]
     BUS -- subscribe --> EX["exporters<br/>(Prometheus / OTEL)"]
-    S -- "_meta/evidence/**" --> COR["correlator"]
-    COR -- "_meta/entity/**" --> FE
+    S -- "state/*/evidence/**" --> COR["catalog<br/>(correlator)"]
+    COR -- "@catalog/state/entity/*" --> FE
 ```
 
-- **Telemetry** rides `zensight/<protocol>/<source>/<metric>`; **control-plane** is `@/`-verbatim
-  (`@/alerts`, `@/commands`, `@/query/*`, `@/artifact`) and the telemetry wildcard `zensight/**`
-  does **not** match it; **metadata** is `_meta/…`; **media** is `@media/…`. Full contract:
-  [`docs/KEYSPACE.md`](docs/KEYSPACE.md).
+- **Keyspace v1** (RFC, ratified): everything rides
+  `zensight/@v1/<origin>/<class>/<producer>/<subject...>` with classes
+  `telemetry`/`state`/`events`, verbatim planes `@rpc`/`@media`/`@blob`, and the
+  `@catalog` identity service; commands are `@rpc` GETs, not publications. The
+  registry + typed builders live in `zensight-keyspace/`; contract summary:
+  [`docs/KEYSPACE.md`](docs/KEYSPACE.md), normative spec:
+  [`docs/rfcs/keyspace-v2/`](docs/rfcs/keyspace-v2/00-index.md).
 - **Sensors** self-report a stable `host_id` and (with `evidence` on) republish observed
   hosts/names; the **correlator** fuses them (union-find over ranked identity rules) into one
   `HostEntity` per host. See `zensight-common/docs/identity-evidence.md` and
@@ -120,8 +124,8 @@ JSON5 in [`configs/`](configs/), one per crate. Shared Zenoh block, overridable 
 ## Development Notes
 
 - Rust edition 2024; Iced 0.14 (tokio, canvas, svg); Zenoh 1.9 (`unstable`); tokio async runtime.
-- Conventional commits (`feat:`/`fix:`/`chore:`/`docs:`). Key expressions:
-  `zensight/<protocol>/<source>/<metric>`. Each view uses a per-view state struct; UI tests use
-  `iced_test::simulator` (see `zensight/docs/testing.md`).
+- Conventional commits (`feat:`/`fix:`/`chore:`/`docs:`). Key expressions: v1 grammar via
+  `zensight-keyspace`/`zensight-common` builders (never ad-hoc `format!`). Each view uses a
+  per-view state struct; UI tests use `iced_test::simulator` (see `zensight/docs/testing.md`).
 - When you change a crate's behavior, update **that crate's `docs/`** and, if the wire contract
   moves, [`docs/KEYSPACE.md`](docs/KEYSPACE.md).

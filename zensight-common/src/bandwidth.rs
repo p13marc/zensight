@@ -17,7 +17,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::keyexpr::KEY_PREFIX;
 use crate::telemetry::Protocol;
 
 /// Telemetry/record label key naming the measurement source (`bw.source`).
@@ -143,17 +142,20 @@ pub struct BandwidthRecord {
     pub host: Option<String>,
 }
 
-/// The per-protocol queryable key for on-demand per-process bandwidth
-/// (`zensight/<protocol>/@/query/bandwidth`), served by the netlink/eBPF tiers.
-/// GET it with a `?by=process|socket&top=<N>` selector.
+/// The fleet-wide v1 `bandwidth` read procedure for on-demand per-process
+/// bandwidth, served by the netlink/eBPF/netring tiers. GET it with a
+/// `?by=process|socket;top=<N>` selector and query target `All` (RFC 05 §2).
 ///
 /// ```
 /// use zensight_common::bandwidth::bandwidth_query_key;
 /// use zensight_common::Protocol;
-/// assert_eq!(bandwidth_query_key(Protocol::Netlink), "zensight/netlink/@/query/bandwidth");
+/// assert_eq!(
+///     bandwidth_query_key(Protocol::Netlink),
+///     "zensight/@v1/*/@rpc/netlink/bandwidth"
+/// );
 /// ```
 pub fn bandwidth_query_key(protocol: Protocol) -> String {
-    format!("{}/{}/@/query/bandwidth", KEY_PREFIX, protocol.as_str())
+    crate::keyexpr::fleet_rpc_key(protocol.as_str(), "bandwidth")
 }
 
 #[cfg(test)]
@@ -210,10 +212,10 @@ mod tests {
     }
 
     #[test]
-    fn query_key_is_protocol_scoped() {
+    fn query_key_is_the_fleet_procedure_selector() {
         assert_eq!(
             bandwidth_query_key(Protocol::Netlink),
-            "zensight/netlink/@/query/bandwidth"
+            "zensight/@v1/*/@rpc/netlink/bandwidth"
         );
     }
 }

@@ -3682,9 +3682,13 @@ impl ZenSight {
         let Some(session) = self.session.clone() else {
             return Task::none();
         };
-        let key = zensight_common::status_key("zensight/netlink", "expectations");
+        let key = zensight_common::fleet_rpc_key("netlink", "expectations");
         Task::future(async move {
-            match session.get(&key).await {
+            match session
+                .get(&key)
+                .target(zenoh::query::QueryTarget::All)
+                .await
+            {
                 Ok(replies) => {
                     if let Ok(reply) = replies.recv_async().await
                         && let Ok(sample) = reply.result()
@@ -3712,9 +3716,13 @@ impl ZenSight {
         let Some(session) = self.session.clone() else {
             return Task::none();
         };
-        let key = zensight_common::status_key("zensight/systemd", "expectations");
+        let key = zensight_common::fleet_rpc_key("systemd", "expectations");
         Task::future(async move {
-            match session.get(&key).await {
+            match session
+                .get(&key)
+                .target(zenoh::query::QueryTarget::All)
+                .await
+            {
                 Ok(replies) => {
                     if let Ok(reply) = replies.recv_async().await
                         && let Ok(sample) = reply.result()
@@ -4905,7 +4913,6 @@ impl ZenSight {
     /// always kills the subscriber (which is the sensor's falling-edge
     /// teardown signal).
     fn open_parallax_tile(&mut self, stream: String) -> Task<Message> {
-        use crate::view::specialized::parallax_detail;
         let Some(source) = self
             .selected_device
             .as_ref()
@@ -4945,12 +4952,14 @@ impl ZenSight {
         else {
             return Task::none();
         };
-        let (frames, handle) = Task::stream(parallax_detail::preview_tile_stream(
-            session,
-            source.clone(),
-            stream.clone(),
-            generation,
-        ))
+        let (frames, handle) = Task::stream(
+            crate::view::specialized::parallax_detail::preview_tile_stream(
+                session,
+                source.clone(),
+                stream.clone(),
+                generation,
+            ),
+        )
         .abortable();
         if let Some(device) = self.selected_device.as_mut() {
             device.parallax_detail.open_tile(
@@ -4960,8 +4969,7 @@ impl ZenSight {
                 false,
             );
         }
-        let cmd_key =
-            zensight_common::command_key(&parallax_detail::host_prefix(&source), "stream");
+        let cmd_key = zensight_common::origin_rpc_key(&source, "parallax", "stream/set");
         let open =
             zensight_common::command::Command::new(zensight_common::StreamControl::OpenStream {
                 stream: stream.clone(),
@@ -4989,7 +4997,6 @@ impl ZenSight {
     /// Close a preview tile (#408): abort its subscriber task, drop it, and
     /// send `close_stream` so the sensor reaps without the idle timeout.
     fn close_parallax_tile(&mut self, stream: String) -> Task<Message> {
-        use crate::view::specialized::parallax_detail;
         let Some(source) = self
             .selected_device
             .as_ref()
@@ -5009,7 +5016,7 @@ impl ZenSight {
                 stream: stream.clone(),
             });
         self.send_command(
-            zensight_common::command_key(&parallax_detail::host_prefix(&source), "stream"),
+            zensight_common::origin_rpc_key(&source, "parallax", "stream/set"),
             &close,
             format!("Closed preview for {stream}"),
         )
@@ -5080,8 +5087,7 @@ impl ZenSight {
                 true,
             );
         }
-        let cmd_key =
-            zensight_common::command_key(&parallax_detail::host_prefix(&source), "stream");
+        let cmd_key = zensight_common::origin_rpc_key(&source, "parallax", "stream/set");
         let open =
             zensight_common::command::Command::new(zensight_common::StreamControl::OpenStream {
                 stream: stream.clone(),
@@ -5117,7 +5123,6 @@ impl ZenSight {
     /// Relay the H.264 tile decoder's discontinuity recovery: ask the sensor
     /// for a fresh IDR (`request_keyframe`) on the stream's command channel.
     fn request_parallax_keyframe(&mut self, stream: String) -> Task<Message> {
-        use crate::view::specialized::parallax_detail;
         let Some(source) = self
             .selected_device
             .as_ref()
@@ -5138,7 +5143,7 @@ impl ZenSight {
         // recur (backed off in h264_tile_stream) — a toast per request is
         // pure noise. Failures still surface.
         self.send_command(
-            zensight_common::command_key(&parallax_detail::host_prefix(&source), "stream"),
+            zensight_common::origin_rpc_key(&source, "parallax", "stream/set"),
             &request,
             String::new(),
         )
@@ -5207,7 +5212,6 @@ impl ZenSight {
     /// subscribers (the sensor's crash backstop); the explicit close makes
     /// the sensor reap immediately instead of after the idle timeout.
     fn teardown_parallax_tiles(&mut self) -> Task<Message> {
-        use crate::view::specialized::parallax_detail;
         let Some(device) = self.selected_device.as_mut() else {
             return Task::none();
         };
@@ -5219,8 +5223,7 @@ impl ZenSight {
         if streams.is_empty() || self.demo_mode || self.command_registry.is_none() {
             return Task::none();
         }
-        let cmd_key =
-            zensight_common::command_key(&parallax_detail::host_prefix(&source), "stream");
+        let cmd_key = zensight_common::origin_rpc_key(&source, "parallax", "stream/set");
         Task::batch(streams.into_iter().map(|stream| {
             let close = zensight_common::command::Command::new(
                 zensight_common::StreamControl::CloseStream {
@@ -5911,13 +5914,18 @@ impl ZenSight {
         };
         // NB: zenoh selector parameters are `;`-separated (`Parameters`), not
         // `&` — the server reads them via `query.parameters().get(..)`.
-        let mut selector = format!("zensight/logs/@/query/events?max={LOG_FETCH_MAX}");
+        // Fleet fan-in: every logs sensor answers, so target All (RFC 05 §2.1).
+        let mut selector = format!(
+            "{}?max={LOG_FETCH_MAX}",
+            zensight_common::fleet_rpc_key("logs", "events")
+        );
         if let Some(since) = since {
             selector.push_str(&format!(";since={since}"));
         }
         Task::future(async move {
             match session
                 .get(&selector)
+                .target(zenoh::query::QueryTarget::All)
                 .timeout(std::time::Duration::from_secs(3))
                 .await
             {

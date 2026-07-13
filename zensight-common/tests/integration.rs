@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 use zensight_common::{
-    Format, KeyExprBuilder, Protocol, TelemetryPoint, TelemetryValue, all_telemetry_wildcard,
-    decode, decode_auto, encode, parse_key_expr,
+    Format, Protocol, TelemetryPoint, TelemetryValue, all_telemetry_wildcard, decode, decode_auto,
+    encode,
 };
 
 #[test]
@@ -48,31 +48,22 @@ fn test_full_telemetry_workflow() {
 }
 
 #[test]
-fn test_key_expression_building_and_parsing() {
-    // Build a key expression
-    let key = KeyExprBuilder::new(Protocol::Snmp).build("switch01", "if/1/ifInOctets");
-
-    assert_eq!(key, "zensight/snmp/switch01/if/1/ifInOctets");
-
-    // Parse it back
-    let parsed = parse_key_expr(&key).expect("Parse failed");
-    assert_eq!(parsed.protocol, Protocol::Snmp);
-    assert_eq!(parsed.source, "switch01");
-    assert_eq!(parsed.metric, "if/1/ifInOctets");
-}
-
-#[test]
 fn test_wildcard_key_expressions() {
     // v1: the telemetry class selector (RFC 04 §4).
     let all = all_telemetry_wildcard();
     assert_eq!(all, "zensight/@v1/*/telemetry/**");
 
-    // Legacy per-protocol/source wildcards keep their shapes until the
-    // KeyExprBuilder itself retires with the cutover (#465).
-    let snmp_all = KeyExprBuilder::new(Protocol::Snmp).protocol_wildcard();
-    assert_eq!(snmp_all, "zensight/snmp/**");
-    let router_all = KeyExprBuilder::new(Protocol::Snmp).source_wildcard("router01");
-    assert_eq!(router_all, "zensight/snmp/router01/**");
+    // A per-protocol narrowing keeps one `*` for the origin (RFC 09 §1).
+    let netring_all = "zensight/@v1/*/telemetry/netring/**";
+    let one = zenoh::key_expr::KeyExpr::try_from(
+        "zensight/@v1/h-3fa9c2d41b7e/telemetry/netring/flow/count",
+    )
+    .unwrap();
+    assert!(
+        zenoh::key_expr::KeyExpr::try_from(netring_all)
+            .unwrap()
+            .intersects(&one)
+    );
 }
 
 #[test]
@@ -91,10 +82,6 @@ fn test_all_protocol_variants() {
     for (protocol, expected_str) in protocols {
         assert_eq!(protocol.as_str(), expected_str);
         assert_eq!(format!("{}", protocol), expected_str);
-
-        // Build key and verify
-        let key = KeyExprBuilder::new(protocol).build("device01", "test");
-        assert!(key.contains(expected_str));
     }
 }
 
@@ -183,31 +170,4 @@ fn test_large_counter_values() {
     let encoded = encode(&point, Format::Cbor).unwrap();
     let decoded: TelemetryPoint = decode(&encoded, Format::Cbor).unwrap();
     assert_eq!(decoded.value, TelemetryValue::Counter(u64::MAX));
-}
-
-#[test]
-fn test_special_characters_in_source() {
-    let sources = ["router-01", "switch_02", "device.local", "192.168.1.1"];
-
-    for source in sources {
-        let key = KeyExprBuilder::new(Protocol::Snmp).build(source, "metric");
-        let parsed = parse_key_expr(&key).unwrap();
-        assert_eq!(parsed.source, source);
-    }
-}
-
-#[test]
-fn test_nested_metric_paths() {
-    let metrics = [
-        "system/sysUpTime",
-        "if/1/ifInOctets",
-        "ip/routing/table/entry/1",
-        "deeply/nested/metric/path/value",
-    ];
-
-    for metric in metrics {
-        let key = KeyExprBuilder::new(Protocol::Snmp).build("device", metric);
-        let parsed = parse_key_expr(&key).unwrap();
-        assert_eq!(parsed.metric, metric);
-    }
 }

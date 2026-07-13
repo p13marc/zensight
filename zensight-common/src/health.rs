@@ -177,6 +177,11 @@ pub struct SensorInfo {
     pub fqdn: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ips: Vec<String>,
+    /// Free-form sensor metadata (device counts, listener addresses, …) —
+    /// carried on the registration doc since the legacy `@/status` document
+    /// retired with the v1 cutover (the health doc absorbs the running flag).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub macs: Vec<String>,
     /// Unix epoch millis of the latest re-emission.

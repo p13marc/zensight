@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
     let format = runner.config().serialization;
-    let runner = runner.with_status_publishing().with_format(format);
+    let runner = runner.with_format(format);
 
     // On-demand artifact channel (`@/artifact`): bundle redacted config + health +
     // counters (report) plus tier-2 directory snapshots. Each kind is a no-op

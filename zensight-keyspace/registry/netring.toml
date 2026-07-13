@@ -68,6 +68,15 @@ since = "1.0"
 description = "registration document: identity, version, capabilities (framework, 60 s re-emit)"
 
 [[subject]]
+path = "evidence/device/{device}"
+class = "state"
+type = "HostEvidence"
+cardinality = 4096
+ttl_s = 900
+since = "1.0"
+description = "wire-observed asset identity claim (MAC/IP/vendor, RFC 06 §4)"
+
+[[subject]]
 path = "evidence/self"
 class = "state"
 type = "HostEvidence"

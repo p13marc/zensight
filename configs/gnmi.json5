@@ -23,8 +23,6 @@
 
   // gNMI sensor settings
   gnmi: {
-    // Key expression prefix for publishing telemetry
-    key_prefix: "zensight/gnmi",
 
     // Override the agent-host source id (default: the local hostname).
     // source: "agent-host-01",

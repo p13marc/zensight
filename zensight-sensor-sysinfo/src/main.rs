@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // Enable status publishing and set format
-    let runner = runner.with_status_publishing().with_format(Format::Json);
+    let runner = runner.with_format(Format::Json);
 
     // On-demand artifact channel (`@/artifact`): a report producer (redacted
     // config + health + counters) and a snapshot producer (allowlisted directory

@@ -33,7 +33,6 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // Enable status publishing
-    let runner = runner.with_status_publishing();
 
     // On-demand debug-report (`@/artifact`): bundle redacted config + health +
     // counters. No-op unless `report.enabled` is set in the config. SNMP secrets

@@ -1011,8 +1011,8 @@ mod tests {
             current_view: CurrentView::default(),
             group_by_host: true,
             subscription_scope: vec![
-                "zensight/netring/**".to_string(),
-                "zensight/sysinfo/**".to_string(),
+                "zensight/@v1/*/telemetry/netring/**".to_string(),
+                "zensight/@v1/*/telemetry/sysinfo/**".to_string(),
             ],
             link_profile: LinkProfile::Constrained,
             identity_expanded: false,
@@ -1039,7 +1039,7 @@ mod tests {
         // The link-profile settings survive the persistent→state hop (#364).
         assert_eq!(
             state.subscription_scope,
-            "zensight/netring/**, zensight/sysinfo/**"
+            "zensight/@v1/*/telemetry/netring/**, zensight/@v1/*/telemetry/sysinfo/**"
         );
         assert_eq!(state.link_profile, LinkProfile::Constrained);
 
@@ -1054,7 +1054,10 @@ mod tests {
         assert!(restored.desktop_notifications);
         assert_eq!(
             restored.subscription_scope,
-            vec!["zensight/netring/**", "zensight/sysinfo/**"]
+            vec![
+                "zensight/@v1/*/telemetry/netring/**",
+                "zensight/@v1/*/telemetry/sysinfo/**"
+            ]
         );
         assert_eq!(restored.link_profile, LinkProfile::Constrained);
     }
@@ -1078,7 +1081,7 @@ mod tests {
     #[test]
     fn test_scope_validation() {
         let mut settings = SettingsState {
-            subscription_scope: "zensight/netring/**".to_string(),
+            subscription_scope: "zensight/@v1/*/telemetry/netring/**".to_string(),
             ..SettingsState::default()
         };
         assert!(settings.validate().is_ok());

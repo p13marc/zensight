@@ -40,8 +40,6 @@
 
   // System information collection settings
   sysinfo: {
-    // Key expression prefix
-    key_prefix: "zensight/sysinfo",
 
     // Source id (hostname) for key expressions
     // Use "auto" to detect the local hostname automatically, or specify a custom name

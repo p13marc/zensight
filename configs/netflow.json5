@@ -22,8 +22,6 @@
 
   // NetFlow/IPFIX sensor settings
   netflow: {
-    // Key expression prefix for publishing
-    key_prefix: "zensight/netflow",
 
     // Override the agent-host source id (default: the local hostname).
     // source: "agent-host-01",

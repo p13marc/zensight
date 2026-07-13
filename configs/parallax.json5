@@ -18,7 +18,6 @@
 
   // Parallax video sensor settings
   parallax: {
-    key_prefix: "zensight/parallax",
     source: "auto",       // host id used as the `source` key chunk; "auto" detects the hostname
 
     // Advertise local V4L2 cameras (/dev/video*) in the stream catalogue.

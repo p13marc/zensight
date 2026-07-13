@@ -22,8 +22,6 @@
 
   // systemd sensor settings
   systemd: {
-    // Key expression prefix
-    key_prefix: "zensight/systemd",
 
     // How often to read the systemd Manager (seconds)
     poll_interval_secs: 15,

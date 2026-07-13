@@ -83,28 +83,6 @@ pub async fn run(
         None
     };
 
-    // Legacy (protocol-scoped) device-liveness shape, kept for one release so
-    // pre-host-scoping sensors still feed entity status. The two wildcards
-    // never match the same concrete key (pinned in zensight-common), and
-    // `handle_liveness` decodes the payload only — no key parsing to fork.
-    let liveness_legacy_sub = if status_from_liveness {
-        let key = "zensight/*/@/devices/*/liveness";
-        info!(key = %key, "subscribing to device liveness (legacy shape)");
-        match session
-            .declare_subscriber(key)
-            .with(flume::unbounded())
-            .await
-        {
-            Ok(s) => Some(s),
-            Err(e) => {
-                warn!(error = %e, "failed to declare legacy liveness subscriber");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
     info!("evidence subscribers ready");
 
     loop {
@@ -135,14 +113,6 @@ pub async fn run(
                     Err(e) => warn!(error = %e, "liveness recv error"),
                 }
             }
-            sample = async { liveness_legacy_sub.as_ref().unwrap().recv_async().await },
-                if liveness_legacy_sub.is_some() =>
-            {
-                match sample {
-                    Ok(sample) => handle_liveness(&sample, &tx).await,
-                    Err(e) => warn!(error = %e, "legacy liveness recv error"),
-                }
-            }
         }
     }
 
@@ -154,15 +124,29 @@ fn is_put(sample: &Sample) -> bool {
     sample.kind() == SampleKind::Put
 }
 
-/// Extract `(sensor, source)` from a host-evidence key
-/// `.../_meta/evidence/host/<sensor>/<source>` (used to resolve a tombstone).
+/// Extract `(sensor, device)` from a v1 device-evidence key (used to resolve
+/// a tombstone into the claim it withdraws).
 fn parse_host_evidence_key(key: &str) -> Option<(String, String)> {
-    let rest = key.split("/evidence/host/").nth(1)?;
-    let (sensor, source) = rest.split_once('/')?;
-    if sensor.is_empty() || source.is_empty() {
+    // v1: zensight/@v1/<origin>/state/<sensor>/evidence/device/<device>.
+    // A `…/evidence/self` tombstone carries only the origin — the store keys
+    // claims by the payload's source, so it just ages out by TTL instead.
+    let mut chunks = key.split('/');
+    if chunks.next() != Some("zensight") || chunks.next() != Some("@v1") {
         return None;
     }
-    Some((sensor.to_string(), source.to_string()))
+    let _origin = chunks.next()?;
+    if chunks.next() != Some("state") {
+        return None;
+    }
+    let sensor = chunks.next()?;
+    if chunks.next() != Some("evidence") || chunks.next() != Some("device") {
+        return None;
+    }
+    let device = chunks.next()?;
+    if sensor.is_empty() || device.is_empty() || chunks.next().is_some() {
+        return None;
+    }
+    Some((sensor.to_string(), device.to_string()))
 }
 
 async fn handle_host(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
@@ -227,22 +211,35 @@ mod tests {
     #[test]
     fn parses_host_evidence_key() {
         assert_eq!(
-            parse_host_evidence_key("zensight/_meta/evidence/host/netlink/host1"),
+            parse_host_evidence_key(
+                "zensight/@v1/h-3fa9c2d41b7e/state/netlink/evidence/device/host1"
+            ),
             Some(("netlink".to_string(), "host1".to_string()))
         );
-        // A MAC-slug source (third-party evidence) stays a single chunk.
+        // A MAC-slug device (third-party evidence) stays a single chunk.
         assert_eq!(
-            parse_host_evidence_key("zensight/_meta/evidence/host/netring/aa-bb-cc-00-00-02"),
+            parse_host_evidence_key(
+                "zensight/@v1/h-3fa9c2d41b7e/state/netring/evidence/device/aa-bb-cc-00-00-02"
+            ),
             Some(("netring".to_string(), "aa-bb-cc-00-00-02".to_string()))
         );
-        // The names subtree is not a host key.
+        // The names subtree is not a device key.
         assert_eq!(
-            parse_host_evidence_key("zensight/_meta/evidence/names/netring/10-0-0-5"),
+            parse_host_evidence_key(
+                "zensight/@v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-5"
+            ),
             None
         );
-        // Missing source chunk.
+        // A self-evidence tombstone carries only the origin — ages out by TTL.
         assert_eq!(
-            parse_host_evidence_key("zensight/_meta/evidence/host/only"),
+            parse_host_evidence_key("zensight/@v1/h-3fa9c2d41b7e/state/netlink/evidence/self"),
+            None
+        );
+        // Trailing chunks make it malformed.
+        assert_eq!(
+            parse_host_evidence_key(
+                "zensight/@v1/h-3fa9c2d41b7e/state/netlink/evidence/device/host1/extra"
+            ),
             None
         );
     }

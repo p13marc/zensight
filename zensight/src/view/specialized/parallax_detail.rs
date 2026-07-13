@@ -18,8 +18,7 @@ use std::time::Instant;
 use iced::futures::Stream;
 use iced::widget::image;
 use zenoh::Session;
-use zensight_common::command::query_key;
-use zensight_common::keyexpr::media_preview_key;
+use zensight_common::keyexpr::{media_preview_key, origin_rpc_key};
 use zensight_common::stream::{FrameMeta, StreamDescriptor};
 use zensight_common::{Format, Protocol, decode};
 
@@ -283,14 +282,10 @@ impl ParallaxDetailState {
     }
 }
 
-/// The sensor's host-scoped control prefix for `host`.
-pub fn host_prefix(host: &str) -> String {
-    format!("zensight/parallax/{host}")
-}
-
-/// Query the stream catalogue (`@/query/streams`) for `host`.
+/// Query the stream catalogue (the `streams` procedure) for one host — the
+/// origin is known here, so the GET targets that host's @rpc key directly.
 pub async fn fetch_streams(session: Arc<Session>, host: String) -> Option<Vec<StreamDescriptor>> {
-    let key = query_key(&host_prefix(&host), "streams");
+    let key = origin_rpc_key(&host, "parallax", "streams");
     let replies = session.get(key).await.ok()?;
     let reply = replies.recv_async().await.ok()?;
     let sample = reply.result().ok()?;
@@ -366,12 +361,15 @@ mod tests {
     #[test]
     fn preview_key_is_verbatim_media_plane() {
         // Pin the exact key the tile stream subscribes to — the sensor
-        // publishes on this literal key (cross-crate contract).
+        // publishes on this literal key (cross-crate contract, RFC 07 §1).
         assert_eq!(
-            media_preview_key(Protocol::Parallax, "hostA", "cam0"),
-            "zensight/parallax/hostA/@media/cam0/preview/jpeg"
+            media_preview_key(Protocol::Parallax, "h-3fa9c2d41b7e", "cam0"),
+            "zensight/@v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
         );
-        assert_eq!(host_prefix("hostA"), "zensight/parallax/hostA");
+        assert_eq!(
+            origin_rpc_key("h-3fa9c2d41b7e", "parallax", "streams"),
+            "zensight/@v1/h-3fa9c2d41b7e/@rpc/parallax/streams"
+        );
     }
 
     #[test]

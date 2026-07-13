@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
 
     // Enable status publishing and pin JSON serialization.
     let format = runner.config().serialization;
-    let runner = runner.with_status_publishing().with_format(format);
+    let runner = runner.with_format(format);
 
     // On-demand debug-report (`@/artifact`): bundle redacted config + health +
     // counters. No-op unless `report.enabled` is set in the config.

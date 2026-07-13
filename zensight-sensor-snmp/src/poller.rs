@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 use tokio::time::{interval, timeout};
 use zenoh::Session as ZenohSession;
 
-use zensight_common::{Format, KeyExprBuilder, Protocol, TelemetryPoint, TelemetryValue, encode};
+use zensight_common::{Format, Protocol, TelemetryPoint, TelemetryValue, encode};
 
 use crate::config::{
     AuthProtocol, DeviceConfig, OidGroup, PrivProtocol, SnmpV3Security, SnmpVersion,

@@ -21,7 +21,6 @@
 
   // Netlink sensor settings
   netlink: {
-    key_prefix: "zensight/netlink",
     source: "auto",     // host id used as telemetry `source`; "auto" detects the hostname
     poll_interval_secs: 2,
     collect: {
@@ -70,7 +69,7 @@
     },
 
     // Host-evidence feed (#307): republish valid ARP/NDP neighbors as
-    // third-party identity evidence on `zensight/_meta/evidence/**` for the
+    // third-party identity evidence on `…/state/netlink/evidence/**` for the
     // correlator (epic #312). Change-driven with a periodic liveness refresh;
     // the neighbor poll drives it but `min_interval_secs` floors the rate.
     evidence: {

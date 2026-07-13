@@ -22,8 +22,6 @@
 
   // Modbus sensor settings
   modbus: {
-    // Key expression prefix
-    key_prefix: "zensight/modbus",
 
     // Override the agent-host source id (default: the local hostname).
     // source: "agent-host-01",

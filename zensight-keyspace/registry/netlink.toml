@@ -43,6 +43,15 @@ since = "1.0"
 description = "registration document: identity, version, capabilities (framework, 60 s re-emit)"
 
 [[subject]]
+path = "evidence/device/{device}"
+class = "state"
+type = "HostEvidence"
+cardinality = 256
+ttl_s = 900
+since = "1.0"
+description = "neighbor-table identity claim about an observed host (RFC 06 §4)"
+
+[[subject]]
 path = "evidence/self"
 class = "state"
 type = "HostEvidence"

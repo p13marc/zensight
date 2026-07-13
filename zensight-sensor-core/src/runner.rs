@@ -13,7 +13,6 @@ use crate::config::SensorConfig;
 use crate::error::{Result, SensorError};
 use crate::liveliness::LivelinessManager;
 use crate::publisher::Publisher;
-use crate::status::StatusPublisher;
 
 /// Sensor runner that manages the lifecycle of a protocol sensor.
 ///
@@ -23,7 +22,6 @@ use crate::status::StatusPublisher;
 /// - Zenoh connection
 /// - Task spawning and management
 /// - Graceful shutdown on Ctrl+C
-/// - Status publishing (optional)
 ///
 /// # Example
 ///
@@ -62,8 +60,6 @@ pub struct SensorRunner<C: SensorConfig> {
     session: Arc<zenoh::Session>,
     /// Publisher for telemetry.
     publisher: Publisher,
-    /// Status publisher (optional).
-    status_publisher: Option<StatusPublisher>,
     /// Liveliness manager for presence detection.
     liveliness: Option<LivelinessManager>,
     /// Sensor health tracker, published periodically to the host-scoped
@@ -162,33 +158,11 @@ impl<C: SensorConfig> SensorRunner<C> {
             config,
             session,
             publisher,
-            status_publisher: None,
             liveliness: None,
             health,
             identity: None,
             tasks: Vec::new(),
         })
-    }
-
-    /// The host-scoped control prefix for this instance:
-    /// `{key_prefix}/{source}` (e.g. `zensight/sysinfo/hostA`). All per-instance
-    /// state channels (`@/health`, `@/errors`, `@/status`, `@/alive`,
-    /// `@/devices/**`) hang off it.
-    fn control_prefix(&self) -> String {
-        crate::keys::control_prefix(self.config.key_prefix(), &self.source)
-    }
-
-    /// Enable status publishing.
-    ///
-    /// When enabled, the runner will publish status messages on startup and shutdown.
-    pub fn with_status_publishing(mut self) -> Self {
-        self.status_publisher = Some(StatusPublisher::new(
-            self.publisher.clone(),
-            self.control_prefix(),
-            &self.name,
-            &self.version,
-        ));
-        self
     }
 
     /// Declare the sensor-level liveliness token now instead of at [`Self::run`].
@@ -262,16 +236,6 @@ impl<C: SensorConfig> SensorRunner<C> {
     /// Set a custom serialization format for the publisher.
     pub fn with_format(mut self, format: Format) -> Self {
         self.publisher = Publisher::new(self.session.clone(), self.config.key_prefix(), format);
-        // Recreate status publisher with new publisher (control prefix survives
-        // the rebuild — it derives from config + source, not the publisher).
-        if self.status_publisher.is_some() {
-            self.status_publisher = Some(StatusPublisher::new(
-                self.publisher.clone(),
-                self.control_prefix(),
-                &self.name,
-                &self.version,
-            ));
-        }
         self
     }
 
@@ -354,16 +318,16 @@ impl<C: SensorConfig> SensorRunner<C> {
     /// Run the sensor until a shutdown signal (Ctrl+C / SIGINT or SIGTERM) is received.
     ///
     /// This will:
-    /// 1. Publish "running" status (if enabled)
+    /// 1. Serve `introspect`, declare liveliness, start health/identity tasks
     /// 2. Wait for a shutdown signal (Ctrl+C / SIGINT or, on Unix, SIGTERM)
-    /// 3. Abort all spawned tasks
-    /// 4. Publish "offline" status (if enabled)
-    /// 5. Close the Zenoh session
+    /// 3. Abort all spawned tasks and close the Zenoh session
     pub async fn run(self) -> Result<()> {
         self.run_with_metadata(None).await
     }
 
-    /// Run the sensor with custom status metadata.
+    /// Run the sensor with free-form metadata carried on the registration doc
+    /// (`state/<producer>/sensor` — the legacy `@/status` document retired
+    /// with the v1 cutover).
     pub async fn run_with_metadata(mut self, metadata: Option<serde_json::Value>) -> Result<()> {
         // Serve `introspect` (RFC 08 §6) — the registry slice this build was
         // compiled against — before the liveliness token, so "alive ⇒
@@ -393,13 +357,6 @@ impl<C: SensorConfig> SensorRunner<C> {
                 Ok(manager) => self.liveliness = Some(manager),
                 Err(e) => tracing::warn!(error = %e, "Failed to declare liveliness token"),
             }
-        }
-
-        // Publish running status
-        if let Some(ref status_pub) = self.status_publisher
-            && let Err(e) = status_pub.publish_running(metadata).await
-        {
-            tracing::warn!(error = %e, "Failed to publish running status");
         }
 
         // Periodically publish sensor health to `<prefix>/<source>/@/health` so the
@@ -438,6 +395,7 @@ impl<C: SensorConfig> SensorRunner<C> {
             let v1_ctx = self.publisher.v1().clone();
             let health = self.health.clone();
             let identity_cfg = self.config.identity_config();
+            let metadata = metadata.clone();
             let task = tokio::spawn(async move {
                 // Opt-in cloud-metadata probe (#311): one shot before the first
                 // emit — an instance's cloud identity never changes while it
@@ -482,6 +440,7 @@ impl<C: SensorConfig> SensorRunner<C> {
                         fqdn: id.fqdn.clone(),
                         ips: id.ips.clone(),
                         macs: id.macs.clone(),
+                        metadata: metadata.clone(),
                         last_updated: now,
                     };
                     let evidence = zensight_common::HostEvidence {
@@ -535,13 +494,6 @@ impl<C: SensorConfig> SensorRunner<C> {
 
         // Wait briefly for tasks to clean up
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Publish offline status
-        if let Some(ref status_pub) = self.status_publisher
-            && let Err(e) = status_pub.publish_offline().await
-        {
-            tracing::warn!(error = %e, "Failed to publish offline status");
-        }
 
         // Close Zenoh session
         if let Err(e) = self.session.close().await {

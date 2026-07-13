@@ -11,7 +11,7 @@ use rasn_snmp::v2c;
 use tokio::net::UdpSocket;
 use zenoh::Session as ZenohSession;
 
-use zensight_common::{Format, KeyExprBuilder, Protocol, TelemetryPoint, TelemetryValue, encode};
+use zensight_common::{Format, Protocol, TelemetryPoint, TelemetryValue, encode};
 
 use crate::mib::MibResolver;
 
@@ -215,7 +215,11 @@ impl TrapReceiver {
 
         // Publish main trap notification
         let metric_name = format!("trap/{}", trap_id);
-        let key = self.key_builder.build(&trap.source_ip, &metric_name);
+        // Proxy shape: device chunk (slugged source IP) between the producer
+        // prefix and the metric (RFC 11 §2 — snmp is a proxy producer; same
+        // `.`/`:` → `-` mapping as the netring name-observation keys).
+        let device = trap.source_ip.replace(['.', ':'], "-");
+        let key = format!("{}/{}/{}", self.key_prefix, device, metric_name);
 
         let point = TelemetryPoint {
             timestamp: zensight_common::current_timestamp_millis(),
@@ -238,7 +242,7 @@ impl TrapReceiver {
         for varbind in &trap.varbinds {
             let varbind_name = self.mib_resolver.resolve(&varbind.oid);
             let varbind_metric = format!("trap/{}/{}", trap_id, varbind_name);
-            let varbind_key = self.key_builder.build(&trap.source_ip, &varbind_metric);
+            let varbind_key = format!("{}/{}/{}", self.key_prefix, device, varbind_metric);
 
             let mut varbind_labels = labels.clone();
             varbind_labels.insert("oid".to_string(), varbind.oid.clone());

@@ -342,7 +342,7 @@ mod tests {
                     hash: zenoh_blob::Hash([0u8; 32]),
                     created_ms: 1,
                 },
-                blob_prefix: "zensight/netlink/@/artifact/blob".into(),
+                blob_prefix: "zensight/@v1/h-3fa9c2d41b7e/@blob/artifact".into(),
             },
             expires_ms: 1,
         };
@@ -358,8 +358,8 @@ mod tests {
             kind: "snapshot".into(),
             delivery: Delivery::Tree {
                 tree_id: "t".into(),
-                store_prefix: "zensight/sysinfo/@/store".into(),
-                tree_prefix: "zensight/sysinfo/@/tree".into(),
+                store_prefix: "zensight/@v1/h-3fa9c2d41b7e/@blob/store".into(),
+                tree_prefix: "zensight/@v1/h-3fa9c2d41b7e/@blob/tree".into(),
                 summary: TreeSummary {
                     file_count: 3,
                     total_bytes: 42,

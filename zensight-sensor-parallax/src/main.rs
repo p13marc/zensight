@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
 
     // Enable status publishing, set format, and declare liveliness early so
     // per-stream device tokens can be declared before run().
-    let runner = runner.with_status_publishing().with_format(Format::Json);
+    let runner = runner.with_format(Format::Json);
     let runner = runner
         .with_liveliness()
         .await

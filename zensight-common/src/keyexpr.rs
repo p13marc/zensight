@@ -3,159 +3,6 @@ use crate::telemetry::Protocol;
 /// Default key expression prefix for all ZenSight telemetry.
 pub const KEY_PREFIX: &str = "zensight";
 
-/// Error type for key expression parsing.
-#[derive(Debug, thiserror::Error)]
-pub enum ParseError {
-    #[error("key expression too short: expected at least 4 segments, got {0}")]
-    TooFewSegments(usize),
-    #[error("invalid prefix: expected '{expected}', got '{actual}'")]
-    InvalidPrefix {
-        expected: &'static str,
-        actual: String,
-    },
-    #[error("unknown protocol: '{0}'")]
-    UnknownProtocol(String),
-    #[error("empty source identifier")]
-    EmptySource,
-}
-
-/// Builder for constructing ZenSight key expressions.
-///
-/// Key expressions follow the pattern:
-/// `zensight/<protocol>/<source>/<metric_path>`
-#[derive(Debug, Clone)]
-pub struct KeyExprBuilder {
-    prefix: String,
-    protocol: Protocol,
-}
-
-impl KeyExprBuilder {
-    /// Create a new key expression builder for a protocol.
-    pub fn new(protocol: Protocol) -> Self {
-        Self {
-            prefix: KEY_PREFIX.to_string(),
-            protocol,
-        }
-    }
-
-    /// Create a builder with a custom prefix.
-    pub fn with_prefix(prefix: impl Into<String>, protocol: Protocol) -> Self {
-        Self {
-            prefix: prefix.into(),
-            protocol,
-        }
-    }
-
-    /// Build a key expression for a specific source and metric.
-    ///
-    /// # Panics
-    ///
-    /// Debug-asserts that `source` and `metric` are non-empty and don't contain
-    /// double slashes (`//`).
-    ///
-    /// # Example
-    /// ```
-    /// use zensight_common::keyexpr::KeyExprBuilder;
-    /// use zensight_common::telemetry::Protocol;
-    ///
-    /// let builder = KeyExprBuilder::new(Protocol::Snmp);
-    /// let key = builder.build("router01", "system/sysUpTime");
-    /// assert_eq!(key, "zensight/snmp/router01/system/sysUpTime");
-    /// ```
-    pub fn build(&self, source: &str, metric: &str) -> String {
-        debug_assert!(!source.is_empty(), "source must not be empty");
-        debug_assert!(!metric.is_empty(), "metric must not be empty");
-        debug_assert!(
-            !source.contains("//") && !metric.contains("//"),
-            "source and metric must not contain '//'"
-        );
-        format!(
-            "{}/{}/{}/{}",
-            self.prefix,
-            self.protocol.as_str(),
-            source,
-            metric
-        )
-    }
-
-    /// Build a wildcard key expression for all metrics from a source.
-    ///
-    /// # Example
-    /// ```
-    /// use zensight_common::keyexpr::KeyExprBuilder;
-    /// use zensight_common::telemetry::Protocol;
-    ///
-    /// let builder = KeyExprBuilder::new(Protocol::Snmp);
-    /// let key = builder.source_wildcard("router01");
-    /// assert_eq!(key, "zensight/snmp/router01/**");
-    /// ```
-    pub fn source_wildcard(&self, source: &str) -> String {
-        format!("{}/{}/{}/**", self.prefix, self.protocol.as_str(), source)
-    }
-
-    /// Build a wildcard key expression for all sources of this protocol.
-    ///
-    /// # Example
-    /// ```
-    /// use zensight_common::keyexpr::KeyExprBuilder;
-    /// use zensight_common::telemetry::Protocol;
-    ///
-    /// let builder = KeyExprBuilder::new(Protocol::Snmp);
-    /// let key = builder.protocol_wildcard();
-    /// assert_eq!(key, "zensight/snmp/**");
-    /// ```
-    pub fn protocol_wildcard(&self) -> String {
-        format!("{}/{}/**", self.prefix, self.protocol.as_str())
-    }
-
-    /// Build a key expression for one sensor instance's lifecycle status.
-    ///
-    /// Host-scoped: two hosts running the same protocol publish distinct
-    /// status keys (see `docs/KEYSPACE.md`).
-    ///
-    /// # Example
-    /// ```
-    /// use zensight_common::keyexpr::KeyExprBuilder;
-    /// use zensight_common::telemetry::Protocol;
-    ///
-    /// let builder = KeyExprBuilder::new(Protocol::Snmp);
-    /// let key = builder.status_key("poller01");
-    /// assert_eq!(key, "zensight/snmp/poller01/@/status");
-    /// ```
-    pub fn status_key(&self, source: &str) -> String {
-        format!(
-            "{}/{}/{}/@/status",
-            self.prefix,
-            self.protocol.as_str(),
-            source
-        )
-    }
-
-    /// Build a key expression for a single keyed alert.
-    ///
-    /// Matches: `zensight/<protocol>/@/alerts/<alert_key>`
-    ///
-    /// # Example
-    /// ```
-    /// use zensight_common::keyexpr::KeyExprBuilder;
-    /// use zensight_common::telemetry::Protocol;
-    ///
-    /// let builder = KeyExprBuilder::new(Protocol::Netlink);
-    /// assert_eq!(
-    ///     builder.alert_key_expr("ssh-listening-0011223344556677"),
-    ///     "zensight/netlink/@/alerts/ssh-listening-0011223344556677"
-    /// );
-    /// ```
-    pub fn alert_key_expr(&self, alert_key: &str) -> String {
-        format!(
-            "{}/{}/@/alerts/{}",
-            self.prefix,
-            self.protocol.as_str(),
-            alert_key
-        )
-    }
-}
-
 /// Build the v1 telemetry class selector (all producers, all origins).
 ///
 /// # Example
@@ -170,23 +17,6 @@ pub fn all_telemetry_wildcard() -> String {
     format!("{}/@v1/*/telemetry/**", KEY_PREFIX)
 }
 
-/// Build the control prefix for one sensor *instance*: `zensight/<protocol>/<source>`.
-///
-/// Every per-instance state channel (`@/health`, `@/errors`, `@/status`,
-/// `@/alive`, `@/devices/**`) hangs off this prefix, so two hosts running the
-/// same protocol never collide (they publish e.g.
-/// `zensight/sysinfo/hostA/@/health` vs `zensight/sysinfo/hostB/@/health`).
-///
-/// # Example
-/// ```
-/// use zensight_common::keyexpr::sensor_control_prefix;
-///
-/// assert_eq!(sensor_control_prefix("sysinfo", "host1"), "zensight/sysinfo/host1");
-/// ```
-pub fn sensor_control_prefix(protocol: &str, source: &str) -> String {
-    format!("{}/{}/{}", KEY_PREFIX, protocol, source)
-}
-
 /// Caller-side fleet procedure selector (RFC 05 §2): GET
 /// `<base>/@v1/*/@rpc/<producer>/<procedure...>` reaches every host serving
 /// the producer. Callers MUST use query target `All` (RFC 05 §2.1) —
@@ -198,6 +28,17 @@ pub fn fleet_rpc_key(producer: &str, procedure: &str) -> String {
 /// Caller-side fleet write selector: the `<topic>/set` procedure fleet-wide.
 pub fn fleet_command_key(producer: &str, topic: &str) -> String {
     fleet_rpc_key(producer, &format!("{topic}/set"))
+}
+
+/// Caller-side single-host procedure key (RFC 05 §2): GET
+/// `<base>/@v1/<origin>/@rpc/<producer>/<procedure...>` reaches exactly one
+/// host's producer — use when the origin is already known (e.g. a drill-down
+/// view), [`fleet_rpc_key`] otherwise.
+pub fn origin_rpc_key(origin: &str, producer: &str, procedure: &str) -> String {
+    format!(
+        "{}/@v1/{}/@rpc/{}/{}",
+        KEY_PREFIX, origin, producer, procedure
+    )
 }
 
 /// Build a wildcard key expression for the whole fleet state plane.
@@ -249,51 +90,6 @@ pub fn all_errors_wildcard() -> String {
     format!("{}/@v1/*/state/*/errors", KEY_PREFIX)
 }
 
-/// Build a wildcard key expression for every host-scoped control-plane key
-/// (`@/health`, `@/errors`, `@/status`, `@/alive`, `@/devices/**`, …).
-///
-/// Matches: `zensight/<protocol>/<source>/@/**`. Does NOT match the
-/// protocol-scoped channels (`zensight/<protocol>/@/alerts/*`), the telemetry
-/// firehose, or the `@media`/`@pdns` planes — pinned by tests below.
-///
-/// # Example
-/// ```
-/// use zensight_common::keyexpr::all_control_wildcard;
-///
-/// assert_eq!(all_control_wildcard(), "zensight/*/*/@/**");
-/// ```
-pub fn all_control_wildcard() -> String {
-    format!("{}/*/*/@/**", KEY_PREFIX)
-}
-
-/// Build a wildcard key expression for all sensor-instance liveliness tokens.
-///
-/// Matches: `zensight/<protocol>/<source>/@/alive`
-///
-/// # Example
-/// ```
-/// use zensight_common::keyexpr::all_sensor_alive_wildcard;
-///
-/// assert_eq!(all_sensor_alive_wildcard(), "zensight/*/*/@/alive");
-/// ```
-pub fn all_sensor_alive_wildcard() -> String {
-    format!("{}/*/*/@/alive", KEY_PREFIX)
-}
-
-/// Build a wildcard key expression for all device liveliness tokens.
-///
-/// Matches: `zensight/<protocol>/<source>/@/devices/<device>/alive`
-///
-/// # Example
-/// ```
-/// use zensight_common::keyexpr::all_device_alive_wildcard;
-///
-/// assert_eq!(all_device_alive_wildcard(), "zensight/*/*/@/devices/*/alive");
-/// ```
-pub fn all_device_alive_wildcard() -> String {
-    format!("{}/*/*/@/devices/*/alive", KEY_PREFIX)
-}
-
 /// Build a wildcard key expression for all sensor discovery data.
 ///
 /// Matches: `zensight/@v1/<origin>/state/<producer>/sensor`
@@ -309,33 +105,18 @@ pub fn all_sensors_wildcard() -> String {
     format!("{}/@v1/*/state/*/sensor", KEY_PREFIX)
 }
 
-/// Build the sensor-registration key for one sensor instance. Keyed by
-/// `<name>/<source>` — per-name keys would collide across hosts running the
-/// same sensor.
-///
-/// # Example
-/// ```
-/// use zensight_common::keyexpr::sensor_info_key;
-///
-/// assert_eq!(sensor_info_key("sysinfo", "host1"), "zensight/_meta/sensors/sysinfo/host1");
-/// ```
-pub fn sensor_info_key(name: &str, source: &str) -> String {
-    format!("{}/_meta/sensors/{}/{}", KEY_PREFIX, name, source)
-}
-
-/// Build the host-evidence key for one `(sensor, source)` claim.
-///
-/// # Example
-/// ```
-/// use zensight_common::keyexpr::host_evidence_key;
-///
-/// assert_eq!(
-///     host_evidence_key("netlink", "host1"),
-///     "zensight/_meta/evidence/host/netlink/host1"
-/// );
-/// ```
-pub fn host_evidence_key(sensor: &str, source: &str) -> String {
-    format!("{}/_meta/evidence/host/{}/{}", KEY_PREFIX, sensor, source)
+/// Build this host's v1 evidence key for one observed device (RFC 06 §4):
+/// `zensight/@v1/<local-origin>/state/<sensor>/evidence/device/<device>`.
+/// The device chunk is slugged, so raw hostnames/IPs/MACs are safe inputs;
+/// consumers read the observed identity from the payload, not the key.
+pub fn host_evidence_key(sensor: &str, device: &str) -> String {
+    format!(
+        "{}/@v1/{}/state/{}/evidence/device/{}",
+        KEY_PREFIX,
+        zensight_keyspace::context::host_id().as_str(),
+        sensor,
+        zensight_keyspace::slug::chunk_slug(device)
+    )
 }
 
 /// Build a wildcard key expression for the whole evidence keyspace
@@ -352,26 +133,22 @@ pub fn all_evidence_wildcard() -> String {
     format!("{}/@v1/*/state/*/evidence/**", KEY_PREFIX)
 }
 
-/// Build the name-observation key for one `(sensor, source)` claim, where
-/// `source` is the observed IP slugified (`.`/`:` → `-`) so updates for the
-/// same IP replace in place (#307).
-///
-/// # Example
-/// ```
-/// use zensight_common::keyexpr::name_observation_key;
-///
-/// assert_eq!(
-///     name_observation_key("netring", "10-0-0-9"),
-///     "zensight/_meta/evidence/names/netring/10-0-0-9"
-/// );
-/// ```
-pub fn name_observation_key(sensor: &str, source: &str) -> String {
-    format!("{}/_meta/evidence/names/{}/{}", KEY_PREFIX, sensor, source)
+/// Build this host's v1 name-observation key for one observed IP (#307,
+/// RFC 06 §4): the ip is slugified (`.`/`:` → `-`) so updates for the same
+/// IP replace in place:
+/// `zensight/@v1/<local-origin>/state/<sensor>/evidence/names/<ip-slug>`.
+pub fn name_observation_key(sensor: &str, ip_slug: &str) -> String {
+    format!(
+        "{}/@v1/{}/state/{}/evidence/names/{}",
+        KEY_PREFIX,
+        zensight_keyspace::context::host_id().as_str(),
+        sensor,
+        ip_slug
+    )
 }
 
-/// Build a wildcard key expression for all passive-DNS name observations
-/// (`zensight/_meta/evidence/names/**`), a subset of [`all_evidence_wildcard`]
-/// (#307).
+/// Build a wildcard key expression for all passive-DNS name observations,
+/// a subset of [`all_evidence_wildcard`] (#307).
 ///
 /// # Example
 /// ```
@@ -438,9 +215,9 @@ pub fn entities_query_key() -> String {
     format!("{}/@v1/@catalog/state/entity/*", KEY_PREFIX)
 }
 
-/// Build the queryable key for on-demand IP→name resolution
-/// (`zensight/_meta/query/names`, selector `?ip=<ip>`), served by the correlator
-/// so arbitrary/external IPs don't flood the bus (#305).
+/// Build the queryable key for on-demand IP→name resolution (selector
+/// `?ip=<ip>`), served by the catalog so arbitrary/external IPs don't flood
+/// the bus (#305).
 ///
 /// # Example
 /// ```
@@ -497,22 +274,16 @@ pub fn all_alerts_wildcard() -> String {
     format!("{}/@v1/*/state/*/alert/*", KEY_PREFIX)
 }
 
-/// Build the media-plane key for one video stream profile (#359):
-/// `zensight/<protocol>/<source>/@media/<stream>/video/<codec>/<profile>`.
+/// Build the v1 media-plane key for one video stream profile (RFC 07 §1):
+/// `zensight/@v1/<origin>/@media/<producer>/<stream>/video/<codec>/<profile>`.
 ///
-/// `@media` is an `@`-verbatim chunk — a sibling of the `@/` control plane —
-/// so the video firehose is invisible to both the telemetry wildcard
-/// (`zensight/**`) and the control wildcard (`zensight/*/@/**`). Samples on
-/// this key are **opaque**: raw encoded access units with a Zenoh `Encoding`
-/// (e.g. `video/h264`) + a frame-metadata attachment, never the
-/// `TelemetryPoint`/`Format` envelope.
+/// `@media` is an `@`-verbatim plane chunk — invisible to the telemetry and
+/// state class selectors (D2). Samples on this key are **opaque**: raw
+/// encoded access units with a Zenoh `Encoding` (e.g. `video/h264`) + a
+/// frame-metadata attachment, never the `TelemetryPoint`/`Format` envelope.
 ///
-/// Stream *control* stays on the ordinary `@/` channels — reuse
-/// [`crate::command::command_key`] / [`crate::command::query_key`] /
-/// [`crate::command::status_key`] with topics `stream` (commands:
-/// [`crate::stream::StreamControl`]) and `streams` (query: list of
-/// [`crate::stream::StreamDescriptor`]; status:
-/// [`crate::stream::StreamStatus`]).
+/// Stream *control* rides the `@rpc` plane — the `stream`/`stream/set` and
+/// `streams` procedures (see [`crate::command`] and [`crate::stream`]).
 ///
 /// # Example
 /// ```
@@ -520,34 +291,33 @@ pub fn all_alerts_wildcard() -> String {
 /// use zensight_common::telemetry::Protocol;
 ///
 /// assert_eq!(
-///     media_video_key(Protocol::Netring, "host01", "cam0", "h264", "main"),
-///     "zensight/netring/host01/@media/cam0/video/h264/main"
+///     media_video_key(Protocol::Parallax, "h-3fa9c2d41b7e", "cam0", "h264", "main"),
+///     "zensight/@v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main"
 /// );
 /// ```
 pub fn media_video_key(
     protocol: Protocol,
-    source: &str,
+    origin: &str,
     stream: &str,
     codec: &str,
     profile: &str,
 ) -> String {
     format!(
-        "{}/{}/{}/@media/{}/video/{}/{}",
+        "{}/@v1/{}/@media/{}/{}/video/{}/{}",
         KEY_PREFIX,
+        origin,
         protocol.as_str(),
-        source,
         stream,
         codec,
         profile
     )
 }
 
-/// Build the media-plane key for one stream's JPEG preview (#359):
-/// `zensight/<protocol>/<source>/@media/<stream>/preview/jpeg`.
+/// Build the v1 media-plane key for one stream's JPEG preview (RFC 07 §1):
+/// `zensight/@v1/<origin>/@media/<producer>/<stream>/preview/jpeg`.
 ///
 /// Same opaque, `@`-verbatim plane as [`media_video_key`] (no serialization
-/// envelope, `QosClass::LiveVideo`); control rides the `@/` channels with
-/// topics `stream`/`streams` — see [`media_video_key`] for the contract.
+/// envelope, `QosClass::LiveVideo`); control rides the `@rpc` plane.
 ///
 /// # Example
 /// ```
@@ -555,16 +325,16 @@ pub fn media_video_key(
 /// use zensight_common::telemetry::Protocol;
 ///
 /// assert_eq!(
-///     media_preview_key(Protocol::Netring, "host01", "cam0"),
-///     "zensight/netring/host01/@media/cam0/preview/jpeg"
+///     media_preview_key(Protocol::Parallax, "h-3fa9c2d41b7e", "cam0"),
+///     "zensight/@v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
 /// );
 /// ```
-pub fn media_preview_key(protocol: Protocol, source: &str, stream: &str) -> String {
+pub fn media_preview_key(protocol: Protocol, origin: &str, stream: &str) -> String {
     format!(
-        "{}/{}/{}/@media/{}/preview/jpeg",
+        "{}/@v1/{}/@media/{}/{}/preview/jpeg",
         KEY_PREFIX,
+        origin,
         protocol.as_str(),
-        source,
         stream
     )
 }
@@ -616,60 +386,6 @@ pub fn all_pdns_wildcard() -> String {
     format!("{}/@v1/@catalog/state/pdns/**", KEY_PREFIX)
 }
 
-/// Parse a key expression to extract protocol, source, and metric path.
-///
-/// Returns a descriptive error if the key expression doesn't match the expected pattern.
-pub fn parse_key_expr(key: &str) -> Result<ParsedKeyExpr<'_>, ParseError> {
-    let parts: Vec<&str> = key.split('/').collect();
-
-    if parts.len() < 4 {
-        return Err(ParseError::TooFewSegments(parts.len()));
-    }
-
-    if parts[0] != KEY_PREFIX {
-        return Err(ParseError::InvalidPrefix {
-            expected: KEY_PREFIX,
-            actual: parts[0].to_string(),
-        });
-    }
-
-    let protocol = match parts[1] {
-        "snmp" => Protocol::Snmp,
-        "logs" => Protocol::Logs,
-        "gnmi" => Protocol::Gnmi,
-        "netflow" => Protocol::Netflow,
-        "opcua" => Protocol::Opcua,
-        "modbus" => Protocol::Modbus,
-        "sysinfo" => Protocol::Sysinfo,
-        "netlink" => Protocol::Netlink,
-        "netring" => Protocol::Netring,
-        "systemd" => Protocol::Systemd,
-        "parallax" => Protocol::Parallax,
-        other => return Err(ParseError::UnknownProtocol(other.to_string())),
-    };
-
-    let source = parts[2];
-    if source.is_empty() {
-        return Err(ParseError::EmptySource);
-    }
-
-    let metric = parts[3..].join("/");
-
-    Ok(ParsedKeyExpr {
-        protocol,
-        source,
-        metric,
-    })
-}
-
-/// Parsed components of a ZenSight key expression.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedKeyExpr<'a> {
-    pub protocol: Protocol,
-    pub source: &'a str,
-    pub metric: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -697,60 +413,65 @@ mod tests {
         assert!(telemetry.intersects(&rollup));
     }
 
-    /// #359 acceptance pin: the media plane rides `@media/…` — an `@`-verbatim
-    /// chunk like `@/`, but a *different* chunk — so a concrete media key is
-    /// invisible to BOTH the telemetry firehose (`zensight/**`) and the
-    /// control-plane wildcard (`zensight/*/@/**`). The video firehose can
-    /// never leak into telemetry/exporter/GUI consumers.
+    /// #359 acceptance pin, v1: the media plane rides the `@media` verbatim
+    /// plane chunk — invisible to BOTH the telemetry and state class
+    /// selectors (D2). The video firehose can never leak into
+    /// telemetry/exporter/GUI consumers.
     #[test]
-    fn media_plane_is_off_the_telemetry_and_control_buses() {
+    fn media_plane_is_off_the_telemetry_and_state_buses() {
         use zenoh::key_expr::KeyExpr;
         let telemetry = KeyExpr::try_from(all_telemetry_wildcard()).unwrap();
-        let control = KeyExpr::try_from("zensight/*/@/**").unwrap();
+        let state = KeyExpr::try_from(all_state_wildcard()).unwrap();
         for media_key in [
-            media_video_key(Protocol::Netring, "host01", "cam0", "h264", "main"),
-            media_preview_key(Protocol::Netring, "host01", "cam0"),
+            media_video_key(Protocol::Parallax, "h-3fa9c2d41b7e", "cam0", "h264", "main"),
+            media_preview_key(Protocol::Parallax, "h-3fa9c2d41b7e", "cam0"),
         ] {
             let media = KeyExpr::try_from(media_key.clone()).unwrap();
             assert!(
                 !telemetry.intersects(&media),
-                "zensight/** must not match {media_key}"
+                "the telemetry class selector must not match {media_key}"
             );
             assert!(
-                !control.intersects(&media),
-                "zensight/*/@/** must not match {media_key} — @/ and @media are distinct verbatim chunks"
+                !state.intersects(&media),
+                "the state class selector must not match {media_key} — @media is a verbatim plane"
             );
         }
         // A subscriber declared on the exact concrete key does receive it.
-        let exact =
-            KeyExpr::try_from(media_preview_key(Protocol::Netring, "host01", "cam0")).unwrap();
-        let same =
-            KeyExpr::try_from(media_preview_key(Protocol::Netring, "host01", "cam0")).unwrap();
+        let exact = KeyExpr::try_from(media_preview_key(
+            Protocol::Parallax,
+            "h-3fa9c2d41b7e",
+            "cam0",
+        ))
+        .unwrap();
+        let same = KeyExpr::try_from(media_preview_key(
+            Protocol::Parallax,
+            "h-3fa9c2d41b7e",
+            "cam0",
+        ))
+        .unwrap();
         assert!(exact.intersects(&same));
     }
 
-    /// #310 acceptance pin: the historical passive-DNS tier rides `@pdns/<ip>` —
-    /// an `@`-verbatim chunk like `@/` and `@media`, but a *different* chunk — so
-    /// a concrete `@pdns` key is invisible to BOTH the telemetry firehose
-    /// (`zensight/**`) and the per-sensor control-plane wildcard
-    /// (`zensight/*/@/**`). The durable IP↔name records can never leak into
-    /// telemetry/exporter/GUI consumers; only a storage backend subscribed on the
-    /// explicit `zensight/@pdns/**` tier captures them.
+    /// #310 acceptance pin, v1: the historical passive-DNS tier rides
+    /// `@catalog` state — captured by the dedicated pdns selector, invisible
+    /// to the telemetry class selector, and NOT matched by the `*`-origin
+    /// state selector (D4: `*` never matches the verbatim `@catalog` chunk),
+    /// so the durable IP↔name records never leak into fleet-state consumers.
     #[test]
-    fn pdns_tier_is_off_the_telemetry_and_control_buses() {
+    fn pdns_tier_is_off_the_telemetry_and_fleet_state_buses() {
         use zenoh::key_expr::KeyExpr;
         let telemetry = KeyExpr::try_from(all_telemetry_wildcard()).unwrap();
-        let control = KeyExpr::try_from("zensight/*/@/**").unwrap();
+        let fleet_state = KeyExpr::try_from(all_state_wildcard()).unwrap();
         for ip in ["10.0.0.9", "2001:db8::1"] {
             let k = pdns_key(ip);
             let pdns = KeyExpr::try_from(k.clone()).unwrap();
             assert!(
                 !telemetry.intersects(&pdns),
-                "zensight/** must not match {k}"
+                "the telemetry class selector must not match {k}"
             );
             assert!(
-                !control.intersects(&pdns),
-                "zensight/*/@/** must not match {k} — @/ and @pdns are distinct verbatim chunks"
+                !fleet_state.intersects(&pdns),
+                "the *-origin state selector must not match {k} — @catalog is verbatim (D4)"
             );
         }
         // The dedicated historical-tier subscriber DOES match a concrete record.
@@ -758,7 +479,7 @@ mod tests {
         let one = KeyExpr::try_from(pdns_key("10.0.0.9")).unwrap();
         assert!(
             tier.intersects(&one),
-            "zensight/@pdns/** must match a concrete @pdns record"
+            "the pdns selector must match a concrete @pdns record"
         );
     }
 
@@ -773,121 +494,6 @@ mod tests {
         assert!(cmd.ends_with("/@rpc/netring/stream/set"), "{cmd}");
         assert!(query_key(prefix, "streams").ends_with("/@rpc/netring/streams"));
         assert_eq!(query_key(prefix, "streams"), status_key(prefix, "streams"));
-    }
-
-    /// Multi-host acceptance pin: the host-scoped control plane
-    /// (`zensight/<proto>/<source>/@/…`) must be (a) invisible to the telemetry
-    /// firehose, (b) matched by the scoped control wildcard, and (c) NOT
-    /// matched by the legacy protocol-scoped control wildcard — the GUI keeps a
-    /// subscriber on each shape (legacy for `@/alerts/*` + old sensors, scoped
-    /// for per-instance state), and this non-intersection is what guarantees a
-    /// concrete key is never double-delivered.
-    #[test]
-    fn scoped_control_plane_is_disjoint_from_telemetry_and_legacy_control() {
-        use zenoh::key_expr::KeyExpr;
-        let telemetry = KeyExpr::try_from(all_telemetry_wildcard()).unwrap();
-        let legacy_control = KeyExpr::try_from("zensight/*/@/**").unwrap();
-        let scoped_control = KeyExpr::try_from(all_control_wildcard()).unwrap();
-
-        for key in [
-            "zensight/sysinfo/host1/@/health",
-            "zensight/sysinfo/host1/@/errors",
-            "zensight/sysinfo/host1/@/status",
-            "zensight/sysinfo/host1/@/alive",
-            "zensight/snmp/poller01/@/devices/router01/liveness",
-            "zensight/snmp/poller01/@/devices/router01/alive",
-        ] {
-            let k = KeyExpr::try_from(key).unwrap();
-            assert!(
-                !telemetry.intersects(&k),
-                "zensight/** must not match {key}"
-            );
-            assert!(
-                scoped_control.intersects(&k),
-                "zensight/*/*/@/** must match {key}"
-            );
-            assert!(
-                !legacy_control.intersects(&k),
-                "legacy zensight/*/@/** must not match {key} — dual subscribers must never double-deliver"
-            );
-        }
-
-        // The scoped control wildcard must not stray onto the other planes.
-        for key in [
-            "zensight/sysinfo/host1/cpu/usage",                 // telemetry
-            "zensight/netlink/@/alerts/abcd1234",               // protocol-scoped alerts (deferred)
-            "zensight/netring/host01/@media/cam0/preview/jpeg", // media plane
-            "zensight/@pdns/10-0-0-9",                          // pdns plane
-        ] {
-            let k = KeyExpr::try_from(key).unwrap();
-            assert!(
-                !scoped_control.intersects(&k),
-                "zensight/*/*/@/** must not match {key}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_key_builder() {
-        let builder = KeyExprBuilder::new(Protocol::Snmp);
-
-        assert_eq!(
-            builder.build("router01", "system/sysUpTime"),
-            "zensight/snmp/router01/system/sysUpTime"
-        );
-
-        assert_eq!(
-            builder.source_wildcard("router01"),
-            "zensight/snmp/router01/**"
-        );
-
-        assert_eq!(builder.protocol_wildcard(), "zensight/snmp/**");
-
-        assert_eq!(
-            builder.status_key("poller01"),
-            "zensight/snmp/poller01/@/status"
-        );
-    }
-
-    #[test]
-    fn test_sensor_control_prefix() {
-        assert_eq!(
-            sensor_control_prefix("sysinfo", "host1"),
-            "zensight/sysinfo/host1"
-        );
-    }
-
-    #[test]
-    fn test_parse_key_expr() {
-        let parsed = parse_key_expr("zensight/snmp/router01/system/sysUpTime").unwrap();
-
-        assert_eq!(parsed.protocol, Protocol::Snmp);
-        assert_eq!(parsed.source, "router01");
-        assert_eq!(parsed.metric, "system/sysUpTime");
-    }
-
-    #[test]
-    fn test_parse_sysinfo_key_expr() {
-        let parsed = parse_key_expr("zensight/sysinfo/server01/cpu/usage").unwrap();
-        assert_eq!(parsed.protocol, Protocol::Sysinfo);
-        assert_eq!(parsed.source, "server01");
-        assert_eq!(parsed.metric, "cpu/usage");
-    }
-
-    #[test]
-    fn test_parse_invalid_key() {
-        assert!(matches!(
-            parse_key_expr("invalid/key"),
-            Err(ParseError::TooFewSegments(2))
-        ));
-        assert!(matches!(
-            parse_key_expr("zensight/unknown/device/metric"),
-            Err(ParseError::UnknownProtocol(_))
-        ));
-        assert!(matches!(
-            parse_key_expr("other/snmp/device/metric"),
-            Err(ParseError::InvalidPrefix { .. })
-        ));
     }
 
     #[test]
