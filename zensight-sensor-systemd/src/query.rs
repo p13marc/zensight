@@ -122,12 +122,12 @@ pub async fn run(
             q = units_q.recv_async() => {
                 let Ok(query) = q else { return };
                 let recs = list_records(&manager, false).await;
-                reply_json(&query, &recs).await;
+                reply_json(&query, &units_key, &recs).await;
             }
             q = failed_q.recv_async() => {
                 let Ok(query) = q else { return };
                 let recs = list_records(&manager, true).await;
-                reply_json(&query, &recs).await;
+                reply_json(&query, &failed_key, &recs).await;
             }
             q = unit_q.recv_async() => {
                 let Ok(query) = q else { return };
@@ -140,22 +140,22 @@ pub async fn run(
                 if let (Some(d), Some(n)) = (detail.as_mut(), name.as_deref()) {
                     d.recent_changes = events.recent_for_unit(n, RECENT_CHANGES_MAX);
                 }
-                reply_json(&query, &detail).await;
+                reply_json(&query, &unit_key, &detail).await;
             }
             q = events_q.recv_async() => {
                 let Ok(query) = q else { return };
-                reply_json(&query, &events.recent()).await;
+                reply_json(&query, &events_key, &events.recent()).await;
             }
             q = timers_q.recv_async() => {
                 let Ok(query) = q else { return };
                 let now = chrono::Utc::now().timestamp_micros().max(0) as u64;
                 let recs = list_timers(&conn, &manager, now).await;
-                reply_json(&query, &recs).await;
+                reply_json(&query, &timers_key, &recs).await;
             }
             q = cgroups_q.recv_async() => {
                 let Ok(query) = q else { return };
                 let tree = build_cgroup_tree(&cgroup, query.parameters().as_str());
-                reply_json(&query, &tree).await;
+                reply_json(&query, &cgroups_key, &tree).await;
             }
         }
     }
@@ -315,11 +315,13 @@ fn hex_lower(bytes: Vec<u8>) -> String {
     })
 }
 
-async fn reply_json<T: serde::Serialize>(query: &zenoh::query::Query, records: &T) {
+/// Reply on the queryable's own CONCRETE key (never the query's possibly
+/// wildcard selector — RFC 05 §2.1).
+async fn reply_json<T: serde::Serialize>(query: &zenoh::query::Query, key: &str, records: &T) {
     match serde_json::to_vec(records) {
         Ok(payload) => {
-            if let Err(e) = query.reply(key.as_str(), payload).await {
-                tracing::warn!(error = %e, "query: reply failed");
+            if let Err(e) = query.reply(key, payload).await {
+                tracing::warn!(error = %e, key = %key, "query: reply failed");
             }
         }
         Err(e) => tracing::warn!(error = %e, "query: serialize failed"),

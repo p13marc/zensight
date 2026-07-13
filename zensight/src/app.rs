@@ -5028,7 +5028,7 @@ impl ZenSight {
     /// replaces an open preview tile and aborts its subscriber).
     #[cfg(feature = "h264")]
     fn open_parallax_video_tile(&mut self, stream: String) -> Task<Message> {
-        use crate::view::specialized::{parallax_detail, parallax_h264};
+        use crate::view::specialized::parallax_h264;
         let Some(source) = self
             .selected_device
             .as_ref()
