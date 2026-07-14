@@ -19,7 +19,7 @@ use zensight_keyspace::grammar::BlobTier;
 /// ```
 /// use zensight_common::command::command_key;
 /// let k = command_key("logs", "filter");
-/// assert!(k.starts_with("zensight/v1/h-"));
+/// assert!(k.starts_with("v1/h-"));
 /// assert!(k.ends_with("/@rpc/logs/filter/set"));
 /// ```
 pub fn command_key(producer: &str, topic: &str) -> String {
@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn key_builders() {
         let k = command_key("netlink", "expectations");
-        assert!(k.starts_with("zensight/v1/h-"), "{k}");
+        assert!(k.starts_with("v1/h-"), "{k}");
         assert!(k.ends_with("/@rpc/netlink/expectations/set"), "{k}");
         let s = status_key("netring", "detectors");
         assert!(s.ends_with("/@rpc/netring/detectors"), "{s}");

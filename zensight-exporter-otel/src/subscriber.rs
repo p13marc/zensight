@@ -15,7 +15,7 @@ use crate::exporter::SharedExporter;
 /// Default key expression to subscribe to.
 // v1 (RFC 04 §4): the telemetry class selector — the class chunk IS the
 // filter, so nothing is discarded client-side (incumbent pain P6 retired).
-pub const DEFAULT_KEY_EXPR: &str = "zensight/v1/*/telemetry/**";
+pub const DEFAULT_KEY_EXPR: &str = "v1/*/telemetry/**";
 
 /// Whether a key carries a [`TelemetryPoint`] — v1: exactly the telemetry
 /// class keys (`zensight/v1/<origin>/telemetry/…`). With the class selector
@@ -63,46 +63,11 @@ impl TelemetrySubscriber {
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> anyhow::Result<()> {
         info!("Connecting to Zenoh...");
 
-        // Build Zenoh config
-        let mut config = zenoh::Config::default();
-
-        // Set mode
-        match self.zenoh_config.mode.as_str() {
-            "client" => {
-                config
-                    .insert_json5("mode", "\"client\"")
-                    .map_err(|e| anyhow::anyhow!("Failed to set mode: {}", e))?;
-            }
-            "router" => {
-                config
-                    .insert_json5("mode", "\"router\"")
-                    .map_err(|e| anyhow::anyhow!("Failed to set mode: {}", e))?;
-            }
-            _ => {
-                config
-                    .insert_json5("mode", "\"peer\"")
-                    .map_err(|e| anyhow::anyhow!("Failed to set mode: {}", e))?;
-            }
-        }
-
-        // Set connect endpoints
-        if !self.zenoh_config.connect.is_empty() {
-            let endpoints_json = serde_json::to_string(&self.zenoh_config.connect)?;
-            config
-                .insert_json5("connect/endpoints", &endpoints_json)
-                .map_err(|e| anyhow::anyhow!("Failed to set connect endpoints: {}", e))?;
-        }
-
-        // Set listen endpoints
-        if !self.zenoh_config.listen.is_empty() {
-            let endpoints_json = serde_json::to_string(&self.zenoh_config.listen)?;
-            config
-                .insert_json5("listen/endpoints", &endpoints_json)
-                .map_err(|e| anyhow::anyhow!("Failed to set listen endpoints: {}", e))?;
-        }
-
-        // Open session
-        let session = zenoh::open(config)
+        // The shared builder is the ONLY place the session `namespace` (= the
+        // deployment base) is set (#466). An exporter with its own hand-rolled
+        // `zenoh::Config` would subscribe to a keyspace no sensor publishes to,
+        // and would simply export nothing — quietly.
+        let session = zensight_common::session::connect(&self.zenoh_config)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to open Zenoh session: {}", e))?;
 
@@ -263,27 +228,23 @@ mod tests {
 
     #[test]
     fn test_default_key_expr() {
-        assert_eq!(DEFAULT_KEY_EXPR, "zensight/v1/*/telemetry/**");
+        assert_eq!(DEFAULT_KEY_EXPR, "v1/*/telemetry/**");
     }
 
     #[test]
     fn telemetry_key_guard() {
         assert!(is_telemetry_key(
-            "zensight/v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage"
+            "v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage"
         ));
         assert!(!is_telemetry_key(
-            "zensight/v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1"
+            "v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1"
         ));
-        assert!(!is_telemetry_key(
-            "zensight/v1/h-3fa9c2d41b7e/state/snmp/health"
-        ));
+        assert!(!is_telemetry_key("v1/h-3fa9c2d41b7e/state/snmp/health"));
         // Host-scoped control plane: the `@` chunk moves one level deeper but
         // stays excluded (any `@`-prefixed chunk is non-telemetry).
+        assert!(!is_telemetry_key("v1/@catalog/state/entity/h-0123456789ab"));
         assert!(!is_telemetry_key(
-            "zensight/v1/@catalog/state/entity/h-0123456789ab"
-        ));
-        assert!(!is_telemetry_key(
-            "zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
+            "v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
         ));
         assert!(!is_telemetry_key("zensight/legacy/host/cpu/usage"));
     }
@@ -295,14 +256,14 @@ mod tests {
     #[test]
     fn media_plane_keys_are_not_telemetry() {
         assert!(!is_telemetry_key(
-            "zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main"
+            "v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main"
         ));
         assert!(!is_telemetry_key(
-            "zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
+            "v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
         ));
         // ...while stream *stats* are ordinary telemetry.
         assert!(is_telemetry_key(
-            "zensight/v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage"
+            "v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage"
         ));
     }
 
@@ -314,8 +275,7 @@ mod tests {
     fn alerts_need_their_own_subscription() {
         use zenoh::key_expr::KeyExpr;
 
-        let alert = KeyExpr::new("zensight/v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1")
-            .unwrap();
+        let alert = KeyExpr::new("v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1").unwrap();
         let telemetry = KeyExpr::new(DEFAULT_KEY_EXPR).unwrap();
         let alerts_sub = KeyExpr::new(all_alerts_wildcard()).unwrap();
 

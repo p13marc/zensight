@@ -83,13 +83,14 @@ pub fn topic_list(producer: Option<&str>, class: Option<&str>) -> Result<()> {
 /// replaces positional `split('/')` re-parsing. The variables come back
 /// **named**, which is why the output can say `mount=root` rather than
 /// `parts[6]`.
-pub fn topic_info(key: &str) -> Result<()> {
-    let Some((structural, producer, subject)) = zensight_common::keyexpr::refine_wire_key(key)
+pub fn topic_info(base: &str, key: &str) -> Result<()> {
+    let Some((structural, producer, subject)) =
+        zensight_common::keyexpr::refine_full_key(base, key)
     else {
         // Distinguish the two failure modes: a key that is not v1-shaped at all,
         // versus one that parses structurally but names an unregistered subject.
         // RFC 08: "a subject that is not registered does not exist."
-        return match zensight_common::keyexpr::parse_wire_key(key) {
+        return match zensight_common::keyexpr::parse_full_key(base, key) {
             Some(s) => Err(anyhow!(
                 "key parses as v1 ({}), but its subject is not registered — \
                  a subject that is not registered does not exist (RFC 08).\n\
@@ -250,12 +251,20 @@ mod tests {
     #[test]
     fn topic_info_refines_a_concrete_key() {
         // A registered sysinfo state subject.
-        topic_info("zensight/v1/h-3fa9c2d41b7e/state/sysinfo/health").unwrap();
+        topic_info(
+            zensight_keyspace::DEFAULT_BASE,
+            "zensight/v1/h-3fa9c2d41b7e/state/sysinfo/health",
+        )
+        .unwrap();
     }
 
     #[test]
     fn topic_info_rejects_a_non_v1_key() {
-        let err = topic_info("zensight/snmp/router-1/if/eth0/rx").unwrap_err();
+        let err = topic_info(
+            zensight_keyspace::DEFAULT_BASE,
+            "zensight/snmp/router-1/if/eth0/rx",
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("not a v1 key"), "got: {err}");
     }
 
@@ -263,8 +272,11 @@ mod tests {
     /// say which of the two things went wrong, because the fixes differ.
     #[test]
     fn topic_info_distinguishes_unregistered_from_malformed() {
-        let err =
-            topic_info("zensight/v1/h-3fa9c2d41b7e/state/sysinfo/not_a_real_subject").unwrap_err();
+        let err = topic_info(
+            zensight_keyspace::DEFAULT_BASE,
+            "zensight/v1/h-3fa9c2d41b7e/state/sysinfo/not_a_real_subject",
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("not registered"), "got: {err}");
     }
 

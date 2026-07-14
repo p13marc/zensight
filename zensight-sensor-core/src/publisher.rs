@@ -295,7 +295,7 @@ mod tests {
         // The publisher's key root is the v1 telemetry prefix for its
         // producer on THIS host (origin-scoped, RFC 04).
         let prefix = V1Context::for_producer("test").telemetry_prefix();
-        assert!(prefix.starts_with("zensight/v1/h-"), "{prefix}");
+        assert!(prefix.starts_with("v1/h-"), "{prefix}");
         assert!(prefix.ends_with("/telemetry/test"), "{prefix}");
         assert_eq!(
             format!("{prefix}/device/metric"),

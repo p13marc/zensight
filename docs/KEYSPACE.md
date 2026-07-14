@@ -110,6 +110,38 @@ rather than relying on key algebra to hide us. Pinned by
 `zensight-sensor-core/tests/adv_publisher_detection.rs` (no warning, end to end).
 RFC: [03 §1.2](rfcs/keyspace-v2/03-grammar.md), [12 §7](rfcs/keyspace-v2/12-open-questions.md).
 
+## The base is the session namespace, not a chunk anyone types
+
+Application code **never spells `zensight`**. The base is set once, as the Zenoh
+session `namespace` (`zenoh.namespace`, default `zensight`, override
+`ZENSIGHT_ZENOH_NAMESPACE`), and the runtime prefixes it onto every keyexpr the
+session emits, strips it on delivery, and **filters ingress from outside it**
+(RFC 03 §1.1, 09 §0 — issue #466).
+
+So there are two views of every key, and which one you are in is a property of
+the *session*, not the key:
+
+| | sees | builds keys with |
+|---|---|---|
+| **applications** (sensors, GUI, correlator, exporters) — namespaced | `v1/h-…/telemetry/sysinfo/cpu/usage` | `V1Context`, `zensight_common::keyexpr` — all base-relative |
+| **routers / storages / ACL** — no namespace | `zensight/v1/h-…/…` | full keys, written by hand in `configs/router-*.json5` |
+| **debug tools** (`zenctl`, `v1_probe`) — un-namespaced *on purpose* (RFC 09 §5) | `zensight/v1/h-…/…` | `grammar::with_base(base, …)`, `keyexpr::parse_full_key(base, …)` |
+
+The middle and bottom rows are why `with_base`/`strip_base` exist and why
+`zenctl` takes a `--base`: an explorer that ran inside the namespace could not
+see a key from *outside* it, and spotting exactly that is what an explorer is
+for.
+
+Two CI guards keep this true: application source may not contain a `"zensight/`
+literal at all, and only `zensight_common::session` may call `zenoh::open` —
+because the namespace is per-session, and a component that hand-rolls its own
+`zenoh::Config` would silently publish at the bus root and go deaf with no error.
+(There were five such builders before #466. There is one now.)
+
+The wire is unchanged by all of this: `zensight-sensor-core/tests/cutover_e2e.rs`
+pins it with a namespaced sensor and an **un-namespaced** observer, so the same
+key is asserted in both spellings at once.
+
 ## Operations
 
 Isolated verification: `cargo run -p zensight-common --example v1_probe` opens

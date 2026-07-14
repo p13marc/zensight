@@ -11,6 +11,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use zenoh::Session;
 use zenoh::query::{ConsolidationMode, QueryTarget};
+use zensight_keyspace::grammar::with_base;
 
 /// How a producer answered a procedure call.
 pub enum Answer {
@@ -81,6 +82,7 @@ pub async fn open(connect: &[String], listen: &[String], scouting: bool) -> Resu
 /// liveliness roster; see `cmd::doctor`.
 pub async fn fleet_get(
     session: &Session,
+    base: &str,
     key: &str,
     payload: Option<Vec<u8>>,
     timeout: Duration,
@@ -102,7 +104,7 @@ pub async fn fleet_get(
     while let Ok(reply) = replies.recv_async().await {
         match reply.result() {
             Ok(sample) => {
-                let origin = origin_of(sample.key_expr().as_str());
+                let origin = origin_of(base, sample.key_expr().as_str());
                 out.push(FleetAnswer {
                     origin,
                     answer: Answer::Value(sample.payload().to_bytes().to_vec()),
@@ -144,8 +146,8 @@ pub async fn fleet_get(
 
 /// The origin chunk of a wire key, via the grammar (never by index — RFC 03
 /// §1.1: positions are relative to the configured base).
-fn origin_of(key: &str) -> String {
-    zensight_common::keyexpr::parse_wire_key(key)
+fn origin_of(base: &str, key: &str) -> String {
+    zensight_common::keyexpr::parse_full_key(base, key)
         .map(|k| k.origin.chunk().to_string())
         .unwrap_or_else(|| "?".to_string())
 }
@@ -155,12 +157,18 @@ fn origin_of(key: &str) -> String {
 /// RFC 04 §5 — a liveliness query on `zensight/v1/*/state/*/alive`. Zero
 /// payload bytes: the token *key* is the record. `@catalog` is asked for by
 /// name because `*` can never match a verbatim service origin (property D4).
-pub async fn roster(session: &Session, timeout: Duration) -> Result<BTreeMap<String, Vec<String>>> {
+pub async fn roster(
+    session: &Session,
+    base: &str,
+    timeout: Duration,
+) -> Result<BTreeMap<String, Vec<String>>> {
     let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
+    // The builders are base-relative (#466); this session is deliberately
+    // un-namespaced, so it must spell the base itself.
     for expr in [
-        zensight_common::all_liveliness_wildcard(),
-        zensight_common::correlator_alive_key(),
+        with_base(base, &zensight_common::all_liveliness_wildcard()),
+        with_base(base, &zensight_common::correlator_alive_key()),
     ] {
         let Ok(replies) = session.liveliness().get(&expr).timeout(timeout).await else {
             continue;
@@ -168,7 +176,7 @@ pub async fn roster(session: &Session, timeout: Duration) -> Result<BTreeMap<Str
         while let Ok(reply) = replies.recv_async().await {
             let Ok(sample) = reply.result() else { continue };
             let key = sample.key_expr().as_str();
-            let Some(parsed) = zensight_common::keyexpr::parse_wire_key(key) else {
+            let Some(parsed) = zensight_common::keyexpr::parse_full_key(base, key) else {
                 continue;
             };
             let origin = parsed.origin.chunk().to_string();

@@ -1504,7 +1504,7 @@ mod tests {
         let prefix =
             zensight_sensor_core::v1::V1Context::for_producer("sysinfo").telemetry_prefix();
         let key = build_key_expr(&prefix, "server01", "cpu/usage");
-        assert!(key.starts_with("zensight/v1/h-"), "{key}");
+        assert!(key.starts_with("v1/h-"), "{key}");
         assert!(key.ends_with("/telemetry/sysinfo/cpu/usage"), "{key}");
         assert!(!key.contains("server01"), "{key}");
     }

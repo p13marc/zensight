@@ -34,6 +34,27 @@ pub mod registry;
 pub mod slice;
 pub mod slug;
 
+/// The default deployment base (RFC 03 §1.1).
+///
+/// **It is not part of any key this crate builds.** It is the value a
+/// participant sets as its Zenoh session **`namespace`**, which prefixes it
+/// onto every keyexpr the session emits, strips it on delivery, and *filters*
+/// ingress from outside it — so the base is an isolation boundary, not a string
+/// convention (RFC 09 §0, issue #466).
+///
+/// The only legitimate readers are therefore:
+/// - session configuration ([`zensight_common::session`] — the one place it is
+///   spelled in a running application);
+/// - router-side artifacts (storage selectors, ACL rules), which see **full**
+///   keys because a router has no namespace;
+/// - deliberately un-namespaced debug tools (`zenctl`, the `v1_probe` example),
+///   which spell full keys because that is the honest view of the wire
+///   (RFC 09 §5).
+///
+/// Application code that reaches for this to *build a key* has made a mistake:
+/// the session adds the base.
+pub const DEFAULT_BASE: &str = "zensight";
+
 pub use common_state::CommonState;
 pub use context::V1Context;
 pub use grammar::{

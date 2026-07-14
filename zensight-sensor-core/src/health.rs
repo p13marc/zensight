@@ -721,7 +721,7 @@ mod tests {
     #[test]
     fn test_state_keys_are_origin_scoped() {
         let ctx = crate::v1::V1Context::for_producer("sysinfo");
-        assert!(ctx.health_key().starts_with("zensight/v1/h-"));
+        assert!(ctx.health_key().starts_with("v1/h-"));
         assert!(ctx.health_key().ends_with("/state/sysinfo/health"));
         assert!(ctx.errors_key().ends_with("/state/sysinfo/errors"));
         assert!(

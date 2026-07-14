@@ -21,6 +21,7 @@ use zenoh_ext::{AdvancedSubscriberBuilderExt, HistoryConfig, RecoveryConfig};
 use zensight_common::{
     HostEvidence, NameObservation, all_evidence_wildcard, all_name_evidence_wildcard,
 };
+use zensight_keyspace::grammar::{Class, ClassOrPlane};
 
 use crate::engine::EvidenceMsg;
 
@@ -96,27 +97,31 @@ fn is_put(sample: &Sample) -> bool {
 
 /// Extract `(sensor, device)` from a v1 device-evidence key (used to resolve
 /// a tombstone into the claim it withdraws).
+///
+/// `v1/<origin>/state/<sensor>/evidence/device/<device>` — base-relative,
+/// because the session namespace already stripped the base on ingress (#466).
+///
+/// This was a hand-rolled `split('/')` walk that also had to assert the base
+/// chunk by hand. Going through the grammar deletes both problems at once: the
+/// base is not the parser's business, and the chunk positions come from the
+/// grammar rather than from counting (RFC 08 §1, issue #475).
+///
+/// A `…/evidence/self` tombstone carries only the origin — the store keys
+/// claims by the payload's source, so it just ages out by TTL instead.
 fn parse_host_evidence_key(key: &str) -> Option<(String, String)> {
-    // v1: zensight/v1/<origin>/state/<sensor>/evidence/device/<device>.
-    // A `…/evidence/self` tombstone carries only the origin — the store keys
-    // claims by the payload's source, so it just ages out by TTL instead.
-    let mut chunks = key.split('/');
-    if chunks.next() != Some("zensight") || chunks.next() != Some("v1") {
+    let parsed = zensight_common::keyexpr::parse_key(key)?;
+    if !matches!(parsed.class, ClassOrPlane::Class(Class::State)) {
         return None;
     }
-    let _origin = chunks.next()?;
-    if chunks.next() != Some("state") {
-        return None;
+    let sensor = parsed.producer.as_ref()?.name().to_string();
+    match parsed.subject.as_slice() {
+        [evidence, device_kw, device]
+            if evidence == "evidence" && device_kw == "device" && !device.is_empty() =>
+        {
+            Some((sensor, device.clone()))
+        }
+        _ => None,
     }
-    let sensor = chunks.next()?;
-    if chunks.next() != Some("evidence") || chunks.next() != Some("device") {
-        return None;
-    }
-    let device = chunks.next()?;
-    if sensor.is_empty() || device.is_empty() || chunks.next().is_some() {
-        return None;
-    }
-    Some((sensor.to_string(), device.to_string()))
 }
 
 async fn handle_host(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
@@ -163,35 +168,29 @@ mod tests {
     #[test]
     fn parses_host_evidence_key() {
         assert_eq!(
-            parse_host_evidence_key(
-                "zensight/v1/h-3fa9c2d41b7e/state/netlink/evidence/device/host1"
-            ),
+            parse_host_evidence_key("v1/h-3fa9c2d41b7e/state/netlink/evidence/device/host1"),
             Some(("netlink".to_string(), "host1".to_string()))
         );
         // A MAC-slug device (third-party evidence) stays a single chunk.
         assert_eq!(
             parse_host_evidence_key(
-                "zensight/v1/h-3fa9c2d41b7e/state/netring/evidence/device/aa-bb-cc-00-00-02"
+                "v1/h-3fa9c2d41b7e/state/netring/evidence/device/aa-bb-cc-00-00-02"
             ),
             Some(("netring".to_string(), "aa-bb-cc-00-00-02".to_string()))
         );
         // The names subtree is not a device key.
         assert_eq!(
-            parse_host_evidence_key(
-                "zensight/v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-5"
-            ),
+            parse_host_evidence_key("v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-5"),
             None
         );
         // A self-evidence tombstone carries only the origin — ages out by TTL.
         assert_eq!(
-            parse_host_evidence_key("zensight/v1/h-3fa9c2d41b7e/state/netlink/evidence/self"),
+            parse_host_evidence_key("v1/h-3fa9c2d41b7e/state/netlink/evidence/self"),
             None
         );
         // Trailing chunks make it malformed.
         assert_eq!(
-            parse_host_evidence_key(
-                "zensight/v1/h-3fa9c2d41b7e/state/netlink/evidence/device/host1/extra"
-            ),
+            parse_host_evidence_key("v1/h-3fa9c2d41b7e/state/netlink/evidence/device/host1/extra"),
             None
         );
     }

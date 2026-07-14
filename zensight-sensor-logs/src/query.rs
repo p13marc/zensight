@@ -167,11 +167,14 @@ mod tests {
             .as_nanos();
         let prefix = format!("test_{nanos}/logs");
 
-        let session = Arc::new(
-            zenoh::open(zenoh::Config::default())
-                .await
-                .expect("open zenoh session"),
-        );
+        // Multicast scouting OFF. A default-config session joins whatever mesh
+        // it can reach — including a live fleet on the same host — so a test
+        // that scouts is not a test, it is a participant (RFC 09 §0.1).
+        let mut config = zenoh::Config::default();
+        config
+            .insert_json5("scouting/multicast/enabled", "false")
+            .expect("disable multicast scouting");
+        let session = Arc::new(zenoh::open(config).await.expect("open zenoh session"));
 
         let (ring, capacity) = new_ring(1000);
         for i in 0..5 {

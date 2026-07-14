@@ -103,7 +103,7 @@ async fn late_publisher_detection_does_not_warn() {
     // to mean anything.
     let registry = AdvancedPublisherRegistry::new(
         publisher_session.clone(),
-        "zensight/v1/h-9706b31ddad3/telemetry/netring",
+        "v1/h-9706b31ddad3/telemetry/netring",
         Format::Cbor,
         AdvancedPublisherConfig::default(),
     );

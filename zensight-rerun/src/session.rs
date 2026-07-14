@@ -8,49 +8,25 @@ use zensight_common::config::ZenohConfig;
 /// host joins any default-scouting session — isolation is what keeps demo
 /// recordings and tests deterministic.
 ///
-/// The mode/connect/listen/timestamping half necessarily mirrors
-/// `zensight_common::session::connect` (zensight-common/src/session.rs):
-/// that helper builds its `zenoh::Config` internally and opens the session
-/// in one call, so there is no seam to inject the scouting knobs without
-/// modifying zensight-common. The non-isolated path delegates to the common
-/// helper (see [`open_session`]); only this isolate delta is kept local.
+/// Everything shared — mode validation, endpoints, timestamping, and (since
+/// #466) the session **`namespace`** that carries the deployment base — comes
+/// from `zensight_common::session::build_config`, which exists precisely to be
+/// this seam. Only the isolate *delta* is local: gossip off as well, so the
+/// session cannot reach a mesh even through an already-connected peer.
+///
+/// Rebuilding a `zenoh::Config` from scratch here would mean a rerun adapter
+/// that quietly subscribes to a keyspace nothing publishes to.
 pub fn build_isolated_zenoh_config(config: &ZenohConfig) -> anyhow::Result<zenoh::Config> {
-    let mut zenoh_config = zenoh::Config::default();
+    let mut zenoh_config = zensight_common::session::build_config(&ZenohConfig {
+        // multicast off, via the shared knob
+        scouting: false,
+        ..config.clone()
+    })
+    .map_err(|e| anyhow::anyhow!("failed to build Zenoh config: {e}"))?;
 
-    match config.mode.as_str() {
-        mode @ ("client" | "peer" | "router") => {
-            zenoh_config
-                .insert_json5("mode", &format!("\"{mode}\""))
-                .map_err(|e| anyhow::anyhow!("failed to set mode: {e}"))?;
-        }
-        other => {
-            anyhow::bail!("invalid Zenoh mode '{other}' (expected client, peer, or router)");
-        }
-    }
-
-    if !config.connect.is_empty() {
-        let endpoints = serde_json::to_string(&config.connect)?;
-        zenoh_config
-            .insert_json5("connect/endpoints", &endpoints)
-            .map_err(|e| anyhow::anyhow!("failed to set connect endpoints: {e}"))?;
-    }
-
-    if !config.listen.is_empty() {
-        let endpoints = serde_json::to_string(&config.listen)?;
-        zenoh_config
-            .insert_json5("listen/endpoints", &endpoints)
-            .map_err(|e| anyhow::anyhow!("failed to set listen endpoints: {e}"))?;
-    }
-
-    // Declared publishers on the control plane need session timestamping
-    // (same rationale as zensight_common::session::connect).
-    zenoh_config
-        .insert_json5("timestamping/enabled", "true")
-        .map_err(|e| anyhow::anyhow!("failed to enable timestamping: {e}"))?;
-
-    zenoh_config
-        .insert_json5("scouting/multicast/enabled", "false")
-        .map_err(|e| anyhow::anyhow!("failed to disable multicast scouting: {e}"))?;
+    // The isolate delta. RFC 09 §0.1: multicast and gossip are independent
+    // switches — an isolated *recording* wants both off (there is no hub to
+    // traverse), which is stricter than the isolated *deployment* posture.
     zenoh_config
         .insert_json5("scouting/gossip/enabled", "false")
         .map_err(|e| anyhow::anyhow!("failed to disable gossip scouting: {e}"))?;
@@ -98,6 +74,7 @@ mod tests {
             connect: vec![],
             listen: vec![],
             scouting: true,
+            ..Default::default()
         };
         assert!(build_isolated_zenoh_config(&config).is_err());
     }

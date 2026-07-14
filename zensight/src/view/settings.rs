@@ -233,7 +233,31 @@ impl PersistentSettings {
         );
         state.desktop_notifications = self.desktop_notifications;
         state.group_by_host = self.group_by_host;
-        state.subscription_scope = self.subscription_scope.join(", ");
+        // #466: scopes are base-relative now. A settings.json5 written before the
+        // namespace landed holds full keys (`zensight/v1/…`), which on a
+        // namespaced session match NOTHING — the GUI would come up connected,
+        // healthy, and completely empty, with no error anywhere. That is the
+        // exact shape of the drill-down outage, so it must not be silent.
+        //
+        // We cannot hard-fail at startup (that bricks the app on a stale config
+        // file the user cannot see), so: drop the offending entries, say so
+        // loudly, and fall back to the full class selector — which is the
+        // behaviour of an empty scope, i.e. "show me everything". Degrading to
+        // *more* data is safe; degrading to none is not.
+        let (relative, stale): (Vec<String>, Vec<String>) = self
+            .subscription_scope
+            .iter()
+            .cloned()
+            .partition(|s| zensight_common::keyexpr::validate_relative_selector(s).is_ok());
+        if !stale.is_empty() {
+            tracing::error!(
+                dropped = ?stale,
+                "subscription scope entries spell the deployment base and would match nothing \
+                 (#466: the session sets it as the Zenoh namespace). Dropping them and falling \
+                 back to the full telemetry selector — re-enter them without the `zensight/` head."
+            );
+        }
+        state.subscription_scope = relative.join(", ");
         state.link_profile = self.link_profile;
         state
     }
@@ -442,10 +466,15 @@ impl SettingsState {
         }
 
         // Validate subscription-scope key expressions (#364).
+        //
+        // Since #466 these are BASE-RELATIVE: the session sets `zensight` as its
+        // Zenoh namespace, so a scope that spells the base is re-prefixed on
+        // egress to `zensight/zensight/v1/…` and matches nothing — a healthy
+        // session, a green connection indicator, and an empty dashboard. Reject
+        // it here, with the spelling that works.
         for scope in self.parse_endpoints(&self.subscription_scope) {
-            if zenoh::key_expr::KeyExpr::try_from(scope.as_str()).is_err() {
-                return Err(format!("Invalid subscription key expression: {}", scope));
-            }
+            zensight_common::keyexpr::validate_relative_selector(&scope)
+                .map_err(|e| format!("Invalid subscription key expression: {e}"))?;
         }
 
         // Validate max history
@@ -721,7 +750,7 @@ fn render_zenoh_section(state: &SettingsState) -> Element<'_, Message> {
     // Subscription scope (#364): narrow the zensight/** telemetry firehose.
     let scope_label = text("Subscription scope:").size(14);
     let scope_input = text_input(
-        "zensight/v1/*/telemetry/netring/**, zensight/v1/*/telemetry/sysinfo/**",
+        "v1/*/telemetry/netring/**, zensight/v1/*/telemetry/sysinfo/**",
         &state.subscription_scope,
     )
     .on_input(Message::SubscriptionScopeChanged)
@@ -965,7 +994,7 @@ mod tests {
             overview_expanded: true,
             current_view: CurrentView::default(),
             group_by_host: true,
-            subscription_scope: vec!["zensight/v1/*/telemetry/netring/**".to_string()],
+            subscription_scope: vec!["v1/*/telemetry/netring/**".to_string()],
             link_profile: LinkProfile::Constrained,
             identity_expanded: true,
             topology_lens: Default::default(),
@@ -1011,8 +1040,8 @@ mod tests {
             current_view: CurrentView::default(),
             group_by_host: true,
             subscription_scope: vec![
-                "zensight/v1/*/telemetry/netring/**".to_string(),
-                "zensight/v1/*/telemetry/sysinfo/**".to_string(),
+                "v1/*/telemetry/netring/**".to_string(),
+                "v1/*/telemetry/sysinfo/**".to_string(),
             ],
             link_profile: LinkProfile::Constrained,
             identity_expanded: false,
@@ -1039,7 +1068,7 @@ mod tests {
         // The link-profile settings survive the persistent→state hop (#364).
         assert_eq!(
             state.subscription_scope,
-            "zensight/v1/*/telemetry/netring/**, zensight/v1/*/telemetry/sysinfo/**"
+            "v1/*/telemetry/netring/**, v1/*/telemetry/sysinfo/**"
         );
         assert_eq!(state.link_profile, LinkProfile::Constrained);
 
@@ -1054,12 +1083,43 @@ mod tests {
         assert!(restored.desktop_notifications);
         assert_eq!(
             restored.subscription_scope,
-            vec![
-                "zensight/v1/*/telemetry/netring/**",
-                "zensight/v1/*/telemetry/sysinfo/**"
-            ]
+            vec!["v1/*/telemetry/netring/**", "v1/*/telemetry/sysinfo/**"]
         );
         assert_eq!(restored.link_profile, LinkProfile::Constrained);
+    }
+
+    /// #466: a settings.json5 written before the namespace landed holds FULL
+    /// key expressions. On a namespaced session those match nothing — the GUI
+    /// would come up connected, healthy and empty, with no error anywhere,
+    /// which is precisely how the drill-down outage presented.
+    ///
+    /// So a stale entry must be **dropped**, not honoured. Dropping it degrades
+    /// to the full class selector (an empty scope = show everything), which is
+    /// more data than asked for — the safe direction. Honouring it would show
+    /// none.
+    #[test]
+    fn a_pre_466_scope_is_dropped_not_silently_honoured() {
+        let persistent = PersistentSettings {
+            subscription_scope: vec![
+                "zensight/v1/*/telemetry/netring/**".to_string(), // stale: spells the base
+                "v1/*/telemetry/sysinfo/**".to_string(),          // fine
+            ],
+            ..Default::default()
+        };
+        let state = persistent.to_state();
+        assert_eq!(
+            state.subscription_scope, "v1/*/telemetry/sysinfo/**",
+            "the base-prefixed entry must not survive the load"
+        );
+
+        // And a user typing one into the settings box is told what to write.
+        let mut s = SettingsState::default();
+        s.set_subscription_scope("zensight/v1/*/telemetry/netring/**".into());
+        let err = s.validate().expect_err("a full key must not validate");
+        assert!(
+            err.contains("v1/*/telemetry/netring/**"),
+            "the error must show the spelling that works, got: {err}"
+        );
     }
 
     /// A pre-#364 settings file (no subscription_scope / link_profile keys)
@@ -1081,7 +1141,7 @@ mod tests {
     #[test]
     fn test_scope_validation() {
         let mut settings = SettingsState {
-            subscription_scope: "zensight/v1/*/telemetry/netring/**".to_string(),
+            subscription_scope: "v1/*/telemetry/netring/**".to_string(),
             ..SettingsState::default()
         };
         assert!(settings.validate().is_ok());

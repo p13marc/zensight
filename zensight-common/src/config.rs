@@ -28,6 +28,22 @@ pub struct ZenohConfig {
     /// find each other, the `just run` topology).
     #[serde(default = "default_scouting")]
     pub scouting: bool,
+
+    /// The deployment base (RFC 03 §1.1), set as the Zenoh session
+    /// **`namespace`** (RFC 09 §0, issue #466).
+    ///
+    /// Every key ZenSight builds is base-relative (`v1/…`); the session
+    /// prefixes this on egress, strips it on ingress, and *filters* ingress
+    /// from outside it — so the base is an **isolation boundary**, not a
+    /// string convention. Two independent deployments on one Zenoh network
+    /// use different bases and cannot see each other.
+    ///
+    /// **This is the only place an application spells the base.** Multi-chunk
+    /// bases are legal (`acme/fleet-a`); wildcards are not.
+    ///
+    /// Override with `ZENSIGHT_ZENOH_NAMESPACE`.
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
 }
 
 fn default_scouting() -> bool {
@@ -38,6 +54,10 @@ fn default_mode() -> String {
     "peer".to_string()
 }
 
+fn default_namespace() -> String {
+    zensight_keyspace::DEFAULT_BASE.to_string()
+}
+
 impl Default for ZenohConfig {
     fn default() -> Self {
         Self {
@@ -45,12 +65,14 @@ impl Default for ZenohConfig {
             connect: Vec::new(),
             listen: Vec::new(),
             scouting: true,
+            namespace: default_namespace(),
         }
     }
 }
 
 impl ZenohConfig {
-    /// Apply `ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN,SCOUTING}` environment overrides.
+    /// Apply `ZENSIGHT_ZENOH_{MODE,CONNECT,LISTEN,SCOUTING,NAMESPACE}` environment
+    /// overrides.
     ///
     /// `CONNECT`/`LISTEN` are comma-separated endpoint lists. Unset variables
     /// leave the field untouched. This lets a launcher (e.g. `just run`) pin
@@ -82,6 +104,9 @@ impl ZenohConfig {
         if let Some(s) = get("ZENSIGHT_ZENOH_SCOUTING") {
             self.scouting = !matches!(s.trim(), "false" | "0" | "off" | "no");
         }
+        if let Some(ns) = get("ZENSIGHT_ZENOH_NAMESPACE") {
+            self.namespace = ns.trim().to_string();
+        }
         self
     }
 }
@@ -106,8 +131,22 @@ mod zenoh_env_tests {
             connect: vec!["tcp/a:1".into()],
             listen: vec![],
             scouting: true,
+            namespace: "zensight".into(),
         };
         assert_eq!(over(base.clone(), &[]), base);
+    }
+
+    /// #466: the deployment base is config, and a launcher must be able to
+    /// point a process at another deployment without a rebuild.
+    #[test]
+    fn namespace_override() {
+        let out = over(
+            ZenohConfig::default(),
+            &[("ZENSIGHT_ZENOH_NAMESPACE", " acme/fleet-a ")],
+        );
+        assert_eq!(out.namespace, "acme/fleet-a");
+        // Unset leaves the default in place.
+        assert_eq!(over(ZenohConfig::default(), &[]).namespace, "zensight");
     }
 
     #[test]

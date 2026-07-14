@@ -19,6 +19,23 @@
 //! subscriber now sees our own traffic too and the leak check has to say what it
 //! means: anything outside v1. Same guarantee, stated explicitly instead of
 //! riding on key algebra.
+//!
+//! # The two sessions are deliberately asymmetric (#466)
+//!
+//! The **sensor** is a real participant: it sets the deployment base as its
+//! session `namespace` (RFC 09 §0), so every key it declares is base-relative
+//! (`v1/…`) and the `zensight/` that lands on the wire is the *namespace*, not
+//! a string the application concatenated.
+//!
+//! The **observer** is deliberately **un-namespaced** — the honest view of the
+//! wire, which is exactly the posture a router, a storage selector, an ACL rule,
+//! or `zenctl` has (RFC 09 §5). Its subscribers therefore spell FULL keys.
+//!
+//! That asymmetry is what makes this test prove #466 rather than merely survive
+//! it: the assertions below are unchanged, byte for byte, from before the
+//! namespace landed. The application stopped spelling the base and *the wire did
+//! not move*. If the namespace were not being applied, the observer would see
+//! nothing at all.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -51,6 +68,17 @@ fn connect_config(port: u16) -> zenoh::Config {
     config
         .insert_json5("connect/endpoints", &format!("[\"tcp/127.0.0.1:{port}\"]"))
         .unwrap();
+    config
+}
+
+/// The SENSOR's session: a real participant, so it sets the base as its
+/// `namespace` (#466). Everything the framework declares below is
+/// base-relative; the session puts `zensight/` on the wire.
+fn sensor_config(port: u16) -> zenoh::Config {
+    let mut config = connect_config(port);
+    config
+        .insert_json5("namespace", "\"zensight\"")
+        .expect("set the deployment namespace");
     config
 }
 
@@ -114,13 +142,25 @@ async fn legacy_bus_is_silent_and_v1_carries_everything() {
     // Sensor peer: publish through the real framework channels — telemetry,
     // health, and a firing alert.
     let sensor = Arc::new(
-        zenoh::open(connect_config(port))
+        zenoh::open(sensor_config(port))
             .await
             .expect("open sensor session"),
     );
     tokio::time::sleep(Duration::from_millis(400)).await;
 
     let publisher = Publisher::new(sensor.clone(), "netlink", Format::Json);
+
+    // #466, half one: the application's OWN view of its key never contains the
+    // base. There is no `V1Context::base()` to get it wrong with.
+    let built = publisher.v1().telemetry_prefix();
+    assert!(
+        built.starts_with("v1/"),
+        "an application key must start at the version chunk: {built}"
+    );
+    assert!(
+        !built.starts_with("zensight"),
+        "the deployment base leaked into an application key: {built}"
+    );
 
     let point = zensight_common::TelemetryPoint::new(
         "cutover-host",
@@ -177,4 +217,74 @@ async fn legacy_bus_is_silent_and_v1_carries_everything() {
     for key in &v1 {
         assert!(key.starts_with("zensight/v1/"), "malformed v1 key: {key}");
     }
+
+    // #466, half two: the SAME key, in two spellings. The application built
+    // `v1/<origin>/telemetry/netlink`; the un-namespaced observer saw
+    // `zensight/v1/<origin>/telemetry/netlink`. The namespace is the bridge, and
+    // it is the only thing that put `zensight/` there.
+    assert!(
+        v1.iter()
+            .any(|k| k == &format!("zensight/{built}/iface/eth0/rx_bytes")),
+        "the namespace must prefix exactly the key the application built \
+         ({built}/iface/eth0/rx_bytes); saw: {v1:?}"
+    );
+}
+
+/// #466: the namespace is an **isolation boundary**, not a prefix.
+///
+/// RFC 03 §1.1 promises that a namespaced session *filters* ingress from
+/// outside its namespace — "the base is an isolation boundary, not just a
+/// prefix". That is the property that makes two deployments able to share a
+/// Zenoh network, and it is the reason this is worth doing at all rather than
+/// just concatenating a string. Nothing else in the suite pins it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_namespace_filters_ingress_from_other_deployments() {
+    let (observer, port) = {
+        let mut opened = None;
+        for attempt in 0..8 {
+            let port = candidate_port(attempt + 64);
+            if let Ok(s) = zenoh::open(listen_config(port)).await {
+                opened = Some((s, port));
+                break;
+            }
+        }
+        opened.expect("open listening observer session")
+    };
+
+    // A participant of the `zensight` deployment.
+    let member = zenoh::open(sensor_config(port))
+        .await
+        .expect("open namespaced session");
+
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let log = seen.clone();
+    // Base-relative, exactly as application code writes it.
+    let _sub = member
+        .declare_subscriber("v1/**")
+        .callback(move |s| log.lock().unwrap().push(s.key_expr().as_str().to_string()))
+        .await
+        .expect("declare a base-relative subscriber");
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // The observer is un-namespaced, so it publishes literal wire keys. Two
+    // well-formed v1 keys, differing only in their base.
+    for key in [
+        "other-deployment/v1/h-000000000000/telemetry/netlink/x",
+        "zensight/v1/h-000000000000/telemetry/netlink/x",
+    ] {
+        observer.put(key, vec![1u8]).await.expect("put");
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.len(),
+        1,
+        "ingress from outside the namespace must be FILTERED, not merely unmatched — saw {seen:?}"
+    );
+    assert_eq!(
+        seen[0], "v1/h-000000000000/telemetry/netlink/x",
+        "ingress must arrive with the base already stripped"
+    );
 }

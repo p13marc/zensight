@@ -61,7 +61,7 @@ mod tests {
     fn test_command_key() {
         // v1 (RFC 05): filter writes are the `filter/set` procedure.
         let k = command_key("logs");
-        assert!(k.starts_with("zensight/v1/h-"), "{k}");
+        assert!(k.starts_with("v1/h-"), "{k}");
         assert!(k.ends_with("/@rpc/logs/filter/set"), "{k}");
     }
 

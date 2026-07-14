@@ -45,7 +45,7 @@ fn sample_alert(source: &str) -> Alert {
 async fn fires_then_resolves() {
     let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
     let sub = session
-        .declare_subscriber("zensight/v1/*/state/netlink/alert/*")
+        .declare_subscriber("v1/*/state/netlink/alert/*")
         .await
         .expect("subscriber");
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -104,7 +104,7 @@ async fn fires_then_resolves() {
 async fn debounce_suppresses_first_observe() {
     let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
     let sub = session
-        .declare_subscriber("zensight/v1/*/state/netlink/alert/*")
+        .declare_subscriber("v1/*/state/netlink/alert/*")
         .await
         .expect("subscriber");
     tokio::time::sleep(Duration::from_millis(150)).await;

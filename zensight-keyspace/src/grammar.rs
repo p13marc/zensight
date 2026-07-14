@@ -550,6 +550,36 @@ pub fn with_base(base: &str, key_or_selector: &str) -> String {
     format!("{base}/{key_or_selector}")
 }
 
+/// Strip an explicit base from a **full** (wire-form) key — the inverse of
+/// [`with_base`].
+///
+/// For un-namespaced observers only: `zenctl`, the `v1_probe` example, and
+/// router-side tooling all see the base on the wire because they deliberately
+/// do not set a session namespace (RFC 09 §5). A *namespaced* session — every
+/// application session — has already had the base stripped for it on ingress,
+/// and must call [`parse`] directly.
+///
+/// Returns `None` if `key` does not sit under `base`, which for an observer is
+/// the meaningful answer: the key belongs to another deployment.
+///
+/// ```
+/// use zensight_keyspace::grammar::strip_base;
+///
+/// assert_eq!(
+///     strip_base("zensight", "zensight/v1/h-3fa9c2d41b7e/state/sysinfo/health"),
+///     Some("v1/h-3fa9c2d41b7e/state/sysinfo/health"),
+/// );
+/// // A multi-chunk base works the same way (RFC 03 §1.1).
+/// assert_eq!(strip_base("acme/fleet-a", "acme/fleet-a/v1/x"), Some("v1/x"));
+/// // Another deployment's traffic is not ours to parse.
+/// assert_eq!(strip_base("zensight", "other/v1/h-3fa9c2d41b7e/state/sysinfo/health"), None);
+/// // Not a prefix *boundary* — `zensightly` is a different base.
+/// assert_eq!(strip_base("zensight", "zensightly/v1/x"), None);
+/// ```
+pub fn strip_base<'k>(base: &str, key: &'k str) -> Option<&'k str> {
+    key.strip_prefix(base)?.strip_prefix('/')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
