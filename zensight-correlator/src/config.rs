@@ -58,6 +58,19 @@ pub struct CorrelatorConfig {
     /// Logging configuration.
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    /// Allow operator identity assertions — `@catalog/@rpc/link` and `unlink`
+    /// (#473, RFC 06 §5.4).
+    ///
+    /// **Off by default, and deliberately so.** A `link` overrides the
+    /// conflicting-strong-ids guard, which is the one rule standing between the
+    /// catalog and silently fusing two real machines into one host. The RFC calls
+    /// the procedure "operator-invoked, gated"; this is the gate. When off, both
+    /// procedures are still *served* — they reply `error/gated` rather than
+    /// timing out, so an operator learns the feature exists and is switched off,
+    /// instead of learning nothing.
+    #[serde(default)]
+    pub allow_operator_assertions: bool,
 }
 
 fn default_evidence_ttl() -> u64 {
@@ -82,6 +95,7 @@ impl Default for CorrelatorConfig {
             reemit_secs: default_reemit_secs(),
             rules: RulesConfig::default(),
             logging: LoggingConfig::default(),
+            allow_operator_assertions: false,
         }
     }
 }

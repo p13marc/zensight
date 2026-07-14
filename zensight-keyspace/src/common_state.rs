@@ -51,4 +51,6 @@ pub enum CommonState<'a> {
     CatalogAlias { old_id: &'a str },
     /// `@catalog` `pdns/{ip_slug}` — the accumulated IP↔name record.
     CatalogPdns { ip_slug: &'a str },
+    /// `@catalog` `assertion/{id}` — an operator identity assertion (#473).
+    CatalogAssertion { id: &'a str },
 }

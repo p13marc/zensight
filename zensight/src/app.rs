@@ -1713,6 +1713,16 @@ impl ZenSight {
                 self.rederive_entities();
             }
 
+            Message::AliasReceived(alias) => {
+                // Re-point a retired id at its successor. `resolve_alias` follows
+                // the chain, so a host that has been merged twice still resolves.
+                self.entities.aliases.insert(alias.old_id, alias.entity_id);
+            }
+
+            Message::AliasRemoved(old_id) => {
+                self.entities.aliases.remove(&old_id);
+            }
+
             Message::LookupNamesForIp(ip) => {
                 use crate::view::specialized::fetch::Fetch;
                 self.global_search.names_lookup = Some((ip.clone(), Fetch::Loading));
@@ -7885,6 +7895,59 @@ mod tier2_app_fold_tests {
         assert!(
             format!("{:?}", r.record.key).contains("nginx.service"),
             "the row must be keyed by the unit the registry named"
+        );
+    }
+}
+
+/// #486 / RFC 06 §5.1: the GUI must consume `@catalog/state/alias/*`.
+///
+/// An operator's `link` retires an entity id — its doc is *tombstoned*. Anything
+/// still holding that id resolves to nothing unless the alias re-points it. A
+/// merge the product cannot see is not a merge.
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+
+    fn alias(old_id: &str, entity_id: &str) -> zensight_common::AliasRecord {
+        zensight_common::AliasRecord {
+            old_id: old_id.to_string(),
+            entity_id: entity_id.to_string(),
+            last_updated: 1,
+        }
+    }
+
+    #[test]
+    fn an_alias_record_repoints_a_retired_entity_id() {
+        let mut a = ZenSight::boot(true).0;
+        assert_eq!(
+            a.entities.resolve_alias("h-000000000001"),
+            "h-000000000001",
+            "unknown id resolves to itself — never to nothing"
+        );
+
+        let _ = a.update(Message::AliasReceived(alias(
+            "h-000000000001",
+            "h-000000000002",
+        )));
+        assert_eq!(
+            a.entities.resolve_alias("h-000000000001"),
+            "h-000000000002",
+            "a consumer holding the retired id must find the host it became"
+        );
+    }
+
+    #[test]
+    fn an_unlink_drops_the_alias_with_it() {
+        let mut a = ZenSight::boot(true).0;
+        let _ = a.update(Message::AliasReceived(alias(
+            "h-000000000001",
+            "h-000000000002",
+        )));
+        let _ = a.update(Message::AliasRemoved("h-000000000001".to_string()));
+        assert_eq!(
+            a.entities.resolve_alias("h-000000000001"),
+            "h-000000000001",
+            "a stale alias would keep re-pointing at an entity that no longer claims it"
         );
     }
 }

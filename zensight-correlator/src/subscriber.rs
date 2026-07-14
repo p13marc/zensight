@@ -19,7 +19,8 @@ use zenoh::Session;
 use zenoh::sample::{Sample, SampleKind};
 use zenoh_ext::{AdvancedSubscriberBuilderExt, HistoryConfig, RecoveryConfig};
 use zensight_common::{
-    HostEvidence, NameObservation, all_evidence_wildcard, all_name_evidence_wildcard,
+    HostEvidence, NameObservation, OperatorAssertion, all_assertion_wildcard,
+    all_evidence_wildcard, all_name_evidence_wildcard,
 };
 use zensight_keyspace::grammar::{Class, ClassOrPlane};
 
@@ -62,6 +63,22 @@ pub async fn run(
         .await
         .map_err(|e| anyhow::anyhow!("failed to declare name-evidence subscriber: {e}"))?;
 
+    // The catalog's own operator assertions (#473). Subscribing to what we
+    // publish is not a loop: it is what makes a *restarted* correlator (or a
+    // second one, or one recovering from a router storage) re-learn the
+    // operator's decisions through the same path as everything else, keeping the
+    // catalog a pure function of bus state (RFC 06 §5). `history()` is what makes
+    // the re-seed happen at all.
+    let assertion_key = all_assertion_wildcard();
+    info!(key = %assertion_key, "subscribing to operator assertions");
+    let assertion_sub = session
+        .declare_subscriber(&assertion_key)
+        .with(flume::unbounded())
+        .history(HistoryConfig::default().detect_late_publishers())
+        .recovery(RecoveryConfig::default())
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to declare assertion subscriber: {e}"))?;
+
     info!("evidence subscribers ready");
 
     loop {
@@ -82,6 +99,12 @@ pub async fn run(
                 match sample {
                     Ok(sample) => handle_name(&sample, &tx).await,
                     Err(e) => warn!(error = %e, "name-evidence recv error"),
+                }
+            }
+            sample = assertion_sub.recv_async() => {
+                match sample {
+                    Ok(sample) => handle_assertion(&sample, &tx).await,
+                    Err(e) => warn!(error = %e, "assertion recv error"),
                 }
             }
         }
@@ -145,6 +168,26 @@ async fn handle_host(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
             let _ = tx.send(EvidenceMsg::Host(Box::new(ev))).await;
         }
         None => warn!(key = %key, "failed to decode HostEvidence"),
+    }
+}
+
+/// An assertion put, or its tombstone (an `unlink` retiring the `link` it
+/// supersedes — the id comes from the key, since a Delete carries no payload).
+async fn handle_assertion(sample: &Sample, tx: &mpsc::Sender<EvidenceMsg>) {
+    let key = sample.key_expr().as_str();
+    if !is_put(sample) {
+        if let Some(id) = key.rsplit('/').next().filter(|id| !id.is_empty()) {
+            let _ = tx
+                .send(EvidenceMsg::RemoveAssertion { id: id.to_string() })
+                .await;
+        }
+        return;
+    }
+    match decode::<OperatorAssertion>(&sample.payload().to_bytes()) {
+        Some(a) => {
+            let _ = tx.send(EvidenceMsg::Assert(a)).await;
+        }
+        None => warn!(key = %key, "failed to decode OperatorAssertion"),
     }
 }
 

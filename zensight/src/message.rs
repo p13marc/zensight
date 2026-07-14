@@ -107,6 +107,19 @@ pub enum Message {
     /// parsed from the last key chunk (#306).
     EntityRemoved(String),
 
+    /// An alias record: an entity id that has been retired, and the id it now
+    /// points at (`@catalog/state/alias/<old_id>`, RFC 06 §5.1 step 1).
+    ///
+    /// A UI **MUST** consume these (#486). The entity doc for a retired id is
+    /// tombstoned, so anything still holding that id — a focused host, a saved
+    /// topology layout, a link an operator was sent — resolves to nothing unless
+    /// the alias re-points it. Without this, an operator's merge is invisible in
+    /// the product, which is the same as not having merged.
+    AliasReceived(zensight_common::AliasRecord),
+
+    /// An alias was retired (Delete) — e.g. an `unlink` undoing a merge.
+    AliasRemoved(String),
+
     /// Resolve passive-DNS names for an IP the entity store doesn't claim
     /// (#314): GET the catalog's `@rpc/names?ip=` procedure from the global
     /// search panel.

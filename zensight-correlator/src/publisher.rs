@@ -14,7 +14,9 @@ use tracing::{debug, info, warn};
 use zenoh::Session;
 use zenoh::pubsub::Publisher;
 use zensight_common::serialization::Format;
-use zensight_common::{AliasRecord, HostEntity, alias_key, encode, entity_key};
+use zensight_common::{
+    AliasRecord, HostEntity, OperatorAssertion, alias_key, assertion_key, encode, entity_key,
+};
 
 use crate::engine::EntityOp;
 
@@ -149,6 +151,50 @@ pub async fn run(
             }
         }
     }
+    Ok(())
+}
+
+/// Publish one operator assertion on its catalog state key (#473).
+///
+/// Round-trips through the bus rather than only mutating memory: this is the
+/// record that makes a restarted correlator (or a second one, or a
+/// storage-backed router) see the operator's decision. A declared publisher per
+/// call is fine — an operator invokes this by hand, not in a loop.
+pub async fn publish_assertion(
+    session: &Session,
+    format: Format,
+    assertion: &OperatorAssertion,
+) -> anyhow::Result<()> {
+    let key = assertion_key(&assertion.id);
+    let payload =
+        encode(assertion, format).map_err(|e| anyhow::anyhow!("encode assertion: {e}"))?;
+    let q = zensight_common::QosClass::Entity;
+    let pubr = session
+        .declare_publisher(key.clone())
+        .congestion_control(q.congestion_control())
+        .priority(q.priority())
+        .express(q.express())
+        .reliability(q.reliability())
+        .await
+        .map_err(|e| anyhow::anyhow!("declare assertion publisher {key}: {e}"))?;
+    pubr.put(payload)
+        .await
+        .map_err(|e| anyhow::anyhow!("put assertion {key}: {e}"))?;
+    info!(key = %key, kind = ?assertion.kind, "published operator assertion");
+    Ok(())
+}
+
+/// Tombstone an assertion key — how an `unlink` retires the `link` it replaces.
+pub async fn retire_assertion(session: &Session, id: &str) -> anyhow::Result<()> {
+    let key = assertion_key(id);
+    let pubr = session
+        .declare_publisher(key.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!("declare assertion publisher {key}: {e}"))?;
+    pubr.delete()
+        .await
+        .map_err(|e| anyhow::anyhow!("delete assertion {key}: {e}"))?;
+    info!(key = %key, "retired operator assertion");
     Ok(())
 }
 

@@ -43,10 +43,10 @@
 //! applied order — and therefore the resulting partition — does not depend on
 //! input order.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sha2::{Digest, Sha256};
-use zensight_common::{HostEntity, HostEvidence, MemberClaim};
+use zensight_common::{AssertionKind, HostEntity, HostEvidence, MemberClaim, OperatorAssertion};
 
 use crate::config::RulesConfig;
 
@@ -91,6 +91,108 @@ impl Rule {
     }
 }
 
+/// The operator's assertions, indexed for the merge (#473, RFC 06 §5.4).
+///
+/// Built from the `@catalog/state/assertion/*` documents — which is to say, from
+/// the bus. The merge stays a pure function; this is just another input to it.
+#[derive(Debug, Default, Clone)]
+pub struct Assertions {
+    /// `old origin → new origin`, from every `link`. Applied as a **rewrite of
+    /// the host_id before correlation**, not as a special bridge — see
+    /// [`Assertions::canon`].
+    links: HashMap<String, String>,
+    /// Unordered origin pairs an operator has vetoed. Both directions are
+    /// inserted so lookup needs no ordering convention.
+    forbidden: HashSet<(String, String)>,
+}
+
+impl Assertions {
+    /// Index a set of assertion documents. `unlink` wins over `link` for the
+    /// same pair regardless of arrival order: a veto is the operator's *latest*
+    /// word by construction (issuing one is how you retire a link), and letting
+    /// map order decide would make the outcome depend on HashMap iteration.
+    pub fn new(docs: impl IntoIterator<Item = OperatorAssertion>) -> Self {
+        let mut links = HashMap::new();
+        let mut forbidden: HashSet<(String, String)> = HashSet::new();
+        let docs: Vec<_> = docs.into_iter().collect();
+
+        for d in &docs {
+            if d.kind == AssertionKind::Unlink {
+                forbidden.insert((d.old.clone(), d.new.clone()));
+                forbidden.insert((d.new.clone(), d.old.clone()));
+            }
+        }
+        for d in &docs {
+            if d.kind == AssertionKind::Link && !forbidden.contains(&(d.old.clone(), d.new.clone()))
+            {
+                links.insert(d.old.clone(), d.new.clone());
+            }
+        }
+
+        let mut me = Self { links, forbidden };
+
+        // A veto can still be violated *transitively*: `link a→c` and `link b→c`
+        // canonicalize a and b to the same id, merging the very pair an operator
+        // said were different machines. Direct-pair filtering above does not see
+        // this. Break the chain by dropping the link out of the vetoed id — the
+        // veto is the operator's most recent word, so it wins and the id is left
+        // standing alone. Bounded: each pass removes at least one edge.
+        for _ in 0..16 {
+            let violation = me
+                .forbidden
+                .iter()
+                .find(|(a, b)| me.canon(a) == me.canon(b))
+                .map(|(a, b)| (a.clone(), b.clone()));
+            let Some((a, b)) = violation else { break };
+            tracing::warn!(
+                a = %a, b = %b,
+                "operator vetoed this pair, but a link chain still merges them — \
+                 dropping the link so the veto holds"
+            );
+            if me.links.remove(&a).is_none() {
+                me.links.remove(&b);
+            }
+        }
+        me
+    }
+
+    /// Follow the link chain to the origin an id should now be known by.
+    ///
+    /// **This is the whole of `link`'s implementation.** A reinstall gives one
+    /// machine two origins; canonicalizing the old to the new makes the existing
+    /// `host_id` rule bucket their evidence together, makes the conflict guard
+    /// see one id instead of two, and makes `entity_id_for` return the new
+    /// origin — with no forced bridge, no guard bypass, and no second code path
+    /// through the merge. A chain (reinstalled twice) collapses in one pass.
+    ///
+    /// Bounded against a cycle an operator could type in (`link a b` +
+    /// `link b a`): a cycle resolves to *some* member of it, deterministically,
+    /// rather than hanging the correlator.
+    fn canon(&self, id: &str) -> String {
+        let mut cur = id;
+        for _ in 0..16 {
+            match self.links.get(cur) {
+                Some(next) if next != cur => cur = next.as_str(),
+                _ => break,
+            }
+        }
+        cur.to_string()
+    }
+
+    /// The origins that were linked *away* into `entity_id` — the ids a consumer
+    /// may still be holding, and therefore the ones that need alias records.
+    fn aliases_of(&self, entity_id: &str) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .links
+            .keys()
+            .filter(|old| self.canon(old) == entity_id && old.as_str() != entity_id)
+            .cloned()
+            .collect();
+        v.sort();
+        v
+    }
+}
+
 /// Union-find with a host_id aggregated per set for the conflict guard.
 struct UnionFind {
     parent: Vec<usize>,
@@ -130,6 +232,13 @@ impl UnionFind {
             return true; // already together — nothing to do, not a conflict
         }
         // host_id-conflict guard: never merge two distinct host_ids.
+        //
+        // An operator veto (`unlink`, #473) needs no arm here, and adding one
+        // would be dead code: by the time a bridge is applied, host_ids have been
+        // canonicalized (`Assertions::canon`), so a vetoed pair is either two
+        // distinct ids — which this arm already refuses — or one id, which is
+        // precisely what the veto prevents from happening. The veto is therefore
+        // enforced where it is decidable: in `Assertions::new`, on the link map.
         match (&self.set_host_id[ra], &self.set_host_id[rb]) {
             (Some(ha), Some(hb)) if ha != hb => return false,
             _ => {}
@@ -174,15 +283,26 @@ fn node_key(ev: &HostEvidence) -> String {
 
 /// Merge the evidence snapshot into entities. `names`/`status`/`aliases` are
 /// left for the engine to fill; this produces the identifying + membership core.
-pub fn correlate(evidence: &[HostEvidence], rules: &RulesConfig) -> Vec<HostEntity> {
+pub fn correlate(
+    evidence: &[HostEvidence],
+    rules: &RulesConfig,
+    assertions: &Assertions,
+) -> Vec<HostEntity> {
     if evidence.is_empty() {
         return Vec::new();
     }
 
-    let node_host_ids: Vec<Option<String>> = evidence.iter().map(|e| e.host_id.clone()).collect();
+    // Operator links (#473) are applied *here*, as a rewrite of each node's
+    // host_id — before a single bridge is generated. Everything downstream (the
+    // host_id bucket rule, the conflict guard, `entity_id_for`) then does the
+    // right thing without knowing assertions exist.
+    let node_host_ids: Vec<Option<String>> = evidence
+        .iter()
+        .map(|e| e.host_id.as_deref().map(|h| assertions.canon(h)))
+        .collect();
     let mut uf = UnionFind::new(&node_host_ids);
 
-    let bridges = generate_bridges(evidence, rules);
+    let bridges = generate_bridges(evidence, rules, &node_host_ids);
 
     // Per-node strongest applied bridge: (rule, confidence). None ⇒ singleton
     // seed ("self").
@@ -202,7 +322,21 @@ pub fn correlate(evidence: &[HostEvidence], rules: &RulesConfig) -> Vec<HostEnti
         }
     }
 
-    build_entities(evidence, &mut uf, &node_rule)
+    let mut entities = build_entities(evidence, &mut uf, &node_rule, &node_host_ids);
+
+    // An id an operator linked away is an id consumers may still hold. Recording
+    // it in `aliases` is what makes the publisher emit the `alias/<old>` record
+    // (RFC 06 §5.4) — without this the merge is invisible to anyone holding the
+    // old id, which is the same as not having merged.
+    for e in &mut entities {
+        for old in assertions.aliases_of(&e.entity_id) {
+            if !e.aliases.contains(&old) {
+                e.aliases.push(old);
+            }
+        }
+        e.aliases.sort();
+    }
+    entities
 }
 
 /// Update a node's strongest-rule credit. "Strongest" is by rule priority first
@@ -220,14 +354,23 @@ fn credit(slot: &mut Option<(Rule, f32)>, rule: Rule, confidence: f32) {
 
 /// Generate all candidate bridges, then sort them into a deterministic,
 /// input-order-independent application order.
-fn generate_bridges(evidence: &[HostEvidence], rules: &RulesConfig) -> Vec<Bridge> {
+fn generate_bridges(
+    evidence: &[HostEvidence],
+    rules: &RulesConfig,
+    node_host_ids: &[Option<String>],
+) -> Vec<Bridge> {
     let mut bridges: Vec<Bridge> = Vec::new();
 
     // host_id: exact-equal buckets (each bucket is one certain host).
+    //
+    // Buckets on the *canonical* id, not the raw payload one — that single
+    // substitution is what makes an operator `link` merge a reinstall: the old
+    // and new origins land in one bucket and the ordinary host_id rule does the
+    // rest, at full confidence, with no bridge type of its own.
     if rules.host_id {
         let mut buckets: HashMap<&str, Vec<usize>> = HashMap::new();
-        for (i, e) in evidence.iter().enumerate() {
-            if let Some(h) = e.host_id.as_deref() {
+        for (i, h) in node_host_ids.iter().enumerate() {
+            if let Some(h) = h.as_deref() {
                 buckets.entry(h).or_default().push(i);
             }
         }
@@ -373,6 +516,7 @@ fn build_entities(
     evidence: &[HostEvidence],
     uf: &mut UnionFind,
     node_rule: &[Option<(Rule, f32)>],
+    node_host_ids: &[Option<String>],
 ) -> Vec<HostEntity> {
     // Group node indices by their set root.
     let mut sets: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -383,7 +527,7 @@ fn build_entities(
 
     let mut entities: Vec<HostEntity> = sets
         .into_values()
-        .map(|members| build_entity(evidence, &members, node_rule))
+        .map(|members| build_entity(evidence, &members, node_rule, node_host_ids))
         .collect();
 
     // Sort entities by id for a stable output ordering.
@@ -395,10 +539,13 @@ fn build_entity(
     evidence: &[HostEvidence],
     members: &[usize],
     node_rule: &[Option<(Rule, f32)>],
+    node_host_ids: &[Option<String>],
 ) -> HostEntity {
+    // The *canonical* host_id (post-`link`), not the raw payload one: after a
+    // reinstall link, the entity must be known by the new origin.
     let host_id = members
         .iter()
-        .filter_map(|&i| evidence[i].host_id.clone())
+        .filter_map(|&i| node_host_ids[i].clone())
         .next();
 
     let boot_id = members
@@ -620,7 +767,7 @@ mod tests {
         a.host_id = Some(hid(0xab));
         let mut b = ev("netlink", "host1");
         b.host_id = Some(hid(0xab));
-        let ents = correlate(&[a, b], &RulesConfig::default());
+        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
         assert_eq!(ents.len(), 1);
         assert_eq!(ents[0].members.len(), 2);
         assert!(ents[0].members.iter().all(|m| m.rule == "host_id"));
@@ -635,7 +782,7 @@ mod tests {
         a.cloud = Some(cloud("aws", "i-0abc"));
         let mut b = ev("netlink", "vm1");
         b.cloud = Some(cloud("aws", "i-0abc"));
-        let ents = correlate(&[a, b], &RulesConfig::default());
+        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
         assert_eq!(ents.len(), 1);
         assert!(ents[0].members.iter().all(|m| m.rule == "cloud_instance"));
         assert!((ents[0].members[0].confidence - 0.95).abs() < 1e-5);
@@ -648,7 +795,7 @@ mod tests {
         a.cloud = Some(cloud("aws", "12345"));
         let mut b = ev("sysinfo", "b");
         b.cloud = Some(cloud("gcp", "12345"));
-        let ents = correlate(&[a, b], &RulesConfig::default());
+        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
         assert_eq!(
             ents.len(),
             2,
@@ -666,7 +813,7 @@ mod tests {
             cloud_instance: false,
             ..RulesConfig::default()
         };
-        let ents = correlate(&[a, b], &rules);
+        let ents = correlate(&[a, b], &rules, &Assertions::default());
         assert_eq!(ents.len(), 2);
     }
 
@@ -680,7 +827,7 @@ mod tests {
         let mut b = ev("sysinfo", "b");
         b.host_id = Some(hid(0x22));
         b.cloud = Some(cloud("aws", "i-0abc"));
-        let ents = correlate(&[a, b], &RulesConfig::default());
+        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
         assert_eq!(ents.len(), 2);
     }
 
@@ -692,7 +839,7 @@ mod tests {
         a.container_id = Some("c".repeat(64));
         let mut b = ev("sysinfo", "b");
         b.container_id = Some("c".repeat(64));
-        let ents = correlate(&[a, b], &RulesConfig::default());
+        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
         assert_eq!(ents.len(), 2, "container_id must never be a merge key");
 
         // ... but within one host, members' container ids union onto the entity.
@@ -705,7 +852,7 @@ mod tests {
         let mut z = ev("netring", "h");
         z.host_id = Some(hid(0x55));
         z.container_id = Some("a".repeat(64)); // duplicate → deduped
-        let ents = correlate(&[x, y, z], &RulesConfig::default());
+        let ents = correlate(&[x, y, z], &RulesConfig::default(), &Assertions::default());
         assert_eq!(ents.len(), 1);
         assert_eq!(ents[0].container_ids, vec!["a".repeat(64), "b".repeat(64)]);
     }
@@ -718,7 +865,7 @@ mod tests {
         let mut b = ev("netring", "b");
         b.macs = vec!["aa:bb:cc:dd:ee:ff".into()];
         b.ips = vec!["10.0.0.1".into()];
-        let ents = correlate(&[a, b], &RulesConfig::default());
+        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
         assert_eq!(ents.len(), 1, "shared MAC+IP must merge");
         assert!(ents[0].members.iter().any(|m| m.rule == "mac_ip"));
     }
@@ -729,7 +876,7 @@ mod tests {
         a.ips = vec!["10.0.0.1".into()];
         let mut b = ev("netring", "b");
         b.ips = vec!["10.0.0.1".into()];
-        let ents = correlate(&[a, b], &RulesConfig::default());
+        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
         assert_eq!(ents.len(), 2, "shared IP alone (DHCP reuse) must NOT merge");
     }
 
@@ -741,7 +888,7 @@ mod tests {
         let mut b = ev("netring", "b");
         b.macs = vec!["aa:bb:cc:dd:ee:ff".into()];
         b.ips = vec!["10.0.0.2".into()]; // different IP
-        let ents = correlate(&[a, b], &RulesConfig::default());
+        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
         assert_eq!(ents.len(), 2, "shared MAC alone (VM clone) must NOT merge");
     }
 
@@ -751,7 +898,7 @@ mod tests {
         a.fqdn = Some("Host1.Example.COM".into());
         let mut b = ev("s", "b");
         b.fqdn = Some("host1.example.com".into());
-        let ents = correlate(&[a, b], &RulesConfig::default());
+        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
         assert_eq!(ents.len(), 1);
         assert!(ents[0].members.iter().any(|m| m.rule == "fqdn"));
     }
@@ -766,7 +913,7 @@ mod tests {
             hostname_enabled: false,
             ..RulesConfig::default()
         };
-        let ents = correlate(&[a, b], &rules);
+        let ents = correlate(&[a, b], &rules, &Assertions::default());
         assert_eq!(ents.len(), 2, "hostname rule disabled → no hostname bridge");
     }
 
@@ -780,7 +927,7 @@ mod tests {
         let mut b = ev("sysinfo", "b");
         b.host_id = Some(hid(0x22));
         b.hostname = Some("web".into());
-        let ents = correlate(&[a, b], &RulesConfig::default());
+        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
         assert_eq!(ents.len(), 2, "distinct host_ids must stay separate");
     }
 
@@ -793,7 +940,7 @@ mod tests {
         let mut b = ev("netring", "b");
         b.macs = vec!["aa:bb:cc:dd:ee:ff".into()];
         b.ips = vec!["10.0.0.1".into()];
-        let ents = correlate(&[a, b], &RulesConfig::default());
+        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
         assert_eq!(ents.len(), 1);
         let c = ents[0]
             .members
@@ -811,7 +958,7 @@ mod tests {
     fn entity_id_host_id_path_is_pinned_prefix() {
         let mut a = ev("sysinfo", "host1");
         a.host_id = Some(hid(0xab)); // "abab…" (64 hex); first 12 chars → "abababababab"
-        let ents = correlate(&[a], &RulesConfig::default());
+        let ents = correlate(&[a], &RulesConfig::default(), &Assertions::default());
         assert_eq!(ents[0].entity_id, "h-abababababab");
     }
 
@@ -820,7 +967,7 @@ mod tests {
         // fqdn-only set → id = h_<sha256("host1.example.com")[..12]>.
         let mut a = ev("s", "a");
         a.fqdn = Some("host1.example.com".into());
-        let ents = correlate(&[a], &RulesConfig::default());
+        let ents = correlate(&[a], &RulesConfig::default(), &Assertions::default());
         let expected = format!("h-{}", sha256_12("host1.example.com"));
         assert_eq!(ents[0].entity_id, expected);
     }
@@ -839,7 +986,7 @@ mod tests {
         let mut c = ev("netring", "c");
         c.macs = vec!["aa:aa:aa:aa:aa:aa".into()];
         c.ips = vec!["10.0.0.5".into()];
-        let ents = correlate(&[a, b, c], &RulesConfig::default());
+        let ents = correlate(&[a, b, c], &RulesConfig::default(), &Assertions::default());
         assert_eq!(ents.len(), 1);
         assert_eq!(ents[0].members.len(), 3);
     }
@@ -854,10 +1001,187 @@ mod tests {
         b.macs = vec!["aa:bb:cc:dd:ee:ff".into()];
         let mut c = ev("netring", "c");
         c.fqdn = Some("other.example.com".into());
-        let forward = correlate(&[a.clone(), b.clone(), c.clone()], &RulesConfig::default());
-        let reversed = correlate(&[c, b, a], &RulesConfig::default());
+        let forward = correlate(
+            &[a.clone(), b.clone(), c.clone()],
+            &RulesConfig::default(),
+            &Assertions::default(),
+        );
+        let reversed = correlate(&[c, b, a], &RulesConfig::default(), &Assertions::default());
         let fj = serde_json::to_string(&forward).unwrap();
         let rj = serde_json::to_string(&reversed).unwrap();
         assert_eq!(fj, rj, "shuffled input must serialize byte-identically");
+    }
+
+    // ── Operator assertions (#473, RFC 06 §5.4) ─────────────────────────────
+
+    fn origin(n: u8) -> String {
+        format!("h-{:012x}", n)
+    }
+
+    fn assertion(kind: AssertionKind, old: &str, new: &str) -> OperatorAssertion {
+        OperatorAssertion {
+            id: OperatorAssertion::id(kind, old, new),
+            kind,
+            old: old.to_string(),
+            new: new.to_string(),
+            asserted_at: 1,
+            note: None,
+        }
+    }
+
+    /// Without an operator, a reinstall is two hosts — and that is *correct*.
+    /// This pins the behaviour `link` exists to override, so the test below has
+    /// something to be a difference from.
+    #[test]
+    fn a_reinstall_is_two_hosts_until_an_operator_says_otherwise() {
+        let mut a = ev("sysinfo", "web01");
+        a.host_id = Some(origin(1));
+        a.hostname = Some("web01".into());
+        let mut b = ev("sysinfo", "web01");
+        b.host_id = Some(origin(2));
+        b.hostname = Some("web01".into());
+
+        let ents = correlate(&[a, b], &RulesConfig::default(), &Assertions::default());
+        assert_eq!(
+            ents.len(),
+            2,
+            "same hostname, different machine-ids: the conflict guard must refuse \
+             to merge them — the catalog cannot tell a reinstall from two machines"
+        );
+    }
+
+    /// `link` is the operator saying "it is a reinstall". The entity must come
+    /// back under the **new** origin, with the old one as an alias — an alias is
+    /// what lets a consumer holding the old id find the host again.
+    #[test]
+    fn link_merges_a_reinstall_under_the_new_origin() {
+        let mut a = ev("sysinfo", "web01");
+        a.host_id = Some(origin(1));
+        let mut b = ev("netlink", "web01");
+        b.host_id = Some(origin(2));
+
+        let asserts = Assertions::new([assertion(AssertionKind::Link, &origin(1), &origin(2))]);
+        let ents = correlate(&[a, b], &RulesConfig::default(), &asserts);
+
+        assert_eq!(ents.len(), 1, "the operator said these are one machine");
+        assert_eq!(
+            ents[0].entity_id,
+            origin(2),
+            "the entity is known by the NEW origin — the old one is history"
+        );
+        assert_eq!(ents[0].host_id.as_deref(), Some(origin(2).as_str()));
+        assert_eq!(
+            ents[0].aliases,
+            vec![origin(1)],
+            "the retired origin must be an alias, or every consumer holding it is stranded"
+        );
+        assert_eq!(ents[0].members.len(), 2);
+    }
+
+    /// `unlink` retires a link: the two must come apart again, and the alias with
+    /// them. This is the undo, and it has to be total — an operator who cannot
+    /// undo a merge will not risk making one.
+    #[test]
+    fn unlink_retires_a_link() {
+        let mut a = ev("sysinfo", "web01");
+        a.host_id = Some(origin(1));
+        let mut b = ev("netlink", "web01");
+        b.host_id = Some(origin(2));
+
+        let asserts = Assertions::new([
+            assertion(AssertionKind::Link, &origin(1), &origin(2)),
+            assertion(AssertionKind::Unlink, &origin(1), &origin(2)),
+        ]);
+        let ents = correlate(&[a, b], &RulesConfig::default(), &asserts);
+
+        assert_eq!(ents.len(), 2, "the veto splits them back apart");
+        assert!(
+            ents.iter().all(|e| e.aliases.is_empty()),
+            "and takes the alias with it — a stale alias would re-point consumers \
+             at an entity that no longer claims them"
+        );
+    }
+
+    /// Order-independence: the same assertions in the other order must give the
+    /// same answer. A veto is the operator's *latest* word by construction
+    /// (issuing one is how you retire a link), so it wins regardless of the order
+    /// documents happen to arrive off the bus — which is not an order we control.
+    #[test]
+    fn a_veto_wins_whatever_order_the_documents_arrive_in() {
+        let mut a = ev("sysinfo", "web01");
+        a.host_id = Some(origin(1));
+        let mut b = ev("netlink", "web01");
+        b.host_id = Some(origin(2));
+
+        let unlink_first = Assertions::new([
+            assertion(AssertionKind::Unlink, &origin(1), &origin(2)),
+            assertion(AssertionKind::Link, &origin(1), &origin(2)),
+        ]);
+        let ents = correlate(
+            std::slice::from_ref(&a),
+            &RulesConfig::default(),
+            &unlink_first,
+        );
+        assert_eq!(ents.len(), 1);
+
+        let ents = correlate(&[a, b], &RulesConfig::default(), &unlink_first);
+        assert_eq!(
+            ents.len(),
+            2,
+            "the veto holds no matter which arrived first"
+        );
+    }
+
+    /// The transitive case, which direct-pair filtering does not see: `link a→c`
+    /// and `link b→c` canonicalize a and b to the same id, merging the very pair
+    /// the operator vetoed. The veto must still hold.
+    #[test]
+    fn a_veto_survives_a_link_chain_that_would_route_around_it() {
+        let mut a = ev("sysinfo", "a");
+        a.host_id = Some(origin(1));
+        let mut b = ev("sysinfo", "b");
+        b.host_id = Some(origin(2));
+        let mut c = ev("sysinfo", "c");
+        c.host_id = Some(origin(3));
+
+        let asserts = Assertions::new([
+            assertion(AssertionKind::Link, &origin(1), &origin(3)),
+            assertion(AssertionKind::Link, &origin(2), &origin(3)),
+            assertion(AssertionKind::Unlink, &origin(1), &origin(2)),
+        ]);
+        let ents = correlate(&[a, b, c], &RulesConfig::default(), &asserts);
+
+        let merged: Vec<_> = ents.iter().filter(|e| e.members.len() > 1).collect();
+        for e in &merged {
+            let ids: Vec<&str> = e.members.iter().map(|m| m.source.as_str()).collect();
+            assert!(
+                !(ids.contains(&"a") && ids.contains(&"b")),
+                "an operator said a and b are different machines; a chain through c \
+                 must not put them in one entity anyway"
+            );
+        }
+    }
+
+    /// A cycle an operator can type (`link a b` + `link b a`) must terminate.
+    #[test]
+    fn a_link_cycle_terminates() {
+        let asserts = Assertions::new([
+            assertion(AssertionKind::Link, &origin(1), &origin(2)),
+            assertion(AssertionKind::Link, &origin(2), &origin(1)),
+        ]);
+        // The bound is what is under test: this returns, deterministically.
+        let canon = asserts.canon(&origin(1));
+        assert!(canon == origin(1) || canon == origin(2));
+    }
+
+    /// Chained reinstalls collapse to the newest origin in one pass.
+    #[test]
+    fn a_link_chain_collapses_to_the_newest_origin() {
+        let asserts = Assertions::new([
+            assertion(AssertionKind::Link, &origin(1), &origin(2)),
+            assertion(AssertionKind::Link, &origin(2), &origin(3)),
+        ]);
+        assert_eq!(asserts.canon(&origin(1)), origin(3));
+        assert_eq!(asserts.aliases_of(&origin(3)), vec![origin(1), origin(2)]);
     }
 }

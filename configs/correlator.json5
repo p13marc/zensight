@@ -39,6 +39,22 @@
     hostname_enabled: true, // equal hostname           -> confidence 0.25
   },
 
+  // Operator identity assertions — `@catalog/@rpc/link` / `unlink` (#473,
+  // RFC 06 §5.4).
+  //
+  //   zenctl service call @catalog "" link --param old=h-<12hex> --param new=h-<12hex>
+  //
+  // A reinstall (new machine-id, same box) mints a NEW origin while the old
+  // one's evidence is still live. The correlator refuses to merge them, and it
+  // is right to: it cannot tell a reinstall from two machines. Only an operator
+  // can, and this is how they say so. `unlink` is the undo.
+  //
+  // OFF by default, because `link` overrides the one guard standing between the
+  // catalog and fusing two real hosts into one. When off, both procedures still
+  // reply `error/gated` rather than timing out — an operator finds out the
+  // feature exists and is disabled.
+  allow_operator_assertions: false,
+
   // Logging configuration
   logging: {
     // Log level: "trace", "debug", "info", "warn", "error"

@@ -80,6 +80,52 @@ dropped. So a shared hostname or shared cloud instance can never override two
 machines that are provably distinct by machine-id — `host_id` stays the top
 authority.
 
+## Operator assertions: `link` and `unlink`
+
+The guard above is right, and it is also the reason a **reinstall** looks like two
+hosts. Same box, new `/etc/machine-id`, new origin — while the old origin's
+evidence is still live. The catalog cannot tell that from two machines, so it
+refuses to merge, and it is correct to refuse. Only an operator knows.
+
+So the operator says so (RFC 06 §5.4, gated behind `allow_operator_assertions`):
+
+```bash
+zenctl service call @catalog "" link --param old=h-1111aaaa2222 --param new=h-3333bbbb4444
+```
+
+**A `link` is a rewrite of `host_id`, not a special kind of bridge.** Before any
+bridge is generated, every node's `host_id` is canonicalized through the link
+chain (`Assertions::canon`). The old origin *becomes* the new one, so:
+
+- the ordinary `host_id` bucket rule merges them, at full confidence;
+- the conflict guard sees one id, not two, and has nothing to object to;
+- `entity_id_for` returns the new origin, so the entity is known by the id the
+  machine actually publishes under today;
+- the retired origin lands in `aliases`, which is what makes the publisher emit
+  the `alias/<old>` record a consumer holding the stale id needs.
+
+There is no second code path through the merge, and no guard bypass to get wrong.
+
+`unlink` is the veto: these are **not** the same machine. It retires a `link` (and
+tombstones its document, so a correlator restarting from a storage does not
+re-seed a revoked one). A veto also wins over any link chain that would route
+around it — `link a→c` plus `link b→c` would otherwise merge a vetoed pair
+transitively, so `Assertions::new` breaks the chain rather than let that happen.
+
+**The assertions live on the bus** (`@catalog/state/assertion/<id>`), not in a
+config file or a side table. The catalog is a pure function of live bus state
+(RFC 06 §5: "no private database, no migration state"), and an operator override
+is state that is not evidence. Publishing it as a registered state subject is what
+keeps the property: a restarted correlator, a replica, or a storage-backed router
+re-seeds the operator's decisions through the same path as every other document.
+The correlator therefore subscribes to what it publishes — which looks circular
+and is exactly the point.
+
+Assertions name **origin ids** (`h-<12hex>`), never the weaker evidence-derived
+entity ids: an id computed from a hostname or a MAC changes shape when the set it
+names changes, so an assertion keyed on one would dangle the moment it took
+effect.
+
 ## Observer weighting
 
 If *either* endpoint of a bridge is a third-party claim (`observer.is_some()` —

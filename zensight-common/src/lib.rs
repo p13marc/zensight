@@ -25,6 +25,7 @@ pub mod payload;
 pub mod publisher_registry;
 pub mod qos;
 pub mod query_detail;
+pub mod rpc;
 pub mod semconv;
 pub mod serialization;
 pub mod session;
@@ -51,21 +52,23 @@ pub use config::{
     IdentityConfig, LinkProfile, LogFormat, LoggingConfig, SnapshotDir, ZenohConfig, load_config,
     parse_config,
 };
-pub use entity::{AliasRecord, HostEntity, MemberClaim, NameVal, PdnsRecord};
+pub use entity::{
+    AliasRecord, AssertionKind, HostEntity, MemberClaim, NameVal, OperatorAssertion, PdnsRecord,
+};
 pub use error::{Error, Result};
 pub use evidence::{CloudFacts, HostEvidence, NameObservation};
 pub use health::{
     DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, HealthStatus, SensorInfo,
 };
 pub use keyexpr::{
-    alias_key, all_alerts_wildcard, all_device_liveliness_wildcard, all_entity_wildcard,
-    all_evidence_wildcard, all_health_wildcard, all_liveliness_wildcard,
-    all_name_evidence_wildcard, all_pdns_wildcard, all_state_wildcard, all_telemetry_wildcard,
-    catalog_claim_key, catalog_claims_wildcard, catalog_rpc_key, correlator_alive_key,
-    entities_query_key, entity_key, fleet_blob_prefix, fleet_command_key, fleet_rpc_key,
-    host_evidence_key, is_telemetry_key, media_preview_key, media_video_key, name_observation_key,
-    names_query_key, origin_rpc_key, parse_full_key, parse_key, pdns_key, refine_full_key,
-    refine_key, validate_relative_selector,
+    alias_key, all_alerts_wildcard, all_alias_wildcard, all_assertion_wildcard,
+    all_device_liveliness_wildcard, all_entity_wildcard, all_evidence_wildcard,
+    all_health_wildcard, all_liveliness_wildcard, all_name_evidence_wildcard, all_pdns_wildcard,
+    all_state_wildcard, all_telemetry_wildcard, assertion_key, catalog_claim_key,
+    catalog_claims_wildcard, catalog_rpc_key, correlator_alive_key, entities_query_key, entity_key,
+    fleet_blob_prefix, fleet_command_key, fleet_rpc_key, host_evidence_key, is_telemetry_key,
+    media_preview_key, media_video_key, name_observation_key, names_query_key, origin_rpc_key,
+    parse_full_key, parse_key, pdns_key, refine_full_key, refine_key, validate_relative_selector,
 };
 pub use payload::{PAYLOAD_TYPES, decode_payload, schema_location};
 pub use publisher_registry::PublisherRegistry;
@@ -76,6 +79,10 @@ pub use query_detail::{
     LatencyReport, LogRecord, MatrixRecord, NameInfo, NeighborRecord, NetflowFieldValue,
     NetflowRecord, ProcessRecord, QuicRecord, RouteRecord, SocketRecord, SshRecord, TalkerRecord,
     TimerRecord, TlsRecord, UnitDetail, UnitRecord,
+};
+pub use rpc::{
+    ERR_BUSY, ERR_GATED, ERR_INVALID_ARGS, ERR_NOT_FOUND, ERR_UNAUTHORIZED, ERR_UNSUPPORTED,
+    RpcError, RpcRequest, RpcResult,
 };
 pub use serialization::{Format, decode, decode_auto, encode};
 pub use session::connect;

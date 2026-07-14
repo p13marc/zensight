@@ -17,85 +17,20 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use zenoh::Session;
 
 use crate::error::{Result, SensorError};
 use crate::v1::V1Context;
 
-/// Convention-reserved error names (RFC 05 §3).
-pub const ERR_INVALID_ARGS: &str = "error/invalid-args";
-pub const ERR_UNAUTHORIZED: &str = "error/unauthorized";
-pub const ERR_NOT_FOUND: &str = "error/not-found";
-pub const ERR_UNSUPPORTED: &str = "error/unsupported";
-pub const ERR_BUSY: &str = "error/busy";
-pub const ERR_GATED: &str = "error/gated";
-
-/// A procedure failure: namespaced name + human message. Serialized as the
-/// `reply_err` payload — a value reply always means success.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RpcError {
-    pub error: String,
-    pub message: String,
-}
-
-impl RpcError {
-    pub fn new(name: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            error: name.into(),
-            message: message.into(),
-        }
-    }
-
-    pub fn invalid_args(message: impl Into<String>) -> Self {
-        Self::new(ERR_INVALID_ARGS, message)
-    }
-
-    pub fn not_found(message: impl Into<String>) -> Self {
-        Self::new(ERR_NOT_FOUND, message)
-    }
-
-    pub fn unsupported(message: impl Into<String>) -> Self {
-        Self::new(ERR_UNSUPPORTED, message)
-    }
-
-    pub fn gated(message: impl Into<String>) -> Self {
-        Self::new(ERR_GATED, message)
-    }
-
-    /// A producer-specific failure: `error/<producer>/<slug>`.
-    pub fn producer(producer: &str, slug: &str, message: impl Into<String>) -> Self {
-        Self::new(format!("error/{producer}/{slug}"), message)
-    }
-}
-
-/// One incoming call.
-#[derive(Debug, Clone)]
-pub struct RpcRequest {
-    /// The query payload (request body), empty when none.
-    pub payload: Vec<u8>,
-    /// Zenoh selector parameters (`?a=1;b=2`), raw.
-    pub parameters: String,
-}
-
-impl RpcRequest {
-    /// Decode the JSON request body.
-    pub fn json<T: serde::de::DeserializeOwned>(&self) -> std::result::Result<T, RpcError> {
-        serde_json::from_slice(&self.payload)
-            .map_err(|e| RpcError::invalid_args(format!("bad request body: {e}")))
-    }
-
-    /// One selector parameter by name.
-    pub fn param(&self, name: &str) -> Option<String> {
-        self.parameters.split(';').find_map(|kv| {
-            let (k, v) = kv.split_once('=')?;
-            (k == name).then(|| v.to_string())
-        })
-    }
-}
-
-/// Successful reply bytes (already encoded — typically JSON).
-pub type RpcResult = std::result::Result<Vec<u8>, RpcError>;
+// The call contract itself (RpcError/RpcRequest/RpcResult + the reserved error
+// names) lives in `zensight-common`: a *caller* is not a sensor, and neither is
+// the correlator, which serves `@catalog/@rpc/link` without depending on this
+// crate. Re-exported so a sensor's `use zensight_sensor_core::rpc::*` is
+// unchanged.
+pub use zensight_common::rpc::{
+    ERR_BUSY, ERR_GATED, ERR_INVALID_ARGS, ERR_NOT_FOUND, ERR_UNAUTHORIZED, ERR_UNSUPPORTED,
+    RpcError, RpcRequest, RpcResult,
+};
 
 /// Serve one procedure. The returned task runs until the session closes;
 /// track it with `SensorRunner::spawn`-style lifetime (or just hold it).

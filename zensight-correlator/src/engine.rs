@@ -16,7 +16,8 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, sleep_until};
 use tracing::{debug, info};
 use zensight_common::{
-    HostEntity, HostEvidence, NameObservation, NameVal, PdnsRecord, current_timestamp_millis,
+    HostEntity, HostEvidence, NameObservation, NameVal, OperatorAssertion, PdnsRecord,
+    current_timestamp_millis,
 };
 
 use crate::config::CorrelatorConfig;
@@ -40,6 +41,16 @@ pub enum EvidenceMsg {
     /// `state/<sensor>/evidence/{self,device/<d>}`): drop that claim now instead of
     /// waiting for it to age out by TTL.
     RemoveHost { sensor: String, source: String },
+    /// An operator identity assertion (`@catalog/state/assertion/<id>`, #473).
+    ///
+    /// The catalog subscribes to its **own** published state here, which looks
+    /// circular and is not: it is what keeps the catalog a pure function of the
+    /// bus (RFC 06 §5). The assertion a restarted correlator re-seeds from a
+    /// storage arrives through exactly this path, so there is one code path, not
+    /// a live one and a recovery one.
+    Assert(OperatorAssertion),
+    /// An assertion was retired (a `Delete` on its key).
+    RemoveAssertion { id: String },
 }
 
 /// A change to publish on the entity keyspace.
@@ -68,6 +79,9 @@ pub struct CorrelatorState {
     names: NameStore,
     /// Entity id → last published record.
     last: HashMap<String, EntityRecord>,
+    /// Operator assertions by id (#473) — an input to the merge, held exactly as
+    /// it arrived off the bus.
+    assertions: HashMap<String, OperatorAssertion>,
 }
 
 impl CorrelatorState {
@@ -78,6 +92,7 @@ impl CorrelatorState {
             evidence: EvidenceStore::default(),
             names: NameStore::default(),
             last: HashMap::new(),
+            assertions: HashMap::new(),
         }
     }
 
@@ -89,7 +104,29 @@ impl CorrelatorState {
             EvidenceMsg::RemoveHost { sensor, source } => {
                 self.evidence.remove(&sensor, &source);
             }
+            EvidenceMsg::Assert(a) => {
+                self.assertions.insert(a.id.clone(), a);
+            }
+            EvidenceMsg::RemoveAssertion { id } => {
+                self.assertions.remove(&id);
+            }
         }
+    }
+
+    /// The operator's assertions, indexed for the merge. Note there is no TTL
+    /// sweep: operator evidence is **strong and does not age out** (RFC 06 §5.4).
+    /// A link survives the machine being off for a month; only an operator
+    /// retires it.
+    fn assertions(&self) -> merge::Assertions {
+        merge::Assertions::new(self.assertions.values().cloned())
+    }
+
+    /// The current assertion set (serves the `@rpc/link`/`unlink` idempotency
+    /// check and the assertion seed).
+    pub fn current_assertions(&self) -> Vec<OperatorAssertion> {
+        let mut v: Vec<OperatorAssertion> = self.assertions.values().cloned().collect();
+        v.sort_by(|a, b| a.id.cmp(&b.id));
+        v
     }
 
     /// Recompute the entity set at `now_ms` and return the ops to publish.
@@ -103,7 +140,7 @@ impl CorrelatorState {
         self.names.sweep(now_ms, ttl_ms);
 
         let live = self.evidence.live(now_ms, ttl_ms);
-        let mut entities = merge::correlate(&live, &self.config.rules);
+        let mut entities = merge::correlate(&live, &self.config.rules, &self.assertions());
 
         for e in &mut entities {
             self.inject_names(e);
