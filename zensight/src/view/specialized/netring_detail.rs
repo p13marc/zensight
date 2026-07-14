@@ -447,31 +447,25 @@ mod tests {
 
     #[test]
     fn key_matches_sensor() {
-        assert_eq!(flows_key(None), "zensight/v1/*/@rpc/netring/flows");
-        assert_eq!(quic_key(None), "zensight/v1/*/@rpc/netring/quic");
-        assert_eq!(ssh_key(None), "zensight/v1/*/@rpc/netring/ssh");
-        assert_eq!(ja4h_key(None), "zensight/v1/*/@rpc/netring/ja4h");
-        assert_eq!(tls_key(None), "zensight/v1/*/@rpc/netring/tls");
-        assert_eq!(assets_key(None), "zensight/v1/*/@rpc/netring/assets");
+        assert_eq!(flows_key(None), "v1/*/@rpc/netring/flows");
+        assert_eq!(quic_key(None), "v1/*/@rpc/netring/quic");
+        assert_eq!(ssh_key(None), "v1/*/@rpc/netring/ssh");
+        assert_eq!(ja4h_key(None), "v1/*/@rpc/netring/ja4h");
+        assert_eq!(tls_key(None), "v1/*/@rpc/netring/tls");
+        assert_eq!(assets_key(None), "v1/*/@rpc/netring/assets");
         // The 4 previously-orphaned channels now reachable (#45).
-        assert_eq!(
-            talkers_key(None),
-            "zensight/v1/*/@rpc/netring/talkers?top=50"
-        );
-        assert_eq!(
-            elephant_key(None),
-            "zensight/v1/*/@rpc/netring/elephant_flows"
-        );
-        assert_eq!(dns_key(None), "zensight/v1/*/@rpc/netring/dns?top=50");
-        assert_eq!(http_key(None), "zensight/v1/*/@rpc/netring/http?top=50");
+        assert_eq!(talkers_key(None), "v1/*/@rpc/netring/talkers?top=50");
+        assert_eq!(elephant_key(None), "v1/*/@rpc/netring/elephant_flows");
+        assert_eq!(dns_key(None), "v1/*/@rpc/netring/dns?top=50");
+        assert_eq!(http_key(None), "v1/*/@rpc/netring/http?top=50");
         // Traffic-matrix / service-map channel (#122).
-        assert_eq!(matrix_key(None), "zensight/v1/*/@rpc/netring/matrix?top=50");
+        assert_eq!(matrix_key(None), "v1/*/@rpc/netring/matrix?top=50");
         // Capture-to-disk index channel (#327).
-        assert_eq!(captures_key(None), "zensight/v1/*/@rpc/netring/captures");
+        assert_eq!(captures_key(None), "v1/*/@rpc/netring/captures");
         // The device drill-down targets one host's concrete procedure key.
         assert_eq!(
             flows_key(Some("h-3fa9c2d41b7e")),
-            "zensight/v1/h-3fa9c2d41b7e/@rpc/netring/flows"
+            "v1/h-3fa9c2d41b7e/@rpc/netring/flows"
         );
     }
 

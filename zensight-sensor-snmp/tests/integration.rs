@@ -34,7 +34,7 @@ fn test_snmp_key_expressions() {
     let sys_uptime = format!("{prefix}/router01/system/sysUpTime");
     assert_eq!(
         sys_uptime,
-        format!("zensight/v1/{origin}/telemetry/snmp/router01/system/sysUpTime")
+        format!("v1/{origin}/telemetry/snmp/router01/system/sysUpTime")
     );
 }
 

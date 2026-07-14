@@ -85,8 +85,13 @@ async fn main() {
             };
             *v1_log.lock().unwrap().entry(bucket).or_default() += 1;
 
-            if let Some(idx) = key.find("v1/")
-                && let Ok(parsed) = zensight_keyspace::grammar::parse(&key[idx..])
+            // The probe is deliberately UN-namespaced (RFC 09 §5: a debug tool
+            // spells full keys, because the honest view of the wire is the whole
+            // point of it), so it strips the base explicitly rather than hunting
+            // for "v1/" with a substring search — which would also match a base
+            // that happened to contain it (#466).
+            if let Some(parsed) =
+                zensight_common::keyexpr::parse_full_key(zensight_keyspace::DEFAULT_BASE, key)
                 && matches!(
                     parsed.class,
                     zensight_keyspace::grammar::ClassOrPlane::Class(

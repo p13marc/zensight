@@ -3,6 +3,14 @@
   // Zenoh connection settings
   zenoh: {
     mode: "peer",
+    // namespace: "zensight",       // the deployment base (#466). Set as the Zenoh
+                                    // session namespace: the runtime prefixes it onto
+                                    // every key, strips it on ingress, and filters
+                                    // traffic from other deployments. App code never
+                                    // spells it. Change it only to isolate a second
+                                    // deployment on one network (or via
+                                    // ZENSIGHT_ZENOH_NAMESPACE).
+
     // connect: ["tcp/localhost:7447"],  // Uncomment for client mode
   },
 

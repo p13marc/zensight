@@ -15,6 +15,12 @@
 // `zensight_common::command::artifact_{store,tree}_prefix` derive). Chunks
 // dedupe per origin; the Tier-1 `@blob/artifact` chunks are deliberately NOT
 // stored — they are one-shot deliveries owned by the artifact channel.
+//
+// KEYS HERE ARE **FULL**, AND THAT IS CORRECT (#466, RFC 09 §0).
+// Applications set the deployment base (`zensight`) as their Zenoh session
+// `namespace` and never spell it — but a *router* has no namespace, so what
+// reaches these storages is the full `zensight/v1/...` key. Do not "fix" these
+// selectors to be base-relative: they would match nothing.
 {
   mode: "router",
 

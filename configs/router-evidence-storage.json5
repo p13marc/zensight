@@ -9,6 +9,12 @@
 //
 // Requires the storage-manager + filesystem-backend plugins (shipped with a
 // standard zenohd build): zenoh-plugin-storage-manager, zenoh-backend-fs.
+//
+// KEYS HERE ARE **FULL**, AND THAT IS CORRECT (#466, RFC 09 §0).
+// Applications set the deployment base (`zensight`) as their Zenoh session
+// `namespace` and never spell it — but a *router* has no namespace, so what
+// reaches these storages is the full `zensight/v1/...` key. Do not "fix" these
+// selectors to be base-relative: they would match nothing.
 {
   mode: "router",
 

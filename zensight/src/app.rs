@@ -265,6 +265,10 @@ impl ZenSight {
             connect: persistent.zenoh_connect.clone(),
             listen: persistent.zenoh_listen.clone(),
             scouting: true,
+            // The deployment base (#466) is not a GUI setting: it is the
+            // namespace every participant must agree on, so it comes from the
+            // default / `ZENSIGHT_ZENOH_NAMESPACE`, not from a text box.
+            ..Default::default()
         }
         .with_env_overrides();
         let link = crate::subscription::LinkConfig {
@@ -5688,7 +5692,7 @@ impl ZenSight {
                     let Ok(sample) = reply.result() else { continue };
                     // The concrete key that answered carries the origin.
                     let Some(parsed) =
-                        zensight_common::keyexpr::parse_wire_key(sample.key_expr().as_str())
+                        zensight_common::keyexpr::parse_key(sample.key_expr().as_str())
                     else {
                         continue;
                     };
@@ -6696,6 +6700,7 @@ impl ZenSight {
                 connect: self.settings.connect_endpoints(),
                 listen: self.settings.listen_endpoints(),
                 scouting: true,
+                ..Default::default()
             },
             scope: self.settings.scope_entries(),
             profile: self.settings.link_profile,

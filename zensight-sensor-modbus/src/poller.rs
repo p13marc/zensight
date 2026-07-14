@@ -384,12 +384,12 @@ mod tests {
     fn test_build_key_expr() {
         assert_eq!(
             build_key_expr(
-                "zensight/v1/h-3fa9c2d41b7e/telemetry/modbus",
+                "v1/h-3fa9c2d41b7e/telemetry/modbus",
                 "plc01",
                 "holding",
                 "temperature"
             ),
-            "zensight/v1/h-3fa9c2d41b7e/telemetry/modbus/plc01/holding/temperature"
+            "v1/h-3fa9c2d41b7e/telemetry/modbus/plc01/holding/temperature"
         );
     }
 

@@ -166,7 +166,7 @@ mod tests {
         // running the same producer never collide (RFC 04 §5).
         let ctx = crate::v1::V1Context::for_producer("snmp");
         let sensor_key = ctx.alive_key();
-        assert!(sensor_key.starts_with("zensight/v1/h-"), "{sensor_key}");
+        assert!(sensor_key.starts_with("v1/h-"), "{sensor_key}");
         assert!(sensor_key.ends_with("/state/snmp/alive"), "{sensor_key}");
 
         let device_key = ctx.device_alive_key("router01");

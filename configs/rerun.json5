@@ -43,7 +43,7 @@
     // Narrow the telemetry subscription
     // (default "zensight/v1/*/telemetry/**" — the v1 class selector). The
     // alert/health/entity subscribers are separate and unaffected.
-    // key_expr: "zensight/v1/*/telemetry/sysinfo/**",
+    // key_expr: "v1/*/telemetry/sysinfo/**",
 
     // Only include these protocols (empty = all)
     // include_protocols: ["sysinfo", "netlink", "netring"],

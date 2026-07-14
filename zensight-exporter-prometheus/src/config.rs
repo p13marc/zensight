@@ -371,7 +371,7 @@ mod tests {
                 cleanup_interval_secs: 30
             },
             filters: {
-                key_expr: "zensight/v1/*/telemetry/netring/**",
+                key_expr: "v1/*/telemetry/netring/**",
                 include_protocols: ["snmp", "sysinfo"],
                 exclude_metrics: ["**/debug/**"]
             },
@@ -397,7 +397,7 @@ mod tests {
         assert_eq!(config.filters.include_protocols, vec!["snmp", "sysinfo"]);
         assert_eq!(
             config.filters.key_expr.as_deref(),
-            Some("zensight/v1/*/telemetry/netring/**")
+            Some("v1/*/telemetry/netring/**")
         );
         assert_eq!(config.logging.level, "debug");
         assert_eq!(config.logging.format, LogFormat::Json);

@@ -3,33 +3,43 @@ use crate::telemetry::Protocol;
 use zensight_keyspace::grammar::{self, Class, ClassOrPlane, Origin, StructuralKey};
 use zensight_keyspace::registry::{self, AnySubject};
 
-/// Default key expression prefix for all ZenSight telemetry.
-pub const KEY_PREFIX: &str = "zensight";
+// ---------------------------------------------------------------------------
+// Parsing: base-relative for applications, full-key for un-namespaced tools.
+//
+// Every ZenSight session sets the deployment base as its Zenoh `namespace`
+// (#466, RFC 09 §0), so the session has already stripped it by the time a
+// sample reaches application code: what a subscriber callback sees is `v1/…`.
+// Applications therefore parse with [`parse_key`].
+//
+// Two kinds of party legitimately see the FULL key and must say so explicitly:
+// router-side artifacts (storages, ACL) and un-namespaced debug tools — zenctl
+// and the `v1_probe` example, which are un-namespaced *on purpose*, because the
+// honest view of the wire is the whole point of a debug tool (RFC 09 §5). They
+// parse with [`parse_full_key`], passing the base they were configured with.
+//
+// The two are deliberately different function names rather than one tolerant
+// parser. A parser that accepts both would silently accept a full key from a
+// namespaced session — which is exactly the key that will never match anything.
+// ---------------------------------------------------------------------------
 
-/// Structurally parse a key **as it appears on the wire** (RFC 03).
-///
-/// [`grammar::parse`] is base-relative — the base is meant to be the Zenoh
-/// session namespace (RFC 03 §1.1), so no key the keyspace crate builds
-/// contains it — but keys on the wire still carry `zensight/` because we do not
-/// set the namespace yet (issue #466). This is the single place that bridges
-/// the two; when #466 lands, it becomes a straight call to [`grammar::parse`].
+/// Structurally parse a **base-relative** key (RFC 03) — the form every
+/// namespaced session sees.
 ///
 /// Consumers should reach for this instead of hand-rolling `split('/')`:
 /// positional re-parsing of keys is exactly what the registry was built to
 /// delete (RFC 08 §1, issue #475).
-pub fn parse_wire_key(key: &str) -> Option<StructuralKey> {
-    let rel = key.strip_prefix(KEY_PREFIX)?.strip_prefix('/')?;
-    grammar::parse(rel).ok()
+pub fn parse_key(key: &str) -> Option<StructuralKey> {
+    grammar::parse(key).ok()
 }
 
-/// Parse a wire key and refine its subject tail through the registry (RFC 08
-/// §1's *parse* direction). Returns the producer (or service) base name
+/// Parse a base-relative key and refine its subject tail through the registry
+/// (RFC 08 §1's *parse* direction). Returns the producer (or service) base name
 /// alongside the refined subject.
 ///
 /// `None` when the key is not a v1 data key, or when the subject is not
 /// registered — "a subject that is not registered does not exist".
-pub fn refine_wire_key(key: &str) -> Option<(StructuralKey, String, AnySubject)> {
-    let parsed = parse_wire_key(key)?;
+pub fn refine_key(key: &str) -> Option<(StructuralKey, String, AnySubject)> {
+    let parsed = parse_key(key)?;
     let ClassOrPlane::Class(class) = parsed.class else {
         return None;
     };
@@ -48,16 +58,55 @@ pub fn refine_wire_key(key: &str) -> Option<(StructuralKey, String, AnySubject)>
     Some((parsed, name, subject))
 }
 
-/// Whether a wire key carries a [`crate::TelemetryPoint`] — i.e. is a v1
-/// telemetry-class key on a host origin.
+/// Structurally parse a **full** key as it appears on the wire, given the
+/// deployment base.
+///
+/// For un-namespaced observers only (`zenctl`, `v1_probe`). A namespaced
+/// session must use [`parse_key`] — it never sees the base.
+///
+/// `None` when the key belongs to another deployment (a different base), which
+/// for an observer is the meaningful answer rather than an error.
+pub fn parse_full_key(base: &str, key: &str) -> Option<StructuralKey> {
+    parse_key(grammar::strip_base(base, key)?)
+}
+
+/// [`refine_key`] over a full wire key. See [`parse_full_key`].
+pub fn refine_full_key(base: &str, key: &str) -> Option<(StructuralKey, String, AnySubject)> {
+    refine_key(grammar::strip_base(base, key)?)
+}
+
+/// Whether a base-relative key carries a [`crate::TelemetryPoint`] — i.e. is a
+/// v1 telemetry-class key on a host origin.
 ///
 /// This replaces a positional 4-chunk gate that had been copy-pasted verbatim
 /// into both exporters.
 pub fn is_telemetry_key(key: &str) -> bool {
-    parse_wire_key(key).is_some_and(|k| {
+    parse_key(key).is_some_and(|k| {
         matches!(k.class, ClassOrPlane::Class(Class::Telemetry))
             && matches!(k.origin, Origin::Host(_))
     })
+}
+
+/// Validate a **config-supplied** key expression.
+///
+/// Config selectors are base-relative like everything else (#466): the session
+/// sets the base as its namespace, so a config carrying a full key
+/// (`zensight/v1/*/telemetry/**`) would be re-prefixed on egress to
+/// `zensight/zensight/v1/…` and match nothing at all — silently, with a
+/// perfectly healthy-looking session and an empty dashboard.
+///
+/// That is the failure this rejects at startup, where it is still legible.
+pub fn validate_relative_selector(ke: &str) -> std::result::Result<(), String> {
+    let base = zensight_keyspace::DEFAULT_BASE;
+    if let Some(rel) = grammar::strip_base(base, ke) {
+        return Err(format!(
+            "key expression {ke:?} spells the deployment base. Since #466 the session sets \
+             {base:?} as its Zenoh namespace and every key is base-relative — write {rel:?}."
+        ));
+    }
+    zenoh::key_expr::KeyExpr::try_from(ke)
+        .map(|_| ())
+        .map_err(|e| format!("invalid key expression {ke:?}: {e}"))
 }
 
 /// Build the v1 telemetry class selector (all producers, all origins).
@@ -66,12 +115,12 @@ pub fn is_telemetry_key(key: &str) -> bool {
 /// ```
 /// use zensight_common::keyexpr::all_telemetry_wildcard;
 ///
-/// assert_eq!(all_telemetry_wildcard(), "zensight/v1/*/telemetry/**");
+/// assert_eq!(all_telemetry_wildcard(), "v1/*/telemetry/**");
 /// ```
 pub fn all_telemetry_wildcard() -> String {
     // v1 (RFC 04): the telemetry class selector — nothing to discard
     // client-side (incumbent pain P6 retired).
-    format!("{}/v1/*/telemetry/**", KEY_PREFIX)
+    "v1/*/telemetry/**".to_string()
 }
 
 /// Caller-side fleet procedure selector (RFC 05 §2): GET
@@ -79,7 +128,7 @@ pub fn all_telemetry_wildcard() -> String {
 /// the producer. Callers MUST use query target `All` (RFC 05 §2.1) —
 /// `BestMatching` can short-circuit the fan-in.
 pub fn fleet_rpc_key(producer: &str, procedure: &str) -> String {
-    format!("{}/v1/*/@rpc/{}/{}", KEY_PREFIX, producer, procedure)
+    format!("v1/*/@rpc/{}/{}", producer, procedure)
 }
 
 /// Caller-side fleet write selector: the `<topic>/set` procedure fleet-wide.
@@ -93,7 +142,7 @@ pub fn fleet_command_key(producer: &str, topic: &str) -> String {
 /// (RFC 07 §2). Producers derive their own concrete prefix via
 /// [`crate::command::artifact_blob_prefix`].
 pub fn fleet_blob_prefix() -> String {
-    format!("{}/v1/*/@blob/artifact", KEY_PREFIX)
+    "v1/*/@blob/artifact".to_string()
 }
 
 /// Caller-side single-host procedure key (RFC 05 §2): GET
@@ -101,40 +150,36 @@ pub fn fleet_blob_prefix() -> String {
 /// host's producer — use when the origin is already known (e.g. a drill-down
 /// view), [`fleet_rpc_key`] otherwise.
 pub fn origin_rpc_key(origin: &str, producer: &str, procedure: &str) -> String {
-    format!(
-        "{}/v1/{}/@rpc/{}/{}",
-        KEY_PREFIX, origin, producer, procedure
-    )
+    format!("v1/{origin}/@rpc/{producer}/{procedure}")
 }
 
 /// Build a wildcard key expression for the whole fleet state plane.
 pub fn all_state_wildcard() -> String {
     // v1 (RFC 04): the whole fleet state plane, one selector.
-    format!("{}/v1/*/state/**", KEY_PREFIX)
+    "v1/*/state/**".to_string()
 }
 
 /// Build a wildcard key expression for all sensor health data.
 ///
-/// Matches: `zensight/v1/<origin>/state/<producer>/health`
+/// Matches: `<base>/v1/<origin>/state/<producer>/health`
 ///
 /// # Example
 /// ```
 /// use zensight_common::keyexpr::all_health_wildcard;
 ///
-/// assert_eq!(all_health_wildcard(), "zensight/v1/*/state/*/health");
+/// assert_eq!(all_health_wildcard(), "v1/*/state/*/health");
 /// ```
 pub fn all_health_wildcard() -> String {
-    format!("{}/v1/*/state/*/health", KEY_PREFIX)
+    "v1/*/state/*/health".to_string()
 }
 
 /// Build this host's v1 evidence key for one observed device (RFC 06 §4):
-/// `zensight/v1/<local-origin>/state/<sensor>/evidence/device/<device>`.
+/// `<base>/v1/<local-origin>/state/<sensor>/evidence/device/<device>`.
 /// The device chunk is slugged, so raw hostnames/IPs/MACs are safe inputs;
 /// consumers read the observed identity from the payload, not the key.
 pub fn host_evidence_key(sensor: &str, device: &str) -> String {
     format!(
-        "{}/v1/{}/state/{}/evidence/device/{}",
-        KEY_PREFIX,
+        "v1/{}/state/{}/evidence/device/{}",
         zensight_keyspace::context::host_id().as_str(),
         sensor,
         zensight_keyspace::slug::chunk_slug(device)
@@ -148,21 +193,20 @@ pub fn host_evidence_key(sensor: &str, device: &str) -> String {
 /// ```
 /// use zensight_common::keyexpr::all_evidence_wildcard;
 ///
-/// assert_eq!(all_evidence_wildcard(), "zensight/v1/*/state/*/evidence/**");
+/// assert_eq!(all_evidence_wildcard(), "v1/*/state/*/evidence/**");
 /// ```
 pub fn all_evidence_wildcard() -> String {
     // v1 (RFC 06 §4): evidence is ordinary per-origin state.
-    format!("{}/v1/*/state/*/evidence/**", KEY_PREFIX)
+    "v1/*/state/*/evidence/**".to_string()
 }
 
 /// Build this host's v1 name-observation key for one observed IP (#307,
 /// RFC 06 §4): the ip is slugified (`.`/`:` → `-`) so updates for the same
 /// IP replace in place:
-/// `zensight/v1/<local-origin>/state/<sensor>/evidence/names/<ip-slug>`.
+/// `<base>/v1/<local-origin>/state/<sensor>/evidence/names/<ip-slug>`.
 pub fn name_observation_key(sensor: &str, ip_slug: &str) -> String {
     format!(
-        "{}/v1/{}/state/{}/evidence/names/{}",
-        KEY_PREFIX,
+        "v1/{}/state/{}/evidence/names/{}",
         zensight_keyspace::context::host_id().as_str(),
         sensor,
         ip_slug
@@ -178,15 +222,15 @@ pub fn name_observation_key(sensor: &str, ip_slug: &str) -> String {
 ///
 /// assert_eq!(
 ///     all_name_evidence_wildcard(),
-///     "zensight/v1/*/state/*/evidence/names/*"
+///     "v1/*/state/*/evidence/names/*"
 /// );
 /// ```
 pub fn all_name_evidence_wildcard() -> String {
-    format!("{}/v1/*/state/*/evidence/names/*", KEY_PREFIX)
+    "v1/*/state/*/evidence/names/*".to_string()
 }
 
 /// Build the entity key for one resolved host, published by the correlator on
-/// `zensight/v1/@catalog/state/entity/<entity_id>` (RFC 06 §5).
+/// `<base>/v1/@catalog/state/entity/<entity_id>` (RFC 06 §5).
 ///
 /// # Example
 /// ```
@@ -194,18 +238,18 @@ pub fn all_name_evidence_wildcard() -> String {
 ///
 /// assert_eq!(
 ///     entity_key("h-0123456789ab"),
-///     "zensight/v1/@catalog/state/entity/h-0123456789ab"
+///     "v1/@catalog/state/entity/h-0123456789ab"
 /// );
 /// ```
 pub fn entity_key(entity_id: &str) -> String {
     // v1 (RFC 06 §5): a catalog conclusion under the verbatim service origin.
-    format!("{}/v1/@catalog/state/entity/{}", KEY_PREFIX, entity_id)
+    format!("v1/@catalog/state/entity/{}", entity_id)
 }
 
 /// Build the alias-record key (RFC 06 §5): old-id → entity-id re-pointing on
 /// merges/upgrades, published by the catalog as its own key family.
 pub fn alias_key(old_id: &str) -> String {
-    format!("{}/v1/@catalog/state/alias/{}", KEY_PREFIX, old_id)
+    format!("v1/@catalog/state/alias/{}", old_id)
 }
 
 /// Build a wildcard key expression for the whole entity keyspace — the
@@ -215,11 +259,11 @@ pub fn alias_key(old_id: &str) -> String {
 /// ```
 /// use zensight_common::keyexpr::all_entity_wildcard;
 ///
-/// assert_eq!(all_entity_wildcard(), "zensight/v1/@catalog/state/entity/*");
+/// assert_eq!(all_entity_wildcard(), "v1/@catalog/state/entity/*");
 /// ```
 pub fn all_entity_wildcard() -> String {
     // v1 (RFC 06 §5): the catalog's entity documents.
-    format!("{}/v1/@catalog/state/entity/*", KEY_PREFIX)
+    "v1/@catalog/state/entity/*".to_string()
 }
 
 /// Build the queryable key a late joiner GETs to seed the full current entity
@@ -229,19 +273,19 @@ pub fn all_entity_wildcard() -> String {
 /// ```
 /// use zensight_common::keyexpr::entities_query_key;
 ///
-/// assert_eq!(entities_query_key(), "zensight/v1/@catalog/state/entity/*");
+/// assert_eq!(entities_query_key(), "v1/@catalog/state/entity/*");
 /// ```
 pub fn entities_query_key() -> String {
     // v1 (RFC 05 §4): the seed IS the state selector — the catalog answers
     // it storage-shaped (one reply per entity on its concrete key).
-    format!("{}/v1/@catalog/state/entity/*", KEY_PREFIX)
+    "v1/@catalog/state/entity/*".to_string()
 }
 
 /// Build a catalog procedure key (RFC 06 §5): the catalog is a service
 /// origin, so its procedures ride `<base>/v1/@catalog/@rpc/<procedure>`
 /// with no producer chunk.
 pub fn catalog_rpc_key(procedure: &str) -> String {
-    format!("{}/v1/@catalog/@rpc/{}", KEY_PREFIX, procedure)
+    format!("v1/@catalog/@rpc/{}", procedure)
 }
 
 /// Build the queryable key for on-demand IP→name resolution (selector
@@ -252,7 +296,7 @@ pub fn catalog_rpc_key(procedure: &str) -> String {
 /// ```
 /// use zensight_common::keyexpr::names_query_key;
 ///
-/// assert_eq!(names_query_key(), "zensight/v1/@catalog/@rpc/names");
+/// assert_eq!(names_query_key(), "v1/@catalog/@rpc/names");
 /// ```
 pub fn names_query_key() -> String {
     // v1 (RFC 06 §5): on-demand name resolution is a catalog procedure.
@@ -267,40 +311,36 @@ pub fn names_query_key() -> String {
 /// ```
 /// use zensight_common::keyexpr::correlator_alive_key;
 ///
-/// assert_eq!(correlator_alive_key(), "zensight/v1/@catalog/state/alive");
+/// assert_eq!(correlator_alive_key(), "v1/@catalog/state/alive");
 /// ```
 pub fn correlator_alive_key() -> String {
     // v1 (RFC 04 §5): declared by the elected catalog owner only.
-    format!("{}/v1/@catalog/state/alive", KEY_PREFIX)
+    "v1/@catalog/state/alive".to_string()
 }
 
 /// Build a catalog ownership-claim token key (RFC 06 §5.3). Every candidate
 /// declares one; the lexically-lowest claim chunk wins the election.
 pub fn catalog_claim_key(zid: &str) -> String {
-    format!(
-        "{}/v1/@catalog/state/claim/{}",
-        KEY_PREFIX,
-        zid.to_ascii_lowercase()
-    )
+    format!("v1/@catalog/state/claim/{}", zid.to_ascii_lowercase())
 }
 
 /// The claim-set selector (liveliness) the election and standbys watch.
 pub fn catalog_claims_wildcard() -> String {
-    format!("{}/v1/@catalog/state/claim/*", KEY_PREFIX)
+    "v1/@catalog/state/claim/*".to_string()
 }
 
 /// Build a wildcard key expression for all sensor-emitted alerts.
 ///
-/// Matches: `zensight/v1/<origin>/state/<producer>/alert/<alert_key>`
+/// Matches: `<base>/v1/<origin>/state/<producer>/alert/<alert_key>`
 ///
 /// # Example
 /// ```
 /// use zensight_common::keyexpr::all_alerts_wildcard;
 ///
-/// assert_eq!(all_alerts_wildcard(), "zensight/v1/*/state/*/alert/*");
+/// assert_eq!(all_alerts_wildcard(), "v1/*/state/*/alert/*");
 /// ```
 pub fn all_alerts_wildcard() -> String {
-    format!("{}/v1/*/state/*/alert/*", KEY_PREFIX)
+    "v1/*/state/*/alert/*".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -323,27 +363,27 @@ pub fn all_alerts_wildcard() -> String {
 
 /// Every telemetry key published by one host.
 pub fn origin_telemetry_wildcard(origin: &str) -> String {
-    format!("{KEY_PREFIX}/v1/{origin}/telemetry/**")
+    format!("v1/{origin}/telemetry/**")
 }
 
 /// Every state key published by one host.
 pub fn origin_state_wildcard(origin: &str) -> String {
-    format!("{KEY_PREFIX}/v1/{origin}/state/**")
+    format!("v1/{origin}/state/**")
 }
 
 /// One host's firing alerts (the late-joiner seed GET).
 pub fn origin_alerts_wildcard(origin: &str) -> String {
-    format!("{KEY_PREFIX}/v1/{origin}/state/*/alert/*")
+    format!("v1/{origin}/state/*/alert/*")
 }
 
 /// One host's sensor liveliness tokens.
 pub fn origin_liveliness_expr(origin: &str) -> String {
-    format!("{KEY_PREFIX}/v1/{origin}/state/*/alive")
+    format!("v1/{origin}/state/*/alive")
 }
 
 /// One host's device liveliness tokens.
 pub fn origin_device_liveliness_expr(origin: &str) -> String {
-    format!("{KEY_PREFIX}/v1/{origin}/state/*/device/*/alive")
+    format!("v1/{origin}/state/*/device/*/alive")
 }
 
 /// The whole fleet's producer liveliness tokens — RFC 04 §5's "entire
@@ -359,20 +399,20 @@ pub fn origin_device_liveliness_expr(origin: &str) -> String {
 /// ```
 /// use zensight_common::keyexpr::all_liveliness_wildcard;
 ///
-/// assert_eq!(all_liveliness_wildcard(), "zensight/v1/*/state/*/alive");
+/// assert_eq!(all_liveliness_wildcard(), "v1/*/state/*/alive");
 /// ```
 pub fn all_liveliness_wildcard() -> String {
-    format!("{KEY_PREFIX}/v1/*/state/*/alive")
+    "v1/*/state/*/alive".to_string()
 }
 
 /// The whole fleet's device liveliness tokens (producers that track downstream
 /// devices — RFC 04 §5).
 pub fn all_device_liveliness_wildcard() -> String {
-    format!("{KEY_PREFIX}/v1/*/state/*/device/*/alive")
+    "v1/*/state/*/device/*/alive".to_string()
 }
 
 /// Build the v1 media-plane key for one video stream profile (RFC 07 §1):
-/// `zensight/v1/<origin>/@media/<producer>/<stream>/video/<codec>/<profile>`.
+/// `<base>/v1/<origin>/@media/<producer>/<stream>/video/<codec>/<profile>`.
 ///
 /// `@media` is an `@`-verbatim plane chunk — invisible to the telemetry and
 /// state class selectors (D2). Samples on this key are **opaque**: raw
@@ -389,7 +429,7 @@ pub fn all_device_liveliness_wildcard() -> String {
 ///
 /// assert_eq!(
 ///     media_video_key(Protocol::Parallax, "h-3fa9c2d41b7e", "cam0", "h264", "main"),
-///     "zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main"
+///     "v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main"
 /// );
 /// ```
 pub fn media_video_key(
@@ -400,8 +440,7 @@ pub fn media_video_key(
     profile: &str,
 ) -> String {
     format!(
-        "{}/v1/{}/@media/{}/{}/video/{}/{}",
-        KEY_PREFIX,
+        "v1/{}/@media/{}/{}/video/{}/{}",
         origin,
         protocol.as_str(),
         stream,
@@ -411,7 +450,7 @@ pub fn media_video_key(
 }
 
 /// Build the v1 media-plane key for one stream's JPEG preview (RFC 07 §1):
-/// `zensight/v1/<origin>/@media/<producer>/<stream>/preview/jpeg`.
+/// `<base>/v1/<origin>/@media/<producer>/<stream>/preview/jpeg`.
 ///
 /// Same opaque, `@`-verbatim plane as [`media_video_key`] (no serialization
 /// envelope, `QosClass::LiveVideo`); control rides the `@rpc` plane.
@@ -423,13 +462,12 @@ pub fn media_video_key(
 ///
 /// assert_eq!(
 ///     media_preview_key(Protocol::Parallax, "h-3fa9c2d41b7e", "cam0"),
-///     "zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
+///     "v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
 /// );
 /// ```
 pub fn media_preview_key(protocol: Protocol, origin: &str, stream: &str) -> String {
     format!(
-        "{}/v1/{}/@media/{}/{}/preview/jpeg",
-        KEY_PREFIX,
+        "v1/{}/@media/{}/{}/preview/jpeg",
         origin,
         protocol.as_str(),
         stream
@@ -445,7 +483,7 @@ fn ip_slug(ip: &str) -> String {
 }
 
 /// Build the durable historical passive-DNS key for one IP (#310):
-/// `zensight/v1/@catalog/state/pdns/<ip-slug>`.
+/// `<base>/v1/@catalog/state/pdns/<ip-slug>`.
 ///
 /// `@catalog` is a verbatim origin — the `*` selectors never match it (D4) —
 /// so a durable IP↔name record is invisible to BOTH the telemetry class
@@ -461,12 +499,12 @@ fn ip_slug(ip: &str) -> String {
 /// ```
 /// use zensight_common::keyexpr::pdns_key;
 ///
-/// assert_eq!(pdns_key("10.0.0.9"), "zensight/v1/@catalog/state/pdns/10-0-0-9");
-/// assert_eq!(pdns_key("2001:db8::1"), "zensight/v1/@catalog/state/pdns/2001-db8--1");
+/// assert_eq!(pdns_key("10.0.0.9"), "v1/@catalog/state/pdns/10-0-0-9");
+/// assert_eq!(pdns_key("2001:db8::1"), "v1/@catalog/state/pdns/2001-db8--1");
 /// ```
 pub fn pdns_key(ip: &str) -> String {
     // v1 (RFC 06 §5.2): catalog state; the historical tier is a storage choice.
-    format!("{}/v1/@catalog/state/pdns/{}", KEY_PREFIX, ip_slug(ip))
+    format!("v1/@catalog/state/pdns/{}", ip_slug(ip))
 }
 
 /// Build the wildcard key for the whole historical passive-DNS tier
@@ -477,10 +515,10 @@ pub fn pdns_key(ip: &str) -> String {
 /// ```
 /// use zensight_common::keyexpr::all_pdns_wildcard;
 ///
-/// assert_eq!(all_pdns_wildcard(), "zensight/v1/@catalog/state/pdns/**");
+/// assert_eq!(all_pdns_wildcard(), "v1/@catalog/state/pdns/**");
 /// ```
 pub fn all_pdns_wildcard() -> String {
-    format!("{}/v1/@catalog/state/pdns/**", KEY_PREFIX)
+    "v1/@catalog/state/pdns/**".to_string()
 }
 
 #[cfg(test)]
@@ -506,8 +544,7 @@ mod tests {
         // ...and a telemetry rollup key IS on the bus (logs metrics keep
         // their legacy `logs/` head chunk, hence the doubled chunk).
         let rollup =
-            KeyExpr::try_from("zensight/v1/h-3fa9c2d41b7e/telemetry/logs/logs/by_severity/error")
-                .unwrap();
+            KeyExpr::try_from("v1/h-3fa9c2d41b7e/telemetry/logs/logs/by_severity/error").unwrap();
         assert!(telemetry.intersects(&rollup));
     }
 
@@ -588,7 +625,7 @@ mod tests {
         use crate::command::{command_key, query_key, status_key};
         let producer = "netring";
         let cmd = command_key(producer, "stream");
-        assert!(cmd.starts_with("zensight/v1/h-"), "{cmd}");
+        assert!(cmd.starts_with("v1/h-"), "{cmd}");
         assert!(cmd.ends_with("/@rpc/netring/stream/set"), "{cmd}");
         assert!(query_key(producer, "streams").ends_with("/@rpc/netring/streams"));
         assert_eq!(
@@ -599,6 +636,6 @@ mod tests {
 
     #[test]
     fn test_all_telemetry_wildcard() {
-        assert_eq!(all_telemetry_wildcard(), "zensight/v1/*/telemetry/**");
+        assert_eq!(all_telemetry_wildcard(), "v1/*/telemetry/**");
     }
 }

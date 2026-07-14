@@ -181,12 +181,12 @@ mod tests {
         // Mapped origin → the drilled-in host's concrete procedure key.
         assert_eq!(
             processes_key(Some("h-3fa9c2d41b7e"), ProcessSort::Cpu),
-            "zensight/v1/h-3fa9c2d41b7e/@rpc/sysinfo/processes?sort=cpu&top=50"
+            "v1/h-3fa9c2d41b7e/@rpc/sysinfo/processes?sort=cpu&top=50"
         );
         // No mapping yet → the fleet selector fallback.
         assert_eq!(
             processes_key(None, ProcessSort::Mem),
-            "zensight/v1/*/@rpc/sysinfo/processes?sort=mem&top=50"
+            "v1/*/@rpc/sysinfo/processes?sort=mem&top=50"
         );
         assert_eq!(ProcessSort::Io.token(), "io");
     }

@@ -35,18 +35,17 @@ use crate::sink::ControlItem;
 /// How long the late-joiner entity seed GET waits for the correlator.
 pub const ENTITY_SEED_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Whether a key carries a [`TelemetryPoint`] — v1: exactly the telemetry
-/// class keys (`zensight/v1/<origin>/telemetry/…`). With the class selector
-/// as the subscription this is belt-and-braces (a narrowed `filters.key_expr`
-/// override could still point anywhere). Local copy by design — the exporters
-/// each carry one too; shared extraction is deferred (03-sink-design.md §2).
-pub(crate) fn is_telemetry_key(key: &str) -> bool {
-    let mut chunks = key.split('/');
-    chunks.next() == Some("zensight")
-        && chunks.next() == Some("v1")
-        && chunks.next().is_some_and(|origin| !origin.starts_with('@'))
-        && chunks.next() == Some("telemetry")
-}
+/// Whether a key carries a [`TelemetryPoint`] — the telemetry class keys on a
+/// host origin. With the class selector as the subscription this is
+/// belt-and-braces (a narrowed `filters.key_expr` override could still point
+/// anywhere).
+///
+/// This was a third hand-rolled positional `split('/')` copy, kept local
+/// because "the exporters each carry one too". They no longer do — both now
+/// use this one — and #466 is what forced the issue: the copy asserted the base
+/// chunk by hand, and on a namespaced session there is no base chunk to assert.
+/// A registry-backed parser has no positions to get wrong (issue #475).
+pub(crate) use zensight_common::keyexpr::is_telemetry_key;
 
 /// Subscriber-side counters (shared, readable while running).
 #[derive(Debug, Default)]
@@ -313,28 +312,22 @@ mod tests {
     #[test]
     fn telemetry_key_guard() {
         assert!(is_telemetry_key(
-            "zensight/v1/h-3fa9c2d41b7e/telemetry/netlink/iface/eth0/rx_bytes"
+            "v1/h-3fa9c2d41b7e/telemetry/netlink/iface/eth0/rx_bytes"
         ));
         assert!(!is_telemetry_key(
-            "zensight/v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1"
+            "v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1"
         ));
-        assert!(!is_telemetry_key(
-            "zensight/v1/h-3fa9c2d41b7e/state/sysinfo/health"
-        ));
-        assert!(!is_telemetry_key(
-            "zensight/v1/@catalog/state/entity/h-0123456789ab"
-        ));
+        assert!(!is_telemetry_key("v1/h-3fa9c2d41b7e/state/sysinfo/health"));
+        assert!(!is_telemetry_key("v1/@catalog/state/entity/h-0123456789ab"));
         assert!(!is_telemetry_key("zensight/legacy/host/cpu/usage"));
         // The media plane rides a verbatim `@media` chunk (#359).
         assert!(!is_telemetry_key(
-            "zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main"
+            "v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main"
         ));
-        assert!(!is_telemetry_key(
-            "zensight/v1/@catalog/state/pdns/10-0-0-9"
-        ));
+        assert!(!is_telemetry_key("v1/@catalog/state/pdns/10-0-0-9"));
         // ...while stream *stats* are ordinary telemetry.
         assert!(is_telemetry_key(
-            "zensight/v1/h-3fa9c2d41b7e/telemetry/parallax/cam0/stats/fps"
+            "v1/h-3fa9c2d41b7e/telemetry/parallax/cam0/stats/fps"
         ));
     }
 
@@ -346,8 +339,7 @@ mod tests {
     fn alerts_need_their_own_subscription() {
         use zenoh::key_expr::KeyExpr;
 
-        let alert = KeyExpr::new("zensight/v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1")
-            .unwrap();
+        let alert = KeyExpr::new("v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1").unwrap();
         let telemetry = KeyExpr::new(all_telemetry_wildcard()).unwrap();
         let alerts_sub = KeyExpr::new(all_alerts_wildcard()).unwrap();
 
@@ -369,7 +361,7 @@ mod tests {
 
         let telemetry = KeyExpr::new(all_telemetry_wildcard()).unwrap();
 
-        let health = KeyExpr::new("zensight/v1/h-3fa9c2d41b7e/state/sysinfo/health").unwrap();
+        let health = KeyExpr::new("v1/h-3fa9c2d41b7e/state/sysinfo/health").unwrap();
         assert!(!telemetry.intersects(&health));
         assert!(
             KeyExpr::new(all_health_wildcard())
@@ -380,7 +372,7 @@ mod tests {
         // v1: the entity plane sits under the verbatim `@catalog` origin —
         // structurally invisible to the telemetry firehose (RFC D4), so the
         // dedicated subscriber is a keyexpr necessity, not just a filter.
-        let entity = KeyExpr::new("zensight/v1/@catalog/state/entity/h-0123456789ab").unwrap();
+        let entity = KeyExpr::new("v1/@catalog/state/entity/h-0123456789ab").unwrap();
         assert!(!telemetry.intersects(&entity));
         assert!(!is_telemetry_key(entity.as_str()));
         assert!(

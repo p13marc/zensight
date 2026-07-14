@@ -151,7 +151,7 @@ pub struct BandwidthRecord {
 /// use zensight_common::Protocol;
 /// assert_eq!(
 ///     bandwidth_query_key(Protocol::Netlink),
-///     "zensight/v1/*/@rpc/netlink/bandwidth"
+///     "v1/*/@rpc/netlink/bandwidth"
 /// );
 /// ```
 pub fn bandwidth_query_key(protocol: Protocol) -> String {
@@ -215,7 +215,7 @@ mod tests {
     fn query_key_is_the_fleet_procedure_selector() {
         assert_eq!(
             bandwidth_query_key(Protocol::Netlink),
-            "zensight/v1/*/@rpc/netlink/bandwidth"
+            "v1/*/@rpc/netlink/bandwidth"
         );
     }
 }

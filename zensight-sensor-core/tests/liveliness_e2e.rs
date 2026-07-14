@@ -15,7 +15,7 @@ use zenoh::sample::SampleKind;
 use zensight_sensor_core::LivelinessManager;
 
 /// The frontend's host-scoped sensor-liveliness pattern.
-const FRONTEND_SENSOR_LIVELINESS_EXPR: &str = "zensight/v1/*/state/*/alive";
+const FRONTEND_SENSOR_LIVELINESS_EXPR: &str = "v1/*/state/*/alive";
 
 /// Scouting off so concurrent tests can't cross-contaminate; the two peers
 /// are wired together with an explicit listen/connect endpoint instead.

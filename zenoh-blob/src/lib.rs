@@ -131,8 +131,8 @@ mod key_tests {
     #[test]
     fn key_builders() {
         assert_eq!(
-            manifest_key("zensight/v1/h-0011223344ff/@blob/artifact", "A"),
-            "zensight/v1/h-0011223344ff/@blob/artifact/A/manifest"
+            manifest_key("v1/h-0011223344ff/@blob/artifact", "A"),
+            "v1/h-0011223344ff/@blob/artifact/A/manifest"
         );
         assert_eq!(chunk_key("p", "A", 7), "p/A/chunk/7");
         assert_eq!(download_selector("p", "A", 3), "p/A/**?from=3");

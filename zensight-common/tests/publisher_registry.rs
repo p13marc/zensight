@@ -27,25 +27,25 @@ async fn declares_once_per_key_and_reuses() {
 
     // Two puts on the same key → one declared publisher.
     registry
-        .put("zensight/test/a", b"one".to_vec(), QosClass::Telemetry)
+        .put("pubreg-test/a", b"one".to_vec(), QosClass::Telemetry)
         .await
         .unwrap();
     registry
-        .put("zensight/test/a", b"two".to_vec(), QosClass::Telemetry)
+        .put("pubreg-test/a", b"two".to_vec(), QosClass::Telemetry)
         .await
         .unwrap();
     assert_eq!(registry.len().await, 1, "same key must reuse one publisher");
 
     // A distinct key declares a second publisher.
     registry
-        .put("zensight/test/b", b"x".to_vec(), QosClass::Alert)
+        .put("pubreg-test/b", b"x".to_vec(), QosClass::Alert)
         .await
         .unwrap();
     assert_eq!(registry.len().await, 2);
 
     // Delete on an already-declared key reuses its publisher (no growth).
     registry
-        .delete("zensight/test/a", QosClass::Alert)
+        .delete("pubreg-test/a", QosClass::Alert)
         .await
         .unwrap();
     assert_eq!(registry.len().await, 2);

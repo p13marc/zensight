@@ -74,6 +74,10 @@ enum TopicCmd {
     Info {
         /// A concrete wire key, as it appears on the bus.
         key: String,
+        /// The deployment base (#466) — the key you paste in carries it,
+        /// because what you copied off the wire is the FULL key.
+        #[arg(long, default_value = zensight_keyspace::DEFAULT_BASE)]
+        base: String,
     },
     /// Subscribe and print decoded samples (on-bus).
     Echo {
@@ -155,6 +159,15 @@ struct BusArgs {
     /// Seconds to wait for replies / to watch the bus.
     #[arg(long, default_value_t = 5)]
     timeout: u64,
+    /// The deployment base — the first chunk(s) of every key on the wire.
+    ///
+    /// Applications set this as their Zenoh session `namespace` and never
+    /// spell it (#466). `zenctl` deliberately does **not**: a debug tool runs
+    /// un-namespaced so it sees the wire as it really is, including traffic
+    /// from outside the deployment (RFC 09 §5) — which is what lets it spot a
+    /// leak. So it has to be told what the base is.
+    #[arg(long, default_value = zensight_keyspace::DEFAULT_BASE)]
+    base: String,
 }
 
 impl BusArgs {
@@ -163,6 +176,11 @@ impl BusArgs {
     }
     fn timeout(&self) -> Duration {
         Duration::from_secs(self.timeout)
+    }
+    /// Compose a base-relative key from `zensight-common` into the full wire
+    /// key this un-namespaced tool must actually use.
+    fn wire(&self, relative: &str) -> String {
+        zensight_keyspace::grammar::with_base(&self.base, relative)
     }
 }
 
@@ -180,7 +198,7 @@ async fn main() -> Result<()> {
         Command::Topic(TopicCmd::List { producer, class }) => {
             offline::topic_list(producer.as_deref(), class.as_deref())
         }
-        Command::Topic(TopicCmd::Info { key }) => offline::topic_info(&key),
+        Command::Topic(TopicCmd::Info { key, base }) => offline::topic_info(&base, &key),
         Command::Topic(TopicCmd::Echo {
             selector,
             raw,
@@ -218,7 +236,7 @@ async fn main() -> Result<()> {
 /// `node list` — the liveliness roster (RFC 04 §5).
 async fn cmd_node_list(args: &BusArgs) -> Result<()> {
     let session = args.session().await?;
-    let roster = bus::roster(&session, args.timeout()).await?;
+    let roster = bus::roster(&session, &args.base, args.timeout()).await?;
 
     if roster.is_empty() {
         println!("no live producers.");
@@ -262,7 +280,7 @@ async fn cmd_echo(selector: &str, raw: bool, count: usize, args: &BusArgs) -> Re
         if raw {
             println!("{key}\n  {}", hex(&bytes));
         } else {
-            match render(&key, &bytes) {
+            match render(&args.base, &key, &bytes) {
                 Ok(line) => println!("{key}\n  {line}"),
                 Err(why) => println!("{key}\n  <{why}>"),
             }
@@ -278,8 +296,8 @@ async fn cmd_echo(selector: &str, raw: bool, count: usize, args: &BusArgs) -> Re
 
 /// Wire key → subject → payload type → value, with nothing producer-specific
 /// compiled in. This is the whole point of the registry's parse direction.
-fn render(key: &str, bytes: &[u8]) -> std::result::Result<String, String> {
-    let (_, _, subject) = zensight_common::keyexpr::refine_wire_key(key)
+fn render(base: &str, key: &str, bytes: &[u8]) -> std::result::Result<String, String> {
+    let (_, _, subject) = zensight_common::keyexpr::refine_full_key(base, key)
         .ok_or_else(|| "unregistered subject — not in this build's registry".to_string())?;
     let value = zensight_common::decode_payload(subject.payload_type(), bytes)
         .map_err(|e| e.to_string())?;
@@ -304,10 +322,11 @@ async fn cmd_service_call(
     args: &BusArgs,
 ) -> Result<()> {
     // A service origin (`@catalog`) carries no producer chunk (RFC 03 §1.5).
+    // Un-namespaced tool ⇒ full keys, composed off the configured base (#466).
     let mut key = if origin.starts_with('@') {
-        format!("zensight/v1/{origin}/@rpc/{procedure}")
+        args.wire(&format!("v1/{origin}/@rpc/{procedure}"))
     } else {
-        format!("zensight/v1/{origin}/@rpc/{producer}/{procedure}")
+        args.wire(&format!("v1/{origin}/@rpc/{producer}/{procedure}"))
     };
     if !params.is_empty() {
         key.push('?');
@@ -324,7 +343,7 @@ async fn cmd_service_call(
 
     let session = args.session().await?;
     eprintln!("GET {key}");
-    let answers = bus::fleet_get(&session, &key, payload, args.timeout()).await?;
+    let answers = bus::fleet_get(&session, &args.base, &key, payload, args.timeout()).await?;
 
     if answers.is_empty() {
         // RFC 05 §3.1: "no reply" is not one condition, and callers "MUST NOT
@@ -369,7 +388,7 @@ struct FleetAnswerRef<'a> {
 /// slice this build compiled in (RFC 08 §6).
 async fn cmd_doctor(args: &BusArgs) -> Result<()> {
     let session = args.session().await?;
-    let roster = bus::roster(&session, args.timeout()).await?;
+    let roster = bus::roster(&session, &args.base, args.timeout()).await?;
 
     let mut findings = 0usize;
     let mut answered = 0usize;
@@ -384,7 +403,7 @@ async fn cmd_doctor(args: &BusArgs) -> Result<()> {
             zensight_common::fleet_rpc_key(name, "introspect")
         };
 
-        let answers = bus::fleet_get(&session, &key, None, args.timeout()).await?;
+        let answers = bus::fleet_get(&session, &args.base, &key, None, args.timeout()).await?;
         let local = zensight_keyspace::parse_slice(local_toml)
             .map_err(|e| anyhow::anyhow!("local slice for {name} does not parse: {e}"))?;
 

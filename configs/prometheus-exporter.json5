@@ -76,7 +76,7 @@
     // Narrow it to tame the firehose at the subscription — unwanted protocols
     // and the state/media planes never reach this exporter over the wire.
     // The state/*/alert/* subscriber is separate and unaffected.
-    // key_expr: "zensight/v1/*/telemetry/netring/**",
+    // key_expr: "v1/*/telemetry/netring/**",
 
     // Only include these protocols (empty = all)
     // include_protocols: ["snmp", "sysinfo"],
