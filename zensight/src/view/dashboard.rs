@@ -206,6 +206,40 @@ pub(crate) fn status_rank(status: DeviceStatus) -> u8 {
 }
 
 impl DashboardState {
+    /// Resolve a human identity — a protocol and a host/device name — to the
+    /// device handle that carries it. **The consumer identity bridge** (#474,
+    /// RFC 06 §6).
+    ///
+    /// A name is not an origin, and no amount of string formatting turns one
+    /// into the other. Every consumer that starts from a name (an alert's
+    /// `source`, a cross-view pivot, a topology node) must *look the device up*
+    /// among the devices it has actually seen, and accept that the answer may be
+    /// `None`. Fabricating the handle instead is how the v1 drill-down outage
+    /// happened: the key was well-formed, matched nothing, and timed out in
+    /// silence.
+    ///
+    /// Two hosts *can* share a name. When they do, the lowest origin wins —
+    /// deterministically, so the UI does not flicker between them — and the
+    /// collision is logged. Picking a stable wrong answer beats picking a
+    /// different one every frame.
+    pub fn resolve_device(&self, protocol: Protocol, source: &str) -> Option<DeviceId> {
+        let mut matches: Vec<&DeviceId> = self
+            .devices
+            .keys()
+            .filter(|id| id.protocol == protocol && id.source == source)
+            .collect();
+        matches.sort_by(|a, b| a.origin.cmp(&b.origin));
+        if matches.len() > 1 {
+            tracing::warn!(
+                %protocol,
+                source,
+                origins = ?matches.iter().map(|id| &id.origin).collect::<Vec<_>>(),
+                "name collision: several origins publish this name; using the lowest"
+            );
+        }
+        matches.first().map(|id| (*id).clone())
+    }
+
     /// Ordered list of device ids matching the current filters, in render order.
     /// Used for device→device navigation on the detail view (#35).
     pub fn ordered_device_ids(&self) -> Vec<DeviceId> {
@@ -1407,14 +1441,14 @@ mod tests {
     fn create_test_state_with_devices(count: usize) -> DashboardState {
         let mut state = DashboardState::default();
         for i in 0..count {
-            let id = DeviceId::new(Protocol::Snmp, format!("device{:03}", i));
+            let id = DeviceId::fixture(Protocol::Snmp, format!("device{:03}", i));
             state.devices.insert(id.clone(), DeviceState::new(id));
         }
         state
     }
 
     fn device_with_status(source: &str, status: DeviceStatus) -> DeviceState {
-        let id = DeviceId::new(Protocol::Sysinfo, source);
+        let id = DeviceId::fixture(Protocol::Sysinfo, source);
         let mut d = DeviceState::new(id);
         d.sensor_status = status;
         d
@@ -1451,9 +1485,9 @@ mod tests {
         // #128: a single physical host with two sensor facets must count ONCE,
         // taking the worst facet's status — not once per protocol.
         let mut state = DashboardState::default();
-        let mut sys = DeviceState::new(DeviceId::new(Protocol::Sysinfo, "host1"));
+        let mut sys = DeviceState::new(DeviceId::fixture(Protocol::Sysinfo, "host1"));
         sys.sensor_status = DeviceStatus::Online;
-        let mut net = DeviceState::new(DeviceId::new(Protocol::Netlink, "host1"));
+        let mut net = DeviceState::new(DeviceId::fixture(Protocol::Netlink, "host1"));
         net.sensor_status = DeviceStatus::Offline;
         state.devices.insert(sys.id.clone(), sys);
         state.devices.insert(net.id.clone(), net);

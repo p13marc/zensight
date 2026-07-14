@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn the_flow_table_renders_fetched_records() {
-        let device_id = DeviceId::new(Protocol::Netflow, "router01");
+        let device_id = DeviceId::fixture(Protocol::Netflow, "router01");
         let mut state = DeviceDetailState::new(device_id);
         state
             .netflow_detail
@@ -528,7 +528,7 @@ mod tests {
     /// Before a fetch the view must offer one, not silently show an empty table.
     #[test]
     fn idle_offers_a_fetch() {
-        let device_id = DeviceId::new(Protocol::Netflow, "router01");
+        let device_id = DeviceId::fixture(Protocol::Netflow, "router01");
         let state = DeviceDetailState::new(device_id);
         let mut ui = iced_test::simulator(netflow_traffic_view(&state));
         assert!(ui.find("Fetch flows").is_ok());

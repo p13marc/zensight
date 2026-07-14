@@ -63,7 +63,7 @@ pub static DASHBOARD_SEARCH_ID: LazyLock<Id> = LazyLock::new(|| Id::new("dashboa
 pub static DEVICE_SEARCH_ID: LazyLock<Id> = LazyLock::new(|| Id::new("device-search"));
 
 use crate::entity::EntityStore;
-use crate::message::{DeviceId, Message};
+use crate::message::{DeviceId, Message, Reading};
 use crate::mock;
 use crate::subscription::{
     demo_subscription, keyboard_subscription, tick_subscription, zenoh_subscription,
@@ -172,11 +172,6 @@ pub struct ZenSight {
     theme: AppTheme,
     /// Sensor health snapshots, keyed by sensor name.
     sensor_health: std::collections::HashMap<String, HealthSnapshot>,
-    /// source (payload host label, e.g. hostname) → v1 origin id (`h-<12hex>`),
-    /// learned from health/registration/entity docs. The wire payloads keep
-    /// human-readable sources while keys are origin-scoped — this map is how
-    /// drill-down fetches target the right host's @rpc/@media keys.
-    origins: std::collections::HashMap<String, String>,
     /// Recent error reports per sensor (bounded ring), for the Sensors view.
     recent_errors: std::collections::HashMap<String, std::collections::VecDeque<ErrorReport>>,
     /// Known sensor instances, keyed by `<name>@<source>` (one sensor can run
@@ -291,7 +286,7 @@ impl ZenSight {
             dashboard.connected = true;
             dashboard.connection_state = crate::view::dashboard::ConnectionState::Connected;
             for point in mock::mock_environment() {
-                let device_id = DeviceId::from_telemetry(&point);
+                let device_id = DeviceId::from_telemetry(&point, crate::demo::demo_origin(&point));
                 let device_state = dashboard
                     .devices
                     .entry(device_id.clone())
@@ -388,7 +383,6 @@ impl ZenSight {
             demo_mode,
             theme,
             sensor_health: std::collections::HashMap::new(),
-            origins: std::collections::HashMap::new(),
             recent_errors: std::collections::HashMap::new(),
             known_sensors: std::collections::HashMap::new(),
             toasts: ToastState::default(),
@@ -733,8 +727,12 @@ impl ZenSight {
             }
 
             Message::TopologyViewDeviceDetail(node_id) => {
-                // Navigate to device detail view
-                if let Some(device_id) = self.topology.node_to_device_id(&node_id) {
+                // A topology node is a *host name*. Resolve it to a device
+                // handle instead of building one (#474) — the node knows which
+                // protocol to open, not which origin published it.
+                if let Some(protocol) = self.topology.node_primary_protocol(&node_id)
+                    && let Some(device_id) = self.dashboard.resolve_device(protocol, &node_id)
+                {
                     return ControlFlow::Break(self.select_device(device_id));
                 }
             }
@@ -1617,12 +1615,6 @@ impl ZenSight {
                 // One entry per sensor INSTANCE (`sensor@source`), not per
                 // protocol — N hosts running the same sensor each keep a card.
                 let key = sensor_instance_key(&snapshot.sensor, snapshot.source.as_deref());
-                if let (Some(hid), Some(src)) = (&snapshot.host_id, &snapshot.source) {
-                    self.origins.insert(src.clone(), hid.clone());
-                    // The Focus control (#476) is disabled until the origin is
-                    // known; this is where it usually becomes known.
-                    self.refresh_focus_state();
-                }
                 self.sensor_health.insert(key, snapshot);
             }
 
@@ -1650,10 +1642,6 @@ impl ZenSight {
             }
 
             Message::SensorInfoReceived(info) => {
-                if let Some(hid) = &info.host_id {
-                    self.origins.insert(info.source.clone(), hid.clone());
-                    self.refresh_focus_state();
-                }
                 self.known_sensors
                     .insert(format!("{}@{}", info.name, info.source), info);
             }
@@ -1716,12 +1704,6 @@ impl ZenSight {
             }
 
             Message::EntityReceived(entity) => {
-                if let Some(hid) = &entity.host_id {
-                    for member in &entity.members {
-                        self.origins.insert(member.source.clone(), hid.clone());
-                    }
-                    self.refresh_focus_state();
-                }
                 self.entities.upsert(entity);
                 self.rederive_entities();
             }
@@ -1835,22 +1817,30 @@ impl ZenSight {
                 self.set_sensor_liveliness(&protocol, source.as_deref(), false);
             }
 
-            Message::DeviceOnline(protocol, device_id) => {
-                tracing::debug!(protocol = %protocol, device = %device_id, "Device online (liveliness)");
+            Message::DeviceOnline {
+                protocol,
+                origin,
+                device,
+            } => {
+                tracing::debug!(protocol = %protocol, origin = %origin, device = %device, "Device online (liveliness)");
                 // Device came online - update its status if we're tracking it
                 if let Ok(proto) = protocol.parse::<Protocol>() {
-                    let dev_id = DeviceId::new(proto, &device_id);
+                    let dev_id = DeviceId::new(proto, origin, device);
                     if let Some(device) = self.dashboard.devices.get_mut(&dev_id) {
                         device.is_healthy = true;
                     }
                 }
             }
 
-            Message::DeviceOffline(protocol, device_id) => {
-                tracing::debug!(protocol = %protocol, device = %device_id, "Device offline (liveliness)");
+            Message::DeviceOffline {
+                protocol,
+                origin,
+                device,
+            } => {
+                tracing::debug!(protocol = %protocol, origin = %origin, device = %device, "Device offline (liveliness)");
                 // Device went offline - update its status if we're tracking it
                 if let Ok(proto) = protocol.parse::<Protocol>() {
-                    let dev_id = DeviceId::new(proto, &device_id);
+                    let dev_id = DeviceId::new(proto, origin, device);
                     if let Some(device) = self.dashboard.devices.get_mut(&dev_id) {
                         device.is_healthy = false;
                     }
@@ -1863,9 +1853,33 @@ impl ZenSight {
                 return self.select_device(device_id);
             }
 
-            Message::InvestigateAlert { device, metric } => {
-                // #35: alert → device → metric → chart in one hop.
+            Message::SelectDeviceNamed { protocol, source } => {
                 self.global_search.close();
+                let Some(device_id) = self.dashboard.resolve_device(protocol, &source) else {
+                    self.toasts.push(
+                        ToastSeverity::Info,
+                        format!("No {protocol} device for {source} on the bus"),
+                    );
+                    return Task::none();
+                };
+                return self.select_device(device_id);
+            }
+
+            Message::InvestigateAlert {
+                protocol,
+                source,
+                metric,
+            } => {
+                // #35: alert → device → metric → chart in one hop. The alert
+                // names a host; the origin comes from the device map (#474).
+                self.global_search.close();
+                let Some(device) = self.dashboard.resolve_device(protocol, &source) else {
+                    self.toasts.push(
+                        ToastSeverity::Info,
+                        format!("No {protocol} device for {source} on the bus"),
+                    );
+                    return Task::none();
+                };
                 let task = self.select_device(device);
                 if let (Some(metric), Some(d)) = (metric, self.selected_device.as_mut()) {
                     d.select_metric(metric);
@@ -1910,12 +1924,7 @@ impl ZenSight {
                 }
                 match &origin {
                     Some(o) => {
-                        let host = self
-                            .origins
-                            .iter()
-                            .find(|(_, v)| *v == o)
-                            .map(|(k, _)| k.clone())
-                            .unwrap_or_else(|| o.clone());
+                        let host = self.host_name_for_origin(o);
                         self.toasts.push(
                             ToastSeverity::Info,
                             format!(
@@ -4151,14 +4160,16 @@ impl ZenSight {
     /// no systemd sensor (missing data is the normal case, never a dead end).
     fn pivot_to_unit(&mut self, host: String, unit: String) -> Task<Message> {
         use crate::view::specialized::fetch::Fetch;
-        let id = crate::message::DeviceId::new(zensight_common::Protocol::Systemd, &host);
-        if !self.dashboard.devices.contains_key(&id) {
+        let Some(id) = self
+            .dashboard
+            .resolve_device(zensight_common::Protocol::Systemd, &host)
+        else {
             self.toasts.push(
                 ToastSeverity::Info,
                 format!("No systemd sensor for host {host}"),
             );
             return Task::none();
-        }
+        };
         let select = self.select_device(id);
         if let Some(device) = self.selected_device.as_mut() {
             device.specialized_tab = crate::view::specialized::SpecializedTab::Units;
@@ -4188,14 +4199,16 @@ impl ZenSight {
         start_time: Option<u64>,
     ) -> Task<Message> {
         use crate::view::specialized::sysinfo_detail::PidFilter;
-        let id = crate::message::DeviceId::new(zensight_common::Protocol::Sysinfo, &host);
-        if !self.dashboard.devices.contains_key(&id) {
+        let Some(id) = self
+            .dashboard
+            .resolve_device(zensight_common::Protocol::Sysinfo, &host)
+        else {
             self.toasts.push(
                 ToastSeverity::Info,
                 format!("No sysinfo sensor for host {host}"),
             );
             return Task::none();
-        }
+        };
         let select = self.select_device(id);
         let sort = crate::view::specialized::sysinfo_detail::ProcessSort::default();
         if let Some(device) = self.selected_device.as_mut() {
@@ -4272,26 +4285,51 @@ impl ZenSight {
     /// it, no toast); a non-responding sensor yields the channel's error state.
     /// `prefetch_on_open` already no-ops while disconnected, so this branch only
     /// fires on an explicit fetch.
-    /// The v1 origin id (`h-<12hex>`) for a payload `source` (hostname), from
-    /// the health/registration/entity-fed [`Self::origins`] map. `None` until
-    /// the first health doc arrives (~5 s after connect) — callers fall back
-    /// to the fleet selector.
-    fn origin_for(&self, source: &str) -> Option<String> {
-        self.origins.get(source).cloned()
+    /// The v1 origin id (`h-<12hex>`) publishing for `source` under `protocol`.
+    ///
+    /// Read from the device handle, which carries the origin off the key every
+    /// sample arrived on (#474). It used to come from a side map fed by health/
+    /// registration/entity docs, which meant it was `None` for the first ~5 s
+    /// after connect — and every drill-down in that window silently fell back to
+    /// a fleet-wide selector. There is no such window now: a device we have
+    /// heard from has an origin, and one we have not cannot be queried anyway.
+    fn origin_for(&self, protocol: zensight_common::Protocol, source: &str) -> Option<String> {
+        self.dashboard
+            .resolve_device(protocol, source)
+            .map(|id| id.origin)
+    }
+
+    /// A display name for an origin: the `source` of a device it publishes,
+    /// preferring the host's own sensors over anything it merely polls (a
+    /// poller's origin also publishes the devices it polls, whose names are
+    /// *not* the poller's — RFC 06 §3). Falls back to the origin id, because the
+    /// focus banner is what explains where the fleet went and must never be
+    /// blank.
+    fn host_name_for_origin(&self, origin: &str) -> String {
+        self.dashboard
+            .devices
+            .keys()
+            .filter(|id| id.origin == origin)
+            .min_by_key(|id| {
+                (
+                    crate::view::host::protocol_priority(id.protocol),
+                    id.source.clone(),
+                )
+            })
+            .map(|id| id.source.clone())
+            .unwrap_or_else(|| origin.to_string())
     }
 
     /// Re-project the selected device's origin and focus flag (#476).
     ///
-    /// The source→origin map fills in asynchronously (health/registration/entity
-    /// docs), so a device selected in the first few seconds has no origin yet
-    /// and its Focus control starts disabled. Call this whenever the map or the
-    /// link's focus changes.
+    /// The origin is intrinsic to the device handle (#474), so this only has to
+    /// track the *link's* focus changing under a stable selection.
     fn refresh_focus_state(&mut self) {
         let focus = self.link.focus.clone();
         if let Some(device) = self.selected_device.as_mut() {
-            let origin = self.origins.get(&device.device_id.source).cloned();
-            device.focused = origin.is_some() && origin == focus;
-            device.origin = origin;
+            let origin = device.device_id.origin.clone();
+            device.focused = focus.as_deref() == Some(origin.as_str());
+            device.origin = Some(origin);
         }
     }
 
@@ -4299,7 +4337,7 @@ impl ZenSight {
     /// origin key when the origin is known, else the fleet selector (the
     /// command carries the stream name, and send_command targets All).
     fn parallax_stream_set_key(&self, source: &str) -> String {
-        match self.origin_for(source) {
+        match self.origin_for(zensight_common::Protocol::Parallax, source) {
             Some(origin) => zensight_common::origin_rpc_key(&origin, "parallax", "stream/set"),
             None => zensight_common::fleet_command_key("parallax", "stream"),
         }
@@ -4313,7 +4351,7 @@ impl ZenSight {
         self.selected_device
             .as_ref()
             .filter(|d| d.device_id.protocol == proto)
-            .and_then(|d| self.origin_for(&d.device_id.source))
+            .map(|d| d.device_id.origin.clone())
     }
 
     fn query_channel<T, Fut>(
@@ -4766,7 +4804,7 @@ impl ZenSight {
             let Some(group) = groups.first() else {
                 continue;
             };
-            let node_id = match self.entities.by_device.get(device_id) {
+            let node_id = match self.entities.entity_id_for_device(device_id) {
                 Some(eid) => self.entities.resolve_alias(eid).to_string(),
                 None => device_id.source.clone(),
             };
@@ -4805,7 +4843,7 @@ impl ZenSight {
             if device_id.protocol != Protocol::Sysinfo {
                 continue;
             }
-            let node_id = match self.entities.by_device.get(device_id) {
+            let node_id = match self.entities.entity_id_for_device(device_id) {
                 Some(eid) => self.entities.resolve_alias(eid).to_string(),
                 None => device_id.source.clone(),
             };
@@ -5150,7 +5188,7 @@ impl ZenSight {
                 "Not connected to Zenoh".to_string(),
             )));
         };
-        let origin = self.origin_for(&host);
+        let origin = self.origin_for(zensight_common::Protocol::Sysinfo, &host);
         Task::future(async move {
             let result = fetch_processes(session, origin, sort)
                 .await
@@ -5171,7 +5209,7 @@ impl ZenSight {
                 "Not connected to Zenoh".to_string()
             )));
         };
-        let origin = self.origin_for(&host);
+        let origin = self.origin_for(zensight_common::Protocol::Netflow, &host);
         Task::future(async move {
             let result = fetch_flows(session, origin)
                 .await
@@ -5192,7 +5230,7 @@ impl ZenSight {
                 "Not connected to Zenoh".to_string(),
             )));
         };
-        let origin = self.origin_for(&host);
+        let origin = self.origin_for(zensight_common::Protocol::Sysinfo, &host);
         Task::future(async move {
             let result = fetch_latency(session, origin)
                 .await
@@ -5215,7 +5253,7 @@ impl ZenSight {
                 "Not connected to Zenoh".to_string(),
             )));
         };
-        let origin = self.origin_for(&host);
+        let origin = self.origin_for(zensight_common::Protocol::Parallax, &host);
         Task::future(async move {
             let result = crate::view::specialized::parallax_detail::fetch_streams(session, origin)
                 .await
@@ -5269,9 +5307,19 @@ impl ZenSight {
         else {
             return Task::none();
         };
-        // Media keys are origin-scoped; `*` (a legal subscriber wildcard)
-        // covers the window before the first health doc maps the origin.
-        let media_origin = self.origin_for(&source).unwrap_or_else(|| "*".into());
+        // Media keys are origin-scoped and this one is concrete (#483). A `*`
+        // here is legal but ruinous: it subscribes to *every* host's stream of
+        // that name, so N publishers means N× the video on the wire (RFC 07 §3).
+        // The fallback existed only to cover the window before the origin map
+        // filled in; there is no such window now (#474).
+        let Some(media_origin) = self.origin_for(zensight_common::Protocol::Parallax, &source)
+        else {
+            self.toasts.push(
+                ToastSeverity::Error,
+                format!("No parallax sensor for {source} on the bus"),
+            );
+            return Task::none();
+        };
         let (frames, handle) = Task::stream(
             crate::view::specialized::parallax_detail::preview_tile_stream(
                 session,
@@ -5392,8 +5440,15 @@ impl ZenSight {
         else {
             return Task::none();
         };
-        // Media keys are origin-scoped; `*` covers the pre-map window.
-        let media_origin = self.origin_for(&source).unwrap_or_else(|| "*".into());
+        // Concrete origin, never `*` — see the preview path (#483).
+        let Some(media_origin) = self.origin_for(zensight_common::Protocol::Parallax, &source)
+        else {
+            self.toasts.push(
+                ToastSeverity::Error,
+                format!("No parallax sensor for {source} on the bus"),
+            );
+            return Task::none();
+        };
         let (frames, handle) = Task::stream(parallax_h264::h264_tile_stream(
             session,
             media_origin,
@@ -5977,18 +6032,24 @@ impl ZenSight {
                     // the device, the facets span every member source (union),
                     // else they fall back to the same-source facets.
                     let entity = self.entities.entity_for_device(&device_state.device_id);
-                    let member_ids: Option<std::collections::HashSet<DeviceId>> = entity.map(|e| {
-                        e.members
-                            .iter()
-                            .filter_map(crate::entity::member_device_id)
-                            .collect()
-                    });
+                    // Membership is human identity — `(protocol, source)` — not
+                    // a device handle: an entity's members can span origins (a
+                    // host's own sysinfo, plus the SNMP facet published by a
+                    // *poller* elsewhere), and a member that never published has
+                    // no origin at all (#474).
+                    let member_keys: Option<std::collections::HashSet<crate::entity::MemberKey>> =
+                        entity.map(|e| {
+                            e.members
+                                .iter()
+                                .filter_map(crate::entity::member_key)
+                                .collect()
+                        });
                     let mut facet_states: Vec<&DeviceState> = self
                         .dashboard
                         .devices
                         .values()
-                        .filter(|d| match &member_ids {
-                            Some(ids) => ids.contains(&d.id),
+                        .filter(|d| match &member_keys {
+                            Some(keys) => keys.contains(&crate::entity::device_member_key(&d.id)),
                             None => d.id.source == device_state.device_id.source,
                         })
                         .collect();
@@ -6000,30 +6061,33 @@ impl ZenSight {
                     });
                     let mut facets: Vec<crate::view::device::FacetTab> = facet_states
                         .iter()
-                        .map(|d| crate::view::device::FacetTab {
-                            id: d.id.clone(),
-                            protocol: d.id.protocol,
-                            status: d.effective_status(),
-                            active: d.id == device_state.device_id,
+                        .map(|d| {
+                            crate::view::device::FacetTab::live(
+                                d.id.clone(),
+                                d.effective_status(),
+                                d.id == device_state.device_id,
+                            )
                         })
                         .collect();
                     // Members with no live DeviceState still show as disabled tabs
-                    // (union), so the host's full sensor set is visible.
-                    if let Some(ids) = &member_ids {
-                        let live: std::collections::HashSet<&DeviceId> =
-                            facet_states.iter().map(|d| &d.id).collect();
-                        let mut missing: Vec<&DeviceId> =
-                            ids.iter().filter(|id| !live.contains(id)).collect();
-                        missing.sort_by_key(|id| {
-                            (
-                                crate::view::host::protocol_priority(id.protocol),
-                                id.protocol,
-                            )
+                    // (union), so the host's full sensor set is visible. They have
+                    // no handle — nothing has published, so no origin is known.
+                    if let Some(keys) = &member_keys {
+                        let live: std::collections::HashSet<crate::entity::MemberKey> =
+                            facet_states
+                                .iter()
+                                .map(|d| crate::entity::device_member_key(&d.id))
+                                .collect();
+                        let mut missing: Vec<&crate::entity::MemberKey> =
+                            keys.iter().filter(|k| !live.contains(k)).collect();
+                        missing.sort_by_key(|(protocol, _)| {
+                            (crate::view::host::protocol_priority(*protocol), *protocol)
                         });
-                        for id in missing {
+                        for (protocol, source) in missing {
                             facets.push(crate::view::device::FacetTab {
-                                id: id.clone(),
-                                protocol: id.protocol,
+                                id: None,
+                                source: source.clone(),
+                                protocol: *protocol,
                                 status: zensight_common::DeviceStatus::Unknown,
                                 active: false,
                             });
@@ -6083,13 +6147,11 @@ impl ZenSight {
         // Focus mode (#476): show the *hostname* if we can map the origin back
         // to one, else the origin id itself — never nothing, because the banner
         // is what explains why the rest of the fleet vanished.
-        let focused_host = self.link.focus.as_ref().map(|origin| {
-            self.origins
-                .iter()
-                .find(|(_, v)| *v == origin)
-                .map(|(source, _)| source.clone())
-                .unwrap_or_else(|| origin.clone())
-        });
+        let focused_host = self
+            .link
+            .focus
+            .as_ref()
+            .map(|origin| self.host_name_for_origin(origin));
 
         let shelled = crate::view::shell::app_shell(
             self.current_view,
@@ -6231,7 +6293,12 @@ impl ZenSight {
             return; // Unknown protocol, ignore
         };
 
-        let device_id = DeviceId::new(protocol, &liveness.device);
+        // Liveness names a device, not an origin — resolve it against the
+        // devices we have actually seen (#474). No match ⇒ nothing to update,
+        // which was already this function's contract (see the note below).
+        let Some(device_id) = self.dashboard.resolve_device(protocol, &liveness.device) else {
+            return;
+        };
 
         // Update the device state if it exists
         if let Some(device_state) = self.dashboard.devices.get_mut(&device_id) {
@@ -6395,7 +6462,8 @@ impl ZenSight {
     }
 
     /// Handle incoming telemetry.
-    fn handle_telemetry(&mut self, point: TelemetryPoint) {
+    fn handle_telemetry(&mut self, reading: Reading) {
+        let Reading { point, origin } = reading;
         // Write through to the local tiered store (O(1) hot-ring append; numeric
         // values only). Charts/trends read back from here so history survives restart.
         self.store.record(&point);
@@ -6448,7 +6516,7 @@ impl ZenSight {
             }
         }
 
-        let device_id = DeviceId::from_telemetry(&point);
+        let device_id = DeviceId::from_telemetry(&point, origin);
 
         // Update dashboard device state
         let device_state = self
@@ -6551,12 +6619,10 @@ impl ZenSight {
         let mut detail_state = DeviceDetailState::with_max_history(device_id.clone(), max_history);
         // Project this device's favorited metrics (#27) from the global set.
         detail_state.set_favorites(self.device_favorites(&device_id));
-        // Focus state (#476): the origin may not be known yet (the map is fed by
-        // health/registration/entity docs), in which case the Focus control
-        // renders disabled — see `refresh_focus_state`.
-        detail_state.origin = self.origin_for(&device_id.source);
-        detail_state.focused =
-            detail_state.origin.is_some() && detail_state.origin == self.link.focus;
+        // Focus state (#476): the origin rides on the device handle (#474), so
+        // the Focus control is armed the moment a device can be selected at all.
+        detail_state.focused = self.link.focus.as_deref() == Some(device_id.origin.as_str());
+        detail_state.origin = Some(device_id.origin.clone());
         self.selected_device = Some(detail_state);
         self.set_view(CurrentView::Device);
         // Project firing anomalies for this source into the netring view (#253).
@@ -7495,78 +7561,78 @@ mod sensor_liveliness_tests {
     }
 }
 
-/// Forget-device (#stale facets): dropping a facet removes its map entry, and
-/// forgetting the open device reuses the back-to-dashboard path.
+/// The origin comes off the key (#474). These tests pin the three things the
+/// old `source -> origin` side map got wrong.
 #[cfg(test)]
-mod origin_map_tests {
+mod origin_tests {
     use super::*;
-    use zensight_common::Protocol;
+    use crate::message::Reading;
+    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-    /// The drill-down fetches key off the v1 origin, which the wire payloads
-    /// don't carry in `source` (hostnames) — the map bridges via the health/
-    /// registration/entity docs' `host_id` (== origin id, RFC 06 §1).
-    #[test]
-    fn health_snapshot_populates_the_origin_map() {
-        let mut a = ZenSight::boot(true).0;
-        assert_eq!(a.origin_for("hostA"), None);
-
-        let snapshot = zensight_common::HealthSnapshot {
-            sensor: "sysinfo".into(),
-            status: zensight_common::HealthStatus::Healthy,
-            uptime_secs: 1,
-            devices_total: 0,
-            devices_responding: 0,
-            devices_failed: 0,
-            last_poll_duration_ms: 0,
-            errors_last_hour: 0,
-            metrics_published: 1,
-            host_id: Some("h-3fa9c2d41b7e".into()),
-            source: Some("hostA".into()),
-        };
-        let _ = a.update(Message::HealthSnapshotReceived(snapshot));
-        assert_eq!(a.origin_for("hostA").as_deref(), Some("h-3fa9c2d41b7e"));
+    fn reading(origin: &str, source: &str, metric: &str) -> Reading {
+        Reading::new(
+            TelemetryPoint::new(
+                source,
+                Protocol::Netring,
+                metric,
+                TelemetryValue::Counter(1),
+            ),
+            origin,
+        )
     }
 
+    /// The origin rides in on the sample, so a device is addressable the moment
+    /// it appears — no ~5 s wait for a health doc to teach us who published it.
     #[test]
-    fn entity_members_populate_the_origin_map() {
+    fn one_sample_is_enough_to_learn_the_origin() {
         let mut a = ZenSight::boot(true).0;
-        let entity = zensight_common::HostEntity {
-            entity_id: "h-3fa9c2d41b7e".into(),
-            aliases: vec![],
-            host_id: Some("h-3fa9c2d41b7e".into()),
-            boot_id: None,
-            ips: vec![],
-            macs: vec![],
-            container_ids: vec![],
-            hostname: Some("hostA".into()),
-            fqdn: None,
-            names: vec![],
-            vendor: None,
-            platform: None,
-            members: vec![zensight_common::MemberClaim {
-                sensor: "netring".into(),
-                source: "hostA".into(),
-                rule: "host_id".into(),
-                confidence: 1.0,
-                last_seen: 1,
-            }],
-            status: None,
-            last_updated: 1,
-        };
-        let _ = a.update(Message::EntityReceived(entity));
-        assert_eq!(a.origin_for("hostA").as_deref(), Some("h-3fa9c2d41b7e"));
+        a.dashboard.devices.clear();
+        assert_eq!(a.origin_for(Protocol::Netring, "hostA"), None);
+
+        let _ = a.update(Message::TelemetryReceived(reading(
+            "h-3fa9c2d41b7e",
+            "hostA",
+            "flows/total",
+        )));
+        assert_eq!(
+            a.origin_for(Protocol::Netring, "hostA").as_deref(),
+            Some("h-3fa9c2d41b7e"),
+        );
     }
 
-    /// selected_origin_for: mapped origin when the selected device's source is
-    /// known; None (→ fleet fallback) otherwise.
+    /// **The bug this issue is about.** Two hosts really are called `web01`.
+    /// Keyed on the hostname they were one device and one of them was
+    /// unreachable; keyed on the origin they are two, each addressable.
     #[test]
-    fn selected_origin_resolves_through_the_map() {
+    fn two_hosts_sharing_a_name_are_two_devices() {
         let mut a = ZenSight::boot(true).0;
-        let id = DeviceId::new(Protocol::Netring, "hostA");
+        a.dashboard.devices.clear();
+
+        for origin in ["h-1111aaaa2222", "h-3333bbbb4444"] {
+            let _ = a.update(Message::TelemetryReceived(reading(
+                origin,
+                "web01",
+                "flows/total",
+            )));
+        }
+        assert_eq!(
+            a.dashboard.devices.len(),
+            2,
+            "same name, different hosts — two devices, not one overwriting the other"
+        );
+
+        // Resolution is deterministic (lowest origin), never a coin flip.
+        let first = a.dashboard.resolve_device(Protocol::Netring, "web01");
+        assert_eq!(first.map(|d| d.origin).as_deref(), Some("h-1111aaaa2222"));
+    }
+
+    /// The selected device's origin is its own — no lookup, so no window in
+    /// which a drill-down silently falls back to a fleet-wide selector.
+    #[test]
+    fn the_selected_device_knows_its_own_origin() {
+        let mut a = ZenSight::boot(true).0;
+        let id = DeviceId::new(Protocol::Netring, "h-3fa9c2d41b7e", "hostA");
         a.selected_device = Some(DeviceDetailState::new(id));
-        assert_eq!(a.selected_origin_for(Protocol::Netring), None);
-
-        a.origins.insert("hostA".into(), "h-3fa9c2d41b7e".into());
         assert_eq!(
             a.selected_origin_for(Protocol::Netring).as_deref(),
             Some("h-3fa9c2d41b7e")
@@ -7584,7 +7650,7 @@ mod forget_device_tests {
     #[test]
     fn forget_device_removes_map_entry() {
         let mut a = ZenSight::boot(true).0;
-        let id = DeviceId::new(Protocol::Snmp, "router01");
+        let id = DeviceId::fixture(Protocol::Snmp, "router01");
         a.dashboard
             .devices
             .insert(id.clone(), DeviceState::new(id.clone()));
@@ -7596,7 +7662,7 @@ mod forget_device_tests {
     #[test]
     fn forget_selected_device_clears_selection() {
         let mut a = ZenSight::boot(true).0;
-        let id = DeviceId::new(Protocol::Snmp, "router01");
+        let id = DeviceId::fixture(Protocol::Snmp, "router01");
         a.dashboard
             .devices
             .insert(id.clone(), DeviceState::new(id.clone()));
@@ -7609,8 +7675,8 @@ mod forget_device_tests {
         assert!(matches!(a.current_view, CurrentView::Dashboard));
 
         // Forgetting some *other* device must not touch the open selection.
-        let open = DeviceId::new(Protocol::Sysinfo, "server01");
-        let gone = DeviceId::new(Protocol::Sysinfo, "toolbx");
+        let open = DeviceId::fixture(Protocol::Sysinfo, "server01");
+        let gone = DeviceId::fixture(Protocol::Sysinfo, "toolbx");
         a.dashboard
             .devices
             .insert(open.clone(), DeviceState::new(open.clone()));
@@ -7659,7 +7725,7 @@ mod focus_escape_tests {
     #[test]
     fn escape_in_a_drill_down_navigates_and_keeps_focus() {
         let mut a = focused_app();
-        let id = DeviceId::new(Protocol::Sysinfo, "server01");
+        let id = DeviceId::fixture(Protocol::Sysinfo, "server01");
         a.dashboard
             .devices
             .insert(id.clone(), DeviceState::new(id.clone()));
@@ -7715,7 +7781,7 @@ mod tier2_app_fold_tests {
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
     fn device(protocol: Protocol, source: &str, points: &[(&str, TelemetryValue)]) -> DeviceState {
-        let id = DeviceId::new(protocol, source);
+        let id = DeviceId::fixture(protocol, source);
         let mut d = DeviceState::new(id);
         for (metric, value) in points {
             d.metrics.insert(
@@ -7746,13 +7812,18 @@ mod tier2_app_fold_tests {
         let mut a = ZenSight::boot(true).0;
         a.dashboard.devices.clear();
 
-        let point = |metric: &str, ts: i64, v: u64| TelemetryPoint {
-            timestamp: ts,
-            source: "server01".to_string(),
-            protocol: Protocol::Sysinfo,
-            metric: metric.to_string(),
-            value: TelemetryValue::Counter(v),
-            labels: Default::default(),
+        let point = |metric: &str, ts: i64, v: u64| {
+            crate::message::Reading::new(
+                TelemetryPoint {
+                    timestamp: ts,
+                    source: "server01".to_string(),
+                    protocol: Protocol::Sysinfo,
+                    metric: metric.to_string(),
+                    value: TelemetryValue::Counter(v),
+                    labels: Default::default(),
+                },
+                "h-5e5e5e5e5e5e",
+            )
         };
 
         // Two samples one second apart: eth0 +1000 rx / +2000 tx, wlan0 +500 rx.

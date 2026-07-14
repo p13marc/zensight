@@ -663,11 +663,31 @@ fn format_value_for_export(value: &TelemetryValue) -> String {
 /// host* rather than a top-level navigation axis.
 #[derive(Debug, Clone)]
 pub struct FacetTab {
-    pub id: DeviceId,
+    /// The device handle, when this facet has actually published. `None` for a
+    /// facet the correlator knows about but that has sent no telemetry: its
+    /// origin is unknown, so it has no handle and cannot be opened (#474). It
+    /// still shows, greyed, so the host's full sensor set stays visible.
+    pub id: Option<DeviceId>,
+    /// The member's `source` — the label shown when two facets share a protocol.
+    pub source: String,
     pub protocol: Protocol,
     pub status: DeviceStatus,
     /// Whether this facet is the one currently open.
     pub active: bool,
+}
+
+impl FacetTab {
+    /// A facet for a device we have actually heard from: protocol and source
+    /// come off the handle, so they cannot drift from it.
+    pub fn live(id: DeviceId, status: DeviceStatus, active: bool) -> Self {
+        Self {
+            protocol: id.protocol,
+            source: id.source.clone(),
+            id: Some(id),
+            status,
+            active,
+        }
+    }
 }
 
 /// Triage tint for a facet's status dot (green / amber / red / gray) — shared
@@ -713,22 +733,22 @@ fn facet_tab_strip(facets: &[FacetTab]) -> Option<Element<'static, Message>> {
         .spacing(5)
         .align_y(Alignment::Center);
         if dup_protocols.contains(&f.protocol) {
-            label = label.push(
-                text(format!("· {}", f.id.source))
-                    .size(13)
-                    .style(|t: &Theme| text::Style {
-                        color: Some(crate::view::theme::colors(t).text_muted()),
-                    }),
-            );
+            label = label.push(text(format!("· {}", f.source)).size(13).style(|t: &Theme| {
+                text::Style {
+                    color: Some(crate::view::theme::colors(t).text_muted()),
+                }
+            }));
         }
         let tab = if f.active {
             button(label)
                 .padding([4, 10])
                 .style(iced::widget::button::primary)
         } else {
+            // `on_press_maybe`: a facet with no handle (never published) is
+            // rendered but inert — there is nothing to open.
             button(label)
                 .padding([4, 10])
-                .on_press(Message::SelectDevice(f.id.clone()))
+                .on_press_maybe(f.id.clone().map(Message::SelectDevice))
                 .style(iced::widget::button::secondary)
         };
         tabs = tabs.push(tab);
@@ -1677,10 +1697,8 @@ mod tests {
 
     #[test]
     fn favorites_toggle_and_pin_to_top_of_sorted_metrics() {
-        let mut state = DeviceDetailState::new(DeviceId {
-            protocol: Protocol::Snmp,
-            source: "test".to_string(),
-        });
+        let mut state =
+            DeviceDetailState::new(DeviceId::fixture(Protocol::Snmp, "test".to_string()));
         for m in ["zzz", "aaa", "mmm"] {
             state.update(make_test_point(m));
         }
@@ -1724,10 +1742,8 @@ mod tests {
 
     #[test]
     fn apply_chart_range_pins_window_and_returns_bounds() {
-        let mut state = DeviceDetailState::new(DeviceId {
-            protocol: Protocol::Snmp,
-            source: "test".to_string(),
-        });
+        let mut state =
+            DeviceDetailState::new(DeviceId::fixture(Protocol::Snmp, "test".to_string()));
         // Valid from < to → pins the chart window and returns the bounds.
         state.chart_from_input = "2026-06-26 14:05".to_string();
         state.chart_to_input = "2026-06-26 14:12".to_string();
@@ -1766,10 +1782,7 @@ mod tests {
     /// series); text/binary and unknown metrics are not.
     #[test]
     fn booleans_and_numbers_are_chartable() {
-        let device_id = DeviceId {
-            protocol: Protocol::Netlink,
-            source: "h".to_string(),
-        };
+        let device_id = DeviceId::fixture(Protocol::Netlink, "h".to_string());
         let mut state = DeviceDetailState::new(device_id);
         let mk = |metric: &str, value: TelemetryValue| {
             let mut p = make_test_point(metric);
@@ -1790,10 +1803,7 @@ mod tests {
 
     #[test]
     fn test_history_values_returns_trailing_numeric_series() {
-        let device_id = DeviceId {
-            protocol: Protocol::Sysinfo,
-            source: "h".to_string(),
-        };
+        let device_id = DeviceId::fixture(Protocol::Sysinfo, "h".to_string());
         let mut state = DeviceDetailState::new(device_id);
         for (ts, v) in [(1, 10.0), (2, 20.0), (3, 30.0), (4, 40.0)] {
             let mut p = make_test_point("cpu/usage");
@@ -1809,10 +1819,7 @@ mod tests {
 
     #[test]
     fn test_history_export_is_time_series_not_snapshot() {
-        let device_id = DeviceId {
-            protocol: Protocol::Snmp,
-            source: "test".to_string(),
-        };
+        let device_id = DeviceId::fixture(Protocol::Snmp, "test".to_string());
         let mut state = DeviceDetailState::new(device_id);
 
         // Three samples of the same metric over time.
@@ -1838,10 +1845,7 @@ mod tests {
 
     #[test]
     fn test_metric_filter_empty_returns_all() {
-        let device_id = DeviceId {
-            protocol: Protocol::Snmp,
-            source: "test".to_string(),
-        };
+        let device_id = DeviceId::fixture(Protocol::Snmp, "test".to_string());
         let mut state = DeviceDetailState::new(device_id);
 
         state.update(make_test_point("cpu/usage"));
@@ -1855,10 +1859,7 @@ mod tests {
 
     #[test]
     fn test_metric_filter_substring_match() {
-        let device_id = DeviceId {
-            protocol: Protocol::Snmp,
-            source: "test".to_string(),
-        };
+        let device_id = DeviceId::fixture(Protocol::Snmp, "test".to_string());
         let mut state = DeviceDetailState::new(device_id);
 
         state.update(make_test_point("cpu/usage"));
@@ -1881,10 +1882,7 @@ mod tests {
 
     #[test]
     fn test_metric_filter_case_insensitive() {
-        let device_id = DeviceId {
-            protocol: Protocol::Snmp,
-            source: "test".to_string(),
-        };
+        let device_id = DeviceId::fixture(Protocol::Snmp, "test".to_string());
         let mut state = DeviceDetailState::new(device_id);
 
         state.update(make_test_point("CPU/Usage"));
@@ -1906,10 +1904,7 @@ mod tests {
 
     #[test]
     fn test_metric_filter_debounce() {
-        let device_id = DeviceId {
-            protocol: Protocol::Snmp,
-            source: "test".to_string(),
-        };
+        let device_id = DeviceId::fixture(Protocol::Snmp, "test".to_string());
         let mut state = DeviceDetailState::new(device_id);
 
         state.update(make_test_point("cpu/usage"));
@@ -1941,10 +1936,7 @@ mod tests {
     }
 
     fn device() -> DeviceDetailState {
-        DeviceDetailState::new(DeviceId {
-            protocol: Protocol::Snmp,
-            source: "test".to_string(),
-        })
+        DeviceDetailState::new(DeviceId::fixture(Protocol::Snmp, "test".to_string()))
     }
 
     #[test]

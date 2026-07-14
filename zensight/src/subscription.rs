@@ -11,7 +11,7 @@ use zensight_common::{
 };
 use zensight_keyspace::{Class, ClassOrPlane, CommonState, Origin};
 
-use crate::message::Message;
+use crate::message::{Message, Reading};
 
 // The fleet liveliness selectors used to be two hand-spelled consts here — a
 // second spelling of `all_liveliness_wildcard()` / `all_device_liveliness_wildcard()`,
@@ -369,7 +369,7 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                     result = telemetry_rx.recv_async() => {
                         match result {
                             Ok(sample) => {
-                                let mut telemetry: Vec<TelemetryPoint> = Vec::new();
+                                let mut telemetry: Vec<Reading> = Vec::new();
                                 let mut others: Vec<Message> = Vec::new();
                                 if let Some(msg) = sample_to_message(&sample) {
                                     push_sorted(msg, &mut telemetry, &mut others);
@@ -502,9 +502,9 @@ fn sample_to_message(sample: &zenoh::sample::Sample) -> Option<Message> {
 }
 
 /// Route a decoded message into the telemetry batch or the pass-through list.
-fn push_sorted(msg: Message, telemetry: &mut Vec<TelemetryPoint>, others: &mut Vec<Message>) {
+fn push_sorted(msg: Message, telemetry: &mut Vec<Reading>, others: &mut Vec<Message>) {
     match msg {
-        Message::TelemetryReceived(point) => telemetry.push(point),
+        Message::TelemetryReceived(reading) => telemetry.push(reading),
         other => others.push(other),
     }
 }
@@ -550,13 +550,22 @@ fn parse_device_liveliness(key: &str, is_alive: bool) -> Option<Message> {
         return None;
     }
     let protocol = parsed.producer?.name().to_string();
-    let device_id = device_id.clone();
+    let origin = parsed.origin.chunk().to_string();
+    let device = device_id.clone();
     if is_alive {
-        tracing::debug!(protocol = %protocol, device = %device_id, "Device came online");
-        Some(Message::DeviceOnline(protocol, device_id))
+        tracing::debug!(protocol = %protocol, origin = %origin, device = %device, "Device came online");
+        Some(Message::DeviceOnline {
+            protocol,
+            origin,
+            device,
+        })
     } else {
-        tracing::debug!(protocol = %protocol, device = %device_id, "Device went offline");
-        Some(Message::DeviceOffline(protocol, device_id))
+        tracing::debug!(protocol = %protocol, origin = %origin, device = %device, "Device went offline");
+        Some(Message::DeviceOffline {
+            protocol,
+            origin,
+            device,
+        })
     }
 }
 
@@ -595,12 +604,20 @@ fn parse_tombstone(key: &str) -> Option<Message> {
 fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
     let parsed = parse_key(key)?;
 
+    // The origin is chunk 3 of every key, so it is known here for EVERY class.
+    // It used to be read only after the telemetry early-return below — i.e.
+    // thrown away for the one class that carries 99% of the samples — which is
+    // why the GUI had to rebuild it from a `source -> origin` side map fed by
+    // health docs, and why that map's hostname collisions could misroute
+    // drill-downs to the wrong host (#474).
+    let origin = parsed.origin.chunk().to_string();
+
     // Telemetry: the point carries its own metric name; a subscriber does not
     // need to know *which* subject it is (the views that do refine it
     // themselves, against their own producer's Subject enum).
     if matches!(parsed.class, ClassOrPlane::Class(Class::Telemetry)) {
         return match decode_auto::<TelemetryPoint>(payload) {
-            Ok(point) => Some(Message::TelemetryReceived(point)),
+            Ok(point) => Some(Message::TelemetryReceived(Reading::new(point, origin))),
             Err(e) => {
                 tracing::warn!(error = %e, key = %key, "Failed to decode TelemetryPoint");
                 None
@@ -608,7 +625,6 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
         };
     }
 
-    let origin = parsed.origin.chunk().to_string();
     let (_, protocol, subject) = refine_key(key)?;
 
     // One typed match over the framework state set, instead of a string match
@@ -758,7 +774,8 @@ pub fn demo_subscription() -> Subscription<Message> {
                         zensight_common::Protocol::Gnmi => gnmi_count += 1,
                         _ => {}
                     }
-                    yield Message::TelemetryReceived(point);
+                    let origin = crate::demo::demo_origin(&point);
+                    yield Message::TelemetryReceived(Reading::new(point, origin));
                 }
 
                 // Update metrics counts
@@ -856,13 +873,17 @@ mod tests {
     fn test_parse_device_liveliness() {
         let key = "v1/h-3fa9c2d41b7e/state/snmp/device/router01/alive";
         let msg = parse_device_liveliness(key, true);
-        assert!(
-            matches!(msg, Some(Message::DeviceOnline(ref p, ref d)) if p == "snmp" && d == "router01")
-        );
+        assert!(matches!(
+            msg,
+            Some(Message::DeviceOnline { ref protocol, ref origin, ref device })
+                if protocol == "snmp" && origin == "h-3fa9c2d41b7e" && device == "router01"
+        ));
         let msg = parse_device_liveliness(key, false);
-        assert!(
-            matches!(msg, Some(Message::DeviceOffline(ref p, ref d)) if p == "snmp" && d == "router01")
-        );
+        assert!(matches!(
+            msg,
+            Some(Message::DeviceOffline { ref protocol, ref origin, ref device })
+                if protocol == "snmp" && origin == "h-3fa9c2d41b7e" && device == "router01"
+        ));
     }
 
     #[test]

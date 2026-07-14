@@ -304,14 +304,14 @@ mod tests {
 
     #[test]
     fn test_gnmi_view_renders() {
-        let device_id = DeviceId::new(Protocol::Gnmi, "spine01");
+        let device_id = DeviceId::fixture(Protocol::Gnmi, "spine01");
         let state = DeviceDetailState::new(device_id);
         let _view = gnmi_streaming_view(&state);
     }
 
     #[test]
     fn test_gnmi_view_with_metrics() {
-        let device_id = DeviceId::new(Protocol::Gnmi, "spine01");
+        let device_id = DeviceId::fixture(Protocol::Gnmi, "spine01");
         let mut state = DeviceDetailState::new(device_id);
 
         // Add some test metrics

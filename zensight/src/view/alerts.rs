@@ -1385,11 +1385,13 @@ fn render_incident<'a>(
     header = header.push(spacer);
     // #35: jump to the source device that raised this incident.
     if let Some(first) = incident.alerts.first() {
-        let device = DeviceId::new(first.protocol, incident.source.to_string());
+        let protocol = first.protocol;
+        let source = incident.source.to_string();
         header = header.push(
             button(text("View").size(font::CAPTION))
                 .on_press(Message::InvestigateAlert {
-                    device,
+                    protocol,
+                    source,
                     metric: None,
                 })
                 .padding([space::XS, space::SM])
@@ -1584,7 +1586,8 @@ fn render_alert_row(alert: &Alert) -> Element<'_, Message> {
     // #35: jump straight to the offending device + metric chart.
     let investigate = button(text("View").size(10))
         .on_press(Message::InvestigateAlert {
-            device: alert.device_id.clone(),
+            protocol: alert.device_id.protocol,
+            source: alert.device_id.source.clone(),
             metric: Some(alert.metric.clone()),
         })
         .padding([space::XS, space::SM])
@@ -1620,10 +1623,7 @@ mod tests {
     fn test_alert_rule_matches() {
         let rule = AlertRule::new(1, "Test", "ifInErrors");
 
-        let device = DeviceId {
-            protocol: Protocol::Snmp,
-            source: "router01".to_string(),
-        };
+        let device = DeviceId::fixture(Protocol::Snmp, "router01".to_string());
 
         assert!(rule.matches(&device, "if/1/ifInErrors"));
         assert!(rule.matches(&device, "ifInErrors"));
@@ -1655,10 +1655,7 @@ mod tests {
         rule.operator = ComparisonOp::GreaterThan;
         state.rules.push(rule);
 
-        let device = DeviceId {
-            protocol: Protocol::Snmp,
-            source: "router01".to_string(),
-        };
+        let device = DeviceId::fixture(Protocol::Snmp, "router01".to_string());
 
         // Should trigger
         let alert = state.check_metric(&device, "if/1/errors", 150.0, 1000);
@@ -1687,10 +1684,7 @@ mod tests {
         state.rules.push(AlertRule::new(1, "Test", "errors"));
         state.rules[0].threshold = 0.0;
 
-        let device = DeviceId {
-            protocol: Protocol::Snmp,
-            source: "test".to_string(),
-        };
+        let device = DeviceId::fixture(Protocol::Snmp, "test".to_string());
 
         state.check_metric(&device, "errors", 100.0, 1000);
         assert_eq!(state.unacknowledged_count, 1);

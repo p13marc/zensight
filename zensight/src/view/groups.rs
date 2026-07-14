@@ -720,7 +720,7 @@ mod tests {
         let mut state = GroupsState::new();
         let id = state.create_group("Test");
 
-        let device = DeviceId::new(Protocol::Snmp, "device1");
+        let device = DeviceId::fixture(Protocol::Snmp, "device1");
         state.assign_device(&device, id);
 
         assert!(state.device_in_group(&device, id));
@@ -736,7 +736,7 @@ mod tests {
         let mut state = GroupsState::new();
         let group_id = state.create_group("Servers");
 
-        let device = DeviceId::new(Protocol::Snmp, "router1");
+        let device = DeviceId::fixture(Protocol::Snmp, "router1");
 
         assert!(!state.device_in_group(&device, group_id));
 
@@ -751,7 +751,7 @@ mod tests {
     fn test_toggle_assignment() {
         let mut state = GroupsState::new();
         let group_id = state.create_group("Test");
-        let device = DeviceId::new(Protocol::Logs, "host1");
+        let device = DeviceId::fixture(Protocol::Logs, "host1");
 
         assert!(!state.device_in_group(&device, group_id));
 
@@ -768,7 +768,7 @@ mod tests {
         let g1 = state.create_group("Servers");
         let g2 = state.create_group("Production");
 
-        let device = DeviceId::new(Protocol::Snmp, "web1");
+        let device = DeviceId::fixture(Protocol::Snmp, "web1");
         state.assign_device(&device, g1);
         state.assign_device(&device, g2);
 
@@ -782,8 +782,8 @@ mod tests {
         let g1 = state.create_group("Servers");
         let g2 = state.create_group("Network");
 
-        let server = DeviceId::new(Protocol::Snmp, "server1");
-        let router = DeviceId::new(Protocol::Snmp, "router1");
+        let server = DeviceId::fixture(Protocol::Snmp, "server1");
+        let router = DeviceId::fixture(Protocol::Snmp, "router1");
 
         state.assign_device(&server, g1);
         state.assign_device(&router, g2);
@@ -810,12 +810,12 @@ mod tests {
         let g2 = state.create_group("Group2");
 
         for i in 0..5 {
-            let device = DeviceId::new(Protocol::Snmp, format!("device{}", i));
+            let device = DeviceId::fixture(Protocol::Snmp, format!("device{}", i));
             state.assign_device(&device, g1);
         }
 
         for i in 0..3 {
-            let device = DeviceId::new(Protocol::Snmp, format!("other{}", i));
+            let device = DeviceId::fixture(Protocol::Snmp, format!("other{}", i));
             state.assign_device(&device, g2);
         }
 

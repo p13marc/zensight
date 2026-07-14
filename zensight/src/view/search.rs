@@ -206,9 +206,10 @@ pub struct EntityHit {
     pub label: String,
     /// What matched + provenance context (e.g. the matched passive-DNS name).
     pub sublabel: String,
-    /// The facet device to jump to (`None` when no member maps to a known
-    /// protocol — rendered inert, never a dead button).
-    pub device: Option<DeviceId>,
+    /// The facet to jump to, by human identity (`None` when no member maps to a
+    /// known protocol — rendered inert, never a dead button). Names, not a
+    /// handle: an entity member carries no origin (#474).
+    pub device: Option<crate::entity::MemberKey>,
     /// The entity doc is older than the correlator's re-emit staleness bound.
     pub stale: bool,
 }
@@ -254,7 +255,7 @@ pub fn search_entities(
                 .clone()
                 .or_else(|| e.fqdn.clone())
                 .unwrap_or_else(|| e.entity_id.clone());
-            let device = e.members.iter().find_map(crate::entity::member_device_id);
+            let device = e.members.iter().find_map(crate::entity::member_key);
             scored.push((
                 score,
                 EntityHit {
@@ -327,8 +328,8 @@ pub fn global_search_panel<'a>(
                 label.push_str(" · stale");
             }
             let element: Element<'_, Message> = match hit.device {
-                Some(device) => button(text(label).size(font::CAPTION))
-                    .on_press(Message::SelectDevice(device))
+                Some((protocol, source)) => button(text(label).size(font::CAPTION))
+                    .on_press(Message::SelectDeviceNamed { protocol, source })
                     .width(Length::Fill)
                     .padding([space::XS, space::SM])
                     .style(iced::widget::button::text)
@@ -410,10 +411,7 @@ mod tests {
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
     fn dev(source: &str, proto: Protocol, metrics: &[(&str, f64)]) -> DeviceState {
-        let id = DeviceId {
-            protocol: proto,
-            source: source.to_string(),
-        };
+        let id = DeviceId::fixture(proto, source.to_string());
         let mut d = DeviceState::new(id.clone());
         for (m, v) in metrics {
             d.metrics.insert(
@@ -469,10 +467,7 @@ mod tests {
         for i in 0..(MAX_RESULTS + 50) {
             metrics.push((format!("queue/{i}"), i as f64));
         }
-        let id = DeviceId {
-            protocol: Protocol::Snmp,
-            source: "r1".to_string(),
-        };
+        let id = DeviceId::fixture(Protocol::Snmp, "r1".to_string());
         let mut d = DeviceState::new(id);
         for (m, v) in &metrics {
             d.metrics.insert(
@@ -573,7 +568,7 @@ mod tests {
         assert_eq!(hits[0].label, "web01");
         assert_eq!(
             hits[0].device,
-            Some(DeviceId::new(zensight_common::Protocol::Sysinfo, "web01"))
+            Some((zensight_common::Protocol::Sysinfo, "web01".to_string()))
         );
         assert!(!hits[0].stale);
         // Passive-DNS name hit, with provenance in the sublabel.
