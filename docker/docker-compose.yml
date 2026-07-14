@@ -1,56 +1,54 @@
-# Docker Compose for ZenSight sensors
-# Usage: docker compose -f docker/docker-compose.yml up
+# The all-in-one ZenSight sensors container, as Compose.
+#
+#   ZENSIGHT_ZENOH_CONNECT=tcp/<gui-host>:7447 docker compose -f docker/docker-compose.yml up
+#
+# The canonical invocation is the `podman run` in docs/DEPLOYMENT.md; this file
+# is that same invocation, and must stay that same invocation. If you change one,
+# change the other.
+#
+# ONE service, not one per sensor. The image bundles the five host sensors that
+# `just run` spawns (sysinfo, netlink, netring, logs, systemd) behind the shared
+# spawner (scripts/run-sensors.sh): they observe the *same host*, so splitting
+# them across containers buys nothing but five copies of the host namespaces to
+# get wrong. The correlator is deliberately absent — it must run exactly once per
+# deployment, next to the GUI (`just correlator`).
+#
+# Every flag below is load-bearing, and dropping one makes a sensor go *quiet*
+# rather than fail, which is the worst way to find out. See DEPLOYMENT.md §"What
+# the flags buy" for the full table; the one that is not obvious:
+#
+#   /etc/machine-id  is THE ORIGIN (RFC 06 §1). Without it every container mints
+#                    a fresh random origin at each start, so a restart looks like
+#                    a brand-new host and the catalog accumulates ghosts.
 
 services:
-  # Logs sensor - ingests network syslog + systemd-journald, publishes to Zenoh
-  sensor-logs:
-    image: ghcr.io/p13marc/zensight-sensor-logs:latest
+  sensors:
+    image: ghcr.io/p13marc/zensight-sensors:latest
     build:
       context: ..
-      dockerfile: docker/Dockerfile.sensor
-      args:
-        SENSOR_PACKAGE: zensight-sensor-logs
-        SENSOR_NAME: syslog
-    ports:
-      - "514:514/udp"   # Syslog UDP
-      - "514:514/tcp"   # Syslog TCP
-      - "7447:7447"     # Zenoh
-    volumes:
-      - ./configs/syslog.json5:/etc/zensight/config.json5:ro
-    command: ["--config", "/etc/zensight/config.json5"]
-    restart: unless-stopped
+      dockerfile: docker/Dockerfile.sensors
 
-  # Sysinfo sensor - collects system metrics and publishes to Zenoh
-  sensor-sysinfo:
-    image: ghcr.io/p13marc/zensight-sensor-sysinfo:latest
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.sensor
-      args:
-        SENSOR_PACKAGE: zensight-sensor-sysinfo
-        SENSOR_NAME: sysinfo
-    ports:
-      - "7448:7447"     # Zenoh (different port to avoid conflict)
-    volumes:
-      - ./configs/sysinfo.json5:/etc/zensight/config.json5:ro
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
-    command: ["--config", "/etc/zensight/config.json5"]
-    restart: unless-stopped
+    # The one supported knob. The entrypoint refuses to start without it: a
+    # sensor with nowhere to publish is a sensor that looks fine and says nothing.
+    environment:
+      ZENSIGHT_ZENOH_CONNECT: ${ZENSIGHT_ZENOH_CONNECT:?set it to tcp/<gui-host>:7447}
 
-  # SNMP sensor - polls SNMP agents and publishes to Zenoh
-  sensor-snmp:
-    image: ghcr.io/p13marc/zensight-sensor-snmp:latest
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.sensor
-      args:
-        SENSOR_PACKAGE: zensight-sensor-snmp
-        SENSOR_NAME: snmp
-    ports:
-      - "162:162/udp"   # SNMP traps
-      - "7449:7447"     # Zenoh (different port to avoid conflict)
+    network_mode: host   # netring captures on the host's ifaces; netlink sees its sockets
+    pid: host            # sysinfo's process explorer sees the host's processes
+    userns_mode: host    # rootful: these are host-observing agents (DEPLOYMENT.md)
+
+    cap_add:
+      - NET_RAW    # netring: AF_PACKET capture
+      - NET_ADMIN  # netlink: nftables/conntrack + the XFRM monitor
+      - IPC_LOCK   # netring: the AF_XDP path (locked memory)
+
+    security_opt:
+      - label=disable
+
     volumes:
-      - ./configs/snmp.json5:/etc/zensight/config.json5:ro
-    command: ["--config", "/etc/zensight/config.json5"]
-    restart: unless-stopped
+      - /etc/machine-id:/etc/machine-id:ro
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro
+      - /var/log/journal:/var/log/journal:ro
+      - /run/log/journal:/run/log/journal:ro
+
+    restart: on-failure
