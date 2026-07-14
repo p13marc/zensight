@@ -1,7 +1,9 @@
 # ZenSight Zenoh Keyspace Reference
 
-**The deployed keyspace is the keyspace-v2 convention, v1.0 (ratified).**
-The normative reference is the RFC set in
+**The deployed keyspace is the keyspace-v2 convention, v1.2 (ratified).**
+(v1.1 made the version chunk a plain `v1` — a wire break, already deployed.
+v1.2 is doc-only: it amends the convention with the lessons of the migration
+and changes no key.) The normative reference is the RFC set in
 [`docs/rfcs/keyspace-v2/`](rfcs/keyspace-v2/00-index.md); ZenSight's concrete
 profile (constants, per-sensor worked examples, the mapping of every shipped
 key family) is [chapter 11](rfcs/keyspace-v2/11-zensight-profile.md). The

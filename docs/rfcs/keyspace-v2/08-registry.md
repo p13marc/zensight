@@ -1,6 +1,6 @@
 # 08 — The Subject Registry
 
-**Status: v1.0 (ratified)** · normative chapter
+**Status: v1.2 (ratified)** · normative chapter · *amended in v1.2 — see [00-index.md](00-index.md)*
 
 The grammar fixes positions 1–5 of every key; the registry governs the rest.
 It is the single, machine-readable inventory of every subject, procedure,
@@ -36,6 +36,46 @@ folklore: a subject that is not registered does not exist.
     later-added `flow/{x}`.
 - **Reviewable evolution.** Adding a subject is a registry diff — visible,
   reviewable, and versioned — not a key that quietly appears on the bus.
+
+### 1.1 The origin is an argument too — build/parse × local/remote
+
+*Added in v1.2. The contract above says "one argument per `{var}`" and
+never mentions the origin, which is how three separate implementations of
+it shipped the same bug.*
+
+A key needs an origin as well as a subject, and there are exactly **two
+kinds of origin a component can hold**:
+
+| | what it is | who has it | used to |
+|---|---|---|---|
+| **local** | the origin this process minted for itself ([06 §1](06-identity.md)) | every producer | **serve**: publish state/telemetry, declare a queryable |
+| **remote** | an origin this process *read* — from a key it received, a health doc, a catalog entity | every consumer | **call**: address someone else's `@rpc`, subscribe to one host's `@media` |
+
+They are both `h-<12hex>`. They are never interchangeable, and **a builder
+that silently supplies the local one is a trap**: pass it to a consumer's
+call path and you get a key addressed at *the caller's own host*, where no
+queryable has ever lived. The failure is a timeout, at runtime, in one
+view — the worst possible way to find out. The reference implementation
+made this mistake in three separate commits, and the third one took every
+drill-down in the product down at once ([06 §6.3](06-identity.md)).
+
+So the codegen contract is **build/parse × local/remote**, and:
+
+> Generated builders **MUST** make the origin an explicit argument, and
+> **SHOULD** make its kind a **type**, not a convention.
+
+With a type (`LocalOrigin` vs `RemoteOrigin`, and an explicit
+`FleetSelector` for the deliberate `*`), "I built a key for my own host by
+accident" stops being a runtime timeout and becomes a compile error. That
+is the whole promise of generating this code instead of formatting
+strings, and it is cheap: the origin is *already* a value at every call
+site — it is only stringly-typed because nobody said not to.
+
+A `*` origin **MUST** be reachable only by asking for it by name. It is a
+fleet selector, it pairs with query target **All**
+([05-control-rpc.md §2.1](05-control-rpc.md)), it is forbidden on the bulk
+planes ([07-bulk-planes.md §3](07-bulk-planes.md)), and it must never be
+what a builder does when it has nothing better.
 
 ## 2. Entry format
 
@@ -246,6 +286,18 @@ registry version to coordinate.
   and no `[[deprecated]]` entry is ever deleted; every `events` entry has
   a `rate`; every `{var}`-bearing entry has a `cardinality`; every live
   `state` entry has a `ttl_s`.
+- CI **MUST** enforce the **reverse direction**: *every registered subject
+  and procedure is actually served by the build that advertises it*
+  (§6). Note this is a distinct check, not the mirror image of the first
+  one, and the first one does **not** imply it — a registry may be a
+  strict superset of what the code does and every published key still
+  builds. That superset is what `introspect` ships to the fleet as truth.
+
+  Note also that the forward lint is **vacuous wherever a producer
+  registers a catch-all subject** (`{metric...}` and friends): everything
+  is buildable from a catch-all, so "every published key is buildable"
+  asserts nothing. A registry that leans on catch-alls has bought neither
+  direction.
 
 ## 6. Runtime introspection
 
@@ -262,6 +314,41 @@ What it buys: `GET <base>/v1/*/@rpc/*/introspect` is a fleet
 capability-and-version inventory in one round trip (which hosts still
 serve a deprecated subject; which run last month's registry); generic
 explorer tooling — the `busctl`/`d-feet` equivalent — needs no compiled-in
-registry. A disagreement between introspection and the checked-in TOML is
-a finding, not an ambiguity: the TOML says what *should* run, the
-introspection says what *does*.
+registry.
+
+### 6.1 The registry MUST NOT lie (normative)
+
+*Strengthened in v1.2. v1.0 called a mismatch "a finding, not an
+ambiguity" — it named the gap and declined to close it. Practice showed
+that is not enough.*
+
+A disagreement between introspection and the checked-in TOML is still a
+finding in the direction the TOML *leads*: the TOML says what should run,
+the introspection says what does, and a fleet mid-rollout will honestly
+show both.
+
+But the other direction is not a finding, it is a **defect**:
+
+> **Every subject and procedure in a registry MUST be served by the build
+> that ships it.** A registry entry describing a surface the code does not
+> serve is not aspirational — it is a **lie transmitted to every consumer
+> that calls `introspect`**, and it is worse than silence, because
+> `introspect` is the one source a generic explorer is entitled to trust.
+
+This is what makes the introspection reply trustworthy at all. D-Bus
+introspection XML is dependable because *the implementation emits it*
+([10-prior-art.md](10-prior-art.md)); a registry compiled from a TOML that
+nobody checked against the code has none of that property and all of its
+authority.
+
+The obligation is structural, not procedural. The reference
+implementation's registry was reviewed, versioned, and lint-clean against
+the grammar — and still advertised **seven** surfaces that no build served
+(two capture procedures, three stream procedures, an entity `link`/`unlink`
+pair, a phantom subject), while omitting five that *were* served. Review
+does not catch this. Only a check does (§5), and the strongest form of the
+check is to make the registry the **only** way to declare a surface, so an
+unserved entry is dead code rather than a lie.
+
+An entry for a surface that is merely *planned* is not a registry entry.
+It is a diff, and it lands the day the code does.

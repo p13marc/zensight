@@ -1,7 +1,8 @@
 # 12 — Decisions
 
-**Status: v1.1 — all six original items DECIDED** (2026-07-12, review round 4);
-**§7 added 2026-07-14** (the version chunk is plain, not verbatim). This
+**Status: v1.2 — all six original items DECIDED** (2026-07-12, review round 4);
+**§7 added 2026-07-14** (the version chunk is plain, not verbatim);
+**§8 added 2026-07-14** (the v1.2 amendments that were *rejected*). This
 chapter began as the open-questions list; it is kept as the decision
 record — each item preserves the alternatives and names its
 **revisit trigger**, the concrete future fact that would reopen it.
@@ -202,3 +203,58 @@ explicitly, so it is a decision and not a drift) and
 **Revisit trigger.** Zenoh gains a wildcard that crosses verbatim chunks, or
 zenoh-ext stops locating its sidecars by keyexpr match — either would let the
 version chunk be verbatim again at no cost.
+
+## 8. Amendments proposed in v1.2 and REJECTED — because the RFC was already right
+
+*Added 2026-07-14. Unlike §§1–7 this is not a decision between design
+alternatives; it is a record of two changes that were **proposed, checked, and
+found to be wrong**. It is here because the checking is the reusable part, and
+because an un-recorded rejection gets re-proposed.*
+
+Both were filed after a real migration, by someone who had hit the underlying
+problem as a genuine bug. Both were wrong about *why*.
+
+### 8.1 REJECTED: "05 §2.1 does not mandate query target `All` / concrete reply keys"
+
+**It does — as bolded MUSTs, in a section titled "Fan-in call discipline
+(normative)", with exactly the right reasoning** (`BestMatching` short-circuits
+on any `complete` queryable; consolidation keeps one reply *per reply key*, so a
+fleet replying on the shared wildcard collapses to one survivor).
+
+The bugs were real. The cause was **not reading the normative chapter being
+implemented**, then "rediscovering" the mechanism from Zenoh's API docs — which
+said what §2.1 had said all along. The only thing added was a copy-pasteable
+checklist and an editorial note telling future readers not to "fix" it.
+
+**The generalisable lesson is not about `@rpc`.** It is that a spec you *wrote*
+is a spec you will skim, and the sections you skim are the ones that encode the
+non-obvious behaviour of the system underneath. That is precisely where a
+convention earns its keep, and precisely where it is most likely to be ignored.
+
+### 8.2 REJECTED: "07 should permit wildcard-origin `@blob` fan-out as a fetch path"
+
+**07 §2 already said the opposite, and correctly**: such a fan-out "is legal but
+MUST NOT be the default fetch path", because every matching holder ships the
+full chunk and Zenoh cannot cancel remote replies in flight — N holders cost N×
+the bytes, amplification on exactly the links the plane exists to spare.
+
+What *was* genuinely missing was the neighbouring rule: §1 licensed `*` for the
+**profile** chunk and never forbade wildcarding the **origin** on `@media`. So
+the amendment survived only after being **inverted** — it became
+[07 §3](07-bulk-planes.md), the publisher-concrete / subscriber-may-wildcard
+rule, which subsumes both cases.
+
+### The method, since it is the point
+
+Every v1.2 amendment was greped against the ratified chapter text before it was
+kept, and the Zenoh semantics each one rests on were checked against the API
+docs rather than recalled. **Two of seven did not survive**, and one more had to
+be inverted.
+
+The pattern in all three failures is one thing: *trusting a memory of a contract
+instead of re-reading it*. That is also what caused the outage the amendments
+are about ([06 §6.3](06-identity.md)) — which is a tidy demonstration that the
+failure mode does not spare the people who wrote the spec.
+
+**Revisit trigger.** None. A rejected amendment reopens only if the chapter it
+was rejected against changes.

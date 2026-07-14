@@ -1,6 +1,6 @@
 # 09 — Operations Cookbook
 
-**Status: v1.0 (ratified)** · informative chapter
+**Status: v1.2 (ratified)** · informative chapter · *amended in v1.2 — see [00-index.md](00-index.md)*
 
 Worked recipes for the infrastructure concerns the grammar was shaped
 around: session setup, subscriptions, storage, ACL, and constrained links.
@@ -28,6 +28,57 @@ filtered — the base is an isolation boundary, not a string convention.
 Remember the two scope rules: router-side config (storages, ACL,
 interceptors — everything below) is written with the **full** key, and a
 namespaced session cannot reach the router admin space (§5).
+
+### 0.1 Discovery and scouting
+
+*Added in v1.2. The words `scout`, `gossip` and `multicast` appeared zero
+times across the ratified chapters; §0's entire treatment of connectivity
+was the comment `// mode/connect/listen as the deployment requires`. The
+gap cost a debugging session and produced a green test over a broken
+system, which is the expensive kind.*
+
+Zenoh discovers peers by two **independent** mechanisms, with independent
+switches:
+
+| | `scouting/multicast/enabled` | `scouting/gossip/enabled` |
+|---|---|---|
+| **what** | UDP multicast beacons on the LAN | peers tell their peers about their peers |
+| **reaches** | anything on the segment, including things you did not mean | only within the **already-connected** graph |
+| **needs** | a multicast-capable network | at least one explicit `connect`/`listen` edge |
+
+They are not a single "discovery" knob, and **collapsing them into one is
+a bug**:
+
+- **Turning both off** to isolate a test does more than isolate it. Gossip
+  is what carries reachability *through* a peer, so a hub-and-spoke
+  deployment with gossip off has spokes that can each reach the hub and
+  **cannot reach each other** — silently. Data whose consumer sits on
+  another spoke simply never arrives, and the failure looks like a
+  publisher fault. (This is exactly how an isolated correlator run came
+  back with an empty entity seed: the evidence was published, and could not
+  traverse the gossip-less hub.)
+- **Turning multicast on** in a shared environment does more than discover.
+  A default-config session joins *any* reachable Zenoh mesh, including a
+  colleague's, including production. A test that scouts is not isolated,
+  and the contamination flows both ways.
+
+**Normative recipe for isolated verification** — the one every
+acceptance run in this chapter assumes:
+
+```json5
+{
+  scouting: {
+    multicast: { enabled: false },   // never join a mesh we did not name
+    gossip:    { enabled: true  },   // but let reachability cross the hub
+  },
+  connect: { endpoints: ["tcp/127.0.0.1:<port>"] },   // an explicit graph
+}
+```
+
+Multicast **off**, gossip **on**, explicit endpoints. That is isolation
+*and* a connected graph — and a deployment knob that disables "scouting"
+wholesale MUST be understood to mean the multicast half only, or it will
+break spoke-to-spoke discovery the first time it is used in anger.
 
 ## 1. Selector cookbook
 
@@ -389,3 +440,53 @@ can simply not be allowed on the link at all).
 - If a needed selector is awkward to write, that is registry feedback —
   file it against the subject layout before inventing a client-side filter
   ([08-registry.md §5](08-registry.md)).
+
+## 6. Cutover acceptance
+
+*Added in v1.2. Nothing in the convention said how you **prove** a
+migration finished. [11](11-zensight-profile.md) scopes verification out
+explicitly, so it belongs here.*
+
+A cutover to (or between majors of) this convention is **not done** until
+an isolated run demonstrates **both** of the following. One without the
+other is not evidence.
+
+**1. The retired key family is silent.**
+
+Stand up the deployment, subscribe to the *whole* old root, and assert an
+empty result set while the new planes carry traffic. A migration you can
+assert the *absence* of is a migration you can finish; one you cannot is a
+migration you merely believe in.
+
+Note what this costs you if the version chunk is plain (`v1`, not `@v1`):
+`<base>/**` reaches the new keys too, so the subscriber sees your own
+traffic and the leak check must state its meaning explicitly — *anything
+outside `<base>/v1/`* — rather than riding on key algebra. Same guarantee,
+stated rather than inferred. (A verbatim version chunk gives the algebraic
+version for free, and costs you zenoh-ext's `@adv` sidecars, which is a bad
+trade — [03-grammar.md §1.2](03-grammar.md).)
+
+**2. A consumer-shaped, concrete-key probe passes.**
+
+> **A probe MUST build its keys the way the product builds them.**
+
+A fleet-selector probe (`<base>/v1/*/@rpc/…`) **cannot** catch a broken
+origin path: the `*` matches *any* origin, so a caller whose origin concept
+is complete garbage still gets replies. The reference implementation's
+smoke was green — subscribing on wildcards, asserting replies arrived —
+while **every drill-down in the product was broken**, because the product
+used concrete origins and the probe did not
+([06-identity.md §6.3](06-identity.md)).
+
+> **A test that uses a wildcard where the product uses a concrete value is
+> testing a different program.**
+
+So the probe MUST resolve an origin through the same bridge the consumer
+uses ([06-identity.md §6](06-identity.md)) and then issue **origin-scoped**
+calls — and it MUST fail if the bridge yields nothing. Absence of replies
+and absence of *callers* must not look alike.
+
+Recommended shape (both halves, one run): multicast off / gossip on
+(§0.1), an explicit endpoint, the full producer set, one un-namespaced
+observer for the honest wire view (§5), and a consumer-shaped phase that
+resolves origins and drills down exactly as the UI does.

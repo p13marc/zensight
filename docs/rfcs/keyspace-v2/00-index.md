@@ -1,8 +1,36 @@
 # Zenoh Semantic Convention RFC — Index
 
-**Status: v1.1 — RATIFIED** (v1.0 2026-07-12; adopted for ZenSight, migration
+**Status: v1.2 — RATIFIED** (v1.0 2026-07-12; adopted for ZenSight, migration
 tracked in [#453](https://github.com/p13marc/zensight/issues/453) with the
 enforcement crate `zensight-keyspace`).
+
+> **v1.2 (2026-07-14) — six amendments, all additive, no wire change**
+> ([#467](https://github.com/p13marc/zensight/issues/467)). Every one is a
+> lesson from actually migrating a real application onto v1.0/v1.1 — and each
+> was fact-checked against the ratified chapter text before it was kept. Two
+> proposed amendments were **dropped** because the RFC already said it (see
+> "what did *not* change", below); that is the more useful half of the record.
+>
+> | | Chapter | What |
+> |---|---|---|
+> | **A** | [06 §6](06-identity.md) *(new)* | **The consumer identity bridge.** The payload `host_id` **is** the origin id; a consumer holding a *hostname* MUST resolve it to an origin before building an origin-scoped key. `host_id` appeared **nowhere** in 06, and §5.1 only ran origin → entity — never "I have a box, what key do I build?". A UI built on the missing half took every drill-down in the reference product down at once. **This is the amendment that would have prevented the outage.** |
+> | **B** | [08 §1.1](08-registry.md) *(new)* | **The origin is an argument too.** The codegen contract is build/parse × **local/remote**, and the origin's kind SHOULD be a *type*, so "I built a key for my own host by accident" is a compile error rather than a timeout. Shipped as a bug three times. |
+> | **C** | [08 §5, §6.1](08-registry.md) | **The registry MUST NOT lie.** registry ⊆ served is upgraded from "a finding" to a **MUST**, with the reverse-direction lint. The reference registry advertised **seven** surfaces no build served; `introspect` was shipping them to the fleet as truth. Also: the forward lint is *vacuous* wherever a producer registers a catch-all subject. |
+> | **D** | [09 §0.1](09-operations.md) *(new)* | **Discovery and scouting.** `scout`/`gossip`/`multicast` had **zero hits across all 13 chapters**. Multicast and gossip are *independent* switches; isolated verification is multicast **off**, gossip **on**; a gossip-less hub silently breaks spoke→spoke discovery. |
+> | **F′** | [07 §1, §3](07-bulk-planes.md) *(new §3)* | **The wildcard rule.** *A publisher MUST always use its concrete origin; a subscriber MAY wildcard a chunk it cannot know* — and on the bulk planes, not even then. §1 licensed `*` for the *profile* chunk; nothing forbade wildcarding the **origin** on `@media`, which subscribes to every host's stream of that name. |
+> | **G** | [09 §6](09-operations.md) *(new)* | **Cutover acceptance.** A cutover is not done until the retired family is provably **silent** *and* a **consumer-shaped, concrete-key** probe passes. A `*`-origin probe cannot catch a broken origin path — the reference smoke was green while the product was entirely broken. |
+>
+> **What did *not* change, deliberately.** [05 §2.1](05-control-rpc.md) (fan-in
+> call discipline) was proposed for amendment and **left alone**: it already
+> mandated query target `All` and replying on the producer's own concrete key,
+> as bolded MUSTs, with the right reasoning. Both were hit as real bugs — not
+> because the chapter was silent, but because it had not been read. An
+> editorial note now says so in place, so nobody "fixes" a section that was
+> right. Likewise a proposed `@blob` wildcard amendment was dropped: 07 §2
+> already said the **opposite** of what was proposed, and correctly.
+>
+> Also fixed: 07 §1 cited `05 §5` twice for the stream-control RPC idiom; the
+> normative home is **05 §3**.
 
 > **v1.1 (2026-07-14) — one amendment.** The version chunk is a **plain** `v1`,
 > not the verbatim `@v1` of v1.0. Verbatim made zenoh-ext's `@adv`
