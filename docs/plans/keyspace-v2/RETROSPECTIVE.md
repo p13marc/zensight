@@ -245,7 +245,20 @@ one that damaged trust.
 
 ---
 
-## 5. Proposed RFC amendments (v1.1 — all additive, no wire change) → **#467**
+## 5. Proposed RFC amendments (all additive, no wire change) → **#467**
+
+> **Landed 2026-07-14 as RFC v1.2**, not v1.1 — v1.1 was spent on the version-chunk
+> break (PR #482) while this section was being written. All five surviving amendments
+> shipped: **A** → [06 §6](../../rfcs/keyspace-v2/06-identity.md),
+> **B** → [08 §1.1](../../rfcs/keyspace-v2/08-registry.md),
+> **C** → [08 §5 + §6.1](../../rfcs/keyspace-v2/08-registry.md),
+> **D** → [09 §0.1](../../rfcs/keyspace-v2/09-operations.md),
+> **F′** → [07 §1 + new §3](../../rfcs/keyspace-v2/07-bulk-planes.md),
+> **G** → [09 §6](../../rfcs/keyspace-v2/09-operations.md). The two rejections (E, and
+> the original F) are recorded in [12 §8](../../rfcs/keyspace-v2/12-open-questions.md)
+> so they cannot be quietly re-proposed. **B** and **C** each turned out to have a
+> *code* half the doc cannot carry — filed as #485 (typed local/remote origins) and
+> #484 (the registry ⊆ served lint).
 
 **Revision 1 proposed seven. Five survive.** Each was checked against the chapter text; the
 verdict column is the honest result, including where I was wrong.

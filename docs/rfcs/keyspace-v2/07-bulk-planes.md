@@ -1,6 +1,6 @@
 # 07 — Bulk Planes: `@media` and `@blob`
 
-**Status: v1.0 (ratified)** · normative chapter
+**Status: v1.2 (ratified)** · normative chapter · *amended in v1.2 — see [00-index.md](00-index.md)*
 
 Two kinds of traffic must never meet a wildcard: frame-rate opaque bytes
 (video, imagery) and bulk transfers (files, directory trees, chunks). Both
@@ -43,14 +43,23 @@ Rules:
   no-viewers ↔ some-viewers *edge*: an Nth viewer joining beside a current
   one produces no event and obtains its immediate keyframe via
   `@rpc/<producer>/stream/keyframe`
-  ([05-control-rpc.md §5](05-control-rpc.md)) instead of waiting out a GOP.
+  ([05-control-rpc.md §3](05-control-rpc.md)) instead of waiting out a GOP.
 - **Viewer selectors stay single-stream**: exact key for previews;
   `…/<stream>/video/<codec>/*` for video (one `*` over the
   publisher-configured profile chunk, which the viewer cannot know).
   Matching is intersection-based, so the publisher's matching listener
   fires for the wildcard subscriber.
+  **The `*` is licensed for the *profile* chunk and nothing else.** In
+  particular a viewer MUST NOT wildcard the **origin**: `…/*/@media/…`
+  subscribes to *every host in the fleet* publishing a stream of that name
+  and decodes all of them to render one tile — the same amplification §2
+  forbids as a default `@blob` fetch path, on the plane that carries the
+  most bytes per second on the bus. A viewer that does not know which host
+  it is looking at has not finished resolving its target
+  ([06-identity.md §6](06-identity.md)), and MUST resolve it rather than
+  paper over it with a wildcard.
 - **Stream control is `@rpc`**, stream status/catalogue is `state`
-  ([05-control-rpc.md §5](05-control-rpc.md)); stream *stats*
+  ([05-control-rpc.md §3](05-control-rpc.md)); stream *stats*
   (fps/kbps/drops/viewers) are ordinary `telemetry` under
   `telemetry/<producer>/<stream>/stats/…` — charts light up for free.
   `@media` carries pixels and nothing else.
@@ -102,7 +111,40 @@ never pays a byte), fronted by a resumable client (reference: `zenoh-blob`
   what keeps a transfer from starving telemetry or an alert on a
   constrained link ([04-planes.md §3](04-planes.md)).
 
-## 3. Why planes and not payloads
+## 3. The wildcard rule (normative)
+
+*Added in v1.2. The `@blob` fan-out caveat in §2 and the `@media` origin
+rule in §1 are two instances of one rule that was never stated.*
+
+> **A publisher MUST always use its concrete origin. A subscriber MAY
+> wildcard a chunk it cannot know — and only such a chunk.**
+
+The two halves are not symmetric, and the asymmetry is the point.
+
+- **Publishing** is an assertion about *who you are*. There is exactly one
+  right answer and the publisher always has it. A `*` in a published key is
+  never a shortcut; it is a lie about identity, and it is unrepresentable
+  if the origin is a value the publisher owns rather than a string it
+  formats ([08-registry.md §1.1](08-registry.md)).
+- **Subscribing** is a question about *what exists*. A `*` is the honest
+  spelling of "I cannot know this chunk" — the profile a publisher chose
+  (§1), the set of producers on a host, the hosts in a fleet.
+
+The test for a subscriber is therefore **"can I know this chunk?"**, not
+"is this convenient?". A chunk you *could* resolve but did not is a
+wildcard that will one day match more than you meant — and on the bulk
+planes, "more than you meant" is measured in megabits.
+
+**Cost is the second gate, and it binds even when the first passes.** A
+consumer legitimately unable to name an origin still MUST NOT fan out
+across origins on `@media` or `@blob`, because every matching holder ships
+the full payload and Zenoh cannot cancel remote replies in flight (§2).
+Wildcard-origin on a bulk plane is for *probing* — tiny replies — followed
+by a fetch from one chosen origin's literal key. On the data classes
+(`telemetry` / `state` / `events`) a wildcard origin is ordinary and
+expected; it is what a fleet view *is*.
+
+## 4. Why planes and not payloads
 
 The alternative — riding bulk/media on the data classes with a "big"
 payload type — fails all three constraints these planes exist for:

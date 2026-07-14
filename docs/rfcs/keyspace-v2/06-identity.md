@@ -1,6 +1,6 @@
 # 06 — Identity, Origins, and the Catalog
 
-**Status: v1.0 (ratified)** · normative chapter
+**Status: v1.2 (ratified)** · normative chapter · *amended in v1.2 — see [00-index.md](00-index.md)*
 
 The grammar puts a stable identity in every key (the origin chunk,
 [03-grammar.md §1.3](03-grammar.md)). This chapter defines how that identity
@@ -278,4 +278,76 @@ the storage's `garbage_collection.lifespan`
 replicated catalog storages SHOULD size that lifespan to their
 partition-heal horizon, because a pruned tombstone is what lets a slow
 replica resurrect a merged-away entity.
+
+---
+
+## 6. Targeting a known host — the consumer identity bridge
+
+*Added in v1.2. §5.1 runs origin → entity: "I have a key, whose box is
+this?" This section runs the other way — "I have a box, what key do I
+build?" — and it is the direction that actually breaks products.*
+
+Every key in the convention is origin-scoped. Every *payload* carries a
+human identity (`source` = hostname, a label an operator recognises). A
+consumer therefore holds the human identity and needs the origin, because
+an origin-scoped key is the only thing it can address. **That step is not
+optional and it is not free**, and a convention that leaves it unsaid
+invites the consumer to substitute one for the other.
+
+### 6.1 The bridge
+
+> **The payload `host_id` IS the origin id.** They are the same value,
+> minted by the same function ([§1](#1-host-origins--self-minted-stable-opaque)).
+> Nothing else in a payload is.
+
+A hostname is **not** an identity: it is unstable (renames), non-unique
+(`localhost`, cloned images, two containers named alike), and operator-
+assigned. It is a *display label*.
+
+### 6.2 Normative
+
+- A consumer that holds a human identity (hostname, `source`, a row the
+  user clicked) and needs an origin-scoped key **MUST** resolve it to an
+  origin first. It **MUST NOT** interpolate the human identity into the
+  origin position.
+- A consumer **SHOULD** obtain the origin from the **key it already
+  received**. Every data key it consumed carries the origin in chunk 3; a
+  consumer that re-derives identity from the payload when the key already
+  states it has built a second, weaker identity path for no reason.
+- Where the origin is not on a key the consumer holds, the two sanctioned
+  bridges are:
+  1. **the health / registration documents** — `state/<producer>/health`
+     and `state/<producer>/sensor` both carry `host_id` alongside
+     `source`, and both are origin-scoped, so the pair is self-certifying;
+  2. **the `@catalog` entity document** — which **MUST** therefore
+     enumerate the entity's origins (see §6.4).
+- A consumer **MUST NOT** key its own device/host tables on the human
+  identity. Two hosts reporting one hostname collide, and a collision in a
+  table that *builds keys* does not merely muddle a display — it
+  **misroutes queries to the wrong host**.
+- The `*`-origin fleet selector is a legal fallback *only* while the
+  bridge is genuinely unresolved, and only where the amplification is
+  acceptable ([07-bulk-planes.md §3](07-bulk-planes.md) — on `@media` and
+  `@blob` it is not). It is a fallback, not a default.
+
+### 6.3 Why this is stated so loudly
+
+The reference implementation shipped a UI whose device table was keyed on
+the payload hostname. When drill-down fetches became origin-scoped, they
+were built from that table — so the UI issued
+`GET <base>/v1/toolbx/@rpc/sysinfo/processes`, addressing an origin that
+has never existed, while streamed telemetry kept working perfectly.
+**Every drill-down in the product died at once**, and it looked like a
+sensor fault.
+
+The bridge was on the wire the whole time. The convention never said to
+build it.
+
+### 6.4 Consequence for the entity document
+
+An entity document **MUST** carry the origins it merges — the
+`entity.origins[]` that [§5.1](#51-how-a-ui-joins) step 3 already assumes.
+An entity that records only its members' *human* labels cannot serve as a
+bridge, because reading it leaves the consumer holding exactly what it
+started with.
 

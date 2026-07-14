@@ -1,6 +1,6 @@
 # 05 — Control Plane: `@rpc`
 
-**Status: v1.0 (ratified)** · normative chapter
+**Status: v1.2 (ratified)** · normative chapter · *amended in v1.2 — see [00-index.md](00-index.md)*
 
 All interaction — questions, instructions, downloads-of-detail — happens on
 the `@rpc` plane through **queryables** (request/reply), never through
@@ -72,6 +72,24 @@ discipline does, and fleet callers MUST follow it:
   roster (`<base>/v1/*/state/*/alive`, [04-planes.md §5](04-planes.md)) to
   attribute non-replies — the reply set alone cannot say who *should* have
   answered.
+
+Checklist, because every one of these has been shipped wrong at least once:
+
+| | caller | producer |
+|---|---|---|
+| target | `All` — **not** the default `BestMatching` | — |
+| key | the origin you resolved ([06 §6](06-identity.md)), or an explicit `*` | your **own concrete** key |
+| `complete` | — | **never** on an `@rpc` queryable |
+| consolidation | `None` for belt and braces | — |
+| missing replies | join against the liveliness roster | — |
+
+> **Editorial note (v1.2).** This section is **correct as written** and was
+> deliberately left unchanged by the v1.2 amendments. Both of its MUSTs were
+> hit as real bugs during the reference migration — and the cause was not a
+> gap in this chapter, it was **not having read it**. The mechanism was then
+> "rediscovered" from Zenoh's API docs, which said exactly what §2.1 already
+> said. Recorded here so that a future reader who arrives via those bugs does
+> not conclude the spec was silent and "fix" a section that was right.
 
 ## 3. Read, write, and long-running procedures
 
