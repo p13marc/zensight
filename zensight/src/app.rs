@@ -7137,9 +7137,9 @@ mod prefetch_tests {
 
         // Derived rollups (counters/gauges) are excluded.
         for (metric, value) in [
-            ("logs/by_severity/error_total", TelemetryValue::Counter(3)),
-            ("logs/ingest/received_total", TelemetryValue::Counter(6)),
-            ("logs/units_in_failure", TelemetryValue::Gauge(0.0)),
+            ("by_severity/error_total", TelemetryValue::Counter(3)),
+            ("ingest/received_total", TelemetryValue::Counter(6)),
+            ("units_in_failure", TelemetryValue::Gauge(0.0)),
         ] {
             let rollup = TelemetryPoint::new("host01", Protocol::Logs, metric, value);
             assert!(

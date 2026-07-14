@@ -164,7 +164,7 @@ pub fn score_device(d: &DeviceState) -> HealthScore {
         d.effective_status(),
         metric_text(d, "system/health_state").as_deref(),
         metric_num(d, "system/saturation_score"),
-        metric_num(d, "logs/units_in_failure"),
+        metric_num(d, "units_in_failure"),
         // netring exposes active anomalies under a couple of names depending on
         // build; either is treated as the anomaly signal.
         metric_num(d, "security/anomalies_active")

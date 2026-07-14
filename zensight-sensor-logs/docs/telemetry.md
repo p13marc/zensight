@@ -66,15 +66,15 @@ names below, each starting with the `logs/` chunk):
 
 | Key | Type | Meaning |
 |---|---|---|
-| `logs/by_severity/<level>_total` | Counter | per-severity line counts (8 syslog levels) |
-| `logs/errors_total`, `logs/warnings_total` | Counter | error / warning totals |
-| `logs/by_unit/<unit>/messages_total`, `.../errors_total` | Counter | top-N per-unit rollups (capped to `top_units` + an `other` bucket) |
-| `logs/units_in_failure` | Gauge | units currently in a failure/error state (windowed) |
-| `logs/journald/{read,published,dropped,sampled_out}_total` | Counter | journald throughput accounting |
+| `by_severity/<level>_total` | Counter | per-severity line counts (8 syslog levels) |
+| `errors_total`, `warnings_total` | Counter | error / warning totals |
+| `by_unit/<unit>/messages_total`, `.../errors_total` | Counter | top-N per-unit rollups (capped to `top_units` + an `other` bucket) |
+| `units_in_failure` | Gauge | units currently in a failure/error state (windowed) |
+| `journald/{read,published,dropped,sampled_out}_total` | Counter | journald throughput accounting |
 
-### Ingest accounting (`logs/ingest/*`, #106)
+### Ingest accounting (`ingest/*`, #106)
 
-Network-path loss accounting, parity with journald: `logs/ingest/{received,
+Network-path loss accounting, parity with journald: `ingest/{received,
 parsed,parse_failed,dropped}_total`. A sustained-loss `ErrorReport` is raised once
 the dropped fraction over a window exceeds `ingest.drop_alert_ratio`.
 
@@ -82,12 +82,12 @@ the dropped fraction over a window exceeds `ingest.drop_alert_ratio`.
 
 Drain3-style mining masks variables and clusters each line into a stable template
 (`template_id` / `template` labels on the per-line records), emitting bounded
-`logs/by_template/<id>/{count,errors}_total` series (top-N + an `other` bucket).
+`by_template/<id>/{count,errors}_total` series (top-N + an `other` bucket).
 
 ### Error-budget gauges (`error_budget`, #105)
 
-Layered on the per-unit rollups: `logs/by_unit/<unit>/error_ratio` (window
-`errors/messages`) and `logs/by_unit/<unit>/burn_rate` (× budget). Emitted even
+Layered on the per-unit rollups: `by_unit/<unit>/error_ratio` (window
+`errors/messages`) and `by_unit/<unit>/burn_rate` (× budget). Emitted even
 when alerting is disabled (cheap + bounded).
 
 ## Alerts — `state/logs/alert/<alert_key>`

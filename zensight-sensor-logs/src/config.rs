@@ -91,7 +91,7 @@ pub struct SyslogConfig {
     /// Drain-style streaming log-template mining (#102). Masks variables and
     /// clusters each line into a stable template; attaches `template_id` /
     /// `template` labels to the per-line points and emits bounded
-    /// `logs/by_template/<id>/{count,errors}_total` series. Cheap + bounded, so
+    /// `by_template/<id>/{count,errors}_total` series. Cheap + bounded, so
     /// it's on by default.
     #[serde(default)]
     pub templating: TemplatingConfig,
@@ -310,7 +310,7 @@ impl Default for ErrorBudgetConfig {
 /// Defaults follow the logpai/Drain3 conventions (`depth=4`, `sim=0.4`) and are
 /// bounded so a noisy stream can't blow up cardinality or memory: at most
 /// `max_clusters` templates are mined, and only `top_templates` (+ an `other`
-/// bucket) are emitted as `logs/by_template/*` series.
+/// bucket) are emitted as `by_template/*` series.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TemplatingConfig {
     /// Master switch. On by default (cheap + bounded).

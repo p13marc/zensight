@@ -229,42 +229,36 @@ impl LogAggregator {
 
         for (code, count) in inner.by_severity.iter().enumerate() {
             if let Some(name) = severity_name(code as u8) {
-                points.push(counter(format!("logs/by_severity/{name}_total"), *count));
+                points.push(counter(format!("by_severity/{name}_total"), *count));
             }
         }
-        points.push(counter("logs/errors_total".into(), inner.errors_total));
-        points.push(counter("logs/warnings_total".into(), inner.warnings_total));
+        points.push(counter("errors_total".into(), inner.errors_total));
+        points.push(counter("warnings_total".into(), inner.warnings_total));
 
         for (unit, c) in &inner.units {
             let slug = sanitize_unit(unit);
             points.push(counter(
-                format!("logs/by_unit/{slug}/messages_total"),
+                format!("by_unit/{slug}/messages_total"),
                 c.messages,
             ));
             if c.errors > 0 {
-                points.push(counter(
-                    format!("logs/by_unit/{slug}/errors_total"),
-                    c.errors,
-                ));
+                points.push(counter(format!("by_unit/{slug}/errors_total"), c.errors));
             }
         }
 
         // Units-in-failure is a windowed gauge: distinct units that logged an
         // error/critical since the last emit. Reset for the next window.
         points.push(gauge(
-            "logs/units_in_failure".into(),
+            "units_in_failure".into(),
             inner.failed_units_window.len() as f64,
         ));
         inner.failed_units_window.clear();
 
         if let Some(s) = stats {
-            points.push(counter("logs/journald/read_total".into(), s.read));
-            points.push(counter("logs/journald/published_total".into(), s.published));
-            points.push(counter("logs/journald/dropped_total".into(), s.dropped));
-            points.push(counter(
-                "logs/journald/sampled_out_total".into(),
-                s.sampled_out,
-            ));
+            points.push(counter("journald/read_total".into(), s.read));
+            points.push(counter("journald/published_total".into(), s.published));
+            points.push(counter("journald/dropped_total".into(), s.dropped));
+            points.push(counter("journald/sampled_out_total".into(), s.sampled_out));
         }
 
         points
@@ -309,13 +303,11 @@ impl LogAggregator {
             let eval = evaluate_window(dm, de, &p);
 
             let slug = sanitize_unit(unit);
-            out.points.push(gauge(
-                format!("logs/by_unit/{slug}/error_ratio"),
-                eval.ratio,
-            ));
+            out.points
+                .push(gauge(format!("by_unit/{slug}/error_ratio"), eval.ratio));
             if p.target_ratio > 0.0 {
                 out.points.push(gauge(
-                    format!("logs/by_unit/{slug}/burn_rate"),
+                    format!("by_unit/{slug}/burn_rate"),
                     eval.ratio / p.target_ratio,
                 ));
             }
@@ -442,26 +434,26 @@ mod tests {
 
         let pts = agg.emit("host01", None);
         assert_eq!(
-            find(&pts, "logs/errors_total").unwrap().value,
+            find(&pts, "errors_total").unwrap().value,
             TelemetryValue::Counter(2)
         );
         assert_eq!(
-            find(&pts, "logs/warnings_total").unwrap().value,
+            find(&pts, "warnings_total").unwrap().value,
             TelemetryValue::Counter(1)
         );
         assert_eq!(
-            find(&pts, "logs/by_severity/error_total").unwrap().value,
+            find(&pts, "by_severity/error_total").unwrap().value,
             TelemetryValue::Counter(2)
         );
         assert_eq!(
-            find(&pts, "logs/by_unit/nginx.service/errors_total")
+            find(&pts, "by_unit/nginx.service/errors_total")
                 .unwrap()
                 .value,
             TelemetryValue::Counter(2)
         );
         // Two distinct units logged this window; one (nginx) had errors.
         assert_eq!(
-            find(&pts, "logs/units_in_failure").unwrap().value,
+            find(&pts, "units_in_failure").unwrap().value,
             TelemetryValue::Gauge(1.0)
         );
     }
@@ -472,13 +464,13 @@ mod tests {
         agg.observe(&msg(Severity::Critical, Some("a.service")));
         let first = agg.emit("h", None);
         assert_eq!(
-            find(&first, "logs/units_in_failure").unwrap().value,
+            find(&first, "units_in_failure").unwrap().value,
             TelemetryValue::Gauge(1.0)
         );
         // Next window with no new errors → gauge resets to 0.
         let second = agg.emit("h", None);
         assert_eq!(
-            find(&second, "logs/units_in_failure").unwrap().value,
+            find(&second, "units_in_failure").unwrap().value,
             TelemetryValue::Gauge(0.0)
         );
     }
@@ -492,13 +484,11 @@ mod tests {
         let pts = agg.emit("h", None);
         let unit_series = pts
             .iter()
-            .filter(|p| {
-                p.metric.starts_with("logs/by_unit/") && p.metric.ends_with("/messages_total")
-            })
+            .filter(|p| p.metric.starts_with("by_unit/") && p.metric.ends_with("/messages_total"))
             .count();
         // 2 tracked units + the `other` bucket = 3 series max.
         assert_eq!(unit_series, 3);
-        assert!(find(&pts, "logs/by_unit/other/messages_total").is_some());
+        assert!(find(&pts, "by_unit/other/messages_total").is_some());
     }
 
     fn budget(target: f64, burn_rate: f64, windows: u32, min: u64) -> BudgetParams {
@@ -550,7 +540,7 @@ mod tests {
         observe_window(&agg, "svc.service", 10, 10); // 50% error ratio
         let tick = agg.tick_budgets("h");
         assert_eq!(
-            find(&tick.points, "logs/by_unit/svc.service/error_ratio")
+            find(&tick.points, "by_unit/svc.service/error_ratio")
                 .unwrap()
                 .value,
             TelemetryValue::Gauge(0.5)
@@ -621,10 +611,10 @@ mod tests {
         };
         let pts = agg.emit("h", Some(stats));
         assert_eq!(
-            find(&pts, "logs/journald/dropped_total").unwrap().value,
+            find(&pts, "journald/dropped_total").unwrap().value,
             TelemetryValue::Counter(10)
         );
         // Absent when no journald stats.
-        assert!(find(&agg.emit("h", None), "logs/journald/read_total").is_none());
+        assert!(find(&agg.emit("h", None), "journald/read_total").is_none());
     }
 }

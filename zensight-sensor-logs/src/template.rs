@@ -388,15 +388,9 @@ impl TemplateAggregator {
             crate::telemetry_guard::checked_point(source, metric, TelemetryValue::Counter(v))
         };
         for (id, c) in &inner.counts {
-            points.push(counter(
-                format!("logs/by_template/{id}/count_total"),
-                c.count,
-            ));
+            points.push(counter(format!("by_template/{id}/count_total"), c.count));
             if c.errors > 0 {
-                points.push(counter(
-                    format!("logs/by_template/{id}/errors_total"),
-                    c.errors,
-                ));
+                points.push(counter(format!("by_template/{id}/errors_total"), c.errors));
             }
         }
         points
@@ -515,12 +509,12 @@ mod tests {
         let pts = agg.emit("host01");
         let count = pts
             .iter()
-            .find(|p| p.metric == format!("logs/by_template/{id}/count_total"))
+            .find(|p| p.metric == format!("by_template/{id}/count_total"))
             .unwrap();
         assert_eq!(count.value, TelemetryValue::Counter(2));
         let errors = pts
             .iter()
-            .find(|p| p.metric == format!("logs/by_template/{id}/errors_total"))
+            .find(|p| p.metric == format!("by_template/{id}/errors_total"))
             .unwrap();
         assert_eq!(errors.value, TelemetryValue::Counter(1));
     }
@@ -545,14 +539,12 @@ mod tests {
         let pts = agg.emit("h");
         let series = pts
             .iter()
-            .filter(|p| {
-                p.metric.starts_with("logs/by_template/") && p.metric.ends_with("/count_total")
-            })
+            .filter(|p| p.metric.starts_with("by_template/") && p.metric.ends_with("/count_total"))
             .count();
         assert_eq!(series, 3, "2 tracked templates + the `other` bucket");
         assert!(
             pts.iter()
-                .any(|p| p.metric.starts_with("logs/by_template/other/count_total"))
+                .any(|p| p.metric.starts_with("by_template/other/count_total"))
         );
     }
 }

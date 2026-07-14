@@ -7,8 +7,8 @@ per-unit SLO alerts to Zenoh.
 
 Per-line log events are high-cardinality, so they are **served on demand** from a
 bounded in-memory ring (a GET on `@rpc/logs/events`), never streamed onto the
-telemetry bus (#358). Only low-rate rollups (`logs/by_severity/*`,
-`logs/by_unit/*`, `logs/ingest/*`, …) ride the bus for charts and alerts.
+telemetry bus (#358). Only low-rate rollups (`by_severity/*`,
+`by_unit/*`, `ingest/*`, …) ride the bus for charts and alerts.
 
 ## Features
 

@@ -438,7 +438,7 @@ async fn main() -> Result<()> {
 
     // Streaming log-template mining (#102): mask + cluster each line into a
     // stable template, attach `template_id`/`template` labels to the per-line
-    // points, and emit bounded `logs/by_template/*` series on a tick. Additive
+    // points, and emit bounded `by_template/*` series on a tick. Additive
     // and independent of the `derived` toggle.
     let template_agg = syslog_config.templating.enabled.then(|| {
         let t = &syslog_config.templating;
