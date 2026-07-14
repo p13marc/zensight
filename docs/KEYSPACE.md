@@ -15,11 +15,11 @@ subscribes to it.
 Grammar (RFC [03](rfcs/keyspace-v2/03-grammar.md)):
 
 ```
-zensight/@v1/<origin>/<class>/<producer>/<subject...>     data planes
-zensight/@v1/<origin>/@rpc/<producer>/<procedure...>      request/reply
-zensight/@v1/<origin>/@media/<producer>/<stream>/…        opaque video
-zensight/@v1/<origin>/@blob/{artifact,tree,store}/…       bulk content
-zensight/@v1/@catalog/…                                   the identity catalog
+zensight/v1/<origin>/<class>/<producer>/<subject...>     data planes
+zensight/v1/<origin>/@rpc/<producer>/<procedure...>      request/reply
+zensight/v1/<origin>/@media/<producer>/<stream>/…        opaque video
+zensight/v1/<origin>/@blob/{artifact,tree,store}/…       bulk content
+zensight/v1/@catalog/…                                   the identity catalog
 ```
 
 - `<origin>` = `h-<12hex>` (sha256 of machine-id + salt, RFC
@@ -38,7 +38,7 @@ zensight/@v1/@catalog/…                                   the identity catalog
 - Commands do not exist: writes are GETs on `…/@rpc/<producer>/<topic>/set`,
   reads on `…/@rpc/<producer>/<topic>` (RFC
   [05](rfcs/keyspace-v2/05-control-rpc.md)). Fleet callers select
-  `zensight/@v1/*/@rpc/…` with query target `All`.
+  `zensight/v1/*/@rpc/…` with query target `All`.
 - Late joiners seed with a plain GET on the same state selectors (state is
   its own seed; storage-shaped queryables answer one reply per concrete key).
 
@@ -79,6 +79,34 @@ zensight/@v1/@catalog/…                                   the identity catalog
   MUST build keys through these — never ad-hoc `format!`.
 - **Guard tests**: `zensight-keyspace/tests/guard.rs` pins the D1–D6
   disjointness algebra; consumer crates pin their own selector shapes.
+
+## The version chunk is plain (`v1`), not verbatim
+
+Everything `@`-prefixed in the grammar is **verbatim** — invisible to `*` and
+`**`. That is what keeps the planes out of data selectors (D2) and `@catalog`
+out of a `*` origin (D4). The version chunk is deliberately **not** one of them.
+
+It was `@v1` through the migration. Zenoh's advanced pub/sub parks a
+publisher-detection liveliness token at `<key>/@adv/pub/<zid>/<eid>/…` and parses
+it with `${remaining:**}/@adv/…` — and since `**` cannot cross an `@`,
+`remaining` could not span a key containing `@v1`. **Every** token was
+unparseable by the only code that reads them: `detect_late_publishers()` was
+silently dead, and every subscriber logged *"malformed liveliness token key
+expression"* once per publisher. No upstream fix was possible — the
+`@`-exclusion is a Zenoh matching rule.
+
+The `@` bought invisibility to an **un-versioned** selector, i.e. coexistence
+with the pre-v1 keyspace — a migration property, and the migration is done.
+Cross-major isolation (a `v1` selector never matches a `v2` key) never needed
+it: they are different literal chunks.
+
+**Consequence:** `zensight/**` now *does* match v1 keys. `cutover_e2e` and
+`v1_probe` therefore check that nothing appears **outside** `zensight/v1/`,
+rather than relying on key algebra to hide us. Pinned by
+`zensight-keyspace/tests/adv_token.rs` (the token must parse),
+`guard.rs::d1_version_isolation`, and
+`zensight-sensor-core/tests/adv_publisher_detection.rs` (no warning, end to end).
+RFC: [03 §1.2](rfcs/keyspace-v2/03-grammar.md), [12 §7](rfcs/keyspace-v2/12-open-questions.md).
 
 ## Operations
 

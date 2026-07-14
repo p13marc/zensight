@@ -1,8 +1,8 @@
 //! Runtime control channel for the sentinel: lets the GUI author/push
 //! expectations over Zenoh — as `@rpc` procedures (RFC 05, epic #453):
 //!
-//! - write: `<base>/@v1/<origin>/@rpc/netlink/expectations/set`
-//! - read:  `<base>/@v1/<origin>/@rpc/netlink/expectations`
+//! - write: `<base>/v1/<origin>/@rpc/netlink/expectations/set`
+//! - read:  `<base>/v1/<origin>/@rpc/netlink/expectations`
 //!   (and the same pair for `collection`)
 
 use std::sync::Arc;

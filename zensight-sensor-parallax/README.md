@@ -20,7 +20,7 @@ matching listener forces a keyframe the instant a subscriber appears.
   `request_keyframe`); each open profile is an independent parallax pipeline,
   refcounted per requester and reaped after `idle_timeout_secs` without
   viewers.
-- **Media egress** — `zensight/@v1/<origin>/@media/parallax/<stream>/video/h264/<profile>`
+- **Media egress** — `zensight/v1/<origin>/@media/parallax/<stream>/video/h264/<profile>`
   (encoding `video/h264`) and `…/@media/parallax/<stream>/preview/jpeg`
   (encoding `image/jpeg`), every sample carrying a CBOR `FrameMeta` attachment
   (keyframe flag, pts/dts/duration, sequence, dimensions). Never a telemetry

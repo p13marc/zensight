@@ -45,14 +45,18 @@ async fn main() {
     let legacy: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let v1: Arc<Mutex<BTreeMap<String, u64>>> = Arc::new(Mutex::new(BTreeMap::new()));
 
+    // Anything on the deployment root that is NOT under v1 is a leak. The
+    // "not v1" test lives in the callback because the version chunk is plain:
+    // `**` reaches it, so the selector alone can no longer exclude our own
+    // traffic (see `zensight_keyspace::grammar::VERSION_CHUNK`).
     let legacy_log = legacy.clone();
     let _legacy_sub = session
         .declare_subscriber("zensight/**")
         .callback(move |s| {
-            legacy_log
-                .lock()
-                .unwrap()
-                .push(s.key_expr().as_str().to_string());
+            let key = s.key_expr().as_str();
+            if !key.starts_with("zensight/v1/") {
+                legacy_log.lock().unwrap().push(key.to_string());
+            }
         })
         .await
         .expect("legacy subscriber");
@@ -69,7 +73,7 @@ async fn main() {
     let unreg_log = unregistered.clone();
     let seen_log = telemetry_seen.clone();
     let _v1_sub = session
-        .declare_subscriber("zensight/@v1/**")
+        .declare_subscriber("zensight/v1/**")
         .callback(move |s| {
             let key = s.key_expr().as_str();
             // producer = chunk 5 for data classes, chunk 4 origin for planes.
@@ -81,7 +85,7 @@ async fn main() {
             };
             *v1_log.lock().unwrap().entry(bucket).or_default() += 1;
 
-            if let Some(idx) = key.find("@v1/")
+            if let Some(idx) = key.find("v1/")
                 && let Ok(parsed) = zensight_keyspace::grammar::parse(&key[idx..])
                 && matches!(
                     parsed.class,
@@ -120,7 +124,7 @@ async fn main() {
     let origins: Arc<Mutex<BTreeMap<String, String>>> = Arc::new(Mutex::new(BTreeMap::new()));
     let origins_log = origins.clone();
     let _health_sub = session
-        .declare_subscriber("zensight/@v1/*/state/*/health")
+        .declare_subscriber("zensight/v1/*/state/*/health")
         .callback(move |s| {
             if let Ok(snapshot) = decode_auto::<HealthSnapshot>(&s.payload().to_bytes())
                 && let (Some(hid), Some(src)) = (snapshot.host_id, snapshot.source)
@@ -194,23 +198,23 @@ async fn main() {
         if producer.starts_with('@') {
             continue;
         }
-        let n = probe(format!("zensight/@v1/*/@rpc/{producer}/introspect")).await;
+        let n = probe(format!("zensight/v1/*/@rpc/{producer}/introspect")).await;
         if n == 0 {
             eprintln!("  !! no introspect reply from {producer}");
             rpc_fail = true;
         }
     }
     if producers.contains("logs") {
-        probe("zensight/@v1/*/@rpc/logs/events?max=5".into()).await;
+        probe("zensight/v1/*/@rpc/logs/events?max=5".into()).await;
     }
     if producers.contains("systemd") {
-        probe("zensight/@v1/*/@rpc/systemd/units".into()).await;
+        probe("zensight/v1/*/@rpc/systemd/units".into()).await;
     }
     if producers.contains("parallax") {
-        probe("zensight/@v1/*/@rpc/parallax/streams".into()).await;
+        probe("zensight/v1/*/@rpc/parallax/streams".into()).await;
     }
-    probe("zensight/@v1/*/state/*/alert/*".into()).await;
-    probe("zensight/@v1/@catalog/state/entity/*".into()).await;
+    probe("zensight/v1/*/state/*/alert/*".into()).await;
+    probe("zensight/v1/@catalog/state/entity/*".into()).await;
 
     // == GUI-shaped drill-down phase: origin-scoped GETs, exactly what the
     // device detail tabs send (the fleet probes above cannot catch a broken
@@ -225,7 +229,7 @@ async fn main() {
     for (source, origin) in &origin_map {
         println!("  {source} -> {origin}");
         let drill =
-            |producer: &str, tail: &str| format!("zensight/@v1/{origin}/@rpc/{producer}/{tail}");
+            |producer: &str, tail: &str| format!("zensight/v1/{origin}/@rpc/{producer}/{tail}");
         let mut want = Vec::new();
         if producers.contains("sysinfo") {
             want.push(drill("sysinfo", "processes?sort=cpu&top=5"));
@@ -289,7 +293,7 @@ async fn main() {
 /// Open the first advertised parallax stream (mjpeg), await one preview frame
 /// on the concrete `@media` key, close the stream. Mirrors the GUI tile.
 async fn parallax_tile_roundtrip(session: &zenoh::Session, origin: &str) -> Result<String, String> {
-    let streams_key = format!("zensight/@v1/{origin}/@rpc/parallax/streams");
+    let streams_key = format!("zensight/v1/{origin}/@rpc/parallax/streams");
     let replies = session
         .get(&streams_key)
         .timeout(Duration::from_secs(5))
@@ -307,7 +311,7 @@ async fn parallax_tile_roundtrip(session: &zenoh::Session, origin: &str) -> Resu
         .map(|d| d.stream.clone())
         .ok_or("empty stream catalogue")?;
 
-    let preview_key = format!("zensight/@v1/{origin}/@media/parallax/{stream}/preview/jpeg");
+    let preview_key = format!("zensight/v1/{origin}/@media/parallax/{stream}/preview/jpeg");
     let sub = session
         .declare_subscriber(&preview_key)
         .await
@@ -318,7 +322,7 @@ async fn parallax_tile_roundtrip(session: &zenoh::Session, origin: &str) -> Resu
         codec: Some("mjpeg".into()),
         max_height: None,
     });
-    let set_key = format!("zensight/@v1/{origin}/@rpc/parallax/stream/set");
+    let set_key = format!("zensight/v1/{origin}/@rpc/parallax/stream/set");
     let body = serde_json::to_vec(&open).map_err(|e| e.to_string())?;
     let replies = session
         .get(&set_key)

@@ -4,7 +4,7 @@
 //! [`zensight_common::Alert`]: it owns a [`Publisher`], tracks which alerts are
 //! currently firing, applies a "must be violated continuously for N" debounce,
 //! and publishes firing/resolved transitions to the v1 state key
-//! `<base>/@v1/<origin>/state/<producer>/alert/<alert_key>` (a `Put` to raise/update, a `Put`
+//! `<base>/v1/<origin>/state/<producer>/alert/<alert_key>` (a `Put` to raise/update, a `Put`
 //! with state `Resolved` followed by a `Delete` tombstone to clear).
 //!
 //! Usage from an evaluator sweep:

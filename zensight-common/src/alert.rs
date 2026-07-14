@@ -7,7 +7,7 @@
 //! alert on the bus. This is the wire type for that channel.
 //!
 //! Alerts are LWW state, keyed by [`Alert::alert_key`], at
-//! `<base>/@v1/<origin>/state/<producer>/alert/<alert_key>` (RFC 04 §1.2):
+//! `<base>/v1/<origin>/state/<producer>/alert/<alert_key>` (RFC 04 §1.2):
 //! - a `Put` with [`AlertState::Firing`] raises or updates an alert,
 //! - a `Put` with [`AlertState::Resolved`] (then a Zenoh `Delete` tombstone)
 //!   clears it.
@@ -86,7 +86,7 @@ pub enum AlertState {
 }
 
 /// A fully-formed, sensor-decided alert. The wire type published as LWW
-/// state on `zensight/@v1/<origin>/state/<producer>/alert/<alert_key>`.
+/// state on `zensight/v1/<origin>/state/<producer>/alert/<alert_key>`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Alert {
     /// Unix epoch millis of the latest state transition.

@@ -1,7 +1,7 @@
 # netring telemetry
 
 Every metric is a serialized `TelemetryPoint` published under
-`zensight/@v1/<origin>/telemetry/netring/<metric>` (JSON or CBOR per the
+`zensight/v1/<origin>/telemetry/netring/<metric>` (JSON or CBOR per the
 `serialization` config), via a zenoh-ext `AdvancedPublisher` (per-key cache +
 late-joiner history). `<origin>` is the host's `h-<12hex>` id — the key carries
 no source chunk (the payload `TelemetryPoint` still carries `source`).
@@ -209,9 +209,9 @@ The finished-capture file index rides `@rpc/netring/captures`.
 ## On-demand detail — `@rpc/netring/<topic>`
 
 High-cardinality detail is served on request, never streamed — read procedures
-(GETs) on the `@rpc` plane: `zensight/@v1/<origin>/@rpc/netring/<topic>`.
+(GETs) on the `@rpc` plane: `zensight/v1/<origin>/@rpc/netring/<topic>`.
 Parameters are Zenoh selector params (e.g. `?top=20`). A fleet-wide caller
-selects `zensight/@v1/*/@rpc/netring/<topic>` with query target `All`; every
+selects `zensight/v1/*/@rpc/netring/<topic>` with query target `All`; every
 sensor also serves `@rpc/netring/introspect`, returning its registry slice.
 
 | Topic | Reply | Gate |
@@ -268,7 +268,7 @@ TCP-goodput or systemd's wire-L3 numbers.
 
 Detector, threat-intel, and capture-health alerts publish as a lifecycle
 (firing = Put → resolved = Put(Resolved) → Delete tombstone) on
-`zensight/@v1/<origin>/state/netring/alert/<alert_key>`, where `<alert_key>` is
+`zensight/v1/<origin>/state/netring/alert/<alert_key>`, where `<alert_key>` is
 a stable 16-hex FNV-1a hash of `rule + sorted-labels` (the origin chunk already
 identifies the host, so `source` is not hashed). Late joiners seed the current
 firing set with a plain GET on the same alert state selector (the sensor serves
@@ -285,9 +285,9 @@ arrived on mismatched capture legs; tap miswire or asymmetric routing).
 
 With `evidence` on (default), netring republishes third-party identity claims for
 the correlator: observed-asset `HostEvidence` (`observer=netring`, from the asset
-inventory) on `zensight/@v1/<origin>/state/netring/evidence/device/<device>` and
+inventory) on `zensight/v1/<origin>/state/netring/evidence/device/<device>` and
 passive-DNS `NameObservation`s (one per IP) on
-`zensight/@v1/<origin>/state/netring/evidence/names/<ip-slug>`. Rate-limited
+`zensight/v1/<origin>/state/netring/evidence/names/<ip-slug>`. Rate-limited
 (per-source min-interval + per-tick cap) and TTL-aged. **Gating:** asset evidence
 needs `collect.assets`; name evidence needs `collect.dns` — with those collectors
 off (the shipped default) netring emits no evidence even though `evidence.enabled`

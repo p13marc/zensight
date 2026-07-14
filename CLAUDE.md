@@ -76,7 +76,7 @@ cargo clippy --workspace -- -D warnings
 
 ```mermaid
 flowchart LR
-    S["sensors"] -- publish --> BUS["Zenoh bus<br/>zensight/@v1/&lt;origin&gt;/… · @catalog · @rpc/@media/@blob"]
+    S["sensors"] -- publish --> BUS["Zenoh bus<br/>zensight/v1/&lt;origin&gt;/… · @catalog · @rpc/@media/@blob"]
     BUS -- subscribe --> FE["frontend"]
     BUS -- subscribe --> EX["exporters<br/>(Prometheus / OTEL)"]
     S -- "state/*/evidence/**" --> COR["catalog<br/>(correlator)"]
@@ -84,7 +84,7 @@ flowchart LR
 ```
 
 - **Keyspace v1** (RFC, ratified): everything rides
-  `zensight/@v1/<origin>/<class>/<producer>/<subject...>` with classes
+  `zensight/v1/<origin>/<class>/<producer>/<subject...>` with classes
   `telemetry`/`state`/`events`, verbatim planes `@rpc`/`@media`/`@blob`, and the
   `@catalog` identity service; commands are `@rpc` GETs, not publications. The
   registry + typed builders live in `zensight-keyspace/`; contract summary:

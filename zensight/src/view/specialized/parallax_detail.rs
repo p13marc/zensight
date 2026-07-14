@@ -373,11 +373,11 @@ mod tests {
         // publishes on this literal key (cross-crate contract, RFC 07 §1).
         assert_eq!(
             media_preview_key(Protocol::Parallax, "h-3fa9c2d41b7e", "cam0"),
-            "zensight/@v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
+            "zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
         );
         assert_eq!(
             origin_rpc_key("h-3fa9c2d41b7e", "parallax", "streams"),
-            "zensight/@v1/h-3fa9c2d41b7e/@rpc/parallax/streams"
+            "zensight/v1/h-3fa9c2d41b7e/@rpc/parallax/streams"
         );
     }
 

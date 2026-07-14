@@ -1,7 +1,7 @@
 //! Sensor-alert export.
 //!
 //! Sensors publish fully-formed alerts on
-//! `zensight/@v1/<origin>/state/<producer>/alert/<key>` (firing → resolved →
+//! `zensight/v1/<origin>/state/<producer>/alert/<key>` (firing → resolved →
 //! tombstone). The metric exporters normally subscribe only to the telemetry
 //! class, so those alerts only ever reached the desktop GUI. This
 //! store mirrors the firing set and renders it as a Prometheus gauge so external

@@ -93,7 +93,7 @@ from the incumbent `alert_key`, which prefixes the rule name and hashes the
 source; see [11-zensight-profile.md §3](11-zensight-profile.md).) Modelling
 alerts as events would force every consumer to re-derive "what is firing
 now" from an unbounded log — the exact query the class system should answer
-with one selector: `<base>/@v1/*/state/*/alert/*`.
+with one selector: `<base>/v1/*/state/*/alert/*`.
 
 ### 1.3 `events` — immutable occurrences
 
@@ -376,16 +376,16 @@ is invisible to the keys and to the wire contract.
 ## 4. Storage mapping
 
 The class chunk is the storage selector. A deployment configures storages
-per class, with `strip_prefix` = `<base>/@v1` (a literal leftmost run, as
+per class, with `strip_prefix` = `<base>/v1` (a literal leftmost run, as
 Zenoh requires):
 
 | Storage | Selector | Backend shape |
 |---|---|---|
-| latest-value | `<base>/@v1/*/state/**` | LWW store honouring tombstones (fs/redb/rocksdb-class) |
-| time-series | `<base>/@v1/*/telemetry/**` | append-per-key (influx-class) |
-| event log | `<base>/@v1/*/events/**` | append-only; retention is the **backend database's** policy (e.g. an InfluxDB retention policy) — Zenoh's storage `garbage_collection` GCs metadata, not data |
-| catalog | `<base>/@v1/@catalog/state/**` | LWW store — **explicit**, because `*` never matches `@catalog` (design property D4) |
-| catalog history | `<base>/@v1/@catalog/state/pdns/**` | time-series capture of an LWW stream — see below |
+| latest-value | `<base>/v1/*/state/**` | LWW store honouring tombstones (fs/redb/rocksdb-class) |
+| time-series | `<base>/v1/*/telemetry/**` | append-per-key (influx-class) |
+| event log | `<base>/v1/*/events/**` | append-only; retention is the **backend database's** policy (e.g. an InfluxDB retention policy) — Zenoh's storage `garbage_collection` GCs metadata, not data |
+| catalog | `<base>/v1/@catalog/state/**` | LWW store — **explicit**, because `*` never matches `@catalog` (design property D4) |
+| catalog history | `<base>/v1/@catalog/state/pdns/**` | time-series capture of an LWW stream — see below |
 
 Storages require timestamped samples for LWW to be meaningful: deployments
 MUST enable Zenoh timestamping on the publishing side (routers default to
@@ -432,14 +432,14 @@ like data selectors:
 
 | Token key | Declared by |
 |---|---|
-| `<base>/@v1/<origin>/state/<producer>/alive` | every producer instance |
-| `<base>/@v1/<origin>/state/<producer>/device/<device>/alive` | producers tracking downstream devices |
-| `<base>/@v1/@catalog/state/alive` | the elected catalog owner ([06-identity.md §5.3](06-identity.md)) |
+| `<base>/v1/<origin>/state/<producer>/alive` | every producer instance |
+| `<base>/v1/<origin>/state/<producer>/device/<device>/alive` | producers tracking downstream devices |
+| `<base>/v1/@catalog/state/alive` | the elected catalog owner ([06-identity.md §5.3](06-identity.md)) |
 
 - Liveliness tokens live in the middleware's separate liveliness space;
   they do not collide with data subscribers even though the key shapes
   align. The alignment is for humans and for selector reuse:
-  `<base>/@v1/*/state/*/alive` (liveliness subscriber) is the entire
+  `<base>/v1/*/state/*/alive` (liveliness subscriber) is the entire
   fleet-presence protocol, zero payload bytes. To keep that shape
   unambiguous, `alive` is a reserved subject leaf
   ([03-grammar.md §3](03-grammar.md)) — never a data subject.

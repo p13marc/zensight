@@ -52,7 +52,7 @@ a **negative** one becomes `Gauge`.
 ## Alert model
 
 Sensors publish durable, fully-formed alert decisions as LWW state documents on
-`zensight/@v1/<origin>/state/<producer>/alert/<alert_key>` (`alert.rs`). Unlike the
+`zensight/v1/<origin>/state/<producer>/alert/<alert_key>` (`alert.rs`). Unlike the
 frontend's local threshold rules, an `Alert` is a decision the sensor/sentinel
 already made.
 
@@ -112,11 +112,11 @@ the sentinel, `detectors` for netring):
 
 | Builder | Key | Zenoh primitive |
 |---------|-----|-----------------|
-| `command_key(prefix, topic)` | `zensight/@v1/<origin>/@rpc/<producer>/<topic>/set` | queryable (write procedure) |
-| `status_key(prefix, topic)` | `zensight/@v1/<origin>/@rpc/<producer>/<topic>` | queryable (read) |
+| `command_key(prefix, topic)` | `zensight/v1/<origin>/@rpc/<producer>/<topic>/set` | queryable (write procedure) |
+| `status_key(prefix, topic)` | `zensight/v1/<origin>/@rpc/<producer>/<topic>` | queryable (read) |
 | `query_key(prefix, topic)` | same key as `status_key` — reads are reads | queryable (on-demand bulk detail) |
 
-Fleet callers select `zensight/@v1/*/@rpc/…` (`fleet_rpc_key` /
+Fleet callers select `zensight/v1/*/@rpc/…` (`fleet_rpc_key` /
 `fleet_command_key` in `keyexpr.rs`) with query target `All`; failures ride
 `reply_err` with namespaced `error/...` names. The payload type is
 topic-specific. Wrap it in `Command<T>` when you need an optional correlation

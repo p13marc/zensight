@@ -1,7 +1,7 @@
 # netlink telemetry
 
 All streamed telemetry is published under
-`zensight/@v1/<origin>/telemetry/netlink/<metric>` as a serialized
+`zensight/v1/<origin>/telemetry/netlink/<metric>` as a serialized
 `TelemetryPoint` (JSON or CBOR per `serialization`), where `<origin>` is the
 host's `h-<12hex>` id — the key carries no source chunk; the payload
 `TelemetryPoint` still carries `source`. High-cardinality detail is **never
@@ -117,9 +117,9 @@ No-op unless built with `--features ebpf` **and** holding `CAP_BPF` + `CAP_NET_A
 ## On-demand detail — `@rpc/netlink/<topic>`
 
 Served on request, never streamed — read procedures (GETs) on the `@rpc` plane:
-`zensight/@v1/<origin>/@rpc/netlink/<topic>`. Parameters are Zenoh selector
+`zensight/v1/<origin>/@rpc/netlink/<topic>`. Parameters are Zenoh selector
 params (`?state=&port=`, `?top=N`). A fleet-wide caller selects
-`zensight/@v1/*/@rpc/netlink/<topic>` with query target `All` to fan out to
+`zensight/v1/*/@rpc/netlink/<topic>` with query target `All` to fan out to
 every netlink sensor on the bus. Every sensor also serves
 `@rpc/netlink/introspect`, returning the registry slice this build serves.
 
@@ -151,13 +151,13 @@ systemd unit's `main_pid`, and netring flow ownership.
 
 ## Alerts & identity evidence
 
-- **Alerts** — `zensight/@v1/<origin>/state/netlink/alert/<alert_key>` from
+- **Alerts** — `zensight/v1/<origin>/state/netlink/alert/<alert_key>` from
   sentinel expectation violations (`<alert_key>` = 16-hex FNV-1a of
   `rule + labels`; firing = Put, resolved = Put(Resolved) then a Delete
   tombstone). See [sentinel.md](sentinel.md).
 - **Identity evidence (#307)** — with `evidence` (default on), the neighbor poll
   publishes observed-neighbor `HostEvidence` (ARP/ND table → MAC↔IP,
   `observer=netlink`) on
-  `zensight/@v1/<origin>/state/netlink/evidence/device/<device>` (plus the
+  `zensight/v1/<origin>/state/netlink/evidence/device/<device>` (plus the
   self-claim on `.../evidence/self`) for the correlator, with the configured
   rate-limiting and TTL aging.

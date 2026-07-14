@@ -27,7 +27,7 @@ reports it. That is why the halves are not blended.
 
 ```bash
 zenctl topic list [--producer netring] [--class telemetry]
-zenctl topic info zensight/@v1/h-3fa9c2d41b7e/state/netring/alert/abc123
+zenctl topic info zensight/v1/h-3fa9c2d41b7e/state/netring/alert/abc123
 zenctl service list [--producer netlink]
 zenctl interface list
 zenctl interface show TelemetryPoint
@@ -37,8 +37,8 @@ zenctl interface show TelemetryPoint
 replaced positional `split('/')` re-parsing. Variables come back *named*:
 
 ```
-$ zenctl topic info zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/disk/root/usage_percent
-key       zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/disk/root/usage_percent
+$ zenctl topic info zensight/v1/h-3fa9c2d41b7e/telemetry/sysinfo/disk/root/usage_percent
+key       zensight/v1/h-3fa9c2d41b7e/telemetry/sysinfo/disk/root/usage_percent
 origin    h-3fa9c2d41b7e
 producer  sysinfo
 class     telemetry
@@ -61,13 +61,13 @@ metric tree belongs to the polled device. `topic list` flags those
 
 ```bash
 zenctl node list                        # the liveliness roster
-zenctl topic echo 'zensight/@v1/**'     # subscribe + decode
+zenctl topic echo 'zensight/v1/**'     # subscribe + decode
 zenctl service call '*' sysinfo processes --param sort=cpu --param top=5
 zenctl service call h-3fa9 netring capture/trigger --body @trigger.json
 zenctl doctor                           # fleet vs. this build
 ```
 
-`node list` is a liveliness query on `zensight/@v1/*/state/*/alive` — RFC 04 §5's
+`node list` is a liveliness query on `zensight/v1/*/state/*/alive` — RFC 04 §5's
 "entire fleet-presence protocol, zero payload bytes". The token *key* is the
 record. (The RFC took this from rmw_zenoh's `@ros2_lv` discovery space, which is
 what `ros2 node list` reads.)

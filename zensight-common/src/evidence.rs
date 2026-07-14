@@ -1,4 +1,4 @@
-//! Host-evidence wire types — the `zensight/@v1/*/state/*/evidence/**` keyspace (#301).
+//! Host-evidence wire types — the `zensight/v1/*/state/*/evidence/**` keyspace (#301).
 //!
 //! Sensors publish identity *evidence*; the correlator (single writer) merges it
 //! into entities. Evidence is a claim, not a verdict: `observer: None` marks a

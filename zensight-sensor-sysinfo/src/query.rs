@@ -1,6 +1,6 @@
 //! On-demand per-process detail query channel (principle P2, plan §F).
 //!
-//! Declares `zensight/@v1/<origin>/@rpc/sysinfo/processes`. The GUI calls it when a
+//! Declares `zensight/v1/<origin>/@rpc/sysinfo/processes`. The GUI calls it when a
 //! user drills into a host to ask "what's eating the box?". Each reply is a
 //! fresh, sorted, bounded `Vec<ProcessRecord>` serialized as JSON — the
 //! high-cardinality per-pid firehose is *never* streamed onto the telemetry bus

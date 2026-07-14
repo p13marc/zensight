@@ -38,7 +38,11 @@ set* of prefix rules (one per plane), not one rule
 **P4 — Verbatim chunks make planes; everything lives under the version.**
 `@`-verbatim chunks are the only mechanism that makes separation *hermetic*
 — wildcards structurally cannot cross them — so plane boundaries
-(`@rpc`, `@media`, `@blob`) and the version boundary (`@v1`) are verbatim.
+(`@rpc`, `@media`, `@blob`) and service origins (`@catalog`) are verbatim.
+The version chunk is **not**: verbatim there would have hidden v1 from an
+un-versioned selector, but it also made zenoh-ext's `@adv` publisher-detection
+tokens unparseable, and cross-major isolation never needed it
+([03-grammar.md §1.2](03-grammar.md)).
 And nothing is ever placed beside the version chunk: Sparkplug's
 STATE-outside-`spBv1.0/` needed a breaking release to fix.
 *(Zenoh key-expression formalism; Keelson `@v`/`@rpc`; rmw_zenoh

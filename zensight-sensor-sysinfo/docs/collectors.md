@@ -109,7 +109,7 @@ that normalizes to a saturation fraction of 1.0.
 
 Gated by `sysinfo.alerts.enabled` (default on). Each poll tick the
 already-collected saturation data is graded against the rule thresholds and
-firing/resolved alerts publish on `zensight/@v1/<origin>/state/sysinfo/alert/*`.
+firing/resolved alerts publish on `zensight/v1/<origin>/state/sysinfo/alert/*`.
 A firing alert
 is only published after the violation persists for `for_secs` (`0` = fire on the
 first violation).

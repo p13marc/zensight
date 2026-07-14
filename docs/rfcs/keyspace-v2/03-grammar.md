@@ -52,7 +52,7 @@ mechanism is marked at first mention:
 ## 1. Canonical form
 
 ```
-<base>/@v1/<origin>/<class>/<producer>/<subject...>
+<base>/v1/<origin>/<class>/<producer>/<subject...>
 ```
 
 Six positions. Positions 2–5 are exactly one chunk each; `<base>` is one or
@@ -61,7 +61,7 @@ configuration; the subject is an open-ended path of one or more chunks.
 Example (reference application):
 
 ```
-zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage
+zensight/v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage
 └──┬───┘ └┬┘ └─────┬──────┘ └───┬───┘ └──┬──┘ └───┬───┘
   base  version  origin       class   producer  subject
 ```
@@ -69,7 +69,7 @@ zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage
 | Position | Name | Arity | Rule |
 |---|---|---|---|
 | 1 | `<base>` | ≥ 1 chunk (config-fixed) | Deployment root. Configurable per deployment; MUST be a fixed run of literal, non-verbatim chunks. |
-| 2 | `@v1` | 1 chunk | Convention major version. MUST be a verbatim chunk of the form `@v<integer>`. |
+| 2 | `v1` | 1 chunk | Convention major version. MUST be a **plain** chunk of the form `v<integer>` (§1.2 — it was verbatim in v1.0; the amendment explains why it is not). |
 | 3 | `<origin>` | 1 chunk | Who publishes: a **host origin** (stable opaque id) or a **service origin** (verbatim `@<service>`). |
 | 4 | `<class>` | 1 chunk | Message class: `telemetry` \| `state` \| `events`, or a verbatim plane `@rpc` \| `@media` \| `@blob`. |
 | 5 | `<producer>` | 1 chunk | The component on the origin that produced the data (sensor/agent), optionally instance-suffixed. Omitted under service origins. |
@@ -105,16 +105,47 @@ zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage
   (See NATS guidance: the first token is the isolation key —
   [10-prior-art.md §6](10-prior-art.md).)
 
-### 1.2 `@v1` — version chunk
+### 1.2 `v1` — version chunk
 
-- MUST be verbatim (`@`-prefixed). A verbatim chunk is matched only by an
-  identical chunk — `*` and `**` never cross it — so keys of two convention
-  majors are **mutually invisible by key algebra**, not by discipline.
-  A `<base>/**` subscriber sees nothing under `<base>/@v1/…`, and a
-  `<base>/@v1/**` subscriber sees nothing outside it.
-- This makes coexistence of an old and a new keyspace a *property of the
-  grammar*: both can share a network indefinitely without a bridge, and a
-  consumer opts into exactly one (or explicitly both).
+- MUST be a **plain** chunk of the form `v<integer>` — *not* verbatim. Two
+  convention majors are different literal chunks, so keys of one major are
+  **invisible to a selector written against another**: a `<base>/v1/**`
+  subscriber can never match a `<base>/v2/…` key, and vice versa. That is
+  **version isolation**, and it is the property the convention needs.
+- This makes coexistence of two convention majors a *property of the grammar*:
+  both can share a network indefinitely without a bridge, and a consumer opts
+  into exactly one (or explicitly both).
+
+> **Amendment (v1.1) — the version chunk was verbatim (`@v1`) in v1.0.**
+>
+> Verbatim bought one thing more: invisibility to an **un-versioned** selector.
+> Because `*`/`**` never cross an `@`, a legacy `<base>/**` firehose could not
+> see v1 keys at all — "mutually invisible by key algebra". That was aimed at
+> coexistence with a *pre-convention* keyspace during a migration.
+>
+> It cost more than it bought. Zenoh's advanced pub/sub (zenoh-ext) parks a
+> publisher-detection liveliness token at `<key>/@adv/pub/<zid>/<eid>/…` and
+> parses it back with `${remaining:**}/@adv/…`. Since `**` cannot cross an `@`,
+> `remaining` could not span a key containing `@v1` — so **every** such token was
+> unparseable by the only code that reads them. Late-publisher detection was
+> silently dead and every subscriber logged *"malformed liveliness token key
+> expression"* once per publisher, forever. No upstream fix is possible: the
+> `@`-exclusion is a Zenoh *matching* rule, so no keformat can capture a key
+> containing a verbatim chunk.
+>
+> The trade is sound because the un-versioned-selector case is a **migration**
+> concern, not a steady-state one: it protects a pre-convention consumer, and
+> once the pre-convention keyspace is retired there is none. Cross-major
+> isolation — the property that keeps working forever — never depended on the
+> `@` at all.
+>
+> The chunks that remain verbatim are the ones whose exclusion does daily work:
+> the planes (`@rpc`/`@media`/`@blob`, §4 D2) and service origins (`@catalog`,
+> §4 D4). No advanced publisher ever publishes on those.
+>
+> **Cost, stated plainly:** an un-versioned `<base>/**` selector now matches v1
+> keys. A deployment migrating from a pre-convention keyspace must therefore
+> keep the two apart by *base*, not by key algebra.
 - The major is bumped **only** when the grammar or the semantics of a
   position change incompatibly. Additive evolution (new subjects, new
   producers, new procedures) is a **registry** change and never bumps the
@@ -160,7 +191,7 @@ deployment-level service (not tied to one host), e.g. `@catalog` for the
 identity correlator.
 
 - Verbatim on purpose: `*` does not match a verbatim chunk, so fleet-wide
-  selectors like `<base>/@v1/*/state/**` structurally exclude service
+  selectors like `<base>/v1/*/state/**` structurally exclude service
   output. Consumers of a service subscribe to it **by name** — a deliberate
   visibility boundary, since service output (merged entities, historical
   records) has different trust, cardinality, and storage properties than
@@ -219,7 +250,7 @@ verbatim hermeticity ([10-prior-art.md §4](10-prior-art.md)).
   directory-like metrics), so a trailing chunk would be ambiguous —
   no parser could tell where the subject ends and the producer begins.
 - Under service origins the producer position is **omitted** (the service
-  *is* the producer): `<base>/@v1/@<service>/<class>/<subject...>`. A parser
+  *is* the producer): `<base>/v1/@<service>/<class>/<subject...>`. A parser
   disambiguates by the origin chunk alone: verbatim origin ⇒ chunk 5 (after
   the class) is already subject; host origin ⇒ chunk 5 is the producer.
 - Under `@blob` the producer position is replaced by a reserved **tier
@@ -322,12 +353,22 @@ plain-prose reading true. The theorems cannot be violated by any publisher;
 the preconditions are enforced by registry review, CI, and deployment
 config, and the RFC is explicit about which is which.
 
-**D1 — Version hermeticity.** *Theorem*: `<base>/**` ∩ `<base>/@v1/**` = ∅.
-Old and new keyspaces coexist with zero cross-talk. No precondition — this
-one is pure algebra.
+**D1 — Version isolation.** *Theorem*: `<base>/v1/**` ∩ `<base>/v2/**` = ∅.
+Two convention majors coexist with zero cross-talk: a selector written
+against one can never match the other's keys. No precondition — this one is
+pure algebra (they are different literal chunks).
+
+> **Amended in v1.1.** D1 used to be the stronger *version hermeticity*:
+> `<base>/**` ∩ `<base>/v1/**` = ∅ — v1 was invisible even to an
+> **un-versioned** selector, because the version chunk was verbatim (`@v1`)
+> and `**` does not cross an `@`. That property protected coexistence with a
+> *pre-convention* keyspace during a migration, and it cost the advanced tier
+> its publisher detection (§1.2). The version chunk is now plain, so
+> `<base>/**` **does** reach v1 keys. Cross-major isolation — the part that
+> matters after the migration — is unaffected.
 
 **D2 — Per-origin firehose is data-only.**
-*Theorem*: `<base>/@v1/h-xxx/**` matches every key under the three data
+*Theorem*: `<base>/v1/h-xxx/**` matches every key under the three data
 classes of that host and **no** key under `@rpc`/`@media`/`@blob`.
 *Precondition*: bulk and high-rate payloads actually live under the verbatim
 planes — placement rule R4 ([04-planes.md §2](04-planes.md)), enforced by
@@ -338,20 +379,20 @@ protects against *misplacement*. With both, one subscription = one host's
 complete data plane at bounded rate. This is the single most load-bearing
 property of the design.
 
-**D3 — Class disjointness.** *Theorem*: `<base>/@v1/*/telemetry/**`,
+**D3 — Class disjointness.** *Theorem*: `<base>/v1/*/telemetry/**`,
 `…/*/state/**`, `…/*/events/**` are pairwise non-intersecting — literal
 class chunks differ. Storage and QoS policy select on them directly.
 
-**D4 — Service exclusion.** *Theorem*: `<base>/@v1/*/state/**` does not
-match `<base>/@v1/@catalog/state/**` (verbatim origin). Fleet selectors see
+**D4 — Service exclusion.** *Theorem*: `<base>/v1/*/state/**` does not
+match `<base>/v1/@catalog/state/**` (verbatim origin). Fleet selectors see
 hosts only; catalog consumers subscribe by name. Corollary: this applies to
 **every** keyexpr in a deployment, including ACL rules and storage
 selectors — a rule written with `*` in the origin position never covers
 `@catalog`, which needs its own rule ([09-operations.md §3](09-operations.md)).
 
 **D5 — Targeted and fleet RPC from one key shape.**
-*Theorem*: `GET <base>/@v1/h-xxx/@rpc/netlink/sockets` reaches one host;
-`GET <base>/@v1/*/@rpc/netlink/sockets` intersects every host's queryable —
+*Theorem*: `GET <base>/v1/h-xxx/@rpc/netlink/sockets` reaches one host;
+`GET <base>/v1/*/@rpc/netlink/sockets` intersects every host's queryable —
 same key, `*` in the origin position (the `*` matches host origins but not
 `@catalog`, by D4's mechanism). *Precondition*: collecting **all** replies
 additionally requires the fan-in call discipline of
@@ -361,12 +402,12 @@ and consolidation can short-circuit to a single reply.
 **D6 — Static policy prefixes.** *Theorem*: every security- or
 storage-relevant boundary (deployment, version, origin, class) is a
 fixed-position literal run from the left. So Zenoh storage `strip_prefix`
-(which must be a literal prefix) can strip `<base>/@v1` and select per
+(which must be a literal prefix) can strip `<base>/v1` and select per
 class, and a constrained link can be provisioned by prefix rules with no
 per-key inspection. *Preconditions and limits*:
 - **Per-principal ACL is a fixed set of prefix rules, one per plane — not
   one rule.** ACL matching is keyexpr *inclusion*, and `**` never crosses a
-  verbatim chunk there either: `<base>/@v1/h-xxx/**` does not cover the
+  verbatim chunk there either: `<base>/v1/h-xxx/**` does not cover the
   host's `@rpc` replies, `@media` frames, or `@blob` keys. "Host X may act
   only as itself" is expressed as ~4 literal-prefix rules
   (`…/h-xxx/**`, `…/h-xxx/@rpc/**`, `…/h-xxx/@media/**`, `…/h-xxx/@blob/**`)
@@ -389,31 +430,31 @@ These keys are the reference examples used throughout the RFC (and by the
 guard tests). Base = `zensight`.
 
 ```
-zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage
-zensight/@v1/h-3fa9c2d41b7e/telemetry/snmp/router01/system/sys_uptime
-zensight/@v1/h-3fa9c2d41b7e/state/netring/health
-zensight/@v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1
-zensight/@v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-7
-zensight/@v1/h-3fa9c2d41b7e/events/netring/capture/01jgxqz4yqk8v6txw3m9f2a7cd
-zensight/@v1/h-3fa9c2d41b7e/@rpc/netlink/sockets
-zensight/@v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main
-zensight/@v1/h-3fa9c2d41b7e/@blob/store/sha256/ab12cd34ef56
-zensight/@v1/@catalog/state/entity/h-3fa9c2d41b7e
-zensight/@v1/@catalog/state/pdns/93-184-216-34
+zensight/v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage
+zensight/v1/h-3fa9c2d41b7e/telemetry/snmp/router01/system/sys_uptime
+zensight/v1/h-3fa9c2d41b7e/state/netring/health
+zensight/v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1
+zensight/v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-7
+zensight/v1/h-3fa9c2d41b7e/events/netring/capture/01jgxqz4yqk8v6txw3m9f2a7cd
+zensight/v1/h-3fa9c2d41b7e/@rpc/netlink/sockets
+zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main
+zensight/v1/h-3fa9c2d41b7e/@blob/store/sha256/ab12cd34ef56
+zensight/v1/@catalog/state/entity/h-3fa9c2d41b7e
+zensight/v1/@catalog/state/pdns/93-184-216-34
 ```
 
 And the canonical selectors:
 
 | Need | Selector |
 |---|---|
-| everything about one host (data planes) | `zensight/@v1/h-3fa9c2d41b7e/**` |
-| all telemetry, fleet-wide | `zensight/@v1/*/telemetry/**` |
-| one protocol, fleet-wide | `zensight/@v1/*/telemetry/snmp/**` |
-| all state (→ latest-value storage) | `zensight/@v1/*/state/**` |
-| all alerts | `zensight/@v1/*/state/*/alert/*` |
-| one host's health | `zensight/@v1/h-3fa9c2d41b7e/state/*/health` |
-| fleet RPC fan-in | `zensight/@v1/*/@rpc/netlink/sockets` (GET) |
-| entity documents | `zensight/@v1/@catalog/state/entity/*` |
+| everything about one host (data planes) | `zensight/v1/h-3fa9c2d41b7e/**` |
+| all telemetry, fleet-wide | `zensight/v1/*/telemetry/**` |
+| one protocol, fleet-wide | `zensight/v1/*/telemetry/snmp/**` |
+| all state (→ latest-value storage) | `zensight/v1/*/state/**` |
+| all alerts | `zensight/v1/*/state/*/alert/*` |
+| one host's health | `zensight/v1/h-3fa9c2d41b7e/state/*/health` |
+| fleet RPC fan-in | `zensight/v1/*/@rpc/netlink/sockets` (GET) |
+| entity documents | `zensight/v1/@catalog/state/entity/*` |
 
 ---
 
@@ -445,7 +486,7 @@ one-`*` selector (`…/*/telemetry/snmp/**`).
 The predecessor drafts (`zensight-key-semantic/`, ChatGPT-assisted) proposed:
 
 ```
-zensight/@v1/<realm>/assets/<asset>/entities/<kind>/<entity>/<state|telemetry>/<domain>/<component>/<producer>
+zensight/v1/<realm>/assets/<asset>/entities/<kind>/<entity>/<state|telemetry>/<domain>/<component>/<producer>
 ```
 
 Adopted from it — with credit: the versioned root, the state/telemetry

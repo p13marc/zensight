@@ -7,7 +7,7 @@
 //! aggregated over its open profiles (kbps is the stream's total media
 //! bandwidth; fps counts every published frame, video + preview).
 //!
-//! Telemetry rides `zensight/@v1/<origin>/telemetry/parallax/<stream>/stats/<metric>`
+//! Telemetry rides `zensight/v1/<origin>/telemetry/parallax/<stream>/stats/<metric>`
 //! (fps / kbps / drops / viewers / encode_ms), so existing charts light up
 //! for free; `streams/advertised` is published every tick so a parallax host
 //! shows up on the dashboard even before any stream is opened.

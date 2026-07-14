@@ -175,7 +175,7 @@ names: {
 ## `evidence` — host-evidence feed (#307)
 
 Republishes observed assets / passive-DNS names as identity evidence on
-`zensight/@v1/<origin>/state/netring/evidence/{device/<device>,names/<ip-slug>}`
+`zensight/v1/<origin>/state/netring/evidence/{device/<device>,names/<ip-slug>}`
 for the correlator. Enabled by default but **gated on its source collectors**:
 asset evidence needs `collect.assets`, name evidence needs `collect.dns` — with
 those off (the shipped default) netring emits no evidence even though `enabled`
@@ -215,7 +215,7 @@ When `enabled`, an operator pulls a bounded `pcap[.zst]` via the unified
 artifact procedures (`@rpc/netring/artifact/request` + `artifact/cancel`,
 lifecycle doc at `state/netring/artifact/capture`; GUI *Capture* tab or any
 client), delivered as a Tier-1 blob on
-`zensight/@v1/<origin>/@blob/artifact/...`. Every request is clamped to these limits. **Limitation:** the packet tier
+`zensight/v1/<origin>/@blob/artifact/...`. Every request is clamped to these limits. **Limitation:** the packet tier
 only sees IP/L4 frames — non-IP traffic (ARP/LLDP) is not captured. Backpressure
 is drop-with-count (a lossy capture never stalls telemetry).
 

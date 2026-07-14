@@ -210,7 +210,7 @@ impl LogAggregator {
     }
 
     /// Snapshot the accumulators into telemetry points published under
-    /// `zensight/@v1/<origin>/telemetry/logs/…`. Cumulative counters (per-severity,
+    /// `zensight/v1/<origin>/telemetry/logs/…`. Cumulative counters (per-severity,
     /// totals, per-unit) let the GUI/Prometheus derive rates; the
     /// units-in-failure gauge is windowed and reset here. `stats` adds journald
     /// throughput when the journald source is active.

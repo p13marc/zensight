@@ -2,8 +2,8 @@
 
 Desktop frontend for the ZenSight observability platform. Built with
 [Iced 0.14](https://iced.rs/), it is a **host- and incident-centric** viewer:
-it subscribes to the v1 keyspace over Zenoh (`zensight/@v1/*/telemetry/**` for
-samples, one `zensight/@v1/*/state/**` subscriber for the whole state plane),
+it subscribes to the v1 keyspace over Zenoh (`zensight/v1/*/telemetry/**` for
+samples, one `zensight/v1/*/state/**` subscriber for the whole state plane),
 auto-discovers every sensor, groups each host's per-protocol facets under one
 card, and rolls firing alerts up into unified incidents. Telemetry persists to
 a bounded local store so history survives restart.

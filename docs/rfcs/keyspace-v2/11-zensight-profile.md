@@ -16,7 +16,7 @@ coexistence, and code changes are explicitly out of scope
 | Convention slot | ZenSight binding |
 |---|---|
 | `<base>` | `zensight` — set as the session `namespace` in the shared zenoh config block (overridable per deployment / `ZENSIGHT_ZENOH_*`), so no crate ever concatenates it ([03-grammar.md §1.1](03-grammar.md)) |
-| version | `@v1` |
+| version | `v1` (plain, not verbatim — [03-grammar.md §1.2](03-grammar.md)) |
 | host origin | `h-<12hex>` from `sha256(machine-id + app salt)` — the same value the correlator uses today as `host_id`/`entity_id` (currently spelled `h_<12hex>`; the profile normalizes the separator to `-`) |
 | service origins | `@catalog` (implemented by `zensight-correlator`) |
 | producers | `snmp`, `logs`, `netflow`, `modbus`, `sysinfo`, `gnmi`, `netlink`, `netring`, `systemd`, `parallax` (+ `-<instance>` when doubled on one host) |
@@ -45,68 +45,68 @@ cache-only depth 1.
 
 ```
 # sysinfo (host-local)
-zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage
-zensight/@v1/h-3fa9c2d41b7e/telemetry/sysinfo/memory/usage_percent
-zensight/@v1/h-3fa9c2d41b7e/@rpc/sysinfo/processes?sort=cpu;top=20
+zensight/v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage
+zensight/v1/h-3fa9c2d41b7e/telemetry/sysinfo/memory/usage_percent
+zensight/v1/h-3fa9c2d41b7e/@rpc/sysinfo/processes?sort=cpu;top=20
 
 # snmp (proxy: device first subject chunk)
-zensight/@v1/h-3fa9c2d41b7e/telemetry/snmp/router01/system/sys_uptime
-zensight/@v1/h-3fa9c2d41b7e/state/snmp/device/router01/liveness
-zensight/@v1/h-3fa9c2d41b7e/state/snmp/device/router01/alive          (liveliness token)
+zensight/v1/h-3fa9c2d41b7e/telemetry/snmp/router01/system/sys_uptime
+zensight/v1/h-3fa9c2d41b7e/state/snmp/device/router01/liveness
+zensight/v1/h-3fa9c2d41b7e/state/snmp/device/router01/alive          (liveliness token)
 
 # netlink
-zensight/@v1/h-3fa9c2d41b7e/telemetry/netlink/sockets/tcp/established
-zensight/@v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1
-zensight/@v1/h-3fa9c2d41b7e/@rpc/netlink/sockets?ip=10.0.0.7
-zensight/@v1/h-3fa9c2d41b7e/@rpc/netlink/expectations/set
+zensight/v1/h-3fa9c2d41b7e/telemetry/netlink/sockets/tcp/established
+zensight/v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1
+zensight/v1/h-3fa9c2d41b7e/@rpc/netlink/sockets?ip=10.0.0.7
+zensight/v1/h-3fa9c2d41b7e/@rpc/netlink/expectations/set
 
 # netring
-zensight/@v1/h-3fa9c2d41b7e/telemetry/netring/flow/red/p95_ms
-zensight/@v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-7
-zensight/@v1/h-3fa9c2d41b7e/events/netring/capture/01jgxqz4yqk8v6txw3m9f2a7cd
-zensight/@v1/h-3fa9c2d41b7e/@rpc/netring/capture/trigger
+zensight/v1/h-3fa9c2d41b7e/telemetry/netring/flow/red/p95_ms
+zensight/v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-7
+zensight/v1/h-3fa9c2d41b7e/events/netring/capture/01jgxqz4yqk8v6txw3m9f2a7cd
+zensight/v1/h-3fa9c2d41b7e/@rpc/netring/capture/trigger
 
 # netflow (proxy; REDESIGNED, not migrated as-is — see §3)
-zensight/@v1/h-3fa9c2d41b7e/telemetry/netflow/exporter01/flows_per_second
-zensight/@v1/h-3fa9c2d41b7e/telemetry/netflow/exporter01/top/talkers/1
-zensight/@v1/h-3fa9c2d41b7e/@rpc/netflow/flows?src=10.0.0.1;dst=10.0.0.2;max=500
+zensight/v1/h-3fa9c2d41b7e/telemetry/netflow/exporter01/flows_per_second
+zensight/v1/h-3fa9c2d41b7e/telemetry/netflow/exporter01/top/talkers/1
+zensight/v1/h-3fa9c2d41b7e/@rpc/netflow/flows?src=10.0.0.1;dst=10.0.0.2;max=500
 
 # modbus (proxy)
-zensight/@v1/h-3fa9c2d41b7e/telemetry/modbus/plc01/holding/40001
-zensight/@v1/h-3fa9c2d41b7e/state/modbus/device/plc01/liveness
+zensight/v1/h-3fa9c2d41b7e/telemetry/modbus/plc01/holding/40001
+zensight/v1/h-3fa9c2d41b7e/state/modbus/device/plc01/liveness
 
 # gnmi (proxy; open-depth subject via the {path...} rest-variable, 08 §2;
 # shipped bracketed path-elements are slugged per 03 §2:
 # interfaces/interface[name=eth0]/state → interfaces/interface/eth0/state —
 # the gNMI key list collapses into a chunk, original path in the payload)
-zensight/@v1/h-3fa9c2d41b7e/telemetry/gnmi/router01/interfaces/interface/eth0/state/counters/in_octets
+zensight/v1/h-3fa9c2d41b7e/telemetry/gnmi/router01/interfaces/interface/eth0/state/counters/in_octets
 
 # systemd
-zensight/@v1/h-3fa9c2d41b7e/telemetry/systemd/unit/sshd.service/active
-zensight/@v1/h-3fa9c2d41b7e/@rpc/systemd/action                       (gated write)
+zensight/v1/h-3fa9c2d41b7e/telemetry/systemd/unit/sshd.service/active
+zensight/v1/h-3fa9c2d41b7e/@rpc/systemd/action                       (gated write)
 
 # logs (per-line detail is pull-only, P9)
-zensight/@v1/h-3fa9c2d41b7e/telemetry/logs/by_severity/error
-zensight/@v1/h-3fa9c2d41b7e/@rpc/logs/events?since=1720000000000;max=500
+zensight/v1/h-3fa9c2d41b7e/telemetry/logs/by_severity/error
+zensight/v1/h-3fa9c2d41b7e/@rpc/logs/events?since=1720000000000;max=500
 
 # parallax (media)
-zensight/@v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main
-zensight/@v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg
-zensight/@v1/h-3fa9c2d41b7e/state/parallax/stream/cam0                (catalogue+status doc)
-zensight/@v1/h-3fa9c2d41b7e/telemetry/parallax/cam0/stats/fps
+zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main
+zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg
+zensight/v1/h-3fa9c2d41b7e/state/parallax/stream/cam0                (catalogue+status doc)
+zensight/v1/h-3fa9c2d41b7e/telemetry/parallax/cam0/stats/fps
 
 # framework (every sensor, via sensor-core)
-zensight/@v1/h-3fa9c2d41b7e/state/<producer>/health
-zensight/@v1/h-3fa9c2d41b7e/state/<producer>/errors
-zensight/@v1/h-3fa9c2d41b7e/state/<producer>/sensor                   (registration doc)
-zensight/@v1/h-3fa9c2d41b7e/state/<producer>/alive                    (liveliness token)
-zensight/@v1/h-3fa9c2d41b7e/state/<producer>/evidence/self
+zensight/v1/h-3fa9c2d41b7e/state/<producer>/health
+zensight/v1/h-3fa9c2d41b7e/state/<producer>/errors
+zensight/v1/h-3fa9c2d41b7e/state/<producer>/sensor                   (registration doc)
+zensight/v1/h-3fa9c2d41b7e/state/<producer>/alive                    (liveliness token)
+zensight/v1/h-3fa9c2d41b7e/state/<producer>/evidence/self
 
 # catalog (zensight-correlator)
-zensight/@v1/@catalog/state/entity/h-3fa9c2d41b7e
-zensight/@v1/@catalog/state/alias/h-9d02aa17c44f
-zensight/@v1/@catalog/state/pdns/93-184-216-34
-zensight/@v1/@catalog/@rpc/names?ip=93.184.216.34
+zensight/v1/@catalog/state/entity/h-3fa9c2d41b7e
+zensight/v1/@catalog/state/alias/h-9d02aa17c44f
+zensight/v1/@catalog/state/pdns/93-184-216-34
+zensight/v1/@catalog/@rpc/names?ip=93.184.216.34
 ```
 
 ## 3. Mapping: every shipped family → its convention home

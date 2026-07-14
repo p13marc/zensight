@@ -66,7 +66,7 @@ This document is intended for architectural review. It deliberately prioritizes 
 
 # Canonical keyspace
 
-- zensight/@v1/<realm>/assets/<asset>/entities/<kind>/<entity>/<state|telemetry>/<domain>/<component>/<producer>
+- zensight/v1/<realm>/assets/<asset>/entities/<kind>/<entity>/<state|telemetry>/<domain>/<component>/<producer>
 - Separate namespaces for events, catalog, producers, raw, artifacts, queries and @media.
 
 
@@ -137,51 +137,51 @@ This document is intended for architectural review. It deliberately prioritizes 
 # Appendix A - Example keys
 
 ```
-zensight/@v1/mission-a/assets/surface/entities/asset/asset-01/state/system/health/self
+zensight/v1/mission-a/assets/surface/entities/asset/asset-01/state/system/health/self
 ```
 
 ```
-zensight/@v1/mission-a/assets/surface/entities/asset/asset-01/telemetry/system/cpu.utilization/sysinfo
+zensight/v1/mission-a/assets/surface/entities/asset/asset-01/telemetry/system/cpu.utilization/sysinfo
 ```
 
 ```
-zensight/@v1/mission-a/assets/surface/entities/machine/machine-01/state/system/health/self
+zensight/v1/mission-a/assets/surface/entities/machine/machine-01/state/system/health/self
 ```
 
 ```
-zensight/@v1/mission-a/assets/surface/entities/machine/machine-01/telemetry/system/cpu.utilization/sysinfo
+zensight/v1/mission-a/assets/surface/entities/machine/machine-01/telemetry/system/cpu.utilization/sysinfo
 ```
 
 ```
-zensight/@v1/mission-a/assets/surface/entities/service/service-01/state/system/health/self
+zensight/v1/mission-a/assets/surface/entities/service/service-01/state/system/health/self
 ```
 
 ```
-zensight/@v1/mission-a/assets/surface/entities/service/service-01/telemetry/system/cpu.utilization/sysinfo
+zensight/v1/mission-a/assets/surface/entities/service/service-01/telemetry/system/cpu.utilization/sysinfo
 ```
 
 ```
-zensight/@v1/mission-a/assets/surface/entities/interface/interface-01/state/system/health/self
+zensight/v1/mission-a/assets/surface/entities/interface/interface-01/state/system/health/self
 ```
 
 ```
-zensight/@v1/mission-a/assets/surface/entities/interface/interface-01/telemetry/system/cpu.utilization/sysinfo
+zensight/v1/mission-a/assets/surface/entities/interface/interface-01/telemetry/system/cpu.utilization/sysinfo
 ```
 
 ```
-zensight/@v1/mission-a/assets/surface/entities/process/process-01/state/system/health/self
+zensight/v1/mission-a/assets/surface/entities/process/process-01/state/system/health/self
 ```
 
 ```
-zensight/@v1/mission-a/assets/surface/entities/process/process-01/telemetry/system/cpu.utilization/sysinfo
+zensight/v1/mission-a/assets/surface/entities/process/process-01/telemetry/system/cpu.utilization/sysinfo
 ```
 
 ```
-zensight/@v1/mission-a/assets/surface/entities/modem/modem-01/state/system/health/self
+zensight/v1/mission-a/assets/surface/entities/modem/modem-01/state/system/health/self
 ```
 
 ```
-zensight/@v1/mission-a/assets/surface/entities/modem/modem-01/telemetry/system/cpu.utilization/sysinfo
+zensight/v1/mission-a/assets/surface/entities/modem/modem-01/telemetry/system/cpu.utilization/sysinfo
 ```
 
 

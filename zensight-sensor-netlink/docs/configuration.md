@@ -20,7 +20,7 @@ each block; defaults are as parsed by `src/config.rs`.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `key_prefix` | `"zensight/netlink"` | legacy-form prefix from which the v1 context derives (base `zensight`, producer `netlink` → keys under `zensight/@v1/<origin>/…/netlink/…`) |
+| `key_prefix` | `"zensight/netlink"` | legacy-form prefix from which the v1 context derives (base `zensight`, producer `netlink` → keys under `zensight/v1/<origin>/…/netlink/…`) |
 | `source` | `"auto"` | telemetry `source` id (payload field — not part of the key); `"auto"` detects the hostname |
 | `poll_interval_secs` | `5` | poll cadence (config example uses `2`) |
 | `collect` | see below | per-collector toggles |
@@ -93,7 +93,7 @@ ebpf: {
 ### `netlink.evidence` (#307)
 
 Republishes observed ARP/NDP neighbors as third-party identity evidence on
-`zensight/@v1/<origin>/state/netlink/evidence/device/<device>` for the
+`zensight/v1/<origin>/state/netlink/evidence/device/<device>` for the
 correlator. Change-driven with a periodic liveness refresh.
 
 ```json5

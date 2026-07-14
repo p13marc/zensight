@@ -56,17 +56,17 @@ flowchart TD
 
 All sensors reuse `zensight-sensor-core` (`SensorRunner`, `Publisher`) and `zensight-common`
 (`TelemetryPoint`, config, serialization). Every key rides the ratified keyspace-v2
-grammar `zensight/@v1/<origin>/<class>/<producer>/<subject...>`, where `<origin>` is the
+grammar `zensight/v1/<origin>/<class>/<producer>/<subject...>`, where `<origin>` is the
 host's stable `h-<12hex>` id. The bus carries:
 
-- `zensight/@v1/<origin>/telemetry/<producer>/<metric...>` — telemetry data
-- `zensight/@v1/<origin>/state/<producer>/health` — sensor health
-- `zensight/@v1/<origin>/state/<producer>/device/<device>/liveness` — device liveness
-- `zensight/@v1/<origin>/state/<producer>/errors` — error reports
-- `zensight/@v1/<origin>/state/<producer>/sensor` — sensor registration
-- `zensight/@v1/<origin>/state/<producer>/evidence/**` — identity evidence (feeds the
+- `zensight/v1/<origin>/telemetry/<producer>/<metric...>` — telemetry data
+- `zensight/v1/<origin>/state/<producer>/health` — sensor health
+- `zensight/v1/<origin>/state/<producer>/device/<device>/liveness` — device liveness
+- `zensight/v1/<origin>/state/<producer>/errors` — error reports
+- `zensight/v1/<origin>/state/<producer>/sensor` — sensor registration
+- `zensight/v1/<origin>/state/<producer>/evidence/**` — identity evidence (feeds the
   catalog, see below)
-- `zensight/@v1/<origin>/@media/parallax/<stream>/…` — opaque live media (H.264 +
+- `zensight/v1/<origin>/@media/parallax/<stream>/…` — opaque live media (H.264 +
   JPEG previews with CBOR `FrameMeta` attachments; produced on demand by
   `zensight-sensor-parallax`, viewed in the GUI — KEYSPACE.md)
 
@@ -103,10 +103,10 @@ flowchart BT
 flowchart LR
     subgraph Collection["1. Collection"]
         SNMPAgent["SNMP Agent"] -- "poll (GET)" --> SnmpSensor["zensight-sensor-snmp"]
-        SnmpSensor -- publish --> SnmpKey["zensight/@v1/&lt;origin&gt;/telemetry/snmp/router01/system/sysUpTime"]
+        SnmpSensor -- publish --> SnmpKey["zensight/v1/&lt;origin&gt;/telemetry/snmp/router01/system/sysUpTime"]
 
         SyslogSource["Syslog Source"] -- "UDP/TCP 514" --> LogsSensor["zensight-sensor-logs"]
-        LogsSensor -- publish --> LogsKey["zensight/@v1/&lt;origin&gt;/telemetry/logs/..."]
+        LogsSensor -- publish --> LogsKey["zensight/v1/&lt;origin&gt;/telemetry/logs/..."]
     end
 
     subgraph Model["2. Common Data Model"]
@@ -117,7 +117,7 @@ flowchart LR
     LogsKey --> TP
 
     subgraph Consumption["3. Consumption"]
-        Bus["zensight/@v1/*/telemetry/** subscribe"]
+        Bus["zensight/v1/*/telemetry/** subscribe"]
         Frontend["ZenSight Frontend<br/>Dashboard/Device views,<br/>health &amp; liveness, topology"]
         PromExp["Prometheus Exporter<br/>/metrics HTTP endpoint"]
         OtelExp["OpenTelemetry Exporter<br/>metrics via OTLP,<br/>log records to OTEL logs"]
@@ -145,16 +145,16 @@ TelemetryPoint {
 
 ## Key Expression Hierarchy
 
-Everything rides `zensight/@v1/<origin>/<class>/<producer>/<subject...>` with the
+Everything rides `zensight/v1/<origin>/<class>/<producer>/<subject...>` with the
 data classes `telemetry` / `state` / `events` and the verbatim planes `@rpc` /
 `@media` / `@blob`; the identity catalog publishes under the verbatim `@catalog`
 origin.
 
 ```
-zensight/@v1/
+zensight/v1/
 ├── <origin>/                            # h-<12hex> — one subtree per host
 │   ├── telemetry/<producer>/<metric...> # TelemetryPoint samples
-│   │       Example: zensight/@v1/h-3fa9c2d41b7e/telemetry/snmp/router01/interfaces/eth0/ifInOctets
+│   │       Example: zensight/v1/h-3fa9c2d41b7e/telemetry/snmp/router01/interfaces/eth0/ifInOctets
 │   ├── state/<producer>/                # LWW documents (its own late-joiner seed)
 │   │   ├── health · errors · sensor · alive
 │   │   ├── device/<device>/{liveness,alive}
@@ -209,8 +209,8 @@ match the subscriber:
 
 | Subtree | Publisher | Subscriber (frontend) |
 |---------|-----------|-----------------------|
-| **Telemetry** `zensight/@v1/*/telemetry/**` | zenoh-ext **`AdvancedPublisher`** (per-key cache + miss/publisher detection) | zenoh-ext **`AdvancedSubscriber`** (`history` + `recovery` + late-publisher detection) |
-| **State plane** `zensight/@v1/*/state/**` | declared plain publisher `put` / `delete` | plain subscriber on `zensight/@v1/*/state/**` (+ `zensight/@v1/@catalog/state/entity/*`) |
+| **Telemetry** `zensight/v1/*/telemetry/**` | zenoh-ext **`AdvancedPublisher`** (per-key cache + miss/publisher detection) | zenoh-ext **`AdvancedSubscriber`** (`history` + `recovery` + late-publisher detection) |
+| **State plane** `zensight/v1/*/state/**` | declared plain publisher `put` / `delete` | plain subscriber on `zensight/v1/*/state/**` (+ `zensight/v1/@catalog/state/entity/*`) |
 
 - **Telemetry** flows through the base `Publisher`, which routes
   `publish`/`publish_to_key`/`publish_batch` through an
@@ -221,7 +221,7 @@ match the subscriber:
 - **State** (`health`, `errors`, `alert/*`, `device/*/liveness`, `sensor`,
   `evidence/**`) is `put`/`delete` through declared plain publishers (one-shot
   `session.put` is banned by CI). The GUI reads it with a separate **plain**
-  subscriber on `zensight/@v1/*/state/**` — the classes are disjoint by
+  subscriber on `zensight/v1/*/state/**` — the classes are disjoint by
   construction, so the telemetry selector never sees state and vice versa.
   Runtime control is not a subtree at all: it is request/reply GETs on the
   verbatim `@rpc` plane (`<topic>` read, `<topic>/set` write).
@@ -232,9 +232,10 @@ match the subscriber:
 
 The two paths never merge: an `AdvancedSubscriber` only gets history/recovery from a matching
 `AdvancedPublisher`, and the class split means a single telemetry subscription can never see
-state documents — so each class needs its own publisher/subscriber pairing. (The verbatim
-`@v1` chunk also means the legacy `zensight/**` wildcard matches **nothing** on the v1 bus —
-pinned by `zensight-sensor-core/tests/cutover_e2e.rs`.)
+state documents — so each class needs its own publisher/subscriber pairing. (An un-versioned
+`zensight/**` wildcard **does** reach v1 keys: the version chunk is plain, not verbatim —
+see `zensight_keyspace::grammar::VERSION_CHUNK`. `cutover_e2e.rs` therefore checks that
+nothing appears *outside* `zensight/v1/`, rather than relying on key algebra to hide us.)
 
 ```mermaid
 sequenceDiagram
@@ -244,18 +245,18 @@ sequenceDiagram
     participant AdvSub as AdvancedSubscriber
     participant GUI as Frontend
 
-    Note over Sensor,GUI: Telemetry — zensight/@v1/*/telemetry/** (history + recovery + QoS)
+    Note over Sensor,GUI: Telemetry — zensight/v1/*/telemetry/** (history + recovery + QoS)
     Sensor->>AdvPub: publish(TelemetryPoint)
     AdvPub->>Bus: per-key cache + publish
     Bus->>AdvSub: deliver (+ history/recovery for late joiners)
     AdvSub->>GUI: TelemetryPoint
 
-    Note over Sensor,GUI: State plane — zensight/@v1/*/state/** (declared plain put/delete)
+    Note over Sensor,GUI: State plane — zensight/v1/*/state/** (declared plain put/delete)
     Sensor->>Bus: put / delete (health, alerts, liveness, evidence, registration)
-    Bus->>GUI: plain subscribe on zensight/@v1/*/state/**
+    Bus->>GUI: plain subscribe on zensight/v1/*/state/**
 
     Note over Sensor,GUI: Control — @rpc plane (request/reply, no publications)
-    GUI->>Bus: GET zensight/@v1/&lt;origin&gt;/@rpc/&lt;producer&gt;/&lt;topic&gt;[/set]
+    GUI->>Bus: GET zensight/v1/&lt;origin&gt;/@rpc/&lt;producer&gt;/&lt;topic&gt;[/set]
     Bus->>Sensor: queryable replies (value or reply_err)
 ```
 
@@ -264,8 +265,8 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     subgraph Subs["Subscriptions (subscription.rs)"]
-        ZenohSub["Zenoh Subscriber<br/>zensight/@v1/*/telemetry/** all telemetry<br/>history recovery + late-publisher detection"]
-        LiveSub["Liveliness Subscriber<br/>sensor + device presence<br/>(zensight/@v1/*/state/*/alive,<br/>zensight/@v1/*/state/*/device/*/alive)"]
+        ZenohSub["Zenoh Subscriber<br/>zensight/v1/*/telemetry/** all telemetry<br/>history recovery + late-publisher detection"]
+        LiveSub["Liveliness Subscriber<br/>sensor + device presence<br/>(zensight/v1/*/state/*/alive,<br/>zensight/v1/*/state/*/device/*/alive)"]
         Tick["Tick (1s interval)<br/>UI refresh"]
         Keyboard["Keyboard<br/>Ctrl+F, Escape, ..."]
     end
@@ -332,9 +333,9 @@ stateDiagram-v2
 ```
 
 The `Running` phase's protocol/health/liveliness tasks run concurrently, all feeding the same
-`Zenoh Publisher`, which emits `zensight/@v1/<origin>/telemetry/<producer>/<metric...>` →
-`TelemetryPoint`, `zensight/@v1/<origin>/state/<producer>/health` → `HealthSnapshot`, and
-`zensight/@v1/<origin>/state/<producer>/device/<device>/liveness` → `DeviceLiveness`. RPC
+`Zenoh Publisher`, which emits `zensight/v1/<origin>/telemetry/<producer>/<metric...>` →
+`TelemetryPoint`, `zensight/v1/<origin>/state/<producer>/health` → `HealthSnapshot`, and
+`zensight/v1/<origin>/state/<producer>/device/<device>/liveness` → `DeviceLiveness`. RPC
 queryables (including `@rpc/<producer>/introspect`) are declared **before** the liveliness
 token, so "alive ⇒ callable" holds.
 
@@ -397,11 +398,11 @@ Syslog severity maps to OTEL severity as follows:
 | 6 (Info) | INFO |
 | 7 (Debug) | DEBUG |
 
-Both exporters subscribe to telemetry on `zensight/@v1/*/telemetry/**` (the classes are
+Both exporters subscribe to telemetry on `zensight/v1/*/telemetry/**` (the classes are
 disjoint, so this can never match state; the verbatim `@rpc`/`@media`/`@blob` planes are
 unreachable by construction). With `export_alerts` enabled (the
 default) each exporter **also** declares a dedicated subscriber on
-`zensight/@v1/*/state/*/alert/*` and mirrors firing sensor alerts out: Prometheus renders a
+`zensight/v1/*/state/*/alert/*` and mirrors firing sensor alerts out: Prometheus renders a
 `<prefix>_alert` gauge (`1` while firing, series absent once resolved —
 Alertmanager-compatible), and the OTel exporter emits OTLP log records on the
 `zensight.alerts` scope. The rest of the state plane is not subscribed at

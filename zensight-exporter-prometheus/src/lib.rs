@@ -8,7 +8,7 @@
 //! ```text
 //! ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
 //! │  Zenoh Network  │────>│    Collector    │────>│   HTTP Server   │
-//! │  (@v1 telemetry)  │     │  (aggregation)  │     │   (/metrics)    │
+//! │  (v1 telemetry)  │     │  (aggregation)  │     │   (/metrics)    │
 //! └─────────────────┘     └─────────────────┘     └─────────────────┘
 //! ```
 //!

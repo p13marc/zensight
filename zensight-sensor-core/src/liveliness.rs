@@ -9,8 +9,8 @@
 //! The manager takes the sensor's [`V1Context`]; token keys mirror the state
 //! grammar (origin-scoped, so two hosts never collide):
 //!
-//! - Sensor liveliness: `<base>/@v1/<origin>/state/<producer>/alive`
-//! - Device liveliness: `<base>/@v1/<origin>/state/<producer>/device/<device>/alive`
+//! - Sensor liveliness: `<base>/v1/<origin>/state/<producer>/alive`
+//! - Device liveliness: `<base>/v1/<origin>/state/<producer>/device/<device>/alive`
 //!
 //! # Example
 //!
@@ -58,7 +58,7 @@ impl LivelinessManager {
     /// Create a new liveliness manager and declare the sensor as alive.
     ///
     /// The sensor liveliness token is declared immediately at
-    /// `<base>/@v1/<origin>/state/<producer>/alive` (RFC 04 §5).
+    /// `<base>/v1/<origin>/state/<producer>/alive` (RFC 04 §5).
     pub async fn new(session: Arc<Session>, ctx: V1Context) -> Result<Self> {
         let sensor_key = ctx.alive_key();
 
@@ -83,7 +83,7 @@ impl LivelinessManager {
     /// Declare a device as alive.
     ///
     /// Creates a liveliness token at
-    /// `<base>/@v1/<origin>/state/<producer>/device/<device>/alive`
+    /// `<base>/v1/<origin>/state/<producer>/device/<device>/alive`
     ///
     /// If the device already has a token, this is a no-op.
     pub async fn declare_device_alive(&self, device_id: &str) -> Result<()> {
@@ -166,7 +166,7 @@ mod tests {
         // running the same producer never collide (RFC 04 §5).
         let ctx = crate::v1::V1Context::for_producer("snmp");
         let sensor_key = ctx.alive_key();
-        assert!(sensor_key.starts_with("zensight/@v1/h-"), "{sensor_key}");
+        assert!(sensor_key.starts_with("zensight/v1/h-"), "{sensor_key}");
         assert!(sensor_key.ends_with("/state/snmp/alive"), "{sensor_key}");
 
         let device_key = ctx.device_alive_key("router01");

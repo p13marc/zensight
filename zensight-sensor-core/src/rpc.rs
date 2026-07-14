@@ -1,7 +1,7 @@
 //! The `@rpc` control plane (RFC 05, epic #453).
 //!
 //! Producers serve *procedures* as Zenoh queryables at
-//! `<base>/@v1/<origin>/@rpc/<producer>/<procedure...>`. All interaction is
+//! `<base>/v1/<origin>/@rpc/<producer>/<procedure...>`. All interaction is
 //! request/reply — pub/sub commands are gone. The disciplines this module
 //! bakes in (so sensors cannot get them wrong):
 //!

@@ -133,6 +133,12 @@ jobs:
       # followed by @v1) in non-test source so the old grammar cannot creep
       # back. Comments and assertions are excluded — negative pins ("must
       # NOT match") and historical notes are legitimate.
+      # Catches pre-v1 key literals (`"zensight/snmp/…"`). The version chunk is
+      # a plain `v1`, so a legal key literal now *also* starts with a lowercase
+      # letter — `zensight/v1/` is the one allowed spelling, and everything else
+      # under `"zensight/<lowercase>` is a legacy key that must be built through
+      # zensight-keyspace instead. (It whitelisted `zensight/@v1` while the
+      # version chunk was verbatim; see grammar::VERSION_CHUNK for why it is not.)
       - name: no legacy keyspace literals (v1 guard)
         run: |
           hits=$(grep -rnE '"zensight/[a-z_]' \
@@ -140,7 +146,7 @@ jobs:
             zensight-sensor-core/src zensight-sensor-*/src zensight-exporter-*/src \
             zensight-rerun/src zensight-keyspace/src \
             --include='*.rs' \
-            | grep -v 'zensight/@v1' \
+            | grep -v 'zensight/v1' \
             | grep -vE '/tests/|_test\.rs|journald\.cursor|zensight/host-id' \
             | grep -vE ':[0-9]+: *//' \
             | grep -v 'assert' || true)

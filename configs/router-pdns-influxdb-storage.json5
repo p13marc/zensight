@@ -1,5 +1,5 @@
 // zenohd (router) configuration that captures the ZenSight historical
-// passive-DNS tier (`zensight/@v1/@catalog/state/pdns/**`, #310 / RFC 09 §2)
+// passive-DNS tier (`zensight/v1/@catalog/state/pdns/**`, #310 / RFC 09 §2)
 // into an InfluxDB time-series bucket. The catalog publishes a PdnsRecord (an
 // IP's full accumulated name set) on `…/state/pdns/<ip-slug>` every time it
 // learns/updates names for an IP; an InfluxDB-backed storage subscribed on
@@ -66,8 +66,8 @@
         // common head so each IP's records key on just its ip-slug (the
         // InfluxDB measurement/series), keeping the time series tidy.
         "zensight-pdns": {
-          key_expr: "zensight/@v1/@catalog/state/pdns/**",
-          strip_prefix: "zensight/@v1/@catalog/state/pdns",
+          key_expr: "zensight/v1/@catalog/state/pdns/**",
+          strip_prefix: "zensight/v1/@catalog/state/pdns",
           volume: {
             id: "influxdb",
             db: "zensight_pdns",
@@ -79,8 +79,8 @@
 
         // --- v2.x storage variant (UNVERIFIED) ---
         // "zensight-pdns": {
-        //   key_expr: "zensight/@v1/@catalog/state/pdns/**",
-        //   strip_prefix: "zensight/@v1/@catalog/state/pdns",
+        //   key_expr: "zensight/v1/@catalog/state/pdns/**",
+        //   strip_prefix: "zensight/v1/@catalog/state/pdns",
         //   volume: {
         //     id: "influxdb2",
         //     db: "zensight_pdns",           // v2 bucket

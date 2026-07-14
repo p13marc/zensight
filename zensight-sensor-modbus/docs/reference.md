@@ -5,15 +5,15 @@ scaled values from a per-device register map.
 
 ## Telemetry & keyspace
 
-All keys follow the v1 grammar, `zensight/@v1/<origin>/…`, where `<origin>` is
+All keys follow the v1 grammar, `zensight/v1/<origin>/…`, where `<origin>` is
 the **poller host's** stable id (`h-<12hex>`). Modbus is a *proxy producer*: the
 observed device is the first subject chunk after the producer.
 
 | Key | Payload |
 |-----|---------|
-| `zensight/@v1/<origin>/telemetry/modbus/<device>/<register_type>/<register>` | Decoded register value. `<register_type>` is `coil`, `discrete`, `input`, or `holding`; `<register>` is the register's configured `name` (falls back to a `register_names` map entry, else the raw address). |
+| `zensight/v1/<origin>/telemetry/modbus/<device>/<register_type>/<register>` | Decoded register value. `<register_type>` is `coil`, `discrete`, `input`, or `holding`; `<register>` is the register's configured `name` (falls back to a `register_names` map entry, else the raw address). |
 
-Example: `zensight/@v1/h-3fa9c2d41b7e/telemetry/modbus/plc01/holding/temperature`.
+Example: `zensight/v1/h-3fa9c2d41b7e/telemetry/modbus/plc01/holding/temperature`.
 Each point carries labels including `register_type`, `address`, `unit_id`, and
 `data_type`.
 
@@ -22,14 +22,14 @@ defaults to the local hostname unless `modbus.source` is set.
 
 ### Control plane (via `zensight-sensor-core`)
 
-- `zensight/@v1/<origin>/state/modbus/health` — sensor health document (absorbs the legacy running flag)
-- `zensight/@v1/<origin>/state/modbus/device/<device>/liveness` — per-device liveness document (a `…/device/<device>/alive` liveliness token is separate machinery)
-- `zensight/@v1/<origin>/state/modbus/errors` — error reports
-- `zensight/@v1/<origin>/@rpc/modbus/artifact/{request,cancel}` — on-demand debug report / snapshot (opt-in via `artifacts`); progress rides the `state/modbus/artifact/<kind>` status document
-- `zensight/@v1/<origin>/state/modbus/sensor` — sensor registration (`SensorInfo`)
-- `zensight/@v1/<origin>/state/modbus/evidence/self` — self-reported host evidence
-- `zensight/@v1/<origin>/state/modbus/alive` — sensor liveliness token
-- `zensight/@v1/<origin>/@rpc/modbus/introspect` — the registry slice this build serves
+- `zensight/v1/<origin>/state/modbus/health` — sensor health document (absorbs the legacy running flag)
+- `zensight/v1/<origin>/state/modbus/device/<device>/liveness` — per-device liveness document (a `…/device/<device>/alive` liveliness token is separate machinery)
+- `zensight/v1/<origin>/state/modbus/errors` — error reports
+- `zensight/v1/<origin>/@rpc/modbus/artifact/{request,cancel}` — on-demand debug report / snapshot (opt-in via `artifacts`); progress rides the `state/modbus/artifact/<kind>` status document
+- `zensight/v1/<origin>/state/modbus/sensor` — sensor registration (`SensorInfo`)
+- `zensight/v1/<origin>/state/modbus/evidence/self` — self-reported host evidence
+- `zensight/v1/<origin>/state/modbus/alive` — sensor liveliness token
+- `zensight/v1/<origin>/@rpc/modbus/introspect` — the registry slice this build serves
 
 See [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for the authoritative contract.
 

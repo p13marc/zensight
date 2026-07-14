@@ -258,7 +258,7 @@ source as the producer's key constants, so it cannot drift from behavior
 (the reason D-Bus introspection XML is trustworthy: the implementation
 emits it — [10-prior-art.md](10-prior-art.md)).
 
-What it buys: `GET <base>/@v1/*/@rpc/*/introspect` is a fleet
+What it buys: `GET <base>/v1/*/@rpc/*/introspect` is a fleet
 capability-and-version inventory in one round trip (which hosts still
 serve a deprecated subject; which run last month's registry); generic
 explorer tooling — the `busctl`/`d-feet` equivalent — needs no compiled-in

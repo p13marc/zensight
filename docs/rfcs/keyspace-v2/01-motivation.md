@@ -113,8 +113,8 @@ is the clean-slate counterpart.
 - **Multi-tenancy.** Isolation is a deployment-prefix concern
   ([03-grammar.md §1.1](03-grammar.md)); no tenant machinery is specified.
 - **Migration planning.** This RFC specifies the destination, not the
-  journey. The `@v1` chunk guarantees the two keyspaces can coexist
-  indefinitely without interference ([03-grammar.md §1.2](03-grammar.md));
+  journey. The version chunk lets two convention majors coexist indefinitely
+  without interference ([03-grammar.md §1.2](03-grammar.md));
   how and when ZenSight walks over is deliberately out of scope.
 - **Payload schemas.** Payload types are referenced by the registry but
   their definitions and evolution rules stay with the owning crates.

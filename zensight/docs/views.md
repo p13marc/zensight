@@ -53,7 +53,7 @@ The shell is always present; only the content region swaps as you navigate.
 
 ## Focus mode (one host instead of the fleet)
 
-The v1 grammar made a single host expressible as one selector — `@v1/<origin>/**`
+The v1 grammar made a single host expressible as one selector — `v1/<origin>/**`
 — so the host detail header carries a **Focus this host** button (#476). Focusing
 sets `LinkConfig.focus = Some(origin)`; `subscription.rs` then swaps the fleet
 data-plane selectors for that origin's telemetry, state, alerts and liveliness. On
@@ -148,7 +148,7 @@ drill-downs.
 **Expectations** (`view/expectations.rs`) — authors sentinel expectations (over
 sockets/links/routes) and pushes them to the netlink sensor at runtime as an
 `@rpc` write: a GET on the fleet selector
-`zensight/@v1/*/@rpc/netlink/expectations/set` (query target `All`); the sensor
+`zensight/v1/*/@rpc/netlink/expectations/set` (query target `All`); the sensor
 hot-swaps its evaluator and acks in the reply (refusals arrive as `reply_err`
 `{error, message}` payloads). The current config reads back with a GET on
 `…/@rpc/netlink/expectations`.
@@ -169,7 +169,7 @@ name each row. `model.rs` is the pure, unit-tested graph model: typed nodes
 liveness + per-producer `state/*/health` documents + entity staleness) and
 typed edges (`EdgeKind`): **Flow** edges are directed and rate-weighted from
 the netring traffic matrix (the `@rpc` procedure
-`zensight/@v1/*/@rpc/netring/matrix`, bytes/sec; arrowheads only where a rate was
+`zensight/v1/*/@rpc/netring/matrix`, bytes/sec; arrowheads only where a rate was
 observed; flows are the fallback + cumulative-stat enrichment), **L2Adjacency**
 edges come from netlink neighbor tables (dotted), and **Gateway** edges from
 the `routes/default_v4_gw` metric (dashed; unresolved gateways become wire-only
@@ -215,11 +215,11 @@ netring flow table and device detail.
 **Parallax live video** (`view/specialized/parallax.rs` +
 `parallax_detail.rs`, #408) — the media-plane viewer for a parallax device.
 The stream catalogue is fetched on open with a GET on the single-host `@rpc`
-key `zensight/@v1/<origin>/@rpc/parallax/streams` (`Fetch` lifecycle,
+key `zensight/v1/<origin>/@rpc/parallax/streams` (`Fetch` lifecycle,
 mock-served in demo mode); Open sends `open_stream` (codec `mjpeg`) as an
 `@rpc` write on `…/@rpc/parallax/stream/set` and spawns one **abortable**
 `Task::stream` per tile — a plain subscriber on the exact
-`zensight/@v1/<origin>/@media/parallax/<stream>/preview/jpeg` key,
+`zensight/v1/<origin>/@media/parallax/<stream>/preview/jpeg` key,
 latest-frame-wins, CBOR `FrameMeta`
 attachment, JPEG→RGBA decoded off the UI thread. Video tiles (`--features
 h264`) subscribe with the profile chunk as a single-chunk wildcard
@@ -302,7 +302,7 @@ object: related alerts grouped into one incident with a timeline and evidence
 pivots.
 
 **Sensors** (`view/sensors.rs`) — the sensor registry and per-instance health
-detail (from the `zensight/@v1/<origin>/state/<producer>/sensor` registration
+detail (from the `zensight/v1/<origin>/state/<producer>/sensor` registration
 documents and the `…/state/<producer>/health` snapshots, both riding the one
 state subscriber). One card per sensor **instance**
 (`sysinfo @ hostA`), keyed by `sensor@source`, so N machines running the same
@@ -318,7 +318,7 @@ fraction); while **downloading**, `zenoh-blob` chunk counts drive the same bar
 the Sensors-page card and the netring Capture tab — get the bar.
 
 Card status follows Zenoh liveliness, not just snapshots: when a sensor's
-`zensight/@v1/<origin>/state/<producer>/alive` token disappears (clean
+`zensight/v1/<origin>/state/<producer>/alive` token disappears (clean
 shutdown, or lease expiry
 after a crash), its card flips to **Offline** — a dead sensor publishes no
 further snapshots, so without this the last-reported status would stick

@@ -1,6 +1,6 @@
 # logs telemetry
 
-The logs sensor publishes under `zensight/@v1/<origin>/…`, where `<origin>` is
+The logs sensor publishes under `zensight/v1/<origin>/…`, where `<origin>` is
 the **sensor host's** stable id (`h-<12hex>`); the originating host of each log
 line (network or journald) rides in the records and labels, not the key. Two
 planes:
@@ -16,8 +16,8 @@ for the canonical reference.
 
 ## Per-line events — `@rpc/logs/events` (`Vec<LogRecord>`)
 
-Served as a read procedure at `zensight/@v1/<origin>/@rpc/logs/events` (fleet
-callers select `zensight/@v1/*/@rpc/logs/events` with query target `All`). Each
+Served as a read procedure at `zensight/v1/<origin>/@rpc/logs/events` (fleet
+callers select `zensight/v1/*/@rpc/logs/events` with query target `All`). Each
 `LogRecord` (see
 `zensight-common/src/query_detail.rs`) keeps the #104 identity — a unique,
 time-sortable `uid` (`<timestamp_ms><seq>`, zero-padded) — plus the OpenTelemetry
@@ -43,7 +43,7 @@ invocation that produced it (matches systemd sensor `UnitDetail.invocation_id`).
 Parameters are Zenoh selector params, **`;`-separated** (not `&`):
 
 ```
-zensight/@v1/*/@rpc/logs/events?since=1719999000000;max=500;source=web01
+zensight/v1/*/@rpc/logs/events?since=1719999000000;max=500;source=web01
 ```
 
 | Param | Meaning |
@@ -61,7 +61,7 @@ seeds its buffer from this queryable on open and refreshes on a slow tick.
 ## Derived rollups (`derived`, default on)
 
 Emitted every `derived_interval_secs` (default 10) under
-`zensight/@v1/<origin>/telemetry/logs/` — one sensor-wide series (the metric
+`zensight/v1/<origin>/telemetry/logs/` — one sensor-wide series (the metric
 names below, each starting with the `logs/` chunk):
 
 | Key | Type | Meaning |
@@ -92,7 +92,7 @@ when alerting is disabled (cheap + bounded).
 
 ## Alerts — `state/logs/alert/<alert_key>`
 
-Lifecycle alerts on `zensight/@v1/<origin>/state/logs/alert/<alert_key>`
+Lifecycle alerts on `zensight/v1/<origin>/state/logs/alert/<alert_key>`
 (`<alert_key>` = 16-hex FNV-1a of rule + labels; firing = Put, resolved =
 Put(Resolved) then a Delete tombstone):
 

@@ -69,7 +69,7 @@ enum TopicCmd {
     },
     /// Describe one key or subject pattern (offline).
     ///
-    /// Accepts a full wire key (`zensight/@v1/h-abc.../telemetry/sysinfo/cpu/usage`)
+    /// Accepts a full wire key (`zensight/v1/h-abc.../telemetry/sysinfo/cpu/usage`)
     /// and refines it through the registry's parse direction.
     Info {
         /// A concrete wire key, as it appears on the bus.
@@ -78,7 +78,7 @@ enum TopicCmd {
     /// Subscribe and print decoded samples (on-bus).
     Echo {
         /// Key expression to subscribe to. Defaults to all v1 data.
-        #[arg(default_value = "zensight/@v1/**")]
+        #[arg(default_value = "zensight/v1/**")]
         selector: String,
         /// Print raw payload bytes as hex instead of decoding.
         #[arg(long)]
@@ -305,9 +305,9 @@ async fn cmd_service_call(
 ) -> Result<()> {
     // A service origin (`@catalog`) carries no producer chunk (RFC 03 §1.5).
     let mut key = if origin.starts_with('@') {
-        format!("zensight/@v1/{origin}/@rpc/{procedure}")
+        format!("zensight/v1/{origin}/@rpc/{procedure}")
     } else {
-        format!("zensight/@v1/{origin}/@rpc/{producer}/{procedure}")
+        format!("zensight/v1/{origin}/@rpc/{producer}/{procedure}")
     };
     if !params.is_empty() {
         key.push('?');

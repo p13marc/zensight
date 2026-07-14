@@ -59,7 +59,7 @@ fn concrete_keys() {
             }
         )
         .unwrap(),
-        "@v1/h-3fa9c2d41b7e/telemetry/netring/flow/red/p95_ms"
+        "v1/h-3fa9c2d41b7e/telemetry/netring/flow/red/p95_ms"
     );
     assert_eq!(
         netring::key(
@@ -69,7 +69,7 @@ fn concrete_keys() {
             }
         )
         .unwrap(),
-        "@v1/h-3fa9c2d41b7e/state/netring/alert/9f2c81ab04d7e3f1"
+        "v1/h-3fa9c2d41b7e/state/netring/alert/9f2c81ab04d7e3f1"
     );
 }
 
@@ -139,13 +139,13 @@ fn subject_metadata() {
 fn procedures() {
     assert_eq!(
         netring::rpc_key(&host(), netring::ProcedureId::CaptureDiskSet).unwrap(),
-        "@v1/h-3fa9c2d41b7e/@rpc/netring/capture_disk/set"
+        "v1/h-3fa9c2d41b7e/@rpc/netring/capture_disk/set"
     );
     assert_eq!(netring::ProcedureId::CaptureDiskSet.kind(), "write");
     assert_eq!(netring::ProcedureId::Flows.kind(), "read");
     assert!(netring::ProcedureId::ALL.contains(&netring::ProcedureId::Introspect));
     // The rpc key parses back structurally.
-    let parsed = grammar::parse("@v1/h-3fa9c2d41b7e/@rpc/netring/capture_disk/set").unwrap();
+    let parsed = grammar::parse("v1/h-3fa9c2d41b7e/@rpc/netring/capture_disk/set").unwrap();
     assert_eq!(parsed.class, ClassOrPlane::Plane(Plane::Rpc));
 }
 
@@ -153,7 +153,7 @@ fn procedures() {
 fn instance_suffixed_producer_keys() {
     let netring2 = Producer::with_instance("netring", 2).unwrap();
     let key = netring::key_as(&host(), &netring2, &netring::Subject::Health).unwrap();
-    assert_eq!(key, "@v1/h-3fa9c2d41b7e/state/netring-2/health");
+    assert_eq!(key, "v1/h-3fa9c2d41b7e/state/netring-2/health");
     // Parses back to base name + instance, so registry dispatch still works.
     let parsed = grammar::parse(&key).unwrap();
     let producer = parsed.producer.unwrap();

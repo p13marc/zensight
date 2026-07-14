@@ -53,8 +53,8 @@ Merge is gated on judgement calls, not correctness (§6).
 
 | | master | branch |
 |---|---|---|
-| telemetry | `zensight/sysinfo/toolbx/cpu/usage` | `zensight/@v1/h-9706b31ddad3/telemetry/sysinfo/cpu/usage` |
-| health | `zensight/sysinfo/@/health` | `zensight/@v1/h-…/state/sysinfo/health` |
+| telemetry | `zensight/sysinfo/toolbx/cpu/usage` | `zensight/v1/h-9706b31ddad3/telemetry/sysinfo/cpu/usage` |
+| health | `zensight/sysinfo/@/health` | `zensight/v1/h-…/state/sysinfo/health` |
 | alerts | one blob on `@/alerts` | `…/state/netlink/alert/<16hex>` — one LWW doc per alert key |
 | commands | put on `zensight/<p>/@/command` | GET `…/@rpc/netlink/sockets`, write `…/@rpc/netlink/expectations/set` |
 | identity | `_meta/evidence/**` | `…/state/<producer>/evidence/**` → `@catalog/state/entity/<id>` |
@@ -77,6 +77,11 @@ Merge is gated on judgement calls, not correctness (§6).
 
 Yes — and here is the evidence, rather than the vibe.
 
+> **Superseded (2026-07-14).** The version chunk is now a plain `v1`. The verbatim `@v1`
+> made zenoh-ext's `@adv` publisher-detection tokens unparseable, silently killing
+> late-publisher detection. What follows was true of the cutover and is kept as the
+> record of it — see [03-grammar §1.2](../../rfcs/keyspace-v2/03-grammar.md).
+
 **D1 (`@v1` is a verbatim chunk, so `**` never crosses it) made the cutover provable.**
 This sounded like a pedantic grammar rule when it was written. In practice it is the
 single most valuable line in the RFC: it let me write
@@ -89,7 +94,7 @@ and the test would be impossible to write.
 **Class selectors retired client-side filtering.** On master the exporters subscribed to
 the firehose and threw away everything that wasn't telemetry, with an `is_telemetry_key`
 predicate carrying the knowledge. On the branch they subscribe to
-`zensight/@v1/*/telemetry/**` and the router does the work. Same for the GUI's state vs
+`zensight/v1/*/telemetry/**` and the router does the work. Same for the GUI's state vs
 telemetry paths. That is real bandwidth on a constrained link, not just tidiness.
 
 **The population-budget rule caught a real design bug before it shipped.** netflow was
@@ -159,7 +164,7 @@ type system never stopped me. A `LocalOrigin` vs `RemoteOrigin` distinction woul
 payloads carry a *human* identity (`source` = hostname, e.g. `toolbx`). The GUI's device
 map is keyed by `source`, because that is what it shows the user. When the drill-down
 fetches became origin-scoped, they were built from the *hostname* — so the GUI cheerfully
-GET `zensight/@v1/toolbx/@rpc/sysinfo/processes`, where no queryable has ever lived.
+GET `zensight/v1/toolbx/@rpc/sysinfo/processes`, where no queryable has ever lived.
 
 Result: **every drill-down in the product died at once** — Process Explorer, all of
 netlink's tabs, all of netring's, systemd's, parallax — while streamed telemetry kept
@@ -174,7 +179,7 @@ That is a load-bearing consumer-side pattern and it is nowhere in the convention
 ### 4.3 Fleet-selector smoke tests cannot catch broken origin paths
 
 My isolated smoke was green while the product was completely broken, because it probed
-`zensight/@v1/*/@rpc/…` — the `*` matches *any* origin, so a caller with a garbage origin
+`zensight/v1/*/@rpc/…` — the `*` matches *any* origin, so a caller with a garbage origin
 concept still gets replies. The smoke now has a **GUI-shaped phase**: it builds the same
 health-fed source→origin map and then requires *origin-scoped* replies (plus the full
 parallax tile lifecycle). Lesson: a test that uses a wildcard where the product uses a
@@ -300,7 +305,7 @@ capabilities are implemented, on the wire, and unconsumed.**
 |---|---|---|
 | **`introspect`** — fleet capability & version inventory; "who still serves a deprecated subject" (08 §6 sells exactly this) | all 10 sensors + `@catalog` | **nothing calls it** (#469) |
 | **The registry's generated `parse` direction** — normative in 08 §1, specified precisely to *"replace positional `split('/')` re-parsing scattered across consumers"* | `parse_subject` is generated | **zero callers; the GUI still hand-parses in 18 sites** (#475) |
-| **One-origin drill-down** (`@v1/h-xxx/**`) — "complete data plane of one host", 09 §1. Not expressible on master's keyspace at all. | the grammar makes it expressible; a `scope` config knob exists | **no UI affordance** (#476) |
+| **One-origin drill-down** (`v1/h-xxx/**`) — "complete data plane of one host", 09 §1. Not expressible on master's keyspace at all. | the grammar makes it expressible; a `scope` config knob exists | **no UI affordance** (#476) |
 | **netflow's `flows` ring** — built *this epic*, to replace the per-flow-pair keys the population-budget rule forbade | served | **no GUI tab** (#469) |
 
 `introspect` and the one-origin selector are the two that would visibly change how the product

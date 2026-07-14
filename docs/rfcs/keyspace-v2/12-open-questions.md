@@ -1,6 +1,7 @@
 # 12 — Decisions
 
-**Status: v1.0 (ratified) — all six items DECIDED** (2026-07-12, review round 4). This
+**Status: v1.1 — all six original items DECIDED** (2026-07-12, review round 4);
+**§7 added 2026-07-14** (the version chunk is plain, not verbatim). This
 chapter began as the open-questions list; it is kept as the decision
 record — each item preserves the alternatives and names its
 **revisit trigger**, the concrete future fact that would reopen it.
@@ -15,15 +16,14 @@ deployment prefix (`acme/fleet-a` as `<base>`) sufficient?
 
 **Alternatives.** (a) deployment prefix only
 ([03-grammar.md §1.1](03-grammar.md)); (b) reserve a fixed chunk between
-`<base>` and `@v1` now, empty-tolerated later.
+`<base>` and the version chunk now, empty-tolerated later.
 
 **Decision: (a).** The deployment prefix is *zero-code* — it is the
 session `namespace`, set in config, invisible to application code, and
 enforced as an ingress filter (a session cannot even accidentally consume
 another realm's traffic). A reserved-but-unused chunk would cost every key
-today for a need the namespace already serves, and the verbatim `@v1`
-boundary means a future `@v2` could introduce a realm position without
-ambiguity anyway.
+today for a need the namespace already serves, and the version chunk means a
+future `v2` could introduce a realm position without ambiguity anyway.
 
 **Revisit trigger.** A real deployment needs *cross-realm* consumers —
 the one thing a namespaced session cannot be.
@@ -149,3 +149,56 @@ lighter instrument than a class.
 **Revisit trigger.** A real consumer that needs alerts-without-state read
 permission (the ACL case) — the one thing the subject placement cannot
 grant.
+
+
+## 7. Verbatim version chunk — DECIDED (v1.1): plain `v<int>`, reversing v1.0
+
+**Question.** The version chunk shipped as a verbatim `@v1` so that `*`/`**`
+could not cross it, making v1 invisible even to an *un-versioned* selector
+([03-grammar.md §1.2](03-grammar.md), D1). Is that worth its cost?
+
+**The cost, discovered in production.** Zenoh's advanced pub/sub (zenoh-ext)
+parks a publisher-detection liveliness token at
+`<key>/@adv/pub/<zid>/<eid>/<meta>` and parses it back with
+`${remaining:**}/@adv/…`. The publisher's key must be captured by
+`${remaining:**}` — and `**` never matches a chunk beginning with `@`. So
+`remaining` could not span any key containing `@v1`: **every** token we declared
+was unparseable by the only code that reads them. `detect_late_publishers()` was
+silently dead (the parse is the first thing its callback does), and every
+subscriber logged *"malformed liveliness token key expression"* once per
+publisher, indefinitely.
+
+**Alternatives.** (a) plain `v<int>` — drop the `@`; (b) fold `<base>/@v1` into
+the session `namespace`, so the app-level key zenoh-ext sees carries no verbatim
+chunk; (c) keep `@v1`, disable publisher detection; (d) fork zenoh-ext to parse
+the token textually rather than by keyexpr match.
+
+**Decision: (a).** The `@` bought exactly one thing beyond what a plain chunk
+gives: invisibility to an **un-versioned** selector — i.e. coexistence with a
+*pre-convention* keyspace. That is a **migration** property, and the migration
+is done. The property that keeps working forever — *a v1 selector never matches
+a v2 key* — never needed the `@`, because `v1` and `v2` are different literal
+chunks.
+
+(b) works (verified) but is a large refactor and abuses the namespace, whose
+purpose is to keep the *base* out of application code, not to smuggle a grammar
+position out of sight; it also makes one session unable to speak two majors.
+(c) permanently forfeits a delivery guarantee to keep a migration artifact.
+(d) is impossible as a *fix*: the `@`-exclusion is a Zenoh **matching** rule, so
+no keformat spelling can capture a key containing a verbatim chunk — a fork would
+have to abandon keyexpr matching entirely, and we would carry it forever.
+
+The chunks that remain verbatim are the ones still doing daily work — the planes
+(`@rpc`/`@media`/`@blob`, D2) and service origins (`@catalog`, D4). No advanced
+publisher ever publishes on those, so none of them is affected.
+
+**Cost, stated plainly.** An un-versioned `<base>/**` selector now reaches v1
+keys. A deployment coexisting with a pre-convention keyspace must separate the
+two by `<base>`, not by key algebra. Pinned by
+`zensight-keyspace/tests/guard.rs::d1_version_isolation` (which asserts the loss
+explicitly, so it is a decision and not a drift) and
+`zensight-keyspace/tests/adv_token.rs` (the token must parse).
+
+**Revisit trigger.** Zenoh gains a wildcard that crosses verbatim chunks, or
+zenoh-ext stops locating its sidecars by keyexpr match — either would let the
+version chunk be verbatim again at no cost.

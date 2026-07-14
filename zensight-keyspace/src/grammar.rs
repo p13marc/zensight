@@ -2,13 +2,41 @@
 //!
 //! Normative source: RFC 03 (`docs/rfcs/keyspace-v2/03-grammar.md`). Every
 //! rule here cites its section. Keys are **base-relative**: they start at the
-//! `@v1` version chunk; the deployment base rides the session namespace
+//! `v1` version chunk; the deployment base rides the session namespace
 //! (RFC 03 §1.1) and never appears in application-built keys.
 
 use std::fmt;
 
 /// The convention major this crate implements (RFC 03 §1.2).
-pub const VERSION_CHUNK: &str = "@v1";
+///
+/// **Plain, not verbatim** — and that is load-bearing, not an oversight.
+///
+/// It was `@v1` through the migration. A verbatim chunk is invisible to `*`
+/// and `**`, which bought *legacy hermeticity*: the pre-v1 firehose selector
+/// `zensight/**` could not see v1 keys, so an un-migrated consumer could not
+/// receive samples it would then mis-decode. That mattered exactly once, during
+/// the cutover, and the pre-v1 keyspace is now retired.
+///
+/// What it cost was permanent. zenoh-ext's advanced tier parks its
+/// publisher-detection tokens at `<key>/@adv/pub/<zid>/<eid>/…` and parses them
+/// with `${remaining:**}/@adv/…` — and `**` never matches a chunk beginning
+/// with `@`. So `remaining` could not span a key containing `@v1`: **every**
+/// `@adv` token we declared was unparseable by the only thing that reads them.
+/// `detect_late_publishers()` was silently dead and every subscriber's log
+/// filled with "malformed liveliness token key expression". No upstream fix is
+/// possible with a wildcard — the `@`-exclusion is a Zenoh matching rule.
+///
+/// A plain `v1` costs nothing that survives the migration and restores the
+/// advanced tier, because the property we actually wanted is **version
+/// isolation**, and that never depended on the `@`: `v1` and `v2` are different
+/// literal chunks, so a `v1/**` selector can never match a v2 key. The chunks
+/// that stay verbatim are the ones still doing daily work — the planes
+/// (`@rpc`/`@media`/`@blob`, design property D2) and service origins
+/// (`@catalog`, D4).
+///
+/// Pinned by `tests/adv_token.rs` (the token must parse) and
+/// `tests/guard.rs::d1_version_isolation`.
+pub const VERSION_CHUNK: &str = "v1";
 
 /// Data classes (RFC 03 §1.4). Plain chunks — they participate in wildcards.
 pub const CLASS_TELEMETRY: &str = "telemetry";
@@ -296,7 +324,7 @@ fn push_key(parts: &mut String, chunk: &str) {
     parts.push_str(chunk);
 }
 
-/// Build a data-class key: `@v1/<origin>/<class>[/<producer>]/<subject...>`.
+/// Build a data-class key: `v1/<origin>/<class>[/<producer>]/<subject...>`.
 ///
 /// The producer chunk is omitted under service origins (RFC 03 §1.5).
 pub fn data_key(
@@ -333,7 +361,7 @@ pub fn data_key(
     Ok(key)
 }
 
-/// Build an `@rpc` procedure key: `@v1/<origin>/@rpc[/<producer>]/<procedure...>`.
+/// Build an `@rpc` procedure key: `v1/<origin>/@rpc[/<producer>]/<procedure...>`.
 pub fn rpc_key(
     origin: &Origin,
     producer: Option<&Producer>,
@@ -359,7 +387,7 @@ pub fn rpc_key(
     Ok(key)
 }
 
-/// Build an `@media` key: `@v1/<origin>/@media/<producer>/<stream...>`.
+/// Build an `@media` key: `v1/<origin>/@media/<producer>/<stream...>`.
 pub fn media_key(
     origin: &Origin,
     producer: &Producer,
@@ -377,7 +405,7 @@ pub fn media_key(
     Ok(key)
 }
 
-/// Build an `@blob` key: `@v1/<origin>/@blob/<tier>/<rest...>` (RFC 07 §2).
+/// Build an `@blob` key: `v1/<origin>/@blob/<tier>/<rest...>` (RFC 07 §2).
 pub fn blob_key(origin: &Origin, tier: BlobTier, rest: &[&str]) -> Result<String, KeyError> {
     validate_subject(rest)?;
     let mut key = String::new();
@@ -391,8 +419,8 @@ pub fn blob_key(origin: &Origin, tier: BlobTier, rest: &[&str]) -> Result<String
     Ok(key)
 }
 
-/// Liveliness token key for a producer: `@v1/<origin>/state/<producer>/alive`
-/// (RFC 04 §5). Service origins: `@v1/@<service>/state/alive`.
+/// Liveliness token key for a producer: `v1/<origin>/state/<producer>/alive`
+/// (RFC 04 §5). Service origins: `v1/@<service>/state/alive`.
 pub fn alive_key(origin: &Origin, producer: Option<&Producer>) -> Result<String, KeyError> {
     if origin.has_producer_chunk() != producer.is_some() {
         return Err(KeyError::Parse(
@@ -412,7 +440,7 @@ pub fn alive_key(origin: &Origin, producer: Option<&Producer>) -> Result<String,
 }
 
 /// Liveliness token key for a tracked downstream device (RFC 04 §5):
-/// `@v1/<origin>/state/<producer>/device/<device>/alive`.
+/// `v1/<origin>/state/<producer>/device/<device>/alive`.
 pub fn device_alive_key(
     origin: &Origin,
     producer: &Producer,
@@ -446,8 +474,8 @@ pub struct StructuralKey {
     pub subject: Vec<String>,
 }
 
-/// Parse a base-relative v1 key (`@v1/...`). Structural only: subject tails
-/// stay opaque (RFC 03 §1). Rejects anything that is not under `@v1`.
+/// Parse a base-relative v1 key (`v1/...`). Structural only: subject tails
+/// stay opaque (RFC 03 §1). Rejects anything that is not under `v1`.
 pub fn parse(key: &str) -> Result<StructuralKey, KeyError> {
     let mut chunks = key.split('/');
     let version = chunks
@@ -643,17 +671,17 @@ mod tests {
             .unwrap(),
         ];
         let expected = [
-            "@v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage",
-            "@v1/h-3fa9c2d41b7e/telemetry/snmp/router01/system/sys_uptime",
-            "@v1/h-3fa9c2d41b7e/state/netring/health",
-            "@v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1",
-            "@v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-7",
-            "@v1/h-3fa9c2d41b7e/events/netring/capture/01jgxqz4yqk8v6txw3m9f2a7cd",
-            "@v1/h-3fa9c2d41b7e/@rpc/netlink/sockets",
-            "@v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main",
-            "@v1/h-3fa9c2d41b7e/@blob/store/sha256/ab12cd34ef56",
-            "@v1/@catalog/state/entity/h-3fa9c2d41b7e",
-            "@v1/@catalog/state/pdns/93-184-216-34",
+            "v1/h-3fa9c2d41b7e/telemetry/sysinfo/cpu/usage",
+            "v1/h-3fa9c2d41b7e/telemetry/snmp/router01/system/sys_uptime",
+            "v1/h-3fa9c2d41b7e/state/netring/health",
+            "v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1",
+            "v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-7",
+            "v1/h-3fa9c2d41b7e/events/netring/capture/01jgxqz4yqk8v6txw3m9f2a7cd",
+            "v1/h-3fa9c2d41b7e/@rpc/netlink/sockets",
+            "v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main",
+            "v1/h-3fa9c2d41b7e/@blob/store/sha256/ab12cd34ef56",
+            "v1/@catalog/state/entity/h-3fa9c2d41b7e",
+            "v1/@catalog/state/pdns/93-184-216-34",
         ];
         for (built, want) in cases.iter().zip(expected) {
             assert_eq!(built, want);
@@ -691,15 +719,15 @@ mod tests {
         );
         assert_eq!(
             alive_key(&host(), Some(&Producer::new("netlink").unwrap())).unwrap(),
-            "@v1/h-3fa9c2d41b7e/state/netlink/alive"
+            "v1/h-3fa9c2d41b7e/state/netlink/alive"
         );
         assert_eq!(
             alive_key(&Origin::catalog(), None).unwrap(),
-            "@v1/@catalog/state/alive"
+            "v1/@catalog/state/alive"
         );
         assert_eq!(
             device_alive_key(&host(), &Producer::new("snmp").unwrap(), "router01").unwrap(),
-            "@v1/h-3fa9c2d41b7e/state/snmp/device/router01/alive"
+            "v1/h-3fa9c2d41b7e/state/snmp/device/router01/alive"
         );
     }
 
@@ -721,7 +749,7 @@ mod tests {
     fn parse_rejects_foreign_keys() {
         assert!(parse("zensight/netlink/host/@/health").is_err());
         assert!(parse("@v2/h-3fa9c2d41b7e/state/x/health").is_err());
-        assert!(parse("@v1/h-3fa9c2d41b7e/bogus/x/health").is_err());
-        assert!(parse("@v1/h-3fa9c2d41b7e/@blob/bogus/x").is_err());
+        assert!(parse("v1/h-3fa9c2d41b7e/bogus/x/health").is_err());
+        assert!(parse("v1/h-3fa9c2d41b7e/@blob/bogus/x").is_err());
     }
 }

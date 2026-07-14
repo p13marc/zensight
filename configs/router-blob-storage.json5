@@ -11,7 +11,7 @@
 //
 // The two key ranges below cover the v1 `@blob` plane tiers (RFC 07 §2):
 // every host's Tier-2 store/tree prefixes
-// (`zensight/@v1/<origin>/@blob/{store,tree}` — what
+// (`zensight/v1/<origin>/@blob/{store,tree}` — what
 // `zensight_common::command::artifact_{store,tree}_prefix` derive). Chunks
 // dedupe per origin; the Tier-1 `@blob/artifact` chunks are deliberately NOT
 // stored — they are one-shot deliveries owned by the artifact channel.
@@ -41,14 +41,14 @@
         // default last-writer-wins reconciliation is a no-op and re-PUTs are
         // idempotent — no timestamping concerns.
         "zensight-blob-chunks": {
-          key_expr: "zensight/@v1/*/@blob/store/**",
-          strip_prefix: "zensight/@v1",
+          key_expr: "zensight/v1/*/@blob/store/**",
+          strip_prefix: "zensight/v1",
           volume: { id: "fs", dir: "zensight-blob-chunks" },
         },
         // Tree indexes: .../@blob/tree/<id> -> encoded TreeIndex.
         "zensight-blob-trees": {
-          key_expr: "zensight/@v1/*/@blob/tree/**",
-          strip_prefix: "zensight/@v1",
+          key_expr: "zensight/v1/*/@blob/tree/**",
+          strip_prefix: "zensight/v1",
           volume: { id: "fs", dir: "zensight-blob-trees" },
         },
       },

@@ -25,7 +25,7 @@ request/reply, no publications):
 | `…/@rpc/<producer>/artifact/cancel` | queryable (write procedure) | GET with the artifact id (ULID) to abort/free early |
 
 Delivery servers are spun up only for the tiers actually registered, on the
-verbatim `@blob` plane (`zensight/@v1/<origin>/@blob/…` — `zenoh-blob` itself
+verbatim `@blob` plane (`zensight/v1/<origin>/@blob/…` — `zenoh-blob` itself
 stays prefix-agnostic):
 
 - **Tier-1 (`Blob`)** — a `zenoh-blob` `BlobServer` under `…/@blob/artifact`.

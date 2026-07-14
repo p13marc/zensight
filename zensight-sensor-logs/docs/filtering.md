@@ -47,7 +47,7 @@ syslog: {
 Set `enable_dynamic_filters: true` to expose the runtime control procedures.
 Dynamic filters are keyed by id and combine with the static base filter.
 
-- **Write** (a GET with payload): `zensight/@v1/<origin>/@rpc/logs/filter/set`
+- **Write** (a GET with payload): `zensight/v1/<origin>/@rpc/logs/filter/set`
   — a `FilterCommand` (serde-tagged `"type"`, snake_case):
 
   ```json
@@ -62,7 +62,7 @@ Dynamic filters are keyed by id and combine with the static base filter.
 
   `id` is optional on `add_filter` (auto-generated if omitted).
 
-- **Read**: `zensight/@v1/<origin>/@rpc/logs/filter` — returns a
+- **Read**: `zensight/v1/<origin>/@rpc/logs/filter` — returns a
   `FilterStatus { base_filter, dynamic_filters, stats }` (the config base filter,
   the active dynamic filters, and filter statistics).
 

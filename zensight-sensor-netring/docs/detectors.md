@@ -3,7 +3,7 @@
 netring's NDR surface runs three families off the same tracked flow / DNS
 stream: **built-in anomaly detectors** (`anomalies.*`), **threat-intel**
 (`threat.*`), and the **passive asset inventory** (`collect.assets`). Every hit
-becomes an `Alert` on `zensight/@v1/<origin>/state/netring/alert/<alert_key>`
+becomes an `Alert` on `zensight/v1/<origin>/state/netring/alert/<alert_key>`
 through one uniform drain (`ChannelSink → to_view → map::anomaly_alert`), so
 they share the same lifecycle, labelling, and cardinality discipline.
 
@@ -74,7 +74,7 @@ agents, DGA-scored CDN/randomised-but-benign SLDs).
 ## Runtime detection tuning — `@rpc/netring/detectors` (#121)
 
 The `detectors` procedure pair — write via a GET with payload on
-`zensight/@v1/<origin>/@rpc/netring/detectors/set`, read the current
+`zensight/v1/<origin>/@rpc/netring/detectors/set`, read the current
 configuration with a plain GET on `.../@rpc/netring/detectors` — hot-swaps the
 allowlist and each detector's **mute / threshold** without a restart — surfaced
 in the GUI Security view's *Detection Tuning* panel.
