@@ -768,10 +768,7 @@ mod tests {
     use zensight_common::{Protocol, TelemetryPoint};
 
     fn state_with(metrics: &[(&str, f64)]) -> DeviceDetailState {
-        let mut s = DeviceDetailState::new(DeviceId {
-            protocol: Protocol::Systemd,
-            source: "server01".into(),
-        });
+        let mut s = DeviceDetailState::new(DeviceId::fixture(Protocol::Systemd, "server01"));
         for (m, v) in metrics {
             s.metrics.insert(
                 (*m).to_string(),

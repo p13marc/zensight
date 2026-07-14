@@ -264,7 +264,7 @@ impl TopologyState {
             }
 
             let source = device_id.source.clone();
-            let node_id = match entities.by_device.get(device_id) {
+            let node_id = match entities.entity_id_for_device(device_id) {
                 Some(eid) => entities.resolve_alias(eid).to_string(),
                 None => source.clone(),
             };
@@ -1141,14 +1141,12 @@ impl TopologyState {
         center_layout(self);
     }
 
-    /// Get the DeviceId for a node (if it corresponds to a device). Uses the
-    /// node's primary protocol so "View Device Details" lands on a real device
-    /// even for netlink-only hosts (#83).
-    pub fn node_to_device_id(&self, node_id: &NodeId) -> Option<DeviceId> {
-        self.nodes.get(node_id).map(|node| DeviceId {
-            protocol: primary_protocol(node),
-            source: node_id.clone(),
-        })
+    /// The protocol "View Device Details" should open for a node — its primary
+    /// protocol, so the jump lands on a real device even for netlink-only hosts
+    /// (#83). The caller pairs this with the node id (a host *name*) and
+    /// resolves the pair to a device handle; a node knows no origin (#474).
+    pub fn node_primary_protocol(&self, node_id: &NodeId) -> Option<zensight_common::Protocol> {
+        self.nodes.get(node_id).map(primary_protocol)
     }
 }
 
@@ -1764,7 +1762,7 @@ mod tests {
         use zensight_common::Protocol;
 
         let device = |source: &str| {
-            let id = DeviceId::new(Protocol::Sysinfo, source);
+            let id = DeviceId::fixture(Protocol::Sysinfo, source);
             (id.clone(), DeviceState::new(id))
         };
         let mut devices: HashMap<DeviceId, DeviceState> = [device("host-a")].into();
@@ -2060,7 +2058,7 @@ mod tests {
 
         let mut devices: HashMap<DeviceId, DeviceState> = HashMap::new();
         let mut add = |proto: Protocol, source: &str, metrics: usize| {
-            let id = DeviceId::new(proto, source);
+            let id = DeviceId::fixture(proto, source);
             let mut d = DeviceState::new(id.clone());
             d.metric_count = metrics;
             devices.insert(id, d);

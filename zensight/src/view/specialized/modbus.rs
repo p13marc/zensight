@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_modbus_view_renders() {
-        let device_id = DeviceId::new(Protocol::Modbus, "plc01");
+        let device_id = DeviceId::fixture(Protocol::Modbus, "plc01");
         let state = DeviceDetailState::new(device_id);
         let _view = modbus_plc_view(&state);
     }

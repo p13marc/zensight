@@ -81,10 +81,7 @@ fn test_dashboard_with_devices() {
     state.connection_state = ConnectionState::Connected;
 
     // Add mock devices
-    let device_id = DeviceId {
-        protocol: Protocol::Snmp,
-        source: "router01".to_string(),
-    };
+    let device_id = DeviceId::fixture(Protocol::Snmp, "router01".to_string());
     let mut device = DeviceState::new(device_id.clone());
     device.metric_count = 5;
     device.is_healthy = true;
@@ -125,10 +122,7 @@ fn test_dashboard_health_overview_surfaces_worst_host() {
     state.connected = true;
     state.connection_state = ConnectionState::Connected;
 
-    let degraded_id = DeviceId {
-        protocol: Protocol::Sysinfo,
-        source: "host-sad".to_string(),
-    };
+    let degraded_id = DeviceId::fixture(Protocol::Sysinfo, "host-sad".to_string());
     let mut degraded = DeviceState::new(degraded_id.clone());
     degraded.update_from_liveness(DeviceStatus::Degraded, 2, Some("flapping".into()));
     state.devices.insert(degraded_id.clone(), degraded);
@@ -171,10 +165,7 @@ fn test_dashboard_card_shows_trend_badge() {
 
     let mut state = DashboardState::default();
     state.connected = true;
-    let device_id = DeviceId {
-        protocol: Protocol::Sysinfo,
-        source: "server01".to_string(),
-    };
+    let device_id = DeviceId::fixture(Protocol::Sysinfo, "server01".to_string());
     let mut device = DeviceState::new(device_id.clone());
     device.metric_count = 1;
     device.is_healthy = true;
@@ -228,10 +219,7 @@ fn test_dashboard_card_shows_trend_badge() {
 fn test_global_search_panel_results() {
     use zensight::view::search::{self, GlobalSearchState, SearchHit};
 
-    let device_id = DeviceId {
-        protocol: Protocol::Snmp,
-        source: "router01".to_string(),
-    };
+    let device_id = DeviceId::fixture(Protocol::Snmp, "router01".to_string());
     let mut device = DeviceState::new(device_id.clone());
     device.metrics.insert(
         "queue/depth".to_string(),
@@ -380,10 +368,7 @@ fn test_shell_shows_connection_status() {
 /// Test device detail view with mock data.
 #[test]
 fn test_device_detail_view() {
-    let device_id = DeviceId {
-        protocol: Protocol::Sysinfo,
-        source: "server01".to_string(),
-    };
+    let device_id = DeviceId::fixture(Protocol::Sysinfo, "server01".to_string());
     let mut state = DeviceDetailState::new(device_id);
 
     // Add mock telemetry
@@ -407,10 +392,7 @@ fn test_device_detail_view() {
 /// is known, and clicking it drives `SetFocusHost(Some(origin))`.
 #[test]
 fn test_device_detail_focus_button() {
-    let device_id = DeviceId {
-        protocol: Protocol::Sysinfo,
-        source: "server01".to_string(),
-    };
+    let device_id = DeviceId::fixture(Protocol::Sysinfo, "server01".to_string());
     let mut state = DeviceDetailState::new(device_id);
     state.origin = Some("h-3fa9c2d41b7e".to_string());
 
@@ -429,10 +411,7 @@ fn test_device_detail_focus_button() {
 /// so, because an emptied fleet dashboard otherwise looks like an outage.
 #[test]
 fn test_focus_mode_offers_a_way_out() {
-    let device_id = DeviceId {
-        protocol: Protocol::Sysinfo,
-        source: "server01".to_string(),
-    };
+    let device_id = DeviceId::fixture(Protocol::Sysinfo, "server01".to_string());
     let mut state = DeviceDetailState::new(device_id);
     state.origin = Some("h-3fa9c2d41b7e".to_string());
     state.focused = true;
@@ -474,32 +453,16 @@ fn test_focus_mode_offers_a_way_out() {
 fn test_host_detail_facet_tabs() {
     use zensight_common::DeviceStatus;
 
-    let active = DeviceId {
-        protocol: Protocol::Sysinfo,
-        source: "server01".to_string(),
-    };
+    let active = DeviceId::fixture(Protocol::Sysinfo, "server01".to_string());
     let mut state = DeviceDetailState::new(active.clone());
     for point in mock::sysinfo::host("server01") {
         state.update(point);
     }
 
-    let netlink_id = DeviceId {
-        protocol: Protocol::Netlink,
-        source: "server01".to_string(),
-    };
+    let netlink_id = DeviceId::fixture(Protocol::Netlink, "server01".to_string());
     let facets = vec![
-        FacetTab {
-            id: active.clone(),
-            protocol: Protocol::Sysinfo,
-            status: DeviceStatus::Online,
-            active: true,
-        },
-        FacetTab {
-            id: netlink_id.clone(),
-            protocol: Protocol::Netlink,
-            status: DeviceStatus::Degraded,
-            active: false,
-        },
+        FacetTab::live(active.clone(), DeviceStatus::Online, true),
+        FacetTab::live(netlink_id.clone(), DeviceStatus::Degraded, false),
     ];
 
     let syslog_filter = SyslogFilterState::default();
@@ -533,20 +496,12 @@ fn test_host_detail_facet_tabs() {
 fn test_host_detail_single_facet_has_no_strip() {
     use zensight_common::DeviceStatus;
 
-    let id = DeviceId {
-        protocol: Protocol::Sysinfo,
-        source: "server01".to_string(),
-    };
+    let id = DeviceId::fixture(Protocol::Sysinfo, "server01".to_string());
     let mut state = DeviceDetailState::new(id.clone());
     for point in mock::sysinfo::host("server01") {
         state.update(point);
     }
-    let facets = vec![FacetTab {
-        id,
-        protocol: Protocol::Sysinfo,
-        status: DeviceStatus::Online,
-        active: true,
-    }];
+    let facets = vec![FacetTab::live(id, DeviceStatus::Online, true)];
 
     let syslog_filter = SyslogFilterState::default();
     let mut ui = simulator(host_detail_view(DeviceViewCtx {
@@ -586,7 +541,7 @@ fn test_host_card_disambiguates_same_protocol_facets() {
         state.connected = true;
         state.connection_state = ConnectionState::Connected;
         for source in sources {
-            let id = DeviceId::new(Protocol::Sysinfo, *source);
+            let id = DeviceId::fixture(Protocol::Sysinfo, *source);
             let mut device = DeviceState::new(id.clone());
             device.metric_count = 3;
             device.is_healthy = true;
@@ -661,21 +616,11 @@ fn test_forget_button_only_for_offline_facet() {
     use zensight_common::DeviceStatus;
 
     fn view_for(status: DeviceStatus) -> (DeviceId, Vec<FacetTab>, DeviceDetailState) {
-        let active = DeviceId::new(Protocol::Sysinfo, "toolbx");
-        let other = DeviceId::new(Protocol::Sysinfo, "host-a");
+        let active = DeviceId::fixture(Protocol::Sysinfo, "toolbx");
+        let other = DeviceId::fixture(Protocol::Sysinfo, "host-a");
         let facets = vec![
-            FacetTab {
-                id: active.clone(),
-                protocol: Protocol::Sysinfo,
-                status,
-                active: true,
-            },
-            FacetTab {
-                id: other,
-                protocol: Protocol::Sysinfo,
-                status: DeviceStatus::Online,
-                active: false,
-            },
+            FacetTab::live(active.clone(), status, true),
+            FacetTab::live(other, DeviceStatus::Online, false),
         ];
         let state = DeviceDetailState::new(active.clone());
         (active, facets, state)
@@ -723,10 +668,7 @@ fn test_forget_button_only_for_offline_facet() {
 /// Test clicking Back button in device view.
 #[test]
 fn test_device_back_button() {
-    let device_id = DeviceId {
-        protocol: Protocol::Snmp,
-        source: "router01".to_string(),
-    };
+    let device_id = DeviceId::fixture(Protocol::Snmp, "router01".to_string());
     let state = DeviceDetailState::new(device_id);
 
     let syslog_filter = SyslogFilterState::default();
@@ -751,7 +693,7 @@ fn test_alert_investigate_navigates_to_device_metric() {
 
     let mut state = AlertsState::new();
     let rule = AlertRule::new(1, "High CPU", "cpu/usage").with_severity(Severity::Critical);
-    let device = DeviceId::new(Protocol::Sysinfo, "server01");
+    let device = DeviceId::fixture(Protocol::Sysinfo, "server01");
     state.alerts.push(Alert::new(
         1,
         &rule,
@@ -768,8 +710,8 @@ fn test_alert_investigate_navigates_to_device_metric() {
     assert!(
         messages.iter().any(|m| matches!(
             m,
-            Message::InvestigateAlert { device: d, metric: Some(metric) }
-                if d.source == "server01" && metric == "cpu/usage"
+            Message::InvestigateAlert { source, metric: Some(metric), .. }
+                if source == "server01" && metric == "cpu/usage"
         )),
         "expected InvestigateAlert for server01/cpu/usage, got {messages:?}"
     );
@@ -781,7 +723,7 @@ fn test_alert_investigate_navigates_to_device_metric() {
 fn test_metric_promote_to_alert() {
     use zensight_common::TelemetryValue;
 
-    let device_id = DeviceId::new(Protocol::Sysinfo, "server01");
+    let device_id = DeviceId::fixture(Protocol::Sysinfo, "server01");
     let mut state = DeviceDetailState::new(device_id);
     let mut p = zensight_common::TelemetryPoint {
         timestamp: 0,
@@ -815,7 +757,7 @@ fn test_metric_promote_to_alert() {
 fn test_sysinfo_depth_cards() {
     use zensight_common::TelemetryValue;
 
-    let device_id = DeviceId::new(Protocol::Sysinfo, "server01");
+    let device_id = DeviceId::fixture(Protocol::Sysinfo, "server01");
     let mut state = DeviceDetailState::new(device_id);
     let mut put = |metric: &str, v: f64| {
         state.update(zensight_common::TelemetryPoint {
@@ -843,7 +785,7 @@ fn test_sysinfo_depth_cards() {
 fn test_netlink_tc_panel() {
     use zensight_common::TelemetryValue;
 
-    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let device_id = DeviceId::fixture(Protocol::Netlink, "gw01");
     let mut state = DeviceDetailState::new(device_id);
     let mut put = |metric: &str, v: u64| {
         state.update(zensight_common::TelemetryPoint {
@@ -871,7 +813,7 @@ fn test_netlink_tc_panel() {
 fn test_netlink_depth_cards() {
     use zensight_common::TelemetryValue;
 
-    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let device_id = DeviceId::fixture(Protocol::Netlink, "gw01");
     let mut state = DeviceDetailState::new(device_id);
     let mut put = |metric: &str, v: f64| {
         state.update(zensight_common::TelemetryPoint {
@@ -907,7 +849,7 @@ fn test_netlink_depth_cards() {
 fn test_netring_red_cards() {
     use zensight_common::TelemetryValue;
 
-    let device_id = DeviceId::new(Protocol::Netring, "sensor01");
+    let device_id = DeviceId::fixture(Protocol::Netring, "sensor01");
     let mut state = DeviceDetailState::new(device_id);
     let mut put = |metric: &str, v: f64| {
         state.update(zensight_common::TelemetryPoint {
@@ -1013,10 +955,7 @@ fn test_settings_save_button() {
 /// Test metric filtering in device view.
 #[test]
 fn test_device_metric_filter() {
-    let device_id = DeviceId {
-        protocol: Protocol::Sysinfo,
-        source: "server01".to_string(),
-    };
+    let device_id = DeviceId::fixture(Protocol::Sysinfo, "server01".to_string());
     let mut state = DeviceDetailState::new(device_id);
 
     // Add mock telemetry
@@ -1038,10 +977,7 @@ fn test_device_metric_filter() {
 /// Test SNMP specialized view renders with interface table.
 #[test]
 fn test_snmp_specialized_view() {
-    let device_id = DeviceId {
-        protocol: Protocol::Snmp,
-        source: "router01".to_string(),
-    };
+    let device_id = DeviceId::fixture(Protocol::Snmp, "router01".to_string());
     let mut state = DeviceDetailState::new(device_id);
 
     // Add mock SNMP telemetry
@@ -1066,10 +1002,7 @@ fn test_syslog_specialized_view() {
     use zensight_common::TelemetryPoint;
     use zensight_common::TelemetryValue;
 
-    let device_id = DeviceId {
-        protocol: Protocol::Logs,
-        source: "server01".to_string(),
-    };
+    let device_id = DeviceId::fixture(Protocol::Logs, "server01".to_string());
     let mut state = DeviceDetailState::new(device_id);
 
     // Add a syslog message
@@ -1100,10 +1033,7 @@ fn test_modbus_specialized_view() {
     use zensight_common::TelemetryPoint;
     use zensight_common::TelemetryValue;
 
-    let device_id = DeviceId {
-        protocol: Protocol::Modbus,
-        source: "plc01".to_string(),
-    };
+    let device_id = DeviceId::fixture(Protocol::Modbus, "plc01".to_string());
     let mut state = DeviceDetailState::new(device_id);
 
     // Add a holding register
@@ -1130,10 +1060,7 @@ fn test_netflow_specialized_view() {
     use zensight_common::TelemetryPoint;
     use zensight_common::TelemetryValue;
 
-    let device_id = DeviceId {
-        protocol: Protocol::Netflow,
-        source: "router01".to_string(),
-    };
+    let device_id = DeviceId::fixture(Protocol::Netflow, "router01".to_string());
     let mut state = DeviceDetailState::new(device_id);
 
     // Add a flow record
@@ -1169,10 +1096,7 @@ fn test_gnmi_specialized_view() {
     use zensight_common::TelemetryPoint;
     use zensight_common::TelemetryValue;
 
-    let device_id = DeviceId {
-        protocol: Protocol::Gnmi,
-        source: "spine01".to_string(),
-    };
+    let device_id = DeviceId::fixture(Protocol::Gnmi, "spine01".to_string());
     let mut state = DeviceDetailState::new(device_id);
 
     // Add a gNMI path
@@ -1209,10 +1133,7 @@ fn test_overview_section_renders() {
     state.connected = true;
 
     // Add a sysinfo device with metrics
-    let device_id = DeviceId {
-        protocol: Protocol::Sysinfo,
-        source: "server01".to_string(),
-    };
+    let device_id = DeviceId::fixture(Protocol::Sysinfo, "server01".to_string());
     let mut device = DeviceState::new(device_id.clone());
     device.metric_count = 3;
     device.is_healthy = true;
@@ -1262,10 +1183,7 @@ fn test_overview_protocol_tab_click() {
     state.connected = true;
 
     // Add an SNMP device
-    let device_id = DeviceId {
-        protocol: Protocol::Snmp,
-        source: "router01".to_string(),
-    };
+    let device_id = DeviceId::fixture(Protocol::Snmp, "router01".to_string());
     let mut device = DeviceState::new(device_id.clone());
     device.metric_count = 1;
     device.is_healthy = true;
@@ -1320,10 +1238,7 @@ fn test_overview_collapse_toggle() {
     state.connected = true;
 
     // Add a device so overview shows
-    let device_id = DeviceId {
-        protocol: Protocol::Sysinfo,
-        source: "server01".to_string(),
-    };
+    let device_id = DeviceId::fixture(Protocol::Sysinfo, "server01".to_string());
     let mut device = DeviceState::new(device_id.clone());
 
     let point = TelemetryPoint::new(
@@ -1984,7 +1899,7 @@ fn test_specialized_device_view_has_back_button() {
     use zensight::view::device::device_view;
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Netlink, "router01");
+    let device_id = DeviceId::fixture(Protocol::Netlink, "router01");
     let mut state = DeviceDetailState::new(device_id);
     state.update(TelemetryPoint::new(
         "router01",
@@ -2014,7 +1929,7 @@ fn test_netlink_specialized_view() {
     use zensight::view::specialized::netlink::netlink_host_view;
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Netlink, "router01");
+    let device_id = DeviceId::fixture(Protocol::Netlink, "router01");
     let mut state = DeviceDetailState::new(device_id);
     for (metric, value) in [
         ("iface/eth0/rx_bytes", TelemetryValue::Counter(1000)),
@@ -2127,7 +2042,7 @@ fn test_netring_specialized_view() {
     use zensight::view::specialized::netring::netring_sensor_view;
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let device_id = DeviceId::fixture(Protocol::Netring, "wiretap1");
     let mut state = DeviceDetailState::new(device_id);
     for (metric, value) in [
         ("flow/started_total", TelemetryValue::Counter(10)),
@@ -2173,7 +2088,7 @@ fn test_netring_specialized_view() {
     // #247: content is tabbed. Loading/error render inline on the Flows tab;
     // drive the active tab explicitly (view tests can't switch via click).
     {
-        let mut s = DeviceDetailState::new(DeviceId::new(Protocol::Netring, "wiretap1"));
+        let mut s = DeviceDetailState::new(DeviceId::fixture(Protocol::Netring, "wiretap1"));
         s.specialized_tab = zensight::view::specialized::SpecializedTab::Flows;
         s.netring_detail.loading();
         {
@@ -2268,7 +2183,7 @@ fn test_netlink_netring_overviews_render() {
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
     // Netlink host with an up interface + established sockets.
-    let nl_id = DeviceId::new(Protocol::Netlink, "router01");
+    let nl_id = DeviceId::fixture(Protocol::Netlink, "router01");
     let mut nl = DeviceState::new(nl_id.clone());
     nl.metrics.insert(
         "iface/eth0/up".into(),
@@ -2294,7 +2209,7 @@ fn test_netlink_netring_overviews_render() {
     assert!(ui.find("TCP established").is_ok());
 
     // Netring sensor with flow + reset metrics.
-    let nr_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let nr_id = DeviceId::fixture(Protocol::Netring, "wiretap1");
     let mut nr = DeviceState::new(nr_id.clone());
     nr.metrics.insert(
         "flow/active".into(),
@@ -2516,7 +2431,7 @@ fn test_netlink_conntrack_wireguard_sections() {
     use zensight::view::specialized::netlink::netlink_host_view;
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let device_id = DeviceId::fixture(Protocol::Netlink, "gw01");
     let mut state = DeviceDetailState::new(device_id);
 
     // Without conntrack/wireguard metrics: sections absent.
@@ -2571,7 +2486,7 @@ fn test_netlink_tabs_capability_and_switch() {
     use zensight::view::specialized::netlink::netlink_host_view;
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let device_id = DeviceId::fixture(Protocol::Netlink, "gw01");
     let mut state = DeviceDetailState::new(device_id);
     // Bare host: only base metrics, no tc/xfrm/conntrack/wireguard.
     state.update(TelemetryPoint::new(
@@ -2624,7 +2539,7 @@ fn test_netlink_wireguard_tab() {
     use zensight::view::specialized::netlink::netlink_host_view;
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let device_id = DeviceId::fixture(Protocol::Netlink, "gw01");
     let mut state = DeviceDetailState::new(device_id);
     state.specialized_tab = zensight::view::specialized::SpecializedTab::WireGuard;
     for (m, v) in [
@@ -2670,7 +2585,7 @@ fn test_netlink_events_tab() {
     };
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let device_id = DeviceId::fixture(Protocol::Netlink, "gw01");
     let mut state = DeviceDetailState::new(device_id);
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Events;
     state.update(TelemetryPoint::new(
@@ -2716,7 +2631,7 @@ fn test_netlink_firewall_tab() {
     use zensight::view::specialized::netlink_detail::{NetlinkDetailData, NetlinkDetailTopic};
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let device_id = DeviceId::fixture(Protocol::Netlink, "gw01");
     let mut state = DeviceDetailState::new(device_id);
     state.specialized_tab = zensight::view::specialized::SpecializedTab::FirewallIpsec;
     for (m, v) in [
@@ -2758,7 +2673,7 @@ fn test_netlink_qos_tab() {
     use zensight::view::specialized::netlink::netlink_host_view;
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let device_id = DeviceId::fixture(Protocol::Netlink, "gw01");
     let mut state = DeviceDetailState::new(device_id);
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Qos;
     for (m, v) in [
@@ -2789,7 +2704,7 @@ fn test_netlink_routing_tab() {
     use zensight::view::specialized::netlink_detail::{NetlinkDetailData, NetlinkDetailTopic};
     use zensight_common::{Protocol, RouteRecord, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let device_id = DeviceId::fixture(Protocol::Netlink, "gw01");
     let mut state = DeviceDetailState::new(device_id);
     state.specialized_tab = zensight::view::specialized::SpecializedTab::RoutingNeighbors;
     for (m, v) in [
@@ -2831,7 +2746,7 @@ fn test_netlink_interfaces_tab_and_pivot() {
     use zensight::view::specialized::netlink::netlink_host_view;
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let device_id = DeviceId::fixture(Protocol::Netlink, "gw01");
     let mut state = DeviceDetailState::new(device_id);
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Interfaces;
     for (m, v) in [
@@ -2868,7 +2783,7 @@ fn test_netlink_overview_hero() {
     use zensight::view::specialized::netlink::netlink_host_view;
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let device_id = DeviceId::fixture(Protocol::Netlink, "gw01");
     let mut state = DeviceDetailState::new(device_id);
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Overview;
     for (m, v) in [
@@ -2909,7 +2824,7 @@ fn test_netlink_sockets_explorer_pagination_and_charts() {
     use zensight::view::specialized::netlink_detail::{NetlinkDetailData, NetlinkDetailTopic};
     use zensight_common::{Protocol, SocketRecord};
 
-    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let device_id = DeviceId::fixture(Protocol::Netlink, "gw01");
     let mut state = DeviceDetailState::new(device_id);
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Sockets;
 
@@ -2981,7 +2896,7 @@ fn test_netlink_sockets_ebpf_section() {
     };
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Netlink, "gw01");
+    let device_id = DeviceId::fixture(Protocol::Netlink, "gw01");
     let mut state = DeviceDetailState::new(device_id);
     state.specialized_tab = SpecializedTab::Sockets;
     // A socket aggregate so the Sockets tab renders its base content.
@@ -3047,7 +2962,7 @@ fn test_netring_tls_capture_sections() {
     use zensight::view::specialized::netring::netring_sensor_view;
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue, TlsRecord};
 
-    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let device_id = DeviceId::fixture(Protocol::Netring, "wiretap1");
     let mut state = DeviceDetailState::new(device_id);
     for (m, v) in [
         ("tls/handshakes_total", TelemetryValue::Counter(12)),
@@ -3095,7 +3010,7 @@ fn test_netring_encrypted_dns_panel() {
     use zensight::view::specialized::netring::netring_sensor_view;
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let device_id = DeviceId::fixture(Protocol::Netring, "wiretap1");
     let mut state = DeviceDetailState::new(device_id);
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Dns;
 
@@ -3126,7 +3041,7 @@ fn test_netring_quic_ssh_sections() {
     use zensight::view::specialized::netring::netring_sensor_view;
     use zensight_common::{Protocol, QuicRecord, SshRecord, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let device_id = DeviceId::fixture(Protocol::Netring, "wiretap1");
     let mut state = DeviceDetailState::new(device_id);
     for (m, v) in [
         ("quic/distinct_sni", TelemetryValue::Gauge(5.0)),
@@ -3170,7 +3085,7 @@ fn test_netring_capture_overload_and_breakdown() {
     use zensight::view::specialized::netring::netring_sensor_view;
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let device_id = DeviceId::fixture(Protocol::Netring, "wiretap1");
     let mut state = DeviceDetailState::new(device_id);
     for (m, v) in [
         ("capture/0/packets", TelemetryValue::Counter(100000)),
@@ -3197,7 +3112,7 @@ fn test_netring_capture_backend_and_shedding() {
     use zensight::view::specialized::netring::netring_sensor_view;
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let device_id = DeviceId::fixture(Protocol::Netring, "wiretap1");
     let mut state = DeviceDetailState::new(device_id);
     for (m, v) in [
         (
@@ -3276,7 +3191,7 @@ fn test_netring_assets_section() {
     use zensight::view::specialized::netring::netring_sensor_view;
     use zensight_common::{AssetRecord, Protocol, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let device_id = DeviceId::fixture(Protocol::Netring, "wiretap1");
     let mut state = DeviceDetailState::new(device_id);
     state.update(TelemetryPoint::new(
         "wiretap1",
@@ -3321,7 +3236,7 @@ fn test_netring_tabs_capability_and_switch() {
     use zensight::view::specialized::netring::netring_sensor_view;
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let device_id = DeviceId::fixture(Protocol::Netring, "wiretap1");
     let mut state = DeviceDetailState::new(device_id);
     // No dns/ metrics → DNS tab hidden; always-on tabs present.
     {
@@ -3363,7 +3278,7 @@ fn test_netring_security_tab_and_strip() {
     use zensight::view::specialized::netring::netring_sensor_view;
     use zensight_common::{Alert, AlertKind, AlertSeverity, AlertState, Protocol};
 
-    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let device_id = DeviceId::fixture(Protocol::Netring, "wiretap1");
     let mut state = DeviceDetailState::new(device_id);
     state.netring_detail.anomalies = vec![Alert {
         timestamp: 0,
@@ -3421,7 +3336,7 @@ fn test_netring_overview_chip_and_talkers_tab() {
     use zensight::view::specialized::netring::netring_sensor_view;
     use zensight_common::{Protocol, TalkerRecord, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Netring, "wiretap1");
+    let device_id = DeviceId::fixture(Protocol::Netring, "wiretap1");
     let mut state = DeviceDetailState::new(device_id);
     for (m, v) in [
         ("flow/started_total", TelemetryValue::Counter(3)),
@@ -3522,7 +3437,7 @@ fn test_logs_rollup_panel_renders() {
     use zensight::view::specialized::{SyslogFilterState, syslog_event_view};
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Logs, "host01");
+    let device_id = DeviceId::fixture(Protocol::Logs, "host01");
     let mut state = DeviceDetailState::new(device_id);
     for (m, v) in [
         ("errors_total", TelemetryValue::Counter(42)),
@@ -3568,7 +3483,7 @@ fn test_logs_rollup_show_all_units() {
     use zensight::view::specialized::{SyslogFilterState, syslog_event_view};
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId::new(Protocol::Logs, "host01");
+    let device_id = DeviceId::fixture(Protocol::Logs, "host01");
     let mut state = DeviceDetailState::new(device_id);
     for (unit, n) in [
         ("nginx.service", 900),
@@ -3768,10 +3683,7 @@ fn test_syslog_device_shows_host_history() {
     use zensight::view::specialized::syslog_message_from_point;
     use zensight_common::{TelemetryPoint, TelemetryValue};
 
-    let device_id = DeviceId {
-        protocol: Protocol::Logs,
-        source: "host9".to_string(),
-    };
+    let device_id = DeviceId::fixture(Protocol::Logs, "host9".to_string());
     let state = DeviceDetailState::new(device_id);
 
     let mk = |msg: &str| {
@@ -3801,10 +3713,7 @@ fn test_systemd_specialized_view_tabs() {
     use zensight::view::specialized::{SpecializedTab, specialized_view};
     use zensight_common::{TelemetryPoint, TelemetryValue};
 
-    let id = DeviceId {
-        protocol: Protocol::Systemd,
-        source: "server01".to_string(),
-    };
+    let id = DeviceId::fixture(Protocol::Systemd, "server01".to_string());
     let mut state = DeviceDetailState::new(id.clone());
     for (metric, v) in [
         ("units/total", 300.0),
@@ -3849,10 +3758,7 @@ fn test_systemd_units_tab_fetches_on_demand() {
     use zensight::view::specialized::specialized_view;
     use zensight::view::specialized::systemd_detail::SystemdDetailTopic;
 
-    let id = DeviceId {
-        protocol: Protocol::Systemd,
-        source: "server01".to_string(),
-    };
+    let id = DeviceId::fixture(Protocol::Systemd, "server01".to_string());
     let mut state = DeviceDetailState::new(id);
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Units;
 
@@ -3877,10 +3783,7 @@ fn test_systemd_units_action_confirm_flow() {
     use zensight::view::specialized::systemd_detail::{SystemdDetailData, SystemdDetailTopic};
     use zensight_common::query_detail::UnitRecord;
 
-    let id = DeviceId {
-        protocol: Protocol::Systemd,
-        source: "server01".to_string(),
-    };
+    let id = DeviceId::fixture(Protocol::Systemd, "server01".to_string());
     let mut state = DeviceDetailState::new(id);
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Units;
     state.systemd_detail.apply(
@@ -4007,10 +3910,7 @@ fn test_entity(id: &str, hostname: &str, members: &[(&str, &str)]) -> HostEntity
 }
 
 fn device(protocol: Protocol, source: &str) -> (DeviceId, DeviceState) {
-    let id = DeviceId {
-        protocol,
-        source: source.to_string(),
-    };
+    let id = DeviceId::fixture(protocol, source);
     let mut d = DeviceState::new(id.clone());
     d.metric_count = 3;
     d.is_healthy = true;
@@ -4101,20 +4001,12 @@ fn test_dashboard_empty_entity_store_degraded_parity() {
 /// member's rule + confidence — the wrong-merge diagnosis affordance.
 #[test]
 fn test_host_detail_resolution_group() {
-    let id = DeviceId {
-        protocol: Protocol::Sysinfo,
-        source: "server01".to_string(),
-    };
+    let id = DeviceId::fixture(Protocol::Sysinfo, "server01".to_string());
     let mut detail = DeviceDetailState::new(id.clone());
     for point in mock::sysinfo::host("server01") {
         detail.update(point);
     }
-    let facets = vec![FacetTab {
-        id: id.clone(),
-        protocol: Protocol::Sysinfo,
-        status: DeviceStatus::Online,
-        active: true,
-    }];
+    let facets = vec![FacetTab::live(id.clone(), DeviceStatus::Online, true)];
     let entity = test_entity(
         "h_web01",
         "web-01",
@@ -4146,10 +4038,7 @@ fn test_host_detail_resolution_group() {
 /// live device still surfaces via the entity.
 #[test]
 fn test_host_detail_entity_facet_tabs() {
-    let id = DeviceId {
-        protocol: Protocol::Sysinfo,
-        source: "server01".to_string(),
-    };
+    let id = DeviceId::fixture(Protocol::Sysinfo, "server01".to_string());
     let mut detail = DeviceDetailState::new(id.clone());
     for point in mock::sysinfo::host("server01") {
         detail.update(point);
@@ -4157,17 +4046,10 @@ fn test_host_detail_entity_facet_tabs() {
     // Two facet tabs built from the entity: the live sysinfo one + a netlink
     // member (disabled, no live device).
     let facets = vec![
+        FacetTab::live(id.clone(), DeviceStatus::Online, true),
         FacetTab {
-            id: id.clone(),
-            protocol: Protocol::Sysinfo,
-            status: DeviceStatus::Online,
-            active: true,
-        },
-        FacetTab {
-            id: DeviceId {
-                protocol: Protocol::Netlink,
-                source: "server01".to_string(),
-            },
+            id: None,
+            source: "server01".to_string(),
             protocol: Protocol::Netlink,
             status: DeviceStatus::Unknown,
             active: false,
@@ -4200,20 +4082,16 @@ fn test_host_detail_entity_facet_tabs() {
 /// `ToggleIdentityDetails`. Expanding shows everything (no data loss).
 #[test]
 fn test_host_identity_collapsed_by_default() {
-    let id = DeviceId {
-        protocol: Protocol::Sysinfo,
-        source: "server01".to_string(),
-    };
+    let id = DeviceId::fixture(Protocol::Sysinfo, "server01".to_string());
     let mut detail = DeviceDetailState::new(id.clone());
     for point in mock::sysinfo::host("server01") {
         detail.update(point);
     }
-    let facets = vec![FacetTab {
+    let facets = vec![FacetTab::live(
         id,
-        protocol: Protocol::Sysinfo,
-        status: zensight_common::DeviceStatus::Online,
-        active: true,
-    }];
+        zensight_common::DeviceStatus::Online,
+        true,
+    )];
     let entity = test_entity(
         "h_web01",
         "web-01",
@@ -4251,10 +4129,7 @@ fn test_host_identity_collapsed_by_default() {
 fn test_syslog_drilldown_single_back() {
     use zensight::view::specialized::syslog_event_view;
 
-    let id = DeviceId {
-        protocol: Protocol::Logs,
-        source: "server01".to_string(),
-    };
+    let id = DeviceId::fixture(Protocol::Logs, "server01".to_string());
     let detail = DeviceDetailState::new(id.clone());
     let syslog_filter = SyslogFilterState::default();
 
@@ -4263,12 +4138,11 @@ fn test_syslog_drilldown_single_back() {
     assert!(body.find("Back").is_err());
 
     // The host shell around it: exactly one nav layer with the Back button.
-    let facets = vec![FacetTab {
+    let facets = vec![FacetTab::live(
         id,
-        protocol: Protocol::Logs,
-        status: zensight_common::DeviceStatus::Online,
-        active: true,
-    }];
+        zensight_common::DeviceStatus::Online,
+        true,
+    )];
     let mut ui = simulator(host_detail_view(DeviceViewCtx {
         state: &detail,
         syslog_filter: &syslog_filter,
@@ -4317,7 +4191,7 @@ fn netring_capture_tab_hosts_capture_form() {
     use zensight::view::specialized::netring::netring_sensor_view;
     use zensight_common::ArtifactKind;
 
-    let device_id = DeviceId::new(Protocol::Netring, "host01");
+    let device_id = DeviceId::fixture(Protocol::Netring, "host01");
     let mut state = DeviceDetailState::new(device_id.clone());
     state.specialized_tab = SpecializedTab::Capture;
     // A capture/ metric so the tab is visible even without the advert path.
@@ -4358,7 +4232,7 @@ fn netring_capture_tab_without_advert_is_health_only() {
     use zensight::view::specialized::SpecializedTab;
     use zensight::view::specialized::netring::netring_sensor_view;
 
-    let device_id = DeviceId::new(Protocol::Netring, "host01");
+    let device_id = DeviceId::fixture(Protocol::Netring, "host01");
     let mut state = DeviceDetailState::new(device_id);
     state.specialized_tab = SpecializedTab::Capture;
     state.update(zensight_common::TelemetryPoint::new(
@@ -4388,7 +4262,7 @@ fn netring_bandwidth_pivot_and_chip_clear() {
     use zensight::view::specialized::SpecializedTab;
     use zensight::view::specialized::netring::netring_sensor_view;
 
-    let device_id = DeviceId::new(Protocol::Netring, "host01");
+    let device_id = DeviceId::fixture(Protocol::Netring, "host01");
     let mut state = DeviceDetailState::new(device_id);
     state.specialized_tab = SpecializedTab::Bandwidth;
     state.update(zensight_common::TelemetryPoint::new(
@@ -4520,10 +4394,7 @@ fn no_capture_advert_renders_no_form() {
 fn test_parallax_catalogue_and_tiles() {
     use zensight::view::specialized::parallax::parallax_view;
 
-    let device_id = DeviceId {
-        protocol: Protocol::Parallax,
-        source: "hostA".to_string(),
-    };
+    let device_id = DeviceId::fixture(Protocol::Parallax, "hostA".to_string());
     let mut state = DeviceDetailState::new(device_id);
 
     // Idle catalogue → load affordance + empty-tiles placeholder.
@@ -4615,7 +4486,7 @@ fn sysinfo_point(
 }
 
 fn sysinfo_state(points: &[(&str, zensight_common::TelemetryValue)]) -> DeviceDetailState {
-    let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Sysinfo, "server01"));
+    let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Sysinfo, "server01"));
     for (metric, value) in points {
         state.update(sysinfo_point(metric, value.clone()));
     }
@@ -4729,7 +4600,7 @@ fn tier2_sysinfo_temperature_rows_render() {
 }
 
 fn netlink_state(points: &[(&str, zensight_common::TelemetryValue)]) -> DeviceDetailState {
-    let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Netlink, "server01"));
+    let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Netlink, "server01"));
     for (metric, value) in points {
         state.update(zensight_common::TelemetryPoint {
             timestamp: 0,
@@ -4805,7 +4676,7 @@ fn netring_state(
     tab: zensight::view::specialized::SpecializedTab,
     points: &[(&str, zensight_common::TelemetryValue)],
 ) -> DeviceDetailState {
-    let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Netring, "wiretap1"));
+    let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Netring, "wiretap1"));
     for (metric, value) in points {
         state.update(zensight_common::TelemetryPoint {
             timestamp: 0,
@@ -4886,7 +4757,7 @@ fn tier2_netring_http_method_rows_render() {
 fn tier2_netlink_overview_counts_interfaces() {
     use zensight::view::overview::netlink::netlink_overview;
 
-    let id = DeviceId::new(Protocol::Netlink, "server01");
+    let id = DeviceId::fixture(Protocol::Netlink, "server01");
     let mut device = DeviceState::new(id.clone());
     for (metric, up) in [("iface/eth0/up", true), ("iface/wan0/up", false)] {
         device.metrics.insert(
@@ -4921,7 +4792,7 @@ fn tier2_netlink_overview_counts_interfaces() {
 fn sysinfo_latency_panel_renders_percentiles() {
     use zensight_common::{Histogram, LatencyReport};
 
-    let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Sysinfo, "server01"));
+    let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Sysinfo, "server01"));
     state.sysinfo_detail.apply_latency(Ok(LatencyReport {
         available: true,
         window_secs: 10,
@@ -4961,7 +4832,7 @@ fn sysinfo_latency_panel_renders_percentiles() {
 fn sysinfo_latency_panel_distinguishes_unavailable_from_no_answer() {
     use zensight_common::LatencyReport;
 
-    let mut unavailable = DeviceDetailState::new(DeviceId::new(Protocol::Sysinfo, "server01"));
+    let mut unavailable = DeviceDetailState::new(DeviceId::fixture(Protocol::Sysinfo, "server01"));
     unavailable.sysinfo_detail.apply_latency(Ok(LatencyReport {
         available: false,
         ..Default::default()
@@ -4978,7 +4849,7 @@ fn sysinfo_latency_panel_distinguishes_unavailable_from_no_answer() {
         "an unavailable collector must say so, not look like a failed fetch"
     );
 
-    let mut failed = DeviceDetailState::new(DeviceId::new(Protocol::Sysinfo, "server01"));
+    let mut failed = DeviceDetailState::new(DeviceId::fixture(Protocol::Sysinfo, "server01"));
     failed
         .sysinfo_detail
         .apply_latency(Err("No sysinfo sensor responded".into()));
@@ -4995,7 +4866,7 @@ fn sysinfo_latency_panel_distinguishes_unavailable_from_no_answer() {
 fn netring_encrypted_dns_destinations_flag_unknown_resolvers() {
     use zensight_common::EncryptedDnsRecord;
 
-    let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Netring, "wiretap1"));
+    let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Netring, "wiretap1"));
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Dns;
     // The DNS tab is capability-gated on `dns/` telemetry. A host doing *only*
     // encrypted DNS still publishes `dns/encrypted/*`, so it reaches the tab —

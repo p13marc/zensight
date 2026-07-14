@@ -20,7 +20,7 @@ use iced::{Element, Length, Theme};
 
 use zensight_common::{Alert as SensorAlert, AlertSeverity, AlertState, Protocol};
 
-use crate::message::{DeviceId, Message};
+use crate::message::Message;
 use crate::view::alerts::{AlertsState, Severity};
 use crate::view::components::{badge, card, empty_state, section_header};
 use crate::view::formatting::format_timestamp;
@@ -275,9 +275,17 @@ fn render_timeline<'a>(inc: &Incident) -> Element<'a, Message> {
 /// right device view (prefetch-on-open populates flows/sockets/etc).
 fn render_evidence<'a>(inc: &Incident) -> Element<'a, Message> {
     let host = inc.evidence.host.clone();
-    let pivot = |label: &str, device: DeviceId, metric: Option<String>| -> Element<'a, Message> {
+    let pivot = |label: &str,
+                 protocol: Protocol,
+                 source: String,
+                 metric: Option<String>|
+     -> Element<'a, Message> {
         button(text(label.to_string()).size(font::CAPTION))
-            .on_press(Message::InvestigateAlert { device, metric })
+            .on_press(Message::InvestigateAlert {
+                protocol,
+                source,
+                metric,
+            })
             .padding([2, 8])
             .into()
     };
@@ -286,33 +294,22 @@ fn render_evidence<'a>(inc: &Incident) -> Element<'a, Message> {
         vec![text("Evidence:").size(font::CAPTION).style(dim).into()];
 
     // The host/device that raised the incident.
-    row_items.push(pivot(
-        "host ↗",
-        DeviceId::new(inc.evidence.protocol, host.clone()),
-        None,
-    ));
+    row_items.push(pivot("host ↗", inc.evidence.protocol, host.clone(), None));
     // Offending metric → device chart.
     if let Some(metric) = &inc.evidence.metric {
         row_items.push(pivot(
             "metric ↗",
-            DeviceId::new(inc.evidence.protocol, host.clone()),
+            inc.evidence.protocol,
+            host.clone(),
             Some(metric.clone()),
         ));
     }
     // Offending flows → netring device (its flow panel).
     if inc.evidence.flow_src.is_some() {
-        row_items.push(pivot(
-            "flows ↗",
-            DeviceId::new(Protocol::Netring, host.clone()),
-            None,
-        ));
+        row_items.push(pivot("flows ↗", Protocol::Netring, host.clone(), None));
     }
     // Host logs → syslog device (filtered to this host).
-    row_items.push(pivot(
-        "logs ↗",
-        DeviceId::new(Protocol::Logs, host.clone()),
-        None,
-    ));
+    row_items.push(pivot("logs ↗", Protocol::Logs, host.clone(), None));
 
     iced::widget::Row::with_children(row_items)
         .spacing(space::SM)

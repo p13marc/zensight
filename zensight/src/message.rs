@@ -7,15 +7,45 @@ use crate::view::alerts::{ComparisonOp, Severity};
 use crate::view::chart::TimeWindow;
 use crate::view::settings::ZenohMode;
 
+/// One telemetry sample, plus **who published it** (#474).
+///
+/// The origin is chunk 3 of the sample's key. A `TelemetryPoint` has never
+/// carried one — it carries a *human* `source` — and the GUI used to throw the
+/// key's origin away at decode and then reconstruct it from a `source → origin`
+/// side map fed out-of-band by health docs. That map collided on duplicate
+/// hostnames, and since the map is what builds every origin-scoped `@rpc` key,
+/// a collision misrouted drill-downs to the wrong host.
+///
+/// So: carry it. It was on every sample all along.
+#[derive(Debug, Clone)]
+pub struct Reading {
+    pub point: TelemetryPoint,
+    /// The publishing host's origin (`h-<12hex>`), read from the key.
+    pub origin: String,
+}
+
+impl Reading {
+    pub fn new(point: TelemetryPoint, origin: impl Into<String>) -> Self {
+        Self {
+            point,
+            origin: origin.into(),
+        }
+    }
+
+    pub fn device_id(&self) -> DeviceId {
+        DeviceId::from_telemetry(&self.point, &self.origin)
+    }
+}
+
 /// Messages for the ZenSight application.
 #[derive(Debug, Clone)]
 pub enum Message {
     /// Telemetry received from Zenoh subscription.
-    TelemetryReceived(TelemetryPoint),
+    TelemetryReceived(Reading),
 
     /// A burst of telemetry drained in one go (startup history / streaming
     /// spikes) — one iced update instead of one per sample.
-    TelemetryBatch(Vec<TelemetryPoint>),
+    TelemetryBatch(Vec<Reading>),
 
     /// A periodic off-thread store flush finished. Payload is the number of
     /// downsampled buckets persisted (or `Err` with a message on failure). #22.
@@ -598,14 +628,34 @@ pub enum Message {
     /// Sensor went offline (liveliness token disappeared).
     SensorOffline(String, Option<String>),
 
-    /// Device came online (liveliness token appeared).
-    DeviceOnline(String, String),
+    /// Device came online (liveliness token appeared). Carries the publishing
+    /// host's origin because that is half of the device's identity (#474) —
+    /// without it the handler cannot name the device it is being told about.
+    DeviceOnline {
+        protocol: String,
+        origin: String,
+        device: String,
+    },
 
     /// Device went offline (liveliness token disappeared).
-    DeviceOffline(String, String),
+    DeviceOffline {
+        protocol: String,
+        origin: String,
+        device: String,
+    },
 
     /// User selected a device from the dashboard.
     SelectDevice(DeviceId),
+
+    /// Select a device the user picked out by *name* — an entity member, a
+    /// topology node, a search hit. The origin is not knowable from a name, so
+    /// the app resolves it against the devices it has seen
+    /// ([`crate::view::dashboard::DashboardState::resolve_device`]) rather than
+    /// letting the view fabricate a handle (#474, RFC 06 §6).
+    SelectDeviceNamed {
+        protocol: Protocol,
+        source: String,
+    },
 
     /// User dismissed a stale facet: drop it from the in-memory device map.
     /// Facets are not persisted, so this is a pure view-model removal — the
@@ -614,8 +664,13 @@ pub enum Message {
 
     /// Jump from an alert straight to the offending device, pre-selecting the
     /// metric (if known) so its chart opens immediately (#35 triage loop).
+    ///
+    /// Names the device by *human* identity — an alert carries a `source`, not
+    /// an origin. The app resolves it against the devices it has seen
+    /// ([`DashboardState::resolve_device`]); a view must not invent the handle.
     InvestigateAlert {
-        device: DeviceId,
+        protocol: Protocol,
+        source: String,
         metric: Option<String>,
     },
 
@@ -1149,30 +1204,88 @@ pub enum AttributionTarget {
     Topology,
 }
 
-/// Unique identifier for a device (protocol + source name).
+/// Unique identifier for a device: **who published it**, what protocol, and
+/// which device it is *about*.
+///
+/// # Why the origin is here (#474)
+///
+/// This used to be `{ protocol, source }`, where `source` is the payload's
+/// human label. That collides: two hosts reporting the same hostname
+/// (`localhost`, a cloned VM image, two containers named alike) landed on one
+/// `DeviceId` and overwrote each other.
+///
+/// On the old keyspace that only muddled a *display*. On v1 it **misroutes
+/// queries** — this id is what every origin-scoped `@rpc`/`@media` key is built
+/// from, so the loser's drill-downs and video tiles silently targeted the
+/// winner's host. The origin (`h-<12hex>`) is the identity; the hostname never
+/// was (RFC 06 §6.1).
+///
+/// # Why `source` is still here
+///
+/// It is **not** merely a display label, and dropping it would be a worse bug
+/// than the one being fixed. For a *host* sensor (sysinfo, netlink, …) `source`
+/// is the publishing host's own hostname, and is indeed decorative — the origin
+/// already says which box it is. But for a **proxy** sensor (SNMP, Modbus,
+/// gNMI, NetFlow) `source` is the *polled device*: `origin` is the poller's
+/// host, `source` is `router01`. Keying on the origin alone would collapse
+/// every device a poller polls into one.
+///
+/// So the triple is exactly RFC 06 §3's model — *observed devices are subjects,
+/// not origins*: the origin says who is talking, the source says who they are
+/// talking about. Two collectors polling one router yield two ids, and merging
+/// them is the catalog's job, not this struct's.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DeviceId {
     pub protocol: Protocol,
+    /// The publishing host's v1 origin (`h-<12hex>`) — chunk 3 of every key it
+    /// publishes. Read from the key, never from the payload.
+    pub origin: String,
+    /// The payload's `source`: the publisher's own hostname for a host sensor,
+    /// the polled device's name for a proxy sensor.
     pub source: String,
 }
 
+/// The placeholder origin worn by every [`DeviceId::fixture`].
+pub const FIXTURE_ORIGIN: &str = "h-fixture0000";
+
 impl DeviceId {
-    pub fn new(protocol: Protocol, source: impl Into<String>) -> Self {
+    pub fn new(protocol: Protocol, origin: impl Into<String>, source: impl Into<String>) -> Self {
         Self {
             protocol,
+            origin: origin.into(),
             source: source.into(),
         }
     }
 
-    pub fn from_telemetry(point: &TelemetryPoint) -> Self {
+    /// A device from an unspecified host — **fixtures only** (tests, mock data,
+    /// the demo simulator's static environment). Every such device gets the same
+    /// placeholder origin, so `(protocol, source)` still tells them apart.
+    ///
+    /// Real code never calls this: the origin arrives on the key, and inventing
+    /// one is the bug this type exists to prevent (#474). The placeholder is
+    /// deliberately not a valid minted id, so if one ever escapes onto the wire
+    /// it fails the grammar rather than quietly addressing a host that isn't
+    /// there.
+    pub fn fixture(protocol: Protocol, source: impl Into<String>) -> Self {
+        Self::new(protocol, FIXTURE_ORIGIN, source)
+    }
+
+    /// The origin comes from the **key** (chunk 3), not the payload — a
+    /// `TelemetryPoint` has never carried one, which is exactly why the GUI used
+    /// to need a `source -> origin` side map fed out-of-band from health docs.
+    /// It is on every sample; it was simply being thrown away at decode.
+    pub fn from_telemetry(point: &TelemetryPoint, origin: impl Into<String>) -> Self {
         Self {
             protocol: point.protocol,
+            origin: origin.into(),
             source: point.source.clone(),
         }
     }
 }
 
 impl std::fmt::Display for DeviceId {
+    /// Human-facing: the hostname is what an operator recognises, so it stays
+    /// the label. The origin is an *address*, not a name (RFC 06 §1).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}", self.protocol, self.source)
     }

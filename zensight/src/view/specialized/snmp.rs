@@ -523,7 +523,7 @@ mod tests {
 
     #[test]
     fn test_snmp_view_renders() {
-        let device_id = DeviceId::new(Protocol::Snmp, "router01");
+        let device_id = DeviceId::fixture(Protocol::Snmp, "router01");
         let state = DeviceDetailState::new(device_id);
         let _view = snmp_device_view(&state);
     }

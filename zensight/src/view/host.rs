@@ -123,7 +123,7 @@ pub fn aggregate<'a>(devices: &[&'a DeviceState], entities: &'a EntityStore) -> 
     // Preserve deterministic ordering with a BTreeMap keyed by a sortable form.
     let mut by_host: BTreeMap<HostKey, Vec<&DeviceState>> = BTreeMap::new();
     for d in devices {
-        let key = match entities.by_device.get(&d.id) {
+        let key = match entities.entity_id_for_device(&d.id) {
             Some(eid) => HostKey::Entity(entities.resolve_alias(eid).to_string()),
             None => HostKey::Source(d.id.source.clone()),
         };
@@ -193,7 +193,7 @@ mod tests {
     use zensight_common::MemberClaim;
 
     fn facet(proto: Protocol, source: &str, status: DeviceStatus) -> DeviceState {
-        let mut d = DeviceState::new(DeviceId::new(proto, source));
+        let mut d = DeviceState::new(DeviceId::fixture(proto, source));
         d.update_from_liveness(status, 0, None);
         d.metric_count = 3;
         d

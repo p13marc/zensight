@@ -14,6 +14,29 @@ use zensight_common::{
     Protocol, TelemetryPoint, TelemetryValue,
 };
 
+/// The single simulated host every proxy sensor (SNMP/Modbus/gNMI/NetFlow)
+/// polls from — the demo's stand-in for "the machine the poller runs on".
+const DEMO_POLLER: &str = "demo-poller";
+
+/// The v1 origin a real sensor would have published this point under.
+///
+/// Demo mode mirrors the wire contract (see `mock`), so it must mirror this
+/// too: a host sensor publishes under *its own* origin, while a proxy sensor
+/// (SNMP, Modbus, gNMI, NetFlow) publishes every device it polls under the
+/// *poller's* origin, with the device in the subject (RFC 06 §3). Inventing a
+/// per-device origin here would show a device topology the product cannot
+/// actually produce.
+///
+/// The id is the mock entity id, because RFC 06 §6 says the two are the same
+/// value: a host's `host_id` *is* its origin.
+pub fn demo_origin(point: &TelemetryPoint) -> String {
+    let host = match point.protocol {
+        Protocol::Snmp | Protocol::Modbus | Protocol::Gnmi | Protocol::Netflow => DEMO_POLLER,
+        _ => point.source.as_str(),
+    };
+    crate::mock::entity_id_for(host)
+}
+
 /// Demo simulation state.
 ///
 /// Maintains stateful counters and generates realistic time-varying metrics.

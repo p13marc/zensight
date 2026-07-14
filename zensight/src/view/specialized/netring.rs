@@ -2202,7 +2202,7 @@ mod tests {
     fn matrix_destination_pivots_to_flows() {
         // The matrix table's destination is a drill-down pivot (#246). Use the
         // matrix (heatmap is canvas, no text) so the clicked dst is unambiguous.
-        let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Netring, "host01"));
+        let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Netring, "host01"));
         state.netring_detail.matrix = Fetch::Ready(vec![MatrixRecord {
             src: "10.0.0.1:5555".to_string(),
             dst: "10.0.0.42:443".to_string(),
@@ -2225,7 +2225,7 @@ mod tests {
     /// emits the hot-switch.
     fn capture_disk_state() -> DeviceDetailState {
         use zensight_common::{CaptureRecord, TelemetryPoint};
-        let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Netring, "host01"));
+        let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Netring, "host01"));
         for (metric, value) in [
             (
                 "capture/disk/mode",
@@ -2300,7 +2300,7 @@ mod tests {
 
     #[test]
     fn capture_to_disk_hidden_without_disk_telemetry() {
-        let state = DeviceDetailState::new(DeviceId::new(Protocol::Netring, "host01"));
+        let state = DeviceDetailState::new(DeviceId::fixture(Protocol::Netring, "host01"));
         assert!(render_capture_to_disk(&state).is_none());
     }
 
@@ -2309,7 +2309,7 @@ mod tests {
     #[test]
     fn flow_who_button_emits_attribution_fetch() {
         use crate::view::specialized::attribution::{AttributedProcess, AttributionSource};
-        let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Netring, "host01"));
+        let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Netring, "host01"));
         state.netring_detail.flows = Fetch::Ready(vec![zensight_common::FlowRecord {
             src: "10.0.0.5:44444".into(),
             dst: "1.1.1.1:443".into(),
@@ -2358,7 +2358,7 @@ mod tests {
     /// #309: no socket matched → graceful "unattributed", never an error look.
     #[test]
     fn flow_attribution_unattributed_renders_gracefully() {
-        let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Netring, "host01"));
+        let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Netring, "host01"));
         state.netring_detail.attribution =
             Some(("10.0.0.5:1 → 1.1.1.1:2".into(), Fetch::Ready(None)));
         let line = attribution_line(state.netring_detail.attribution.as_ref())

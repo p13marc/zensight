@@ -1303,7 +1303,7 @@ mod tests {
 
     #[test]
     fn test_sysinfo_view_renders() {
-        let device_id = DeviceId::new(Protocol::Sysinfo, "server01");
+        let device_id = DeviceId::fixture(Protocol::Sysinfo, "server01");
         let state = DeviceDetailState::new(device_id);
         // Just verify it doesn't panic
         let _view = sysinfo_host_view(&state);
@@ -1339,7 +1339,7 @@ mod tests {
 
     #[test]
     fn process_row_unit_chip_pivots_to_unit() {
-        let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Sysinfo, "server01"));
+        let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Sysinfo, "server01"));
         state.sysinfo_detail.processes = Fetch::Ready(vec![
             proc(42, 100, Some("/system.slice/redis.service")),
             proc(43, 100, Some("/sys/fs/cgroup")), // non-unit cgroup → plain "—"
@@ -1357,7 +1357,7 @@ mod tests {
 
     #[test]
     fn pid_filter_banner_guards_stale_generations() {
-        let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Sysinfo, "server01"));
+        let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Sysinfo, "server01"));
         state.sysinfo_detail.processes = Fetch::Ready(vec![proc(42, 999, None)]);
         // The pivot expected start_time 100 but pid 42 now has 999 → reused.
         state.sysinfo_detail.pid_filter = Some(PidFilter {
@@ -1383,7 +1383,7 @@ mod tests {
 
     #[test]
     fn pid_filter_live_match_shows_only_that_process() {
-        let mut state = DeviceDetailState::new(DeviceId::new(Protocol::Sysinfo, "server01"));
+        let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Sysinfo, "server01"));
         state.sysinfo_detail.processes = Fetch::Ready(vec![proc(42, 100, None), proc(7, 5, None)]);
         state.sysinfo_detail.pid_filter = Some(PidFilter {
             pid: 42,

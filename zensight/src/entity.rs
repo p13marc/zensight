@@ -27,13 +27,27 @@ use crate::message::DeviceId;
 /// freshness indicator (the correlator may be gone).
 pub const ENTITY_STALE_MS: i64 = 180_000;
 
-/// Map a [`MemberClaim`] back to the per-protocol [`DeviceId`] it was merged
-/// from. Returns `None` when the claim's `sensor` string is not a known
-/// [`Protocol`] (forward-compat: a newer correlator merging an unknown sensor).
-pub fn member_device_id(m: &MemberClaim) -> Option<DeviceId> {
+/// The human identity of a device: `(protocol, source)`.
+///
+/// The entity index is keyed on this rather than on [`DeviceId`] because a
+/// [`MemberClaim`] names a sensor and a source and carries no origin — the
+/// correlator merges *human* identity, which is the whole point of it. A
+/// `DeviceId` projects down to a `MemberKey` (dropping its origin), so lookups
+/// still start from the device handle the GUI holds.
+pub type MemberKey = (Protocol, String);
+
+/// The [`MemberKey`] a claim was merged from. `None` when the claim's `sensor`
+/// string is not a known [`Protocol`] (forward-compat: a newer correlator
+/// merging an unknown sensor).
+pub fn member_key(m: &MemberClaim) -> Option<MemberKey> {
     Protocol::from_str(&m.sensor)
         .ok()
-        .map(|p| DeviceId::new(p, m.source.clone()))
+        .map(|p| (p, m.source.clone()))
+}
+
+/// Project a device handle onto its human identity.
+pub fn device_member_key(id: &DeviceId) -> MemberKey {
+    (id.protocol, id.source.clone())
 }
 
 /// GUI-side index over the correlator's [`HostEntity`] docs.
@@ -44,8 +58,9 @@ pub fn member_device_id(m: &MemberClaim) -> Option<DeviceId> {
 pub struct EntityStore {
     /// Entities keyed by `entity_id`.
     pub hosts: HashMap<String, HostEntity>,
-    /// `DeviceId` → owning `entity_id` (from each entity's `members[]`).
-    pub by_device: HashMap<DeviceId, String>,
+    /// `(protocol, source)` → owning `entity_id` (from each entity's
+    /// `members[]`). See [`MemberKey`] for why this is not keyed on `DeviceId`.
+    pub by_device: HashMap<MemberKey, String>,
     /// Identifying `IpAddr` → owning `entity_id` (from each entity's `ips[]`).
     pub by_ip: HashMap<IpAddr, String>,
     /// Normalized (lowercase) MAC → owning `entity_id` (from `macs[]`, #314) —
@@ -77,8 +92,8 @@ impl EntityStore {
         // stale index entries behind.
         self.drop_indexes(&id);
         for m in &e.members {
-            if let Some(did) = member_device_id(m) {
-                self.by_device.insert(did, id.clone());
+            if let Some(key) = member_key(m) {
+                self.by_device.insert(key, id.clone());
             }
         }
         for ip in &e.ips {
@@ -115,7 +130,13 @@ impl EntityStore {
 
     /// The entity a given per-protocol device belongs to, if any.
     pub fn entity_for_device(&self, id: &DeviceId) -> Option<&HostEntity> {
-        self.by_device.get(id).and_then(|eid| self.hosts.get(eid))
+        self.entity_id_for_device(id)
+            .and_then(|eid| self.hosts.get(eid))
+    }
+
+    /// The `entity_id` a given per-protocol device belongs to, if any.
+    pub fn entity_id_for_device(&self, id: &DeviceId) -> Option<&String> {
+        self.by_device.get(&device_member_key(id))
     }
 
     /// The entity that claims a given identifying IP, if any.
@@ -209,11 +230,11 @@ mod tests {
             Protocol::Systemd,
         ] {
             let m = member(p.as_str(), "host1");
-            let did = member_device_id(&m).expect("known protocol maps");
-            assert_eq!(did, DeviceId::new(p, "host1"));
+            let key = member_key(&m).expect("known protocol maps");
+            assert_eq!(key, (p, "host1".to_string()));
         }
-        // Unknown sensor → no device id (forward-compat).
-        assert!(member_device_id(&member("mystery", "host1")).is_none());
+        // Unknown sensor → no member key (forward-compat).
+        assert!(member_key(&member("mystery", "host1")).is_none());
     }
 
     #[test]
@@ -254,12 +275,12 @@ mod tests {
 
         assert!(
             store
-                .entity_for_device(&DeviceId::new(Protocol::Sysinfo, "srv1"))
+                .entity_for_device(&DeviceId::fixture(Protocol::Sysinfo, "srv1"))
                 .is_some()
         );
         assert!(
             store
-                .entity_for_device(&DeviceId::new(Protocol::Netlink, "srv1"))
+                .entity_for_device(&DeviceId::fixture(Protocol::Netlink, "srv1"))
                 .is_some()
         );
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
@@ -283,13 +304,13 @@ mod tests {
 
         assert!(
             store
-                .entity_for_device(&DeviceId::new(Protocol::Sysinfo, "srv1"))
+                .entity_for_device(&DeviceId::fixture(Protocol::Sysinfo, "srv1"))
                 .is_some()
         );
         // Dropped member/ip no longer resolve.
         assert!(
             store
-                .entity_for_device(&DeviceId::new(Protocol::Netlink, "srv1"))
+                .entity_for_device(&DeviceId::fixture(Protocol::Netlink, "srv1"))
                 .is_none()
         );
         let old_ip: IpAddr = "10.0.0.1".parse().unwrap();
@@ -310,7 +331,7 @@ mod tests {
         assert!(store.is_empty());
         assert!(
             store
-                .entity_for_device(&DeviceId::new(Protocol::Sysinfo, "srv1"))
+                .entity_for_device(&DeviceId::fixture(Protocol::Sysinfo, "srv1"))
                 .is_none()
         );
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
@@ -359,7 +380,7 @@ mod tests {
         assert!(!store.hosts.contains_key("h_aaa"));
         assert!(
             store
-                .entity_for_device(&DeviceId::new(Protocol::Sysinfo, "srv1"))
+                .entity_for_device(&DeviceId::fixture(Protocol::Sysinfo, "srv1"))
                 .is_none()
         );
     }

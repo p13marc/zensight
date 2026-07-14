@@ -674,7 +674,7 @@ pub mod modbus {
 /// Generate a complete mock environment with multiple devices.
 /// Deterministic `h_<12hex>` entity id from a host name (FNV-1a). Mirrors the
 /// correlator's stable-id scheme so demo/mock ids are consistent across runs.
-fn entity_id_for(name: &str) -> String {
+pub(crate) fn entity_id_for(name: &str) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in name.as_bytes() {
         hash ^= *b as u64;

@@ -1800,7 +1800,7 @@ mod tests {
 
     #[test]
     fn test_syslog_view_renders() {
-        let device_id = DeviceId::new(Protocol::Logs, "server01");
+        let device_id = DeviceId::fixture(Protocol::Logs, "server01");
         let state = DeviceDetailState::new(device_id);
         let filter_state = SyslogFilterState::default();
         let _view = syslog_event_view(&state, &filter_state, &[]);
