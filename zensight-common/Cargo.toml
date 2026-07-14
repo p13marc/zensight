@@ -18,3 +18,8 @@ tracing-subscriber.workspace = true
 thiserror.workspace = true
 ulid = { workspace = true }
 zenoh-blob = { workspace = true }
+
+[dev-dependencies]
+# router_storage.rs gives each zenohd run a fresh ZENOH_BACKEND_FS_ROOT, so a
+# test cannot pass on the previous run's stored data.
+tempfile.workspace = true
