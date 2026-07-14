@@ -231,3 +231,93 @@ stop:
 # Remove generated run configs and logs.
 clean-run:
     rm -rf {{rundir}}
+
+# ── Router storage verification (#471) ───────────────────────────────────────
+
+# Verify configs/router-*.json5 against a REAL zenohd: state docs outlive their
+# publisher, DELETE tombstones retire, blob chunks persist, `*` cannot match
+# @catalog, and a fleet @rpc GET still fans in (no `complete` storage).
+#
+# Needs zenohd AND its plugins, all at the workspace's zenoh version (1.9).
+# The plugins are cdylibs, not binaries — `cargo install` refuses them, and the
+# volume name `fs` is NOT the crate name (it is zenoh-backend-*filesystem*):
+#
+#   cargo install zenohd --version 1.9.0 --locked
+#   just router-plugins        # builds the two .so files into ~/.zenoh/lib
+#
+# A version-mismatched plugin is the trap: zenohd loads, logs one line, and
+# serves *no* storage — every test then fails as "nothing was stored".
+#
+# The suite spawns its own zenohd on loopback:17447 with multicast AND gossip
+# off. It never touches 7447 and never joins your fleet.
+router-verify:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v zenohd >/dev/null || {
+      echo "zenohd not on PATH — cargo install zenohd --version 1.9.0 --locked" >&2
+      exit 1
+    }
+    for so in libzenoh_plugin_storage_manager.so libzenoh_backend_fs.so; do
+      [ -f ~/.zenoh/lib/"$so" ] || {
+        echo "$so missing from ~/.zenoh/lib — run: just router-plugins" >&2
+        exit 1
+      }
+    done
+    echo "zenohd: $(zenohd --version 2>&1 | head -1)"
+    cargo test -p zensight-common --test router_storage -- --ignored --nocapture --test-threads=1
+
+# Build the storage-manager plugin + fs backend from crates.io into ~/.zenoh/lib,
+# at the zenoh version this workspace pins. Both are cdylibs, so they must be
+# built rather than installed (`cargo install` refuses a library crate).
+#
+# THREE TRAPS. Each one produces the same symptom: zenohd starts, logs a single
+# ERROR line, and then serves no storage at all — so every router-verify test
+# fails as "nothing was stored" and none of them tells you why.
+#
+#  1. **Build both plugins in ONE workspace.** zenoh-plugin-storage-manager takes
+#     `zenoh_backend_traits` with `default-features = false`; zenoh-backend-
+#     filesystem takes it with defaults. Built separately, their compiled feature
+#     strings differ and zenoh's compatibility check rejects the pair
+#     ("Incompatible Zenoh feature sets"). Building them in one cargo workspace
+#     unifies the features. This is why the recipe below writes a workspace
+#     manifest rather than building each crate in turn.
+#  2. Zenoh checks plugin compatibility by **exact rustc version**, and
+#     zenoh-backend-filesystem ships a `rust-toolchain.toml` pinning an older one
+#     than you will have built zenohd with ("Incompatible rustc versions"). It is
+#     removed below so everything is built with the host toolchain.
+#  3. The fs backend vendors rocksdb, whose C++ predates GCC 13's stricter header
+#     hygiene — hence CXXFLAGS. Do NOT also set CFLAGS: the `-include` lands on a
+#     zstd .S assembly file and breaks the build.
+router-plugins version="1.9.0":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # OUTSIDE the repo, and not in /tmp.
+    #
+    # Not in the repo (not even under target/): `cargo new` walks up looking for a
+    # workspace and, finding ours, helpfully ADDS the scratch crate to the real
+    # `Cargo.toml`'s members and rewrites `Cargo.lock`. Not in /tmp: this is a
+    # rocksdb build, and a tmpfs with a quota dies half-way through with a
+    # "Disk quota exceeded" from rustc.
+    work="${XDG_CACHE_HOME:-$HOME/.cache}/zensight/router-plugins"
+    rm -rf "$work" && mkdir -p "$work" ~/.zenoh/lib
+    echo "host toolchain: $(rustc --version)  (zenohd must be built with THIS)"
+    crates="zenoh-plugin-storage-manager zenoh-backend-filesystem"
+    for crate in $crates; do
+      # A throwaway crate is only how we get cargo to populate its registry cache
+      # (`cargo fetch`); the .crate tarball we actually build lands there.
+      (cd "$work" && cargo new --quiet --lib fetch-$crate && cd fetch-$crate \
+        && cargo add --quiet "$crate@{{version}}" && cargo fetch --quiet)
+      tar xzf ~/.cargo/registry/cache/*/"$crate-{{version}}.crate" -C "$work"
+      rm -f "$work/$crate-{{version}}/rust-toolchain.toml"      # trap 2
+    done
+    # trap 1: one workspace, one build, unified features.
+    {
+      echo '[workspace]'
+      echo 'resolver = "2"'
+      echo -n 'members = ['
+      for crate in $crates; do echo -n "\"$crate-{{version}}\", "; done
+      echo ']'
+    } > "$work/Cargo.toml"
+    (cd "$work" && CXXFLAGS="-include cstdint" cargo build --release)   # trap 3
+    find "$work/target/release" -maxdepth 1 -name 'libzenoh_*.so' -exec cp -v {} ~/.zenoh/lib/ \;
+    ls -l ~/.zenoh/lib
