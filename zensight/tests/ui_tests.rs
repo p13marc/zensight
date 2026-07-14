@@ -3525,11 +3525,11 @@ fn test_logs_rollup_panel_renders() {
     let device_id = DeviceId::new(Protocol::Logs, "host01");
     let mut state = DeviceDetailState::new(device_id);
     for (m, v) in [
-        ("logs/errors_total", TelemetryValue::Counter(42)),
-        ("logs/warnings_total", TelemetryValue::Counter(7)),
-        ("logs/units_in_failure", TelemetryValue::Gauge(2.0)),
+        ("errors_total", TelemetryValue::Counter(42)),
+        ("warnings_total", TelemetryValue::Counter(7)),
+        ("units_in_failure", TelemetryValue::Gauge(2.0)),
         (
-            "logs/by_unit/nginx.service/messages_total",
+            "by_unit/nginx.service/messages_total",
             TelemetryValue::Counter(900),
         ),
     ] {
@@ -3580,7 +3580,7 @@ fn test_logs_rollup_show_all_units() {
         state.update(TelemetryPoint::new(
             "host01",
             Protocol::Logs,
-            format!("logs/by_unit/{unit}/messages_total"),
+            format!("by_unit/{unit}/messages_total"),
             TelemetryValue::Counter(n),
         ));
     }

@@ -37,11 +37,7 @@ mod tests {
     /// ...and a real subject constructs.
     #[test]
     fn a_registered_metric_constructs() {
-        let p = checked_point(
-            "h",
-            "logs/ingest/received_total",
-            TelemetryValue::Gauge(1.0),
-        );
-        assert_eq!(p.metric, "logs/ingest/received_total");
+        let p = checked_point("h", "ingest/received_total", TelemetryValue::Gauge(1.0));
+        assert_eq!(p.metric, "ingest/received_total");
     }
 }

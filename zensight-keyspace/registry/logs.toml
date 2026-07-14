@@ -3,15 +3,20 @@
 # (issue #468) — see registry/sysinfo.toml for the rule and why.
 # Source: src/derived.rs, src/ingest.rs, src/template.rs.
 #
-# The doubled `logs/` head (`telemetry/logs/logs/...`) is issue #470 and is
-# deliberately NOT fixed here — stripping it renames the exported Prometheus
-# series. This registers what the sensor actually emits today.
+# The doubled `logs/` head (`telemetry/logs/logs/...`) is FIXED (#470): the
+# subject paths below no longer repeat the producer name, because the sensor's
+# metric names no longer do. `logs` was the only producer that prefixed its
+# metric names with its own name — the producer chunk already says it.
+#
+# This renamed the exported Prometheus/OTel series (they derive from
+# `point.metric`, not the key): `zensight_logs_logs_errors_total` is now
+# `zensight_logs_errors_total`. See CHANGELOG.
 #
 # `events/{uid}` (src/receiver.rs) is NOT registered: it is never published,
 # it only feeds the bounded `@rpc/logs/events` ring (src/main.rs).
 
 [registry]
-version = "1.1"
+version = "2.0"
 app = "zensight"
 convention = 1
 
@@ -20,35 +25,35 @@ name = "logs"
 description = "unified logs sensor; per-line detail is pull-only (RFC 04 R3)"
 
 [[subject]]
-path = "logs/ingest/received_total"
+path = "ingest/received_total"
 class = "telemetry"
 type = "TelemetryPoint"
 since = "1.1"
 description = "lines received"
 
 [[subject]]
-path = "logs/ingest/parsed_total"
+path = "ingest/parsed_total"
 class = "telemetry"
 type = "TelemetryPoint"
 since = "1.1"
 description = "lines parsed"
 
 [[subject]]
-path = "logs/ingest/parse_failed_total"
+path = "ingest/parse_failed_total"
 class = "telemetry"
 type = "TelemetryPoint"
 since = "1.1"
 description = "lines that failed to parse"
 
 [[subject]]
-path = "logs/ingest/dropped_total"
+path = "ingest/dropped_total"
 class = "telemetry"
 type = "TelemetryPoint"
 since = "1.1"
 description = "lines dropped"
 
 [[subject]]
-path = "logs/by_severity/{severity}"
+path = "by_severity/{severity}"
 class = "telemetry"
 type = "TelemetryPoint"
 cardinality = 16
@@ -56,56 +61,56 @@ since = "1.1"
 description = "lines by syslog severity; the leaf is `<severity>_total`"
 
 [[subject]]
-path = "logs/errors_total"
+path = "errors_total"
 class = "telemetry"
 type = "TelemetryPoint"
 since = "1.1"
 description = "error-severity lines"
 
 [[subject]]
-path = "logs/warnings_total"
+path = "warnings_total"
 class = "telemetry"
 type = "TelemetryPoint"
 since = "1.1"
 description = "warning-severity lines"
 
 [[subject]]
-path = "logs/units_in_failure"
+path = "units_in_failure"
 class = "telemetry"
 type = "TelemetryPoint"
 since = "1.1"
 description = "units currently in a failure state per the log stream"
 
 [[subject]]
-path = "logs/journald/read_total"
+path = "journald/read_total"
 class = "telemetry"
 type = "TelemetryPoint"
 since = "1.1"
 description = "journald entries read"
 
 [[subject]]
-path = "logs/journald/published_total"
+path = "journald/published_total"
 class = "telemetry"
 type = "TelemetryPoint"
 since = "1.1"
 description = "entries published"
 
 [[subject]]
-path = "logs/journald/dropped_total"
+path = "journald/dropped_total"
 class = "telemetry"
 type = "TelemetryPoint"
 since = "1.1"
 description = "entries dropped"
 
 [[subject]]
-path = "logs/journald/sampled_out_total"
+path = "journald/sampled_out_total"
 class = "telemetry"
 type = "TelemetryPoint"
 since = "1.1"
 description = "entries sampled out"
 
 [[subject]]
-path = "logs/by_unit/{unit}/messages_total"
+path = "by_unit/{unit}/messages_total"
 class = "telemetry"
 type = "TelemetryPoint"
 cardinality = 256
@@ -113,7 +118,7 @@ since = "1.1"
 description = "lines from this unit"
 
 [[subject]]
-path = "logs/by_unit/{unit}/errors_total"
+path = "by_unit/{unit}/errors_total"
 class = "telemetry"
 type = "TelemetryPoint"
 cardinality = 256
@@ -121,7 +126,7 @@ since = "1.1"
 description = "error lines from this unit"
 
 [[subject]]
-path = "logs/by_unit/{unit}/error_ratio"
+path = "by_unit/{unit}/error_ratio"
 class = "telemetry"
 type = "TelemetryPoint"
 cardinality = 256
@@ -129,7 +134,7 @@ since = "1.1"
 description = "error share for this unit"
 
 [[subject]]
-path = "logs/by_unit/{unit}/burn_rate"
+path = "by_unit/{unit}/burn_rate"
 class = "telemetry"
 type = "TelemetryPoint"
 cardinality = 256
@@ -137,7 +142,7 @@ since = "1.1"
 description = "error burn rate for this unit"
 
 [[subject]]
-path = "logs/by_template/{template}/count_total"
+path = "by_template/{template}/count_total"
 class = "telemetry"
 type = "TelemetryPoint"
 cardinality = 512
@@ -145,7 +150,7 @@ since = "1.1"
 description = "lines matching this template"
 
 [[subject]]
-path = "logs/by_template/{template}/errors_total"
+path = "by_template/{template}/errors_total"
 class = "telemetry"
 type = "TelemetryPoint"
 cardinality = 512
@@ -254,3 +259,104 @@ request = "TopicConfig"
 reply = "Ack"
 since = "1.0"
 description = "apply filter configuration (dynamic message filters)"
+
+# ── Retired (#470) ─────────────────────────────────────────────────────────
+# The doubled `logs/` head. Every path below moved to the same path without it
+# (`logs/errors_total` -> `errors_total`): the producer chunk already says
+# "logs", so repeating it in the subject was noise on every key, and no other
+# producer did it.
+#
+# Recorded here rather than deleted, because RFC 08 §3 forbids ever re-using a
+# retired path — and `introspect` must be able to tell a consumer that a key it
+# remembers is gone, not merely absent.
+
+[[deprecated]]
+path = "logs/ingest/received_total"
+since = "2.0"
+reason = "the producer chunk already names the producer (#470)"
+
+[[deprecated]]
+path = "logs/ingest/parsed_total"
+since = "2.0"
+reason = "the producer chunk already names the producer (#470)"
+
+[[deprecated]]
+path = "logs/ingest/parse_failed_total"
+since = "2.0"
+reason = "the producer chunk already names the producer (#470)"
+
+[[deprecated]]
+path = "logs/ingest/dropped_total"
+since = "2.0"
+reason = "the producer chunk already names the producer (#470)"
+
+[[deprecated]]
+path = "logs/by_severity/{severity}"
+since = "2.0"
+reason = "the producer chunk already names the producer (#470)"
+
+[[deprecated]]
+path = "logs/errors_total"
+since = "2.0"
+reason = "the producer chunk already names the producer (#470)"
+
+[[deprecated]]
+path = "logs/warnings_total"
+since = "2.0"
+reason = "the producer chunk already names the producer (#470)"
+
+[[deprecated]]
+path = "logs/units_in_failure"
+since = "2.0"
+reason = "the producer chunk already names the producer (#470)"
+
+[[deprecated]]
+path = "logs/journald/read_total"
+since = "2.0"
+reason = "the producer chunk already names the producer (#470)"
+
+[[deprecated]]
+path = "logs/journald/published_total"
+since = "2.0"
+reason = "the producer chunk already names the producer (#470)"
+
+[[deprecated]]
+path = "logs/journald/dropped_total"
+since = "2.0"
+reason = "the producer chunk already names the producer (#470)"
+
+[[deprecated]]
+path = "logs/journald/sampled_out_total"
+since = "2.0"
+reason = "the producer chunk already names the producer (#470)"
+
+[[deprecated]]
+path = "logs/by_unit/{unit}/messages_total"
+since = "2.0"
+reason = "the producer chunk already names the producer (#470)"
+
+[[deprecated]]
+path = "logs/by_unit/{unit}/errors_total"
+since = "2.0"
+reason = "the producer chunk already names the producer (#470)"
+
+[[deprecated]]
+path = "logs/by_unit/{unit}/error_ratio"
+since = "2.0"
+reason = "the producer chunk already names the producer (#470)"
+
+[[deprecated]]
+path = "logs/by_unit/{unit}/burn_rate"
+since = "2.0"
+reason = "the producer chunk already names the producer (#470)"
+
+[[deprecated]]
+path = "logs/by_template/{template}/count_total"
+since = "2.0"
+reason = "the producer chunk already names the producer (#470)"
+
+[[deprecated]]
+path = "logs/by_template/{template}/errors_total"
+since = "2.0"
+reason = "the producer chunk already names the producer (#470)"
+

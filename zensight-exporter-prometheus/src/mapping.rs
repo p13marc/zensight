@@ -330,4 +330,38 @@ mod tests {
         assert!(is_exportable(&TelemetryValue::Text("hello".into())));
         assert!(!is_exportable(&TelemetryValue::Binary(vec![1, 2, 3])));
     }
+
+    /// #470: the logs sensor no longer prefixes its metric names with its own
+    /// producer name, and the exported series name follows — because it derives
+    /// from `point.metric`, not from the key.
+    ///
+    /// This is the breaking half of #470 and the reason it is pinned: the KEY
+    /// change is invisible to consumers (everything subscribes by class
+    /// wildcard), but the SERIES change is not — it renames every logs metric in
+    /// every Prometheus dashboard and alert rule built on them.
+    #[test]
+    fn logs_series_lost_their_doubled_name() {
+        let name = |m| build_metric_name("zensight", Protocol::Logs, m);
+
+        // was: zensight_logs_logs_errors_total
+        assert_eq!(name("errors_total"), "zensight_logs_errors_total");
+        assert_eq!(name("units_in_failure"), "zensight_logs_units_in_failure");
+        assert_eq!(
+            name("journald/read_total"),
+            "zensight_logs_journald_read_total"
+        );
+        assert_eq!(
+            name("by_unit/nginx.service/messages_total"),
+            "zensight_logs_by_unit_nginx_service_messages_total"
+        );
+
+        // No logs series contains the producer name twice any more.
+        for m in ["errors_total", "warnings_total", "units_in_failure"] {
+            assert!(
+                !name(m).contains("logs_logs"),
+                "the doubled producer name survived: {}",
+                name(m)
+            );
+        }
+    }
 }

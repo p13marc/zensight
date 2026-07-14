@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — BREAKING
+
+- **The exported Prometheus/OTel series for the logs sensor are renamed** (#470).
+  The logs sensor was the only producer that prefixed its *metric names* with its
+  own producer name, so every key carried the chunk twice
+  (`…/telemetry/logs/logs/errors_total`) — and because both exporters derive the
+  series name from `point.metric` rather than from the key, that doubling was
+  visible in every dashboard:
+
+  | | before | after |
+  |---|---|---|
+  | Prometheus | `zensight_logs_logs_errors_total` | `zensight_logs_errors_total` |
+  | OTel | `zensight.logs.logs.errors_total` | `zensight.logs.errors_total` |
+
+  **Dashboards, alert rules and recording rules built on the old names will stop
+  matching and must be updated.** All 18 logs metric families are affected
+  (`errors_total`, `warnings_total`, `units_in_failure`, `ingest/*`,
+  `by_severity/*`, `by_unit/*`, `by_template/*`, `journald/*`).
+
+  The *keyspace* change is **not** breaking: every consumer subscribes by class
+  wildcard (`v1/*/telemetry/**`), so no subscription needs to change. The retired
+  subject paths are recorded in `zensight-keyspace/registry/deprecated.lock` and
+  may never be re-used (RFC 08 §3), so `introspect` can tell a consumer that a key
+  it remembers is *gone* rather than merely absent.
+
 ### Added
 
 - **`zensight-sensor-parallax` — live video onto the media plane** (epic #402,

@@ -445,7 +445,18 @@ pub fn syslog_event_view<'a>(
     if filter_state.stats_open {
         stats = stats.push(render_severity_summary(messages, filter_state));
         // Derived rollups (#63/#64): rendered when the sensor publishes them.
-        if state.metrics.keys().any(|k| k.starts_with("logs/")) {
+        //
+        // The gate used to be `starts_with("logs/")`, which worked only because
+        // the metric names redundantly repeated the producer name (#470). What
+        // it was really asking is "is this a registered logs subject?", so it
+        // now asks that directly — the registry's parse direction, which is the
+        // thing it exists for (RFC 08 §1, #475). The unregistered legacy
+        // `<facility>/<severity>` line shape correctly fails it.
+        if state
+            .metrics
+            .keys()
+            .any(|k| LogsSubject::parse_metric(k).is_some())
+        {
             stats = stats.push(render_logs_rollup(state, filter_state));
         }
     }
@@ -481,22 +492,19 @@ fn render_logs_rollup<'a>(
 
     // KPI tiles in a single wrap-row (the netring/netlink tile pattern).
     let mut tiles = vec![
-        metric_tile("errors (total)", num("logs/errors_total")),
-        metric_tile("warnings (total)", num("logs/warnings_total")),
-        metric_tile("units in failure", num("logs/units_in_failure")),
+        metric_tile("errors (total)", num("errors_total")),
+        metric_tile("warnings (total)", num("warnings_total")),
+        metric_tile("units in failure", num("units_in_failure")),
     ];
-    if state.metrics.contains_key("logs/journald/read_total") {
-        tiles.push(metric_tile(
-            "journald read",
-            num("logs/journald/read_total"),
-        ));
+    if state.metrics.contains_key("journald/read_total") {
+        tiles.push(metric_tile("journald read", num("journald/read_total")));
         tiles.push(metric_tile(
             "journald published",
-            num("logs/journald/published_total"),
+            num("journald/published_total"),
         ));
         tiles.push(metric_tile(
             "journald dropped",
-            num("logs/journald/dropped_total"),
+            num("journald/dropped_total"),
         ));
     }
     let mut col = column![].spacing(space::SM);
@@ -514,8 +522,8 @@ fn render_logs_rollup<'a>(
         .metrics
         .iter()
         .filter_map(|(m, p)| {
-            // `logs/by_unit/{unit}/messages_total` (#475).
-            let Some(LogsSubject::LogsByUnitMessagesTotal { unit }) = LogsSubject::parse_metric(m)
+            // `by_unit/{unit}/messages_total` (#475).
+            let Some(LogsSubject::ByUnitMessagesTotal { unit }) = LogsSubject::parse_metric(m)
             else {
                 return None;
             };

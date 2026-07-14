@@ -144,10 +144,16 @@ fn collect_messages(devices: &HashMap<&DeviceId, &DeviceState>) -> Vec<LogMessag
 
     for (device_id, state) in devices {
         for (key, point) in &state.metrics {
-            // Skip the derived `logs/*` rollup counters (those *are* registered) and
-            // any non-text metric (#101 — the old `message/*` + numeric-severity
+            // Skip the derived rollup counters (those *are* registered) and any
+            // non-text metric (#101 — the old `message/*` + numeric-severity
             // contract this read no longer exists).
-            if key.starts_with("logs/") {
+            //
+            // "Registered subject" IS the discriminator, and now it is spelled
+            // that way. The old `starts_with("logs/")` test only worked because
+            // the rollup names redundantly repeated the producer name (#470);
+            // with that gone, the string test would have silently let every
+            // rollup through as a log line.
+            if zensight_keyspace::registry::logs::Subject::parse_metric(key).is_some() {
                 continue;
             }
             let TelemetryValue::Text(message) = &point.value else {
@@ -370,11 +376,11 @@ mod tests {
         );
         // A derived rollup counter — must be ignored.
         state.metrics.insert(
-            "logs/errors_total".to_string(),
+            "errors_total".to_string(),
             TelemetryPoint::new(
                 "host1",
                 Protocol::Logs,
-                "logs/errors_total",
+                "errors_total",
                 TelemetryValue::Counter(5),
             ),
         );

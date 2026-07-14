@@ -98,10 +98,10 @@ impl IngestStatsSnapshot {
             crate::telemetry_guard::checked_point(source, metric, TelemetryValue::Counter(v))
         };
         vec![
-            counter("logs/ingest/received_total", self.received),
-            counter("logs/ingest/parsed_total", self.parsed),
-            counter("logs/ingest/parse_failed_total", self.parse_failed),
-            counter("logs/ingest/dropped_total", self.dropped),
+            counter("ingest/received_total", self.received),
+            counter("ingest/parsed_total", self.parsed),
+            counter("ingest/parse_failed_total", self.parse_failed),
+            counter("ingest/dropped_total", self.dropped),
         ]
     }
 }
@@ -460,19 +460,13 @@ mod tests {
                 .map(|p| p.value.clone())
                 .unwrap()
         };
+        assert_eq!(find("ingest/received_total"), TelemetryValue::Counter(2));
+        assert_eq!(find("ingest/parsed_total"), TelemetryValue::Counter(1));
         assert_eq!(
-            find("logs/ingest/received_total"),
-            TelemetryValue::Counter(2)
-        );
-        assert_eq!(find("logs/ingest/parsed_total"), TelemetryValue::Counter(1));
-        assert_eq!(
-            find("logs/ingest/parse_failed_total"),
+            find("ingest/parse_failed_total"),
             TelemetryValue::Counter(1)
         );
-        assert_eq!(
-            find("logs/ingest/dropped_total"),
-            TelemetryValue::Counter(1)
-        );
+        assert_eq!(find("ingest/dropped_total"), TelemetryValue::Counter(1));
         assert!(pts.iter().all(|p| p.source == "host01"));
     }
 
