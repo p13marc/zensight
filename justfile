@@ -270,33 +270,54 @@ router-verify:
 # at the zenoh version this workspace pins. Both are cdylibs, so they must be
 # built rather than installed (`cargo install` refuses a library crate).
 #
-# TWO TRAPS, both of which produce a router that starts, logs one ERROR line, and
-# then silently serves no storage at all:
+# THREE TRAPS. Each one produces the same symptom: zenohd starts, logs a single
+# ERROR line, and then serves no storage at all — so every router-verify test
+# fails as "nothing was stored" and none of them tells you why.
 #
-#  1. Zenoh checks plugin compatibility by **exact rustc version**, and
+#  1. **Build both plugins in ONE workspace.** zenoh-plugin-storage-manager takes
+#     `zenoh_backend_traits` with `default-features = false`; zenoh-backend-
+#     filesystem takes it with defaults. Built separately, their compiled feature
+#     strings differ and zenoh's compatibility check rejects the pair
+#     ("Incompatible Zenoh feature sets"). Building them in one cargo workspace
+#     unifies the features. This is why the recipe below writes a workspace
+#     manifest rather than building each crate in turn.
+#  2. Zenoh checks plugin compatibility by **exact rustc version**, and
 #     zenoh-backend-filesystem ships a `rust-toolchain.toml` pinning an older one
-#     than you will have built zenohd with. It is removed below so both are built
-#     with the host toolchain. (`Plugin compatibility mismatch: Incompatible rustc
-#     versions` in the zenohd log.)
-#  2. The fs backend vendors rocksdb, whose C++ predates GCC 13's stricter header
+#     than you will have built zenohd with ("Incompatible rustc versions"). It is
+#     removed below so everything is built with the host toolchain.
+#  3. The fs backend vendors rocksdb, whose C++ predates GCC 13's stricter header
 #     hygiene — hence CXXFLAGS. Do NOT also set CFLAGS: the `-include` lands on a
 #     zstd .S assembly file and breaks the build.
 router-plugins version="1.9.0":
     #!/usr/bin/env bash
     set -euo pipefail
-    work="$(mktemp -d)"
-    trap 'rm -rf "$work"' EXIT
-    mkdir -p ~/.zenoh/lib
+    # OUTSIDE the repo, and not in /tmp.
+    #
+    # Not in the repo (not even under target/): `cargo new` walks up looking for a
+    # workspace and, finding ours, helpfully ADDS the scratch crate to the real
+    # `Cargo.toml`'s members and rewrites `Cargo.lock`. Not in /tmp: this is a
+    # rocksdb build, and a tmpfs with a quota dies half-way through with a
+    # "Disk quota exceeded" from rustc.
+    work="${XDG_CACHE_HOME:-$HOME/.cache}/zensight/router-plugins"
+    rm -rf "$work" && mkdir -p "$work" ~/.zenoh/lib
     echo "host toolchain: $(rustc --version)  (zenohd must be built with THIS)"
-    for crate in zenoh-plugin-storage-manager zenoh-backend-filesystem; do
-      echo "building $crate {{version}}…"
-      # `cargo fetch` populates the registry cache; the .crate tarball lives there.
+    crates="zenoh-plugin-storage-manager zenoh-backend-filesystem"
+    for crate in $crates; do
+      # A throwaway crate is only how we get cargo to populate its registry cache
+      # (`cargo fetch`); the .crate tarball we actually build lands there.
       (cd "$work" && cargo new --quiet --lib fetch-$crate && cd fetch-$crate \
         && cargo add --quiet "$crate@{{version}}" && cargo fetch --quiet)
       tar xzf ~/.cargo/registry/cache/*/"$crate-{{version}}.crate" -C "$work"
-      src="$work/$crate-{{version}}"
-      rm -f "$src/rust-toolchain.toml"      # trap 1
-      (cd "$src" && CXXFLAGS="-include cstdint" cargo build --release --quiet)  # trap 2
-      find "$src/target/release" -maxdepth 1 -name '*.so' -exec cp -v {} ~/.zenoh/lib/ \;
+      rm -f "$work/$crate-{{version}}/rust-toolchain.toml"      # trap 2
     done
+    # trap 1: one workspace, one build, unified features.
+    {
+      echo '[workspace]'
+      echo 'resolver = "2"'
+      echo -n 'members = ['
+      for crate in $crates; do echo -n "\"$crate-{{version}}\", "; done
+      echo ']'
+    } > "$work/Cargo.toml"
+    (cd "$work" && CXXFLAGS="-include cstdint" cargo build --release)   # trap 3
+    find "$work/target/release" -maxdepth 1 -name 'libzenoh_*.so' -exec cp -v {} ~/.zenoh/lib/ \;
     ls -l ~/.zenoh/lib
