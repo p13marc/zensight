@@ -169,3 +169,49 @@ jobs:
             echo "$hits"
             exit 1
           fi
+
+  # The self-building sensors image (docker/Dockerfile.sensors) is built by
+  # NOTHING: the release pipeline assembles its image from prebuilt binaries via
+  # Dockerfile.sensors-runtime, and no test compiles this one. It has therefore
+  # been free to rot — a renamed crate, a dropped system library, a moved script
+  # would only be discovered by whoever next tried to build it by hand (#472).
+  #
+  # Post-merge only. It is a full workspace build inside Docker (~15 min); paying
+  # that on every PR to catch a file that changes a few times a year is a bad
+  # trade, and catching it at merge is still well before a release.
+  container-image:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the all-in-one sensors image
+        run: docker build -f docker/Dockerfile.sensors -t zensight-sensors:ci .
+
+      # The image is useless if its entrypoint doesn't run, and the failure mode
+      # is a container that exits silently. It must REFUSE to start without a
+      # Zenoh endpoint (exit 64) — a sensor with nowhere to publish looks healthy
+      # and says nothing, which is the whole failure class this image invites.
+      - name: The entrypoint refuses to start with nowhere to publish
+        run: |
+          set +e
+          out=$(docker run --rm zensight-sensors:ci 2>&1)
+          code=$?
+          set -e
+          echo "$out"
+          if [ "$code" -ne 64 ]; then
+            echo "::error::expected exit 64 (missing ZENSIGHT_ZENOH_CONNECT), got $code"
+            exit 1
+          fi
+
+      - name: The bundled sensors are the ones the spawner spawns
+        run: |
+          # Dockerfile.sensors hardcodes its `cargo build -p` list. If a sensor
+          # joins `just run` and nobody updates the Dockerfile, the container
+          # quietly ships without it — telemetry that exists on a dev box and not
+          # in production is the worst kind of drift.
+          for s in sysinfo netlink netring logs systemd; do
+            docker run --rm --entrypoint /bin/sh zensight-sensors:ci \
+              -c "test -x /usr/local/bin/zensight-sensor-$s" \
+              || { echo "::error::zensight-sensor-$s missing from the image"; exit 1; }
+          done
