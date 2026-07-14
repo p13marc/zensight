@@ -1043,6 +1043,7 @@ fn emit(files: &[RegistryFile]) -> String {
         ("entity/{entity_id}", "CatalogEntity { entity_id }"),
         ("alias/{old_id}", "CatalogAlias { old_id }"),
         ("pdns/{ip_slug}", "CatalogPdns { ip_slug }"),
+        ("assertion/{id}", "CatalogAssertion { id }"),
     ];
     let _ = writeln!(out, "impl AnySubject {{");
     let _ = writeln!(

@@ -60,6 +60,7 @@ pub fn decode_payload(type_name: &str, bytes: &[u8]) -> Result<Value> {
         "NameObservation" => as_json::<crate::NameObservation>(bytes),
         "HostEntity" => as_json::<crate::HostEntity>(bytes),
         "AliasRecord" => as_json::<crate::AliasRecord>(bytes),
+        "OperatorAssertion" => as_json::<crate::OperatorAssertion>(bytes),
         "PdnsRecord" => as_json::<crate::PdnsRecord>(bytes),
         "StreamStatus" => as_json::<crate::StreamStatus>(bytes),
         other => Err(Error::UnknownPayloadType(other.to_string())),
@@ -93,6 +94,10 @@ pub const PAYLOAD_TYPES: &[(&str, &str)] = &[
     ),
     ("HostEntity", "zensight_common::entity::HostEntity"),
     ("AliasRecord", "zensight_common::entity::AliasRecord"),
+    (
+        "OperatorAssertion",
+        "zensight_common::entity::OperatorAssertion",
+    ),
     ("PdnsRecord", "zensight_common::entity::PdnsRecord"),
     ("StreamStatus", "zensight_common::stream::StreamStatus"),
 ];

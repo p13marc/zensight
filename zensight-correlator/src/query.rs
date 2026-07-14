@@ -16,9 +16,13 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::{info, warn};
 use zenoh::Session;
-use zensight_common::{catalog_rpc_key, entities_query_key, names_query_key};
+use zensight_common::serialization::Format;
+use zensight_common::{
+    AssertionKind, OperatorAssertion, RpcError, RpcRequest, catalog_rpc_key, entities_query_key,
+    names_query_key,
+};
 
-use crate::engine::SharedState;
+use crate::engine::{EvidenceMsg, SharedState};
 
 /// Cap on names returned for one IP query.
 const NAMES_TOP_N: usize = 32;
@@ -105,6 +109,184 @@ pub async fn serve_names(
         }
     }
     Ok(())
+}
+
+/// Serve `link` and `unlink` — the operator identity assertions (#473, RFC 06
+/// §5.4).
+///
+/// `GET …/@catalog/@rpc/link?old=<origin>;new=<origin>` says *these two origins
+/// are the same machine* — the reinstall case, where the host minted a new
+/// origin, the old one's evidence is still live, and the correlator's
+/// conflicting-strong-ids guard correctly refuses to merge them because it
+/// cannot tell a reinstall from two machines. Only an operator can.
+///
+/// `unlink` says the opposite, and retires the `link` it replaces.
+///
+/// Both are **write** procedures, and both are **gated** (`allow_operator_
+/// assertions`). Both are idempotent: the assertion id is derived from the pair,
+/// so re-asserting overwrites rather than accumulating.
+pub async fn serve_assertions(
+    session: Arc<Session>,
+    state: SharedState,
+    format: Format,
+    allowed: bool,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let link_key = catalog_rpc_key("link");
+    let unlink_key = catalog_rpc_key("unlink");
+    let link_q = session
+        .declare_queryable(&link_key)
+        .await
+        .map_err(|e| anyhow::anyhow!("declare link queryable: {e}"))?;
+    let unlink_q = session
+        .declare_queryable(&unlink_key)
+        .await
+        .map_err(|e| anyhow::anyhow!("declare unlink queryable: {e}"))?;
+    info!(
+        link = %link_key, unlink = %unlink_key, gated = !allowed,
+        "operator assertion procedures ready"
+    );
+
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+            query = link_q.recv_async() => {
+                let Ok(query) = query else { break };
+                handle_assertion(
+                    &session, &state, format, allowed, AssertionKind::Link, &link_key, query,
+                ).await;
+            }
+            query = unlink_q.recv_async() => {
+                let Ok(query) = query else { break };
+                handle_assertion(
+                    &session, &state, format, allowed, AssertionKind::Unlink, &unlink_key, query,
+                ).await;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate, record, publish, reply. Failures ride `reply_err` with a
+/// machine-readable name (RFC 05 §3) — a value reply always means it worked.
+async fn handle_assertion(
+    session: &Session,
+    state: &SharedState,
+    format: Format,
+    allowed: bool,
+    kind: AssertionKind,
+    reply_key: &str,
+    query: zenoh::query::Query,
+) {
+    let req = RpcRequest {
+        payload: query
+            .payload()
+            .map(|p| p.to_bytes().to_vec())
+            .unwrap_or_default(),
+        parameters: query.parameters().to_string(),
+    };
+    match build_assertion(&req, allowed, kind) {
+        Ok(assertion) => {
+            // Record it locally *and* publish it. The local apply makes the next
+            // recompute see it without waiting for our own subscriber to loop the
+            // put back; the publish is what makes it survive us.
+            state
+                .lock()
+                .unwrap()
+                .apply(EvidenceMsg::Assert(assertion.clone()));
+
+            // An `unlink` retires the `link` it contradicts: without this the
+            // link document would sit in the storage, and a correlator restarting
+            // from that storage would re-seed a link the operator has revoked.
+            if kind == AssertionKind::Unlink {
+                let link_id =
+                    OperatorAssertion::id(AssertionKind::Link, &assertion.old, &assertion.new);
+                state.lock().unwrap().apply(EvidenceMsg::RemoveAssertion {
+                    id: link_id.clone(),
+                });
+                if let Err(e) = crate::publisher::retire_assertion(session, &link_id).await {
+                    warn!(error = %e, "retiring the superseded link failed");
+                }
+            }
+
+            if let Err(e) = crate::publisher::publish_assertion(session, format, &assertion).await {
+                warn!(error = %e, "publishing the assertion failed");
+                reply_err(
+                    &query,
+                    RpcError::new("error/catalog/publish", e.to_string()),
+                )
+                .await;
+                return;
+            }
+            match serde_json::to_vec(&assertion) {
+                Ok(payload) => {
+                    if let Err(e) = query.reply(reply_key, payload).await {
+                        warn!(error = %e, "assertion reply failed");
+                    }
+                }
+                Err(e) => warn!(error = %e, "serialize assertion failed"),
+            }
+        }
+        Err(e) => reply_err(&query, e).await,
+    }
+}
+
+/// Pure: request → assertion, or the error the caller gets back.
+fn build_assertion(
+    req: &RpcRequest,
+    allowed: bool,
+    kind: AssertionKind,
+) -> Result<OperatorAssertion, RpcError> {
+    if !allowed {
+        return Err(RpcError::gated(
+            "operator assertions are disabled; set `allow_operator_assertions: true` \
+             in the correlator config (RFC 06 §5.4 — a link overrides the guard that \
+             keeps two machines from fusing into one host)",
+        ));
+    }
+    let old = req
+        .param("old")
+        .ok_or_else(|| RpcError::invalid_args("missing ?old=<origin>"))?;
+    let new = req
+        .param("new")
+        .ok_or_else(|| RpcError::invalid_args("missing ?new=<origin>"))?;
+
+    // Origin ids only — never the weaker evidence-derived entity ids. An entity
+    // id computed from a hostname or a MAC *changes when the set it names
+    // changes*, so an assertion keyed on one would dangle the instant it took
+    // effect. An origin id is minted by the host and never moves.
+    for id in [&old, &new] {
+        if !zensight_keyspace::grammar::is_valid_host_origin(id) {
+            return Err(RpcError::invalid_args(format!(
+                "`{id}` is not a host origin id (expected `h-<12hex>`). Operator \
+                 assertions name origins, not the evidence-derived entity ids that \
+                 change shape when a merge does."
+            )));
+        }
+    }
+    if old == new {
+        return Err(RpcError::invalid_args(
+            "`old` and `new` are the same origin — nothing to assert",
+        ));
+    }
+
+    Ok(OperatorAssertion {
+        id: OperatorAssertion::id(kind, &old, &new),
+        kind,
+        old,
+        new,
+        asserted_at: zensight_common::current_timestamp_millis(),
+        note: req.param("note"),
+    })
+}
+
+async fn reply_err(query: &zenoh::query::Query, err: RpcError) {
+    let payload = serde_json::to_vec(&err).unwrap_or_default();
+    if let Err(e) = query.reply_err(payload).await {
+        warn!(error = %e, "reply_err failed");
+    }
 }
 
 /// Serve `introspect` — the catalog registry slice this build was compiled

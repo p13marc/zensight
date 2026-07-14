@@ -252,6 +252,31 @@ pub fn alias_key(old_id: &str) -> String {
     format!("v1/@catalog/state/alias/{}", old_id)
 }
 
+/// Wildcard over the alias family — what a UI subscribes to so an operator's
+/// merge is *visible* (RFC 06 §5.1 step 1). Without this a link is a no-op as
+/// far as the product is concerned.
+pub fn all_alias_wildcard() -> String {
+    "v1/@catalog/state/alias/*".to_string()
+}
+
+/// Build the operator-assertion key (#473): an explicit operator statement about
+/// identity, held on the bus as ordinary catalog state.
+///
+/// This is what keeps the catalog a **pure function of live bus state** (RFC 06
+/// §5: "no private database, no migration state"). An operator override is state
+/// that is not evidence, so it would otherwise have to live in a side table that
+/// no restart, replica, or storage could see. Publishing it as a registered
+/// state subject means a restarted correlator re-seeds it through exactly the
+/// same path as everything else.
+pub fn assertion_key(id: &str) -> String {
+    format!("v1/@catalog/state/assertion/{}", id)
+}
+
+/// Wildcard over the assertion family — the correlator's own re-seed selector.
+pub fn all_assertion_wildcard() -> String {
+    "v1/@catalog/state/assertion/*".to_string()
+}
+
 /// Build a wildcard key expression for the whole entity keyspace — the
 /// correlator's single-writer materialized view (#305).
 ///

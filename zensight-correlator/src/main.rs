@@ -135,6 +135,21 @@ async fn main() -> anyhow::Result<()> {
         })
     };
 
+    // Operator identity assertions (#473): link/unlink. Served whether or not
+    // they are enabled — a gated procedure that *replies* "gated" tells an
+    // operator the feature exists; one that isn't declared just times out.
+    let assertion_task = {
+        let s = session.clone();
+        let st = state.clone();
+        let sh = shutdown_rx.clone();
+        let allowed = config.allow_operator_assertions;
+        tokio::spawn(async move {
+            if let Err(e) = query::serve_assertions(s, st, serialization, allowed, sh).await {
+                error!(error = %e, "assertion queryable error");
+            }
+        })
+    };
+
     // Input source: real evidence subscribers, or (in --demo) a synthetic feed
     // driving the exact same engine/store/publisher pipeline.
     let input_task = if args.demo {
@@ -165,6 +180,7 @@ async fn main() -> anyhow::Result<()> {
         let _ = entities_task.await;
         let _ = names_task.await;
         let _ = introspect_task.await;
+        let _ = assertion_task.await;
     })
     .await;
 

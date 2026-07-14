@@ -56,6 +56,67 @@ pub struct AliasRecord {
     pub last_updated: i64,
 }
 
+/// What an operator asserted about two origins (#473, RFC 06 §5.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AssertionKind {
+    /// "These are the same host." The canonical case is a **reinstall**: the
+    /// machine minted a new origin, evidence for the old one is still live, and
+    /// the conflicting-strong-ids rule correctly refuses to merge them — the
+    /// catalog cannot tell a reinstall from two machines. Only an operator can.
+    Link,
+    /// "These are **not** the same host." Retires a [`AssertionKind::Link`], and
+    /// stands on its own as a veto: it forbids the merge rules from ever putting
+    /// the two origins in one entity, including transitively through a third
+    /// node.
+    Unlink,
+}
+
+/// An operator's explicit statement about identity, carried on the bus as
+/// ordinary catalog state (#473).
+///
+/// **Why this is a wire record and not a config file or a side table.** RFC 06
+/// §5 says the catalog is a pure function of live evidence — "no private
+/// database, no migration state". An operator override *is* state, and it is not
+/// evidence. Putting it in a registered state subject
+/// ([`crate::keyexpr::assertion_key`]) is what preserves the property: a
+/// restarted correlator, a replica, or a second catalog re-seeds the assertion
+/// through the same path as every other document, and a storage-backed router
+/// makes it durable for free. A side table would be invisible to all three.
+///
+/// The two ids are **origin ids** (`h-<12hex>`), never the weaker
+/// evidence-derived entity ids: an entity id computed from a hostname or MAC
+/// changes when the set it names changes, so an assertion keyed on one would
+/// dangle the moment it took effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorAssertion {
+    /// Stable key chunk, derived from the pair — see [`OperatorAssertion::id`].
+    pub id: String,
+    pub kind: AssertionKind,
+    /// The retired/older origin (`old` in `@rpc/link?old=…;new=…`).
+    pub old: String,
+    /// The current origin the entity should be known by (`new`).
+    pub new: String,
+    /// Unix epoch millis the operator made the call.
+    pub asserted_at: i64,
+    /// Free-text operator note ("reinstalled 2026-07-14, same box").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl OperatorAssertion {
+    /// The key chunk for a `(kind, old, new)` triple: stable, collision-free,
+    /// and re-derivable, so re-asserting the same thing is an idempotent LWW
+    /// overwrite rather than a second record.
+    pub fn id(kind: AssertionKind, old: &str, new: &str) -> String {
+        let k = match kind {
+            AssertionKind::Link => "link",
+            AssertionKind::Unlink => "unlink",
+        };
+        format!("{k}-{old}-{new}")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PdnsRecord {
     /// The IP these names are bound to (canonical, *un*-slugified — the key is

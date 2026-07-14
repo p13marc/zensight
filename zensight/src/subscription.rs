@@ -584,6 +584,10 @@ fn parse_tombstone(key: &str) -> Option<Message> {
         CommonState::CatalogEntity { entity_id } => {
             Some(Message::EntityRemoved(entity_id.to_string()))
         }
+        // An alias tombstone: an operator un-merged (`@catalog/@rpc/unlink`).
+        // Dropping it matters as much as adding it — a stale alias would keep
+        // re-pointing consumers at an entity that no longer claims them.
+        CommonState::CatalogAlias { old_id } => Some(Message::AliasRemoved(old_id.to_string())),
         _ => None,
     }
 }
@@ -657,13 +661,22 @@ fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
             }
         }),
         CommonState::CatalogEntity { .. } => decode!(HostEntity, Message::EntityReceived),
+        // An alias re-points a retired entity id at its successor. The GUI must
+        // consume it (RFC 06 §5.1 step 1, #486): the retired id's entity doc is
+        // gone, so without the alias an operator's merge simply makes a host
+        // vanish for anyone holding the old id.
+        CommonState::CatalogAlias { .. } => {
+            decode!(zensight_common::AliasRecord, Message::AliasReceived)
+        }
         // Evidence is the catalog's input, not the GUI's; artifact progress is
-        // polled over @rpc; aliases and pdns have no GUI consumer.
+        // polled over @rpc; pdns is resolved on demand over @rpc/names; an
+        // assertion is the *operator's* input to the catalog — the GUI reads its
+        // consequences (entities + aliases), not the instruction.
         CommonState::EvidenceSelf
         | CommonState::EvidenceDevice { .. }
         | CommonState::EvidenceNames { .. }
         | CommonState::Artifact { .. }
-        | CommonState::CatalogAlias { .. }
+        | CommonState::CatalogAssertion { .. }
         | CommonState::CatalogPdns { .. } => None,
     }
 }
