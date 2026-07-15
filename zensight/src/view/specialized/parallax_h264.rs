@@ -54,6 +54,23 @@ mod real {
     /// it just doesn't re-ask (or re-warn) for one.
     const RESYNC_MIN_INTERVAL: Duration = Duration::from_secs(2);
 
+    /// If a tile keeps RECEIVING access units but never decodes a single
+    /// displayable frame within this window, give up and end the tile with a
+    /// reason instead of showing a silent black rectangle forever. This covers
+    /// the GUI-only failure the sensor's own first-frame watchdog can't see
+    /// (the sensor IS publishing — it just can't be decoded/synced here). The
+    /// window is generous enough to outlast a slow first keyframe (a late
+    /// viewer waits up to one GOP for a natural IDR).
+    const NO_DECODE_TIMEOUT: Duration = Duration::from_secs(12);
+
+    /// If a tile receives NO access unit at all within this window, the tier
+    /// isn't publishing (e.g. its open failed on the sensor — a single camera
+    /// busy with another tier, RFC 07 §3 exact-tier keys mean nothing else
+    /// fills in). End the tile with a reason instead of a permanent "Waiting
+    /// for frames…". Comfortably longer than the sensor's own tier hand-over +
+    /// build-retry window.
+    const NO_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+
     /// A stateful H.264 → RGBA frame decoder (pure — unit-testable without
     /// Zenoh). Owns the openh264 decoder plus a cached I420→RGBA converter
     /// keyed by frame dimensions.
@@ -150,17 +167,61 @@ mod real {
             // cleared by a successful decode so a fresh failure after a
             // healthy stretch asks immediately.
             let mut last_resync: Option<Instant> = None;
+            // Guard against a tile that receives frames but never decodes one
+            // (NO_DECODE_TIMEOUT): stamp when the first AU arrives, and whether
+            // any displayable frame has ever come out.
+            let mut first_frame_at: Option<Instant> = None;
+            let mut ever_decoded = false;
+            // Whether ANY sample has arrived on this tier's key. Until one does,
+            // bound the wait (NO_FIRST_FRAME_TIMEOUT) so a tier that never
+            // publishes (open failed on the sensor) ends with a reason.
+            let mut any_sample = false;
             loop {
-                let sample = match subscriber.recv_async().await {
-                    Ok(s) => s,
-                    Err(_) => break, // session closed
+                let sample = if any_sample {
+                    match subscriber.recv_async().await {
+                        Ok(s) => s,
+                        Err(_) => break, // session closed
+                    }
+                } else {
+                    match tokio::time::timeout(NO_FIRST_FRAME_TIMEOUT, subscriber.recv_async())
+                        .await
+                    {
+                        Ok(Ok(s)) => s,
+                        Ok(Err(_)) => break, // session closed
+                        Err(_) => {
+                            yield Message::ParallaxTileEnded {
+                                stream,
+                                generation,
+                                error: Some(
+                                    "no video on this tier — the camera may be busy or unavailable"
+                                        .to_string(),
+                                ),
+                            };
+                            return;
+                        }
+                    }
                 };
+                any_sample = true;
                 let Some(meta) = sample
                     .attachment()
                     .and_then(|a| decode::<FrameMeta>(&a.to_bytes(), Format::Cbor).ok())
                 else {
                     continue;
                 };
+                // Frames ARE arriving. If none ever decodes within the window,
+                // stop showing a silent black tile and say why.
+                let arrived = *first_frame_at.get_or_insert_with(Instant::now);
+                if !ever_decoded && arrived.elapsed() >= NO_DECODE_TIMEOUT {
+                    yield Message::ParallaxTileEnded {
+                        stream,
+                        generation,
+                        error: Some(format!(
+                            "receiving {}×{} video but could not decode this tier",
+                            meta.width, meta.height
+                        )),
+                    };
+                    return;
+                }
                 // A gap means dropped access units: reference frames are
                 // gone. Drop sync, rebuild, and ask for a fresh IDR.
                 if synced
@@ -203,6 +264,7 @@ mod real {
                 match decoded {
                     Ok(Some((w, h, rgba))) => {
                         last_resync = None;
+                        ever_decoded = true;
                         yield Message::ParallaxFrame {
                             stream: stream.clone(),
                             generation,

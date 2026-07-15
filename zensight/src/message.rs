@@ -541,11 +541,15 @@ pub enum Message {
         source: String,
         status: zensight_common::stream::StreamStatus,
     },
-    /// Open a live H.264 video tile (#409): sends `open_stream` (codec
-    /// `h264`) and spawns the decoding subscriber task. Only functional on
-    /// builds with the `h264` feature; otherwise it toasts the build hint.
+    /// Open a live H.264 video tile (#409) on a specific `tier`: sends
+    /// `open_stream` (codec `h264`, that tier) and spawns the decoding
+    /// subscriber on the exact tier key. Fired by the per-tier buttons — each
+    /// offered tier is its own button (#494/#502). Opening a different tier for
+    /// a stream replaces its single tile. Only functional on builds with the
+    /// `h264` feature; otherwise it toasts the build hint.
     ParallaxOpenVideoTile {
         stream: String,
+        tier: String,
     },
     /// Ask the sensor for a fresh IDR (`request_keyframe`) — fired by the
     /// H.264 tile decoder on a sequence discontinuity (#409).
@@ -561,10 +565,6 @@ pub enum Message {
     /// Dismiss the expanded-tile overlay (Esc / backdrop click / Close),
     /// restoring the tile's pre-expand profile.
     ParallaxCollapseTile,
-    /// Choose the bandwidth tier newly-opened video tiles prefer (#494/#502):
-    /// `Some(tier)` pins a ladder rung, `None` = auto (per-stream default).
-    /// A per-viewer choice — it steers future opens, never a live stream.
-    ParallaxSelectTier(Option<String>),
 
     // ── Cross-view identity pivots (#313) — host-local joins over already-
     // published data; every pivot is a query-time read, no new bus traffic.

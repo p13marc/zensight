@@ -4408,27 +4408,19 @@ fn test_parallax_catalogue_and_tiles() {
         );
     }
 
-    // Ready catalogue renders one row per stream (with the active badge) and
-    // Open dispatches ParallaxOpenTile.
+    // Ready catalogue renders one row per stream with its native geometry and
+    // active badge. Per-tier Live buttons only render on `--features h264`
+    // builds (this is a default build), so the tier-open click is asserted in
+    // the h264 unit test `catalogue_row_opens_the_clicked_tier`.
     state.parallax_detail.apply(Ok(mock::parallax::streams()));
     {
         let mut ui = simulator(parallax_view(&state));
         assert!(ui.find("video0").is_ok());
         assert!(ui.find("door").is_ok());
         assert!(ui.find("test pattern smpte").is_ok());
-        // Capability-bearing catalogue (#507): native geometry + offered tiers
-        // render as their own cells now.
+        // Capability-bearing catalogue (#507): native geometry renders as a cell.
         assert!(ui.find("640×360").is_ok(), "native geometry cell");
-        assert!(ui.find("low·high").is_ok(), "test0 offers low + high tiers");
         assert!(ui.find("live").is_ok(), "door is advertised active");
-        let _ = ui.click("Open");
-        let messages: Vec<Message> = ui.into_messages().collect();
-        assert!(
-            messages
-                .iter()
-                .any(|m| matches!(m, Message::ParallaxOpenTile { .. })),
-            "clicking Open must dispatch ParallaxOpenTile"
-        );
     }
 
     // An open tile renders its waiting caption; Close dispatches

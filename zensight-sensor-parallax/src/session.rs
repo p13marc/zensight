@@ -37,6 +37,14 @@ use crate::{egress, pipeline};
 /// Capacity of the actor's command channel.
 const CHANNEL_CAPACITY: usize = 64;
 
+/// When switching video tiers on an exclusive source (V4L2/RTSP), the just
+/// released sibling capture frees its device asynchronously — its source loop
+/// runs on a blocking thread that only exits on its next iteration. Retry the
+/// new tier's build this many times, spaced by [`BUILD_RETRY_DELAY`], to absorb
+/// that hand-over window (`EBUSY`) before giving up (~1s total).
+const BUILD_RETRY_MAX: u32 = 20;
+const BUILD_RETRY_DELAY: Duration = Duration::from_millis(50);
+
 /// One per-stream media profile. A stream has at most one `Preview` and one
 /// `Video(tier)` per tier index — distinct tiers are **independent** encoders
 /// published concurrently on distinct `@media/<stream>/video/h264/<tier>` keys,
@@ -528,6 +536,15 @@ impl SessionManager {
             Existing::None => {}
         }
 
+        // A single camera can't feed two captures at once: on an exclusive
+        // source (V4L2/RTSP) opening a video tier must first release any other
+        // open video tier for this stream, or the new capture fails `EBUSY`
+        // while the old tier lingers in its idle window. No-op for the
+        // shareable test source, so concurrent tiers (#494) still work there.
+        if matches!(profile, Profile::Video(_)) && kind.is_exclusive() {
+            self.release_conflicting_video_tiers(stream, profile).await;
+        }
+
         // Build the profile pipeline. Test/V4L2 sources are self-driving and
         // built synchronously; RTSP must connect first, which is NEVER done
         // inside the actor (an unreachable camera would stall every stream
@@ -565,7 +582,24 @@ impl SessionManager {
             _ => {
                 let built = match profile {
                     Profile::Video(idx) => {
-                        pipeline::build_video(&kind, &self.tier_params(idx), &stream_stats)
+                        let mut built =
+                            pipeline::build_video(&kind, &self.tier_params(idx), &stream_stats);
+                        // Absorb the just-released sibling's async device
+                        // hand-over (see BUILD_RETRY_MAX): retry the exclusive
+                        // capture a few times before surfacing the failure.
+                        if kind.is_exclusive() {
+                            let mut tries = 0;
+                            while built.is_err() && tries < BUILD_RETRY_MAX {
+                                tries += 1;
+                                tokio::time::sleep(BUILD_RETRY_DELAY).await;
+                                built = pipeline::build_video(
+                                    &kind,
+                                    &self.tier_params(idx),
+                                    &stream_stats,
+                                );
+                            }
+                        }
+                        built
                     }
                     Profile::Preview => {
                         pipeline::build_preview(&kind, &self.config.preview, &stream_stats)
@@ -986,6 +1020,36 @@ impl SessionManager {
             self.teardown_profile(&stream, profile);
             self.publish_status(&stream).await;
         }
+    }
+
+    /// Release every OTHER open video tier for `stream` before opening `keep`
+    /// (exclusive-source tier switch). A single camera serves one capture at a
+    /// time, so the outgoing tier must hand the device over — waiting for its
+    /// 30s idle window would leave the new tier stuck on `EBUSY`. Tears down
+    /// unconditionally (not just idle/unwatched slots): on an exclusive source
+    /// a rival tier can never stream alongside `keep` anyway, and the GUI has
+    /// already replaced its tile. The torn-down tier's late `EgressEnded` /
+    /// viewer edge are ignored downstream (epoch + slot guards).
+    async fn release_conflicting_video_tiers(&mut self, stream: &str, keep: Profile) {
+        let siblings: Vec<Profile> = self
+            .sessions
+            .get(stream)
+            .map(|s| {
+                s.profiles()
+                    .map(|(p, _)| p)
+                    .filter(|p| matches!(p, Profile::Video(_)) && *p != keep)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if siblings.is_empty() {
+            return;
+        }
+        for profile in siblings {
+            tracing::info!(stream = %stream, profile = profile.as_str(),
+                "releasing sibling video tier for an exclusive-source tier switch");
+            self.teardown_profile(stream, profile);
+        }
+        self.publish_status(stream).await;
     }
 
     fn teardown_profile(&mut self, stream: &str, profile: Profile) {

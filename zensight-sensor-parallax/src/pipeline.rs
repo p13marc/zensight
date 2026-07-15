@@ -705,10 +705,17 @@ pub fn build_preview(
 /// Scale (w, h) down to `max_height` preserving aspect, even-aligning both
 /// dimensions (I420 / H.264 requirement). `None` or a cap at/above the native
 /// height keeps the native size (still even-aligned).
+///
+/// This is the ADVERTISED size (catalogue `TierSpec`, `FrameMeta.width/height`,
+/// per-tier status). It must match what the live `VideoScale` actually encodes,
+/// or the GUI's bandwidth/resolution readout disagrees with the pixels on
+/// screen. `VideoScale::resolve` derives the width with `div_ceil` (round up)
+/// then even-aligns, so we do the same — a plain floor here was off by up to two
+/// pixels (e.g. 1280×720 → 480 advertised 852 but encoded 854).
 fn capped_dimensions(width: u32, height: u32, max_height: Option<u32>) -> (u32, u32) {
     let (w, h) = match max_height {
         Some(mh) if mh < height && mh >= 2 => {
-            let w = (width as u64 * mh as u64 / height as u64) as u32;
+            let w = (width as u64 * mh as u64).div_ceil(height as u64) as u32;
             (w, mh)
         }
         _ => (width, height),
@@ -870,6 +877,111 @@ mod tests {
         );
     }
 
+    /// Like [`pull_frames`] but keeps each access unit's FULL bytes, so a test
+    /// can feed them to a decoder (mirrors the GUI's `h264_tile_stream`).
+    async fn pull_full_aus(built: BuiltPipeline, count: usize) -> Vec<Vec<u8>> {
+        let mut built = built;
+        let handle = executor()
+            .start(&mut built.pipeline)
+            .expect("start pipeline");
+        let sink = built.sink.clone();
+        let aus = tokio::task::spawn_blocking(move || {
+            let mut out: Vec<Vec<u8>> = Vec::new();
+            for _ in 0..200 {
+                match sink.pull_buffer_timeout(Some(Duration::from_millis(500))) {
+                    Ok(Some(buf)) => {
+                        out.push(buf.as_bytes().to_vec());
+                        if out.len() >= count {
+                            break;
+                        }
+                    }
+                    Ok(None) => {
+                        if sink.is_eos() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            out
+        })
+        .await
+        .expect("pull task");
+        built.stop.stop();
+        let _ = tokio::time::timeout(Duration::from_secs(10), handle.wait()).await;
+        aus
+    }
+
+    /// Every scaled tier must decode through the GUI's exact path
+    /// (`parallax_h264::H264TileDecoder::decode_to_rgba`: decode →
+    /// `to_yuv420_planar` → `VideoConvert` I420→RGBA) AND the size the sensor
+    /// ADVERTISES (`capped_dimensions` → `FrameMeta`/catalogue) must equal the
+    /// size actually encoded. A non-mod-16 aspect-derived width (1280×720 →
+    /// 854×480) is the awkward case; a floor/ceil disagreement here used to make
+    /// the readout claim 852 while the pixels were 854.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn scaled_tier_decodes_like_the_gui() {
+        use parallax::converters::{PixelFormat, VideoConvert};
+
+        // (native_w, native_h, max_height): each row exercises the GUI decode
+        // for an awkward scaled geometry — non-mod-16 widths are the suspect.
+        let cases = [
+            ("720p-native", 1280, 720, None),
+            ("720p→480", 1280, 720, Some(480u32)), // 854×480 (non-mod-16)
+            ("360p→240-low", 640, 360, Some(240u32)), // 426×240 (non-mod-16)
+            ("1080p→480", 1920, 1080, Some(480u32)), // 854×480
+            ("1080p→240", 1920, 1080, Some(240u32)), // 426×240
+        ];
+        for (label, nw, nh, max_height) in cases {
+            let kind = SourceKind::Test {
+                pattern: "smpte".into(),
+                width: nw,
+                height: nh,
+                fps: 30,
+            };
+            let built =
+                build_video(&kind, &vparams(30, max_height), &Arc::default()).expect("build video");
+            let advertised = (built.width, built.height);
+            let aus = pull_full_aus(built, 6).await;
+            assert!(!aus.is_empty(), "{label}: no access units produced");
+
+            let mut decoder = H264Decoder::new().expect("decoder");
+            let mut decoded: Option<(u32, u32, usize, usize)> = None;
+            for au in &aus {
+                if let Some(frame) = decoder.decode(au).expect("decode must not error") {
+                    let (w, h) = (frame.width() as u32, frame.height() as u32);
+                    let yuv = frame.to_yuv420_planar();
+                    let conv = VideoConvert::new(PixelFormat::I420, PixelFormat::Rgba, w, h)
+                        .unwrap_or_else(|e| {
+                            panic!("{label}: VideoConvert::new {w}×{h} failed: {e}")
+                        });
+                    let mut rgba = vec![0u8; (w * h * 4) as usize];
+                    let expected_yuv = (w * h * 3 / 2) as usize;
+                    conv.convert(&yuv, &mut rgba).unwrap_or_else(|e| {
+                        panic!(
+                            "{label}: convert {w}×{h} failed: {e} (yuv_len={}, expected={expected_yuv})",
+                            yuv.len()
+                        )
+                    });
+                    decoded = Some((w, h, yuv.len(), expected_yuv));
+                    break;
+                }
+            }
+            let (w, h, yuv_len, expected) =
+                decoded.unwrap_or_else(|| panic!("{label}: decoder produced no frame"));
+            eprintln!(
+                "{label}: advertised={advertised:?} decoded={w}×{h} yuv_len={yuv_len} expected_yuv={expected}"
+            );
+            // The advertised size must equal what was actually encoded, or the
+            // GUI's per-tier resolution/bandwidth readout lies about the pixels.
+            assert_eq!(
+                advertised,
+                (w, h),
+                "{label}: advertised size must match the decoded frame"
+            );
+        }
+    }
+
     #[test]
     fn video_respects_max_height() {
         let built = build_video(
@@ -889,7 +1001,13 @@ mod tests {
     #[test]
     fn capped_dimensions_even_aligned() {
         assert_eq!(capped_dimensions(641, 361, None), (640, 360));
-        assert_eq!(capped_dimensions(640, 360, Some(181)), (320, 180));
+        // Aspect-derived width rounds UP (div_ceil) then even-aligns, matching
+        // the live `VideoScale::resolve` (a floor here was off by ≤2px).
+        assert_eq!(capped_dimensions(640, 360, Some(181)), (322, 180));
+        // The real 720p→480 case: 1280*480/720 = 853.33 → 854 (NOT 852).
+        assert_eq!(capped_dimensions(1280, 720, Some(480)), (854, 480));
+        // A width that lands exactly even needs no rounding.
+        assert_eq!(capped_dimensions(1280, 720, Some(240)), (426, 240));
         assert_eq!(capped_dimensions(640, 360, Some(720)), (640, 360));
         assert_eq!(capped_dimensions(3, 3, Some(1)), (2, 2));
     }

@@ -1,14 +1,17 @@
 //! Parallax (live video / media plane) specialized view (#408, epic #402).
 //!
 //! Renders the sensor's stream catalogue (fetched on demand from
-//! `@rpc/parallax/streams`) and a grid of live JPEG preview tiles. Opening a tile
-//! sends `open_stream` (codec `mjpeg`) and spawns an abortable subscriber
-//! task on the exact `@media/<stream>/preview/jpeg` key (see
-//! `parallax_detail.rs`); each decoded frame lands here as an
-//! [`iced::widget::image`] with a seq/fps caption. Closing (or leaving the
-//! view) aborts the subscriber and sends `close_stream`.
+//! `@rpc/parallax/streams`) and a grid of live tiles. Each catalogue row shows
+//! one **Live** button per offered bandwidth tier (#494/#502): clicking a tier
+//! sends `open_stream` (codec `h264`, that tier) and spawns an abortable
+//! subscriber on the exact `@media/<stream>/video/h264/<tier>` key (see
+//! `parallax_h264.rs`); decoded frames land here as an [`iced::widget::image`]
+//! with a resolution/fps caption. One tile per stream — picking a different
+//! tier replaces it. Closing (or leaving the view) aborts the subscriber and
+//! sends `close_stream`. (The low-cost JPEG preview path still exists for demo
+//! mode and the expand overlay; it is no longer a catalogue action.)
 
-use iced::widget::{Space, button, column, container, image, mouse_area, pick_list, row, text};
+use iced::widget::{Space, button, column, container, image, mouse_area, row, text, tooltip};
 use iced::{ContentFit, Element, Length, Theme};
 
 use crate::message::Message;
@@ -72,44 +75,20 @@ fn muted(t: &Theme) -> text::Style {
     }
 }
 
-/// The "Auto" sentinel in the preferred-tier picker: maps to `None`, so each
-/// stream falls back to its own catalogue default.
-const TIER_AUTO: &str = "Auto";
-
-/// A device-wide picker for the tier newly-opened video tiles prefer
-/// (#494/#502). Options are the distinct tiers the catalogue advertises (ladder
-/// order) plus Auto. A per-viewer choice: it steers future opens, never a live
-/// stream (the sensor publishes every tier concurrently — switching is a
-/// re-open, not a live re-tune). `None` when the catalogue offers no tiers.
-fn tier_selector(detail: &ParallaxDetailState) -> Option<Element<'_, Message>> {
-    let streams = detail.catalogue.ready()?;
-    let mut names: Vec<String> = Vec::new();
-    for s in streams {
-        for t in &s.tiers {
-            if !names.contains(&t.name) {
-                names.push(t.name.clone());
-            }
-        }
-    }
-    if names.is_empty() {
-        return None;
-    }
-    let mut options = vec![TIER_AUTO.to_string()];
-    options.extend(names);
-    let selected = detail
-        .preferred_tier
-        .clone()
-        .unwrap_or_else(|| TIER_AUTO.to_string());
-    let picker = pick_list(options, Some(selected), |choice| {
-        Message::ParallaxSelectTier((choice.as_str() != TIER_AUTO).then_some(choice))
-    })
-    .text_size(12);
-    Some(
-        row![text("Preferred video tier").size(12).style(muted), picker]
-            .spacing(space::SM)
-            .align_y(iced::Alignment::Center)
-            .into(),
+/// Wrap a catalogue action button with a hover tooltip spelling out what a
+/// click opens (a bare tier name like `high` isn't self-explanatory).
+fn action_tooltip<'a>(
+    control: impl Into<Element<'a, Message>>,
+    hint: String,
+) -> Element<'a, Message> {
+    tooltip(
+        control,
+        container(text(hint).size(11))
+            .padding(6)
+            .style(container::rounded_box),
+        tooltip::Position::Top,
     )
+    .into()
 }
 
 /// The applied-bandwidth suffix for a live video tile (#503): its tier's
@@ -124,45 +103,70 @@ fn tier_readout(detail: &ParallaxDetailState, name: &str, tile: &TileState) -> O
     ))
 }
 
-/// One catalogue row: name · description · codecs · live badge · open/close.
+/// A tier button's short label: `<name> ≤<cap>p` (or `<name> native` when the
+/// tier is uncapped). The full resolution/fps/bitrate lives in the tooltip.
+fn tier_button_label(spec: &zensight_common::stream::TierSpec) -> String {
+    match spec.max_height {
+        Some(h) => format!("{} ≤{h}p", spec.name),
+        None => format!("{} native", spec.name),
+    }
+}
+
+/// The tier button's tooltip: what a click actually opens.
+fn tier_tooltip(spec: &zensight_common::stream::TierSpec) -> String {
+    let cap = match spec.max_height {
+        Some(h) => format!("≤{h}p"),
+        None => "native".to_string(),
+    };
+    format!(
+        "Live H.264 · {cap} · {} fps · {} kbps",
+        spec.fps, spec.bitrate_kbps
+    )
+}
+
+/// One catalogue row: name · native geometry · a Live button per offered tier
+/// (#494/#502) · Close. Each tier button opens Live directly on that tier; the
+/// currently-live tier reads as selected (disabled). One tile per stream, so
+/// picking a different tier replaces it.
 fn catalogue_row<'a>(
     detail: &'a ParallaxDetailState,
     stream: &'a zensight_common::StreamDescriptor,
 ) -> Element<'a, Message> {
     let open = detail.is_open(&stream.stream);
-    let toggle: Element<'a, Message> = if open {
-        button(text("Close").size(12))
-            .on_press(Message::ParallaxCloseTile {
-                stream: stream.stream.clone(),
-            })
-            .into()
-    } else {
-        let mut buttons = row![
-            button(text("Open").size(12)).on_press(Message::ParallaxOpenTile {
-                stream: stream.stream.clone(),
-            })
-        ]
-        .spacing(space::XS);
-        // The H.264 live view exists only on `--features h264` builds (#409);
-        // without it the section header carries the build hint instead.
-        if parallax_h264::AVAILABLE {
-            buttons = buttons.push(button(text("Video").size(12)).on_press(
-                Message::ParallaxOpenVideoTile {
+    let live_tier = detail
+        .tiles
+        .get(&stream.stream)
+        .and_then(|t| t.selected_tier.clone());
+    // One button per offered tier (only with the H.264 decoder — otherwise the
+    // section header carries the build hint). The active tier's button is
+    // disabled so it reads as "currently live".
+    let controls: Element<'a, Message> = if parallax_h264::AVAILABLE {
+        let mut buttons = row![].spacing(space::XS);
+        for spec in &stream.tiers {
+            let is_live = live_tier.as_deref() == Some(spec.name.as_str());
+            let mut b = button(text(tier_button_label(spec)).size(12));
+            if !is_live {
+                b = b.on_press(Message::ParallaxOpenVideoTile {
+                    stream: stream.stream.clone(),
+                    tier: spec.name.clone(),
+                });
+            }
+            buttons = buttons.push(action_tooltip(b, tier_tooltip(spec)));
+        }
+        if open {
+            buttons = buttons.push(button(text("Close").size(12)).on_press(
+                Message::ParallaxCloseTile {
                     stream: stream.stream.clone(),
                 },
             ));
         }
         buttons.into()
+    } else {
+        Space::new().width(Length::Shrink).into()
     };
-    let mut cells = row![
-        text(&stream.stream).size(14).width(Length::Fixed(140.0)),
-        text(stream.codecs.join(" · "))
-            .size(12)
-            .style(muted)
-            .width(Length::Fixed(110.0)),
-    ]
-    .spacing(space::SM)
-    .align_y(iced::Alignment::Center);
+    let mut cells = row![text(&stream.stream).size(14).width(Length::Fixed(140.0)),]
+        .spacing(space::SM)
+        .align_y(iced::Alignment::Center);
     // Native geometry (capability-bearing catalogue, #507) so the offered tiers
     // read as honest — no 720p tier on a 480p camera.
     if let (Some(w), Some(h)) = (stream.width, stream.height) {
@@ -173,15 +177,6 @@ fn catalogue_row<'a>(
                 .width(Length::Fixed(80.0)),
         );
     }
-    if !stream.tiers.is_empty() {
-        let tiers = stream
-            .tiers
-            .iter()
-            .map(|t| t.name.as_str())
-            .collect::<Vec<_>>()
-            .join("·");
-        cells = cells.push(text(tiers).size(12).style(muted));
-    }
     if stream.active {
         cells = cells.push(text("live").size(12).style(|t: &Theme| text::Style {
             color: Some(theme::colors(t).success()),
@@ -190,7 +185,7 @@ fn catalogue_row<'a>(
     if let Some(description) = &stream.description {
         cells = cells.push(text(description).size(12).style(muted));
     }
-    cells = cells.push(Space::new().width(Length::Fill)).push(toggle);
+    cells = cells.push(Space::new().width(Length::Fill)).push(controls);
     cells.into()
 }
 
@@ -324,17 +319,10 @@ pub fn parallax_view(state: &DeviceDetailState) -> Element<'_, Message> {
 
     let mut content = column![header].spacing(space::MD).padding(space::LG);
 
-    // Stream catalogue.
+    // Stream catalogue: each stream offers a Live button per tier (#494/#502).
     content = content.push(text("Streams").size(14));
     if !parallax_h264::AVAILABLE {
         content = content.push(text(parallax_h264::UNAVAILABLE_HINT).size(11).style(muted));
-    }
-    // Preferred-tier picker (#502): only shown with the decoder and once the
-    // catalogue advertises tiers to choose among.
-    if parallax_h264::AVAILABLE
-        && let Some(selector) = tier_selector(detail)
-    {
-        content = content.push(selector);
     }
     match &detail.catalogue {
         Fetch::Idle => {
@@ -388,7 +376,7 @@ pub fn parallax_view(state: &DeviceDetailState) -> Element<'_, Message> {
                 .style(muted),
         );
     } else {
-        content = content.push(text("Previews").size(14));
+        content = content.push(text("Live view").size(14));
         let tiles: Vec<_> = detail.tiles.iter().collect();
         for chunk in tiles.chunks(TILES_PER_ROW) {
             let mut grid_row = row![].spacing(space::MD);
@@ -442,6 +430,69 @@ mod tests {
             msgs.iter()
                 .any(|m| matches!(m, Message::ParallaxCollapseTile)),
             "Close dismisses the overlay"
+        );
+    }
+
+    fn two_tier_descriptor() -> zensight_common::StreamDescriptor {
+        use zensight_common::stream::TierSpec;
+        zensight_common::StreamDescriptor {
+            stream: "cam0".into(),
+            codecs: vec!["h264".into()],
+            active: false,
+            width: Some(1280),
+            height: Some(720),
+            fps: Some(30.0),
+            tiers: vec![
+                TierSpec {
+                    name: "medium".into(),
+                    max_height: Some(480),
+                    fps: 20,
+                    bitrate_kbps: 1200,
+                },
+                TierSpec {
+                    name: "high".into(),
+                    max_height: None,
+                    fps: 30,
+                    bitrate_kbps: 4000,
+                },
+            ],
+            description: None,
+        }
+    }
+
+    #[test]
+    fn tier_button_labels_show_cap_or_native() {
+        let specs = two_tier_descriptor().tiers;
+        assert_eq!(tier_button_label(&specs[0]), "medium ≤480p");
+        assert_eq!(tier_button_label(&specs[1]), "high native");
+    }
+
+    #[test]
+    fn catalogue_row_opens_the_clicked_tier() {
+        use iced_test::simulator;
+
+        // With the H.264 decoder the row shows one Live button per tier; each
+        // dispatches ParallaxOpenVideoTile for THAT exact tier. (Without the
+        // decoder `parallax_h264::AVAILABLE` is false and the row shows no tier
+        // buttons — so this assertion only holds in an h264-feature build.)
+        if !parallax_h264::AVAILABLE {
+            return;
+        }
+        let mut detail = ParallaxDetailState::default();
+        detail.apply(Ok(vec![two_tier_descriptor()]));
+        let descriptor = two_tier_descriptor();
+
+        let mut ui = simulator(catalogue_row(&detail, &descriptor));
+        assert!(ui.find("medium ≤480p").is_ok(), "a Live button per tier");
+        assert!(ui.find("high native").is_ok());
+        let _ = ui.click("high native");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            msgs.iter().any(|m| matches!(
+                m,
+                Message::ParallaxOpenVideoTile { stream, tier } if stream == "cam0" && tier == "high"
+            )),
+            "clicking a tier opens Live on exactly that tier"
         );
     }
 

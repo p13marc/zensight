@@ -39,6 +39,21 @@ pub enum SourceKind {
     },
 }
 
+impl SourceKind {
+    /// Whether this source can be captured by only ONE pipeline at a time.
+    ///
+    /// A single V4L2 device (`/dev/videoX`) can't be streamed by two pipelines
+    /// at once — the second `REQBUFS`/`S_FMT` fails `EBUSY` — and most RTSP
+    /// cameras cap concurrent sessions. The synthetic test source has no such
+    /// limit (each pipeline generates independently). This gates whether
+    /// opening a new video tier must first release a sibling tier's capture
+    /// (see `SessionManager::open`): exclusive sources serve one video tier per
+    /// stream, shareable sources allow concurrent tiers (true simulcast).
+    pub fn is_exclusive(&self) -> bool {
+        matches!(self, SourceKind::V4l2 { .. } | SourceKind::Rtsp { .. })
+    }
+}
+
 /// One advertised stream: name + how to open it + its native capabilities.
 #[derive(Debug, Clone)]
 pub struct CatalogEntry {
@@ -335,6 +350,35 @@ mod tests {
     fn v4l2_names_derive_from_device_path() {
         assert_eq!(v4l2_stream_name("/dev/video0"), "video0");
         assert_eq!(v4l2_stream_name("video7"), "video7");
+    }
+
+    #[test]
+    fn exclusive_sources_are_single_capture() {
+        // A single camera can't feed two captures at once → one video tier at a
+        // time (drives the tier-switch hand-over). The test source is shareable.
+        assert!(
+            SourceKind::V4l2 {
+                device: "/dev/video0".into()
+            }
+            .is_exclusive()
+        );
+        assert!(
+            SourceKind::Rtsp {
+                url: "rtsp://cam/1".into(),
+                username: None,
+                password: None,
+            }
+            .is_exclusive()
+        );
+        assert!(
+            !SourceKind::Test {
+                pattern: "smpte".into(),
+                width: 320,
+                height: 240,
+                fps: 30,
+            }
+            .is_exclusive()
+        );
     }
 
     #[test]

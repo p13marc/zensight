@@ -1544,8 +1544,8 @@ impl ZenSight {
                     device.parallax_detail.apply_stream_status(&status);
                 }
             }
-            Message::ParallaxOpenVideoTile { stream } => {
-                return ControlFlow::Break(self.open_parallax_video_tile(stream));
+            Message::ParallaxOpenVideoTile { stream, tier } => {
+                return ControlFlow::Break(self.open_parallax_video_tile(stream, tier));
             }
             Message::ParallaxRequestKeyframe { stream } => {
                 return ControlFlow::Break(self.request_parallax_keyframe(stream));
@@ -1555,14 +1555,6 @@ impl ZenSight {
             }
             Message::ParallaxCollapseTile => {
                 return ControlFlow::Break(self.collapse_parallax_tile());
-            }
-            Message::ParallaxSelectTier(tier) => {
-                // Steers future video opens only; live tiles keep their tier
-                // (the sensor publishes every tier concurrently — switching is
-                // a re-open, not a live re-tune).
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.parallax_detail.preferred_tier = tier;
-                }
             }
             other => return ControlFlow::Continue(other),
         }
@@ -5418,12 +5410,13 @@ impl ZenSight {
         )
     }
 
-    /// Open a live H.264 video tile (#409). Only functional on builds with
-    /// the `h264` feature — otherwise toast the build hint. The tile shares
-    /// the preview-tile state machine (one tile per stream; opening video
-    /// replaces an open preview tile and aborts its subscriber).
+    /// Open a live H.264 video tile (#409) on an explicit `tier` (the per-tier
+    /// buttons pass the exact tier; the expand-upgrade path passes a resolved
+    /// default). Only functional on builds with the `h264` feature — otherwise
+    /// toast the build hint. The tile is per-stream (one tile); opening a
+    /// different tier replaces it and aborts the old subscriber.
     #[cfg(feature = "h264")]
-    fn open_parallax_video_tile(&mut self, stream: String) -> Task<Message> {
+    fn open_parallax_video_tile(&mut self, stream: String, tier: String) -> Task<Message> {
         use crate::view::specialized::parallax_h264;
         let Some(source) = self
             .selected_device
@@ -5433,16 +5426,6 @@ impl ZenSight {
         else {
             return Task::none();
         };
-        // The exact tier to open + subscribe to (#494/#502): the user's
-        // preferred tier when this stream offers it, else the catalogue
-        // default (medium, or the highest a small camera can feed). A stream
-        // whose catalogue hasn't loaded falls back to the sensor's own default
-        // tier name, which every ladder defines.
-        let tier = self
-            .selected_device
-            .as_ref()
-            .and_then(|d| d.parallax_detail.resolve_tier(&stream))
-            .unwrap_or_else(|| "medium".to_string());
         if self.demo_mode {
             if let Some(device) = self.selected_device.as_mut() {
                 let generation = device.parallax_detail.allocate_generation();
@@ -5533,7 +5516,7 @@ impl ZenSight {
     /// Without the `h264` feature the video tile is a stub: explain how to
     /// get it instead of failing silently (#409).
     #[cfg(not(feature = "h264"))]
-    fn open_parallax_video_tile(&mut self, _stream: String) -> Task<Message> {
+    fn open_parallax_video_tile(&mut self, _stream: String, _tier: String) -> Task<Message> {
         self.toasts.push(
             ToastSeverity::Info,
             crate::view::specialized::parallax_h264::UNAVAILABLE_HINT.to_string(),
@@ -5605,7 +5588,13 @@ impl ZenSight {
                     .any(|s| s.stream == stream && s.codecs.iter().any(|c| c == "h264"))
             });
         if needs_video && parallax_h264::AVAILABLE && advertises_h264 && !self.demo_mode {
-            return self.open_parallax_video_tile(stream);
+            // Expand upgrades a preview to video on the stream's default tier
+            // (the per-tier buttons carry an explicit tier; expand has none).
+            let tier = device
+                .parallax_detail
+                .resolve_tier(&stream)
+                .unwrap_or_else(|| "medium".to_string());
+            return self.open_parallax_video_tile(stream, tier);
         }
         Task::none()
     }

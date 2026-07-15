@@ -51,10 +51,6 @@ pub struct ParallaxDetailState {
     /// the tile shows (#503), sourced from the sensor rather than a client-side
     /// arrival EMA.
     pub status: BTreeMap<String, StreamStatus>,
-    /// The tier newly-opened video tiles prefer, when the stream offers it
-    /// (#502). `None` = let each stream fall back to its catalogue default.
-    /// A per-viewer choice: it only steers future opens, never a live stream.
-    pub preferred_tier: Option<String>,
     /// The tile currently shown in the near-fullscreen overlay (#436).
     /// Lives on this state (not the app) so every existing teardown choke
     /// point that clears the tiles also dismisses the overlay.
@@ -202,19 +198,14 @@ impl ParallaxDetailState {
             .unwrap_or(&[])
     }
 
-    /// Resolve which tier a new video tile for `stream` should open on: the
-    /// user's [`preferred_tier`](Self::preferred_tier) when the stream offers
-    /// it, else `medium` if offered, else the highest-quality offered tier
-    /// (the ladder's tail). `None` only when the catalogue lists no tiers.
+    /// Resolve a sensible DEFAULT tier for `stream` (used by the expand-upgrade
+    /// path, which has no explicit tier — the per-tier buttons pass one): the
+    /// `medium` tier if offered, else the highest-quality offered tier (the
+    /// ladder's tail). `None` only when the catalogue lists no tiers.
     pub fn resolve_tier(&self, stream: &str) -> Option<String> {
         let tiers = self.offered_tiers(stream);
         if tiers.is_empty() {
             return None;
-        }
-        if let Some(pref) = self.preferred_tier.as_deref()
-            && tiers.iter().any(|t| t.name == pref)
-        {
-            return Some(pref.to_string());
         }
         tiers
             .iter()
@@ -747,22 +738,14 @@ mod tests {
     }
 
     #[test]
-    fn resolve_tier_honors_preference_then_catalogue_default() {
+    fn resolve_tier_picks_medium_then_the_ladder_tail() {
         let mut state = ParallaxDetailState::default();
         // No catalogue yet → nothing to resolve.
         assert_eq!(state.resolve_tier("cam0"), None);
 
         state.apply(Ok(vec![ladder_descriptor()]));
-        // Default: medium is offered, so it wins over the highest tier.
-        assert_eq!(state.resolve_tier("cam0").as_deref(), Some("medium"));
-
-        // A preference the stream offers is honored.
-        state.preferred_tier = Some("low".into());
-        assert_eq!(state.resolve_tier("cam0").as_deref(), Some("low"));
-
-        // A preference the stream does NOT offer falls back to the default —
-        // never advertises a tier the camera can't feed.
-        state.preferred_tier = Some("ultra".into());
+        // The default-tier resolver (expand-upgrade path) prefers `medium` when
+        // offered, else the highest tier the camera can feed.
         assert_eq!(state.resolve_tier("cam0").as_deref(), Some("medium"));
     }
 }
