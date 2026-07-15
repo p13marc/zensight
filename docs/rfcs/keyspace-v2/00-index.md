@@ -1,8 +1,27 @@
 # Zenoh Semantic Convention RFC — Index
 
-**Status: v1.2 — RATIFIED** (v1.0 2026-07-12; adopted for ZenSight, migration
+**Status: v1.3 — RATIFIED** (v1.0 2026-07-12; adopted for ZenSight, migration
 tracked in [#453](https://github.com/p13marc/zensight/issues/453) with the
 enforcement crate `zensight-keyspace`).
+
+> **v1.3 (2026-07-15) — `@media` tiers; wire-breaking payloads, key grammar
+> unchanged** ([#494](https://github.com/p13marc/zensight/issues/494)). The
+> `@media` video key's last chunk changes meaning from an undefined `<profile>`
+> to a normative **`<tier>`** — a named bandwidth rung the publisher offers
+> concurrently and the viewer subscribes to *exactly*. Three linked changes:
+> **(1)** [07 §1](07-bulk-planes.md) defines `<tier>` and **revokes** the
+> `…/video/<codec>/*` wildcard (amendment F′ licensed it against "the viewer
+> cannot know this chunk"; the catalogue now publishes the tiers, so the viewer
+> *can* — and the `*` would match every tier at once, breaking simulcast).
+> **(2)** [08 §2](08-registry.md) gives `[[media]]` a real contract — its own
+> normative field table, `attachment` CI-resolved against the shared type
+> table, `cardinality` required on `{var}` media paths, and generated key
+> builders. **(3)** The stream-control payloads (`StreamControl`,
+> `StreamStatus`, `StreamDescriptor`) move to a tier-oriented, capability-bearing
+> shape. The **key grammar is unchanged** — position count and version chunk
+> stay `v1`; only one chunk's *meaning* and the control payloads move — but the
+> payload change is wire-breaking, and backward compatibility was explicitly not
+> a constraint for this release.
 
 > **v1.2 (2026-07-14) — six amendments, all additive, no wire change**
 > ([#467](https://github.com/p13marc/zensight/issues/467)). Every one is a
@@ -84,7 +103,7 @@ zensight/v1/h-3fa9c2d41b7e/state/netlink/alert/9f2c81ab04d7e3f1
 zensight/v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-7
 zensight/v1/h-3fa9c2d41b7e/events/netring/capture/01jgxqz4yqk8v6txw3m9f2a7cd
 zensight/v1/h-3fa9c2d41b7e/@rpc/netlink/sockets
-zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main
+zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/high
 zensight/v1/h-3fa9c2d41b7e/@blob/store/sha256/ab12cd34ef56
 zensight/v1/@catalog/state/entity/h-3fa9c2d41b7e
 zensight/v1/@catalog/state/pdns/93-184-216-34

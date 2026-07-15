@@ -121,6 +121,7 @@ async fn spawn_sensor_with_config(
     StatsRegistry,
 ) {
     let catalog = Arc::new(Catalog::build(&config));
+    let tiers = config.video.tiers.clone();
     let publisher = Publisher::new(session.clone(), "parallax", Format::Json);
     // v1: control/query surfaces key off the producer name (the origin
     // chunk scopes per host; the source label is payload-only).
@@ -148,7 +149,13 @@ async fn spawn_sensor_with_config(
         host_prefix.clone(),
         handle.clone(),
     ));
-    tokio::spawn(query::run(session, host_prefix, catalog, handle.clone()));
+    tokio::spawn(query::run(
+        session,
+        host_prefix,
+        catalog,
+        tiers,
+        handle.clone(),
+    ));
     // Let the subscriber + queryables propagate.
     tokio::time::sleep(Duration::from_millis(300)).await;
     (handle, registry)
@@ -218,10 +225,14 @@ async fn catalogue_query_lists_test_stream() {
     assert_eq!(got[0].stream, "test0");
     assert_eq!(got[0].codecs, vec!["h264", "mjpeg"]);
     assert!(!got[0].active, "nothing has been opened yet");
-    assert_eq!(
-        got[0].description.as_deref(),
-        Some("test pattern smpte 160x120@8")
-    );
+    // Capability-bearing (#507): native geometry is a field now, not smuggled
+    // through the description string.
+    assert_eq!((got[0].width, got[0].height), (Some(160), Some(120)));
+    assert_eq!(got[0].description.as_deref(), Some("test pattern smpte"));
+    // A 120-high source can only feed the uncapped `high` tier — the 240/480
+    // tiers would upscale, so the catalogue honestly omits them.
+    let tier_names: Vec<&str> = got[0].tiers.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(tier_names, vec!["high"]);
 
     viewer.close().await.unwrap();
     sensor.close().await.unwrap();
@@ -253,7 +264,7 @@ async fn open_preview_streams_jpeg_frames_at_config_fps() {
         StreamControl::OpenStream {
             stream: "test0".into(),
             codec: Some("mjpeg".into()),
-            max_height: None,
+            tier: None,
         },
     )
     .await;
@@ -307,7 +318,9 @@ async fn open_preview_streams_jpeg_frames_at_config_fps() {
     // The per-stream state doc reported the open transition (v1: LWW state,
     // RFC 05 §5) — the subscriber was declared before the open.
     let status = await_status(&status_sub, |s| s.open).await;
-    assert_eq!(status.profile.as_deref(), Some("mjpeg"));
+    // A preview-only open reports `open` but carries no video tier.
+    assert!(status.open);
+    assert!(status.tiers.is_empty(), "preview is not a video tier");
 
     // Tear the stream down before the runtime drops: a live pipeline keeps a
     // blocking source task alive, and tokio's shutdown would wait forever.
@@ -316,6 +329,8 @@ async fn open_preview_streams_jpeg_frames_at_config_fps() {
         &host_prefix,
         StreamControl::CloseStream {
             stream: "test0".into(),
+            codec: None,
+            tier: None,
         },
     )
     .await;
@@ -333,15 +348,13 @@ async fn open_h264_video_streams_with_keyframe_control() {
     let host_prefix = "parallax".to_string();
     let handle = spawn_sensor(sensor.clone(), source).await;
 
-    // Subscribe FIRST so the initial IDR is observed. The profile chunk is
-    // the GUI's single-chunk wildcard (the sensor's `video.profile` is
-    // configurable and the catalogue doesn't carry it) — zenoh matching is
-    // intersection-based, so the sensor's matching listener must see this
-    // subscriber as a viewer (asserted below via the status queryable).
-    let video_key = {
-        let concrete = v1ctx().media_video_key("test0", "h264", "main");
-        format!("{}/*", concrete.rsplit_once('/').expect("profile chunk").0)
-    };
+    // Subscribe FIRST so the initial IDR is observed, to the EXACT default
+    // tier's key (keyspace v1.3 revoked the `video/h264/*` wildcard: the tier
+    // is published in the catalogue, so the viewer subscribes to it exactly).
+    // The open below uses `tier: None`, which resolves to the sensor default
+    // (`medium`); the matching listener must see this subscriber as a viewer
+    // (asserted below via the status doc).
+    let video_key = v1ctx().media_video_key("test0", "h264", "medium");
     let sub = viewer
         .declare_subscriber(&video_key)
         .await
@@ -357,7 +370,7 @@ async fn open_h264_video_streams_with_keyframe_control() {
         StreamControl::OpenStream {
             stream: "test0".into(),
             codec: Some("h264".into()),
-            max_height: None,
+            tier: None,
         },
     )
     .await;
@@ -436,6 +449,7 @@ async fn open_h264_video_streams_with_keyframe_control() {
         &host_prefix,
         StreamControl::RequestKeyframe {
             stream: "test0".into(),
+            tier: None,
         },
     )
     .await;
@@ -463,14 +477,22 @@ async fn open_h264_video_streams_with_keyframe_control() {
     // The per-stream state doc reports the h264 profile (v1 LWW state);
     // the subscriber was declared before the open, and viewer-count
     // transitions re-publish the doc.
-    let status = await_status(&status_sub, |s| s.open && s.viewers >= 1).await;
-    assert_eq!(status.profile.as_deref(), Some("h264/main"));
-    // The wildcard-profile subscriber registered as a viewer: the sensor's
-    // matching listener fired on it (this also proves the idle reaper —
-    // idle_timeout_secs: 1, and we streamed well past that — saw a viewer).
+    let status = await_status(&status_sub, |s| {
+        s.open && s.tiers.iter().any(|t| t.viewers >= 1)
+    })
+    .await;
+    // The open used `tier: None` → the sensor default tier (`medium`).
+    let tier = status
+        .tiers
+        .iter()
+        .find(|t| t.tier == "medium")
+        .expect("default tier present in status");
+    // The exact-tier subscriber registered as a viewer: the sensor's matching
+    // listener fired on it (this also proves the idle reaper — idle_timeout_secs
+    // is 1s and we streamed well past that but saw a viewer).
     assert!(
-        status.viewers >= 1,
-        "matching listener must count the wildcard-profile subscriber as a viewer"
+        tier.viewers >= 1,
+        "matching listener must count the exact-tier subscriber as a viewer"
     );
 
     // Teardown before the runtime drops (blocking source task).
@@ -479,10 +501,213 @@ async fn open_h264_video_streams_with_keyframe_control() {
         &host_prefix,
         StreamControl::CloseStream {
             stream: "test0".into(),
+            codec: None,
+            tier: None,
         },
     )
     .await;
     drop(sub);
+    wait_until_closed(&handle).await;
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
+/// A test source tall enough (360) to offer two *distinct* video tiers:
+/// `low` (capped at 240 → downscaled) and `high` (uncapped → native 360).
+/// `medium` (cap 480) would upscale a 360 source, so the catalogue omits it —
+/// exactly the two-tier ladder the acceptance test needs.
+fn simulcast_parallax_config() -> ParallaxConfig {
+    json5::from_str(
+        r#"{
+            enumerate_v4l2: false,
+            test_sources: [
+                { name: "test0", pattern: "smpte", width: 640, height: 360, fps: 15 },
+            ],
+            preview: { fps: 4, quality: 70 },
+            idle_timeout_secs: 3,
+        }"#,
+    )
+    .unwrap()
+}
+
+/// The epic #494 acceptance criterion: two viewers on the *same* camera, one
+/// on `…/video/h264/low` and one on `…/video/h264/high`, both rendering
+/// independently. Today's single-encoder architecture structurally cannot do
+/// this (one encoder, last-writer-wins on resolution); demand-driven tiered
+/// simulcast runs a separate pipeline per (stream, tier), so each viewer gets
+/// the resolution its link asked for and neither perturbs the other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_viewers_on_distinct_tiers_stream_independently() {
+    let (sensor, viewer) = isolated_pair().await;
+    let source = "e2e-simulcast";
+    let host_prefix = "parallax".to_string();
+    let handle = spawn_sensor_with_config(sensor.clone(), source, simulcast_parallax_config())
+        .await
+        .0;
+
+    // The catalogue offers exactly the two non-upscaling tiers.
+    let got = query_catalogue(&viewer, &host_prefix).await;
+    let tier_names: Vec<&str> = got[0].tiers.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(
+        tier_names,
+        vec!["low", "high"],
+        "a 360-high source offers low (240) + high (native); medium would upscale"
+    );
+
+    // Subscribe to each tier's EXACT key (v1.3 revoked the `video/h264/*`
+    // wildcard) BEFORE opening, so each first IDR is observed.
+    let low_key = v1ctx().media_video_key("test0", "h264", "low");
+    let high_key = v1ctx().media_video_key("test0", "h264", "high");
+    let low_sub = viewer
+        .declare_subscriber(&low_key)
+        .await
+        .expect("declare low-tier subscriber");
+    let high_sub = viewer
+        .declare_subscriber(&high_key)
+        .await
+        .expect("declare high-tier subscriber");
+    let status_sub = viewer
+        .declare_subscriber(v1ctx().state_key(&["stream", "test0"]))
+        .await
+        .expect("declare status sub");
+
+    // Two independent opens, one per tier.
+    for tier in ["low", "high"] {
+        send_control(
+            &viewer,
+            &host_prefix,
+            StreamControl::OpenStream {
+                stream: "test0".into(),
+                codec: Some("h264".into()),
+                tier: Some(tier.into()),
+            },
+        )
+        .await;
+    }
+
+    async fn next_h264(
+        sub: &zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
+    ) -> (FrameMeta, Vec<u8>) {
+        let sample = tokio::time::timeout(Duration::from_secs(5), sub.recv_async())
+            .await
+            .expect("video frame timed out")
+            .expect("video subscriber closed");
+        assert!(
+            sample.encoding().to_string().starts_with("video/h264"),
+            "video must carry video/h264, got {}",
+            sample.encoding()
+        );
+        let att = sample.attachment().expect("frame has FrameMeta attachment");
+        let meta: FrameMeta = decode(&att.to_bytes(), Format::Cbor).expect("decode FrameMeta");
+        let payload = sample.payload().to_bytes().to_vec();
+        (meta, payload)
+    }
+
+    // Read a keyframe from each tier: the low branch is scaled to 240, the high
+    // branch stays native 360. Distinct encoded geometry on the same source is
+    // the proof that these are two independent encoders, not one shared stream.
+    async fn first_keyframe(
+        sub: &zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
+    ) -> FrameMeta {
+        for _ in 0..8 {
+            let (meta, payload) = next_h264(sub).await;
+            if meta.keyframe {
+                assert!(
+                    annexb::has_idr(&payload) && annexb::has_param_sets(&payload),
+                    "keyframe AU must carry an IDR + SPS/PPS (seq {})",
+                    meta.sequence
+                );
+                return meta;
+            }
+        }
+        panic!("no keyframe within the first 8 access units");
+    }
+
+    let low_meta = first_keyframe(&low_sub).await;
+    let high_meta = first_keyframe(&high_sub).await;
+    assert_eq!(
+        low_meta.height, 240,
+        "low tier must be downscaled to its 240 cap"
+    );
+    assert_eq!(
+        high_meta.height, 360,
+        "high tier is uncapped → native source height"
+    );
+    assert_ne!(
+        (low_meta.width, low_meta.height),
+        (high_meta.width, high_meta.height),
+        "the two tiers must carry genuinely different encoded geometry"
+    );
+
+    // The per-stream status doc lists BOTH tiers, each with its own applied
+    // resolution and its own viewer count — the demand signal is per-tier.
+    let status = await_status(&status_sub, |s| {
+        s.open && s.tiers.len() == 2 && s.tiers.iter().all(|t| t.viewers >= 1)
+    })
+    .await;
+    let low_status = status
+        .tiers
+        .iter()
+        .find(|t| t.tier == "low")
+        .expect("low tier in status");
+    let high_status = status
+        .tiers
+        .iter()
+        .find(|t| t.tier == "high")
+        .expect("high tier in status");
+    assert_eq!(low_status.applied.height, 240);
+    assert_eq!(high_status.applied.height, 360);
+
+    // Independence: closing the LOW tier must not disturb the HIGH tier — its
+    // frames keep flowing without so much as a forced re-key.
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::CloseStream {
+            stream: "test0".into(),
+            codec: Some("h264".into()),
+            tier: Some("low".into()),
+        },
+    )
+    .await;
+    drop(low_sub);
+
+    // The high tier is still live: several more frames arrive after the low
+    // tier is gone.
+    for _ in 0..3 {
+        let (meta, _) = next_h264(&high_sub).await;
+        assert_eq!(
+            meta.height, 360,
+            "high tier's geometry must be unchanged by the low tier closing"
+        );
+    }
+
+    // Status now shows the low tier without a viewer (dropped to zero, or
+    // already reaped) while the high tier still carries its viewer — the demand
+    // signal is genuinely per-tier, and closing one left the other untouched.
+    let status = await_status(&status_sub, |s| {
+        s.tiers.iter().all(|t| t.tier != "low" || t.viewers == 0)
+            && s.tiers.iter().any(|t| t.tier == "high" && t.viewers >= 1)
+    })
+    .await;
+    assert!(
+        status.open,
+        "the stream stays open while the high tier still has a viewer"
+    );
+
+    // Teardown before the runtime drops (blocking source tasks).
+    send_control(
+        &viewer,
+        &host_prefix,
+        StreamControl::CloseStream {
+            stream: "test0".into(),
+            codec: Some("h264".into()),
+            tier: Some("high".into()),
+        },
+    )
+    .await;
+    drop(high_sub);
     wait_until_closed(&handle).await;
 
     viewer.close().await.unwrap();
@@ -515,7 +740,7 @@ async fn stats_ticker_publishes_fps_telemetry() {
         StreamControl::OpenStream {
             stream: "test0".into(),
             codec: Some("mjpeg".into()),
-            max_height: None,
+            tier: None,
         },
     )
     .await;
@@ -547,6 +772,8 @@ async fn stats_ticker_publishes_fps_telemetry() {
         &host_prefix,
         StreamControl::CloseStream {
             stream: "test0".into(),
+            codec: None,
+            tier: None,
         },
     )
     .await;
@@ -591,7 +818,7 @@ async fn close_and_idle_reaper_tear_stream_down() {
         StreamControl::OpenStream {
             stream: "test0".into(),
             codec: Some("mjpeg".into()),
-            max_height: None,
+            tier: None,
         },
     )
     .await;
@@ -613,6 +840,8 @@ async fn close_and_idle_reaper_tear_stream_down() {
         &host_prefix,
         StreamControl::CloseStream {
             stream: "test0".into(),
+            codec: None,
+            tier: None,
         },
     )
     .await;
@@ -673,7 +902,7 @@ async fn failed_open_publishes_closed_status_and_leaks_no_stats() {
         StreamControl::OpenStream {
             stream: "deadcam".into(),
             codec: Some("mjpeg".into()),
-            max_height: None,
+            tier: None,
         },
     )
     .await;
@@ -736,7 +965,7 @@ async fn rtsp_connect_does_not_block_stream_queries() {
         StreamControl::OpenStream {
             stream: "deadcam".into(),
             codec: Some("h264".into()),
-            max_height: None,
+            tier: None,
         },
     )
     .await;

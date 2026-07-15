@@ -4415,7 +4415,11 @@ fn test_parallax_catalogue_and_tiles() {
         let mut ui = simulator(parallax_view(&state));
         assert!(ui.find("video0").is_ok());
         assert!(ui.find("door").is_ok());
-        assert!(ui.find("test pattern smpte 640x360@15").is_ok());
+        assert!(ui.find("test pattern smpte").is_ok());
+        // Capability-bearing catalogue (#507): native geometry + offered tiers
+        // render as their own cells now.
+        assert!(ui.find("640×360").is_ok(), "native geometry cell");
+        assert!(ui.find("low·high").is_ok(), "test0 offers low + high tiers");
         assert!(ui.find("live").is_ok(), "door is advertised active");
         let _ = ui.click("Open");
         let messages: Vec<Message> = ui.into_messages().collect();
@@ -4432,7 +4436,7 @@ fn test_parallax_catalogue_and_tiles() {
     let generation = state.parallax_detail.allocate_generation();
     state
         .parallax_detail
-        .open_tile("video0", generation, None, false);
+        .open_tile("video0", generation, None, false, None);
     {
         let mut ui = simulator(parallax_view(&state));
         assert!(ui.find("video0 · waiting for frames…").is_ok());

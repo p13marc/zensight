@@ -63,6 +63,7 @@ pub fn decode_payload(type_name: &str, bytes: &[u8]) -> Result<Value> {
         "OperatorAssertion" => as_json::<crate::OperatorAssertion>(bytes),
         "PdnsRecord" => as_json::<crate::PdnsRecord>(bytes),
         "StreamStatus" => as_json::<crate::StreamStatus>(bytes),
+        "FrameMeta" => as_json::<crate::stream::FrameMeta>(bytes),
         other => Err(Error::UnknownPayloadType(other.to_string())),
     }
 }
@@ -100,6 +101,8 @@ pub const PAYLOAD_TYPES: &[(&str, &str)] = &[
     ),
     ("PdnsRecord", "zensight_common::entity::PdnsRecord"),
     ("StreamStatus", "zensight_common::stream::StreamStatus"),
+    // The `@media` per-frame attachment (RFC 07 §1 / 08 §2 `[[media]]`).
+    ("FrameMeta", "zensight_common::stream::FrameMeta"),
 ];
 
 /// Where the type named `type_name` is defined, if the table knows it.

@@ -18,38 +18,79 @@
 
 use serde::{Deserialize, Serialize};
 
+/// One named bandwidth **tier** a stream offers — the `<tier>` key chunk plus
+/// its target encoder parameters (RFC 07 §1). Tiers are published concurrently,
+/// each on its own `@media/<stream>/video/<codec>/<tier>` key; a viewer
+/// subscribes to exactly the tier its link can take, so two viewers on
+/// different links never fight over one encoder (#494, #497).
+///
+/// This is the tier *definition* — the sensor owns the numbers; the wire and
+/// the key carry the *name*. It appears in [`StreamDescriptor::tiers`] (the
+/// catalogue) and in the `tiers/set` admin command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TierSpec {
+    /// Tier name — the `<tier>` key chunk (`low` / `medium` / `high`).
+    pub name: String,
+    /// Aspect-preserving height cap in pixels; `None` = native.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_height: Option<u32>,
+    /// Target framerate.
+    pub fps: u32,
+    /// Target encoded bitrate.
+    pub bitrate_kbps: u32,
+}
+
 /// Runtime control for one media stream, sent on the `stream` command topic.
 ///
 /// Tagged like the other sensor command enums (`type`, snake_case), so on the
 /// wire an open looks like
-/// `{"type":"open_stream","stream":"cam0","codec":"h264"}`.
+/// `{"type":"open_stream","stream":"cam0","tier":"high"}`.
+///
+/// Note per-viewer quality is expressed by *which `<tier>` key you subscribe
+/// to*, not by a command (#494). These commands manage a stream's lifecycle and
+/// keyframes; redefining what a tier *means* is a separate `tiers/set` admin
+/// command ([`TierSpec`]), the only global knob.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamControl {
-    /// Open (start publishing) a stream. The sensor declares the media
-    /// publisher on the concrete `@media/<stream>/…` key and starts the
-    /// pipeline.
+    /// Open (start publishing) one tier of a stream. The sensor declares the
+    /// media publisher on the concrete `@media/<stream>/video/<codec>/<tier>`
+    /// key (or `…/preview/<format>` for the preview codec) and starts the
+    /// pipeline. Distinct tiers open independent encoders.
     OpenStream {
         /// Stream identifier (the `<stream>` key chunk).
         stream: String,
-        /// Requested codec (e.g. `h264`); `None` = sensor default.
+        /// Requested codec (e.g. `h264`, `mjpeg` for the preview); `None` =
+        /// sensor default (video).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         codec: Option<String>,
-        /// Cap the encoded height in pixels (bandwidth control); `None` = native.
+        /// Which tier to open (the `<tier>` key chunk); `None` = the sensor's
+        /// default tier. Ignored for the preview codec.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_height: Option<u32>,
+        tier: Option<String>,
     },
-    /// Close (stop publishing) a stream and undeclare its media publisher.
+    /// Close (stop publishing) one tier of a stream and undeclare its media
+    /// publisher. Mirrors the `OpenStream` selector.
     CloseStream {
         /// Stream identifier.
         stream: String,
+        /// Codec, matching the open; `None` = video default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codec: Option<String>,
+        /// Tier, matching the open; `None` = default tier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tier: Option<String>,
     },
-    /// Force the encoder to emit a keyframe (IDR) on the next access unit.
-    /// Normally unnecessary — the sensor's matching listener already forces a
-    /// keyframe when a subscriber appears — but exposed for explicit recovery.
+    /// Force the encoder to emit a keyframe (IDR) on the next access unit of one
+    /// tier. Normally unnecessary — the matching listener forces a keyframe when
+    /// a subscriber appears — but RFC 07 §1 mandates it for the Nth viewer, who
+    /// gets no matching-listener edge.
     RequestKeyframe {
         /// Stream identifier.
         stream: String,
+        /// Which tier's encoder to force; `None` = default tier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tier: Option<String>,
     },
 }
 
@@ -84,31 +125,80 @@ pub struct FrameMeta {
 }
 
 /// One advertised media stream, served from the `streams` query topic.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// **Capability-bearing** (#507): a viewer builds a sensible tier selector from
+/// the camera's *native* geometry and the tiers on offer, without opening the
+/// stream first. Native `width`/`height`/`fps` are probed from the source
+/// (`None` when genuinely unknown — e.g. an RTSP stream whose SDP carries no
+/// dimensions); `codecs` reflects the real per-source capability, not a
+/// hardcoded pair.
+// No `Eq`: `fps` is an `f32` (native framerate), which is only `PartialEq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StreamDescriptor {
     /// Stream identifier (the `<stream>` key chunk).
     pub stream: String,
     /// Codecs this stream can be opened with (e.g. `["h264", "mjpeg"]`).
     pub codecs: Vec<String>,
-    /// Whether the stream is currently open (publishing).
+    /// Whether the stream is currently open (any tier publishing).
     pub active: bool,
+    /// Native capture width in pixels; `None` if unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    /// Native capture height in pixels; `None` if unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    /// Native capture framerate; `None` if unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<f32>,
+    /// The bandwidth tiers this stream offers, so a viewer can subscribe to an
+    /// exact `<tier>` key and never advertise a tier the camera can't feed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tiers: Vec<TierSpec>,
     /// Optional human-readable description (camera position, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 
-/// Current state of one stream, reported on the `streams` status topic.
+/// The **applied** parameters of one running tier — actual, not requested (a
+/// hardware encoder may silently ignore a knob, and the scaler even-aligns
+/// dimensions). This is what the GUI should render as the tile's real state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TierApplied {
+    /// Encoded width in pixels (post-scale, even-aligned).
+    pub width: u32,
+    /// Encoded height in pixels.
+    pub height: u32,
+    /// Applied framerate cap.
+    pub fps: u32,
+    /// Applied encoded bitrate.
+    pub bitrate_kbps: u32,
+}
+
+/// State of one running tier, reported inside [`StreamStatus`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TierStatus {
+    /// Tier name (the `<tier>` key chunk).
+    pub tier: String,
+    /// Parameters actually in effect on this tier's encoder.
+    pub applied: TierApplied,
+    /// Matching subscribers observed by this tier's media publisher.
+    pub viewers: u32,
+}
+
+/// Current state of one stream, reported on the `stream/<stream>` status doc.
+///
+/// **Per-tier** (#497): a stream can have several tiers live at once, each with
+/// its own applied params and viewer count. A single `Option<profile>` could
+/// not express two live tiers — this is a `Vec`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamStatus {
     /// Stream identifier.
     pub stream: String,
-    /// Whether the stream is currently open (publishing).
+    /// Whether the stream is currently open (any tier publishing).
     pub open: bool,
-    /// Number of matching subscribers observed by the media publisher.
-    pub viewers: u32,
-    /// Active `<codec>/<profile>` when open (e.g. `h264/main`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<String>,
+    /// Per-tier state for every tier currently live.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tiers: Vec<TierStatus>,
 }
 
 #[cfg(test)]
@@ -122,18 +212,21 @@ mod tests {
             StreamControl::OpenStream {
                 stream: "cam0".into(),
                 codec: Some("h264".into()),
-                max_height: Some(720),
+                tier: Some("high".into()),
             },
             StreamControl::OpenStream {
                 stream: "cam1".into(),
                 codec: None,
-                max_height: None,
+                tier: None,
             },
             StreamControl::CloseStream {
                 stream: "cam0".into(),
+                codec: Some("h264".into()),
+                tier: Some("low".into()),
             },
             StreamControl::RequestKeyframe {
                 stream: "cam0".into(),
+                tier: Some("medium".into()),
             },
         ] {
             for format in [Format::Json, Format::Cbor] {
@@ -150,16 +243,17 @@ mod tests {
         let json = serde_json::to_value(StreamControl::OpenStream {
             stream: "cam0".into(),
             codec: Some("h264".into()),
-            max_height: None,
+            tier: None,
         })
         .unwrap();
         assert_eq!(json["type"], "open_stream");
         assert_eq!(json["stream"], "cam0");
         assert_eq!(json["codec"], "h264");
-        assert!(json.get("max_height").is_none(), "None fields are omitted");
+        assert!(json.get("tier").is_none(), "None fields are omitted");
 
         let json = serde_json::to_value(StreamControl::RequestKeyframe {
             stream: "cam0".into(),
+            tier: None,
         })
         .unwrap();
         assert_eq!(json["type"], "request_keyframe");
@@ -171,6 +265,23 @@ mod tests {
             stream: "cam0".into(),
             codecs: vec!["h264".into(), "mjpeg".into()],
             active: true,
+            width: Some(1280),
+            height: Some(720),
+            fps: Some(30.0),
+            tiers: vec![
+                TierSpec {
+                    name: "low".into(),
+                    max_height: Some(240),
+                    fps: 10,
+                    bitrate_kbps: 400,
+                },
+                TierSpec {
+                    name: "high".into(),
+                    max_height: None,
+                    fps: 30,
+                    bitrate_kbps: 4000,
+                },
+            ],
             description: Some("front door".into()),
         };
         let bytes = encode(&desc, Format::Cbor).unwrap();
@@ -180,8 +291,28 @@ mod tests {
         let status = StreamStatus {
             stream: "cam0".into(),
             open: true,
-            viewers: 2,
-            profile: Some("h264/main".into()),
+            tiers: vec![
+                TierStatus {
+                    tier: "low".into(),
+                    applied: TierApplied {
+                        width: 320,
+                        height: 240,
+                        fps: 10,
+                        bitrate_kbps: 400,
+                    },
+                    viewers: 1,
+                },
+                TierStatus {
+                    tier: "high".into(),
+                    applied: TierApplied {
+                        width: 1280,
+                        height: 720,
+                        fps: 30,
+                        bitrate_kbps: 4000,
+                    },
+                    viewers: 2,
+                },
+            ],
         };
         let bytes = encode(&status, Format::Json).unwrap();
         let back: StreamStatus = decode(&bytes, Format::Json).unwrap();
@@ -245,6 +376,8 @@ mod tests {
         use crate::command::Command;
         let cmd = Command::new(StreamControl::CloseStream {
             stream: "cam0".into(),
+            codec: None,
+            tier: None,
         })
         .with_id("req-1");
         let bytes = encode(&cmd, Format::Json).unwrap();
@@ -253,7 +386,9 @@ mod tests {
         assert_eq!(
             back.body,
             StreamControl::CloseStream {
-                stream: "cam0".into()
+                stream: "cam0".into(),
+                codec: None,
+                tier: None,
             }
         );
     }

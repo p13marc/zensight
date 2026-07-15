@@ -26,7 +26,7 @@ const EXAMPLES: &[&str] = &[
     "zensight/v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-7",
     "zensight/v1/h-3fa9c2d41b7e/events/netring/capture/01jgxqz4yqk8v6txw3m9f2a7cd",
     "zensight/v1/h-3fa9c2d41b7e/@rpc/netlink/sockets",
-    "zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main",
+    "zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/high",
     "zensight/v1/h-3fa9c2d41b7e/@blob/store/sha256/ab12cd34ef56",
     "zensight/v1/@catalog/state/entity/h-3fa9c2d41b7e",
     "zensight/v1/@catalog/state/alias/h-9d02aa17c44f",
@@ -185,7 +185,7 @@ fn d6_acl_inclusion_per_plane() {
     ));
     assert!(!incl(
         &format!("{host}/**"),
-        &format!("{host}/@media/parallax/cam0/video/h264/main")
+        &format!("{host}/@media/parallax/cam0/video/h264/high")
     ));
     assert!(!incl(
         &format!("{host}/**"),
@@ -202,7 +202,7 @@ fn d6_acl_inclusion_per_plane() {
     ));
     assert!(incl(
         &format!("{host}/@media/**"),
-        &format!("{host}/@media/parallax/cam0/video/h264/main")
+        &format!("{host}/@media/parallax/cam0/video/h264/high")
     ));
     assert!(incl(
         &format!("{host}/@blob/**"),
@@ -241,10 +241,18 @@ fn selector_precision() {
         "zensight/v1/*/state/*/evidence/**",
         "zensight/v1/h-3fa9c2d41b7e/state/netring/evidence/names/10-0-0-7"
     ));
-    // Single-stream media selectors never match a sibling stream.
+    // Media viewers subscribe to an EXACT tier — no wildcard on @media (07 §1,
+    // keyspace v1.3): an exact-tier key never matches a sibling stream…
     assert!(!inter(
-        "zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/*",
-        "zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam1/video/h264/main"
+        "zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/high",
+        "zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam1/video/h264/high"
+    ));
+    // …and, the property the wildcard revocation exists for, never matches a
+    // SIBLING TIER of the same stream (a `…/h264/*` would have matched both,
+    // interleaving two H.264 streams on one subscriber and breaking simulcast).
+    assert!(!inter(
+        "zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/high",
+        "zensight/v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/low"
     ));
     // Sibling-suffix subject versioning stays invisible to pinned selectors
     // (RFC 08 §3: sockets2, never sockets/v2).

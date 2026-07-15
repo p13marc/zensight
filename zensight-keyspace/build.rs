@@ -417,14 +417,36 @@ fn load_registry(dir: &Path) -> Vec<RegistryFile> {
             });
         }
 
-        // [[media]] entries: validated shape only (patterns), no codegen yet.
+        // [[media]] entries (RFC 08 §2): patterns validated; a `{var}`-bearing
+        // media path MUST declare a `cardinality` (the highest-bandwidth plane
+        // must bound its fan-out — the `{tier}` chunk multiplies it), and every
+        // entry MUST name an `attachment` type (CI-resolved against the shared
+        // type table by `payload::types_are_total`). No builder codegen yet; the
+        // hand-written `media_*_key()` builders are pinned by the guard tests.
         if let Some(media) = doc.get("media").and_then(|v| v.as_array()) {
             for entry in media {
                 let mpath = entry
                     .get("path")
                     .and_then(|v| v.as_str())
                     .unwrap_or_else(|| fail(&fname, "[[media]] missing path"));
-                parse_pattern(&fname, mpath);
+                let chunks = parse_pattern(&fname, mpath);
+                let has_var = chunks.iter().any(|c| !matches!(c, Chunk::Literal(_)));
+                let cardinality = entry.get("cardinality").and_then(|v| v.as_integer());
+                if has_var && cardinality.is_none() {
+                    fail(
+                        &fname,
+                        &format!(
+                            "[[media]] {mpath:?}: {{var}} pattern needs integer cardinality \
+                             (RFC 08 §2)"
+                        ),
+                    );
+                }
+                if entry.get("attachment").and_then(|v| v.as_str()).is_none() {
+                    fail(
+                        &fname,
+                        &format!("[[media]] {mpath:?}: missing attachment type (RFC 08 §2)"),
+                    );
+                }
             }
         }
 

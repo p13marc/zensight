@@ -23,7 +23,7 @@ zensight-sensor-core = { path = "../zensight-sensor-core" }
 # C++ codec from source), V4L2 cameras, RTSP/retina clients, and the pure-Rust
 # JPEG codecs for the preview profile. libcamera is deliberately skipped (heavy
 # system dependency; V4L2 covers webcams).
-parallax-pipeline = { version = "0.1.3", default-features = false, features = [
+parallax-pipeline = { version = "0.3.0", default-features = false, features = [
     "h264",
     "v4l2",
     "rtsp",

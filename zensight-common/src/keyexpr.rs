@@ -436,8 +436,13 @@ pub fn all_device_liveliness_wildcard() -> String {
     "v1/*/state/*/device/*/alive".to_string()
 }
 
-/// Build the v1 media-plane key for one video stream profile (RFC 07 §1):
-/// `<base>/v1/<origin>/@media/<producer>/<stream>/video/<codec>/<profile>`.
+/// Build the v1 media-plane key for one video stream tier (RFC 07 §1):
+/// `<base>/v1/<origin>/@media/<producer>/<stream>/video/<codec>/<tier>`.
+///
+/// The last chunk is a viewer-chosen **tier** (`low`/`medium`/`high`), a named
+/// bandwidth rung published concurrently on its own key — subscribed to
+/// *exactly*, never with a wildcard (keyspace v1.3, RFC 07 §1). It is not an
+/// H.264 coding profile.
 ///
 /// `@media` is an `@`-verbatim plane chunk — invisible to the telemetry and
 /// state class selectors (D2). Samples on this key are **opaque**: raw
@@ -453,8 +458,8 @@ pub fn all_device_liveliness_wildcard() -> String {
 /// use zensight_common::telemetry::Protocol;
 ///
 /// assert_eq!(
-///     media_video_key(Protocol::Parallax, "h-3fa9c2d41b7e", "cam0", "h264", "main"),
-///     "v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/main"
+///     media_video_key(Protocol::Parallax, "h-3fa9c2d41b7e", "cam0", "h264", "high"),
+///     "v1/h-3fa9c2d41b7e/@media/parallax/cam0/video/h264/high"
 /// );
 /// ```
 pub fn media_video_key(
@@ -462,7 +467,7 @@ pub fn media_video_key(
     origin: &str,
     stream: &str,
     codec: &str,
-    profile: &str,
+    tier: &str,
 ) -> String {
     format!(
         "v1/{}/@media/{}/{}/video/{}/{}",
@@ -470,7 +475,7 @@ pub fn media_video_key(
         protocol.as_str(),
         stream,
         codec,
-        profile
+        tier
     )
 }
 

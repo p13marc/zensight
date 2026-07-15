@@ -111,6 +111,10 @@ async fn media_plane_e2e_stream_control_and_keyframe() {
         stream: "cam0".into(),
         codecs: vec!["mjpeg".into()],
         active: false,
+        width: None,
+        height: None,
+        fps: None,
+        tiers: Vec::new(),
         description: Some("front door".into()),
     }];
 
@@ -165,7 +169,7 @@ async fn media_plane_e2e_stream_control_and_keyframe() {
     let open = Command::new(StreamControl::OpenStream {
         stream: "cam0".into(),
         codec: Some("mjpeg".into()),
-        max_height: None,
+        tier: None,
     });
     viewer
         .put(&cmd_key, serde_json::to_vec(&open).unwrap())

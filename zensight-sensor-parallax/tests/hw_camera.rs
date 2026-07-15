@@ -118,6 +118,7 @@ async fn v4l2_camera_preview_delivers_real_frames() {
         sensor.clone(),
         host_prefix.clone(),
         catalog,
+        Vec::new(),
         handle.clone(),
     ));
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -152,7 +153,7 @@ async fn v4l2_camera_preview_delivers_real_frames() {
             serde_json::to_vec(&Command::new(StreamControl::OpenStream {
                 stream: camera.clone(),
                 codec: Some("mjpeg".into()),
-                max_height: None,
+                tier: None,
             }))
             .unwrap(),
         )
@@ -180,8 +181,12 @@ async fn v4l2_camera_preview_delivers_real_frames() {
     viewer
         .put(
             command_key(&host_prefix, "stream"),
-            serde_json::to_vec(&Command::new(StreamControl::CloseStream { stream: camera }))
-                .unwrap(),
+            serde_json::to_vec(&Command::new(StreamControl::CloseStream {
+                stream: camera,
+                codec: None,
+                tier: None,
+            }))
+            .unwrap(),
         )
         .await
         .expect("send CloseStream");

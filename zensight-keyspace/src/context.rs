@@ -147,13 +147,15 @@ impl V1Context {
             .expect("registry procedure chunks are valid")
     }
 
-    /// Media plane keys (RFC 07 §1).
-    pub fn media_video_key(&self, stream: &str, codec: &str, profile: &str) -> String {
+    /// Media plane video key (RFC 07 §1): the last chunk is a viewer-chosen
+    /// **tier** (`low`/`medium`/`high`), not a codec profile — the viewer
+    /// subscribes to it exactly (keyspace v1.3).
+    pub fn media_video_key(&self, stream: &str, codec: &str, tier: &str) -> String {
         let chunks = [
             chunk_slug(stream),
             "video".into(),
             chunk_slug(codec),
-            chunk_slug(profile),
+            chunk_slug(tier),
         ];
         let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
         grammar::media_key(&self.origin, &self.producer, &refs)
@@ -220,8 +222,8 @@ mod tests {
             "v1/h-3fa9c2d41b7e/@rpc/sysinfo/introspect"
         );
         assert_eq!(
-            c.media_video_key("cam0", "h264", "main"),
-            "v1/h-3fa9c2d41b7e/@media/sysinfo/cam0/video/h264/main"
+            c.media_video_key("cam0", "h264", "high"),
+            "v1/h-3fa9c2d41b7e/@media/sysinfo/cam0/video/h264/high"
         );
     }
 
