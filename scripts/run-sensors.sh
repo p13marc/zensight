@@ -34,6 +34,12 @@ FAIL_FAST="${FAIL_FAST:-0}"
 # which is unreliable on hosts with a VPN or extra interfaces.
 export ZENSIGHT_ZENOH_CONNECT="$CONNECT"
 
+# Endpoints are pinned via CONNECT, so multicast scouting is pure noise here (it
+# also risks joining a neighbour's live hub, and on loopback it triggers a
+# CONNECTION_TO_SELF error storm). Gossip stays on, so hub spokes still discover
+# each other. Overridable for anyone who genuinely wants multicast.
+export ZENSIGHT_ZENOH_SCOUTING="${ZENSIGHT_ZENOH_SCOUTING:-false}"
+
 spawn() {
     local bin="$1" cfg="$2" name
     name="${cfg%.json5}"

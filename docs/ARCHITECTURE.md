@@ -190,7 +190,13 @@ All processes run in `mode: "peer"`. Peers can discover each other two ways:
 
 `just run` therefore pins an explicit **loopback rendezvous**: the GUI
 `listen`s on `tcp/127.0.0.1:7447` and every sensor `connect`s to it, so the
-pieces always meet regardless of the network. This is driven by environment
+pieces always meet regardless of the network. Because the endpoints are pinned,
+`just run` also sets `ZENSIGHT_ZENOH_SCOUTING=false` on every process to turn
+**multicast scouting off** — it is redundant here, and on loopback it produces a
+noisy `CONNECTION_TO_SELF` / "Attempt to establish transport to itself" error
+storm as the hub locator gets scouted back and dialed. Gossip stays on (the two
+are independent switches), so the hub's spokes still discover each other — this
+is how the correlator finds the sensors' evidence. This is driven by environment
 overrides applied on top of the file/settings config:
 
 | Env var | Effect |
@@ -198,6 +204,7 @@ overrides applied on top of the file/settings config:
 | `ZENSIGHT_ZENOH_MODE` | override `mode` |
 | `ZENSIGHT_ZENOH_CONNECT` | override `connect` endpoints (comma-separated) |
 | `ZENSIGHT_ZENOH_LISTEN` | override `listen` endpoints (comma-separated) |
+| `ZENSIGHT_ZENOH_SCOUTING` | `false` disables multicast scouting (gossip unaffected) |
 
 Implemented by `ZenohConfig::with_env_overrides()` (zensight-common), applied in
 both the sensor session (`session::connect`) and the GUI.

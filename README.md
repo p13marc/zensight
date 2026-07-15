@@ -81,8 +81,11 @@ See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 `just run` pins an explicit loopback rendezvous (the GUI listens on `tcp/127.0.0.1:7447`;
 sensors connect to it) so the pieces always find each other **without** relying on multicast
 peer discovery — which is unreliable on hosts with a VPN or extra interfaces (tailscale,
-docker, …). To target specific endpoints, set `ZENSIGHT_ZENOH_CONNECT`, `ZENSIGHT_ZENOH_LISTEN`,
-or `ZENSIGHT_ZENOH_MODE` (comma-separated), which override the config.
+docker, …). Since the endpoints are pinned, `just run` also sets `ZENSIGHT_ZENOH_SCOUTING=false`
+to turn multicast off; that silences the loopback `CONNECTION_TO_SELF` / "transport to itself"
+warnings Zenoh otherwise logs (gossip stays on, so the correlator still finds the sensors). To
+target specific endpoints, set `ZENSIGHT_ZENOH_CONNECT`, `ZENSIGHT_ZENOH_LISTEN`, or
+`ZENSIGHT_ZENOH_MODE` (comma-separated), which override the config.
 
 > **Seeing no data in the GUI?** It's almost always discovery — the GUI and sensors didn't
 > form a Zenoh session. `just run` fixes this; if you launch pieces by hand, give them matching

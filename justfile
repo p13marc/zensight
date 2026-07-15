@@ -107,7 +107,7 @@ configure:
 # sensors on OTHER machines, listen on all interfaces:
 #   just gui listen=tcp/0.0.0.0:7447
 gui listen=hub: build
-    ZENSIGHT_ZENOH_LISTEN="{{trim_start_match(listen, 'listen=')}}" {{bindir}}/zensight
+    ZENSIGHT_ZENOH_LISTEN="{{trim_start_match(listen, 'listen=')}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight
 
 # A built-in simulator feeds realistic telemetry, health, liveness and anomaly
 # alerts for every sensor type — no real sensors, capabilities or Zenoh hub.
@@ -117,32 +117,32 @@ demo: build
 
 # Run the netring sensor (wire flows + anomaly alerts).
 netring: caps configure
-    ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-sensor-netring --config {{rundir}}/netring.json5
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-sensor-netring --config {{rundir}}/netring.json5
 
 # Run the netlink sensor (kernel interfaces/sockets + expectation alerts).
 netlink: caps configure
-    ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-sensor-netlink --config {{rundir}}/netlink.json5
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-sensor-netlink --config {{rundir}}/netlink.json5
 
 # Run the sysinfo sensor (CPU/memory/disk/network).
 sysinfo: build configure
-    ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-sensor-sysinfo --config {{rundir}}/sysinfo.json5
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-sensor-sysinfo --config {{rundir}}/sysinfo.json5
 
 # Run the logs sensor (systemd journal via journald + known-event alerts).
 logs: build configure
-    ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-sensor-logs --config {{rundir}}/logs.json5
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-sensor-logs --config {{rundir}}/logs.json5
 
 # Run the systemd sensor (unit/boot telemetry + threshold alerts + sentinel).
 systemd: build configure
-    ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-sensor-systemd --config {{rundir}}/systemd.json5
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-sensor-systemd --config {{rundir}}/systemd.json5
 
 # Run the parallax sensor (live video: synthetic test pattern + local cameras).
 # Open the parallax device in the GUI and "Load streams" → preview tiles.
 parallax: build configure
-    ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-sensor-parallax --config {{rundir}}/parallax.json5
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-sensor-parallax --config {{rundir}}/parallax.json5
 
 # Run the identity correlator (fuses sensor evidence into one HostEntity per host).
 correlator: build configure
-    ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-correlator --config {{rundir}}/correlator.json5
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-correlator --config {{rundir}}/correlator.json5
 
 # Optional Rerun sidecar (evaluation prototype, epic #415), standalone — or add
 # it to the full stack with `just run rerun=live|record|both`.
@@ -153,7 +153,7 @@ correlator: build configure
 rerun mode="live":
     cargo build {{relflag}} -p zensight-rerun
     mkdir -p {{rundir}}
-    ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-rerun --config configs/rerun.json5 \
+    ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-rerun --config configs/rerun.json5 \
         --mode {{trim_start_match(mode, 'mode=')}} --rrd-path {{rundir}}/zensight.rrd
 
 # ── Run (everything) ─────────────────────────────────────────────────────────
@@ -204,7 +204,7 @@ run rerun="": setup configure
             fi ;;
         esac
         echo "Starting Rerun sidecar, mode=$rerun_mode (log → {{rundir}}/rerun.log)…"
-        ZENSIGHT_ZENOH_CONNECT="{{hub}}" {{bindir}}/zensight-rerun --config configs/rerun.json5 \
+        ZENSIGHT_ZENOH_CONNECT="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight-rerun --config configs/rerun.json5 \
             --mode "$rerun_mode" --rrd-path {{rundir}}/zensight.rrd > {{rundir}}/rerun.log 2>&1 &
     fi
     sleep 1
@@ -214,7 +214,7 @@ run rerun="": setup configure
     # echoing to the terminal. Override verbosity with RUST_LOG if needed.
     export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
     export RUST_LOG="${RUST_LOG:-info}"
-    ZENSIGHT_ZENOH_LISTEN="{{hub}}" {{bindir}}/zensight 2>&1 | tee {{rundir}}/gui.log
+    ZENSIGHT_ZENOH_LISTEN="{{hub}}" ZENSIGHT_ZENOH_SCOUTING=false {{bindir}}/zensight 2>&1 | tee {{rundir}}/gui.log
 
 # ── Container image ──────────────────────────────────────────────────────────
 
